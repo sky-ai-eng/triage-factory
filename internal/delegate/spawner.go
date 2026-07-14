@@ -307,6 +307,15 @@ type Spawner struct {
 	// executorIdentity().
 	executorID string
 	bootEpoch  int64
+	// placementResolver computes the (org, repo) rendezvous stamp at enqueue
+	// and, via placementClaim, the two-tier claim config (TFAC-587). Both nil/
+	// zero when placement is off (local N=1, or the layer feature-flagged
+	// off): enqueue then stamps nothing and the claim runs the global-oldest
+	// path — the whole layer is advisory. Guarded by s.mu like the other
+	// startup-set seams; wired once via SetPlacement before the dispatcher
+	// starts.
+	placementResolver placementResolver
+	placementClaim    db.ClaimPlacement
 	// runSem bounds how many runs execute off the dispatcher at once — a
 	// process-wide cap so a burst of queued steps doesn't fan into an
 	// unbounded number of agent subprocesses. Sized in NewSpawner

@@ -41,7 +41,7 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	}
 
 	// Empty queue: nothing claimable.
-	if got, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch); err != nil || got != nil {
+	if got, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
 		t.Fatalf("ClaimNextRun on empty queue = (%v, %v), want (nil, nil)", got, err)
 	}
 
@@ -60,7 +60,7 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 		t.Fatalf("set session_id: %v", err)
 	}
 
-	got, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch)
+	got, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{})
 	if err != nil {
 		t.Fatalf("ClaimNextRun: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	}
 
 	// Claimed → no longer queued, so a second claim finds nothing.
-	if got2, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch); err != nil || got2 != nil {
+	if got2, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || got2 != nil {
 		t.Fatalf("second ClaimNextRun = (%v, %v), want (nil, nil)", got2, err)
 	}
 }
@@ -125,7 +125,7 @@ func TestRunQueueStore_SQLite_CancelRequestedNotClaimed(t *testing.T) {
 	if err != nil || !changed {
 		t.Fatalf("RequestRunCancelSystem = (%v, %v), want (true, nil)", changed, err)
 	}
-	if got, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch); err != nil || got != nil {
+	if got, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
 		t.Fatalf("ClaimNextRun on cancel-requested blueprint = (%v, %v), want (nil, nil)", got, err)
 	}
 	// Idempotent: re-requesting on an already-flagged running row reports no change.
@@ -168,7 +168,7 @@ func TestRunQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	}
 
 	// Claim it → running, attempts=1.
-	claimed, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch)
+	claimed, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{})
 	if err != nil || claimed == nil {
 		t.Fatalf("ClaimNextRun: (%v, %v)", claimed, err)
 	}
@@ -177,7 +177,7 @@ func TestRunQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	if err := stores.RunQueue.RequeueRun(ctx, org, "rqr-run-0", "transient setup error"); err != nil {
 		t.Fatalf("RequeueRun: %v", err)
 	}
-	reclaimed, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch)
+	reclaimed, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{})
 	if err != nil || reclaimed == nil {
 		t.Fatalf("re-ClaimNextRun: (%v, %v)", reclaimed, err)
 	}
@@ -194,7 +194,7 @@ func TestRunQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("ResetProcessingRuns reset %d rows, want 1", n)
 	}
-	afterReset, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch)
+	afterReset, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{})
 	if err != nil || afterReset == nil {
 		t.Fatalf("ClaimNextRun after reset: (%v, %v)", afterReset, err)
 	}
@@ -250,7 +250,7 @@ func TestRunQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 		t.Fatalf("ResetProcessingRuns reset %d rows, want 0 (dormant run must stay parked)", n)
 	}
 	// And it is not claimable (it's not 'queued').
-	if got, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch); err != nil || got != nil {
+	if got, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
 		t.Fatalf("ClaimNextRun = (%v, %v), want (nil, nil)", got, err)
 	}
 }
@@ -287,7 +287,7 @@ func TestRunQueueStore_SQLite_ResetProcessingRuns_ScopedToOwner(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("EnqueueRun: %v", err)
 	}
-	if _, err := stores.RunQueue.ClaimNextRun(ctx, "instance-a", 3); err != nil {
+	if _, err := stores.RunQueue.ClaimNextRun(ctx, "instance-a", 3, db.ClaimPlacement{}); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 

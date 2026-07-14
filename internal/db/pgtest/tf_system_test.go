@@ -168,7 +168,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 			t.Fatalf("RunQueue.EnqueueRun (dispatcher's own step enqueue): %v", err)
 		}
 
-		claimed, err := stores.RunQueue.ClaimNextRun(ctx, executorID, 1)
+		claimed, err := stores.RunQueue.ClaimNextRun(ctx, executorID, 1, db.ClaimPlacement{})
 		if err != nil {
 			t.Fatalf("RunQueue.ClaimNextRun: %v", err)
 		}

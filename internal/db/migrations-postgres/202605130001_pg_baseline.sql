@@ -1418,6 +1418,23 @@ CREATE TABLE public.runs (
     -- requeued/reset run never carries a stale key the brain could
     -- mistakenly seal to.
     cred_pubkey text,
+    -- preferred_executor_id is the placement affinity stamp (TFAC-587, spec
+    -- §6): the capacity-weighted rendezvous winner for this run's (org, repo)
+    -- key, computed by the control plane over live registry members at
+    -- enqueue and re-stamped on every blueprint-step advance so it never
+    -- outlives one queue dwell. The two-tier claim reads it — tier 1 is an
+    -- indexed equality (preferred_executor_id = the claiming executor), tier
+    -- 2 spills anything aged past the placement window or whose preferred
+    -- owner is dead/gated/draining. Purely advisory: NULL means "unowned,
+    -- claimable by anyone now" (never stamped, placement disabled, or cleared
+    -- on requeue), so the whole layer can be dropped without breaking a
+    -- claim. Distinct from executor_id in lifetime — this is SET while the
+    -- row is queued (its entire purpose) and cleared alongside executor_id on
+    -- every requeue/reset path (a queued row carries no owner and no stale
+    -- preference toward a possibly-dead instance). Deliberately NO FK to
+    -- instances, same as executor_id: a stamp toward a since-retired instance
+    -- is legal and self-heals via the aging tier.
+    preferred_executor_id text,
     CONSTRAINT runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
     CONSTRAINT runs_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT runs_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
@@ -5903,6 +5920,15 @@ CREATE INDEX idx_runs_blueprint        ON public.runs (blueprint_run_id, bluepri
 -- 'queued' run (FIFO by started_at, id) under FOR UPDATE SKIP LOCKED. Partial so
 -- it only spans unclaimed work, mirroring idx_event_queue_pending.
 CREATE INDEX idx_runs_queued ON public.runs (started_at, id) WHERE (status = 'queued'::text);
+-- Placement tier-1 claim index: the two-tier claim's hot path is an executor
+-- pulling its OWN preferred queued runs (preferred_executor_id = me), ordered
+-- by started_at, id. This partial index makes that an indexed equality — the
+-- point of stamping the rendezvous winner at enqueue instead of re-evaluating
+-- the hash per claim — and lets the ORDER BY (preferred = me) DESC, started_at,
+-- id resolve a tier-1 row without scanning the whole queued set. Same partial
+-- WHERE status='queued' as idx_runs_queued, so it too spans only unclaimed
+-- work. Global-oldest (placement disabled) still uses idx_runs_queued.
+CREATE INDEX idx_runs_queued_preferred ON public.runs (preferred_executor_id, started_at, id) WHERE (status = 'queued'::text);
 -- Replay fence (relocated from runs): one event firing one trigger materializes
 -- at most one blueprint_run. Partial WHERE triggering_event_id IS NOT NULL so
 -- manual blueprint runs (NULL) never participate.
@@ -8077,6 +8103,48 @@ REVOKE ALL ON public.poll_readiness FROM PUBLIC;
 REVOKE ALL ON public.poll_readiness FROM anon, authenticated, service_role;
 
 
+-- placement_overrides (TFAC-587, spec §6.1): human intent that wins over the
+-- computed capacity-weighted rendezvous order for a single placement key — a
+-- manual pin, or a hot-key replica count, and nothing else (drain lives on
+-- the executor's own instances row). Checked before the hash; expected to
+-- stay nearly empty, because the rendezvous hash is the default map and
+-- needs no rows at all. This is the "table for the exceptions" half of the
+-- design's "hash for the map, table for the exceptions" — the mutable state
+-- deliberately confined to what an operator explicitly types, never a
+-- rebalancer-written routing table.
+--
+-- Keyed (org_id, key_kind, key_value): key_kind is 'repo' (a delegation key,
+-- key_value "owner/repo") or 'project' (a curator key, key_value a project
+-- id). org_id is a plain text column (not a uuid FK) matching the rendezvous
+-- key's own org fold and the instances-family convention — a pin is
+-- operational intent, not tenant content. pinned_instance_id / replicas are
+-- the two intents; a pin wins when both are set. Neither is FK-validated
+-- (a pin to a not-yet-registered or since-retired instance is legal and
+-- self-heals via the claim's aging tier, exactly like the rendezvous stamp).
+--
+-- Admin-pool-only / system table, same posture as instances / poll_readiness:
+-- the explainer endpoint reads it for an already-authorized, operator-gated
+-- orgID, not as a browsable RLS surface. RLS enabled with NO policy
+-- (deny-by-default to non-BYPASSRLS roles) + REVOKE ALL from PUBLIC + the app
+-- roles; the admin pool does all I/O with org_id bound by argument.
+CREATE TABLE public.placement_overrides (
+    org_id             text NOT NULL,
+    key_kind           text NOT NULL,
+    key_value          text NOT NULL,
+    pinned_instance_id text,
+    replicas           integer NOT NULL DEFAULT 0,
+    updated_at         timestamp with time zone NOT NULL DEFAULT now()
+);
+
+ALTER TABLE ONLY public.placement_overrides
+    ADD CONSTRAINT placement_overrides_pkey PRIMARY KEY (org_id, key_kind, key_value);
+
+ALTER TABLE public.placement_overrides ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.placement_overrides FROM PUBLIC;
+REVOKE ALL ON public.placement_overrides FROM anon, authenticated, service_role;
+
+
 -- ws_outbox: overflow storage for the tf_ws backplane (TFAC-584, spec
 -- §5.1/§5). websocket.Hub.Broadcast publishes an envelope on tf_ws for
 -- every control pod to fan into its own local sockets; NOTIFY caps a
@@ -8400,6 +8468,12 @@ GRANT USAGE, SELECT ON SEQUENCE public.ws_outbox_id_seq TO tf_system;
 GRANT SELECT, DELETE ON TABLE public.ws_presence TO tf_system;
 -- Fleet registry: this instance's own register + heartbeat + drain flag.
 GRANT SELECT, INSERT, UPDATE ON TABLE public.instances TO tf_system;
+-- placement_overrides (TFAC-587): SELECT-only. The dispatcher's post-step
+-- reactor enqueues the next blueprint step on the executor, and the
+-- placement stamp it computes reads any override for the run's key. Writes
+-- (pin / replica count) are an operator action on a control pod, never the
+-- executor's path.
+GRANT SELECT ON TABLE public.placement_overrides TO tf_system;
 
 -- Blueprint run-instance sequencing: the dispatcher's post-step reactor
 -- advances current_step_index, flips terminal status, and applies

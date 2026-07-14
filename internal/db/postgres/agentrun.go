@@ -284,10 +284,15 @@ func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID, ex
 // executor_id/boot_epoch alongside the flip: a queued row has no owner, the
 // same invariant RequeueRun/ResetProcessingRuns hold, and the fleet reaper's
 // ownership sweep would otherwise mis-attribute this row to its prior owner.
+// preferred_executor_id is cleared for the same reason (TFAC-587): a
+// long-parked run's old stamp is exactly the outlives-a-dwell case placement
+// calls out — NULL re-queues it as unowned/immediately-claimable, and the
+// claiming executor re-warms and re-earns affinity on the next enqueue.
 func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error) {
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', parked_at = NULL, claimed_at = NULL,
-		                executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL
+		                executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL,
+		                preferred_executor_id = NULL
 		WHERE org_id = $1 AND id = $2
 		  AND (status = 'open'
 		       OR (status = 'completed' AND outcome = 'abort'))

@@ -62,21 +62,28 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 	_, err := s.conn.ExecContext(ctx, `
 		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility,
-		                  creator_user_id, actor_agent_id, blueprint_run_id, blueprint_step_index)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?)
+		                  creator_user_id, actor_agent_id, blueprint_run_id, blueprint_step_index,
+		                  preferred_executor_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?, NULLIF(?, ''))
 	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), status, run.Model, run.WorktreePath,
 		triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID,
 		nullIfEmpty(run.CreatorUserID), nullIfEmpty(run.ActorAgentID),
-		nullIfEmpty(run.BlueprintRunID), stepIdx)
+		nullIfEmpty(run.BlueprintRunID), stepIdx, run.PreferredExecutorID)
 	return err
 }
 
-func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64) (*domain.AgentRun, error) {
+func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, _ db.ClaimPlacement) (*domain.AgentRun, error) {
 	// Flip the oldest claimable queued run to 'running', stamp claimed_at, bump
 	// attempts. Claimable = its owning blueprint_run is still 'running' and not
 	// cancel-requested (a sequence-cancelled blueprint's queued step is never
 	// claimed). A NULL subquery (nothing claimable) matches no row, RETURNING
 	// yields nothing, and the scan reports ErrNoRows -> (nil, nil).
+	//
+	// The ClaimPlacement arg is ignored: SQLite is N=1 (local mode, always
+	// role=all), so there is exactly one executor and the two-tier claim is
+	// vacuous — every queued run's preferred_executor_id is either this one
+	// instance (tier 1 self-hits) or NULL, and both resolve to "claim the
+	// oldest". Placement (TFAC-587) is a multi-executor concern, Postgres-only.
 	//
 	// executor_id + boot_epoch are stamped in this same statement (TFAC-578),
 	// mirroring the Postgres impl, so the row's ownership is never ambiguous
@@ -112,7 +119,7 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 	// cleared too: a queued row has no owner (mirrors the Postgres impl).
 	_, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL, result_summary = ?,
-			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL
+			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
 		WHERE id = ? AND status = 'running'
 	`, lastErr, runID)
 	return err
@@ -178,7 +185,7 @@ func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, r
 	}
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL,
-			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL
+			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
 		WHERE id = ? AND status = 'awaiting_credentials'
 	`, runID)
 	if err != nil {
@@ -258,7 +265,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID stri
 	// The reset clears the stamp: a queued row has no owner.
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL,
-			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL
+			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
 		WHERE status NOT IN (
 			'queued',
 			'completed','failed','cancelled','task_unsolvable',

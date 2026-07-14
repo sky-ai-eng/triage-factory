@@ -64,13 +64,13 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 		_, err := s.conn.ExecContext(ctx, `
 			INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
 			                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
-			                  actor_agent_id, blueprint_run_id, blueprint_step_index)
+			                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, 'event', $8,
 			        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
-			        'team', NULL, $9, $10, $11)
+			        'team', NULL, $9, $10, $11, NULLIF($12, ''))
 		`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), status, run.Model, run.WorktreePath,
 			nullIfEmpty(run.TriggerID), nullIfEmpty(run.ActorAgentID),
-			nullIfEmpty(run.BlueprintRunID), stepIdx)
+			nullIfEmpty(run.BlueprintRunID), stepIdx, run.PreferredExecutorID)
 		if err != nil {
 			return err
 		}
@@ -88,15 +88,15 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 	_, err := s.conn.ExecContext(ctx, `
 		INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
-		                  actor_agent_id, blueprint_run_id, blueprint_step_index)
+		                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'manual', $8,
 		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
 		        'team',
 		        COALESCE(NULLIF($9, '')::uuid, (SELECT owner_user_id FROM orgs WHERE id = $2)),
-		        $10, $11, $12)
+		        $10, $11, $12, NULLIF($13, ''))
 	`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), status, run.Model, run.WorktreePath,
 		nullIfEmpty(run.TriggerID), creatorBind, nullIfEmpty(run.ActorAgentID),
-		nullIfEmpty(run.BlueprintRunID), stepIdx)
+		nullIfEmpty(run.BlueprintRunID), stepIdx, run.PreferredExecutorID)
 	if err != nil {
 		return err
 	}
@@ -114,15 +114,46 @@ func (s *runQueueStore) notifyWake(ctx context.Context, orgID string) {
 	_ = wakebus.Publish(ctx, s.conn, wakebus.KindRun, orgID)
 }
 
-func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64) (*domain.AgentRun, error) {
-	// FOR UPDATE SKIP LOCKED on the inner select so a future multi-worker
-	// dispatcher never claims the same queued run. Claimable = the owning
-	// blueprint_run is still 'running' and not cancel-requested. An empty queue
-	// matches no row and the scan reports ErrNoRows -> (nil, nil).
+func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement) (*domain.AgentRun, error) {
+	// FOR UPDATE SKIP LOCKED on the inner select so a multi-worker fleet never
+	// claims the same queued run. Claimable = the owning blueprint_run is still
+	// 'running' and not cancel-requested. An empty queue matches no row and the
+	// scan reports ErrNoRows -> (nil, nil).
 	//
 	// executor_id + boot_epoch are stamped in this same statement (TFAC-578)
 	// so the row's ownership is never ambiguous between claim and the process
 	// actually going live — see ResetProcessingRuns.
+	//
+	// candidatePredicate + orderBy are the only two things placement changes
+	// (TFAC-587). Disabled: the globally-oldest claimable run, exactly the
+	// pre-placement query. Enabled: the two-tier claim (see the SQL below).
+	candidatePredicate := ""
+	orderBy := "r.started_at, r.id"
+	args := []any{executorID, bootEpoch}
+	if placement.Enabled {
+		// $3 = aging seconds, $4 = liveness seconds. A run is claimable by me
+		// when it is mine (tier 1), unowned, aged past the tier-2 window, or
+		// its stamped preferred is not a live claimant — dead (heartbeat
+		// stale past liveness), draining, or dispatch-gated. Tier 1 sorts
+		// first, so a fresh run with a live owner is exclusively that owner's
+		// until it ages (warm cache), while a saturated/dead owner never
+		// head-of-line-blocks its shard.
+		candidatePredicate = `
+			  AND (
+			    (r.preferred_executor_id IS NOT NULL AND r.preferred_executor_id = $1)
+			    OR r.preferred_executor_id IS NULL
+			    OR r.started_at < now() - make_interval(secs => $3)
+			    OR NOT EXISTS (
+			        SELECT 1 FROM instances i
+			        WHERE i.id = r.preferred_executor_id
+			          AND i.last_heartbeat_at >= now() - make_interval(secs => $4)
+			          AND i.draining = false
+			          AND i.dispatch_gated IS NOT TRUE
+			    )
+			  )`
+		orderBy = "(r.preferred_executor_id IS NOT NULL AND r.preferred_executor_id = $1) DESC, r.started_at, r.id"
+		args = append(args, placement.AgingInterval.Seconds(), placement.Liveness.Seconds())
+	}
 	row := s.conn.QueryRowContext(ctx, `
 		UPDATE runs
 		SET status = 'running', claimed_at = now(), attempts = attempts + 1,
@@ -133,12 +164,12 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 			JOIN blueprint_runs br ON br.id = r.blueprint_run_id
 			WHERE r.status = 'queued'
 			  AND br.cancel_requested = false
-			  AND br.status = 'running'
-			ORDER BY r.started_at, r.id
+			  AND br.status = 'running'`+candidatePredicate+`
+			ORDER BY `+orderBy+`
 			FOR UPDATE OF r SKIP LOCKED
 			LIMIT 1
 		)
-		RETURNING `+runQueueClaimCols, executorID, bootEpoch)
+		RETURNING `+runQueueClaimCols, args...)
 	run, err := scanPgClaimedRun(row)
 	return run, wrapAdminPoolPermErr(err, "run_queue.ClaimNextRun")
 }
@@ -149,9 +180,15 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 	// The ownership stamp is cleared too: a queued row has no owner, and a
 	// stale pair here would misdirect any owner-keyed reader (the reaper,
 	// the fleet view) toward an instance that stopped touching the row.
+	// preferred_executor_id is cleared for the same reason (TFAC-587): a
+	// requeue's stamp likely points at the executor that just failed the run;
+	// NULL means "unowned, claimable by anyone now" — a live executor re-warms
+	// it with no aging delay, which is the correct placement-is-advisory
+	// answer on a recovery path (affinity is re-earned on the next enqueue,
+	// never carried stale).
 	_, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL, result_summary = $3,
-			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL
+			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
 		WHERE org_id = $1 AND id = $2 AND status = 'running'
 	`, orgID, runID, lastErr)
 	return err
@@ -202,7 +239,7 @@ func (s *runQueueStore) GetClaim(ctx context.Context, orgID, runID string) (db.A
 func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, runID string) (bool, error) {
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL,
-			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL
+			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
 		WHERE org_id = $1 AND id = $2 AND status = 'awaiting_credentials'
 	`, orgID, runID)
 	if err != nil {
@@ -272,7 +309,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID stri
 	// stamp: a queued row has no owner.
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL,
-			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL
+			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
 		WHERE status NOT IN (
 			'queued',
 			'completed','failed','cancelled','task_unsolvable',

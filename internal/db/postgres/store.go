@@ -384,6 +384,10 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// readiness gate for /api/jira/stock + the one-shot "config took
 		// effect" announce toast. See TFAC-583.
 		PollReadiness: newPollReadinessStore(admin),
+		// PlacementOverrides is admin-pool only, same posture as Instances:
+		// the placement pin/replica overrides (TFAC-587) read for an already-
+		// authorized, operator-gated orgID, never a browsable RLS surface.
+		PlacementOverrides: newPlacementOverrideStore(admin),
 		// RunCredentials is admin-pool only, same posture as Instances/
 		// RunSignals: the sealed per-run credential bundle channel
 		// (TFAC-614) never serves a request handler.

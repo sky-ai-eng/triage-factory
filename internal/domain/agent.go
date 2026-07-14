@@ -200,6 +200,16 @@ type AgentRun struct {
 	// lease the control plane signals an owning executor through. Empty
 	// string === SQL NULL.
 	ExecutorID string `json:"-"`
+
+	// PreferredExecutorID is the placement affinity stamp (TFAC-587): the
+	// capacity-weighted rendezvous winner for this run's (org, repo) key,
+	// computed at enqueue and re-stamped on each blueprint-step advance. The
+	// two-tier claim reads it (tier 1 = preferred equals the claiming
+	// executor). Advisory: empty (→ SQL NULL) means "unowned, claimable by
+	// anyone now" — placement disabled, local N=1, a non-repo key, or a
+	// requeue that cleared it. Set on enqueue and while the row is queued
+	// (unlike ExecutorID); read back only where placement needs it.
+	PreferredExecutorID string `json:"-"`
 }
 
 // SnapshotReapKey identifies a parked workspace snapshot eligible for retention

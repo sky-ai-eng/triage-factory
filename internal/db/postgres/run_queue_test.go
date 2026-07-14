@@ -34,7 +34,7 @@ func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
 
 	// Empty queue.
-	if got, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch); err != nil || got != nil {
+	if got, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
 		t.Fatalf("ClaimNextRun on empty queue = (%v, %v), want (nil, nil)", got, err)
 	}
 
@@ -47,7 +47,7 @@ func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 		t.Fatalf("EnqueueRun: %v", err)
 	}
 
-	got, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch)
+	got, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{})
 	if err != nil || got == nil {
 		t.Fatalf("ClaimNextRun: (%v, %v)", got, err)
 	}
@@ -69,7 +69,7 @@ func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 	if err := stores.RunQueue.RequeueRun(ctx, orgID, runID, "transient"); err != nil {
 		t.Fatalf("RequeueRun: %v", err)
 	}
-	got2, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch)
+	got2, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{})
 	if err != nil || got2 == nil || got2.Attempts != 2 {
 		t.Fatalf("re-claim = (%+v, %v), want attempts=2", got2, err)
 	}
@@ -106,7 +106,7 @@ func TestRunQueueStore_Postgres_ResetProcessingRuns_ScopedToOwner(t *testing.T) 
 	}
 
 	// Process A claims and is still live (never crashed).
-	claimed, err := stores.RunQueue.ClaimNextRun(ctx, "process-a", 1)
+	claimed, err := stores.RunQueue.ClaimNextRun(ctx, "process-a", 1, db.ClaimPlacement{})
 	if err != nil || claimed == nil || claimed.ID != runID {
 		t.Fatalf("process-a claim: got=%v err=%v", claimed, err)
 	}
@@ -159,7 +159,7 @@ func TestRunQueueStore_Postgres_ResetProcessingRuns_NeverResetsCurrentEpoch(t *t
 		t.Fatalf("EnqueueRun: %v", err)
 	}
 
-	if _, err := stores.RunQueue.ClaimNextRun(ctx, "process-self", 5); err != nil {
+	if _, err := stores.RunQueue.ClaimNextRun(ctx, "process-self", 5, db.ClaimPlacement{}); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 
@@ -195,7 +195,7 @@ func TestRunQueueStore_Postgres_CancelRequestedNotClaimed(t *testing.T) {
 	if changed, err := stores.Blueprints.RequestRunCancelSystem(ctx, orgID, brID); err != nil || !changed {
 		t.Fatalf("RequestRunCancelSystem = (%v, %v)", changed, err)
 	}
-	if got, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch); err != nil || got != nil {
+	if got, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || got != nil {
 		t.Fatalf("ClaimNextRun on cancel-requested blueprint = (%v, %v), want (nil, nil)", got, err)
 	}
 }
@@ -237,7 +237,7 @@ func TestRunQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for {
-				run, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch)
+				run, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{})
 				if err != nil {
 					t.Errorf("ClaimNextRun: %v", err)
 					return

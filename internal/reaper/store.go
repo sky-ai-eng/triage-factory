@@ -156,11 +156,16 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	// 3. Not cancel-requested, attempts remaining: requeue. Same status/
 	// summary semantics as RunQueueStore.RequeueRun — clears the ownership
 	// stamp (a queued row has no owner) and leaves attempts as-is; the
-	// eventual re-claim bumps it. preferred_executor_id re-stamping is P2
-	// scope (placement doesn't exist yet) — plain requeue until then.
+	// eventual re-claim bumps it. preferred_executor_id is cleared too
+	// (TFAC-587): the reaper requeues precisely because the stamped executor
+	// is dead, so its stamp is the staler-than-a-dwell case the placement
+	// design calls out — NULL is "unowned, claimable by any live executor
+	// now" (no aging delay), which is the correct advisory answer here.
+	// Affinity is re-earned on the next enqueue, never carried toward a
+	// corpse.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', claimed_at = NULL, executor_id = NULL, boot_epoch = NULL,
-			cred_pubkey = NULL,
+			cred_pubkey = NULL, preferred_executor_id = NULL,
 			result_summary = 'Requeued: executor heartbeat stale (reaper)'
 		WHERE id IN (
 			SELECT r.id `+reapCandidateJoin+`

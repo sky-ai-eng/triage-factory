@@ -155,7 +155,7 @@ func TestResumeOpenRun_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
 func claimAndDispatch(t *testing.T, s *Spawner, database *sql.DB) {
 	t.Helper()
 	ctx := context.Background()
-	run, err := s.runQueue.ClaimNextRun(ctx, "test-executor", 1)
+	run, err := s.runQueue.ClaimNextRun(ctx, "test-executor", 1, db.ClaimPlacement{})
 	if err != nil {
 		t.Fatalf("claim next run: %v", err)
 	}

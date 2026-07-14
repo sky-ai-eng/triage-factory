@@ -48,7 +48,7 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 
 	claim := func(t *testing.T, store db.RunQueueStore, runID string) {
 		t.Helper()
-		got, err := store.ClaimNextRun(ctx, executorID, bootEpoch)
+		got, err := store.ClaimNextRun(ctx, executorID, bootEpoch, db.ClaimPlacement{})
 		if err != nil {
 			t.Fatalf("ClaimNextRun: %v", err)
 		}
