@@ -154,37 +154,47 @@ func maybeRunPtraceProbe() {
 	os.Exit(0)
 }
 
+// sidecarHarnessErr records a failure from installInProcessSidecarHarness (set
+// once by TestMain). startLiveRun checks it first so a broken harness fails the
+// live-sidecar tests with the exact cause rather than a cryptic setuid-exec
+// error — and the non-sidecar integration tests, which don't touch it, still run.
+var sidecarHarnessErr error
+
 // installInProcessSidecarHarness wires the sidecar-launch seam for the
 // integration TestMain: it points sidecarBinaryPath at a world-traversable copy
 // of this test binary and installs the in-process sidecar launcher. The copy is
 // needed because the real test binary lives under `go test`'s 0700 build cache,
 // which a setuid-to-sidecar-uid exec cannot traverse (the kernel resolves the
 // path after the credential switch) — the same constraint startSidecarCommHelper
-// and withStubSidecarBinary already work around. Returns a cleanup for the copy.
-func installInProcessSidecarHarness() func() {
-	sidecarLauncher = inProcessSidecarLauncher{}
-
+// and withStubSidecarBinary already work around.
+//
+// All-or-nothing: the two seams (sidecarBinaryPath, sidecarLauncher) are wired
+// together only AFTER the accessible copy exists, so a setup failure never
+// leaves the launcher installed while sidecarBinaryPath still points at the
+// un-exec'able 0700 build-cache binary — that partial state turns an
+// environment problem into a cryptic setuid-exec EACCES deep inside a test.
+// Returns the (non-nil) cleanup for whatever it created, plus any setup error;
+// on error neither seam is wired, and startLiveRun surfaces the error directly.
+func installInProcessSidecarHarness() (func(), error) {
 	dir, err := os.MkdirTemp("", "tf-sidecar-harness-")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "installInProcessSidecarHarness: mkdtemp: %v\n", err)
-		return func() {}
+		return func() {}, fmt.Errorf("mkdtemp: %w", err)
 	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
 	if err := os.Chmod(dir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "installInProcessSidecarHarness: chmod dir: %v\n", err)
-		return func() { _ = os.RemoveAll(dir) }
+		return cleanup, fmt.Errorf("chmod harness dir: %w", err)
 	}
 	binCopy := filepath.Join(dir, "tf-sidecar-testbin")
-	data, rerr := os.ReadFile(os.Args[0])
-	if rerr != nil {
-		fmt.Fprintf(os.Stderr, "installInProcessSidecarHarness: read test binary: %v\n", rerr)
-		return func() { _ = os.RemoveAll(dir) }
+	data, err := os.ReadFile(os.Args[0])
+	if err != nil {
+		return cleanup, fmt.Errorf("read test binary: %w", err)
 	}
-	if werr := os.WriteFile(binCopy, data, 0o755); werr != nil {
-		fmt.Fprintf(os.Stderr, "installInProcessSidecarHarness: write binary copy: %v\n", werr)
-		return func() { _ = os.RemoveAll(dir) }
+	if err := os.WriteFile(binCopy, data, 0o755); err != nil {
+		return cleanup, fmt.Errorf("write binary copy: %w", err)
 	}
 	sidecarBinaryPath = func() (string, error) { return binCopy, nil }
-	return func() { _ = os.RemoveAll(dir) }
+	sidecarLauncher = inProcessSidecarLauncher{}
+	return cleanup, nil
 }
 
 // --- the two-run harness ---
@@ -216,6 +226,9 @@ func startLiveRun(t *testing.T, ctx context.Context, runID string, customize fun
 		t.Skip("live sidecar harness needs root: setuid sidecar + gVisor caps")
 	}
 	requireRunsc(t)
+	if sidecarHarnessErr != nil {
+		t.Fatalf("live sidecar harness was not wired at startup: %v", sidecarHarnessErr)
+	}
 
 	cfg := minimalConfig(t)
 	cfg.RunID = runID
@@ -255,15 +268,21 @@ func (lr *liveRun) teardown() {
 	}
 }
 
-// --- /proc uid-band observation (the eviction + memory proofs read this) ---
+// --- /proc sidecar observation (the eviction + memory proofs read this) ---
 
-// pidsAtUID returns the pids whose real uid (the first field of
-// /proc/<pid>/status's Uid line) equals uid. This is the direct kernel read the
-// eviction proof turns on: the run's credential-bearing process family is
-// exactly the set at SidecarUID(idx), so "no process at that uid" is "the run's
-// credential address space is gone" — stronger than checking a single named pid,
-// and it needs no production Pid() accessor on the sidecar handle.
-func pidsAtUID(t *testing.T, uid int) []int {
+// sidecarPidsAtUID returns the pids that are BOTH a tf-sidecar (comm ==
+// SidecarCommName) AND running at the given real uid — the exact pair
+// reapOrphanSidecars keys on, and for the same reason: a uid match alone would
+// miscount an unrelated host process that happens to land in the reserved
+// sidecar band (mis-asserting "not evicted", or handing the ptrace probe the
+// wrong target), while a comm match alone can't tell one run's sidecar from
+// another's. The comm scopes to "is a TF sidecar"; the uid scopes to "this
+// specific run" (SidecarUID(idx) is unique per run). Since the sidecar holds the
+// run's whole credential set in one process and forks no credential-bearing
+// child (the node agent runs inside the gVisor jail, not under the sidecar),
+// "no such process" is "this run's credential address space is gone" — and it
+// needs no production Pid() accessor on the sidecar handle.
+func sidecarPidsAtUID(t *testing.T, uid int) []int {
 	t.Helper()
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -275,6 +294,13 @@ func pidsAtUID(t *testing.T, uid int) []int {
 		if err != nil {
 			continue // not a pid dir
 		}
+		comm, err := os.ReadFile("/proc/" + e.Name() + "/comm")
+		if err != nil {
+			continue // exited mid-scan, or unreadable — not ours
+		}
+		if strings.TrimRight(string(comm), "\n") != SidecarCommName {
+			continue
+		}
 		// procRealUID (sidecar_reap_linux.go) is the same real-uid read the
 		// boot-time orphan reap uses; an exited-mid-scan process reads ok=false
 		// and is treated as "not at this uid".
@@ -285,20 +311,20 @@ func pidsAtUID(t *testing.T, uid int) []int {
 	return pids
 }
 
-// waitForUIDBandEmpty polls until no process remains at uid, or fails after
-// timeout. Kill→reap is synchronous in inProcessSidecar.Close, but a node child
-// or a late scheduler reap can lag a beat, so this tolerates a short settle.
-func waitForUIDBandEmpty(t *testing.T, uid int, timeout time.Duration) {
+// waitForSidecarGone polls until no tf-sidecar process remains at uid, or fails
+// after timeout. Kill→reap is synchronous in inProcessSidecar.Close, but a late
+// scheduler reap can lag a beat, so this tolerates a short settle.
+func waitForSidecarGone(t *testing.T, uid int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if len(pidsAtUID(t, uid)) == 0 {
+		if len(sidecarPidsAtUID(t, uid)) == 0 {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	remaining := pidsAtUID(t, uid)
-	t.Fatalf("EVICTION FAILED: %d process(es) still live at sidecar uid %d after teardown %v — the run's credential address space was not freed", len(remaining), uid, remaining)
+	remaining := sidecarPidsAtUID(t, uid)
+	t.Fatalf("EVICTION FAILED: %d tf-sidecar process(es) still live at uid %d after teardown %v — the run's credential address space was not freed", len(remaining), uid, remaining)
 }
 
 // runPtraceProbeAsUID execs the probe child (this test binary, via

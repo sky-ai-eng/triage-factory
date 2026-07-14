@@ -34,7 +34,9 @@ import (
 // cross-tenant egress probe's nc pattern but for unix sockets (via python3 from
 // the baked rootfs, whose connect() raises — and so exits non-zero — on a path
 // that is absent or unreachable). sib is the sibling run's host socket path
-// (absent inside this jail); own is DefaultSocketPath, this run's own socket.
+// (absent inside this jail — the BLOCKED expectation); the run's own socket is
+// always TrustedAgentHostSocketDestination, bind-mounted in, dialed as the
+// REACHABLE positive control.
 func unixDialProbeArgv(sib string) []string {
 	const probe = `import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.settimeout(3); s.connect(sys.argv[1])`
 	script := `SIB='` + sib + `'; OWN='` + TrustedAgentHostSocketDestination + `'; ` +
@@ -121,9 +123,9 @@ func TestIntegration_CrossSidecarPtraceDenied(t *testing.T) {
 		t.Fatalf("run A and run B share sidecar uid %d — derived uids are not distinct", a.sidecarUID)
 	}
 
-	pidsA := pidsAtUID(t, a.sidecarUID)
+	pidsA := sidecarPidsAtUID(t, a.sidecarUID)
 	if len(pidsA) == 0 {
-		t.Fatalf("no live sidecar process at run A's uid %d to target", a.sidecarUID)
+		t.Fatalf("no live tf-sidecar at run A's uid %d to target", a.sidecarUID)
 	}
 	targetPid := pidsA[0]
 

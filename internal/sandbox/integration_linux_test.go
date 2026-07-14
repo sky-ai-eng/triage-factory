@@ -61,7 +61,14 @@ func TestMain(m *testing.M) {
 	// routes its launch through runLauncher and LaunchSidecar through
 	// sidecarLauncher, so both must be set before any test calls them.
 	runLauncher = inProcessLauncher{}
-	sidecarHarnessCleanup := installInProcessSidecarHarness()
+	sidecarHarnessCleanup, err := installInProcessSidecarHarness()
+	if err != nil {
+		// Record it, don't abort: the live-sidecar tests fail loudly with this
+		// exact cause (via sidecarHarnessErr), while the non-sidecar integration
+		// tests — which don't use the harness — still run.
+		sidecarHarnessErr = err
+		fmt.Fprintf(os.Stderr, "TestMain: sidecar harness setup failed: %v\n", err)
+	}
 
 	if shouldPreWarmRootfs() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
