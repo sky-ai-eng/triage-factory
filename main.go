@@ -23,6 +23,11 @@ import (
 	// `slack` entitlement.
 	_ "github.com/sky-ai-eng/triage-factory/ee/slack"
 
+	// Enterprise Edition fleet console: registers the /api/fleet route
+	// installer via init(). Gated at runtime on is_operator AND the
+	// deployment-scoped `fleet` entitlement (entitlements.Active()).
+	_ "github.com/sky-ai-eng/triage-factory/ee/fleet"
+
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 

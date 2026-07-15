@@ -403,6 +403,13 @@ var orgScopedTables = []string{
 	// (admin-pool-only system state, same posture as poll_readiness) — not
 	// reached by CASCADE, so listed explicitly.
 	"placement_overrides",
+	// instance_stats + operators (TFAC-589): admin-pool-only system tables
+	// with no FK to orgs (fleet telemetry samples / the deployment-operator
+	// identity) — same posture as instances / placement_overrides, so they
+	// must be listed explicitly or Reset would leak sample and operator rows
+	// across tests sharing this container (the exact cross-subtest bleed the
+	// instance_stat/operator conformance suites hit otherwise).
+	"instance_stats", "operators",
 	// users last — most other tables FK into it.
 	"users",
 	// NOT INCLUDED explicitly: system_prompt_versions, events_catalog.

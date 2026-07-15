@@ -368,6 +368,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// membership registry every TF process registers into at boot and
 		// refreshes via periodic heartbeat.
 		Instances: newInstanceStore(admin),
+		// InstanceStats + Operators are admin-pool only, same posture as
+		// Instances: fleet telemetry + the deployment-operator identity, never
+		// read under a user's RLS context (TFAC-589).
+		InstanceStats: newInstanceStatStore(admin),
+		Operators:     newOperatorStore(admin),
 		// RunSignals is admin-pool only, same posture as Instances: the
 		// cross-pod run-control outbox (TFAC-585), never read under a
 		// user's RLS context.

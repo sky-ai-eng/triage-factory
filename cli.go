@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/instance"
 	"github.com/sky-ai-eng/triage-factory/cmd/jwkinit"
 	"github.com/sky-ai-eng/triage-factory/cmd/migrate"
+	"github.com/sky-ai-eng/triage-factory/cmd/operator"
 	"github.com/sky-ai-eng/triage-factory/cmd/runsidecar"
 	"github.com/sky-ai-eng/triage-factory/cmd/snapshotcapture"
 	"github.com/sky-ai-eng/triage-factory/cmd/uninstall"
@@ -72,6 +73,8 @@ func dispatchCLI(args []string) (handled bool, err error) {
 		jwkinit.Handle(args[1:])
 	case "instance":
 		instance.Handle(args[1:])
+	case "operator":
+		operator.Handle(args[1:])
 	case "-h", "--help", "help":
 		printTopLevelHelp()
 	case "-v", "--version", "version":
@@ -115,6 +118,9 @@ USER COMMANDS
   triagefactory instance drain <id>        stop new claims, quiesce
   triagefactory instance undrain <id>      resume claims
   triagefactory instance placement ...     inspect / steer run placement
+  triagefactory operator add <email>       grant the fleet-console operator flag
+  triagefactory operator remove <email>    revoke it
+  triagefactory operator list              show deployment operators
 
 AGENT COMMANDS
   Used by delegated Claude Code agents inside their worktree, not

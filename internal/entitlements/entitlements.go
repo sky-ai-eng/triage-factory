@@ -61,12 +61,24 @@ const (
 	// db.ErrNotApplicableInLocal as a 500. Revisit if/when local-mode Slack
 	// support is actually built.
 	FeatureSlack Feature = "slack"
+
+	// FeatureFleet gates the sandbox-fleet administration console — the Fleet
+	// page and the rich /api/fleet surfaces (overview, instances + drain,
+	// timeseries, queue). It is the first DEPLOYMENT-scoped feature: fleet
+	// administration is a cross-org console, so it resolves through Active()
+	// (the license-backed deployment path), never For(orgID) — the per-org
+	// resolver could not even name an org for a cross-org view. The gate
+	// composes with the deployment-operator identity: a surface renders only
+	// when the caller is_operator AND Active().Has(FeatureFleet). Operability
+	// (the registry read, drain, and the operator CLI) is core and ungated;
+	// only the console is EE (spec §8.4).
+	FeatureFleet Feature = "fleet"
 )
 
 // allFeatures is the registry of every gated feature. Unexported + returned by
 // value through AllFeatures so a caller can't append to or blank out the
 // registry and corrupt the probe.
-var allFeatures = []Feature{FeatureSSO, FeatureGovernance, FeatureSlack}
+var allFeatures = []Feature{FeatureSSO, FeatureGovernance, FeatureSlack, FeatureFleet}
 
 // AllFeatures returns every gated feature, for the /api/entitlements probe to
 // iterate and report the subset the active provider licenses. It returns a
@@ -132,9 +144,27 @@ func (s staticProvider) For(string) Entitlements { return s.ent }
 // entitled, for any org.
 func Static(features ...Feature) Provider { return staticProvider{ent: New(features, nil)} }
 
+// DeploymentProvider resolves the DEPLOYMENT-scoped entitlements snapshot —
+// the features the deployment's own license grants, independent of any org.
+// This is the seam deployment-scoped surfaces (the fleet console) resolve
+// through, via Active(): a cross-org console has no orgID to hand For(orgID),
+// and on a SaaS build For would be Stripe-per-org while the deployment license
+// is what actually names FeatureFleet. Providers GROW BY IMPLEMENTATIONS
+// (staticDeployment, the ee license provider); a nil registration is ignored.
+type DeploymentProvider interface {
+	Active() Entitlements
+}
+
+// staticDeployment yields a fixed deployment snapshot (the everything-off
+// default until ee.Install registers the license-backed provider).
+type staticDeployment struct{ ent Entitlements }
+
+func (s staticDeployment) Active() Entitlements { return s.ent }
+
 var (
-	mu       sync.RWMutex
-	provider Provider = Static() // per-org default: everything off
+	mu         sync.RWMutex
+	provider   Provider           = Static()           // per-org default: everything off
+	deployment DeploymentProvider = staticDeployment{} // deployment default: everything off
 )
 
 // RegisterProvider installs the process-wide per-org Provider. Called once,
@@ -162,6 +192,31 @@ func For(orgID string) Entitlements {
 	return p.For(orgID)
 }
 
+// RegisterDeploymentProvider installs the process-wide DeploymentProvider that
+// backs Active(). Called once from ee.Install alongside RegisterProvider, from
+// the same verified license. A nil provider is ignored (the everything-off
+// default stays), so a wiring bug can never nil-deref Active.
+func RegisterDeploymentProvider(p DeploymentProvider) {
+	if p == nil {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	deployment = p
+}
+
+// Active returns the deployment-scoped entitlements snapshot — what the
+// deployment's own license grants, independent of any org. This is the ONLY
+// correct resolver for deployment-scoped surfaces (the fleet console); the
+// per-org For(orgID) governs org-facing surfaces and cannot name an org for a
+// cross-org console. Everything off until ee.Install registers the license.
+func Active() Entitlements {
+	mu.RLock()
+	p := deployment
+	mu.RUnlock()
+	return p.Active()
+}
+
 // Reset restores the Static (everything off) default provider and clears
 // every registered event-source gate. Intended for tests that register a stub
 // provider and/or a synthetic GateEventSource and need to avoid leaking
@@ -170,5 +225,6 @@ func Reset() {
 	mu.Lock()
 	defer mu.Unlock()
 	provider = Static()
+	deployment = staticDeployment{}
 	eventSourceGates = map[string]Feature{}
 }

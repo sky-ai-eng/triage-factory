@@ -347,6 +347,18 @@ type Stores struct {
 	// SQLite is N=1: one row, epoch bumping per restart.
 	Instances InstanceStore
 
+	// InstanceStats owns the instance_stats table — the 1-minute fleet
+	// telemetry samples the per-pod sampler writes and the fleet dashboard
+	// reads (TFAC-589). Admin-pool-only, same posture as Instances: a fleet
+	// member's telemetry isn't tenant data.
+	InstanceStats InstanceStatStore
+
+	// Operators owns the operators table — the deployment-operator identity
+	// managed by the `triagefactory operator` CLI and read by the fleet gate
+	// (TFAC-589). Admin-pool-only, same posture as Instances: an operator is
+	// deployment config, not tenant data.
+	Operators OperatorStore
+
 	// RunSignals owns the run_signals table — the cross-pod run-control
 	// outbox (TFAC-585). Postgres only: the SQLite impl is a stub
 	// returning ErrNotApplicableInLocal from every method, mirroring

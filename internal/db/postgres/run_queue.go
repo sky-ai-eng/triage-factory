@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
@@ -447,6 +448,116 @@ func scanOrgQueueShares(rows *sql.Rows) ([]db.OrgQueueShare, error) {
 			share.MaxConcurrentRuns = &v
 		}
 		out = append(out, share)
+	}
+	return out, rows.Err()
+}
+
+func (s *runQueueStore) CountQueuedSystem(ctx context.Context) (int, error) {
+	var n int
+	err := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE status = 'queued'`).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func (s *runQueueStore) RecentRunTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.RunTiming, error) {
+	if limit <= 0 {
+		limit = 5000
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT org_id::text, COALESCE(executor_id, ''), status, COALESCE(failure_kind, ''),
+		       started_at, claimed_at, completed_at, duration_ms
+		FROM runs
+		WHERE started_at >= $1
+		ORDER BY started_at DESC
+		LIMIT $2
+	`, since.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRunTimings(rows)
+}
+
+func (s *runQueueStore) QueuedRunAgesSystem(ctx context.Context) ([]domain.QueuedRun, error) {
+	return s.queuedRunAges(ctx, "")
+}
+
+func (s *runQueueStore) QueuedRunAgesForOrgSystem(ctx context.Context, orgID string) ([]domain.QueuedRun, error) {
+	return s.queuedRunAges(ctx, orgID)
+}
+
+func (s *runQueueStore) queuedRunAges(ctx context.Context, orgID string) ([]domain.QueuedRun, error) {
+	q := `SELECT org_id::text, started_at, COALESCE(preferred_executor_id, '')
+	      FROM runs WHERE status = 'queued'`
+	args := []any{}
+	if orgID != "" {
+		q += ` AND org_id = $1`
+		args = append(args, orgID)
+	}
+	q += ` ORDER BY started_at ASC`
+	rows, err := s.conn.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.QueuedRun
+	for rows.Next() {
+		var qr domain.QueuedRun
+		if err := rows.Scan(&qr.OrgID, &qr.EnqueuedAt, &qr.PreferredExecutor); err != nil {
+			return nil, err
+		}
+		out = append(out, qr)
+	}
+	return out, rows.Err()
+}
+
+func (s *runQueueStore) RecentRunTimingsForOrgSystem(ctx context.Context, orgID string, since, until time.Time, limit int) ([]domain.RunTiming, error) {
+	if limit <= 0 {
+		limit = 5000
+	}
+	q := `SELECT org_id::text, COALESCE(executor_id, ''), status, COALESCE(failure_kind, ''),
+	             started_at, claimed_at, completed_at, duration_ms
+	      FROM runs WHERE org_id = $1 AND started_at >= $2`
+	args := []any{orgID, since.UTC()}
+	if !until.IsZero() {
+		args = append(args, until.UTC())
+		q += ` AND started_at < $3`
+	}
+	args = append(args, limit)
+	q += ` ORDER BY started_at DESC LIMIT $` + strconv.Itoa(len(args))
+	rows, err := s.conn.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRunTimings(rows)
+}
+
+func scanRunTimings(rows *sql.Rows) ([]domain.RunTiming, error) {
+	var out []domain.RunTiming
+	for rows.Next() {
+		var t domain.RunTiming
+		var claimedAt, completedAt sql.NullTime
+		var durationMS sql.NullInt64
+		if err := rows.Scan(
+			&t.OrgID, &t.ExecutorID, &t.Status, &t.FailureKind,
+			&t.StartedAt, &claimedAt, &completedAt, &durationMS,
+		); err != nil {
+			return nil, err
+		}
+		if claimedAt.Valid {
+			v := claimedAt.Time
+			t.ClaimedAt = &v
+		}
+		if completedAt.Valid {
+			v := completedAt.Time
+			t.CompletedAt = &v
+		}
+		t.DurationMS = intPtrFromNull(durationMS)
+		out = append(out, t)
 	}
 	return out, rows.Err()
 }

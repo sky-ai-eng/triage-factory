@@ -74,4 +74,12 @@ type SpendStore interface {
 	// nothing and the cap would never trip. SQLite is N=1 / no RLS, so it
 	// delegates to SpendByCategory with the same team filter applied.
 	SpendByCategorySystemForTeam(ctx context.Context, orgID, teamID string, since, until time.Time) ([]domain.SpendBucket, error)
+
+	// SpendTotalSystem sums settled llm_spend across ALL orgs in the window —
+	// the deployment-wide cost overlay on the fleet dashboard (TFAC-589). The
+	// only cross-org (no orgID) spend read: it exists solely for the
+	// operator-gated fleet console, never a tenant-facing surface, so it runs on
+	// the admin pool with no org filter. Both bounds optional (zero time drops
+	// the clause), same convention as SpendByCategorySystem.
+	SpendTotalSystem(ctx context.Context, since, until time.Time) (float64, error)
 }

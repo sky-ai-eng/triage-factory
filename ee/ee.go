@@ -59,10 +59,18 @@ func Install() {
 	for i, f := range claims.Features {
 		feats[i] = entitlements.Feature(f)
 	}
-	entitlements.RegisterProvider(licenseProvider{
+	lp := licenseProvider{
 		claims: claims,
 		ent:    entitlements.New(feats, nil), // features auto-all; the license's deployment-wide Limits are NOT per-org
-	})
+	}
+	entitlements.RegisterProvider(lp)
+	// The deployment-scoped resolver Active() reads: for self-host the
+	// deployment features ARE the license features (the same expiry-checked
+	// snapshot), so the one provider backs both seams. On a future SaaS build
+	// For would swap to a Stripe-per-org resolver while Active stays
+	// license-backed — the reason fleet administration resolves here, never
+	// through For(orgID).
+	entitlements.RegisterDeploymentProvider(lp)
 	// Startup diagnostic → stderr (like the failure paths above), so it doesn't
 	// land in the stdout log stream or leak the org/feature list into structured
 	// stdout logging.
@@ -105,6 +113,18 @@ type licenseProvider struct {
 }
 
 func (p licenseProvider) For(string) entitlements.Entitlements {
+	if !p.claims.Valid(time.Now()) {
+		return entitlements.Entitlements{}
+	}
+	return p.ent
+}
+
+// Active backs entitlements.Active() — the deployment-scoped snapshot. Same
+// expiry-checked feature set as For (self-host licensing is deployment-wide),
+// so a lapsed license darkens the fleet console exactly as it darkens per-org
+// features. This is what lets is_operator AND Active().Has(FeatureFleet) gate
+// the console without naming an org.
+func (p licenseProvider) Active() entitlements.Entitlements {
 	if !p.claims.Valid(time.Now()) {
 		return entitlements.Entitlements{}
 	}

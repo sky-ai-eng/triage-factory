@@ -72,6 +72,9 @@ func TestHandleFleetQueue_QuietOrgReturnsZeroShare(t *testing.T) {
 	}
 }
 
+// The org-facing per-org cap read-out requires an explicit ?org=; the
+// deployment-wide operator view is a separate EE surface (/api/fleet/backlog),
+// so this endpoint deliberately does not serve a no-org "whole fleet" request.
 func TestHandleFleetQueue_RequiresOrgParam(t *testing.T) {
 	s := &Server{az: &authz.Checker{}, fleetQueue: &fakeFleetQueue{}}
 	rec := httptest.NewRecorder()

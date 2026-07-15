@@ -32,18 +32,22 @@ type fleetQueueShareDTO struct {
 	AtCap             bool   `json:"at_cap"`
 }
 
-// handleFleetQueue surfaces per-org run-queue shares (spec §8.3's `queue`
-// fleet surface: per-org active/queued shares) — the read the fleet dashboard
-// consumes and the operator uses to see one tenant's burst against the fleet's
-// capacity.
+// handleFleetQueue surfaces one org's run-queue share against its concurrency
+// cap: active vs queued runs, the configured cap, and whether the org is at cap
+// (its queued runs invisible to claims until an active one finishes). This is
+// the org-facing read-out of the per-org cap + fair-claim feature — an org
+// admin (or the org owner) checking their own tenant's standing.
 //
-// The FleetQueueShares store read is fleet-wide (every org's share); the
-// spec's full operator view is gated on the operator identity that lands with
-// a later ticket. Until then this mirrors the placement explainer's interim
-// exactly: org-admin gated on ?org=, returning only the caller's own org's
-// share — so no tenant sees another's queue depth before the operator gate
-// exists. When operator identity lands, an operator caller (no ?org=) gets the
-// full list; the store method already returns it.
+// Org-scoped by design: the FleetQueueShares store read is fleet-wide, but this
+// endpoint returns only the caller's own ?org= row, so no tenant sees another's
+// queue depth. It is org-admin gated exactly like the placement explainer.
+//
+// The DEPLOYMENT-WIDE operator queue view is a SEPARATE surface, not this one:
+// the fleet console's operator backlog (fleet-wide oldest-waiting + per-org
+// shares) lives in ee/fleet at GET /api/fleet/backlog, gated on the operator
+// identity AND the FeatureFleet entitlement (the console is EE; this per-org
+// cap read-out is org-facing operability). The two are different lenses on the
+// queue — cap-fairness here, wait-latency there — deliberately kept apart.
 //
 // GET /api/fleet/queue?org=<uuid>
 func (s *Server) handleFleetQueue(w http.ResponseWriter, r *http.Request) {

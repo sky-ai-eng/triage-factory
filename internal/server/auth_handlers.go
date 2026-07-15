@@ -717,6 +717,13 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// invite-only "ask your admin" state, without a second round trip.
 		// Not omitempty — false is a meaningful value the gate must see.
 		OrgCreationEnabled bool `json:"org_creation_enabled"`
+		// IsOperator reports whether this identity is a deployment operator
+		// (TFAC-589) — the org-less flag the fleet-console nav gate reads
+		// (together with the FeatureFleet entitlement). Deployment config, not
+		// tenant data, so it lives on identity here rather than a per-org role.
+		// Not omitempty — false is meaningful. Local mode: the single user is
+		// implicitly the operator.
+		IsOperator bool `json:"is_operator"`
 	}
 
 	// Local-mode shim path: withSession injects a synthetic claim
@@ -749,6 +756,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			// renders the onboarding entry, so the value is moot; report
 			// the permissive default for shape consistency.
 			OrgCreationEnabled: true,
+			// The single local user is implicitly the operator (there is no
+			// one else); FeatureFleet is still unlicensed locally, so the
+			// console stays dark — this only makes core operability legible.
+			IsOperator: true,
 		}
 		// s.users is wired by New(). The middleware-shim unit test
 		// constructs a bare &Server{} to exercise the sentinel path
@@ -779,6 +790,17 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	resp.Orgs = []orgRow{}
 	resp.Email = claims.Email
 	resp.OrgCreationEnabled = runmode.OrgCreationEnabled()
+	// Deployment-operator flag (TFAC-589): a plain lookup of the verified
+	// session email against the org-less operators table. Admin-pool read
+	// (operators has no RLS policy); best-effort — a lookup error leaves it
+	// false (fail closed, the console 404s), never fails the identity read.
+	if s.allStores.Operators != nil && claims.Email != "" {
+		if ok, err := s.allStores.Operators.IsOperator(r.Context(), claims.Email); err != nil {
+			serverLog.Warn("operator lookup failed on /api/me", "error", err)
+		} else {
+			resp.IsOperator = ok
+		}
+	}
 	if sess := SessionFrom(r.Context()); sess != nil && sess.ActiveOrgID.Valid {
 		resp.ActiveOrgID = sess.ActiveOrgID.UUID.String()
 	}

@@ -877,10 +877,14 @@ func (s *Server) routes() {
 	// Scope is role-gated: /me is any org member, /teams/{id} is team-admin OR
 	// org-admin, /org is org-admin. The team/org reads use the admin-pool
 	// ListSpendSystem (the role gate is the authorization for crossing RLS).
-	uh := &usageHandler{tx: s.tx, az: s.az}
+	uh := &usageHandler{tx: s.tx, az: s.az, runQueue: s.allStores.RunQueue}
 	s.api("GET /api/usage/me", uh.handleUsageMe)
 	s.api("GET /api/usage/teams/{team_id}", uh.handleUsageTeam)
 	s.api("GET /api/usage/org", uh.handleUsageOrg)
+	// Org-scoped operations subset (TFAC-589): an org admin's own queue waits +
+	// run durations + failure rates. Org-admin gated, SaaS-safe (no cross-tenant
+	// machine truth) — the org-facing complement to the operator-only fleet console.
+	s.api("GET /api/usage/org/ops", uh.handleUsageOrgOps)
 	// Activity feed (EE, FeatureGovernance): the team/org Actions (external-action
 	// audit log) + Objects (artifact history) lenses, selected by ?view= — same
 	// scope gates as the spend reads above, plus the entitlement (unlicensed →

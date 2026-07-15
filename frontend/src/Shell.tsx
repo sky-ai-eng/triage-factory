@@ -3,6 +3,7 @@ import { Settings } from 'lucide-react'
 import { useOrgHref } from './hooks/useOrgHref'
 import { useOptionalAuth } from './contexts/AuthContext'
 import { useOrgRole } from './hooks/useOrgRole'
+import { FeatureFleet, useEntitlements } from './hooks/useEntitlements'
 import OrgPicker from './components/OrgPicker'
 import UserMenu from './components/UserMenu'
 
@@ -34,6 +35,14 @@ export default function Shell() {
   // The org template (low-frequency admin config) is reached via the Org pill →
   // Template tab, not a standalone nav entry (TFAC-436).
   const { isAdmin: orgAdmin } = useOrgRole()
+
+  // Fleet console (TFAC-589) — the sandbox-fleet admin surface. Composes the two
+  // deployment-scoped gates: the operator identity (from /api/me, org-less) AND
+  // the FeatureFleet entitlement. Both must hold; absent otherwise (no upsell
+  // stub), matching the backend's 404-and-hide. Local mode is unlicensed, so the
+  // item never shows there even though the single user is nominally an operator.
+  const { has, loaded: entLoaded } = useEntitlements()
+  const fleetVisible = entLoaded && has(FeatureFleet) && (auth?.me?.is_operator ?? false)
 
   // Full-bleed routes (the agent run station) drop the app nav + main padding so
   // the page owns the whole viewport — it's a focused, open-in-new-tab surface.
@@ -116,6 +125,11 @@ export default function Shell() {
             {orgAdmin && (
               <NavLink to={orgHref('/org')} className={({ isActive }) => pill(isActive)}>
                 Org
+              </NavLink>
+            )}
+            {fleetVisible && (
+              <NavLink to={orgHref('/fleet')} className={({ isActive }) => pill(isActive)}>
+                Fleet
               </NavLink>
             )}
           </div>

@@ -128,6 +128,31 @@ func (s *spendStore) SpendByCategorySystemForTeam(ctx context.Context, orgID, te
 	return spendByCategory(ctx, s.admin, orgID, teamID, since, until)
 }
 
+func (s *spendStore) SpendTotalSystem(ctx context.Context, since, until time.Time) (float64, error) {
+	var where strings.Builder
+	args := []any{}
+	next := func(v any) string {
+		args = append(args, v)
+		return "$" + strconv.Itoa(len(args))
+	}
+	if !since.IsZero() {
+		where.WriteString(` AND occurred_at >= ` + next(since))
+	}
+	if !until.IsZero() {
+		where.WriteString(` AND occurred_at < ` + next(until))
+	}
+	// COALESCE so no rows sums to 0, not NULL; double-precision accumulation
+	// matches SpendByCategorySystem's reconciliation rationale.
+	var total sql.NullFloat64
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(total_cost_usd::double precision), 0)
+		FROM llm_spend WHERE 1=1`+where.String(), args...).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("spend total: %w", err)
+	}
+	return total.Float64, nil
+}
+
 // spendByCategory is the shared aggregate the app- and admin-pool variants both
 // run; q selects which pool (and thus whether RLS applies). A non-empty teamID
 // adds an `AND team_id = teamID` filter (the per-team cap path); "" leaves the
