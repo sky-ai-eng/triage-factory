@@ -242,10 +242,16 @@ At horizontal scale the profile becomes the **scheduling unit**: a heavy/browser
 profile routes to a large-Machine pool, a cheap profile to small ones. That same
 sizing is the natural **metering/billing hook** — "this profile's runs cost this
 much and go there." On shared SaaS, larger/browser profiles are the upcharge
-lever; on self-host, the operator sizes their own pools. The fleet-side
-mechanics — budget-based admission, the eligibility-vs-affinity split in the
-run claim, warm-variant tracking, and the cross-org recipe-sharing invariant —
-are specified in `docs/for-agents/specs/horizontal-scaling/` §6.4.
+lever; on self-host, the operator sizes their own pools. Concretely, the
+per-tenant **compute quota is memory-denominated** (`Σ active-run mem_budget_mb
+≤ org_budget_mb`) — not a run count, and not image size — with the profile's
+`mem_budget_mb` as the one meter and `org_budget_mb` plan-derived (tier × seats,
+via the license entitlement); it composes with, but is a distinct axis from,
+TFAC-590's org-owned `max_concurrent_runs` self-limit. The fleet-side
+mechanics — budget-based admission, this per-tenant quota, the
+eligibility-vs-affinity split in the run claim, warm-variant tracking, and the
+cross-org recipe-sharing invariant — are specified in
+`docs/for-agents/specs/horizontal-scaling/` §6.4.
 
 ---
 

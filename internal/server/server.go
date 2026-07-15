@@ -102,6 +102,10 @@ type Server struct {
 	// via SetPlacementResolver after construction; nil until then so the
 	// endpoint 503s rather than panicking if a request races startup.
 	placement placementResolver
+	// fleetQueue backs the GET /api/fleet/queue view: per-org run-queue shares
+	// (active/queued + cap). Satisfied by the RunQueue store; a narrow
+	// interface so the handler test can inject canned shares.
+	fleetQueue fleetQueueReader
 	// ghResolver picks the right GitHub credential (org App installation
 	// token → PAT) per request, given the org + target account. The per-repo
 	// handler operations migrated off the old process-global PAT client —
@@ -526,6 +530,7 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 		authEvents:   stores.AuthEvents,
 		tx:           stores.Tx,
 		az:           authz.New(database, stores.Tx),
+		fleetQueue:   stores.RunQueue,
 		allStores:    stores,
 		serverPort:   serverPort,
 		mux:          http.NewServeMux(),
@@ -756,6 +761,11 @@ func (s *Server) routes() {
 	// for a key. Org-admin gated inside the handler on ?org= (the fleet
 	// operator identity is TFAC-589). Read-only.
 	s.api("GET /api/fleet/placement", s.handleFleetPlacement)
+	// Fleet queue view: per-org active/queued shares + the org's concurrency
+	// cap. Org-admin gated inside the handler on ?org= (the fleet-wide
+	// operator view is a later ticket, same interim as the placement explainer
+	// above). Read-only.
+	s.api("GET /api/fleet/queue", s.handleFleetQueue)
 	// Local-mode "Start your factory" provision action — creates
 	// the synthetic tenant + materializes shipped defaults via the shared
 	// bootstrap chain. Idempotent; no-op once a tenant exists.

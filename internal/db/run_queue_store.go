@@ -172,6 +172,18 @@ type RunQueueStore interface {
 	// re-minting.
 	ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan time.Time) ([]AwaitingCredentialsRun, error)
 
+	// FleetQueueShares returns the run-queue occupancy of every org with any
+	// active or queued work, newest-pressure first — the per-org shares the
+	// operator fleet queue view (GET /api/fleet/queue) surfaces and
+	// the claim's fairness ordering acts on. Active counts runs occupying a
+	// live executor slot (status running/awaiting_credentials); Queued counts
+	// runs still waiting to be claimed; MaxConcurrentRuns is the org's
+	// configured cap (nil = unlimited, also nil for a non-positive value). An
+	// org with neither active nor queued runs is omitted. Admin-pool,
+	// cross-org: this is a fleet/operator read with no per-user identity, the
+	// same posture as ClaimNextRun (SQLite is N=1 — at most the one local org).
+	FleetQueueShares(ctx context.Context) ([]OrgQueueShare, error)
+
 	// ReconcileOrphanedRuns is the boot self-heal mirror of ResetProcessingRuns:
 	// every child run left non-terminal (queued/claimed/running/
 	// open/pending_approval/...) under a blueprint_run that is already terminal
@@ -185,6 +197,25 @@ type RunQueueStore interface {
 	// this heals rows already broken at boot. Cross-org system sweep; returns the
 	// count cancelled.
 	ReconcileOrphanedRuns(ctx context.Context) (int, error)
+}
+
+// OrgQueueShare is one org's run-queue occupancy from FleetQueueShares — the
+// shape the fleet queue view renders and the fairness claim reasons about.
+// Active + Queued are live counts at read time; a zero-of-both org is never
+// returned.
+type OrgQueueShare struct {
+	OrgID string
+	// Active is the org's runs currently occupying a live executor slot
+	// (status running/awaiting_credentials) — the value the per-org cap and
+	// the fairness ordering compare against.
+	Active int
+	// Queued is the org's runs still waiting to be claimed.
+	Queued int
+	// MaxConcurrentRuns is the org's configured concurrency cap, nil when
+	// unlimited (a NULL or non-positive max_concurrent_runs). When non-nil and
+	// Active >= *MaxConcurrentRuns the org is at its ceiling and its queued
+	// runs are invisible to claims until an active run finishes.
+	MaxConcurrentRuns *int
 }
 
 // AwaitingCredentialsRun is one row from ListAwaitingCredentials /

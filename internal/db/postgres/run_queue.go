@@ -114,6 +114,18 @@ func (s *runQueueStore) notifyWake(ctx context.Context, orgID string) {
 	_ = wakebus.Publish(ctx, s.conn, wakebus.KindRun, orgID)
 }
 
+// activeRunStatusesSQL is the set of runs.status values that occupy a live
+// executor slot — claimed and executing, but not yet terminal and not
+// hibernated (open/pending_approval park off the fleet). It is what the
+// per-org fairness/cap claim counts as an org's "active" runs. Keep this
+// status set in sync with idx_runs_active_by_org's partial predicate: Postgres
+// serves the count from that partial index when the query's WHERE provably
+// implies the index predicate (predicate implication — an equivalent IN-list
+// matches regardless of spelling, not textual identity), and that implication
+// is what keeps the count an index scan over the small live set rather than a
+// seq scan of the whole runs history.
+const activeRunStatusesSQL = `'running', 'awaiting_credentials'`
+
 func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement) (*domain.AgentRun, error) {
 	// FOR UPDATE SKIP LOCKED on the inner select so a multi-worker fleet never
 	// claims the same queued run. Claimable = the owning blueprint_run is still
@@ -124,11 +136,26 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 	// so the row's ownership is never ambiguous between claim and the process
 	// actually going live — see ResetProcessingRuns.
 	//
-	// candidatePredicate + orderBy are the only two things placement changes
-	// (TFAC-587). Disabled: the globally-oldest claimable run, exactly the
-	// pre-placement query. Enabled: the two-tier claim (see the SQL below).
+	// Per-org fairness + cap are ALWAYS applied here, independent of
+	// placement: the org_active CTE counts each org's active (slot-occupying)
+	// runs once per statement, the cap filter hides a queued run whose org is
+	// at or above its max_concurrent_runs, and the fairness key orders
+	// claimable rows fewest-active-org first. Both degrade to a no-op at N=1 /
+	// single org — the fairness key is constant across all candidates (so the
+	// order collapses to started_at, id — the old global-oldest) and the
+	// default NULL cap never filters — so existing single-org callers see the
+	// same run claimed. The active count reads committed state, so under a
+	// burst of concurrent claimers an org can momentarily exceed its cap by the
+	// number of in-flight claims (a soft ceiling); sequential claims are exact.
+	//
+	// candidatePredicate + the tier prefix on the order are the only things
+	// placement changes (TFAC-587). Placement composes with fairness by
+	// prefixing the tier term to the ORDER BY — fairness then orders WITHIN
+	// each tier. Disabled: no tier term, no candidate predicate — the claim is
+	// the globally-oldest claimable run modulo fairness/cap. Enabled: the
+	// two-tier claim (see the SQL below).
 	candidatePredicate := ""
-	orderBy := "r.started_at, r.id"
+	tierPrefix := "" // placement tier ordering, prepended to the fairness key
 	args := []any{executorID, bootEpoch}
 	if placement.Enabled {
 		// $3 = aging seconds, $4 = liveness seconds. A run is claimable by me
@@ -151,10 +178,19 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 			          AND i.dispatch_gated IS NOT TRUE
 			    )
 			  )`
-		orderBy = "(r.preferred_executor_id IS NOT NULL AND r.preferred_executor_id = $1) DESC, r.started_at, r.id"
+		tierPrefix = "(r.preferred_executor_id IS NOT NULL AND r.preferred_executor_id = $1) DESC, "
 		args = append(args, placement.AgingInterval.Seconds(), placement.Liveness.Seconds())
 	}
+	// Fairness orders WITHIN each placement tier: fewest-active-org first, then
+	// oldest. COALESCE covers an org with zero active runs (no org_active row).
+	orderBy := tierPrefix + "COALESCE(oa.active, 0), r.started_at, r.id"
 	row := s.conn.QueryRowContext(ctx, `
+		WITH org_active AS (
+			SELECT org_id, count(*)::int AS active
+			FROM runs
+			WHERE status IN (`+activeRunStatusesSQL+`)
+			GROUP BY org_id
+		)
 		UPDATE runs
 		SET status = 'running', claimed_at = now(), attempts = attempts + 1,
 		    executor_id = NULLIF($1, ''),
@@ -162,9 +198,16 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 		WHERE id = (
 			SELECT r.id FROM runs r
 			JOIN blueprint_runs br ON br.id = r.blueprint_run_id
+			LEFT JOIN org_active oa ON oa.org_id = r.org_id
+			LEFT JOIN org_settings os ON os.org_id = r.org_id
 			WHERE r.status = 'queued'
 			  AND br.cancel_requested = false
-			  AND br.status = 'running'`+candidatePredicate+`
+			  AND br.status = 'running'
+			  AND (
+			    os.max_concurrent_runs IS NULL
+			    OR os.max_concurrent_runs <= 0
+			    OR COALESCE(oa.active, 0) < os.max_concurrent_runs
+			  )`+candidatePredicate+`
 			ORDER BY `+orderBy+`
 			FOR UPDATE OF r SKIP LOCKED
 			LIMIT 1
@@ -326,6 +369,33 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID stri
 	return int(n), nil
 }
 
+func (s *runQueueStore) FleetQueueShares(ctx context.Context) ([]db.OrgQueueShare, error) {
+	// One pass over the live (active + queued) run set, grouped by org, then a
+	// PK lookup on org_settings for the cap. FILTER splits the two counts in a
+	// single scan; the status filter keeps it off the terminal-run history. An
+	// operator-cadence read, not the claim hot path — idx_runs_org_status
+	// (org_id, status) serves it. Ordered most-pressure first so the fleet view
+	// leads with the busiest tenants.
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT counts.org_id::text, counts.active, counts.queued, os.max_concurrent_runs
+		FROM (
+			SELECT org_id,
+			       count(*) FILTER (WHERE status IN (`+activeRunStatusesSQL+`))::int AS active,
+			       count(*) FILTER (WHERE status = 'queued')::int                   AS queued
+			FROM runs
+			WHERE status IN (`+activeRunStatusesSQL+`, 'queued')
+			GROUP BY org_id
+		) counts
+		LEFT JOIN org_settings os ON os.org_id = counts.org_id
+		ORDER BY (counts.active + counts.queued) DESC, counts.org_id
+	`)
+	if err != nil {
+		return nil, wrapAdminPoolPermErr(err, "run_queue.FleetQueueShares")
+	}
+	defer rows.Close()
+	return scanOrgQueueShares(rows)
+}
+
 func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) {
 	// Boot self-heal — see RunQueueStore.ReconcileOrphanedRuns and the
 	// SQLite mirror. Admin pool (BYPASSRLS): a cross-org system sweep with no
@@ -358,6 +428,27 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 	}
 	n, _ := res.RowsAffected()
 	return int(n), nil
+}
+
+// scanOrgQueueShares reads FleetQueueShares rows, mapping a NULL or
+// non-positive max_concurrent_runs to a nil cap (unlimited).
+func scanOrgQueueShares(rows *sql.Rows) ([]db.OrgQueueShare, error) {
+	var out []db.OrgQueueShare
+	for rows.Next() {
+		var (
+			share   db.OrgQueueShare
+			maxRuns sql.NullInt64
+		)
+		if err := rows.Scan(&share.OrgID, &share.Active, &share.Queued, &maxRuns); err != nil {
+			return nil, err
+		}
+		if maxRuns.Valid && maxRuns.Int64 > 0 {
+			v := int(maxRuns.Int64)
+			share.MaxConcurrentRuns = &v
+		}
+		out = append(out, share)
+	}
+	return out, rows.Err()
 }
 
 func scanPgClaimedRun(row *sql.Row) (*domain.AgentRun, error) {

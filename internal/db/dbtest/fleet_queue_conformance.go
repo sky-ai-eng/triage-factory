@@ -1,0 +1,121 @@
+package dbtest
+
+import (
+	"context"
+	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+)
+
+// FleetQueueSharesFactory is what a per-backend test file hands to
+// RunFleetQueueSharesConformance. Returns the wired RunQueueStore, the orgID
+// its seeder stages rows under, and the seeder.
+type FleetQueueSharesFactory func(t *testing.T) (store db.RunQueueStore, orgID string, seed FleetQueueSharesSeeder)
+
+// FleetQueueSharesSeeder stages the run + settings states FleetQueueShares
+// reads. The store's own guarded flips can't reach terminal/dormant/active
+// statuses on demand, so ForceStatus writes them directly.
+type FleetQueueSharesSeeder struct {
+	// EnqueueRun stages one queued run (under a running blueprint_run) and
+	// returns its id.
+	EnqueueRun func(t *testing.T) (runID string)
+
+	// ForceStatus rewrites a run's status directly, bypassing the store's
+	// guards.
+	ForceStatus func(t *testing.T, runID, status string)
+
+	// SetMaxConcurrentRuns upserts the org's max_concurrent_runs cap; a nil
+	// cap writes SQL NULL (unlimited).
+	SetMaxConcurrentRuns func(t *testing.T, cap *int)
+}
+
+// RunFleetQueueSharesConformance covers the per-backend FleetQueueShares
+// contract: it counts an org's active (slot-occupying: running/
+// awaiting_credentials) and queued runs, excludes terminal and hibernated
+// (open/pending_approval) runs from both, and reports the configured cap —
+// nil for an unset or non-positive value. Multi-org fairness ordering is a
+// Postgres-only concern exercised in that backend's own tests; this suite
+// runs single-org against both dialects (SQLite is N=1).
+func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
+	t.Helper()
+	ctx := context.Background()
+
+	// shareFor returns the org's row from FleetQueueShares, or a zero value
+	// with found=false when the org has no active/queued runs (omitted).
+	shareFor := func(t *testing.T, store db.RunQueueStore, orgID string) (db.OrgQueueShare, bool) {
+		t.Helper()
+		shares, err := store.FleetQueueShares(ctx)
+		if err != nil {
+			t.Fatalf("FleetQueueShares: %v", err)
+		}
+		for _, s := range shares {
+			if s.OrgID == orgID {
+				return s, true
+			}
+		}
+		return db.OrgQueueShare{}, false
+	}
+
+	t.Run("counts_active_queued_and_cap", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+
+		// No runs → the org contributes no row.
+		if s, found := shareFor(t, store, orgID); found {
+			t.Fatalf("empty queue reported a share %+v, want the org omitted", s)
+		}
+
+		// 2 active (one running, one awaiting_credentials) + 1 still queued.
+		r1, r2, r3 := seed.EnqueueRun(t), seed.EnqueueRun(t), seed.EnqueueRun(t)
+		seed.ForceStatus(t, r1, "running")
+		seed.ForceStatus(t, r2, "awaiting_credentials")
+		_ = r3 // left queued
+
+		s, found := shareFor(t, store, orgID)
+		if !found {
+			t.Fatalf("org %s missing from FleetQueueShares after enqueue", orgID)
+		}
+		if s.Active != 2 || s.Queued != 1 {
+			t.Fatalf("share = {active:%d queued:%d}, want {active:2 queued:1}", s.Active, s.Queued)
+		}
+		if s.MaxConcurrentRuns != nil {
+			t.Fatalf("cap = %d with no org_settings cap set, want nil (unlimited)", *s.MaxConcurrentRuns)
+		}
+
+		// A positive cap surfaces verbatim.
+		five := 5
+		seed.SetMaxConcurrentRuns(t, &five)
+		if s, _ := shareFor(t, store, orgID); s.MaxConcurrentRuns == nil || *s.MaxConcurrentRuns != 5 {
+			t.Fatalf("cap = %v after set to 5, want 5", s.MaxConcurrentRuns)
+		}
+
+		// Non-positive and NULL both mean unlimited (nil).
+		zero := 0
+		seed.SetMaxConcurrentRuns(t, &zero)
+		if s, _ := shareFor(t, store, orgID); s.MaxConcurrentRuns != nil {
+			t.Fatalf("cap = %d after set to 0, want nil (unlimited)", *s.MaxConcurrentRuns)
+		}
+		seed.SetMaxConcurrentRuns(t, nil)
+		if s, _ := shareFor(t, store, orgID); s.MaxConcurrentRuns != nil {
+			t.Fatalf("cap = %d after set to NULL, want nil (unlimited)", *s.MaxConcurrentRuns)
+		}
+	})
+
+	t.Run("terminal_and_dormant_runs_excluded", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+
+		queued := seed.EnqueueRun(t) // counts as queued
+		_ = queued
+		done := seed.EnqueueRun(t)
+		seed.ForceStatus(t, done, "completed") // terminal: excluded from both
+		parked := seed.EnqueueRun(t)
+		seed.ForceStatus(t, parked, "open") // hibernated: excluded from active
+
+		s, found := shareFor(t, store, orgID)
+		if !found {
+			t.Fatalf("org %s missing from FleetQueueShares", orgID)
+		}
+		if s.Active != 0 || s.Queued != 1 {
+			t.Fatalf("share = {active:%d queued:%d}, want {active:0 queued:1} (terminal + dormant excluded)", s.Active, s.Queued)
+		}
+	})
+}
