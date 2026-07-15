@@ -5967,9 +5967,11 @@ CREATE INDEX idx_runs_queued_preferred ON public.runs (preferred_executor_id, st
 -- orgs at their max_concurrent_runs cap and order claimable rows fewest-active
 -- first. This partial index spans ONLY active rows — bounded by fleet capacity
 -- (hundreds), not the whole runs history — so that GROUP BY org_id is an
--- index-only scan over the small live set rather than a seq scan. Predicate
--- must stay byte-identical to the claim's active-count WHERE for the planner to
--- match it.
+-- index-only scan over the small live set rather than a seq scan. The planner
+-- uses this partial index when the claim's active-count WHERE provably IMPLIES
+-- this predicate (predicate implication, not textual identity — an equivalent
+-- status IN-list matches regardless of spelling); keep the claim's active-run
+-- status set in sync with the one here so that implication holds.
 CREATE INDEX idx_runs_active_by_org ON public.runs (org_id) WHERE (status = ANY (ARRAY['running'::text, 'awaiting_credentials'::text]));
 -- Replay fence (relocated from runs): one event firing one trigger materializes
 -- at most one blueprint_run. Partial WHERE triggering_event_id IS NOT NULL so

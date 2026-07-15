@@ -82,9 +82,13 @@ func (s *Server) handleFleetQueue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Interim org scoping: return only the requested org's row. An org with no
-	// active or queued runs is absent from the fleet-wide result — report it as
-	// an all-zero share (with its cap, if any) rather than 404, so a caller
-	// polling a quiet org gets a stable shape.
+	// active or queued runs is absent from the activity-driven FleetQueueShares
+	// result, so report it as an all-zero share rather than 404 — a stable shape
+	// for a caller polling a quiet org. The configured cap rides the shares row,
+	// which only exists for orgs with queue activity, so a quiet org's
+	// max_concurrent_runs reads as unset here (at_cap is trivially false at zero
+	// active regardless); the cap read-back for an idle org belongs on the
+	// settings surface, not this queue view.
 	dto := fleetQueueShareDTO{OrgID: orgID}
 	for _, sh := range shares {
 		if sh.OrgID != orgID {

@@ -117,9 +117,13 @@ func (s *runQueueStore) notifyWake(ctx context.Context, orgID string) {
 // activeRunStatusesSQL is the set of runs.status values that occupy a live
 // executor slot — claimed and executing, but not yet terminal and not
 // hibernated (open/pending_approval park off the fleet). It is what the
-// per-org fairness/cap claim counts as an org's "active" runs, and MUST stay
-// byte-identical to idx_runs_active_by_org's partial predicate so that count
-// is an index-only scan over the small live set.
+// per-org fairness/cap claim counts as an org's "active" runs. Keep this
+// status set in sync with idx_runs_active_by_org's partial predicate: Postgres
+// serves the count from that partial index when the query's WHERE provably
+// implies the index predicate (predicate implication — an equivalent IN-list
+// matches regardless of spelling, not textual identity), and that implication
+// is what keeps the count an index scan over the small live set rather than a
+// seq scan of the whole runs history.
 const activeRunStatusesSQL = `'running', 'awaiting_credentials'`
 
 func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement) (*domain.AgentRun, error) {
