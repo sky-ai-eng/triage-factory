@@ -161,18 +161,26 @@ multi_mode() {
 }
 
 # control_role mirrors internal/runmode.ParseRole's normalization for
-# TF_ROLE. Note it DOES fold whitespace, unlike multi_mode above: ParseRole
-# trims TF_ROLE (strings.TrimSpace) where ModeFromEnv deliberately does NOT
-# trim TF_MODE, so the two normalizers differ on purpose. A control pod
-# never launches a sandbox — curator turns home to executors, and the
-# brain's own LLM work is toolless direct API calls — so it needs no
-# cap-broker: below, it skips the broker spawn + socket wait while keeping
-# the identical uid/capability drop (running with root + Docker's default
-# caps would be strictly worse). An invalid TF_ROLE fails boot in the Go
-# process regardless, so a stray match here on a malformed value is moot —
-# the container crash-loops either way.
+# TF_ROLE: lower-case, and trim leading/trailing whitespace only (matching
+# strings.TrimSpace) — NOT fold interior whitespace, so "con trol" does not
+# collapse to "control" here just as ParseRole would reject it (and fail
+# boot) rather than accept it. Note this DOES trim, unlike multi_mode above:
+# ParseRole trims TF_ROLE where ModeFromEnv deliberately does NOT trim
+# TF_MODE, so the two normalizers differ on purpose. The trim is the POSIX
+# ${var#...}/${var%...} idiom run inside a command substitution so its
+# scratch variable never leaks into the parent shell (like multi_mode, this
+# stays side-effect-free). A control pod never launches a sandbox — curator
+# turns home to executors, and the brain's own LLM work is toolless direct
+# API calls — so it needs no cap-broker: below, it skips the broker spawn +
+# socket wait while keeping the identical uid/capability drop (running with
+# root + Docker's default caps would be strictly worse).
 control_role() {
-    [ "$(printf '%s' "${TF_ROLE:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" = "control" ]
+    [ "$(
+        r="${TF_ROLE:-}"
+        r="${r#"${r%%[![:space:]]*}"}"
+        r="${r%"${r##*[![:space:]]}"}"
+        printf '%s' "$r" | tr '[:upper:]' '[:lower:]'
+    )" = "control" ]
 }
 
 if [ "$(uname -s)" = "Linux" ] && multi_mode; then
