@@ -464,6 +464,66 @@ func TestRunQueueStore_SQLite_Credentials(t *testing.T) {
 	})
 }
 
+// TestRunQueueStore_SQLite_FleetQueueShares runs the shared per-org queue-share
+// conformance against the SQLite impl (N=1 — one local org).
+func TestRunQueueStore_SQLite_FleetQueueShares(t *testing.T) {
+	dbtest.RunFleetQueueSharesConformance(t, func(t *testing.T) (db.RunQueueStore, string, dbtest.FleetQueueSharesSeeder) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		ctx := context.Background()
+		org := runmode.LocalDefaultOrgID
+
+		task := seedEntityEventTask(t, conn, "rq-fqs")
+		insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqfqs-p0", Name: "Step 0", Body: "b", Source: "user"})
+		insertBlueprintForTest(t, conn, "rqfqs-bp", "RQ FQS Blueprint")
+		if err := stores.Blueprints.ReplaceSteps(ctx, org, "rqfqs-bp", []string{"rqfqs-p0"}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+			ID: "rqfqs-br", BlueprintID: "rqfqs-bp", TaskID: task.ID,
+			TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+			WorktreePath: "/tmp/wt-rqfqs",
+		})
+		if err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+
+		nextStep := 0
+		seed := dbtest.FleetQueueSharesSeeder{
+			EnqueueRun: func(t *testing.T) string {
+				t.Helper()
+				idx := nextStep
+				nextStep++
+				runID := uuid.New().String()
+				if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+					ID: runID, TaskID: task.ID, PromptID: "rqfqs-p0", Model: "m",
+					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &idx,
+				}); err != nil {
+					t.Fatalf("EnqueueRun: %v", err)
+				}
+				return runID
+			},
+			ForceStatus: func(t *testing.T, runID, status string) {
+				t.Helper()
+				if _, err := conn.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
+					t.Fatalf("force status %q: %v", status, err)
+				}
+			},
+			SetMaxConcurrentRuns: func(t *testing.T, cap *int) {
+				t.Helper()
+				if _, err := conn.Exec(`
+					INSERT INTO org_settings (org_id, max_concurrent_runs) VALUES (?, ?)
+					ON CONFLICT(org_id) DO UPDATE SET max_concurrent_runs = excluded.max_concurrent_runs
+				`, org, cap); err != nil {
+					t.Fatalf("set max_concurrent_runs: %v", err)
+				}
+			},
+		}
+		return stores.RunQueue, org, seed
+	})
+}
+
 func TestRunQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)

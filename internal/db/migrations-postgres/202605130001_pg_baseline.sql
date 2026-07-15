@@ -1021,6 +1021,17 @@ CREATE TABLE public.org_settings (
     -- the nullable max_llm_model_tier shape above; in-flight runs are unaffected
     -- and the read fails open on error so a transient failure can't wedge delegation.
     max_daily_cost_usd double precision,
+    -- Per-org cap on how many runs the org may have executing concurrently
+    -- across the whole executor fleet. NULL = unlimited (the app/claim also
+    -- treats <= 0 as unlimited, mirroring max_daily_cost_usd's "0 = no cap").
+    -- Enforced in ClaimNextRun: a queued run is invisible to claims while its
+    -- org's active-run count (status running/awaiting_credentials) is at or
+    -- above this value, so one tenant's burst can't monopolize the fleet's
+    -- slots — the admission ceiling the daily *spend* cap can't express. Read
+    -- live in the claim statement, so lowering it takes effect on the next
+    -- claims with no restart; in-flight runs are never interrupted (the cap
+    -- gates new claims only). Local mode / SQLite is N=1 and ignores it.
+    max_concurrent_runs integer,
     -- Ship-dark org toggle for the within-org prompt marketplace (TFAC-535 /
     -- TFAC-92 scoping decision 4). Default false: rendered grayed out with
     -- "coming soon" in org settings until the TFAC-539 launch flip; UI +
@@ -5951,6 +5962,15 @@ CREATE INDEX idx_runs_queued ON public.runs (started_at, id) WHERE (status = 'qu
 -- WHERE status='queued' as idx_runs_queued, so it too spans only unclaimed
 -- work. Global-oldest (placement disabled) still uses idx_runs_queued.
 CREATE INDEX idx_runs_queued_preferred ON public.runs (preferred_executor_id, started_at, id) WHERE (status = 'queued'::text);
+-- Per-org fairness/cap claim index: the claim computes each org's active-run
+-- count (status running/awaiting_credentials) once per statement to both filter
+-- orgs at their max_concurrent_runs cap and order claimable rows fewest-active
+-- first. This partial index spans ONLY active rows — bounded by fleet capacity
+-- (hundreds), not the whole runs history — so that GROUP BY org_id is an
+-- index-only scan over the small live set rather than a seq scan. Predicate
+-- must stay byte-identical to the claim's active-count WHERE for the planner to
+-- match it.
+CREATE INDEX idx_runs_active_by_org ON public.runs (org_id) WHERE (status = ANY (ARRAY['running'::text, 'awaiting_credentials'::text]));
 -- Replay fence (relocated from runs): one event firing one trigger materializes
 -- at most one blueprint_run. Partial WHERE triggering_event_id IS NOT NULL so
 -- manual blueprint runs (NULL) never participate.

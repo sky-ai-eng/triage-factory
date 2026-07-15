@@ -85,6 +85,13 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 	// instance (tier 1 self-hits) or NULL, and both resolve to "claim the
 	// oldest". Placement (TFAC-587) is a multi-executor concern, Postgres-only.
 	//
+	// Per-org fairness + the max_concurrent_runs cap are likewise
+	// Postgres-only and absent here: SQLite is one org and one executor, so the
+	// fairness comparison is trivially won by the sole org and a single-process
+	// semaphore already bounds local concurrency. The column exists in the
+	// SQLite schema for store-interface symmetry; the claim ignores it exactly
+	// as it ignores placement.
+	//
 	// executor_id + boot_epoch are stamped in this same statement (TFAC-578),
 	// mirroring the Postgres impl, so the row's ownership is never ambiguous
 	// between claim and the process actually going live — see
@@ -280,6 +287,46 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID stri
 	}
 	n, _ := res.RowsAffected()
 	return int(n), nil
+}
+
+func (s *runQueueStore) FleetQueueShares(ctx context.Context) ([]db.OrgQueueShare, error) {
+	// SQLite is N=1 — at most the one local org has any rows — but the shape
+	// mirrors the Postgres impl so the conformance suite runs identically. No
+	// FILTER (portability); SUM(CASE ...) is the equivalent. A NULL or
+	// non-positive max_concurrent_runs maps to a nil cap (unlimited).
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT counts.org_id, counts.active, counts.queued, os.max_concurrent_runs
+		FROM (
+			SELECT org_id,
+			       SUM(CASE WHEN status IN ('running', 'awaiting_credentials') THEN 1 ELSE 0 END) AS active,
+			       SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END)                              AS queued
+			FROM runs
+			WHERE status IN ('running', 'awaiting_credentials', 'queued')
+			GROUP BY org_id
+		) counts
+		LEFT JOIN org_settings os ON os.org_id = counts.org_id
+		ORDER BY (counts.active + counts.queued) DESC, counts.org_id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []db.OrgQueueShare
+	for rows.Next() {
+		var (
+			share   db.OrgQueueShare
+			maxRuns sql.NullInt64
+		)
+		if err := rows.Scan(&share.OrgID, &share.Active, &share.Queued, &maxRuns); err != nil {
+			return nil, err
+		}
+		if maxRuns.Valid && maxRuns.Int64 > 0 {
+			v := int(maxRuns.Int64)
+			share.MaxConcurrentRuns = &v
+		}
+		out = append(out, share)
+	}
+	return out, rows.Err()
 }
 
 func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) {

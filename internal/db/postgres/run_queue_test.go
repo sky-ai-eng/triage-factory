@@ -460,6 +460,55 @@ func TestRunQueueStore_Postgres_Credentials(t *testing.T) {
 	})
 }
 
+// TestRunQueueStore_Postgres_FleetQueueShares runs the shared per-org
+// queue-share conformance against the Postgres impl (admin pool). Each factory
+// call resets the harness so subtests don't share state.
+func TestRunQueueStore_Postgres_FleetQueueShares(t *testing.T) {
+	h := pgtest.Shared(t)
+	ctx := context.Background()
+
+	dbtest.RunFleetQueueSharesConformance(t, func(t *testing.T) (db.RunQueueStore, string, dbtest.FleetQueueSharesSeeder) {
+		t.Helper()
+		h.Reset(t)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+		orgID, userID := seedPgOrgForBlueprints(t, h)
+		brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+
+		nextStep := 0
+		seed := dbtest.FleetQueueSharesSeeder{
+			EnqueueRun: func(t *testing.T) string {
+				t.Helper()
+				idx := nextStep
+				nextStep++
+				runID := uuid.New().String()
+				if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+					ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
+					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
+				}); err != nil {
+					t.Fatalf("EnqueueRun: %v", err)
+				}
+				return runID
+			},
+			ForceStatus: func(t *testing.T, runID, status string) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(`UPDATE runs SET status = $1 WHERE id = $2`, status, runID); err != nil {
+					t.Fatalf("force status %q: %v", status, err)
+				}
+			},
+			SetMaxConcurrentRuns: func(t *testing.T, cap *int) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(`
+					INSERT INTO org_settings (org_id, max_concurrent_runs) VALUES ($1, $2)
+					ON CONFLICT (org_id) DO UPDATE SET max_concurrent_runs = EXCLUDED.max_concurrent_runs
+				`, orgID, cap); err != nil {
+					t.Fatalf("set max_concurrent_runs: %v", err)
+				}
+			},
+		}
+		return stores.RunQueue, orgID, seed
+	})
+}
+
 // pgRunStatus reads a run's status and whether completed_at is stamped.
 func pgRunStatus(t *testing.T, h *pgtest.Harness, runID string) (status string, completed bool) {
 	t.Helper()
