@@ -39,23 +39,81 @@ func newCuratorStore(q, admin queryer) db.CuratorStore {
 
 var _ db.CuratorStore = (*curatorStore)(nil)
 
-func (s *curatorStore) CreateRequest(ctx context.Context, orgID, projectID, creatorUserID, userInput string) (string, error) {
+func (s *curatorStore) CreateRequest(ctx context.Context, orgID, projectID, creatorUserID, homeInstanceID, userInput string) (string, error) {
 	var id string
 	// team_id is snapshotted from the project at creation (point-in-time, like
 	// runs.team_id) so curator spend rolls into the project's team; the
 	// security_invoker llm_spend view reads the column directly. Any future
 	// curator INSERT MUST keep this (SELECT team_id FROM projects WHERE id = ...)
 	// subquery (TFAC-476). $2 (project_id) is reused for the correlated lookup.
+	// home_instance_id is the resolved curator home (spec §6.3); NULLIF maps the
+	// local / role=all empty string to NULL.
 	err := s.q.QueryRowContext(ctx, `
 		INSERT INTO curator_requests
-			(org_id, project_id, team_id, creator_user_id, status, user_input)
-		VALUES ($1, $2, (SELECT team_id FROM projects WHERE id = $2), $3, 'queued', $4)
+			(org_id, project_id, team_id, creator_user_id, status, user_input, home_instance_id)
+		VALUES ($1, $2, (SELECT team_id FROM projects WHERE id = $2), $3, 'queued', $4, NULLIF($5, ''))
 		RETURNING id::text
-	`, orgID, projectID, creatorUserID, userInput).Scan(&id)
+	`, orgID, projectID, creatorUserID, userInput, homeInstanceID).Scan(&id)
 	if err != nil {
 		return "", err
 	}
 	return id, nil
+}
+
+// ListQueuedRequestsForHomeSystem scans the queued turns homed to this executor
+// (curator homing, spec §6.3) via the admin pool — a cross-user, cross-org
+// system read, home_instance_id bound by argument. Backed by
+// idx_curator_requests_homed_queued.
+func (s *curatorStore) ListQueuedRequestsForHomeSystem(ctx context.Context, homeInstanceID string) ([]domain.HomedCuratorRequest, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT id::text, org_id::text, project_id::text, creator_user_id::text
+		FROM curator_requests
+		WHERE home_instance_id = $1 AND status = 'queued'
+		ORDER BY created_at ASC, id ASC
+	`, homeInstanceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.HomedCuratorRequest
+	for rows.Next() {
+		var r domain.HomedCuratorRequest
+		if err := rows.Scan(&r.ID, &r.OrgID, &r.ProjectID, &r.CreatorUserID); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// CancelStrandedRequestsForHomeSystem flips this executor's stranded queued/
+// running turns to cancelled (curator homing, spec §6.3) via the admin pool. It
+// rolls the denormalized token columns up from the curator_messages SUM, same
+// as every other terminal write (a 'running' turn stranded on a dead home may
+// have streamed and paid for messages before the home died, so llm_spend must
+// reflect them rather than strand at 0 — TFAC-473). tf_system therefore needs
+// SELECT on curator_messages as well as UPDATE on curator_requests; both are
+// granted in the baseline. Correlated on curator_requests.id (bulk update).
+func (s *curatorStore) CancelStrandedRequestsForHomeSystem(ctx context.Context, homeInstanceID, errMsg string) (int, error) {
+	res, err := s.admin.ExecContext(ctx, `
+		UPDATE curator_requests
+		SET status = 'cancelled',
+		    error_msg = COALESCE(error_msg, $2),
+		    finished_at = COALESCE(finished_at, now()),
+		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE request_id = curator_requests.id),
+		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE request_id = curator_requests.id),
+		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE request_id = curator_requests.id),
+		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE request_id = curator_requests.id)
+		WHERE home_instance_id = $1 AND status IN ('queued', 'running')
+	`, homeInstanceID, errMsg)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
 }
 
 func (s *curatorStore) GetRequest(ctx context.Context, orgID, id string) (*domain.CuratorRequest, error) {

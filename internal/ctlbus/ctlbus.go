@@ -29,10 +29,10 @@ import (
 
 // Channel is the Postgres NOTIFY/LISTEN channel name every relay message
 // rides. The same channel carries TFAC-584's session kicks, TFAC-585's
-// run-signal doorbells, and TFAC-614's cred_request doorbell — payloads are
-// discriminated by their JSON "kind" field (see internal/app/ctl.go), so
-// Message kinds must stay disjoint from theirs ("kick", "new", "ack",
-// "cred_request").
+// run-signal doorbells, TFAC-614's cred_request doorbell, and the curator
+// homing doorbells (spec §6.3) — payloads are discriminated by their JSON
+// "kind" field (see internal/app/ctl.go), so Message kinds must stay disjoint
+// from theirs ("kick", "new", "ack", "cred_request").
 const Channel = "tf_ctl"
 
 // Message is the relay payload. Kind selects which field group applies:
@@ -41,14 +41,21 @@ const Channel = "tf_ctl"
 // poller.Manager.PollSoon call); "cred_request" uses OrgID/RunID (TFAC-614:
 // an executor parked in status='awaiting_credentials' nudging the brain's
 // credential provisioner — see internal/credprovision and
-// internal/app/ctl.go's dispatch case).
+// internal/app/ctl.go's dispatch case); "curator_new" / "curator_cancel" use
+// OrgID/ProjectID (curator homing, spec §6.3): a control pod nudging the home
+// executor's claim loop for a fresh turn, or routing a cross-pod cancel to
+// whichever executor holds the project's live session. Both curator kinds are
+// broadcast + self-filtered (the claim loop scans its own homed queue; only the
+// pod holding the session has something to cancel), so no target field is
+// needed.
 type Message struct {
-	Kind    string `json:"kind"`
-	Manager string `json:"manager,omitempty"`
-	OrgID   string `json:"org_id"`
-	Source  string `json:"source,omitempty"`
-	Force   bool   `json:"force,omitempty"`
-	RunID   string `json:"run_id,omitempty"`
+	Kind      string `json:"kind"`
+	Manager   string `json:"manager,omitempty"`
+	OrgID     string `json:"org_id"`
+	Source    string `json:"source,omitempty"`
+	Force     bool   `json:"force,omitempty"`
+	RunID     string `json:"run_id,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
 }
 
 // execer is the minimal *sql.DB surface Publish needs — a pooled

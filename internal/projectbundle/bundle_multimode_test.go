@@ -92,7 +92,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 
 	// One completed curator turn + a pending-context row, claims-bound.
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, srcOrg, srcUser, func(tx db.TxStores) error {
-		reqID, e := tx.Curator.CreateRequest(ctx, srcOrg, projectID, srcUser, "hi")
+		reqID, e := tx.Curator.CreateRequest(ctx, srcOrg, projectID, srcUser, "", "hi")
 		if e != nil {
 			return e
 		}

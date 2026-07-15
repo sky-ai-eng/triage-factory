@@ -370,7 +370,7 @@ func TestCurator_Postgres_Multimode_CancelMidFlight(t *testing.T) {
 	// Parked in runAgent ⇒ the row is already 'running'.
 	waitInFlight(t, stub, 1)
 
-	c.Cancel(projA)
+	c.Cancel(orgA, projA)
 
 	waitForStatus(t, h, reqID, "cancelled")
 	close(stub.release) // release any racing parked dispatch (no-op once returned)

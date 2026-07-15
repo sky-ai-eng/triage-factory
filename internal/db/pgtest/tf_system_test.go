@@ -463,6 +463,60 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 	})
 
+	t.Run("curator_homing", func(t *testing.T) {
+		// Seed a project + two turns homed to this executor: a 'queued' turn
+		// (the claim loop's ListQueuedRequestsForHomeSystem must see it) and a
+		// 'running' turn that already streamed a token-bearing message (the
+		// ownership-scoped sweep's roll-up must read curator_messages).
+		projectID := newUUID(t, h)
+		MustExec(t, h.AdminDB, `
+			INSERT INTO projects (id, org_id, creator_user_id, team_id, name, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'homing-conformance', now(), now())
+		`, projectID, orgID, userID, teamID)
+
+		queuedID := newUUID(t, h)
+		runningID := newUUID(t, h)
+		MustExec(t, h.AdminDB, `
+			INSERT INTO curator_requests (id, org_id, project_id, creator_user_id, team_id, status, user_input, home_instance_id)
+			VALUES ($1, $2, $3, $4, $5, 'queued', 'q', $6),
+			       ($7, $2, $3, $4, $5, 'running', 'r', $6)
+		`, queuedID, orgID, projectID, userID, teamID, executorID, runningID)
+		MustExec(t, h.AdminDB, `
+			INSERT INTO curator_messages (org_id, creator_user_id, request_id, role, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+			VALUES ($1, $2, $3, 'assistant', 11, 22, 33, 44)
+		`, orgID, userID, runningID)
+
+		// List (SELECT curator_requests) — the claim loop's homed scan.
+		homed, err := stores.Curator.ListQueuedRequestsForHomeSystem(ctx, executorID)
+		if err != nil {
+			t.Fatalf("Curator.ListQueuedRequestsForHomeSystem: %v", err)
+		}
+		if len(homed) != 1 || homed[0].ID != queuedID {
+			t.Fatalf("ListQueuedRequestsForHomeSystem = %+v, want the one queued turn", homed)
+		}
+
+		// Sweep (UPDATE curator_requests + SELECT curator_messages for the
+		// token roll-up) — a missing curator_messages grant fails 42501 here.
+		n, err := stores.Curator.CancelStrandedRequestsForHomeSystem(ctx, executorID, "process restarted")
+		if err != nil {
+			t.Fatalf("Curator.CancelStrandedRequestsForHomeSystem: %v", err)
+		}
+		if n != 2 {
+			t.Fatalf("CancelStrandedRequestsForHomeSystem flipped %d turns, want 2", n)
+		}
+		// The running turn's streamed tokens rolled up (not stranded at 0) —
+		// the whole point of matching every other terminal write (TFAC-473).
+		var in, out, cr, cc int
+		if err := h.AdminDB.QueryRowContext(ctx,
+			`SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens FROM curator_requests WHERE id = $1`, runningID,
+		).Scan(&in, &out, &cr, &cc); err != nil {
+			t.Fatalf("read back running turn: %v", err)
+		}
+		if in != 11 || out != 22 || cr != 33 || cc != 44 {
+			t.Errorf("token roll-up = (%d,%d,%d,%d), want (11,22,33,44) — a stranded turn must report its streamed spend", in, out, cr, cc)
+		}
+	})
+
 	t.Run("ws_backplane", func(t *testing.T) {
 		b := wsbackplane.New(h.SystemDB, "", executorID, websocket.NewHub())
 		if present := b.PresentFor(ctx, orgID, "some-run-id"); present {

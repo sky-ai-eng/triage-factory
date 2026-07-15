@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
+	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
@@ -325,31 +326,102 @@ func (a *App) buildExecution() error {
 		projectclassify.WaitFor(ctx, a.stores.Entities, a.triggerClassifier, orgID, entityID, projectclassify.DefaultWaitTimeout)
 	})
 
-	// The server + curator handles below only exist on serveHTTP roles. An
-	// executor has no server to hand the spawner to and runs no curator
-	// chat, so it stops here with just the dispatcher-ready spawner.
+	// Curator runtime — per-project chat sessions. Built on serveHTTP roles
+	// (control/all: SendMessage forwards or runs in-process) and, in multi mode,
+	// on executors (the home executor executes homed turns off the claim loop,
+	// spec §6.3). buildCuratorRuntime no-ops on pods that run no curator.
+	if err := a.buildCuratorRuntime(); err != nil {
+		return err
+	}
+
+	// The server handle below only exists on serveHTTP roles. An executor has
+	// no server to hand the spawner/curator to — its curator (if built) runs
+	// headless off the claim loop.
 	if !a.plan.serveHTTP {
 		return nil
 	}
 	a.srv.SetSpawner(a.spawner)
-
-	// Curator runtime — per-project chat sessions. Sweep stranded
-	// turns from a previous process first: a binary restart killed every
-	// per-project goroutine + subprocess, so any queued/running row is by
-	// definition stranded — cancelling it makes the user re-send rather than
-	// wait for a delayed mystery reply.
-	if n, err := a.stores.Curator.CancelOrphanedNonTerminalRequests(context.Background()); err != nil {
-		curatorLog.Error("sweep stranded turns failed", "error", err)
-	} else if n > 0 {
-		curatorLog.Info("cancelled stranded turns from prior process", "count", n)
+	if a.curator != nil {
+		a.srv.SetCurator(a.curator)
 	}
+	return nil
+}
+
+// buildCuratorRuntime constructs the per-project curator (chat sessions) and
+// wires the homing role each pod plays (curator homing, spec §6.3):
+//
+//   - serveHTTP roles (control/all) always build it — that is where a chat POST
+//     lands. A control pod additionally gets the Homer + doorbell in
+//     buildPlacement (which runs after the placement resolver exists), so its
+//     SendMessage forwards to the home executor. role=all keeps the unchanged
+//     in-process path (no Homer wired).
+//   - multi-mode executors build it too and run the claim loop, so a homed turn
+//     executes on the executor that owns the project's warm cache. Executors
+//     serve no HTTP, so their curator runs headless.
+//
+// Any other pod (there is none today) no-ops.
+func (a *App) buildCuratorRuntime() error {
+	multi := runmode.Current() == runmode.ModeMulti
+	executorRuntime := multi && a.plan.dispatcher && a.plan.role == runmode.RoleExecutor
+	if !a.plan.serveHTTP && !executorRuntime {
+		return nil
+	}
+
+	// Boot recovery: cancel curator turns stranded by this pod's previous boot
+	// (a restart killed every session goroutine + subprocess, so a non-terminal
+	// row is stranded — cancelling lets the user re-send rather than wait for a
+	// mystery reply). local / role=all owned every row, so it sweeps globally;
+	// the multi-mode split roles sweep only turns homed to THEMSELVES, so a
+	// control restart never cancels an executor's live turns (the leader reaper
+	// covers turns homed to a *dead* executor).
+	a.sweepStrandedCuratorTurns(multi)
+
 	a.curator = curator.New(a.stores, a.wsHub, "")
 	a.curator.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
 	if a.llmResolver != nil {
 		a.curator.SetLLMResolver(llmcred.SystemEnvResolver(a.llmResolver, "tf-curator"))
 	}
-	a.srv.SetCurator(a.curator)
+
+	if executorRuntime {
+		a.curatorClaimLoop = curator.NewHomeClaimLoop(a.curator, a.stores.Curator, a.identity.ID)
+	}
 	return nil
+}
+
+// sweepStrandedCuratorTurns runs the boot recovery sweep: ownership-scoped on a
+// multi-mode split role (control/executor), global on local / role=all. See
+// buildCuratorRuntime for the rationale.
+func (a *App) sweepStrandedCuratorTurns(multi bool) {
+	if multi && a.plan.role != runmode.RoleAll {
+		if n, err := a.stores.Curator.CancelStrandedRequestsForHomeSystem(context.Background(), a.identity.ID, "process restarted"); err != nil {
+			curatorLog.Error("sweep stranded homed turns failed", "error", err)
+		} else if n > 0 {
+			curatorLog.Info("cancelled stranded turns homed to this pod's prior boot", "count", n)
+		}
+		return
+	}
+	if n, err := a.stores.Curator.CancelOrphanedNonTerminalRequests(context.Background()); err != nil {
+		curatorLog.Error("sweep stranded turns failed", "error", err)
+	} else if n > 0 {
+		curatorLog.Info("cancelled stranded turns from prior process", "count", n)
+	}
+}
+
+// publishCuratorDoorbell publishes a curator homing tf_ctl notification
+// (spec §6.3): "curator_new" nudges the home executor's claim loop, and
+// "curator_cancel" routes a cross-pod cancel to whichever executor holds the
+// project's live session. Best-effort — a publish error only costs the home
+// executor's backstop-poll latency (curator_new) or the DB-level cancel flip's
+// eventual convergence (curator_cancel). Wired onto the control-pod curator's
+// doorbell seam in buildPlacement.
+func (a *App) publishCuratorDoorbell(kind, orgID, projectID string) {
+	if a.database == nil {
+		return
+	}
+	msg := ctlbus.Message{Kind: kind, OrgID: orgID, ProjectID: projectID}
+	if err := ctlbus.Publish(context.Background(), a.database, msg); err != nil {
+		appLog.Warn("curator doorbell publish failed", "kind", kind, "project", projectID, "error", err)
+	}
 }
 
 // buildRouting wires the durable ingest seam, the poller manager, and the

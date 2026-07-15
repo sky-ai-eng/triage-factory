@@ -134,7 +134,7 @@ func seedRequest(t *testing.T, ctx context.Context, stores db.Stores, orgID, use
 	t.Helper()
 	var id string
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
-		rid, err := ts.Curator.CreateRequest(ctx, orgID, projectID, userID, input)
+		rid, err := ts.Curator.CreateRequest(ctx, orgID, projectID, userID, "", input)
 		if err != nil {
 			return err
 		}

@@ -388,6 +388,10 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// the placement pin/replica overrides (TFAC-587) read for an already-
 		// authorized, operator-gated orgID, never a browsable RLS surface.
 		PlacementOverrides: newPlacementOverrideStore(admin),
+		// CuratorHomes is admin-pool only, same posture as PlacementOverrides:
+		// the (org, project) -> home executor map for curator homing (spec
+		// §6.3), coordination state read/written for an explicit orgID.
+		CuratorHomes: newCuratorHomeStore(admin),
 		// RunCredentials is admin-pool only, same posture as Instances/
 		// RunSignals: the sealed per-run credential bundle channel
 		// (TFAC-614) never serves a request handler.

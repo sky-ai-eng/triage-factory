@@ -97,6 +97,15 @@ func RunReaper(ctx context.Context, store Store, interval time.Duration, staleTh
 				reaperLog.Info("reaped dead-executor runs",
 					"requeued", counts.Requeued, "failed_executor_lost", counts.Failed, "cancelled", counts.Cancelled)
 			}
+			// Curator homing (spec §6.3): retire turns stranded on a dead home so
+			// they stop showing in-flight — the user's next turn re-homes.
+			// Separate from ReapDeadExecutors: curator turns are curator_requests
+			// rows, not runs, and the recovery is retire-only (no requeue).
+			if n, cerr := store.CancelStrandedCuratorTurns(ctx, staleThreshold); cerr != nil {
+				reaperLog.Warn("curator stranded-home sweep failed; retrying next tick", "error", cerr)
+			} else if n > 0 {
+				reaperLog.Info("cancelled curator turns stranded on a dead home", "count", n)
+			}
 		}
 	}
 }

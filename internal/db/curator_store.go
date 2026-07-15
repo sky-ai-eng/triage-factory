@@ -43,7 +43,14 @@ type CuratorStore interface {
 	// (D9 retrofit will plumb the real user from request context).
 	// In Postgres the value is bound directly; in SQLite the
 	// column has a DEFAULT and the value is bound for parity.
-	CreateRequest(ctx context.Context, orgID, projectID, creatorUserID, userInput string) (string, error)
+	//
+	// homeInstanceID is the executor that will run this turn — the resolved
+	// curator home (spec §6.3). "" for the untouched local / role=all path
+	// (which never forwards and sweeps globally); the serving pod's own id in
+	// the no-executor-available fallback; a remote executor id when a control
+	// pod forwards. Stored NULL when empty; the executor claim loop and the
+	// ownership-scoped sweeps select on it.
+	CreateRequest(ctx context.Context, orgID, projectID, creatorUserID, homeInstanceID, userInput string) (string, error)
 
 	// GetRequest reads a single request row, or (nil, nil) if not
 	// found. App-pool in Postgres so curator_requests_select RLS
@@ -248,4 +255,26 @@ type CuratorStore interface {
 	// per-pod, but pod sharding doesn't exist (single-pod multi-mode
 	// in v1).
 	CancelOrphanedNonTerminalRequests(ctx context.Context) (int, error)
+
+	// ListQueuedRequestsForHomeSystem returns the queued curator_request rows
+	// homed to homeInstanceID (id, org, project, creator), oldest first — the
+	// executor claim loop's scan (curator homing, spec §6.3). Admin-pool /
+	// BYPASSRLS: a cross-user, cross-org system read of turns this executor
+	// owns, with home_instance_id bound by argument. Only ever returns rows the
+	// resolver stamped to this executor, so it never needs a per-row lock — one
+	// home owns a project, and the per-project session serializes turns.
+	ListQueuedRequestsForHomeSystem(ctx context.Context, homeInstanceID string) ([]domain.HomedCuratorRequest, error)
+
+	// CancelStrandedRequestsForHomeSystem flips every queued/running
+	// curator_request homed to homeInstanceID to cancelled with errMsg — the
+	// ownership-scoped recovery pass (curator homing, spec §6.3). Each pod
+	// sweeps only turns homed to ITSELF: an executor cancels its own prior-boot
+	// stranded turns on boot. This replaces the fleet-unsafe global
+	// CancelOrphanedNonTerminalRequests on multi-mode split roles — a control
+	// restart must never cancel an executor's live turns. Like every other
+	// terminal write it refreshes the denormalized token columns from the
+	// curator_messages SUM so a turn killed mid-stream still reports its spend
+	// (TFAC-473), so the admin pool needs SELECT on curator_messages too.
+	// Home_instance_id bound by argument. Returns the row count flipped.
+	CancelStrandedRequestsForHomeSystem(ctx context.Context, homeInstanceID, errMsg string) (int, error)
 }

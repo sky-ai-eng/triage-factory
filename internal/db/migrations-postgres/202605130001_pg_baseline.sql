@@ -627,7 +627,19 @@ CREATE TABLE public.curator_requests (
     cache_creation_tokens integer DEFAULT 0 NOT NULL,
     started_at timestamp with time zone,
     finished_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- home_instance_id (curator homing, spec §6.3): the executor instance that
+    -- runs this turn. Stamped at creation from the resolved home — a remote
+    -- executor when the serving control pod forwards, or the serving pod itself
+    -- in the local / no-executor-available fallback. NULL only on the untouched
+    -- local / role=all path (which never forwards and sweeps globally). The
+    -- executor claim loop selects on it (home_instance_id = me AND
+    -- status = 'queued'); the ownership-scoped boot sweep and the leader reaper
+    -- read it to retire turns stranded on a pod that died. Plain text, matching
+    -- instances.id / runs.executor_id (not FK-validated — a home id that has
+    -- since retired self-heals via the next turn's re-home, exactly like the
+    -- placement stamp).
+    home_instance_id text
 );
 
 
@@ -2442,6 +2454,16 @@ CREATE UNIQUE INDEX idx_curator_pending_context_one_pending_per_type ON public.c
 --
 
 CREATE INDEX idx_curator_requests_in_flight ON public.curator_requests USING btree (project_id) WHERE (status = ANY (ARRAY['queued'::text, 'running'::text]));
+
+
+--
+-- Name: idx_curator_requests_homed_queued; Type: INDEX; Schema: public; Owner: -
+--
+
+-- The executor claim loop's hot path: pull my queued homed turns. Mirrors
+-- idx_runs_queued_preferred (the run queue's tier-1 claim). Curator homing,
+-- spec §6.3.
+CREATE INDEX idx_curator_requests_homed_queued ON public.curator_requests USING btree (home_instance_id, created_at, id) WHERE (status = 'queued'::text);
 
 
 --
@@ -8145,6 +8167,45 @@ REVOKE ALL ON public.placement_overrides FROM PUBLIC;
 REVOKE ALL ON public.placement_overrides FROM anon, authenticated, service_role;
 
 
+-- curator_homes (curator homing, spec §6.3): the durable (org, project) ->
+-- home executor map. A curator session is the one *stateful* placement client
+-- (sticky per-project cwd + shared-RO worktrees per (org, repo)); homing keeps
+-- that cache on ~1 executor at N>1 (the TFAC-60/61 disk economics) AND makes
+-- the session a singleton — the session lives at exactly one home, and every
+-- control pod routes turns there, so a second control pod can't mint a second
+-- live session for the same project.
+--
+-- The row is minted on the first turn from the capacity-weighted rendezvous
+-- winner over live executors, kept sticky while the home's heartbeat stays
+-- fresh (the hash is the initial map, this row pins it until death so a benign
+-- fleet reshuffle never thrashes a warm cache), and re-minted by the next turn
+-- once the home goes heartbeat-stale (re-home on death — the new executor
+-- re-materializes worktrees via seed-on-demand, one cold blobless clone, rare
+-- and self-healing). home_boot_epoch snapshots the home's registration epoch at
+-- mint so a same-id/newer-boot home is legible.
+--
+-- Admin-pool-only / system table, same posture as instances / placement_-
+-- overrides: pure placement coordination, never a browsable RLS surface. RLS
+-- enabled with NO policy (deny-by-default to non-BYPASSRLS roles) + REVOKE ALL;
+-- the admin pool does all I/O with org_id bound by argument.
+CREATE TABLE public.curator_homes (
+    org_id           text NOT NULL,
+    project_id       text NOT NULL,
+    home_instance_id text NOT NULL,
+    home_boot_epoch  bigint NOT NULL DEFAULT 0,
+    homed_at         timestamp with time zone NOT NULL DEFAULT now(),
+    updated_at       timestamp with time zone NOT NULL DEFAULT now()
+);
+
+ALTER TABLE ONLY public.curator_homes
+    ADD CONSTRAINT curator_homes_pkey PRIMARY KEY (org_id, project_id);
+
+ALTER TABLE public.curator_homes ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.curator_homes FROM PUBLIC;
+REVOKE ALL ON public.curator_homes FROM anon, authenticated, service_role;
+
+
 -- ws_outbox: overflow storage for the tf_ws backplane (TFAC-584, spec
 -- §5.1/§5). websocket.Hub.Broadcast publishes an envelope on tf_ws for
 -- every control pod to fan into its own local sockets; NOTIFY caps a
@@ -8509,7 +8570,21 @@ GRANT SELECT ON TABLE public.jira_project_status_rules TO tf_system;
 -- llm_spend is security_invoker: reading it needs SELECT on its own base
 -- tables too (curator_requests, system_llm_runs), not just the view.
 GRANT SELECT ON TABLE public.llm_spend TO tf_system;
-GRANT SELECT ON TABLE public.curator_requests TO tf_system;
+-- curator_requests: SELECT feeds llm_spend and the executor claim loop's
+-- homed-turn scan; UPDATE is the ownership-scoped boot sweep + the leader
+-- reaper cancelling turns stranded on a dead home (curator homing, spec §6.3).
+-- The per-turn running/terminal writes ride the app pool under the requesting
+-- user's synthetic claims, not tf_system.
+GRANT SELECT, UPDATE ON TABLE public.curator_requests TO tf_system;
+-- curator_messages: SELECT so the ownership-scoped boot sweep's token roll-up
+-- (the correlated SUM every terminal write performs, TFAC-473) can read the
+-- turn's streamed messages on the executor's tf_system pool. Read-only — the
+-- per-message inserts ride the app pool under synthetic claims.
+GRANT SELECT ON TABLE public.curator_messages TO tf_system;
+-- curator_homes: the control pod upserts the (org, project) -> home mapping at
+-- turn dispatch and the executor claim loop reads it; the reaper/reset clears
+-- it. All I/O is admin-pool with org_id bound by argument (curator homing).
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.curator_homes TO tf_system;
 GRANT SELECT ON TABLE public.system_llm_runs TO tf_system;
 -- Sealed per-run credential bundles (TFAC-614): the executor's
 -- awaiting-credentials wait polls this for the bundle the brain sealed to

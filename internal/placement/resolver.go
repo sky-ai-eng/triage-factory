@@ -91,6 +91,13 @@ type Candidate struct {
 	Weight     int
 	Score      float64
 
+	// BootEpoch is the instance's registration epoch, carried through from the
+	// registry row so a consumer that persists a placement decision (curator
+	// homing snapshots it into curator_homes.home_boot_epoch, spec §6.3) can
+	// record which boot it chose without a second registry read. 0 for a pin to
+	// an instance that isn't a live registry row.
+	BootEpoch int64
+
 	// Eligible is true when this instance was a ranking candidate (live,
 	// executor-capable, not draining, weight > 0). An ineligible instance is
 	// still listed (with why) so the explainer can show a dead/draining
@@ -200,11 +207,14 @@ func (r *Resolver) computePlan(ctx context.Context, orgID, keyKind, keyValue str
 	cutoff := r.clock().Add(-r.livenessOrDefault())
 	members := make([]Member, 0, len(rows))
 	excluded := make([]Candidate, 0)
+	bootByID := make(map[string]int64, len(rows))
 	for _, in := range rows {
+		bootByID[in.ID] = in.BootEpoch
 		if reason, ok := ineligibleReason(in, cutoff); ok {
 			excluded = append(excluded, Candidate{
 				InstanceID: in.ID,
 				Weight:     maxRunsOrZero(in),
+				BootEpoch:  in.BootEpoch,
 				Reason:     reason,
 			})
 			continue
@@ -224,6 +234,7 @@ func (r *Resolver) computePlan(ctx context.Context, orgID, keyKind, keyValue str
 			InstanceID: rk.InstanceID,
 			Weight:     rk.Weight,
 			Score:      rk.Score,
+			BootEpoch:  bootByID[rk.InstanceID],
 			Eligible:   true,
 			Preferred:  preferred[rk.InstanceID],
 		}
