@@ -189,6 +189,21 @@ func (s *fsStorage) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+func (s *fsStorage) Stat(ctx context.Context, key string) (ObjectInfo, error) {
+	p, err := s.path(key)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ObjectInfo{}, ErrNotFound
+		}
+		return ObjectInfo{}, err
+	}
+	return ObjectInfo{Key: key, Size: info.Size(), ModTime: info.ModTime()}, nil
+}
+
 func (s *fsStorage) Exists(ctx context.Context, key string) (bool, error) {
 	p, err := s.path(key)
 	if err != nil {

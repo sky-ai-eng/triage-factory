@@ -101,6 +101,19 @@ func runConformance(t *testing.T, store Storage) {
 		if want := body[5:9]; !bytes.Equal(got, want) {
 			t.Fatalf("GetRange(5,4) = %q; want %q", got, want)
 		}
+		// Zero-length window: an empty read, never a backend InvalidRange error.
+		rc, err = store.GetRange(ctx, key, 4, 0)
+		if err != nil {
+			t.Fatalf("GetRange zero-length: %v", err)
+		}
+		got, err = io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			t.Fatalf("read zero-length range: %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("GetRange(4,0) = %q; want empty", got)
+		}
 		// To-end from an offset: length < 0.
 		rc, err = store.GetRange(ctx, key, 10, -1)
 		if err != nil {
@@ -121,6 +134,24 @@ func runConformance(t *testing.T, store Storage) {
 		}
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("GetRange(missing) err = %v; want ErrNotFound", err)
+		}
+	})
+
+	t.Run("stat", func(t *testing.T) {
+		key := "org-1/run-6/stat.bin"
+		body := []byte("twelve bytes")
+		if err := store.Put(ctx, key, bytes.NewReader(body)); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		info, err := store.Stat(ctx, key)
+		if err != nil {
+			t.Fatalf("Stat: %v", err)
+		}
+		if info.Size != int64(len(body)) {
+			t.Fatalf("Stat size = %d; want %d", info.Size, len(body))
+		}
+		if _, err := store.Stat(ctx, "org-1/run-6/absent"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Stat(missing) err = %v; want ErrNotFound", err)
 		}
 	})
 

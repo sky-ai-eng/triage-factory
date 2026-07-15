@@ -67,6 +67,11 @@ type Storage interface {
 	// Exists reports whether a blob is present at key. A missing key is
 	// (false, nil); only a backend failure returns a non-nil error.
 	Exists(ctx context.Context, key string) (bool, error)
+	// Stat returns a single blob's size and last-modified time without
+	// opening its body — a single HEAD, not a prefix scan. A missing key
+	// returns ErrNotFound. A ranged read uses this to size its response, so
+	// it must not degrade to listing a whole prefix per request.
+	Stat(ctx context.Context, key string) (ObjectInfo, error)
 	// List returns every blob whose key begins with prefix, in no
 	// guaranteed order. A prefix that matches nothing is an empty slice,
 	// not an error. Keys are returned whole (prefix included), matching

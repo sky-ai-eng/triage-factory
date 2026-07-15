@@ -189,6 +189,12 @@ func (o *objectStorage) Get(ctx context.Context, key string) (io.ReadCloser, err
 }
 
 func (o *objectStorage) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+	// A zero-length window would format an inverted "bytes=off-(off-1)" that
+	// S3 rejects as InvalidRange. Nothing to fetch — return an empty body
+	// rather than turn a degenerate request into a backend error.
+	if length == 0 {
+		return io.NopCloser(strings.NewReader("")), nil
+	}
 	// The HTTP Range header the S3 GetObject API accepts: "bytes=off-" for
 	// to-end, "bytes=off-last" for a bounded window (last is inclusive, so
 	// off+length-1). The server responds 206 with just those bytes.
@@ -249,6 +255,24 @@ func (o *objectStorage) Delete(ctx context.Context, key string) error {
 		return fmt.Errorf("storage: delete %q: %w", key, err)
 	}
 	return nil
+}
+
+func (o *objectStorage) Stat(ctx context.Context, key string) (ObjectInfo, error) {
+	resp, err := o.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(o.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		if isNotFound(err) {
+			return ObjectInfo{}, ErrNotFound
+		}
+		return ObjectInfo{}, fmt.Errorf("storage: stat %q: %w", key, err)
+	}
+	info := ObjectInfo{Key: key, Size: aws.ToInt64(resp.ContentLength)}
+	if resp.LastModified != nil {
+		info.ModTime = *resp.LastModified
+	}
+	return info, nil
 }
 
 func (o *objectStorage) Exists(ctx context.Context, key string) (bool, error) {

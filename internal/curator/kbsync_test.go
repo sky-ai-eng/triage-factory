@@ -41,6 +41,9 @@ func (c *countingStorage) Delete(ctx context.Context, key string) error {
 func (c *countingStorage) Exists(ctx context.Context, key string) (bool, error) {
 	return c.inner.Exists(ctx, key)
 }
+func (c *countingStorage) Stat(ctx context.Context, key string) (storage.ObjectInfo, error) {
+	return c.inner.Stat(ctx, key)
+}
 func (c *countingStorage) List(ctx context.Context, prefix string) ([]storage.ObjectInfo, error) {
 	return c.inner.List(ctx, prefix)
 }

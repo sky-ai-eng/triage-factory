@@ -88,6 +88,13 @@ func key(orgID, projectID, name string) (string, error) {
 // files are the agent's scratch state, never user-visible KB). Exported so
 // the syncer and handlers can pre-check a name before deciding whether to
 // skip or reject it.
+//
+// Both '/' (the object-store key separator, always rejected) AND the OS path
+// separator are rejected: on Windows filepath.Base treats '\' as a separator,
+// so a name containing '\' that passed here but not sanitizeKnowledgeFilename
+// would round-trip inconsistently and leave the object unreachable from the
+// per-file endpoints. Rejecting both keeps kbstore in lockstep with the
+// local-disk sanitizer on every platform.
 func ValidateName(name string) error {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
@@ -96,7 +103,7 @@ func ValidateName(name string) error {
 	if trimmed == "." || trimmed == ".." {
 		return fmt.Errorf("%w: %q", ErrInvalidName, name)
 	}
-	if strings.ContainsRune(trimmed, '/') {
+	if strings.ContainsRune(trimmed, '/') || strings.ContainsRune(trimmed, filepath.Separator) {
 		return fmt.Errorf("%w: %q contains a path separator", ErrInvalidName, name)
 	}
 	if strings.HasPrefix(trimmed, ".") {
@@ -130,23 +137,19 @@ func (s *Store) List(ctx context.Context, orgID, projectID string) ([]FileInfo, 
 	return out, nil
 }
 
-// Stat returns one KB file's listing entry (size + mod time) or ErrNotFound.
-// Backed by List so it inherits the flat-name filtering; the serve handler
-// uses it to size a byte-range response before streaming it.
+// Stat returns one KB file's size and mod time, or ErrNotFound. It is a single
+// HEAD on the exact key — the serve handler calls it on every ranged GET (video
+// scrubbing), so it must not list the whole project prefix per request.
 func (s *Store) Stat(ctx context.Context, orgID, projectID, name string) (FileInfo, error) {
-	if err := ValidateName(name); err != nil {
-		return FileInfo{}, err
-	}
-	list, err := s.List(ctx, orgID, projectID)
+	k, err := key(orgID, projectID, name)
 	if err != nil {
 		return FileInfo{}, err
 	}
-	for _, f := range list {
-		if f.Name == name {
-			return f, nil
-		}
+	info, err := s.blobs.Stat(ctx, k)
+	if err != nil {
+		return FileInfo{}, err
 	}
-	return FileInfo{}, ErrNotFound
+	return FileInfo{Name: name, Size: info.Size, ModTime: info.ModTime}, nil
 }
 
 // Get opens a KB file for streaming reads. A missing file returns
