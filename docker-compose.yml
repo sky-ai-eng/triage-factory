@@ -554,9 +554,12 @@ services:
       start_period: 30s
 
   # ── Sandbox worker (TFAC-582) ─────────────────────────────────────────
-  # Only started with the `scale` profile:
+  # Only started with the `scale` profile, layering the capless-control
+  # override so the main service is a control pod (see the "Scaling out"
+  # header at the top of this file):
   #
-  #   TF_ROLE=control docker compose --profile scale up -d --scale executor=2
+  #   docker compose -f docker-compose.yml -f docker-compose.control.yml \
+  #     --profile scale up -d --scale executor=2
   #
   # Same image + entrypoint as the control pod (broker-then-drop privilege
   # separation), TF_ROLE=executor. It runs the delegated-run dispatcher +

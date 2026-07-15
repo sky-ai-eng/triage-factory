@@ -29,11 +29,17 @@ export COMPOSE_FILE=docker-compose.yml:docker-compose.control.yml
 docker compose --profile scale up -d --scale executor=2
 ```
 
-> Forgetting the override fails **safe**, not broken: the pod still runs as a
-> control pod, and the caps it would have carried sit inert (nothing on control
-> launches a sandbox, so the entrypoint and the Go role-gate both skip the
-> broker). The override is what lets a control pod schedule on a substrate that
-> forbids privileged containers — managed Kubernetes included.
+> **Pass the override on every command — it is required, not optional
+> hardening.** With `TF_ROLE` unset in `.env` (the default above), this override
+> is the *only* thing that makes the main service a control pod. Drop `-f
+> docker-compose.control.yml` (or the `COMPOSE_FILE` export) and the service
+> falls back to its `all` default — a working but **privileged** all-in-one box
+> beside your executors, not a capless control pod. The role-gate is still the
+> backstop: any pod that resolves to `control` skips the broker and never
+> exercises the sandbox caps even when they are present, so control is never a
+> privileged-sandbox risk. What the override adds is making the service *be*
+> control and shedding those otherwise-inert caps, so it can schedule on a
+> substrate that forbids privileged containers — managed Kubernetes included.
 
 That's the whole topology — **there is no load balancer.** Executors accept no
 inbound traffic (no published ports; their only listener is a localhost-only
