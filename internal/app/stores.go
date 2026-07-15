@@ -151,8 +151,17 @@ func (a *App) openStores(ctx context.Context) error {
 		// Best-effort startup cleanup of orphaned sandboxes from a prior
 		// hard-crashed TF process. Never fatal — failure here just means
 		// orphaned resources stick around until the next boot.
-		if err := sandbox.ReapOrphans(ctx); err != nil {
-			sandboxLog.Warn("reap orphans at boot failed", "error", err)
+		//
+		// Skipped on a control pod: it never launches a sandbox, so it has
+		// nothing of its own to reap, and it holds no broker to route the
+		// (privileged) reap through — running it would only log EPERM noise
+		// from the capless orchestrator. Any pre-upgrade leftovers from a
+		// container that once sandboxed are container-scoped (netns, veth,
+		// iptables) and die with the container's recreation.
+		if a.plan.role != runmode.RoleControl {
+			if err := sandbox.ReapOrphans(ctx); err != nil {
+				sandboxLog.Warn("reap orphans at boot failed", "error", err)
+			}
 		}
 
 	default:

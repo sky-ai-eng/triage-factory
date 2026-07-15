@@ -374,8 +374,10 @@ to remain out of Kubernetes clusters entirely:
   executors. The control plane's own background LLM work (task scoring, project
   classification, repo profiling) is deliberately toolless — prompt in, JSON out,
   no filesystem, no tool loop, no subprocess — so there is nothing to jail: those
-  are direct API calls from the Go process.
-  <!-- TODO(TFAC-628): the "runs on executors" half is now true — curator turns home to executors (curator homing shipped) and the toolless direct-call half was already shipped (TFAC-627), so the control process has zero sandbox users. What still awaits the compose cap-drop (TFAC-628) is "holds no sandbox capabilities": the control service still carries the cap-broker + SYS_ADMIN/NET_ADMIN in docker-compose.yml. Nothing on control uses them anymore. -->
+  are direct API calls from the Go process. The control service carries no
+  sandbox capabilities: `docker-compose.control.yml` clears the caps + seccomp
+  and the control pod spawns no cap-broker (the entrypoint and the Go role-gate
+  both skip it), so nothing privileged is present to misuse.
 - **If executors must run in Kubernetes**, they run as privileged pods on a
   dedicated, tainted node pool with the cloud metadata endpoint blocked, a
   minimal node role, and no other tenants' pods scheduled there. We do not

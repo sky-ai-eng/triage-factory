@@ -81,6 +81,39 @@ func TestStartCapBrokerIfSandboxing_AllowsOrchestratorUIDOutsideSidecarBand(t *t
 	}
 }
 
+// TestStartCapBrokerIfSandboxing_SkipsAtControlRole pins the control-role
+// exclusion: even on a host that WOULD sandbox (multi + Linux), a control
+// pod never launches a sandbox, so it must not start a cap-broker. The skip
+// is deliberately fail-closed — with no broker started, SetPrivilegedOps is
+// never installed, so a stray sandbox launch that somehow reached a control
+// pod fails loudly at construction ("cap-broker not started") rather than
+// running unjailed. See TestLaunchSidecar_NoLauncherInstalledErrors in
+// internal/sandbox for the downstream half of that guarantee.
+func TestStartCapBrokerIfSandboxing_SkipsAtControlRole(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	if !agentproc.WillSandbox() {
+		t.Skip("host does not sandbox (non-Linux); the control-skip only matters where a broker would otherwise start")
+	}
+	origBroker := startCapBrokerFn
+	t.Cleanup(func() { startCapBrokerFn = origBroker })
+	called := false
+	startCapBrokerFn = func(context.Context) (capBrokerHandle, func(context.Context) error, error) {
+		called = true
+		return nil, nil, nil
+	}
+
+	a := &App{plan: planForRole(runmode.RoleControl)}
+	if err := a.startCapBrokerIfSandboxing(context.Background()); err != nil {
+		t.Fatalf("control role should skip the broker cleanly, got error: %v", err)
+	}
+	if called {
+		t.Error("startCapBroker was invoked on a control pod — control never sandboxes, so it must not start a broker")
+	}
+	if a.capBroker != nil {
+		t.Error("capBroker set on a control pod")
+	}
+}
+
 // TestStartCapBrokerIfSandboxing_FailClosed pins the retirement of the
 // privsep rollback flag: on a host that sandboxes, a broker that can't start
 // is FATAL. startCapBrokerIfSandboxing surfaces the error rather than

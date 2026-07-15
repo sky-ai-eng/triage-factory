@@ -1,0 +1,50 @@
+# Capless control-pod override for the `scale` topology.
+#
+# Layer this on top of docker-compose.yml to run the main `triagefactory`
+# service as an unprivileged CONTROL pod — API + background brain, no sandbox
+# launcher:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.control.yml \
+#     --profile scale up -d --scale executor=2
+#
+# That yields 1 control pod (the published entrypoint) + N executor pods. The
+# executor service (docker-compose.yml, `scale` profile) keeps its sandbox
+# caps unchanged — executors are where every sandboxed workload runs.
+#
+# Why an override file rather than a dedicated `control` service:
+#   - The base `triagefactory` service must keep serving the `all` role WITH
+#     caps on a plain `docker compose up` (the single-box default), so the
+#     shared x-tf-hardening anchor can't simply lose them.
+#   - Compose profiles can't EXCLUDE an un-profiled service, so a dedicated
+#     `control` service under the `scale` profile would boot next to the
+#     all-in-one on a bare `--profile scale up` and collide on port 3000.
+#   - Tradeoff: this override is the SOLE source of the control role (TF_ROLE
+#     stays unset in .env — see .env.example), so you MUST pass it on every
+#     command. Drop it and the main service falls back to its `all` default
+#     (ParseRole("") == all): a working but PRIVILEGED all-in-one box beside
+#     the executors, NOT a capless control pod. An
+#     `export COMPOSE_FILE=docker-compose.yml:docker-compose.control.yml`
+#     covers a whole shell. The role-gate stays the safety backstop
+#     regardless: any pod that resolves to `control` skips the broker and
+#     never exercises the sandbox caps even if they are present — so control
+#     is never a privileged-sandbox risk; this override's job is to make the
+#     service control at all and to shed those otherwise-inert caps.
+#
+# `!reset` empties the values merged in from the x-tf-hardening anchor
+# (cap_add, security_opt); it requires **Docker Compose >= 2.24**. `cgroup:
+# private` is left as-is on purpose — harmless without sandboxes, and fewer
+# moving parts than resetting it too. With the caps and the custom seccomp
+# profile gone, the pod runs with Docker's default capability set and default
+# seccomp, so it can schedule on substrates that forbid privileged
+# containers (managed Kubernetes included).
+#
+# Forward note: once TF_ROLE=all is retired in multi mode, control becomes the
+# default main-service role and the co-located control+executor blueprint
+# replaces this override — so treat this file as the interim capless-control
+# shape, not a permanent fixture.
+services:
+  triagefactory:
+    environment:
+      TF_ROLE: control
+    cap_add: !reset []
+    security_opt: !reset []

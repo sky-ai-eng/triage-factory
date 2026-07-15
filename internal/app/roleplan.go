@@ -16,13 +16,19 @@ import "github.com/sky-ai-eng/triage-factory/internal/runmode"
 // re-growing.
 //
 // Two subsystem groups are deliberately NOT represented here because they
-// are gated on something other than role:
+// are gated on something other than role alone:
 //
 //   - The cap-broker + sandbox substrate is gated on agentproc.WillSandbox()
-//     (multi + Linux), not role — EVERY role sandboxes in multi mode
-//     (executors run delegated runs; control pods run curator chats). See
-//     internal/app/privsep.go and the ticket's "do NOT role-gate the
-//     cap-broker" decision.
+//     (multi + Linux) AND on the role hosting sandboxes at all: an executor
+//     sandboxes delegated runs and an all-in-one box sandboxes both, but a
+//     control pod never launches a sandbox — curator turns home to
+//     executors and the brain's own LLM work is toolless direct API calls,
+//     so nothing on control needs a jail. Control therefore starts no
+//     broker and installs no privileged ops, and a stray sandbox launch
+//     that somehow reached it fails loudly at construction rather than
+//     running unjailed. The gate lives in internal/app/privsep.go, not this
+//     plan, because it also depends on mode+GOOS (WillSandbox), which a
+//     role predicate alone can't express.
 //   - The instance registry (Register + heartbeat), the worktree cache
 //     reaper, git-hooks materialization, and orphaned-worktree cleanup run
 //     in every role: registry membership is fleet-wide, and both control

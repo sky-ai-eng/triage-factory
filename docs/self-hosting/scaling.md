@@ -18,12 +18,28 @@ executor** pods with the `scale` compose profile.
 Bring up 1 control + 2 executors:
 
 ```sh
-# In .env, flip the main service to the control role:
-echo 'TF_ROLE=control' >> .env
+# The capless-control override (docker-compose.control.yml) pins the main
+# service to the control role AND clears its sandbox caps + seccomp — a
+# control pod launches no sandbox, so it needs neither. It uses Compose's
+# `!reset` tag, so it requires Docker Compose ≥ 2.24. Layer it on with a
+# second -f; export COMPOSE_FILE so the follow-up commands inherit both:
+export COMPOSE_FILE=docker-compose.yml:docker-compose.control.yml
 
 # Start the control pod (the published entrypoint) plus 2 executor pods:
 docker compose --profile scale up -d --scale executor=2
 ```
+
+> **Pass the override on every command — it is required, not optional
+> hardening.** With `TF_ROLE` unset in `.env` (the default above), this override
+> is the *only* thing that makes the main service a control pod. Drop `-f
+> docker-compose.control.yml` (or the `COMPOSE_FILE` export) and the service
+> falls back to its `all` default — a working but **privileged** all-in-one box
+> beside your executors, not a capless control pod. The role-gate is still the
+> backstop: any pod that resolves to `control` skips the broker and never
+> exercises the sandbox caps even when they are present, so control is never a
+> privileged-sandbox risk. What the override adds is making the service *be*
+> control and shedding those otherwise-inert caps, so it can schedule on a
+> substrate that forbids privileged containers — managed Kubernetes included.
 
 That's the whole topology — **there is no load balancer.** Executors accept no
 inbound traffic (no published ports; their only listener is a localhost-only
