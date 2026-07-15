@@ -3,6 +3,7 @@ package curator
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -71,6 +72,55 @@ func TestDispatch_AdmissionHoldsTurnQueued(t *testing.T) {
 	}
 	if agentRan.Load() {
 		t.Fatal("agent ran for a turn cancelled while waiting on admission")
+	}
+}
+
+// TestDispatch_AdmissionFailureIsLegible pins the error attribution: a gate
+// that fails for a reason OTHER than the turn's ctx (a miswire, an internal
+// error) must land the row 'failed' carrying the gate's own error — not
+// 'cancelled', which would pin the failure on the user and mask it.
+func TestDispatch_AdmissionFailureIsLegible(t *testing.T) {
+	database := newTestDB(t)
+	projectID := seedProject(t, database, "broken-gate")
+	c := New(sqlitestore.New(database), nil, "")
+	t.Cleanup(c.Shutdown)
+
+	var agentRan atomic.Bool
+	c.runAgent = func(context.Context, agentproc.RunOptions, agentproc.Sink) (*agentproc.Outcome, error) {
+		agentRan.Store(true)
+		return nil, errors.New("must not run when admission itself failed")
+	}
+	c.SetAdmission(func(context.Context) (func(), error) {
+		return nil, errors.New("gate exploded")
+	})
+
+	reqID, err := c.SendMessage(t.Context(), projectID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "hi")
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, gerr := db.GetCuratorRequest(database, reqID)
+		if gerr != nil {
+			t.Fatalf("get request: %v", gerr)
+		}
+		if got.Status == "failed" {
+			if !strings.Contains(got.ErrorMsg, "gate exploded") {
+				t.Fatalf("error_msg = %q, want the gate's own error surfaced", got.ErrorMsg)
+			}
+			break
+		}
+		if got.Status == "cancelled" {
+			t.Fatalf("gate failure written as cancelled (error_msg = %q), want failed", got.ErrorMsg)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status = %q, want failed", got.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if agentRan.Load() {
+		t.Fatal("agent ran for a turn whose admission failed")
 	}
 }
 

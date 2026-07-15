@@ -49,6 +49,13 @@ func (s *Spawner) AcquireTurnSlot(ctx context.Context) (release func(), err erro
 	}
 	select {
 	case sem <- struct{}{}:
+		// A free slot and a done ctx race in this select, and select picks
+		// arbitrarily — re-check so a cancelled caller never walks away
+		// holding a slot, which is this function's documented contract.
+		if err := ctx.Err(); err != nil {
+			<-sem
+			return nil, err
+		}
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

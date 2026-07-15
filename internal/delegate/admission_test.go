@@ -44,6 +44,27 @@ func TestAcquireTurnSlot_SharesDispatcherSemaphore(t *testing.T) {
 	release2()
 }
 
+// TestAcquireTurnSlot_CancelledCtxNeverHoldsSlot pins the race the select
+// alone would lose ~half the time: with a free slot AND an already-done ctx,
+// select picks arbitrarily, so without the post-acquire re-check a cancelled
+// caller could walk away holding a slot. Looped so the pseudo-random pick is
+// actually exercised on both arms.
+func TestAcquireTurnSlot_CancelledCtxNeverHoldsSlot(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	s.SetMaxConcurrentRuns(1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 100; i++ {
+		if _, err := s.AcquireTurnSlot(ctx); err == nil {
+			t.Fatalf("iteration %d: acquire with a cancelled ctx succeeded", i)
+		}
+		if got := len(s.semaphore()); got != 0 {
+			t.Fatalf("iteration %d: cancelled acquire left %d slot(s) held", i, got)
+		}
+	}
+}
+
 // TestAcquireTurnSlot_WaitsOutMemoryGate pins the gate ordering: a
 // memory-gated host holds the turn without taking a slot (so a starved host
 // parks with nothing held, same as the dispatcher), and admits it once a

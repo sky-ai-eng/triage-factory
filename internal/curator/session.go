@@ -131,11 +131,17 @@ func (s *projectSession) dispatch(item queueItem) {
 	if admit := s.curator.getAdmitTurn(); admit != nil {
 		release, admitErr := admit(msgCtx)
 		if admitErr != nil {
-			reason := "user cancelled"
-			if s.ctx.Err() != nil {
-				reason = "process shutting down"
+			// Only a fired ctx is a cancellation; any other gate error is
+			// the gate's own failure and must stay legible as one — writing
+			// it as "user cancelled" would misattribute and mask it.
+			switch {
+			case s.ctx.Err() != nil:
+				s.markCancelled(item, "process shutting down")
+			case msgCtx.Err() != nil:
+				s.markCancelled(item, "user cancelled")
+			default:
+				s.failRequest(item, fmt.Sprintf("turn admission: %v", admitErr))
 			}
-			s.markCancelled(item, reason)
 			return
 		}
 		defer release()
