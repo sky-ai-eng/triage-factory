@@ -1124,6 +1124,36 @@ are exactly what "counts + memory" fails to capture:
   run in an isolated/unprivileged builder — never in the
   capability-holding `cap-broker` — which then only mounts the
   resulting rootfs read-only by verified hash.
+- **The per-tenant compute quota is the same budget, summed per org —
+  not a run-count cap.** Fleet-capacity admission (first bullet) answers
+  *can this executor hold the run*; the SaaS compute quota answers *has
+  this tenant used up the compute its plan includes*, and it is the
+  **same `mem_budget_mb` unit** — one meter end to end. The claim gains a
+  second budget term alongside the capacity check: `Σ(org's active runs'
+  mem_budget_mb) + this run's budget ≤ org_budget_mb`. Memory, not run
+  count, is the denomination on purpose: once profiles are heterogeneous,
+  a browser-heavy tenant and a CI-triage tenant at the *same run count*
+  consume wildly different compute, and memory (not runs) is what the
+  vendor is billed for. Image/variant **size is deliberately *not* the
+  meter** — it is a shared, content-addressed disk artifact
+  (`instance_variants.bytes`, cross-tenant by hash — the image bullet
+  above), so metering on it bills the cache, not the run. `org_budget_mb` is **plan-derived,
+  never an operator-set row**: it rides the license entitlement (§11
+  decision 1, `entitlements.Active()`), so it is un-raisable by the org
+  admin by construction and scales with tier × seats (e.g.
+  `base(tier) + per_seat(tier)·seats`, community < professional <
+  enterprise) — the billing formula only parameterizes the number, it
+  does not touch the mechanism, so the mechanism can land before the
+  formula is settled. Self-host is unlimited (the operator sizes their
+  own pools, sandbox-fleet §5); a manual per-tenant override can sit on
+  top later, but the default is the plan. This is a **distinct axis from
+  TFAC-590's** `org_settings.max_concurrent_runs`, which stays the
+  *org's own* self-limit — a count-shaped knob the org sets to protect
+  *its own* GitHub/CI/API from *its own* agents ("no more than N open PRs
+  at once") — orthogonal to the operator's memory-denominated compute
+  quota; the claim composes both (plus fairness ordering and the capacity
+  floor). Lands with budget admission below (needs `mem_budget_mb` on the
+  profile + run), and is console-EE / SaaS-only.
 
 None of this is needed while only the "base" profile exists — P1–P3
 deliberately assume one variant and a uniform budget. The gate:
