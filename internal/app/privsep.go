@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
@@ -51,17 +52,31 @@ var startCapBrokerFn = startCapBroker
 // startCapBrokerIfSandboxing starts the cap-broker subprocess and routes
 // internal/sandbox's privileged-ops and launch implementation through it
 // whenever this host will actually sandbox runs (multi mode + Linux —
-// agentproc.WillSandbox). The broker is the ONLY sandbox launch path, so a
-// broker that can't start is FATAL: the error propagates to app.New rather
-// than falling back to a less-isolated in-process launch. Local mode (and
-// non-Linux) never sandboxes, so this is a no-op there — the sandbox is
-// never reached, and no broker is needed.
+// agentproc.WillSandbox) AND this role hosts sandboxes. The broker is the
+// ONLY sandbox launch path, so a broker that can't start is FATAL: the
+// error propagates to app.New rather than falling back to a less-isolated
+// in-process launch. Local mode (and non-Linux) never sandboxes, so this is
+// a no-op there — the sandbox is never reached, and no broker is needed.
+//
+// The control role is excluded even in multi mode on Linux: a control pod
+// never launches a sandbox — curator turns home to executors and the
+// brain's own LLM work is toolless direct API calls — so it needs no
+// broker and holds no privileged ops. Leaving the broker unstarted is
+// deliberately fail-closed: SetPrivilegedOps stays uninstalled, so a stray
+// sandbox launch that somehow reached a control pod (a bug, a misconfig)
+// fails loudly at construction ("cap-broker not started") rather than
+// silently running unjailed in the capless orchestrator. The compose
+// override drops the container caps to match.
 //
 // Safe to call unconditionally from any platform — the actual spawn
 // (startCapBroker) is build-tag split and the WillSandbox gate never lets
 // the non-Linux stub fire in practice.
 func (a *App) startCapBrokerIfSandboxing(ctx context.Context) error {
 	if !agentproc.WillSandbox() {
+		return nil
+	}
+	if a.plan.role == runmode.RoleControl {
+		appLog.Info("control role: skipping cap-broker (control pods never launch sandboxes)")
 		return nil
 	}
 	// A collision here would let the orchestrator and some run's sidecar

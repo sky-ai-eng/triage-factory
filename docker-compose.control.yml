@@ -1,0 +1,43 @@
+# Capless control-pod override for the `scale` topology.
+#
+# Layer this on top of docker-compose.yml to run the main `triagefactory`
+# service as an unprivileged CONTROL pod — API + background brain, no sandbox
+# launcher:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.control.yml \
+#     --profile scale up -d --scale executor=2
+#
+# That yields 1 control pod (the published entrypoint) + N executor pods. The
+# executor service (docker-compose.yml, `scale` profile) keeps its sandbox
+# caps unchanged — executors are where every sandboxed workload runs.
+#
+# Why an override file rather than a dedicated `control` service:
+#   - The base `triagefactory` service must keep serving the `all` role WITH
+#     caps on a plain `docker compose up` (the single-box default), so the
+#     shared x-tf-hardening anchor can't simply lose them.
+#   - Compose profiles can't EXCLUDE an un-profiled service, so a dedicated
+#     `control` service under the `scale` profile would boot next to the
+#     all-in-one on a bare `--profile scale up` and collide on port 3000.
+#   - Forgetting this override fails SAFE: the pod still runs correctly as a
+#     control pod (TF_ROLE from .env), and the granted caps sit inert —
+#     nothing on control exercises them, because the entrypoint and the Go
+#     role-gate both skip the broker at role=control.
+#
+# `!reset` empties the values merged in from the x-tf-hardening anchor
+# (cap_add, security_opt); it requires **Docker Compose >= 2.24**. `cgroup:
+# private` is left as-is on purpose — harmless without sandboxes, and fewer
+# moving parts than resetting it too. With the caps and the custom seccomp
+# profile gone, the pod runs with Docker's default capability set and default
+# seccomp, so it can schedule on substrates that forbid privileged
+# containers (managed Kubernetes included).
+#
+# Forward note: once TF_ROLE=all is retired in multi mode, control becomes the
+# default main-service role and the co-located control+executor blueprint
+# replaces this override — so treat this file as the interim capless-control
+# shape, not a permanent fixture.
+services:
+  triagefactory:
+    environment:
+      TF_ROLE: control
+    cap_add: !reset []
+    security_opt: !reset []

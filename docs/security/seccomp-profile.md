@@ -6,6 +6,12 @@ seccomp=docker/seccomp-profile.json` — a default-deny allowlist, not
 [security-overview.md](security-overview.md) §3/§6 vector 2 for the
 threat-model framing.
 
+This profile applies to the **sandbox-hosting** services only — the `all`
+default and every `executor`. A capless control pod launches no sandbox and
+so needs none of it: `docker-compose.control.yml` clears `security_opt` (and
+the caps) via Compose's `!reset`, leaving the control pod on Docker's default
+seccomp profile.
+
 **Scope — self-host `docker-compose` only.** Fly.io-hosted production (`fly.toml`)
 runs with unconfined seccomp inside its Fly Machine and is not covered by this
 profile — the Fly Machine config format has no `security_opt`-equivalent field to

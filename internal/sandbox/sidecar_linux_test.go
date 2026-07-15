@@ -90,7 +90,14 @@ func TestLaunchSidecar_NoLauncherInstalledErrors(t *testing.T) {
 	sidecarLauncher = nil
 	t.Cleanup(func() { sidecarLauncher = orig })
 
-	if _, err := LaunchSidecar(context.Background(), SidecarConfig{RunID: "run-x", SubnetIdx: 0}); err == nil {
+	_, err := LaunchSidecar(context.Background(), SidecarConfig{RunID: "run-x", SubnetIdx: 0})
+	if err == nil {
 		t.Fatal("expected an error when no sidecar launcher is installed")
+	}
+	// The error must legibly name the misconfiguration (no broker), not a
+	// nil deref — this is the downstream half of the control-role fail-closed
+	// guarantee (a control pod installs no launcher).
+	if !strings.Contains(err.Error(), "cap-broker not started") {
+		t.Errorf("err = %v, want it to name the missing cap-broker", err)
 	}
 }

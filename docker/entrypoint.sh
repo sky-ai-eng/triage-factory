@@ -6,8 +6,9 @@
 #      failure so a not-yet-ready Postgres doesn't hard-fail the
 #      container before compose/Fly finishes wiring DNS. Idempotent
 #      and safe to re-run on every restart.
-#   2. Privilege separation (multi mode only): spawn the cap-broker,
-#      then exec into the orchestrator with its capabilities dropped.
+#   2. Privilege separation (multi mode only): spawn the cap-broker on a
+#      sandbox-hosting role (all, executor) — control skips it — then exec
+#      into the orchestrator with its capabilities dropped, on every role.
 #   3. exec the binary so tini/the container sees its signals
 #      directly (no shell intermediary swallowing SIGTERM).
 #
@@ -101,17 +102,28 @@ done
 #
 # In multi mode on Linux — this container's sandbox is Linux-only and this
 # whole mechanism exists to protect it — privilege separation is the only
-# sandbox launch path. This entrypoint:
+# sandbox launch path on a sandbox-hosting role (all, executor). This
+# entrypoint:
 #
-#   1. Spawns the cap-broker in the background. It stays root, holding
-#      whatever this container was granted (SYS_ADMIN + NET_ADMIN on
-#      top of Docker's own baseline set — see docker-compose.yml's
-#      cap_add comment). It never touches credentials or hostile input.
-#   2. Waits (bounded) for the broker's control socket to come up.
+#   1. Spawns the cap-broker in the background — UNLESS this is a control
+#      pod (control_role below), which never launches a sandbox and so
+#      skips the broker outright, the Go side role-gating it to match. On
+#      the roles that do spawn it, the broker stays root, holding whatever
+#      this container was granted (SYS_ADMIN + NET_ADMIN on top of Docker's
+#      own baseline set — see docker-compose.yml's cap_add comment); it
+#      never touches credentials or hostile input. A control pod's compose
+#      service clears those caps via the docker-compose.control.yml
+#      override, so the drop below has nothing broker-shaped to shed there.
+#   2. Waits (bounded) for the broker's control socket to come up (skipped
+#      with the spawn on control).
 #   3. execs — REPLACING this shell, not forking a child — into the
 #      orchestrator via setpriv, which atomically clears the capability
 #      bounding set, drops inheritable capabilities, sets no_new_privs,
-#      and switches to a different, unprivileged uid.
+#      and switches to a different, unprivileged uid. This step runs on
+#      EVERY role, control included: dropping to the unprivileged uid is
+#      correct whether or not a broker was spawned, and skipping it would
+#      leave the orchestrator running as root with Docker's default caps,
+#      strictly worse.
 #
 # This exec boundary is the actual drop, and it has to happen here, in
 # a small single-threaded C program, rather than inside the Go
@@ -148,6 +160,21 @@ multi_mode() {
     [ "$(printf '%s' "${TF_MODE:-local}" | tr '[:upper:]' '[:lower:]')" = "multi" ]
 }
 
+# control_role mirrors internal/runmode.ParseRole's normalization for
+# TF_ROLE. Note it DOES fold whitespace, unlike multi_mode above: ParseRole
+# trims TF_ROLE (strings.TrimSpace) where ModeFromEnv deliberately does NOT
+# trim TF_MODE, so the two normalizers differ on purpose. A control pod
+# never launches a sandbox — curator turns home to executors, and the
+# brain's own LLM work is toolless direct API calls — so it needs no
+# cap-broker: below, it skips the broker spawn + socket wait while keeping
+# the identical uid/capability drop (running with root + Docker's default
+# caps would be strictly worse). An invalid TF_ROLE fails boot in the Go
+# process regardless, so a stray match here on a malformed value is moot —
+# the container crash-loops either way.
+control_role() {
+    [ "$(printf '%s' "${TF_ROLE:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" = "control" ]
+}
+
 if [ "$(uname -s)" = "Linux" ] && multi_mode; then
     TF_ORCHESTRATOR_UID="${TF_ORCHESTRATOR_UID:-10001}"
     TF_ORCHESTRATOR_GID="${TF_ORCHESTRATOR_GID:-10001}"
@@ -171,27 +198,35 @@ if [ "$(uname -s)" = "Linux" ] && multi_mode; then
     [ -d /data ] && chown "$TF_ORCHESTRATOR_UID:$TF_ORCHESTRATOR_GID" /data
     [ -d /opt/triagefactory/sandbox ] && chown "$TF_ORCHESTRATOR_UID:$TF_ORCHESTRATOR_GID" /opt/triagefactory/sandbox
 
-    triagefactory cap-broker --socket "$TF_CAPBROKER_SOCKET" --orchestrator-uid "$TF_ORCHESTRATOR_UID" &
-    BROKER_PID=$!
+    # The control role skips the broker entirely (see control_role above):
+    # it never launches a sandbox, and the Go side role-gates the broker to
+    # match (internal/app/privsep.go), so a broker here would be dead weight
+    # the orchestrator never dials. Every other role (all, executor) spawns
+    # and waits for it exactly as before — this branch is the only
+    # difference, so those paths stay byte-identical.
+    if ! control_role; then
+        triagefactory cap-broker --socket "$TF_CAPBROKER_SOCKET" --orchestrator-uid "$TF_ORCHESTRATOR_UID" &
+        BROKER_PID=$!
 
-    # Bounded wait for the broker's control socket, mirroring the 10s
-    # budget cmd/capbroker/orchestrator_linux.go's own readyTimeout uses
-    # for the dev/bare-metal spawn-and-wait fallback path.
-    attempts=10
-    attempt=0
-    while [ ! -S "$TF_CAPBROKER_SOCKET" ]; do
-        if ! kill -0 "$BROKER_PID" 2>/dev/null; then
-            echo "entrypoint: cap-broker exited before creating its socket" >&2
-            exit 1
-        fi
-        attempt=$((attempt + 1))
-        if [ "$attempt" -ge "$attempts" ]; then
-            echo "entrypoint: cap-broker did not create its socket within ${attempts}s" >&2
-            kill "$BROKER_PID" 2>/dev/null || true
-            exit 1
-        fi
-        sleep 1
-    done
+        # Bounded wait for the broker's control socket, mirroring the 10s
+        # budget cmd/capbroker/orchestrator_linux.go's own readyTimeout uses
+        # for the dev/bare-metal spawn-and-wait fallback path.
+        attempts=10
+        attempt=0
+        while [ ! -S "$TF_CAPBROKER_SOCKET" ]; do
+            if ! kill -0 "$BROKER_PID" 2>/dev/null; then
+                echo "entrypoint: cap-broker exited before creating its socket" >&2
+                exit 1
+            fi
+            attempt=$((attempt + 1))
+            if [ "$attempt" -ge "$attempts" ]; then
+                echo "entrypoint: cap-broker did not create its socket within ${attempts}s" >&2
+                kill "$BROKER_PID" 2>/dev/null || true
+                exit 1
+            fi
+            sleep 1
+        done
+    fi
 
     # setpriv switches uid/gid/capabilities but never touches environment
     # variables, so HOME (inherited from this shell's own environment —
