@@ -1,47 +1,48 @@
 package runmode
 
 // Deployment role — TF_ROLE — is the horizontal-scaling companion to
-// TF_MODE (see the package doc in runmode.go). It splits the single
-// process into cooperating pods:
+// TF_MODE (see the package doc in runmode.go). It is a MULTI-MODE-ONLY
+// input naming which half of the split this process runs:
 //
-//   - all      the single-process shape: HTTP+WS, pollers, event
-//              drainer/router, AI managers, curator, run dispatcher,
-//              sweepers — one box runs everything. LOCAL-ONLY: it is what
-//              local mode always is (see below), and it is rejected at
-//              boot in multi mode, where the deployment is always a
-//              control+executor split.
 //   - control  the API + brain half: HTTP/API/WS, migrations, the
-//              leader-elected background brain, curator chat sandboxes.
+//              leader-elected background brain, curator forwarding.
 //              Does NOT run the delegated-run dispatcher.
 //   - executor a shared-nothing sandbox worker: the run dispatcher,
-//              sandboxes, per-run proxies, and the worktree/snapshot
-//              reapers against its own TF_STATE_ROOT. No user HTTP, no
-//              pollers, no router, no AI managers, no migrations (it
-//              asserts the schema instead — see internal/db).
+//              sandboxes, per-run credential sidecars, and the
+//              worktree/snapshot reapers against its own TF_STATE_ROOT.
+//              No user HTTP, no pollers, no router, no AI managers, no
+//              migrations (it asserts the schema instead — see
+//              internal/db).
 //
-// Read once at startup from TF_ROLE via InitRoleFromEnv(), called in
-// main() right after InitFromEnv() and before the argv-dispatch switch,
-// so every consumer — including the `migrate` subcommand — sees the
-// resolved role. This replaces internal/db/migrations.go's env-per-call
+// "all" is NOT an input: it is the internal name of local mode's resolved
+// single-process shape (planForRole's everything-row, the value local
+// registers into the instance registry). Local mode ignores TF_ROLE
+// entirely — the single-process shape is gated on the MODE, not on a role
+// an operator sets — and multi mode accepts only control/executor, so
+// there is no environment value anywhere that yields a fused multi
+// process.
+//
+// Read once at startup via InitRoleFromEnv(), called in main() right
+// after InitFromEnv() and before the argv-dispatch switch, so every
+// consumer — including the `migrate` subcommand — sees the same resolved
+// role. This replaces internal/db/migrations.go's env-per-call
 // isExecutorRole() placeholder: the migration gate now reads Role().
 //
-// Three boot-safety rules, all deliberate:
+// Boot-safety rules, all deliberate:
 //
-//   - An invalid TF_ROLE value fails boot loudly (InitRoleFromEnv returns
-//     an error) rather than defaulting to all. A typo'd TF_ROLE=exectuor
-//     silently running a full stack on a sandbox host is exactly the
-//     misconfiguration this flag exists to prevent.
-//   - Local mode forces all. Local is structurally single-process (SQLite,
-//     N=1, never sandboxes), so a control/executor split is meaningless
-//     there; rather than brick a laptop over a stray env var, we log a
-//     warning and run as all.
-//   - Multi mode rejects all (and unset, which parses to all). Multi is
-//     always the control+executor split: the credential-isolation
-//     boundary hangs on the MODE (multi ⇒ every run's credentials live
-//     only in its per-run sidecar), not on a deployment knob an operator
-//     could forget. A fused single process would quietly recouple the
-//     secret store with the sandbox host, so it is not a deployable
-//     shape — boot fails with a pointer at the split blueprint.
+//   - In multi mode TF_ROLE is REQUIRED and must be control or executor;
+//     unset, "all", or a typo (TF_ROLE=exectuor silently running a full
+//     stack on a sandbox host is exactly the misconfiguration this flag
+//     exists to prevent) all fail boot loudly with a pointer at the
+//     split blueprint. Multi is always the split: the credential-
+//     isolation boundary hangs on the MODE (multi ⇒ every run's
+//     credentials live only in its per-run sidecar), never on a
+//     deployment knob an operator could forget.
+//   - In local mode TF_ROLE is IGNORED — any value, valid or garbage,
+//     logs one warning and the process runs the single-process shape.
+//     Local is structurally single-process (SQLite, N=1, never
+//     sandboxes), so a role is meaningless there, and a stray env var
+//     must never brick a laptop.
 
 import (
 	"fmt"
@@ -56,20 +57,22 @@ import (
 type DeployRole string
 
 const (
-	// RoleAll is the single-process role: every subsystem in one binary.
-	// Local-only — it is the only role local mode ever runs as (and what
-	// an unset TF_ROLE parses to), but multi mode refuses to boot with it
-	// (InitRole): multi is always the control+executor split.
+	// RoleAll is the single-process shape: every subsystem in one binary.
+	// NOT an input — TF_ROLE never resolves to it (ParseRole rejects
+	// "all", local ignores TF_ROLE, multi requires a split role). It
+	// exists as the internal name of local mode's resolved inventory:
+	// what Role() answers there, what planForRole expands to everything,
+	// and what a local process stamps into the instance registry.
 	RoleAll DeployRole = "all"
 
 	// RoleControl is the API + background-brain role. Serves user HTTP/WS,
-	// runs migrations, hosts the leader-elected brain, sandboxes curator
-	// chats — but never claims or executes delegated runs.
+	// runs migrations, hosts the leader-elected brain, forwards curator
+	// turns — but never claims or executes delegated runs.
 	RoleControl DeployRole = "control"
 
 	// RoleExecutor is the shared-nothing sandbox-worker role: it drains the
 	// run queue and executes delegated runs, and nothing else. Multi-mode
-	// only (local forces all).
+	// only.
 	RoleExecutor DeployRole = "executor"
 )
 
@@ -93,12 +96,12 @@ var (
 //
 // When the role has not been initialized (a bare test that never called
 // InitRoleFromEnv), Role falls back to parsing TF_ROLE live — WITHOUT
-// the local-forces-all coupling InitRoleFromEnv applies, because that
-// coupling is a boot-policy decision, not the raw role. An unparseable
-// value degrades to RoleAll in that fallback (the safe default); boot
-// itself surfaces the parse error loudly via InitRoleFromEnv. Production
-// initializes the role as the second line of main(), so this branch is
-// test-only in practice.
+// the mode policies InitRoleFromEnv applies, because those are
+// boot-policy decisions, not the raw role. An unset or unparseable value
+// degrades to RoleAll in that fallback (the safe single-process
+// default); boot itself surfaces a bad value loudly via InitRoleFromEnv.
+// Production initializes the role as the second line of main(), so this
+// branch is test-only in practice.
 func Role() DeployRole {
 	roleMu.RLock()
 	initialized := roleInitialized
@@ -114,54 +117,52 @@ func Role() DeployRole {
 	return parsed
 }
 
-// ParseRole parses a TF_ROLE env-var string into a Role. Empty maps to
-// RoleAll (the safe default); known values map to their constants;
-// anything else errors so a typo fails boot loudly. Case-insensitive and
-// whitespace-trimmed, mirroring ModeFromEnv's conventions.
-//
-// ParseRole is the RAW parse — it does NOT apply the local-forces-all
-// policy. InitRoleFromEnv layers that on once it knows the mode.
+// ParseRole parses a TF_ROLE env-var string into a Role. Only the two
+// split roles are inputs: "all" is not a value an operator can set (the
+// single-process shape is local mode's, gated on TF_MODE, and multi has
+// no fused shape at all), and empty errors so multi's "forgot to set it"
+// fails loudly — local never calls this (InitRoleFromEnv ignores TF_ROLE
+// there). Case-insensitive and whitespace-trimmed, mirroring
+// ModeFromEnv's conventions.
 func ParseRole(s string) (DeployRole, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "":
-		return RoleAll, nil
-	case "all":
-		return RoleAll, nil
 	case "control":
 		return RoleControl, nil
 	case "executor":
 		return RoleExecutor, nil
+	case "":
+		return "", fmt.Errorf("TF_ROLE is required in multi mode: multi always runs as a control+executor split, so every process — including CLI subcommands like `migrate` — must set TF_ROLE=%q or TF_ROLE=%q explicitly. The default docker-compose.yml brings up both; see docs/self-hosting/scaling.md", RoleControl, RoleExecutor)
+	case "all":
+		return "", fmt.Errorf("TF_ROLE=all is not a deployable role: the single-process shape is local mode's (gated on TF_MODE, no role needed), and multi mode always runs as a control+executor split — set TF_ROLE=%q or TF_ROLE=%q; see docs/self-hosting/scaling.md", RoleControl, RoleExecutor)
 	default:
-		return "", fmt.Errorf("unknown TF_ROLE=%q (want %q, %q, or %q, or empty for %q)", s, RoleAll, RoleControl, RoleExecutor, RoleAll)
+		return "", fmt.Errorf("unknown TF_ROLE=%q (want %q or %q)", s, RoleControl, RoleExecutor)
 	}
 }
 
-// InitRole sets the process-wide role, applying the mode policies:
-// local forces all; multi rejects all. Same idempotency contract as
-// Init: first call sets state and returns nil; a subsequent call with
-// the same resolved role is a no-op; a subsequent call with a different
-// role errors without mutating state.
-//
-// The local-forces-all coercion is silent here — the caller
-// (InitRoleFromEnv) surfaces whether it happened so main() can log it,
-// keeping this function free of a logging dependency.
+// InitRole sets the process-wide role. Only the split roles are valid in
+// multi mode; RoleAll is accepted solely as local mode's resolved shape
+// (InitRoleFromEnv passes it there) and rejected in multi so no
+// programmatic caller can construct a fused multi process either. Same
+// idempotency contract as Init: first call sets state and returns nil; a
+// subsequent call with the same resolved role is a no-op; a subsequent
+// call with a different role errors without mutating state.
 func InitRole(requested DeployRole) error {
 	if requested != RoleAll && requested != RoleControl && requested != RoleExecutor {
-		return fmt.Errorf("unknown role %q (want %q, %q, or %q)", requested, RoleAll, RoleControl, RoleExecutor)
+		return fmt.Errorf("unknown role %q (want %q or %q)", requested, RoleControl, RoleExecutor)
 	}
 	resolved := requested
-	// Local mode is structurally single-process — coerce any split role to
-	// all. The caller logs the coercion; here we just resolve it.
+	// Local mode is structurally single-process — whatever the caller
+	// asked for, local resolves to the everything-shape.
 	if Current() == ModeLocal {
 		resolved = RoleAll
 	}
 	// Multi mode is always the control+executor split — a fused single
 	// process would hold the secret store and host sandboxes at once,
 	// which is exactly the shape the split exists to make undeployable.
-	// Unset TF_ROLE parses to all, so this also catches "forgot to set
-	// it". Boot fails here, legibly, before anything opens a DB.
+	// Unreachable via TF_ROLE (ParseRole already rejects "all"/unset);
+	// this guards programmatic callers.
 	if Current() == ModeMulti && resolved == RoleAll {
-		return fmt.Errorf("TF_ROLE=all (or unset) is not valid in multi mode: multi always runs as a control+executor split, so every process — including CLI subcommands like `migrate` — must set TF_ROLE=%q or TF_ROLE=%q explicitly. The default docker-compose.yml brings up both; see docs/self-hosting/scaling.md", RoleControl, RoleExecutor)
+		return fmt.Errorf("role %q is not valid in multi mode: multi always runs as a control+executor split (%q or %q)", RoleAll, RoleControl, RoleExecutor)
 	}
 	roleMu.Lock()
 	defer roleMu.Unlock()
@@ -176,24 +177,28 @@ func InitRole(requested DeployRole) error {
 	return nil
 }
 
-// InitRoleFromEnv reads TF_ROLE, parses it, and installs the process-wide
-// role. An invalid value returns an error (fail boot loudly), and so does
-// all/unset in multi mode (see InitRole). In local mode a non-all role is
-// coerced to all and a warning is returned via coerced=true + the
-// requested role, so main() can log it — runmode has no logger dependency
-// of its own.
+// InitRoleFromEnv installs the process-wide role per the mode policies.
+// Local mode IGNORES TF_ROLE: any value — split role, "all", garbage —
+// resolves to the single-process shape, with ignored=true (plus the raw
+// value) returned when the var was set so main() can log one warning;
+// runmode has no logger dependency of its own. A stray env var must
+// never brick a laptop. Multi mode parses strictly: control or executor,
+// anything else (including unset and "all") fails boot loudly.
 //
 // Call once in main(), right after InitFromEnv() and before the argv
 // dispatch, so the migrate subcommand and every subsystem see the same
 // resolved role.
-func InitRoleFromEnv() (coerced bool, requested DeployRole, err error) {
-	requested, err = ParseRole(os.Getenv("TF_ROLE"))
+func InitRoleFromEnv() (ignored bool, rawValue string, err error) {
+	raw := os.Getenv("TF_ROLE")
+	if Current() == ModeLocal {
+		if err := InitRole(RoleAll); err != nil {
+			return false, raw, err
+		}
+		return strings.TrimSpace(raw) != "", raw, nil
+	}
+	parsed, err := ParseRole(raw)
 	if err != nil {
-		return false, "", err
+		return false, raw, err
 	}
-	coerced = Current() == ModeLocal && requested != RoleAll
-	if err := InitRole(requested); err != nil {
-		return false, requested, err
-	}
-	return coerced, requested, nil
+	return false, raw, InitRole(parsed)
 }

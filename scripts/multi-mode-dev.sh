@@ -139,10 +139,14 @@ EOF
 cmd_run() {
   need_bin
   [ -f "$ENV_FILE" ] || { echo "no $ENV_FILE — run 'up' first" >&2; exit 1; }
-  local role="${1:-control}"
-  case "$role" in
-    control|executor) ;;
-    *) echo "usage: $0 run [control|executor]  (multi mode has no fused single-process role)" >&2; exit 1 ;;
+  # First arg selects the role ONLY when it's a bare role token; a flag (or
+  # nothing) means "control" and everything is forwarded to the binary, so
+  # `run --log-level=debug` and `run executor --log-level=debug` both work.
+  local role=control
+  case "${1:-}" in
+    control|executor) role=$1; shift ;;
+    ""|-*) ;;
+    *) echo "usage: $0 run [control|executor] [flags forwarded to triagefactory]" >&2; exit 1 ;;
   esac
   set -a
   # shellcheck disable=SC1090
@@ -167,9 +171,9 @@ cmd_run() {
     # without them the boot fails loudly at cap-broker start (correct: an
     # executor that can't sandbox must not run).
     export TF_HEALTHZ_PORT="${TF_HEALTHZ_PORT:-3001}"
-    exec "$BIN" --no-browser
+    exec "$BIN" --no-browser "$@"
   fi
-  exec "$BIN" --port 3000 --no-browser
+  exec "$BIN" --port 3000 --no-browser "$@"
 }
 
 cmd_down() {

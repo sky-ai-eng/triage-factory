@@ -151,9 +151,9 @@ And the inverse — what at design time **assumed exactly one process**
 One binary, one new startup flag alongside `TF_MODE`:
 
 ```
-TF_ROLE = all | control | executor
-  local mode: forces all (the single-process shape)
-  multi mode: control or executor REQUIRED — all/unset refuses to boot
+TF_ROLE = control | executor        (multi-mode-only input)
+  multi mode: REQUIRED — unset, "all", or a typo refuses to boot
+  local mode: IGNORED — the single-process shape is gated on TF_MODE
 ```
 
 - **`all`** — the single-process shape: HTTP + WS + background brain +
