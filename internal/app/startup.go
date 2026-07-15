@@ -63,16 +63,23 @@ func (a *App) runStartupTasks(ctx context.Context) {
 // that lazy-starts a runner on first Trigger, matching the
 // scorer/profiler which are likewise never explicitly started.
 func (a *App) startWorkers(ctx context.Context) {
-	// Knowledge-base watcher (curator KB): brain-capable roles only
-	// (control/all — an executor runs no curator chat), but NOT gated on
-	// the background-brain lease itself. Every control pod (holder or
-	// standby) sandboxes its own curator chats and keeps its own
-	// per-project KB directory under its own TF_STATE_ROOT, so each pod
-	// independently watching ITS OWN projects root is correct regardless
-	// of lease state — unlike the event-queue drain worker and poller
-	// below, which are genuinely single-writer and move with the lease
-	// (see brain.go's startBrain/stopBrain).
-	if a.plan.brain {
+	// Knowledge-base file observer (curator KB). Which observer runs depends
+	// on where the KB lives for this pod:
+	//
+	//   - local (role=all): the pure-broadcaster KnowledgeWatcher, exactly as
+	//     before — the on-disk KB is the truth, there is no blob store in the
+	//     path, and each pod watches its own projects root.
+	//   - multi + executor / all: the KBSyncer — these pods run curator turns
+	//     on their own disk, so agent KB writes must be mirrored into the blob
+	//     store (the multi-mode source of truth) and broadcast to browsers on
+	//     control pods over the WS backplane.
+	//   - multi + control: nothing. A capless control pod forwards turns to
+	//     executors and hosts no KB on disk, so it has nothing to observe.
+	//
+	// Not gated on the background-brain lease: this tracks a pod's own disk,
+	// which is correct on holder and standby alike (unlike the single-writer
+	// drain worker/poller below, which move with the lease).
+	if a.knowledgeSyncEnabled() {
 		a.startKnowledgeWatcher()
 	}
 
@@ -292,10 +299,23 @@ func (a *App) wireCloneStatusCallback() {
 	})
 }
 
-// startKnowledgeWatcher fires `project_knowledge_updated` over the websocket
+// knowledgeSyncEnabled reports whether this pod runs a KB observer, and if so
+// startKnowledgeWatcher picks which one. Local (role=all) watches as before;
+// in multi mode only the pods that run curator turns on their own disk —
+// executors and role=all — sync, never a capless control pod.
+func (a *App) knowledgeSyncEnabled() bool {
+	if runmode.Current() == runmode.ModeLocal {
+		return a.plan.brain
+	}
+	return a.curator != nil && a.plan.role != runmode.RoleControl
+}
+
+// startKnowledgeWatcher starts the KB observer for this pod. In local mode it
+// is the pure-broadcaster KnowledgeWatcher — `project_knowledge_updated` fires
 // whenever a file under <projectsRoot>/<id>/knowledge-base/ changes, so the
-// frontend Knowledge panel refetches as the agent writes files mid-turn.
-// Failure is non-fatal — the panel still works, just without live updates.
+// panel refetches as the agent writes files. In multi mode it is the KBSyncer,
+// which additionally mirrors those writes into the blob store. Failure is
+// non-fatal — chat still works, just without live KB sync.
 func (a *App) startKnowledgeWatcher() {
 	// resolveOrgForProject stamps each broadcast with the project's owning
 	// org so the hub's per-connection filter keeps it scoped. Returning ""
@@ -312,9 +332,18 @@ func (a *App) startKnowledgeWatcher() {
 		}
 		return orgID
 	}
-	if root, err := curator.ProjectsWatchRoot(); err != nil {
+	root, err := curator.ProjectsWatchRoot()
+	if err != nil {
 		kbwatcherLog.Warn("resolve projects root failed; live kb updates disabled", "error", err)
-	} else if _, err := curator.NewKnowledgeWatcher(a.wsHub, root, resolveOrgForProject); err != nil {
+		return
+	}
+	if runmode.Current() == runmode.ModeMulti {
+		if _, err := curator.NewKBSyncer(a.kbStore, a.wsHub, root, resolveOrgForProject); err != nil {
+			kbwatcherLog.Warn("start kb syncer failed; live kb sync disabled", "error", err)
+		}
+		return
+	}
+	if _, err := curator.NewKnowledgeWatcher(a.wsHub, root, resolveOrgForProject); err != nil {
 		kbwatcherLog.Warn("start failed; live kb updates disabled", "error", err)
 	}
 }

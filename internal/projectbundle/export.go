@@ -8,14 +8,15 @@ import (
 	"os"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 )
 
 // Export builds a project bundle and streams it as a ZIP reader. DB
 // reads run claims-bound inside one WithTx (see collectExportState for
 // the RLS visibility contract); orgID scopes every lookup so a
 // multi-mode caller cannot read another tenant's project state.
-func Export(ctx context.Context, txr db.TxRunner, orgID, userID, projectID string) (io.ReadCloser, error) {
-	state, err := collectExportState(ctx, txr, orgID, userID, projectID)
+func Export(ctx context.Context, txr db.TxRunner, kb *kbstore.Store, orgID, userID, projectID string) (io.ReadCloser, error) {
+	state, err := collectExportState(ctx, txr, kb, orgID, userID, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -56,6 +57,20 @@ func writeExportZip(ctx context.Context, w io.Writer, artifacts []bundleArtifact
 				_ = zw.Close()
 				return fmt.Errorf("write zip entry %q: %w", artifact.bundlePath, err)
 			}
+			continue
+		}
+		if artifact.open != nil {
+			src, err := artifact.open(ctx)
+			if err != nil {
+				_ = zw.Close()
+				return fmt.Errorf("open bundle source %q: %w", artifact.bundlePath, err)
+			}
+			if _, err := io.Copy(dst, src); err != nil {
+				src.Close()
+				_ = zw.Close()
+				return fmt.Errorf("copy bundle source %q: %w", artifact.bundlePath, err)
+			}
+			src.Close()
 			continue
 		}
 		if artifact.diskPath == "" {

@@ -322,7 +322,7 @@ func (s *Server) handleProjectExportPreview(w http.ResponseWriter, r *http.Reque
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	id := r.PathValue("id")
-	preview, err := projectbundle.Preview(r.Context(), s.tx, orgID, userID, id)
+	preview, err := projectbundle.Preview(r.Context(), s.tx, s.kb, orgID, userID, id)
 	if err != nil {
 		if errors.Is(err, projectbundle.ErrProjectNotFound) {
 			notFound(w, "project")
@@ -354,7 +354,7 @@ func (s *Server) handleProjectExport(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "project")
 		return
 	}
-	stream, err := projectbundle.Export(r.Context(), s.tx, orgID, userID, id)
+	stream, err := projectbundle.Export(r.Context(), s.tx, s.kb, orgID, userID, id)
 	if err != nil {
 		if errors.Is(err, projectbundle.ErrProjectNotFound) {
 			notFound(w, "project")
@@ -429,6 +429,7 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	project, warnings, err := projectbundle.Import(
 		r.Context(),
 		s.tx,
+		s.kb,
 		orgID,
 		teamID,
 		userID,
@@ -852,15 +853,34 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	// logged server-side; the header is a generic message so we
 	// don't leak filesystem layout to the client.
 	const cleanupWarning = "on-disk cleanup of project knowledge dir failed; check server logs"
-	dir, dirErr := curator.KnowledgeDir(orgID, id)
-	switch {
-	case dirErr != nil:
-		projectsLog.Warn("cannot resolve knowledge dir, on-disk cleanup skipped", "project", id, "error", dirErr)
-		w.Header().Set("X-Cleanup-Warning", cleanupWarning)
-	default:
-		if rmErr := os.RemoveAll(dir); rmErr != nil && !os.IsNotExist(rmErr) {
-			projectsLog.Warn("cleanup of project knowledge dir failed", "project", id, "dir", dir, "error", rmErr)
+	if runmode.Current() == runmode.ModeMulti {
+		// Multi mode: the blob store is the KB source of truth, so clear its
+		// prefix (best-effort, same warning contract). Then drop any local
+		// materialization — present at role=all where control + executor are
+		// co-located — and nudge the home executor to os.RemoveAll its own via
+		// the project_deleted doorbell (best-effort, self-filtered to an idle
+		// project so it never races a live turn's teardown).
+		if delErr := s.kb.DeletePrefix(r.Context(), orgID, id); delErr != nil {
+			projectsLog.Warn("cleanup of project kb store prefix failed", "project", id, "error", delErr)
 			w.Header().Set("X-Cleanup-Warning", cleanupWarning)
+		}
+		if dir, dirErr := curator.KnowledgeDir(orgID, id); dirErr == nil {
+			if rmErr := os.RemoveAll(dir); rmErr != nil && !os.IsNotExist(rmErr) {
+				projectsLog.Warn("cleanup of local project dir failed", "project", id, "dir", dir, "error", rmErr)
+			}
+		}
+		s.kbChanged("project_deleted", orgID, id)
+	} else {
+		dir, dirErr := curator.KnowledgeDir(orgID, id)
+		switch {
+		case dirErr != nil:
+			projectsLog.Warn("cannot resolve knowledge dir, on-disk cleanup skipped", "project", id, "error", dirErr)
+			w.Header().Set("X-Cleanup-Warning", cleanupWarning)
+		default:
+			if rmErr := os.RemoveAll(dir); rmErr != nil && !os.IsNotExist(rmErr) {
+				projectsLog.Warn("cleanup of project knowledge dir failed", "project", id, "dir", dir, "error", rmErr)
+				w.Header().Set("X-Cleanup-Warning", cleanupWarning)
+			}
 		}
 	}
 
@@ -1167,6 +1187,18 @@ func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) 
 		notFound(w, "project")
 		return
 	}
+	// Multi mode: the blob store is the KB source of truth (control's own disk
+	// hosts no KB). Local mode keeps the byte-identical on-disk read below.
+	if runmode.Current() == runmode.ModeMulti {
+		files, err := s.listKnowledgeFromStore(r.Context(), orgID, id)
+		if err != nil {
+			projectsLog.Error("knowledge list: store list failed", "project", id, "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read knowledge base"})
+			return
+		}
+		writeJSON(w, http.StatusOK, files)
+		return
+	}
 	root, err := curator.KnowledgeDir(orgID, id)
 	if err != nil {
 		projectsLog.Error("knowledge list: resolve dir failed", "project", id, "error", err)
@@ -1459,6 +1491,13 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
 	}
+	// Multi mode: stream from the blob store with single-range support (video
+	// scrubbing). resolveKnowledgePath already validated the name; the sanitized
+	// base is the flat KB filename. Local mode keeps the on-disk serve below.
+	if runmode.Current() == runmode.ModeMulti {
+		s.serveKnowledgeFromStore(w, r, orgID, id, filepath.Base(full))
+		return
+	}
 	linfo, err := os.Lstat(full)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1599,17 +1638,24 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 		notFound(w, "project")
 		return
 	}
-	root, err := curator.KnowledgeDir(orgID, id)
-	if err != nil {
-		projectsLog.Error("knowledge upload: resolve dir failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to resolve knowledge dir"})
-		return
-	}
-	kbDir := filepath.Join(root, "knowledge-base")
-	if err := os.MkdirAll(kbDir, 0o755); err != nil {
-		projectsLog.Error("knowledge upload: mkdir failed", "dir", kbDir, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create knowledge dir"})
-		return
+	// Multi mode targets the blob store (control hosts no KB on disk); local
+	// mode writes the on-disk knowledge-base dir. Only the local path needs the
+	// dir materialized up front.
+	multi := runmode.Current() == runmode.ModeMulti
+	var kbDir string
+	if !multi {
+		root, err := curator.KnowledgeDir(orgID, id)
+		if err != nil {
+			projectsLog.Error("knowledge upload: resolve dir failed", "project", id, "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to resolve knowledge dir"})
+			return
+		}
+		kbDir = filepath.Join(root, "knowledge-base")
+		if err := os.MkdirAll(kbDir, 0o755); err != nil {
+			projectsLog.Error("knowledge upload: mkdir failed", "dir", kbDir, "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create knowledge dir"})
+			return
+		}
 	}
 
 	type uploadResult struct {
@@ -1632,10 +1678,30 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 			})
 			continue
 		}
-		full := filepath.Join(kbDir, name)
-		if errMsg := writeUploadedFile(fh, full); errMsg != "" {
-			results = append(results, uploadResult{Original: original, Error: errMsg})
-			continue
+		if multi {
+			// Preserve reject-on-conflict: the per-project lock this handler
+			// holds serializes the Exists+Put window within a pod. A cross-
+			// control-pod race on the same name degrades to last-writer-wins
+			// (accepted — the lock is in-process only).
+			exists, err := s.kb.Exists(r.Context(), orgID, id, name)
+			if err != nil {
+				results = append(results, uploadResult{Original: original, Error: "check existing: " + err.Error()})
+				continue
+			}
+			if exists {
+				results = append(results, uploadResult{Original: original, Error: "file already exists — delete it first"})
+				continue
+			}
+			if errMsg := s.putUploadedKB(r.Context(), orgID, id, name, fh); errMsg != "" {
+				results = append(results, uploadResult{Original: original, Error: errMsg})
+				continue
+			}
+		} else {
+			full := filepath.Join(kbDir, name)
+			if errMsg := writeUploadedFile(fh, full); errMsg != "" {
+				results = append(results, uploadResult{Original: original, Error: errMsg})
+				continue
+			}
 		}
 		results = append(results, uploadResult{Path: name, Original: original})
 	}
@@ -1660,6 +1726,11 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 			// The activity timestamp is a hint for follow-on display,
 			// not part of the upload's correctness contract.
 			projectsLog.Warn("knowledge upload: bump updated_at failed", "project", id, "error", err)
+		}
+		// Multi mode: tell browsers the panel changed and nudge the home
+		// executor to materialize the upload into a live session's dir.
+		if multi {
+			s.kbChanged("", orgID, id)
 		}
 	}
 
@@ -1801,7 +1872,28 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 		writeJSON(w, status, map[string]string{"error": errMsg})
 		return
 	}
-	if err := os.Remove(full); err != nil {
+	multi := runmode.Current() == runmode.ModeMulti
+	if multi {
+		// Store DELETE is idempotent, so check Exists first to preserve the
+		// on-disk path's 404-on-missing behavior. resolveKnowledgePath already
+		// validated the name; its base is the flat KB filename.
+		name := filepath.Base(full)
+		exists, err := s.kb.Exists(r.Context(), orgID, id, name)
+		if err != nil {
+			projectsLog.Error("knowledge delete: store exists failed", "project", id, "file", name, "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove file"})
+			return
+		}
+		if !exists {
+			notFound(w, "file")
+			return
+		}
+		if err := s.kb.Delete(r.Context(), orgID, id, name); err != nil {
+			projectsLog.Error("knowledge delete: store delete failed", "project", id, "file", name, "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove file"})
+			return
+		}
+	} else if err := os.Remove(full); err != nil {
 		if os.IsNotExist(err) {
 			notFound(w, "file")
 			return
@@ -1816,6 +1908,9 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 		projectsLog.Error("knowledge delete: bump updated_at failed", "project", id, "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update project state"})
 		return
+	}
+	if multi {
+		s.kbChanged("", orgID, id)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

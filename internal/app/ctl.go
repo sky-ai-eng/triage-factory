@@ -104,6 +104,30 @@ func (a *App) dispatchCtl(payload string) {
 			}
 			a.curator.CancelLocal(msg.ProjectID)
 		}
+	case "kb_changed":
+		// Project knowledge base: a control-pod KB upload/delete
+		// nudges the home executor to materialize the panel write into a live
+		// session's dir; op="project_deleted" drops the executor's stale
+		// materialized project dir. Broadcast + self-filter — the curator's own
+		// live-session check makes this a no-op on every pod but the one running
+		// the project's session (nil curator on a plain control pod → no-op).
+		if a.curator != nil {
+			var msg ctlbus.Message
+			if err := json.Unmarshal([]byte(payload), &msg); err != nil {
+				appLog.Warn("tf_ctl: malformed kb_changed; dropping", "error", err)
+				return
+			}
+			// Materialize/drop do store + disk I/O, so run off the LISTEN read
+			// loop (which every dispatchCtl branch must not block).
+			switch msg.Op {
+			case "project_deleted":
+				go a.curator.DropMaterializedKBIfIdle(msg.OrgID, msg.ProjectID)
+			default:
+				if a.curator.HasLiveSession(msg.ProjectID) {
+					go a.curator.MaterializeKB(context.Background(), msg.OrgID, msg.ProjectID)
+				}
+			}
+		}
 	default:
 		appLog.Warn("tf_ctl: unknown message kind", "kind", probe.Kind)
 	}

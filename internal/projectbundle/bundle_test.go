@@ -180,7 +180,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 
 func exportFixtureBundle(t *testing.T, database *sql.DB, projectID string) []byte {
 	t.Helper()
-	reader, err := Export(context.Background(), sqlitestore.New(database).Tx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, projectID)
+	reader, err := Export(context.Background(), sqlitestore.New(database).Tx, nil, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, projectID)
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -232,6 +232,7 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	imported, warnings, err := Import(
 		context.Background(),
 		sqlitestore.New(targetDB).Tx,
+		nil,
 		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID,
 		bytes.NewReader(bundleBytes),
 		int64(len(bundleBytes)),
@@ -356,6 +357,7 @@ func TestImport_MissingReposAbortsWithoutWrites(t *testing.T) {
 	_, _, err := Import(
 		context.Background(),
 		sqlitestore.New(targetDB).Tx,
+		nil,
 		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID,
 		bytes.NewReader(bundleBytes),
 		int64(len(bundleBytes)),
@@ -392,6 +394,7 @@ func TestImport_DuplicateNameAborts(t *testing.T) {
 	_, _, err := Import(
 		context.Background(),
 		sqlitestore.New(targetDB).Tx,
+		nil,
 		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID,
 		bytes.NewReader(bundleBytes),
 		int64(len(bundleBytes)),

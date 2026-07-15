@@ -66,6 +66,9 @@ func TestRemoveClaudeProjectsForCurator_ReturnsRemoveErrors(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("chmod-based permission test is not reliable on Windows")
 	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the chmod 0555 that this test relies on to force a remove failure")
+	}
 
 	home := t.TempDir()
 	projectsDir := filepath.Join(t.TempDir(), "projects")

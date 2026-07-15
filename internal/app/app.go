@@ -33,6 +33,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/lease"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
@@ -45,6 +46,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
+	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -137,6 +139,18 @@ type App struct {
 	curatorClaimLoop *curator.HomeClaimLoop // executor-only: pulls homed curator turns (spec §6.3)
 	router           *routing.Router
 	srv              *server.Server
+
+	// blobStore is the process-wide durable blob seam (storage.New): the
+	// blueprint workspace snapshots plus, in multi mode, the project
+	// knowledge base. Built once in buildExecution and shared — the spawner
+	// gets it via SetStorage and kbStore wraps the same instance.
+	blobStore storage.Storage
+	// kbStore is the multi-mode knowledge-base source of truth, wrapping
+	// blobStore with the KB key convention. Non-nil on every role (cheap to
+	// build); its consumers — the KB handlers, the executor syncer, the
+	// classifier, project bundle import/export — only reach for it on the
+	// multi-mode path, so in local mode it exists but is never read.
+	kbStore *kbstore.Store
 
 	// placementResolver computes the capacity-weighted rendezvous placement
 	// (TFAC-587): the (org, repo) affinity stamp the spawner writes at enqueue

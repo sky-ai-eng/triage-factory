@@ -19,6 +19,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,6 +29,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
@@ -181,7 +184,7 @@ type haikuPrompt struct {
 func (r *Runner) voteStage1(ctx context.Context, project domain.Project, entity domain.Entity) Vote {
 	v := Vote{ProjectID: project.ID}
 
-	kb, _, err := readProjectKB(r.orgID, project.ID)
+	kb, _, err := r.readProjectKB(ctx, project.ID)
 	if err != nil {
 		classifyLog.Warn("kb read failed, voting with empty kb", "project", project.ID, "error", err)
 		kb = ""
@@ -234,7 +237,17 @@ func truncateDescription(desc string) string {
 //
 // We Stat each file before reading so we never load oversized content
 // into memory. truncated=true signals at least one file was skipped.
-func readProjectKB(orgID, projectID string) (string, bool, error) {
+//
+// Multi mode reads the same .md set from the blob store (control hosts no KB
+// on disk); local mode keeps the byte-identical on-disk read.
+func (r *Runner) readProjectKB(ctx context.Context, projectID string) (string, bool, error) {
+	if r.kb != nil && runmode.Current() == runmode.ModeMulti {
+		return readProjectKBFromStore(ctx, r.kb, r.orgID, projectID)
+	}
+	return readProjectKBFromDisk(r.orgID, projectID)
+}
+
+func readProjectKBFromDisk(orgID, projectID string) (string, bool, error) {
 	root, err := curator.KnowledgeDir(orgID, projectID)
 	if err != nil {
 		return "", false, err
@@ -275,6 +288,55 @@ func readProjectKB(orgID, projectID string) (string, bool, error) {
 		data, err := os.ReadFile(full)
 		if err != nil {
 			classifyLog.Warn("read kb file failed", "project", projectID, "file", name, "error", err)
+			continue
+		}
+		fmt.Fprintf(&buf, "## %s\n\n%s\n\n", name, data)
+	}
+	if truncated {
+		buf.WriteString("\n…[some knowledge-base files exceeded the inline cap and were skipped]")
+	}
+	return buf.String(), truncated, nil
+}
+
+// readProjectKBFromStore is the multi-mode counterpart of
+// readProjectKBFromDisk: it concatenates the project's .md knowledge from the
+// blob store under the same budget and header format, so classifier prompts
+// are byte-identical between modes for the same content. Oversize files are
+// skipped whole (never truncated mid-content), same as the disk path.
+func readProjectKBFromStore(ctx context.Context, kb *kbstore.Store, orgID, projectID string) (string, bool, error) {
+	files, err := kb.List(ctx, orgID, projectID)
+	if err != nil {
+		return "", false, err
+	}
+	names := make([]string, 0, len(files))
+	sizeByName := make(map[string]int64, len(files))
+	for _, f := range files {
+		if !strings.HasSuffix(f.Name, ".md") {
+			continue
+		}
+		names = append(names, f.Name)
+		sizeByName[f.Name] = f.Size
+	}
+	sort.Strings(names)
+
+	var buf bytes.Buffer
+	truncated := false
+	for _, name := range names {
+		headerOverhead := len("## ") + len(name) + len("\n\n") + len("\n\n")
+		needed := buf.Len() + headerOverhead + int(sizeByName[name])
+		if needed > kbInlineMaxBytes {
+			truncated = true
+			continue
+		}
+		rc, err := kb.Get(ctx, orgID, projectID, name)
+		if err != nil {
+			classifyLog.Warn("read kb file from store failed", "project", projectID, "file", name, "error", err)
+			continue
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			classifyLog.Warn("read kb file from store failed", "project", projectID, "file", name, "error", err)
 			continue
 		}
 		fmt.Fprintf(&buf, "## %s\n\n%s\n\n", name, data)

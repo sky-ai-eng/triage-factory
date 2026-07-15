@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -17,7 +18,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -26,6 +29,11 @@ type bundleArtifact struct {
 	size       int64
 	diskPath   string
 	content    []byte
+	// open streams the artifact's bytes from a non-disk source (the KB blob
+	// store in multi mode) so a large KB file need not be buffered whole in
+	// memory the way content does. Exactly one of content / diskPath / open is
+	// set per artifact.
+	open func(context.Context) (io.ReadCloser, error)
 }
 
 type exportState struct {
@@ -43,7 +51,7 @@ type exportState struct {
 // turns, the local single user's export carries everything). Filesystem
 // collection happens after the tx ends so disk walks never hold a
 // claims-bound connection.
-func collectExportState(ctx context.Context, txr db.TxRunner, orgID, userID, projectID string) (*exportState, error) {
+func collectExportState(ctx context.Context, txr db.TxRunner, kb *kbstore.Store, orgID, userID, projectID string) (*exportState, error) {
 	var (
 		project  *domain.Project
 		requests []domain.CuratorRequest
@@ -104,7 +112,13 @@ func collectExportState(ctx context.Context, txr db.TxRunner, orgID, userID, pro
 		},
 	}
 
-	if err := appendDirArtifacts(filepath.Join(projectRoot, "knowledge-base"), knowledgePrefix, &state.artifacts); err != nil {
+	// Knowledge base: multi mode collects it from the blob store (control
+	// hosts no KB on disk); local mode walks the on-disk knowledge-base dir.
+	if kb != nil && runmode.Current() == runmode.ModeMulti {
+		if err := appendKBStoreArtifacts(ctx, kb, orgID, project.ID, knowledgePrefix, &state.artifacts); err != nil {
+			return nil, fmt.Errorf("collect knowledge files from store: %w", err)
+		}
+	} else if err := appendDirArtifacts(filepath.Join(projectRoot, "knowledge-base"), knowledgePrefix, &state.artifacts); err != nil {
 		return nil, fmt.Errorf("collect knowledge files: %w", err)
 	}
 
@@ -202,6 +216,29 @@ func appendDirArtifacts(dir, bundlePrefix string, out *[]bundleArtifact) error {
 		})
 		return nil
 	})
+}
+
+// appendKBStoreArtifacts collects a project's knowledge base from the blob
+// store as bundle artifacts, each with a streaming open() so a large KB file
+// (an image or video an agent captured) is copied into the zip without ever
+// buffering whole in memory. bundlePath mirrors the on-disk layout
+// (knowledge-base/<name>) so an exported bundle is identical across modes.
+func appendKBStoreArtifacts(ctx context.Context, kb *kbstore.Store, orgID, projectID, bundlePrefix string, out *[]bundleArtifact) error {
+	files, err := kb.List(ctx, orgID, projectID)
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		name := f.Name
+		*out = append(*out, bundleArtifact{
+			bundlePath: path.Join(bundlePrefix, name),
+			size:       f.Size,
+			open: func(ctx context.Context) (io.ReadCloser, error) {
+				return kb.Get(ctx, orgID, projectID, name)
+			},
+		})
+	}
+	return nil
 }
 
 // appendSessionArtifacts locates the curator's Claude Code session tree

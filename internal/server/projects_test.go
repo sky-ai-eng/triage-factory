@@ -491,6 +491,13 @@ func TestProjectDelete_PathResolutionFailure_StillWarns(t *testing.T) {
 // by dropping write perms on the parent dir so RemoveAll can't
 // clear the contents.
 func TestProjectDelete_CleanupWarningRedactsPath(t *testing.T) {
+	// The test forces RemoveAll to fail by dropping write perms on the parent
+	// dir — but root bypasses unix permission checks, so RemoveAll would
+	// succeed and no warning would be set. Skip when running as root (CI
+	// containers) rather than assert a guarantee the OS won't honor there.
+	if os.Geteuid() == 0 {
+		t.Skip("cannot force RemoveAll to fail as root; permission-based cleanup-warning assertion is meaningless")
+	}
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
 

@@ -23,6 +23,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
@@ -86,6 +87,12 @@ type Server struct {
 	wsBackplane WSKicker
 	spawner     *delegate.Spawner
 	curator     *curator.Curator
+	// kb is the multi-mode knowledge-base blob seam. Wired via
+	// SetKBStore after construction; nil in local mode, where the KB handlers
+	// stay on their byte-identical on-disk path and never consult it. The
+	// handlers gate on runmode.ModeMulti, so a nil here in local mode is never
+	// dereferenced.
+	kb *kbstore.Store
 	// reconciler backs the Tier-2 run-scoped artifact refresh endpoint
 	// (TFAC-464) — the same Reconciler the background Tier-1 Manager runs.
 	// Wired via SetReconciler after construction; nil until then, so the
@@ -152,7 +159,12 @@ type Server struct {
 	// can't fire one org's poller restart with another org's PAT.
 	onGitHubChanged func(orgID string) // GitHub creds/access changed — evict the reachable-repo cache + re-due the org's GitHub poll (profiling is driven by the system:poll "profiler" subscriber, not here)
 	onJiraChanged   func(orgID string) // Jira config changed — restart Jira poller only
-	scorerTrigger   func(orgID string) // invoked after non-poll task creation (e.g. carry-over) to kick the per-org scorer immediately
+	// kbChangedDoorbell rings the tf_ctl "kb_changed" cross-pod nudge after a
+	// KB upload/delete/project-delete so the home executor materializes the
+	// panel write into a live session's dir. Wired only in multi mode; nil in
+	// local (no cross-pod plane), where the handlers skip it.
+	kbChangedDoorbell func(op, orgID, projectID string)
+	scorerTrigger     func(orgID string) // invoked after non-poll task creation (e.g. carry-over) to kick the per-org scorer immediately
 	// profilerTrigger kicks the per-org repo-profiling manager. force=true
 	// bypasses the 3-day TTL — the explicit "Re-profile" button and a
 	// repo-set change both want an immediate re-profile rather than waiting
@@ -1371,6 +1383,23 @@ func (s *Server) SetSpawner(sp *delegate.Spawner) {
 // Curator after the websocket hub is constructed.
 func (s *Server) SetCurator(c *curator.Curator) {
 	s.curator = c
+}
+
+// SetKBStore wires the knowledge-base blob store into the server so the
+// /api/projects/{id}/knowledge/* handlers serve the KB from the object store
+// in multi mode. Wired post-construction (mirrors SetSpawner) once the shared
+// storage.Storage exists. Left nil in local mode — the handlers branch on
+// runmode and never dereference it there.
+func (s *Server) SetKBStore(kb *kbstore.Store) {
+	s.kb = kb
+}
+
+// SetKBChangedDoorbell wires the cross-pod tf_ctl publisher the KB
+// upload/delete/project-delete handlers ring so the home executor materializes
+// the panel write mid-session. Multi mode only; nil elsewhere degrades to
+// the executor's turn-start materialize latency, never lost data.
+func (s *Server) SetKBChangedDoorbell(fn func(op, orgID, projectID string)) {
+	s.kbChangedDoorbell = fn
 }
 
 // SetOnGitHubChanged registers a callback for GitHub config changes (creds, URL, repos).

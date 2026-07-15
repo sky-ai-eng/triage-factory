@@ -113,7 +113,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	}
 
 	// Export under the exporting user's claims.
-	preview, err := Preview(ctx, stores.Tx, srcOrg, srcUser, projectID)
+	preview, err := Preview(ctx, stores.Tx, nil, srcOrg, srcUser, projectID)
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 		t.Fatalf("unexpected preview warnings: %v", preview.Warnings)
 	}
 
-	reader, err := Export(ctx, stores.Tx, srcOrg, srcUser, projectID)
+	reader, err := Export(ctx, stores.Tx, nil, srcOrg, srcUser, projectID)
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -146,6 +146,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	imported, warnings, err := Import(
 		ctx,
 		stores.Tx,
+		nil,
 		dstOrg, dstTeam, dstUser,
 		bytes.NewReader(bundleBytes),
 		int64(len(bundleBytes)),
