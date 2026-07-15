@@ -223,10 +223,13 @@ type RunQueueStore interface {
 	// RecentRunTimingsForOrgSystem is RecentRunTimingsSystem narrowed to one
 	// org (WHERE org_id = orgID) — the org-scoped operations subset an org
 	// admin sees on /usage (their queue waits + run durations), SaaS-safe with
-	// no cross-tenant machine truth. Admin pool with org bound by argument, the
-	// same posture as SpendByCategorySystem; the HTTP org-admin gate is the
-	// authorization to read it.
-	RecentRunTimingsForOrgSystem(ctx context.Context, orgID string, since time.Time, limit int) ([]domain.RunTiming, error)
+	// no cross-tenant machine truth. The window is half-open [since, until):
+	// unlike the fleet console's live "recent up to now" read this one honors an
+	// explicit upper bound so a past-window /usage query doesn't leak newer
+	// runs (a zero until drops the upper clause). Admin pool with org bound by
+	// argument, same posture as SpendByCategorySystem; the HTTP org-admin gate
+	// is the authorization to read it.
+	RecentRunTimingsForOrgSystem(ctx context.Context, orgID string, since, until time.Time, limit int) ([]domain.RunTiming, error)
 
 	// QueuedRunAgesForOrgSystem is QueuedRunAgesSystem narrowed to one org —
 	// the org-scoped queue depth + oldest wait for the /usage ops subset.

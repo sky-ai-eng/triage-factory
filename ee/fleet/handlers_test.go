@@ -75,18 +75,31 @@ func TestSummarizeRunsAndQueue(t *testing.T) {
 	timings := []domain.RunTiming{
 		{Status: "completed", StartedAt: now.Add(-10 * time.Minute), ClaimedAt: tp(now.Add(-9 * time.Minute)), DurationMS: ip(60000)},
 		{Status: "failed", FailureKind: "memory_limit", StartedAt: now.Add(-8 * time.Minute), ClaimedAt: tp(now.Add(-8 * time.Minute)), DurationMS: ip(30000)},
+		// An UNCLASSIFIED failure (empty failure_kind) — must still count as failed.
+		{Status: "failed", StartedAt: now.Add(-7 * time.Minute), ClaimedAt: tp(now.Add(-7 * time.Minute)), DurationMS: ip(1000)},
 		{Status: "running", StartedAt: now.Add(-2 * time.Minute), ClaimedAt: tp(now.Add(-2 * time.Minute))},
+		// A parked "open" run — NOT executing, must NOT count as active.
+		{Status: "open", StartedAt: now.Add(-90 * time.Second), ClaimedAt: tp(now.Add(-90 * time.Second))},
 		{Status: "queued", StartedAt: now.Add(-1 * time.Minute)}, // not claimed → no wait sample
 	}
 	rs := summarizeRuns(timings, 24)
-	if rs.Total != 4 || rs.Completed != 1 || rs.Failed != 1 || rs.Active != 1 {
-		t.Fatalf("run counts wrong: %+v", rs)
+	if rs.Total != 6 || rs.Completed != 1 {
+		t.Fatalf("run totals wrong: %+v", rs)
+	}
+	// Both failed runs count (classified + unclassified), but only the classified
+	// one appears in the by-kind breakdown.
+	if rs.Failed != 2 {
+		t.Fatalf("Failed = %d, want 2 (unclassified failure must count)", rs.Failed)
+	}
+	if len(rs.FailureKinds) != 1 || rs.FailureKinds[0].Kind != "memory_limit" || rs.FailureKinds[0].Count != 1 {
+		t.Fatalf("failure kinds wrong: %+v", rs.FailureKinds)
+	}
+	// Only the running run is active — queued and open are excluded.
+	if rs.Active != 1 {
+		t.Fatalf("Active = %d, want 1 (open + queued excluded)", rs.Active)
 	}
 	if rs.DurationP50MS == nil {
 		t.Fatalf("expected duration percentile")
-	}
-	if len(rs.FailureKinds) != 1 || rs.FailureKinds[0].Kind != "memory_limit" {
-		t.Fatalf("failure kinds wrong: %+v", rs.FailureKinds)
 	}
 
 	queued := []domain.QueuedRun{
@@ -102,12 +115,17 @@ func TestSummarizeRunsAndQueue(t *testing.T) {
 		t.Fatalf("oldest wait ~300s, got %v", qs.OldestWaitS)
 	}
 	if qs.WaitP50MS == nil {
-		t.Fatalf("expected wait percentile from 3 claimed runs")
+		t.Fatalf("expected wait percentile from the claimed runs")
 	}
 
-	shares := byOrgShares(queued, now)
+	// The backlog view's per-org breakdown (GET /api/fleet/backlog): busiest org
+	// first, each carrying its own oldest wait.
+	shares := backlogByOrg(queued, now)
 	if len(shares) != 2 || shares[0].OrgID != "a" || shares[0].Count != 2 {
-		t.Fatalf("org shares wrong: %+v", shares)
+		t.Fatalf("backlog org shares wrong: %+v", shares)
+	}
+	if shares[0].OldestWaitS < 299 || shares[0].OldestWaitS > 301 {
+		t.Fatalf("org a oldest wait ~300s, got %v", shares[0].OldestWaitS)
 	}
 }
 

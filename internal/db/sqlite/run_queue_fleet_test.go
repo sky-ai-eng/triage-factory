@@ -92,11 +92,22 @@ func TestRunQueueStore_SQLite_FleetReads(t *testing.T) {
 		t.Fatalf("completed run should carry claimed_at for the queue-wait metric")
 	}
 
-	// Org filter on the timing read.
-	if ts, _ := stores.RunQueue.RecentRunTimingsForOrgSystem(ctx, org, time.Unix(0, 0), 0); len(ts) != 2 {
+	// Org filter on the timing read (no until bound).
+	if ts, _ := stores.RunQueue.RecentRunTimingsForOrgSystem(ctx, org, time.Unix(0, 0), time.Time{}, 0); len(ts) != 2 {
 		t.Fatalf("RecentRunTimingsForOrgSystem(self) = %d, want 2", len(ts))
 	}
-	if ts, _ := stores.RunQueue.RecentRunTimingsForOrgSystem(ctx, "00000000-0000-0000-0000-0000000000ff", time.Unix(0, 0), 0); len(ts) != 0 {
+	if ts, _ := stores.RunQueue.RecentRunTimingsForOrgSystem(ctx, "00000000-0000-0000-0000-0000000000ff", time.Unix(0, 0), time.Time{}, 0); len(ts) != 0 {
 		t.Fatalf("RecentRunTimingsForOrgSystem(other org) = %d, want 0", len(ts))
+	}
+
+	// until bound is honored: an upper bound before both runs' started_at
+	// (which are ~now) excludes them; a bound in the future includes both.
+	past := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if ts, _ := stores.RunQueue.RecentRunTimingsForOrgSystem(ctx, org, time.Unix(0, 0), past, 0); len(ts) != 0 {
+		t.Fatalf("RecentRunTimingsForOrgSystem with until in the past = %d, want 0 (upper bound applied)", len(ts))
+	}
+	future := time.Now().UTC().Add(time.Hour)
+	if ts, _ := stores.RunQueue.RecentRunTimingsForOrgSystem(ctx, org, time.Unix(0, 0), future, 0); len(ts) != 2 {
+		t.Fatalf("RecentRunTimingsForOrgSystem with until in the future = %d, want 2", len(ts))
 	}
 }

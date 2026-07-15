@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"sort"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // usageOrgOpsResponse is the org-scoped operations subset an org admin sees on
@@ -53,7 +55,7 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	timings, err := h.runQueue.RecentRunTimingsForOrgSystem(r.Context(), orgID, since, 0)
+	timings, err := h.runQueue.RecentRunTimingsForOrgSystem(r.Context(), orgID, since, until, 0)
 	if err != nil {
 		internalError(w, "usage-ops-timings", err)
 		return
@@ -83,14 +85,19 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 		if t.DurationMS != nil {
 			durations = append(durations, *t.DurationMS)
 		}
-		switch {
-		case t.Status == "completed":
+		switch t.Status {
+		case "completed":
 			resp.RunsCompleted++
-		case t.FailureKind != "":
+		case "failed":
+			// Count every failed run; failure_kind is a classification that is
+			// legitimately empty on an unclassified/legacy failure, so only the
+			// classified ones feed the by-kind breakdown.
 			resp.RunsFailed++
-			failureCounts[t.FailureKind]++
+			if t.FailureKind != "" {
+				failureCounts[t.FailureKind]++
+			}
 		}
-		if !isTerminalRunStatus(t.Status) && t.Status != "queued" {
+		if domain.IsActiveRunStatus(t.Status) {
 			resp.RunsActive++
 		}
 	}
@@ -101,15 +108,6 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 	resp.FailureKinds = sortedOpsFailureKinds(failureCounts)
 
 	writeJSON(w, http.StatusOK, resp)
-}
-
-// isTerminalRunStatus mirrors domain/agent.go's run lifecycle terminal set.
-func isTerminalRunStatus(status string) bool {
-	switch status {
-	case "completed", "failed", "cancelled", "task_unsolvable":
-		return true
-	}
-	return false
 }
 
 // usagePercentileMS is the nearest-rank (ceil) percentile — the same convention

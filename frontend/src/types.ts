@@ -1299,17 +1299,21 @@ export interface FleetTimeseries {
   samples: FleetSample[]
 }
 
-export interface FleetOrgQueueShare {
+// FleetBacklog mirrors the EE console's GET /api/fleet/backlog (TFAC-589): the
+// operator wait-latency lens — fleet-wide queue depth + the single oldest wait,
+// and per-org shares by pending count and each org's own oldest wait. Distinct
+// from core's /api/fleet/queue (the org-facing per-org cap read-out).
+export interface FleetBacklogOrgShare {
   org_id: string
   count: number
   oldest_wait_seconds: number
 }
 
-export interface FleetQueue {
+export interface FleetBacklog {
   generated_at: string
   depth: number
   oldest_wait_seconds: number
-  by_org: FleetOrgQueueShare[]
+  by_org: FleetBacklogOrgShare[]
 }
 
 // UsageOrgOps — the org-scoped operations subset (TFAC-589): an org admin's own

@@ -39,5 +39,9 @@ func install(api server.ExtensionAPI) {
 	api.API("GET /api/fleet/instances", h.handleInstances)
 	api.APIMutating("POST /api/fleet/instances/{id}/drain", h.handleDrain)
 	api.API("GET /api/fleet/timeseries", h.handleTimeseries)
-	api.API("GET /api/fleet/queue", h.handleQueue)
+	// The operator backlog (fleet-wide oldest-waiting + per-org shares) is a
+	// distinct surface from core's org-facing GET /api/fleet/queue (the per-org
+	// cap read-out, internal/server/fleet_queue.go) — hence /api/fleet/backlog,
+	// not /api/fleet/queue.
+	api.API("GET /api/fleet/backlog", h.handleBacklog)
 }

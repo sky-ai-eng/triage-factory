@@ -454,18 +454,24 @@ func (s *runQueueStore) queuedRunAges(ctx context.Context, orgID string) ([]doma
 	return out, rows.Err()
 }
 
-func (s *runQueueStore) RecentRunTimingsForOrgSystem(ctx context.Context, orgID string, since time.Time, limit int) ([]domain.RunTiming, error) {
+func (s *runQueueStore) RecentRunTimingsForOrgSystem(ctx context.Context, orgID string, since, until time.Time, limit int) ([]domain.RunTiming, error) {
 	if limit <= 0 {
 		limit = 5000
 	}
-	rows, err := s.conn.QueryContext(ctx, `
-		SELECT org_id, COALESCE(executor_id, ''), status, COALESCE(failure_kind, ''),
-		       started_at, claimed_at, completed_at, duration_ms
-		FROM runs
-		WHERE org_id = ? AND started_at >= ?
-		ORDER BY started_at DESC
-		LIMIT ?
-	`, orgID, since.UTC(), limit)
+	// Raw string comparison on started_at — the house convention for the runs
+	// table (ClaimNextRun orders/filters started_at raw); both the stored
+	// CURRENT_TIMESTAMP value and the bound serialize sortably.
+	q := `SELECT org_id, COALESCE(executor_id, ''), status, COALESCE(failure_kind, ''),
+	             started_at, claimed_at, completed_at, duration_ms
+	      FROM runs WHERE org_id = ? AND started_at >= ?`
+	args := []any{orgID, since.UTC()}
+	if !until.IsZero() {
+		q += ` AND started_at < ?`
+		args = append(args, until.UTC())
+	}
+	q += ` ORDER BY started_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.conn.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

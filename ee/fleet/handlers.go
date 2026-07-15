@@ -12,16 +12,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// isTerminalRunStatus mirrors domain/agent.go's run lifecycle: the states a run
-// never leaves. Everything else is in-flight (or queued, handled separately).
-func isTerminalRunStatus(status string) bool {
-	switch status {
-	case "completed", "failed", "cancelled", "task_unsolvable":
-		return true
-	}
-	return false
-}
-
 // parseWindow reads ?hours= (default 24, clamped 1..168) into a start time.
 func parseWindow(r *http.Request, now time.Time) (since time.Time, hours int) {
 	hours = 24
@@ -207,14 +197,19 @@ func summarizeRuns(timings []domain.RunTiming, hours int) runsSummary {
 	failureCounts := map[string]int{}
 	var durations []int
 	for _, t := range timings {
-		switch {
-		case t.Status == "completed":
+		switch t.Status {
+		case "completed":
 			rs.Completed++
-		case t.FailureKind != "":
+		case "failed":
+			// Every failed run counts (failure_kind is a classification that is
+			// legitimately empty on an unclassified/legacy failure); only the
+			// classified ones contribute to the by-kind breakdown.
 			rs.Failed++
-			failureCounts[t.FailureKind]++
+			if t.FailureKind != "" {
+				failureCounts[t.FailureKind]++
+			}
 		}
-		if !isTerminalRunStatus(t.Status) && t.Status != "queued" {
+		if domain.IsActiveRunStatus(t.Status) {
 			rs.Active++
 		}
 		if t.DurationMS != nil {
@@ -416,49 +411,57 @@ func (h *handler) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, timeseriesDTO{GeneratedAt: now, WindowHours: hours, Samples: out})
 }
 
-// --- GET /api/fleet/queue ---
+// --- GET /api/fleet/backlog ---
+//
+// The deployment-wide operator queue view: fleet backlog depth, the single
+// oldest wait, and per-org shares by pending count + each org's oldest wait.
+// This is the WAIT-LATENCY lens (who is waiting and for how long) — distinct
+// from core's org-facing GET /api/fleet/queue, which is the per-org CAP lens
+// (active vs queued vs cap). Different surfaces on purpose; this one is
+// operator + FeatureFleet gated (the console), that one is org-admin (core).
 
-type orgQueueShare struct {
+type backlogOrgShare struct {
 	OrgID       string  `json:"org_id"`
 	Count       int     `json:"count"`
 	OldestWaitS float64 `json:"oldest_wait_seconds"`
 }
 
-type queueDTO struct {
-	GeneratedAt time.Time       `json:"generated_at"`
-	Depth       int             `json:"depth"`
-	OldestWaitS float64         `json:"oldest_wait_seconds"`
-	ByOrg       []orgQueueShare `json:"by_org"`
+type backlogDTO struct {
+	GeneratedAt time.Time         `json:"generated_at"`
+	Depth       int               `json:"depth"`
+	OldestWaitS float64           `json:"oldest_wait_seconds"`
+	ByOrg       []backlogOrgShare `json:"by_org"`
 }
 
-func (h *handler) handleQueue(w http.ResponseWriter, r *http.Request) {
+func (h *handler) handleBacklog(w http.ResponseWriter, r *http.Request) {
 	if h.gate(w, r) == nil {
 		return
 	}
 	now := time.Now().UTC()
 	queued, err := h.stores.RunQueue.QueuedRunAgesSystem(r.Context())
 	if err != nil {
-		httpx.InternalError(w, "fleet-queue", err)
+		httpx.InternalError(w, "fleet-backlog", err)
 		return
 	}
-	dto := queueDTO{GeneratedAt: now, Depth: len(queued), ByOrg: byOrgShares(queued, now)}
+	dto := backlogDTO{GeneratedAt: now, Depth: len(queued), ByOrg: backlogByOrg(queued, now)}
 	if len(queued) > 0 {
+		// QueuedRunAgesSystem is oldest-first, so [0] is the oldest wait.
 		dto.OldestWaitS = now.Sub(queued[0].EnqueuedAt).Seconds()
 	}
 	httpx.WriteJSON(w, http.StatusOK, dto)
 }
 
-func byOrgShares(queued []domain.QueuedRun, now time.Time) []orgQueueShare {
+func backlogByOrg(queued []domain.QueuedRun, now time.Time) []backlogOrgShare {
 	// queued is oldest-first, so the first row seen per org is its oldest wait.
 	idx := map[string]int{}
-	var shares []orgQueueShare
+	var shares []backlogOrgShare
 	for _, q := range queued {
 		if i, ok := idx[q.OrgID]; ok {
 			shares[i].Count++
 			continue
 		}
 		idx[q.OrgID] = len(shares)
-		shares = append(shares, orgQueueShare{
+		shares = append(shares, backlogOrgShare{
 			OrgID:       q.OrgID,
 			Count:       1,
 			OldestWaitS: now.Sub(q.EnqueuedAt).Seconds(),

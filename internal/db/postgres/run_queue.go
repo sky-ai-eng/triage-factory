@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
@@ -513,18 +514,21 @@ func (s *runQueueStore) queuedRunAges(ctx context.Context, orgID string) ([]doma
 	return out, rows.Err()
 }
 
-func (s *runQueueStore) RecentRunTimingsForOrgSystem(ctx context.Context, orgID string, since time.Time, limit int) ([]domain.RunTiming, error) {
+func (s *runQueueStore) RecentRunTimingsForOrgSystem(ctx context.Context, orgID string, since, until time.Time, limit int) ([]domain.RunTiming, error) {
 	if limit <= 0 {
 		limit = 5000
 	}
-	rows, err := s.conn.QueryContext(ctx, `
-		SELECT org_id::text, COALESCE(executor_id, ''), status, COALESCE(failure_kind, ''),
-		       started_at, claimed_at, completed_at, duration_ms
-		FROM runs
-		WHERE org_id = $1 AND started_at >= $2
-		ORDER BY started_at DESC
-		LIMIT $3
-	`, orgID, since.UTC(), limit)
+	q := `SELECT org_id::text, COALESCE(executor_id, ''), status, COALESCE(failure_kind, ''),
+	             started_at, claimed_at, completed_at, duration_ms
+	      FROM runs WHERE org_id = $1 AND started_at >= $2`
+	args := []any{orgID, since.UTC()}
+	if !until.IsZero() {
+		args = append(args, until.UTC())
+		q += ` AND started_at < $3`
+	}
+	args = append(args, limit)
+	q += ` ORDER BY started_at DESC LIMIT $` + strconv.Itoa(len(args))
+	rows, err := s.conn.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

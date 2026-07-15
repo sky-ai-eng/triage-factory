@@ -9,7 +9,7 @@ import type {
   FleetInstance,
   FleetInstances,
   FleetOverview,
-  FleetQueue,
+  FleetBacklog,
   FleetTimeseries,
 } from '../types'
 
@@ -617,7 +617,7 @@ function Readout({
   )
 }
 
-function QueueBand({ q }: { q: FleetQueue | null }) {
+function QueueBand({ q }: { q: FleetBacklog | null }) {
   if (!q) return null
   if (q.depth === 0) {
     return (
@@ -682,7 +682,7 @@ export default function Fleet() {
   const timeseries = useFleetFetch<FleetTimeseries>(
     gated ? null : `/api/fleet/timeseries?hours=${hours}`,
   )
-  const queue = useFleetFetch<FleetQueue>(gated ? null : `/api/fleet/queue?_r=${rev}`)
+  const queue = useFleetFetch<FleetBacklog>(gated ? null : `/api/fleet/backlog?_r=${rev}`)
 
   const series = useMemo(() => aggregateSeries(timeseries.data), [timeseries.data])
 
