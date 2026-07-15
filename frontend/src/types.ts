@@ -990,11 +990,12 @@ export type WSEvent =
       data: { request_id: string; status: CuratorRequestStatus }
     }
   | {
-      // data.pending (multi mode) lists filenames the executor syncer is
-      // uploading to the blob store — the panel renders ghost rows for them so
-      // a large-video upload reads as progress, not a confusing delay. A
-      // completion event carries data: null (nothing pending) and the panel
-      // refetches the durable listing. Local mode always sends data: null.
+      // The executor syncer (multi mode) always carries a `pending` field: the
+      // batch's in-flight filenames on start — the panel renders ghost rows for
+      // them so a large-video upload reads as progress — and an empty array on
+      // completion, which is how the panel tells a sync signal apart from the
+      // control pod's own upload/delete broadcast (that, and local mode, send
+      // data: null and only trigger a refetch, never touching ghost rows).
       type: 'project_knowledge_updated'
       project_id: string
       data: { pending?: string[] } | null
