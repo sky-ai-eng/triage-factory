@@ -70,6 +70,39 @@ func sweepAwaiting(ctx context.Context, mgr *Manager) {
 	}
 }
 
+// RunCuratorAwaitingSweep is the backstop for homed curator turns whose
+// curator_cred_request tf_ctl notification the lossy relay dropped —
+// the curator-turn analog of RunAwaitingSweep, started/stopped alongside it in
+// the brain. mgr nil is a no-op.
+func RunCuratorAwaitingSweep(ctx context.Context, mgr *Manager, interval time.Duration) {
+	if mgr == nil {
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			sweepCuratorAwaiting(ctx, mgr)
+		}
+	}
+}
+
+func sweepCuratorAwaiting(ctx context.Context, mgr *Manager) {
+	turns, err := mgr.stores.Curator.ListAwaitingCredentialTurnsSystem(ctx)
+	if err != nil {
+		log.Warn("list awaiting-credentials curator turns failed; retrying next tick", "error", err)
+		return
+	}
+	for _, turn := range turns {
+		if err := mgr.ProvisionForCuratorTurn(ctx, turn.OrgID, turn.ID); err != nil {
+			log.Warn("backstop-sweep curator provision failed", "request", turn.ID, "error", err)
+		}
+	}
+}
+
 // RunRefreshSweep re-mints and re-seals the GitHub tokens of every active
 // (claimed, non-terminal) run whose sealed bundle is older than
 // refreshAfter (TFAC-614) — GitHub installation tokens are hour-lived, runs

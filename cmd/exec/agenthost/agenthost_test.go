@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -171,7 +172,7 @@ func TestIPCClient_MultiCall_PerCallDial(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LookupRun call %d: %v", i, err)
 		}
-		if got != info {
+		if !reflect.DeepEqual(got, info) {
 			t.Errorf("call %d: identity mismatch: got %+v, want %+v", i, got, info)
 		}
 	}
@@ -212,7 +213,7 @@ func TestServer_LookupRun_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookupRun: %v", err)
 	}
-	if got != info {
+	if !reflect.DeepEqual(got, info) {
 		t.Errorf("LookupRun mismatch: got %+v, want %+v", got, info)
 	}
 	if got.TeamID != info.TeamID {
@@ -335,7 +336,7 @@ func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {
 			t.Errorf("LookupRun(%s): %v", path, err)
 			return
 		}
-		if got != want {
+		if !reflect.DeepEqual(got, want) {
 			t.Errorf("identity mismatch on %s: got %+v, want %+v", path, got, want)
 		}
 	}

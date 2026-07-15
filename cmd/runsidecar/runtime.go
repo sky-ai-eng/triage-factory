@@ -224,6 +224,7 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 		TeamID:           ai.TeamID,
 		RunID:            ai.RunID,
 		IsEventTriggered: ai.EventTriggered,
+		PinnedRepos:      ai.PinnedRepos,
 	}
 	proxyCreds := &agenthost.ProxyCredentials{
 		GitHubAPIURL:   proxies.GitHubAPIURL,

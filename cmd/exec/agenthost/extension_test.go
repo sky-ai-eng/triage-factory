@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -131,7 +132,7 @@ func TestLocalClient_CallExtension_Entitled_InvokesHandlerWithRunInfo(t *testing
 	if err != nil {
 		t.Fatalf("CallExtension: %v", err)
 	}
-	if gotInfo != info {
+	if !reflect.DeepEqual(gotInfo, info) {
 		t.Errorf("handler saw RunInfo %+v, want %+v", gotInfo, info)
 	}
 	if gotMethod != "post" {

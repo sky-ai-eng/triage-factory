@@ -136,6 +136,20 @@ func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Proje
 	return scanProjectRow(row)
 }
 
+// GetSystem is the admin-pool (BYPASSRLS) variant of Get — a JWT-less
+// background job resolving one project by id under an explicit orgID. See the
+// interface doc.
+func (s *projectStore) GetSystem(ctx context.Context, orgID, id string) (*domain.Project, error) {
+	row := s.admin.QueryRowContext(ctx, `
+		SELECT id, name, description, curator_session_id, pinned_repos,
+		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
+		       team_id, visibility, creator_user_id, created_at, updated_at
+		FROM projects
+		WHERE org_id = $1 AND id = $2
+	`, orgID, id)
+	return scanProjectRow(row)
+}
+
 func (s *projectStore) List(ctx context.Context, orgID string) ([]domain.Project, error) {
 	return listProjects(ctx, s.q, orgID)
 }

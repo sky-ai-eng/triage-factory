@@ -298,7 +298,7 @@ func TestCurator_Postgres_Multimode_BoundedEvictableCache(t *testing.T) {
 	seedRepoProfile(t, h, orgCold, "acme", "cold", coldUp, "main")
 	seedRepoProfile(t, h, orgHot, "acme", "hot", hotUp, "main")
 
-	noToken := func(context.Context, string) string { return "" }
+	noToken := func(context.Context, string, string) worktree.CloneAuth { return worktree.CloneAuth{} }
 
 	// The hot org's repo is materialized and KEPT mounted (a live reader);
 	// the cold org's is materialized then released (quiescent).

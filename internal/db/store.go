@@ -399,6 +399,13 @@ type Stores struct {
 	// there is no app-pool grant at all.
 	RunCredentials RunCredentialsStore
 
+	// CuratorTurnCredentials owns the curator_turn_credentials table — the
+	// sealed per-turn credential bundle channel, the curator-turn
+	// analog of RunCredentials keyed on the curator_requests id. Admin-pool-
+	// only, same posture as RunCredentials: credential-bearing ciphertext,
+	// never a request-handler surface, no app-pool grant.
+	CuratorTurnCredentials CuratorTurnCredentialsStore
+
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
 	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —
 	// core holds no SSO symbols.

@@ -978,13 +978,15 @@ func (c *LocalClient) legacyRepoClient(ctx context.Context, owner, repo string) 
 }
 
 // authorizeRepo is the exec-gh repo gate (multi mode): the run may only act on
-// a repo its team tracks AND that it has materialized in run_worktrees. Same
-// predicate as the git proxy's Authorize (run_worktrees holds the run's task
-// repo too — recorded at setup — and any workspace-add'd repo). A partial test
-// wiring (nil stores) skips the gate. Both a hard deny and a fail-closed
-// backend error record a git_denied audit row before returning, so a transient
-// DB blip during a denied gh op still leaves an audit trail — symmetric with
-// the proxy's "authorize-error" path.
+// a repo its team tracks AND that it has EITHER materialized in run_worktrees
+// (a delegated run's task repo — recorded at setup — or a workspace-add'd repo)
+// OR that appears in the turn's pinned set (a curator turn, which creates no
+// run_worktrees rows). Same team-tracks predicate as the git proxy's
+// Authorize; the second arm is the run_worktrees ledger or the pinned set. A
+// partial test wiring (nil stores) skips the gate. Both a hard deny and a
+// fail-closed backend error record a git_denied audit row before returning, so
+// a transient DB blip during a denied gh op still leaves an audit trail —
+// symmetric with the proxy's "authorize-error" path.
 func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) error {
 	if !c.gateWired {
 		return nil
@@ -995,12 +997,20 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, err)
 	}
 	if tracks {
+		repoID := owner + "/" + repo
+		// Curator turns carry their authorized set explicitly (no run_worktrees
+		// ledger); a delegated run passes an empty PinnedRepos so this arm is
+		// inert and the ledger check below is the sole gate, unchanged.
+		for _, p := range c.info.PinnedRepos {
+			if strings.EqualFold(p, repoID) {
+				return nil
+			}
+		}
 		rows, lerr := c.rt.ListRunWorktrees(ctx)
 		if lerr != nil {
 			c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 			return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, lerr)
 		}
-		repoID := owner + "/" + repo
 		for _, w := range rows {
 			if strings.EqualFold(w.RepoID, repoID) {
 				return nil

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -114,6 +115,85 @@ func (s *curatorStore) CancelStrandedRequestsForHomeSystem(ctx context.Context, 
 		return 0, err
 	}
 	return int(n), nil
+}
+
+// PublishTurnCredPubKey records the per-turn sidecar pubkey on the turn's row
+// and rings the brain's provisioner. Guarded on non-terminal AND
+// cred_pubkey = ” so a late/duplicate publish neither reopens a finished turn
+// nor clobbers a key the brain may already be sealing to — the curator-turn
+// analog of MarkAwaitingCredentials' running-only guard. Fires the doorbell
+// only when a non-empty key was actually recorded (an empty publish is a no-op
+// the brain would just skip). Admin pool: the executor's bring-up has no JWT
+// claims, and cred_pubkey rides tf_system's UPDATE grant on curator_requests.
+func (s *curatorStore) PublishTurnCredPubKey(ctx context.Context, orgID, requestID, pubkey string) (bool, error) {
+	res, err := s.admin.ExecContext(ctx, `
+		UPDATE curator_requests SET cred_pubkey = $3
+		WHERE org_id = $1 AND id = $2 AND status IN ('queued', 'running') AND cred_pubkey = ''
+	`, orgID, requestID, pubkey)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	matched := n > 0
+	if matched && pubkey != "" {
+		_ = ctlbus.Publish(ctx, s.admin, ctlbus.Message{Kind: "curator_cred_request", OrgID: orgID, RunID: requestID})
+	}
+	return matched, nil
+}
+
+// GetTurnProvisionInfoSystem reads one turn's provisioning fields on the admin
+// pool — the brain's single-turn re-read on the curator_cred_request
+// doorbell. cred_pubkey is NOT NULL so no COALESCE; home_instance_id is
+// nullable and maps to "".
+func (s *curatorStore) GetTurnProvisionInfoSystem(ctx context.Context, orgID, requestID string) (*domain.CuratorTurnProvision, bool, error) {
+	var p domain.CuratorTurnProvision
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT id::text, org_id::text, project_id::text, COALESCE(home_instance_id, ''), status, cred_pubkey
+		FROM curator_requests
+		WHERE org_id = $1 AND id = $2
+	`, orgID, requestID).Scan(&p.ID, &p.OrgID, &p.ProjectID, &p.HomeInstanceID, &p.Status, &p.CredPubKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return &p, true, nil
+}
+
+// ListAwaitingCredentialTurnsSystem finds turns that published a sidecar key but
+// still lack a fresh sealed bundle — no curator_turn_credentials row,
+// or one sealed under an older boot_epoch than the home instance's current one
+// (a home restart). The backstop sweep's input; admin pool, cross-org.
+func (s *curatorStore) ListAwaitingCredentialTurnsSystem(ctx context.Context) ([]domain.CuratorTurnProvision, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT cr.id::text, cr.org_id::text, cr.project_id::text,
+		       COALESCE(cr.home_instance_id, ''), cr.status, cr.cred_pubkey
+		FROM curator_requests cr
+		LEFT JOIN curator_turn_credentials ctc ON ctc.request_id = cr.id
+		LEFT JOIN instances i ON i.id = cr.home_instance_id
+		WHERE cr.status IN ('queued', 'running')
+		  AND cr.cred_pubkey <> ''
+		  AND cr.home_instance_id IS NOT NULL
+		  AND (ctc.request_id IS NULL OR (i.id IS NOT NULL AND ctc.boot_epoch < i.boot_epoch))
+		ORDER BY cr.created_at ASC, cr.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.CuratorTurnProvision
+	for rows.Next() {
+		var p domain.CuratorTurnProvision
+		if err := rows.Scan(&p.ID, &p.OrgID, &p.ProjectID, &p.HomeInstanceID, &p.Status, &p.CredPubKey); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 func (s *curatorStore) GetRequest(ctx context.Context, orgID, id string) (*domain.CuratorRequest, error) {
@@ -346,7 +426,7 @@ func (s *curatorStore) ConsumePendingContext(ctx context.Context, orgID, project
 		p, err := scanPgCuratorProject(tx.QueryRowContext(ctx, `
 			SELECT id::text, name, description, curator_session_id,
 			       pinned_repos, jira_project_key, linear_project_key,
-			       spec_authorship_blueprint_id, created_at, updated_at
+			       spec_authorship_blueprint_id, team_id::text, created_at, updated_at
 			FROM projects
 			WHERE org_id = $1 AND id = $2
 		`, orgID, projectID))
@@ -790,11 +870,12 @@ func scanPgCuratorProject(row interface {
 		jiraKey         sql.NullString
 		linearKey       sql.NullString
 		specBlueprintID sql.NullString
+		teamID          sql.NullString
 		pinnedJSON      []byte
 	)
 	err := row.Scan(
 		&p.ID, &p.Name, &p.Description, &sessionID, &pinnedJSON,
-		&jiraKey, &linearKey, &specBlueprintID,
+		&jiraKey, &linearKey, &specBlueprintID, &teamID,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -803,6 +884,7 @@ func scanPgCuratorProject(row interface {
 	if err != nil {
 		return nil, err
 	}
+	p.TeamID = teamID.String
 	p.CuratorSessionID = sessionID.String
 	p.JiraProjectKey = jiraKey.String
 	p.LinearProjectKey = linearKey.String

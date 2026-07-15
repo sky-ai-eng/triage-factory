@@ -27,13 +27,14 @@ import (
 // indicates a race: the user removed the repo from configured-repos
 // AFTER pinning. Same handling — log + skip.
 //
-// tokenFor resolves the host-side clone credential for a repo's owner
-// so private-repo refreshes authenticate in multi mode. It may be
-// nil (tests) or return "" — CloneAuthFor then no-ops, and the refresh runs
-// credential-free exactly as before. The token is scoped to the profile's
-// clone URL host and only injects for an https:// origin, so a local-mode SSH
-// origin is untouched.
-func materializePinnedRepos(ctx context.Context, repos db.RepoStore, tokenFor func(ctx context.Context, owner string) string, orgID, projectID, projectDir string, pinnedRepos []string) {
+// authFor resolves the host-side fetch credential for a pinned repo, given its
+// owner and clone URL. On the executor path it routes through the turn
+// sidecar's git proxy (the orchestrator holds no token); on all/
+// local it injects the App token resolved from the live store. It may be nil
+// (tests) or return a zero CloneAuth — the refresh then runs credential-free
+// exactly as before. The auth is scoped to the profile's clone URL host and
+// only injects for an https:// origin, so a local-mode SSH origin is untouched.
+func materializePinnedRepos(ctx context.Context, repos db.RepoStore, authFor func(ctx context.Context, owner, cloneURL string) worktree.CloneAuth, orgID, projectID, projectDir string, pinnedRepos []string) {
 	for _, slug := range pinnedRepos {
 		if ctx.Err() != nil {
 			return
@@ -66,8 +67,8 @@ func materializePinnedRepos(ctx context.Context, repos db.RepoStore, tokenFor fu
 			continue
 		}
 		var auth worktree.CloneAuth
-		if tokenFor != nil {
-			auth = worktree.CloneAuthFor(profile.CloneURL, tokenFor(ctx, owner))
+		if authFor != nil {
+			auth = authFor(ctx, owner, profile.CloneURL)
 		}
 		// Seed-on-demand (TFAC-60/-62): pass the upstream clone URL so a
 		// missing bare — a private pinned repo never delegated against —
@@ -95,7 +96,7 @@ func materializePinnedRepos(ctx context.Context, repos db.RepoStore, tokenFor fu
 // failures are logged and skipped — same best-effort contract as the local
 // path: the agent still gets whatever subset materialized. The returned
 // release is always non-nil and safe to call even when nothing materialized.
-func materializeSharedPinnedRepos(ctx context.Context, repos db.RepoStore, tokenFor func(ctx context.Context, owner string) string, orgID, projectID string, pinnedRepos []string) ([]agentproc.ReadOnlyRepoMount, func()) {
+func materializeSharedPinnedRepos(ctx context.Context, repos db.RepoStore, authFor func(ctx context.Context, owner, cloneURL string) worktree.CloneAuth, orgID, projectID string, pinnedRepos []string) ([]agentproc.ReadOnlyRepoMount, func()) {
 	var (
 		mounts   []agentproc.ReadOnlyRepoMount
 		releases []func()
@@ -147,8 +148,8 @@ func materializeSharedPinnedRepos(ctx context.Context, repos db.RepoStore, token
 			continue
 		}
 		var auth worktree.CloneAuth
-		if tokenFor != nil {
-			auth = worktree.CloneAuthFor(profile.CloneURL, tokenFor(ctx, owner))
+		if authFor != nil {
+			auth = authFor(ctx, owner, profile.CloneURL)
 		}
 		wtDir, release, err := worktree.EnsureSharedCuratorWorktree(ctx, orgID, owner, repo, branch,
 			worktree.WithCloneAuth(auth), worktree.WithCloneURL(profile.CloneURL))

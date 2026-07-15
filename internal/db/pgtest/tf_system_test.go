@@ -517,6 +517,44 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 	})
 
+	t.Run("curator_turn_credentials", func(t *testing.T) {
+		// The home executor's sidecar bring-up publishes the turn's pubkey
+		// (UPDATE curator_requests.cred_pubkey — rides the curator_requests
+		// grant) and polls / cleans up the sealed bundle (SELECT + DELETE on
+		// curator_turn_credentials). A missing grant fails 42501 here.
+		projectID := newUUID(t, h)
+		MustExec(t, h.AdminDB, `
+			INSERT INTO projects (id, org_id, creator_user_id, team_id, name, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 'turn-cred-conformance', now(), now())
+		`, projectID, orgID, userID, teamID)
+		turnID := newUUID(t, h)
+		MustExec(t, h.AdminDB, `
+			INSERT INTO curator_requests (id, org_id, project_id, creator_user_id, team_id, status, user_input, home_instance_id)
+			VALUES ($1, $2, $3, $4, $5, 'queued', 'q', $6)
+		`, turnID, orgID, projectID, userID, teamID, executorID)
+
+		// Publish the sidecar pubkey via the executor's tf_system pool.
+		if matched, err := stores.Curator.PublishTurnCredPubKey(ctx, orgID, turnID, "sidecar-pubkey"); err != nil || !matched {
+			t.Fatalf("Curator.PublishTurnCredPubKey = (%v, %v), want (true, nil)", matched, err)
+		}
+
+		// The brain seals + writes bundles on its own superuser pool (never
+		// tf_system); seed directly via AdminDB so this isolates the executor's
+		// read/delete side.
+		MustExec(t, h.AdminDB, `
+			INSERT INTO curator_turn_credentials (request_id, org_id, executor_id, boot_epoch, sealed)
+			VALUES ($1, $2, $3, 1, $4)
+		`, turnID, orgID, executorID, []byte("sealed-turn-bytes"))
+		if _, _, _, ok, err := stores.CuratorTurnCredentials.Get(ctx, orgID, turnID); err != nil {
+			t.Fatalf("CuratorTurnCredentials.Get: %v", err)
+		} else if !ok {
+			t.Errorf("CuratorTurnCredentials.Get: ok=false, want the seeded bundle")
+		}
+		if ok, err := stores.CuratorTurnCredentials.Delete(ctx, orgID, turnID); err != nil || !ok {
+			t.Errorf("CuratorTurnCredentials.Delete: ok=%v err=%v", ok, err)
+		}
+	})
+
 	t.Run("ws_backplane", func(t *testing.T) {
 		b := wsbackplane.New(h.SystemDB, "", executorID, websocket.NewHub())
 		if present := b.PresentFor(ctx, orgID, "some-run-id"); present {
