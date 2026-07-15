@@ -338,60 +338,19 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	s.updateStatus(orgID, runID, "running")
 
-	// StartAgentHost is invoked from inside agentproc.Run's sandbox
-	// branch; the closure brings the run identity along so the
-	// daemon's per-socket LocalClient routes writes through the right
-	// (orgID, userID) pair. Local-mode + non-sandbox calls never
-	// invoke this closure (agentproc gates on shouldSandbox).
-	stores, storesSet := s.getStores()
-	var (
-		info           agenthost.RunInfo
-		startAgentHost func() (sandbox.Mount, io.Closer, error)
-	)
-	if storesSet {
-		info = agenthost.RunInfo{
-			OrgID:            orgID,
-			UserID:           creatorUserID,
-			RunID:            runID,
-			TeamID:           cfg.teamID,
-			IsEventTriggered: triggerType == domain.TriggerTypeEvent,
-		}
-		if cfg.execSandbox != nil {
-			// TF_ROLE=executor: the credential sidecar HOSTS the exec-verb socket
-			// server (the relocation) and already created the socket during
-			// bring-up. The orchestrator only supplies the bind mount — it runs no
-			// Server and keeps the hostile-input parser (with its all-orgs stores)
-			// out of its own address space entirely.
-			startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-				return agenthost.SocketMountFor(runID), noopCloser{}, nil
-			}
-		} else {
-			// all/local: the orchestrator IS the credential holder, so it hosts the
-			// socket server in-process over its live stores (no sidecar, no relay).
-			startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-				hd, mount, err := agenthost.Start(stores, info, nil)
-				if err != nil {
-					return sandbox.Mount{}, nil, err
-				}
-				return mount, hd, nil
-			}
-		}
-	}
-
-	// Git proxy (multi mode, org has a GitHub credential): the per-repo
-	// scoped-token source + the live repo/ref gate, plus the receive-pack
-	// backstop wired to the same record path the pre-push hook uses so a
-	// `git push --no-verify` the hook can't see still records a branch artifact
-	// (TFAC-467). nil in local mode / no GitHub credential — no proxy.
-	// On the executor path the git proxy runs in the credential sidecar (brought
-	// up by the dispatcher), so none is wired here — agentproc launches into the
-	// prebuilt network and ignores GitProxy. On all/local the orchestrator IS
-	// the credential holder and runs the in-process git proxy over the resolver.
-	var gitProxy *agentproc.GitProxyConfig
-	if cfg.execSandbox == nil {
-		gitProxy = s.gitProxyConfigFor(ctx, info, stores)
-		if gitProxy != nil && storesSet {
-			gitProxy.RecordPush = gitPushRecorder(stores, info)
+	// StartAgentHost is invoked from inside agentproc.Run's sandbox branch —
+	// which only a multi-mode dispatch reaches, and every multi dispatch
+	// stood up the per-run credential sidecar first. The sidecar HOSTS the
+	// exec-verb socket server (the relocation) and already created the
+	// socket during bring-up; the orchestrator only supplies the bind mount,
+	// keeping the hostile-input parser (with its all-orgs stores) out of its
+	// own address space entirely. Local (no sandbox) never invokes the
+	// closure, and the former in-process socket server over live stores is
+	// gone with the fused single-process shape.
+	var startAgentHost func() (sandbox.Mount, io.Closer, error)
+	if cfg.execSandbox != nil {
+		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
+			return agenthost.SocketMountFor(runID), noopCloser{}, nil
 		}
 	}
 
@@ -422,14 +381,12 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		OrgID:        orgID,
 		Secrets:      s.getRunSecrets(),
 		LLMResolver:  s.llmResolverForRun(orgID, runID),
-		// Executor path (nil/empty elsewhere): hand agentproc the prebuilt run
-		// network and the sidecar's proxy env so it launches into them and holds
-		// no credential — the sidecar owns the LLM/git/egress proxies + the
-		// live SigV4 refresh. On all/local these are nil and agentproc allocates
-		// the network and runs the in-process proxies over the resolver.
+		// Multi mode: hand agentproc the prebuilt run network and the
+		// sidecar's proxy env so it launches into them and holds no
+		// credential — the sidecar owns the LLM/git/egress proxies + the
+		// live SigV4 refresh. nil in local (no sandbox).
 		PrebuiltNetwork:  cfg.execSandbox.runNetwork(),
 		PrebuiltProxyEnv: cfg.execSandbox.proxyEnv(),
-		GitProxy:         gitProxy,
 		StartAgentHost:   startAgentHost,
 		// Org commit identity (TFAC-452): empty when none resolved → ambient git
 		// config inherited (today's behavior).

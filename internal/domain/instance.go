@@ -37,11 +37,11 @@ type Instance struct {
 }
 
 // Instance roles — the value app.registerInstance stamps here from
-// runmode.Role() (TFAC-582). "all" is the single-process default (and what
-// local mode always is); "control" and "executor" are the two halves of the
-// control/executor split. These string values MUST match runmode's
-// DeployRole constants (RoleAll / RoleControl / RoleExecutor) — registration
-// passes string(runmode.Role()) straight through.
+// runmode.Role() (TFAC-582). "all" is the local-only single-process shape
+// (multi rejects it at boot); "control" and "executor" are the two halves of
+// the split every multi deployment runs. These string values MUST match
+// runmode's DeployRole constants (RoleAll / RoleControl / RoleExecutor) —
+// registration passes string(runmode.Role()) straight through.
 const (
 	InstanceRoleAll      = "all"
 	InstanceRoleControl  = "control"

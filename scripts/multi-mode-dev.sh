@@ -11,10 +11,20 @@
 # the containers, which needs no image build at all.
 #
 # Usage:
-#   go build -o triagefactory .         # build the binary first
-#   ./scripts/multi-mode-dev.sh up      # start deps, migrate schema (idempotent)
-#   ./scripts/multi-mode-dev.sh run     # run ./triagefactory in TF_MODE=multi
-#   ./scripts/multi-mode-dev.sh down    # stop deps, remove volumes
+#   go build -o triagefactory .              # build the binary first
+#   ./scripts/multi-mode-dev.sh up           # start deps, migrate schema (idempotent)
+#   ./scripts/multi-mode-dev.sh run          # run the CONTROL half (API on :3000)
+#   ./scripts/multi-mode-dev.sh run executor # run the EXECUTOR half (separate terminal)
+#   ./scripts/multi-mode-dev.sh down         # stop deps, remove volumes
+#
+# Multi mode is always the control+executor split — the binary refuses to
+# boot multi as a single fused process — so `run` takes the role to host.
+# Most dev sessions only need `run` (control): the full API/WS/brain against
+# real Postgres. Add `run executor` in a second terminal only when the work
+# needs dispatch/sandboxing, which additionally requires a runsc-capable
+# Linux host with the sandbox caps (the same bar as production executors).
+# Each role gets its own TF_STATE_ROOT under .multi-dev-state/ so the two
+# host processes never collide on the instance-identity flock.
 #
 # State: secrets + the GoTrue signing keypair persist in .env.multi-dev
 # (gitignored) across runs, so `up` after a `down` reuses the same identity.
@@ -116,20 +126,38 @@ EOF
   source "$ENV_FILE"
   set +a
   echo "Running migrations..."
-  TF_MODE=multi TF_DATABASE_URL="postgres://supabase_admin:${POSTGRES_PASSWORD}@localhost:5432/postgres" \
+  # Role is required in multi even for CLI subcommands (multi+all/unset
+  # refuses to boot); control is the migrating role.
+  TF_MODE=multi TF_ROLE=control TF_DATABASE_URL="postgres://supabase_admin:${POSTGRES_PASSWORD}@localhost:5432/postgres" \
     "$BIN" migrate up
 
-  echo "Up. Run './scripts/multi-mode-dev.sh run' to start the server, or 'down' to tear down."
+  echo "Up. Run './scripts/multi-mode-dev.sh run' for the control half (and"
+  echo "'./scripts/multi-mode-dev.sh run executor' in another terminal when you"
+  echo "need dispatch), or 'down' to tear down."
 }
 
 cmd_run() {
   need_bin
   [ -f "$ENV_FILE" ] || { echo "no $ENV_FILE — run 'up' first" >&2; exit 1; }
+  # First arg selects the role ONLY when it's a bare role token; a flag (or
+  # nothing) means "control" and everything is forwarded to the binary, so
+  # `run --log-level=debug` and `run executor --log-level=debug` both work.
+  local role=control
+  case "${1:-}" in
+    control|executor) role=$1; shift ;;
+    ""|-*) ;;
+    *) echo "usage: $0 run [control|executor] [flags forwarded to triagefactory]" >&2; exit 1 ;;
+  esac
   set -a
   # shellcheck disable=SC1090
   source "$ENV_FILE"
   set +a
   export TF_MODE=multi
+  export TF_ROLE="$role"
+  # Per-role state root: two host processes against one state root would
+  # fail fast on the instance-identity flock, by design.
+  export TF_STATE_ROOT="$ROOT/.multi-dev-state/$role"
+  mkdir -p "$TF_STATE_ROOT"
   export TF_DATABASE_URL="postgres://supabase_admin:${POSTGRES_PASSWORD}@localhost:5432/postgres"
   export TF_GOTRUE_URL="http://localhost:9999"
   export TF_GOTRUE_JWKS_URL="http://localhost:9999/.well-known/jwks.json"
@@ -137,6 +165,14 @@ cmd_run() {
   export TF_BLOB_ENDPOINT="http://localhost:8333"
   export TF_BLOB_BUCKET="${TF_BLOB_BUCKET:-tf-workspaces}"
   export TF_BLOB_REGION="${TF_BLOB_REGION:-us-east-1}"
+  if [ "$role" = "executor" ]; then
+    # No user HTTP on an executor — the localhost healthz is its only
+    # listener. Sandboxing needs runsc + the sandbox caps on THIS host;
+    # without them the boot fails loudly at cap-broker start (correct: an
+    # executor that can't sandbox must not run).
+    export TF_HEALTHZ_PORT="${TF_HEALTHZ_PORT:-3001}"
+    exec "$BIN" --no-browser "$@"
+  fi
   exec "$BIN" --port 3000 --no-browser "$@"
 }
 
@@ -185,5 +221,5 @@ case "${1:-}" in
   up) cmd_up ;;
   run) shift; cmd_run "$@" ;;
   down) cmd_down ;;
-  *) echo "usage: $0 {up|run|down}" >&2; exit 1 ;;
+  *) echo "usage: $0 {up|run [control|executor]|down}" >&2; exit 1 ;;
 esac

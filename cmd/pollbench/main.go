@@ -83,8 +83,15 @@ func main() {
 
 	// The modeled deployment is a multi-mode GHES install; multi is also the
 	// polling path with no local-user dashboard backfill inflating counts.
+	// The poller/tracker is a brain component, so this process models the
+	// control role — multi mode has no fused single-process role to fall
+	// back to.
 	if err := runmode.Init(runmode.ModeMulti); err != nil {
 		fmt.Fprintf(os.Stderr, "init runmode: %v\n", err)
+		os.Exit(1)
+	}
+	if err := runmode.InitRole(runmode.RoleControl); err != nil {
+		fmt.Fprintf(os.Stderr, "init role: %v\n", err)
 		os.Exit(1)
 	}
 

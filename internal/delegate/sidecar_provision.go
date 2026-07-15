@@ -107,14 +107,20 @@ func (e *executorSandbox) GitCloneAuth(cloneURL string) worktree.CloneAuth {
 // bringUpExecutorSandbox stands up the run network, launches the credential
 // sidecar, provisions it (publishing the sidecar's public key so the brain
 // seals THIS run's bundle to it, without the orchestrator ever unsealing), and
-// binds the sidecar's proxies on the veth. Returns nil on every non-executor
-// role and on an unwired test fixture — the caller then keeps the in-process
-// proxy path (agentproc allocates the network and runs the proxies itself).
+// binds the sidecar's proxies on the veth. Gated on the MODE, not the role:
+// multi mode is always per-run-isolated, so every multi dispatch takes the
+// sidecar path (in practice only executors dispatch — control runs no
+// dispatcher and the all role is local-only — but hanging the gate on the
+// mode means a future multi caller can never silently fall back to the
+// in-process credential path; on a pod with no cap-broker it fails loudly at
+// construction instead). Returns nil in local mode and on an unwired test
+// fixture — the caller then keeps the in-process proxy path (agentproc
+// allocates the network and runs the proxies itself).
 //
 // On any error the partial state (network, sidecar) is already torn down; the
 // caller does not Close a nil return.
 func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run *domain.AgentRun, task domain.Task) (*executorSandbox, error) {
-	if runmode.Role() != runmode.RoleExecutor {
+	if runmode.Current() != runmode.ModeMulti {
 		return nil, nil
 	}
 	// Not wired (a test fixture) — degrade like every other nil-store seam in

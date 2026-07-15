@@ -6,10 +6,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // Live interactive-sandbox integration tests: they drive RunInteractive
@@ -70,6 +72,51 @@ func requireInteractiveSandbox(t *testing.T) (SecretsReader, string) {
 	return secrets, orgID
 }
 
+// prebuiltRunHarness stands up what the delegate/curator sidecar bring-up
+// provides in production — the per-run network plus the LLM/git/egress
+// proxies over the resolved org credential — so these tests exercise the
+// prebuilt-network shape that is now the ONLY sandbox launch path (the
+// in-process bring-up inside newSandboxCommand no longer exists). The proxies
+// run in this test process rather than a credential sidecar, which preserves
+// the property the jail-side assertions care about: the sandbox env carries
+// only proxy URLs + per-run placeholders, never the real key.
+//
+// Returns the network, the sandbox proxy env, and a close func the test MUST
+// call before asserting on leaked netns — the network is caller-owned (the
+// production contract: the delegate closes it after Run returns), so the
+// LiveRun's own teardown deliberately leaves it up. close is idempotent and
+// also registered as a cleanup backstop.
+func prebuiltRunHarness(t *testing.T, secrets SecretsReader, orgID, runID string) (*sandbox.RunNetwork, []string, func()) {
+	t.Helper()
+	ctx := context.Background()
+	creds, err := resolveCredentials(ctx, secrets, orgID, nil)
+	if err != nil {
+		t.Fatalf("resolve credentials: %v", err)
+	}
+	net, err := sandbox.SetupRunNetwork(ctx, runID)
+	if err != nil {
+		t.Fatalf("SetupRunNetwork: %v", err)
+	}
+	proxies, env, err := startProxiesForSandbox(ctx, net.HostIP, creds, nil, nil)
+	if err != nil {
+		_ = net.Close()
+		t.Fatalf("startProxiesForSandbox: %v", err)
+	}
+	var once sync.Once
+	closeHarness := func() {
+		once.Do(func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := proxies.Shutdown(sctx); err != nil {
+				t.Logf("proxy shutdown: %v", err)
+			}
+			_ = net.Close()
+		})
+	}
+	t.Cleanup(closeHarness)
+	return net, env, closeHarness
+}
+
 // tfNetnsEntries snapshots the set of tf-<frag>-<idx> network namespaces — the
 // per-run netns the sandbox creates. The teardown assertions diff against a
 // baseline so a parallel/leftover run on the box doesn't false-positive.
@@ -128,14 +175,16 @@ func TestIntegration_InteractiveSandbox_SteerAndTeardown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
+	net, proxyEnv, closeHarness := prebuiltRunHarness(t, secrets, orgID, "itest-live-sandbox-steer")
 	sink := newLiveSink()
 	lr, err := RunInteractive(ctx, RunOptions{
-		Cwd:     t.TempDir(),
-		Message: "Reply with exactly the word PING and nothing else.",
-		Model:   "haiku",
-		TraceID: "itest-live-sandbox-steer",
-		OrgID:   orgID,
-		Secrets: secrets,
+		Cwd:              t.TempDir(),
+		Message:          "Reply with exactly the word PING and nothing else.",
+		Model:            "haiku",
+		TraceID:          "itest-live-sandbox-steer",
+		OrgID:            orgID,
+		PrebuiltNetwork:  net,
+		PrebuiltProxyEnv: proxyEnv,
 	}, sink, denyAllPermissions)
 	if err != nil {
 		t.Fatalf("RunInteractive (sandbox): %v", err)
@@ -168,8 +217,11 @@ func TestIntegration_InteractiveSandbox_SteerAndTeardown(t *testing.T) {
 	}
 	<-lr.Done()
 
-	// Teardown ownership: LiveRun ran cleanup after cmd.Wait, freeing the
-	// subnet slot — no tf- netns/veth survives.
+	// Teardown ownership matches production: LiveRun ran its cleanup after
+	// cmd.Wait, and the caller (here the harness, in production the
+	// delegate/curator) closes the network it owns — after which no tf-
+	// netns/veth survives.
+	closeHarness()
 	assertNoNewNetns(t, before)
 }
 
@@ -183,14 +235,16 @@ func TestIntegration_InteractiveSandbox_Interrupt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
+	net, proxyEnv, closeHarness := prebuiltRunHarness(t, secrets, orgID, "itest-live-sandbox-interrupt")
 	sink := newLiveSink()
 	lr, err := RunInteractive(ctx, RunOptions{
-		Cwd:     t.TempDir(),
-		Message: "Write a very long, detailed essay of at least 3000 words about the full history of computing. Take your time and be thorough.",
-		Model:   "haiku",
-		TraceID: "itest-live-sandbox-interrupt",
-		OrgID:   orgID,
-		Secrets: secrets,
+		Cwd:              t.TempDir(),
+		Message:          "Write a very long, detailed essay of at least 3000 words about the full history of computing. Take your time and be thorough.",
+		Model:            "haiku",
+		TraceID:          "itest-live-sandbox-interrupt",
+		OrgID:            orgID,
+		PrebuiltNetwork:  net,
+		PrebuiltProxyEnv: proxyEnv,
 	}, sink, denyAllPermissions)
 	if err != nil {
 		t.Fatalf("RunInteractive (sandbox): %v", err)
@@ -220,6 +274,7 @@ func TestIntegration_InteractiveSandbox_Interrupt(t *testing.T) {
 	if res.Subtype != "error_during_execution" {
 		t.Errorf("interrupt result subtype = %q, want error_during_execution", res.Subtype)
 	}
+	closeHarness()
 	assertNoNewNetns(t, before)
 }
 
@@ -246,14 +301,16 @@ func TestIntegration_InteractiveSandbox_Permission(t *testing.T) {
 		return PermissionDecision{Behavior: "deny", Message: "denied by test"}
 	}
 
+	net, proxyEnv, closeHarness := prebuiltRunHarness(t, secrets, orgID, "itest-live-sandbox-perm")
 	sink := newLiveSink()
 	lr, err := RunInteractive(ctx, RunOptions{
-		Cwd:     cwd,
-		Message: "Use the Write tool to create a file named secret.txt containing the text 'hello'. Do it now without asking.",
-		Model:   "sonnet-4-6",
-		TraceID: "itest-live-sandbox-perm",
-		OrgID:   orgID,
-		Secrets: secrets,
+		Cwd:              cwd,
+		Message:          "Use the Write tool to create a file named secret.txt containing the text 'hello'. Do it now without asking.",
+		Model:            "sonnet-4-6",
+		TraceID:          "itest-live-sandbox-perm",
+		OrgID:            orgID,
+		PrebuiltNetwork:  net,
+		PrebuiltProxyEnv: proxyEnv,
 	}, sink, handler)
 	if err != nil {
 		t.Fatalf("RunInteractive (sandbox): %v", err)
@@ -273,5 +330,6 @@ func TestIntegration_InteractiveSandbox_Permission(t *testing.T) {
 	if _, err := os.Stat(target); err == nil {
 		t.Errorf("file %s was written despite a denied permission", target)
 	}
+	closeHarness()
 	assertNoNewNetns(t, before)
 }

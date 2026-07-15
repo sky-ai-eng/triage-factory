@@ -34,13 +34,11 @@ CGO_ENABLED=0 GOOS=linux go build -o "$OUT_DIR/sandbox-bench" ./cmd/sandbox-benc
 echo "==> building runtime image ($IMAGE)"
 docker build -t "$IMAGE" -f docker/Dockerfile .
 
-# Prefer the compose stack's rootfs cache volume if it exists (warm),
-# else a bench-dedicated one.
-ROOTFS_VOL=$(docker volume ls -q | grep -m1 '_tf-rootfs$' || true)
-if [ -z "$ROOTFS_VOL" ]; then
-    ROOTFS_VOL=tf-bench-rootfs
-    docker volume create "$ROOTFS_VOL" >/dev/null
-fi
+# Bench-dedicated rootfs cache volume, kept warm across bench runs. (The
+# compose stack's executors use anonymous per-replica volumes, so there is
+# no shared named volume to borrow.)
+ROOTFS_VOL=tf-bench-rootfs
+docker volume create "$ROOTFS_VOL" >/dev/null
 echo "==> rootfs cache volume: $ROOTFS_VOL"
 
 STAMP=$(date +%Y%m%d-%H%M%S)

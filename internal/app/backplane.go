@@ -9,22 +9,14 @@ import (
 // buildWSBackplane wires the cross-pod fan-out (TFAC-584):
 // websocket.Hub.Broadcast/CloseUserConnections gain a Postgres
 // LISTEN/NOTIFY relay, and the spawner/server get the presence/kick
-// hooks that ride it. a.wsBackplane stays nil — and every consumer (Hub,
-// Spawner, Server) already treats that as "behave exactly as before"
-// (see their respective SetBackplane/SetPresenceChecker/SetWSBackplane
-// doc comments) — in two cases:
-//
-//   - local mode, obviously (no Postgres at all).
-//   - TF_ROLE=all, even under TF_MODE=multi: role=all is single-process
-//     by construction (none of the spec's deployment shapes run more
-//     than one role=all process against the same database — a fleet is
-//     always control+executor roles), so Broadcast's local delivery,
-//     CloseUserConnections, and PresentFor already reach every socket
-//     that will ever exist. Constructing the backplane there would only
-//     add idle LISTEN connections plus heartbeat/reaper goroutines for
-//     zero behavioral benefit, and silently contradict this package's
-//     own doc comment ("single-process TF_ROLE=all never constructs a
-//     Backplane") the moment someone actually checked.
+// hooks that ride it. a.wsBackplane stays nil in local mode — a single
+// process with no Postgres has nothing to relay across, and every
+// consumer (Hub, Spawner, Server) already treats nil as "behave exactly
+// as before" (see their respective SetBackplane/SetPresenceChecker/
+// SetWSBackplane doc comments). Multi mode always builds it: multi is
+// always the control+executor split, so every pod either serves sockets
+// another pod's events must reach, or emits events another pod's
+// sockets must receive.
 //
 // This never fails boot: the actual LISTEN connections open lazily
 // inside the RunPublicListener (startWorkers) / RunBusListener
@@ -33,7 +25,7 @@ import (
 // pod on local-only fan-out (TFAC-584's "keep serving" contract), never
 // crashes it.
 func (a *App) buildWSBackplane() {
-	if runmode.Current() != runmode.ModeMulti || a.plan.role == runmode.RoleAll {
+	if runmode.Current() != runmode.ModeMulti {
 		return
 	}
 	dsn := wsbackplane.DirectDSN()

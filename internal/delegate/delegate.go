@@ -502,20 +502,18 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 	}
 
 	s.updateStatus(orgID, runID, "cloning")
-	// Resolve the host-side clone credential. On the executor path the clone
-	// routes through the sidecar's git proxy (CloneAuthViaGitProxy): git is
+	// Resolve the host-side clone credential. In multi mode the clone routes
+	// through the sidecar's git proxy (CloneAuthViaGitProxy): git is
 	// rewritten from the upstream host to the proxy URL and presents only the
 	// per-run placeholder, so the real App token stays in the sidecar. The
 	// insteadOf upstream is the clone URL's scheme+host (matching the sandbox
-	// agent's own git-proxy pairs, which use the org git base). Elsewhere:
-	// CloneAuthFor scopes a real token to the upstream host and no-ops on an SSH
-	// URL or an empty token, so it's inert in local SSH mode and for
-	// public/anonymous clones.
+	// agent's own git-proxy pairs, which use the org git base). Local keeps
+	// its existing path — the operator's SSH key or anonymous HTTPS, no
+	// injected credential (the former in-process token mint is gone with the
+	// fused single-process shape).
 	var cloneAuth worktree.CloneAuth
 	if execSandbox != nil {
 		cloneAuth = worktree.CloneAuthViaGitProxy(execSandbox.res.GitProxyURL, cloneHostBase(upstreamCloneURL), execSandbox.res.GitProxyToken)
-	} else {
-		cloneAuth = worktree.CloneAuthFor(upstreamCloneURL, s.resolveCloneToken(ctx, orgID, owner, repo))
 	}
 	wtPath, err := worktree.CreateForPR(ctx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, runID,
 		worktree.WithCloneAuth(cloneAuth),

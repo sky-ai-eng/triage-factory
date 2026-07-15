@@ -55,19 +55,21 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("runmode: %w", err)
 	}
 
-	// Resolve the deployment role (TF_ROLE, default all) right after the
-	// mode and before the argv dispatch, so the `migrate` subcommand and
-	// every subsystem see the same role. An invalid value fails boot
-	// loudly; local mode coerces any split role to all (it is structurally
-	// single-process) and we log the coercion rather than brick a laptop
-	// over a stray env var.
-	coerced, requested, err := runmode.InitRoleFromEnv()
+	// Resolve the deployment role (TF_ROLE) right after the mode and
+	// before the argv dispatch, so the `migrate` subcommand and every
+	// subsystem see the same role. Multi mode requires control or
+	// executor — anything else (unset, "all", a typo) fails boot loudly
+	// with a pointer at the split blueprint, since multi is always the
+	// control+executor split. Local mode ignores TF_ROLE entirely (the
+	// single-process shape is gated on the mode, not a role); a set value
+	// logs one warning rather than bricking a laptop over a stray env var.
+	ignored, rawRole, err := runmode.InitRoleFromEnv()
 	if err != nil {
 		return fmt.Errorf("runmode role: %w", err)
 	}
-	if coerced {
-		bootLog.Warn("TF_ROLE ignored in local mode: local is single-process and always runs as role=all",
-			"requested", requested, "effective", runmode.Role())
+	if ignored {
+		bootLog.Warn("TF_ROLE ignored in local mode: local is single-process by construction (roles exist only in multi mode)",
+			"value", rawRole)
 	}
 
 	// CLI subcommands short-circuit before any server wiring: exec/status

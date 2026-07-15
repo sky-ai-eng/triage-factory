@@ -504,14 +504,14 @@ func (c *LocalClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (do
 
 // --- jira ---
 //
-// jiraSystemClient builds the org's bot-attributed Jira client. On
-// TF_ROLE=executor, when the daemon attached a sealed run bundle to ctx
-// (server.dispatch), it builds straight from the bundle's Jira credential —
-// no secret-store read, since the secret store is disabled on an executor.
-// Every other role/mode falls through to the ForSystem resolver: local mode
-// reads the OS keychain on the user's own machine, TF_ROLE=all reads the
-// live (Vault-backed) secret store. Either way the agent process never holds
-// the token.
+// jiraSystemClient builds the org's bot-attributed Jira client. In multi
+// mode the daemon lives in the run's credential sidecar and proxyCreds is
+// always set, so every Jira verb routes through the sidecar's REST proxy —
+// no secret-store read anywhere in multi (the executor's store is disabled,
+// and the fused single process that once read the live store is gone).
+// Local mode falls through to the ForSystem resolver over the OS keychain
+// on the user's own machine. Either way the agent process never holds the
+// token.
 //
 // A missing credential maps to a clear "not configured" message (the
 // guidance exec printed before handing off); every other resolver error

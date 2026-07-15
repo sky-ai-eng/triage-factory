@@ -76,9 +76,8 @@ func (a *App) dispatchCtl(payload string) {
 		}
 		a.handleCtlMessage(msg)
 	case "kick":
-		// nil at TF_ROLE=all in multi mode (single-process by construction,
-		// buildWSBackplane never runs) and on a pod whose backplane build
-		// found no DSN — no sockets to kick either way.
+		// nil on a pod whose backplane build found no DSN — no sockets to
+		// kick there anyway (local never reaches this listener at all).
 		if a.wsBackplane != nil {
 			a.wsBackplane.HandleCtlKick(payload)
 		}

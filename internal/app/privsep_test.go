@@ -38,7 +38,7 @@ func TestStartCapBrokerIfSandboxing_RefusesOrchestratorUIDInSidecarBand(t *testi
 		return nil, nil, nil
 	}
 
-	a := &App{}
+	a := &App{plan: planForRole(runmode.RoleExecutor)}
 	err := a.startCapBrokerIfSandboxing(context.Background())
 	if err == nil {
 		t.Fatal("expected a fatal error when the orchestrator's own uid falls inside the reserved sidecar band")
@@ -72,7 +72,7 @@ func TestStartCapBrokerIfSandboxing_AllowsOrchestratorUIDOutsideSidecarBand(t *t
 		return nil, nil, nil
 	}
 
-	a := &App{}
+	a := &App{plan: planForRole(runmode.RoleExecutor)}
 	if err := a.startCapBrokerIfSandboxing(context.Background()); err != nil {
 		t.Fatalf("startCapBrokerIfSandboxing: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestStartCapBrokerIfSandboxing_FailClosed(t *testing.T) {
 		return nil, nil, wantErr
 	}
 
-	a := &App{}
+	a := &App{plan: planForRole(runmode.RoleExecutor)}
 	err := a.startCapBrokerIfSandboxing(context.Background())
 	if err == nil {
 		t.Fatal("expected a fatal error when the broker can't start on a sandboxing host — no silent fallback to a less-isolated launch")

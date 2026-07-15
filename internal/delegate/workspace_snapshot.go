@@ -321,14 +321,14 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID, owner, repo,
 
 	if man.HasGit {
 		delta := &worktree.GitDelta{Branch: man.Branch, Head: man.Head, Bundle: bundle, Patch: patch}
-		// Mint the host-side clone credential for this repo's owner, mirroring the
-		// PR-setup path (delegate.go). resolveCloneToken runs through the tiered
-		// resolver (App installation token or org PAT), and CloneAuthFor no-ops on
-		// an SSH URL / empty token, so this is inert in local SSH mode and for
-		// public clones — only a multi-mode HTTPS private repo gets the token,
-		// which authenticates both the on-demand re-clone and the checkout's lazy
-		// promisor fetch inside RestoreWorkspaceGit.
-		auth := worktree.CloneAuthFor(cloneURL, s.resolveCloneToken(ctx, orgID, owner, repo))
+		// No clone credential is minted here: every ensureWorkspace caller
+		// passes an empty cloneURL (the rebuild replays the delta onto a bare
+		// that already exists on this host), and CloneAuthFor returns zero
+		// auth for an empty URL — so the former token mint never reached git.
+		// If a fresh-host seed-from-cloneURL path lands later, its auth must
+		// route through the run's credential sidecar (the git proxy), never an
+		// in-process resolver read.
+		auth := worktree.CloneAuthFor(cloneURL, "")
 		if err := worktree.RestoreWorkspaceGit(ctx, owner, repo, wtDir, delta, cloneURL, auth); err != nil {
 			return fmt.Errorf("rehydrate: restore git: %w", err)
 		}

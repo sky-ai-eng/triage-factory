@@ -80,8 +80,8 @@ type Server struct {
 	ghResolver ghclient.Resolver
 
 	// proxyCreds points the gh/jira verbs at this run's credential-sidecar REST
-	// proxies (TF_ROLE=executor runs only — the spawner passes nil on
-	// TF_ROLE=all and local mode). When set, every gh/jira verb builds a client
+	// proxies — always set in multi mode, where the daemon lives in the
+	// sidecar; nil in local mode. When set, every gh/jira verb builds a client
 	// against the proxy URL holding only a per-run placeholder; the sidecar
 	// injects the real credential on the upstream hop, so this daemon holds
 	// none. nil resolves through ghResolver / the Jira resolver exactly as

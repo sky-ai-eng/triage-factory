@@ -104,7 +104,7 @@ func TestResolve_ExcludesDeadDrainingControl(t *testing.T) {
 		t.Fatalf("exactly one eligible candidate, got %d", eligible)
 	}
 	for id, want := range map[string]string{
-		"exec-dead": "dead", "exec-drain": "draining", "ctl": "control-only", "exec-nocap": "no-capacity",
+		"exec-dead": "dead", "exec-drain": "draining", "ctl": "not-an-executor", "exec-nocap": "no-capacity",
 	} {
 		if reasons[id] != want {
 			t.Fatalf("candidate %s reason = %q, want %q", id, reasons[id], want)

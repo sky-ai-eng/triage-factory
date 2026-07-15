@@ -22,58 +22,54 @@
 #
 #   docker compose up -d
 #
-# A sandbox-hosting TF container (the `all` default, and every `executor`)
-# needs SYS_ADMIN + NET_ADMIN + a seccomp profile permissive enough for the
-# in-container gVisor sandbox (netns + iptables + runsc) — a tailored
-# allowlist as of TFAC-608, not `unconfined`; see
-# docs/security/seccomp-profile.md. A pure control pod launches no sandbox
-# and drops all of this via docker-compose.control.yml (see the "Scaling
-# out" note below).
-# The `cap_add` / `security_opt` block on the sandbox-hosting service is
-# what makes self-host work on the same Docker engine that Fly Machines use
-# upstream. Managed-Kubernetes / Railway / Render block these
-# primitives and won't host a sandbox-hosting role — that's by design (the
-# sandbox is why the multi-tenant story is safe at all); a capless control
-# pod, by contrast, is an ordinary web service those platforms can run.
+# ── Topology: multi mode is ALWAYS control + executor ─────────────────
+# The default `docker compose up` brings up the co-located split: one
+# `triagefactory` control pod (the published entrypoint — API/WS, the
+# leader-elected background brain, the secret store) plus one `executor`
+# (the sandbox worker — run dispatcher, gVisor jails, per-run credential
+# sidecars). There is no single-process `all` shape in multi mode: the
+# binary refuses to boot multi with TF_ROLE=all or unset, so the
+# credential-isolation boundary hangs on the MODE — every multi deployment
+# is per-run-isolated by construction, and only the executor container
+# ever holds sandbox capabilities. (`all` remains local mode's shape,
+# which needs none of this stack.)
 #
-# This grant is a ceiling on the container, not a promise that the whole
-# TF process wields it. Inside the container, docker/entrypoint.sh spawns
-# a small `cap-broker` process that is the only thing holding
-# SYS_ADMIN/NET_ADMIN, then execs the main TF binary (the "orchestrator" —
-# the one parsing webhook payloads, agent output, and holding
-# credentials) into an empty capability set, a different unprivileged
-# uid, and a cleared capability bounding set, before that process runs a
-# single line of Go. See docs/security/privilege-separation.md for the process-model
-# table (also documents the privilege-separation model).
+# Only the EXECUTOR needs SYS_ADMIN + NET_ADMIN + a seccomp profile
+# permissive enough for the in-container gVisor sandbox (netns + iptables
+# + runsc) — a tailored allowlist as of TFAC-608, not `unconfined`; see
+# docs/security/seccomp-profile.md. The control pod launches no sandbox —
+# curator chats home to executors and the brain's own LLM work is
+# toolless direct calls — so it runs as an ordinary capless web service,
+# hostable even on platforms (managed Kubernetes / Railway / Render) that
+# block privileged primitives. Those platforms still can't host
+# executors; that's by design (the sandbox is why the multi-tenant story
+# is safe at all).
 #
-# ── Scaling out (TFAC-582) ────────────────────────────────────────────
-# The default `docker compose up` runs the single all-in-one
-# `triagefactory` service (TF_ROLE unset → all) — one box, no LB, exactly
-# as before. To split the execution plane across a control pod + N sandbox
-# workers, layer the capless-control override on and start the `scale`
-# profile:
+# The executor's grant is a ceiling on the container, not a promise that
+# the whole TF process wields it. Inside the container,
+# docker/entrypoint.sh spawns a small `cap-broker` process that is the
+# only thing holding SYS_ADMIN/NET_ADMIN, then execs the main TF binary
+# (the "orchestrator" — the one parsing agent output) into an empty
+# capability set, a different unprivileged uid, and a cleared capability
+# bounding set, before that process runs a single line of Go. See
+# docs/security/privilege-separation.md for the process-model table.
 #
-#   docker compose -f docker-compose.yml -f docker-compose.control.yml \
-#     --profile scale up -d --scale executor=2
+# ── Scaling out ────────────────────────────────────────────────────────
+# Add executors by scaling the executor service:
 #
-# That yields 1 control (the published entrypoint — executors take no
-# inbound traffic, so there is NO load balancer in this shape) plus 2
-# executors, each on its own TF_STATE_ROOT volume. Both roles run the same
-# image and the same entrypoint, but only the SANDBOX-HOSTING roles carry
-# the caps: an executor sandboxes delegated runs, while a control pod
-# launches no sandbox at all — curator chats home to executors and the
-# brain's own LLM work is toolless direct calls — so it runs capless, with
-# docker-compose.control.yml clearing its caps + seccomp (see that file's
-# header). See docs/self-hosting/scaling.md for the override-file workflow
-# (and its Docker Compose ≥ 2.24 floor), the N-executor profile, the
-# max_connections arithmetic, and the M≥2-control (HA) reference
-# reverse-proxy config.
+#   docker compose up -d --scale executor=3
+#
+# Control stays the single published entrypoint (executors take no
+# inbound traffic, so there is NO load balancer in this shape); each
+# executor replica gets its own anonymous TF_STATE_ROOT volume. See
+# docs/self-hosting/scaling.md for the max_connections arithmetic and the
+# M≥2-control (HA) reference reverse-proxy config.
 
 # Shared, security-critical container hardening for the SANDBOX-HOSTING
-# roles (the `all` default + every `executor`). Anchored so those services
-# can never drift on the caps + seccomp + cgroup shape. A control pod
-# launches no sandbox and clears this whole block via
-# docker-compose.control.yml, so it needs none of it:
+# role — the executor service (every replica). Anchored so the shape can
+# never drift on caps + seccomp + cgroup. The control service deliberately
+# does NOT reference this block — it launches no sandbox and needs none of
+# it:
 #   - SYS_ADMIN + NET_ADMIN: the in-container gVisor sandbox's netns +
 #     iptables + runsc work. Held ONLY by the cap-broker inside the
 #     container; the orchestrator execs capless (see the header above).
@@ -453,17 +449,15 @@ services:
       seaweedfs-postinit: { condition: service_completed_successfully }
     environment:
       TF_MODE: multi
-      # Deployment role (TFAC-582). Unset → all (the single all-in-one box,
-      # today's shape). To scale out, layer docker-compose.control.yml on top
-      # of this file: it pins TF_ROLE=control AND clears the sandbox caps, so
-      # this service becomes the API + brain (capless) while the `executor`
-      # service(s) claim + sandbox the delegated runs. That override is why
-      # the value here can stay unset by default — a bare `docker compose up`
-      # is still the all-in-one box. Invalid values fail boot loudly; local
-      # mode would force all (moot here — this is multi).
-      TF_ROLE: ${TF_ROLE:-}
+      # Deployment role: this service IS the control pod — API/WS, the
+      # leader-elected background brain, migrations, the secret store. Fixed,
+      # not operator-tunable: multi mode refuses to boot as `all` (there is
+      # no fused single-process shape), and the `executor` service below
+      # claims + sandboxes the delegated runs. Capless by construction — see
+      # the topology header at the top of this file.
+      TF_ROLE: control
       # Per-role Postgres pool ceiling (per pool) + advisory platform reserve.
-      # Empty → the role default (control/all: 25 conns/pool, 12 GB reserve;
+      # Empty → the role default (control: 25 conns/pool, 12 GB reserve;
       # executor: 6 conns/pool, 2 GB reserve). See the max_connections
       # arithmetic in docs/self-hosting/scaling.md.
       TF_DB_MAX_OPEN_CONNS: ${TF_DB_MAX_OPEN_CONNS:-}
@@ -514,35 +508,24 @@ services:
       TF_PREVENT_ORG_CREATION: ${TF_PREVENT_ORG_CREATION:-}
       TF_TRUSTED_PROXY_CIDR: ${TF_TRUSTED_PROXY_CIDR:-}
       TF_CAPTURE_CLIENT_IP: ${TF_CAPTURE_CLIENT_IP:-}
-      # Privilege separation (docker/entrypoint.sh, see .env.example): on a
-      # sandbox-hosting role (the `all` default here) the cap-broker is the
-      # only sandbox launch path and is spawned at boot. A control pod (the
-      # docker-compose.control.yml override) skips the broker entirely. These
-      # knobs only tune the orchestrator uid/gid, $HOME, and the broker
-      # socket path.
+      # Privilege separation (docker/entrypoint.sh, see .env.example): the
+      # entrypoint's exec-time drop runs on every role — control simply
+      # skips the cap-broker spawn (it never launches a sandbox, and this
+      # service carries no caps to broker anyway). These knobs only tune
+      # the orchestrator uid/gid, $HOME, and the broker socket path.
       TF_ORCHESTRATOR_UID: ${TF_ORCHESTRATOR_UID:-}
       TF_ORCHESTRATOR_GID: ${TF_ORCHESTRATOR_GID:-}
       TF_ORCHESTRATOR_HOME: ${TF_ORCHESTRATOR_HOME:-}
       TF_CAPBROKER_SOCKET: ${TF_CAPBROKER_SOCKET:-}
       TF_SANDBOX_GID: ${TF_SANDBOX_GID:-}
-    # Sandbox caps + seccomp + private cgroup — see the x-tf-hardening
-    # anchor above (shared with the executor service so they can't drift).
-    # The docker-compose.control.yml override clears the caps + seccomp here
-    # when this service runs as a control pod, which needs none of them.
-    <<: *tf-hardening
+    # No x-tf-hardening here, deliberately: a control pod launches no
+    # sandbox, so it carries no SYS_ADMIN/NET_ADMIN, no custom seccomp, and
+    # runs like any ordinary web service. Only the executor service below
+    # references the hardening anchor.
     volumes:
-      # Host-global toolchain cache: the runtime-extracted sandbox rootfs
-      # (~hundreds of MB). Kept warm across `docker compose down/up` so a
-      # restart doesn't re-extract the alpine tree (~5 min cold). The Agent
-      # SDK is baked into the image at /opt/triagefactory/sdk (a sibling of
-      # this mount) and deliberately NOT volume-mounted: a named volume over
-      # it would shadow the image's copy and pin a stale SDK across image
-      # bumps, so the image always wins for the SDK while only the cache
-      # persists here.
-      - tf-rootfs:/opt/triagefactory/sandbox
-      # Tenant-data caches under StateRoot (/data in multi): per-org worktree
-      # bare clones + curator shared repos. Re-seedable on demand, but
-      # persisting avoids a full re-clone on every restart.
+      # Tenant-data caches under StateRoot (/data in multi): per-org curator
+      # project state + control-side caches. (The sandbox rootfs cache lives
+      # on executors — control never extracts one.)
       - tf-data:/data
     ports:
       - "3000:3000"
@@ -554,20 +537,18 @@ services:
       start_period: 30s
 
   # ── Sandbox worker (TFAC-582) ─────────────────────────────────────────
-  # Only started with the `scale` profile, layering the capless-control
-  # override so the main service is a control pod (see the "Scaling out"
-  # header at the top of this file):
+  # Part of the DEFAULT `docker compose up` — multi mode is always the
+  # control+executor split, and this is the executor half (one replica by
+  # default; scale with `--scale executor=N`, see the topology header).
   #
-  #   docker compose -f docker-compose.yml -f docker-compose.control.yml \
-  #     --profile scale up -d --scale executor=2
-  #
-  # Same image + entrypoint as the control pod (broker-then-drop privilege
-  # separation), TF_ROLE=executor. It runs the delegated-run dispatcher +
-  # sandboxes + per-run proxies + reapers and NOTHING else — no user HTTP,
-  # no pollers, no router, no AI managers, no migrations (it asserts the
-  # schema in-process at boot, refusing a behind/ahead mismatch). It accepts
-  # NO inbound traffic (no published ports); the control pod is the single
-  # entrypoint, so there is no load balancer in this shape.
+  # Same image + entrypoint as the control pod (with the broker-then-drop
+  # privilege separation the control pod skips), TF_ROLE=executor. It runs
+  # the delegated-run dispatcher + sandboxes + per-run credential sidecars +
+  # reapers and NOTHING else — no user HTTP, no pollers, no router, no AI
+  # managers, no migrations (it asserts the schema in-process at boot,
+  # refusing a behind/ahead mismatch). It accepts NO inbound traffic (no
+  # published ports); the control pod is the single entrypoint, so there is
+  # no load balancer in this shape.
   #
   # Shared-nothing: each replica gets its OWN anonymous /data
   # (TF_STATE_ROOT) and /opt/triagefactory/sandbox (rootfs cache) volume —
@@ -576,8 +557,9 @@ services:
   # boot) and violate the shared-nothing model. The tradeoff is each
   # replica re-extracts the sandbox rootfs once on first boot (~minutes,
   # cold) and anonymous volumes accumulate until `docker compose down -v`.
+  # Executor disk is cache by design — durable state (Postgres, workspace
+  # snapshots, the KB blob store) lives in the backing services.
   executor:
-    profiles: ["scale"]
     build:
       context: .
       dockerfile: docker/Dockerfile
@@ -616,7 +598,7 @@ services:
       # runs no migrations and no RLS request handlers, so its app pool is
       # effectively idle; both pools ship much smaller ceilings than the API
       # tier (see TF_DB_MAX_OPEN_CONNS and the max_connections arithmetic in
-      # docs/self-hosting/scaling.md). Control/all pods keep the supabase_admin
+      # docs/self-hosting/scaling.md). Control pods keep the supabase_admin
       # DSN unchanged — narrowing control is explicitly out of scope.
       TF_DATABASE_URL: postgres://tf_system:${TF_SYSTEM_PASSWORD:?missing TF_SYSTEM_PASSWORD (see .env.example)}@postgres:5432/postgres
       TF_AUTHENTICATOR_PASSWORD: ${TF_AUTHENTICATOR_PASSWORD:?missing TF_AUTHENTICATOR_PASSWORD (see .env.example)}
@@ -640,16 +622,17 @@ services:
       TF_DB_MAX_OPEN_CONNS: ${TF_DB_MAX_OPEN_CONNS:-}
       TF_PLATFORM_RESERVE_MB: ${TF_PLATFORM_RESERVE_MB:-}
       # Privilege separation (docker/entrypoint.sh): the executor sandboxes
-      # every delegated run, so the cap-broker is spawned unconditionally,
-      # exactly as on the control pod. These only tune the orchestrator
-      # uid/gid, $HOME, and broker socket path.
+      # every delegated run, so the cap-broker is spawned unconditionally —
+      # unlike the control pod, which skips it. These only tune the
+      # orchestrator uid/gid, $HOME, and broker socket path.
       TF_ORCHESTRATOR_UID: ${TF_ORCHESTRATOR_UID:-}
       TF_ORCHESTRATOR_GID: ${TF_ORCHESTRATOR_GID:-}
       TF_ORCHESTRATOR_HOME: ${TF_ORCHESTRATOR_HOME:-}
       TF_CAPBROKER_SOCKET: ${TF_CAPBROKER_SOCKET:-}
       TF_SANDBOX_GID: ${TF_SANDBOX_GID:-}
-    # Same sandbox caps + seccomp + private cgroup as the control pod — an
-    # executor's whole job is launching sandboxes.
+    # Sandbox caps + seccomp + private cgroup (the x-tf-hardening anchor) —
+    # an executor's whole job is launching sandboxes, and it is the ONLY
+    # service that carries these.
     <<: *tf-hardening
     volumes:
       # Anonymous, per-replica (see the shared-nothing note above).
@@ -672,6 +655,5 @@ services:
 
 volumes:
   pg-data:
-  tf-rootfs:
   tf-data:
   seaweed-data:

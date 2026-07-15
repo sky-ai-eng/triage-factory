@@ -440,11 +440,12 @@ func (a *App) buildCuratorRuntime() error {
 	return nil
 }
 
-// sweepStrandedCuratorTurns runs the boot recovery sweep: ownership-scoped on a
-// multi-mode split role (control/executor), global on local / role=all. See
-// buildCuratorRuntime for the rationale.
+// sweepStrandedCuratorTurns runs the boot recovery sweep: ownership-scoped in
+// multi mode (always a split role — control/executor), global in local, where
+// the single process owned every row. See buildCuratorRuntime for the
+// rationale.
 func (a *App) sweepStrandedCuratorTurns(multi bool) {
-	if multi && a.plan.role != runmode.RoleAll {
+	if multi {
 		if n, err := a.stores.Curator.CancelStrandedRequestsForHomeSystem(context.Background(), a.identity.ID, "process restarted"); err != nil {
 			curatorLog.Error("sweep stranded homed turns failed", "error", err)
 		} else if n > 0 {

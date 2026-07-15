@@ -169,8 +169,8 @@ func (a *App) stopBrain(reason string) {
 func (a *App) isBrainHolder() bool {
 	switch a.plan.role {
 	case runmode.RoleAll:
-		// Single process, always self-holds — local mode always resolves
-		// here too (InitRoleFromEnv coerces any split role to all there).
+		// Local-only (multi rejects all at boot): the single local process
+		// always self-holds.
 		return true
 	case runmode.RoleExecutor:
 		// Never brain-capable; every relay call must go over tf_ctl.
