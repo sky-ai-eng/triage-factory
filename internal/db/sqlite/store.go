@@ -141,6 +141,11 @@ func New(conn *sql.DB) db.Stores {
 		// one connection (N=1, no RLS). Fleet membership registry — one
 		// row, epoch bumping per restart.
 		Instances: newInstanceStore(conn),
+		// InstanceStats + Operators collapse to the one connection (N=1). The
+		// sampler still writes stats; operators is effectively unused (the
+		// single local user is implicitly the operator). See TFAC-589.
+		InstanceStats: newInstanceStatStore(conn),
+		Operators:     newOperatorStore(conn),
 		// RunSignals is Postgres-only (TFAC-585): this is a stub returning
 		// ErrNotApplicableInLocal from every method — local mode is always
 		// its own run's owner, so no code path may reach it.

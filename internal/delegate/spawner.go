@@ -154,6 +154,10 @@ type Spawner struct {
 	// RunDispatcher). Also the liveness read the cross-pod signal seam
 	// (TFAC-585) uses to decide whether a run's executor is still around.
 	instances db.InstanceStore
+	// instanceStats is the 1-minute fleet telemetry sink RunInstanceStatSampler
+	// writes (TFAC-589). Nil-safe: a nil store makes the sampler a logged no-op,
+	// same shape as instances on the heartbeat loop.
+	instanceStats db.InstanceStatStore
 	// pendingInput is the durable half of resume-by-enqueue (TFAC-585): the
 	// message recorded before a parked run's continuation is re-queued as
 	// ordinary claimable work. Wired unconditionally in NewSpawner — both
@@ -422,6 +426,18 @@ type Spawner struct {
 	// NewSpawner so existing all-role behavior is unchanged.
 	reportCapacity atomic.Bool
 
+	// claimCount accumulates successful run claims for the 1-minute fleet
+	// telemetry sampler (TFAC-589). Incremented once per claimed run in the
+	// dispatch loop; TakeClaims swaps it to 0 so each sample reports the
+	// delta since the last. A monotonic counter read-and-reset, never a gate.
+	claimCount atomic.Int64
+	// spawnMu guards spawnDurationsMS — the per-run bring-up latencies
+	// (claim → agent start) recorded since the last sample. TakeSpawnP50MS
+	// computes the median and clears the slice. Bounded implicitly by the
+	// 1-minute drain cadence (at most one entry per run started in the window).
+	spawnMu          sync.Mutex
+	spawnDurationsMS []int
+
 	agentToolsOnce  sync.Once
 	agentToolsCache string
 
@@ -467,6 +483,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		externalActions:  stores.ExternalActions,
 		teams:            stores.Teams,
 		instances:        stores.Instances,
+		instanceStats:    stores.InstanceStats,
 		pendingInput:     stores.RunPendingInput,
 		pendingFirings:   stores.PendingFirings,
 		tx:               stores.Tx,

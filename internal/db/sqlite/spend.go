@@ -111,6 +111,29 @@ func (s *spendStore) SpendByCategorySystemForTeam(ctx context.Context, orgID, te
 	return s.spendByCategory(ctx, orgID, teamID, since, until)
 }
 
+func (s *spendStore) SpendTotalSystem(ctx context.Context, since, until time.Time) (float64, error) {
+	// N=1: one org, so a cross-org total needs no org filter (and would be
+	// wrong to pin to the local sentinel — there is nothing else to sum).
+	var where strings.Builder
+	where.WriteString(`WHERE 1=1`)
+	args := []any{}
+	if !since.IsZero() {
+		where.WriteString(` AND datetime(occurred_at) >= datetime(?)`)
+		args = append(args, since)
+	}
+	if !until.IsZero() {
+		where.WriteString(` AND datetime(occurred_at) < datetime(?)`)
+		args = append(args, until)
+	}
+	var total sql.NullFloat64
+	err := s.q.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(total_cost_usd), 0) FROM llm_spend `+where.String(), args...).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("spend total: %w", err)
+	}
+	return total.Float64, nil
+}
+
 func (s *spendStore) SpendByCategory(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error) {
 	return s.spendByCategory(ctx, orgID, "", since, until)
 }

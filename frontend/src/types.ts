@@ -489,6 +489,11 @@ export interface MeResponse {
    *  by the server (both modes) — true in local mode (N=1, never renders
    *  onboarding). */
   org_creation_enabled: boolean
+  /** Whether this identity is a deployment operator (TFAC-589) — the org-less
+   *  flag managed by `triagefactory operator`. Composes with the FeatureFleet
+   *  entitlement to gate the Fleet console nav item + page. Always sent (both
+   *  modes); true in local mode (the single user is the implicit operator). */
+  is_operator: boolean
 }
 
 /** One linked login identity for the signed-in principal, from
@@ -1190,4 +1195,143 @@ export interface AccessLogResponse {
   limit: number
   offset: number
   has_more: boolean
+}
+
+// --- Fleet console (TFAC-589) — mirrors ee/fleet DTOs ---
+
+export interface FleetTotals {
+  instances: number
+  executors: number
+  control: number
+  draining: number
+  gated: number
+  stale: number
+  capacity_max: number
+  active_runs: number
+}
+
+export interface FleetQueueSummary {
+  depth: number
+  oldest_wait_seconds: number
+  wait_p50_ms?: number
+  wait_p95_ms?: number
+}
+
+export interface FleetFailureKindRate {
+  kind: string
+  count: number
+}
+
+export interface FleetRunsSummary {
+  window_hours: number
+  total: number
+  active: number
+  completed: number
+  failed: number
+  duration_p50_ms?: number
+  duration_p95_ms?: number
+  failure_kinds: FleetFailureKindRate[]
+}
+
+export interface FleetVersionSkew {
+  version: string
+  count: number
+}
+
+export interface FleetSpendSummary {
+  window_hours: number
+  total_usd: number
+}
+
+export interface FleetOverview {
+  generated_at: string
+  stale_after_seconds: number
+  totals: FleetTotals
+  queue: FleetQueueSummary
+  runs: FleetRunsSummary
+  versions: FleetVersionSkew[]
+  spend?: FleetSpendSummary
+}
+
+export interface FleetInstance {
+  id: string
+  role: string
+  version: string
+  boot_epoch: number
+  started_at: string
+  last_heartbeat_at: string
+  heartbeat_age_seconds: number
+  stale: boolean
+  draining: boolean
+  dispatch_gated?: boolean
+  max_runs?: number
+  active_runs?: number
+  mem_total_mb?: number
+  mem_available_mb?: number
+  cpu_pct?: number
+  load1?: number
+  claims_last_sample?: number
+  spawn_p50_ms?: number
+}
+
+export interface FleetInstances {
+  generated_at: string
+  stale_after_seconds: number
+  instances: FleetInstance[]
+}
+
+export interface FleetSample {
+  instance_id: string
+  at: string
+  active_runs?: number
+  queued_visible?: number
+  mem_available_mb?: number
+  cpu_pct?: number
+  load1?: number
+  claims?: number
+  spawn_p50_ms?: number
+  oom_kills?: number
+}
+
+export interface FleetTimeseries {
+  generated_at: string
+  window_hours: number
+  samples: FleetSample[]
+}
+
+export interface FleetOrgQueueShare {
+  org_id: string
+  count: number
+  oldest_wait_seconds: number
+}
+
+export interface FleetQueue {
+  generated_at: string
+  depth: number
+  oldest_wait_seconds: number
+  by_org: FleetOrgQueueShare[]
+}
+
+// UsageOrgOps — the org-scoped operations subset (TFAC-589): an org admin's own
+// queue waits + run durations, mirroring GET /api/usage/org/ops. SaaS-safe (no
+// cross-tenant machine truth).
+export interface UsageOrgOpsFailureKind {
+  kind: string
+  count: number
+}
+
+export interface UsageOrgOps {
+  window_since: string
+  window_until: string
+  queue_depth: number
+  oldest_wait_seconds: number
+  wait_p50_ms?: number
+  wait_p95_ms?: number
+  runs_total: number
+  runs_active: number
+  runs_completed: number
+  runs_failed: number
+  duration_p50_ms?: number
+  duration_p95_ms?: number
+  failure_kinds: UsageOrgOpsFailureKind[]
 }

@@ -27,6 +27,13 @@ func newAuthEventStore(q queryer) db.AuthEventStore {
 	return &authEventStore{q: q}
 }
 
+// NewAuthEventStore builds a standalone db.AuthEventStore against a pooled
+// *sql.DB — the narrow constructor the `triagefactory operator` CLI uses to
+// append its operator-grant/revoke audit rows without the full db.Stores bundle.
+func NewAuthEventStore(conn *sql.DB) db.AuthEventStore {
+	return newAuthEventStore(conn)
+}
+
 var _ db.AuthEventStore = (*authEventStore)(nil)
 
 // authEventColumns is the SELECT list scanned into a domain.AuthEvent via

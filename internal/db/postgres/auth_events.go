@@ -23,6 +23,13 @@ func newAuthEventStore(admin queryer) db.AuthEventStore {
 	return &authEventStore{admin: admin}
 }
 
+// NewAuthEventStore builds a standalone db.AuthEventStore against a pooled
+// *sql.DB — the narrow constructor the `triagefactory operator` CLI uses to
+// append its operator-grant/revoke audit rows without the full db.Stores bundle.
+func NewAuthEventStore(admin *sql.DB) db.AuthEventStore {
+	return newAuthEventStore(admin)
+}
+
 var _ db.AuthEventStore = (*authEventStore)(nil)
 
 // pgAuthEventColumns is the SELECT list scanned into a domain.AuthEvent via

@@ -48,6 +48,15 @@ const (
 	AuthEventJWTVerifyFailure       = "jwt_verify_failure"
 	AuthEventSSOEnforcementRejected = "sso_enforcement_rejected" // EE
 	AuthEventBreakGlassLogin        = "break_glass_login"        // EE
+	// Deployment-operator grant/revoke (TFAC-589), recorded by the
+	// `triagefactory operator` CLI. Org-less (an operator is deployment
+	// config, not a member role), so these land here with a NULL org rather
+	// than in the org-scoped access_change_log — auth_events is the durable
+	// SOC2 record with nullable org, the right home for a deployment-wide
+	// access change. UserID is empty (a shell operator, not a session user);
+	// the granted email + the OS actor ride detail_json.
+	AuthEventOperatorGranted = "operator_granted"
+	AuthEventOperatorRevoked = "operator_revoked"
 )
 
 // AuthEventListOpts bounds + filters a read for tests and the deferred viewer

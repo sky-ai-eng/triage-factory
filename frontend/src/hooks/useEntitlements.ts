@@ -102,6 +102,12 @@ export function invalidateEntitlements(): void {
 export const FeatureGovernance = 'governance' as const
 export const FeatureSSO = 'sso' as const
 export const FeatureSlack = 'slack' as const
+// FeatureFleet gates the sandbox-fleet administration console. Deployment-
+// scoped server-side (resolves via entitlements.Active()); on self-host the
+// /api/entitlements probe reports it identically for every org, so the FE gate
+// `has(FeatureFleet)` is correct here. The nav item additionally requires the
+// operator flag from /api/me — the two compose exactly as the backend gate does.
+export const FeatureFleet = 'fleet' as const
 
 export interface Entitlements {
   /** Whether `feature` is licensed for the viewer. False until the probe

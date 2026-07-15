@@ -8228,6 +8228,83 @@ REVOKE ALL ON public.curator_homes FROM PUBLIC;
 REVOKE ALL ON public.curator_homes FROM anon, authenticated, service_role;
 
 
+-- instance_stats: 1-minute telemetry samples, one row per pod per minute,
+-- written by the sampler alongside the registry heartbeat and read by the
+-- fleet dashboard's timeseries + overview surfaces. The registry row
+-- (instances) carries the *current* capacity/admission snapshot; this table
+-- carries its *history* plus the fields too transient for the 4s heartbeat to
+-- be a useful record of (per-sample claim rate, spawn latency, OOM kills).
+--
+-- Every metric column is nullable on purpose: a control pod has no runs to
+-- report (active_runs/queued_visible/claims/spawn_p50_ms stay NULL), and a
+-- non-Linux or unconfined host can't report cpu/load/oom — a partial sample is
+-- still a useful row, so the sampler writes whatever it could read rather than
+-- dropping the sample. mem_available_mb comes from hostmem (cgroup-aware
+-- instance truth), never a host-wide /proc/meminfo read.
+--
+-- Admin-pool-only / system table, same posture as instances: no org_id (a
+-- fleet member's telemetry isn't tenant data). RLS enabled with NO policy
+-- (deny-by-default to non-BYPASSRLS roles) + REVOKE ALL from PUBLIC + the app
+-- roles; the admin pool does all I/O. A ~30d retention reaper trims it.
+CREATE TABLE public.instance_stats (
+    instance_id       text NOT NULL,
+    at                timestamp with time zone NOT NULL,
+    active_runs       integer,
+    queued_visible    integer,
+    mem_available_mb  integer,
+    cpu_pct           real,
+    load1             real,
+    claims            integer,
+    spawn_p50_ms      integer,
+    oom_kills         integer
+);
+
+ALTER TABLE ONLY public.instance_stats
+    ADD CONSTRAINT instance_stats_pkey PRIMARY KEY (instance_id, at);
+
+-- The reaper deletes by age and the fleet-wide timeseries scans a recent
+-- window across all instances, both keyed on `at` alone (the PK's leading
+-- instance_id can't serve either) — so a dedicated `at` index earns its keep.
+CREATE INDEX instance_stats_at_idx ON public.instance_stats USING btree (at);
+
+ALTER TABLE public.instance_stats ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.instance_stats FROM PUBLIC;
+REVOKE ALL ON public.instance_stats FROM anon, authenticated, service_role;
+
+
+-- operators: the deployment-operator identity — the CLI-managed flag that
+-- gates the fleet console (fleet administration is deployment-scoped, so an
+-- operator is org-less: it is not a member role). Managed only through
+-- `triagefactory operator add|remove|list <email>`; the bootstrap trust
+-- boundary is shell access to the deployment, the same boundary as jwk-init.
+--
+-- Keyed on the lower-cased email rather than a user id on purpose: the email is
+-- what the CLI names, it is present on every verified session (claims.Email
+-- from GoTrue), and keying on it lets an operator be authorized before their
+-- first login (no user row exists yet) and survive user-row churn. The gate is
+-- a plain lookup of the request's verified email against this table.
+--
+-- Admin-pool-only / system table, same posture as instances: no org_id (an
+-- operator is deployment config, not tenant data). RLS enabled with NO policy +
+-- REVOKE ALL from PUBLIC + the app roles; the admin pool does all I/O.
+CREATE TABLE public.operators (
+    email     text NOT NULL,
+    added_at  timestamp with time zone NOT NULL DEFAULT now(),
+    -- added_by: the OS user that ran the CLI, best-effort provenance for the
+    -- `operator list` read-out. Not an authorization input.
+    added_by  text
+);
+
+ALTER TABLE ONLY public.operators
+    ADD CONSTRAINT operators_pkey PRIMARY KEY (email);
+
+ALTER TABLE public.operators ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.operators FROM PUBLIC;
+REVOKE ALL ON public.operators FROM anon, authenticated, service_role;
+
+
 -- ws_outbox: overflow storage for the tf_ws backplane (TFAC-584, spec
 -- §5.1/§5). websocket.Hub.Broadcast publishes an envelope on tf_ws for
 -- every control pod to fan into its own local sockets; NOTIFY caps a
@@ -8551,6 +8628,16 @@ GRANT USAGE, SELECT ON SEQUENCE public.ws_outbox_id_seq TO tf_system;
 GRANT SELECT, DELETE ON TABLE public.ws_presence TO tf_system;
 -- Fleet registry: this instance's own register + heartbeat + drain flag.
 GRANT SELECT, INSERT, UPDATE ON TABLE public.instances TO tf_system;
+-- instance_stats: the per-pod sampler INSERTs one row a minute, and the
+-- retention reaper DELETEs the tail — both run on every pod, executors
+-- included. SELECT for the dashboard read (a control pod's admin pool, but
+-- granted here too so the posture matches instances regardless of which admin
+-- role a pod's pool binds).
+GRANT SELECT, INSERT, DELETE ON TABLE public.instance_stats TO tf_system;
+-- operators: the deployment-operator identity. The fleet gate + the operator
+-- CLI read/write it via the admin pool; granted to tf_system so the operator
+-- CLI works regardless of which admin role its connection binds.
+GRANT SELECT, INSERT, DELETE ON TABLE public.operators TO tf_system;
 -- placement_overrides (TFAC-587): SELECT-only. The dispatcher's post-step
 -- reactor enqueues the next blueprint step on the executor, and the
 -- placement stamp it computes reads any override for the run's key. Writes

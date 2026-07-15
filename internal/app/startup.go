@@ -132,6 +132,11 @@ func (a *App) startWorkers(ctx context.Context) {
 	// on executor-capable roles — see SetReportCapacity).
 	go a.spawner.RunInstanceHeartbeat(ctx, delegate.DefaultInstanceHeartbeatInterval)
 
+	// Fleet telemetry sampler (TFAC-589): every role writes one instance_stats
+	// row a minute (cpu/load/mem/oom deployment-wide; run-scoped fields only on
+	// executor-capable roles) and reaps the ~30d tail. The dashboard reads it.
+	go a.spawner.RunInstanceStatSampler(ctx, delegate.DefaultInstanceStatSampleInterval, delegate.DefaultInstanceStatRetention)
+
 	// WS backplane workers (TFAC-584) — nil in local mode / before
 	// buildWSBackplane wires it, so every branch below is a no-op there.
 	if a.wsBackplane != nil {

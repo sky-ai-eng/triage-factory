@@ -35,6 +35,7 @@ import type {
   UsageOrgLevelBucket,
   UsageDayBucket,
   UsageDayModelBucket,
+  UsageOrgOps,
 } from '../types'
 
 // Usage is the core spend dashboard (TFAC-479) over the spend-layer read API
@@ -1313,6 +1314,108 @@ function TeamCaps({
   )
 }
 
+// fmtOpsMs / fmtOpsDur render latency + wait figures for the Operations band —
+// local to this section (the spend console works in dollars, not durations).
+function fmtOpsMs(ms: number | undefined): string {
+  if (ms == null) return '—'
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  const s = ms / 1000
+  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)}s`
+  return `${(s / 60).toFixed(1)}m`
+}
+
+function fmtOpsDur(seconds: number): string {
+  if (seconds < 1) return '0s'
+  if (seconds < 60) return `${Math.round(seconds)}s`
+  const m = seconds / 60
+  if (m < 60) return `${m.toFixed(m < 10 ? 1 : 0)}m`
+  return `${(m / 60).toFixed(1)}h`
+}
+
+// OrgOpsBand — the org-scoped operations subset (TFAC-589): queue waits + run
+// durations for the org admin, the org-facing complement to the operator-only
+// fleet console. Core (not governance-gated); mirrors the burn-console
+// aesthetic with etched instruments. Absent silently on a fetch error.
+function OrgOpsBand({ since }: { since: string }) {
+  const { data } = useUsageFetch<UsageOrgOps>(withWindow('/api/usage/org/ops', since))
+  if (!data) return null
+  const failRate = data.runs_total > 0 ? (data.runs_failed / data.runs_total) * 100 : 0
+  return (
+    <section className="mb-12">
+      <div className="mb-6 flex items-end gap-4">
+        <span className="pb-1.5 font-mono text-[12px] font-semibold uppercase tracking-[0.2em] text-text-secondary">
+          Operations
+        </span>
+        <span className="mb-[9px] h-px flex-1 bg-border-subtle" />
+        <span className="pb-0.5 font-mono text-[10px] uppercase tracking-wider text-text-tertiary/70">
+          queue &amp; run latency · this window
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-x-10 gap-y-8 md:grid-cols-3 lg:grid-cols-5">
+        <Instrument label="Queue depth">
+          <p className="font-mono text-[22px] font-light tabular-nums text-text-primary">
+            {data.queue_depth}
+          </p>
+          <p className="mt-1 font-mono text-[10px] text-text-tertiary">
+            oldest {data.queue_depth > 0 ? fmtOpsDur(data.oldest_wait_seconds) : '—'}
+          </p>
+        </Instrument>
+        <Instrument
+          label="Queue wait"
+          aside={<span className="font-mono text-[9px] text-text-tertiary/60">p50 · p95</span>}
+        >
+          <p className="font-mono text-[22px] font-light tabular-nums text-text-primary">
+            {fmtOpsMs(data.wait_p50_ms)}
+          </p>
+          <p className="mt-1 font-mono text-[10px] text-text-tertiary">
+            p95 {fmtOpsMs(data.wait_p95_ms)}
+          </p>
+        </Instrument>
+        <Instrument
+          label="Run duration"
+          aside={<span className="font-mono text-[9px] text-text-tertiary/60">p50 · p95</span>}
+        >
+          <p className="font-mono text-[22px] font-light tabular-nums text-text-primary">
+            {fmtOpsMs(data.duration_p50_ms)}
+          </p>
+          <p className="mt-1 font-mono text-[10px] text-text-tertiary">
+            p95 {fmtOpsMs(data.duration_p95_ms)}
+          </p>
+        </Instrument>
+        <Instrument label="Runs">
+          <p className="font-mono text-[22px] font-light tabular-nums text-text-primary">
+            {data.runs_total}
+          </p>
+          <p className="mt-1 font-mono text-[10px] text-text-tertiary">
+            {data.runs_completed} done · {data.runs_active} active
+          </p>
+        </Instrument>
+        <Instrument
+          label="Failures"
+          aside={
+            <span
+              className={`font-mono text-[9px] tabular-nums ${failRate > 5 ? 'text-dismiss' : 'text-text-tertiary/60'}`}
+            >
+              {failRate.toFixed(1)}%
+            </span>
+          }
+        >
+          <p
+            className={`font-mono text-[22px] font-light tabular-nums ${data.runs_failed > 0 ? 'text-dismiss' : 'text-text-primary'}`}
+          >
+            {data.runs_failed}
+          </p>
+          <p className="mt-1 truncate font-mono text-[10px] text-text-tertiary">
+            {data.failure_kinds.length > 0
+              ? data.failure_kinds.map((f) => f.kind.replace(/_/g, ' ')).join(', ')
+              : 'none'}
+          </p>
+        </Instrument>
+      </div>
+    </section>
+  )
+}
+
 function OrgSection({ since, days, gov }: { since: string; days: number; gov: boolean }) {
   const { data, error } = useUsageFetch<UsageOrgResponse>(withWindow('/api/usage/org', since))
   // Per-team caps are an EE/governance surface; render the editor only when the
@@ -1374,6 +1477,9 @@ function OrgSection({ since, days, gov }: { since: string; days: number; gov: bo
           />
         </div>
       </Band>
+      {/* Operations subset (TFAC-589) — org-scoped queue/run latency, core (not
+          governance-gated); the org-facing complement to the fleet console. */}
+      <OrgOpsBand since={since} />
       {/* EE activity feed (Actions / Objects lenses) — org-wide (cross-team), behind FeatureGovernance. */}
       {gov && <ActivityFeed baseUrl="/api/usage/org/activity" showTeam />}
     </>

@@ -197,6 +197,40 @@ type RunQueueStore interface {
 	// this heals rows already broken at boot. Cross-org system sweep; returns the
 	// count cancelled.
 	ReconcileOrphanedRuns(ctx context.Context) (int, error)
+
+	// CountQueuedSystem returns how many runs are currently in status='queued'
+	// across the whole deployment — the fleet-wide backlog the sampler records
+	// as instance_stats.queued_visible (the depth any executor could claim).
+	// A count, not a placement-eligibility filter: placement is advisory, so
+	// the global queued depth is the honest "work waiting" number. Cross-org
+	// system read on the admin pool.
+	CountQueuedSystem(ctx context.Context) (int, error)
+
+	// RecentRunTimingsSystem returns the timing projection of every run started
+	// at-or-after `since`, newest first, capped at `limit` rows — the fleet
+	// dashboard's source for queue-wait and run-duration percentiles and
+	// failure-kind rates (TFAC-589). Percentiles are computed Go-side (portable
+	// across SQLite/Postgres, matching the usage handler's aggregation style),
+	// so this returns rows, not aggregates. Cross-org system read.
+	RecentRunTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.RunTiming, error)
+
+	// QueuedRunAgesSystem returns every currently-queued run's org + enqueue
+	// time (+ any placement preference), for the fleet queue view's
+	// oldest-waiting age and per-org share. Unwindowed on purpose — a run that
+	// has waited a long time is the one worth surfacing. Cross-org system read.
+	QueuedRunAgesSystem(ctx context.Context) ([]domain.QueuedRun, error)
+
+	// RecentRunTimingsForOrgSystem is RecentRunTimingsSystem narrowed to one
+	// org (WHERE org_id = orgID) — the org-scoped operations subset an org
+	// admin sees on /usage (their queue waits + run durations), SaaS-safe with
+	// no cross-tenant machine truth. Admin pool with org bound by argument, the
+	// same posture as SpendByCategorySystem; the HTTP org-admin gate is the
+	// authorization to read it.
+	RecentRunTimingsForOrgSystem(ctx context.Context, orgID string, since time.Time, limit int) ([]domain.RunTiming, error)
+
+	// QueuedRunAgesForOrgSystem is QueuedRunAgesSystem narrowed to one org —
+	// the org-scoped queue depth + oldest wait for the /usage ops subset.
+	QueuedRunAgesForOrgSystem(ctx context.Context, orgID string) ([]domain.QueuedRun, error)
 }
 
 // OrgQueueShare is one org's run-queue occupancy from FleetQueueShares — the
