@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
@@ -193,6 +194,29 @@ func (s *projectSession) dispatch(item queueItem) {
 	if err != nil {
 		s.failRequest(item, fmt.Sprintf("knowledge dir: %v", err))
 		return
+	}
+
+	// Knowledge-base blob sync brackets (multi mode). fsnotify can drop
+	// events, so every turn is bracketed: pull the store→disk diff before the
+	// agent runs so it sees panel uploads and any writes another executor
+	// made, and reconcile disk→store after runAgent returns (all exit paths)
+	// so anything the executor's watcher missed still lands durably. Local
+	// mode's KB on disk is already the truth — no blob store in the path — so
+	// both are skipped and behavior is byte-identical.
+	if kb := s.curator.getKB(); kb != nil && runmode.Current() == runmode.ModeMulti {
+		kbDir := filepath.Join(cwd, "knowledge-base")
+		if mErr := materializeProjectKB(msgCtx, kb, item.orgID, s.projectID, kbDir); mErr != nil {
+			curatorLog.Warn("kb turn-start materialize failed", "project", s.projectID, "error", mErr)
+		}
+		defer func() {
+			// WithoutCancel(s.ctx): the reconcile must complete even on a
+			// cancelled turn or a shutting-down session — it is the durability
+			// backstop. Registered after the materialize so it fires on every
+			// exit path below, runAgent included.
+			if rErr := reconcileProjectKB(context.WithoutCancel(s.ctx), kb, item.orgID, s.projectID, kbDir); rErr != nil {
+				curatorLog.Warn("kb turn-end reconcile failed", "project", s.projectID, "error", rErr)
+			}
+		}()
 	}
 
 	// Consume pending context-change rows AND read the project state in

@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -78,6 +79,14 @@ type Curator struct {
 	// so the live path is byte-for-byte the direct agentproc.Run call.
 	runAgent func(context.Context, agentproc.RunOptions, agentproc.Sink) (*agentproc.Outcome, error)
 
+	// kb is the multi-mode knowledge-base blob store. On an
+	// executor the session brackets materialize the KB store→disk at turn
+	// start and reconcile disk→store at turn end through it, and the
+	// kb_changed doorbell materializes a panel upload into a live session's
+	// dir. nil in local mode and in tests, where the brackets branch on
+	// runmode and never touch it.
+	kb *kbstore.Store
+
 	// closed is set during Shutdown; SendMessage rejects after this.
 	closed bool
 }
@@ -119,6 +128,37 @@ func (c *Curator) SetRunCredentialResolvers(resolver ghclient.Resolver, secrets 
 	c.ghResolver = resolver
 	c.secrets = secrets
 	c.modelFor = modelFor
+}
+
+// SetKBStore wires the knowledge-base blob store so the session
+// brackets and the kb_changed doorbell can materialize/reconcile the KB
+// against the object store in multi mode. Set once at startup on pods that
+// build a curator; nil in local mode leaves the brackets on their no-op
+// branch (local KB is plain on-disk files, already the truth).
+func (c *Curator) SetKBStore(kb *kbstore.Store) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.kb = kb
+}
+
+// getKB returns the wired KB store under the lock, matching getSecrets' race-
+// free accessor shape.
+func (c *Curator) getKB() *kbstore.Store {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.kb
+}
+
+// HasLiveSession reports whether this pod currently runs a session goroutine
+// for the project — the in-memory self-filter the kb_changed doorbell uses to
+// decide whether a panel upload must be materialized into a live turn's dir
+// (the home-but-idle case is covered by the next turn's start-materialize, so
+// it needs no per-executor DB read here).
+func (c *Curator) HasLiveSession(projectID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.sessions[projectID]
+	return ok
 }
 
 // SetLLMResolver wires the shared brain-side LLM-credential resolver

@@ -13,6 +13,7 @@ import {
   Image as ImageIcon,
   File as FileIcon,
   Download,
+  Loader2,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import type {
@@ -1036,6 +1037,11 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
+  // syncing holds filenames the executor syncer reported as in-flight uploads
+  // (multi mode's `pending` field). We render a ghost row per name not yet in
+  // the durable listing, so a large upload reads as progress rather than a
+  // confusing delay. Cleared when the batch-complete event (no pending) lands.
+  const [syncing, setSyncing] = useState<string[]>([])
   // Synchronous ref so the drop/picker guards can reject overlapping
   // uploads without racing setState. A naive `if (uploading) return`
   // would let a second drop slip through between the first call's
@@ -1110,6 +1116,11 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
   useWebSocket((event) => {
     if (event.type !== 'project_knowledge_updated') return
     if (event.project_id !== projectId) return
+    const pending = event.data?.pending
+    // Batch start carries the names being uploaded; batch complete carries no
+    // pending field, so we clear the ghost rows and let the refetch show the
+    // now-durable files.
+    setSyncing(pending && pending.length > 0 ? pending : [])
     refreshFiles()
   })
 
@@ -1207,6 +1218,11 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
     }
   }
 
+  // Ghost rows: syncing names not yet present in the durable listing. As each
+  // upload lands and a refetch brings it into `files`, its ghost drops out.
+  const knownPaths = new Set(files.map((f) => f.path))
+  const ghostNames = syncing.filter((n) => !knownPaths.has(n))
+
   return (
     <Card
       className={`transition-shadow duration-200 ${dragOver ? 'ring-2 ring-accent' : ''}`}
@@ -1248,7 +1264,7 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
 
       {loading ? (
         <div className="text-[12px] text-text-tertiary">Loading…</div>
-      ) : files.length === 0 ? (
+      ) : files.length === 0 && ghostNames.length === 0 ? (
         <div className="text-[12px] text-text-tertiary italic py-4 text-center">
           No knowledge files yet. Drop files here or click <span className="not-italic">+ Add</span>
           .
@@ -1267,6 +1283,9 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
               onToggle={() => setExpanded(expanded === file.path ? null : file.path)}
               onDelete={() => handleDelete(file)}
             />
+          ))}
+          {ghostNames.map((name) => (
+            <KnowledgeSyncingRow key={`syncing:${name}`} name={name} />
           ))}
         </div>
       )}
@@ -1485,6 +1504,22 @@ function hasFiles(e: React.DragEvent): boolean {
 // Empty content with a text-shaped mime means the file was over the
 // inline-size limit; we lazy-fetch via the raw endpoint on first
 // expand.
+// KnowledgeSyncingRow is the ghost row shown for a file the executor syncer is
+// still uploading to the blob store (multi mode's `pending` names). It mirrors
+// KnowledgeRow's frame with a spinner and no actions, so a large upload reads
+// as in-progress until its durable listing entry arrives and replaces it.
+function KnowledgeSyncingRow({ name }: { name: string }) {
+  return (
+    <div className="rounded-lg border border-border-subtle border-dashed bg-white/20 overflow-hidden">
+      <div className="flex items-center gap-3 px-3 py-2 min-w-0">
+        <Loader2 size={14} className="shrink-0 animate-spin text-text-tertiary" />
+        <span className="flex-1 truncate text-[13px] text-text-tertiary">{name}</span>
+        <span className="shrink-0 text-[11px] text-text-tertiary italic">Syncing…</span>
+      </div>
+    </div>
+  )
+}
+
 function KnowledgeRow({
   projectId,
   file,

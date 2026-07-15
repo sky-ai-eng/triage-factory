@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -23,6 +24,14 @@ type fsStorage struct {
 // disk (the root is created lazily on the first Put), so it can't fail.
 func newFSStorage(dir string) *fsStorage {
 	return &fsStorage{root: dir}
+}
+
+// NewFS is the exported constructor for the filesystem backend, so a caller
+// (a handler or syncer test) can build a real, disk-backed Storage over a
+// temp dir without going through New's mode selection. Production still
+// reaches the filesystem backend only via New in local mode.
+func NewFS(root string) Storage {
+	return newFSStorage(root)
 }
 
 func (s *fsStorage) Put(ctx context.Context, key string, r io.Reader) error {
@@ -69,6 +78,104 @@ func (s *fsStorage) Get(ctx context.Context, key string) (io.ReadCloser, error) 
 		return nil, err
 	}
 	return f, nil
+}
+
+func (s *fsStorage) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+	p, err := s.path(key)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			f.Close()
+			return nil, err
+		}
+	}
+	if length < 0 {
+		return f, nil
+	}
+	// LimitReader caps the body at length; the file handle still needs
+	// closing, so wrap the pair so the caller's single Close reaches the
+	// underlying *os.File.
+	return &limitedFile{Reader: io.LimitReader(f, length), f: f}, nil
+}
+
+// limitedFile pairs a length-bounded reader with the file handle it reads
+// from so GetRange can return an io.ReadCloser whose Close reaches the
+// underlying descriptor rather than leaking it.
+type limitedFile struct {
+	io.Reader
+	f *os.File
+}
+
+func (l *limitedFile) Close() error { return l.f.Close() }
+
+func (s *fsStorage) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	// The prefix names a subtree under the root; walk it and re-derive each
+	// file's key by stripping the root back off. A prefix that resolves to a
+	// missing dir is an empty listing, matching the object store's "no keys
+	// under this prefix" (not an error). Reuse path()'s containment rules by
+	// resolving the prefix as a key would be — but the prefix may name a
+	// directory rather than a single object, so resolve against the root
+	// directly here while keeping the ".." rejection.
+	for _, seg := range strings.Split(prefix, "/") {
+		if seg == ".." {
+			return nil, fmt.Errorf("storage: invalid prefix %q (..)", prefix)
+		}
+	}
+	root := filepath.Clean(s.root)
+	rel := strings.TrimPrefix(path.Clean("/"+strings.TrimPrefix(prefix, "/")), "/")
+	start := root
+	if rel != "" {
+		start = filepath.Join(root, filepath.FromSlash(rel))
+	}
+	if !strings.HasPrefix(start, root) {
+		return nil, fmt.Errorf("storage: invalid prefix %q", prefix)
+	}
+	var out []ObjectInfo
+	err := filepath.WalkDir(start, func(full string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			// A missing start dir is "no objects", not a failure.
+			if os.IsNotExist(walkErr) {
+				return nil
+			}
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // raced deletion during the walk
+			}
+			return err
+		}
+		keyRel, err := filepath.Rel(root, full)
+		if err != nil {
+			return err
+		}
+		out = append(out, ObjectInfo{
+			Key:     filepath.ToSlash(keyRel),
+			Size:    info.Size(),
+			ModTime: info.ModTime(),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (s *fsStorage) Delete(ctx context.Context, key string) error {

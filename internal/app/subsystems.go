@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
@@ -282,7 +283,18 @@ func (a *App) buildExecution() error {
 	if err != nil {
 		return fmt.Errorf("storage init: %w", err)
 	}
+	a.blobStore = blobStore
 	a.spawner.SetStorage(blobStore)
+	// One kbstore over the same blob store, shared by every KB consumer
+	// (handlers, executor syncer, classifier, project bundle). In multi mode
+	// it is the KB source of truth; local mode never reads it (the handlers
+	// stay on their byte-identical on-disk path).
+	a.kbStore = kbstore.New(blobStore)
+	// The classifier is built earlier (buildAI) than the KB store, so hand it
+	// the store now. Nil-safe: only brain-capable roles build a classifier.
+	if a.classifier != nil {
+		a.classifier.SetKBStore(a.kbStore)
+	}
 
 	// Cross-pod run control (TFAC-585): the run_signals outbox is Postgres-
 	// only, so this is the ONE gate that keeps local mode structurally free
@@ -344,6 +356,14 @@ func (a *App) buildExecution() error {
 	if a.curator != nil {
 		a.srv.SetCurator(a.curator)
 	}
+	// KB blob seam for the Knowledge panel handlers. The handlers branch on
+	// runmode, so this is inert in local mode; the doorbell that nudges the
+	// home executor to materialize a panel upload mid-session only exists in
+	// multi mode (tf_ctl NOTIFY has no local analogue).
+	a.srv.SetKBStore(a.kbStore)
+	if runmode.Current() == runmode.ModeMulti {
+		a.srv.SetKBChangedDoorbell(a.publishKBDoorbell)
+	}
 	return nil
 }
 
@@ -378,6 +398,11 @@ func (a *App) buildCuratorRuntime() error {
 
 	a.curator = curator.New(a.stores, a.wsHub, "")
 	a.curator.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
+	// KB blob seam: in multi mode the executor materializes the
+	// project KB from the store at turn start and reconciles disk→store at
+	// turn end, so the curator holds the same *kbstore.Store the handlers use.
+	// Inert in local mode (the session brackets branch on runmode).
+	a.curator.SetKBStore(a.kbStore)
 	if a.llmResolver != nil {
 		a.curator.SetLLMResolver(llmcred.SystemEnvResolver(a.llmResolver, "tf-curator"))
 	}
@@ -430,6 +455,22 @@ func (a *App) publishCuratorDoorbell(kind, orgID, projectID string) {
 	msg := ctlbus.Message{Kind: kind, OrgID: orgID, ProjectID: projectID}
 	if err := ctlbus.Publish(context.Background(), a.database, msg); err != nil {
 		appLog.Warn("curator doorbell publish failed", "kind", kind, "project", projectID, "error", err)
+	}
+}
+
+// publishKBDoorbell publishes a "kb_changed" tf_ctl notification:
+// the KB upload/delete handlers ring it so the home executor materializes the
+// panel write into a live session's dir, and op="project_deleted" tells the
+// home executor to drop its materialized project dir. Best-effort — a publish
+// error only costs the executor its turn-start materialize latency. Wired onto
+// the server's kbChangedDoorbell seam in buildExecution (multi mode only).
+func (a *App) publishKBDoorbell(op, orgID, projectID string) {
+	if a.database == nil {
+		return
+	}
+	msg := ctlbus.Message{Kind: "kb_changed", OrgID: orgID, ProjectID: projectID, Op: op}
+	if err := ctlbus.Publish(context.Background(), a.database, msg); err != nil {
+		appLog.Warn("kb doorbell publish failed", "op", op, "project", projectID, "error", err)
 	}
 }
 

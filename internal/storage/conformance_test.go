@@ -82,6 +82,85 @@ func runConformance(t *testing.T, store Storage) {
 		}
 	})
 
+	t.Run("get range", func(t *testing.T) {
+		key := "org-1/run-5/ranged.bin"
+		body := []byte("0123456789abcdef")
+		if err := store.Put(ctx, key, bytes.NewReader(body)); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		// Bounded window in the middle: bytes [5, 9).
+		rc, err := store.GetRange(ctx, key, 5, 4)
+		if err != nil {
+			t.Fatalf("GetRange bounded: %v", err)
+		}
+		got, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			t.Fatalf("read bounded range: %v", err)
+		}
+		if want := body[5:9]; !bytes.Equal(got, want) {
+			t.Fatalf("GetRange(5,4) = %q; want %q", got, want)
+		}
+		// To-end from an offset: length < 0.
+		rc, err = store.GetRange(ctx, key, 10, -1)
+		if err != nil {
+			t.Fatalf("GetRange to-end: %v", err)
+		}
+		got, err = io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			t.Fatalf("read to-end range: %v", err)
+		}
+		if want := body[10:]; !bytes.Equal(got, want) {
+			t.Fatalf("GetRange(10,-1) = %q; want %q", got, want)
+		}
+		// Missing key surfaces ErrNotFound like Get does.
+		rc, err = store.GetRange(ctx, "org-1/run-5/nope", 0, 4)
+		if rc != nil {
+			rc.Close()
+		}
+		if !errors.Is(err, ErrNotFound) {
+			t.Fatalf("GetRange(missing) err = %v; want ErrNotFound", err)
+		}
+	})
+
+	t.Run("list", func(t *testing.T) {
+		// A dedicated prefix so the listing assertion is independent of the
+		// other subtests' keys.
+		prefix := "list-org/proj-9/kb/"
+		want := map[string]int64{
+			prefix + "a.md":         5,
+			prefix + "b.txt":        3,
+			prefix + "sub/deep.bin": 7,
+		}
+		for k, n := range want {
+			if err := store.Put(ctx, k, bytes.NewReader(bytes.Repeat([]byte("x"), int(n)))); err != nil {
+				t.Fatalf("Put %q: %v", k, err)
+			}
+		}
+		got, err := store.List(ctx, prefix)
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		gotByKey := map[string]int64{}
+		for _, o := range got {
+			gotByKey[o.Key] = o.Size
+		}
+		for k, n := range want {
+			if gotByKey[k] != n {
+				t.Fatalf("List missing/wrong %q: got size %d, want %d (full=%v)", k, gotByKey[k], n, gotByKey)
+			}
+		}
+		// A prefix matching nothing is an empty listing, not an error.
+		none, err := store.List(ctx, "list-org/does-not-exist/")
+		if err != nil {
+			t.Fatalf("List(empty prefix): %v", err)
+		}
+		if len(none) != 0 {
+			t.Fatalf("List(empty prefix) = %d entries; want 0", len(none))
+		}
+	})
+
 	t.Run("large streamed blob", func(t *testing.T) {
 		// 24 MiB is deliberately over the transfer manager's 16 MiB multipart
 		// threshold (8 MiB parts), so Put streams as a real multipart upload —

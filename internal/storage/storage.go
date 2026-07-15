@@ -16,6 +16,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -29,6 +30,17 @@ import (
 // as an error.
 var ErrNotFound = errors.New("storage: key not found")
 
+// ObjectInfo describes one stored blob returned by List: its full key,
+// byte size, and last-modified time. It is the listing shape both backends
+// map onto — the object store's ListObjectsV2 metadata and the filesystem's
+// os.FileInfo — so a caller can diff a store prefix against a local dir
+// without opening any blob.
+type ObjectInfo struct {
+	Key     string
+	Size    int64
+	ModTime time.Time
+}
+
 // Storage is a streamed, key-addressed blob store. Keys are opaque,
 // caller-namespaced strings (e.g. "<orgID>/<blueprint_run_id>/workspace.tar");
 // this package assigns them no structure. Put and Get stream their bodies
@@ -40,12 +52,26 @@ type Storage interface {
 	// Get opens the blob at key for streaming reads. The caller must Close
 	// the returned reader. A missing key returns ErrNotFound.
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
+	// GetRange opens a byte range of the blob at key for streaming reads.
+	// offset is the first byte to serve (0-based, within the blob); length
+	// is how many bytes, or a negative value for "to the end of the blob".
+	// The caller must Close the returned reader. A missing key returns
+	// ErrNotFound. Callers validate the range against a known size before
+	// calling — an out-of-range offset is a caller bug, and the object
+	// backend surfaces it as an S3 InvalidRange error rather than an empty
+	// read.
+	GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
 	// Delete removes the blob at key. Deleting a missing key is not an
 	// error (idempotent, matching S3 DELETE semantics).
 	Delete(ctx context.Context, key string) error
 	// Exists reports whether a blob is present at key. A missing key is
 	// (false, nil); only a backend failure returns a non-nil error.
 	Exists(ctx context.Context, key string) (bool, error)
+	// List returns every blob whose key begins with prefix, in no
+	// guaranteed order. A prefix that matches nothing is an empty slice,
+	// not an error. Keys are returned whole (prefix included), matching
+	// what Get/Delete expect back.
+	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
 }
 
 // New constructs the process-wide blob store for the current runtime mode.

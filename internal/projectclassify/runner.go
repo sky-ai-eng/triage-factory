@@ -7,6 +7,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
@@ -36,6 +37,7 @@ type Runner struct {
 	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests).
 	recorder   *systemllm.Recorder     // captures per-vote LLM cost + tokens into system_llm_runs (TFAC-451)
 	limiter    *syslimit.Limiter       // shared system-job sandbox cap (nil → unlimited).
+	kb         *kbstore.Store          // multi-mode KB blob store; set by the Manager, nil in local/tests.
 
 	// stage1Fn is the test seam (see stage1Func), defaulted in NewRunner
 	// to the real implementation.

@@ -8,4 +8,5 @@ import "github.com/sky-ai-eng/triage-factory/internal/logging"
 var (
 	curatorLog   = logging.Component("curator")
 	kbwatcherLog = logging.Component("kbwatcher")
+	kbsyncLog    = logging.Component("kbsync")
 )

@@ -19,7 +19,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -92,6 +94,7 @@ func (r *countingReader) Read(p []byte) (int, error) {
 func Import(
 	ctx context.Context,
 	txr db.TxRunner,
+	kb *kbstore.Store,
 	orgID, teamID, userID string,
 	readerAt io.ReaderAt,
 	size int64,
@@ -162,11 +165,21 @@ func Import(
 	kbRoot := filepath.Join(projectRoot, "knowledge-base")
 	extractionBudget := newZipExtractionBudget(maxImportExtractBundleBytes, maxImportExtractEntryBytes)
 
+	multiKB := kb != nil && runmode.Current() == runmode.ModeMulti
+
 	cleanup := &rollbackTracker{}
 	committed := false
 	defer func() {
 		if !committed {
 			cleanup.Cleanup()
+			if multiKB {
+				// The KB landed in the store, not on disk — the disk rollback
+				// can't reach it, so clear the prefix explicitly. WithoutCancel
+				// so a cancelled import ctx still cleans up.
+				if err := kb.DeletePrefix(context.WithoutCancel(ctx), orgID, newProjectID); err != nil {
+					bundleLog.Warn("rollback: clear imported kb store prefix failed", "project", newProjectID, "error", err)
+				}
+			}
 		}
 	}()
 
@@ -176,7 +189,14 @@ func Import(
 	if err := os.MkdirAll(kbRoot, 0o755); err != nil {
 		return nil, nil, fmt.Errorf("mkdir knowledge root: %w", err)
 	}
-	if err := materializeKnowledge(entries, kbRoot, extractionBudget); err != nil {
+	// Multi mode: the blob store is the KB source of truth, so stream the
+	// bundle's knowledge entries there (the executor materializes them to disk
+	// on the next turn). Local mode extracts to the on-disk knowledge-base dir.
+	if multiKB {
+		if err := uploadKnowledgeToStore(ctx, kb, orgID, newProjectID, entries, extractionBudget); err != nil {
+			return nil, nil, err
+		}
+	} else if err := materializeKnowledge(entries, kbRoot, extractionBudget); err != nil {
 		return nil, nil, err
 	}
 	if hasSession {
@@ -521,6 +541,45 @@ func materializeKnowledge(entries map[string]*zip.File, kbRoot string, extractio
 			return fmt.Errorf("mkdir knowledge parent for %s: %w", dest, err)
 		}
 		if err := copyZipEntryRaw(e.File, dest, 0o644, extractionBudget); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// uploadKnowledgeToStore streams the bundle's knowledge entries into the KB
+// blob store (multi mode) under the same extraction budget the on-disk path
+// enforces. Nested entries — which the flat KB layout never produces — are
+// rejected by the store's name validation, so a hand-crafted bundle can't
+// nest its way past the flat contract.
+func uploadKnowledgeToStore(ctx context.Context, kb *kbstore.Store, orgID, projectID string, entries map[string]*zip.File, extractionBudget *zipExtractionBudget) error {
+	kbEntries, err := listEntriesWithPrefix(entries, knowledgePrefix)
+	if err != nil {
+		return err
+	}
+	for _, e := range kbEntries {
+		rel, err := safeBundleRel(e.Name, knowledgePrefix)
+		if err != nil {
+			return err
+		}
+		if err := kbstore.ValidateName(rel); err != nil {
+			return fmt.Errorf("bundle knowledge entry %q is not a flat KB file: %w", e.Name, err)
+		}
+		declared, err := extractionBudget.reserve(e.File)
+		if err != nil {
+			return err
+		}
+		rc, err := e.File.Open()
+		if err != nil {
+			return fmt.Errorf("open bundle entry %s: %w", e.Name, err)
+		}
+		reader := &countingReader{r: io.LimitReader(rc, declared+1)}
+		putErr := kb.Put(ctx, orgID, projectID, rel, reader)
+		rc.Close()
+		if putErr != nil {
+			return fmt.Errorf("upload knowledge %s to store: %w", rel, putErr)
+		}
+		if err := verifyZipEntryBytes(e.Name, reader.n, declared); err != nil {
 			return err
 		}
 	}

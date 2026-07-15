@@ -6,6 +6,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
@@ -31,10 +32,21 @@ type Manager struct {
 	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests).
 	recorder   *systemllm.Recorder     // captures per-vote LLM cost + tokens into system_llm_runs (TFAC-451)
 	limiter    *syslimit.Limiter       // shared system-job sandbox cap, injected into every per-org Runner.
+	kb         *kbstore.Store          // multi-mode KB blob store; nil in local, where the KB is read from disk.
 
 	mu      sync.Mutex
 	runners map[string]*Runner
 	stopped bool
+}
+
+// SetKBStore wires the KB blob store so the classifier reads project
+// knowledge from the object store in multi mode. Set once at startup; nil in
+// local mode leaves readProjectKB on its byte-identical on-disk path. Runners
+// created after this inherit the store.
+func (m *Manager) SetKBStore(kb *kbstore.Store) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.kb = kb
 }
 
 // llmResolveFunc is the RunOptions.LLMResolver shape the classifier's Haiku
@@ -82,6 +94,7 @@ func (m *Manager) Trigger(orgID string) {
 	r, ok := m.runners[orgID]
 	if !ok {
 		r = NewRunner(m.entities, m.projects, orgID, m.secrets, m.llmResolve, m.recorder, m.limiter)
+		r.kb = m.kb
 		r.Start()
 		m.runners[orgID] = r
 	}

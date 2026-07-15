@@ -989,7 +989,16 @@ export type WSEvent =
       project_id: string
       data: { request_id: string; status: CuratorRequestStatus }
     }
-  | { type: 'project_knowledge_updated'; project_id: string; data: null }
+  | {
+      // data.pending (multi mode) lists filenames the executor syncer is
+      // uploading to the blob store — the panel renders ghost rows for them so
+      // a large-video upload reads as progress, not a confusing delay. A
+      // completion event carries data: null (nothing pending) and the panel
+      // refetches the durable listing. Local mode always sends data: null.
+      type: 'project_knowledge_updated'
+      project_id: string
+      data: { pending?: string[] } | null
+    }
   | {
       type: 'entities_assigned_to_project'
       project_id: string

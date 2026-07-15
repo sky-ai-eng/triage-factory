@@ -47,7 +47,12 @@ const Channel = "tf_ctl"
 // whichever executor holds the project's live session. Both curator kinds are
 // broadcast + self-filtered (the claim loop scans its own homed queue; only the
 // pod holding the session has something to cancel), so no target field is
-// needed.
+// needed. "kb_changed" uses OrgID/ProjectID/Op (project knowledge base): a
+// control pod's KB upload/delete nudging the home executor to materialize the
+// panel write into a live session's dir; Op="project_deleted" tells the home
+// executor to best-effort drop its materialized project dir. Broadcast +
+// self-filtered like the curator kinds — only the pod holding (or homing) the
+// project reacts.
 type Message struct {
 	Kind      string `json:"kind"`
 	Manager   string `json:"manager,omitempty"`
@@ -56,6 +61,7 @@ type Message struct {
 	Force     bool   `json:"force,omitempty"`
 	RunID     string `json:"run_id,omitempty"`
 	ProjectID string `json:"project_id,omitempty"`
+	Op        string `json:"op,omitempty"`
 }
 
 // execer is the minimal *sql.DB surface Publish needs — a pooled

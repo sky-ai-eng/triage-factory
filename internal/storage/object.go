@@ -188,6 +188,57 @@ func (o *objectStorage) Get(ctx context.Context, key string) (io.ReadCloser, err
 	return resp.Body, nil
 }
 
+func (o *objectStorage) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+	// The HTTP Range header the S3 GetObject API accepts: "bytes=off-" for
+	// to-end, "bytes=off-last" for a bounded window (last is inclusive, so
+	// off+length-1). The server responds 206 with just those bytes.
+	var rangeHdr string
+	if length < 0 {
+		rangeHdr = fmt.Sprintf("bytes=%d-", offset)
+	} else {
+		rangeHdr = fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)
+	}
+	resp, err := o.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(o.bucket),
+		Key:    aws.String(key),
+		Range:  aws.String(rangeHdr),
+	})
+	if err != nil {
+		if isNotFound(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("storage: get range %q: %w", key, err)
+	}
+	return resp.Body, nil
+}
+
+func (o *objectStorage) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	var out []ObjectInfo
+	var token *string
+	for {
+		resp, err := o.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(o.bucket),
+			Prefix:            aws.String(prefix),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("storage: list %q: %w", prefix, err)
+		}
+		for _, obj := range resp.Contents {
+			info := ObjectInfo{Key: aws.ToString(obj.Key), Size: aws.ToInt64(obj.Size)}
+			if obj.LastModified != nil {
+				info.ModTime = *obj.LastModified
+			}
+			out = append(out, info)
+		}
+		if !aws.ToBool(resp.IsTruncated) {
+			break
+		}
+		token = resp.NextContinuationToken
+	}
+	return out, nil
+}
+
 func (o *objectStorage) Delete(ctx context.Context, key string) error {
 	// S3 DELETE is idempotent — removing a missing key is a success — so
 	// this matches the filesystem backend without a special case.
