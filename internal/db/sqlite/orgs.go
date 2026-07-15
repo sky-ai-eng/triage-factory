@@ -92,19 +92,20 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		ghInterval, jiraInterval                 string
 		cloneProto                               string
 		maxDailyCost                             sql.NullFloat64
+		maxConcurrentRuns                        sql.NullInt64
 		marketplaceEnabled                       bool
 	)
 	err := q.QueryRowContext(ctx, `
 		SELECT github_base_url, github_poll_interval, github_clone_protocol,
 		       jira_base_url, jira_poll_interval,
 		       anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
-		       max_daily_cost_usd, marketplace_enabled
+		       max_daily_cost_usd, max_concurrent_runs, marketplace_enabled
 		FROM org_settings WHERE org_id = ?
 	`, orgID).Scan(
 		&ghURL, &ghInterval, &cloneProto,
 		&jiraURL, &jiraInterval,
 		&anthRef, &bedRef, &maxTier,
-		&maxDailyCost, &marketplaceEnabled,
+		&maxDailyCost, &maxConcurrentRuns, &marketplaceEnabled,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Provisioning is meant to seed an org_settings row at org-
@@ -136,7 +137,8 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		AnthropicAPIKeyRef:    anthRef.String,
 		BedrockCredentialsRef: bedRef.String,
 		MaxLLMModelTier:       maxTier.String,
-		MaxDailyCostUSD:       maxDailyCost.Float64, // NULL → 0 (no cap)
+		MaxDailyCostUSD:       maxDailyCost.Float64,         // NULL → 0 (no cap)
+		MaxConcurrentRuns:     int(maxConcurrentRuns.Int64), // NULL → 0 (unlimited)
 		MarketplaceEnabled:    marketplaceEnabled,
 	}, nil
 }
@@ -151,9 +153,9 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 			org_id, github_base_url, github_poll_interval, github_clone_protocol,
 			jira_base_url, jira_poll_interval,
 			anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
-			max_daily_cost_usd, marketplace_enabled,
+			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
 			updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(org_id) DO UPDATE SET
 			github_base_url = excluded.github_base_url,
 			github_poll_interval = excluded.github_poll_interval,
@@ -164,6 +166,7 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 			bedrock_credentials_ref = excluded.bedrock_credentials_ref,
 			max_llm_model_tier = excluded.max_llm_model_tier,
 			max_daily_cost_usd = excluded.max_daily_cost_usd,
+			max_concurrent_runs = excluded.max_concurrent_runs,
 			marketplace_enabled = excluded.marketplace_enabled,
 			updated_at = CURRENT_TIMESTAMP
 	`,
@@ -177,6 +180,7 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 		nullStringValue(u.BedrockCredentialsRef),
 		nullStringValue(u.MaxLLMModelTier),
 		nullFloatValue(u.MaxDailyCostUSD),
+		nullIntValue(u.MaxConcurrentRuns),
 		u.MarketplaceEnabled,
 	)
 	if err != nil {
@@ -205,6 +209,17 @@ func nullFloatValue(f float64) any {
 		return nil
 	}
 	return f
+}
+
+// nullIntValue returns nil when n is 0 so the column lands SQL NULL — the
+// integer analog of nullFloatValue. Used for nullable ceiling columns whose
+// Go zero value means "unset" (org_settings.max_concurrent_runs: 0 / NULL both
+// mean "unlimited").
+func nullIntValue(n int) any {
+	if n == 0 {
+		return nil
+	}
+	return n
 }
 
 // marshalJSONArray is shared by the team_settings + jira rules upserts:

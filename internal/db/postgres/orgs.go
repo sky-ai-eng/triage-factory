@@ -102,6 +102,7 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		ghSecs, jiraSecs                         float64
 		cloneProto                               string
 		maxDailyCost                             sql.NullFloat64
+		maxConcurrentRuns                        sql.NullInt64
 		marketplaceEnabled                       bool
 	)
 	// EXTRACT(EPOCH FROM interval) returns numeric in PG13+; the
@@ -116,13 +117,13 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		       jira_base_url,
 		       EXTRACT(EPOCH FROM jira_poll_interval)::double precision,
 		       anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
-		       max_daily_cost_usd, marketplace_enabled
+		       max_daily_cost_usd, max_concurrent_runs, marketplace_enabled
 		FROM org_settings WHERE org_id = $1
 	`, orgID).Scan(
 		&ghURL, &ghSecs, &cloneProto,
 		&jiraURL, &jiraSecs,
 		&anthRef, &bedRef, &maxTier,
-		&maxDailyCost, &marketplaceEnabled,
+		&maxDailyCost, &maxConcurrentRuns, &marketplaceEnabled,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Provisioning seeds org_settings rows at org-create time
@@ -144,7 +145,8 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		AnthropicAPIKeyRef:    anthRef.String,
 		BedrockCredentialsRef: bedRef.String,
 		MaxLLMModelTier:       maxTier.String,
-		MaxDailyCostUSD:       maxDailyCost.Float64, // NULL → 0 (no cap)
+		MaxDailyCostUSD:       maxDailyCost.Float64,         // NULL → 0 (no cap)
+		MaxConcurrentRuns:     int(maxConcurrentRuns.Int64), // NULL → 0 (unlimited)
 		MarketplaceEnabled:    marketplaceEnabled,
 	}, nil
 }
@@ -162,13 +164,13 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 			org_id, github_base_url, github_poll_interval, github_clone_protocol,
 			jira_base_url, jira_poll_interval,
 			anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
-			max_daily_cost_usd, marketplace_enabled,
+			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
 			updated_at
 		) VALUES (
 			$1, $2, make_interval(secs => $3), $4,
 			$5, make_interval(secs => $6),
 			$7, $8, $9,
-			$10, $11,
+			$10, $11, $12,
 			now()
 		)
 		ON CONFLICT (org_id) DO UPDATE SET
@@ -181,6 +183,7 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 			bedrock_credentials_ref = EXCLUDED.bedrock_credentials_ref,
 			max_llm_model_tier = EXCLUDED.max_llm_model_tier,
 			max_daily_cost_usd = EXCLUDED.max_daily_cost_usd,
+			max_concurrent_runs = EXCLUDED.max_concurrent_runs,
 			marketplace_enabled = EXCLUDED.marketplace_enabled,
 			updated_at = now()
 	`,
@@ -194,6 +197,7 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 		nullString(u.BedrockCredentialsRef),
 		nullString(u.MaxLLMModelTier),
 		nullFloat(u.MaxDailyCostUSD),
+		nullInt(u.MaxConcurrentRuns),
 		u.MarketplaceEnabled,
 	)
 	if err != nil {

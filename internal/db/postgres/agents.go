@@ -207,6 +207,17 @@ func nullFloat(f float64) any {
 	return f
 }
 
+// nullInt returns nil when n is 0 so the column ends up SQL NULL — the integer
+// analog of nullFloat. Used for nullable ceiling columns whose Go zero value
+// (0) means "unset" (e.g. org_settings.max_concurrent_runs, where 0 / NULL both
+// mean "unlimited").
+func nullInt(n int) any {
+	if n == 0 {
+		return nil
+	}
+	return n
+}
+
 // nullUUID returns nil for empty / non-UUID input, otherwise the string
 // for direct pgx UUID binding. Distinguished from nullString because
 // passing an empty string into a UUID column would 22P02-error.

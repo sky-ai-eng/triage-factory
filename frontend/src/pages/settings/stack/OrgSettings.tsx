@@ -54,7 +54,7 @@ import JiraAccessGroup from '../JiraAccessGroup'
 import AtlassianOAuthAppCard from '../AtlassianOAuthAppCard'
 import SlackWorkspacesCard from '../SlackWorkspacesCard'
 import TeamManagementSection from '../../../components/TeamManagementSection'
-import { dailyCapError, saveOrgConfig, type OrgConfigForm } from '../orgConfig'
+import { dailyCapError, concurrentRunsError, saveOrgConfig, type OrgConfigForm } from '../orgConfig'
 import { connectJira, JIRA_DEPLOYMENT_OPTIONS } from '../jiraConnect'
 import { connectAnthropic, CLAUDE_SOURCE_OPTIONS } from '../anthropicConnect'
 import { connectBedrock, bedrockPayloadFromForm } from '../bedrockConnect'
@@ -232,6 +232,14 @@ export default function OrgSettings({
   // Frontend input-layer validation: a typed cap must be a positive number
   // (blank = no cap). Gates the section's Save and surfaces an inline message.
   const dailyCapErr = dailyCapError(draft.org.max_daily_cost_usd)
+  const concurrentRunsValue = Number(baseline.org.max_concurrent_runs)
+  const concurrentRunsSummary =
+    baseline.org.max_concurrent_runs.trim() !== '' && concurrentRunsValue > 0
+      ? `${concurrentRunsValue} at once`
+      : 'Unlimited'
+  // Frontend input-layer validation: a typed limit must be a non-negative whole
+  // number (blank or 0 = unlimited). Gates the section's Save + inline message.
+  const concurrentRunsErr = concurrentRunsError(draft.org.max_concurrent_runs)
 
   // ── Claude credentials ── Captured via the validated connectAnthropic /
   // connectBedrock endpoints (never the bulk org POST). Local shows the
@@ -639,6 +647,68 @@ export default function OrgSettings({
             {dailyCapErr !== null && (
               <span id="daily-cap-error" className="mt-1.5 block text-[11px] text-dismiss">
                 {dailyCapErr}
+              </span>
+            )}
+          </label>
+        </div>
+      </SettingsSection>
+
+      {/* ── Concurrent run limit ── An admission ceiling on how many of the org's
+          runs execute at once across the fleet — the instantaneous sibling of
+          the daily spend cap. When the org is at its limit, further queued runs
+          wait (invisible to the claim) until an active one finishes; nothing is
+          dropped. Protects the org's own downstream (GitHub App rate limits, CI,
+          a flood of PRs) from an event storm. Blank or 0 = unlimited. Read live
+          by the claim, so a change takes effect on the next claim. */}
+      <SettingsSection
+        title="Concurrent run limit"
+        summary={concurrentRunsSummary}
+        dirty={draft.org.max_concurrent_runs !== baseline.org.max_concurrent_runs}
+        saving={isSaving('concurrent-runs')}
+        saveDisabled={concurrentRunsErr !== null}
+        onSave={() =>
+          commitOrgSlice(
+            'concurrent-runs',
+            { max_concurrent_runs: draft.org.max_concurrent_runs },
+            'Concurrent run limit',
+          )
+        }
+        onCancel={() => revertOrg(['max_concurrent_runs'])}
+      >
+        <div className="space-y-5">
+          <div className="space-y-1.5">
+            <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+              Limit concurrent agent runs
+            </h2>
+            <p className="text-[13px] leading-relaxed text-text-tertiary">
+              A ceiling on how many agent runs execute at once across the fleet. Use it to protect
+              your own downstream — a burst of events can otherwise open many pull requests at once,
+              each triggering a CI build, and hammer your GitHub App&rsquo;s rate limits. Runs over
+              the limit wait in the queue until an active one finishes; none are dropped, and
+              in-flight runs keep going. Leave blank (or 0) for no limit.
+            </p>
+          </div>
+          <label className="block max-w-[220px]">
+            <span className="mb-1.5 block text-[11px] text-text-tertiary">Max runs at once</span>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              inputMode="numeric"
+              placeholder="Unlimited"
+              aria-invalid={concurrentRunsErr !== null}
+              aria-describedby={concurrentRunsErr !== null ? 'concurrent-runs-error' : undefined}
+              value={draft.org.max_concurrent_runs}
+              onChange={(e) =>
+                patch({ org: { ...draft.org, max_concurrent_runs: e.target.value } })
+              }
+              className={`${inputClass} ${
+                concurrentRunsErr !== null ? 'border-dismiss/60 focus:border-dismiss/60' : ''
+              }`}
+            />
+            {concurrentRunsErr !== null && (
+              <span id="concurrent-runs-error" className="mt-1.5 block text-[11px] text-dismiss">
+                {concurrentRunsErr}
               </span>
             )}
           </label>
