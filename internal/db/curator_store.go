@@ -265,6 +265,35 @@ type CuratorStore interface {
 	// home owns a project, and the per-project session serializes turns.
 	ListQueuedRequestsForHomeSystem(ctx context.Context, homeInstanceID string) ([]domain.HomedCuratorRequest, error)
 
+	// PublishTurnCredPubKey records requestID's per-turn credential sidecar
+	// pubkey on curator_requests.cred_pubkey and — Postgres only — fires the
+	// tf_ctl curator_cred_request doorbell so the brain's provisioner seals this
+	// turn's bundle to it without waiting for the backstop sweep.
+	// The curator-turn analog of RunQueueStore.MarkAwaitingCredentials, but a
+	// curator turn has no 'awaiting_credentials' status of its own (it stays
+	// queued/running while the sidecar comes up), so the guard is: record only
+	// while the turn is non-terminal AND has no key yet — a late/duplicate
+	// publish can't reopen a finished turn or overwrite a key the brain may
+	// already be sealing to. matched is false when the guard didn't hold. Admin
+	// pool (the executor's sidecar bring-up runs with no JWT claims); empty
+	// pubkey round-trips (recorded as '') and fires no doorbell.
+	PublishTurnCredPubKey(ctx context.Context, orgID, requestID, pubkey string) (matched bool, err error)
+
+	// GetTurnProvisionInfoSystem reads the credential-provisioning fields of one
+	// curator turn via the admin pool — the brain's targeted single-turn read on
+	// a curator_cred_request notification: the doorbell carries only
+	// (org, request) ids, so the brain re-reads the live row rather than trusting
+	// a payload that could be stale. Returns ok=false when requestID is unknown.
+	GetTurnProvisionInfoSystem(ctx context.Context, orgID, requestID string) (*domain.CuratorTurnProvision, bool, error)
+
+	// ListAwaitingCredentialTurnsSystem returns every non-terminal curator turn
+	// that has published a sidecar pubkey but has no fresh sealed bundle yet — no
+	// curator_turn_credentials row, or one sealed under an older boot_epoch than
+	// the home executor's current one (a home restart). The backstop-sweep input
+	// for a dropped curator_cred_request notification (the relay is
+	// lossy by design). Admin pool / BYPASSRLS, cross-org system read.
+	ListAwaitingCredentialTurnsSystem(ctx context.Context) ([]domain.CuratorTurnProvision, error)
+
 	// CancelStrandedRequestsForHomeSystem flips every queued/running
 	// curator_request homed to homeInstanceID to cancelled with errMsg — the
 	// ownership-scoped recovery pass (curator homing, spec §6.3). Each pod

@@ -10,6 +10,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -61,6 +63,15 @@ type Curator struct {
 	// missed doorbell, so this is a latency optimization, never a correctness
 	// dependency.
 	doorbell func(kind, orgID, projectID string)
+
+	// bringUpTurnSandbox stands up a homed turn's executor sandbox (network +
+	// credential sidecar) before the turn runs — the delegation spawner's
+	// BringUpCuratorSandbox, wired via SetTurnSandbox on a multi-mode executor
+	// pod only. nil on control/all/local keeps the in-process
+	// agenthost.Start path byte-identical. Defined as a curator-local func type
+	// (not a delegate import) to avoid a dependency cycle, exactly how admitTurn
+	// avoids importing delegate.
+	bringUpTurnSandbox BringUpTurnSandboxFunc
 
 	// admitTurn gates one turn's execution through the host's shared agent
 	// capacity — in production the delegation spawner's AcquireTurnSlot, so a
@@ -158,6 +169,52 @@ func (c *Curator) SetDoorbell(fn func(kind, orgID, projectID string)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.doorbell = fn
+}
+
+// TurnSandbox is the executor-side network + credential sidecar a homed curator
+// turn runs under. Returned by the SetTurnSandbox seam (the
+// delegation spawner's BringUpCuratorSandbox); *delegate.executorSandbox
+// satisfies it. Curator defines the interface rather than importing delegate to
+// avoid a dependency cycle, mirroring how admitTurn avoids it.
+type TurnSandbox interface {
+	// Network is the prebuilt run network agentproc launches the jail into
+	// (RunOptions.PrebuiltNetwork).
+	Network() *sandbox.RunNetwork
+	// ProxyEnv is the non-secret sandbox proxy env (RunOptions.PrebuiltProxyEnv).
+	ProxyEnv() []string
+	// GitCloneAuth routes a host-side fetch of cloneURL through the turn's git
+	// proxy so the orchestrator holds no token (empty when the sandbox has no
+	// git proxy).
+	GitCloneAuth(cloneURL string) worktree.CloneAuth
+	// Close tears the sandbox down (network + sidecar). Deferred by the dispatch
+	// after a successful bring-up.
+	Close()
+}
+
+// BringUpTurnSandboxFunc stands up a homed curator turn's sandbox before the
+// turn runs. Its shape matches Spawner.BringUpCuratorSandbox, which returns
+// (nil, nil) on every non-executor role and unwired fixture — the caller then
+// keeps the in-process path.
+type BringUpTurnSandboxFunc func(ctx context.Context, orgID, requestID, userID, teamID string, pinnedRepos []string) (TurnSandbox, error)
+
+// SetTurnSandbox wires the executor-side turn-sandbox bring-up — the
+// delegation spawner's BringUpCuratorSandbox. Called once at startup on a
+// multi-mode executor pod only (gated on the executor runtime in
+// buildCuratorRuntime); left nil on control/all/local, where dispatch keeps the
+// in-process agenthost.Start path unchanged.
+func (c *Curator) SetTurnSandbox(fn BringUpTurnSandboxFunc) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.bringUpTurnSandbox = fn
+}
+
+// getTurnSandbox returns the wired bring-up seam under the lock, matching
+// getAdmitTurn's race-free accessor shape. nil on every pod but a multi-mode
+// executor.
+func (c *Curator) getTurnSandbox() BringUpTurnSandboxFunc {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.bringUpTurnSandbox
 }
 
 // SetAdmission wires the shared turn-admission gate — the delegation

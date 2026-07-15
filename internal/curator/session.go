@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // projectSession is the per-project goroutine handle. One queue, one
@@ -235,6 +236,31 @@ func (s *projectSession) dispatch(item queueItem) {
 		return
 	}
 
+	// Executor path: stand the turn's network + credential sidecar up
+	// BEFORE the pinned-repo materialize, so the host-side fetch routes through
+	// the sidecar's git proxy while the orchestrator holds no credential. The
+	// seam is wired only on a multi-mode executor pod (buildCuratorRuntime gated
+	// on the executor runtime); control/all/local leave it nil (bringUp nil →
+	// turnSandbox nil) and keep the in-process path below byte-identical.
+	var turnSandbox TurnSandbox
+	if bringUp := s.curator.getTurnSandbox(); bringUp != nil {
+		sb, err := bringUp(msgCtx, item.orgID, requestID, item.creatorUserID, project.TeamID, project.PinnedRepos)
+		if err != nil {
+			s.failRequest(item, fmt.Sprintf("bring up turn sandbox: %v", err))
+			s.revertPendingFor(item)
+			return
+		}
+		if sb != nil {
+			turnSandbox = sb
+			// Deferred immediately after a successful bring-up. releaseRepos
+			// (deferred below, so registered LATER) runs BEFORE this Close under
+			// LIFO — safe: both fire only after runAgent returns (the jail has
+			// exited), and the shared-worktree refcount is independent of the
+			// network/sidecar teardown.
+			defer sb.Close()
+		}
+	}
+
 	// Refresh pinned-repo worktrees before spawning the agent so its
 	// view of the world matches upstream HEAD on the user-configured
 	// branch (profile.BaseBranch || profile.DefaultBranch). Per-repo
@@ -254,18 +280,26 @@ func (s *projectSession) dispatch(item queueItem) {
 	// agent inspects repos with its file tools (Read/Grep/Glob), and the
 	// curator never depends on in-jail commit/push/fetch: pinned-repo fetches
 	// run host-side here, and in-jail git history is out of scope (TFAC-71).
-	cloneTokenFor := func(ctx context.Context, owner string) string {
-		return s.curator.cloneTokenFor(ctx, item.orgID, owner)
+	// authFor builds the host-side fetch credential for a pinned repo. On the
+	// executor the turn sandbox routes it through the sidecar's git proxy (no
+	// orchestrator-held token); on all/local it injects the App token
+	// from the live store (the prior path). turnSandbox is nil on all/local, so
+	// the closure resolves to CloneAuthFor there exactly as before.
+	authFor := func(ctx context.Context, owner, cloneURL string) worktree.CloneAuth {
+		if turnSandbox != nil {
+			return turnSandbox.GitCloneAuth(cloneURL)
+		}
+		return worktree.CloneAuthFor(cloneURL, s.curator.cloneTokenFor(ctx, item.orgID, owner))
 	}
 	var roRepoMounts []agentproc.ReadOnlyRepoMount
 	if agentproc.WillSandbox() {
 		var releaseRepos func()
 		roRepoMounts, releaseRepos = materializeSharedPinnedRepos(msgCtx, s.curator.stores.Repos,
-			cloneTokenFor, item.orgID, s.projectID, project.PinnedRepos)
+			authFor, item.orgID, s.projectID, project.PinnedRepos)
 		defer releaseRepos()
 	} else {
 		materializePinnedRepos(msgCtx, s.curator.stores.Repos,
-			cloneTokenFor, item.orgID, s.projectID, cwd, project.PinnedRepos)
+			authFor, item.orgID, s.projectID, cwd, project.PinnedRepos)
 	}
 	if msgCtx.Err() != nil {
 		// Cancel fired during repo refresh (one big bare clone can
@@ -394,21 +428,43 @@ func (s *projectSession) dispatch(item queueItem) {
 	// so there is no runs.team_id to read — project.TeamID is the canonical
 	// team here). IsEventTriggered is false — every curator turn is user-driven.
 	startAgentHost := func() (sandbox.Mount, io.Closer, error) {
-		// The curator doesn't (yet) participate in the sealed-bundle credential
-		// path (internal/delegate's awaitCredentials gate) — a curator turn
-		// never carries a bundle, so this always resolves through the live
-		// secret store, same as before.
+		if turnSandbox != nil {
+			// Executor path: the credential sidecar HOSTS the exec-verb
+			// socket server (created at bring-up over the sealed bundle), so the
+			// orchestrator only supplies the bind mount — it runs no in-process
+			// daemon and keeps the hostile-input parser out of its own address
+			// space, exactly like the delegated executor branch
+			// (internal/delegate/run.go). Never reads the disabled secret store.
+			return agenthost.SocketMountFor(requestID), noopCloser{}, nil
+		}
+		// all/local: the orchestrator IS the credential holder, so it hosts the
+		// socket server in-process over its live stores. PinnedRepos authorizes
+		// the agent's exec-gh verbs against the project's pinned set — a curator
+		// turn creates no run_worktrees rows the run path's gate would key on.
 		hd, mount, err := agenthost.Start(s.curator.stores, agenthost.RunInfo{
 			OrgID:            item.orgID,
 			UserID:           item.creatorUserID,
 			RunID:            requestID,
 			TeamID:           project.TeamID,
 			IsEventTriggered: false,
+			PinnedRepos:      project.PinnedRepos,
 		}, nil)
 		if err != nil {
 			return sandbox.Mount{}, nil, err
 		}
 		return mount, hd, nil
+	}
+
+	// Executor path: launch the agent into the prebuilt sandbox network + proxy
+	// env the turn sidecar produced (nil-safe accessors), so agentproc skips its
+	// in-process credential resolution entirely — the disabled secret store is
+	// never touched and the sealed bundle drives the sidecar's proxies. nil on
+	// all/local, where agentproc allocates the network and resolves in-process.
+	var prebuiltNet *sandbox.RunNetwork
+	var prebuiltProxyEnv []string
+	if turnSandbox != nil {
+		prebuiltNet = turnSandbox.Network()
+		prebuiltProxyEnv = turnSandbox.ProxyEnv()
 	}
 
 	outcome, runErr := s.curator.runAgent(msgCtx, agentproc.RunOptions{
@@ -423,10 +479,17 @@ func (s *projectSession) dispatch(item queueItem) {
 			"TRIAGE_FACTORY_CURATOR_PROJECT_ID=" + s.projectID,
 			"TRIAGE_FACTORY_CURATOR_REQUEST_ID=" + requestID,
 		},
-		TraceID:            requestID,
-		OrgID:              item.orgID,
-		Secrets:            s.curator.getSecrets(),
-		LLMResolver:        s.curator.getLLMResolver(),
+		TraceID:     requestID,
+		OrgID:       item.orgID,
+		Secrets:     s.curator.getSecrets(),
+		LLMResolver: s.curator.getLLMResolver(),
+		// PrebuiltNetwork/PrebuiltProxyEnv are set only on the executor path;
+		// agentproc.Run skips in-process credential resolution whenever
+		// PrebuiltNetwork is non-nil, so Secrets/LLMResolver above are inert
+		// there (the sidecar's proxies serve the sealed bundle instead) and the
+		// diff stays minimal — no branch on the RunOptions themselves.
+		PrebuiltNetwork:    prebuiltNet,
+		PrebuiltProxyEnv:   prebuiltProxyEnv,
 		StartAgentHost:     startAgentHost,
 		ReadOnlyRepoMounts: roRepoMounts,
 	}, newRequestSink(s.curator, s.projectID, requestID, item.orgID, item.creatorUserID))
@@ -659,3 +722,11 @@ func (s *projectSession) failRequest(item queueItem, errMsg string) {
 	}
 	s.curator.broadcastRequestUpdate(item.orgID, s.projectID, item.requestID, "failed")
 }
+
+// noopCloser is an io.Closer that closes nothing — returned by the executor
+// path's startAgentHost, where the credential sidecar owns the
+// socket's lifecycle (torn down by the turn sandbox's Close, not this closer).
+// Mirrors the delegate spawner's noopCloser.
+type noopCloser struct{}
+
+func (noopCloser) Close() error { return nil }

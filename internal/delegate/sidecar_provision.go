@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // executorSandbox is the run network + credential sidecar + proxy coordinates
@@ -75,6 +76,32 @@ func (e *executorSandbox) runNetwork() *sandbox.RunNetwork {
 		return nil
 	}
 	return e.net
+}
+
+// Network / ProxyEnv / GitCloneAuth are the exported accessors the curator seam
+// (internal/curator's TurnSandbox) consumes — a homed curator turn runs under
+// this same executor sandbox but curator can't import the unexported delegate
+// type, so it depends on an interface these satisfy. Kept thin wrappers over
+// the run-path accessors so both paths read the same coordinates.
+
+// Network is the prebuilt run network for a curator turn (PrebuiltNetwork).
+func (e *executorSandbox) Network() *sandbox.RunNetwork { return e.runNetwork() }
+
+// ProxyEnv is the non-secret sandbox proxy env for a curator turn
+// (PrebuiltProxyEnv).
+func (e *executorSandbox) ProxyEnv() []string { return e.proxyEnv() }
+
+// GitCloneAuth builds the CloneAuth that routes a host-side fetch of cloneURL
+// through this turn's sidecar git proxy — the curator materialize's equivalent
+// of the delegated clone's CloneAuthViaGitProxy (internal/delegate/delegate.go),
+// so the orchestrator holds no token and the real credential is injected
+// host-side on the sidecar's upstream hop. Empty (a no-op CloneAuth) when the
+// sidecar exposes no git proxy.
+func (e *executorSandbox) GitCloneAuth(cloneURL string) worktree.CloneAuth {
+	if e == nil || e.res == nil {
+		return worktree.CloneAuth{}
+	}
+	return worktree.CloneAuthViaGitProxy(e.res.GitProxyURL, cloneHostBase(cloneURL), e.res.GitProxyToken)
 }
 
 // bringUpExecutorSandbox stands up the run network, launches the credential
@@ -175,7 +202,10 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 	// sealed blob down (the sidecar idempotently re-accepts it) so a long run
 	// keeps signing with live credentials instead of 502-ing on expiry.
 	_, myBootEpoch := s.executorIdentity()
-	go s.relayCredentialRefreshes(orgID, run.ID, myBootEpoch, conn, es.stopRelay)
+	go s.relayCredentialRefreshes(run.ID, func(ctx context.Context) (int64, []byte, bool, error) {
+		_, be, sealed, ok, err := s.runCredentials.Get(ctx, orgID, run.ID)
+		return be, sealed, ok, err
+	}, myBootEpoch, conn, es.stopRelay)
 	return es, nil
 }
 
@@ -185,15 +215,21 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 // expiry), so the sidecar never serves a stale credential in practice.
 const credRefreshRelayInterval = 30 * time.Second
 
-// relayCredentialRefreshes polls run_credentials for this run and relays any
-// NEW sealed bundle down to the sidecar over the supervision channel — the
-// push half of mid-run credential refresh (the sidecar can't reach the DB). It
-// relays only when the sealed bytes actually change (the brain re-mint), never
-// unsealing them. Runs until stop is closed (executorSandbox.Close) or the
-// supervision channel dies. Never fires on all/local (there is no executor
-// sandbox there).
-func (s *Spawner) relayCredentialRefreshes(orgID, runID string, bootEpoch int64, conn *sidecarproto.Conn, stop <-chan struct{}) {
-	if s.runCredentials == nil {
+// credBundleGetter reads the current sealed bundle for a run or a curator turn:
+// its boot_epoch, the ciphertext, whether a row exists, and any read error. The
+// run variant wraps runCredentials.Get; the curator variant wraps
+// curatorTurnCredentials.Get. relayCredentialRefreshes never unseals the bytes.
+type credBundleGetter func(ctx context.Context) (bootEpoch int64, sealed []byte, ok bool, err error)
+
+// relayCredentialRefreshes polls the sealed-bundle channel for one run/turn and
+// relays any NEW sealed bundle down to the sidecar over the supervision channel
+// — the push half of mid-run credential refresh (the sidecar can't reach the
+// DB). It relays only when the sealed bytes actually change (the brain re-mint),
+// never unsealing them. subject is the run/turn id for logging; getter reads the
+// channel (run vs curator). Runs until stop is closed (executorSandbox.Close) or
+// the supervision channel dies. Never fires on all/local (no executor sandbox).
+func (s *Spawner) relayCredentialRefreshes(subject string, getter credBundleGetter, bootEpoch int64, conn *sidecarproto.Conn, stop <-chan struct{}) {
+	if getter == nil {
 		return
 	}
 	ticker := time.NewTicker(credRefreshRelayInterval)
@@ -211,10 +247,10 @@ func (s *Spawner) relayCredentialRefreshes(orgID, runID string, bootEpoch int64,
 			return
 		case <-ticker.C:
 			readCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			_, be, sealed, ok, err := s.runCredentials.Get(readCtx, orgID, runID)
+			be, sealed, ok, err := getter(readCtx)
 			cancel()
 			if err != nil {
-				dispatchLog.Warn("read run credentials for refresh relay failed; retrying", "run", runID, "error", err)
+				dispatchLog.Warn("read sealed credential bundle for refresh relay failed; retrying", "subject", subject, "error", err)
 				continue
 			}
 			if !ok || be != bootEpoch || len(sealed) == 0 || bytes.Equal(sealed, lastSealed) {
@@ -224,7 +260,7 @@ func (s *Spawner) relayCredentialRefreshes(orgID, runID string, bootEpoch int64,
 			err = conn.Call(relayCtx, sidecarproto.KindSealedBundle, sidecarproto.SealedBundleBody{Sealed: sealed, BootEpoch: be}, nil)
 			cancel()
 			if err != nil {
-				dispatchLog.Warn("relay refreshed credential bundle to sidecar failed; will retry next tick", "run", runID, "error", err)
+				dispatchLog.Warn("relay refreshed credential bundle to sidecar failed; will retry next tick", "subject", subject, "error", err)
 				continue
 			}
 			lastSealed = sealed

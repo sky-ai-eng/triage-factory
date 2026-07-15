@@ -52,6 +52,15 @@ type ProjectStore interface {
 	// Get returns a project by id, or (nil, nil) if not found.
 	Get(ctx context.Context, orgID, id string) (*domain.Project, error)
 
+	// GetSystem is the admin-pool (BYPASSRLS) variant of Get for
+	// JWT-less background jobs that resolve a project by id under an
+	// explicit orgID — the curator-turn credential provisioner reading a
+	// homed turn's pinned repos + owning team to build the sealed bundle's
+	// authorized GitHub set. org_id is bound by argument; a
+	// targeted single-project read, the same posture as Tasks.GetSystem.
+	// SQLite is N=1 and unscoped — it collapses to Get.
+	GetSystem(ctx context.Context, orgID, id string) (*domain.Project, error)
+
 	// List returns all projects ordered by name (case-insensitive).
 	// No pagination — counts stay small (≤100 in any plausible install).
 	// Empty result returns []domain.Project{}, not nil.

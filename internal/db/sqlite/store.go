@@ -172,6 +172,11 @@ func New(conn *sql.DB) db.Stores {
 		// role=all, the bundle path is executor-role-only) — exists for
 		// store-interface + conformance-test symmetry. See TFAC-614.
 		RunCredentials: newRunCredentialsStore(conn),
+		// CuratorTurnCredentials is admin-pool only in Postgres; SQLite
+		// collapses to the one connection. Never populated in local mode (the
+		// bundle path is executor-role-only) — exists for store-interface +
+		// conformance-test symmetry.
+		CuratorTurnCredentials: newCuratorTurnCredentialsStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

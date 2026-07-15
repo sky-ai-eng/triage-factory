@@ -91,6 +91,14 @@ type Spawner struct {
 	// nil-safe (RoleAll/local never gate on it, since they resolve
 	// credentials directly instead).
 	runCredentials db.RunCredentialsStore
+	// curatorTurnCredentials + curatorStore are the curator-turn analogs of
+	// runCredentials + runQueue: BringUpCuratorSandbox publishes the
+	// turn's sidecar pubkey via curatorStore.PublishTurnCredPubKey and polls
+	// curatorTurnCredentials for the sealed bundle the brain wrote. nil-safe
+	// (RoleAll/local never bring a curator sidecar up); a nil pair makes
+	// BringUpCuratorSandbox degrade like every other nil-store seam here.
+	curatorTurnCredentials db.CuratorTurnCredentialsStore
+	curatorStore           db.CuratorStore
 	// awaitingCredentialsTimeout overrides awaitingCredentialsTimeout (the
 	// package default) when > 0 — tests inject a short value via
 	// SetAwaitingCredentialsTimeout, mirroring idleHibernateTimeout.
@@ -463,41 +471,43 @@ type Spawner struct {
 // partial db.Stores{} — every field is a nil-safe interface.
 func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	s := &Spawner{
-		database:         database,
-		prompts:          stores.Prompts,
-		agents:           stores.Agents,
-		blueprints:       stores.Blueprints,
-		runQueue:         stores.RunQueue,
-		runCredentials:   stores.RunCredentials,
-		tasks:            stores.Tasks,
-		agentRuns:        stores.AgentRuns,
-		entities:         stores.Entities,
-		artifacts:        stores.Artifacts,
-		stagedInjections: stores.StagedInjections,
-		events:           stores.Events,
-		taskMemory:       stores.TaskMemory,
-		runWorktrees:     stores.RunWorktrees,
-		orgs:             stores.Orgs,
-		spend:            stores.Spend,
-		jiraRules:        stores.JiraStatusRules,
-		externalActions:  stores.ExternalActions,
-		teams:            stores.Teams,
-		instances:        stores.Instances,
-		instanceStats:    stores.InstanceStats,
-		pendingInput:     stores.RunPendingInput,
-		pendingFirings:   stores.PendingFirings,
-		tx:               stores.Tx,
-		ghClient:         ghClient,
-		wsHub:            wsHub,
-		model:            model,
-		cancels:          make(map[string]context.CancelFunc),
-		dispatchWake:     make(chan struct{}, 1),
-		procs:            make(map[string]*liveRunHandle),
-		permPending:      make(map[string]*pendingPermission),
-		ackWaiters:       make(map[int64]chan struct{}),
-		signalApplyWake:  make(chan struct{}, 1),
-		runSem:           make(chan struct{}, DefaultMaxConcurrentRuns),
-		memAvailMB:       hostmem.AvailableMB,
+		database:               database,
+		prompts:                stores.Prompts,
+		agents:                 stores.Agents,
+		blueprints:             stores.Blueprints,
+		runQueue:               stores.RunQueue,
+		runCredentials:         stores.RunCredentials,
+		curatorTurnCredentials: stores.CuratorTurnCredentials,
+		curatorStore:           stores.Curator,
+		tasks:                  stores.Tasks,
+		agentRuns:              stores.AgentRuns,
+		entities:               stores.Entities,
+		artifacts:              stores.Artifacts,
+		stagedInjections:       stores.StagedInjections,
+		events:                 stores.Events,
+		taskMemory:             stores.TaskMemory,
+		runWorktrees:           stores.RunWorktrees,
+		orgs:                   stores.Orgs,
+		spend:                  stores.Spend,
+		jiraRules:              stores.JiraStatusRules,
+		externalActions:        stores.ExternalActions,
+		teams:                  stores.Teams,
+		instances:              stores.Instances,
+		instanceStats:          stores.InstanceStats,
+		pendingInput:           stores.RunPendingInput,
+		pendingFirings:         stores.PendingFirings,
+		tx:                     stores.Tx,
+		ghClient:               ghClient,
+		wsHub:                  wsHub,
+		model:                  model,
+		cancels:                make(map[string]context.CancelFunc),
+		dispatchWake:           make(chan struct{}, 1),
+		procs:                  make(map[string]*liveRunHandle),
+		permPending:            make(map[string]*pendingPermission),
+		ackWaiters:             make(map[int64]chan struct{}),
+		signalApplyWake:        make(chan struct{}, 1),
+		runSem:                 make(chan struct{}, DefaultMaxConcurrentRuns),
+		memAvailMB:             hostmem.AvailableMB,
 	}
 	s.controller = inProcessController{s: s}
 	// Report capacity by default (executor/all); a pure-control pod flips

@@ -29,10 +29,11 @@ import (
 
 // Channel is the Postgres NOTIFY/LISTEN channel name every relay message
 // rides. The same channel carries TFAC-584's session kicks, TFAC-585's
-// run-signal doorbells, TFAC-614's cred_request doorbell, and the curator
-// homing doorbells (spec §6.3) — payloads are discriminated by their JSON
-// "kind" field (see internal/app/ctl.go), so Message kinds must stay disjoint
-// from theirs ("kick", "new", "ack", "cred_request").
+// run-signal doorbells, TFAC-614's cred_request doorbell, the
+// curator_cred_request doorbell, and the curator homing doorbells (spec §6.3) —
+// payloads are discriminated by their JSON "kind" field (see
+// internal/app/ctl.go), so Message kinds must stay disjoint from theirs
+// ("kick", "new", "ack", "cred_request", "curator_cred_request").
 const Channel = "tf_ctl"
 
 // Message is the relay payload. Kind selects which field group applies:
@@ -41,7 +42,10 @@ const Channel = "tf_ctl"
 // poller.Manager.PollSoon call); "cred_request" uses OrgID/RunID (TFAC-614:
 // an executor parked in status='awaiting_credentials' nudging the brain's
 // credential provisioner — see internal/credprovision and
-// internal/app/ctl.go's dispatch case); "curator_new" / "curator_cancel" use
+// internal/app/ctl.go's dispatch case); "curator_cred_request" uses OrgID/RunID
+// too (a home executor standing a curator turn's credential sidecar up nudging
+// the same provisioner — RunID carries the curator_requests id);
+// "curator_new" / "curator_cancel" use
 // OrgID/ProjectID (curator homing, spec §6.3): a control pod nudging the home
 // executor's claim loop for a fresh turn, or routing a cross-pod cancel to
 // whichever executor holds the project's live session. Both curator kinds are

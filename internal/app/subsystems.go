@@ -393,6 +393,24 @@ func (a *App) buildCuratorRuntime() error {
 
 	if executorRuntime {
 		a.curatorClaimLoop = curator.NewHomeClaimLoop(a.curator, a.stores.Curator, a.identity.ID)
+		// Curator turns on an executor participate in the sealed-bundle
+		// credential path: the spawner stands each turn's network +
+		// credential sidecar up so the turn resolves LLM/GitHub/Jira through the
+		// sidecar's proxies over the sealed bundle, never the disabled secret
+		// store. The adapter converts the spawner's *executorSandbox to the
+		// curator.TurnSandbox interface, mapping a nil return to a nil interface
+		// (avoiding a non-nil interface wrapping a nil pointer). Wired only here,
+		// so control/all/local keep the in-process path.
+		a.curator.SetTurnSandbox(func(ctx context.Context, orgID, requestID, userID, teamID string, pinnedRepos []string) (curator.TurnSandbox, error) {
+			sb, err := a.spawner.BringUpCuratorSandbox(ctx, orgID, requestID, userID, teamID, pinnedRepos)
+			if err != nil {
+				return nil, err
+			}
+			if sb == nil {
+				return nil, nil
+			}
+			return sb, nil
+		})
 	}
 	return nil
 }

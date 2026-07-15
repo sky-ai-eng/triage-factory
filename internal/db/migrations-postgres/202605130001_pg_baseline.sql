@@ -639,7 +639,16 @@ CREATE TABLE public.curator_requests (
     -- instances.id / runs.executor_id (not FK-validated — a home id that has
     -- since retired self-heals via the next turn's re-home, exactly like the
     -- placement stamp).
-    home_instance_id text
+    home_instance_id text,
+    -- cred_pubkey: the per-turn credential sidecar's X25519 public
+    -- key (base64), the curator-turn analog of runs.cred_pubkey. The home
+    -- executor publishes it when it stands the turn's sidecar up, and the brain
+    -- reads it at seal time so the sealed bundle opens only inside that turn's
+    -- sidecar process — the orchestrator never holds the private half. NOT NULL
+    -- DEFAULT '' (empty = no sidecar published yet, the untouched local /
+    -- role=all path); recorded only while the turn is non-terminal, so a
+    -- finished turn never carries a key the brain could seal a fresh bundle to.
+    cred_pubkey text DEFAULT ''::text NOT NULL
 );
 
 
@@ -8564,6 +8573,45 @@ REVOKE ALL ON public.run_credentials FROM PUBLIC;
 REVOKE ALL ON public.run_credentials FROM anon, authenticated, service_role;
 
 
+-- curator_turn_credentials: the curator-turn analog of
+-- run_credentials — the sealed per-turn credential bundle channel. A homed
+-- curator turn is a curator_requests row (not a runs row), so the run-keyed
+-- handshake can't carry it; this is the column-for-column mirror keyed on the
+-- request id instead. The home executor publishes its per-turn sidecar pubkey
+-- onto curator_requests.cred_pubkey and rings the brain; the brain resolves the
+-- turn's LLM/GitHub/Jira credentials, seals them to that key, and writes exactly
+-- one row here. One row per turn (PK request_id), replaced wholesale on every
+-- write (Put upserts, boot_epoch-guarded so a slow provision can't clobber a
+-- fresher one). The executor polls it, hands the OPAQUE sealed bytes to the
+-- sidecar, and never unseals — only the sidecar holds the private half.
+--
+-- Admin-pool only, no RLS policy (deny-by-default) — same posture as
+-- run_credentials: credential-bearing sealed ciphertext, never a request-handler
+-- surface, so there is deliberately no app-pool grant at all. Rows also cascade
+-- with the request (the turn finishing / project delete retires them).
+CREATE TABLE public.curator_turn_credentials (
+    request_id  uuid NOT NULL,
+    org_id      uuid NOT NULL,
+    executor_id text NOT NULL,
+    boot_epoch  bigint NOT NULL,
+    sealed      bytea NOT NULL,
+    created_at  timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE ONLY public.curator_turn_credentials
+    ADD CONSTRAINT curator_turn_credentials_pkey PRIMARY KEY (request_id);
+
+ALTER TABLE ONLY public.curator_turn_credentials
+    ADD CONSTRAINT curator_turn_credentials_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.curator_turn_credentials
+    ADD CONSTRAINT curator_turn_credentials_request_id_org_id_fkey FOREIGN KEY (request_id, org_id) REFERENCES public.curator_requests(id, org_id) ON DELETE CASCADE;
+
+ALTER TABLE public.curator_turn_credentials ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.curator_turn_credentials FROM PUBLIC;
+REVOKE ALL ON public.curator_turn_credentials FROM anon, authenticated, service_role;
+
+
 -- tf_system: least-privilege executor role. Login mechanics mirror
 -- authenticator — the postgres-postinit-system sidecar ALTERs this role
 -- to LOGIN with TF_SYSTEM_PASSWORD once this migration has applied; see
@@ -8681,9 +8729,11 @@ GRANT SELECT ON TABLE public.jira_project_status_rules TO tf_system;
 GRANT SELECT ON TABLE public.llm_spend TO tf_system;
 -- curator_requests: SELECT feeds llm_spend and the executor claim loop's
 -- homed-turn scan; UPDATE is the ownership-scoped boot sweep + the leader
--- reaper cancelling turns stranded on a dead home (curator homing, spec §6.3).
--- The per-turn running/terminal writes ride the app pool under the requesting
--- user's synthetic claims, not tf_system.
+-- reaper cancelling turns stranded on a dead home (curator homing, spec §6.3),
+-- and the home executor's PublishTurnCredPubKey stamp of cred_pubkey when it
+-- stands a turn's credential sidecar up. The per-turn
+-- running/terminal writes ride the app pool under the requesting user's
+-- synthetic claims, not tf_system.
 GRANT SELECT, UPDATE ON TABLE public.curator_requests TO tf_system;
 -- curator_messages: SELECT so the ownership-scoped boot sweep's token roll-up
 -- (the correlated SUM every terminal write performs, TFAC-473) can read the
@@ -8703,6 +8753,12 @@ GRANT SELECT ON TABLE public.system_llm_runs TO tf_system;
 -- INSERT/DELETE: only the brain provisions (Put) and only a future
 -- terminal-disposition cleanup would delete, neither of which runs here.
 GRANT SELECT ON TABLE public.run_credentials TO tf_system;
+-- Sealed per-turn credential bundles: the curator-turn analog of
+-- run_credentials. The home executor's sidecar bring-up polls this for the
+-- bundle the brain sealed to its published pubkey (SELECT), and best-effort
+-- deletes the row on turn teardown so sealed material doesn't linger (DELETE).
+-- No INSERT — only the brain provisions (Put), on its own superuser admin pool.
+GRANT SELECT, DELETE ON TABLE public.curator_turn_credentials TO tf_system;
 -- The executor's schema-compatibility assert (internal/db/migrations.go)
 -- reads this and nothing else; no DDL, ever.
 GRANT SELECT ON TABLE public.goose_db_version TO tf_system;

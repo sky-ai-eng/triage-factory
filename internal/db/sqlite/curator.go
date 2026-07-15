@@ -111,6 +111,78 @@ func (s *curatorStore) CancelStrandedRequestsForHomeSystem(ctx context.Context, 
 	return int(n), nil
 }
 
+// PublishTurnCredPubKey records the per-turn sidecar pubkey on the turn's row.
+// Inert in SQLite (N=1 role=all never stands a sidecar up), but
+// implemented for interface + conformance symmetry. Guarded on non-terminal AND
+// cred_pubkey = ” so a duplicate publish never reopens a finished turn or
+// overwrites a recorded key; no doorbell (SQLite has no tf_ctl).
+func (s *curatorStore) PublishTurnCredPubKey(ctx context.Context, orgID, requestID, pubkey string) (bool, error) {
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE curator_requests SET cred_pubkey = ?
+		WHERE org_id = ? AND id = ? AND status IN ('queued', 'running') AND cred_pubkey = ''
+	`, pubkey, orgID, requestID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// GetTurnProvisionInfoSystem reads one turn's provisioning fields.
+// home_instance_id is nullable and maps to "".
+func (s *curatorStore) GetTurnProvisionInfoSystem(ctx context.Context, orgID, requestID string) (*domain.CuratorTurnProvision, bool, error) {
+	var p domain.CuratorTurnProvision
+	var homeInstanceID sql.NullString
+	err := s.q.QueryRowContext(ctx, `
+		SELECT id, org_id, project_id, home_instance_id, status, cred_pubkey
+		FROM curator_requests
+		WHERE org_id = ? AND id = ?
+	`, orgID, requestID).Scan(&p.ID, &p.OrgID, &p.ProjectID, &homeInstanceID, &p.Status, &p.CredPubKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	p.HomeInstanceID = homeInstanceID.String
+	return &p, true, nil
+}
+
+// ListAwaitingCredentialTurnsSystem finds turns that published a key but lack a
+// fresh sealed bundle. Inert in SQLite (N=1 never provisions), but
+// implemented for interface symmetry.
+func (s *curatorStore) ListAwaitingCredentialTurnsSystem(ctx context.Context) ([]domain.CuratorTurnProvision, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT cr.id, cr.org_id, cr.project_id, cr.home_instance_id, cr.status, cr.cred_pubkey
+		FROM curator_requests cr
+		LEFT JOIN curator_turn_credentials ctc ON ctc.request_id = cr.id
+		LEFT JOIN instances i ON i.id = cr.home_instance_id
+		WHERE cr.status IN ('queued', 'running')
+		  AND cr.cred_pubkey <> ''
+		  AND cr.home_instance_id IS NOT NULL
+		  AND (ctc.request_id IS NULL OR (i.id IS NOT NULL AND ctc.boot_epoch < i.boot_epoch))
+		ORDER BY cr.created_at ASC, cr.id ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.CuratorTurnProvision
+	for rows.Next() {
+		var p domain.CuratorTurnProvision
+		var homeInstanceID sql.NullString
+		if err := rows.Scan(&p.ID, &p.OrgID, &p.ProjectID, &homeInstanceID, &p.Status, &p.CredPubKey); err != nil {
+			return nil, err
+		}
+		p.HomeInstanceID = homeInstanceID.String
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 func (s *curatorStore) GetRequest(ctx context.Context, orgID, id string) (*domain.CuratorRequest, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -322,7 +394,7 @@ func (s *curatorStore) ConsumePendingContext(ctx context.Context, orgID, project
 		}
 
 		p, err := scanCuratorProject(tx.QueryRowContext(ctx, `
-			SELECT id, name, description, curator_session_id, pinned_repos, jira_project_key, linear_project_key, spec_authorship_blueprint_id, created_at, updated_at
+			SELECT id, name, description, curator_session_id, pinned_repos, jira_project_key, linear_project_key, spec_authorship_blueprint_id, team_id, created_at, updated_at
 			FROM projects WHERE id = ?
 		`, projectID))
 		if err != nil {
@@ -808,13 +880,14 @@ func scanCuratorProject(row interface {
 		jiraKey         sql.NullString
 		linearKey       sql.NullString
 		specBlueprintID sql.NullString
+		teamID          sql.NullString
 		pinnedJSON      string
 		createdAt       time.Time
 		updatedAt       time.Time
 	)
 	err := row.Scan(
 		&p.ID, &p.Name, &p.Description, &sessionID, &pinnedJSON,
-		&jiraKey, &linearKey, &specBlueprintID,
+		&jiraKey, &linearKey, &specBlueprintID, &teamID,
 		&createdAt, &updatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -823,6 +896,7 @@ func scanCuratorProject(row interface {
 	if err != nil {
 		return nil, err
 	}
+	p.TeamID = teamID.String
 	p.CuratorSessionID = sessionID.String
 	p.JiraProjectKey = jiraKey.String
 	p.LinearProjectKey = linearKey.String

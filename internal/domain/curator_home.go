@@ -42,3 +42,21 @@ type HomedCuratorRequest struct {
 	ProjectID     string
 	CreatorUserID string
 }
+
+// CuratorTurnProvision is the brain-side projection of a curator turn's
+// credential-provisioning fields: what
+// credprovision.ProvisionForCuratorTurn reads to resolve and seal the turn's
+// bundle. The request carries the recipient key (CredPubKey, published by the
+// home executor's sidecar bring-up) and the home the bundle is sealed for
+// (HomeInstanceID → its current boot_epoch); the project it names drives the
+// GitHub authorized set (pinned ∩ tracked) and the owning team. Status gates
+// the no-op-on-terminal check. The curator-turn analog of the run path's
+// AwaitingCredentialsRun.
+type CuratorTurnProvision struct {
+	ID             string
+	OrgID          string
+	ProjectID      string
+	HomeInstanceID string
+	Status         string
+	CredPubKey     string
+}
