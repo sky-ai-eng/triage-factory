@@ -382,9 +382,14 @@ type orgSettingsResponse struct {
 	// MaxDailyCostUSD is the org-wide daily LLM spend cap (TFAC-477); 0 = no
 	// cap. Always emitted (not omitempty) so the Settings form can render the
 	// numeric input's current value, including an explicit "0 / no cap".
-	MaxDailyCostUSD    float64 `json:"max_daily_cost_usd"`
-	HasAnthropicAPIKey bool    `json:"has_anthropic_api_key"`
-	HasBedrockCreds    bool    `json:"has_bedrock_credentials"`
+	MaxDailyCostUSD float64 `json:"max_daily_cost_usd"`
+	// MaxConcurrentRuns is the org-wide concurrent-run ceiling; 0 = unlimited.
+	// Always emitted (not omitempty) for the same reason as MaxDailyCostUSD —
+	// the form renders the numeric input's current value, "0 / unlimited"
+	// included.
+	MaxConcurrentRuns  int  `json:"max_concurrent_runs"`
+	HasAnthropicAPIKey bool `json:"has_anthropic_api_key"`
+	HasBedrockCreds    bool `json:"has_bedrock_credentials"`
 	// Bedrock non-secret config (TFAC-68). The credential itself never
 	// leaves the vault — presence rides has_bedrock_credentials and the
 	// method marker below; these three let the Settings form render the
@@ -470,6 +475,7 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		HasJiraCredential:   hasJiraCred,
 		MaxLLMModelTier:     orgSet.MaxLLMModelTier,
 		MaxDailyCostUSD:     orgSet.MaxDailyCostUSD,
+		MaxConcurrentRuns:   orgSet.MaxConcurrentRuns,
 		HasAnthropicAPIKey:  orgSet.AnthropicAPIKeyRef != "",
 		HasBedrockCreds:     orgSet.BedrockCredentialsRef != "",
 		BedrockAuthMethod:   bedrockAuthMethodFromRef(orgSet.BedrockCredentialsRef),
@@ -495,6 +501,10 @@ type orgSettingsUpdate struct {
 	// nil = don't touch (an unrelated save leaves it alone) and a present value
 	// (including 0, which clears the cap) is applied. Validated >= 0.
 	MaxDailyCostUSD *float64 `json:"max_daily_cost_usd"`
+	// MaxConcurrentRuns is the org-wide concurrent-run ceiling. Pointer with the
+	// same semantics as MaxDailyCostUSD: nil = don't touch, a present value
+	// (including 0, which clears it back to unlimited) is applied. Validated >= 0.
+	MaxConcurrentRuns *int `json:"max_concurrent_runs"`
 	// NOTE: the Anthropic API key is deliberately NOT a field here. It is
 	// writable only through the validated POST /api/anthropic/connect endpoint
 	// (which clears it on an empty key), so the bulk settings form can never be
@@ -608,6 +618,24 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		orgSet.MaxDailyCostUSD = *req.MaxDailyCostUSD
+	}
+
+	// Concurrent-run limit: nil = don't touch, 0 = clear it (unlimited), >0 =
+	// set. Reject a negative — the claim treats <= 0 as unlimited, so a negative
+	// would silently read as "no limit" rather than any meaningful ceiling. The
+	// upper bound keeps a validated value inside the Postgres int4 column, so an
+	// oversized input 400s here rather than 500ing on an "integer out of range"
+	// at the DB.
+	if req.MaxConcurrentRuns != nil {
+		if *req.MaxConcurrentRuns < 0 {
+			badRequest(w, "max_concurrent_runs must be >= 0")
+			return
+		}
+		if *req.MaxConcurrentRuns > domain.MaxConcurrentRunsCeiling {
+			badRequest(w, fmt.Sprintf("max_concurrent_runs must be at most %d", domain.MaxConcurrentRunsCeiling))
+			return
+		}
+		orgSet.MaxConcurrentRuns = *req.MaxConcurrentRuns
 	}
 
 	// GitHub PAT (PAT_1, the org bot credential): nil = don't touch, "" =

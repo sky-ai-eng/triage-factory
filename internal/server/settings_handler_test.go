@@ -894,6 +894,97 @@ func TestOrgSettingsPost_DailyCostCap_NegativeRejected(t *testing.T) {
 	}
 }
 
+// --- TFAC-638 concurrent-run limit -----------------------------------------
+
+// orgConcurrentRuns reads the org settings GET and returns max_concurrent_runs.
+func orgConcurrentRuns(t *testing.T, s *Server) int {
+	t.Helper()
+	rec := doJSON(t, s, "GET", "/api/settings/org", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/settings/org: %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		MaxConcurrentRuns int `json:"max_concurrent_runs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode org settings: %v", err)
+	}
+	return resp.MaxConcurrentRuns
+}
+
+// TestOrgSettingsPost_ConcurrentRuns_RoundTrip pins the GET/POST wire round-trip:
+// POSTing a positive limit reflects it on the next GET, and POSTing 0 clears it
+// back to "unlimited".
+func TestOrgSettingsPost_ConcurrentRuns_RoundTrip(t *testing.T) {
+	s := newTestServer(t)
+
+	if got := orgConcurrentRuns(t, s); got != 0 {
+		t.Fatalf("fresh org concurrent-run limit = %v, want 0 (unlimited by default)", got)
+	}
+
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_concurrent_runs": 8})
+	if got := orgConcurrentRuns(t, s); got != 8 {
+		t.Errorf("after POST 8, GET max_concurrent_runs = %v, want 8", got)
+	}
+
+	// 0 clears the limit.
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_concurrent_runs": 0})
+	if got := orgConcurrentRuns(t, s); got != 0 {
+		t.Errorf("after POST 0, GET max_concurrent_runs = %v, want 0 (cleared)", got)
+	}
+}
+
+// TestOrgSettingsPost_ConcurrentRuns_OmittedFieldUntouched pins the pointer-nil
+// semantics: a save that omits max_concurrent_runs must leave a previously-set
+// limit intact (an unrelated org save can't stomp it).
+func TestOrgSettingsPost_ConcurrentRuns_OmittedFieldUntouched(t *testing.T) {
+	s := newTestServer(t)
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_concurrent_runs": 5})
+
+	// A save touching only the model tier omits the limit → it must survive.
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_llm_model_tier": "sonnet"})
+	if got := orgConcurrentRuns(t, s); got != 5 {
+		t.Errorf("omitting max_concurrent_runs cleared the limit: got %v, want 5 preserved", got)
+	}
+}
+
+// TestOrgSettingsPost_ConcurrentRuns_NegativeRejected pins the >= 0 validation.
+func TestOrgSettingsPost_ConcurrentRuns_NegativeRejected(t *testing.T) {
+	s := newTestServer(t)
+	rec := doJSON(t, s, "POST", "/api/settings/org", map[string]any{"max_concurrent_runs": -1})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("negative limit should 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp["error"], "max_concurrent_runs must be >= 0") {
+		t.Errorf("expected >= 0 validation message, got: %q", resp["error"])
+	}
+}
+
+// TestOrgSettingsPost_ConcurrentRuns_OversizedRejected pins the upper bound: a
+// value beyond the ceiling 400s at the handler rather than overflowing the
+// Postgres int4 column into a 500.
+func TestOrgSettingsPost_ConcurrentRuns_OversizedRejected(t *testing.T) {
+	s := newTestServer(t)
+	rec := doJSON(t, s, "POST", "/api/settings/org",
+		map[string]any{"max_concurrent_runs": domain.MaxConcurrentRunsCeiling + 1})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized limit should 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp["error"], "max_concurrent_runs must be at most") {
+		t.Errorf("expected upper-bound validation message, got: %q", resp["error"])
+	}
+	// The ceiling itself is accepted.
+	postJSONResp(t, s, "/api/settings/org",
+		map[string]any{"max_concurrent_runs": domain.MaxConcurrentRunsCeiling})
+	if got := orgConcurrentRuns(t, s); got != domain.MaxConcurrentRunsCeiling {
+		t.Errorf("ceiling value should round-trip, got %v want %v", got, domain.MaxConcurrentRunsCeiling)
+	}
+}
+
 // --- TFAC-392 unattended-prompt grace window bounds ------------------------
 
 // teamGrace reads the team settings GET and returns the stored grace (ms) plus

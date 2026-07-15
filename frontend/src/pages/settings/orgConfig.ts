@@ -38,6 +38,11 @@ export interface OrgConfigForm {
   // (not a number) so the input can be cleared to "" cleanly and partial typing
   // works; saveOrgConfig converts it to the wire number.
   max_daily_cost_usd: string
+  // Org-wide concurrent-run limit, held as the raw text input. Empty (or 0) =
+  // "unlimited"; a positive integer string is the ceiling on runs executing at
+  // once across the fleet. Held as a string for the same reasons as
+  // max_daily_cost_usd; saveOrgConfig converts it to the wire number.
+  max_concurrent_runs: string
   // The org's Anthropic API key (BYOK). Blank on load — it's a secret that never
   // leaves the vault, like jira_pat. It is captured ONLY via the validated
   // connectAnthropic endpoint and is deliberately NOT sent by saveOrgConfig, so
@@ -82,6 +87,8 @@ export interface OrgSettingsData {
   max_llm_model_tier?: string
   // Org-wide daily spend cap in USD (TFAC-477); 0 = no cap. Always present.
   max_daily_cost_usd: number
+  // Org-wide concurrent-run limit; 0 = unlimited. Always present.
+  max_concurrent_runs: number
   has_anthropic_api_key: boolean
   has_bedrock_credentials: boolean
   // Bedrock non-secret config — echoed by the GET so the form renders the
@@ -110,6 +117,7 @@ export const emptyOrgConfig = (): OrgConfigForm => ({
   jira_poll_interval: '5m0s',
   max_llm_model_tier: '',
   max_daily_cost_usd: '',
+  max_concurrent_runs: '',
   anthropic_api_key: '',
   bedrock_auth_method: 'bearer',
   bedrock_bearer_token: '',
@@ -144,6 +152,9 @@ export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
     // 0 (no cap) renders as an empty input ("No cap"); any positive cap seeds
     // the numeric string the input edits.
     max_daily_cost_usd: org.max_daily_cost_usd ? String(org.max_daily_cost_usd) : '',
+    // 0 (unlimited) renders as an empty input; any positive limit seeds the
+    // numeric string the input edits.
+    max_concurrent_runs: org.max_concurrent_runs ? String(org.max_concurrent_runs) : '',
     // Secret — never returned by the GET (presence rides has_anthropic_api_key),
     // so it stays blank and a save without a re-typed key leaves the vault key
     // untouched.
@@ -192,6 +203,51 @@ export function dailyCapError(raw: string): string | null {
   return null
 }
 
+// MAX_CONCURRENT_RUNS_CEILING mirrors domain.MaxConcurrentRunsCeiling — a sanity
+// bound far beyond any real fleet that keeps a validated value inside the
+// backend's int4 column. Kept in sync with the Go constant by hand (there's no
+// shared source), like the `>= 0` guard below mirrors the handler.
+export const MAX_CONCURRENT_RUNS_CEILING = 1_000_000
+
+// concurrentRunsError is the frontend input-layer validation for the
+// concurrent-run limit. "Unlimited" is expressed by clearing the field (blank)
+// OR by an explicit 0 — the ticket's "blank or 0 = unlimited" — so both are
+// always valid. A typed value must parse to a non-negative, finite integer at
+// or below the ceiling: negatives are rejected (the claim reads <= 0 as
+// unlimited, so a negative would silently mean "no limit" and 400 at the API),
+// fractions are rejected since the column is an integer, and an oversized value
+// is rejected before it can 400 at the DB. Returns the user-facing message, or
+// null when the input is acceptable. Mirrors the backend's guard so Save blocks
+// before the round-trip instead of bouncing off a 400.
+export function concurrentRunsError(raw: string): string | null {
+  const trimmed = raw.trim()
+  if (trimmed === '') return null
+  const n = Number(trimmed)
+  if (!Number.isFinite(n)) return 'Enter a whole number, or leave blank for unlimited.'
+  if (n < 0) return 'Enter 0 or more, or leave blank for unlimited.'
+  if (!Number.isInteger(n)) return 'Enter a whole number of runs.'
+  if (n > MAX_CONCURRENT_RUNS_CEILING)
+    return `Enter ${MAX_CONCURRENT_RUNS_CEILING.toLocaleString()} or fewer.`
+  return null
+}
+
+// concurrentRunsToWire converts the concurrent-run text input to the wire value
+// for max_concurrent_runs. Validation happens upstream (concurrentRunsError
+// gates the Save button), so by the time this runs the input is either blank or
+// a non-negative integer:
+//   - blank        → 0 (an explicit "unlimited" clear)
+//   - valid number → passed straight through
+//   - unparseable  → undefined, which JSON.stringify drops, so the field is
+//     omitted and a previously-stored limit is left UNTOUCHED rather than
+//     silently cleared to 0. Effectively unreachable from a number input; the
+//     guard just makes the "never stomp the limit on garbage" property explicit.
+function concurrentRunsToWire(raw: string): number | undefined {
+  const trimmed = raw.trim()
+  if (trimmed === '') return 0
+  const n = Number(trimmed)
+  return Number.isFinite(n) ? n : undefined
+}
+
 // dailyCapToWire converts the daily-cap text input to the wire value for
 // max_daily_cost_usd. Validation happens upstream (dailyCapError gates the Save
 // button), so by the time this runs the input is either blank or a positive
@@ -232,6 +288,7 @@ export async function saveOrgConfig(
       jira_poll_interval: form.jira_poll_interval,
       max_llm_model_tier: form.max_llm_model_tier,
       max_daily_cost_usd: dailyCapToWire(form.max_daily_cost_usd),
+      max_concurrent_runs: concurrentRunsToWire(form.max_concurrent_runs),
     }),
   })
   if (!res.ok) {

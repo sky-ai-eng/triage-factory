@@ -17,6 +17,15 @@ const DefaultModel = "sonnet"
 // substituted with the run's ticket id at prompt-render time.
 const DefaultBranchTemplate = "tfac/<ticket-id>"
 
+// MaxConcurrentRunsCeiling is the largest value OrgSettings.MaxConcurrentRuns
+// accepts. It's a sanity bound far beyond any real fleet (per-executor
+// concurrency tops out in the low hundreds; even a large fleet stays in the
+// tens of thousands), chosen so a validated value always fits the Postgres
+// int4 column — an oversized input is rejected with a clean 400 at the handler
+// rather than an "integer out of range" 500 at the DB. The frontend mirrors
+// this bound so Save blocks before the round-trip.
+const MaxConcurrentRunsCeiling = 1_000_000
+
 // OrgSettings is the org-scope settings row (org_settings table).
 //
 // Field nullability:
@@ -31,6 +40,9 @@ const DefaultBranchTemplate = "tfac/<ticket-id>"
 //   - MaxDailyCostUSD is a nullable numeric column (TFAC-477). 0
 //     round-trips 0 ↔ NULL — "no cap". Callers never need to
 //     distinguish 0 from NULL.
+//   - MaxConcurrentRuns is a nullable integer column. 0 round-trips
+//     0 ↔ NULL — "unlimited". Same convention as MaxDailyCostUSD;
+//     the claim treats <= 0 as unlimited too.
 //
 // GitHubCloneProtocol is "ssh" or "https" only — enforced by a CHECK
 // on both backends. An empty string from a caller is treated as
@@ -53,6 +65,19 @@ type OrgSettings struct {
 	// summed across every category) is >= this value, the delegation choke
 	// point refuses all new agent runs. A runaway-spend fuse.
 	MaxDailyCostUSD float64
+
+	// MaxConcurrentRuns is the org-wide ceiling on how many runs the org may
+	// have executing at once across the executor fleet. 0 = unlimited
+	// (round-trips 0 ↔ NULL; the claim also treats <= 0 as unlimited). Read
+	// live in the Postgres claim — a queued run is invisible to claims while
+	// the org's active-run count is at or above this value — so an event storm
+	// can't monopolize the fleet's slots. The instantaneous-concurrency sibling
+	// of the daily *spend* cap. Enforced multi-mode only (SQLite/local is N=1).
+	//
+	// The store read clamps a stray negative (no DB CHECK guards the column) up
+	// to 0, so callers always see "unlimited" as 0 and never a negative. Writes
+	// are validated in [0, MaxConcurrentRunsCeiling] at the handler.
+	MaxConcurrentRuns int
 
 	// MarketplaceEnabled was originally scoped as a ship-dark toggle for the
 	// within-org prompt marketplace (TFAC-535); that turned out to be the

@@ -64,6 +64,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			BedrockCredentialsRef: "vault://orgs/A/bedrock",
 			MaxLLMModelTier:       "sonnet",
 			MaxDailyCostUSD:       12.50,
+			MaxConcurrentRuns:     8,
 			MarketplaceEnabled:    true,
 		}
 		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, want); err != nil {
@@ -157,7 +158,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// AnthropicAPIKeyRef / BedrockCredentialsRef / MaxLLMModelTier /
 		// GitHubBaseURL / JiraBaseURL: empty input writes NULL, scans
 		// back as "". MaxDailyCostUSD: 0 input writes NULL, scans back as 0
-		// (TFAC-477's "no cap" round-trip). Pins the ""/0 ↔ NULL contract.
+		// (TFAC-477's "no cap" round-trip). MaxConcurrentRuns: 0 input writes
+		// NULL, scans back as 0 ("unlimited"). Pins the ""/0 ↔ NULL contract.
 		stores, ids := factory(t)
 		in := domain.OrgSettings{
 			GitHubPollInterval:  5 * time.Minute,
@@ -173,7 +175,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if got.GitHubBaseURL != "" || got.JiraBaseURL != "" ||
 			got.AnthropicAPIKeyRef != "" || got.BedrockCredentialsRef != "" ||
-			got.MaxLLMModelTier != "" || got.MaxDailyCostUSD != 0 {
+			got.MaxLLMModelTier != "" || got.MaxDailyCostUSD != 0 ||
+			got.MaxConcurrentRuns != 0 {
 			t.Errorf("nullable empties did not round-trip: %+v", got)
 		}
 	})
@@ -213,6 +216,66 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
+	t.Run("OrgSettings_ConcurrentRunsLimit_SetThenClear", func(t *testing.T) {
+		// A positive concurrent-run limit round-trips, and writing 0 clears it
+		// back to "unlimited" (0 ↔ NULL). The set/clear cycle on the same row
+		// proves the column isn't write-once — the integer sibling of the daily
+		// cost-cap test above.
+		stores, ids := factory(t)
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+		set := base
+		set.MaxConcurrentRuns = 12
+		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
+			t.Fatalf("UpdateSettings (set limit): %v", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem after set: %v", err)
+		}
+		if got.MaxConcurrentRuns != 12 {
+			t.Errorf("after set, MaxConcurrentRuns = %v; want 12", got.MaxConcurrentRuns)
+		}
+		// Clear: 0 writes NULL, reads back 0.
+		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
+			t.Fatalf("UpdateSettings (clear limit): %v", err)
+		}
+		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem after clear: %v", err)
+		}
+		if got.MaxConcurrentRuns != 0 {
+			t.Errorf("after clear, MaxConcurrentRuns = %v; want 0 (unlimited)", got.MaxConcurrentRuns)
+		}
+	})
+
+	t.Run("OrgSettings_ConcurrentRunsLimit_NegativeScansAsUnlimited", func(t *testing.T) {
+		// No DB CHECK guards max_concurrent_runs, so a negative could reach the
+		// column (a migration, a manual write). Everything downstream reads
+		// <= 0 as unlimited; the store read must agree, surfacing a stored
+		// negative as 0 rather than handing the settings UI a value it rejects.
+		stores, ids := factory(t)
+		in := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+			MaxConcurrentRuns:   -7,
+		}
+		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in); err != nil {
+			t.Fatalf("UpdateSettings (negative): %v", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		if got.MaxConcurrentRuns != 0 {
+			t.Errorf("stored negative MaxConcurrentRuns scanned as %v; want 0 (clamped to unlimited)", got.MaxConcurrentRuns)
+		}
+	})
+
 	t.Run("OrgSettings_Update_Overwrites", func(t *testing.T) {
 		stores, ids := factory(t)
 		first := domain.OrgSettings{
@@ -222,6 +285,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			JiraPollInterval:    5 * time.Minute,
 			MaxLLMModelTier:     "haiku",
 			MaxDailyCostUSD:     5,
+			MaxConcurrentRuns:   3,
 		}
 		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, first); err != nil {
 			t.Fatalf("first UpdateSettings: %v", err)
@@ -230,6 +294,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		second.GitHubBaseURL = "https://second.example.com"
 		second.MaxLLMModelTier = "opus"
 		second.MaxDailyCostUSD = 10
+		second.MaxConcurrentRuns = 20
 		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, second); err != nil {
 			t.Fatalf("second UpdateSettings: %v", err)
 		}
