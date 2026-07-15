@@ -95,6 +95,60 @@ func TestInitRoleFromEnv_InvalidFailsBoot(t *testing.T) {
 	}
 }
 
+// TestInitRoleFromEnv_MultiRejectsAll pins the third boot rule: multi mode
+// refuses to run as the fused single process, whether TF_ROLE says "all"
+// explicitly or is simply unset (which parses to all). The error is the
+// boot-time pointer at the split blueprint.
+func TestInitRoleFromEnv_MultiRejectsAll(t *testing.T) {
+	for _, val := range []string{"", "all", "ALL"} {
+		t.Run("TF_ROLE="+val, func(t *testing.T) {
+			SetForTest(t, ModeMulti)
+			resetRoleForTest(t)
+			t.Setenv("TF_ROLE", val)
+
+			if _, _, err := InitRoleFromEnv(); err == nil {
+				t.Fatalf("InitRoleFromEnv with TF_ROLE=%q in multi mode must fail boot — multi is always the control+executor split", val)
+			}
+		})
+	}
+}
+
+// TestInitRole_MultiRejectsAll_DoesNotMutate pins that the rejection leaves
+// the role uninitialized, so a subsequent valid init still works.
+func TestInitRole_MultiRejectsAll_DoesNotMutate(t *testing.T) {
+	SetForTest(t, ModeMulti)
+	resetRoleForTest(t)
+
+	if err := InitRole(RoleAll); err == nil {
+		t.Fatal("InitRole(all) in multi mode must error")
+	}
+	if err := InitRole(RoleControl); err != nil {
+		t.Fatalf("InitRole(control) after a rejected all: %v", err)
+	}
+	if Role() != RoleControl {
+		t.Errorf("Role() = %q, want control", Role())
+	}
+}
+
+// TestInitRole_LocalStillAcceptsAll pins that the multi rejection does not
+// leak into local mode: all (and unset) remain local's only shape.
+func TestInitRole_LocalStillAcceptsAll(t *testing.T) {
+	SetForTest(t, ModeLocal)
+	resetRoleForTest(t)
+	t.Setenv("TF_ROLE", "")
+
+	coerced, _, err := InitRoleFromEnv()
+	if err != nil {
+		t.Fatalf("InitRoleFromEnv: %v", err)
+	}
+	if coerced {
+		t.Error("unset TF_ROLE in local mode is not a coercion")
+	}
+	if Role() != RoleAll {
+		t.Errorf("Role() = %q, want all", Role())
+	}
+}
+
 // TestRole_UninitializedFallsBackToEnv pins the reset-hook behavior the
 // internal/db migration-gate tests rely on: with the role never
 // initialized, Role() honors a live TF_ROLE without the local-forces-all

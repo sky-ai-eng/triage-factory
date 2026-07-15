@@ -54,9 +54,9 @@ type subsystemPlan struct {
 	//
 	// This does NOT mean the brain is currently running on this process —
 	// that's dynamic, driven by lease-holder state (TFAC-583,
-	// internal/app/brain.go): at role=all (and local, which forces all)
-	// the single process always self-holds and starts the brain once at
-	// boot, unconditionally, same as before this ticket; at role=control
+	// internal/app/brain.go): at role=all (local-only — multi rejects all
+	// at boot) the single process always self-holds and starts the brain
+	// once at boot, unconditionally; at role=control
 	// in multi mode, the brain starts only while this pod actually holds
 	// the "background-brain" lease, and stops on demotion. A standby
 	// control pod still builds every brain object (buildAI/buildRouting) —
@@ -80,7 +80,8 @@ type subsystemPlan struct {
 // planForRole resolves the subsystem inventory for a deployment role.
 //
 // The derivations, stated positively for the reader:
-//   - all      = everything (today's single-process shape, byte-identical).
+//   - all      = everything — local mode's single-process shape (the only
+//     place all still boots; multi rejects it at role resolution).
 //   - control  = serve HTTP + brain, but NO run dispatcher.
 //   - executor = run dispatcher + healthz, but NO HTTP, NO brain.
 func planForRole(role runmode.DeployRole) subsystemPlan {

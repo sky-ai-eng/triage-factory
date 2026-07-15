@@ -11,7 +11,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -87,15 +86,14 @@ type Spawner struct {
 	blueprints db.BlueprintStore
 	runQueue   db.RunQueueStore // the run queue the dispatcher drains: enqueue a step, claim it, run it, react
 	// runCredentials is the sealed per-run credential bundle channel
-	// (TFAC-614) — TF_ROLE=executor's awaiting-credentials wait reads it;
-	// nil-safe (RoleAll/local never gate on it, since they resolve
-	// credentials directly instead).
+	// (TFAC-614) — the executor's awaiting-credentials wait reads it;
+	// nil-safe (local resolves credentials directly and never gates on it).
 	runCredentials db.RunCredentialsStore
 	// curatorTurnCredentials + curatorStore are the curator-turn analogs of
 	// runCredentials + runQueue: BringUpCuratorSandbox publishes the
 	// turn's sidecar pubkey via curatorStore.PublishTurnCredPubKey and polls
 	// curatorTurnCredentials for the sealed bundle the brain wrote. nil-safe
-	// (RoleAll/local never bring a curator sidecar up); a nil pair makes
+	// (local never brings a curator sidecar up); a nil pair makes
 	// BringUpCuratorSandbox degrade like every other nil-store seam here.
 	curatorTurnCredentials db.CuratorTurnCredentialsStore
 	curatorStore           db.CuratorStore
@@ -827,160 +825,6 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string
 		return nil
 	}
 	return client
-}
-
-// resolveCloneToken resolves the App installation token for the host-side
-// clone of a repo owned by owner, via the same resolver
-// resolveGHClient uses — so the API client and the `git clone`/`git fetch`
-// share one cached installation token. owner selects the
-// installation.
-//
-// Multi-mode only by design: this ticket scopes host-side token injection to
-// the hosted runtime (where SSH is unavailable and the App token is the only
-// credential). Local clones deliberately keep their existing path — the
-// operator's SSH key, or anonymous HTTPS — so local behavior is byte-for-byte
-// unchanged. (CloneAuthFor independently no-ops on an SSH-form URL; the mode
-// gate is what additionally leaves a local *HTTPS* clone uninjected, which is
-// a separate future step per the ticket.)
-//
-// Returns "" when local, when no resolver is wired (test fixtures), or when
-// resolution fails — the clone then proceeds with no injected credential. A
-// resolve failure is logged so a real backend outage (e.g. vault down) isn't
-// silent; the clone itself surfaces the auth error if the repo is private.
-//
-// repo disambiguates the TF_ROLE=executor bundle lookup exactly like
-// resolveGHClient's — required, not optional, whenever the caller has a
-// specific repo in view (every real caller does).
-func (s *Spawner) resolveCloneToken(ctx context.Context, orgID, owner, repo string) string {
-	// TF_ROLE=executor never reaches here — setupGitHub routes the clone
-	// through the sidecar's git proxy (CloneAuthViaGitProxy) instead of
-	// resolving a real token. This resolver path serves only all/local.
-	if runmode.Current() == runmode.ModeLocal {
-		return ""
-	}
-	s.mu.Lock()
-	resolver := s.ghResolver
-	s.mu.Unlock()
-	if resolver == nil {
-		return ""
-	}
-	tok, err := resolver.TokenFor(ctx, orgID, owner)
-	if err != nil {
-		delegateLog.Warn("resolve clone token failed", "org", orgID, "target", owner, "error", err)
-		return ""
-	}
-	return tok.Value
-}
-
-// gitProxyConfigFor builds the per-run git-egress wiring for a run
-// targeting a repo owned by owner: a gitproxy TokenSource backed by the
-// same resolver resolveCloneToken uses, so the host-side clone and the
-// in-sandbox push resolve one credential (App installation token or org
-// PAT, App preferred — TokenFor selects the owner's installation and
-// falls through to the PAT). agentproc holds the token host-side and
-// routes the sandbox git at the proxy; the real credential never enters
-// the box.
-//
-// Returns nil — disabling the git proxy — in local mode (the agent runs
-// on the host with the operator's own git credentials), when no resolver
-// is wired (test fixtures), or when owner is empty (Jira-only runs that
-// pre-clone nothing). agentproc ignores a nil GitProxy.
-//
-// Upstream is resolved through the resolver's authoritative base
-// resolution (org_settings → legacy github_url secret → github.com) so a
-// GHES org's sandbox git routes to, and the insteadOf rewrite matches,
-// its own host rather than github.com; a read error degrades to "" and
-// agentproc defaults it to github.com. Failing safe: a wrong base only
-// makes the insteadOf prefix miss the worktree remote, so the push is
-// dropped closed at the egress allowlist — the credential is never sent
-// to the wrong host.
-//
-// The closure maps the resolver's no-credentials sentinel to
-// agentproc.ErrNoSandboxGitCredentials so a misconfigured org surfaces a
-// clear admin-facing failure at run start rather than a confusing git
-// error from inside the sandbox. The resolver is read under the same
-// lock as resolveCloneToken so a startup-time credential hot-swap can't
-// race it.
-func (s *Spawner) gitProxyConfigFor(ctx context.Context, info agenthost.RunInfo, stores db.Stores) *agentproc.GitProxyConfig {
-	// TF_ROLE=executor never reaches here — its git proxy runs in the
-	// credential sidecar (executorGitGate supplies the authorize gate). This
-	// in-process path, built over the resolver, serves only all/local.
-	if runmode.Current() == runmode.ModeLocal {
-		return nil
-	}
-	s.mu.Lock()
-	resolver := s.ghResolver
-	s.mu.Unlock()
-	if resolver == nil {
-		return nil
-	}
-	// The per-repo scoped mint + run-start probe live on the ScopedResolver
-	// extension (the production resolver implements it). A resolver that
-	// doesn't (a test fake) gets no git proxy — better no egress than an
-	// unconstrained one.
-	scoped, ok := resolver.(ghclient.ScopedResolver)
-	if !ok {
-		return nil
-	}
-	orgID := info.OrgID
-
-	// Only wire a git proxy when the org has SOME GitHub credential. A
-	// Jira-only / no-GitHub org gets none — no regression, its runs do no git
-	// (and a GitHub-PR run with no credential already fails earlier in
-	// setupGitHub). A read error is treated as "proceed" so a transient outage
-	// doesn't strip egress from a run that has credentials; the per-request
-	// mint then surfaces the real failure. Only a definitive false disables it.
-	if has, err := scoped.HasAnyCredential(ctx, orgID); err != nil {
-		delegateLog.Warn("probe github credential for git proxy failed; proceeding (per-request mint surfaces a real failure)", "org", orgID, "error", err)
-	} else if !has {
-		return nil
-	}
-
-	upstream := ""
-	if base, err := resolver.BaseURLFor(ctx, orgID); err != nil {
-		delegateLog.Warn("resolve git host base failed; leaving upstream empty; agentproc defaults to github.com", "org", orgID, "error", err)
-	} else {
-		upstream = base
-	}
-
-	// The audit sink for denied git ops, routed through the same host-side
-	// recording the push backstop uses (admin pool for an event-triggered run,
-	// the kicking-off user's synthetic claims for a manual one).
-	denialHost := agenthost.NewLocal(stores, info)
-
-	return &agentproc.GitProxyConfig{
-		Upstream: upstream,
-		TokenSource: func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
-			// Layer 1: a fresh token scoped to exactly owner/repo with the only
-			// permission a clone/fetch/push needs. An over-scoped App can't
-			// leak its breadth through this token; a PAT org falls through
-			// unscoped (a PAT can't be narrowed) and Layer 2/3 enforce it.
-			tok, err := scoped.TokenForRepoScoped(ctx, orgID, owner, repo, map[string]string{"contents": "write"})
-			if err != nil {
-				if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-					return gitproxy.Token{}, fmt.Errorf("%w: org %s repo %s/%s", agentproc.ErrNoSandboxGitCredentials, orgID, owner, repo)
-				}
-				return gitproxy.Token{}, err
-			}
-			return gitproxy.Token{Value: tok.Value, ExpiresAt: tok.ExpiresAt}, nil
-		},
-		ProbeCredentials: func(ctx context.Context) error {
-			has, err := scoped.HasAnyCredential(ctx, orgID)
-			if err != nil {
-				return err
-			}
-			if !has {
-				return fmt.Errorf("%w: org %s", agentproc.ErrNoSandboxGitCredentials, orgID)
-			}
-			return nil
-		},
-		Authorize: func(ctx context.Context, owner, repo string) (gitproxy.Decision, error) {
-			return gitAuthorizeDecision(ctx, stores, info, owner, repo)
-		},
-		RecordDenial: func(ctx context.Context, denied gitproxy.DeniedGitOp) {
-			denialHost.RecordGitDenied(ctx, denied.Owner, denied.Repo, denied.Ref, denied.Op, denied.Reason)
-		},
-	}
 }
 
 // gitAuthorizeDecision is the git proxy's live per-repo gate (Layer 2 + the

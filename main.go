@@ -55,12 +55,14 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("runmode: %w", err)
 	}
 
-	// Resolve the deployment role (TF_ROLE, default all) right after the
-	// mode and before the argv dispatch, so the `migrate` subcommand and
-	// every subsystem see the same role. An invalid value fails boot
-	// loudly; local mode coerces any split role to all (it is structurally
+	// Resolve the deployment role (TF_ROLE) right after the mode and
+	// before the argv dispatch, so the `migrate` subcommand and every
+	// subsystem see the same role. An invalid value fails boot loudly;
+	// local mode coerces any split role to all (it is structurally
 	// single-process) and we log the coercion rather than brick a laptop
-	// over a stray env var.
+	// over a stray env var; multi mode rejects all/unset outright — multi
+	// is always the control+executor split, and the error points the
+	// operator at the blueprint.
 	coerced, requested, err := runmode.InitRoleFromEnv()
 	if err != nil {
 		return fmt.Errorf("runmode role: %w", err)

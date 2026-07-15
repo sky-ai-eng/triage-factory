@@ -376,54 +376,16 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	}
 
 	// Resume runs follow the same sandbox-branch path as the initial
-	// invocation, so wire the same per-run agenthost daemon. The run
-	// identity is unchanged across resumes — only the prompt and the
-	// SessionID differ.
-	stores, storesSet := s.getStores()
-	var (
-		info           agenthost.RunInfo
-		startAgentHost func() (sandbox.Mount, io.Closer, error)
-	)
-	if storesSet {
-		info = agenthost.RunInfo{
-			OrgID:            orgID,
-			UserID:           creatorUserID,
-			RunID:            runID,
-			TeamID:           opts.TeamID,
-			IsEventTriggered: triggerType == domain.TriggerTypeEvent,
-		}
-		if opts.execSandbox != nil {
-			// TF_ROLE=executor: the credential sidecar hosts the exec-verb socket
-			// server (the relocation); the orchestrator only supplies the bind
-			// mount for the socket the sidecar already created at bring-up.
-			startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-				return agenthost.SocketMountFor(runID), noopCloser{}, nil
-			}
-		} else {
-			// all/local: host the socket server in-process over live stores.
-			startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-				hd, mount, err := agenthost.Start(stores, info, nil)
-				if err != nil {
-					return sandbox.Mount{}, nil, err
-				}
-				return mount, hd, nil
-			}
-		}
-	}
-
-	// On the executor path the git proxy runs in the credential sidecar (brought
-	// up by the dispatcher before this call), so none is wired here. On all/local
-	// wire the same in-process git proxy the initial invocation got — authority
-	// is re-derived live (per-repo lazy mint + the run_worktrees-backed gate), so
-	// no head-ref or owner needs threading through resume. Also wire the
-	// receive-pack backstop to the same record path the pre-push hook uses
-	// (TFAC-467). nil config (local mode / no GitHub credential) leaves the
-	// --no-verify gap accepted.
-	var gitProxy *agentproc.GitProxyConfig
-	if opts.execSandbox == nil {
-		gitProxy = s.gitProxyConfigFor(ctx, info, stores)
-		if gitProxy != nil && storesSet {
-			gitProxy.RecordPush = gitPushRecorder(stores, info)
+	// invocation, so wire the same per-run agenthost socket mount. The
+	// credential sidecar hosts the exec-verb socket server (the relocation)
+	// and already created the socket at bring-up; the orchestrator only
+	// supplies the bind mount. Local (no sandbox) never invokes the closure,
+	// so none is built — the former in-process socket server over live
+	// stores is gone with the fused single-process shape.
+	var startAgentHost func() (sandbox.Mount, io.Closer, error)
+	if opts.execSandbox != nil {
+		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
+			return agenthost.SocketMountFor(runID), noopCloser{}, nil
 		}
 	}
 
@@ -439,11 +401,10 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		OrgID:        orgID,
 		Secrets:      s.getRunSecrets(),
 		LLMResolver:  s.llmResolverForRun(orgID, runID),
-		// Executor path (nil/empty on all/local): launch into the prebuilt
-		// network + the sidecar's proxy env; the sidecar holds the credentials.
+		// Multi mode: launch into the prebuilt network + the sidecar's proxy
+		// env; the sidecar holds the credentials. nil in local (no sandbox).
 		PrebuiltNetwork:  opts.execSandbox.runNetwork(),
 		PrebuiltProxyEnv: opts.execSandbox.proxyEnv(),
-		GitProxy:         gitProxy,
 		StartAgentHost:   startAgentHost,
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)

@@ -69,8 +69,8 @@ func (a *App) startWorkers(ctx context.Context) {
 	//   - local (role=all): the pure-broadcaster KnowledgeWatcher, exactly as
 	//     before — the on-disk KB is the truth, there is no blob store in the
 	//     path, and each pod watches its own projects root.
-	//   - multi + executor / all: the KBSyncer — these pods run curator turns
-	//     on their own disk, so agent KB writes must be mirrored into the blob
+	//   - multi + executor: the KBSyncer — executors run curator turns on
+	//     their own disk, so agent KB writes must be mirrored into the blob
 	//     store (the multi-mode source of truth) and broadcast to browsers on
 	//     control pods over the WS backplane.
 	//   - multi + control: nothing. A capless control pod forwards turns to
@@ -302,12 +302,12 @@ func (a *App) wireCloneStatusCallback() {
 // knowledgeSyncEnabled reports whether this pod runs a KB observer, and if so
 // startKnowledgeWatcher picks which one. Local (role=all) watches as before;
 // in multi mode only the pods that run curator turns on their own disk —
-// executors and role=all — sync, never a capless control pod.
+// executors — sync, never a capless control pod.
 func (a *App) knowledgeSyncEnabled() bool {
 	if runmode.Current() == runmode.ModeLocal {
 		return a.plan.brain
 	}
-	return a.curator != nil && a.plan.role != runmode.RoleControl
+	return a.curator != nil && a.plan.role == runmode.RoleExecutor
 }
 
 // startKnowledgeWatcher starts the KB observer for this pod. In local mode it

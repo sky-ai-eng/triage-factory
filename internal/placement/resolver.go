@@ -110,7 +110,7 @@ type Candidate struct {
 
 	// Reason is a short human tag for the explainer: "" when plainly ranked,
 	// otherwise why it was excluded or specially placed ("dead", "draining",
-	// "control-only", "no-capacity", "pinned"). Note "gated" is deliberately
+	// "not-an-executor", "no-capacity", "pinned"). Note "gated" is deliberately
 	// NOT here: a momentarily dispatch-gated executor stays an eligible
 	// rendezvous candidate (gating is transient and handled at claim time), so
 	// the resolver never tags one.
@@ -283,16 +283,16 @@ func preferredSet(ranked []Ranked, override *domain.PlacementOverride) []string 
 }
 
 // ineligibleReason reports whether an instance can NOT be a rendezvous owner
-// and why. Excluded: non-executor-capable roles (a control-only pod runs no
-// dispatcher), a dead heartbeat, an operator drain, or no advertised
-// capacity. A momentarily memory-gated executor is NOT excluded here — gating
-// is transient and dropping it would thrash every key it owns on each
-// gate/ungate; the claim handles a gated preferred via its own spillover.
+// and why. Excluded: non-executor roles (placement only runs in multi mode,
+// where every dispatcher is an executor — a control pod runs none, and the
+// all role is local-only and never registers into a multi fleet), a dead
+// heartbeat, an operator drain, or no advertised capacity. A momentarily
+// memory-gated executor is NOT excluded here — gating is transient and
+// dropping it would thrash every key it owns on each gate/ungate; the claim
+// handles a gated preferred via its own spillover.
 func ineligibleReason(in domain.Instance, liveCutoff time.Time) (string, bool) {
-	switch in.Role {
-	case domain.InstanceRoleExecutor, domain.InstanceRoleAll:
-	default:
-		return "control-only", true
+	if in.Role != domain.InstanceRoleExecutor {
+		return "not-an-executor", true
 	}
 	if in.LastHeartbeatAt.Before(liveCutoff) {
 		return "dead", true

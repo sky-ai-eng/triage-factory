@@ -19,20 +19,23 @@ import (
 // BringUpCuratorSandbox stands up the run network + credential sidecar for a
 // homed curator turn — the curator-turn analog of
 // bringUpExecutorSandbox. Curator wires it through the SetTurnSandbox seam,
-// gated on the executor runtime, so control/all/local (where this returns nil)
-// keep the in-process agenthost.Start path byte-identical.
+// gated on the executor runtime, so local (where this returns nil) keeps the
+// in-process agenthost.Start path byte-identical.
 //
-// Returns (nil, nil) on every non-executor role and on an unwired fixture (nil
-// curator stores), exactly like bringUpExecutorSandbox — the caller then keeps
-// the in-process path. On any error the partial state (network, sidecar) is
-// already torn down; the caller does not Close a nil return.
+// Gated on the MODE, not the role, for the same reason as
+// bringUpExecutorSandbox: multi is always per-run-isolated, and a future
+// multi caller must never silently fall back to in-process credential
+// resolution. Returns (nil, nil) in local mode and on an unwired fixture (nil
+// curator stores) — the caller then keeps the in-process path. On any error
+// the partial state (network, sidecar) is already torn down; the caller does
+// not Close a nil return.
 //
 // pinnedRepos is the turn's authorized GitHub set ("owner/repo"): it gates the
 // sidecar's git proxy (pinned ∩ tracked) and, carried on RunInfo/AgentHostInfo,
 // authorizes the agent's exec-gh verbs against the same set. userID is the
 // requesting user; teamID the curated project's owning team.
 func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, requestID, userID, teamID string, pinnedRepos []string) (*executorSandbox, error) {
-	if runmode.Role() != runmode.RoleExecutor {
+	if runmode.Current() != runmode.ModeMulti {
 		return nil, nil
 	}
 	// Not wired (a test fixture) — degrade like every other nil-store seam here.

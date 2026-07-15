@@ -96,9 +96,8 @@ type App struct {
 	wsHub *websocket.Hub
 	// wsBackplane is the multi-mode cross-pod fan-out for wsHub, the
 	// spawner's presence check, and the server's session kick (TFAC-584).
-	// nil in local mode and at TF_ROLE=all before buildWSBackplane runs —
-	// every consumer treats that as "behave exactly as before this
-	// existed" (see buildWSBackplane's doc comment).
+	// nil in local mode — every consumer treats that as "behave exactly
+	// as before this existed" (see buildWSBackplane's doc comment).
 	wsBackplane *wsbackplane.Backplane
 
 	// deployPublicURL is the deployment's externally-visible base URL —
@@ -322,8 +321,9 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 		return nil, err
 	}
 	// The background-brain lease elector (TFAC-583) — control role in
-	// multi mode only. role=all never elects (startBrain runs directly,
-	// unconditionally, from Run); an executor is never brain-capable.
+	// multi mode only. Local (role=all) never elects (startBrain runs
+	// directly, unconditionally, from Run); an executor is never
+	// brain-capable.
 	// Built after buildExecution so the spawner's identity-fence check
 	// (IdentityFenced) exists to wire in.
 	if a.plan.role == runmode.RoleControl {
@@ -362,7 +362,7 @@ func (a *App) Run(ctx context.Context) error {
 		// loses, and re-wins the "background-brain" lease across its
 		// lifetime. Backgrounded — Run blocks on the HTTP listener below.
 		go a.leaseElector.Run(ctx)
-	case a.plan.brain: // role == all (includes every local-mode boot)
+	case a.plan.brain: // role == all — local mode only (multi never plans all)
 		// Single process, always self-holds — zero lease I/O, brain starts
 		// once, unconditionally, exactly like every release before this
 		// ticket.

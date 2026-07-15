@@ -91,11 +91,12 @@ What Triage Factory doesn't require:
 
 The capability-holding component never listens on the network. The cap-broker's
 only inputs are a local unix-socket RPC and the run I/O it passes through. It
-has no routable port, no request parser, and no authentication surface. In the
-all-in-one process (`TF_ROLE='all'`) the HTTP API is served by the unprivileged
-orchestrator, not the cap-broker; in a fleet, executor-role pods take no inbound
-traffic at all. The hostile-input surface is only things the process itself
-reached out to or spawned.
+has no routable port, no request parser, and no authentication surface. Multi
+mode is always the control+executor split (`TF_ROLE=all` refuses to boot
+there), and only executors run a broker — executor pods take no inbound
+traffic at all, while the control pod serves the HTTP API with no broker and
+no sandbox capabilities in its container. The hostile-input surface is only
+things the process itself reached out to or spawned.
 
 ---
 

@@ -22,5 +22,6 @@ docs/triagefactory-spec.md
 docs/oauth-smoke.html
 .env
 .env.multi-dev
+.multi-dev-state/
 triage-factory
 bench-results/

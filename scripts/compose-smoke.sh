@@ -142,7 +142,29 @@ while :; do
   sleep 3
   elapsed=$((elapsed + 3))
 done
-pass "all services healthy (triagefactory up — implies postgres + gotrue healthy, sidecars completed, migrate-up ran)"
+pass "control healthy (triagefactory up — implies postgres + gotrue healthy, sidecars completed, migrate-up ran)"
+
+# The executor is the second half of the default co-located split. It only
+# starts after the control pod is healthy (its schema assert needs the
+# migrated schema) and postgres-postinit-system completed (its admin pool
+# authenticates as tf_system), so its healthy state is a full second-boot
+# gate: role resolution accepted TF_ROLE=executor, the cap-broker came up,
+# the dispatcher is heartbeating.
+echo "Waiting for executor to become healthy (timeout ${HEALTH_TIMEOUT}s)..."
+ecid=$(dc ps -aq executor | head -1)
+[ -n "$ecid" ] || fail "executor container was not created"
+elapsed=0
+while :; do
+  status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$ecid" 2>/dev/null || echo missing)
+  case "$status" in
+    healthy) break ;;
+    exited|dead) fail "executor $status before becoming healthy" ;;
+  esac
+  [ "$elapsed" -ge "$HEALTH_TIMEOUT" ] && fail "executor not healthy after ${HEALTH_TIMEOUT}s (last status: $status)"
+  sleep 3
+  elapsed=$((elapsed + 3))
+done
+pass "executor healthy (role accepted, schema assert passed, broker up, dispatcher heartbeating)"
 
 # postgres-postinit-system (reconciles tf_system's password) deliberately
 # starts only AFTER triagefactory is healthy — tf_system doesn't exist
@@ -237,14 +259,19 @@ case "$gv" in
   *) pass "migrations applied (goose_db_version has $gv rows)" ;;
 esac
 
-# 6. Privilege-separation posture. The failure class this catches is
-#    invisible to the health probe: the container boots green while the
-#    split is silently degraded (one process, or an orchestrator that kept
-#    its capabilities, or a /run/tf the unprivileged orchestrator can't
-#    create per-run agenthost sockets in — every delegated run would then
-#    fail at its first sandbox setup, long after "healthy"). The compose
-#    stack pins TF_MODE=multi, and the cap-broker is the only sandbox launch
-#    path, so the split is unconditionally expected here.
+# 6. Privilege-separation posture, per role. The failure class this catches
+#    is invisible to the health probes: a container boots green while the
+#    split is silently degraded (a broker on the capless control pod, an
+#    orchestrator that kept its capabilities, or a /run/tf the unprivileged
+#    executor orchestrator can't create per-run agenthost sockets in). Multi
+#    mode is always the control+executor split, so BOTH postures are
+#    unconditionally expected:
+#      control  — NO cap-broker (it never launches a sandbox and its service
+#                 carries no caps), orchestrator capless + non-root.
+#      executor — cap-broker present (the only sandbox launch path),
+#                 orchestrator capless + non-root, /run/tf orchestrator-owned.
+
+# 6a. Control: capless, broker-free.
 posture=$(dc exec -T triagefactory sh -c '
   broker=""; orch=""
   for c in /proc/[0-9]*/comm; do
@@ -255,19 +282,42 @@ posture=$(dc exec -T triagefactory sh -c '
       tf-orchestrator)  orch=$pid ;;
     esac
   done
-  [ -n "$broker" ] || { echo "no tf-cap-broker process found"; exit 1; }
+  [ -z "$broker" ] || { echo "control pod runs a tf-cap-broker (pid $broker); control must never spawn one"; exit 1; }
   [ -n "$orch" ]   || { echo "no tf-orchestrator process found"; exit 1; }
   eff=$(awk "/^CapEff/{print \$2}" "/proc/$orch/status")
   bnd=$(awk "/^CapBnd/{print \$2}" "/proc/$orch/status")
-  [ "$eff" = "0000000000000000" ] || { echo "orchestrator CapEff=$eff, want all-zero"; exit 1; }
-  [ "$bnd" = "0000000000000000" ] || { echo "orchestrator CapBnd=$bnd, want all-zero (bounding set must be cleared)"; exit 1; }
+  [ "$eff" = "0000000000000000" ] || { echo "control orchestrator CapEff=$eff, want all-zero"; exit 1; }
+  [ "$bnd" = "0000000000000000" ] || { echo "control orchestrator CapBnd=$bnd, want all-zero (bounding set must be cleared)"; exit 1; }
   ouid=$(awk "/^Uid/{print \$2}" "/proc/$orch/status")
-  [ "$ouid" != "0" ] || { echo "orchestrator runs as root; the uid switch did not apply"; exit 1; }
+  [ "$ouid" != "0" ] || { echo "control orchestrator runs as root; the uid switch did not apply"; exit 1; }
+  echo "no broker; orchestrator pid $orch (uid $ouid, CapEff/CapBnd zero)"
+' 2>&1) || fail "control privsep posture: $posture"
+pass "control privsep posture: $posture"
+
+# 6b. Executor: broker-then-drop split.
+posture=$(dc exec -T executor sh -c '
+  broker=""; orch=""
+  for c in /proc/[0-9]*/comm; do
+    read -r name < "$c" 2>/dev/null || continue
+    pid=${c#/proc/}; pid=${pid%%/*}
+    case "$name" in
+      tf-cap-broker)    broker=$pid ;;
+      tf-orchestrator)  orch=$pid ;;
+    esac
+  done
+  [ -n "$broker" ] || { echo "no tf-cap-broker process found (the only sandbox launch path)"; exit 1; }
+  [ -n "$orch" ]   || { echo "no tf-orchestrator process found"; exit 1; }
+  eff=$(awk "/^CapEff/{print \$2}" "/proc/$orch/status")
+  bnd=$(awk "/^CapBnd/{print \$2}" "/proc/$orch/status")
+  [ "$eff" = "0000000000000000" ] || { echo "executor orchestrator CapEff=$eff, want all-zero"; exit 1; }
+  [ "$bnd" = "0000000000000000" ] || { echo "executor orchestrator CapBnd=$bnd, want all-zero (bounding set must be cleared)"; exit 1; }
+  ouid=$(awk "/^Uid/{print \$2}" "/proc/$orch/status")
+  [ "$ouid" != "0" ] || { echo "executor orchestrator runs as root; the uid switch did not apply"; exit 1; }
   duid=$(stat -c %u /run/tf)
   [ "$duid" = "$ouid" ] || { echo "/run/tf owned by uid $duid, want the orchestrator uid $ouid (agenthost sockets are created there unprivileged)"; exit 1; }
   echo "broker pid $broker (root, caps); orchestrator pid $orch (uid $ouid, CapEff/CapBnd zero); /run/tf owned by $ouid"
-' 2>&1) || fail "privsep posture: $posture"
-pass "privsep posture: $posture"
+' 2>&1) || fail "executor privsep posture: $posture"
+pass "executor privsep posture: $posture"
 
 echo ""
 echo "compose-smoke: ALL CHECKS PASSED ✓"

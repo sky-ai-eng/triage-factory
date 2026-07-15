@@ -138,6 +138,9 @@ func summarizeInstances(instances []domain.Instance, now time.Time) fleetTotals 
 		if inst.DispatchGated != nil && *inst.DispatchGated {
 			t.Gated++
 		}
+		// Fleet rows are multi-mode registrations, so the non-control bucket
+		// is exactly the executors (the all role is local-only and never
+		// registers into a Postgres fleet).
 		if inst.Role == domain.InstanceRoleControl {
 			t.Control++
 		} else {

@@ -3,6 +3,7 @@ package agentproc
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
@@ -145,19 +145,6 @@ type RunOptions struct {
 	// threads it through.
 	OnResult func(*Result)
 
-	// GitProxy, when non-nil, wires a per-run git credential proxy into
-	// the sandbox branch so the agent can push/fetch over git-over-HTTPS
-	// without the real GitHub credential ever entering the box. The
-	// caller (delegate spawner) builds it over the GitHub resolver's
-	// TokenFor (App-or-PAT); the proxy holds the token host-side and the
-	// sandbox git is routed at it via injected GIT_CONFIG env entries.
-	//
-	// nil for runs with no git egress need — prompt-only scorer /
-	// classifier / profiler calls, and Jira-only runs that pre-clone
-	// nothing. Local-mode + non-sandbox paths ignore it (the agent runs
-	// directly on the host with the operator's own git credentials).
-	GitProxy *GitProxyConfig
-
 	// LLMResolver, when non-nil, resolves the org's LLM env map instead of
 	// Run's built-in raw-secret resolution — the seam the brain wires to
 	// internal/llmcred so a role-mode Bedrock org mints short-lived STS
@@ -171,35 +158,23 @@ type RunOptions struct {
 	// classifier); a mint failure surfaces here and the caller skips.
 	LLMResolver func(ctx context.Context, orgID string) (map[string]string, error)
 
-	// LLMCredentialSource, when non-nil, is the executor's live re-reader of
-	// the run's newest sealed LLM material (the analog of GitProxy's
-	// TokenSource). startProxiesForSandbox wires it into the SigV4 proxy so a
-	// role-mode run whose STS session credentials are re-minted mid-run picks
-	// up the fresh triple without a proxy restart — reading the newest sealed
-	// bundle, never the run-start snapshot. Returns the newest bundle.LLM env
-	// map plus its expiry (zero = non-expiring). Wired by the delegate on the
-	// executor bundle path only; nil everywhere else keeps the run-start
-	// snapshot (bearer / anthropic, brain-side consumers, local).
-	LLMCredentialSource func(ctx context.Context) (env map[string]string, expiry time.Time, err error)
-
-	// PrebuiltNetwork, when non-nil, is a run network the delegate stood up
-	// itself (sandbox.SetupRunNetwork) BEFORE calling Run — the executor path
-	// where the credential sidecar and its proxies are already live on
-	// PrebuiltNetwork.HostIP, because the pre-sandbox clone had to route
-	// through them. Run launches the sandbox into this network (Config.Network)
-	// instead of allocating one, does NOT resolve credentials or run the
-	// in-process proxies (PrebuiltProxyEnv already carries the agent's proxy
-	// env), and does NOT tear the network or sidecar down — the delegate owns
-	// both, closing them after Run returns. nil keeps the self-contained path:
-	// Run allocates the network and runs the in-process proxies (all/local,
-	// curator, one-shot system jobs) — byte-identical to before.
+	// PrebuiltNetwork is the run network the caller stood up
+	// (sandbox.SetupRunNetwork) BEFORE calling Run, with the run's credential
+	// sidecar and its LLM/git/egress proxies already live on
+	// PrebuiltNetwork.HostIP. REQUIRED whenever the run sandboxes: multi mode
+	// is per-run-isolated by construction, so this process never resolves a
+	// run credential or hosts a run proxy itself — the former in-process
+	// bring-up no longer exists, and a sandboxed call without a prebuilt
+	// network fails before the subprocess spawns. Run launches the sandbox
+	// into this network (Config.Network) and does NOT tear it or the sidecar
+	// down — the caller owns both, closing them after Run returns. Ignored
+	// (and normally nil) on the non-sandbox local path.
 	PrebuiltNetwork *sandbox.RunNetwork
 
-	// PrebuiltProxyEnv is the non-secret sandbox env the delegate's sidecar
-	// bring-up produced (LLM/git/egress proxy URLs + per-run placeholders + the
-	// single GIT_CONFIG_* block). Folded verbatim into the sandbox env when
-	// PrebuiltNetwork is set — it takes the place of the in-process
-	// ConfigureProxies output. Ignored when PrebuiltNetwork is nil.
+	// PrebuiltProxyEnv is the non-secret sandbox env the sidecar bring-up
+	// produced (LLM/git/egress proxy URLs + per-run placeholders + the
+	// single GIT_CONFIG_* block). Folded verbatim into the sandbox env
+	// alongside PrebuiltNetwork.
 	PrebuiltProxyEnv []string
 
 	// StartAgentHost, when non-nil, starts the per-run host agenthost
@@ -489,18 +464,16 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 // sandbox.Wrap's own self-cleanup contract); the returned cleanup is then a
 // spent no-op, safe to defer or ignore.
 //
-// PROPERTY B INVARIANT: credentials are resolved here on the host side, then
-// routed through a per-run LLM proxy bound to the sandbox's host-side veth IP
-// (see the configureProxies callback). The agent's env carries only the proxy
-// URL + a per-run placeholder credential; the real key lives in the proxy
-// process on the host and is injected into the upstream HTTP request right
-// before it leaves the box.
+// PROPERTY B INVARIANT: this process holds no run credential at all. The
+// run's LLM/git/egress proxies run in the per-run credential sidecar the
+// caller brought up over the sealed bundle; the agent's env carries only the
+// proxy URLs + per-run placeholder credentials (opts.PrebuiltProxyEnv), and
+// the real key is injected onto the upstream hop inside the sidecar.
 func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath string) (runProc, func(), error) {
 	// Teardown state, accumulated as each setup step below succeeds. cleanup
 	// runs the undos in LIFO order and is single-shot via once, so the error
 	// paths can invoke it eagerly and the caller can still defer it safely.
 	var (
-		proxies    *runProxies
 		scratchCwd string
 		ahCloser   io.Closer
 		sb         *sandbox.Sandbox
@@ -533,35 +506,22 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 				// this is teardown; the run's own ctx may be canceled.
 				_ = sandbox.RemoveRunTree(context.Background(), scratchCwd)
 			}
-			if proxies != nil {
-				// Detached context so a cancelled run still gets a clean
-				// Shutdown drain rather than a torn TCP close that leaks the
-				// proxy goroutine.
-				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer shutdownCancel()
-				if err := proxies.Shutdown(shutdownCtx); err != nil {
-					agentprocLog.Warn("proxy shutdown failed", "error", err)
-				}
-			}
 		})
 	}
 
 	sdkDir := filepath.Dir(wrapperPath)
 
-	// The self-contained path resolves the org's LLM credentials here and runs
-	// the in-process proxies over them (configureProxies below). The executor
-	// path (PrebuiltNetwork set) holds NO credential — its proxies already run
-	// in the delegate's sidecar over the sealed bundle — so it must NOT resolve
-	// (the executor's secret store is disabled and no bundle is on ctx); the
-	// agent's proxy env arrives verbatim in opts.PrebuiltProxyEnv.
-	var creds map[string]string
+	// Every sandboxed run launches into a prebuilt per-run network whose
+	// credential sidecar already runs the proxies over the run's sealed
+	// bundle — delegated runs and homed curator turns alike. This process
+	// resolves no credential here (the executor's secret store is disabled,
+	// and multi mode is per-run-isolated by construction); the former
+	// in-process proxy bring-up no longer exists, so a sandboxed caller
+	// without a prebuilt network is a wiring bug, surfaced before the
+	// subprocess spawns rather than degraded into a fused fallback.
 	if opts.PrebuiltNetwork == nil {
-		resolved, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID, opts.LLMResolver)
-		if err != nil {
-			cleanup()
-			return nil, cleanup, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
-		}
-		creds = resolved
+		cleanup()
+		return nil, cleanup, errors.New("sandbox: no prebuilt run network — sandboxed runs require the per-run credential sidecar (multi mode is always per-run-isolated)")
 	}
 
 	// Some callers (scorer, classifier stage1, profiler) are prompt-only —
@@ -688,61 +648,27 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		BuildArgs(sandboxOpts)...,
 	)
 
-	// Two credential provenances for the run's proxies:
-	//
-	//   - Self-contained (PrebuiltNetwork nil — all/local/curator/system jobs):
-	//     the orchestrator IS the credential holder, so after Wrap wires the
-	//     netns it calls ConfigureProxies, which starts the LLM/git/egress
-	//     proxies on the host-side veth IP over the credentials resolved above
-	//     and returns the sandbox env naming them. Property B: the returned env
-	//     carries only proxy URLs + per-run placeholders.
-	//
-	//   - Executor (PrebuiltNetwork set): the delegate already stood up the
-	//     network AND the credential sidecar, brought its proxies up on the
-	//     veth IP (because the pre-sandbox clone had to route through them), and
-	//     handed us their sandbox env in PrebuiltProxyEnv. Fold it into the
-	//     sandbox env, give Wrap the network so it skips its own allocation +
-	//     ConfigureProxies, and hold no credential here at all.
-	var configureProxies func(*sandbox.Sandbox) ([]string, error)
-	if opts.PrebuiltNetwork == nil {
-		configureProxies = func(s *sandbox.Sandbox) ([]string, error) {
-			// Fold the org commit identity (TFAC-452) into the sandbox's
-			// GIT_CONFIG_* block alongside core.hooksPath + the proxy pairs.
-			// Empty identity → no pairs added.
-			identityPairs := githooks.IdentityConfigPairs(opts.GitUserName, opts.GitUserEmail)
-			bundle, proxyEnv, perr := startProxiesForSandbox(runCtx, s.HostIP, creds, opts.GitProxy, opts.LLMCredentialSource, identityPairs...)
-			if perr != nil {
-				return nil, perr
-			}
-			// Hand the bundle to the enclosing scope so cleanup tears down the
-			// proxy on every exit path (normal, error, ctx cancellation).
-			proxies = bundle
-			return proxyEnv, nil
-		}
-	} else {
-		// The delegate's sidecar bring-up already produced the agent's proxy
-		// env (LLM/git/egress URLs + placeholders + the single GIT_CONFIG_*
-		// block); it takes the place of ConfigureProxies' output here.
-		sbEnv = append(sbEnv, opts.PrebuiltProxyEnv...)
-	}
+	// The caller's sidecar bring-up already produced the agent's proxy env
+	// (LLM/git/egress URLs + placeholders + the single GIT_CONFIG_* block,
+	// with the org commit identity folded in at bring-up). Fold it into the
+	// sandbox env and give Wrap the prebuilt network so it skips its own
+	// allocation — this process holds no run credential and runs no proxy.
+	sbEnv = append(sbEnv, opts.PrebuiltProxyEnv...)
 
 	sandboxRun, sboxObj, err := sandbox.Wrap(runCtx, sandbox.Config{
-		RunID:            opts.TraceID,
-		Worktree:         workCwd,
-		SDKDir:           sdkDir,
-		Argv:             argv,
-		Env:              sbEnv,
-		ExtraMounts:      extraMounts,
-		ConfigureProxies: configureProxies,
-		Network:          opts.PrebuiltNetwork,
-		MemoryLimitMB:    runMemoryLimitMB(),
+		RunID:         opts.TraceID,
+		Worktree:      workCwd,
+		SDKDir:        sdkDir,
+		Argv:          argv,
+		Env:           sbEnv,
+		ExtraMounts:   extraMounts,
+		Network:       opts.PrebuiltNetwork,
+		MemoryLimitMB: runMemoryLimitMB(),
 	})
 	if err != nil {
-		// Wrap cleaned up its own partial state, but configureProxies may
-		// have started the proxies before a later Wrap step failed — cleanup
-		// shuts them down (plus the agenthost daemon + scratch dir). On the
-		// executor path the delegate's sidecar + network are untouched here —
-		// it owns their teardown once Run returns.
+		// Wrap cleaned up its own partial state; cleanup covers the agenthost
+		// daemon + scratch dir. The caller's sidecar + network are untouched
+		// here — it owns their teardown once Run returns.
 		cleanup()
 		return nil, cleanup, fmt.Errorf("sandbox: %w", err)
 	}

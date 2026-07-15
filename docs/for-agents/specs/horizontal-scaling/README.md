@@ -151,14 +151,18 @@ And the inverse — what at design time **assumed exactly one process**
 One binary, one new startup flag alongside `TF_MODE`:
 
 ```
-TF_ROLE = all | control | executor        (default: all; local mode forces all)
+TF_ROLE = all | control | executor
+  local mode: forces all (the single-process shape)
+  multi mode: control or executor REQUIRED — all/unset refuses to boot
 ```
 
-- **`all`** — today's process: HTTP + WS + background brain + dispatcher
-  + sandboxes. The default; the only shape local mode and small
-  self-hosts ever see. All coordination mechanisms below still run, they
-  just trivially self-resolve (the process holds every lease, placement
-  always picks itself, NOTIFY loops back).
+- **`all`** — the single-process shape: HTTP + WS + background brain +
+  dispatcher. LOCAL-ONLY (TFAC-637 retired it as a multi role): multi
+  mode is always the control+executor split, so the credential-isolation
+  boundary hangs on the mode, never on a deployment knob. In local mode
+  all coordination mechanisms below still run, they just trivially
+  self-resolve (the process holds every lease, placement always picks
+  itself).
 - **`control`** — serves HTTP/API/WS and *competes for leadership* of
   the background brain (§3). Spawns no sandboxes at all: its system
   jobs are toolless direct LLM calls and curator turns execute on
@@ -225,8 +229,9 @@ filesystem, and coordinate only through Postgres rows.
 
 | Shape | Control | Executors | What you get |
 | --- | --- | --- | --- |
-| **All-in-one** (default; local + small self-host) | `TF_ROLE=all`, one process | in-process | Today's box. Every mechanism self-resolves; nothing to operate. |
-| **First fleet** | 1 | N | The main win: sandbox capacity scales independently and executor deploys never touch the API. The lone control pod trivially holds the brain lease. **No load balancer** — one entrypoint, exactly like today's single container (§2.6). A control restart is a brief API blip + brain restart whose poll catch-up is mostly free 304s. |
+| **Local** | `TF_ROLE=all`, one process | in-process | The laptop box (SQLite, no sandbox). Every mechanism self-resolves; nothing to operate. Not a multi shape. |
+| **Co-located split** (multi default; TFAC-637) | 1 | 1, same box | The smallest multi deployment: the shipped compose brings up control + one executor together. Per-run credential isolation by construction; the control container carries no sandbox caps. |
+| **First fleet** | 1 | N | The main win: sandbox capacity scales independently and executor deploys never touch the API. The lone control pod trivially holds the brain lease. **No load balancer** — one entrypoint (§2.6). A control restart is a brief API blip + brain restart whose poll catch-up is mostly free 304s. |
 | **HA** | 2–3 behind the LB | N | Every control pod serves API/WS (replica-safe already) and competes for the one brain lease; exactly one holds it, the rest are **working API replicas + warm standbys, not idle spares**. Leader loss → takeover ≤ ~TTL. Zero-downtime rolls both tiers: control one-at-a-time behind readiness, executors drain-and-replace. Postgres HA remains the floor — control HA cannot exceed the database's. |
 
 Start at the smallest shape that meets the requirement and move down
@@ -1490,9 +1495,17 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
 18. Scorer / classifier / profiler become direct toolless LLM calls
     from Go — no SDK subprocess, no sandbox, no Node; spend
     accounting + `syslimit` semantics preserved. (M)
-19. Control pods drop the sandbox caps (compose: the `control`-role
-    service loses `cap_add`/seccomp overrides; `all` keeps them) —
-    prerequisite: curator homing (P2 item 12). (S)
+19. Control pods drop the sandbox caps — prerequisite: curator homing
+    (P2 item 12). Shipped as an interim override file, then superseded
+    by item 19b. (S)
+19b. Retire `TF_ROLE=all` in multi (TFAC-637): multi always boots as
+    control or executor; the default compose is the co-located split
+    with control capless and only the executor referencing the
+    hardening anchor; the fused in-process credential path (in-process
+    run proxies, live-store clone tokens, in-process agenthost over
+    stores) is deleted — sandboxed runs REQUIRE a prebuilt per-run
+    network + credential sidecar. `all` survives as local mode's
+    single-process shape only. (M)
 
 **P5 — On demand**
 20. Per-org brain sharding across control pods (same lease table,

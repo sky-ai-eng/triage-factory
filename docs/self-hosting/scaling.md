@@ -1,56 +1,50 @@
 # Scaling out: control + N executors
 
-The default `docker compose up` runs one all-in-one `triagefactory` container
-(`TF_ROLE` unset → `all`) — HTTP + pollers + brain + the delegated-run dispatcher
-in a single process. That goes a long way (memory-bound; budget ~0.25 GB RAM per
-concurrent run). When you outgrow one box, or want the sandbox fleet to fail
-independently of the API, split the process into a **control** pod and **N
-executor** pods with the `scale` compose profile.
+Multi mode is **always** a control + executor split — there is no fused
+single-process option (`TF_ROLE=all`, or leaving it unset, refuses to boot in
+multi mode; `all` is local mode's shape). The default `docker compose up`
+brings up the smallest split: one `triagefactory` **control** pod (API/WS, the
+background brain, migrations, the secret store) co-located with one
+**executor** (the run dispatcher, gVisor sandboxes, per-run credential
+sidecars) on the same box. That goes a long way (executors are memory-bound;
+budget ~0.25 GB RAM per concurrent run). When you outgrow one box, or want the
+sandbox fleet to fail independently of the API, add executors.
 
-`TF_ROLE` names the role each container plays:
+`TF_ROLE` names the role each container plays (the bundled compose file sets
+it per service; only a custom deployment sets it by hand):
 
 | Role | Serves user HTTP/WS | Pollers + router + AI brain | Runs migrations | Claims + executes delegated runs | Sandboxes |
 |------|:---:|:---:|:---:|:---:|:---:|
-| `all` (default) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `control` | ✅ | ✅ | ✅ | ❌ | ❌ |
 | `executor` | ❌ | ❌ | ❌ (asserts schema) | ✅ | ✅ (delegated runs, curator) |
 
-Bring up 1 control + 2 executors:
+Scale to 1 control + 2 executors:
 
 ```sh
-# The capless-control override (docker-compose.control.yml) pins the main
-# service to the control role AND clears its sandbox caps + seccomp — a
-# control pod launches no sandbox, so it needs neither. It uses Compose's
-# `!reset` tag, so it requires Docker Compose ≥ 2.24. Layer it on with a
-# second -f; export COMPOSE_FILE so the follow-up commands inherit both:
-export COMPOSE_FILE=docker-compose.yml:docker-compose.control.yml
-
-# Start the control pod (the published entrypoint) plus 2 executor pods:
-docker compose --profile scale up -d --scale executor=2
+docker compose up -d --scale executor=2
 ```
 
-> **Pass the override on every command — it is required, not optional
-> hardening.** With `TF_ROLE` unset in `.env` (the default above), this override
-> is the *only* thing that makes the main service a control pod. Drop `-f
-> docker-compose.control.yml` (or the `COMPOSE_FILE` export) and the service
-> falls back to its `all` default — a working but **privileged** all-in-one box
-> beside your executors, not a capless control pod. The role-gate is still the
-> backstop: any pod that resolves to `control` skips the broker and never
-> exercises the sandbox caps even when they are present, so control is never a
-> privileged-sandbox risk. What the override adds is making the service *be*
-> control and shedding those otherwise-inert caps, so it can schedule on a
-> substrate that forbids privileged containers — managed Kubernetes included.
+> **Why there is no single-process multi shape.** The split is what carries
+> the credential-isolation guarantee: the control pod holds the secret store
+> but launches no sandbox (and carries no sandbox caps — it schedules on any
+> substrate that forbids privileged containers, managed Kubernetes included),
+> while an executor sandboxes hostile agent workloads but never holds the
+> secret-decryption key — every run's credentials arrive as a sealed per-run
+> bundle that only that run's sidecar can open. A fused process would hold
+> both powers at once, so multi mode makes it unbootable rather than
+> discouraged: the isolation boundary hangs on `TF_MODE`, not on a deployment
+> knob an operator could forget.
 
 That's the whole topology — **there is no load balancer.** Executors accept no
 inbound traffic (no published ports; their only listener is a localhost-only
-healthz), so the single control pod stays the single entrypoint exactly as the
-all-in-one did. Verify a run flows end-to-end:
+healthz), so the single control pod stays the single entrypoint. Verify a run
+flows end-to-end:
 
 ```sh
-docker compose --profile scale ps                 # 1 triagefactory (control) + 2 executor, all healthy
+docker compose ps                 # 1 triagefactory (control) + N executor, all healthy
 # Enqueue a manual delegation through the control pod's API, then watch an
 # executor claim it (run_messages land, the run completes):
-docker compose --profile scale logs -f executor
+docker compose logs -f executor
 ```
 
 Both roles run the **same image and entrypoint**, but **only executors carry the
@@ -69,21 +63,21 @@ Each executor's container HEALTHCHECK hits its localhost `GET /healthz` — see
 
 ## Executor database role (`tf_system`)
 
-An executor's admin database pool connects as `tf_system`, not `supabase_admin` — a least-privilege role (`BYPASSRLS`, no DDL, an enumerated grant list covering only the run-execution tables the dispatcher touches). Executors are the most-exposed machine class in the fleet (they run agent workloads and parse agent output), so a compromised executor holding `tf_system` never has superuser reach — no other org's rows outside the granted tables, no DDL, no server-wide surface. Control/`all` pods are unaffected; they keep the `supabase_admin` DSN because they run migrations.
+An executor's admin database pool connects as `tf_system`, not `supabase_admin` — a least-privilege role (`BYPASSRLS`, no DDL, an enumerated grant list covering only the run-execution tables the dispatcher touches). Executors are the most-exposed machine class in the fleet (they run agent workloads and parse agent output), so a compromised executor holding `tf_system` never has superuser reach — no other org's rows outside the granted tables, no DDL, no server-wide surface. Control pods are unaffected; they keep the `supabase_admin` DSN because they run migrations.
 
-This is wired automatically by `docker compose --profile scale` (the `executor` service's `TF_DATABASE_URL` is templated from `TF_SYSTEM_PASSWORD`) — nothing to configure beyond filling in `.env`. If you're running an executor outside the shipped compose file (bare-metal, a custom orchestrator) and it ends up pointed at a superuser DSN — e.g. a dev box reusing the control pod's connection string — TF logs one `ERROR` at boot naming the misconfiguration and continues (it does not refuse to boot): compose, the supported deployment path, ships this correctly, so a hard failure there would be disproportionate; the warning is for exactly this kind of bare-metal drift. Fix it by pointing the executor's `TF_DATABASE_URL` at `tf_system` instead.
+This is wired automatically by the bundled compose file (the `executor` service's `TF_DATABASE_URL` is templated from `TF_SYSTEM_PASSWORD`) — nothing to configure beyond filling in `.env`. If you're running an executor outside the shipped compose file (bare-metal, a custom orchestrator) and it ends up pointed at a superuser DSN — e.g. a dev box reusing the control pod's connection string — TF logs one `ERROR` at boot naming the misconfiguration and continues (it does not refuse to boot): compose, the supported deployment path, ships this correctly, so a hard failure there would be disproportionate; the warning is for exactly this kind of bare-metal drift. Fix it by pointing the executor's `TF_DATABASE_URL` at `tf_system` instead.
 
 ## Per-role DB pools and `max_connections`
 
 Every pod opens two Postgres pools (an admin pool and an app/RLS pool). The API
-tier (`control`/`all`) keeps 25 connections per pool; an **executor ships much
+tier (`control`) keeps 25 connections per pool; an **executor ships much
 smaller ceilings** — its dispatcher, heartbeat, and run sinks need a fraction of
 the API tier's request concurrency, and its app pool is effectively idle (no RLS
 request handlers run on an executor). At the defaults:
 
 | Role | Per-pool ceiling | Pools | Per-pod worst case |
 |------|:---:|:---:|:---:|
-| `control` / `all` | 25 | 2 | 50 |
+| `control` | 25 | 2 | 50 |
 | `executor` | 6 | 2 | 12 |
 
 So the 1-control + 2-executor profile demands at most **25×2 + 2×(6×2) = 74**
