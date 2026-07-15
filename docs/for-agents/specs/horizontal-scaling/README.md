@@ -1156,6 +1156,47 @@ these tiny tables ~free — the classic front-loading justification
 is the deliberate forward-compat room in the meantime, per the
 `executor_id` precedent: pre-ship only the shape-certain thing.
 
+### 6.5 The locality model (what placement never looks at)
+
+Everything in this section shares one inversion that is easy to miss and
+load-bearing everywhere: **locality is manufactured, never observed.** No
+component anywhere inventories which repos, bares, or worktrees sit on
+which executor's disk. Routing consults exactly three things: the pure
+rendezvous hash (stateless), the per-run `preferred_executor_id` stamp
+(lives one queue dwell, cleared on requeue), and the `curator_homes` pin
+(cleared on executor death or project delete). The warm cache is the
+*consequence* of always routing a key to the same winner — never an
+*input* to the routing decision.
+
+Three corollaries, each of which looks like a bug or a missing feature
+until you see the doctrine:
+
+- **The delegation `(org, repo)` and curator `(org, project)` key
+  namespaces are independent.** A project's curator home and its pinned
+  repos' run-placement winners coincide only by chance. Deliberate:
+  aligning them would couple two different lifecycles (a
+  sticky-until-death pin vs a per-dwell stamp) to save at most one
+  duplicated bare per repo — and TFAC-60's per-pod budget already bounds
+  the duplication.
+- **Cache eviction changes no routing state.** When the TFAC-60 reaper
+  evicts a cold bare, nothing is "unmarked" anywhere — the next run or
+  turn for that key routes to the same winner and pays one blobless
+  clone to re-seed. Eviction is a cache concern, routing is a hashing
+  concern; coupling them would require fleet-visible disk inventory.
+- **Feeding observed cache/disk state back into placement is a
+  correctness bug, not an optimization.** Determinism is the whole
+  contract: every pod computes the same winner for a key with zero
+  coordination. A "prefer whoever is warm" shortcut evaluated on one
+  pod's local knowledge forks the map.
+
+Capacity, by contrast, *is* observed — but only through the registry
+heartbeat (weights, liveness, the memory gate), never per-key. And the
+capacity envelope is per-host and work-source-agnostic: a curator turn
+executing on its home is admitted through the same memory guardrail and
+concurrency semaphore as a dispatched run
+(`Spawner.AcquireTurnSlot`), so heartbeat occupancy reports the host's
+true sandbox load, not just the run queue's share of it.
+
 ---
 
 ## 7. Background jobs at N (and the unprivileged control plane)

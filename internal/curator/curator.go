@@ -62,6 +62,15 @@ type Curator struct {
 	// dependency.
 	doorbell func(kind, orgID, projectID string)
 
+	// admitTurn gates one turn's execution through the host's shared agent
+	// capacity — in production the delegation spawner's AcquireTurnSlot, so a
+	// curator turn waits out the same memory guardrail and occupies the same
+	// concurrency slot a delegated run would (which also puts it in the
+	// instance heartbeat's occupancy snapshot). The wait happens with the
+	// turn's row still 'queued' and its cancel handle armed, so a cancel
+	// during the wait lands normally. nil (tests) admits immediately.
+	admitTurn func(ctx context.Context) (release func(), err error)
+
 	// runAgent dispatches one agent turn. Defaults to agentproc.Run in
 	// New; the multi-mode capstone pgtest (TFAC-65) overrides it to drive
 	// SendMessage → dispatch → terminal without spawning the claude
@@ -149,6 +158,25 @@ func (c *Curator) SetDoorbell(fn func(kind, orgID, projectID string)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.doorbell = fn
+}
+
+// SetAdmission wires the shared turn-admission gate — the delegation
+// spawner's AcquireTurnSlot in production. Set once at startup on every pod
+// that can execute a turn in-process; without it a burst of concurrent
+// project turns fans into sandboxes the host's capacity accounting never
+// sees.
+func (c *Curator) SetAdmission(fn func(ctx context.Context) (release func(), err error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.admitTurn = fn
+}
+
+// getAdmitTurn returns the wired admission gate under the lock, matching
+// getSecrets' race-free accessor shape.
+func (c *Curator) getAdmitTurn() func(context.Context) (func(), error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.admitTurn
 }
 
 // homeMode is the routing decision for one turn.

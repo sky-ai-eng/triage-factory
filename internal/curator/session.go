@@ -121,6 +121,32 @@ func (s *projectSession) dispatch(item queueItem) {
 		msgCancel()
 	}()
 
+	// Admission: hold the turn at 'queued' until the host's shared agent
+	// capacity admits it — the same memory guardrail + concurrency
+	// semaphore delegated runs pass through — so N projects turning at
+	// once queue here instead of fanning into N concurrent sandboxes. The
+	// cancel handle is already armed above, so a cancel (or shutdown)
+	// fires msgCtx and ends the wait with the row landing cancelled,
+	// never having held a slot.
+	if admit := s.curator.getAdmitTurn(); admit != nil {
+		release, admitErr := admit(msgCtx)
+		if admitErr != nil {
+			// Only a fired ctx is a cancellation; any other gate error is
+			// the gate's own failure and must stay legible as one — writing
+			// it as "user cancelled" would misattribute and mask it.
+			switch {
+			case s.ctx.Err() != nil:
+				s.markCancelled(item, "process shutting down")
+			case msgCtx.Err() != nil:
+				s.markCancelled(item, "user cancelled")
+			default:
+				s.failRequest(item, fmt.Sprintf("turn admission: %v", admitErr))
+			}
+			return
+		}
+		defer release()
+	}
+
 	// MarkRequestRunning + the immediate GetRequest read happen in
 	// one short tx — same identity, single round-trip on Postgres.
 	// Cancellation that lands during this tx is observed via msgCtx

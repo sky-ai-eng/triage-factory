@@ -323,6 +323,11 @@ type Spawner struct {
 	// before the dispatcher starts. Each drain acquires a slot before
 	// claiming and the run goroutine releases it on terminal.
 	runSem chan struct{}
+	// turnGateRecheck is how often AcquireTurnSlot re-probes the memory
+	// guardrail while an off-queue turn waits it out. Zero means use
+	// defaultTurnGateRecheck; tests set a short value directly (same-package,
+	// like memAvailMB). Read through turnGateRecheckInterval().
+	turnGateRecheck time.Duration
 	// idleHibernateTimeout is how long a live run may go quiet (no stream
 	// activity) before it hibernates to a durable resume. Zero means use
 	// DefaultIdleHibernateTimeout; tests inject a short value via

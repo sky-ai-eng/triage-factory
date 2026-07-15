@@ -382,6 +382,15 @@ func (a *App) buildCuratorRuntime() error {
 		a.curator.SetLLMResolver(llmcred.SystemEnvResolver(a.llmResolver, "tf-curator"))
 	}
 
+	// Curator turns spawn the same class of agent subprocess a delegated run
+	// does, so they share the spawner's capacity envelope: each turn waits
+	// out the dispatch memory guardrail and occupies a concurrency-semaphore
+	// slot, which also puts it in the instance heartbeat's occupancy
+	// snapshot. Wired on every pod that builds a curator — a control pod
+	// forwards turns instead of executing them, so its gate is simply never
+	// consulted.
+	a.curator.SetAdmission(a.spawner.AcquireTurnSlot)
+
 	if executorRuntime {
 		a.curatorClaimLoop = curator.NewHomeClaimLoop(a.curator, a.stores.Curator, a.identity.ID)
 	}
