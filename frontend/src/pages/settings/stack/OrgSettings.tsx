@@ -54,7 +54,13 @@ import JiraAccessGroup from '../JiraAccessGroup'
 import AtlassianOAuthAppCard from '../AtlassianOAuthAppCard'
 import SlackWorkspacesCard from '../SlackWorkspacesCard'
 import TeamManagementSection from '../../../components/TeamManagementSection'
-import { dailyCapError, concurrentRunsError, saveOrgConfig, type OrgConfigForm } from '../orgConfig'
+import {
+  dailyCapError,
+  concurrentRunsError,
+  MAX_CONCURRENT_RUNS_CEILING,
+  saveOrgConfig,
+  type OrgConfigForm,
+} from '../orgConfig'
 import { connectJira, JIRA_DEPLOYMENT_OPTIONS } from '../jiraConnect'
 import { connectAnthropic, CLAUDE_SOURCE_OPTIONS } from '../anthropicConnect'
 import { connectBedrock, bedrockPayloadFromForm } from '../bedrockConnect'
@@ -693,6 +699,7 @@ export default function OrgSettings({
             <input
               type="number"
               min="0"
+              max={MAX_CONCURRENT_RUNS_CEILING}
               step="1"
               inputMode="numeric"
               placeholder="Unlimited"

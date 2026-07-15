@@ -136,6 +136,14 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 	if err != nil {
 		return domain.OrgSettings{}, fmt.Errorf("read org_settings: %w", err)
 	}
+	// Clamp a stray negative up to 0. No DB CHECK guards this column, and
+	// everything downstream (the claim) reads <= 0 as unlimited — so surface a
+	// negative as 0 here too, keeping "unlimited" consistently 0 and never
+	// handing the settings UI a value it rejects.
+	concurrentRuns := int(maxConcurrentRuns.Int64) // NULL → 0 (unlimited)
+	if concurrentRuns < 0 {
+		concurrentRuns = 0
+	}
 	return domain.OrgSettings{
 		GitHubBaseURL:         ghURL.String,
 		GitHubPollInterval:    secondsToDuration(ghSecs),
@@ -145,8 +153,8 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		AnthropicAPIKeyRef:    anthRef.String,
 		BedrockCredentialsRef: bedRef.String,
 		MaxLLMModelTier:       maxTier.String,
-		MaxDailyCostUSD:       maxDailyCost.Float64,         // NULL → 0 (no cap)
-		MaxConcurrentRuns:     int(maxConcurrentRuns.Int64), // NULL → 0 (unlimited)
+		MaxDailyCostUSD:       maxDailyCost.Float64, // NULL → 0 (no cap)
+		MaxConcurrentRuns:     concurrentRuns,
 		MarketplaceEnabled:    marketplaceEnabled,
 	}, nil
 }

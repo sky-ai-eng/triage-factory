@@ -17,6 +17,15 @@ const DefaultModel = "sonnet"
 // substituted with the run's ticket id at prompt-render time.
 const DefaultBranchTemplate = "tfac/<ticket-id>"
 
+// MaxConcurrentRunsCeiling is the largest value OrgSettings.MaxConcurrentRuns
+// accepts. It's a sanity bound far beyond any real fleet (per-executor
+// concurrency tops out in the low hundreds; even a large fleet stays in the
+// tens of thousands), chosen so a validated value always fits the Postgres
+// int4 column — an oversized input is rejected with a clean 400 at the handler
+// rather than an "integer out of range" 500 at the DB. The frontend mirrors
+// this bound so Save blocks before the round-trip.
+const MaxConcurrentRunsCeiling = 1_000_000
+
 // OrgSettings is the org-scope settings row (org_settings table).
 //
 // Field nullability:
@@ -64,6 +73,10 @@ type OrgSettings struct {
 	// the org's active-run count is at or above this value — so an event storm
 	// can't monopolize the fleet's slots. The instantaneous-concurrency sibling
 	// of the daily *spend* cap. Enforced multi-mode only (SQLite/local is N=1).
+	//
+	// The store read clamps a stray negative (no DB CHECK guards the column) up
+	// to 0, so callers always see "unlimited" as 0 and never a negative. Writes
+	// are validated in [0, MaxConcurrentRunsCeiling] at the handler.
 	MaxConcurrentRuns int
 
 	// MarketplaceEnabled was originally scoped as a ship-dark toggle for the

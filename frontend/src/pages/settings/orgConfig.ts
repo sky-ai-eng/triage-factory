@@ -203,15 +203,22 @@ export function dailyCapError(raw: string): string | null {
   return null
 }
 
+// MAX_CONCURRENT_RUNS_CEILING mirrors domain.MaxConcurrentRunsCeiling — a sanity
+// bound far beyond any real fleet that keeps a validated value inside the
+// backend's int4 column. Kept in sync with the Go constant by hand (there's no
+// shared source), like the `>= 0` guard below mirrors the handler.
+export const MAX_CONCURRENT_RUNS_CEILING = 1_000_000
+
 // concurrentRunsError is the frontend input-layer validation for the
 // concurrent-run limit. "Unlimited" is expressed by clearing the field (blank)
 // OR by an explicit 0 — the ticket's "blank or 0 = unlimited" — so both are
-// always valid. A typed value must parse to a non-negative, finite integer:
-// negatives are rejected (the claim reads <= 0 as unlimited, so a negative
-// would silently mean "no limit" and 400 at the API), and fractions are
-// rejected since the column is an integer. Returns the user-facing message, or
-// null when the input is acceptable. Mirrors the backend's `>= 0` guard so Save
-// blocks before the round-trip instead of bouncing off a 400.
+// always valid. A typed value must parse to a non-negative, finite integer at
+// or below the ceiling: negatives are rejected (the claim reads <= 0 as
+// unlimited, so a negative would silently mean "no limit" and 400 at the API),
+// fractions are rejected since the column is an integer, and an oversized value
+// is rejected before it can 400 at the DB. Returns the user-facing message, or
+// null when the input is acceptable. Mirrors the backend's guard so Save blocks
+// before the round-trip instead of bouncing off a 400.
 export function concurrentRunsError(raw: string): string | null {
   const trimmed = raw.trim()
   if (trimmed === '') return null
@@ -219,6 +226,8 @@ export function concurrentRunsError(raw: string): string | null {
   if (!Number.isFinite(n)) return 'Enter a whole number, or leave blank for unlimited.'
   if (n < 0) return 'Enter 0 or more, or leave blank for unlimited.'
   if (!Number.isInteger(n)) return 'Enter a whole number of runs.'
+  if (n > MAX_CONCURRENT_RUNS_CEILING)
+    return `Enter ${MAX_CONCURRENT_RUNS_CEILING.toLocaleString()} or fewer.`
   return null
 }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { dailyCapError, concurrentRunsError } from './orgConfig'
+import { dailyCapError, concurrentRunsError, MAX_CONCURRENT_RUNS_CEILING } from './orgConfig'
 
 describe('dailyCapError', () => {
   it('treats blank (and whitespace) as valid — that is how "no cap" is expressed', () => {
@@ -52,6 +52,11 @@ describe('concurrentRunsError', () => {
   it('rejects fractional values (the column is an integer)', () => {
     expect(concurrentRunsError('2.5')).not.toBeNull()
     expect(concurrentRunsError('0.5')).not.toBeNull()
+  })
+
+  it('accepts the ceiling but rejects anything above it', () => {
+    expect(concurrentRunsError(String(MAX_CONCURRENT_RUNS_CEILING))).toBeNull()
+    expect(concurrentRunsError(String(MAX_CONCURRENT_RUNS_CEILING + 1))).not.toBeNull()
   })
 
   it('rejects non-numeric input', () => {

@@ -252,6 +252,30 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
+	t.Run("OrgSettings_ConcurrentRunsLimit_NegativeScansAsUnlimited", func(t *testing.T) {
+		// No DB CHECK guards max_concurrent_runs, so a negative could reach the
+		// column (a migration, a manual write). Everything downstream reads
+		// <= 0 as unlimited; the store read must agree, surfacing a stored
+		// negative as 0 rather than handing the settings UI a value it rejects.
+		stores, ids := factory(t)
+		in := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+			MaxConcurrentRuns:   -7,
+		}
+		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in); err != nil {
+			t.Fatalf("UpdateSettings (negative): %v", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		if got.MaxConcurrentRuns != 0 {
+			t.Errorf("stored negative MaxConcurrentRuns scanned as %v; want 0 (clamped to unlimited)", got.MaxConcurrentRuns)
+		}
+	})
+
 	t.Run("OrgSettings_Update_Overwrites", func(t *testing.T) {
 		stores, ids := factory(t)
 		first := domain.OrgSettings{

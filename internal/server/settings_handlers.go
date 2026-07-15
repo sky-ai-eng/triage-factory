@@ -622,10 +622,17 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 
 	// Concurrent-run limit: nil = don't touch, 0 = clear it (unlimited), >0 =
 	// set. Reject a negative — the claim treats <= 0 as unlimited, so a negative
-	// would silently read as "no limit" rather than any meaningful ceiling.
+	// would silently read as "no limit" rather than any meaningful ceiling. The
+	// upper bound keeps a validated value inside the Postgres int4 column, so an
+	// oversized input 400s here rather than 500ing on an "integer out of range"
+	// at the DB.
 	if req.MaxConcurrentRuns != nil {
 		if *req.MaxConcurrentRuns < 0 {
 			badRequest(w, "max_concurrent_runs must be >= 0")
+			return
+		}
+		if *req.MaxConcurrentRuns > domain.MaxConcurrentRunsCeiling {
+			badRequest(w, fmt.Sprintf("max_concurrent_runs must be at most %d", domain.MaxConcurrentRunsCeiling))
 			return
 		}
 		orgSet.MaxConcurrentRuns = *req.MaxConcurrentRuns

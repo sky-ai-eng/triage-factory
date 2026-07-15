@@ -962,6 +962,29 @@ func TestOrgSettingsPost_ConcurrentRuns_NegativeRejected(t *testing.T) {
 	}
 }
 
+// TestOrgSettingsPost_ConcurrentRuns_OversizedRejected pins the upper bound: a
+// value beyond the ceiling 400s at the handler rather than overflowing the
+// Postgres int4 column into a 500.
+func TestOrgSettingsPost_ConcurrentRuns_OversizedRejected(t *testing.T) {
+	s := newTestServer(t)
+	rec := doJSON(t, s, "POST", "/api/settings/org",
+		map[string]any{"max_concurrent_runs": domain.MaxConcurrentRunsCeiling + 1})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized limit should 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp["error"], "max_concurrent_runs must be at most") {
+		t.Errorf("expected upper-bound validation message, got: %q", resp["error"])
+	}
+	// The ceiling itself is accepted.
+	postJSONResp(t, s, "/api/settings/org",
+		map[string]any{"max_concurrent_runs": domain.MaxConcurrentRunsCeiling})
+	if got := orgConcurrentRuns(t, s); got != domain.MaxConcurrentRunsCeiling {
+		t.Errorf("ceiling value should round-trip, got %v want %v", got, domain.MaxConcurrentRunsCeiling)
+	}
+}
+
 // --- TFAC-392 unattended-prompt grace window bounds ------------------------
 
 // teamGrace reads the team settings GET and returns the stored grace (ms) plus
