@@ -1116,11 +1116,15 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
   useWebSocket((event) => {
     if (event.type !== 'project_knowledge_updated') return
     if (event.project_id !== projectId) return
+    // The executor syncer always carries a `pending` field — the batch's names
+    // on start, an empty array on completion — so we drive ghost rows only off
+    // those. The control pod's own upload/delete broadcasts `data: null` (no
+    // pending field); it must NOT clear ghost rows for an unrelated in-flight
+    // executor batch, so we leave `syncing` untouched and just refetch.
     const pending = event.data?.pending
-    // Batch start carries the names being uploaded; batch complete carries no
-    // pending field, so we clear the ghost rows and let the refetch show the
-    // now-durable files.
-    setSyncing(pending && pending.length > 0 ? pending : [])
+    if (pending !== undefined) {
+      setSyncing(pending)
+    }
     refreshFiles()
   })
 

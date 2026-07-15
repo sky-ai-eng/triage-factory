@@ -620,23 +620,24 @@ func (ks *KBSyncer) resolveOrg(projectID string) string {
 	return ks.resolveOrgFor(projectID)
 }
 
-// broadcast emits project_knowledge_updated. When names is non-nil the event
-// carries a "pending" list so the panel renders ghost rows for names not yet
-// in its listing; a nil names emits the plain completion event the watcher
-// has always sent.
+// broadcast emits project_knowledge_updated. It ALWAYS carries a "pending"
+// field — the batch-start names, or an empty list on completion. That empty
+// list (not a null Data) is what distinguishes an executor sync signal from the
+// control pod's own upload/delete event, which broadcasts Data:null: the panel
+// clears its ghost rows only on a sync signal, so a concurrent panel mutation
+// of a different file can't prematurely clear a ghost for an in-flight batch.
 func (ks *KBSyncer) broadcast(orgID, projectID string, names []string) {
 	if ks.hub == nil || orgID == "" {
 		return
 	}
-	var data any
-	if names != nil {
-		data = map[string]any{"pending": names}
+	if names == nil {
+		names = []string{}
 	}
 	ks.hub.Broadcast(websocket.Event{
 		Type:      "project_knowledge_updated",
 		OrgID:     orgID,
 		ProjectID: projectID,
-		Data:      data,
+		Data:      map[string]any{"pending": names},
 	})
 }
 
@@ -703,6 +704,16 @@ func materializeProjectKB(ctx context.Context, kb *kbstore.Store, orgID, project
 			kbsyncLog.Warn("materialize download failed", "project", projectID, "file", f.Name, "error", err)
 		}
 	}
+	// RemoveLocal is intentionally asymmetric with reconcileProjectKB's
+	// push-only stance, and the asymmetry is correct under the "disk is cache,
+	// the store is the truth" doctrine. A disk file the store lacks is either a
+	// panel delete to propagate (the common case — the store is authoritative,
+	// so the cache must drop it) OR a local write that never reached the store
+	// before this pod restarted (crashed between the fsnotify write and the
+	// debounce/turn-end reconcile). We remove both: an un-synced write was never
+	// durable, so treating it as absent from the truth loses nothing the system
+	// had ever committed to keep — unlike a store-only file, which IS durable
+	// user data and is why reconcileProjectKB never deletes remotely.
 	for _, name := range diff.RemoveLocal {
 		if err := os.Remove(filepath.Join(kbDir, name)); err != nil && !os.IsNotExist(err) {
 			kbsyncLog.Warn("materialize local remove failed", "project", projectID, "file", name, "error", err)
