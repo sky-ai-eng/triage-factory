@@ -18,7 +18,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +26,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -242,7 +242,7 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 		return
 	}
 
-	token := strings.TrimSpace(os.Getenv(envServiceRoleToken))
+	token := strings.TrimSpace(secretenv.Get(envServiceRoleToken))
 	if token == "" {
 		httpx.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "SSO admin token not configured — run `triagefactory jwk-init` and set " + envServiceRoleToken,

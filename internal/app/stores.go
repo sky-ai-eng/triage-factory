@@ -16,6 +16,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 )
 
 // openStores opens the right backend for the runtime mode, wires the
@@ -55,7 +56,7 @@ func (a *App) openStores(ctx context.Context) error {
 		// userinfo to authenticator + its own password (set out-of-band by
 		// the postgres-postinit sidecar). Two passwords by design — see
 		// CLAUDE.md and the postgres-postinit service in docker-compose.yml.
-		adminDSN := os.Getenv("TF_DATABASE_URL")
+		adminDSN := secretenv.Get("TF_DATABASE_URL")
 		if adminDSN == "" {
 			return errors.New("TF_MODE=multi requires TF_DATABASE_URL")
 		}
@@ -63,7 +64,7 @@ func (a *App) openStores(ctx context.Context) error {
 		// ctl.go, the WS backplane's tf_ws/tf_bus listeners) resolve their
 		// own session-mode DSN via wsbackplane.DirectDSN — a pooled *sql.DB
 		// can't hold a session-mode LISTEN, so no raw-DSN field is kept here.
-		authPassword := os.Getenv("TF_AUTHENTICATOR_PASSWORD")
+		authPassword := secretenv.Get("TF_AUTHENTICATOR_PASSWORD")
 		if authPassword == "" {
 			return errors.New("TF_MODE=multi requires TF_AUTHENTICATOR_PASSWORD")
 		}
@@ -108,7 +109,7 @@ func (a *App) openStores(ctx context.Context) error {
 		a.database = adminDB
 		a.appDB = appDB
 		if a.plan.role == runmode.RoleExecutor {
-			if os.Getenv(pgstore.EnvSecretEncryptionKey) != "" {
+			if secretenv.Get(pgstore.EnvSecretEncryptionKey) != "" {
 				appLog.Warn("TF_SECRET_ENCRYPTION_KEY is set but ignored on TF_ROLE=executor — executors never hold the secret-decryption key; per-run credentials arrive via sealed bundles instead (TFAC-614)")
 			}
 			a.stores = pgstore.NewWithoutSecrets(adminDB, appDB)

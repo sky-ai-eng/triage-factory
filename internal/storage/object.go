@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 )
 
 // Env var names for the object backend. Documented in
@@ -74,8 +75,8 @@ func ObjectConfigFromEnv() (ObjectConfig, error) {
 	return ObjectConfig{
 		Endpoint:  endpoint,
 		Bucket:    bucket,
-		AccessKey: strings.TrimSpace(os.Getenv(envBlobAccessKey)),
-		SecretKey: strings.TrimSpace(os.Getenv(envBlobSecretKey)),
+		AccessKey: strings.TrimSpace(secretenv.Get(envBlobAccessKey)),
+		SecretKey: strings.TrimSpace(secretenv.Get(envBlobSecretKey)),
 		Region:    strings.TrimSpace(os.Getenv(envBlobRegion)),
 	}, nil
 }

@@ -27,7 +27,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
+
+	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 )
 
 // Key is a 32-byte fixed-size key. AES-256 takes a 32-byte key; the
@@ -36,12 +37,14 @@ import (
 // code, semantically distinct callers.
 type Key [32]byte
 
-// LoadKeyFromEnv reads the named env var and decodes it as either hex
-// (64 chars) or standard base64. Returns a clear error rather than
-// panicking — multi-mode boot fails fast on this, surfacing a readable
-// startup error. The caller names the variable.
+// LoadKeyFromEnv reads the named deployment secret (through secretenv, which
+// has captured it out of the environment at boot; falls back to os.Getenv for
+// names it didn't capture) and decodes it as either hex (64 chars) or standard
+// base64. Returns a clear error rather than panicking — multi-mode boot fails
+// fast on this, surfacing a readable startup error. The caller names the
+// variable.
 func LoadKeyFromEnv(envVar string) (Key, error) {
-	raw := os.Getenv(envVar)
+	raw := secretenv.Get(envVar)
 	if raw == "" {
 		return Key{}, fmt.Errorf("%s is empty (generate with `openssl rand -hex 32`)", envVar)
 	}

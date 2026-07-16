@@ -115,8 +115,27 @@ echo "$TOKEN" | TF_GOTRUE_JWKS_URL=http://localhost:9999/.well-known/jwks.json \
 
 You should see the parsed claims printed as JSON (`Subject`, `Email`, `Provider`, etc.). This requires a local TF binary on the host — useful when the in-container TF service is misbehaving and you want to isolate the Verifier path from the rest of the server.
 
+## 7. (Optional) Enable Enterprise features
+
+Enterprise features — SSO, Slack, governance, the fleet console — are gated by a signed license token. A **release** binary bakes your vendor's public key at build time and verifies the token offline; a from-source `go build` has no baked key and ignores the license entirely (community build).
+
+To enable it, set the token your vendor gave you in `.env`:
+
+```bash
+TF_LICENSE=<signed-token>
+```
+
+then `docker compose up -d`. On boot the control pod logs the verdict to stderr:
+
+```
+Enterprise license: Acme Corp (features: [sso slack governance fleet]) valid until 2026-09-21
+```
+
+No token, a token signed by the wrong key, or an expired token → community default (every enterprise feature off, no crash). Confirm which features are live at any time with `GET /api/entitlements`. To supply the token as a mounted file instead of `.env`, see [Deployment secrets](secrets.md).
+
 ## Next steps
 
+- [Deployment secrets](secrets.md) — supplying secrets from files (`*_FILE` / Docker & K8s secrets) and how TF handles them
 - [Monitoring & health checks](monitoring.md) — `/api/health`, `/readyz`, executor `/healthz`
 - [Scaling out](scaling.md) — control + N executors, per-role DB pools, HA reverse proxy
 - [Client IP & trusted proxies](networking.md) — `TF_TRUSTED_PROXY_CIDR` behind a load balancer

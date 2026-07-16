@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
@@ -93,7 +94,7 @@ func OpenAt(dbPath string) (*sql.DB, error) {
 // own closing the returned *sql.DB.
 func OpenForCLI() (*sql.DB, string, error) {
 	if runmode.Current() == runmode.ModeMulti {
-		dsn := os.Getenv("TF_DATABASE_URL")
+		dsn := secretenv.Get("TF_DATABASE_URL")
 		if dsn == "" {
 			return nil, "", fmt.Errorf("TF_MODE=multi requires TF_DATABASE_URL")
 		}
