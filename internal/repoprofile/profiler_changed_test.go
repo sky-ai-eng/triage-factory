@@ -3,18 +3,72 @@ package repoprofile
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
+
+// TestRunOrg_ProviderBackoff_SkipsToast pins the systemllm circuit
+// breaker's caller-side behavior (profiler.go's IsProviderBackoff check): a
+// batch failing with a breaker skip must not fire the user-facing
+// "Profiling failed" toast — it's an anticipated, self-healing deferral,
+// not a genuine failure the user needs to see. The doc-scan phase still
+// broadcasts repo_docs_updated unconditionally before the batch is even
+// attempted, so the assertion here specifically checks for the toast's
+// absence, not "no message of any kind."
+func TestRunOrg_ProviderBackoff_SkipsToast(t *testing.T) {
+	readmeBody := `{"content":"` + base64.StdEncoding.EncodeToString([]byte("# readme")) + `","encoding":"base64"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/contents/README.md"):
+			_, _ = w.Write([]byte(readmeBody))
+		case strings.Contains(r.URL.Path, "/contents/"):
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			_, _ = w.Write([]byte(`{"default_branch":"main","clone_url":"https://x/own/withdocs.git"}`))
+		}
+	}))
+	defer srv.Close()
+
+	hub := websocket.NewHub()
+	client := dialHubTestClient(t, hub)
+	waitForHubClient(t, hub)
+
+	repos := &batchRepoStore{names: []string{"own/withdocs"}}
+	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, hub)
+	p.batchFn = func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
+		return nil, &systemllm.ErrProviderBackoff{Provider: "anthropic-direct:default"}
+	}
+
+	if _, err := p.RunOrg(context.Background(), "org-1", true); err != nil {
+		t.Fatalf("RunOrg: %v", err)
+	}
+
+	msg := client.expectMessage(t, 2*time.Second)
+	var evt struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(msg, &evt); err != nil {
+		t.Fatalf("unmarshal event: %v", err)
+	}
+	if evt.Type != "repo_docs_updated" {
+		t.Fatalf("first event type = %q, want repo_docs_updated", evt.Type)
+	}
+
+	client.expectNoMessage(t, 200*time.Millisecond)
+}
 
 // TestRunOrg_ChangedTracksUpsertSuccess pins that the cycle's changed flag
 // reflects whether a row was *successfully persisted*, not merely attempted:

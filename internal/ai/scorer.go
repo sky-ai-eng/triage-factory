@@ -219,7 +219,15 @@ func (r *Runner) scoreTasks(ctx context.Context, tasks []domain.Task) (scores []
 	skipped := 0
 	for i, res := range results {
 		if res.err != nil {
-			aiLog.Warn("scoring batch failed; tasks skipped", "batch", i+1, "batches", len(batches), "skipped", len(batches[i]), "error", res.err)
+			// A provider-backoff skip (systemllm's circuit breaker) is an
+			// anticipated, self-healing deferral, not a genuine failure —
+			// log it quietly so a boot-time overload doesn't read as a wall
+			// of errors.
+			if systemllm.IsProviderBackoff(res.err) {
+				aiLog.Info("scoring batch deferred; provider backing off, retrying next cycle", "batch", i+1, "batches", len(batches), "skipped", len(batches[i]))
+			} else {
+				aiLog.Warn("scoring batch failed; tasks skipped", "batch", i+1, "batches", len(batches), "skipped", len(batches[i]), "error", res.err)
+			}
 			skipped += len(batches[i])
 			continue
 		}

@@ -164,7 +164,15 @@ func (r *Runner) run(ctx context.Context) {
 		// failure (claude CLI unavailable, transient network) clears.
 		if allErrored(votes) {
 			skipped++
-			classifyLog.Warn("all votes errored, leaving unclassified for retry", "entity", e.ID, "votes", len(votes))
+			// A provider-backoff skip (systemllm's circuit breaker) is an
+			// anticipated, self-healing deferral, not a genuine failure —
+			// log it quietly so a boot-time overload doesn't read as a wall
+			// of errors.
+			if allProviderBackoff(votes) {
+				classifyLog.Info("all votes deferred; provider backing off, retrying next cycle", "entity", e.ID, "votes", len(votes))
+			} else {
+				classifyLog.Warn("all votes errored, leaving unclassified for retry", "entity", e.ID, "votes", len(votes))
+			}
 			continue
 		}
 
@@ -213,6 +221,23 @@ func allErrored(votes []Vote) bool {
 	}
 	for _, v := range votes {
 		if v.Err == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// allProviderBackoff reports whether every vote failed specifically because
+// the upstream provider was in circuit-breaker backoff (see
+// systemllm.IsProviderBackoff) — an anticipated, self-healing skip, not a
+// genuine failure worth a Warn. Only meaningful when allErrored(votes) is
+// already true.
+func allProviderBackoff(votes []Vote) bool {
+	if len(votes) == 0 {
+		return false
+	}
+	for _, v := range votes {
+		if !systemllm.IsProviderBackoff(v.Err) {
 			return false
 		}
 	}
