@@ -43,14 +43,29 @@ func PullRequestTarget(repoPath string, number int) string {
 	return fmt.Sprintf("%s#%d", repoPath, number)
 }
 
-// GitHubPullURL builds the github.com web link for a PR — the human-facing URL
-// the audit feed links a row to when the action's build site has no html_url in
-// hand (a board-drag, a review-thread reply, a review whose artifact carries no
-// URL). Always github.com, matching branchWebURL's documented default (the
-// product is GitHub-focused; GHES web hosts aren't modeled). repoPath is a
+// GitHubPullURLBase builds the web link for a PR on a specific GitHub host base
+// — github.com, a GHES host, or a GHEC data-residency host — so a human-facing
+// link points at the server the object actually lives on. base is the org's
+// user-facing web base (e.g. "https://github.com" or "https://ghe.example.com"),
+// as reported by the credential resolver's BaseURLFor; a trailing slash is
+// trimmed. An empty base falls back to the public github.com host, so a caller
+// that couldn't resolve the org base still produces a usable link. repoPath is a
 // validated owner/repo, so it isn't re-escaped.
+func GitHubPullURLBase(base, repoPath string, number int) string {
+	base = strings.TrimRight(base, "/")
+	if base == "" {
+		base = "https://github.com"
+	}
+	return fmt.Sprintf("%s/%s/pull/%d", base, repoPath, number)
+}
+
+// GitHubPullURL is the public-host convenience wrapper over GitHubPullURLBase —
+// the fallback the audit feed links a row to when the action's build site has no
+// html_url in hand and no org base is resolved (a board-drag, a review-thread
+// reply). Host-aware callers that know the org's GitHub base (e.g. a submitted
+// review's deep link) should pass it to GitHubPullURLBase instead.
 func GitHubPullURL(repoPath string, number int) string {
-	return fmt.Sprintf("https://github.com/%s/pull/%d", repoPath, number)
+	return GitHubPullURLBase("", repoPath, number)
 }
 
 // PullRequestDedupKey is the stable key every writer that touches a given PR

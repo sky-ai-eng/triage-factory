@@ -356,7 +356,27 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	submitted := *fresh
 	submitted.State = domain.ArtifactStateReviewSubmitted
 	submitted.ExternalID = strconv.Itoa(reviewID)
-	submitted.URL = fmt.Sprintf("%s#pullrequestreview-%d", domain.GitHubPullURL(owner+"/"+repo, number), reviewID)
+	// Anchor the "View on GitHub" deep link to the org's own GitHub host —
+	// github.com, a GHES host, or a GHEC data-residency host — not a hardcoded
+	// github.com. A review artifact carries no GitHub-minted html_url (unlike a PR
+	// artifact), so the URL is composed here; BaseURLFor is the same host
+	// resolution the client that just submitted the review used, so the link and
+	// the submit agree on the server. A resolve failure degrades to the public
+	// host rather than failing the stamp after the review is already live.
+	//
+	// On cleanupCtx, not r.Context(): this runs after the review is live on
+	// GitHub, so it must not turn on request liveness. A client disconnect
+	// between the submit and here would cancel r.Context(), fail the resolve, and
+	// silently downgrade the stamped link to github.com — reintroducing this very
+	// bug in a GHES/GHEC org through a narrow race. The detached context makes the
+	// host resolution unconditional, like the rest of this post-write block.
+	webBase, baseErr := ah.ghResolver.BaseURLFor(cleanupCtx, orgID)
+	if baseErr != nil {
+		artifactsLog.Warn("resolve github base for review URL failed; using default host",
+			"artifact", art.ID, "org", orgID, "error", baseErr)
+		webBase = ""
+	}
+	submitted.URL = fmt.Sprintf("%s#pullrequestreview-%d", domain.GitHubPullURLBase(webBase, owner+"/"+repo, number), reviewID)
 	submitted.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
 	stamp := func() error {
 		return ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
