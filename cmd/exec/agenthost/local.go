@@ -907,6 +907,18 @@ func (c *LocalClient) githubResolver() ghclient.Resolver {
 	return c.ghResolver
 }
 
+// GithubWebHostBase returns the org's user-facing GitHub host base (github.com,
+// a GHES host, or a GHEC data-residency host) for this run. The pre-push hook's
+// branch-capture gate uses it to decide whether a push's remote belongs to the
+// org's GitHub before recording a branch artifact — local mode's only capture
+// point, where the hook holds this in-process client. Same resolution
+// (org_settings → github_url secret → default) hostAnchorBranchURL uses to
+// anchor the recorded branch link, so the gate and the corrected URL agree on
+// the host.
+func (c *LocalClient) GithubWebHostBase(ctx context.Context) (string, error) {
+	return c.githubResolver().BaseURLFor(ctx, c.info.OrgID)
+}
+
 // mapGithubResolveErr maps a resolver error to the agent-facing form: a
 // missing credential becomes the same "not configured" guidance the gh branch
 // printed before this refactor; every other resolver error (a transient
