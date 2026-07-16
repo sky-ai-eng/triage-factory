@@ -446,6 +446,58 @@ func byID(comments []domain.ReviewArtifactComment, id string) domain.ReviewArtif
 	return domain.ReviewArtifactComment{}
 }
 
+// TestLocalClient_GithubAddPendingReviewComment_DedupsExactMatch pins that a
+// second add-review-comment call with the exact same (path, line, start_line,
+// body) as an already-staged comment is a no-op: it returns the EXISTING
+// comment id instead of appending a duplicate, so a confused/retrying agent
+// can't stage the same finding twice. A same-line comment with a different
+// body is a distinct finding and stages as normal (not collapsed).
+func TestLocalClient_GithubAddPendingReviewComment_DedupsExactMatch(t *testing.T) {
+	head := "live_head"
+	srv := reviewDiffServer(t, &head)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+
+	const anchor = "worktree_head"
+	cid1, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "nit: rename", 3, nil, anchor)
+	if err != nil {
+		t.Fatalf("add comment 1: %v", err)
+	}
+
+	// Exact repeat: same path, line, start_line (nil), and body.
+	cid2, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "nit: rename", 3, nil, anchor)
+	if err != nil {
+		t.Fatalf("add comment 2 (duplicate): %v", err)
+	}
+	if cid2 != cid1 {
+		t.Errorf("duplicate add returned id %q, want the existing id %q", cid2, cid1)
+	}
+
+	arts := listRunArtifacts(t, stores, info.RunID)
+	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	if len(d.StagedComments) != 1 {
+		t.Fatalf("exact duplicate must not append a second staged comment, got %d: %+v", len(d.StagedComments), d.StagedComments)
+	}
+
+	// Same line, different body: a distinct finding, stages normally.
+	cid3, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "different finding", 3, nil, anchor)
+	if err != nil {
+		t.Fatalf("add comment 3 (distinct): %v", err)
+	}
+	if cid3 == cid1 {
+		t.Errorf("a different body on the same line must NOT dedup, got the same id %q", cid3)
+	}
+	arts = listRunArtifacts(t, stores, info.RunID)
+	d, _ = domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	if len(d.StagedComments) != 2 {
+		t.Fatalf("a same-line different-body comment must stage separately, got %d: %+v", len(d.StagedComments), d.StagedComments)
+	}
+}
+
 // TestLocalClient_PerCommentHeadSHA_CapturedAcrossCheckoutAdvance pins that each
 // staged comment records the worktree HEAD it was authored against — so an agent
 // that pulls new commits between two adds yields two comments anchored to

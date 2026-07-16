@@ -1118,6 +1118,16 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 // body already carries the severity badge baked in (the caller bakes it);
 // line>0 with a non-nil startLine makes it a multi-line range.
 //
+// Exact (path, line, start_line, body) matches against an already-staged
+// comment are deduped: the existing comment's id is returned and nothing is
+// appended. This is for agents, not humans — a delegated agent that re-adds
+// the same finding (e.g. retrying after an ambiguous result, or re-walking its
+// own findings list) would otherwise stage the identical comment twice, and
+// both copies would survive to the submitted review. A dedup hit is a no-op
+// success rather than an error, so the agent doesn't "fix" it by rewording the
+// duplicate into a near-duplicate. Same line, different body is a distinct
+// finding and is never collapsed.
+//
 // commitSHA is the anchor: the commit GitHub reads the comment's line in the
 // frame of, carried through to the atomic submit at approval. When the CLI
 // supplied it (the normal path — the agent has a worktree), it's the worktree
@@ -1185,6 +1195,19 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 		return "", fmt.Errorf("%s", msg)
 	}
 
+	// Exact-match dedup: an agent that re-adds the same finding (a retry after an
+	// ambiguous tool result, re-walking its own findings list) would otherwise stage
+	// a second identical inline comment that survives to the submitted review. Only
+	// an exact (path, line, start_line, body) match collapses — same line, different
+	// body is a distinct finding and must not be silently dropped. Returning the
+	// existing id keeps this a no-op success rather than an error the agent might
+	// "fix" by rewording the duplicate into a near-duplicate.
+	for _, c := range details.StagedComments {
+		if c.Path == path && intPtrEq(c.Line, &line) && intPtrEq(c.StartLine, startLine) && c.Body == body {
+			return c.ID, nil
+		}
+	}
+
 	commentID := uuid.New().String()
 	ln := line
 	comment := domain.ReviewArtifactComment{
@@ -1201,6 +1224,15 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 		return "", fmt.Errorf("stage review comment: %w", err)
 	}
 	return commentID, nil
+}
+
+// intPtrEq reports whether two possibly-nil *int point to equal values —
+// nil == nil, and a non-nil pair compares by dereferenced value.
+func intPtrEq(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // UpdateStagedReviewComment rewrites the body of one staged comment on this run's
