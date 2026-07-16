@@ -1,9 +1,20 @@
 // Package pgtest spins up a supabase/postgres testcontainer for D3+
-// Postgres-backed tests. The harness is shared per-process via sync.Once
-// — the first test pays the ~5s boot cost; subsequent tests share the
-// same container and call Reset between cases to TRUNCATE state.
+// Postgres-backed tests. The harness is shared per-process — the first
+// test pays the boot cost; subsequent tests share the same container and
+// call Reset between cases to TRUNCATE state.
 //
-// Two SQL connections are exposed:
+// The shared container is a single point of failure for the whole test
+// binary: on a loaded CI runner the kernel OOM killer sometimes takes
+// out the postmaster mid-suite, which used to cascade into every
+// remaining Postgres test failing at Reset ("unexpected EOF" from the
+// dying connections, then "connection refused" forever after). Shared
+// and Reset now detect that death (liveness probe, never error-string
+// matching) and boot a replacement in place — see reviveLocked — so a
+// one-off kill costs one container boot instead of the rest of the
+// suite.
+//
+// Three SQL connections are exposed (SystemDB being the tf_system
+// executor role documented on the Harness struct):
 //   - AdminDB connects as `supabase_admin` — the real superuser in the
 //     supabase image. The image's own migrations demote `postgres` to
 //     NOSUPERUSER (see 10000000000000_demote-postgres.sql), so attempts
@@ -27,6 +38,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -79,36 +91,105 @@ type Harness struct {
 }
 
 var (
-	sharedOnce sync.Once
-	shared     *Harness
-	sharedErr  error
+	// sharedMu guards the boot/revive lifecycle below. The pg-backed
+	// suites run their tests sequentially (no t.Parallel), so contention
+	// is nil — the mutex exists so reviveLocked's in-place connection
+	// swap can never race a concurrent Shared call under -race.
+	sharedMu  sync.Mutex
+	booted    bool
+	shared    *Harness
+	sharedErr error
+	// reviveBudget bounds how many container deaths a single test binary
+	// will absorb. One death is CI resource pressure; a container that
+	// keeps dying means the environment is genuinely unstable (or a test
+	// is crashing Postgres), and re-booting per test would just stretch a
+	// doomed run out to the go-test timeout.
+	reviveBudget = 2
 )
 
 // Shared returns the package-scoped harness, booting the container on
 // the first call. Subsequent calls return the same instance. Tests
 // that need isolation should call h.Reset(t) at the top of the test.
 //
-// Two outcomes are distinct on purpose:
+// Three outcomes are distinct on purpose:
 //   - Docker is genuinely unreachable → t.Skip. Lets the SQLite suite
 //     run cleanly in CI environments without a Docker daemon.
 //   - Docker is healthy but boot failed (migration error, SQL bug,
 //     image regression, anything else) → t.Fatalf. Treating these as
 //     skips would let a real schema regression silently turn the
 //     Postgres suite into a green-but-empty pass.
+//   - A previously healthy container no longer answers a liveness probe
+//     (OOM-killed postmaster on a loaded CI runner) → revive: boot a
+//     replacement in place, bounded by reviveBudget.
 func Shared(t *testing.T) *Harness {
 	t.Helper()
 	// Probe Docker first so unreachable-daemon failures are
 	// disambiguated from boot failures. The probe is cheap — pings the
 	// Docker socket via the testcontainers provider — and runs on
-	// every Shared() call (cheap is fine; sharedOnce guards the
-	// expensive boot itself).
+	// every Shared() call (cheap is fine; booted guards the expensive
+	// boot itself).
 	testcontainers.SkipIfProviderIsNotHealthy(t)
 
-	sharedOnce.Do(boot)
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	if !booted {
+		booted = true
+		shared, sharedErr = boot()
+	}
 	if sharedErr != nil {
-		t.Fatalf("pgtest: boot failed (Docker is reachable but bring-up errored — this is NOT a skip-worthy condition): %v", sharedErr)
+		t.Fatalf("pgtest: harness unavailable (Docker is reachable but bring-up errored — this is NOT a skip-worthy condition): %v", sharedErr)
+	}
+	if err := pingSharedLocked(); err != nil {
+		if rerr := reviveLocked(fmt.Errorf("liveness probe: %w", err)); rerr != nil {
+			t.Fatalf("pgtest: shared container died and revive failed: %v", rerr)
+		}
 	}
 	return shared
+}
+
+// pingSharedLocked probes the shared container for liveness. The bound
+// exists so a hung-but-listening server classifies as dead instead of
+// stalling the binary into go test's panic timeout; against a dead
+// container the dial fails immediately. Callers hold sharedMu.
+func pingSharedLocked() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return shared.AdminDB.PingContext(ctx)
+}
+
+// reviveLocked replaces a dead shared container with a freshly booted,
+// fully migrated one, swapping the new connections into the existing
+// Harness value so pointers tests already hold observe the replacement.
+// A failed revive (or an exhausted budget) is sticky via sharedErr —
+// every subsequent Shared call fails fast rather than each paying a
+// multi-minute boot attempt against a broken environment. Callers hold
+// sharedMu; failures are returned, never t.Fatalf'd here, so callers
+// can release the lock before failing the test (t.Fatalf runs Goexit,
+// which would leak the lock and deadlock the rest of the suite).
+func reviveLocked(cause error) error {
+	if reviveBudget <= 0 {
+		sharedErr = fmt.Errorf("container died again (%v) with the revive budget spent — repeated deaths mean genuine environment instability, not a one-off kill", cause)
+		return sharedErr
+	}
+	reviveBudget--
+	fmt.Fprintf(os.Stderr, "pgtest: shared Postgres container unreachable (%v); booting a replacement (%d revive(s) left in this process)\n", cause, reviveBudget)
+
+	_ = shared.AdminDB.Close()
+	_ = shared.AppDB.Close()
+	_ = shared.SystemDB.Close()
+	// Bounded: a stuck Docker daemon must not hang the revive forever.
+	// Terminate on an already-dead container just errors; ignore it.
+	termCtx, termCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	_ = shared.Container.Terminate(termCtx)
+	termCancel()
+
+	fresh, err := boot()
+	if err != nil {
+		sharedErr = fmt.Errorf("revive after container death (%v): %w", cause, err)
+		return sharedErr
+	}
+	*shared = *fresh
+	return nil
 }
 
 // bootContainer starts a fresh supabase/postgres container and returns
@@ -169,6 +250,15 @@ func bootContainer(ctx context.Context) (pg *postgres.PostgresContainer, pgDSN, 
 		testcontainers.WithCmd("postgres",
 			"-c", "config_file=/etc/postgresql/postgresql.conf",
 			"-c", "fsync=off",
+			// The bundled config sizes shared_buffers=128MB for real
+			// workloads; a test DB holds a few hundred rows. Later -c
+			// flags win over the config file. Trimming keeps N
+			// concurrent harness containers (one per test binary under
+			// `go test ./...`) cheap, and — because shared buffers count
+			// toward every backend's RSS — stops Postgres processes from
+			// looking like the fattest OOM-kill candidates on a loaded
+			// CI runner.
+			"-c", "shared_buffers=32MB",
 		),
 		testcontainers.WithWaitStrategyAndDeadline(3*time.Minute, waitStrategies...),
 	)
@@ -202,14 +292,13 @@ func bootContainer(ctx context.Context) (pg *postgres.PostgresContainer, pgDSN, 
 	return pg, pgDSN, adminDSN, adminDB, nil
 }
 
-func boot() {
+func boot() (*Harness, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	pg, pgDSN, _, adminDB, err := bootContainer(ctx)
 	if err != nil {
-		sharedErr = err
-		return
+		return nil, err
 	}
 
 	// Run goose migrations as supabase_admin (real superuser). RLS is
@@ -219,8 +308,7 @@ func boot() {
 	if err := db.Migrate(adminDB, "postgres"); err != nil {
 		_ = adminDB.Close()
 		_ = pg.Terminate(ctx)
-		sharedErr = fmt.Errorf("migrate: %w", err)
-		return
+		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
 	// The image ships authenticator LOGIN but with no password. Set
@@ -232,23 +320,20 @@ func boot() {
 	); err != nil {
 		_ = adminDB.Close()
 		_ = pg.Terminate(ctx)
-		sharedErr = fmt.Errorf("set authenticator password: %w", err)
-		return
+		return nil, fmt.Errorf("set authenticator password: %w", err)
 	}
 
 	appDSN, err := rewriteUser(pgDSN, "authenticator", authPassword)
 	if err != nil {
 		_ = adminDB.Close()
 		_ = pg.Terminate(ctx)
-		sharedErr = fmt.Errorf("build app dsn: %w", err)
-		return
+		return nil, fmt.Errorf("build app dsn: %w", err)
 	}
 	appDB, err := sql.Open("pgx", appDSN)
 	if err != nil {
 		_ = adminDB.Close()
 		_ = pg.Terminate(ctx)
-		sharedErr = fmt.Errorf("open app db: %w", err)
-		return
+		return nil, fmt.Errorf("open app db: %w", err)
 	}
 
 	// tf_system ships NOLOGIN in the baseline (production LOGIN comes from
@@ -261,27 +346,24 @@ func boot() {
 		_ = appDB.Close()
 		_ = adminDB.Close()
 		_ = pg.Terminate(ctx)
-		sharedErr = fmt.Errorf("set tf_system password: %w", err)
-		return
+		return nil, fmt.Errorf("set tf_system password: %w", err)
 	}
 	systemDSN, err := rewriteUser(pgDSN, "tf_system", systemPassword)
 	if err != nil {
 		_ = appDB.Close()
 		_ = adminDB.Close()
 		_ = pg.Terminate(ctx)
-		sharedErr = fmt.Errorf("build system dsn: %w", err)
-		return
+		return nil, fmt.Errorf("build system dsn: %w", err)
 	}
 	systemDB, err := sql.Open("pgx", systemDSN)
 	if err != nil {
 		_ = appDB.Close()
 		_ = adminDB.Close()
 		_ = pg.Terminate(ctx)
-		sharedErr = fmt.Errorf("open system db: %w", err)
-		return
+		return nil, fmt.Errorf("open system db: %w", err)
 	}
 
-	shared = &Harness{Container: pg, AdminDB: adminDB, AppDB: appDB, SystemDB: systemDB}
+	return &Harness{Container: pg, AdminDB: adminDB, AppDB: appDB, SystemDB: systemDB}, nil
 }
 
 // NewInstance boots a dedicated, independent supabase/postgres
@@ -423,23 +505,61 @@ var orgScopedTables = []string{
 // — that's image-owned and our users table cascades from it. Tests
 // that seed auth.users via SeedAuthUser should call Reset *first*, then
 // re-seed.
+//
+// Reset is also where a mid-suite container death surfaces in practice
+// (it's the first DB touch of nearly every Postgres test), so a failed
+// truncate is classified before failing the test: if a liveness probe
+// on the same connection also fails, the container is dead — revive it
+// and retry once. A live server answering the probe means the truncate
+// error was a genuine SQL failure, which fails loudly as before.
 func (h *Harness) Reset(t *testing.T) {
 	t.Helper()
+	err := h.truncateAll()
+	if err == nil {
+		return
+	}
+
+	sharedMu.Lock()
+	pingErr := pingSharedLocked()
+	var reviveErr error
+	if pingErr != nil {
+		reviveErr = reviveLocked(fmt.Errorf("%v (liveness probe: %v)", err, pingErr))
+	}
+	sharedMu.Unlock()
+
+	if pingErr == nil {
+		t.Fatalf("Reset: %v", err)
+	}
+	if reviveErr != nil {
+		t.Fatalf("Reset: container died mid-suite and revive failed: %v", reviveErr)
+	}
+	if err := h.truncateAll(); err != nil {
+		t.Fatalf("Reset (after revive): %v", err)
+	}
+}
+
+// truncateAll is Reset's actual work. Bounded so a wedged server
+// converts into a classifiable error instead of hanging the whole
+// binary into go test's panic timeout.
+func (h *Harness) truncateAll() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 	// Build a single TRUNCATE statement so CASCADE works across all
 	// tables at once (TRUNCATE on a single table can fail if another
 	// table not in the list FKs into it; lumping them together avoids
 	// that ordering issue).
 	stmt := "TRUNCATE TABLE " + strings.Join(orgScopedTables, ", ") + " RESTART IDENTITY CASCADE"
-	if _, err := h.AdminDB.Exec(stmt); err != nil {
-		t.Fatalf("Reset: %v", err)
+	if _, err := h.AdminDB.ExecContext(ctx, stmt); err != nil {
+		return fmt.Errorf("truncate org-scoped tables: %w", err)
 	}
 	// Drop auth.users rows we may have seeded. Image schema FKs from
 	// public.users → auth.users(id) ON DELETE CASCADE, but the TRUNCATE
 	// above goes the other direction. Wipe auth.users explicitly so
 	// SeedAuthUser can re-insert the same IDs without conflict.
-	if _, err := h.AdminDB.Exec(`DELETE FROM auth.users`); err != nil {
-		t.Fatalf("Reset auth.users: %v", err)
+	if _, err := h.AdminDB.ExecContext(ctx, `DELETE FROM auth.users`); err != nil {
+		return fmt.Errorf("clear auth.users: %w", err)
 	}
+	return nil
 }
 
 // SeedAuthUser inserts a row into auth.users with the given id + email.
