@@ -63,8 +63,8 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility,
 		                  creator_user_id, actor_agent_id, blueprint_run_id, blueprint_step_index,
-		                  preferred_executor_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?, NULLIF(?, ''))
+		                  preferred_executor_id, queued_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?, NULLIF(?, ''), CURRENT_TIMESTAMP)
 	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), status, run.Model, run.WorktreePath,
 		triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID,
 		nullIfEmpty(run.CreatorUserID), nullIfEmpty(run.ActorAgentID),
@@ -125,7 +125,7 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 	// requeue can't resurrect a terminal/dormant row. The ownership stamp is
 	// cleared too: a queued row has no owner (mirrors the Postgres impl).
 	_, err := s.conn.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', claimed_at = NULL, result_summary = ?,
+		UPDATE runs SET status = 'queued', queued_at = CURRENT_TIMESTAMP, claimed_at = NULL, result_summary = ?,
 			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
 		WHERE id = ? AND status = 'running'
 	`, lastErr, runID)
@@ -191,7 +191,7 @@ func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, r
 		return false, err
 	}
 	res, err := s.conn.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', claimed_at = NULL,
+		UPDATE runs SET status = 'queued', queued_at = CURRENT_TIMESTAMP, claimed_at = NULL,
 			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
 		WHERE id = ? AND status = 'awaiting_credentials'
 	`, runID)
@@ -271,7 +271,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID stri
 	// 202607080003_pre_registry_orphan_normalization, not by this sweep.
 	// The reset clears the stamp: a queued row has no owner.
 	res, err := s.conn.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', claimed_at = NULL,
+		UPDATE runs SET status = 'queued', queued_at = CURRENT_TIMESTAMP, claimed_at = NULL,
 			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
 		WHERE status NOT IN (
 			'queued',

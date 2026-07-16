@@ -14,6 +14,8 @@ import {
   isActiveRun,
   isActiveStatus,
   isFailedStatus,
+  queueDwellMs,
+  workStartedAt,
 } from '../lib/runStatus'
 import { AttentionRow, CardPlane, EventTag, HudHeader, SourceTag } from './board/cardChrome'
 import { compactNum, runGlow, TONE_TEXT, type Glow, type StepState } from './board/cardStyle'
@@ -83,10 +85,15 @@ export default function AgentCard({
     return () => clearInterval(interval)
   }, [isActive, isQueued])
 
-  const elapsed =
-    !isActive && run.DurationMs != null
+  // Queue dwell is its own timer: a queued run's header ticks the live wait,
+  // a started run's footer shows the settled dwell. Working elapsed ticks
+  // from the claim stamp so queue time never inflates it.
+  const elapsed = isQueued
+    ? formatElapsed(run.QueuedAt ?? run.StartedAt, now)
+    : !isActive && run.DurationMs != null
       ? formatDurationMs(run.DurationMs)
-      : formatElapsed(run.StartedAt, now)
+      : formatElapsed(workStartedAt(run), now)
+  const dwellMs = queueDwellMs(run, now)
   // Approval is derived from the unresolved-artifact set (draft PRs + ready
   // reviews), not a `pending_approval` run status — a card needs the user
   // whenever has_unresolved_artifacts is true, live or terminal.
@@ -256,6 +263,11 @@ export default function AgentCard({
             {run.actor_agent_name && (
               <span title="The bot that executed this run">Ran as {run.actor_agent_name}</span>
             )}
+            {!isQueued && dwellMs != null && dwellMs >= QUEUE_DWELL_VISIBLE_MS && (
+              <span title="Time this run waited in the queue for a free slot before starting">
+                queued {formatDurationMs(dwellMs)}
+              </span>
+            )}
             {stats.comments > 0 && <span>{stats.comments} comments</span>}
             {stats.tokens > 0 && <span>{compactNum(stats.tokens)} tokens</span>}
             {run.TotalCostUSD != null && run.TotalCostUSD > 0 && (
@@ -346,6 +358,10 @@ function ArtifactsAffordance({
   )
 }
 
+// Queue dwell below this stays off the footer: a couple of seconds is normal
+// dispatch latency (the claim scan tick), not a wait worth a readout.
+const QUEUE_DWELL_VISIBLE_MS = 5000
+
 // QueuedBlock fills the feed slot while the run waits for a dispatcher slot.
 // Concurrent runs are capped process-wide, so a burst of delegations executes
 // a few at a time — this says so, instead of leaving a dead-looking card.
@@ -354,7 +370,7 @@ function QueuedBlock() {
     <div className="flex h-[3.5rem] items-end px-4 pb-1 font-mono text-[10.5px] text-text-tertiary/70">
       <span
         className="inline-flex items-center gap-2"
-        title="Concurrent runs are capped (TF_MAX_CONCURRENT_RUNS, default 4). This run starts automatically when a slot frees up."
+        title="Concurrent runs are capped (TF_MAX_CONCURRENT_RUNS, default 8). This run starts automatically when a slot frees up."
       >
         <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-snooze" />
         queued — starts when a run slot frees up

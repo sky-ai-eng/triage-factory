@@ -83,6 +83,13 @@ export interface AgentRun {
   Status: string
   Model: string
   StartedAt: string
+  // QueuedAt is when the run last entered the queue; ClaimedAt is when the
+  // dispatcher last claimed it (work actually began). Together they carry the
+  // latest queue episode's dwell — the queue timer — while StartedAt stays the
+  // mint stamp and DurationMs stays pure working time. Both absent on legacy
+  // rows that predate the queue columns.
+  QueuedAt?: string | null
+  ClaimedAt?: string | null
   CompletedAt?: string
   TotalCostUSD?: number
   DurationMs?: number

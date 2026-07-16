@@ -156,3 +156,28 @@ describe('AgentCard queued rendering', () => {
     expect(screen.queryByText(/run slot/)).not.toBeInTheDocument()
   })
 })
+
+describe('AgentCard queue-dwell footer', () => {
+  it('shows how long a started run waited in the queue', () => {
+    renderCard({
+      Status: 'running',
+      QueuedAt: '2026-06-25T00:00:00Z',
+      ClaimedAt: '2026-06-25T00:06:00Z',
+    })
+    expect(screen.getByText(/queued 6m 0s/)).toBeInTheDocument()
+  })
+
+  it('stays quiet for ordinary dispatch latency below the threshold', () => {
+    renderCard({
+      Status: 'running',
+      QueuedAt: '2026-06-25T00:00:00Z',
+      ClaimedAt: '2026-06-25T00:00:02Z',
+    })
+    expect(screen.queryByText(/^queued /)).not.toBeInTheDocument()
+  })
+
+  it('hides the dwell for legacy rows where it is unknowable', () => {
+    renderCard({ Status: 'completed', DurationMs: 120000 })
+    expect(screen.queryByText(/^queued /)).not.toBeInTheDocument()
+  })
+})

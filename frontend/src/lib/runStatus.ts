@@ -54,6 +54,26 @@ export function isResumableRun(run: AgentRun): boolean {
   )
 }
 
+// workStartedAt — when the run actually began executing: the dispatcher's
+// claim stamp, falling back to the mint stamp for legacy rows that predate the
+// queue columns. Live elapsed readouts tick from here so queue dwell never
+// inflates working time.
+export function workStartedAt(run: AgentRun): string {
+  return run.ClaimedAt ?? run.StartedAt
+}
+
+// queueDwellMs — how long the run waited in the queue: live (now − QueuedAt)
+// while it is still queued, else the latest episode's settled dwell
+// (ClaimedAt − QueuedAt). null when the row predates the queue columns and the
+// dwell is unknowable.
+export function queueDwellMs(run: AgentRun, now: number = Date.now()): number | null {
+  const queuedAt = run.QueuedAt ?? (run.Status === 'queued' ? run.StartedAt : null)
+  if (!queuedAt) return null
+  if (run.Status === 'queued') return Math.max(0, now - new Date(queuedAt).getTime())
+  if (!run.ClaimedAt) return null
+  return Math.max(0, new Date(run.ClaimedAt).getTime() - new Date(queuedAt).getTime())
+}
+
 export function formatDurationMs(ms: number): string {
   const seconds = Math.floor(ms / 1000)
   if (seconds < 60) return `${seconds}s`

@@ -24,12 +24,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// DefaultMaxConcurrentRuns is the conservative process-wide cap on how
-// many runs execute off the dispatcher at once, so a burst of queued steps
-// doesn't fan into an unbounded number of agent subprocesses. Tunable via
-// SetMaxConcurrentRuns before the dispatcher starts; deployments set it
-// with the TF_MAX_CONCURRENT_RUNS env var (see ParseMaxConcurrentRuns).
-const DefaultMaxConcurrentRuns = 4
+// DefaultMaxConcurrentRuns is the process-wide cap on how many runs
+// execute off the dispatcher at once, so a burst of queued steps doesn't
+// fan into an unbounded number of agent subprocesses. 8 comfortably fits
+// the ~256 MB/run planning budget on ordinary hardware while still
+// throttling API spend. Tunable via SetMaxConcurrentRuns before the
+// dispatcher starts; deployments set it with the TF_MAX_CONCURRENT_RUNS
+// env var (see ParseMaxConcurrentRuns).
+const DefaultMaxConcurrentRuns = 8
 
 // MaxConcurrentRunsCeiling is the largest value the concurrency cap may
 // take. It mirrors sandbox.MaxSandboxes, the sandbox subnet allocator's

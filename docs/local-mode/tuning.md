@@ -7,16 +7,19 @@ multi mode too; the `TF_CLAUDE_BINARY` override is local-mode only.
 ## Run concurrency
 
 Delegated runs execute through a process-wide dispatcher that runs at most
-`TF_MAX_CONCURRENT_RUNS` agents at once — **default 4, and the cap applies in
+`TF_MAX_CONCURRENT_RUNS` agents at once — **default 8, and the cap applies in
 local mode too**, not just multi (concurrency is an API-spend throttle as much
 as a memory guard). Delegating more work than the cap is normal: the extra runs
 wait in a durable queue — the board card and the run page show **QUEUED** with
 the time spent waiting — and each starts automatically as a slot frees. Nothing
 is stuck, and queued runs survive a restart (the dispatcher re-claims them on
-boot).
+boot). Queue time is tracked separately from working time: elapsed/duration
+readouts measure from when the run actually started executing, and a run that
+waited meaningfully shows its dwell as its own `queued` readout on the card
+footer and the run page's telemetry rail.
 
 ```bash
-export TF_MAX_CONCURRENT_RUNS=8   # each concurrent run costs ~256 MB RAM plus API spend
+export TF_MAX_CONCURRENT_RUNS=16   # each concurrent run costs ~256 MB RAM plus API spend
 ```
 
 The effective cap is logged at boot (`run concurrency cap`); when a burst

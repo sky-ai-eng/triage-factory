@@ -181,8 +181,8 @@ func (a *App) buildExecution() error {
 	// runs.executor_id on claimed rows must equal the registry id, and
 	// RunInstanceHeartbeat's fenced renewal needs the matching boot_epoch.
 	a.spawner.SetExecutorID(a.identity.ID, a.bootEpoch)
-	// Dispatcher concurrency is a deployment decision: the default of 4 is
-	// conservative for a laptop, while a provisioned multi-mode host handles
+	// Dispatcher concurrency is a deployment decision: the default of 8 fits
+	// ordinary hardware, while a provisioned multi-mode host handles
 	// far more (memory-bound; see the TF_MAX_CONCURRENT_RUNS guidance in
 	// .env.example for the sizing numbers). Resolved before RunDispatcher
 	// starts — resizing later would strand semaphore tokens.

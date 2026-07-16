@@ -1421,6 +1421,14 @@ CREATE TABLE public.runs (
     -- (queued -> running) via FOR UPDATE SKIP LOCKED, stamping claimed_at and
     -- bumping attempts. Both stay NULL/0 for the legacy never-queued shape.
     claimed_at timestamp with time zone,
+    -- queued_at is when the run last entered the queue. started_at is the
+    -- mint stamp and never resets, so after any re-queue (transient-setup
+    -- retry, crash reconcile, resume-by-enqueue, reaper spill) it stops
+    -- describing the current wait. Re-stamped on every flip to
+    -- status='queued': claimed_at − queued_at is the latest queue episode's
+    -- dwell, now() − queued_at the live wait a QUEUED card shows — keeping
+    -- queue time out of the working-time readouts.
+    queued_at timestamp with time zone,
     attempts integer DEFAULT 0 NOT NULL,
     -- executor_id records which executor instance owns a run's live
     -- process while it is running. Stamped atomically at claim (queued ->

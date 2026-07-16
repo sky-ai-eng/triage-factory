@@ -290,7 +290,8 @@ func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID, ex
 // claiming executor re-warms and re-earns affinity on the next enqueue.
 func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error) {
 	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', parked_at = NULL, claimed_at = NULL,
+		UPDATE runs SET status = 'queued', queued_at = now(),
+		                parked_at = NULL, claimed_at = NULL,
 		                executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL,
 		                preferred_executor_id = NULL
 		WHERE org_id = $1 AND id = $2
@@ -569,7 +570,7 @@ func (s *agentRunStore) MarkDiscarded(ctx context.Context, orgID, runID, stopRea
 // JOINs. Keeping this here keeps the simple "just the run" projection
 // uncoupled from those.
 const pgRunColumns = `
-	r.id, r.task_id, r.status, COALESCE(r.model, ''), r.started_at, r.completed_at,
+	r.id, r.task_id, r.status, COALESCE(r.model, ''), r.started_at, r.queued_at, r.claimed_at, r.completed_at,
 	r.total_cost_usd, r.duration_ms, r.num_turns,
 	COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
 	COALESCE(r.result_summary, ''),
@@ -1120,14 +1121,14 @@ func tokenTotals(ctx context.Context, q queryer, orgID, runID string) (*domain.T
 // scanAgentRunRows handles the rows.Scan case. Both unpack the
 // nullable columns through the same set of intermediates.
 func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
-	var completedAt sql.NullTime
+	var queuedAt, claimedAt, completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var blueprintRunID sql.NullString
 	var failureKind string
 
 	if err := row.Scan(
-		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
@@ -1136,19 +1137,19 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 		return err
 	}
 	r.FailureKind = domain.RunFailureKind(failureKind)
-	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
+	finalizeAgentRun(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
 	return nil
 }
 
 func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
-	var completedAt sql.NullTime
+	var queuedAt, claimedAt, completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var blueprintRunID sql.NullString
 	var failureKind string
 
 	if err := rows.Scan(
-		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
@@ -1157,17 +1158,23 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 		return err
 	}
 	r.FailureKind = domain.RunFailureKind(failureKind)
-	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
+	finalizeAgentRun(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
 	return nil
 }
 
-func finalizeAgentRun(r *domain.AgentRun, completedAt sql.NullTime, costUSD sql.NullFloat64, durationMs, numTurns, blueprintStep sql.NullInt64, blueprintRunID sql.NullString) {
+func finalizeAgentRun(r *domain.AgentRun, queuedAt, claimedAt, completedAt sql.NullTime, costUSD sql.NullFloat64, durationMs, numTurns, blueprintStep sql.NullInt64, blueprintRunID sql.NullString) {
 	if blueprintRunID.Valid {
 		r.BlueprintRunID = blueprintRunID.String
 	}
 	if blueprintStep.Valid {
 		v := int(blueprintStep.Int64)
 		r.BlueprintStepIndex = &v
+	}
+	if queuedAt.Valid {
+		r.QueuedAt = &queuedAt.Time
+	}
+	if claimedAt.Valid {
+		r.ClaimedAt = &claimedAt.Time
 	}
 	if completedAt.Valid {
 		r.CompletedAt = &completedAt.Time
