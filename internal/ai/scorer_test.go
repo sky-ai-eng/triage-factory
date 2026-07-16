@@ -4,12 +4,39 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
+
+// captureHandler is a minimal slog.Handler that records emitted entries so a
+// test can assert exactly what — and how often — a code path logged. Mirrors
+// internal/github/client_test.go's helper of the same name/shape.
+type captureHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *captureHandler) recorded() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Record(nil), h.records...)
+}
 
 // TestScoreTasks_BatchesAndCountsSkips exercises the scoreFn seam:
 // scoreTasks chunks tasks into batchSize batches, dispatches each through the
@@ -60,6 +87,41 @@ func TestScoreTasks_BatchesAndCountsSkips(t *testing.T) {
 	}
 	if len(scores) != 15 {
 		t.Errorf("aggregated scores = %d; want 15 (25 - 10 skipped)", len(scores))
+	}
+}
+
+// TestScoreTasks_ProviderBackoff_LogsQuietly pins the systemllm circuit
+// breaker's caller-side behavior (scorer.go's IsProviderBackoff check): a
+// batch failing with a breaker skip is still counted as skipped for retry
+// exactly like any other failure, but it must log at Info, never at the
+// Warn level a genuine failure gets — a boot-time overload shouldn't read
+// as a wall of alarms.
+func TestScoreTasks_ProviderBackoff_LogsQuietly(t *testing.T) {
+	logs := &captureHandler{}
+	prev := aiLog
+	aiLog = slog.New(logs)
+	t.Cleanup(func() { aiLog = prev })
+
+	r := NewRunner(nil, nil, "org-x", nil, nil, nil, nil, RunnerCallbacks{})
+	r.scoreFn = func(context.Context, []TaskInput, string, agentproc.SecretsReader) ([]TaskScore, error) {
+		return nil, &systemllm.ErrProviderBackoff{Provider: "anthropic-direct:default"}
+	}
+
+	tasks := []domain.Task{{ID: "t-1"}}
+	_, skipped, err := r.scoreTasks(context.Background(), tasks)
+	if err != nil {
+		t.Fatalf("scoreTasks: %v", err)
+	}
+	if skipped != 1 {
+		t.Errorf("skipped = %d, want 1 — a breaker skip must still count the batch as skipped for retry", skipped)
+	}
+
+	recs := logs.recorded()
+	if len(recs) != 1 {
+		t.Fatalf("expected exactly one log record, got %d", len(recs))
+	}
+	if got := recs[0]; got.Level != slog.LevelInfo {
+		t.Errorf("log level = %v, want Info for a provider-backoff skip (got message %q)", got.Level, got.Message)
 	}
 }
 
