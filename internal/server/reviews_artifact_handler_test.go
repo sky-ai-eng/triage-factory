@@ -143,6 +143,12 @@ func TestReviewArtifactApprove(t *testing.T) {
 	if !strings.Contains(art.URL, "pullrequestreview-12345") {
 		t.Errorf("artifact URL = %q, want a review anchor", art.URL)
 	}
+	// The deep link must be anchored to the org's own GitHub host (seedApp sets
+	// GitHubBaseURL to the stub), not a hardcoded github.com — the review URL is
+	// composed TF-side, so an org on GHES/GHEC would otherwise get a dead link.
+	if !strings.HasPrefix(art.URL, stub.URL+"/") || strings.Contains(art.URL, "github.com") {
+		t.Errorf("artifact URL = %q, want the org GitHub host %q, not hardcoded github.com", art.URL, stub.URL)
+	}
 	var runStatus string
 	if err := srv.db.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&runStatus); err != nil {
 		t.Fatalf("read run: %v", err)

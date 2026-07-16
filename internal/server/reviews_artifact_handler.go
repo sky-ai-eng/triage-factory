@@ -356,7 +356,20 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	submitted := *fresh
 	submitted.State = domain.ArtifactStateReviewSubmitted
 	submitted.ExternalID = strconv.Itoa(reviewID)
-	submitted.URL = fmt.Sprintf("%s#pullrequestreview-%d", domain.GitHubPullURL(owner+"/"+repo, number), reviewID)
+	// Anchor the "View on GitHub" deep link to the org's own GitHub host —
+	// github.com, a GHES host, or a GHEC data-residency host — not a hardcoded
+	// github.com. A review artifact carries no GitHub-minted html_url (unlike a PR
+	// artifact), so the URL is composed here; BaseURLFor is the same host
+	// resolution the client that just submitted the review used, so the link and
+	// the submit agree on the server. A resolve failure degrades to the public
+	// host rather than failing the stamp after the review is already live.
+	webBase, baseErr := ah.ghResolver.BaseURLFor(r.Context(), orgID)
+	if baseErr != nil {
+		artifactsLog.Warn("resolve github base for review URL failed; using default host",
+			"artifact", art.ID, "org", orgID, "error", baseErr)
+		webBase = ""
+	}
+	submitted.URL = fmt.Sprintf("%s#pullrequestreview-%d", domain.GitHubPullURLBase(webBase, owner+"/"+repo, number), reviewID)
 	submitted.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
 	stamp := func() error {
 		return ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
