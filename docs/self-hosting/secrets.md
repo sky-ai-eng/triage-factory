@@ -1,0 +1,58 @@
+# Deployment secrets
+
+The multi-mode stack reads several secrets at boot: the at-rest encryption keys (`TF_SECRET_ENCRYPTION_KEY`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`), the database DSN and role passwords, the object-store keys (`TF_BLOB_*`), the GoTrue admin bearer (`TF_GOTRUE_SERVICE_ROLE_TOKEN`), and — optionally — the Enterprise license token (`TF_LICENSE`). Every one is documented inline in [`.env.example`](../../.env.example). This page is about how to *supply* them and how TF handles them.
+
+For **rotating** a secret, see [key rotation](key-rotation.md) (the JWT signing key) and the per-variable notes in `.env.example` (each key's rotation impact). For the deployment's overall threat model, see [docs/security/](../security/).
+
+## Two ways to supply a secret
+
+**Plain environment variable** (the default). Set `NAME` in `.env`; the bundled compose forwards it into the container.
+
+**A file** (`NAME_FILE`) — the standard convention for Docker and Kubernetes secrets, which are mounted as files. Set `NAME_FILE` to the mount path and leave the plain `NAME` blank. This keeps the secret's *value* out of the compose file, out of `docker inspect`, and out of the container's environment entirely — only the path is an env var.
+
+## How TF handles a secret at boot
+
+At startup TF captures each deployment secret into process memory (from `NAME_FILE` if set, else the plain `NAME`) and then **unsets it from the environment**. A set-but-unreadable `NAME_FILE` fails boot with a clear error; if both `NAME` and `NAME_FILE` are set, the file wins (with a warning).
+
+What that buys you, and where the value can still be observed:
+
+| Surface | Plain `NAME=` | Via `NAME_FILE` |
+|---|---|---|
+| Child processes (git, `gh`, the SDK installer) inheriting it | **no** — unset from `os.Environ()` before any child spawns | **no** |
+| `docker inspect` / the compose file | yes | **no** — never a container-create env var |
+| This process's own `/proc/<pid>/environ` | **yes** — the kernel's exec-time snapshot; TF can't rewrite it in-process | **no** — only the path was ever in env |
+| Process heap (`/proc/<pid>/mem`, root/same-uid) | yes | yes — unavoidable: TF must hold the value to decrypt/sign/connect |
+
+So `NAME_FILE` is strictly better for the sensitive keys — above all `TF_SECRET_ENCRYPTION_KEY`, the master key for the org-secrets vault. Credentials handed to *sandboxed agents* are a separate, stronger boundary — see [docs/security/](../security/).
+
+## Which secrets support `NAME_FILE` in the bundled compose
+
+The **binary** honors `NAME_FILE` for `TF_SECRET_ENCRYPTION_KEY`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_LICENSE`, `TF_GOTRUE_SERVICE_ROLE_TOKEN`, `TF_DATABASE_URL`, `TF_DATABASE_DIRECT_URL`, `TF_AUTHENTICATOR_PASSWORD`, `TF_BLOB_ACCESS_KEY`, and `TF_BLOB_SECRET_KEY` — but only if the container's environment actually carries the `NAME_FILE` variable.
+
+The bundled `docker-compose.yml` **forwards `NAME_FILE` for the TF-only secrets**: `TF_LICENSE`, `TF_GOTRUE_SERVICE_ROLE_TOKEN`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_SECRET_ENCRYPTION_KEY`. For those, set `NAME_FILE` in `.env`, leave the plain `NAME` blank, and mount the file.
+
+The rest are **not** `_FILE`-wired in the bundled stack, because the compose file either **constructs** them (`TF_DATABASE_URL` is built from `POSTGRES_PASSWORD`) or **shares** them with a sidecar that needs the plain value (`TF_BLOB_*` are templated into SeaweedFS's S3 identity; `TF_AUTHENTICATOR_PASSWORD` is applied to the DB role by `postgres-postinit`). Use `NAME_FILE` for those only in a custom deployment (Kubernetes, your own compose) where you set the container environment yourself.
+
+## Example: mount secrets with Docker Compose
+
+Docker Compose secrets mount under `/run/secrets/<name>`. Because the bundled compose already forwards the `_FILE` vars, an override only needs the **mount**; point `_FILE` at it from `.env`:
+
+```yaml
+# compose.override.yml  (auto-merged by `docker compose`)
+secrets:
+  tf_enc_key: { file: ./secrets/enc_key }
+  tf_license: { file: ./secrets/license }
+services:
+  triagefactory:
+    secrets: [tf_enc_key, tf_license]
+  executor:
+    secrets: [tf_license]
+```
+
+```dotenv
+# .env — leave the plain TF_SECRET_ENCRYPTION_KEY blank; point _FILE at the mount
+TF_SECRET_ENCRYPTION_KEY_FILE=/run/secrets/tf_enc_key
+TF_LICENSE_FILE=/run/secrets/tf_license
+```
+
+> The three crypto keys are optional (`:-`) in the bundled compose specifically so the file form can leave the plain var blank — if you supply *neither* the plain value nor a readable file, the binary fails fast at boot with a clear `"<NAME> is empty"`. The other required secrets keep compose's parse-time `${VAR:?}` check, so an unfilled `.env` still fails at `docker compose up`.

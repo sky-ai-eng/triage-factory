@@ -460,7 +460,7 @@ services:
       # Set TF_LICENSE in your .env to the signed token from your vendor; the
       # control pod runs the license-gated brain features (Slack, fleet console).
       # Or supply it as a mounted file: set TF_LICENSE_FILE (forwarded below) to
-      # the mount path — see the *_FILE section in docs/self-hosting/install.md.
+      # the mount path — see docs/self-hosting/secrets.md.
       TF_LICENSE: ${TF_LICENSE:-}
       TF_LICENSE_FILE: ${TF_LICENSE_FILE:-}
       # Per-role Postgres pool ceiling (per pool) + advisory platform reserve.
@@ -495,7 +495,7 @@ services:
       # TF-only at-rest keys. Supply each as a plain value OR — to keep it out of
       # the container env and `docker inspect` — as a mounted file via <NAME>_FILE
       # (both are forwarded, so an operator only sets one; see the *_FILE section
-      # in docs/self-hosting/install.md). These are `:-` not `:?` because the file
+      # in docs/self-hosting/secrets.md). These are `:-` not `:?` because the file
       # form leaves the plain var empty; the binary fails fast at boot with a clear
       # "<NAME> is empty" if it gets NEITHER, so for these three the missing-secret
       # check moves from compose-parse to boot. (The shared/constructed secrets
@@ -611,7 +611,7 @@ services:
       # Same license as the control pod — all pods in a deployment share one
       # token. The executor evaluates per-org entitlements while running
       # delegated agents (e.g. the Slack exec verbs), so it needs it too.
-      # Plain value or mounted file via TF_LICENSE_FILE (see install.md).
+      # Plain value or mounted file via TF_LICENSE_FILE (see secrets.md).
       TF_LICENSE: ${TF_LICENSE:-}
       TF_LICENSE_FILE: ${TF_LICENSE_FILE:-}
       # Localhost-only liveness endpoint (the container HEALTHCHECK target).
