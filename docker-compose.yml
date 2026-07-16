@@ -430,6 +430,11 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      # Optional Enterprise public-key OVERRIDE (a dev/fork issuer key).
+      # Empty → the source default (the production key), so a from-source
+      # build verifies official licenses exactly like the published image.
+      args:
+        TF_LICENSE_PUBLIC_KEY: "${TF_LICENSE_PUBLIC_KEY:-}"
     # image: ghcr.io/sky-ai-eng/triage-factory:latest
     # Auto-restart on any exit. Load-bearing for the fleet's identity-
     # supersession fence (TFAC-586): a process that boots off a duplicated
@@ -590,6 +595,10 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      # Same optional key override as the `triagefactory` service — the two
+      # builds must agree or the roles would disagree on license validity.
+      args:
+        TF_LICENSE_PUBLIC_KEY: "${TF_LICENSE_PUBLIC_KEY:-}"
     # image: ghcr.io/sky-ai-eng/triage-factory:latest
     # See the `triagefactory` service's identical restart policy comment —
     # same identity-supersession crash-loop-is-the-alarm rationale applies

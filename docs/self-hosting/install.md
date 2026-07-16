@@ -117,7 +117,7 @@ You should see the parsed claims printed as JSON (`Subject`, `Email`, `Provider`
 
 ## 7. (Optional) Enable Enterprise features
 
-Enterprise features — SSO, Slack, governance, the fleet console — are gated by a signed license token. A **release** binary bakes your vendor's public key at build time and verifies the token offline; a from-source `go build` has no baked key and ignores the license entirely (community build).
+Enterprise features — SSO, Slack, governance, the fleet console — are gated by a signed license token. Every build verifies the token offline against the vendor's public key, which ships in the source — the published image and a from-source build behave identically, so there is nothing to configure beyond the token itself.
 
 To enable it, set the token your vendor gave you in `.env`:
 

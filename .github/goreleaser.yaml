@@ -26,10 +26,12 @@ builds:
       # would strip it. Matching the tag exactly makes
       # `triagefactory --version` line up with what the user typed.
       #
-      # ee.publicKeyB64: the Enterprise PUBLIC key, baked so official builds verify
-      # licenses. envOrDefault → "" when TF_LICENSE_PUBLIC_KEY is unset (community
-      # forks / local builds) so they still build — EE off, community default.
-      - -s -w -X main.Version={{.Tag}} -X github.com/sky-ai-eng/triage-factory/ee.publicKeyB64={{ envOrDefault "TF_LICENSE_PUBLIC_KEY" "" }}
+      # No ee.publicKeyB64 injection: the Enterprise PUBLIC key ships as the
+      # source default (ee/ee.go), so release artifacts verify official
+      # licenses without any build-time wiring. Re-adding an -X here would
+      # OVERRIDE that default — with an unset env it would silently ship
+      # builds that ignore every license.
+      - -s -w -X main.Version={{.Tag}}
 
 archives:
   - id: default
