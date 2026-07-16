@@ -446,6 +446,139 @@ func byID(comments []domain.ReviewArtifactComment, id string) domain.ReviewArtif
 	return domain.ReviewArtifactComment{}
 }
 
+// TestLocalClient_GithubAddPendingReviewComment_DedupsExactMatch pins that a
+// second add-review-comment call with the exact same (path, line, start_line,
+// body) as an already-staged comment is a no-op: it returns the EXISTING
+// comment id instead of appending a duplicate, so a confused/retrying agent
+// can't stage the same finding twice. A same-line comment with a different
+// body is a distinct finding and stages as normal (not collapsed).
+func TestLocalClient_GithubAddPendingReviewComment_DedupsExactMatch(t *testing.T) {
+	head := "live_head"
+	srv := reviewDiffServer(t, &head)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+
+	const anchor = "worktree_head"
+	cid1, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "nit: rename", 3, nil, anchor)
+	if err != nil {
+		t.Fatalf("add comment 1: %v", err)
+	}
+
+	// Exact repeat: same path, line, start_line (nil), and body.
+	cid2, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "nit: rename", 3, nil, anchor)
+	if err != nil {
+		t.Fatalf("add comment 2 (duplicate): %v", err)
+	}
+	if cid2 != cid1 {
+		t.Errorf("duplicate add returned id %q, want the existing id %q", cid2, cid1)
+	}
+
+	arts := listRunArtifacts(t, stores, info.RunID)
+	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	if len(d.StagedComments) != 1 {
+		t.Fatalf("exact duplicate must not append a second staged comment, got %d: %+v", len(d.StagedComments), d.StagedComments)
+	}
+	if d.StagedComments[0].CommitSHA != anchor {
+		t.Errorf("a repeat with the SAME anchor must not disturb CommitSHA, got %q, want %q", d.StagedComments[0].CommitSHA, anchor)
+	}
+
+	// Same line, different body: a distinct finding, stages normally.
+	cid3, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "different finding", 3, nil, anchor)
+	if err != nil {
+		t.Fatalf("add comment 3 (distinct): %v", err)
+	}
+	if cid3 == cid1 {
+		t.Errorf("a different body on the same line must NOT dedup, got the same id %q", cid3)
+	}
+	arts = listRunArtifacts(t, stores, info.RunID)
+	d, _ = domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	if len(d.StagedComments) != 2 {
+		t.Fatalf("a same-line different-body comment must stage separately, got %d: %+v", len(d.StagedComments), d.StagedComments)
+	}
+
+	// Multi-line range: a repeat with a non-nil start_line must dedup by VALUE
+	// (pointer identity would never match across two separate CLI calls, since
+	// each call mints its own *int) — pins that start_line is compared by
+	// dereferenced value, not coincidentally via a nil/nil pointer match.
+	cid4, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "multi-line finding", 3, intPtr(2), anchor)
+	if err != nil {
+		t.Fatalf("add comment 4 (multi-line): %v", err)
+	}
+	cid5, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "multi-line finding", 3, intPtr(2), anchor)
+	if err != nil {
+		t.Fatalf("add comment 5 (multi-line duplicate): %v", err)
+	}
+	if cid5 != cid4 {
+		t.Errorf("a multi-line duplicate (start_line=2, line=3) returned id %q, want the existing id %q", cid5, cid4)
+	}
+	arts = listRunArtifacts(t, stores, info.RunID)
+	d, _ = domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	if len(d.StagedComments) != 3 {
+		t.Fatalf("a multi-line exact duplicate must not append a second staged comment, got %d: %+v", len(d.StagedComments), d.StagedComments)
+	}
+	// A different start_line on the same line/body is a distinct range, not a dup.
+	cid6, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "multi-line finding", 3, intPtr(1), anchor)
+	if err != nil {
+		t.Fatalf("add comment 6 (different start_line): %v", err)
+	}
+	if cid6 == cid4 {
+		t.Errorf("a different start_line must NOT dedup against the start_line=2 comment, got the same id %q", cid6)
+	}
+}
+
+// intPtr returns a pointer to v, for constructing multi-line review-comment
+// start_line arguments in tests.
+func intPtr(v int) *int { return &v }
+
+// TestLocalClient_GithubAddPendingReviewComment_DedupRefreshesStaleAnchor pins
+// that a dedup hit is NOT a pure no-op when the anchor commit differs: the
+// scenario is an agent whose checkout advances (a pull, a rebase) between two
+// otherwise-identical add-review-comment calls for the same finding. Content
+// matches, so it dedups — but blindly keeping the FIRST call's CommitSHA would
+// leave the one surviving comment anchored to an older commit than the agent
+// most recently validated against, which is exactly the stale-anchor risk
+// finalize's forward-reconcile (TFAC-499) exists to avoid. The fix re-anchors
+// the existing comment to the newer, already-validated commitSHA in place.
+func TestLocalClient_GithubAddPendingReviewComment_DedupRefreshesStaleAnchor(t *testing.T) {
+	head := "live_head"
+	srv := reviewDiffServer(t, &head)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+
+	cid1, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "nit: rename", 3, nil, "commit_v1")
+	if err != nil {
+		t.Fatalf("add comment (commit_v1): %v", err)
+	}
+
+	// The agent's checkout advances; it revalidates and re-adds the SAME finding
+	// against the new head. Content is identical, so this dedups against cid1 —
+	// but the anchor must move forward to commit_v2, not stay pinned to commit_v1.
+	cid2, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "nit: rename", 3, nil, "commit_v2")
+	if err != nil {
+		t.Fatalf("add comment (commit_v2, dedup): %v", err)
+	}
+	if cid2 != cid1 {
+		t.Errorf("dedup across a changed anchor returned id %q, want the existing id %q", cid2, cid1)
+	}
+
+	arts := listRunArtifacts(t, stores, info.RunID)
+	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	if len(d.StagedComments) != 1 {
+		t.Fatalf("dedup across a changed anchor must not append a second staged comment, got %d: %+v", len(d.StagedComments), d.StagedComments)
+	}
+	if d.StagedComments[0].CommitSHA != "commit_v2" {
+		t.Errorf("dedup hit must refresh the anchor to the newer commit_v2, got %q", d.StagedComments[0].CommitSHA)
+	}
+}
+
 // TestLocalClient_PerCommentHeadSHA_CapturedAcrossCheckoutAdvance pins that each
 // staged comment records the worktree HEAD it was authored against — so an agent
 // that pulls new commits between two adds yields two comments anchored to
