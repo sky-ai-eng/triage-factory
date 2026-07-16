@@ -25,14 +25,24 @@ import (
 
 // publicKeyB64 is the standard-base64 of the DER/SPKI (PKIX
 // SubjectPublicKeyInfo) encoding of the ECDSA P-256 PUBLIC key license
-// tokens are verified against — the conventional public-key encoding a
-// signing service emits, so the production key flows straight into ldflags
-// with no re-encoding. Only the public half is baked in; the private
-// signing key never ships and is held entirely by the licensor's issuing
-// service. Empty in source — release builds inject the real key via:
+// tokens are verified against. The production key is the source default so
+// every build verifies official license tokens. Only the public half — the
+// private signing key is held entirely by the licensor's issuing service,
+// so committing it grants nothing beyond the ability to verify.
+//
+// Builds against a different issuer (a dev signing key, a fork running its
+// own) override it at link time:
 //
 //	-ldflags "-X github.com/sky-ai-eng/triage-factory/ee.publicKeyB64=<b64>"
-var publicKeyB64 = ""
+//
+// An explicit empty override (`-X ...publicKeyB64=`) yields a build with no
+// key at all — the community posture, where TF_LICENSE is ignored outright.
+//
+// Rotating the key: update this constant and the TestShippedPublicKeyDefaultLoads
+// pin in the same change, then reissue customer tokens under the new key. The
+// pin is an independent copy on purpose — deriving it from this variable would
+// verify the source against itself.
+var publicKeyB64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAExwX8JiPaEIRK4S1IxytI/FbY28LzBhg1F1q5uwLy47IosslwxxzsxUAFx0xpnGPqoGeadQr9Gw4Um2vuksHdhQ=="
 
 // Install verifies TF_LICENSE (if set) and registers the resulting per-org
 // entitlements provider so enterprise features light up. Called once from

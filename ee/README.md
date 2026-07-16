@@ -55,11 +55,23 @@ dormancy contract — is in
 
 ## Licensing a build
 
-Releases bake the Enterprise **public** key — a standard-base64 DER/SPKI
-ECDSA P-256 key — via
-`-ldflags "-X github.com/sky-ai-eng/triage-factory/ee.publicKeyB64=<b64>"`.
-The private signing key never ships; production tokens are minted out-of-band
-by the licensor's issuing service. At runtime, `TF_LICENSE=<token>` supplies a
-signed token; `ee.Install()` verifies it offline against the baked public key
-and registers the entitlements checker. No token, wrong key, or expired token
-→ community default (every enterprise feature off).
+The Enterprise **public** key — a standard-base64 DER/SPKI ECDSA P-256 key —
+ships as the source default of `ee.publicKeyB64` (`ee/ee.go`), so **every**
+build verifies official license tokens: the published image, a compose build
+from source, a plain `go build`. The private signing key never ships;
+production tokens are minted out-of-band by the licensor's issuing service.
+At runtime, `TF_LICENSE=<token>` supplies a signed token; `ee.Install()`
+verifies it offline against the baked public key and registers the
+entitlements checker. No token, wrong key, or expired token → community
+default (every enterprise feature off).
+
+A build against a **different issuer** (a dev signing key, a fork running its
+own) overrides the key at link time:
+
+```
+-ldflags "-X github.com/sky-ai-eng/triage-factory/ee.publicKeyB64=<b64>"
+```
+
+(also exposed as the `TF_LICENSE_PUBLIC_KEY` Docker build arg / compose `.env`
+variable). An explicit empty override produces a build with no key at all —
+`TF_LICENSE` is then ignored outright.

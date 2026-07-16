@@ -48,14 +48,15 @@ jobs:
 
       # Fail-closed gate on the baked Enterprise public key, mirroring release.yml's
       # verify-license-key job. A workflow can't `needs:` a job in another workflow, so
-      # we run the same committed check inline here — before the (expensive) build — or a
-      # bad/empty TF_LICENSE_PUBLIC_KEY would publish :latest/:vX.Y.Z/:edge images with
+      # we run the same check inline here — before the (expensive) build — or a mangled
+      # ee.publicKeyB64 source default would publish :latest/:vX.Y.Z/:edge images with
       # enterprise features silently disabled. Runs on both the tag and main (:edge) paths.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
       - name: Verify baked Enterprise public key
-        env:
-          TF_LICENSE_PUBLIC_KEY: ${{ vars.TF_LICENSE_PUBLIC_KEY }}
-          CANONICAL: ${{ github.repository == 'sky-ai-eng/triage-factory' }}
-        run: ./scripts/verify-license-key.sh
+        run: go test ./ee/ -run TestShippedPublicKeyDefaultLoads
 
       # QEMU lets the amd64 runner cross-build the arm64 image
       # without provisioning a native arm runner. Slow but free.
@@ -116,10 +117,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Public Enterprise key baked into the image (repo variable, not a secret).
-          # Empty on forks without the variable → community image, EE off.
-          build-args: |
-            TF_LICENSE_PUBLIC_KEY=${{ vars.TF_LICENSE_PUBLIC_KEY }}
+          # The Dockerfile's TF_LICENSE_PUBLIC_KEY build arg exists only to
+          # OVERRIDE with a dev/fork issuer key — never set it here.
           # GHA cache halves repeat-build times. Scoped per-arch so
           # cross-build doesn't poison the native cache.
           cache-from: type=gha
