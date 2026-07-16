@@ -36,7 +36,7 @@ Work flows through an automation engine drawn as a factory floor. A durable **en
 brew tap sky-ai-eng/tap && brew install triagefactory && triagefactory
 ```
 
-State lives in SQLite, credentials live in the OS keychain (or an encrypted file on a headless host), and agent runs execute in isolated git worktrees. No Postgres, no Docker, no DevOps. For direct downloads, building from source, and the full flag reference, see [docs/local-mode/](docs/local-mode/README.md) and [docs/INSTALLATION.md](docs/INSTALLATION.md).
+State lives in SQLite, credentials live in the OS keychain or an encrypted file, and agent runs execute in isolated git worktrees (not secured sandboxes). No Postgres, no Docker, no DevOps. For direct downloads, building from source, and the full flag reference, see [docs/local-mode/](docs/local-mode/README.md) and [docs/INSTALLATION.md](docs/INSTALLATION.md).
 
 **Self-hosted (multi-tenant)** — your whole org, on Linux hosts you control. The same binary and schema, deployed with Docker Compose as a control + executor split: Postgres with per-org row-level security, SSO/SAML sign-in, audit logs, and Slack ingest via the [Enterprise Edition](ee/), a `/usage` dashboard with per-team and org-wide spend caps, and every agent run confined to its own gVisor sandbox. See [docs/self-hosting/](docs/self-hosting/README.md) to stand one up.
 
