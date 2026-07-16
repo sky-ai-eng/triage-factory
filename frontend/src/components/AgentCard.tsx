@@ -14,6 +14,7 @@ import {
   isActiveRun,
   isActiveStatus,
   isFailedStatus,
+  QUEUE_DWELL_VISIBLE_MS,
   queueDwellMs,
   workStartedAt,
 } from '../lib/runStatus'
@@ -357,10 +358,6 @@ function ArtifactsAffordance({
     </Popover.Root>
   )
 }
-
-// Queue dwell below this stays off the footer: a couple of seconds is normal
-// dispatch latency (the claim scan tick), not a wait worth a readout.
-const QUEUE_DWELL_VISIBLE_MS = 5000
 
 // QueuedBlock fills the feed slot while the run waits for a dispatcher slot.
 // Concurrent runs are capped process-wide, so a burst of delegations executes

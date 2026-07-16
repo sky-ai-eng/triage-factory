@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import AgentCard from './AgentCard'
+import { QUEUE_DWELL_VISIBLE_MS } from '../lib/runStatus'
 import type { AgentRun, Task } from '../types'
 
 // useOrgHref pulls in deployment-config + org-context fetches we don't need
@@ -167,11 +168,15 @@ describe('AgentCard queue-dwell footer', () => {
     expect(screen.getByText(/queued 6m 0s/)).toBeInTheDocument()
   })
 
-  it('stays quiet for ordinary dispatch latency below the threshold', () => {
+  it('stays quiet for ordinary dispatch latency below the shared threshold', () => {
+    // Pin the edge just under QUEUE_DWELL_VISIBLE_MS — this dwell sat in the
+    // 1–5s window where the card and the telemetry rail once disagreed.
     renderCard({
       Status: 'running',
-      QueuedAt: '2026-06-25T00:00:00Z',
-      ClaimedAt: '2026-06-25T00:00:02Z',
+      QueuedAt: '2026-06-25T00:00:00.000Z',
+      ClaimedAt: new Date(
+        new Date('2026-06-25T00:00:00.000Z').getTime() + QUEUE_DWELL_VISIBLE_MS - 1,
+      ).toISOString(),
     })
     expect(screen.queryByText(/^queued /)).not.toBeInTheDocument()
   })

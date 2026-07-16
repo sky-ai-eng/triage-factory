@@ -62,6 +62,12 @@ export function workStartedAt(run: AgentRun): string {
   return run.ClaimedAt ?? run.StartedAt
 }
 
+// Settled queue dwell below this stays off the run surfaces (card footer,
+// telemetry rail): a couple of seconds is normal dispatch latency (the claim
+// scan tick), not a wait worth a readout. One constant so the two surfaces
+// can't drift; a live QUEUED run always shows its wait regardless.
+export const QUEUE_DWELL_VISIBLE_MS = 5000
+
 // queueDwellMs — how long the run waited in the queue: live (now − QueuedAt)
 // while it is still queued, else the latest episode's settled dwell
 // (ClaimedAt − QueuedAt). null when the row predates the queue columns and the

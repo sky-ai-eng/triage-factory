@@ -1,6 +1,12 @@
 import { useMemo } from 'react'
 import type { AgentMessage, AgentRun } from '../../types'
-import { formatDurationMs, formatElapsed, queueDwellMs, workStartedAt } from '../../lib/runStatus'
+import {
+  formatDurationMs,
+  formatElapsed,
+  QUEUE_DWELL_VISIBLE_MS,
+  queueDwellMs,
+  workStartedAt,
+} from '../../lib/runStatus'
 import { compactNum, tokenTotals, tint, type StationState } from './stationStyle'
 import ArtifactList from '../ArtifactList'
 
@@ -71,7 +77,7 @@ export function TelemetryRail({ run, messages, state, now, onOpenArtifact }: Pro
         {duration && (run.DurationMs != null || !isQueued) && (
           <Readout k={run.DurationMs != null ? 'elapsed' : 'running'} v={duration} />
         )}
-        {dwellMs != null && (isQueued || dwellMs >= 1000) && (
+        {dwellMs != null && (isQueued || dwellMs >= QUEUE_DWELL_VISIBLE_MS) && (
           <Readout
             k="queued"
             v={formatDurationMs(dwellMs)}
