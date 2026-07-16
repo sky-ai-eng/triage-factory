@@ -167,21 +167,23 @@ func pingSharedLocked() error {
 // can release the lock before failing the test (t.Fatalf runs Goexit,
 // which would leak the lock and deadlock the rest of the suite).
 func reviveLocked(cause error) error {
+	// The dead instance is torn down before the budget check so every
+	// exit path leaves no stale handles or exited container behind.
+	// Bounded: a stuck Docker daemon must not hang the revive forever.
+	// Terminate on an already-dead container just errors; ignore it.
+	_ = shared.AdminDB.Close()
+	_ = shared.AppDB.Close()
+	_ = shared.SystemDB.Close()
+	termCtx, termCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	_ = shared.Container.Terminate(termCtx)
+	termCancel()
+
 	if reviveBudget <= 0 {
 		sharedErr = fmt.Errorf("container died again (%v) with the revive budget spent — repeated deaths mean genuine environment instability, not a one-off kill", cause)
 		return sharedErr
 	}
 	reviveBudget--
 	fmt.Fprintf(os.Stderr, "pgtest: shared Postgres container unreachable (%v); booting a replacement (%d revive(s) left in this process)\n", cause, reviveBudget)
-
-	_ = shared.AdminDB.Close()
-	_ = shared.AppDB.Close()
-	_ = shared.SystemDB.Close()
-	// Bounded: a stuck Docker daemon must not hang the revive forever.
-	// Terminate on an already-dead container just errors; ignore it.
-	termCtx, termCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	_ = shared.Container.Terminate(termCtx)
-	termCancel()
 
 	fresh, err := boot()
 	if err != nil {
