@@ -363,7 +363,14 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// resolution the client that just submitted the review used, so the link and
 	// the submit agree on the server. A resolve failure degrades to the public
 	// host rather than failing the stamp after the review is already live.
-	webBase, baseErr := ah.ghResolver.BaseURLFor(r.Context(), orgID)
+	//
+	// On cleanupCtx, not r.Context(): this runs after the review is live on
+	// GitHub, so it must not turn on request liveness. A client disconnect
+	// between the submit and here would cancel r.Context(), fail the resolve, and
+	// silently downgrade the stamped link to github.com — reintroducing this very
+	// bug in a GHES/GHEC org through a narrow race. The detached context makes the
+	// host resolution unconditional, like the rest of this post-write block.
+	webBase, baseErr := ah.ghResolver.BaseURLFor(cleanupCtx, orgID)
 	if baseErr != nil {
 		artifactsLog.Warn("resolve github base for review URL failed; using default host",
 			"artifact", art.ID, "org", orgID, "error", baseErr)
