@@ -169,6 +169,14 @@ func TestProviderBreaker_EscalatesAndCaps(t *testing.T) {
 		}
 		prev = delay
 	}
+
+	// The raw failures counter must itself stay bounded across an extended
+	// outage, not just the delay derived from it — an unbounded counter
+	// would be a misleading number for anyone who later logs or exposes it
+	// directly.
+	if got, want := b.state["p"].failures, providerBreakerMaxDoublings+1; got != want {
+		t.Errorf("failures = %d after %d consecutive failures, want capped at %d", got, providerBreakerMaxDoublings+3, want)
+	}
 }
 
 func TestProviderBreaker_NilIsSafeNoOp(t *testing.T) {

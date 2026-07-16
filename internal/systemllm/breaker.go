@@ -126,12 +126,15 @@ func (b *providerBreaker) recordResult(provider string, transientFailure bool) {
 		c = &providerCooldown{}
 		b.state[provider] = c
 	}
-	c.failures++
-	doublings := c.failures - 1
-	if doublings > providerBreakerMaxDoublings {
-		doublings = providerBreakerMaxDoublings
+	// Clamp failures itself (not just the doublings derived from it) so an
+	// extended outage doesn't leave an ever-growing counter behind — the
+	// delay it produces is already capped, but an unbounded failures count
+	// would be a misleading number for anyone who later logs or exposes it
+	// directly for observability.
+	if c.failures < providerBreakerMaxDoublings+1 {
+		c.failures++
 	}
-	delay := providerBreakerBaseDelay * time.Duration(1<<uint(doublings))
+	delay := providerBreakerBaseDelay * time.Duration(1<<uint(c.failures-1))
 	if delay > providerBreakerMaxDelay {
 		delay = providerBreakerMaxDelay
 	}
