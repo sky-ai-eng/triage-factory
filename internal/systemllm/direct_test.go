@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,20 +27,30 @@ func (s stubSecrets) Get(_ context.Context, orgID, key string) (string, error) {
 
 // capturingHandler records the last request it served (method/path/header)
 // alongside a caller-supplied response, so tests can assert on how
-// buildDirectClient shaped the outgoing call.
+// buildDirectClient shaped the outgoing call. ServeHTTP runs on a
+// goroutine spawned by the httptest server, distinct from the test
+// goroutine that reads these fields back (often after the SDK's own retry
+// loop has driven several requests through it) — mu guards every access so
+// that's race-free rather than relying on the request/response round trip
+// to provide ordering the race detector doesn't recognize.
 type capturingHandler struct {
-	t          *testing.T
-	status     int
-	body       string
-	lastHeader http.Header
-	lastPath   string
-	requests   int
+	t      *testing.T
+	status int
+	body   string
+
+	mu            sync.Mutex
+	lastReqHeader http.Header
+	lastReqPath   string
+	reqCount      int
 }
 
 func (h *capturingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.requests++
-	h.lastHeader = r.Header.Clone()
-	h.lastPath = r.URL.Path
+	h.mu.Lock()
+	h.reqCount++
+	h.lastReqHeader = r.Header.Clone()
+	h.lastReqPath = r.URL.Path
+	h.mu.Unlock()
+
 	io.Copy(io.Discard, r.Body)
 	w.Header().Set("Content-Type", "application/json")
 	status := h.status
@@ -52,6 +63,30 @@ func (h *capturingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		body = `{"type":"error","error":{"type":"invalid_request_error","message":"stub error"}}`
 	}
 	w.Write([]byte(body))
+}
+
+// Requests returns the number of requests served so far. Safe for
+// concurrent use with ServeHTTP.
+func (h *capturingHandler) Requests() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.reqCount
+}
+
+// LastHeader returns the most recently served request's headers. Safe for
+// concurrent use with ServeHTTP.
+func (h *capturingHandler) LastHeader() http.Header {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lastReqHeader
+}
+
+// LastPath returns the most recently served request's URL path. Safe for
+// concurrent use with ServeHTTP.
+func (h *capturingHandler) LastPath() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lastReqPath
 }
 
 func completeOpts(orgID string, secrets agentproc.SecretsReader) CompleteOptions {
@@ -94,11 +129,11 @@ func TestComplete_Direct_AnthropicAPIKey(t *testing.T) {
 	if result.Text != "hello world" {
 		t.Errorf("Text = %q, want %q", result.Text, "hello world")
 	}
-	if got := h.lastHeader.Get("X-Api-Key"); got != "sk-ant-test" {
+	if got := h.LastHeader().Get("X-Api-Key"); got != "sk-ant-test" {
 		t.Errorf("X-Api-Key = %q, want sk-ant-test", got)
 	}
-	if h.lastHeader.Get("Authorization") != "" {
-		t.Errorf("Authorization should be unset with no auth token configured, got %q", h.lastHeader.Get("Authorization"))
+	if h.LastHeader().Get("Authorization") != "" {
+		t.Errorf("Authorization should be unset with no auth token configured, got %q", h.LastHeader().Get("Authorization"))
 	}
 }
 
@@ -122,10 +157,10 @@ func TestComplete_Direct_AnthropicAuthTokenBearer(t *testing.T) {
 	if _, err := r.Complete(context.Background(), completeOpts("org-1", secrets)); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if got := h.lastHeader.Get("X-Api-Key"); got != "sk-ant-test" {
+	if got := h.LastHeader().Get("X-Api-Key"); got != "sk-ant-test" {
 		t.Errorf("X-Api-Key = %q, want sk-ant-test", got)
 	}
-	if got := h.lastHeader.Get("Authorization"); got != "Bearer gateway-bearer-tok" {
+	if got := h.LastHeader().Get("Authorization"); got != "Bearer gateway-bearer-tok" {
 		t.Errorf("Authorization = %q, want Bearer gateway-bearer-tok", got)
 	}
 }
@@ -152,11 +187,11 @@ func TestComplete_Direct_BedrockBearer(t *testing.T) {
 	if result.Text != "bedrock bearer ok" {
 		t.Errorf("Text = %q", result.Text)
 	}
-	if got := h.lastHeader.Get("Authorization"); got != "Bearer bedrock-bearer-tok" {
+	if got := h.LastHeader().Get("Authorization"); got != "Bearer bedrock-bearer-tok" {
 		t.Errorf("Authorization = %q, want Bearer bedrock-bearer-tok", got)
 	}
-	if !strings.Contains(h.lastPath, "/invoke") {
-		t.Errorf("path = %q, want a Bedrock /model/.../invoke path", h.lastPath)
+	if !strings.Contains(h.LastPath(), "/invoke") {
+		t.Errorf("path = %q, want a Bedrock /model/.../invoke path", h.LastPath())
 	}
 }
 
@@ -187,10 +222,10 @@ func TestComplete_Direct_BedrockSigV4WithSessionToken(t *testing.T) {
 	if result.Text != "sigv4 ok" {
 		t.Errorf("Text = %q", result.Text)
 	}
-	if got := h.lastHeader.Get("Authorization"); !strings.HasPrefix(got, "AWS4-HMAC-SHA256") {
+	if got := h.LastHeader().Get("Authorization"); !strings.HasPrefix(got, "AWS4-HMAC-SHA256") {
 		t.Errorf("Authorization = %q, want an AWS4-HMAC-SHA256 SigV4 signature", got)
 	}
-	if got := h.lastHeader.Get("X-Amz-Security-Token"); got != "sessiontoken123" {
+	if got := h.LastHeader().Get("X-Amz-Security-Token"); got != "sessiontoken123" {
 		t.Errorf("X-Amz-Security-Token = %q, want sessiontoken123", got)
 	}
 }
@@ -214,8 +249,8 @@ func TestComplete_Direct_BedrockModelDefaultAndOverride(t *testing.T) {
 		if _, err := r.Complete(context.Background(), completeOpts("org-1", secrets)); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
-		if !strings.Contains(h.lastPath, defaultBedrockHaikuModel) {
-			t.Errorf("path = %q, want it to reference the default model %q", h.lastPath, defaultBedrockHaikuModel)
+		if !strings.Contains(h.LastPath(), defaultBedrockHaikuModel) {
+			t.Errorf("path = %q, want it to reference the default model %q", h.LastPath(), defaultBedrockHaikuModel)
 		}
 	})
 
@@ -233,8 +268,8 @@ func TestComplete_Direct_BedrockModelDefaultAndOverride(t *testing.T) {
 		if _, err := r.Complete(context.Background(), completeOpts("org-1", secrets)); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
-		if !strings.Contains(h.lastPath, "custom.inference.profile") {
-			t.Errorf("path = %q, want it to reference the overridden model", h.lastPath)
+		if !strings.Contains(h.LastPath(), "custom.inference.profile") {
+			t.Errorf("path = %q, want it to reference the overridden model", h.LastPath())
 		}
 	})
 }
@@ -279,8 +314,8 @@ func TestComplete_Direct_BedrockCostAccounting_PricesOnPinnedModel(t *testing.T)
 		if _, err := r.Complete(context.Background(), opts); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
-		if !strings.Contains(h.lastPath, wantModelSubstr) {
-			t.Errorf("path = %q, want it to reference %q", h.lastPath, wantModelSubstr)
+		if !strings.Contains(h.LastPath(), wantModelSubstr) {
+			t.Errorf("path = %q, want it to reference %q", h.LastPath(), wantModelSubstr)
 		}
 		if len(fs.rows) != 1 {
 			t.Fatalf("recorded %d rows, want 1", len(fs.rows))
@@ -403,8 +438,8 @@ func TestComplete_Direct_TerminalErrorNotRetried(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for a 400 response")
 	}
-	if h.requests != 1 {
-		t.Errorf("requests = %d, want exactly 1 (400 is terminal, not retried)", h.requests)
+	if h.Requests() != 1 {
+		t.Errorf("requests = %d, want exactly 1 (400 is terminal, not retried)", h.Requests())
 	}
 }
 
@@ -480,7 +515,7 @@ func TestComplete_Direct_LLMResolverUsed(t *testing.T) {
 	if result.Text != "resolver ok" {
 		t.Errorf("Text = %q", result.Text)
 	}
-	if got := h.lastHeader.Get("X-Api-Key"); got != "sk-ant-minted" {
+	if got := h.LastHeader().Get("X-Api-Key"); got != "sk-ant-minted" {
 		t.Errorf("X-Api-Key = %q, want the resolver-supplied key", got)
 	}
 }

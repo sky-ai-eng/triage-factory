@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -141,12 +142,23 @@ func (b *providerBreaker) recordResult(provider string, transientFailure bool) {
 // worth backing off on: an overloaded/rate-limited/5xx API response
 // (mirrors the SDK's own retry classifier, internal/requestconfig — by the
 // time completeDirect sees callErr, the SDK has already exhausted its own
-// retries for exactly this class), or a transport-level failure that never
-// got a response at all (a dial/DNS/TLS/timeout failure looks identical to
-// an overloaded endpoint from the caller's side). A caller-cancelled or
-// deadline-exceeded ctx is not a provider signal, and a 4xx client error
-// (bad request, auth, not found) is a permanent misconfiguration no
-// cooldown will fix — neither should trip the breaker.
+// retries for exactly this class), or a network-level failure that never
+// got a response at all — the SDK's request executor returns the
+// underlying http.Client.Do error verbatim when even its own retries never
+// got a response, which net/http surfaces as a *url.Error wrapping the
+// dial/DNS/TLS/timeout failure; that satisfies net.Error, and an
+// unreachable endpoint looks identical to an overloaded one from the
+// caller's side.
+//
+// Everything else does NOT trip the breaker: a caller-cancelled or
+// deadline-exceeded ctx is not a provider signal; a 4xx client error (bad
+// request, auth, not found) is a permanent misconfiguration no cooldown
+// will fix; and an unrecognized local/SDK error (a request body that
+// couldn't be replayed for retry, a malformed error response the SDK
+// couldn't parse into apierror.Error, ...) is equally not something a
+// cooldown fixes — bucketing every unclassified error as transient would
+// silently downgrade a genuine, recurring bug to a quiet "retrying next
+// cycle" log line instead of surfacing it.
 func isTransientFailure(ctx context.Context, err error) bool {
 	if err == nil || ctx.Err() != nil {
 		return false
@@ -156,5 +168,6 @@ func isTransientFailure(ctx context.Context, err error) bool {
 		sc := apiErr.StatusCode
 		return sc == 408 || sc == 409 || sc == 429 || sc >= 500
 	}
-	return true
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }

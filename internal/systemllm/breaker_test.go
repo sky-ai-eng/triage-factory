@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -94,7 +95,18 @@ func TestIsTransientFailure(t *testing.T) {
 		{"400 bad request is permanent, not transient", bg, &anthropic.Error{StatusCode: 400}, false},
 		{"401 unauthorized is permanent, not transient", bg, &anthropic.Error{StatusCode: 401}, false},
 		{"404 not found is permanent, not transient", bg, &anthropic.Error{StatusCode: 404}, false},
-		{"raw transport error with no structured response is treated as transient", bg, errors.New("dial tcp: connection refused"), true},
+		{
+			name: "a net.Error-shaped transport failure (dial/DNS/TLS/timeout) is transient",
+			ctx:  bg,
+			err:  &url.Error{Op: "Post", URL: "https://api.anthropic.com/v1/messages", Err: errors.New("connection refused")},
+			want: true,
+		},
+		{
+			name: "an unstructured local/SDK error with no net.Error shape is NOT transient",
+			ctx:  bg,
+			err:  errors.New("unexpected end of JSON input"),
+			want: false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -190,7 +202,7 @@ func TestComplete_Direct_ProviderBreakerShortCircuitsRepeatedOverload(t *testing
 	if IsProviderBackoff(err) {
 		t.Fatal("the first call is a genuine attempt against the stub server, not a breaker short-circuit")
 	}
-	afterFirst := h.requests
+	afterFirst := h.Requests()
 	if afterFirst == 0 {
 		t.Fatal("expected at least one real request against the stub server")
 	}
@@ -199,8 +211,8 @@ func TestComplete_Direct_ProviderBreakerShortCircuitsRepeatedOverload(t *testing
 	if !IsProviderBackoff(err2) {
 		t.Fatalf("second Complete's err = %v, want ErrProviderBackoff (the breaker should have tripped)", err2)
 	}
-	if h.requests != afterFirst {
-		t.Errorf("requests = %d after the second Complete, want unchanged at %d — the breaker should short-circuit without a network call", h.requests, afterFirst)
+	if h.Requests() != afterFirst {
+		t.Errorf("requests = %d after the second Complete, want unchanged at %d — the breaker should short-circuit without a network call", h.Requests(), afterFirst)
 	}
 }
 
@@ -240,7 +252,7 @@ func TestComplete_Direct_ProviderBreakerDoesNotLeakAcrossProviders(t *testing.T)
 	if result.Text != "still healthy" {
 		t.Errorf("Text = %q", result.Text)
 	}
-	if healthy.requests == 0 {
+	if healthy.Requests() == 0 {
 		t.Error("expected org-2's healthy provider to receive a real request")
 	}
 }
@@ -266,7 +278,7 @@ func TestComplete_Direct_TerminalErrorDoesNotTripBreaker(t *testing.T) {
 	if _, err := r.Complete(context.Background(), completeOpts("org-1", secrets)); err == nil {
 		t.Fatal("expected an error for a 400 response")
 	}
-	if h.requests != 2 {
-		t.Errorf("requests = %d, want 2 — a permanent 4xx must never trip the breaker", h.requests)
+	if h.Requests() != 2 {
+		t.Errorf("requests = %d, want 2 — a permanent 4xx must never trip the breaker", h.Requests())
 	}
 }
