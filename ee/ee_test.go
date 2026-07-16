@@ -8,14 +8,18 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
 
-// The production public key ships as publicKeyB64's source default, so a
-// mangled edit (truncated paste, stray whitespace, wrong encoding) would
-// silently produce a build that ignores every official license. loadPublicKey
-// fails closed to nil on any parse problem, so "the default loads" is the
-// whole guarantee.
+// The production public key ships as publicKeyB64's source default, so a bad
+// edit would silently produce a build that ignores (or worse, mis-verifies)
+// every official license. Pinning exact equality — not just parseability —
+// catches the dangerous case a parse check can't: a *valid but wrong* key,
+// e.g. a dev key accidentally committed after local debugging. Reading the
+// real variable also makes this immune to declaration formatting, unlike any
+// text-level extraction. Rotating the prod key updates this pin, the source
+// default, and scripts/verify-license-key.sh's EXPECTED in the same change.
 func TestShippedPublicKeyDefaultLoads(t *testing.T) {
-	if publicKeyB64 == "" {
-		t.Fatal("publicKeyB64 source default is empty — official builds would ignore TF_LICENSE entirely")
+	const prodKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAExwX8JiPaEIRK4S1IxytI/FbY28LzBhg1F1q5uwLy47IosslwxxzsxUAFx0xpnGPqoGeadQr9Gw4Um2vuksHdhQ=="
+	if publicKeyB64 != prodKey {
+		t.Fatalf("publicKeyB64 source default is not the tf-license-prod public key — official builds would reject (wrong key) or ignore (empty/corrupt) every official license\n got: %q", publicKeyB64)
 	}
 	if loadPublicKey() == nil {
 		t.Fatal("publicKeyB64 source default does not parse as a P-256 SPKI public key — official builds would ignore TF_LICENSE entirely")
