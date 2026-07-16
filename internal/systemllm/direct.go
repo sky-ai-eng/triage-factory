@@ -51,6 +51,16 @@ func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*C
 		return nil, err
 	}
 
+	// Pre-flight circuit-breaker check (see breaker.go): if this same
+	// upstream provider recently failed with a transient error and its
+	// cooldown hasn't elapsed, fail fast without spending a request — the
+	// caller's existing fallback (leave for next poll cycle) handles it
+	// exactly like any other completeDirect error.
+	provider := providerKey(creds)
+	if backoffErr := r.breaker.check(provider); backoffErr != nil {
+		return nil, backoffErr
+	}
+
 	client, model, err := buildDirectClient(creds, opts.DirectModel)
 	if err != nil {
 		return nil, err
@@ -63,6 +73,7 @@ func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*C
 		System:      []anthropic.TextBlockParam{{Text: opts.SystemPrompt}},
 		Messages:    []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(opts.UserMessage))},
 	})
+	r.breaker.recordResult(provider, isTransientFailure(ctx, callErr))
 
 	durationMs := int(time.Since(startedAt).Milliseconds())
 	r.recordDirectCall(ctx, opts, model, startedAt, durationMs, msg, callErr)
@@ -140,6 +151,49 @@ func extractText(msg *anthropic.Message) string {
 		}
 	}
 	return out.String()
+}
+
+// providerKey derives the circuit-breaker registry key for creds — mirrors
+// buildDirectClient's provider-branch precedence (Anthropic direct wins
+// over Bedrock bearer wins over Bedrock SigV4) so the breaker groups
+// exactly the calls that share an upstream failure domain.
+//
+// A custom base-URL override (a customer gateway/proxy, or a Bedrock VPC
+// endpoint) is treated as a distinct fleet from the vendor's default
+// endpoint, so it gets its own key. A bare region with no override is not
+// customer-specific: a 529 from Anthropic's default endpoint reflects
+// overall vendor capacity, not a per-key quota, so every org on that
+// default endpoint deliberately shares one breaker entry — that's the
+// whole point of keying by provider instead of by org.
+func providerKey(creds map[string]string) string {
+	if creds["ANTHROPIC_API_KEY"] != "" {
+		if base := normalizeProviderURL(creds["ANTHROPIC_BASE_URL"]); base != "" {
+			return "anthropic-direct:" + base
+		}
+		return "anthropic-direct:default"
+	}
+
+	hasBedrock := creds["AWS_BEARER_TOKEN_BEDROCK"] != "" ||
+		(creds["AWS_ACCESS_KEY_ID"] != "" && creds["AWS_SECRET_ACCESS_KEY"] != "")
+	if hasBedrock {
+		region := creds["AWS_REGION"]
+		if base := normalizeProviderURL(creds["ANTHROPIC_BEDROCK_BASE_URL"]); base != "" {
+			return "bedrock:" + region + "@" + base
+		}
+		return "bedrock:" + region
+	}
+
+	// Unreachable in practice — resolveDirectCreds already errors out for an
+	// org with nothing configured before providerKey is ever called — kept
+	// as a defensive fallback matching buildDirectClient's own.
+	return "unknown"
+}
+
+// normalizeProviderURL lowercases and trims a base-URL override so two
+// configs that differ only in case or a trailing slash share one breaker
+// entry instead of silently splitting into two.
+func normalizeProviderURL(raw string) string {
+	return strings.TrimRight(strings.ToLower(strings.TrimSpace(raw)), "/")
 }
 
 // buildDirectClient resolves the provider from the env-var map

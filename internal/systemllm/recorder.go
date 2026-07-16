@@ -36,13 +36,20 @@ const (
 // Recorder writes one system_llm_runs row per agentproc.Run call. A nil
 // Recorder (or one built with a nil store) is a safe no-op, so callers in
 // tests / local paths that never wire a store don't have to nil-check.
+//
+// breaker is the multi-mode direct-API path's shared circuit breaker (see
+// breaker.go) — one Recorder is constructed once per process and handed to
+// all three system jobs (scorer, repo-profiler, classifier), so it doubles
+// as the natural shared home for state that needs to be visible across all
+// of them.
 type Recorder struct {
-	store db.SystemLLMRunStore
+	store   db.SystemLLMRunStore
+	breaker *providerBreaker
 }
 
 // NewRecorder wraps the store. Pass the bundle's SystemLLMRuns store.
 func NewRecorder(store db.SystemLLMRunStore) *Recorder {
-	return &Recorder{store: store}
+	return &Recorder{store: store, breaker: newProviderBreaker()}
 }
 
 // Call carries the per-call context the call site supplies. Cost /

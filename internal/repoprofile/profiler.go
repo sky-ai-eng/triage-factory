@@ -301,12 +301,23 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 
 		results, err := p.batchFn(ctx, orgID, batch, p.secrets)
 		if err != nil {
-			repoprofileLog.Error("profile batch failed", "batch", i/profileBatchSize+1, "error", err)
-			repoNames := make([]string, len(batch))
-			for j, d := range batch {
-				repoNames[j] = d.profile.ID
+			// A provider-backoff skip (systemllm's circuit breaker) is an
+			// anticipated, self-healing deferral, not a genuine failure —
+			// log it quietly and skip the user-facing toast so a boot-time
+			// overload doesn't read as a wall of errors.
+			backoff := systemllm.IsProviderBackoff(err)
+			if backoff {
+				repoprofileLog.Info("profile batch deferred; provider backing off, retrying next cycle", "batch", i/profileBatchSize+1)
+			} else {
+				repoprofileLog.Error("profile batch failed", "batch", i/profileBatchSize+1, "error", err)
 			}
-			toast.Warning(p.ws, orgID, fmt.Sprintf("Profiling failed for %s — rows saved without AI summary", strings.Join(repoNames, ", ")))
+			if !backoff {
+				repoNames := make([]string, len(batch))
+				for j, d := range batch {
+					repoNames[j] = d.profile.ID
+				}
+				toast.Warning(p.ws, orgID, fmt.Sprintf("Profiling failed for %s — rows saved without AI summary", strings.Join(repoNames, ", ")))
+			}
 			// Fallback: upsert without profile_text so the row at least exists.
 			for _, d := range batch {
 				if uErr := p.repos.UpsertSystem(ctx, orgID, d.profile); uErr != nil {
