@@ -191,7 +191,7 @@ func (a *App) buildExecution() error {
 	if n, clamped, err := delegate.ParseMaxConcurrentRuns(rawMaxConcurrentRuns); err != nil {
 		appLog.Warn("max concurrent runs", "error", err)
 	} else if clamped {
-		// Distinct from the "configured" log below: an operator asked for more
+		// Distinct from the effective-cap log below: an operator asked for more
 		// than the sandbox subnet allocator can ever honor, not just a value
 		// above the default. Without this, a requested 1000 and an explicitly
 		// set 256 would log identically and the operator sizing for a bigger
@@ -202,8 +202,12 @@ func (a *App) buildExecution() error {
 	} else if n != delegate.DefaultMaxConcurrentRuns {
 		capRuns = n
 		a.spawner.SetMaxConcurrentRuns(n)
-		appLog.Info("max concurrent runs configured", "cap", n)
 	}
+	// Always name the effective cap, default included and in both modes — a
+	// burst of delegations queues behind this number, and "runs sit queued"
+	// must trace back to it from the boot log alone (local mode skips the
+	// multi-only capacity advertisement below entirely).
+	appLog.Info("run concurrency cap", "cap", capRuns, "env", "TF_MAX_CONCURRENT_RUNS")
 	// Memory guardrail companion to the cap above: the cap bounds how many
 	// runs may execute, the floor stops new claims when the host is out of
 	// headroom regardless of the cap. Fails open off-Linux and when the

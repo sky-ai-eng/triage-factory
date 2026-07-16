@@ -366,6 +366,10 @@ type Spawner struct {
 	// transition (and only the transition) is logged — a gated host
 	// would otherwise emit a line every scan tick.
 	memGated atomic.Bool
+	// capSaturated tracks whether the dispatcher last found every runSem
+	// slot occupied with runs queued behind it, so the saturation episode
+	// is logged on its transitions only — same rationale as memGated.
+	capSaturated atomic.Bool
 	// identityFenced latches (sticky, restart to clear) when a heartbeat
 	// renewal proves another process re-registered this instance id with
 	// a newer boot_epoch — the split-identity case. Once set, the

@@ -188,11 +188,20 @@ func (s *Spawner) drainRunQueue(ctx context.Context) {
 		// 'running' that then sits idle waiting for a slot. Blocks at capacity
 		// until a finishing run releases its slot; a shutdown breaks the wait
 		// (in-flight runs are ctx-cancelled, and the boot reconcile re-queues
-		// anything left mid-flight).
+		// anything left mid-flight). The try-then-block split exists only to
+		// observe which of the two happened: saturation episodes are
+		// transition-logged so a backlog of queued runs is diagnosable from
+		// the log rather than reading as a silent hang.
 		select {
 		case sem <- struct{}{}:
-		case <-ctx.Done():
-			return
+			s.noteCapAcquireImmediate(cap(sem))
+		default:
+			s.noteCapAcquireBlocked(ctx, cap(sem))
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
 		}
 		executorID, bootEpoch := s.executorIdentity()
 		run, err := s.runQueue.ClaimNextRun(ctx, executorID, bootEpoch, s.claimPlacement())

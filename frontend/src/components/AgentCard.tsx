@@ -70,13 +70,18 @@ export default function AgentCard({
   const [now, setNow] = useState(() => Date.now())
 
   const isActive = isActiveRun(run)
+  // Waiting for a dispatcher slot (the process-wide concurrency cap), not
+  // executing. Without an explicit state the card reads as broken — a frozen
+  // elapsed readout and an empty feed — when the run is just in line.
+  const isQueued = run.Status === 'queued'
 
-  // Tick once per second while active so the elapsed display updates live.
+  // Tick once per second while active (elapsed) or queued (wait time) so the
+  // readout updates live.
   useEffect(() => {
-    if (!isActive) return
+    if (!isActive && !isQueued) return
     const interval = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(interval)
-  }, [isActive])
+  }, [isActive, isQueued])
 
   const elapsed =
     !isActive && run.DurationMs != null
@@ -125,9 +130,15 @@ export default function AgentCard({
             <div className="flex shrink-0 items-center gap-2">
               {assigneeSlot}
               <HeaderDivider />
-              <span className="inline-flex items-center gap-1.5 font-mono text-[11px] leading-none tabular-nums text-text-tertiary/80">
+              <span
+                className="inline-flex items-center gap-1.5 font-mono text-[11px] leading-none tabular-nums text-text-tertiary/80"
+                title={isQueued ? 'Time spent waiting in the run queue' : undefined}
+              >
                 {isActive && (
                   <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-delegate" />
+                )}
+                {isQueued && (
+                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-snooze" />
                 )}
                 {elapsed}
               </span>
@@ -194,12 +205,15 @@ export default function AgentCard({
           </div>
         </div>
 
-        {/* Activity — a terminal run shows its outcome; a live run shows a
+        {/* Activity — a queued run states that it's waiting (a slot, not a
+            bug); a terminal run shows its outcome; a live run shows a
             flush, borderless feed of one-liners (no window-into-the-agent; the
             expanded view is for that). A memory-limit kill has no
             ResultSummary (infra failures write run_messages, not a summary)
             but still gets the ResultBlock — its kind carries the copy. */}
-        {isTerminal && (run.ResultSummary || run.FailureKind === 'memory_limit') ? (
+        {isQueued ? (
+          <QueuedBlock />
+        ) : isTerminal && (run.ResultSummary || run.FailureKind === 'memory_limit') ? (
           <ResultBlock
             status={run.Status}
             summary={run.ResultSummary}
@@ -329,6 +343,23 @@ function ArtifactsAffordance({
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
+  )
+}
+
+// QueuedBlock fills the feed slot while the run waits for a dispatcher slot.
+// Concurrent runs are capped process-wide, so a burst of delegations executes
+// a few at a time — this says so, instead of leaving a dead-looking card.
+function QueuedBlock() {
+  return (
+    <div className="flex h-[3.5rem] items-end px-4 pb-1 font-mono text-[10.5px] text-text-tertiary/70">
+      <span
+        className="inline-flex items-center gap-2"
+        title="Concurrent runs are capped (TF_MAX_CONCURRENT_RUNS, default 4). This run starts automatically when a slot frees up."
+      >
+        <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-snooze" />
+        queued — starts when a run slot frees up
+      </span>
+    </div>
   )
 }
 

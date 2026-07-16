@@ -62,7 +62,12 @@ export function TelemetryRail({ run, messages, state, now, onOpenArtifact }: Pro
           <Readout k="cost" v={`$${run.TotalCostUSD.toFixed(run.TotalCostUSD < 1 ? 4 : 2)}`} />
         )}
         {run.Model && <Readout k="model" v={shortModel(run.Model)} title={run.Model} />}
-        {duration && <Readout k={run.DurationMs != null ? 'elapsed' : 'running'} v={duration} />}
+        {duration && (
+          <Readout
+            k={run.DurationMs != null ? 'elapsed' : run.Status === 'queued' ? 'queued' : 'running'}
+            v={duration}
+          />
+        )}
         {started && (
           <Readout k="started" v={clockStamp(started)} title={started.toLocaleString()} />
         )}

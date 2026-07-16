@@ -141,3 +141,18 @@ describe('AgentCard failure-kind rendering', () => {
     expect(screen.queryByText(/memory limit/i)).not.toBeInTheDocument()
   })
 })
+
+describe('AgentCard queued rendering', () => {
+  it('names the wait — queued for a slot — instead of showing a dead card', () => {
+    renderCard({ Status: 'queued' })
+    expect(screen.getByText(/queued — starts when a run slot frees up/)).toBeInTheDocument()
+    // The tooltip names the knob, so a stalled-looking burst of delegations
+    // traces back to the concurrency cap without reading the docs.
+    expect(screen.getByTitle(/TF_MAX_CONCURRENT_RUNS/)).toBeInTheDocument()
+  })
+
+  it('keeps the queued notice off active and terminal cards', () => {
+    renderCard({ Status: 'running' })
+    expect(screen.queryByText(/run slot/)).not.toBeInTheDocument()
+  })
+})
