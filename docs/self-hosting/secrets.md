@@ -27,9 +27,9 @@ So `NAME_FILE` is strictly better for the sensitive keys — above all `TF_SECRE
 
 ## Which secrets support `NAME_FILE` in the bundled compose
 
-The **binary** honors `NAME_FILE` for `TF_SECRET_ENCRYPTION_KEY`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_LICENSE`, `TF_GOTRUE_SERVICE_ROLE_TOKEN`, `TF_DATABASE_URL`, `TF_DATABASE_DIRECT_URL`, `TF_AUTHENTICATOR_PASSWORD`, `TF_BLOB_ACCESS_KEY`, and `TF_BLOB_SECRET_KEY` — but only if the container's environment actually carries the `NAME_FILE` variable.
+The **binary** honors `NAME_FILE` for `TF_SECRET_ENCRYPTION_KEY`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_LICENSE`, `TF_GOTRUE_SERVICE_ROLE_TOKEN`, `TF_ATLASSIAN_CLIENT_SECRET`, `TF_DATABASE_URL`, `TF_DATABASE_DIRECT_URL`, `TF_AUTHENTICATOR_PASSWORD`, `TF_BLOB_ACCESS_KEY`, and `TF_BLOB_SECRET_KEY` — but only if the container's environment actually carries the `NAME_FILE` variable.
 
-The bundled `docker-compose.yml` **forwards `NAME_FILE` for the TF-only secrets**: `TF_LICENSE`, `TF_GOTRUE_SERVICE_ROLE_TOKEN`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_SECRET_ENCRYPTION_KEY`. For those, set `NAME_FILE` in `.env`, leave the plain `NAME` blank, and mount the file.
+The bundled `docker-compose.yml` **forwards `NAME_FILE` for the TF-only secrets**: `TF_LICENSE`, `TF_GOTRUE_SERVICE_ROLE_TOKEN`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_SECRET_ENCRYPTION_KEY` (all pods), and `TF_ATLASSIAN_CLIENT_SECRET` (the control pod only — it serves the Jira connect flow). For those, set `NAME_FILE` in `.env`, leave the plain `NAME` blank, and mount the file.
 
 The rest are **not** `_FILE`-wired in the bundled stack, because the compose file either **constructs** them (`TF_DATABASE_URL` is built from `POSTGRES_PASSWORD`) or **shares** them with a sidecar that needs the plain value (`TF_BLOB_*` are templated into SeaweedFS's S3 identity; `TF_AUTHENTICATOR_PASSWORD` is applied to the DB role by `postgres-postinit`). Use `NAME_FILE` for those only in a custom deployment (Kubernetes, your own compose) where you set the container environment yourself.
 

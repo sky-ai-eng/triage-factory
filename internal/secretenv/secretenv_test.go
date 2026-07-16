@@ -8,6 +8,22 @@ import (
 	"testing"
 )
 
+func TestResolve_TrimsOnlyTrailingNewline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secret")
+	// Leading/inner space is preserved; only the trailing \r\n is stripped.
+	if err := os.WriteFile(path, []byte("  lead and space \r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TF_TEST_SECRET_FILE", path)
+	dst := map[string]string{}
+	if err := resolveInto(dst, []string{"TF_TEST_SECRET"}); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got, want := dst["TF_TEST_SECRET"], "  lead and space "; got != want {
+		t.Fatalf("value = %q, want %q (only trailing CR/LF trimmed)", got, want)
+	}
+}
+
 func TestResolve_FileMaterializesAndUnsets(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "secret")

@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 )
 
 // ErrNoAtlassianOAuthApp is returned by OAuthAppResolver.Resolve when no
@@ -54,7 +55,7 @@ func FirstPartyOAuthAppFromEnv() OAuthApp {
 	}
 	return OAuthApp{
 		ClientID:     strings.TrimSpace(os.Getenv(envAtlassianClientID)),
-		ClientSecret: strings.TrimSpace(os.Getenv(envAtlassianClientSecret)),
+		ClientSecret: strings.TrimSpace(secretenv.Get(envAtlassianClientSecret)),
 	}
 }
 

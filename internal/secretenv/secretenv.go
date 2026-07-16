@@ -56,6 +56,7 @@ var Secrets = []string{
 	"TF_COOKIE_SECRET",
 	"TF_LICENSE",                   // signed Enterprise license token
 	"TF_GOTRUE_SERVICE_ROLE_TOKEN", // RS256 admin bearer for GoTrue's SSO admin API
+	"TF_ATLASSIAN_CLIENT_SECRET",   // first-party Atlassian OAuth (3LO) app secret
 	"TF_DATABASE_URL",
 	"TF_DATABASE_DIRECT_URL",
 	"TF_AUTHENTICATOR_PASSWORD",
@@ -103,9 +104,10 @@ func resolveInto(dst map[string]string, names []string) error {
 			if err != nil {
 				return fmt.Errorf("%s=%q: %w", fileVar, path, err)
 			}
-			// Trim trailing newline(s): secret files conventionally end in
-			// one, and none of these values carry meaningful whitespace.
-			value = strings.TrimSpace(string(data))
+			// Strip a trailing line ending — secret files conventionally end
+			// in one. Only \r\n, not all whitespace: a leading/inner space
+			// could be meaningful for some future secret, so don't touch it.
+			value = strings.TrimRight(string(data), "\r\n")
 			if os.Getenv(name) != "" {
 				warnf("both %s and %s are set; using the file", name, fileVar)
 			}

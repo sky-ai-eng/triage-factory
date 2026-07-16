@@ -527,6 +527,14 @@ services:
       TF_PREVENT_ORG_CREATION: ${TF_PREVENT_ORG_CREATION:-}
       TF_TRUSTED_PROXY_CIDR: ${TF_TRUSTED_PROXY_CIDR:-}
       TF_CAPTURE_CLIENT_IP: ${TF_CAPTURE_CLIENT_IP:-}
+      # First-party Atlassian OAuth (3LO) app for one-click "Connect Jira"
+      # (optional; the control pod serves the connect flow, so control-only).
+      # Read from the process env at boot — forwarded here or a .env value is
+      # silently ignored. The secret can also be a mounted file via
+      # TF_ATLASSIAN_CLIENT_SECRET_FILE (see docs/self-hosting/secrets.md).
+      TF_ATLASSIAN_CLIENT_ID: ${TF_ATLASSIAN_CLIENT_ID:-}
+      TF_ATLASSIAN_CLIENT_SECRET: ${TF_ATLASSIAN_CLIENT_SECRET:-}
+      TF_ATLASSIAN_CLIENT_SECRET_FILE: ${TF_ATLASSIAN_CLIENT_SECRET_FILE:-}
       # Privilege separation (docker/entrypoint.sh, see .env.example): the
       # entrypoint's exec-time drop runs on every role — control simply
       # skips the cap-broker spawn (it never launches a sandbox, and this
