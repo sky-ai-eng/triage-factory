@@ -114,10 +114,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # No TF_LICENSE_PUBLIC_KEY build-arg: the production public key is
-          # ee.publicKeyB64's source default, so the published image verifies
-          # official licenses with zero build-time wiring. The arg exists only
-          # to OVERRIDE with a dev/fork issuer key — never set it here.
+          # This arg exists only to OVERRIDE with a dev/fork issuer
+          # key — never set it here.
           # GHA cache halves repeat-build times. Scoped per-arch so
           # cross-build doesn't poison the native cache.
           cache-from: type=gha

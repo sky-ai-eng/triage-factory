@@ -27,10 +27,9 @@ builds:
       # `triagefactory --version` line up with what the user typed.
       #
       # No ee.publicKeyB64 injection: the Enterprise PUBLIC key ships as the
-      # source default (ee/ee.go), so release artifacts verify official
-      # licenses without any build-time wiring. Re-adding an -X here would
-      # OVERRIDE that default — with an unset env it would silently ship
-      # builds that ignore every license.
+      # source default (ee/ee.go). Re-adding an -X here would OVERRIDE
+      # that default — with an unset env it would silently ship builds
+      # that ignore every license.
       - -s -w -X main.Version={{.Tag}}
 
 archives:
