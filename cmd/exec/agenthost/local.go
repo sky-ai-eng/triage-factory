@@ -499,7 +499,39 @@ func (c *LocalClient) BuildAgentRunFooter(ctx context.Context, kind string) (str
 // pool/tx branch in-process; relayRuntime relays it as one op so the tx stays
 // orchestrator-side. Returns the stored row. See TFAC-460.
 func (c *LocalClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
+	a = c.hostAnchorBranchURL(ctx, a)
 	return c.rt.UpsertArtifact(ctx, a)
+}
+
+// hostAnchorBranchURL re-anchors a branch artifact's web URL to the org's own
+// GitHub host — github.com, a GHES host, or a GHEC data-residency host. A branch
+// artifact's URL is synthesized where the host isn't knowable (the sandbox
+// pre-push hook holds no credentials; the domain constructor has no org
+// context), so it is composed against github.com and corrected here. This is the
+// one host-side choke point every branch write funnels through — the local
+// mode hook's in-process client and the multi-mode git-proxy push recorder both
+// upsert through this LocalClient — and it holds the credential resolver, so the
+// link is fixed before the row is written.
+//
+// Branch is the only artifact kind with a synthesized URL: a PR carries GitHub's
+// own html_url and a review's link is resolved server-side, so both already name
+// the right host and pass through untouched. A base-resolve failure keeps the
+// default github.com URL (the link degrades; the record does not), and a
+// non-branch ref leaves the URL as-is rather than clobber it.
+func (c *LocalClient) hostAnchorBranchURL(ctx context.Context, a domain.Artifact) domain.Artifact {
+	if a.Kind != domain.ArtifactKindBranch {
+		return a
+	}
+	base, err := c.githubResolver().BaseURLFor(ctx, c.info.OrgID)
+	if err != nil {
+		agenthostLog.Warn("resolve github base for branch URL failed; keeping default host",
+			"run", c.info.RunID, "target", a.Target, "ref", a.ExternalID, "error", err)
+		return a
+	}
+	if u, ok := domain.BranchArtifactWebURL(base, a.Target, a.ExternalID); ok {
+		a.URL = u
+	}
+	return a
 }
 
 // --- jira ---

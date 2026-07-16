@@ -172,6 +172,45 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 	}
 }
 
+// TestCapture_BranchPush_AnchorsURLToOrgHost pins that the host-side sink
+// re-anchors a branch artifact's web link to the org's own GitHub host. The URL
+// is synthesized against github.com where the host can't be known (the sandbox
+// pre-push hook, the domain constructor), so without this an org on GHES/GHEC
+// would get a dead github.com "open branch" link. Both the artifact URL and the
+// branch-push audit action's deep link (built from the same artifact) are
+// corrected.
+func TestCapture_BranchPush_AnchorsURLToOrgHost(t *testing.T) {
+	stores, info := newCaptureStores(t, false)
+	client := NewLocal(stores, info)
+	client.ghResolver = fakeGitHubResolver{baseURL: "https://ghe.example.com", token: "org-pat"}
+
+	branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat/x", "abc123", true)
+	if !ok {
+		t.Fatal("NewBranchArtifact returned ok=false")
+	}
+	// The constructor can't know the org host, so it defaults to github.com...
+	if branch.URL != "https://github.com/octo/repo/tree/feat/x" {
+		t.Fatalf("precondition: constructor URL = %q, want the github.com default", branch.URL)
+	}
+
+	stored, err := client.UpsertArtifact(context.Background(), branch)
+	if err != nil {
+		t.Fatalf("UpsertArtifact: %v", err)
+	}
+	// ...and the sink rewrites it to the org's GHES host, segments preserved.
+	if stored.URL != "https://ghe.example.com/octo/repo/tree/feat/x" {
+		t.Errorf("stored branch URL = %q, want the org GHES host", stored.URL)
+	}
+
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want 1 branch action, got %d: %+v", len(acts), acts)
+	}
+	if acts[0].URL != "https://ghe.example.com/octo/repo/tree/feat/x" {
+		t.Errorf("branch action URL = %q, want the org GHES host", acts[0].URL)
+	}
+}
+
 // TestCapture_GithubReply_RecordsArtifactlessAction pins that a review-thread
 // reply — which rides the review and produces NO comment artifact — is still
 // captured as a standalone comment_posted external action (the Actions lens is

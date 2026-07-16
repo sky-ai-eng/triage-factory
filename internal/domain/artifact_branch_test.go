@@ -97,3 +97,37 @@ func TestNewBranchArtifact_URLEscapesBranchSegments(t *testing.T) {
 		}
 	}
 }
+
+// TestBranchArtifactWebURL pins the host-aware builder the artifact sink uses to
+// re-anchor a branch link to the org's own GitHub host: a GHES base is honored
+// (with a trailing slash trimmed and segments still escaped), an empty base
+// falls back to github.com, and a non-branch ref / malformed repo returns
+// ok=false so the sink leaves the existing URL untouched.
+func TestBranchArtifactWebURL(t *testing.T) {
+	cases := []struct {
+		name     string
+		base     string
+		repoPath string
+		ref      string
+		want     string
+		wantOK   bool
+	}{
+		{"ghes host", "https://ghe.example.com", "octo/repo", branchRefPrefix + "feature/x", "https://ghe.example.com/octo/repo/tree/feature/x", true},
+		{"ghes trailing slash trimmed", "https://ghe.example.com/", "octo/repo", branchRefPrefix + "main", "https://ghe.example.com/octo/repo/tree/main", true},
+		{"ghes escapes segments", "https://ghe.example.com", "octo/repo", branchRefPrefix + "wip/a b", "https://ghe.example.com/octo/repo/tree/wip/a%20b", true},
+		{"empty base falls back to github.com", "", "octo/repo", branchRefPrefix + "main", "https://github.com/octo/repo/tree/main", true},
+		{"non-branch ref rejected", "https://ghe.example.com", "octo/repo", "refs/tags/v1", "", false},
+		{"malformed repo rejected", "https://ghe.example.com", "octo", branchRefPrefix + "main", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := BranchArtifactWebURL(c.base, c.repoPath, c.ref)
+			if ok != c.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, c.wantOK)
+			}
+			if got != c.want {
+				t.Errorf("url = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
