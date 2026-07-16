@@ -86,9 +86,20 @@ jobs:
         if: steps.docs.outputs.only != 'true'
         run: go build ./...
 
+      # gotestsum wraps `go test` so individually failed tests are re-run
+      # (up to twice) in a fresh process before the job is marked failed.
+      # This is the backstop for infra-level flakes — e.g. the shared
+      # pgtest supabase container being OOM-killed mid-test on a loaded
+      # runner: the rerun's fresh process boots a fresh container and
+      # passes, while a real regression keeps failing on every attempt
+      # and still fails the job. Reruns are skipped when more than 15
+      # tests fail (that's a genuine breakage, not a flake), and every
+      # rerun is visible in the log ("DONE N runs"), so absorbed flakes
+      # stay auditable rather than silent. A process-level kill of the
+      # test binary itself (no per-test attribution) still fails the job.
       - name: Go test
         if: steps.docs.outputs.only != 'true'
-        run: go test -race ./...
+        run: go run gotest.tools/gotestsum@v1.13.0 --format standard-quiet --rerun-fails=2 --rerun-fails-max-failures=15 --packages=./... -- -race
 
       - name: Docs-only change, build/test skipped
         if: steps.docs.outputs.only == 'true'
