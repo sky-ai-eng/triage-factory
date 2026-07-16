@@ -115,6 +115,59 @@ echo "$TOKEN" | TF_GOTRUE_JWKS_URL=http://localhost:9999/.well-known/jwks.json \
 
 You should see the parsed claims printed as JSON (`Subject`, `Email`, `Provider`, etc.). This requires a local TF binary on the host — useful when the in-container TF service is misbehaving and you want to isolate the Verifier path from the rest of the server.
 
+## 7. (Optional) Enable Enterprise features
+
+Enterprise features — SSO, Slack, governance, the fleet console — are gated by a signed license token. A **release** binary bakes your vendor's public key at build time and verifies the token offline; a from-source `go build` has no baked key and ignores the license entirely (community build).
+
+To enable it, set the token your vendor gave you in `.env`:
+
+```bash
+TF_LICENSE=<signed-token>
+```
+
+then `docker compose up -d`. On boot the control pod logs the verdict to stderr:
+
+```
+Enterprise license: Acme Corp (features: [sso slack governance fleet]) valid until 2026-09-21
+```
+
+No token, a token signed by the wrong key, or an expired token → community default (every enterprise feature off, no crash). Confirm which features are live at any time with `GET /api/entitlements`.
+
+## File-backed secrets (`*_FILE`)
+
+Every deployment secret can be supplied from a **file** instead of an env var — the standard convention for Docker/Kubernetes secrets, which are mounted as files. For a secret `NAME`, set `NAME_FILE` to the mount path; TF reads the file at boot into memory and then unsets it from the environment. Two payoffs, and the second is stronger with `NAME_FILE` than with a plain env var:
+
+- **Child processes never inherit it.** At boot TF captures each secret and unsets it from `os.Environ()`, so subprocesses it spawns (git, `gh`, the SDK installer) don't carry it — for both `NAME` and `NAME_FILE` forms.
+- **It stays out of `docker inspect` and the process's own `/proc/<pid>/environ` — only with `NAME_FILE`.** With a file, the *value* is never an env var (only the path is), so it appears in neither. A plain `NAME=` value still lives in the kernel's exec-time environment snapshot that `/proc/<pid>/environ` exposes — TF can't scrub that in-process (unsetting rewrites only Go's copy, not the kernel region), so **prefer `NAME_FILE` for the sensitive keys** (`TF_SECRET_ENCRYPTION_KEY` above all).
+
+The **binary** honors `NAME_FILE` for: `TF_SECRET_ENCRYPTION_KEY`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_LICENSE`, `TF_GOTRUE_SERVICE_ROLE_TOKEN`, `TF_DATABASE_URL`, `TF_DATABASE_DIRECT_URL`, `TF_AUTHENTICATOR_PASSWORD`, `TF_BLOB_ACCESS_KEY`, `TF_BLOB_SECRET_KEY`.
+
+But `NAME_FILE` only takes effect if the container's environment actually carries it. The **bundled `docker-compose.yml` forwards `NAME_FILE` for the TF-only secrets** — `TF_LICENSE`, `TF_GOTRUE_SERVICE_ROLE_TOKEN`, `TF_SESSION_ENCRYPTION_KEY`, `TF_COOKIE_SECRET`, `TF_SECRET_ENCRYPTION_KEY` — so for those you just set `NAME_FILE` in `.env` (leaving the plain `NAME` blank) and mount the file. The others are **not** `_FILE`-wired in the bundled stack, because the compose file either **constructs** them (`TF_DATABASE_URL` is built from `POSTGRES_PASSWORD`) or **shares** them with a sidecar that needs the plain value (`TF_BLOB_*` are templated into SeaweedFS's identity; `TF_AUTHENTICATOR_PASSWORD` is applied to the DB role by `postgres-postinit`) — use `NAME_FILE` for those only in a custom deployment (K8s, your own compose) where you set the container env yourself.
+
+If both `NAME` and `NAME_FILE` are set, the file wins (with a warning). A `NAME_FILE` that points at an unreadable path fails boot with a clear error — it never silently falls back.
+
+Example — mount the vault key + license as Docker Compose secrets (they land under `/run/secrets/<name>`). Because the bundled compose already forwards the `_FILE` vars, the override only needs the **mount**; point `_FILE` at it from `.env`:
+
+```yaml
+# compose.override.yml  (auto-merged by `docker compose`)
+secrets:
+  tf_enc_key: { file: ./secrets/enc_key }
+  tf_license: { file: ./secrets/license }
+services:
+  triagefactory:
+    secrets: [tf_enc_key, tf_license]
+  executor:
+    secrets: [tf_license]
+```
+
+```dotenv
+# .env — leave the plain TF_SECRET_ENCRYPTION_KEY blank; point _FILE at the mount
+TF_SECRET_ENCRYPTION_KEY_FILE=/run/secrets/tf_enc_key
+TF_LICENSE_FILE=/run/secrets/tf_license
+```
+
+> Note: the secret still lives in the process's **heap** while TF is using it (any program that decrypts, signs, or connects must hold the value in memory — `/proc/<pid>/mem`, root/same-uid, can reach it). "Out of the child-inherited environment, and — via `NAME_FILE` — out of `/proc/environ` too, into heap only" is the reachable end state. Credentials handed to sandboxed agents are scrubbed separately — see the [security model](../security/).
+
 ## Next steps
 
 - [Monitoring & health checks](monitoring.md) — `/api/health`, `/readyz`, executor `/healthz`

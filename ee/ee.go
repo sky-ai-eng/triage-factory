@@ -20,6 +20,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/ee/license"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 )
 
 // publicKeyB64 is the standard-base64 of the DER/SPKI (PKIX
@@ -41,7 +42,7 @@ var publicKeyB64 = ""
 // Never fatal: a bad license degrades to the Static (everything off)
 // default, it does not crash the binary.
 func Install() {
-	token := os.Getenv("TF_LICENSE")
+	token := secretenv.Get("TF_LICENSE")
 	if token == "" {
 		return
 	}

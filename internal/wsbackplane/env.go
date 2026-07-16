@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 )
 
 // Channel names for the three LISTEN/NOTIFY channels this package owns
@@ -156,8 +158,8 @@ func RevalidateIntervalFromEnv() time.Duration {
 // carry a LISTEN session (spec §5, TFAC-307 §2 interaction). Nothing pools
 // TF_DATABASE_URL today, so defaulting to it is a no-op until 307 lands.
 func DirectDSN() string {
-	if v := strings.TrimSpace(os.Getenv("TF_DATABASE_DIRECT_URL")); v != "" {
+	if v := strings.TrimSpace(secretenv.Get("TF_DATABASE_DIRECT_URL")); v != "" {
 		return v
 	}
-	return os.Getenv("TF_DATABASE_URL")
+	return secretenv.Get("TF_DATABASE_URL")
 }

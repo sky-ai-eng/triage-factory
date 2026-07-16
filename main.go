@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/procname"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 
 	// Enterprise Edition SSO: registers its store factories, route installer,
 	// and LoginExtension via init(). Gated at runtime on the `sso` entitlement.
@@ -70,6 +71,19 @@ func run(ctx context.Context, args []string) error {
 	if ignored {
 		bootLog.Warn("TF_ROLE ignored in local mode: local is single-process by construction (roles exist only in multi mode)",
 			"value", rawRole)
+	}
+
+	// Capture the deployment secrets (from ${NAME}_FILE if set, else the plain
+	// env var) into process memory and unset them from the environment, before
+	// anything reads them — including the `migrate` subcommand's DSN below.
+	// After this they're gone from os.Environ(), so child processes don't
+	// inherit them; readers pull them back via secretenv.Get. (A _FILE-supplied
+	// secret is also absent from this process's own /proc/environ + `docker
+	// inspect`; a plain env one can't be — see the secretenv package doc.)
+	// Fails fast on a set-but-unreadable file.
+	secretenv.SetWarnFunc(func(format string, args ...any) { bootLog.Warn(fmt.Sprintf(format, args...)) })
+	if err := secretenv.Resolve(); err != nil {
+		return fmt.Errorf("resolve deployment secrets: %w", err)
 	}
 
 	// CLI subcommands short-circuit before any server wiring: exec/status
