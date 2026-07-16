@@ -42,7 +42,7 @@ State lives in SQLite, credentials live in the OS keychain or an encrypted file,
 
 ## Security & isolation
 
-Triage Factory runs code written by an AI agent acting on untrusted input — repository contents, issue text, tool output, any of which can carry a prompt injection. Confining that agent, isolating tenants from one another, and keeping real credentials out of reach is the product's central design problem, not something bolted on later. The model below is the self-hosted, multi-tenant posture on Linux; local mode is a single user on their own machine, where runs execute in isolated git worktrees.
+Triage Factory runs code written by an AI agent acting on untrusted input such as repository contents, issue text, and tool output. Confining that agent, isolating tenants from one another, and keeping real credentials out of reach is the product's central design problem. The model below is the self-hosted, multi-tenant posture on Linux; local mode is a single user on their own machine, where runs execute in isolated git worktrees and most security features don't apply.
 
 **The agent is the most confined process in the system.** In multi-tenant mode on Linux, each run executes in its own gVisor sandbox: non-root, zero ambient capabilities, a tailored seccomp allowlist, and a per-run memory ceiling. The elevated privileges Triage Factory needs from the host exist only to _build_ that sandbox — never to run the agent inside it. And no single process holds both a dangerous privilege and exposure to the agent's output: the part that can configure the kernel holds no credentials, and the part that holds credentials can't touch the kernel.
 
