@@ -18,9 +18,9 @@
   </a>
 </p>
 
-Triage Factory watches everything that needs attention across your GitHub and Jira — open PRs, review requests, CI failures, merge conflicts, assigned tickets — scores and ranks it with AI, and lets you delegate the work to Claude Code agents that run in isolation and stream back to a live dashboard. You decide what gets automated, and you can take over any agent's run at any point.
+Triage Factory watches everything that needs attention across your GitHub, Jira, and Slack — open PRs, review requests, CI failures, merge conflicts, assigned tickets, mentions — scores and ranks it with AI, and lets you delegate the work to Claude Code agents that run in isolation and stream back to a live dashboard. You decide what gets automated, and you can take over any agent's run at any point.
 
-It's a single Go binary that runs on infrastructure you control. One developer runs it locally — SQLite, credentials in the OS keychain (or an encrypted file when no keychain is reachable). A whole organization runs the _same_ binary self-hosted in multi-tenant mode — Postgres, GoTrue auth, per-org isolation, and, on Linux, per-run gVisor sandboxing. There's no hosted service in the loop: your code and credentials stay on your infrastructure, and the only things that leave it are API calls to GitHub, Jira, and Claude. Local mode is just the same schema and the same code path at N=1.
+It's a single Go binary that runs on infrastructure you control. One developer runs it locally — SQLite, credentials in the OS keychain (or an encrypted file when no keychain is reachable). A whole organization runs the _same_ binary self-hosted in multi-tenant mode — Postgres, per-org row-level isolation, and, on Linux, every agent run confined to its own gVisor sandbox. There's no hosted service in the loop: your code and credentials stay on your infrastructure, and the only things that leave it are API calls to the services you connect — GitHub, Jira, Slack, and your model provider. Local mode is the same schema and the same code path at N=1.
 
 For a product tour and screenshots, see [triagefactory.com](https://www.triagefactory.com).
 
@@ -30,22 +30,27 @@ Work flows through an automation engine drawn as a factory floor. A durable **en
 
 ## Local or self-hosted
 
-**Local (N=1)** — one developer, on your laptop. `brew install`, SQLite, credentials in the OS keychain (or an encrypted file when none is reachable, like a container or headless host). Agent runs execute in isolated git worktrees. No DevOps.
-
-**Self-hosted (multi-tenant)** — your whole org on a Linux host you control: Postgres, GoTrue sign-in (SSO/SAML via the [Enterprise Edition](ee/)), RLS-isolated tenants, and — on Linux — gVisor-sandboxed agent runs with a locked-down egress allowlist. Same binary, same schema, deployed with Docker Compose. See [docs/self-hosting/](docs/self-hosting/README.md).
-
-## Install
-
-### macOS/Linux — Homebrew (recommended)
+**Local (N=1)** — one developer, on your laptop. One command to install and run:
 
 ```bash
-brew update
-brew tap sky-ai-eng/tap
-brew install triagefactory
-triagefactory
+brew tap sky-ai-eng/tap && brew install triagefactory && triagefactory
 ```
 
-For direct downloads, building from source, and platform notes, see [docs/INSTALLATION.md](docs/INSTALLATION.md).
+State lives in SQLite, credentials live in the OS keychain (or an encrypted file on a headless host), and agent runs execute in isolated git worktrees. No Postgres, no Docker, no DevOps. For direct downloads, building from source, and the full flag reference, see [docs/local-mode/](docs/local-mode/README.md) and [docs/INSTALLATION.md](docs/INSTALLATION.md).
+
+**Self-hosted (multi-tenant)** — your whole org, on Linux hosts you control. The same binary and schema, deployed with Docker Compose as a control + executor split: Postgres with per-org row-level security, SSO/SAML sign-in and audit logs via the [Enterprise Edition](ee/), a `/usage` dashboard with per-team and org-wide spend caps, and every agent run confined to its own gVisor sandbox. See [docs/self-hosting/](docs/self-hosting/README.md) to stand one up.
+
+## Security & isolation
+
+Triage Factory runs code written by an AI agent acting on untrusted input — repository contents, issue text, tool output, any of which can carry a prompt injection. Confining that agent, isolating tenants from one another, and keeping real credentials out of reach is the product's central design problem, not something bolted on later.
+
+**The agent is the most confined process in the system.** Every run executes in its own gVisor sandbox: non-root, zero ambient capabilities, a tailored seccomp allowlist, and a per-run memory ceiling. The elevated privileges Triage Factory needs from the host exist only to _build_ that sandbox — never to run the agent inside it. And no single process holds both a dangerous privilege and exposure to the agent's output: the part that can configure the kernel holds no credentials, and the part that holds credentials can't touch the kernel.
+
+**Credentials never enter the sandbox.** The agent's environment is built from scratch with placeholders — a per-run proxy URL and a throwaway token that dies with the run. Your real keys (Anthropic, the GitHub App, the database) live only on the host and are attached on the upstream hop. Dump a live agent's environment and there's nothing worth stealing in it.
+
+**Tenants are isolated by construction, not by policy.** Data is fenced with per-org Postgres row-level security. And unlike the usual container setup — every run hanging off one shared Linux bridge, a single ARP-spoof away from its neighbors — each run gets its own point-to-point virtual link on its own private subnet, with no layer-2 path between concurrent runs. Cross-tenant snooping isn't "blocked by a rule"; there's no shared wire to snoop. Each run's egress is a fail-closed allowlist that reaches only the hosts it needs.
+
+**Evaluating Triage Factory for your own infrastructure?** The full threat model, the privilege-separation process model, and what a compromise of each component yields — every claim anchored to something you can run against the binary — are in [docs/security/security-overview.md](docs/security/security-overview.md).
 
 ## Documentation
 
@@ -58,12 +63,12 @@ For direct downloads, building from source, and platform notes, see [docs/INSTAL
 
 ## License
 
-The repository is source-available under the [Triage Factory License 1.0](LICENSE) — free to use, copy, and modify for your own internal business purposes, but not to redistribute or offer as a hosted service. The [`ee/`](ee/) subtree (Enterprise Edition) is covered by the same license; its features are gated behind a license key and require a commercial subscription to enable. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution terms.
+Source-available under the [Triage Factory License 1.0](LICENSE): free to use, copy, and modify for your own internal business purposes, but not to redistribute or offer as a hosted service. The [`ee/`](ee/) subtree (Enterprise Edition) is under the same license, with its features gated behind a commercial license key. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution terms.
 
 ## Disclaimer
 
-Triage Factory is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, non-infringement, and title. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability, whether in an action of contract, tort, or otherwise, arising from, out of, or in connection with the software or the use or other dealings in the software.
+Triage Factory is provided "as is", without warranty of any kind; see the [LICENSE](LICENSE) for the full terms.
 
-Triage Factory delegates work to autonomous agents that read and write to your source repositories, ticket trackers, and local filesystem. You are solely responsible for reviewing what agents do on your behalf, for the credentials you configure, and for any consequences of automated actions taken against your systems or third-party services.
+Triage Factory delegates work to autonomous agents that read and write to your source repositories, ticket trackers, and local filesystem. You are solely responsible for reviewing what agents do on your behalf, for the credentials you configure, and for the consequences of any automated actions taken against your systems or third-party services.
 
-**Self-hosted multi-tenant deployments.** Triage Factory can be self-hosted in multi-tenant mode (e.g., via the provided Docker Compose configuration) to serve multiple organizations from a single deployment. Multi-tenant isolation in that configuration depends on the operator's infrastructure, configuration, network topology, secrets management, and patching cadence, as well as on the correctness of the upstream software itself — which, like all software, may contain isolation, sandboxing, or row-level-security defects, known or unknown. Operators who choose to host Triage Factory for third parties do so at their own risk and are solely responsible for the security, privacy, compliance, and tenant isolation of their deployment. The authors and copyright holders make no warranty that any release is free of multi-tenant isolation defects and accept no liability for cross-tenant data exposure, sandbox escape, or any other isolation failure in self-hosted deployments.
+**Self-hosted multi-tenant deployments.** When you self-host Triage Factory to serve multiple organizations from one deployment, tenant isolation depends on your infrastructure, configuration, network topology, secrets management, and patching cadence, as well as on the correctness of the upstream software itself — which, like all software, may contain isolation, sandboxing, or row-level-security defects, known or unknown. Operators who host it for third parties do so at their own risk and are solely responsible for the security, privacy, compliance, and tenant isolation of their deployment. See [docs/security/](docs/security/README.md) for the isolation model to evaluate.
