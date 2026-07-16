@@ -38,9 +38,10 @@ import (
 // An explicit empty override (`-X ...publicKeyB64=`) yields a build with no
 // key at all — the community posture, where TF_LICENSE is ignored outright.
 //
-// Rotating the key: update this constant, the TestShippedPublicKeyDefaultLoads
-// pin, and scripts/verify-license-key.sh's EXPECTED in the same change, then
-// reissue customer tokens under the new key.
+// Rotating the key: update this constant and the TestShippedPublicKeyDefaultLoads
+// pin in the same change, then reissue customer tokens under the new key. The
+// pin is an independent copy on purpose — deriving it from this variable would
+// verify the source against itself.
 var publicKeyB64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAExwX8JiPaEIRK4S1IxytI/FbY28LzBhg1F1q5uwLy47IosslwxxzsxUAFx0xpnGPqoGeadQr9Gw4Um2vuksHdhQ=="
 
 // Install verifies TF_LICENSE (if set) and registers the resulting per-org

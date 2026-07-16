@@ -12,8 +12,8 @@ import (
 // edit would silently produce a build that ignores (or worse, mis-verifies)
 // every official license. Pinning exact equality catches a *valid but wrong*
 // key too — e.g. a dev key accidentally committed after local debugging.
-// Rotating the prod key updates this pin, the source default, and
-// scripts/verify-license-key.sh's EXPECTED in the same change.
+// Deliberately an independent copy of the literal; rotation is documented on
+// publicKeyB64 itself.
 func TestShippedPublicKeyDefaultLoads(t *testing.T) {
 	const prodKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAExwX8JiPaEIRK4S1IxytI/FbY28LzBhg1F1q5uwLy47IosslwxxzsxUAFx0xpnGPqoGeadQr9Gw4Um2vuksHdhQ=="
 	if publicKeyB64 != prodKey {

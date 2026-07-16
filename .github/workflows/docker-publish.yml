@@ -48,12 +48,15 @@ jobs:
 
       # Fail-closed gate on the baked Enterprise public key, mirroring release.yml's
       # verify-license-key job. A workflow can't `needs:` a job in another workflow, so
-      # we run the same committed check inline here — before the (expensive) build — or a
-      # mangled ee.publicKeyB64 source default would publish :latest/:vX.Y.Z/:edge images
-      # with enterprise features silently disabled. Runs on both the tag and main (:edge)
-      # paths. The check reads the committed source; no env to wire.
+      # we run the same check inline here — before the (expensive) build — or a mangled
+      # ee.publicKeyB64 source default would publish :latest/:vX.Y.Z/:edge images with
+      # enterprise features silently disabled. Runs on both the tag and main (:edge) paths.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
       - name: Verify baked Enterprise public key
-        run: ./scripts/verify-license-key.sh
+        run: go test ./ee/ -run TestShippedPublicKeyDefaultLoads
 
       # QEMU lets the amd64 runner cross-build the arm64 image
       # without provisioning a native arm runner. Slow but free.

@@ -39,14 +39,18 @@ jobs:
 
   # Fail-closed gate on the baked Enterprise public key — the source default of
   # ee.publicKeyB64; a mangled/wrong value would silently ship EE-disabled binaries
-  # (loadPublicKey → nil). TestShippedPublicKeyDefaultLoads covers the same class in
-  # `go test`; this is the release-time catch. See scripts/verify-license-key.sh.
+  # (loadPublicKey → nil). Same test that gates PRs, re-run here because a tag can
+  # be cut from any commit.
   verify-license-key:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
       - name: Verify baked Enterprise public key
-        run: ./scripts/verify-license-key.sh
+        run: go test ./ee/ -run TestShippedPublicKeyDefaultLoads
 
   goreleaser:
     needs: [dependency-licenses, verify-license-key]
