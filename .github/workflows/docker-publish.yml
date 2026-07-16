@@ -114,8 +114,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # This arg exists only to OVERRIDE with a dev/fork issuer
-          # key — never set it here.
+          # The Dockerfile's TF_LICENSE_PUBLIC_KEY build arg exists only to
+          # OVERRIDE with a dev/fork issuer key — never set it here.
           # GHA cache halves repeat-build times. Scoped per-arch so
           # cross-build doesn't poison the native cache.
           cache-from: type=gha

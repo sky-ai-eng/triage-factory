@@ -431,8 +431,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       # Optional Enterprise public-key OVERRIDE (a dev/fork issuer key).
-      # Empty → the source default (the production key), so a from-source
-      # build verifies official licenses exactly like the published image.
+      # Empty → the source default (the production key).
       args:
         TF_LICENSE_PUBLIC_KEY: "${TF_LICENSE_PUBLIC_KEY:-}"
     # image: ghcr.io/sky-ai-eng/triage-factory:latest

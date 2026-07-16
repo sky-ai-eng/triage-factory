@@ -117,9 +117,7 @@ You should see the parsed claims printed as JSON (`Subject`, `Email`, `Provider`
 
 ## 7. (Optional) Enable Enterprise features
 
-Enterprise features — SSO, Slack, governance, the fleet console — are gated by a signed license token. Every build verifies the token offline against the vendor's public key, which ships in the source — the published image and a from-source build behave identically, so there is nothing to configure beyond the token itself.
-
-To enable it, set the token your vendor gave you in `.env`:
+Enterprise features — SSO, Slack, governance, the fleet console — are gated by a signed license token, verified offline at boot. To enable them, set the token your vendor gave you in `.env`:
 
 ```bash
 TF_LICENSE=<signed-token>

@@ -10,12 +10,10 @@ import (
 
 // The production public key ships as publicKeyB64's source default, so a bad
 // edit would silently produce a build that ignores (or worse, mis-verifies)
-// every official license. Pinning exact equality — not just parseability —
-// catches the dangerous case a parse check can't: a *valid but wrong* key,
-// e.g. a dev key accidentally committed after local debugging. Reading the
-// real variable also makes this immune to declaration formatting, unlike any
-// text-level extraction. Rotating the prod key updates this pin, the source
-// default, and scripts/verify-license-key.sh's EXPECTED in the same change.
+// every official license. Pinning exact equality catches a *valid but wrong*
+// key too — e.g. a dev key accidentally committed after local debugging.
+// Rotating the prod key updates this pin, the source default, and
+// scripts/verify-license-key.sh's EXPECTED in the same change.
 func TestShippedPublicKeyDefaultLoads(t *testing.T) {
 	const prodKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAExwX8JiPaEIRK4S1IxytI/FbY28LzBhg1F1q5uwLy47IosslwxxzsxUAFx0xpnGPqoGeadQr9Gw4Um2vuksHdhQ=="
 	if publicKeyB64 != prodKey {

@@ -91,11 +91,9 @@ COPY --from=frontend-builder /src/frontend/dist ./frontend/dist
 # fail to exec in either alpine container.
 ARG TARGETOS=linux
 ARG TARGETARCH
-# Enterprise public-key OVERRIDE (a dev/fork issuer key). Leave empty for the default:
-# the production public key ships as ee.publicKeyB64's source default, so an image built
-# with no arg verifies official licenses. The -X is appended only when set — an
-# unconditional -X with an empty value would stomp that default and silently produce an
-# image that ignores every license.
+# Enterprise public-key OVERRIDE (a dev/fork issuer key); empty keeps ee.publicKeyB64's
+# source default. The -X is appended only when set — an unconditional -X with an empty
+# value would stomp that default and silently produce an image that ignores every license.
 ARG TF_LICENSE_PUBLIC_KEY=
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \

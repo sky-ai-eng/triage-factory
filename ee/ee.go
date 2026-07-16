@@ -26,12 +26,9 @@ import (
 // publicKeyB64 is the standard-base64 of the DER/SPKI (PKIX
 // SubjectPublicKeyInfo) encoding of the ECDSA P-256 PUBLIC key license
 // tokens are verified against. The production key is the source default so
-// that EVERY build — the published image, a compose build from source, a
-// plain `go build` — verifies official license tokens out of the box; an
-// operator's journey is "set TF_LICENSE and go", never "did you use a
-// release binary?". This is only the public half — the private signing key
-// never ships and is held entirely by the licensor's issuing service, so
-// committing it grants nothing beyond the ability to verify.
+// every build verifies official license tokens. Only the public half — the
+// private signing key is held entirely by the licensor's issuing service,
+// so committing it grants nothing beyond the ability to verify.
 //
 // Builds against a different issuer (a dev signing key, a fork running its
 // own) override it at link time:
@@ -41,8 +38,8 @@ import (
 // An explicit empty override (`-X ...publicKeyB64=`) yields a build with no
 // key at all — the community posture, where TF_LICENSE is ignored outright.
 //
-// Rotating the key: update this constant and scripts/verify-license-key.sh's
-// EXPECTED in the same change (the CI gate holds them in lockstep), then
+// Rotating the key: update this constant, the TestShippedPublicKeyDefaultLoads
+// pin, and scripts/verify-license-key.sh's EXPECTED in the same change, then
 // reissue customer tokens under the new key.
 var publicKeyB64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAExwX8JiPaEIRK4S1IxytI/FbY28LzBhg1F1q5uwLy47IosslwxxzsxUAFx0xpnGPqoGeadQr9Gw4Um2vuksHdhQ=="
 

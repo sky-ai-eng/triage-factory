@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
 #
-# Verify the Enterprise PUBLIC key that ships as ee.publicKeyB64's SOURCE DEFAULT
-# (ee/ee.go). Every build — the published image, a compose build, a plain `go build` —
-# bakes this default, so a mangled edit (truncated paste, stray whitespace, wrong key)
-# would ship builds that silently ignore every official license (loadPublicKey fails
-# closed to nil → EE off). This check makes that failure LOUD, before an expensive
-# release/publish build. TestShippedPublicKeyDefaultLoads (ee/ee_test.go) covers the
-# same class on every `go test ./...`; this script is the pre-build belt to that
-# suspender and additionally pins the default to the expected tf-license-prod key,
-# catching a wrong-key paste that still parses.
+# Verify the Enterprise PUBLIC key that ships as ee.publicKeyB64's source default
+# (ee/ee.go): a mangled or wrong value would ship builds that silently ignore every
+# official license (loadPublicKey fails closed to nil → EE off). This makes that
+# failure LOUD before an expensive release/publish build; TestShippedPublicKeyDefaultLoads
+# (ee/ee_test.go) is the same gate at PR time.
 #
 # Rotating the prod key is deliberate: update ee/ee.go's default, the pin in
 # TestShippedPublicKeyDefaultLoads, AND EXPECTED here in the same change, then reissue
@@ -19,12 +15,11 @@ cd "$(dirname "$0")/.."
 
 EXPECTED="MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAExwX8JiPaEIRK4S1IxytI/FbY28LzBhg1F1q5uwLy47IosslwxxzsxUAFx0xpnGPqoGeadQr9Gw4Um2vuksHdhQ=="
 
-# A fixed-string presence check, deliberately NOT a positional extraction: parsing the
-# declaration (sed on `var publicKeyB64 = ...`) would couple this gate to formatting and
-# hard-fail a release over an innocent refactor (e.g. regrouping into a var block). The
-# quoted literal either appears in the file or it doesn't, wherever the declaration
-# lives. The semantic check — the VARIABLE actually holds this value — is the unit
-# test's job (it reads the real var, immune to formatting by construction).
+# A fixed-string presence check, deliberately NOT an extraction of the declaration:
+# parsing the source line would couple this gate to formatting and hard-fail a release
+# over an innocent refactor. The quoted literal either appears in the file or it
+# doesn't, wherever the declaration lives. The semantic check — the VARIABLE actually
+# holds this value — is the unit test's job.
 if ! grep -qF "\"$EXPECTED\"" ee/ee.go; then
   echo "::error::the expected tf-license-prod public key does not appear as a string literal in ee/ee.go — a mangled edit (truncated paste / stray whitespace) or the wrong key. Builds would silently ship EE-disabled. If the prod key legitimately rotated, update the ee/ee.go default, the TestShippedPublicKeyDefaultLoads pin, AND EXPECTED in scripts/verify-license-key.sh in the same change." >&2
   exit 1
