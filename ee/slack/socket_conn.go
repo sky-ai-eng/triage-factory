@@ -296,6 +296,11 @@ func (c *appConnection) serveOnce(ctx context.Context, stores db.Stores, pipelin
 // the connection's only liveness mechanism now that the read loop no longer
 // imposes a data-frame deadline; coder/websocket delivers the pong through the
 // concurrent Read in serveOnce, so this must run alongside that loop.
+//
+// Running from its own goroutine is safe against serveOnce's concurrent
+// ack Writes: coder/websocket funnels every frame — control (this ping) and
+// data (the ack) — through one internal write mutex, so the two can't
+// interleave bytes on the wire or race the shared write buffer.
 func (c *appConnection) pingLoop(ctx context.Context, conn *slackws.Conn, onDead context.CancelFunc, done chan struct{}) {
 	defer close(done)
 	ticker := time.NewTicker(socketPingInterval)
