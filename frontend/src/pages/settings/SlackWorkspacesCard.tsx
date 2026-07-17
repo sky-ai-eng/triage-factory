@@ -97,7 +97,11 @@ export default function SlackWorkspacesCard({ orgId }: { orgId: string }) {
     const load = (initial: boolean) => {
       apiJSON<SlackWorkspace[]>('/api/slack/workspaces')
         .then((ws) => {
-          if (!cancelled) setWorkspaces(ws)
+          if (cancelled) return
+          setWorkspaces(ws)
+          // Clear a stale banner: a later poll succeeding means the list is
+          // current, so an error from the initial (failed) load must not linger.
+          setLoadError(null)
         })
         .catch((e) => {
           // Only the initial fetch surfaces a load error; a transient poll
