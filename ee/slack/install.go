@@ -70,6 +70,7 @@ func install(api server.ExtensionAPI) {
 		identity:    NewIdentityResolver(stores),
 		channelName: NewChannelResolver(stores),
 		permalink:   NewPermalinkResolver(stores),
+		title:       NewTitleResolver(stores),
 	}
 	sockets := newSocketManager(stores, pipeline, slackHTTPClient, socketConfigChanged)
 
