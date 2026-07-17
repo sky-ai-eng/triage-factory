@@ -36,6 +36,16 @@ type ProxyCredentials struct {
 	// JiraAPIURL / JiraAPIToken are the same for the Jira-REST proxy.
 	JiraAPIURL   string
 	JiraAPIToken string
+
+	// GitProxyURL / GitProxyToken are the run's git-over-HTTPS proxy address and
+	// the per-run placeholder a host-side clone/fetch presents. `workspace add`'s
+	// materialization routes through this proxy (worktree.CloneAuthViaGitProxy)
+	// so the real installation token — held only in the sidecar's bundle-backed
+	// proxy — is injected on the upstream hop and never enters this daemon. Empty
+	// when the run started no git proxy (a prompt-only / Jira-only run); a clone
+	// then injects nothing and surfaces its own auth error on a private repo.
+	GitProxyURL   string
+	GitProxyToken string
 }
 
 // proxyRepoClient builds a GitHub client pointed at the sidecar's GitHub-REST
