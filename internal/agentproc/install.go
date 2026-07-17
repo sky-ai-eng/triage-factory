@@ -1,6 +1,7 @@
 package agentproc
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -79,12 +80,12 @@ func doInstall() (string, error) {
 		return "", err
 	}
 
-	if err := os.WriteFile(filepath.Join(sdkDir, "package-lock.json"), packageLockJSON, 0o644); err != nil {
+	if err := writeFileIfChanged(filepath.Join(sdkDir, "package-lock.json"), packageLockJSON, 0o644); err != nil {
 		return "", fmt.Errorf("write package-lock.json: %w", err)
 	}
 
 	wrapperPath := filepath.Join(sdkDir, "wrapper.mjs")
-	if err := os.WriteFile(wrapperPath, wrapperJS, 0o644); err != nil {
+	if err := writeFileIfChanged(wrapperPath, wrapperJS, 0o644); err != nil {
 		return "", fmt.Errorf("write wrapper.mjs: %w", err)
 	}
 
@@ -139,7 +140,22 @@ func writePackageJSON(sdkDir string) error {
   }
 }
 `, sdkVersion)
-	return os.WriteFile(filepath.Join(sdkDir, "package.json"), []byte(body), 0o644)
+	return writeFileIfChanged(filepath.Join(sdkDir, "package.json"), []byte(body), 0o644)
+}
+
+// writeFileIfChanged writes content to path only when it isn't already there
+// byte-for-byte. The Docker image bakes the SDK scaffolding (package.json,
+// package-lock.json, wrapper.mjs) from the same sources this file embeds, into
+// a root-owned read-only /opt/triagefactory/sdk — so an unconditional rewrite
+// by the unprivileged runtime EACCESes. Skipping the write when the content
+// already matches keeps that baked runtime immutable (the orchestrator and the
+// sandboxed agent can't tamper with it) while still refreshing a genuinely
+// writable local-mode SDK dir on an upgrade.
+func writeFileIfChanged(path string, content []byte, perm os.FileMode) error {
+	if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, content) {
+		return nil
+	}
+	return os.WriteFile(path, content, perm)
 }
 
 // checkNode verifies a usable Node is on PATH. Required floor is 18 —
