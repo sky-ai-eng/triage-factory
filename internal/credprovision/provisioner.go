@@ -296,6 +296,16 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runI
 // or one that already cloned before a refresh — so without it, a fresh
 // run's initial host-side clone (setupGitHub's resolveCloneToken, before
 // any worktree exists) would get no token at all.
+//
+// A run with no GitHub anchor — a Slack mention, a Jira issue, a taskless
+// run — has neither a GitHub task-repo nor any worktree, so the set above is
+// empty and its bundle would carry no GitHub credential at all: it couldn't
+// read a PR diff, check a CI status, or `workspace add` a repo. Such a run
+// falls back to the team's whole tracked set so it can reach the repos its
+// team operates on. This widens READ/API reach, not push authority: the
+// tokens stay per-repo scoped (resolveGitHub), and pushes remain gated by the
+// run_worktrees ledger a `workspace add` creates. The boundary is the team's
+// own tracked repos — never another team's, never another org's.
 func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, runID string) ([]string, error) {
 	if m.stores.TeamGitHubRepos == nil {
 		return nil, nil
@@ -329,6 +339,19 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, ru
 		}
 		for _, w := range rows {
 			add(w.RepoID)
+		}
+	}
+
+	// Unanchored run: no task-repo, no worktree. Grant the team's tracked set
+	// (already the tracking source of truth, so no per-repo TracksRepoSystem
+	// re-check) rather than shipping a run with no GitHub credential at all.
+	if len(out) == 0 {
+		tracked, err := m.stores.TeamGitHubRepos.ListForTeamSystem(ctx, teamID)
+		if err != nil {
+			return nil, fmt.Errorf("list team tracked repos: %w", err)
+		}
+		for _, t := range tracked {
+			out = append(out, t.Slug())
 		}
 	}
 	return out, nil
