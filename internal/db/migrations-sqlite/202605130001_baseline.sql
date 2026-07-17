@@ -379,9 +379,9 @@ CREATE TABLE team_settings (
     -- team owns the model + auto-delegate toggle, users do not override.
     -- default_model is the Claude tier used for scoring + agent runs
     -- (clamped by org_settings.max_llm_model_tier when set).
-    -- auto_delegate_enabled defaults FALSE — new teams don't auto-spawn
-    -- agents until explicitly opted in. Local mode flips this true via
-    -- the explicit value config.Default() writes on first Save().
+    -- auto_delegate_enabled defaulted FALSE in this shipped (frozen)
+    -- baseline; migration 202607160002 rebuilds the table to default it
+    -- TRUE, matching the Postgres baseline and domain.DefaultTeamSettings.
     default_model                 TEXT NOT NULL DEFAULT 'sonnet',
     auto_delegate_enabled         INTEGER NOT NULL DEFAULT 0,
     updated_at                    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP

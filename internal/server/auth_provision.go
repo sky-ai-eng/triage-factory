@@ -237,7 +237,7 @@ func (s *Server) provisionOrg(ctx context.Context, userID uuid.UUID, name, slugB
 // org+team needs at provisioning time. Both rows take their values
 // entirely from the schema DEFAULT clauses — listing only the
 // foreign-key column lets the NOT NULL DEFAULTs (poll intervals, clone
-// protocol, model tier, auto_delegate_enabled=false) populate the rest.
+// protocol, model tier, auto_delegate_enabled=true) populate the rest.
 // ON CONFLICT DO NOTHING so a backfill/re-run can't clobber an admin's
 // edits.
 func seedSettingsRows(ctx context.Context, tx *sql.Tx, orgID, teamID uuid.UUID) error {

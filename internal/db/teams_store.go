@@ -99,7 +99,7 @@ type TeamsStore interface {
 	// it falls back to domain.DefaultTeamSettings() (matching the
 	// schema DEFAULT clauses) so callers see a populated struct
 	// rather than the Go zero value with empty model + zero thresholds
-	// + auto_delegate=false. Row-missing is a test-fixture-only case;
+	// + auto_delegate=true. Row-missing is a test-fixture-only case;
 	// production paths seed a row at team-create time. JiraProjects
 	// is a denormalized fast path keyed `(team_id, project_key)`;
 	// the per-project status rules live on JiraStatusRulesStore.
