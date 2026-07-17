@@ -57,11 +57,32 @@ func NewBranchArtifact(repoPath, ref, sha string, created bool) (Artifact, bool)
 		Kind:        ArtifactKindBranch,
 		Target:      repoPath,
 		ExternalID:  ref,
-		URL:         branchWebURL(repoPath, branch),
+		URL:         branchWebURL("", repoPath, branch),
 		State:       ArtifactStateBranchPushed,
 		DedupKey:    ArtifactDedupKey(ArtifactProviderGit, ArtifactKindBranch, repoPath, ref),
 		DetailsJSON: string(details),
 	}, true
+}
+
+// BranchArtifactWebURL builds the web link for a pushed branch ref on a specific
+// GitHub host base — github.com, a GHES host, or a GHEC data-residency host.
+// base is the org's user-facing web base (as reported by the credential
+// resolver's BaseURLFor); an empty base falls back to the public github.com
+// host.
+//
+// It exists because a branch artifact's URL is synthesized where the org's host
+// isn't knowable — the sandbox pre-push hook has no credentials, and this
+// domain constructor has no org context — so NewBranchArtifact composes it
+// against github.com and the host-side artifact sink re-anchors it here once the
+// base resolves. ok=false when ref is not a branch (a tag or other namespace) or
+// repoPath is not exactly owner/repo, so the sink leaves the existing URL
+// untouched rather than clobber it with a malformed link.
+func BranchArtifactWebURL(base, repoPath, ref string) (string, bool) {
+	branch, ok := strings.CutPrefix(ref, branchRefPrefix)
+	if !ok || !validOwnerRepo(repoPath) {
+		return "", false
+	}
+	return branchWebURL(base, repoPath, branch), true
 }
 
 // ParseBranchArtifactSHA extracts the pushed commit SHA from a branch artifact's
@@ -90,21 +111,26 @@ func validOwnerRepo(repoPath string) bool {
 	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
 }
 
-// branchWebURL builds the GitHub web link for a branch. Always github.com: the
-// URL is a human-facing link, and the artifact's source (a sandbox git remote
-// rewritten to the per-run proxy address) is not a usable web host, so the host
-// is never derived from it. GHES web hosts aren't modeled — the product is
-// GitHub-focused and a github.com link is the documented default.
+// branchWebURL builds the web link for a branch on the given GitHub host base
+// (github.com or a GHES/GHEC host); an empty base falls back to the public
+// github.com host. The base can't be derived from the artifact's source — a
+// sandbox git remote rewritten to the per-run proxy address is not a usable web
+// host — so it is passed in by the host-side caller that resolved it, and
+// defaulted to github.com where it isn't known yet (the constructor).
 //
 // Each branch path segment is URL-escaped: a branch name can legally contain
 // '#', '%', '?', space, etc., which would otherwise break the link (a '#' would
 // start a fragment). '/' separators are preserved (feature/x maps to
 // .../tree/feature/x), so escaping is per-segment. owner/repo are already
 // validated clean path segments, so they are not re-escaped.
-func branchWebURL(repoPath, branch string) string {
+func branchWebURL(base, repoPath, branch string) string {
+	base = strings.TrimRight(base, "/")
+	if base == "" {
+		base = "https://github.com"
+	}
 	segs := strings.Split(branch, "/")
 	for i, s := range segs {
 		segs[i] = url.PathEscape(s)
 	}
-	return "https://github.com/" + repoPath + "/tree/" + strings.Join(segs, "/")
+	return base + "/" + repoPath + "/tree/" + strings.Join(segs, "/")
 }

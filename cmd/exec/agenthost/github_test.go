@@ -65,7 +65,10 @@ func (f fakeGitHubResolver) TokenFor(_ context.Context, _, _ string) (githubapp.
 }
 
 func (f fakeGitHubResolver) BaseURLFor(_ context.Context, _ string) (string, error) {
-	panic("BaseURLFor is not used by the host-routed gh surface")
+	// Reached by UpsertArtifact when it re-anchors a branch artifact's URL to the
+	// org host; returns the configured base so a branch-capture test can assert
+	// the rewrite.
+	return f.baseURL, nil
 }
 
 func (f fakeGitHubResolver) OrgIdentityFor(_ context.Context, _ string) (string, string, bool) {

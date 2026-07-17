@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -40,12 +41,27 @@ func runRecordPush(host agenthost.Client, args []string) {
 		os.Exit(2)
 	}
 
-	owner, repo, ok := parseRemoteOwnerRepo(*remote)
+	// Bound the whole callback so the hook can never block the push
+	// indefinitely. The IPC path already has its own 30s call timeout; this also
+	// caps the local SQLite reads (base resolve) and the write, where a wedged
+	// operation (WAL lock, full disk) would otherwise hold git open with no
+	// backstop. On timeout the read/write errors, we report and return —
+	// best-effort, the push still proceeds.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Gate the remote on the org's OWN GitHub host — github.com, a GHES host, or
+	// a GHEC data-residency host — so a push to an unrelated remote (gitlab, a
+	// personal fork elsewhere) isn't recorded as an org branch artifact. The
+	// artifact sink re-anchors the recorded link to this same host, so a GHES
+	// org's branch link is correct end-to-end; the two resolve identically.
+	// An unresolvable base (orgGitHubHost returns "") falls back to a
+	// github.com-only gate, preserving the historical behavior on a read miss.
+	owner, repo, ok := parseRemoteOwnerRepo(*remote, orgGitHubHost(ctx, host))
 	if !ok {
-		// Unparseable remote (a non-GitHub host, a GHES layout we don't
-		// model). Best-effort: nothing to anchor the artifact to, so warn
-		// and return rather than failing the push.
-		fmt.Fprintf(os.Stderr, "hook record-push: could not parse owner/repo from remote %q; skipping\n", *remote)
+		// A remote that isn't the org's GitHub host, or an unparseable one.
+		// Best-effort: skip rather than fail the push.
+		fmt.Fprintf(os.Stderr, "hook record-push: remote %q is not the org's GitHub host (or unparseable); skipping\n", *remote)
 		return
 	}
 
@@ -59,17 +75,41 @@ func runRecordPush(host agenthost.Client, args []string) {
 		return
 	}
 
-	// Bound the write so the hook can never block the push indefinitely.
-	// The IPC path already has its own 30s call timeout; this also caps the
-	// local SQLite path, where a wedged write (WAL lock, full disk) would
-	// otherwise hold git open with no backstop. On timeout the upsert errors,
-	// we report and return — best-effort, the push still proceeds.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	if _, err := host.UpsertArtifact(ctx, artifact); err != nil {
 		fmt.Fprintf(os.Stderr, "hook record-push: record branch %s: %v\n", *ref, err)
 		return // best-effort: never fail the push
 	}
+}
+
+// orgHostResolver is the subset of the host client the pre-push hook needs to
+// learn the org's GitHub host. Only the in-process LocalClient (local mode)
+// implements it — the sandbox hook stands down before reaching here (the
+// pre-push script exits on TF_GIT_PUSH_CAPTURE=proxy), so the IPC client never
+// needs it.
+type orgHostResolver interface {
+	GithubWebHostBase(ctx context.Context) (string, error)
+}
+
+// orgGitHubHost resolves the org's GitHub web host (github.com, a GHES host, or
+// a GHEC data-residency host) for the remote gate, or "" when it can't be
+// resolved — a host client that doesn't expose it (the sandbox IPC path, which
+// never records here) or a base read failure. "" makes parseRemoteOwnerRepo
+// fall back to a github.com-only gate rather than reject every remote.
+func orgGitHubHost(ctx context.Context, host agenthost.Client) string {
+	whr, ok := host.(orgHostResolver)
+	if !ok {
+		return ""
+	}
+	base, err := whr.GithubWebHostBase(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hook record-push: resolve org github host: %v; falling back to github.com gate\n", err)
+		return ""
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // parseRemoteOwnerRepo extracts owner/repo from the remote URL git hands
@@ -79,20 +119,20 @@ func runRecordPush(host agenthost.Client, args []string) {
 // exactly owner/repo on a recognized host (the caller treats that as a
 // best-effort skip).
 //
-// Host gating: the artifact URL is hardcoded to github.com, so a non-GitHub
-// remote (gitlab.com/group/repo) must NOT be recorded — it would mint a
-// wrong github.com link for someone else's repo. Accepted hosts are
-// github.com itself and any loopback/private IP (the sandbox git proxy's
-// veth address, where the real upstream was github.com). A GHES/other public
-// host is skipped rather than mis-recorded — correct-web-host GHES support is
-// explicitly out of scope (see branchWebURL).
+// Host gating: a branch artifact is a GitHub entity, so a remote that isn't the
+// org's GitHub host (gitlab.com/group/repo, a personal fork elsewhere) must NOT
+// be recorded. baseHost is the org's resolved GitHub host — github.com, a GHES
+// host, or a GHEC data-residency host; a remote is accepted when its host
+// matches it (or is a loopback/private proxy address). An empty baseHost (the
+// org base couldn't be resolved) falls back to a github.com-only gate. See
+// isTrustedHost.
 //
 // A deliberately small, self-contained parser rather than importing
 // cmd/exec/gh's unexported equivalent: gh is a heavy subcommand package
 // and exporting its helper to share ~20 lines would widen its API and
 // invert the dependency. If a third copy appears, that's the rule-of-three
 // trigger to extract a shared leaf.
-func parseRemoteOwnerRepo(remote string) (owner, repo string, ok bool) {
+func parseRemoteOwnerRepo(remote, baseHost string) (owner, repo string, ok bool) {
 	remote = strings.TrimSpace(remote)
 	if remote == "" {
 		return "", "", false
@@ -116,7 +156,7 @@ func parseRemoteOwnerRepo(remote string) (owner, repo string, ok bool) {
 		host, path = stripUserInfo(rest[:slash]), rest[slash+1:]
 	}
 
-	if !isGitHubOrProxyHost(host) {
+	if !isTrustedHost(host, baseHost) {
 		return "", "", false
 	}
 	return splitOwnerRepoPath(path)
@@ -130,22 +170,33 @@ func stripUserInfo(host string) string {
 	return host
 }
 
-// isGitHubOrProxyHost reports whether host (a possibly host:port authority)
-// is one record-push trusts to be github.com: literally github.com, or a
-// loopback/private IP — the sandbox git proxy's veth address, which fronts
-// a github.com upstream. Any other public host (gitlab.com, a GHES domain)
-// is rejected so its pushes aren't mis-recorded under a github.com URL.
-func isGitHubOrProxyHost(host string) bool {
+// isTrustedHost reports whether host (a possibly host:port authority) is one
+// record-push trusts to be the org's GitHub. baseHost is the org's resolved
+// GitHub host:
+//
+//   - a case-insensitive match against baseHost — the org's own host, whether
+//     that's github.com, a GHES host, or a GHEC data-residency host — is trusted;
+//   - a loopback/private IP is trusted as the sandbox git proxy's veth address
+//     (which fronts the org upstream). The sandbox hook stands down in favor of
+//     the proxy's own capture, so this is a belt-and-suspenders accept;
+//   - when baseHost is empty (the org base couldn't be resolved), it falls back
+//     to the historical github.com-only accept so a transient resolver miss
+//     doesn't silently stop recording public-github pushes.
+//
+// Anything else (gitlab.com, a github.com push from a GHES org) is rejected so
+// its pushes aren't recorded — and, post-anchoring, mis-linked — under the org's
+// host.
+func isTrustedHost(host, baseHost string) bool {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	if host == "github.com" {
+	if baseHost != "" && strings.EqualFold(host, baseHost) {
 		return true
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		return ip.IsLoopback() || ip.IsPrivate()
 	}
-	return false
+	return baseHost == "" && strings.EqualFold(host, "github.com")
 }
 
 // splitOwnerRepoPath takes the path portion after the host and resolves it

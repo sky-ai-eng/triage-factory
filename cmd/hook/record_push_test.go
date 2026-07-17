@@ -34,6 +34,11 @@ func newTestStores(t *testing.T) (db.Stores, string) {
 	if err := db.Migrate(conn, "sqlite3"); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	// Seed the local sentinel org so org_settings (org_id → orgs FK) can be
+	// written — the branch-capture gate resolves the org's GitHub base from it.
+	if _, err := conn.Exec(`INSERT INTO orgs (id, slug, name) VALUES (?, 'local', 'Local')`, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("seed org: %v", err)
+	}
 	// Minimal valid run: event-triggered (creator_user_id NULL) + a
 	// non-blueprint origin so the parent-pairing CHECKs don't demand a
 	// task/prompt/blueprint chain. org_id/team_id default to the local
@@ -163,36 +168,104 @@ func TestRecordPush_SkipsNonBranchRef(t *testing.T) {
 	}
 }
 
+// TestRecordPush_GHESHostRecordsAndAnchorsURL is the end-to-end proof for the
+// local-mode GHES path: with the org's GitHub base set to a GHES host, a push to
+// that host is captured (the gate accepts it) AND the recorded branch link is
+// anchored to the GHES host, not github.com. This is the scenario the earlier
+// github.com-only gate silently dropped before an artifact was ever written.
+func TestRecordPush_GHESHostRecordsAndAnchorsURL(t *testing.T) {
+	stores, runID := newTestStores(t)
+	if err := stores.Orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID,
+		domain.OrgSettings{GitHubBaseURL: "https://github.corp.example.com"}); err != nil {
+		t.Fatalf("seed org github base: %v", err)
+	}
+	host := hostFor(stores, runID, false)
+
+	runRecordPush(host, []string{
+		"--remote", "https://github.corp.example.com/octo/repo.git",
+		"--ref", "refs/heads/feature/x",
+		"--sha", "abc123",
+		"--new=true",
+	})
+
+	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
+	if err != nil {
+		t.Fatalf("ListByRun: %v", err)
+	}
+	if len(arts) != 1 {
+		t.Fatalf("got %d artifacts, want 1 (a GHES push must be captured in local mode)", len(arts))
+	}
+	if want := "https://github.corp.example.com/octo/repo/tree/feature/x"; arts[0].URL != want {
+		t.Errorf("url = %q, want %q (anchored to the GHES host, not github.com)", arts[0].URL, want)
+	}
+}
+
+// TestRecordPush_GHESOrgSkipsForeignHost proves the gate still excludes a push
+// to a host that isn't the org's GitHub — here github.com from a GHES org — so
+// an unrelated remote is never recorded (and never mis-anchored to the GHES
+// host).
+func TestRecordPush_GHESOrgSkipsForeignHost(t *testing.T) {
+	stores, runID := newTestStores(t)
+	if err := stores.Orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID,
+		domain.OrgSettings{GitHubBaseURL: "https://github.corp.example.com"}); err != nil {
+		t.Fatalf("seed org github base: %v", err)
+	}
+	host := hostFor(stores, runID, false)
+
+	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/heads/main", "--sha", "xyz", "--new=true"})
+
+	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
+	if err != nil {
+		t.Fatalf("ListByRun: %v", err)
+	}
+	if len(arts) != 0 {
+		t.Fatalf("got %d artifacts, want 0 (github.com is not the GHES org's host)", len(arts))
+	}
+}
+
 func TestParseRemoteOwnerRepo(t *testing.T) {
+	const ghes = "github.corp.example.com"
 	cases := []struct {
-		remote string
-		owner  string
-		repo   string
-		ok     bool
+		remote   string
+		baseHost string
+		owner    string
+		repo     string
+		ok       bool
 	}{
-		{"https://github.com/octo/repo.git", "octo", "repo", true},
-		{"https://github.com/octo/repo", "octo", "repo", true},
-		{"git@github.com:octo/repo.git", "octo", "repo", true},
-		{"git@github.com:octo/repo", "octo", "repo", true},
-		{"ssh://git@github.com/octo/repo.git", "octo", "repo", true},
-		// Sandbox git-proxy rewrites the remote to its veth address; the
-		// owner/repo path still parses cleanly.
-		{"http://10.42.0.1:38573/octo/repo", "octo", "repo", true},
-		{"http://127.0.0.1:9000/octo/repo", "octo", "repo", true},
+		// A github.com org: its own host parses in every remote shape.
+		{"https://github.com/octo/repo.git", "github.com", "octo", "repo", true},
+		{"https://github.com/octo/repo", "github.com", "octo", "repo", true},
+		{"git@github.com:octo/repo.git", "github.com", "octo", "repo", true},
+		{"git@github.com:octo/repo", "github.com", "octo", "repo", true},
+		{"ssh://git@github.com/octo/repo.git", "github.com", "octo", "repo", true},
+		// A GHES org: its own host is accepted (URL- and SCP-style, case-
+		// insensitive), which is the whole point of this change.
+		{"https://github.corp.example.com/octo/repo.git", ghes, "octo", "repo", true},
+		{"git@github.corp.example.com:octo/repo.git", ghes, "octo", "repo", true},
+		{"https://GitHub.Corp.Example.Com/octo/repo", ghes, "octo", "repo", true},
+		// ...but github.com is NOT the GHES org's host, so a push there is not
+		// recorded (it isn't the org's repo, and would be mis-anchored).
+		{"https://github.com/octo/repo", ghes, "", "", false},
+		// Sandbox git-proxy veth (loopback/private) is trusted regardless of base.
+		{"http://10.42.0.1:38573/octo/repo", "github.com", "octo", "repo", true},
+		{"http://127.0.0.1:9000/octo/repo", ghes, "octo", "repo", true},
+		// Base unresolved ("") falls back to a github.com-only gate.
+		{"https://github.com/octo/repo", "", "octo", "repo", true},
+		{"https://github.corp.example.com/octo/repo", "", "", "", false},
 		// Unparseable / unsupported shapes -> best-effort skip.
-		{"", "", "", false},
-		{"https://github.com/octo", "", "", false},
-		// Non-GitHub public hosts are rejected even when the path is exactly
-		// owner/repo — the github.com web URL would be wrong for them.
-		{"https://gitlab.com/group/repo.git", "", "", false},
-		{"git@gitlab.com:group/repo.git", "", "", false},
-		{"https://gitlab.com/group/subgroup/repo.git", "", "", false},
+		{"", "github.com", "", "", false},
+		{"https://github.com/octo", "github.com", "", "", false},
+		// A non-org public host is rejected even when the path is exactly
+		// owner/repo — the recorded link would be wrong for it.
+		{"https://gitlab.com/group/repo.git", "github.com", "", "", false},
+		{"git@gitlab.com:group/repo.git", ghes, "", "", false},
+		{"https://gitlab.com/group/subgroup/repo.git", "github.com", "", "", false},
 	}
 	for _, c := range cases {
-		owner, repo, ok := parseRemoteOwnerRepo(c.remote)
+		owner, repo, ok := parseRemoteOwnerRepo(c.remote, c.baseHost)
 		if ok != c.ok || owner != c.owner || repo != c.repo {
-			t.Errorf("parseRemoteOwnerRepo(%q) = (%q,%q,%v), want (%q,%q,%v)",
-				c.remote, owner, repo, ok, c.owner, c.repo, c.ok)
+			t.Errorf("parseRemoteOwnerRepo(%q, base=%q) = (%q,%q,%v), want (%q,%q,%v)",
+				c.remote, c.baseHost, owner, repo, ok, c.owner, c.repo, c.ok)
 		}
 	}
 }
