@@ -208,8 +208,9 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 		}
 		if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
 			// The eager PR worktree's per-run branch is namespaced by the id
-			// that CreateForPR ran under — the worktree-dir basename (the first
-			// step's run id), NOT the blueprint_run id — so reclaim with that.
+			// CreateForPR ran under — the worktree-dir basename, which is the
+			// blueprint run id (the run-root's key). filepath.Base derives it from
+			// the path so this stays correct regardless of the key.
 			worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.prNumber, filepath.Base(cfg.wtPath))
 		}
 	} else if cfg.runRoot != "" {
@@ -247,18 +248,15 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 			}
 		}
 		// Clean the agent's ghost ~/.claude/projects entry (keyed on the session
-		// cwd = cfg.wtPath, the first step's run-root) BEFORE removing the
-		// run-root dirs — RemoveClaudeProjectDir resolves the cwd via EvalSymlinks
-		// and silently no-ops once the dir is gone.
+		// cwd = cfg.wtPath, the blueprint run-root) BEFORE removing the run-root
+		// dir — RemoveClaudeProjectDir resolves the cwd via EvalSymlinks and
+		// silently no-ops once the dir is gone.
 		worktree.RemoveClaudeProjectDir(cfg.wtPath)
-		// Remove each step's run-root dir. `workspace add` materializes under
-		// runDir(stepRunID), and the first step's run-root holds _scratch; the
-		// old RemoveRunRoot(blueprintRunID) was a no-op (no dir is ever created
-		// under the blueprint_run id — the agent's RUN_ID is always a step run
-		// id). RemoveRunRoot is a safe no-op for a step that materialized nothing.
-		for _, sr := range stepRuns {
-			worktree.RemoveRunRoot(sr.ID)
-		}
+		// The run-root is keyed by the blueprint run id (setup and the cold
+		// rehydrate both build it there), and every `workspace add` checkout
+		// nests under it, so one removal reclaims the whole tree — the per-step
+		// run_worktrees rows and their PR config were already reclaimed above.
+		worktree.RemoveRunRoot(blueprintRunID)
 		return
 	}
 	worktree.RemoveClaudeProjectDir(cfg.wtPath)

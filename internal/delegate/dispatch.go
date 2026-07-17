@@ -795,13 +795,16 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 			cfg runConfig
 			err error
 		)
+		// The run-root is blueprint-scoped (shared across steps, rebuilt under the
+		// same key on rehydrate), so setup keys it by br.ID; run.ID stays the
+		// per-run identity for the worktree_path / run_worktrees records.
 		switch task.EntitySource {
 		case "github":
-			cfg, err = s.setupGitHub(ctx, orgID, run.ID, task, gh, execSandbox)
+			cfg, err = s.setupGitHub(ctx, orgID, run.ID, br.ID, task, gh, execSandbox)
 		case "jira":
-			cfg, err = s.setupJira(ctx, orgID, run.ID, task, gh)
+			cfg, err = s.setupJira(ctx, orgID, run.ID, br.ID, task, gh)
 		case "slack":
-			cfg, err = s.setupSlack(ctx, orgID, run.ID, task, gh)
+			cfg, err = s.setupSlack(ctx, orgID, run.ID, br.ID, task, gh)
 		default:
 			err = fmt.Errorf("unsupported task source: %s", task.EntitySource)
 		}
