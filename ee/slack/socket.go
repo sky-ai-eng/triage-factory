@@ -45,9 +45,17 @@ var (
 	socketBackoffResetAfter = 60 * time.Second
 	socketDialTimeout       = 15 * time.Second
 	socketHelloTimeout      = 10 * time.Second
-	socketReadDeadline      = 45 * time.Second
-	socketAckTimeout        = 5 * time.Second
-	socketNow               = time.Now
+	// Liveness is an active ping, not a read deadline: an idle Socket Mode
+	// connection legitimately carries no data frames for long stretches (Slack
+	// keeps it warm with WebSocket ping control frames the library auto-pongs,
+	// which never surface through Read), so a data-frame read deadline would
+	// tear down a healthy connection. The pinger probes the peer every
+	// socketPingInterval, bounded by socketPingTimeout; a failed probe is what
+	// declares the connection dead.
+	socketPingInterval = 30 * time.Second
+	socketPingTimeout  = 10 * time.Second
+	socketAckTimeout   = 5 * time.Second
+	socketNow          = time.Now
 )
 
 // Per-connection lifecycle states (dialing -> open -> draining -> dead,
