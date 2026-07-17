@@ -345,7 +345,7 @@ func (s *Spawner) executorGitGate(ctx context.Context, info agenthost.RunInfo, s
 // setup failure. Only the executor role reaches here (bringUpExecutorSandbox
 // returns nil otherwise).
 func (s *Spawner) sidecarProvisionFor(orgID, runID string) agentproc.SidecarProvisionFunc {
-	_, myBootEpoch := s.executorIdentity()
+	myID, myBootEpoch := s.executorIdentity()
 	return func(provCtx context.Context, sidecarPubKeyB64 string) ([]byte, int64, error) {
 		// Publish the sidecar's per-run pubkey onto the claim + fire the
 		// cred_request doorbell. MarkAwaitingCredentials is the same call the
@@ -360,12 +360,17 @@ func (s *Spawner) sidecarProvisionFor(orgID, runID string) agentproc.SidecarProv
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		for {
-			_, bootEpoch, sealed, ok, err := s.runCredentials.Get(provCtx, orgID, runID)
+			credExecutorID, bootEpoch, sealed, ok, err := s.runCredentials.Get(provCtx, orgID, runID)
 			if err != nil {
 				dispatchLog.Warn("read run credential bundle failed; retrying", "run", runID, "error", err)
-			} else if ok && bootEpoch == myBootEpoch {
+			} else if ok && credExecutorID == myID && bootEpoch == myBootEpoch {
 				// Opaque ciphertext — the orchestrator relays it verbatim and
-				// never opens it (only the sidecar's private key can).
+				// never opens it (only the sidecar's private key can). Gate on the
+				// bundle's stamped (executor, boot_epoch) matching ours: a row left
+				// by a prior claimant — a dead executor's, or an earlier boot's —
+				// is sealed to a sidecar key this run never minted, so relaying it
+				// would just fail the unseal. Skip and keep polling until the brain
+				// re-seals for THIS claim.
 				return sealed, bootEpoch, nil
 			}
 			select {
