@@ -27,6 +27,13 @@ type RunQueueCredentialsSeeder struct {
 	// produce in real flows (e.g. the running state that follows a
 	// delivered bundle) without depending on those subsystems here.
 	ForceStatus func(t *testing.T, runID, status string)
+
+	// SeedCredential writes a run_credentials bundle for runID (via the
+	// RunCredentialsStore the dialect factory holds), and CredentialExists
+	// reports whether one is present — so the suite can assert the
+	// stale-bundle clear without RunQueueStore knowing about that table.
+	SeedCredential   func(t *testing.T, runID string)
+	CredentialExists func(t *testing.T, runID string) bool
 }
 
 // RunRunQueueCredentialsConformance covers the per-run credential-pubkey
@@ -191,6 +198,30 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		}
 		if got.ExecutorID != "" || got.BootEpoch != 0 {
 			t.Errorf("ownership = (%q, %d) after RequeueRun, want cleared", got.ExecutorID, got.BootEpoch)
+		}
+	})
+
+	t.Run("MarkAwaitingCredentials_clears_stale_bundle", func(t *testing.T) {
+		// A re-claim (or a different executor whose boot_epoch collides) mints a
+		// NEW per-run sidecar key. A bundle sealed to the PRIOR key must not
+		// survive into this attempt — the epoch check can't tell it apart, so
+		// the executor would relay an un-unsealable box ("sealed to a different
+		// key"). MarkAwaitingCredentials clears it as the recipient key rotates.
+		store, orgID, seed := mk(t)
+		if seed.SeedCredential == nil || seed.CredentialExists == nil {
+			t.Skip("seeder does not support credential seeding")
+		}
+		runID := seed.EnqueueRun(t)
+		claim(t, store, runID)
+		seed.SeedCredential(t, runID)
+		if !seed.CredentialExists(t, runID) {
+			t.Fatal("precondition: seeded bundle should exist before MarkAwaitingCredentials")
+		}
+		if matched, err := store.MarkAwaitingCredentials(ctx, orgID, runID, pubKey); err != nil || !matched {
+			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
+		}
+		if seed.CredentialExists(t, runID) {
+			t.Error("stale run_credentials bundle survived MarkAwaitingCredentials; want it cleared as the key rotated")
 		}
 	})
 

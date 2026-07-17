@@ -246,7 +246,13 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 }
 
 func (s *runQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, runID, credPubKey string) (bool, error) {
-	res, err := s.conn.ExecContext(ctx, `
+	tx, err := s.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE runs SET status = 'awaiting_credentials', cred_pubkey = NULLIF($3, '')
 		WHERE org_id = $1 AND id = $2 AND status = 'running'
 	`, orgID, runID, credPubKey)
@@ -255,6 +261,24 @@ func (s *runQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, runI
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
+		return false, err
+	}
+	if n > 0 {
+		// The per-run recipient key just rotated to this bring-up's sidecar
+		// key. Any bundle already sealed to a PRIOR key — a previous attempt's
+		// sidecar, or a dead executor's whose boot_epoch collides with the
+		// claimant's — can never be unsealed by this sidecar, and the reader's
+		// epoch check can't tell them apart. Drop it in the same tx as the key
+		// rotation so the brain (which re-seals to the fresh cred_pubkey on the
+		// doorbell below) is the only writer left, and the executor's poll can
+		// only ever surface a correctly-keyed bundle.
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM run_credentials WHERE org_id = $1 AND run_id = $2
+		`, orgID, runID); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return false, err
 	}
 	if n > 0 {

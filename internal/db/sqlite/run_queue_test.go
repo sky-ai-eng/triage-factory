@@ -459,6 +459,20 @@ func TestRunQueueStore_SQLite_Credentials(t *testing.T) {
 					t.Fatalf("force status %q: %v", status, err)
 				}
 			},
+			SeedCredential: func(t *testing.T, runID string) {
+				t.Helper()
+				if err := stores.RunCredentials.Put(ctx, org, runID, "seed-executor", 1, []byte("stale-sealed")); err != nil {
+					t.Fatalf("seed credential: %v", err)
+				}
+			},
+			CredentialExists: func(t *testing.T, runID string) bool {
+				t.Helper()
+				_, _, _, ok, err := stores.RunCredentials.Get(ctx, org, runID)
+				if err != nil {
+					t.Fatalf("get credential: %v", err)
+				}
+				return ok
+			},
 		}
 		return stores.RunQueue, org, seed
 	})

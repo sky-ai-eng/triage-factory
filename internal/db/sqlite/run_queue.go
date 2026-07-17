@@ -135,15 +135,23 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 	return err
 }
 
-// MarkAwaitingCredentials mirrors the Postgres impl's status flip. No
-// ctlbus doorbell — the tf_ctl fabric is Postgres-only (local mode has no
-// LISTEN/NOTIFY), and never reached in practice anyway: local mode is
-// always role=all, which never parks a run in this status.
+// MarkAwaitingCredentials mirrors the Postgres impl's status flip and the
+// stale-bundle clear (see that impl for why the rotated key invalidates any
+// prior sealed bundle). No ctlbus doorbell — the tf_ctl fabric is
+// Postgres-only (local mode has no LISTEN/NOTIFY), and never reached in
+// practice anyway: local mode is always role=all, which never parks a run in
+// this status. The clear runs regardless for dialect + conformance symmetry.
 func (s *runQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, runID, credPubKey string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	res, err := s.conn.ExecContext(ctx, `
+	tx, err := s.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE runs SET status = 'awaiting_credentials', cred_pubkey = NULLIF(?, '')
 		WHERE id = ? AND status = 'running'
 	`, credPubKey, runID)
@@ -151,7 +159,20 @@ func (s *runQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, runI
 		return false, err
 	}
 	n, err := res.RowsAffected()
-	return n > 0, err
+	if err != nil {
+		return false, err
+	}
+	if n > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM run_credentials WHERE run_id = ?
+		`, runID); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (s *runQueueStore) GetClaim(ctx context.Context, orgID, runID string) (db.AwaitingCredentialsRun, bool, error) {
