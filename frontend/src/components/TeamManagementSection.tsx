@@ -32,7 +32,7 @@ export default function TeamManagementSection() {
   const [archivedError, setArchivedError] = useState<string | null>(null)
   const [restoringId, setRestoringId] = useState<string | null>(null)
 
-  // Which team's archive confirm is open, if any (TFAC-448's ArchiveTeamModal,
+  // Which team's archive confirm is open, if any (ArchiveTeamModal,
   // reused here so the org-wide list gets the same destructive-confirm as the
   // per-team Settings danger zone).
   const [archiveTarget, setArchiveTarget] = useState<{ id: string; name: string } | null>(null)
