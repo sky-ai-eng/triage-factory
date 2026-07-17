@@ -550,6 +550,52 @@ func TestLifecycleAdapter_RunStatus_RunningThenActivity_SetsDescriptionDerivedTe
 	})
 }
 
+// TestLifecycleAdapter_RunStatus_PreRunningPhases_ShowSetupProgress walks a
+// run through queued → cloning → running and pins that the indicator starts
+// at the first setup phase's pair (on both surfaces — no default-verbs gap
+// before the agent is live), retexts on the next phase, and swaps to the
+// generic working pair once the agent goes live.
+func TestLifecycleAdapter_RunStatus_PreRunningPhases_ShowSetupProgress(t *testing.T) {
+	withFastLifecycleTimings(t)
+	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
+	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
+	fx := seedSlackMentionRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
+
+	adapter := newTestLifecycleAdapter(stores, staticURL(""))
+	runs := map[string]*runEntry{}
+	t.Cleanup(func() { stopAllLifecycleWorkers(t, runs) })
+	ctx := context.Background()
+
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "queued"), runs)
+	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
+	first := fake.statusCalls()[0]
+	if first.Status != "is queued…" || len(first.Loading) != 1 || first.Loading[0] != "Waiting for a free agent slot…" {
+		t.Errorf("queued status call = %+v, want the queued phase pair on both surfaces", first)
+	}
+
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "cloning"), runs)
+	waitForCondition(t, 2*time.Second, func() bool {
+		calls := fake.statusCalls()
+		if len(calls) == 0 {
+			return false
+		}
+		last := calls[len(calls)-1]
+		return last.Status == "is preparing a workspace…" &&
+			len(last.Loading) == 1 && last.Loading[0] == "Preparing a workspace…"
+	})
+
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
+	waitForCondition(t, 2*time.Second, func() bool {
+		calls := fake.statusCalls()
+		if len(calls) == 0 {
+			return false
+		}
+		last := calls[len(calls)-1]
+		return last.Status == slackLifecycleInitialStatusText &&
+			len(last.Loading) == 1 && last.Loading[0] == slackLifecycleInitialLoadingText
+	})
+}
+
 // TestLifecycleAdapter_RunStatus_ActivityBurst_DebounceCollapsesToOneCall
 // fires a rapid burst of activity sentinels and pins that they collapse to
 // exactly one additional setStatus call, carrying the LAST event's text.
