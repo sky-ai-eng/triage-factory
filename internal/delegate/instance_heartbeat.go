@@ -256,7 +256,14 @@ func (s *Spawner) heartbeatOnce(ctx context.Context) bool {
 	if s.partitionFenced.CompareAndSwap(true, false) {
 		dispatchLog.Warn("instance un-fenced: heartbeat write succeeded again after a partition — resuming claims", "instance", id)
 	}
-	s.draining.Store(draining)
+	// Log the drain flip so an operator's CLI drain/resume shows up in the
+	// executor's own log. CompareAndSwap fires only on a real transition.
+	switch {
+	case draining && s.draining.CompareAndSwap(false, true):
+		dispatchLog.Info("instance draining: operator asked this executor to quiesce — no new runs will be claimed; live runs finish or hibernate on idle", "instance", id)
+	case !draining && s.draining.CompareAndSwap(true, false):
+		dispatchLog.Info("instance resumed: drain cleared — claiming new runs again", "instance", id)
+	}
 	return true
 }
 
