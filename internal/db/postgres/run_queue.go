@@ -222,20 +222,25 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 
 func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr string) error {
 	// attempts left as-is (the claim counted this try); claimed_at cleared.
-	// Guarded on 'running' so a stale requeue can't resurrect a terminal row.
-	// The ownership stamp is cleared too: a queued row has no owner, and a
-	// stale pair here would misdirect any owner-keyed reader (the reaper,
-	// the fleet view) toward an instance that stopped touching the row.
-	// preferred_executor_id is cleared for the same reason (TFAC-587): a
-	// requeue's stamp likely points at the executor that just failed the run;
-	// NULL means "unowned, claimable by anyone now" — a live executor re-warms
-	// it with no aging delay, which is the correct placement-is-advisory
+	// Guarded on the two mid-setup statuses so a stale requeue can't resurrect
+	// a terminal row: 'running' (the ordinary claimed state) and
+	// 'awaiting_credentials' (a run whose sidecar bring-up already published its
+	// cred pubkey before failing — the setup-failure caller is the only one that
+	// requeues, and it fires strictly before the agent executes, so neither
+	// status can name a live agent here). cred_pubkey is cleared so the next
+	// claim re-publishes a fresh one. The ownership stamp is cleared too: a
+	// queued row has no owner, and a stale pair here would misdirect any
+	// owner-keyed reader (the reaper, the fleet view) toward an instance that
+	// stopped touching the row. preferred_executor_id is cleared for the same
+	// reason: a requeue's stamp likely points at the executor that just failed
+	// the run; NULL means "unowned, claimable by anyone now" — a live executor
+	// re-warms it with no aging delay, which is the correct placement-is-advisory
 	// answer on a recovery path (affinity is re-earned on the next enqueue,
 	// never carried stale).
 	_, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', queued_at = now(), claimed_at = NULL, result_summary = $3,
 			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
-		WHERE org_id = $1 AND id = $2 AND status = 'running'
+		WHERE org_id = $1 AND id = $2 AND status IN ('running', 'awaiting_credentials')
 	`, orgID, runID, lastErr)
 	return err
 }

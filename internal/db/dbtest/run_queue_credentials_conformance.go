@@ -194,6 +194,40 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		}
 	})
 
+	t.Run("RequeueRun_from_awaiting_credentials_requeues", func(t *testing.T) {
+		// The stranding regression: a sidecar bring-up that fails AFTER
+		// MarkAwaitingCredentials leaves the run in 'awaiting_credentials', and
+		// the setup-failure path requeues it via RequeueRun (not the unused
+		// RequeueAwaitingCredentials). A 'running'-only guard silently no-ops
+		// here, stranding the run forever while the backstop sweep re-seals its
+		// bundle every tick. RequeueRun must reset it and make it claimable.
+		store, orgID, seed := mk(t)
+		runID := seed.EnqueueRun(t)
+		claim(t, store, runID)
+		if matched, err := store.MarkAwaitingCredentials(ctx, orgID, runID, pubKey); err != nil || !matched {
+			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
+		}
+
+		// No ForceStatus back to 'running' — requeue straight from
+		// 'awaiting_credentials', the exact state the failed bring-up leaves.
+		if err := store.RequeueRun(ctx, orgID, runID, "sidecar bring-up failed"); err != nil {
+			t.Fatalf("RequeueRun: %v", err)
+		}
+		got, ok, err := store.GetClaim(ctx, orgID, runID)
+		if err != nil || !ok {
+			t.Fatalf("GetClaim = (ok=%v, err=%v), want (true, nil)", ok, err)
+		}
+		if got.CredPubKey != "" {
+			t.Errorf("CredPubKey = %q after RequeueRun, want empty", got.CredPubKey)
+		}
+		if got.ExecutorID != "" || got.BootEpoch != 0 {
+			t.Errorf("ownership = (%q, %d) after RequeueRun, want cleared", got.ExecutorID, got.BootEpoch)
+		}
+		// The run is genuinely back on the queue: it re-claims. A no-op requeue
+		// would have left it in 'awaiting_credentials', and this would fail.
+		claim(t, store, runID)
+	})
+
 	t.Run("ResetProcessingRuns_clears_key", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		runID := seed.EnqueueRun(t)

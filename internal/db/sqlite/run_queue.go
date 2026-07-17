@@ -121,13 +121,16 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 		return err
 	}
 	// attempts is left as-is (the claim counted this try); claimed_at cleared so
-	// the row reads clean for the next claim. Guarded on 'running' so a stale
-	// requeue can't resurrect a terminal/dormant row. The ownership stamp is
-	// cleared too: a queued row has no owner (mirrors the Postgres impl).
+	// the row reads clean for the next claim. Guarded on the two mid-setup
+	// statuses ('running' and 'awaiting_credentials') so a stale requeue can't
+	// resurrect a terminal/dormant row, matching the Postgres impl — the
+	// setup-failure caller is the only one that requeues and fires before the
+	// agent executes, so neither status names a live agent here. The ownership
+	// stamp is cleared too: a queued row has no owner (mirrors the Postgres impl).
 	_, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', queued_at = CURRENT_TIMESTAMP, claimed_at = NULL, result_summary = ?,
 			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
-		WHERE id = ? AND status = 'running'
+		WHERE id = ? AND status IN ('running', 'awaiting_credentials')
 	`, lastErr, runID)
 	return err
 }
