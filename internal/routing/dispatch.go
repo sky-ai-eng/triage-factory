@@ -519,6 +519,12 @@ func (r *Router) fireMatchedTriggers(orgID string, evt domain.Event, entityID st
 		// kill-switch / team_agents / claim all read a real team.
 		acting := effectiveActingTeam(teamID, teamIDValue(task))
 		if !r.autoDelegateEnabledForTeam(context.Background(), acting) {
+			// Diagnosable, not silent: a matched trigger that never fires because
+			// auto-delegate is off for the team is the "a task was created but no
+			// run started" surprise. One line at Info names the reason and the
+			// knob (team_settings.auto_delegate_enabled).
+			routerLog.Info("auto-trigger skipped: auto-delegate disabled for team",
+				"team", acting, "task_id", task.ID, "event_type", evt.EventType, "matched_triggers", len(triggers))
 			continue
 		}
 		for _, trigger := range triggers {
