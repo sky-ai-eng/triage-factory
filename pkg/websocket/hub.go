@@ -181,7 +181,7 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID, si
 	h.indexLocked(c)
 	h.mu.Unlock()
 
-	wsLog.Info("client connected", "total", h.ClientCount())
+	wsLog.Debug("client connected", "total", h.ClientCount())
 
 	// Start write pump in background
 	go h.writePump(c)
@@ -202,7 +202,7 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, userID, orgID, si
 	// the error (broken pipe / already-closed) is not actionable.
 	_ = conn.Close(ws.StatusNormalClosure, "")
 
-	wsLog.Info("client disconnected", "total", h.ClientCount())
+	wsLog.Debug("client disconnected", "total", h.ClientCount())
 }
 
 // Broadcast sends an event to all connected clients, gated by the
