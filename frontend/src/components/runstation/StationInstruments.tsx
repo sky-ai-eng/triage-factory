@@ -1,6 +1,12 @@
 import { useMemo } from 'react'
 import type { AgentMessage, AgentRun } from '../../types'
-import { formatDurationMs, formatElapsed } from '../../lib/runStatus'
+import {
+  formatDurationMs,
+  formatElapsed,
+  QUEUE_DWELL_VISIBLE_MS,
+  queueDwellMs,
+  workStartedAt,
+} from '../../lib/runStatus'
 import { compactNum, tokenTotals, tint, type StationState } from './stationStyle'
 import ArtifactList from '../ArtifactList'
 
@@ -24,13 +30,19 @@ export function TelemetryRail({ run, messages, state, now, onOpenArtifact }: Pro
   // transcript actually grew.
   const tok = useMemo(() => tokenTotals(messages), [messages])
   const contextUsed = useMemo(() => latestContextSize(messages), [messages])
-  const started = run.StartedAt ? new Date(run.StartedAt) : null
+  // Working time and queue dwell are separate gauges: elapsed/running tick
+  // from the claim stamp (queue time never inflates them), the queued readout
+  // carries the wait — live while the run is in line, settled once it ran.
+  const isQueued = run.Status === 'queued'
+  const workStart = workStartedAt(run)
+  const started = !isQueued && workStart ? new Date(workStart) : null
   const duration =
     run.DurationMs != null && run.DurationMs > 0
       ? formatDurationMs(run.DurationMs)
-      : started
-        ? formatElapsed(run.StartedAt, now)
+      : workStart
+        ? formatElapsed(workStart, now)
         : null
+  const dwellMs = queueDwellMs(run, now)
 
   return (
     <aside className="hidden w-[256px] shrink-0 overflow-y-auto border-l border-border-subtle bg-black/[0.012] px-4 py-4 lg:block">
@@ -62,7 +74,20 @@ export function TelemetryRail({ run, messages, state, now, onOpenArtifact }: Pro
           <Readout k="cost" v={`$${run.TotalCostUSD.toFixed(run.TotalCostUSD < 1 ? 4 : 2)}`} />
         )}
         {run.Model && <Readout k="model" v={shortModel(run.Model)} title={run.Model} />}
-        {duration && <Readout k={run.DurationMs != null ? 'elapsed' : 'running'} v={duration} />}
+        {duration && (run.DurationMs != null || !isQueued) && (
+          <Readout k={run.DurationMs != null ? 'elapsed' : 'running'} v={duration} />
+        )}
+        {dwellMs != null && (isQueued || dwellMs >= QUEUE_DWELL_VISIBLE_MS) && (
+          <Readout
+            k="queued"
+            v={formatDurationMs(dwellMs)}
+            title={
+              isQueued
+                ? 'Waiting for a free run slot'
+                : 'Time spent waiting in the queue before this run started'
+            }
+          />
+        )}
         {started && (
           <Readout k="started" v={clockStamp(started)} title={started.toLocaleString()} />
         )}

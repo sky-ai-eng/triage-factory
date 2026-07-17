@@ -317,3 +317,47 @@ func TestParsePlatformReserveMB(t *testing.T) {
 		}
 	}
 }
+
+// TestNoteCapSaturationTransitions pins the saturation episode's state
+// machine: a blocked acquire with an empty queue stays quiet (full
+// utilization is not a backlog), a blocked acquire with queued work opens
+// the episode exactly once, and an immediate acquire closes it.
+func TestNoteCapSaturationTransitions(t *testing.T) {
+	s, database, _, _, run0 := reactorFixture(t, "capsat", 1, "completed", "finish")
+	ctx := context.Background()
+
+	s.noteCapAcquireBlocked(ctx, 4)
+	if s.capSaturated.Load() {
+		t.Error("blocked acquire with an empty queue must not open a saturation episode")
+	}
+
+	if _, err := database.Exec(`UPDATE runs SET status = 'queued' WHERE id = ?`, run0); err != nil {
+		t.Fatalf("force queued: %v", err)
+	}
+	s.noteCapAcquireBlocked(ctx, 4)
+	if !s.capSaturated.Load() {
+		t.Error("blocked acquire with a queued run must open a saturation episode")
+	}
+	// Re-entry while already saturated is a no-op, not a second episode.
+	s.noteCapAcquireBlocked(ctx, 4)
+	if !s.capSaturated.Load() {
+		t.Error("episode must stay open across repeated blocked acquires")
+	}
+
+	s.noteCapAcquireImmediate(4)
+	if s.capSaturated.Load() {
+		t.Error("an immediate acquire must close the saturation episode")
+	}
+}
+
+// TestNoteCapSaturation_NilRunQueueSafe guards test/partial-wiring setups: a
+// spawner with no RunQueueStore must not panic when the dispatcher helpers
+// fire.
+func TestNoteCapSaturation_NilRunQueueSafe(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	s.noteCapAcquireBlocked(context.Background(), 4)
+	if s.capSaturated.Load() {
+		t.Error("nil run queue must never open a saturation episode")
+	}
+	s.noteCapAcquireImmediate(4)
+}

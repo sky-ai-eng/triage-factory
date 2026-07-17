@@ -538,3 +538,66 @@ func seedPgRunQueueFixture(t *testing.T, h *pgtest.Harness, orgID, userID string
 	}
 	return brID, taskID, promptID
 }
+
+// TestRunQueueStore_Postgres_QueuedAtStamps mirrors the SQLite twin: enqueue
+// stamps queued_at, a claim stamps claimed_at (both surfaced through
+// AgentRuns.GetSystem), and a requeue re-stamps queued_at and clears
+// claimed_at so the next dwell measures from the re-entry, not the mint.
+func TestRunQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+
+	runID := uuid.New().String()
+	step0 := 0
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+		ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
+		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
+	}); err != nil {
+		t.Fatalf("EnqueueRun: %v", err)
+	}
+
+	queued, err := stores.AgentRuns.GetSystem(ctx, orgID, runID)
+	if err != nil || queued == nil {
+		t.Fatalf("GetSystem after enqueue: (%v, %v)", queued, err)
+	}
+	if queued.QueuedAt == nil {
+		t.Fatal("QueuedAt = nil after enqueue; the enqueue must stamp queue entry")
+	}
+	if queued.ClaimedAt != nil {
+		t.Fatalf("ClaimedAt = %v on a queued run, want nil", queued.ClaimedAt)
+	}
+	firstQueuedAt := *queued.QueuedAt
+
+	if got, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
+		t.Fatalf("ClaimNextRun: (%v, %v)", got, err)
+	}
+	claimed, err := stores.AgentRuns.GetSystem(ctx, orgID, runID)
+	if err != nil || claimed == nil {
+		t.Fatalf("GetSystem after claim: (%v, %v)", claimed, err)
+	}
+	if claimed.ClaimedAt == nil {
+		t.Fatal("ClaimedAt = nil after claim")
+	}
+	if claimed.ClaimedAt.Before(firstQueuedAt) {
+		t.Fatalf("ClaimedAt %v precedes QueuedAt %v", claimed.ClaimedAt, firstQueuedAt)
+	}
+
+	if err := stores.RunQueue.RequeueRun(ctx, orgID, runID, "transient setup error"); err != nil {
+		t.Fatalf("RequeueRun: %v", err)
+	}
+	requeued, err := stores.AgentRuns.GetSystem(ctx, orgID, runID)
+	if err != nil || requeued == nil {
+		t.Fatalf("GetSystem after requeue: (%v, %v)", requeued, err)
+	}
+	if requeued.QueuedAt == nil || requeued.QueuedAt.Before(firstQueuedAt) {
+		t.Fatalf("QueuedAt after requeue = %v, want re-stamped at/after the first stamp %v", requeued.QueuedAt, firstQueuedAt)
+	}
+	if requeued.ClaimedAt != nil {
+		t.Fatalf("ClaimedAt = %v after requeue, want nil (a queued row has no claim)", requeued.ClaimedAt)
+	}
+}

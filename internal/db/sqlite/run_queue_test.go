@@ -537,3 +537,77 @@ func TestRunQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 		t.Errorf("RequeueRun with non-local orgID should error")
 	}
 }
+
+// TestRunQueueStore_SQLite_QueuedAtStamps pins the queue-dwell timestamps the
+// UI's queue timer reads: enqueue stamps queued_at, a claim stamps claimed_at
+// (both surfaced through AgentRuns.Get), and a requeue re-stamps queued_at and
+// clears claimed_at so the next dwell measures from the re-entry, not the mint.
+func TestRunQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	task := seedEntityEventTask(t, conn, "rq-dwell")
+	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rq-dwell-p0", Name: "Step 0", Body: "b", Source: "user"})
+	insertBlueprintForTest(t, conn, "rq-dwell-bp", "RQ Dwell Blueprint")
+	if err := stores.Blueprints.ReplaceSteps(ctx, org, "rq-dwell-bp", []string{"rq-dwell-p0"}, nil); err != nil {
+		t.Fatalf("ReplaceSteps: %v", err)
+	}
+	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "rq-dwell-br", BlueprintID: "rq-dwell-bp", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+		WorktreePath: "/tmp/wt-rq-dwell",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	step0 := 0
+	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+		ID: "rq-dwell-run", TaskID: task.ID, PromptID: "rq-dwell-p0", Model: "claude-sonnet-4-6",
+		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
+	}); err != nil {
+		t.Fatalf("EnqueueRun: %v", err)
+	}
+
+	queued, err := stores.AgentRuns.Get(ctx, org, "rq-dwell-run")
+	if err != nil || queued == nil {
+		t.Fatalf("Get after enqueue: (%v, %v)", queued, err)
+	}
+	if queued.QueuedAt == nil {
+		t.Fatal("QueuedAt = nil after enqueue; the enqueue must stamp queue entry")
+	}
+	if queued.ClaimedAt != nil {
+		t.Fatalf("ClaimedAt = %v on a queued run, want nil", queued.ClaimedAt)
+	}
+	firstQueuedAt := *queued.QueuedAt
+
+	if got, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
+		t.Fatalf("ClaimNextRun: (%v, %v)", got, err)
+	}
+	claimed, err := stores.AgentRuns.Get(ctx, org, "rq-dwell-run")
+	if err != nil || claimed == nil {
+		t.Fatalf("Get after claim: (%v, %v)", claimed, err)
+	}
+	if claimed.ClaimedAt == nil {
+		t.Fatal("ClaimedAt = nil after claim")
+	}
+	if claimed.ClaimedAt.Before(firstQueuedAt) {
+		t.Fatalf("ClaimedAt %v precedes QueuedAt %v", claimed.ClaimedAt, firstQueuedAt)
+	}
+
+	if err := stores.RunQueue.RequeueRun(ctx, org, "rq-dwell-run", "transient setup error"); err != nil {
+		t.Fatalf("RequeueRun: %v", err)
+	}
+	requeued, err := stores.AgentRuns.Get(ctx, org, "rq-dwell-run")
+	if err != nil || requeued == nil {
+		t.Fatalf("Get after requeue: (%v, %v)", requeued, err)
+	}
+	if requeued.QueuedAt == nil || requeued.QueuedAt.Before(firstQueuedAt) {
+		t.Fatalf("QueuedAt after requeue = %v, want re-stamped at/after the first stamp %v", requeued.QueuedAt, firstQueuedAt)
+	}
+	if requeued.ClaimedAt != nil {
+		t.Fatalf("ClaimedAt = %v after requeue, want nil (a queued row has no claim)", requeued.ClaimedAt)
+	}
+}

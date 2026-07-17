@@ -83,12 +83,20 @@ const (
 
 // AgentRun represents a delegated agent execution.
 type AgentRun struct {
-	ID           string
-	TaskID       string
-	PromptID     string // FK to prompts.id — which prompt was used for this run
-	Status       string // lifecycle: "queued" | "initializing" | "cloning" | "fetching" | "worktree_created" | "agent_starting" | "running" | "open" (a turn ended without a conclusion — not executing, not concluded); terminal: "completed" | "failed" | "cancelled" | "task_unsolvable". (pending_approval was removed — approval is a derived view over the unresolved-artifact set, not a stored status.)
-	Model        string
-	StartedAt    time.Time
+	ID        string
+	TaskID    string
+	PromptID  string // FK to prompts.id — which prompt was used for this run
+	Status    string // lifecycle: "queued" | "initializing" | "cloning" | "fetching" | "worktree_created" | "agent_starting" | "running" | "open" (a turn ended without a conclusion — not executing, not concluded); terminal: "completed" | "failed" | "cancelled" | "task_unsolvable". (pending_approval was removed — approval is a derived view over the unresolved-artifact set, not a stored status.)
+	Model     string
+	StartedAt time.Time
+	// QueuedAt is when the run last entered the queue; ClaimedAt is when the
+	// dispatcher last claimed it (work actually began). Together they carry
+	// the latest queue episode's dwell — the UI's queue timer — while
+	// StartedAt stays the mint stamp and DurationMs stays pure working time
+	// (the SDK-reported per-turn duration, never wall clock across the
+	// queue). Both nil on legacy rows that predate the queue columns.
+	QueuedAt     *time.Time
+	ClaimedAt    *time.Time
 	CompletedAt  *time.Time
 	TotalCostUSD *float64
 	DurationMs   *int

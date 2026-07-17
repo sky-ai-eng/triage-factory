@@ -176,7 +176,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	// Affinity is re-earned on the next enqueue, never carried toward a
 	// corpse.
 	res, err := tx.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', claimed_at = NULL, executor_id = NULL, boot_epoch = NULL,
+		UPDATE runs SET status = 'queued', queued_at = now(), claimed_at = NULL, executor_id = NULL, boot_epoch = NULL,
 			cred_pubkey = NULL, preferred_executor_id = NULL,
 			result_summary = 'Requeued: executor heartbeat stale (reaper)'
 		WHERE id IN (

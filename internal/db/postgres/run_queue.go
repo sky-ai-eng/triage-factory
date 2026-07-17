@@ -65,10 +65,11 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 		_, err := s.conn.ExecContext(ctx, `
 			INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
 			                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
-			                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id)
+			                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id,
+			                  queued_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, 'event', $8,
 			        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
-			        'team', NULL, $9, $10, $11, NULLIF($12, ''))
+			        'team', NULL, $9, $10, $11, NULLIF($12, ''), now())
 		`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), status, run.Model, run.WorktreePath,
 			nullIfEmpty(run.TriggerID), nullIfEmpty(run.ActorAgentID),
 			nullIfEmpty(run.BlueprintRunID), stepIdx, run.PreferredExecutorID)
@@ -89,12 +90,13 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 	_, err := s.conn.ExecContext(ctx, `
 		INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
-		                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id)
+		                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id,
+		                  queued_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'manual', $8,
 		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
 		        'team',
 		        COALESCE(NULLIF($9, '')::uuid, (SELECT owner_user_id FROM orgs WHERE id = $2)),
-		        $10, $11, $12, NULLIF($13, ''))
+		        $10, $11, $12, NULLIF($13, ''), now())
 	`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), status, run.Model, run.WorktreePath,
 		nullIfEmpty(run.TriggerID), creatorBind, nullIfEmpty(run.ActorAgentID),
 		nullIfEmpty(run.BlueprintRunID), stepIdx, run.PreferredExecutorID)
@@ -231,7 +233,7 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 	// answer on a recovery path (affinity is re-earned on the next enqueue,
 	// never carried stale).
 	_, err := s.conn.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', claimed_at = NULL, result_summary = $3,
+		UPDATE runs SET status = 'queued', queued_at = now(), claimed_at = NULL, result_summary = $3,
 			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
 		WHERE org_id = $1 AND id = $2 AND status = 'running'
 	`, orgID, runID, lastErr)
@@ -282,7 +284,7 @@ func (s *runQueueStore) GetClaim(ctx context.Context, orgID, runID string) (db.A
 // arrived just after the deadline check, or the run was reaped).
 func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, runID string) (bool, error) {
 	res, err := s.conn.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', claimed_at = NULL,
+		UPDATE runs SET status = 'queued', queued_at = now(), claimed_at = NULL,
 			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
 		WHERE org_id = $1 AND id = $2 AND status = 'awaiting_credentials'
 	`, orgID, runID)
@@ -352,7 +354,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID stri
 	// 202607080003_pre_registry_orphan_normalization. The reset clears the
 	// stamp: a queued row has no owner.
 	res, err := s.conn.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', claimed_at = NULL,
+		UPDATE runs SET status = 'queued', queued_at = now(), claimed_at = NULL,
 			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
 		WHERE status NOT IN (
 			'queued',

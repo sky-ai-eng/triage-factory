@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import AgentCard from './AgentCard'
+import { QUEUE_DWELL_VISIBLE_MS } from '../lib/runStatus'
 import type { AgentRun, Task } from '../types'
 
 // useOrgHref pulls in deployment-config + org-context fetches we don't need
@@ -139,5 +140,49 @@ describe('AgentCard failure-kind rendering', () => {
     })
     expect(screen.getByText('Failed')).toBeInTheDocument()
     expect(screen.queryByText(/memory limit/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('AgentCard queued rendering', () => {
+  it('names the wait — queued for a slot — instead of showing a dead card', () => {
+    renderCard({ Status: 'queued' })
+    expect(screen.getByText(/queued — starts when a run slot frees up/)).toBeInTheDocument()
+    // The tooltip names the knob, so a stalled-looking burst of delegations
+    // traces back to the concurrency cap without reading the docs.
+    expect(screen.getByTitle(/TF_MAX_CONCURRENT_RUNS/)).toBeInTheDocument()
+  })
+
+  it('keeps the queued notice off active and terminal cards', () => {
+    renderCard({ Status: 'running' })
+    expect(screen.queryByText(/run slot/)).not.toBeInTheDocument()
+  })
+})
+
+describe('AgentCard queue-dwell footer', () => {
+  it('shows how long a started run waited in the queue', () => {
+    renderCard({
+      Status: 'running',
+      QueuedAt: '2026-06-25T00:00:00Z',
+      ClaimedAt: '2026-06-25T00:06:00Z',
+    })
+    expect(screen.getByText(/queued 6m 0s/)).toBeInTheDocument()
+  })
+
+  it('stays quiet for ordinary dispatch latency below the shared threshold', () => {
+    // Pin the edge just under QUEUE_DWELL_VISIBLE_MS — this dwell sat in the
+    // 1–5s window where the card and the telemetry rail once disagreed.
+    renderCard({
+      Status: 'running',
+      QueuedAt: '2026-06-25T00:00:00.000Z',
+      ClaimedAt: new Date(
+        new Date('2026-06-25T00:00:00.000Z').getTime() + QUEUE_DWELL_VISIBLE_MS - 1,
+      ).toISOString(),
+    })
+    expect(screen.queryByText(/^queued /)).not.toBeInTheDocument()
+  })
+
+  it('hides the dwell for legacy rows where it is unknowable', () => {
+    renderCard({ Status: 'completed', DurationMs: 120000 })
+    expect(screen.queryByText(/^queued /)).not.toBeInTheDocument()
   })
 })

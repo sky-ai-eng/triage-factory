@@ -262,6 +262,8 @@ func runResponse(run *domain.AgentRun, artifactCount int, arts []domain.Artifact
 		"Status":               run.Status,
 		"Model":                run.Model,
 		"StartedAt":            run.StartedAt,
+		"QueuedAt":             run.QueuedAt,
+		"ClaimedAt":            run.ClaimedAt,
 		"CompletedAt":          run.CompletedAt,
 		"TotalCostUSD":         run.TotalCostUSD,
 		"DurationMs":           run.DurationMs,

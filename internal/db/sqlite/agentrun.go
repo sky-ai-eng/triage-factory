@@ -215,7 +215,8 @@ func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID st
 		return false, err
 	}
 	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', parked_at = NULL, claimed_at = NULL,
+		UPDATE runs SET status = 'queued', queued_at = CURRENT_TIMESTAMP,
+		                parked_at = NULL, claimed_at = NULL,
 		                executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL,
 		                preferred_executor_id = NULL
 		WHERE id = ?
@@ -389,7 +390,7 @@ func (s *agentRunStore) MarkDiscarded(ctx context.Context, orgID, runID, stopRea
 // explicit whitespace charset (Postgres uses BTRIM with an E'...'
 // escape string).
 const sqliteRunColumns = `
-	r.id, r.task_id, r.status, r.model, r.started_at, r.completed_at,
+	r.id, r.task_id, r.status, r.model, r.started_at, r.queued_at, r.claimed_at, r.completed_at,
 	r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
 	r.result_summary, r.outcome, r.outcome_reason, r.failure_kind, r.session_id, r.actor_agent_id,
 	COALESCE(r.trigger_type, ''),
@@ -1041,13 +1042,13 @@ func (s *agentRunStore) BlueprintSiblingDurationMsSystem(ctx context.Context, or
 // --- Helpers ---
 
 func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
-	var completedAt sql.NullTime
+	var queuedAt, claimedAt, completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
 	if err := row.Scan(
-		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
@@ -1055,19 +1056,19 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	); err != nil {
 		return err
 	}
-	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, blueprintStep,
+	finalizeAgentRun(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
 		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
 	return nil
 }
 
 func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
-	var completedAt sql.NullTime
+	var queuedAt, claimedAt, completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
 	if err := rows.Scan(
-		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
@@ -1075,12 +1076,12 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	); err != nil {
 		return err
 	}
-	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, blueprintStep,
+	finalizeAgentRun(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
 		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
 	return nil
 }
 
-func finalizeAgentRun(r *domain.AgentRun, completedAt sql.NullTime, costUSD sql.NullFloat64,
+func finalizeAgentRun(r *domain.AgentRun, queuedAt, claimedAt, completedAt sql.NullTime, costUSD sql.NullFloat64,
 	durationMs, numTurns, blueprintStep sql.NullInt64,
 	model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID sql.NullString) {
 	r.Model = model.String
@@ -1100,6 +1101,12 @@ func finalizeAgentRun(r *domain.AgentRun, completedAt sql.NullTime, costUSD sql.
 	if blueprintStep.Valid {
 		v := int(blueprintStep.Int64)
 		r.BlueprintStepIndex = &v
+	}
+	if queuedAt.Valid {
+		r.QueuedAt = &queuedAt.Time
+	}
+	if claimedAt.Valid {
+		r.ClaimedAt = &claimedAt.Time
 	}
 	if completedAt.Valid {
 		r.CompletedAt = &completedAt.Time

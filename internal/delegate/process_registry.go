@@ -24,12 +24,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// DefaultMaxConcurrentRuns is the conservative process-wide cap on how
-// many runs execute off the dispatcher at once, so a burst of queued steps
-// doesn't fan into an unbounded number of agent subprocesses. Tunable via
-// SetMaxConcurrentRuns before the dispatcher starts; deployments set it
-// with the TF_MAX_CONCURRENT_RUNS env var (see ParseMaxConcurrentRuns).
-const DefaultMaxConcurrentRuns = 4
+// DefaultMaxConcurrentRuns is the process-wide cap on how many runs
+// execute off the dispatcher at once, so a burst of queued steps doesn't
+// fan into an unbounded number of agent subprocesses. 8 comfortably fits
+// the ~256 MB/run planning budget on ordinary hardware while still
+// throttling API spend. Tunable via SetMaxConcurrentRuns before the
+// dispatcher starts; deployments set it with the TF_MAX_CONCURRENT_RUNS
+// env var (see ParseMaxConcurrentRuns).
+const DefaultMaxConcurrentRuns = 8
 
 // MaxConcurrentRunsCeiling is the largest value the concurrency cap may
 // take. It mirrors sandbox.MaxSandboxes, the sandbox subnet allocator's
@@ -191,6 +193,38 @@ func (s *Spawner) dispatchMemGated() bool {
 		}
 	}
 	return gated
+}
+
+// noteCapAcquireBlocked marks the start of a cap-saturation episode: every
+// concurrency slot is occupied and the dispatcher is about to block waiting
+// for one, with work actually queued behind it. Logged once per episode (not
+// per blocked acquire) so a busy host doesn't emit a line every scan tick,
+// and skipped entirely when nothing is queued — four long runs on an idle
+// queue is full utilization, not a backlog worth announcing. This is the
+// queue-side twin of dispatchMemGated's transition log: without it, a burst
+// of delegations sits visibly "queued" in the UI while the log shows nothing,
+// which reads as a hang rather than admission control.
+func (s *Spawner) noteCapAcquireBlocked(ctx context.Context, capN int) {
+	if s.capSaturated.Load() || s.runQueue == nil {
+		return
+	}
+	queued, err := s.runQueue.CountQueuedSystem(ctx)
+	if err != nil || queued == 0 {
+		return
+	}
+	if s.capSaturated.CompareAndSwap(false, true) {
+		dispatchLog.Info("run concurrency cap reached; queued runs start as slots free",
+			"cap", capN, "queued", queued, "env", "TF_MAX_CONCURRENT_RUNS")
+	}
+}
+
+// noteCapAcquireImmediate records that an acquire succeeded without waiting —
+// the saturation episode, if one was running, is over. Transition-logged like
+// its blocked twin above.
+func (s *Spawner) noteCapAcquireImmediate(capN int) {
+	if s.capSaturated.CompareAndSwap(true, false) {
+		dispatchLog.Info("run concurrency below cap; dispatching queued runs immediately", "cap", capN)
+	}
 }
 
 // DefaultIdleHibernateTimeout is how long a live run may go quiet (no

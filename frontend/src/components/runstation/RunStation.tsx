@@ -11,6 +11,7 @@ import {
   formatElapsed,
   isActiveRun,
   isResumableRun,
+  workStartedAt,
 } from '../../lib/runStatus'
 import { approvalAction, approvalCounts, hasUnresolvedArtifacts } from '../../lib/approval'
 import { EventTag, SourceTag } from '../board/cardChrome'
@@ -86,10 +87,15 @@ export default function RunStation({
   }, [messages])
   const heat = st.live ? liveHeat(st.heat, lastMessageAt, now) : st.heat
 
+  // Queued dwell and working time are separate clocks: a QUEUED station ticks
+  // the live wait, everything else ticks/settles on working time from the
+  // claim stamp (queue dwell never inflates it).
   const elapsed =
-    !active && run.DurationMs != null
-      ? formatDurationMs(run.DurationMs)
-      : formatElapsed(run.StartedAt, now)
+    run.Status === 'queued'
+      ? formatElapsed(run.QueuedAt ?? run.StartedAt, now)
+      : !active && run.DurationMs != null
+        ? formatDurationMs(run.DurationMs)
+        : formatElapsed(workStartedAt(run), now)
 
   const chain = useMemo<ChainStep[]>(() => {
     if (!chainSteps || chainSteps.length <= 1) return []
