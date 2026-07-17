@@ -3,16 +3,19 @@
 package capbroker
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // socketDir is the shared parent directory for TF's local unix sockets —
 // the same directory cmd/exec/agenthost uses for its per-run sockets.
 // Reusing it is fine: MkdirAll is idempotent, and listen's own explicit
-// Chmod (see below) pins the directory's final mode to 0711 regardless
+// chown+chmod (see below) pin the directory's final owner/mode regardless
 // of which package's MkdirAll call happens to create it first —
 // agenthost's own request for 0700 there is a no-op once this directory
 // already exists.
@@ -27,11 +30,12 @@ const DefaultSocketPath = socketDir + "/cap-broker.sock"
 // listen creates the broker's socket following the same anti-race
 // ordering as agenthost/socket_linux.go's Start:
 //
-//  1. MkdirAll + Chmod 0711 on the socket's parent directory — see the
-//     chmod call below for why 0711 rather than agenthost's 0700. Takes
-//     the parent of socketPath (not the socketDir constant directly) so
-//     tests can point listen at an isolated temp directory; production
-//     always passes DefaultSocketPath, whose parent is exactly socketDir.
+//  1. MkdirAll + chgrp + Chmod 0731 on the socket's parent directory — see
+//     the chown/chmod calls below for why 0731 (root:WorktreeGID) rather than
+//     agenthost's 0700. Takes the parent of socketPath (not the socketDir
+//     constant directly) so tests can point listen at an isolated temp
+//     directory; production always passes DefaultSocketPath, whose parent is
+//     exactly socketDir.
 //  2. net.Listen("unix", ...) — creates the socket file under the
 //     process umask (typically too permissive on its own; step 1 covers
 //     the gap, step 3 closes it for good).
@@ -46,27 +50,30 @@ const DefaultSocketPath = socketDir + "/cap-broker.sock"
 //     can reach it either way.
 func listen(socketPath string) (net.Listener, error) {
 	dir := filepath.Dir(socketPath)
-	if err := os.MkdirAll(dir, 0o711); err != nil {
+	if err := os.MkdirAll(dir, 0o731); err != nil {
 		return nil, fmt.Errorf("capbroker: mkdir %s: %w", dir, err)
 	}
-	// Explicit Chmod, not just MkdirAll's mode: MkdirAll is a no-op on an
-	// already-existing directory (e.g. agenthost's HostDaemon.Start also
-	// creates this same shared dir, at 0700, for its own per-run sockets),
-	// so relying on the create-mode alone would leave the directory at
-	// whichever mode whoever created it first happened to request.
-	//
-	// 0711 (owner rwx, group/other --x only) is deliberately still not
-	// 0700: the orchestrator dials this socket as a
-	// *different, non-root* uid than the broker (see the
-	// --orchestrator-uid chown below), and reaching a file by path
-	// requires search (x) permission on every parent directory component
-	// — a 0700 dir would EACCES that connect regardless of the socket
-	// file's own ownership. The missing read bit still blocks readdir/`ls`
-	// for non-owners, so a uid that doesn't already know a specific
-	// socket's filename still can't enumerate this directory to find
-	// one — the same anti-enumeration property agenthost's own per-run
-	// sockets rely on, preserved here.
-	if err := os.Chmod(dir, 0o711); err != nil {
+	// This dir is shared: the broker's own socket lives here, and each run's
+	// credential sidecar — unprivileged (uid WorktreeUID), a WorktreeGID
+	// member — creates its per-run agenthost socket here too. Creating a file
+	// needs write+search on the dir, so the sidecar needs group w; hence
+	// root:WorktreeGID mode 0731. Group is wx (create + traverse) with no r,
+	// and other is x only, so no non-owner can readdir to enumerate live runs'
+	// socket names — the anti-enumeration property the prior 0711 had, extended
+	// just far enough to let the sidecar write. Other keeps x so the (different,
+	// unprivileged) orchestrator can still traverse to reach cap-broker.sock.
+	// Explicit chown+chmod, not the create mode: MkdirAll is a no-op on an
+	// existing dir (agenthost's StartWithServer also MkdirAlls this path), so
+	// the final owner/mode is pinned regardless of who created it first.
+	// The chgrp needs privilege the real (root) broker holds. An unprivileged
+	// caller — a test, or a broker misconfigured without root, which then can't
+	// hold CAP_SYS_ADMIN and can't function anyway — gets EPERM; tolerate that
+	// (the dir stays owner-writable, enough for that caller's own socket) but
+	// surface any other chown error.
+	if err := os.Chown(dir, -1, sandbox.WorktreeGID); err != nil && !errors.Is(err, os.ErrPermission) {
+		return nil, fmt.Errorf("capbroker: chgrp %s to gid=%d: %w", dir, sandbox.WorktreeGID, err)
+	}
+	if err := os.Chmod(dir, 0o731); err != nil {
 		return nil, fmt.Errorf("capbroker: chmod %s: %w", dir, err)
 	}
 	// Remove a stale socket file left by a previous crash — net.Listen

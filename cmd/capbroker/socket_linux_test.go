@@ -8,14 +8,15 @@ import (
 	"testing"
 )
 
-// TestListen_Permissions pins the socket hygiene invariant: 0711 dir
-// (traversable by any uid via a known path, but not listable — see
-// listen's doc), 0600 socket file. Unlike agenthost's per-run socket,
-// there is no chown step in listen() itself — the caller (runBroker, via
-// --orchestrator-uid) chowns the file separately once it knows the
-// dropped-privilege orchestrator's target uid. Uses an isolated temp
-// directory rather than the production socketDir (/run/tf, root-only on
-// most distros) so this runs on an unprivileged CI runner too.
+// TestListen_Permissions pins the socket hygiene invariant: 0731 dir
+// (traversable by any uid via a known path, group-writable so a run's
+// credential sidecar can create its own socket here, but not listable —
+// see listen's doc), 0600 socket file. The dir's group chgrp to WorktreeGID
+// only lands under a real root broker; this test runs unprivileged (so the
+// chgrp EPERMs and is tolerated), which is why it asserts the mode, not the
+// group. Uses an isolated temp directory rather than the production socketDir
+// (/run/tf, root-only on most distros) so this runs on an unprivileged CI
+// runner too.
 func TestListen_Permissions(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "tf-sock-dir", "test-hygiene.sock")
 
@@ -29,8 +30,8 @@ func TestListen_Permissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat socket dir: %v", err)
 	}
-	if got := dirInfo.Mode().Perm(); got != 0o711 {
-		t.Errorf("socket dir mode = %o, want 0711", got)
+	if got := dirInfo.Mode().Perm(); got != 0o731 {
+		t.Errorf("socket dir mode = %o, want 0731", got)
 	}
 
 	fileInfo, err := os.Stat(sockPath)

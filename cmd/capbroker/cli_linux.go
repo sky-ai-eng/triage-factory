@@ -76,20 +76,21 @@ func runBroker(args []string) error {
 			return fmt.Errorf("capbroker: chown socket to orchestrator uid %d: %w", *orchestratorUID, err)
 		}
 
-		// Hand the socket DIRECTORY to the orchestrator too, tightened to
-		// 0700: the same /run/tf holds the agenthost daemon's per-run
-		// sockets, which the (now unprivileged) orchestrator creates
-		// itself and so needs write+search here for. Owner-only is
-		// strictly tighter than listen()'s 0711 default — the only two
-		// parties that belong in this directory are the orchestrator
-		// (owner) and this process (root, DAC-override); the 0711
-		// traverse-by-path concession existed for the orchestrator
-		// reaching a root-owned dir, which ownership now makes moot.
+		// Hand the socket DIRECTORY to the orchestrator (owner) so it can
+		// still reach cap-broker.sock post-drop, but keep it group-owned by
+		// WorktreeGID with group write: each run's credential sidecar —
+		// unprivileged, a WorktreeGID member — creates its own per-run
+		// agenthost socket here, so it needs create (w) + search (x) on the
+		// dir. Hence orchestratorUID:WorktreeGID mode 0730 — owner rwx, group
+		// wx, no other access. The missing read bit preserves the
+		// anti-enumeration property (no non-owner can readdir to discover live
+		// runs' socket names). This process (root, DAC-override) reaches it
+		// regardless.
 		dir := filepath.Dir(*socketPath)
-		if err := os.Chown(dir, *orchestratorUID, -1); err != nil {
-			return fmt.Errorf("capbroker: chown socket dir to orchestrator uid %d: %w", *orchestratorUID, err)
+		if err := os.Chown(dir, *orchestratorUID, sandbox.WorktreeGID); err != nil {
+			return fmt.Errorf("capbroker: chown socket dir to orchestrator uid %d gid %d: %w", *orchestratorUID, sandbox.WorktreeGID, err)
 		}
-		if err := os.Chmod(dir, 0o700); err != nil {
+		if err := os.Chmod(dir, 0o730); err != nil {
 			return fmt.Errorf("capbroker: chmod socket dir: %w", err)
 		}
 	}
