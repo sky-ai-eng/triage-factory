@@ -121,7 +121,7 @@ func assertLaunchParamsSafe(t *testing.T, p LaunchParams) {
 	// TrustedAgentHostSocketPath) rather than re-deriving them — same as the
 	// netns check below reusing NetnsNameForRun — since these ARE the
 	// broker's own resolutions, not a parallel implementation to agree with.
-	orgPrefix, hasScope, scopeErr := worktreeScope(p.RunID, p.Worktree)
+	orgPrefix, hasScope, scopeErr := worktreeScope(p.RunID, p.MemoryNamespace, p.Worktree)
 	if scopeErr != nil {
 		t.Fatalf("accepted worktree %q that fails its own scope re-check: %v", p.Worktree, scopeErr)
 	}

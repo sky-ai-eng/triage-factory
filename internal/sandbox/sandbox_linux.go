@@ -190,6 +190,7 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	containerID := fmt.Sprintf("tf-%s-%d", truncate(cfg.RunID, 11), idx)
 	run, err := runLauncher.LaunchRun(ctx, LaunchParams{
 		RunID:           cfg.RunID,
+		MemoryNamespace: cfg.MemoryNamespace,
 		ContainerID:     containerID,
 		Rootfs:          rootfsSel,
 		Env:             stringsToEnvVars(specCfg.Env),

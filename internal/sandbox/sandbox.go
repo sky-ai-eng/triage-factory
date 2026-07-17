@@ -20,6 +20,13 @@ type Config struct {
 	// (UUID, "live-smoke", anything). Same RunID → same fragment.
 	RunID string
 
+	// MemoryNamespace is the run's blueprint run id — its second legitimate
+	// run-tree key. A cold rehydrate rebuilds the worktree at
+	// RunTreeRoot(memoryNamespace) rather than RunTreeRoot(RunID), so the
+	// launch-time worktree pin (worktreeScope) accepts either. Empty for a run
+	// with no blueprint, where RunID is the only key.
+	MemoryNamespace string
+
 	// Worktree is the host path bind-mounted at /work inside the
 	// sandbox. Caller MUST have created and chowned it to UID
 	// WorktreeUID before invoking Wrap, or the agent's writes will

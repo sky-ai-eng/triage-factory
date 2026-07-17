@@ -4,7 +4,9 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -442,6 +444,14 @@ func ValidateLaunchParams(p LaunchParams) error {
 			return err
 		}
 	}
+	// The memory namespace (blueprint run id) is the run's second legitimate
+	// run-tree key — see worktreeScope. Optional, but path-shape it when present
+	// so it can't smuggle a traversal into the RunTreeRoot join.
+	if p.MemoryNamespace != "" {
+		if err := validateRunID("memory namespace", p.MemoryNamespace); err != nil {
+			return err
+		}
+	}
 	if _, err := validateRootfsName(p.Rootfs.Name); err != nil {
 		return err
 	}
@@ -471,7 +481,7 @@ func ValidateLaunchParams(p LaunchParams) error {
 	// own agenthost socket, or the same org scope as the worktree — see
 	// worktreeScope's doc for the internal-consistency ceiling this enforces
 	// (and does not: a credential-free broker cannot authenticate an org).
-	if err := validateWorktreeAndMounts(p.RunID, p.Worktree, p.Mounts); err != nil {
+	if err := validateWorktreeAndMounts(p.RunID, p.MemoryNamespace, p.Worktree, p.Mounts); err != nil {
 		return err
 	}
 	if err := validateNetnsPath(p.RunID, p.NetnsPath); err != nil {
@@ -602,10 +612,14 @@ func realPath(p string) (string, error) {
 // (internal/worktree + internal/curator, verified — not assumed):
 //
 //   - The ephemeral per-run tree: GitHub PR / Jira / Slack delegated task
-//     runs materialize (or park) their whole working tree at exactly
-//     RunTreeRoot(runID) — os.TempDir()/triagefactory-runs/<runID>. These
-//     runs are org-blind by construction (the tree doesn't outlive the
-//     run), so hasScope is false and no OTHER mount may claim an org scope
+//     runs materialize (or park) their whole working tree under
+//     os.TempDir()/triagefactory-runs/<key>. The key is one of the run's OWN
+//     two lifetime keys: its run id on the first launch (MakeRunRoot(runID)),
+//     or its memory namespace — the blueprint run id — after a cold rehydrate
+//     rebuilds the tree at RunRoot(namespace) (internal/delegate's snapshot
+//     restore). Either of this run's keys is accepted; a THIRD run's tree is
+//     not. These runs are org-blind by construction (the tree doesn't outlive
+//     the run), so hasScope is false and no OTHER mount may claim an org scope
 //     either — there is nothing for it to be consistent with.
 //   - The org-scoped state-root tree: Curator sessions use
 //     paths.ProjectKBDir(orgID, projectID), i.e. <StateRoot>/orgs/<orgID>/…
@@ -615,13 +629,20 @@ func realPath(p string) (string, error) {
 // Anything else — an arbitrary host path, a worktree one level too
 // shallow to name an org, a symlink-clean but out-of-tree path — is
 // rejected outright.
-func worktreeScope(runID, worktree string) (orgPrefix string, hasScope bool, err error) {
+func worktreeScope(runID, memoryNamespace, worktree string) (orgPrefix string, hasScope bool, err error) {
 	realWorktree, err := realPath(worktree)
 	if err != nil {
 		return "", false, fmt.Errorf("sandbox: worktree %q: %w", worktree, err)
 	}
-	if runID != "" {
-		if realRunTree, rtErr := realPath(RunTreeRoot(runID)); rtErr == nil && realWorktree == realRunTree {
+	// Either of the run's own two lifetime keys is a legitimate ephemeral tree:
+	// its run id (first launch) or its memory namespace / blueprint run id (a
+	// tree rebuilt by a cold rehydrate). Matching either short-circuits with
+	// hasScope=false — no org scope for an org-blind tree.
+	for _, key := range [2]string{runID, memoryNamespace} {
+		if key == "" {
+			continue
+		}
+		if realRunTree, rtErr := realPath(RunTreeRoot(key)); rtErr == nil && realWorktree == realRunTree {
 			return "", false, nil
 		}
 	}
@@ -631,6 +652,13 @@ func worktreeScope(runID, worktree string) (orgPrefix string, hasScope bool, err
 	}
 	orgsRoot, err := realPath(filepath.Join(root, "orgs"))
 	if err != nil {
+		// A missing orgs tree just means no org-scoped worktree exists yet (a
+		// fresh deploy with no curator sessions). The worktree, having matched
+		// neither of this run's own trees, is simply not a legitimate shape —
+		// report that rather than the bare lstat of the absent orgs dir.
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", false, fmt.Errorf("sandbox: worktree %q is neither this run's own tree nor under the state-root org tree", worktree)
+		}
 		return "", false, fmt.Errorf("sandbox: worktree %q is neither this run's own tree nor under the state-root org tree: %w", worktree, err)
 	}
 	rel, relErr := filepath.Rel(orgsRoot, realWorktree)
@@ -668,8 +696,8 @@ func worktreeScope(runID, worktree string) (orgPrefix string, hasScope bool, err
 //     worktreeScope derived from Worktree. If Worktree carried no org
 //     scope (the delegated-task-run shape), NO mount may fall in this
 //     bucket at all — there is no legitimate one for that shape.
-func validateWorktreeAndMounts(runID, worktree string, mounts []Mount) error {
-	orgPrefix, hasScope, err := worktreeScope(runID, worktree)
+func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts []Mount) error {
+	orgPrefix, hasScope, err := worktreeScope(runID, memoryNamespace, worktree)
 	if err != nil {
 		return err
 	}

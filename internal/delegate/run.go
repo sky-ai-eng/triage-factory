@@ -369,18 +369,19 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	delegateLog.Info("claude starting for run", "run", runID, "cwd", claudeCwd)
 	baseOpts := agentproc.RunOptions{
-		Cwd:          claudeCwd,
-		Model:        model,
-		SessionID:    resumeSession,
-		Message:      prompt,
-		AllowedTools: agentproc.BuildAllowedToolsWithExtras(selfBin, cfg.extraAllowedTools),
-		MaxTurns:     100,
-		ExtraEnv:     extraEnv,
-		TraceID:      runID,
-		SystemPrompt: cfg.appendSysPrompt,
-		OrgID:        orgID,
-		Secrets:      s.getRunSecrets(),
-		LLMResolver:  s.llmResolverForRun(orgID, runID),
+		Cwd:             claudeCwd,
+		Model:           model,
+		SessionID:       resumeSession,
+		Message:         prompt,
+		AllowedTools:    agentproc.BuildAllowedToolsWithExtras(selfBin, cfg.extraAllowedTools),
+		MaxTurns:        100,
+		ExtraEnv:        extraEnv,
+		TraceID:         runID,
+		MemoryNamespace: namespace,
+		SystemPrompt:    cfg.appendSysPrompt,
+		OrgID:           orgID,
+		Secrets:         s.getRunSecrets(),
+		LLMResolver:     s.llmResolverForRun(orgID, runID),
 		// Multi mode: hand agentproc the prebuilt run network and the
 		// sidecar's proxy env so it launches into them and holds no
 		// credential — the sidecar owns the LLM/git/egress proxies + the

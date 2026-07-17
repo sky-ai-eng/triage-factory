@@ -221,6 +221,12 @@ type LaunchParams struct {
 	// key; RunID is descriptive.
 	RunID string
 
+	// MemoryNamespace is the run's blueprint run id — the second run-tree key
+	// worktreeScope accepts, so a cold-rehydrated worktree (rebuilt at
+	// RunTreeRoot(memoryNamespace)) passes the launch-time pin. Empty for a
+	// no-blueprint run. Descriptive of the run like RunID, not a lifecycle key.
+	MemoryNamespace string
+
 	// ContainerID is the runsc container id — unique per live Wrap (a fresh
 	// subnet index is folded into it), and grep-friendly (it embeds a RunID
 	// fragment). It is the per-run lifecycle key: the runsc container id,

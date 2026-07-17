@@ -113,6 +113,12 @@ type RunOptions struct {
 	// uses its own message-group id.
 	TraceID string
 
+	// MemoryNamespace is the run's blueprint run id, passed to the sandbox as
+	// the second run-tree key its worktree pin accepts (a cold-rehydrated
+	// worktree lives at RunTreeRoot(memoryNamespace), not RunTreeRoot(TraceID)).
+	// Empty for a run with no blueprint, or for callers with no rehydrate path.
+	MemoryNamespace string
+
 	// OrgID scopes credential resolution for this invocation. In
 	// multi mode the runner resolves the org's configured Anthropic /
 	// Bedrock credentials via Secrets and injects them into the Node
@@ -656,14 +662,15 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	sbEnv = append(sbEnv, opts.PrebuiltProxyEnv...)
 
 	sandboxRun, sboxObj, err := sandbox.Wrap(runCtx, sandbox.Config{
-		RunID:         opts.TraceID,
-		Worktree:      workCwd,
-		SDKDir:        sdkDir,
-		Argv:          argv,
-		Env:           sbEnv,
-		ExtraMounts:   extraMounts,
-		Network:       opts.PrebuiltNetwork,
-		MemoryLimitMB: runMemoryLimitMB(),
+		RunID:           opts.TraceID,
+		MemoryNamespace: opts.MemoryNamespace,
+		Worktree:        workCwd,
+		SDKDir:          sdkDir,
+		Argv:            argv,
+		Env:             sbEnv,
+		ExtraMounts:     extraMounts,
+		Network:         opts.PrebuiltNetwork,
+		MemoryLimitMB:   runMemoryLimitMB(),
 	})
 	if err != nil {
 		// Wrap cleaned up its own partial state; cleanup covers the agenthost
