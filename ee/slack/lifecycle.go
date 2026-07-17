@@ -8,8 +8,11 @@
 //
 //   - a 👀 reaction on a routed slack:mention (the ONLY reaction — no
 //     ⏳/✅/❌/⚠️ lifecycle, ratified out),
-//   - the assistant.threads.setStatus "is working…" indicator, kept live by
-//     real run-status/activity traffic (no streaming),
+//   - the assistant.threads.setStatus working indicator — both the
+//     "<app name> is …" status line and, via loading_messages, the animated
+//     in-conversation loading bubble (left unset, Slack rotates its own
+//     stock phrases there) — kept live by real run-status/activity traffic
+//     (no streaming),
 //   - a brief thread reply when a run fails,
 //   - a one-line "connected but not configured" reply when a mention
 //     matches no handler/owner.
@@ -49,6 +52,11 @@ const slackLifecycleFailureCopy = "Something went wrong and this run failed."
 // slackLifecycleInitialStatusText is the setStatus text a per-run worker
 // starts with, before any tool-activity sentinel has arrived to refine it.
 const slackLifecycleInitialStatusText = "is working on it…"
+
+// slackLifecycleInitialLoadingText is slackLifecycleInitialStatusText's
+// loading-bubble counterpart. The bubble renders bare — no app-name prefix —
+// so it needs standalone phrasing.
+const slackLifecycleInitialLoadingText = "Working on it…"
 
 // slackLifecycleAckReaction is the ONLY reaction this adapter ever adds —
 // ratified: no ⏳/✅/❌/⚠️ lifecycle.
@@ -429,7 +437,7 @@ func (a *lifecycleAdapter) handleRunActivity(ctx context.Context, evt domain.Eve
 	if !ok || !entry.isSlack || entry.worker == nil {
 		return
 	}
-	entry.worker.sendActivity(activityStatusText(meta.Tools))
+	entry.worker.sendActivity(activityIndicatorText(meta.Tools))
 }
 
 // resolveRunEntry runs the documented chain — AgentRuns.GetSystem -> Task ->
@@ -548,11 +556,29 @@ func pruneRunCache(runs map[string]*runEntry) {
 	}
 }
 
-// activityStatusText derives the "is running: ..." status text from a
+// indicatorText is one working-indicator update, carrying the same content
+// phrased for the two surfaces a setStatus call drives: status follows the
+// app's name on the under-composer line ("<app name> is running: Bash"),
+// loading stands alone in the in-conversation animated bubble ("Running:
+// Bash") — sent as the single loading_messages entry so the bubble mirrors
+// live run state instead of Slack's stock rotation.
+type indicatorText struct {
+	status  string
+	loading string
+}
+
+// initialIndicatorText is the pair a worker shows before any tool-activity
+// sentinel has arrived to refine it.
+var initialIndicatorText = indicatorText{
+	status:  slackLifecycleInitialStatusText,
+	loading: slackLifecycleInitialLoadingText,
+}
+
+// activityIndicatorText derives both indicator texts from a
 // system:run:activity sentinel's tool list: prefer each tool's Description
 // when non-empty, else a humanized form of its Name, joined for the
 // (usually single-element, occasionally parallel-tool-call) case.
-func activityStatusText(tools []events.RunActivityTool) string {
+func activityIndicatorText(tools []events.RunActivityTool) indicatorText {
 	parts := make([]string, 0, len(tools))
 	for _, t := range tools {
 		label := t.Description
@@ -564,9 +590,10 @@ func activityStatusText(tools []events.RunActivityTool) string {
 		}
 	}
 	if len(parts) == 0 {
-		return slackLifecycleInitialStatusText
+		return initialIndicatorText
 	}
-	return "is running: " + strings.Join(parts, ", ")
+	joined := strings.Join(parts, ", ")
+	return indicatorText{status: "is running: " + joined, loading: "Running: " + joined}
 }
 
 // humanizeToolName turns a raw tool name into something readable in a status
@@ -619,7 +646,7 @@ type runStatusWorker struct {
 	// worker.
 	predecessor <-chan struct{}
 
-	activityCh  chan string // latest-wins (sendActivity drains-then-pushes)
+	activityCh  chan indicatorText // latest-wins (sendActivity drains-then-pushes)
 	keepAliveCh chan struct{}
 	stopCh      chan bool // carries "failed"
 	done        chan struct{}
@@ -639,7 +666,7 @@ func newRunStatusWorker(ctx context.Context, client *http.Client, publicURL func
 		ctx: ctx, client: client, publicURL: publicURL,
 		orgID: orgID, runID: runID, channel: channel, threadTS: threadTS, botToken: botToken,
 		predecessor: predecessor,
-		activityCh:  make(chan string, 1),
+		activityCh:  make(chan indicatorText, 1),
 		keepAliveCh: make(chan struct{}, 1),
 		stopCh:      make(chan bool, 1),
 		done:        make(chan struct{}),
@@ -648,12 +675,12 @@ func newRunStatusWorker(ctx context.Context, client *http.Client, publicURL func
 	return w
 }
 
-// sendActivity delivers text as the latest desired status text, coalescing
+// sendActivity delivers text as the latest desired indicator text, coalescing
 // with any not-yet-consumed prior value — the channel-level half of "at most
 // one call per ~3s per run (coalesce; latest wins)"; the debounce timer
 // inside loop is the other half (bounding the *outgoing* Slack call rate,
 // not just the queue depth).
-func (w *runStatusWorker) sendActivity(text string) {
+func (w *runStatusWorker) sendActivity(text indicatorText) {
 	for {
 		select {
 		case w.activityCh <- text:
@@ -744,7 +771,7 @@ func (w *runStatusWorker) loop() {
 		}
 	}
 
-	text := slackLifecycleInitialStatusText
+	text := initialIndicatorText
 	w.setStatus(text)
 
 	ticker := time.NewTicker(slackLifecycleStatusRefreshInterval)
@@ -754,7 +781,7 @@ func (w *runStatusWorker) loop() {
 
 	var debounce *time.Timer
 	var debounceC <-chan time.Time
-	var pendingText string
+	var pendingText indicatorText
 	var hasPending bool
 	// debounce is reassigned throughout the loop (nil between windows); this
 	// defer closes over the variable itself, so it stops whatever timer is
@@ -770,7 +797,7 @@ func (w *runStatusWorker) loop() {
 	for {
 		select {
 		case <-w.ctx.Done():
-			w.setStatus("")
+			w.clearStatus()
 			return
 
 		case newText := <-w.activityCh:
@@ -785,7 +812,7 @@ func (w *runStatusWorker) loop() {
 			resetLifecycleTimer(idle, slackLifecycleIdleTimeout)
 
 		case failed := <-w.stopCh:
-			w.setStatus("")
+			w.clearStatus()
 			if failed {
 				w.postFailureReply()
 			}
@@ -802,7 +829,7 @@ func (w *runStatusWorker) loop() {
 			w.setStatus(text)
 
 		case <-idle.C:
-			w.setStatus("")
+			w.clearStatus()
 			return
 		}
 	}
@@ -810,12 +837,22 @@ func (w *runStatusWorker) loop() {
 
 // setStatus is the worker's only Slack call for the indicator itself —
 // best-effort, a failure just logs (the next ticker tick or activity update
-// retries naturally).
-func (w *runStatusWorker) setStatus(text string) {
-	if err := slackAssistantSetStatus(w.ctx, w.client, w.botToken, w.channel, w.threadTS, text, nil); err != nil {
+// retries naturally). text.loading rides along as the single
+// loading_messages entry, so the in-conversation bubble shows the same live
+// state as the status line rather than Slack's default rotation.
+func (w *runStatusWorker) setStatus(text indicatorText) {
+	var loading []string
+	if text.loading != "" {
+		loading = []string{text.loading}
+	}
+	if err := slackAssistantSetStatus(w.ctx, w.client, w.botToken, w.channel, w.threadTS, text.status, loading); err != nil {
 		slackLog.Warn("slack lifecycle: setStatus failed", "run", w.runID, "error", err)
 	}
 }
+
+// clearStatus wipes the indicator on both surfaces — an empty status with no
+// loading_messages is Slack's documented "clear it" call.
+func (w *runStatusWorker) clearStatus() { w.setStatus(indicatorText{}) }
 
 func (w *runStatusWorker) postFailureReply() {
 	postSlackFailureReply(w.ctx, w.client, w.publicURL, w.orgID, w.runID, w.channel, w.threadTS, w.botToken)
