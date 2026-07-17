@@ -391,7 +391,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// Same fallback contract as OrgSettings — provisioning seeds
 		// the row in production, but tests that bypass it should
 		// still see populated defaults (sonnet model, 5/20 thresholds,
-		// auto_delegate=false) rather than the Go zero value.
+		// auto_delegate=true) rather than the Go zero value.
 		stores, ids := factory(t)
 		got, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
 		if err != nil {

@@ -187,17 +187,19 @@ type TeamSettings struct {
 // DefaultOrgSettings — read-side fallback for missing rows, plus an
 // explicit Go-side baseline for provisioning paths.
 //
-// AutoDelegateEnabled defaults false here (matching the schema
-// DEFAULT and the multi-mode "new teams require explicit opt-in"
-// rule). The local-mode sentinel team flips this to true via its
-// baseline seed row so the local-first happy path keeps auto-
-// delegation on out of the box.
+// AutoDelegateEnabled defaults true (matching the schema DEFAULT): a
+// team that has a trigger enabled means the run to fire, and every
+// shipped trigger is off until a human opts in, so a second global
+// gate defaulting off just silently swallows the trigger they enabled
+// (a Slack channel claim, for instance, seeds an enabled mention
+// trigger that never fired). The per-team toggle stays, for teams that
+// want review-before-run.
 func DefaultTeamSettings() TeamSettings {
 	return TeamSettings{
 		AIReprioritizeThreshold:         5,
 		AIPreferenceUpdateInterval:      20,
 		DefaultModel:                    DefaultModel,
-		AutoDelegateEnabled:             false,
+		AutoDelegateEnabled:             true,
 		PermissionAbsentGraceMS:         15000,
 		PermissionAbsentAutodenyEnabled: true,
 		BranchTemplate:                  DefaultBranchTemplate,

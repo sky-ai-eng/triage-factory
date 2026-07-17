@@ -140,7 +140,10 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		return false, nil
 	}
 
-	repoprofileLog.Info("profiling configured repos", "org", orgID, "repos", len(repos))
+	// Debug, not Info: this fires every poll cycle regardless of outcome
+	// (the steady state is every repo TTL-skipped). The outcome logs below
+	// promote to Info only when the cycle actually wrote something.
+	repoprofileLog.Debug("profiling configured repos", "org", orgID, "repos", len(repos))
 
 	// touched flips true the first time a repo's row is *successfully*
 	// upserted this cycle (any of the three write sites below). A failed
@@ -284,7 +287,14 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		}
 	}
 
-	repoprofileLog.Info("doc scan complete", "with_docs", len(withDocs), "without_docs", len(withoutDocs))
+	// with_docs==without_docs==0 means every repo was TTL-skipped or
+	// errored — the routine no-op case, so Debug; a nonzero count means at
+	// least one repo was freshly fetched this cycle.
+	if len(withDocs) > 0 || len(withoutDocs) > 0 {
+		repoprofileLog.Info("doc scan complete", "with_docs", len(withDocs), "without_docs", len(withoutDocs))
+	} else {
+		repoprofileLog.Debug("doc scan complete", "with_docs", len(withDocs), "without_docs", len(withoutDocs))
+	}
 
 	// Batch-profile repos that have docs through Haiku.
 	profiled := 0
@@ -367,7 +377,14 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		}
 	}
 
-	repoprofileLog.Info("profile run done", "profiled_with_ai", profiled, "without_docs", len(withoutDocs))
+	// touched mirrors the caller-visible "did this cycle write anything"
+	// signal (see the function doc) — the same steady-state-vs-real-work
+	// split as doc scan complete above.
+	if touched {
+		repoprofileLog.Info("profile run done", "profiled_with_ai", profiled, "without_docs", len(withoutDocs))
+	} else {
+		repoprofileLog.Debug("profile run done", "profiled_with_ai", profiled, "without_docs", len(withoutDocs))
+	}
 	return touched, nil
 }
 

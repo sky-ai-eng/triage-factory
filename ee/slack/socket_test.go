@@ -25,23 +25,28 @@ import (
 // swap-and-restore seam. Read/hello/dial/ack budgets stay generous (a few
 // seconds) so a slightly slow CI runner doesn't flake a functional test;
 // only reconcile/backoff cadence (which tests actively wait out) shrink to
-// milliseconds. Individual tests that need an even shorter read deadline
-// (the "dead socket" case) override socketReadDeadline themselves.
+// milliseconds. The ping interval stays generous (5s) so a quick functional
+// test completes before the first liveness probe fires — the shared fake
+// server doesn't pong (it hands the conn off rather than reading it), so a
+// short interval would tear every connection down. The two liveness tests
+// (idle-survives / dead-peer) shrink socketPingInterval themselves and pair it
+// with a ponging server.
 func withFastSocketTimings(t *testing.T) {
 	t.Helper()
 	origReconcile, origBase, origCap, origReset := socketReconcileInterval, socketBackoffBase, socketBackoffCap, socketBackoffResetAfter
-	origDial, origHello, origRead, origAck := socketDialTimeout, socketHelloTimeout, socketReadDeadline, socketAckTimeout
+	origDial, origHello, origPingEvery, origPingTO, origAck := socketDialTimeout, socketHelloTimeout, socketPingInterval, socketPingTimeout, socketAckTimeout
 	socketReconcileInterval = 20 * time.Millisecond
 	socketBackoffBase = 5 * time.Millisecond
 	socketBackoffCap = 50 * time.Millisecond
 	socketBackoffResetAfter = 150 * time.Millisecond
 	socketDialTimeout = 3 * time.Second
 	socketHelloTimeout = 3 * time.Second
-	socketReadDeadline = 3 * time.Second
+	socketPingInterval = 5 * time.Second
+	socketPingTimeout = 1 * time.Second
 	socketAckTimeout = 3 * time.Second
 	t.Cleanup(func() {
 		socketReconcileInterval, socketBackoffBase, socketBackoffCap, socketBackoffResetAfter = origReconcile, origBase, origCap, origReset
-		socketDialTimeout, socketHelloTimeout, socketReadDeadline, socketAckTimeout = origDial, origHello, origRead, origAck
+		socketDialTimeout, socketHelloTimeout, socketPingInterval, socketPingTimeout, socketAckTimeout = origDial, origHello, origPingEvery, origPingTO, origAck
 	})
 }
 
@@ -55,10 +60,11 @@ func withFastSocketTimings(t *testing.T) {
 // socket_conn.go's real slackConnectionsOpen call reaches this fake instead
 // of slack.com.
 type fakeSlackSocket struct {
-	srv      *httptest.Server
-	authFail atomic.Bool // apps.connections.open returns {"ok":false,"error":"invalid_auth"}
-	badURL   atomic.Bool // apps.connections.open returns a URL that 404s on upgrade (dial failure)
-	conns    chan *slackws.Conn
+	srv       *httptest.Server
+	authFail  atomic.Bool // apps.connections.open returns {"ok":false,"error":"invalid_auth"}
+	badURL    atomic.Bool // apps.connections.open returns a URL that 404s on upgrade (dial failure)
+	keepAlive atomic.Bool // server CloseRead()s each conn so it auto-pongs the client's liveness pings
+	conns     chan *slackws.Conn
 }
 
 func newFakeSlackSocket(t *testing.T) *fakeSlackSocket {
@@ -95,6 +101,13 @@ func (f *fakeSlackSocket) handleSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := conn.Write(context.Background(), slackws.MessageText, []byte(`{"type":"hello"}`)); err != nil {
 		return
+	}
+	if f.keepAlive.Load() {
+		// Background reader that responds to ping/pong/close — the server end of
+		// a healthy connection, so the client's liveness pings get ponged and it
+		// stays up. The conn is write-only after this, which is fine: a
+		// keepAlive test never reads it (it asserts the absence of a reconnect).
+		conn.CloseRead(context.Background())
 	}
 	f.conns <- conn
 }
@@ -594,6 +607,58 @@ func TestSocketManager_DisconnectFrame_CleanRedial(t *testing.T) {
 	payload := eventCallbackPayload(socketTestWorkspace, socketTestAppID, "Ev-after-redial", mentionInner("C1", "U1", "1.0"))
 	sendEventsAPI(t, conn2, "Env-after-redial", payload)
 	expectAck(t, conn2, "Env-after-redial")
+}
+
+// An idle connection (no events for many ping cycles) must stay up — the whole
+// point of the ping-based liveness fix. Before it, a data-frame read deadline
+// tore down a healthy idle connection, and mentions that arrived during the
+// reconnect gap were dropped. keepAlive makes the fake server pong, so the only
+// thing that could cause a redial here is a spurious teardown.
+func TestSocketManager_IdleConnection_SurvivesManyPingCycles(t *testing.T) {
+	withFastSocketTimings(t)
+	socketPingInterval = 25 * time.Millisecond // ~12 probes across the window below
+	fake := newFakeSlackSocket(t)
+	fake.keepAlive.Store(true)
+	rig := newSocketTestRig(t, socketTestRow(socketTestOrgID))
+	runManager(t, rig.mgr)
+
+	fake.nextConn(t) // the one and only connection
+
+	select {
+	case <-fake.conns:
+		t.Fatal("connection redialed while idle — the socket flapped instead of staying up")
+	case <-time.After(300 * time.Millisecond):
+	}
+	if status, ok := rig.mgr.StatusFor(socketTestAppID); !ok || status.State != stateOpen {
+		t.Fatalf("idle connection status = %+v, want state=open", status)
+	}
+}
+
+// A peer that stops ponging (a wedged/half-dead connection that never surfaces
+// a read error on its own) must be detected by the liveness ping and torn down
+// so the loop reconnects. The default fake never pongs, so the client's ping
+// times out.
+func TestSocketManager_DeadPeer_PingTimeout_Reconnects(t *testing.T) {
+	withFastSocketTimings(t)
+	socketPingInterval = 25 * time.Millisecond
+	socketPingTimeout = 40 * time.Millisecond
+	fake := newFakeSlackSocket(t) // keepAlive false — server never pongs
+	rig := newSocketTestRig(t, socketTestRow(socketTestOrgID))
+	runManager(t, rig.mgr)
+
+	fake.nextConn(t) // first connection; its pings go unanswered
+	fake.nextConn(t) // a second dial proves the ping timeout tore the first down
+
+	// ...and it was a failure-driven teardown (backing off), not a graceful
+	// disconnect — the ping timeout is a real connection loss.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if status, ok := rig.mgr.StatusFor(socketTestAppID); ok && status.ConsecutiveFailures >= 1 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("ping timeout did not record a connection failure")
 }
 
 func TestSocketManager_DialFailure_BacksOff(t *testing.T) {

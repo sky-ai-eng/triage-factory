@@ -1750,10 +1750,12 @@ CREATE TABLE public.team_settings (
     -- Team-scope AI behavior policy. Moved off user_settings: in v1 the
     -- team owns the Claude tier used for scoring + agent runs (clamped by
     -- org_settings.max_llm_model_tier when set) and the master toggle for
-    -- auto-delegation. auto_delegate_enabled defaults FALSE so new teams
-    -- don't auto-spawn agents until explicitly opted in.
+    -- auto-delegation. auto_delegate_enabled defaults TRUE: a team whose
+    -- trigger is enabled means the run to fire, and shipped triggers are off
+    -- until opted in, so a second gate defaulting off would swallow it. Teams
+    -- wanting review-before-run turn it off.
     default_model text DEFAULT 'sonnet'::text NOT NULL,
-    auto_delegate_enabled boolean DEFAULT false NOT NULL,
+    auto_delegate_enabled boolean DEFAULT true NOT NULL,
     -- Per-team daily LLM spend cap (TFAC-482, EE/governance-gated). NULL = no cap;
     -- the app layer also treats 0 as "no cap". When the team's spend for the
     -- current UTC calendar day (summed over its team_id rows ONLY — system

@@ -29,12 +29,10 @@ type tenantSeedExecer interface {
 //
 // INSERT OR IGNORE makes it re-entrant: a re-run after a partial
 // provision (or after the user already provisioned) leaves existing
-// rows untouched and reaches the same end state. The team_settings row
-// flips auto_delegate_enabled to 1 — the schema default is 0
-// (multi-mode's "new teams require explicit opt-in"), but local mode is
-// the auto-delegate happy path. Every other column on both settings
-// rows takes its NOT NULL DEFAULT, so listing only the PK is a formal
-// restatement of the schema defaults.
+// rows untouched and reaches the same end state. Both settings rows
+// take every column from its NOT NULL DEFAULT (auto_delegate_enabled
+// among them — now default 1 after migration 202607160002), so listing
+// only the PK is a formal restatement of the schema defaults.
 //
 // SQLite-only: the SQL is INSERT OR IGNORE and the sentinel IDs are
 // hardcoded UUIDs, both of which are the local-mode shape. Multi-mode
@@ -77,7 +75,7 @@ func SeedLocalTenantRows(ctx context.Context, ex tenantSeedExecer) error {
 		},
 		{
 			"team_settings",
-			`INSERT OR IGNORE INTO team_settings (team_id, auto_delegate_enabled) VALUES (?, 1)`,
+			`INSERT OR IGNORE INTO team_settings (team_id) VALUES (?)`,
 			[]any{runmode.LocalDefaultTeamID},
 		},
 	}

@@ -149,8 +149,13 @@ func (c *appConnection) run(ctx context.Context, stores db.Stores, pipeline *ing
 			c.recordFailure(stateAuthFailed, err)
 			wait = socketBackoffCap
 		case err != nil:
+			// Logged here (not just recorded onto status): an error-driven
+			// reconnect is otherwise invisible in the logs, which show only the
+			// next "connection open" with no reason.
 			c.recordFailure(stateBackingOff, err)
 			wait = backoffDuration(attempt)
+			slackLog.Warn("slack socket mode: connection ended, reconnecting",
+				"app", c.appID, "error", err, "attempt", attempt, "backoff", wait.String())
 			attempt++
 		default:
 			// A graceful `disconnect` frame — Slack's documented steady-state
@@ -221,8 +226,23 @@ func (c *appConnection) serveOnce(ctx context.Context, stores db.Stores, pipelin
 	c.setConnected(connectedAt)
 	slackLog.Info("slack socket mode: connection open", "app", c.appID)
 
+	// Liveness pinger. The read loop below blocks on serveCtx with no data-frame
+	// deadline (an idle connection is not a dead one); the pinger is what detects
+	// a genuinely dead peer. On a failed probe it cancels serveCtx, which unblocks
+	// Read and ends the connection so run() reconnects. coder/websocket's Ping
+	// requires a concurrent Reader to read the pong — the read loop is exactly
+	// that. serveCtx is cancelled on any return (deferred), stopping the pinger
+	// before conn.CloseNow so it never probes a closing socket.
+	serveCtx, cancel := context.WithCancel(ctx)
+	pingerDone := make(chan struct{})
+	defer func() {
+		cancel()
+		<-pingerDone
+	}()
+	go c.pingLoop(serveCtx, conn, cancel, pingerDone)
+
 	for {
-		typ, data, err := readEnvelopeFrame(ctx, conn, socketReadDeadline)
+		typ, data, err := conn.Read(serveCtx)
 		if err != nil {
 			return connectedAt, fmt.Errorf("read: %w", err)
 		}
@@ -269,10 +289,49 @@ func (c *appConnection) serveOnce(ctx context.Context, stores db.Stores, pipelin
 	}
 }
 
+// pingLoop probes the peer every socketPingInterval, bounded by
+// socketPingTimeout, until ctx ends or a probe fails. A failed probe means the
+// connection is dead (or wedged past the timeout), so it cancels the
+// connection — unblocking serveOnce's Read and driving a reconnect. This is
+// the connection's only liveness mechanism now that the read loop no longer
+// imposes a data-frame deadline; coder/websocket delivers the pong through the
+// concurrent Read in serveOnce, so this must run alongside that loop.
+//
+// Running from its own goroutine is safe against serveOnce's concurrent
+// ack Writes: coder/websocket funnels every frame — control (this ping) and
+// data (the ack) — through one internal write mutex, so the two can't
+// interleave bytes on the wire or race the shared write buffer.
+func (c *appConnection) pingLoop(ctx context.Context, conn *slackws.Conn, onDead context.CancelFunc, done chan struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(socketPingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pctx, cancel := context.WithTimeout(ctx, socketPingTimeout)
+			err := conn.Ping(pctx)
+			cancel()
+			if err != nil {
+				if ctx.Err() != nil {
+					return // teardown already in progress; not a ping failure
+				}
+				slackLog.Warn("slack socket mode: ping failed, tearing down connection",
+					"app", c.appID, "error", err)
+				onDead()
+				return
+			}
+		}
+	}
+}
+
 // readEnvelopeFrame reads one frame off conn, bounded by timeout against
 // ctx. Cancelling ctx (a stop()) unblocks this immediately — coder/websocket
 // closes the connection and returns an error when the context passed to
-// Read is done, so shutdown never waits on a blocking Read.
+// Read is done, so shutdown never waits on a blocking Read. Used for the
+// bounded hello read; the steady-state loop reads on the connection ctx with
+// no deadline (see serveOnce).
 func readEnvelopeFrame(ctx context.Context, conn *slackws.Conn, timeout time.Duration) (slackws.MessageType, []byte, error) {
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

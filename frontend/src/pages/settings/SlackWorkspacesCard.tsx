@@ -17,10 +17,42 @@
 // case) and the server 400s.
 
 import { useEffect, useState } from 'react'
-import { Check, Copy, ExternalLink, Trash2 } from 'lucide-react'
+import * as Tooltip from '@radix-ui/react-tooltip'
+import { Check, Copy, ExternalLink, HelpCircle, Trash2 } from 'lucide-react'
 import { apiFetch, apiJSON, httpErrorMessage } from '../../lib/apiClient'
 import { toast } from '../../components/Toast/toastStore'
 import { glassInputClass } from './primitives'
+
+// FieldHelp is the hover [?] beside a credential label: the "where in Slack do
+// I find this" navigation lives here rather than as always-on body text, so the
+// form stays terse while the answer is one hover away. Children carry the path.
+function FieldHelp({ children }: { children: React.ReactNode }) {
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger asChild>
+        <button
+          type="button"
+          // A label wraps each field, so a bare click would refocus the input;
+          // the tooltip is hover/focus-driven, so suppress the click entirely.
+          onClick={(e) => e.preventDefault()}
+          aria-label="Where to find this in Slack"
+          className="cursor-help text-text-tertiary/60 transition-colors hover:text-text-secondary"
+        >
+          <HelpCircle size={12} />
+        </button>
+      </Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Content
+          sideOffset={5}
+          className="z-[100] max-w-[260px] rounded-lg bg-text-primary px-3 py-2 text-[11px] leading-relaxed text-white shadow-lg"
+        >
+          {children}
+          <Tooltip.Arrow className="fill-text-primary" />
+        </Tooltip.Content>
+      </Tooltip.Portal>
+    </Tooltip.Root>
+  )
+}
 
 // SlackConnectionStatus is one app's live Socket Mode connection status
 // (TFAC-534) — present only when the backend's socket manager has a
@@ -62,16 +94,30 @@ export default function SlackWorkspacesCard({ orgId }: { orgId: string }) {
 
   useEffect(() => {
     let cancelled = false
-    apiJSON<SlackWorkspace[]>('/api/slack/workspaces')
-      .then((ws) => {
-        if (!cancelled) setWorkspaces(ws)
-      })
-      .catch((e) => {
-        if (!cancelled)
-          setLoadError(httpErrorMessage(e, 'Could not load connected Slack workspaces.'))
-      })
+    const load = (initial: boolean) => {
+      apiJSON<SlackWorkspace[]>('/api/slack/workspaces')
+        .then((ws) => {
+          if (cancelled) return
+          setWorkspaces(ws)
+          // Clear a stale banner: a later poll succeeding means the list is
+          // current, so an error from the initial (failed) load must not linger.
+          setLoadError(null)
+        })
+        .catch((e) => {
+          // Only the initial fetch surfaces a load error; a transient poll
+          // failure must not blow away the list already on screen.
+          if (!cancelled && initial)
+            setLoadError(httpErrorMessage(e, 'Could not load connected Slack workspaces.'))
+        })
+    }
+    load(true)
+    // Poll so a row's live Socket Mode status resolves (Connecting… →
+    // Connected, or a reconnect) without a manual reload — the connection
+    // state lives in the backend socket manager, not the websocket stream.
+    const timer = setInterval(() => load(false), 5000)
     return () => {
       cancelled = true
+      clearInterval(timer)
     }
   }, [orgId])
 
@@ -234,6 +280,36 @@ function TransportChip({ transport }: { transport: 'socket' | 'events_api' }) {
   )
 }
 
+// credentialShapeError catches the two credential mix-ups that otherwise fail
+// deep in Slack's API with an opaque message. Returns a user-facing hint that
+// names the Slack page to copy from, or null when the shapes look right.
+function credentialShapeError(botToken: string, appToken: string): string | null {
+  if (!botToken.startsWith('xoxb-')) {
+    return "That doesn't look like a bot token. Copy the Bot User OAuth Token (starts “xoxb-”) from your Slack app's OAuth & Permissions page."
+  }
+  if (appToken && !appToken.startsWith('xapp-')) {
+    return "That doesn't look like an app-level token. Generate one under Basic Information → App-Level Tokens (starts “xapp-”) with the connections:write scope."
+  }
+  return null
+}
+
+// humanizeConnectError rewrites the raw connect failure — often a verbatim
+// Slack API error the connector has no way to interpret — into an actionable
+// message. Unknown errors fall through unchanged.
+function humanizeConnectError(raw: string): string {
+  const m = raw.toLowerCase()
+  if (m.includes('team_id')) {
+    return 'Slack accepted the token but it isn’t scoped to one workspace. On Enterprise Grid, install the app to a single workspace rather than org-wide, then reconnect.'
+  }
+  if (m.includes('invalid_auth') || m.includes('not_authed') || m.includes('account_inactive')) {
+    return 'Slack rejected the token. Confirm the app is installed to your workspace and that you copied the Bot User OAuth Token (xoxb-) from OAuth & Permissions.'
+  }
+  if (m.includes('missing_scope')) {
+    return 'The app is missing a scope Triage Factory needs. Recreate it from the copied manifest (which includes the scopes) and reinstall.'
+  }
+  return raw
+}
+
 // ConnectFlow is the standing "connect another workspace" form: the deep
 // link + manifest copy buttons, then the paste-back credential fields.
 // Fields carry the "leave blank to keep current" convention for re-submits
@@ -253,6 +329,16 @@ function ConnectFlow({ onConnected }: { onConnected: (ws: SlackWorkspace) => voi
 
   const connect = async () => {
     if (!canSubmit) return
+    // Catch the two credential mix-ups locally, with a message that names the
+    // page to copy from — otherwise they fail deep in Slack's API with an
+    // opaque error (a bot token pasted from App Credentials, an app-level
+    // token that isn't one). Slack still has the final say on a well-shaped
+    // token.
+    const shapeErr = credentialShapeError(botToken.trim(), appToken.trim())
+    if (shapeErr) {
+      setError(shapeErr)
+      return
+    }
     setConnecting(true)
     setError(null)
     try {
@@ -272,116 +358,136 @@ function ConnectFlow({ onConnected }: { onConnected: (ws: SlackWorkspace) => voi
       setTransport('')
       toast.success(`Connected ${ws.workspace_name || ws.workspace_id}`)
     } catch (e) {
-      // 409 "this workspace is already connected" and the transport/auth.test
-      // 400s surface verbatim.
-      setError(httpErrorMessage(e, 'Could not connect the Slack workspace.'))
+      setError(humanizeConnectError(httpErrorMessage(e, 'Could not connect the Slack workspace.')))
     } finally {
       setConnecting(false)
     }
   }
 
   return (
-    <div className="space-y-4 rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/20 px-4 py-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <a
-          href={SLACK_APP_CREATE_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex items-center gap-1.5 rounded-full border border-accent/20 px-3.5 py-1.5 text-[12px] font-medium text-accent transition-colors hover:border-accent/30 hover:text-accent/80"
-        >
-          Create a Slack app <ExternalLink size={12} />
-        </a>
-        <CopyManifestButton transport="socket" label="Copy manifest (Socket Mode)" />
-        <CopyManifestButton transport="events_api" label="Copy manifest (Events API)" />
-      </div>
-      <p className="text-[11px] leading-relaxed text-text-tertiary">
-        Create the app, paste in a copied manifest under &ldquo;Create an app from a
-        manifest&rdquo;, install it to your workspace, then paste the credentials it gives you
-        below.
-      </p>
-
-      <label className="block space-y-2">
-        <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
-          Bot token
-        </span>
-        <input
-          type="password"
-          value={botToken}
-          autoComplete="off"
-          placeholder="xoxb-…"
-          onChange={(e) => setBotToken(e.target.value)}
-          className={glassInputClass}
-        />
-      </label>
-
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <label className="block space-y-2">
-          <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
-            Signing secret <span className="normal-case text-text-tertiary/70">(Events API)</span>
-          </span>
-          <input
-            type="password"
-            value={signingSecret}
-            autoComplete="off"
-            placeholder="Leave blank to keep current"
-            onChange={(e) => setSigningSecret(e.target.value)}
-            className={glassInputClass}
-          />
-        </label>
-        <label className="block space-y-2">
-          <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
-            App-level token <span className="normal-case text-text-tertiary/70">(Socket Mode)</span>
-          </span>
-          <input
-            type="password"
-            value={appToken}
-            autoComplete="off"
-            placeholder="xapp-… — leave blank to keep current"
-            onChange={(e) => setAppToken(e.target.value)}
-            className={glassInputClass}
-          />
-        </label>
-      </div>
-
-      {needsTransportChoice && (
-        <label className="block space-y-2">
-          <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
-            Both credentials supplied — which transport?
-          </span>
-          <div className="flex gap-2">
-            {(['socket', 'events_api'] as const).map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setTransport(t)}
-                className={`rounded-full border px-3.5 py-1.5 text-[12px] font-medium transition-colors ${
-                  transport === t
-                    ? 'border-accent/40 bg-accent/10 text-accent'
-                    : 'border-[var(--color-border-glass)] text-text-secondary hover:text-text-primary'
-                }`}
-              >
-                {t === 'socket' ? 'Socket Mode' : 'Events API'}
-              </button>
-            ))}
-          </div>
-        </label>
-      )}
-
-      {error && (
-        <p role="alert" className="text-[12px] leading-relaxed text-[var(--color-dismiss)]">
-          {error}
+    <Tooltip.Provider delayDuration={150}>
+      <div className="space-y-4 rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/20 px-4 py-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <a
+            href={SLACK_APP_CREATE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-full border border-accent/20 px-3.5 py-1.5 text-[12px] font-medium text-accent transition-colors hover:border-accent/30 hover:text-accent/80"
+          >
+            Create a Slack app <ExternalLink size={12} />
+          </a>
+          <CopyManifestButton transport="socket" label="Copy manifest (Socket Mode)" />
+          <CopyManifestButton transport="events_api" label="Copy manifest (Events API)" />
+        </div>
+        <p className="text-[11px] leading-relaxed text-text-tertiary">
+          Two ways to receive events:{' '}
+          <strong className="font-medium text-text-secondary">Socket Mode</strong> works anywhere —
+          localhost, behind a firewall, no public URL — and is the usual choice;{' '}
+          <strong className="font-medium text-text-secondary">Events API</strong> needs a public
+          HTTPS URL Slack can reach. Copy the matching manifest into &ldquo;Create an app from a
+          manifest,&rdquo; install it to your workspace, then paste the credentials below — hover a{' '}
+          <HelpCircle size={11} className="inline align-[-1px] text-text-tertiary" /> for where each
+          lives in Slack.
         </p>
-      )}
 
-      <button
-        type="button"
-        onClick={() => void connect()}
-        disabled={!canSubmit}
-        className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 disabled:opacity-40 disabled:shadow-none"
-      >
-        {connecting ? 'Connecting…' : 'Connect workspace'}
-      </button>
-    </div>
+        <label className="block space-y-2">
+          <span className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+            Bot token
+            <FieldHelp>
+              Slack app → <strong>OAuth &amp; Permissions</strong> →{' '}
+              <strong>Bot User OAuth Token</strong> (starts <code>xoxb-</code>). Blank until you
+              install the app to a workspace.
+            </FieldHelp>
+          </span>
+          <input
+            type="password"
+            value={botToken}
+            autoComplete="off"
+            placeholder="xoxb-…"
+            onChange={(e) => setBotToken(e.target.value)}
+            className={glassInputClass}
+          />
+        </label>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <label className="block space-y-2">
+            <span className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+              Signing secret <span className="normal-case text-text-tertiary/70">(Events API)</span>
+              <FieldHelp>
+                Slack app → <strong>Basic Information</strong> → <strong>App Credentials</strong> →{' '}
+                <strong>Signing Secret</strong>. Only for Events API — leave blank for Socket Mode.
+              </FieldHelp>
+            </span>
+            <input
+              type="password"
+              value={signingSecret}
+              autoComplete="off"
+              placeholder="Leave blank to keep current"
+              onChange={(e) => setSigningSecret(e.target.value)}
+              className={glassInputClass}
+            />
+          </label>
+          <label className="block space-y-2">
+            <span className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+              App-level token{' '}
+              <span className="normal-case text-text-tertiary/70">(Socket Mode)</span>
+              <FieldHelp>
+                Slack app → <strong>Basic Information</strong> → <strong>App-Level Tokens</strong> →
+                Generate Token &amp; Scopes with the <code>connections:write</code> scope (starts{' '}
+                <code>xapp-</code>). Also flip on <strong>Settings → Socket Mode</strong>.
+              </FieldHelp>
+            </span>
+            <input
+              type="password"
+              value={appToken}
+              autoComplete="off"
+              placeholder="xapp-… — leave blank to keep current"
+              onChange={(e) => setAppToken(e.target.value)}
+              className={glassInputClass}
+            />
+          </label>
+        </div>
+
+        {needsTransportChoice && (
+          <label className="block space-y-2">
+            <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+              Both credentials supplied — which transport?
+            </span>
+            <div className="flex gap-2">
+              {(['socket', 'events_api'] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setTransport(t)}
+                  className={`rounded-full border px-3.5 py-1.5 text-[12px] font-medium transition-colors ${
+                    transport === t
+                      ? 'border-accent/40 bg-accent/10 text-accent'
+                      : 'border-[var(--color-border-glass)] text-text-secondary hover:text-text-primary'
+                  }`}
+                >
+                  {t === 'socket' ? 'Socket Mode' : 'Events API'}
+                </button>
+              ))}
+            </div>
+          </label>
+        )}
+
+        {error && (
+          <p role="alert" className="text-[12px] leading-relaxed text-[var(--color-dismiss)]">
+            {error}
+          </p>
+        )}
+
+        <button
+          type="button"
+          onClick={() => void connect()}
+          disabled={!canSubmit}
+          className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 disabled:opacity-40 disabled:shadow-none"
+        >
+          {connecting ? 'Connecting…' : 'Connect workspace'}
+        </button>
+      </div>
+    </Tooltip.Provider>
   )
 }
 

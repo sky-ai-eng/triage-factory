@@ -367,7 +367,11 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 	}
 
 	if len(openItems) == 0 && len(terminalItems) == 0 {
-		trackerLog.Info("github refresh", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "refreshed", 0, "events", 0)
+		// No-op cycle: every active entity was quiet-skipped (or there were
+		// none). Debug, not Info — this is the steady-state case at the
+		// default 30s+ poll cadence and carries no actionable signal;
+		// liveness is reported independently via /readyz.
+		trackerLog.Debug("github refresh: no-op cycle", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen)
 		if len(entities) > 0 {
 			t.EmitPollComplete("github", startedAt, len(entities), 0)
 		}
@@ -475,7 +479,14 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		}
 	}
 
-	trackerLog.Info("github refresh", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "refreshed", len(refreshed), "events", eventsEmitted)
+	// Info only when the cycle actually produced something (an emitted
+	// event) — a cycle that fetched fresh state but found no transitions is
+	// routine, not noteworthy. See the no-op branch above for the same call.
+	if eventsEmitted > 0 {
+		trackerLog.Info("github refresh", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "refreshed", len(refreshed), "events", eventsEmitted)
+	} else {
+		trackerLog.Debug("github refresh", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen, "refreshed", len(refreshed), "events", eventsEmitted)
+	}
 
 	if len(entities) > 0 {
 		t.EmitPollComplete("github", startedAt, len(entities), eventsEmitted)
