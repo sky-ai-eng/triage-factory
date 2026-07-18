@@ -375,6 +375,10 @@ func (s *entityStore) GetSystem(ctx context.Context, orgID, id string) (*domain.
 	return s.Get(ctx, orgID, id)
 }
 
+func (s *entityStore) GetBySourceSystem(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error) {
+	return s.GetBySource(ctx, orgID, source, sourceID)
+}
+
 func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string) ([]domain.Entity, error) {
 	return s.ListActive(ctx, orgID, source)
 }

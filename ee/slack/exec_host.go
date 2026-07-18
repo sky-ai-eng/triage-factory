@@ -110,12 +110,24 @@ func (h *slackExecHandler) authorizeChannel(ctx context.Context, rt agenthost.Ex
 	return rt.Relay(ctx, "slack", opAuthorizeChannel, slackChannelArg{Channel: channelID}, nil)
 }
 
+// resolveWorkspaceIdentity relays the workspace-identity decision for
+// channelID — the shared first step behind resolveToken (which only needs it
+// to select a token) and send's root-post bookkeeping (which also needs it
+// to address opRecordThreadRoot's permalink dispatch at the right workspace).
+func (h *slackExecHandler) resolveWorkspaceIdentity(ctx context.Context, rt agenthost.ExtensionRuntime, channelID string) (slackWorkspaceIdentity, error) {
+	var ws slackWorkspaceIdentity
+	if err := rt.Relay(ctx, "slack", opResolveWorkspace, slackChannelArg{Channel: channelID}, &ws); err != nil {
+		return slackWorkspaceIdentity{}, err
+	}
+	return ws, nil
+}
+
 // resolveToken resolves which bot token to act as for channelID: relay the
 // workspace-identity decision, then select that (workspace, app)'s token from
 // the sealed bundle.
 func (h *slackExecHandler) resolveToken(ctx context.Context, rt agenthost.ExtensionRuntime, channelID string) (string, error) {
-	var ws slackWorkspaceIdentity
-	if err := rt.Relay(ctx, "slack", opResolveWorkspace, slackChannelArg{Channel: channelID}, &ws); err != nil {
+	ws, err := h.resolveWorkspaceIdentity(ctx, rt, channelID)
+	if err != nil {
 		return "", err
 	}
 	return selectBotToken(ctx, rt, ws)
@@ -169,7 +181,11 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 	if err := h.authorizeChannel(ctx, rt, a.Channel); err != nil {
 		return slackSendResult{}, err
 	}
-	token, err := h.resolveToken(ctx, rt, a.Channel)
+	ws, err := h.resolveWorkspaceIdentity(ctx, rt, a.Channel)
+	if err != nil {
+		return slackSendResult{}, err
+	}
+	token, err := selectBotToken(ctx, rt, ws)
 	if err != nil {
 		return slackSendResult{}, err
 	}
@@ -218,6 +234,13 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 	rootTS := a.ThreadTS
 	if rootTS == "" {
 		rootTS = ts
+	}
+	if a.ThreadTS == "" {
+		// This send IS the thread root: mint/find its entity as kind="thread"
+		// before recordMessage's generic touched-entity resolution below sees
+		// the same (channel, ts) key — awaited so it lands first, since
+		// FindOrCreate never rewrites kind on an already-known row.
+		h.recordThreadRoot(ctx, rt, ws, a.Channel, ts, a.Body)
 	}
 	h.recordMessage(ctx, rt, domain.ActionSlackMessagePosted, a.Channel, rootTS, ts, h.permalinkBestEffort(ctx, token, a.Channel, ts))
 	if attachErr != nil {
@@ -277,6 +300,19 @@ func (h *slackExecHandler) react(ctx context.Context, rt agenthost.ExtensionRunt
 		DetailJSON: string(detail),
 	})
 	return slackReactResult{}, nil
+}
+
+// recordThreadRoot relays opRecordThreadRoot for a channel-root send (no
+// --thread-ts): the orchestrator idempotently finds-or-creates the thread's
+// entity as kind="thread" and, only on first creation, dispatches permalink
+// resolution. Awaited (not fire-and-forget) so it lands before recordMessage
+// runs next — see send()'s call site. Best-effort: a failure is logged and
+// swallowed, never surfaced past the already-successful Slack post.
+func (h *slackExecHandler) recordThreadRoot(ctx context.Context, rt agenthost.ExtensionRuntime, ws slackWorkspaceIdentity, channel, ts, text string) {
+	args := slackThreadRootArg{WorkspaceID: ws.WorkspaceID, APIAppID: ws.APIAppID, Channel: channel, TS: ts, Text: text}
+	if err := rt.Relay(ctx, "slack", opRecordThreadRoot, args, nil); err != nil {
+		slackLog.Warn("record thread-root entity failed", "channel", channel, "ts", ts, "error", err)
+	}
 }
 
 // recordMessage records the send/edit matrix: an `artifacts` row keyed

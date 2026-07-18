@@ -14,10 +14,11 @@ import (
 // This file is the Slack provider's POLICY half: the org-bound, NON-SECRET ops
 // the orchestrator serves against its stores. The sidecar-half handler
 // (exec_host.go) relays to these instead of holding db.Stores itself — every
-// answer here is an authorization decision or a workspace IDENTITY, never a bot
-// token (the token rides the sealed bundle; see exec_provider.go). Identity is
-// bound orchestrator-side from the RunInfo the ProviderOp receives, so a
-// sidecar cannot steer these at another org's channels.
+// answer here is an authorization decision, a workspace IDENTITY (never a bot
+// token — that rides the sealed bundle; see exec_provider.go), or — for
+// opRecordThreadRoot — the entity bookkeeping only the orchestrator's stores
+// can do. Identity is bound orchestrator-side from the RunInfo the ProviderOp
+// receives, so a sidecar cannot steer these at another org's channels.
 
 // registerSlackProviderOps registers the Slack policy ops. Every op is a pure
 // function over the (stores, info) the dispatch passes it, so this needs no
@@ -29,6 +30,7 @@ func registerSlackProviderOps() {
 	agenthost.RegisterProviderOp("slack", opResolveWorkspace, slackOpResolveWorkspace)
 	agenthost.RegisterProviderOp("slack", opResolveWorkspaceForDownload, slackOpResolveWorkspaceForDownload)
 	agenthost.RegisterProviderOp("slack", opAuthorizeFileChannels, slackOpAuthorizeFileChannels)
+	agenthost.RegisterProviderOp("slack", opRecordThreadRoot, slackOpRecordThreadRoot)
 }
 
 // Provider op names — the "slack" namespace's policy ops.
@@ -37,6 +39,7 @@ const (
 	opResolveWorkspace            = "resolve_workspace"
 	opResolveWorkspaceForDownload = "resolve_workspace_download"
 	opAuthorizeFileChannels       = "authorize_file_channels"
+	opRecordThreadRoot            = "record_thread_root"
 )
 
 // Wire payloads for the policy ops. A workspace IDENTITY (workspace_id,
@@ -55,6 +58,16 @@ type (
 	slackWorkspaceIdentity struct {
 		WorkspaceID string `json:"workspace_id"`
 		APIAppID    string `json:"api_app_id"`
+	}
+	// slackThreadRootArg is opRecordThreadRoot's wire shape: the workspace
+	// identity exec_host.go already resolved for the send, plus the
+	// channel-root message's own coordinates and text.
+	slackThreadRootArg struct {
+		WorkspaceID string `json:"workspace_id"`
+		APIAppID    string `json:"api_app_id"`
+		Channel     string `json:"channel"`
+		TS          string `json:"ts"`
+		Text        string `json:"text"`
 	}
 )
 
@@ -178,6 +191,49 @@ func slackOpAuthorizeFileChannels(ctx context.Context, stores db.Stores, info ag
 		}
 	}
 	return nil, fmt.Errorf("slack: this team does not track any channel this file is shared into")
+}
+
+// slackOpRecordThreadRoot is exec_host.go send()'s companion for a
+// channel-root post (no --thread-ts): the run's own message IS the thread's
+// root, so the thread is engaged the same way a root mention engages one at
+// ingest (ingest.go's handleEventCallback) — idempotent FindOrCreateSystem
+// with kind="thread", titled from the posted text. FindOrCreate never
+// rewrites kind on an already-known row, so exec_host.go calls this — and
+// awaits it — before the generic touched-entity resolution
+// (cmd/exec/agenthost/record.go) that recordMessage triggers next can find/
+// create the same (channel, ts) key first and default it to kind="message".
+// Only on first creation, dispatches the same best-effort permalink
+// resolution the ingest pipeline fires for a root mention.
+func slackOpRecordThreadRoot(ctx context.Context, stores db.Stores, info agenthost.RunInfo, args json.RawMessage) (any, error) {
+	var a slackThreadRootArg
+	if err := json.Unmarshal(args, &a); err != nil {
+		return nil, err
+	}
+	if a.Channel == "" || a.TS == "" {
+		return nil, fmt.Errorf("slack: record_thread_root requires channel and ts")
+	}
+	sourceID := domain.SlackSourceID(a.Channel, a.TS)
+	entity, created, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, "slack", sourceID, "thread", mentionTitle(a.Text), "")
+	if err != nil {
+		return nil, fmt.Errorf("slack: record thread root entity: %w", err)
+	}
+	if !created {
+		return nil, nil
+	}
+	bundle := slackstore.FromStores(stores)
+	if bundle == nil {
+		return nil, nil
+	}
+	ws, err := bundle.Workspaces.GetByWorkspaceAppSystem(ctx, a.WorkspaceID, a.APIAppID)
+	if err != nil {
+		slackLog.Warn("record thread root: resolve workspace for permalink failed", "workspace", a.WorkspaceID, "entity", entity.ID, "error", err)
+		return nil, nil
+	}
+	if ws == nil {
+		return nil, nil
+	}
+	NewPermalinkResolver(stores).dispatch(*ws, entity.ID, a.Channel, a.TS)
+	return nil, nil
 }
 
 // workspaceFromRunTaskMetadata resolves the run's own Slack context — its task,

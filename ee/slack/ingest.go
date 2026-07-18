@@ -113,12 +113,19 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 	p.captureChannelSighting(ctx, ws, ev.Channel, occurredAt)
 
 	root := ev.ThreadTS
-	if root == "" {
+	// kind encodes thread engagement: an empty ThreadTS means this mention
+	// IS the thread's root message, so the bot is the reason the thread
+	// exists ("thread"). A non-empty ThreadTS is a mid-thread summons into
+	// a thread someone else rooted ("message").
+	kind := "thread"
+	if root != "" {
+		kind = "message"
+	} else {
 		root = ev.TS
 	}
 	sourceID := domain.SlackSourceID(ev.Channel, root)
 
-	entity, created, err := p.entities.FindOrCreateSystem(ctx, ws.OrgID, "slack", sourceID, "message", mentionTitle(ev.Text), "")
+	entity, created, err := p.entities.FindOrCreateSystem(ctx, ws.OrgID, "slack", sourceID, kind, mentionTitle(ev.Text), "")
 	if err != nil {
 		return fmt.Errorf("find or create slack entity: %w", err)
 	}
