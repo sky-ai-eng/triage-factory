@@ -994,35 +994,32 @@ func slackChatGetPermalink(ctx context.Context, client *http.Client, botToken, c
 const slackAssistantLoadingMessagesMax = 10
 
 // slackAssistantSetStatus sets (or, when status == "", clears) the
-// assistant thinking-status indicator via assistant.threads.setStatus.
-// Works under chat:write alone — no assistant:write grant needed (Slack
-// changelog 2026-03-05 widened the accepted scopes). loadingMessages beyond
-// slackAssistantLoadingMessagesMax is truncated; status is always sent
-// (even empty), matching Slack's own "empty status clears it" contract.
-// loading_messages goes over the wire as a single comma-joined value, not a
-// JSON array — this endpoint is form-urlencoded, not one of the JSON-body
-// wrappers above.
+// assistant working indicator via assistant.threads.setStatus. Works under
+// chat:write alone — no assistant:write grant needed (Slack changelog
+// 2026-03-05 widened the accepted scopes). One call drives two distinct
+// surfaces: status renders as the "<app name> is …" line under the message
+// pane, while loadingMessages feeds the animated in-conversation loading
+// bubble — when the app supplies none, Slack rotates its own stock phrases
+// there. loadingMessages beyond slackAssistantLoadingMessagesMax is
+// truncated; status is always sent (even empty), matching Slack's own
+// "empty status clears it" contract. JSON body, not form-urlencoded:
+// loading_messages is a real JSON string array on the wire, the shape the
+// official SDKs send — a form-encoded scalar would need a joining
+// convention the API doesn't document.
 func slackAssistantSetStatus(ctx context.Context, client *http.Client, botToken, channel, threadTS, status string, loadingMessages []string) error {
 	if len(loadingMessages) > slackAssistantLoadingMessagesMax {
 		loadingMessages = loadingMessages[:slackAssistantLoadingMessagesMax]
 	}
-	form := url.Values{"channel_id": {channel}, "thread_ts": {threadTS}, "status": {status}}
+	payload := map[string]any{"channel_id": channel, "thread_ts": threadTS, "status": status}
 	if len(loadingMessages) > 0 {
-		form.Set("loading_messages", strings.Join(loadingMessages, ","))
+		payload["loading_messages"] = loadingMessages
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+"/assistant.threads.setStatus",
-		bytes.NewReader([]byte(form.Encode())))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+botToken)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	var resp struct {
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
 	}
-	if err := doSlackJSON(ctx, client, req, &resp); err != nil {
+	if err := slackPostJSON(ctx, client, botToken, "assistant.threads.setStatus", payload, &resp); err != nil {
 		return err
 	}
 	if !resp.OK {

@@ -26,7 +26,10 @@ import (
 
 type reactionCall struct{ Channel, TS, Emoji string }
 type postCall struct{ Channel, ThreadTS, Text string }
-type statusCall struct{ Channel, ThreadTS, Status string }
+type statusCall struct {
+	Channel, ThreadTS, Status string
+	Loading                   []string
+}
 
 // fakeLifecycleSlack is a minimal fake covering the three endpoints the
 // lifecycle adapter drives: reactions.add (the 👀 ack), chat.postMessage
@@ -79,12 +82,17 @@ func newFakeLifecycleSlack(t *testing.T) *fakeLifecycleSlack {
 			f.mu.Unlock()
 			writeSlackFakeJSON(w, map[string]any{"ok": true, "ts": "1700000099.000001"})
 		case strings.HasSuffix(r.URL.Path, "/assistant.threads.setStatus"):
-			_ = r.ParseForm()
-			channel, threadTS, status := r.FormValue("channel_id"), r.FormValue("thread_ts"), r.FormValue("status")
+			var body struct {
+				ChannelID       string   `json:"channel_id"`
+				ThreadTS        string   `json:"thread_ts"`
+				Status          string   `json:"status"`
+				LoadingMessages []string `json:"loading_messages"`
+			}
+			_ = decodeSlackFakeBody(r, &body)
 			f.mu.Lock()
 			delay := f.statusClearDelay
 			f.mu.Unlock()
-			if delay > 0 && status == "" {
+			if delay > 0 && body.Status == "" {
 				time.Sleep(delay)
 			}
 			// Recorded AFTER the delay (and always before the response is
@@ -92,7 +100,7 @@ func newFakeLifecycleSlack(t *testing.T) *fakeLifecycleSlack {
 			// RESOLVED, not when its request arrived — the thing that
 			// determines the indicator's final visible state.
 			f.mu.Lock()
-			f.statuses = append(f.statuses, statusCall{Channel: channel, ThreadTS: threadTS, Status: status})
+			f.statuses = append(f.statuses, statusCall{Channel: body.ChannelID, ThreadTS: body.ThreadTS, Status: body.Status, Loading: body.LoadingMessages})
 			f.mu.Unlock()
 			writeSlackFakeJSON(w, map[string]any{"ok": true})
 		default:
@@ -526,11 +534,65 @@ func TestLifecycleAdapter_RunStatus_RunningThenActivity_SetsDescriptionDerivedTe
 	if first.Channel != fx.Meta.Channel || first.Status != slackLifecycleInitialStatusText {
 		t.Errorf("initial status call = %+v, want channel=%q status=%q", first, fx.Meta.Channel, slackLifecycleInitialStatusText)
 	}
+	if len(first.Loading) != 1 || first.Loading[0] != slackLifecycleInitialLoadingText {
+		t.Errorf("initial loading_messages = %q, want [%q] (the bubble must show ours, not Slack's default rotation)", first.Loading, slackLifecycleInitialLoadingText)
+	}
 
 	adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.RunActivityTool{{Name: "Bash", Description: "Running go test ./..."}}), runs)
 	waitForCondition(t, 2*time.Second, func() bool {
 		calls := fake.statusCalls()
-		return len(calls) > 0 && calls[len(calls)-1].Status == "is running: Running go test ./..."
+		if len(calls) == 0 {
+			return false
+		}
+		last := calls[len(calls)-1]
+		return last.Status == "is running: Running go test ./..." &&
+			len(last.Loading) == 1 && last.Loading[0] == "Running: Running go test ./..."
+	})
+}
+
+// TestLifecycleAdapter_RunStatus_PreRunningPhases_ShowSetupProgress walks a
+// run through queued → cloning → running and pins that the indicator starts
+// at the first setup phase's pair (on both surfaces — no default-verbs gap
+// before the agent is live), retexts on the next phase, and swaps to the
+// generic working pair once the agent goes live.
+func TestLifecycleAdapter_RunStatus_PreRunningPhases_ShowSetupProgress(t *testing.T) {
+	withFastLifecycleTimings(t)
+	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
+	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
+	fx := seedSlackMentionRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
+
+	adapter := newTestLifecycleAdapter(stores, staticURL(""))
+	runs := map[string]*runEntry{}
+	t.Cleanup(func() { stopAllLifecycleWorkers(t, runs) })
+	ctx := context.Background()
+
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "queued"), runs)
+	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
+	first := fake.statusCalls()[0]
+	if first.Status != "is queued…" || len(first.Loading) != 1 || first.Loading[0] != "Waiting for a free agent slot…" {
+		t.Errorf("queued status call = %+v, want the queued phase pair on both surfaces", first)
+	}
+
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "cloning"), runs)
+	waitForCondition(t, 2*time.Second, func() bool {
+		calls := fake.statusCalls()
+		if len(calls) == 0 {
+			return false
+		}
+		last := calls[len(calls)-1]
+		return last.Status == "is preparing a workspace…" &&
+			len(last.Loading) == 1 && last.Loading[0] == "Preparing a workspace…"
+	})
+
+	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
+	waitForCondition(t, 2*time.Second, func() bool {
+		calls := fake.statusCalls()
+		if len(calls) == 0 {
+			return false
+		}
+		last := calls[len(calls)-1]
+		return last.Status == slackLifecycleInitialStatusText &&
+			len(last.Loading) == 1 && last.Loading[0] == slackLifecycleInitialLoadingText
 	})
 }
 
@@ -572,6 +634,9 @@ func TestLifecycleAdapter_RunStatus_ActivityBurst_DebounceCollapsesToOneCall(t *
 	}
 	if want := "is running: tool 4"; newCalls[0].Status != want {
 		t.Errorf("collapsed call text = %q, want %q (latest wins)", newCalls[0].Status, want)
+	}
+	if want := "Running: tool 4"; len(newCalls[0].Loading) != 1 || newCalls[0].Loading[0] != want {
+		t.Errorf("collapsed call loading_messages = %q, want [%q]", newCalls[0].Loading, want)
 	}
 }
 
@@ -619,7 +684,7 @@ func TestLifecycleAdapter_RunStatus_Failed_ClearsAndPostsFailureReplyWithURL(t *
 	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "failed"), runs)
 	waitForCondition(t, 2*time.Second, func() bool {
 		calls := fake.statusCalls()
-		return len(calls) > 0 && calls[len(calls)-1].Status == ""
+		return len(calls) > 0 && calls[len(calls)-1].Status == "" && len(calls[len(calls)-1].Loading) == 0
 	})
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.postCalls()) >= 1 })
 
