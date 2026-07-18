@@ -209,7 +209,7 @@ func slackBlueprintFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, stri
 
 // TestBuildStepConfig_Slack_FirstClaim pins wire point 1 (dispatch.go's
 // first-claim switch): a slack task no longer hits the "unsupported task
-// source" error TFAC-510's enabled-by-default slack:message trigger was
+// source" error the enabled-by-default slack:message trigger was
 // tripping on — buildStepConfig routes it through setupSlack and stamps the
 // resolved worktree path onto the blueprint_run.
 func TestBuildStepConfig_Slack_FirstClaim(t *testing.T) {
