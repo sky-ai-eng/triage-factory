@@ -25,7 +25,7 @@ func readFileConfined(root, rel string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(dirfd)
+	defer func() { _ = unix.Close(dirfd) }()
 
 	fd, err := unix.Openat2(dirfd, rel, &unix.OpenHow{
 		Flags:   uint64(os.O_RDONLY | unix.O_CLOEXEC),
