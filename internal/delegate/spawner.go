@@ -902,9 +902,44 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 		allowedRefs = append(allowedRefs, "refs/heads/"+branch)
 	}
 	if !found {
+		// No ledger row for this repo yet. The run's OWN task PR repo is the
+		// bootstrap exception: its run_worktrees row is written only AFTER the
+		// eager-PR setup clone materializes the worktree, yet that clone routes
+		// through this same per-run proxy — so the very first fetch would be
+		// denied against its own not-yet-written row. Authorize the task's own
+		// repo for READ by construction (the run exists to work on that PR).
+		// AllowedRefs stays empty, so a push attempted before the row lands is
+		// still rejected by the receive-pack gate: read-only bootstrap, push
+		// authority is earned once the checkout's branch resolves through a real
+		// ledger row.
+		if isTaskOwnRepo(ctx, stores, info, owner, repo) {
+			return gitproxy.Decision{Allowed: true}, nil
+		}
 		return gitproxy.Decision{Allowed: false}, nil
 	}
 	return gitproxy.Decision{Allowed: true, AllowedRefs: allowedRefs}, nil
+}
+
+// isTaskOwnRepo reports whether (owner, repo) is the GitHub repo of the run's
+// own task — the repo the run was created to work on. It authorizes the initial
+// setup clone for read before that repo's run_worktrees ledger row exists (the
+// row is written post-clone). RunInfo carries no task id, so the run is resolved
+// to its task here. Non-GitHub tasks and any resolution failure report false,
+// falling back to the ledger gate (fail closed).
+func isTaskOwnRepo(ctx context.Context, stores db.Stores, info agenthost.RunInfo, owner, repo string) bool {
+	if stores.AgentRuns == nil || stores.Tasks == nil || info.RunID == "" {
+		return false
+	}
+	run, err := stores.AgentRuns.GetSystem(ctx, info.OrgID, info.RunID)
+	if err != nil || run == nil || run.TaskID == "" {
+		return false
+	}
+	task, err := stores.Tasks.GetSystem(ctx, info.OrgID, run.TaskID)
+	if err != nil || task == nil || task.EntitySource != "github" {
+		return false
+	}
+	taskOwner, taskRepo, _ := parseGitHubTask(*task)
+	return strings.EqualFold(taskOwner, owner) && strings.EqualFold(taskRepo, repo)
 }
 
 // protectedBranches returns the refs that must never be pushed for a repo. The

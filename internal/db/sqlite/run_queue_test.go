@@ -203,6 +203,68 @@ func TestRunQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	}
 }
 
+// TestRunQueueStore_SQLite_RequeueFromSetupStatus is the regression for a run
+// stranded in `cloning`: the claim sets `running`, but the dispatcher then
+// advances the row through granular setup statuses (initializing → cloning →
+// fetching → …) before the agent runs, so a workspace-setup failure requeues
+// from one of those — not from `running`. A guard matching only `running` left
+// the UPDATE hitting zero rows, so the run sat active-but-idle forever ("awaiting
+// agent"). RequeueRun must requeue from every mid-setup status.
+func TestRunQueueStore_SQLite_RequeueFromSetupStatus(t *testing.T) {
+	for _, setupStatus := range []string{"initializing", "cloning", "fetching", "worktree_created", "agent_starting"} {
+		t.Run(setupStatus, func(t *testing.T) {
+			conn := openSQLiteForTest(t)
+			stores := sqlitestore.New(conn)
+			ctx := context.Background()
+			org := runmode.LocalDefaultOrgID
+
+			task := seedEntityEventTask(t, conn, "rq-setup-"+setupStatus)
+			insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqs-p0", Name: "Step 0", Body: "b", Source: "user"})
+			insertBlueprintForTest(t, conn, "rqs-bp", "RQ Setup Blueprint")
+			if err := stores.Blueprints.ReplaceSteps(ctx, org, "rqs-bp", []string{"rqs-p0"}, nil); err != nil {
+				t.Fatalf("ReplaceSteps: %v", err)
+			}
+			brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+				ID: "rqs-br", BlueprintID: "rqs-bp", TaskID: task.ID,
+				TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+				WorktreePath: "/tmp/wt-rqs",
+			})
+			if err != nil {
+				t.Fatalf("CreateRun: %v", err)
+			}
+			step0 := 0
+			if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+				ID: "rqs-run-0", TaskID: task.ID, PromptID: "rqs-p0", Model: "m",
+				TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
+			}); err != nil {
+				t.Fatalf("EnqueueRun: %v", err)
+			}
+			if claimed, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || claimed == nil {
+				t.Fatalf("ClaimNextRun: (%v, %v)", claimed, err)
+			}
+			// Advance to the granular setup status the dispatcher would have set
+			// before the workspace-setup failure fired the requeue.
+			if _, err := conn.ExecContext(ctx, `UPDATE runs SET status = ? WHERE id = 'rqs-run-0'`, setupStatus); err != nil {
+				t.Fatalf("advance to %s: %v", setupStatus, err)
+			}
+
+			if err := stores.RunQueue.RequeueRun(ctx, org, "rqs-run-0", "workspace setup: boom"); err != nil {
+				t.Fatalf("RequeueRun: %v", err)
+			}
+			after, err := stores.AgentRuns.GetSystem(ctx, org, "rqs-run-0")
+			if err != nil || after == nil {
+				t.Fatalf("GetSystem after requeue: (%v, %v)", after, err)
+			}
+			if after.Status != "queued" {
+				t.Fatalf("status after requeue from %q = %q, want queued (requeue must not no-op on a mid-setup status)", setupStatus, after.Status)
+			}
+			if reclaimed, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || reclaimed == nil {
+				t.Fatalf("re-ClaimNextRun after requeue from %q: (%v, %v)", setupStatus, reclaimed, err)
+			}
+		})
+	}
+}
+
 func TestRunQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)

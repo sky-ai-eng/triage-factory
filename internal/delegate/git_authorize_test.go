@@ -109,6 +109,55 @@ func TestGitAuthorizeDecision(t *testing.T) {
 	}
 }
 
+// TestGitAuthorizeDecision_TaskOwnRepoReadableBeforeLedger is the regression
+// test for the first-ever multi-mode GitHub-PR run stalling in `cloning`: the
+// eager-PR setup clone routes through this same per-run proxy, but its
+// run_worktrees ledger row is written only AFTER the clone succeeds — so the
+// bootstrap fetch was denied against its own not-yet-written row. The run's OWN
+// task repo must read as authorized pre-ledger (Allowed=true, no pushable refs),
+// while an unrelated tracked repo with no ledger row still denies — scoping the
+// exception to exactly the repo the run exists to work on.
+func TestGitAuthorizeDecision_TaskOwnRepoReadableBeforeLedger(t *testing.T) {
+	database := newDelegateTestDB(t)
+	stores := sqlitestore.New(database)
+	ctx := context.Background()
+	// seedRun mints the task entity as github "owner/repo#<runID>", so this run's
+	// own task repo is owner/repo.
+	seedRun(t, database, "run-boot", "sess", "/tmp/wt")
+	info := agenthost.RunInfo{OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID, RunID: "run-boot"}
+
+	// Track the run's own task repo AND an unrelated repo. The exception only
+	// fires for a TRACKED repo (the tracks gate runs first), so both are tracked;
+	// what distinguishes them is whether they are the run's task repo.
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+		{Owner: "owner", Repo: "repo"},
+		{Owner: "acme", Repo: "other"},
+	}); err != nil {
+		t.Fatalf("track repos: %v", err)
+	}
+	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.RepoProfile{
+		ID: "owner/repo", Owner: "owner", Repo: "repo", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
+	}); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+
+	// No run_worktrees row exists yet (the clone that writes it hasn't run). The
+	// run's own task repo must be readable; AllowedRefs stays empty so a premature
+	// push is still refused by the receive-pack gate.
+	if d, err := gitAuthorizeDecision(ctx, stores, info, "owner", "repo"); err != nil || !d.Allowed || len(d.AllowedRefs) != 0 {
+		t.Errorf("task's own repo pre-ledger = %+v err=%v; want Allowed=true with no refs (read-only bootstrap)", d, err)
+	}
+	// Case-insensitive, like the ledger path.
+	if d, err := gitAuthorizeDecision(ctx, stores, info, "Owner", "Repo"); err != nil || !d.Allowed {
+		t.Errorf("task's own repo (mixed case) pre-ledger = %+v err=%v; want Allowed=true", d, err)
+	}
+	// A different tracked repo with no ledger row is NOT the run's task repo, so
+	// the exception must not extend to it → deny.
+	if d, err := gitAuthorizeDecision(ctx, stores, info, "acme", "other"); err != nil || d.Allowed {
+		t.Errorf("unrelated tracked repo pre-ledger = %+v err=%v; want deny (exception is scoped to the task's own repo)", d, err)
+	}
+}
+
 // TestGitAuthorizeDecision_ProtectedAndDetached pins the two ways an allowed
 // repo still yields no pushable ref: a checkout sitting on the repo's base /
 // default branch (refused), and a detached HEAD (no live branch yet). Both keep
