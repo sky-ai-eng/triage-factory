@@ -663,7 +663,7 @@ func (c *Client) SearchIssues(ctx context.Context, jql string, fields []string, 
 		"maxResults": maxResults,
 		"fields":     fields,
 	}
-	respBody, err := c.postJSON(ctx, url, payload)
+	respBody, err := c.postJSON(ctx, url, payload, true)
 	if err != nil {
 		return nil, err
 	}
@@ -689,7 +689,7 @@ func extractFieldID(field string) string {
 // only care about success can ignore the id.
 func (c *Client) AddComment(ctx context.Context, issueKey, body string) (string, error) {
 	url := c.apiURL("issue/%s/comment", issueKey)
-	respBody, err := c.postJSON(ctx, url, map[string]string{"body": body})
+	respBody, err := c.postJSON(ctx, url, map[string]string{"body": body}, false)
 	if err != nil {
 		return "", err
 	}
@@ -743,7 +743,7 @@ func (c *Client) CreateIssue(ctx context.Context, projectKey, issueType, summary
 
 	payload := map[string]any{"fields": fields}
 	createURL := c.apiURL("issue")
-	respBody, err := c.postJSON(ctx, createURL, payload)
+	respBody, err := c.postJSON(ctx, createURL, payload, false)
 
 	// If parent field failed on Server/DC, retry with Epic Link
 	if err != nil && parentKey != "" {
@@ -753,7 +753,7 @@ func (c *Client) CreateIssue(ctx context.Context, projectKey, issueType, summary
 			if epicErr == nil && epicField != "" {
 				fields[epicField] = parentKey
 				payload = map[string]any{"fields": fields}
-				respBody, err = c.postJSON(ctx, createURL, payload)
+				respBody, err = c.postJSON(ctx, createURL, payload, false)
 			}
 		}
 	}
@@ -990,28 +990,84 @@ func (c *Client) doTransition(ctx context.Context, issueKey, transitionID string
 	return c.post(ctx, url, payload)
 }
 
-func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := c.cfg.authorize(req); err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
+// doRequest issues method+url (with an optional JSON body) and returns the
+// final response's status and fully-read body after any rate-limit-aware
+// retries. It is the shared core behind get/put/postJSON/post.
+//
+// Each of those keeps its own status-to-error mapping, so the "returned <code>:
+// <body>" strings a caller matches on (e.g. CreateIssue's parent/epic-link
+// fallback) are unchanged. A failure with no response — request build,
+// authorize, transport (after retries), body read, or a ctx cancellation during
+// backoff — is returned as-is and picks up that one helper's wrapping prefix
+// (request %s / PUT %s / POST %s), rather than the assorted per-call-site
+// wording the inlined versions used (raw errors, "read response", ...); no
+// caller inspects those.
+//
+// idempotent selects the retry policy (see retryableStatus): a GET retries a
+// 429 or a 5xx; a mutation (PUT/POST) retries only a 429 — a throttled request
+// was rejected, not processed, so replaying it can't double a side effect,
+// whereas a 5xx mutation might have partially applied and is surfaced instead.
+// The body is buffered as bytes so each attempt gets a fresh reader (an
+// http.Request body isn't reusable across attempts). Every wait is ctx-aware,
+// so the caller's deadline bounds total blocking regardless of the retry cap.
+func (c *Client) doRequest(ctx context.Context, method, url string, body []byte, idempotent bool) (int, []byte, error) {
+	for attempt := 1; ; attempt++ {
+		var reader io.Reader
+		if body != nil {
+			reader = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, url, reader)
+		if err != nil {
+			return 0, nil, err
+		}
+		if err := c.cfg.authorize(req); err != nil {
+			return 0, nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.http.Do(req)
+		resp, err := c.http.Do(req)
+		if err != nil {
+			// A transport error (reset, timeout) is retryable for an idempotent
+			// request; a mutation might have reached Jira, so it is returned as-is.
+			if idempotent && attempt <= maxRateLimitRetries && ctx.Err() == nil {
+				if serr := sleepCtx(ctx, backoffDuration(attempt)); serr != nil {
+					return 0, nil, serr
+				}
+				continue
+			}
+			return 0, nil, err
+		}
+
+		data, rerr := readAllClose(resp)
+		if rerr != nil {
+			return 0, nil, rerr
+		}
+
+		if !retryableStatus(resp.StatusCode, idempotent) || attempt > maxRateLimitRetries {
+			return resp.StatusCode, data, nil
+		}
+
+		wait := rateLimitWait(resp.Header, attempt)
+		if wait > maxRateLimitWait {
+			// Retry-After is longer than we're willing to block for: surface the
+			// throttled response so the caller turns it into its normal error
+			// rather than pinning the goroutine (and, on the agent path, a run
+			// slot) waiting it out.
+			return resp.StatusCode, data, nil
+		}
+		if serr := sleepCtx(ctx, wait); serr != nil {
+			return 0, nil, serr
+		}
+	}
+}
+
+func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
+	status, body, err := c.doRequest(ctx, "GET", url, nil, true)
 	if err != nil {
 		return nil, fmt.Errorf("request %s: %w", url, err)
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s returned %d: %s", url, resp.StatusCode, string(body))
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("GET %s returned %d: %s", url, status, string(body))
 	}
 	return body, nil
 }
@@ -1021,54 +1077,32 @@ func (c *Client) put(ctx context.Context, url string, payload any) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, "PUT", url, bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	if err := c.cfg.authorize(req); err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
+	status, body, err := c.doRequest(ctx, "PUT", url, data, false)
 	if err != nil {
 		return fmt.Errorf("PUT %s: %w", url, err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("PUT %s returned %d: %s", url, resp.StatusCode, string(body))
+	if status >= 300 {
+		return fmt.Errorf("PUT %s returned %d: %s", url, status, string(body))
 	}
 	return nil
 }
 
-func (c *Client) postJSON(ctx context.Context, url string, payload any) ([]byte, error) {
+// postJSON issues a POST and returns the response body. idempotent selects the
+// retry policy: a read-shaped POST (Jira's JQL /search, which mutates nothing)
+// passes true so a transient 5xx is retried; a state-changing POST (add
+// comment, create issue) passes false so only a 429 — provably not processed —
+// is retried, never a 5xx that might have applied.
+func (c *Client) postJSON(ctx context.Context, url string, payload any, idempotent bool) ([]byte, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	if err := c.cfg.authorize(req); err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
+	status, body, err := c.doRequest(ctx, "POST", url, data, idempotent)
 	if err != nil {
 		return nil, fmt.Errorf("POST %s: %w", url, err)
 	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response from POST %s: %w", url, err)
-	}
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("POST %s returned %d: %s", url, resp.StatusCode, string(body))
+	if status >= 300 {
+		return nil, fmt.Errorf("POST %s returned %d: %s", url, status, string(body))
 	}
 	return body, nil
 }
@@ -1078,24 +1112,12 @@ func (c *Client) post(ctx context.Context, url string, payload any) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	if err := c.cfg.authorize(req); err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
+	status, body, err := c.doRequest(ctx, "POST", url, data, false)
 	if err != nil {
 		return fmt.Errorf("POST %s: %w", url, err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("POST %s returned %d: %s", url, resp.StatusCode, string(body))
+	if status >= 300 {
+		return fmt.Errorf("POST %s returned %d: %s", url, status, string(body))
 	}
 	return nil
 }
