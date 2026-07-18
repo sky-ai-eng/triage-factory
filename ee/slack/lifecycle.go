@@ -268,7 +268,7 @@ func (a *lifecycleAdapter) replyNotConfigured(ctx context.Context, orgID, eventI
 func (a *lifecycleAdapter) mentionContext(ctx context.Context, orgID, eventID string) (meta SlackMessageMetadata, token string, ok bool) {
 	metaJSON, err := a.stores.Events.GetMetadataSystem(ctx, orgID, eventID)
 	if err != nil {
-		slackLog.Warn("slack lifecycle: load mention metadata failed", "error", err)
+		slackLog.Warn("slack lifecycle: load message metadata failed", "error", err)
 		return SlackMessageMetadata{}, "", false
 	}
 	if metaJSON == "" {
