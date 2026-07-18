@@ -32,6 +32,9 @@ func TestResolveAddr(t *testing.T) {
 		{"bare port local binds loopback", "9911", runmode.ModeLocal, "127.0.0.1:9911"},
 		{"out-of-range port is not a port", "99999", runmode.ModeMulti, "99999"},
 		{"host:port verbatim", "10.0.0.5:9464", runmode.ModeLocal, "10.0.0.5:9464"},
+		// Bare "0" disables (above), but Go's ephemeral-port spelling is not
+		// swallowed by that: ":0" passes through verbatim to net.Listen.
+		{"colon-zero stays ephemeral-port, not disable", ":0", runmode.ModeMulti, ":0"},
 		{"whitespace trimmed", "  :9000 ", runmode.ModeMulti, ":9000"},
 	}
 	for _, tc := range cases {
@@ -49,6 +52,16 @@ func TestResolveAddr(t *testing.T) {
 // collectors and the service resource, and cancellation shuts the listener
 // down cleanly.
 func TestInitAndServe_EndToEnd(t *testing.T) {
+	// Init mutates two process-globals: the OTel meter provider and this
+	// package's handler. Restore both so no later test in this package
+	// inherits a live SDK provider when it expects the no-op default.
+	prevProvider := otel.GetMeterProvider()
+	prevHandler := handler
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prevProvider)
+		handler = prevHandler
+	})
+
 	t.Setenv("TF_METRICS_ADDR", "127.0.0.1:0")
 	if addr := Init("v-test"); addr != "127.0.0.1:0" {
 		t.Fatalf("Init returned %q; want the configured addr", addr)

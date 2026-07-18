@@ -202,6 +202,12 @@ func serveOn(ctx context.Context, ln net.Listener) error {
 // mode. A bare port number binds all interfaces in multi and loopback in
 // local (matching local mode's loopback-only bind posture); anything else
 // is used verbatim as a host:port.
+//
+// Deliberate overload, worth naming: bare "0" means disable (the common
+// env-var idiom), NOT Go's "OS picks an ephemeral port". The Go spelling
+// still works — ":0" (or "127.0.0.1:0") is not a bare port, so it passes
+// through verbatim to net.Listen — but an ephemeral port is almost never
+// what a metrics endpoint wants (scrape configs need a stable target).
 func resolveAddr(raw string, mode runmode.Mode) string {
 	v := strings.ToLower(strings.TrimSpace(raw))
 	switch v {
