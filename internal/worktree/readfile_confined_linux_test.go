@@ -61,6 +61,41 @@ func TestReadFileConfined(t *testing.T) {
 	}
 }
 
+// TestReadFileConfinedFallback exercises the pre-openat2 (ENOSYS) path directly,
+// since the live openat2 kernel never takes it: the EvalSymlinks-based
+// containment must read a real in-root file but refuse any symlink — final or
+// intermediate — whose target escapes the run root.
+func TestReadFileConfinedFallback(t *testing.T) {
+	root := t.TempDir()
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(outside, []byte("another run's data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub", "real.txt"), []byte("mine"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := readFileConfinedFallback(root, "sub/real.txt"); err != nil || string(got) != "mine" {
+		t.Fatalf("fallback in-root read = (%q, %v), want (\"mine\", nil)", got, err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "sub", "evil.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readFileConfinedFallback(root, "sub/evil.txt"); err == nil {
+		t.Fatalf("fallback escape read succeeded (got %q); must be refused", got)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(root, "linkdir")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readFileConfinedFallback(root, "linkdir/secret.txt"); err == nil {
+		t.Fatalf("fallback intermediate-symlink escape read succeeded (got %q); must be refused", got)
+	}
+}
+
 // TestReadSandboxSessionTranscript_ConfinedToRunRoot ties the sandbox transcript
 // reader to the confinement: a real transcript at the run-root layout reads, but
 // once the hostile agent swaps it for a symlink pointing out of its run root
