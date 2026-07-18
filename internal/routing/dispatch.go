@@ -113,8 +113,15 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
 	}
 
+	// One team↔scope cache for the whole event: the per-handler scope gate
+	// (matchHandlers) and the owner ladder's identity-tier gate (resolveTeamRouting
+	// → trackingTeams) share it, so a team's tracking status is looked up once per
+	// event even when it appears in both the matched handlers and the author's team
+	// set.
+	scopeCache := map[string]bool{}
+
 	// Match event_handlers (rules + triggers) for this event.
-	matchedRules, matchedTriggers, err := r.matchHandlers(orgID, evt)
+	matchedRules, matchedTriggers, err := r.matchHandlers(orgID, evt, scopeCache)
 	if err != nil {
 		disp.Disposition = events.DispositionError
 		return
@@ -127,7 +134,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 
 	// Resolve the task's owner team, visibility set, firing order, and
 	// creation-seed priority.
-	routing, ok := r.resolveTeamRouting(orgID, evt, entityID, matchedRules, matchedTriggers)
+	routing, ok := r.resolveTeamRouting(orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
 	if !ok {
 		disp.Disposition = events.DispositionTasklessNoOwner
 		return
@@ -234,17 +241,18 @@ func (r *Router) routableEntity(orgID string, evt domain.Event) (entityID string
 // caller must not read that as "queried fine, zero handlers matched" (which
 // would misreport an internal error as a legitimate "nothing configured"
 // outcome).
-func (r *Router) matchHandlers(orgID string, evt domain.Event) (matchedRules, matchedTriggers []domain.EventHandler, err error) {
+func (r *Router) matchHandlers(orgID string, evt domain.Event, scopeCache map[string]bool) (matchedRules, matchedTriggers []domain.EventHandler, err error) {
 	handlers, err := r.handlers.GetEnabledForEventSystem(context.Background(), orgID, evt.EventType)
 	if err != nil {
 		routerLog.Error("failed to query event_handlers", "event_type", evt.EventType, "error", err)
 		return nil, nil, err
 	}
 
-	// scopeCache memoizes the team↔scope (e.g. team↔repo) gate per team for
-	// this one event, so a team with several matching handlers does a single
-	// tracking lookup.
-	scopeCache := map[string]bool{}
+	// scopeCache memoizes the team↔scope (e.g. team↔repo) gate per team for this
+	// one event, so a team with several matching handlers does a single tracking
+	// lookup. It's owned by HandleEvent and shared with the owner ladder's
+	// identity-tier gate (resolveTeamRouting → trackingTeams), so a team gated
+	// here isn't re-queried when it also appears in the author's team set.
 	for _, h := range handlers {
 		predJSON := ""
 		if h.ScopePredicateJSON != nil {
@@ -313,7 +321,7 @@ type eventRouting struct {
 //
 // The matched handlers still gate whether a task is created and supply the
 // priority; the model only decides the team set + owner.
-func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler) (eventRouting, bool) {
+func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) (eventRouting, bool) {
 	// teamTriggers is model-independent: a team fires its matched triggers iff it
 	// lands in the model's orderedTeams. Grouped once, threaded through unchanged.
 	// Org-visibility handlers (team_id NULL) route to LocalDefaultTeamID via
@@ -331,7 +339,7 @@ func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID str
 	)
 	switch ownershipModelForEvent(evt.EventType) {
 	case events.OwnershipOwned:
-		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveOwnedRouting(orgID, evt, entityID, matchedRules, matchedTriggers)
+		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveOwnedRouting(orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
 	case events.OwnershipRequestedParty:
 		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveRequestedPartyRouting(orgID, evt, entityID, matchedRules, matchedTriggers)
 	default: // events.OwnershipPool, events.OwnershipUnrouted
@@ -381,15 +389,15 @@ func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) (vi
 // no-steal invariant — lives in ownerLadderRouting, and registered sources
 // inherit all of it unchanged (do NOT reimplement it here). ok=false →
 // external identity, no watching handler → no task.
-func (r *Router) resolveOwnedRouting(orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler) ([]string, string, []string, float64, bool) {
+func (r *Router) resolveOwnedRouting(orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) ([]string, string, []string, float64, bool) {
 	var owner string
 	var ownerSet []string
 	if hooks, ok := sourceHooksFor(evt.EventType); ok {
 		owner, ownerSet = hooks.ResolveOwner(context.Background(), orgID, evt, entityID)
 	} else if isAuthorCentricGitHubEvent(evt.EventType) {
-		owner, ownerSet = r.authorCentricOwner(orgID, evt, entityID)
+		owner, ownerSet = r.authorCentricOwner(orgID, evt, entityID, scopeCache)
 	} else {
-		owner, ownerSet = r.assigneeCentricJiraOwner(orgID, evt, entityID)
+		owner, ownerSet = r.assigneeCentricJiraOwner(orgID, evt, entityID, scopeCache)
 	}
 	return ownerLadderRouting(owner, ownerSet, matchedRules, matchedTriggers)
 }
