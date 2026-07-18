@@ -35,8 +35,8 @@ type SlackMessageMetadata struct {
 	// Mentioned records whether this message explicitly @-mentioned the
 	// bot, as opposed to arriving as a follow-up in an already-engaged
 	// thread. Transport detail, not a different situation — see
-	// domain.EventSlackMessage's doc. Always true until TFAC-650 ingests
-	// non-mention follow-ups.
+	// domain.EventSlackMessage's doc. Always true until non-mention follow-ups
+	// are ingested.
 	Mentioned bool `json:"mentioned"`
 }
 
