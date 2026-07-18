@@ -180,6 +180,46 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 	})
 
+	t.Run("two_team_filter_no_placeholder_gap", func(t *testing.T) {
+		// Passing 2+ team ids must not skip a placeholder number. pgTaskTeamFilter
+		// numbers off len(args); re-reading it per iteration once double-counted
+		// the per-id append, emitting "$3, $5" and leaving $4 bound-but-
+		// unreferenced — Postgres 42P18 "could not determine data type of
+		// parameter $4". The single-team subtests above only ever bind one team
+		// placeholder, so nothing exercised the second; this pins that a
+		// multi-team factory view (or task list) doesn't 500. Covers a base-1
+		// caller (Queued → $2,$3) and a base-2 caller
+		// (ListActiveRefsForEntities → $3,$4).
+		var entA, entB string
+		if err := h.AdminDB.QueryRow(`SELECT entity_id::text FROM tasks WHERE id = $1`, taskA).Scan(&entA); err != nil {
+			t.Fatalf("entity for taskA: %v", err)
+		}
+		if err := h.AdminDB.QueryRow(`SELECT entity_id::text FROM tasks WHERE id = $1`, taskB).Scan(&entB); err != nil {
+			t.Fatalf("entity for taskB: %v", err)
+		}
+		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+			store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
+			both, e := store.Queued(ctx, orgID, []string{teamA, teamB})
+			if e != nil {
+				return fmt.Errorf("Queued(A,B): %w", e)
+			}
+			if !containsTask(both, taskA) || !containsTask(both, taskB) {
+				t.Errorf("Queued(A,B) = %s; want both %s and %s", taskIDs(both), taskA, taskB)
+			}
+			refs, e := store.ListActiveRefsForEntities(ctx, orgID, []string{entA, entB}, []string{teamA, teamB})
+			if e != nil {
+				return fmt.Errorf("ListActiveRefsForEntities(A,B): %w", e)
+			}
+			if !hasRef(refs, taskA) || !hasRef(refs, taskB) {
+				t.Errorf("refs(A,B) = %+v; want both taskA and taskB refs", refs)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("two-team filter: %v", err)
+		}
+	})
+
 	t.Run("sticky_default_round_trips", func(t *testing.T) {
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			users := pgstore.NewForTx(tx, pgtest.SecretKey).Users

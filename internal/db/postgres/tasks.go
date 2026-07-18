@@ -103,9 +103,16 @@ func pgTaskTeamFilter(teamIDs []string, args []any) (string, []any) {
 	if len(teamIDs) == 0 {
 		return "", args
 	}
+	// Number the placeholders off a base captured BEFORE the loop. len(args)
+	// grows as each id is appended below, so re-reading it per iteration and
+	// adding +i double-counts the growth — the second team lands at $5, not $4,
+	// leaving $4 bound-but-unreferenced (Postgres: "could not determine data
+	// type of parameter $4", 42P18). Only bites with 2+ teams; a single team is
+	// one placeholder with no gap.
 	ph := make([]string, len(teamIDs))
+	base := len(args)
 	for i, id := range teamIDs {
-		ph[i] = fmt.Sprintf("$%d", len(args)+1+i)
+		ph[i] = fmt.Sprintf("$%d", base+1+i)
 		args = append(args, id)
 	}
 	list := strings.Join(ph, ", ")
