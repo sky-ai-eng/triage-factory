@@ -203,6 +203,10 @@ var allowedSandboxEnvKeys = map[string]struct{}{
 	"HOME":           {},
 	"TERM":           {},
 	"BUN_JSC_useJIT": {},
+	// Claude Code behavior toggle: suppress the SDK's non-essential traffic
+	// (telemetry / error reporting / auto-updater / feature gates) it can't
+	// reach through the fail-closed egress allowlist anyway. Non-credential.
+	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": {},
 
 	// Run-scoped metadata (delegate/resume ExtraEnv + the git-hooks bin).
 	"TRIAGE_FACTORY_RUN_ID":               {},
