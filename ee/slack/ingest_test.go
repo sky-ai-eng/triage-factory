@@ -149,7 +149,7 @@ func newTestPipeline() (*ingestPipeline, *fakeEntities, *fakeDeliveries, *[]doma
 }
 
 // TestHandleEventCallback_PublishesCorrectEventShape covers the happy path:
-// EventType/EntityID set, metadata round-trips into SlackMentionMetadata.
+// EventType/EntityID set, metadata round-trips into SlackMessageMetadata.
 func TestHandleEventCallback_PublishesCorrectEventShape(t *testing.T) {
 	p, _, _, published := newTestPipeline()
 	ws := testWorkspaceRow("org-1")
@@ -167,18 +167,21 @@ func TestHandleEventCallback_PublishesCorrectEventShape(t *testing.T) {
 	if got.OrgID != "org-1" {
 		t.Errorf("OrgID = %q; want org-1", got.OrgID)
 	}
-	if got.EventType != domain.EventSlackMention {
-		t.Errorf("EventType = %q; want %q", got.EventType, domain.EventSlackMention)
+	if got.EventType != domain.EventSlackMessage {
+		t.Errorf("EventType = %q; want %q", got.EventType, domain.EventSlackMessage)
 	}
 	if got.EntityID == nil || *got.EntityID == "" {
 		t.Fatal("EntityID is nil/empty; want the resolved entity id (router's routableEntity drops nil-entity events)")
 	}
-	var meta SlackMentionMetadata
+	var meta SlackMessageMetadata
 	if err := json.Unmarshal([]byte(got.MetadataJSON), &meta); err != nil {
-		t.Fatalf("metadata did not round-trip into SlackMentionMetadata: %v", err)
+		t.Fatalf("metadata did not round-trip into SlackMessageMetadata: %v", err)
 	}
 	if meta.WorkspaceID != "T0PIPE001" || meta.APIAppID != "A0PIPE001" || meta.Channel != "C1" || meta.SenderID != "U1" || meta.EventID != "Ev1" || meta.ThreadTS != "1599999999.000001" {
 		t.Errorf("metadata = %+v; want fields carried over from ev/ws", meta)
+	}
+	if !meta.Mentioned {
+		t.Error("Mentioned = false; want true (every app_mention delivery is an explicit @-mention)")
 	}
 }
 

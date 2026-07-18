@@ -3,7 +3,7 @@
 // full set, and reassigns a channel's primary tracking team. The primary
 // lifecycle (first-tracker default, oldest-tracker succession) is handled
 // server-side by TeamChannelStore.ReconcilePrimariesSystem; a team's first
-// tracked channel seeds its default slack:mention blueprint so mentions in a
+// tracked channel seeds its default slack:message blueprint so mentions in a
 // newly tracked channel have somewhere to route once TFAC-510's routing flip
 // lands. Deliberately under /api/slack/* rather than
 // /api/settings/team/... — ee-owned routes stay in the slack namespace.
@@ -186,16 +186,16 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 		if e := bundle.TeamChannels.ReplaceForTeam(r.Context(), orgID, teamID, desired); e != nil {
 			return e
 		}
-		// Default blueprint, first-track only (TFAC-543): the prior set was
-		// empty, the new set isn't, and the team hasn't already configured
-		// its own slack:mention trigger.
+		// Default blueprint, first-track only: the prior set was empty, the
+		// new set isn't, and the team hasn't already configured its own
+		// slack:message trigger.
 		if len(prior) == 0 && len(desired) > 0 {
-			hasMention, e := teamHasSlackMentionTrigger(r.Context(), tx, orgID, teamID)
+			hasTrigger, e := teamHasSlackMessageTrigger(r.Context(), tx, orgID, teamID)
 			if e != nil {
 				return e
 			}
-			if !hasMention {
-				if e := seedDefaultSlackMentionBlueprint(r.Context(), tx, orgID, teamID); e != nil {
+			if !hasTrigger {
+				if e := seedDefaultSlackMessageBlueprint(r.Context(), tx, orgID, teamID); e != nil {
 					return e
 				}
 			}
@@ -624,85 +624,90 @@ func diffChannelIDs(prior []slackstore.TeamChannel, desired []string) (added, re
 	return added, removed
 }
 
-// teamHasSlackMentionTrigger reports whether teamID already has a
-// slack:mention trigger (any source — system or user). This replaces slug
+// teamHasSlackMessageTrigger reports whether teamID already has a
+// slack:message trigger (any source — system or user). This replaces slug
 // idempotency for the default-blueprint seed: a team that configured its
 // own trigger is respected (no default forced beside it), and a team that
 // deleted the default doesn't get it resurrected on the next PUT.
-func teamHasSlackMentionTrigger(ctx context.Context, tx db.TxStores, orgID, teamID string) (bool, error) {
+func teamHasSlackMessageTrigger(ctx context.Context, tx db.TxStores, orgID, teamID string) (bool, error) {
 	handlers, err := tx.EventHandlers.List(ctx, orgID, domain.EventHandlerKindTrigger, teamID)
 	if err != nil {
 		return false, err
 	}
 	for _, eh := range handlers {
-		if eh.EventType == domain.EventSlackMention {
+		if eh.EventType == domain.EventSlackMessage {
 			return true, nil
 		}
 	}
 	return false, nil
 }
 
-// slackMentionPromptName/Body are the shipped-content for the default
-// slack:mention blueprint TFAC-543 seeds on a team's first tracked channel.
-// Body interpolates the literal {{EVENT_METADATA_JSON}} placeholder
-// (TFAC-596) — the mention's channel/thread_ts/sender/text otherwise never
-// reach the run, since a task carries only its title. Greenfield: pre-
-// release, existing seeded rows are dogfood-only and are not migrated.
+// slackMessagePromptName/Body are the shipped-content for the default
+// slack:message blueprint seeded on a team's first tracked channel. Body
+// interpolates the literal {{EVENT_METADATA_JSON}} placeholder — the
+// message's channel/thread_ts/sender/text otherwise never reach the run,
+// since a task carries only its title. Deliberately doesn't hinge on
+// whether the triggering message was an explicit @-mention or an
+// engaged-thread follow-up — the agent's job is the same either way, and
+// mention-ness is metadata, not a different situation (see
+// domain.EventSlackMessage's doc). Greenfield: pre-release, existing
+// seeded rows are dogfood-only and are not migrated.
 const (
-	slackMentionPromptName = "Slack mention assistant"
-	slackMentionPromptBody = "A teammate @mentioned the agent in a Slack thread. The task's entity is the thread. " +
-		"Parse the channel, thread_ts, sender, and message text out of this event's metadata:\n\n" +
+	slackMessagePromptName = "Slack assistant"
+	slackMessagePromptBody = "A teammate reached out to the agent in a Slack thread. The task's entity is the " +
+		"thread. Parse the channel, thread_ts, sender, and message text out of this event's metadata:\n\n" +
 		"{{EVENT_METADATA_JSON}}\n\n" +
 		"Read the thread (`exec slack read thread --channel <channel> --ts <thread_ts>`, or `--ts <ts>` when " +
-		"thread_ts is empty — a root-message mention) to see the full request in context, gather what you need " +
-		"from the linked entity and any referenced repos/issues, do the work using the triagefactory exec " +
-		"subcommands available to you, and reply in that same thread with `exec slack send` — your stdout is not " +
-		"visible to the user, so the send is the only way they see your answer."
+		"thread_ts is empty — the triggering message itself started the thread) to see the full request in " +
+		"context, gather what you need from the linked entity and any referenced repos/issues, do the work using " +
+		"the triagefactory exec subcommands available to you, and reply in that same thread with " +
+		"`exec slack send` — your stdout is not visible to the user, so the send is the only way they see your " +
+		"answer."
 )
 
-// slackMentionTriggerBreakerThreshold / MinAutonomySuitability match the
+// slackMessageTriggerBreakerThreshold / MinAutonomySuitability match the
 // shipped system triggers' defaults (see db.ShippedEventHandlers).
 const (
-	slackMentionTriggerBreakerThreshold = 3
-	slackMentionTriggerMinAutonomy      = 0.0
+	slackMessageTriggerBreakerThreshold = 3
+	slackMessageTriggerMinAutonomy      = 0.0
 )
 
-// seedDefaultSlackMentionBlueprint creates, as user-source rows attributed
+// seedDefaultSlackMessageBlueprint creates, as user-source rows attributed
 // to the tracking admin (creator_user_id = them), a 1-step blueprint
-// wrapping a fresh prompt and a slack:mention trigger scoped to any channel
+// wrapping a fresh prompt and a slack:message trigger scoped to any channel
 // (predicate {"channel_in":[]}). Called inside the same tx as the tracking
 // write (handlePut) — see that call site's doc for why this is the
 // app-pool Create path rather than the admin-pool seeders.
-func seedDefaultSlackMentionBlueprint(ctx context.Context, tx db.TxStores, orgID, teamID string) error {
+func seedDefaultSlackMessageBlueprint(ctx context.Context, tx db.TxStores, orgID, teamID string) error {
 	promptID := uuid.New().String()
 	if err := tx.Prompts.Create(ctx, orgID, teamID, domain.Prompt{
 		ID:     promptID,
-		Name:   slackMentionPromptName,
-		Body:   slackMentionPromptBody,
+		Name:   slackMessagePromptName,
+		Body:   slackMessagePromptBody,
 		Source: "user",
 	}); err != nil {
-		return fmt.Errorf("seed slack mention prompt: %w", err)
+		return fmt.Errorf("seed slack message prompt: %w", err)
 	}
 
 	blueprintID := uuid.New().String()
 	if err := tx.Blueprints.Create(ctx, orgID, teamID, domain.Blueprint{
 		ID:     blueprintID,
-		Name:   slackMentionPromptName,
+		Name:   slackMessagePromptName,
 		Source: "user",
 	}); err != nil {
-		return fmt.Errorf("seed slack mention blueprint: %w", err)
+		return fmt.Errorf("seed slack message blueprint: %w", err)
 	}
 	if err := tx.Blueprints.ReplaceSteps(ctx, orgID, blueprintID, []string{promptID}, []string{""}); err != nil {
-		return fmt.Errorf("seed slack mention blueprint steps: %w", err)
+		return fmt.Errorf("seed slack message blueprint steps: %w", err)
 	}
 
 	predicate := `{"channel_in":[]}`
-	threshold := slackMentionTriggerBreakerThreshold
-	minAutonomy := slackMentionTriggerMinAutonomy
+	threshold := slackMessageTriggerBreakerThreshold
+	minAutonomy := slackMessageTriggerMinAutonomy
 	if err := tx.EventHandlers.Create(ctx, orgID, teamID, domain.EventHandler{
 		ID:                     uuid.New().String(),
 		Kind:                   domain.EventHandlerKindTrigger,
-		EventType:              domain.EventSlackMention,
+		EventType:              domain.EventSlackMessage,
 		ScopePredicateJSON:     &predicate,
 		Enabled:                true,
 		Source:                 domain.EventHandlerSourceUser,
@@ -712,7 +717,7 @@ func seedDefaultSlackMentionBlueprint(ctx context.Context, tx db.TxStores, orgID
 		BreakerThreshold:       &threshold,
 		MinAutonomySuitability: &minAutonomy,
 	}); err != nil {
-		return fmt.Errorf("seed slack mention trigger: %w", err)
+		return fmt.Errorf("seed slack message trigger: %w", err)
 	}
 	return nil
 }

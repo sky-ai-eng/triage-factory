@@ -1,5 +1,5 @@
 // Slack routing hooks (TFAC-542): the routing.SourceHooks Slack registers
-// at install (install.go) so a slack:mention event resolves through the
+// at install (install.go) so a slack:message event resolves through the
 // same owner-ladder machinery every other Owned event source uses — see
 // internal/routing/source_registry.go's doc for the inversion-seam
 // rationale core never importing ee/ enables.
@@ -22,13 +22,13 @@ import (
 // taskless; only an applies_to_unowned watcher can still fire.
 func slackChannelOwner(bundle *slackstore.Bundle) func(ctx context.Context, orgID string, evt domain.Event, entityID string) (string, []string) {
 	return func(ctx context.Context, orgID string, evt domain.Event, entityID string) (string, []string) {
-		var meta SlackMentionMetadata
+		var meta SlackMessageMetadata
 		if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-			slackLog.Error("slack owner resolution: mention metadata is not valid JSON", "org_id", orgID, "entity_id", entityID, "error", err)
+			slackLog.Error("slack owner resolution: message metadata is not valid JSON", "org_id", orgID, "entity_id", entityID, "error", err)
 			return "", nil
 		}
 		if meta.Channel == "" {
-			slackLog.Error("slack owner resolution: mention metadata missing channel", "org_id", orgID, "entity_id", entityID)
+			slackLog.Error("slack owner resolution: message metadata missing channel", "org_id", orgID, "entity_id", entityID)
 			return "", nil
 		}
 		team, err := bundle.TeamChannels.PrimaryTeamForChannelSystem(ctx, orgID, meta.Channel)
@@ -51,7 +51,7 @@ func slackChannelOwner(bundle *slackstore.Bundle) func(ctx context.Context, orgI
 // is worse than a briefly-wide gate.
 func slackTeamTracksChannel(bundle *slackstore.Bundle) func(ctx context.Context, evt domain.Event, teamID string) bool {
 	return func(ctx context.Context, evt domain.Event, teamID string) bool {
-		var meta SlackMentionMetadata
+		var meta SlackMessageMetadata
 		if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil || meta.Channel == "" {
 			return true
 		}

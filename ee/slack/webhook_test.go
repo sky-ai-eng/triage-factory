@@ -425,8 +425,8 @@ func TestHandleWebhook_EventCallback_PublishesAndAcks(t *testing.T) {
 	if len(*r.published) != 1 {
 		t.Fatalf("published %d events; want 1", len(*r.published))
 	}
-	if got := (*r.published)[0]; got.EventType != domain.EventSlackMention || got.OrgID != webhookTestOrgID {
-		t.Errorf("published event = %+v; want slack:mention for %s", got, webhookTestOrgID)
+	if got := (*r.published)[0]; got.EventType != domain.EventSlackMessage || got.OrgID != webhookTestOrgID {
+		t.Errorf("published event = %+v; want slack:message for %s", got, webhookTestOrgID)
 	}
 }
 

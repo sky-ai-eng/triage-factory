@@ -419,8 +419,8 @@ func TestSocketManager_HappyPath_PublishesAndAcks(t *testing.T) {
 	if len(*rig.published) != 1 {
 		t.Fatalf("published %d events; want 1", len(*rig.published))
 	}
-	if got := (*rig.published)[0]; got.OrgID != socketTestOrgID || got.EventType != domain.EventSlackMention {
-		t.Errorf("published event = %+v; want slack:mention for %s", got, socketTestOrgID)
+	if got := (*rig.published)[0]; got.OrgID != socketTestOrgID || got.EventType != domain.EventSlackMessage {
+		t.Errorf("published event = %+v; want slack:message for %s", got, socketTestOrgID)
 	}
 
 	status, ok := rig.mgr.StatusFor(socketTestAppID)
@@ -478,7 +478,7 @@ func TestSocketManager_LoadBalancing_TwoWorkspacesOneApp(t *testing.T) {
 	if len(*rig.published) != 2 {
 		t.Fatalf("published %d events; want 2", len(*rig.published))
 	}
-	var meta1, meta2 SlackMentionMetadata
+	var meta1, meta2 SlackMessageMetadata
 	_ = json.Unmarshal([]byte((*rig.published)[0].MetadataJSON), &meta1)
 	_ = json.Unmarshal([]byte((*rig.published)[1].MetadataJSON), &meta2)
 	if meta1.WorkspaceID != "T1LB" || meta2.WorkspaceID != "T2LB" {
