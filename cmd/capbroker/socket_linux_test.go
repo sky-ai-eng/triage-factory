@@ -8,15 +8,15 @@ import (
 	"testing"
 )
 
-// TestListen_Permissions pins the socket hygiene invariant: 0731 dir
+// TestListen_Permissions pins the socket hygiene invariant: 01731 dir
 // (traversable by any uid via a known path, group-writable so a run's
-// credential sidecar can create its own socket here, but not listable —
-// see listen's doc), 0600 socket file. The dir's group chgrp to WorktreeGID
-// only lands under a real root broker; this test runs unprivileged (so the
-// chgrp EPERMs and is tolerated), which is why it asserts the mode, not the
-// group. Uses an isolated temp directory rather than the production socketDir
-// (/run/tf, root-only on most distros) so this runs on an unprivileged CI
-// runner too.
+// credential sidecar can create its own socket here, but not listable, and
+// STICKY so no sidecar can delete/replace another entry — see listen's doc),
+// 0600 socket file. The dir's group chgrp to WorktreeGID only lands under a
+// real root broker; this test runs unprivileged (so the chgrp EPERMs and is
+// tolerated), which is why it asserts the mode, not the group. Uses an isolated
+// temp directory rather than the production socketDir (/run/tf, root-only on
+// most distros) so this runs on an unprivileged CI runner too.
 func TestListen_Permissions(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "tf-sock-dir", "test-hygiene.sock")
 
@@ -32,6 +32,12 @@ func TestListen_Permissions(t *testing.T) {
 	}
 	if got := dirInfo.Mode().Perm(); got != 0o731 {
 		t.Errorf("socket dir mode = %o, want 0731", got)
+	}
+	// Mode().Perm() masks the sticky bit, so assert it separately: without it,
+	// group-write + the shared WorktreeGID would let one run's sidecar unlink or
+	// replace the broker's or a sibling run's socket.
+	if dirInfo.Mode()&os.ModeSticky == 0 {
+		t.Errorf("socket dir mode = %v, want the sticky bit set (cross-run unlink protection)", dirInfo.Mode())
 	}
 
 	fileInfo, err := os.Stat(sockPath)

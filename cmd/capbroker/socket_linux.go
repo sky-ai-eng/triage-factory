@@ -30,9 +30,9 @@ const DefaultSocketPath = socketDir + "/cap-broker.sock"
 // listen creates the broker's socket following the same anti-race
 // ordering as agenthost/socket_linux.go's Start:
 //
-//  1. MkdirAll + chgrp + Chmod 0731 on the socket's parent directory — see
-//     the chown/chmod calls below for why 0731 (root:WorktreeGID) rather than
-//     agenthost's 0700. Takes the parent of socketPath (not the socketDir
+//  1. MkdirAll + chgrp + Chmod 01731 on the socket's parent directory — see
+//     the chown/chmod calls below for why 01731 (root:WorktreeGID, sticky)
+//     rather than agenthost's 0700. Takes the parent of socketPath (not the socketDir
 //     constant directly) so tests can point listen at an isolated temp
 //     directory; production always passes DefaultSocketPath, whose parent is
 //     exactly socketDir.
@@ -50,30 +50,40 @@ const DefaultSocketPath = socketDir + "/cap-broker.sock"
 //     can reach it either way.
 func listen(socketPath string) (net.Listener, error) {
 	dir := filepath.Dir(socketPath)
-	if err := os.MkdirAll(dir, 0o731); err != nil {
+	if err := os.MkdirAll(dir, os.ModeSticky|0o731); err != nil {
 		return nil, fmt.Errorf("capbroker: mkdir %s: %w", dir, err)
 	}
 	// This dir is shared: the broker's own socket lives here, and each run's
-	// credential sidecar — unprivileged (uid WorktreeUID), a WorktreeGID
-	// member — creates its per-run agenthost socket here too. Creating a file
+	// credential sidecar — unprivileged, carrying WorktreeGID as a supplementary
+	// group — creates its per-run agenthost socket here too. Creating a file
 	// needs write+search on the dir, so the sidecar needs group w; hence
-	// root:WorktreeGID mode 0731. Group is wx (create + traverse) with no r,
+	// root:WorktreeGID mode 01731. Group is wx (create + traverse) with no r,
 	// and other is x only, so no non-owner can readdir to enumerate live runs'
 	// socket names — the anti-enumeration property the prior 0711 had, extended
 	// just far enough to let the sidecar write. Other keeps x so the (different,
 	// unprivileged) orchestrator can still traverse to reach cap-broker.sock.
-	// Explicit chown+chmod, not the create mode: MkdirAll is a no-op on an
-	// existing dir (agenthost's StartWithServer also MkdirAlls this path), so
-	// the final owner/mode is pinned regardless of who created it first.
-	// The chgrp needs privilege the real (root) broker holds. An unprivileged
-	// caller — a test, or a broker misconfigured without root, which then can't
-	// hold CAP_SYS_ADMIN and can't function anyway — gets EPERM; tolerate that
-	// (the dir stays owner-writable, enough for that caller's own socket) but
-	// surface any other chown error.
+	//
+	// The STICKY bit (the leading 1) is load-bearing, not hygiene: group-write
+	// makes the directory writable by every run's sidecar, and WorktreeGID is
+	// shared across ALL runs — so without it, POSIX unlink/rename authority (a
+	// property of the PARENT directory, not the entry) would let any one run's
+	// sidecar delete or replace cap-broker.sock (a fixed path — a broker DoS) or
+	// a sibling run's <runID>.sock before that run's daemon binds (cross-run
+	// interference). Sticky restricts unlink/rename to each entry's own owner:
+	// per-run sockets are owned by their run's distinct sidecar uid and the
+	// broker's by root, so each is protected from every other run. Mirrors /tmp's
+	// 1777. Explicit chown+chmod, not the create mode: MkdirAll is a no-op on an
+	// existing dir (agenthost's StartWithServer also MkdirAlls this path), so the
+	// final owner/mode is pinned regardless of who created it first. The chgrp
+	// needs privilege the real (root) broker holds. An unprivileged caller — a
+	// test, or a broker misconfigured without root, which then can't hold
+	// CAP_SYS_ADMIN and can't function anyway — gets EPERM; tolerate that (the dir
+	// stays owner-writable, enough for that caller's own socket) but surface any
+	// other chown error.
 	if err := os.Chown(dir, -1, sandbox.WorktreeGID); err != nil && !errors.Is(err, os.ErrPermission) {
 		return nil, fmt.Errorf("capbroker: chgrp %s to gid=%d: %w", dir, sandbox.WorktreeGID, err)
 	}
-	if err := os.Chmod(dir, 0o731); err != nil {
+	if err := os.Chmod(dir, os.ModeSticky|0o731); err != nil {
 		return nil, fmt.Errorf("capbroker: chmod %s: %w", dir, err)
 	}
 	// Remove a stale socket file left by a previous crash — net.Listen

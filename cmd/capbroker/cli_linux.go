@@ -93,16 +93,19 @@ func runBroker(args []string) error {
 		// WorktreeGID with group write: each run's credential sidecar —
 		// unprivileged, a WorktreeGID member — creates its own per-run
 		// agenthost socket here, so it needs create (w) + search (x) on the
-		// dir. Hence orchestratorUID:WorktreeGID mode 0730 — owner rwx, group
-		// wx, no other access. The missing read bit preserves the
+		// dir. Hence orchestratorUID:WorktreeGID mode 01730 — owner rwx, group
+		// wx, no other access, STICKY. The missing read bit preserves the
 		// anti-enumeration property (no non-owner can readdir to discover live
-		// runs' socket names). This process (root, DAC-override) reaches it
-		// regardless.
+		// runs' socket names); the sticky bit is what stops one run's sidecar
+		// deleting or replacing cap-broker.sock or a sibling run's socket, since
+		// group-write + shared WorktreeGID would otherwise grant unlink/rename
+		// authority over every entry (see listen's doc). This process (root,
+		// DAC-override) reaches it regardless.
 		dir := filepath.Dir(*socketPath)
 		if err := os.Chown(dir, *orchestratorUID, sandbox.WorktreeGID); err != nil {
 			return fmt.Errorf("capbroker: chown socket dir to orchestrator uid %d gid %d: %w", *orchestratorUID, sandbox.WorktreeGID, err)
 		}
-		if err := os.Chmod(dir, 0o730); err != nil {
+		if err := os.Chmod(dir, os.ModeSticky|0o730); err != nil {
 			return fmt.Errorf("capbroker: chmod socket dir: %w", err)
 		}
 	}
