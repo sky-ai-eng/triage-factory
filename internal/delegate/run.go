@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
@@ -49,6 +50,23 @@ func sessionTranscriptExists(wtPath, sessionID string) bool {
 	}
 	_, err = os.Stat(p)
 	return err == nil
+}
+
+// errorResultSummary turns an agent runtime error result into the human-facing
+// failure summary persisted on the run. result is the SDK's error text (the
+// meaningful "why", e.g. "No conversation found with session ID: …"); subtype
+// is its classification ("error_during_execution", …). An error result with no
+// text still needs a non-empty stand-in — the frontend gates its failure detail
+// on a non-empty summary, so returning "" would reproduce the very
+// failed-with-no-reason gap this exists to close.
+func errorResultSummary(result, subtype string) string {
+	if s := strings.TrimSpace(result); s != "" {
+		return s
+	}
+	if subtype != "" {
+		return "agent runtime error: " + subtype
+	}
+	return "agent runtime reported an error result with no detail"
 }
 
 // resolveCommitIdentity resolves the org's GitHub commit-author identity for
@@ -369,18 +387,19 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	delegateLog.Info("claude starting for run", "run", runID, "cwd", claudeCwd)
 	baseOpts := agentproc.RunOptions{
-		Cwd:          claudeCwd,
-		Model:        model,
-		SessionID:    resumeSession,
-		Message:      prompt,
-		AllowedTools: agentproc.BuildAllowedToolsWithExtras(selfBin, cfg.extraAllowedTools),
-		MaxTurns:     100,
-		ExtraEnv:     extraEnv,
-		TraceID:      runID,
-		SystemPrompt: cfg.appendSysPrompt,
-		OrgID:        orgID,
-		Secrets:      s.getRunSecrets(),
-		LLMResolver:  s.llmResolverForRun(orgID, runID),
+		Cwd:             claudeCwd,
+		Model:           model,
+		SessionID:       resumeSession,
+		Message:         prompt,
+		AllowedTools:    agentproc.BuildAllowedToolsWithExtras(selfBin, cfg.extraAllowedTools),
+		MaxTurns:        100,
+		ExtraEnv:        extraEnv,
+		TraceID:         runID,
+		MemoryNamespace: namespace,
+		SystemPrompt:    cfg.appendSysPrompt,
+		OrgID:           orgID,
+		Secrets:         s.getRunSecrets(),
+		LLMResolver:     s.llmResolverForRun(orgID, runID),
 		// Multi mode: hand agentproc the prebuilt run network and the
 		// sidecar's proxy env so it launches into them and holds no
 		// credential — the sidecar owns the LLM/git/egress proxies + the
@@ -565,9 +584,13 @@ func (s *Spawner) processCompletion(
 	failureKind := domain.RunFailureUnclassified
 	switch {
 	case completion.IsError:
-		// Process crash / runtime error — an always-knowable terminal.
+		// Process crash / runtime error — an always-knowable terminal. Carry the
+		// runtime's own error text as the summary: without it the run persists as
+		// a bare agent_error and the only copy of "why" is the executor's stderr,
+		// so the UI shows a failure with no reason.
 		status = "failed"
 		failureKind = domain.RunFailureAgentError
+		resultSummary = errorResultSummary(completion.Result, completion.Subtype)
 	case class == turnValid:
 		resultSummary = parsed.Summary
 		outcome = parsed.Outcome

@@ -601,3 +601,54 @@ func TestRunQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 		t.Fatalf("ClaimedAt = %v after requeue, want nil (a queued row has no claim)", requeued.ClaimedAt)
 	}
 }
+
+// TestRunQueueStore_Postgres_RequeueFromSetupStatus is the production-dialect
+// regression for a run stranded in `cloning`: the claim sets `running`, but the
+// dispatcher advances the row through granular setup statuses before the agent
+// runs, so a workspace-setup failure requeues from one of those. A guard
+// matching only `running` left the UPDATE hitting zero rows and the run sat
+// active-but-idle forever. RequeueRun must requeue from every mid-setup status.
+func TestRunQueueStore_Postgres_RequeueFromSetupStatus(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	for _, setupStatus := range []string{"initializing", "cloning", "fetching", "worktree_created", "agent_starting"} {
+		t.Run(setupStatus, func(t *testing.T) {
+			h.Reset(t)
+			orgID, userID := seedPgOrgForBlueprints(t, h)
+			brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+
+			runID := uuid.New().String()
+			step0 := 0
+			if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+				ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
+				TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
+			}); err != nil {
+				t.Fatalf("EnqueueRun: %v", err)
+			}
+			if got, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
+				t.Fatalf("ClaimNextRun: (%v, %v)", got, err)
+			}
+			// Advance to the granular setup status the dispatcher would have set
+			// before the workspace-setup failure fired the requeue.
+			if _, err := h.AdminDB.ExecContext(ctx, `UPDATE runs SET status = $2 WHERE id = $1`, runID, setupStatus); err != nil {
+				t.Fatalf("advance to %s: %v", setupStatus, err)
+			}
+
+			if err := stores.RunQueue.RequeueRun(ctx, orgID, runID, "workspace setup: boom"); err != nil {
+				t.Fatalf("RequeueRun: %v", err)
+			}
+			after, err := stores.AgentRuns.GetSystem(ctx, orgID, runID)
+			if err != nil || after == nil {
+				t.Fatalf("GetSystem after requeue: (%v, %v)", after, err)
+			}
+			if after.Status != "queued" {
+				t.Fatalf("status after requeue from %q = %q, want queued (requeue must not no-op on a mid-setup status)", setupStatus, after.Status)
+			}
+			if reclaimed, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || reclaimed == nil {
+				t.Fatalf("re-ClaimNextRun after requeue from %q: (%v, %v)", setupStatus, reclaimed, err)
+			}
+		})
+	}
+}

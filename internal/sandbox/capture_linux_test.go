@@ -48,13 +48,13 @@ func TestCaptureRunDelta_DropsPrivilegeAndNetns(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(diagPath) })
 
 	orig := captureCommand
-	captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error) {
+	captureCommand = func(ctx context.Context, wtPath, sessionID string) (*exec.Cmd, error) {
 		script := "{ id; echo ==NET==; cat /proc/net/dev; } > " + diagPath + " 2>&1; echo null"
 		return exec.CommandContext(ctx, "/bin/sh", "-c", script), nil
 	}
 	t.Cleanup(func() { captureCommand = orig })
 
-	raw, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t))
+	raw, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t), "")
 	if err != nil {
 		t.Fatalf("CaptureRunDelta: %v", err)
 	}
@@ -135,13 +135,13 @@ func TestCaptureRunDelta_SkipsNetnsWithoutSysAdmin(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(diagPath) })
 
 	orig := captureCommand
-	captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error) {
+	captureCommand = func(ctx context.Context, wtPath, sessionID string) (*exec.Cmd, error) {
 		script := "{ id; echo ==NETNS==; readlink /proc/self/ns/net; } > " + diagPath + " 2>&1; echo null"
 		return exec.CommandContext(ctx, "/bin/sh", "-c", script), nil
 	}
 	t.Cleanup(func() { captureCommand = orig })
 
-	if _, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t)); err != nil {
+	if _, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t), ""); err != nil {
 		t.Fatalf("CaptureRunDelta: %v", err)
 	}
 
@@ -221,12 +221,12 @@ func TestTailBuffer_KeepsOnlyLastMaxBytes(t *testing.T) {
 // now-empty ": %s" stderr suffix.
 func TestCaptureRunDelta_ErrorHasNoTrailingColonWhenStderrEmpty(t *testing.T) {
 	orig := captureCommand
-	captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error) {
+	captureCommand = func(ctx context.Context, wtPath, sessionID string) (*exec.Cmd, error) {
 		return exec.CommandContext(ctx, "/nonexistent-tf-capture-errfmt-test-binary"), nil
 	}
 	t.Cleanup(func() { captureCommand = orig })
 
-	_, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t))
+	_, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t), "")
 	if err == nil {
 		t.Fatal("expected an error for a nonexistent capture binary")
 	}
@@ -251,7 +251,7 @@ func TestCaptureRunDelta_ErrorHasNoTrailingColonWhenStderrEmpty(t *testing.T) {
 func TestCaptureRunDeltaTo_StdoutIsTheSocketBackedFile(t *testing.T) {
 	orig := captureCommand
 	var gotCmd *exec.Cmd
-	captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error) {
+	captureCommand = func(ctx context.Context, wtPath, sessionID string) (*exec.Cmd, error) {
 		gotCmd = exec.CommandContext(ctx, "/nonexistent-tf-capture-pin-test-binary")
 		return gotCmd, nil
 	}
@@ -265,7 +265,7 @@ func TestCaptureRunDeltaTo_StdoutIsTheSocketBackedFile(t *testing.T) {
 
 	// The child can never actually start (no such binary) — irrelevant here;
 	// CaptureRunDeltaTo still closes pw regardless of outcome.
-	_, _ = CaptureRunDeltaTo(context.Background(), captureTestTree(t), pw)
+	_, _ = CaptureRunDeltaTo(context.Background(), captureTestTree(t), "", pw)
 
 	if gotCmd == nil {
 		t.Fatal("captureCommand was never invoked")
@@ -316,7 +316,7 @@ func TestReadCapturedDelta_OverCapErrors(t *testing.T) {
 // test loudly if reached.
 func TestCaptureRunDelta_RejectsInvalidWorktree(t *testing.T) {
 	orig := captureCommand
-	captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error) {
+	captureCommand = func(ctx context.Context, wtPath, sessionID string) (*exec.Cmd, error) {
 		t.Errorf("captureCommand invoked for invalid worktree %q", wtPath)
 		return exec.Command("false"), nil
 	}
@@ -330,7 +330,7 @@ func TestCaptureRunDelta_RejectsInvalidWorktree(t *testing.T) {
 		"/tmp/../etc/cron.d",             // non-clean
 		"/nonexistent-tf-capture-test/x", // no such tree
 	} {
-		if _, err := (hostOps{}).CaptureRunDelta(context.Background(), path); err == nil {
+		if _, err := (hostOps{}).CaptureRunDelta(context.Background(), path, ""); err == nil {
 			t.Errorf("CaptureRunDelta(%q) = nil error, want validation rejection", path)
 		}
 	}

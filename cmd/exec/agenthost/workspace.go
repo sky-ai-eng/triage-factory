@@ -3,9 +3,12 @@ package agenthost
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -90,6 +93,40 @@ func (c *LocalClient) CreateWorkspaceCheckout(ctx context.Context, owner, repo, 
 	return c.createWorkspaceCheckoutIn(ctx, hostRoot, owner, repo, ref, prNumber)
 }
 
+// materializeWorkspaceCheckout is the full host-side `workspace add`: resolve the
+// run root once, build the checkout under it, and hand the tree to the sandbox
+// uid. It writes the shared bare cache and the run-root, so it runs ONLY where
+// those are owned — an all/local process, or the orchestrator serving a sidecar's
+// relayed op. The capless credential sidecar owns neither (its uid can't write
+// either), so its dispatch relays here instead of calling this.
+func (c *LocalClient) materializeWorkspaceCheckout(ctx context.Context, owner, repo, ref string, prNumber int) (string, error) {
+	// One WorkspaceRoots read serves the create AND the post-create chown/cleanup
+	// containment gate, so both judge against the same root.
+	hostRoot, _, err := c.WorkspaceRoots(ctx)
+	if err != nil {
+		return "", err
+	}
+	path, err := c.createWorkspaceCheckoutIn(ctx, hostRoot, owner, repo, ref, prNumber)
+	if err != nil {
+		return "", err
+	}
+	// The create ran as the host process; hand the subtree to the sandbox uid or
+	// the jailed agent can't write its own checkout. On failure, remove the
+	// checkout so a released reservation can retry cleanly (git clone refuses a
+	// non-empty target) — but ONLY when the path is provably a strict descendant
+	// of the run root, since a regressed create contract would otherwise turn
+	// RemoveAll into deleting an arbitrary host directory.
+	if cerr := agentproc.ChownWorkspaceCheckoutForSandbox(ctx, hostRoot, path); cerr != nil {
+		if strictlyWithin(hostRoot, path) {
+			_ = sandbox.RemoveRunTree(context.Background(), path)
+		} else {
+			agenthostLog.Warn("leaving un-chowned checkout in place; path is not verifiably inside the run root", "path", path, "host_root", hostRoot)
+		}
+		return "", fmt.Errorf("hand checkout to sandbox user: %w", cerr)
+	}
+	return path, nil
+}
+
 // createWorkspaceCheckoutIn is CreateWorkspaceCheckout with the host run root
 // pre-resolved. The daemon dispatch calls this variant so ONE WorkspaceRoots
 // read serves the create AND the post-create chown/cleanup containment gate —
@@ -138,10 +175,10 @@ func (c *LocalClient) createWorkspaceCheckoutIn(ctx context.Context, hostRoot, o
 			// WithBaseBranch refreshes origin/<base> so the worktree-local `pr diff`
 			// frames against a current base, not a clone-time-frozen ref (TFAC-505).
 			worktree.WithBaseBranch(pr.BaseRef),
-			worktree.WithCloneAuth(worktree.CloneAuthFor(upstream, c.workspaceCloneToken(ctx, profile.Owner))))
+			worktree.WithCloneAuth(c.workspaceCloneAuth(ctx, profile.Owner, upstream)))
 	}
 	return workspaceCreateCheckout(ctx, profile.Owner, profile.Repo, profile.CloneURL, ref, c.info.RunID, hostRoot,
-		worktree.WithCloneAuth(worktree.CloneAuthFor(profile.CloneURL, c.workspaceCloneToken(ctx, profile.Owner))))
+		worktree.WithCloneAuth(c.workspaceCloneAuth(ctx, profile.Owner, profile.CloneURL)))
 }
 
 // prCloneURLs derives the (upstream, head) clone URLs to hand CreateForPRInRoot,
@@ -161,23 +198,51 @@ func prCloneURLs(originURL string, pr *ghclient.PRView) (upstream, head string) 
 	return upstream, pr.SSHURL
 }
 
-// workspaceCloneToken resolves the App installation token for the host-side
-// clone of a repo owned by owner — the same tiered resolver every host-routed
-// gh call uses, so the API client and the git clone/fetch share one cached
-// installation token. Mirrors the spawner's resolveCloneToken contract:
-// multi-mode only by design (local clones keep the operator's SSH key /
-// anonymous HTTPS, byte-for-byte unchanged), and "" on any resolution failure —
-// the clone then proceeds uninjected and surfaces the auth error itself if the
-// repo is private. A resolve failure is logged so a real backend outage (e.g.
-// vault down) isn't silent.
-func (c *LocalClient) workspaceCloneToken(ctx context.Context, owner string) string {
+// workspaceCloneAuth resolves the HTTPS credential for the host-side clone of a
+// repo, in the form the run's placement dictates:
+//
+//   - Local mode: no injection. The operator's own git (SSH agent / anonymous
+//     HTTPS) authenticates, byte-for-byte the pre-relocation behavior.
+//   - Executor sidecar (proxyCreds set): route the clone through the run's git
+//     proxy, presenting only the per-run placeholder. The real installation
+//     token lives solely in the sidecar's bundle-backed proxy and is injected on
+//     the upstream hop — this daemon, which parses hostile agent traffic, never
+//     holds it. Same proxy, authz gate, and audit path as the agent's own git
+//     and the eager-PR clone (internal/delegate). If the run started no git
+//     proxy (GitProxyURL empty), inject nothing and let the clone surface its
+//     own auth error rather than reaching the resolver, which is nil here.
+//   - All/local in-process: mint a real repo-scoped token from the live secret
+//     store (the tiered resolver; tests inject a fake). "" on any resolution
+//     failure — the clone then proceeds uninjected and surfaces the auth error
+//     itself if the repo is private. A failure is logged so a backend outage
+//     isn't silent.
+func (c *LocalClient) workspaceCloneAuth(ctx context.Context, owner, cloneURL string) worktree.CloneAuth {
 	if runmode.Current() == runmode.ModeLocal {
-		return ""
+		return worktree.CloneAuth{}
+	}
+	if c.proxyCreds != nil {
+		if c.proxyCreds.GitProxyURL == "" {
+			return worktree.CloneAuth{}
+		}
+		return worktree.CloneAuthViaGitProxy(c.proxyCreds.GitProxyURL, cloneHostBase(cloneURL), c.proxyCreds.GitProxyToken)
 	}
 	tok, err := c.githubResolver().TokenFor(ctx, c.info.OrgID, owner)
 	if err != nil {
 		agenthostLog.Warn("resolve workspace clone token failed; clone proceeds uninjected", "org", c.info.OrgID, "target", owner, "error", err)
-		return ""
+		return worktree.CloneAuth{}
 	}
-	return tok.Value
+	return worktree.CloneAuthFor(cloneURL, tok.Value)
+}
+
+// cloneHostBase reduces a clone URL to its scheme://host origin — the insteadOf
+// prefix CloneAuthViaGitProxy rewrites onto the git proxy. The host-side clone
+// and the in-jail agent must present the identical rewrite so both transit the
+// one proxy the same way. Returns the input unchanged when it isn't a parseable
+// absolute URL, leaving CloneAuthViaGitProxy to no-op on the malformed value.
+func cloneHostBase(cloneURL string) string {
+	u, err := url.Parse(cloneURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return cloneURL
+	}
+	return u.Scheme + "://" + u.Host
 }

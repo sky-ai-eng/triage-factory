@@ -24,7 +24,7 @@ type fakeOps struct {
 	reapOrphansFn     func(ctx context.Context) error
 	chownRunTreeFn    func(ctx context.Context, root, subpath string) error
 	removeRunTreeFn   func(ctx context.Context, path string) error
-	captureRunDeltaFn func(ctx context.Context, worktree string) ([]byte, error)
+	captureRunDeltaFn func(ctx context.Context, worktree, sessionID string) ([]byte, error)
 }
 
 func (f *fakeOps) SetupNetwork(ctx context.Context, runID string, subnetIdx uint8) (sandbox.NetworkState, error) {
@@ -45,8 +45,8 @@ func (f *fakeOps) ChownRunTree(ctx context.Context, root, subpath string) error 
 func (f *fakeOps) RemoveRunTree(ctx context.Context, path string) error {
 	return f.removeRunTreeFn(ctx, path)
 }
-func (f *fakeOps) CaptureRunDelta(ctx context.Context, worktree string) ([]byte, error) {
-	return f.captureRunDeltaFn(ctx, worktree)
+func (f *fakeOps) CaptureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error) {
+	return f.captureRunDeltaFn(ctx, worktree, sessionID)
 }
 
 var _ sandbox.PrivilegedOps = (*fakeOps)(nil)

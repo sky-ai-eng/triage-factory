@@ -23,8 +23,8 @@ func removeRunTree(ctx context.Context, path string) error {
 	return defaultOps.RemoveRunTree(ctx, path)
 }
 
-func captureRunDelta(ctx context.Context, worktree string) ([]byte, error) {
-	return defaultOps.CaptureRunDelta(ctx, worktree)
+func captureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error) {
+	return defaultOps.CaptureRunDelta(ctx, worktree, sessionID)
 }
 
 // runTreeOwnerExtraUID is the orchestrator's uid when this code runs
@@ -43,6 +43,52 @@ var runTreeOwnerExtraUID = -1
 // into brokered mode. Called once by the cap-broker subcommand at boot,
 // before serving; never called in-process.
 func SetRunTreeOwnerUID(uid int) { runTreeOwnerExtraUID = uid }
+
+// runTreeGroupGID is the GROUP a run tree is chowned to at the ownership
+// hand-off, and the write-access channel that lets the orchestrator
+// materialize checkouts into a run root it has otherwise handed to the
+// sandbox agent. It defaults to WorktreeGID — the agent's own gid, the
+// historical target, correct for the in-process/dev case where the tree
+// creator and the agent are one identity. In the brokered split the broker
+// sets it to the ORCHESTRATOR's gid via SetRunTreeGroupGID. That choice is
+// load-bearing: the run root becomes group-writable by the orchestrator
+// WITHOUT granting WorktreeGID, the group the per-run credential sidecar
+// also carries — granting WorktreeGID would let any run's sidecar reach
+// every other run's tree over the shared executor filesystem. The
+// orchestrator's gid is carried by no sandboxed principal (not the agent,
+// not any sidecar), so a run tree stays reachable by exactly the owning
+// agent and the trusted orchestrator, and by nothing else.
+var runTreeGroupGID = WorktreeGID
+
+// SetRunTreeGroupGID registers the orchestrator's gid as the run-tree group
+// target. Called once by the cap-broker subcommand from --orchestrator-gid
+// at boot, before serving; never in-process (dev/same-uid keeps the
+// WorktreeGID default, where owner and agent coincide anyway).
+func SetRunTreeGroupGID(gid int) { runTreeGroupGID = gid }
+
+// runTreeDirMode is the mode the run-tree directory scaffold — the run root
+// and the owner/repo intermediates a mid-run `workspace add` mints — is set
+// to at the ownership hand-off: rwx for the owning agent (owner) AND the
+// orchestrator (group runTreeGroupGID), and nothing for anyone else. The
+// group-write bit is exactly what lets the orchestrator create checkouts
+// inside a run root it has handed to the agent; the 0700 creation mode would
+// deny it. Only the scaffold directories are set to this — a checkout's own
+// tree keeps whatever modes git wrote (executable bits and so on); being
+// reachable THROUGH the scaffold is all the orchestrator needs there.
+const runTreeDirMode = 0o770
+
+// chmodRunTreeDir sets a pinned run-tree directory to runTreeDirMode, using
+// the SAME pinned fd the chown acted on so a rename racing the walk can't
+// redirect it: a real fd is chmod'd directly; an O_PATH fd (the fallback the
+// walk takes when a dir can't be opened readable) can't be Fchmod'd, so it
+// goes through that fd's /proc magic symlink, which still resolves to exactly
+// the pinned inode.
+func chmodRunTreeDir(fd int, isPathFd bool) error {
+	if !isPathFd {
+		return unix.Fchmod(fd, uint32(runTreeDirMode))
+	}
+	return unix.Fchmodat(unix.AT_FDCWD, fmt.Sprintf("/proc/self/fd/%d", fd), uint32(runTreeDirMode), 0)
+}
 
 // allowedRunTreeOwner is the ownership precondition on every run-tree
 // operation at this privileged boundary: the tree (and, for chown, every
@@ -274,7 +320,7 @@ func openEntryPinned(dirFd int, name string) (fd int, st unix.Stat_t, isPathFd b
 // re-resolves `name`, it always chowns the exact inode openEntryPinned
 // pinned — whatever `name` has since been renamed to, or replaced with.
 func chownPinnedEntry(fd int) error {
-	return unix.Fchownat(fd, "", WorktreeUID, WorktreeGID, unix.AT_EMPTY_PATH)
+	return unix.Fchownat(fd, "", WorktreeUID, runTreeGroupGID, unix.AT_EMPTY_PATH)
 }
 
 // listableDirFd returns an fd usable with getdents for the directory
@@ -361,6 +407,14 @@ func chownRunTreeOpenat2(ctx context.Context, root, subpath string) error {
 		if err := chownPinnedEntry(rootFd); err != nil {
 			return fmt.Errorf("fchownat %s: %w", root, err)
 		}
+		// The root is the run root's scaffold directory — set it group-writable
+		// (runTreeDirMode) so the orchestrator can materialize checkouts into it
+		// later; its children keep whatever modes they were created with.
+		// rootFd came from openat2AnchoredChildDir (a real O_DIRECTORY fd), so a
+		// direct Fchmod applies.
+		if err := chmodRunTreeDir(rootFd, false); err != nil {
+			return fmt.Errorf("fchmod %s: %w", root, err)
+		}
 		return chownDirChildren(ctx, rootFd, root)
 	}
 
@@ -409,6 +463,14 @@ func chownRunTreeOpenat2(ctx context.Context, root, subpath string) error {
 		if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 			closeFd(fd)
 			opErr = fmt.Errorf("chown run tree: subpath intermediate %q is not a directory", display)
+			break
+		}
+		// A scaffold intermediate (owner/, owner/repo/): make it group-writable
+		// so a later same-owner `workspace add` can mint sibling checkouts under
+		// it. Same pinned fd as the chown, so the chmod can't be redirected.
+		if err := chmodRunTreeDir(fd, isPathFd); err != nil {
+			closeFd(fd)
+			opErr = fmt.Errorf("fchmod %s: %w", display, err)
 			break
 		}
 		listFd, distinct, err := listableDirFd(fd, isPathFd)

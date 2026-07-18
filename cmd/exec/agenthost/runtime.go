@@ -118,6 +118,10 @@ const (
 	opUpdateReviewDetails     = "update_review_details_if_pending"
 	opRecordExternalWrite     = "record_external_write"
 	opCheckEntitlement        = "check_entitlement"
+	// opCreateWorkspaceCheckout materializes a `workspace add` checkout. Unlike
+	// the other core ops it is FS-bearing: the sidecar relays it because it owns
+	// neither the shared bare cache nor the run-root; the orchestrator serves it.
+	opCreateWorkspaceCheckout = "create_workspace_checkout"
 )
 
 // updateReviewDetailsArgs / updateReviewDetailsResult are the

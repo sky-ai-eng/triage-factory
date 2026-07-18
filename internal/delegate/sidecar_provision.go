@@ -163,6 +163,9 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 	// fold them itself.
 	identity := s.resolveCommitIdentity(ctx, orgID, run.TriggerType, run.CreatorUserID)
 
+	// Held so its proxy coords can be set once bring-up returns them (below):
+	// the relayed workspace-add materialization clones through the run's proxies.
+	relaySrv := agenthost.NewRelayServer(stores, info, git)
 	params := agentproc.SidecarBringUpParams{
 		HostVethIP: net.HostIP,
 		Git:        git,
@@ -170,7 +173,7 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 		// the git proxy's push authz/audit (backed by the same git gate) plus
 		// the exec verb-trace DB ops, all identity-bound from RunInfo. Holds
 		// the stores + secrets the capless sidecar cannot.
-		Relay:         agenthost.NewRelayServer(stores, info, git),
+		Relay:         relaySrv,
 		IdentityPairs: githooks.IdentityConfigPairs(identity.Name, identity.Email),
 		// Every delegated run may touch a GitHub repo (clone/push + GetPR +
 		// agenthost gh verbs), so the git + GitHub-REST proxies are always on.
@@ -198,6 +201,18 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 		_ = net.Close()
 		return nil, fmt.Errorf("bring up credential sidecar: %w", err)
 	}
+	// Hand the relay server the run's now-known proxy coords so a relayed
+	// `workspace add` clones + fetches PRs through them — the orchestrator holds
+	// no real credential for either. Set before the agent runs, so always ready
+	// by the time a materialization arrives.
+	relaySrv.SetProxyCreds(&agenthost.ProxyCredentials{
+		GitHubAPIURL:   res.GitHubAPIURL,
+		GitHubAPIToken: res.GitHubAPIToken,
+		JiraAPIURL:     res.JiraAPIURL,
+		JiraAPIToken:   res.JiraAPIToken,
+		GitProxyURL:    res.GitProxyURL,
+		GitProxyToken:  res.GitProxyToken,
+	})
 
 	es := &executorSandbox{net: net, sidecar: sc, conn: conn, res: res, stopRelay: make(chan struct{})}
 	// The sidecar received this run's bundle once, at bring-up, but the brain's
@@ -345,7 +360,7 @@ func (s *Spawner) executorGitGate(ctx context.Context, info agenthost.RunInfo, s
 // setup failure. Only the executor role reaches here (bringUpExecutorSandbox
 // returns nil otherwise).
 func (s *Spawner) sidecarProvisionFor(orgID, runID string) agentproc.SidecarProvisionFunc {
-	_, myBootEpoch := s.executorIdentity()
+	myID, myBootEpoch := s.executorIdentity()
 	return func(provCtx context.Context, sidecarPubKeyB64 string) ([]byte, int64, error) {
 		// Publish the sidecar's per-run pubkey onto the claim + fire the
 		// cred_request doorbell. MarkAwaitingCredentials is the same call the
@@ -360,12 +375,17 @@ func (s *Spawner) sidecarProvisionFor(orgID, runID string) agentproc.SidecarProv
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		for {
-			_, bootEpoch, sealed, ok, err := s.runCredentials.Get(provCtx, orgID, runID)
+			credExecutorID, bootEpoch, sealed, ok, err := s.runCredentials.Get(provCtx, orgID, runID)
 			if err != nil {
 				dispatchLog.Warn("read run credential bundle failed; retrying", "run", runID, "error", err)
-			} else if ok && bootEpoch == myBootEpoch {
+			} else if ok && credExecutorID == myID && bootEpoch == myBootEpoch {
 				// Opaque ciphertext — the orchestrator relays it verbatim and
-				// never opens it (only the sidecar's private key can).
+				// never opens it (only the sidecar's private key can). Gate on the
+				// bundle's stamped (executor, boot_epoch) matching ours: a row left
+				// by a prior claimant — a dead executor's, or an earlier boot's —
+				// is sealed to a sidecar key this run never minted, so relaying it
+				// would just fail the unseal. Skip and keep polling until the brain
+				// re-seals for THIS claim.
 				return sealed, bootEpoch, nil
 			}
 			select {

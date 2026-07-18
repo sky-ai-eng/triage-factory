@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
@@ -56,6 +57,86 @@ type GitDelta struct {
 	// (tracked modifications and untracked additions alike), with the managed
 	// _scratch tree excluded. nil when the working tree is clean.
 	Patch []byte
+}
+
+// CapturedState is everything one snapshot-capture pass emits from inside the
+// agent-uid child: the git delta (nil for a non-git run root) AND the Claude
+// session transcript (empty when the run carries no session, or the file was
+// absent). Both are agent-owned — the transcript sits at 0600 under a 0700
+// projects dir the SDK locks to its owner — so both have to be read as the
+// sandbox uid. Reading them in the same dropped-privilege child is exactly why
+// the orchestrator, which can read neither, never needs to: it decodes this
+// envelope rather than touching the files. Transcript is a []byte, so JSON
+// carries it base64-encoded, tolerating any bytes without escaping.
+type CapturedState struct {
+	Delta      *GitDelta `json:"delta"`
+	Transcript []byte    `json:"transcript,omitempty"`
+}
+
+// ReadClaudeSessionTranscript reads the Claude session transcript for sessionID
+// under wtPath's project encoding, returning (bytes, true) on success and
+// (nil, false) when there is no session id or the file is absent/unreadable.
+// This is the LOCAL / in-process reader (local + all modes): the transcript
+// lives under the operator's own ~/.claude and the reader shares the agent's
+// uid, so there is no cross-uid boundary. The sandboxed capture child uses
+// ReadSandboxSessionTranscript instead — it must not depend on this process's
+// runmode to find the file, and it must confine the read.
+func ReadClaudeSessionTranscript(wtPath, sessionID string) ([]byte, bool) {
+	if sessionID == "" {
+		return nil, false
+	}
+	p, err := ClaudeSessionPath(ResolveClaudeProjectCwd(wtPath), sessionID)
+	if err != nil {
+		return nil, false
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
+}
+
+// ReadSandboxSessionTranscript reads a SANDBOXED run's Claude session transcript
+// from under runRoot, for use in the snapshot-capture child. It differs from
+// ReadClaudeSessionTranscript in two load-bearing ways:
+//
+//   - It does NOT consult this process's runmode. The capture child is spawned
+//     with a deliberately minimal env (no TF_MODE, HOME=/nonexistent), so the
+//     mode-aware path would resolve as local mode and look under /nonexistent/
+//     .claude — where a sandboxed run's transcript never is. A sandboxed agent's
+//     HOME is the bind-mounted run root and its cwd is the sandbox work root, so
+//     the transcript is always at <runRoot>/.claude/projects/<encode(workRoot)>/
+//     <session>.jsonl. Compute that directly.
+//   - It reads CONFINED to runRoot. The child runs on the HOST filesystem as the
+//     shared agent uid (sandbox.WorktreeUID — identical for every run), so a
+//     plain read would follow a symlink the hostile agent planted at the
+//     transcript path out of its own run root into another run's tree, or any
+//     host file that uid can read, and land it in this run's persisted snapshot.
+//     readFileConfined rejects any resolution that escapes runRoot.
+func ReadSandboxSessionTranscript(runRoot, sessionID string) ([]byte, bool) {
+	if sessionID == "" {
+		return nil, false
+	}
+	root := ResolveClaudeProjectCwd(runRoot)
+	rel, err := filepath.Rel(root, SandboxClaudeSessionPath(runRoot, sessionID))
+	if err != nil {
+		return nil, false
+	}
+	data, err := readFileConfined(root, rel)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
+}
+
+// SandboxClaudeSessionPath is the host path of a sandboxed run's session
+// transcript — <runRoot>/.claude/projects/<encode(SandboxWorkRoot)>/<session>.jsonl
+// — the layout the jailed agent (HOME=run root, cwd=SandboxWorkRoot) writes it
+// under. Exported so a test can seed a transcript at exactly the location
+// ReadSandboxSessionTranscript reads.
+func SandboxClaudeSessionPath(runRoot, sessionID string) string {
+	root := ResolveClaudeProjectCwd(runRoot)
+	return filepath.Join(root, claudeProjectsDir, encodeClaudeProjectDir(agentproc.SandboxWorkRoot), sessionID+".jsonl")
 }
 
 // IsGitWorktree reports whether wtPath is the root of a git working tree (a

@@ -181,6 +181,19 @@ func buildSandboxEnv(extraEnv []string) []string {
 		"PATH=/usr/local/bin:/usr/bin:/bin",
 		"HOME=/work",
 		"TERM=xterm",
+		// The sandbox's egress is a fail-closed allowlist of package registries
+		// (egressproxy.DefaultRegistryHosts); the SDK's non-essential hosts —
+		// telemetry, error reporting, the auto-updater, Statsig feature gates —
+		// are deliberately absent, since inference rides the per-run LLM proxy
+		// rather than direct egress. Left on, that traffic can only produce
+		// denied connections: wasted SDK retry loops plus a flood of INFO-level
+		// egress denials in the executor log, with nothing gained. Disable it at
+		// the source so the jail never opens a connection it can't complete. A
+		// pure behavior toggle, no credential — Property B-safe. Sandbox-only:
+		// the local direct-spawn path runs on the operator's host with real
+		// egress where this traffic legitimately completes, so it stays unset
+		// there (buildSandboxEnv feeds only the sandboxed subprocess).
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
 	}
 	// Engine runtime tuning (JSC JIT off by default). Non-credential by
 	// construction, so it belongs in the Property B-safe base set.

@@ -40,11 +40,15 @@ func runBroker(args []string) error {
 	fs := flag.NewFlagSet("cap-broker", flag.ContinueOnError)
 	socketPath := fs.String("socket", DefaultSocketPath, "unix socket path to serve on")
 	orchestratorUID := fs.Int("orchestrator-uid", -1, "uid the orchestrator process runs as after the exec-time capability drop; when set (>=0), the control socket is chowned to this uid so that different-uid, unprivileged process can still connect")
+	orchestratorGID := fs.Int("orchestrator-gid", -1, "gid the orchestrator process runs as; when set (>=0), run trees are chowned to this group so the orchestrator can materialize checkouts into a run root handed to the sandbox agent, WITHOUT granting WorktreeGID (which a run's sidecar also carries and could otherwise use to reach other runs' trees)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	if err := validateOrchestratorUIDFlag(*orchestratorUID); err != nil {
+		return err
+	}
+	if err := validateOrchestratorGIDFlag(*orchestratorGID); err != nil {
 		return err
 	}
 
@@ -64,6 +68,14 @@ func runBroker(args []string) error {
 		// the orchestrator created.
 		sandbox.SetRunTreeOwnerUID(*orchestratorUID)
 
+		// Chown run trees to the orchestrator's own gid (not WorktreeGID) at
+		// the ownership hand-off, so it can materialize checkouts into a run
+		// root it has handed to the agent without opening that tree to the
+		// per-run sidecar. See sandbox.SetRunTreeGroupGID.
+		if *orchestratorGID >= 0 {
+			sandbox.SetRunTreeGroupGID(*orchestratorGID)
+		}
+
 		// The socket is created owner-only (listen()'s chmod 0600) by
 		// whichever uid this process runs as — root, in the default
 		// deployment. Once the orchestrator drops to a different,
@@ -76,20 +88,24 @@ func runBroker(args []string) error {
 			return fmt.Errorf("capbroker: chown socket to orchestrator uid %d: %w", *orchestratorUID, err)
 		}
 
-		// Hand the socket DIRECTORY to the orchestrator too, tightened to
-		// 0700: the same /run/tf holds the agenthost daemon's per-run
-		// sockets, which the (now unprivileged) orchestrator creates
-		// itself and so needs write+search here for. Owner-only is
-		// strictly tighter than listen()'s 0711 default — the only two
-		// parties that belong in this directory are the orchestrator
-		// (owner) and this process (root, DAC-override); the 0711
-		// traverse-by-path concession existed for the orchestrator
-		// reaching a root-owned dir, which ownership now makes moot.
+		// Hand the socket DIRECTORY to the orchestrator (owner) so it can
+		// still reach cap-broker.sock post-drop, but keep it group-owned by
+		// WorktreeGID with group write: each run's credential sidecar —
+		// unprivileged, a WorktreeGID member — creates its own per-run
+		// agenthost socket here, so it needs create (w) + search (x) on the
+		// dir. Hence orchestratorUID:WorktreeGID mode 01730 — owner rwx, group
+		// wx, no other access, STICKY. The missing read bit preserves the
+		// anti-enumeration property (no non-owner can readdir to discover live
+		// runs' socket names); the sticky bit is what stops one run's sidecar
+		// deleting or replacing cap-broker.sock or a sibling run's socket, since
+		// group-write + shared WorktreeGID would otherwise grant unlink/rename
+		// authority over every entry (see listen's doc). This process (root,
+		// DAC-override) reaches it regardless.
 		dir := filepath.Dir(*socketPath)
-		if err := os.Chown(dir, *orchestratorUID, -1); err != nil {
-			return fmt.Errorf("capbroker: chown socket dir to orchestrator uid %d: %w", *orchestratorUID, err)
+		if err := os.Chown(dir, *orchestratorUID, sandbox.WorktreeGID); err != nil {
+			return fmt.Errorf("capbroker: chown socket dir to orchestrator uid %d gid %d: %w", *orchestratorUID, sandbox.WorktreeGID, err)
 		}
-		if err := os.Chmod(dir, 0o700); err != nil {
+		if err := os.Chmod(dir, os.ModeSticky|0o730); err != nil {
 			return fmt.Errorf("capbroker: chmod socket dir: %w", err)
 		}
 	}
@@ -139,6 +155,27 @@ func runBroker(args []string) error {
 func validateOrchestratorUIDFlag(uid int) error {
 	if uid >= 0 && sandbox.IsSidecarUID(uid) {
 		return fmt.Errorf("capbroker: --orchestrator-uid %d falls inside the reserved sidecar uid band [%d, %d) — the orchestrator and a run's sidecar would share a uid; repoint TF_ORCHESTRATOR_UID outside that range", uid, sandbox.SidecarUIDBase, sandbox.SidecarUIDBase+sandbox.MaxSandboxes)
+	}
+	return nil
+}
+
+// validateOrchestratorGIDFlag refuses a run-tree group that would defeat the
+// isolation the group is chosen FOR. The orchestrator's gid becomes the run
+// tree's group, so it must be a group no sandboxed principal carries:
+// WorktreeGID is carried by every jailed agent AND every per-run sidecar
+// (shared over the executor filesystem), so using it would let any run's
+// sidecar reach any other run's tree; the sidecar uid band is a sidecar's own
+// gid. Either would silently convert the group-write grant into a cross-run
+// hole, so the broker refuses to boot rather than serve it.
+func validateOrchestratorGIDFlag(gid int) error {
+	if gid < 0 {
+		return nil
+	}
+	if gid == sandbox.WorktreeGID {
+		return fmt.Errorf("capbroker: --orchestrator-gid %d is WorktreeGID — run trees would become group-writable by every run's sidecar (a WorktreeGID member); repoint TF_ORCHESTRATOR_GID to a group no sandboxed principal carries", gid)
+	}
+	if sandbox.IsSidecarUID(gid) {
+		return fmt.Errorf("capbroker: --orchestrator-gid %d falls inside the reserved sidecar band [%d, %d); repoint TF_ORCHESTRATOR_GID outside that range", gid, sandbox.SidecarUIDBase, sandbox.SidecarUIDBase+sandbox.MaxSandboxes)
 	}
 	return nil
 }

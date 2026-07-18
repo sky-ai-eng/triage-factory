@@ -21,21 +21,22 @@ import (
 // child.
 var captureViaSandbox = sandbox.CaptureRunDelta
 
-// captureIsolated captures wtPath's git delta via the privileged capture
-// op and decodes the child's JSON output. Empty / "null" output means a
-// non-git run root: no delta.
-func captureIsolated(ctx context.Context, wtPath string) (*worktree.GitDelta, error) {
-	raw, err := captureViaSandbox(ctx, wtPath)
+// captureIsolated captures wtPath's non-recoverable state via the privileged
+// capture op and decodes the child's JSON worktree.CapturedState — the git
+// delta (nil for a non-git run root) and, when sessionID is set, the session
+// transcript the child read as the sandbox uid.
+func captureIsolated(ctx context.Context, wtPath, sessionID string) (*worktree.GitDelta, []byte, error) {
+	raw, err := captureViaSandbox(ctx, wtPath, sessionID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := bytes.TrimSpace(raw)
-	if len(out) == 0 || string(out) == "null" {
-		return nil, nil // non-git run root: no delta
+	if len(out) == 0 {
+		return nil, nil, nil // defensive: the child always encodes a state object
 	}
-	var delta worktree.GitDelta
-	if err := json.Unmarshal(out, &delta); err != nil {
-		return nil, fmt.Errorf("isolated capture: decode delta: %w", err)
+	var state worktree.CapturedState
+	if err := json.Unmarshal(out, &state); err != nil {
+		return nil, nil, fmt.Errorf("isolated capture: decode captured state: %w", err)
 	}
-	return &delta, nil
+	return state.Delta, state.Transcript, nil
 }

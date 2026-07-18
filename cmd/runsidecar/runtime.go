@@ -231,6 +231,8 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 		GitHubAPIToken: proxies.GitHubAPIToken,
 		JiraAPIURL:     proxies.JiraAPIURL,
 		JiraAPIToken:   proxies.JiraAPIToken,
+		GitProxyURL:    proxies.GitProxyURL,
+		GitProxyToken:  proxies.GitProxyToken,
 	}
 	// The provider-credential accessor lets a provider handler (Slack) select
 	// its bot token from the sealed bundle in-process — a live read so a mid-run

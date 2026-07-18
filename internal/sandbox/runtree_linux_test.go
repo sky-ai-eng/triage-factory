@@ -186,6 +186,93 @@ func TestChownRunTree_SubpathChownsIntermediatesShallow(t *testing.T) {
 	}
 }
 
+func statMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return fi.Mode().Perm()
+}
+
+// TestChownRunTree_GroupTargetAndScaffoldMode pins the run-tree ownership model
+// that lets the orchestrator materialize checkouts into a run root it has handed
+// to the agent WITHOUT opening that tree to the per-run sidecar. With the
+// orchestrator's gid registered, the run root and the owner/repo scaffold
+// intermediates become owner=agent, group=orchestrator, mode 0770 (agent-owner
+// and orchestrator-group writable, no access for anyone else — critically not
+// WorktreeGID, which every sidecar carries). A checkout's OWN tree keeps the
+// modes git wrote (only its group moves), since the orchestrator only needs to
+// reach it through the scaffold, not re-mode it.
+func TestChownRunTree_GroupTargetAndScaffoldMode(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (CAP_CHOWN) to change file owners")
+	}
+	const orchGID = 10001 // distinct from WorktreeGID; carried by nothing sandboxed
+	SetRunTreeGroupGID(orchGID)
+	t.Cleanup(func() { SetRunTreeGroupGID(WorktreeGID) })
+
+	// Run-start form (subpath==""): a lazy run root with a _scratch child.
+	root := t.TempDir()
+	scratch := filepath.Join(root, "_scratch")
+	if err := os.Mkdir(scratch, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(scratch, 0o700); err != nil { // defeat umask so the "preserved" assertion is exact
+		t.Fatal(err)
+	}
+	if err := (hostOps{}).ChownRunTree(context.Background(), root, ""); err != nil {
+		t.Fatalf("ChownRunTree(root): %v", err)
+	}
+	// The root is scaffold: agent-owner, orchestrator-group, 0770.
+	if uid, gid := statUIDGID(t, root); uid != WorktreeUID || gid != orchGID {
+		t.Errorf("root owned %d:%d, want %d:%d (agent owner, orchestrator group)", uid, gid, WorktreeUID, orchGID)
+	}
+	if m := statMode(t, root); m != 0o770 {
+		t.Errorf("root mode = %o, want 0770 (agent+orchestrator writable, no other access)", m)
+	}
+	// A non-scaffold child keeps its creation mode; only its group moves.
+	if m := statMode(t, scratch); m != 0o700 {
+		t.Errorf("_scratch mode = %o, want its 0700 preserved (children are not re-moded)", m)
+	}
+	if _, gid := statUIDGID(t, scratch); gid != orchGID {
+		t.Errorf("_scratch gid = %d, want %d", gid, orchGID)
+	}
+
+	// Mid-run form (subpath!=""): owner/repo intermediates become scaffold-mode;
+	// the checkout leaf keeps its own dir mode.
+	root2 := t.TempDir()
+	if err := (hostOps{}).ChownRunTree(context.Background(), root2, ""); err != nil {
+		t.Fatalf("ChownRunTree(root2): %v", err)
+	}
+	leaf := filepath.Join(root2, "sky-ai-eng", "triage-factory", "main")
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(leaf, 0o755); err != nil { // defeat umask for the exact-mode assertion
+		t.Fatal(err)
+	}
+	rel := filepath.Join("sky-ai-eng", "triage-factory", "main")
+	if err := (hostOps{}).ChownRunTree(context.Background(), root2, rel); err != nil {
+		t.Fatalf("ChownRunTree(subpath): %v", err)
+	}
+	for _, d := range []string{filepath.Join(root2, "sky-ai-eng"), filepath.Join(root2, "sky-ai-eng", "triage-factory")} {
+		if m := statMode(t, d); m != 0o770 {
+			t.Errorf("intermediate %s mode = %o, want 0770", d, m)
+		}
+		if uid, gid := statUIDGID(t, d); uid != WorktreeUID || gid != orchGID {
+			t.Errorf("intermediate %s owned %d:%d, want %d:%d", d, uid, gid, WorktreeUID, orchGID)
+		}
+	}
+	// The checkout leaf keeps the mode it was created with (not forced to 0770).
+	if m := statMode(t, leaf); m != 0o755 {
+		t.Errorf("checkout leaf mode = %o, want its 0755 preserved (checkouts are not scaffold)", m)
+	}
+	if uid, gid := statUIDGID(t, leaf); uid != WorktreeUID || gid != orchGID {
+		t.Errorf("checkout leaf owned %d:%d, want %d:%d", uid, gid, WorktreeUID, orchGID)
+	}
+}
+
 // TestChownRunTree_FailsClosedOnForeignEntryInside pins the per-entry
 // ownership check DURING the walk: a foreign-owned file planted inside an
 // otherwise-legitimate tree fails the operation rather than being
@@ -336,7 +423,7 @@ func TestBrokeredMode_RejectsRootOwnedTree(t *testing.T) {
 	if err := (hostOps{}).RemoveRunTree(context.Background(), rootOwned); err == nil {
 		t.Error("RemoveRunTree accepted a root-owned tree in brokered mode; same hole via the destructive op")
 	}
-	if _, err := (hostOps{}).CaptureRunDelta(context.Background(), rootOwned); err == nil {
+	if _, err := (hostOps{}).CaptureRunDelta(context.Background(), rootOwned, ""); err == nil {
 		t.Error("CaptureRunDelta accepted a root-owned tree in brokered mode; same hole via the capture op")
 	}
 }

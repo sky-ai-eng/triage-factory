@@ -214,7 +214,7 @@ if [ "$(uname -s)" = "Linux" ] && multi_mode; then
     # and waits for it exactly as before — this branch is the only
     # difference, so those paths stay byte-identical.
     if ! control_role; then
-        triagefactory cap-broker --socket "$TF_CAPBROKER_SOCKET" --orchestrator-uid "$TF_ORCHESTRATOR_UID" &
+        triagefactory cap-broker --socket "$TF_CAPBROKER_SOCKET" --orchestrator-uid "$TF_ORCHESTRATOR_UID" --orchestrator-gid "$TF_ORCHESTRATOR_GID" &
         BROKER_PID=$!
 
         # Bounded wait for the broker's control socket, mirroring the 10s

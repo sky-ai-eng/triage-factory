@@ -546,6 +546,24 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.AgentRun,
 		return
 	}
 
+	// A resume can only continue the conversation if the Claude session
+	// transcript survived into the rehydrated workspace. When it didn't — the
+	// parking executor snapshotted without it, or nothing restored it (a wiped
+	// ephemeral run-root after a rebuild) — passing --resume anyway makes the
+	// SDK fail with an opaque "No conversation found", 8 seconds in, with no
+	// surfaced reason. Mirror the crash-reclaim guard (runAgent) and stop here
+	// with an actionable failure instead. A silent fresh session is deliberately
+	// NOT the fallback on this path: a message-resume means "keep going from
+	// where we were", and an amnesiac session that only sees the new steering
+	// line would confuse the agent (or re-do already-done work) worse than a
+	// clear "start over" would.
+	if !sessionTranscriptExists(resumeCwd, run.SessionID) {
+		s.failRun(orgID, run.ID, task.ID, "manual", userID,
+			"This run's chat session could not be restored (its transcript did not survive — most often the executor was restarted or rebuilt), so the conversation can't be resumed. Start a new request to continue this work.",
+			domain.RunFailureSessionLost)
+		return
+	}
+
 	// TF_ROLE=executor: bring up the run network + credential sidecar + proxies
 	// for the resumed agent turn (the worktree was already rehydrated above — no
 	// clone — so this only feeds the agent's LLM/git proxies and the agenthost).
@@ -795,13 +813,16 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 			cfg runConfig
 			err error
 		)
+		// The run-root is blueprint-scoped (shared across steps, rebuilt under the
+		// same key on rehydrate), so setup keys it by br.ID; run.ID stays the
+		// per-run identity for the worktree_path / run_worktrees records.
 		switch task.EntitySource {
 		case "github":
-			cfg, err = s.setupGitHub(ctx, orgID, run.ID, task, gh, execSandbox)
+			cfg, err = s.setupGitHub(ctx, orgID, run.ID, br.ID, task, gh, execSandbox)
 		case "jira":
-			cfg, err = s.setupJira(ctx, orgID, run.ID, task, gh)
+			cfg, err = s.setupJira(ctx, orgID, run.ID, br.ID, task, gh)
 		case "slack":
-			cfg, err = s.setupSlack(ctx, orgID, run.ID, task, gh)
+			cfg, err = s.setupSlack(ctx, orgID, run.ID, br.ID, task, gh)
 		default:
 			err = fmt.Errorf("unsupported task source: %s", task.EntitySource)
 		}

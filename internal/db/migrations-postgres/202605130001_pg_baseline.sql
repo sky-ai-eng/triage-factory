@@ -8769,6 +8769,17 @@ GRANT SELECT ON TABLE public.run_credentials TO tf_system;
 -- deletes the row on turn teardown so sealed material doesn't linger (DELETE).
 -- No INSERT — only the brain provisions (Put), on its own superuser admin pool.
 GRANT SELECT, DELETE ON TABLE public.curator_turn_credentials TO tf_system;
+-- Slack provider policy ops (ee/slack/exec_provider_ops.go): the orchestrator
+-- serves the sidecar's relayed `exec slack` calls against these, resolving an
+-- authorization decision or a workspace IDENTITY, never a bot token (that rides
+-- the sealed bundle). All read-only — the executor authorizes and selects, it
+-- never mutates Slack config: team_slack_channels gates whether the run's team
+-- tracks the channel (TracksChannelSystem), slack_channels maps a channel to its
+-- workspace (Channels.GetSystem), org_slack_workspaces picks which connected app
+-- identity to act as (Workspaces.GetByWorkspaceAppSystem / ListAllSystem).
+GRANT SELECT ON TABLE public.team_slack_channels TO tf_system;
+GRANT SELECT ON TABLE public.slack_channels TO tf_system;
+GRANT SELECT ON TABLE public.org_slack_workspaces TO tf_system;
 -- The executor's schema-compatibility assert (internal/db/migrations.go)
 -- reads this and nothing else; no DDL, ever.
 GRANT SELECT ON TABLE public.goose_db_version TO tf_system;

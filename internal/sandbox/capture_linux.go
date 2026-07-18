@@ -20,12 +20,16 @@ import (
 // `snapshot-capture` subcommand — os.Executable() resolves to the same
 // triagefactory binary; this capture runs inside the cap-broker, which is
 // itself a re-exec of that binary.
-var captureCommand = func(ctx context.Context, wtPath string) (*exec.Cmd, error) {
+var captureCommand = func(ctx context.Context, wtPath, sessionID string) (*exec.Cmd, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("locate self: %w", err)
 	}
-	return exec.CommandContext(ctx, self, "snapshot-capture", wtPath), nil
+	argv := []string{"snapshot-capture", wtPath}
+	if sessionID != "" {
+		argv = append(argv, sessionID)
+	}
+	return exec.CommandContext(ctx, self, argv...), nil
 }
 
 // CaptureMaxBytes bounds how many raw bytes of a capture child's stdout
@@ -154,7 +158,7 @@ func (t *tailBuffer) String() string {
 //
 // Returns a bounded tail of the child's stderr (diagnostics, never run
 // data) regardless of outcome, plus the run's error if any.
-func CaptureRunDeltaTo(ctx context.Context, worktree string, stdout *os.File) (stderrTail string, err error) {
+func CaptureRunDeltaTo(ctx context.Context, worktree, sessionID string, stdout *os.File) (stderrTail string, err error) {
 	// stdout is this function's to close, whichever way it returns: on a
 	// validation or captureCommand failure below nobody else will ever hold
 	// a reference to it, and once the child is spawned its own inherited
@@ -166,7 +170,7 @@ func CaptureRunDeltaTo(ctx context.Context, worktree string, stdout *os.File) (s
 		return "", err
 	}
 
-	cmd, err := captureCommand(ctx, worktree)
+	cmd, err := captureCommand(ctx, worktree, sessionID)
 	if err != nil {
 		return "", err
 	}
@@ -208,7 +212,7 @@ func CaptureRunDeltaTo(ctx context.Context, worktree string, stdout *os.File) (s
 // is a few tens of KiB — anything larger would deadlock a child that writes
 // before anyone drains it) and enforcing the same CaptureMaxBytes ceiling
 // the brokered path's client-side reader applies, via ReadCapturedDelta.
-func (hostOps) CaptureRunDelta(ctx context.Context, worktree string) ([]byte, error) {
+func (hostOps) CaptureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error) {
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("isolated capture: create pipe: %w", err)
@@ -225,7 +229,7 @@ func (hostOps) CaptureRunDelta(ctx context.Context, worktree string) ([]byte, er
 		readDone <- readResult{buf, err}
 	}()
 
-	stderrTail, runErr := CaptureRunDeltaTo(ctx, worktree, pw)
+	stderrTail, runErr := CaptureRunDeltaTo(ctx, worktree, sessionID, pw)
 	res := <-readDone
 	if runErr != nil {
 		if stderrTail != "" {

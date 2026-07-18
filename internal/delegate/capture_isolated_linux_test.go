@@ -23,14 +23,14 @@ func TestCaptureWorkspaceGit_LocalModeSkipsIsolation(t *testing.T) {
 
 	called := false
 	orig := captureViaSandbox
-	captureViaSandbox = func(ctx context.Context, wtPath string) ([]byte, error) {
+	captureViaSandbox = func(ctx context.Context, wtPath, sessionID string) ([]byte, error) {
 		called = true
 		return nil, fmt.Errorf("isolated child spawned in local mode")
 	}
 	t.Cleanup(func() { captureViaSandbox = orig })
 
 	dir := newCaptureTestRepo(t)
-	delta, err := captureWorkspaceGit(context.Background(), dir)
+	delta, _, err := captureWorkspaceGit(context.Background(), dir, "")
 	if err != nil {
 		t.Fatalf("captureWorkspaceGit (local): %v", err)
 	}
@@ -42,31 +42,34 @@ func TestCaptureWorkspaceGit_LocalModeSkipsIsolation(t *testing.T) {
 	}
 }
 
-// TestCaptureIsolated_DecodesDeltaAndNull pins the wrapper's decode
-// contract against the privileged capture op: empty or literal-"null"
-// output means "not a git worktree" (nil delta, nil error); a JSON delta
-// decodes; garbage is a clear error rather than a zero-value delta.
-func TestCaptureIsolated_DecodesDeltaAndNull(t *testing.T) {
+// TestCaptureIsolated_DecodesState pins the wrapper's decode contract against
+// the privileged capture op's worktree.CapturedState envelope: empty output
+// means nothing captured; a nil-delta object means "not a git worktree" (nil
+// delta, nil error); a delta decodes; a base64 transcript rides alongside even
+// when the delta is nil (the Jira/Slack lazy shape); garbage is a clear error.
+func TestCaptureIsolated_DecodesState(t *testing.T) {
 	orig := captureViaSandbox
 	t.Cleanup(func() { captureViaSandbox = orig })
 
 	for _, tc := range []struct {
-		name    string
-		raw     []byte
-		wantNil bool
-		wantErr bool
-		head    string
+		name       string
+		raw        []byte
+		wantNil    bool
+		wantErr    bool
+		head       string
+		transcript string
 	}{
 		{name: "empty output", raw: nil, wantNil: true},
-		{name: "null delta", raw: []byte("null\n"), wantNil: true},
-		{name: "real delta", raw: []byte(`{"Head":"abc123"}`), head: "abc123"},
+		{name: "nil-delta object", raw: []byte(`{"delta":null}`), wantNil: true},
+		{name: "real delta", raw: []byte(`{"delta":{"Head":"abc123"}}`), head: "abc123"},
+		{name: "transcript only", raw: []byte(`{"delta":null,"transcript":"aGk="}`), wantNil: true, transcript: "hi"},
 		{name: "garbage", raw: []byte("not-json"), wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			captureViaSandbox = func(ctx context.Context, wtPath string) ([]byte, error) {
+			captureViaSandbox = func(ctx context.Context, wtPath, sessionID string) ([]byte, error) {
 				return tc.raw, nil
 			}
-			delta, err := captureIsolated(context.Background(), "/w")
+			delta, transcript, err := captureIsolated(context.Background(), "/w", "")
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("want decode error, got nil")
@@ -80,10 +83,11 @@ func TestCaptureIsolated_DecodesDeltaAndNull(t *testing.T) {
 				if delta != nil {
 					t.Errorf("delta = %+v, want nil", delta)
 				}
-				return
-			}
-			if delta == nil || delta.Head != tc.head {
+			} else if delta == nil || delta.Head != tc.head {
 				t.Errorf("delta = %+v, want Head %q", delta, tc.head)
+			}
+			if string(transcript) != tc.transcript {
+				t.Errorf("transcript = %q, want %q", transcript, tc.transcript)
 			}
 		})
 	}

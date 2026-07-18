@@ -390,17 +390,18 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	}
 
 	baseOpts := agentproc.RunOptions{
-		Cwd:          cwd,
-		Model:        model,
-		SessionID:    sessionID,
-		Message:      message,
-		AllowedTools: agentproc.BuildAllowedToolsWithExtras(selfBin, opts.ExtraAllowedTools),
-		MaxTurns:     100,
-		ExtraEnv:     extraEnv,
-		TraceID:      runID,
-		OrgID:        orgID,
-		Secrets:      s.getRunSecrets(),
-		LLMResolver:  s.llmResolverForRun(orgID, runID),
+		Cwd:             cwd,
+		Model:           model,
+		SessionID:       sessionID,
+		Message:         message,
+		AllowedTools:    agentproc.BuildAllowedToolsWithExtras(selfBin, opts.ExtraAllowedTools),
+		MaxTurns:        100,
+		ExtraEnv:        extraEnv,
+		TraceID:         runID,
+		MemoryNamespace: opts.Namespace,
+		OrgID:           orgID,
+		Secrets:         s.getRunSecrets(),
+		LLMResolver:     s.llmResolverForRun(orgID, runID),
 		// Multi mode: launch into the prebuilt network + the sidecar's proxy
 		// env; the sidecar holds the credentials. nil in local (no sandbox).
 		PrebuiltNetwork:  opts.execSandbox.runNetwork(),

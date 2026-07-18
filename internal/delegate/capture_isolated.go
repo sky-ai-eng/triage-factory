@@ -24,9 +24,23 @@ import (
 //
 // Local mode has no sandbox and no chown — the operator runs their own repos on
 // a trusted machine — so the capture runs in-process, unchanged.
-func captureWorkspaceGit(ctx context.Context, wtPath string) (*worktree.GitDelta, error) {
+//
+// The session transcript rides out of the SAME capture: in multi mode the
+// child (running as the sandbox uid) is the only identity that can read the
+// SDK's owner-only transcript, so it reads it there; in local mode the
+// in-process reader already IS that uid. Either way the orchestrator, which can
+// read neither the transcript nor a chowned worktree, never touches the files.
+// transcript is empty when the run has no session or the file was absent.
+func captureWorkspaceGit(ctx context.Context, wtPath, sessionID string) (delta *worktree.GitDelta, transcript []byte, err error) {
 	if runmode.Current() != runmode.ModeMulti || runtime.GOOS != "linux" {
-		return worktree.CaptureWorkspaceGit(ctx, wtPath)
+		delta, err = worktree.CaptureWorkspaceGit(ctx, wtPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		if data, ok := worktree.ReadClaudeSessionTranscript(wtPath, sessionID); ok {
+			transcript = data
+		}
+		return delta, transcript, nil
 	}
-	return captureIsolated(ctx, wtPath)
+	return captureIsolated(ctx, wtPath, sessionID)
 }

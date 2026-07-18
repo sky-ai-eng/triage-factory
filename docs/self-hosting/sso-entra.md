@@ -138,6 +138,14 @@ docker compose up -d
 won't pick up new `.env` values. See the [self-host setup](install.md)
 note on this foot-gun.)
 
+> **Egress: the gotrue container needs outbound HTTPS to
+> `login.microsoftonline.com`.** GoTrue fetches each org's Entra federation
+> metadata server-side (step 2.5), so provider registration fails if that host
+> is unreachable. If you run a default-deny egress policy — likely, given Triage
+> Factory's per-run allowlist posture — add `login.microsoftonline.com` to the
+> gotrue service's allowed destinations. This is the one external dependency the
+> SSO path introduces.
+
 ---
 
 # Part 2 — Org-admin setup
@@ -175,15 +183,21 @@ Name it (e.g. "Triage Factory"), then open **Single sign-on** → **SAML**.
 | --- | --- |
 | **Identifier (Entity ID)** | `{TF_PUBLIC_URL}/auth/v1/sso/saml/metadata` |
 | **Reply URL (Assertion Consumer Service URL)** | `{TF_PUBLIC_URL}/auth/v1/sso/saml/acs` |
-| **Sign on URL** | `{TF_PUBLIC_URL}/api/auth/oauth/saml?provider_id=<your-provider_id>` — TF's SP-initiated start endpoint |
+| **Sign on URL** | *leave blank for now* — you'll set it in step 2.5 once you have the `provider_id` |
 
 The **Identifier** and **Reply URL** are GoTrue's SAML SP endpoints — fixed, and
-what make the federation work. The **Sign on URL** is what the My Apps tile
-links to: setting it makes the tile do an **SP-initiated** redirect into Triage
-Factory rather than firing an unsolicited IdP-initiated assertion. SP-initiated
-binds the assertion to a request TF made in *this* browser session, which closes
-the login-CSRF hole that true IdP-initiated SAML leaves open — same one-click
-tile UX, safer flow.
+what make the federation work. Save this card with just those two; the **Sign on
+URL** depends on a `provider_id` that doesn't exist until you register the
+connection in Triage Factory, so Entra is a two-pass job: fill in the identifier
+and reply URL now, then return in [step 2.5](#25-register-the-connection-in-triage-factory)
+to set the Sign on URL.
+
+The Sign on URL, once set, is what the My Apps tile links to:
+`{TF_PUBLIC_URL}/api/auth/oauth/saml?provider_id=<your-provider_id>`. Setting it
+makes the tile do an **SP-initiated** redirect into Triage Factory rather than
+firing an unsolicited IdP-initiated assertion. SP-initiated binds the assertion
+to a request TF made in *this* browser session, which closes the login-CSRF hole
+that true IdP-initiated SAML leaves open — same one-click tile UX, safer flow.
 
 > **You'll fill in `<your-provider_id>` after step 2.5** — it's the `provider_id`
 > the registration call returns (also shown by `GET /api/sso/connection`). The
@@ -195,11 +209,38 @@ tile UX, safer flow.
 
 Leave Relay State and Logout Url blank.
 
+### Attributes & Claims — the email claim
+
+This is the step that most often gets missed, and it's the single most common
+cause of a login that authenticates but then fails or lands the user in
+onboarding: **Triage Factory's just-in-time provisioning keys off the email
+Entra returns in the assertion, so the assertion must carry a real email.**
+
+On the SAML SSO page, open the **Attributes & Claims** card → **Edit**. Confirm:
+
+- There is an email claim — Entra ships one by default at
+  `http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress`.
+- Its **Source attribute is `user.mail`**, not `user.userprincipalname`. A UPN
+  (`alice@contoso.onmicrosoft.com`) is a directory identifier, not necessarily a
+  deliverable mailbox; JIT will create the account under whatever this claim
+  carries.
+- Your test user **actually has the `mail` attribute populated** in Entra
+  (Entra admin center → **Users** → the user → **Contact info** → Email).
+  Cloud-only and guest/external accounts created without a mailbox often have
+  `mail` blank — the claim then comes through empty, and the login has no email
+  to provision with. Set the user's email (or pick a test user who has one).
+
+The **NameID** can stay at Entra's default (UPN / emailAddress format); it's the
+emailaddress claim above that GoTrue reads for the account email.
+
 ## 2.3 Copy the federation metadata URL
 
-Still on the SAML SSO page, find **SAML Certificates** → **App Federation
-Metadata Url**. Copy it (it looks like
+Still on the SAML SSO page, find the **SAML Certificates** card → **App
+Federation Metadata Url**. Copy it (it looks like
 `https://login.microsoftonline.com/<tenant-id>/federationmetadata/2007-06/federationmetadata.xml?appid=<app-id>`).
+You do **not** download or upload the signing certificate by hand — GoTrue
+fetches this metadata URL server-side and reads Entra's entityID, SSO URL, and
+signing certificate out of it.
 
 ## 2.4 Assign users
 

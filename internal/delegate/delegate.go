@@ -425,7 +425,7 @@ func cloneHostBase(cloneURL string) string {
 // the sidecar's GitHub-REST proxy, the clone through its git proxy — so the
 // orchestrator holds no GitHub credential for either. Elsewhere (all/local)
 // ghClient is the resolver-built client and the clone injects a real token.
-func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task domain.Task, ghClient *ghclient.Client, execSandbox *executorSandbox) (runConfig, error) {
+func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, rootKey string, task domain.Task, ghClient *ghclient.Client, execSandbox *executorSandbox) (runConfig, error) {
 	if execSandbox != nil {
 		ghClient = ghclient.NewProxyClient(execSandbox.res.GitHubAPIURL, execSandbox.res.GitHubAPIToken)
 	}
@@ -515,7 +515,11 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 	if execSandbox != nil {
 		cloneAuth = worktree.CloneAuthViaGitProxy(execSandbox.res.GitProxyURL, cloneHostBase(upstreamCloneURL), execSandbox.res.GitProxyToken)
 	}
-	wtPath, err := worktree.CreateForPR(ctx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, runID,
+	// rootKey (the blueprint run id), not this step's run id, keys the worktree
+	// dir + its per-run push config — the PR worktree IS the shared run-root, and
+	// a cold rehydrate rebuilds it under the same key. CleanupPRConfig reclaims
+	// via filepath.Base(wtPath), so it follows this key automatically.
+	wtPath, err := worktree.CreateForPR(ctx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, rootKey,
 		worktree.WithCloneAuth(cloneAuth),
 		// Refresh origin/<base> at materialization so `pr diff` frames against a
 		// current base instead of a clone-time-frozen ref (TFAC-505).
@@ -586,8 +590,12 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID string, task dom
 // runs don't have a single "the worktree" the way GitHub PR runs do,
 // the run-root IS the agent's session cwd, which is the load-bearing
 // invariant for resume.
-func (s *Spawner) setupJira(ctx context.Context, orgID, runID string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
-	runRoot, err := worktree.MakeRunRoot(runID)
+func (s *Spawner) setupJira(ctx context.Context, orgID, runID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+	// The run-root is a blueprint-run resource — shared across every step and
+	// rebuilt under the same key on a cold rehydrate — so it is keyed by rootKey
+	// (the blueprint run id), not this step's run id. runID still stamps the
+	// per-run worktree_path record below.
+	runRoot, err := worktree.MakeRunRoot(rootKey)
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
@@ -626,8 +634,11 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID string, task domai
 //     demand and then needs the gh verbs, the same reasoning as the Jira
 //     arm's GH+Jira composition. No registered reference is not an error:
 //     the run still works with base tools.
-func (s *Spawner) setupSlack(ctx context.Context, orgID, runID string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
-	runRoot, err := worktree.MakeRunRoot(runID)
+func (s *Spawner) setupSlack(ctx context.Context, orgID, runID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+	// Keyed by rootKey (the blueprint run id), not this step's run id — the
+	// run-root is blueprint-scoped and cold-rehydrates under the same key. See
+	// setupJira.
+	runRoot, err := worktree.MakeRunRoot(rootKey)
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}

@@ -129,6 +129,16 @@ func (s *runQueueStore) notifyWake(ctx context.Context, orgID string) {
 // seq scan of the whole runs history.
 const activeRunStatusesSQL = `'running', 'awaiting_credentials'`
 
+// requeuableRunStatusesSQL is every status a claimed-but-not-yet-executing run
+// can hold while the dispatcher builds its workspace — the full active set
+// (domain.IsActiveRunStatus). A run advances 'running' (the claim) →
+// 'initializing' → 'cloning' → 'fetching' → 'worktree_created' →
+// 'agent_starting' as setup progresses, so the setup-failure requeue must match
+// ANY of them; guarding on 'running' alone stranded a run whose clone failed
+// while the row read 'cloning'. It deliberately excludes the terminal, 'queued',
+// and 'open' states so a stale requeue can't resurrect a finished/parked row.
+const requeuableRunStatusesSQL = `'initializing', 'cloning', 'fetching', 'worktree_created', 'agent_starting', 'running', 'awaiting_credentials'`
+
 func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement) (*domain.AgentRun, error) {
 	// FOR UPDATE SKIP LOCKED on the inner select so a multi-worker fleet never
 	// claims the same queued run. Claimable = the owning blueprint_run is still
@@ -222,20 +232,24 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 
 func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr string) error {
 	// attempts left as-is (the claim counted this try); claimed_at cleared.
-	// Guarded on 'running' so a stale requeue can't resurrect a terminal row.
-	// The ownership stamp is cleared too: a queued row has no owner, and a
-	// stale pair here would misdirect any owner-keyed reader (the reaper,
-	// the fleet view) toward an instance that stopped touching the row.
-	// preferred_executor_id is cleared for the same reason (TFAC-587): a
-	// requeue's stamp likely points at the executor that just failed the run;
-	// NULL means "unowned, claimable by anyone now" — a live executor re-warms
-	// it with no aging delay, which is the correct placement-is-advisory
-	// answer on a recovery path (affinity is re-earned on the next enqueue,
-	// never carried stale).
+	// Guarded on the full mid-setup active set (requeuableRunStatusesSQL) so a
+	// stale requeue can't resurrect a terminal/parked/queued row while still
+	// firing from whichever granular status the run held when setup failed — the
+	// setup-failure caller is the only one that requeues and fires strictly
+	// before the agent executes, so none of those statuses can name a live agent
+	// here. cred_pubkey is cleared so the next claim re-publishes a fresh one.
+	// The ownership stamp is cleared too: a queued row has no owner, and a stale
+	// pair here would misdirect any owner-keyed reader (the reaper, the fleet
+	// view) toward an instance that stopped touching the row. preferred_executor_id
+	// is cleared for the same reason: a requeue's stamp likely points at the
+	// executor that just failed the run; NULL means "unowned, claimable by anyone
+	// now" — a live executor re-warms it with no aging delay, which is the correct
+	// placement-is-advisory answer on a recovery path (affinity is re-earned on
+	// the next enqueue, never carried stale).
 	_, err := s.conn.ExecContext(ctx, `
 		UPDATE runs SET status = 'queued', queued_at = now(), claimed_at = NULL, result_summary = $3,
 			executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL, preferred_executor_id = NULL
-		WHERE org_id = $1 AND id = $2 AND status = 'running'
+		WHERE org_id = $1 AND id = $2 AND status IN (`+requeuableRunStatusesSQL+`)
 	`, orgID, runID, lastErr)
 	return err
 }

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -65,6 +67,11 @@ type ingestPipeline struct {
 	// URL into entities.url (TFAC-595), best-effort and detached — see
 	// PermalinkResolver.dispatch. Nil-safe for the same reason as identity.
 	permalink *PermalinkResolver
+	// title recomposes a freshly-created thread entity's title into
+	// "<sender> said "<message>" in #<channel>" once the sender + channel
+	// names resolve, best-effort and detached — see TitleResolver.dispatch.
+	// Nil-safe for the same reason as identity.
+	title *TitleResolver
 }
 
 // handleEventCallback is the one function both transports call for an
@@ -119,6 +126,11 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 	// repeat mentions on an already-known thread shouldn't re-resolve it.
 	if created && p.permalink != nil {
 		p.permalink.dispatch(ws, entity.ID, ev.Channel, root)
+	}
+	// Only on create, for the same reason: the enriched title is written once
+	// against the thread-creating mention, not re-derived per re-mention.
+	if created && p.title != nil {
+		p.title.dispatch(ws, entity.ID, ev.Channel, ev.User, ev.Text)
 	}
 
 	metaJSON, err := json.Marshal(SlackMentionMetadata{
@@ -192,11 +204,103 @@ func (p *ingestPipeline) captureChannelSighting(ctx context.Context, ws slacksto
 	}
 }
 
-// mentionTitle derives the entity title from a mention's raw text: every
-// run of whitespace (including embedded newlines) collapsed to a single
-// space, then capped at mentionTitleMaxRunes.
+// slackEntityRe matches a Slack mrkdwn entity token — the <...> forms Slack
+// wraps around user/channel/special mentions and links in a message's raw
+// text. The inner content decides the kind: a leading @, #, or ! is a
+// mention/special; anything else is a link. Captured and rewritten to a
+// human-readable form by humanizeSlackText.
+var slackEntityRe = regexp.MustCompile(`<([^>]+)>`)
+
+// mentionTitle derives the entity title from a mention's raw text. Slack
+// delivers the body with its markup intact — the triggering @bot is a
+// `<@U…>` token, other people are `<@U…|name>`, channels are `<#C…|name>`,
+// links are `<url|label>` — so a bare title reads like
+// "<@U0BHY927K34> What can you do?". humanizeSlackText turns those tokens
+// into their readable form (dropping the leading bot mention, keeping named
+// mentions as "@name"/"#name", links as their label), then whitespace is
+// collapsed and the result capped at mentionTitleMaxRunes.
 func mentionTitle(text string) string {
-	return truncateRunes(strings.Join(strings.Fields(text), " "), mentionTitleMaxRunes)
+	return truncateRunes(strings.Join(strings.Fields(humanizeSlackText(text)), " "), mentionTitleMaxRunes)
+}
+
+// humanizeSlackText rewrites Slack's mrkdwn entity tokens into plain,
+// title-friendly text and unescapes the three characters Slack escapes in
+// message bodies (&amp; &lt; &gt;). Entities carrying no display name — a
+// bare `<@U123>` or `<#C123>`, whose name lives behind an API lookup this
+// synchronous path deliberately never makes — are dropped rather than
+// leaking a raw Slack id into the title.
+func humanizeSlackText(text string) string {
+	out := slackEntityRe.ReplaceAllStringFunc(text, func(tok string) string {
+		inner := tok[1 : len(tok)-1] // strip the surrounding < >
+		body, label, hasLabel := strings.Cut(inner, "|")
+		switch {
+		case strings.HasPrefix(body, "@"): // user mention
+			if hasLabel {
+				return "@" + label
+			}
+			return "" // bare id (e.g. the triggering @bot) — drop it
+		case strings.HasPrefix(body, "#"): // channel mention
+			if hasLabel {
+				return "#" + label
+			}
+			return ""
+		case strings.HasPrefix(body, "!"): // special mention (@here/@channel/subteam)
+			switch body {
+			case "!here", "!channel", "!everyone":
+				return "@" + body[1:]
+			}
+			if hasLabel { // <!subteam^S…|name>
+				return "@" + label
+			}
+			return ""
+		default: // link: <url|label> or <url>
+			if hasLabel {
+				return label
+			}
+			return body
+		}
+	})
+	return htmlUnescapeSlack(out)
+}
+
+// htmlUnescapeSlack reverses the three entity escapes Slack applies to
+// message text (and only those three — Slack does not escape other HTML
+// entities in message bodies). &amp; is last so an already-unescaped &lt;
+// isn't produced and then re-read.
+func htmlUnescapeSlack(s string) string {
+	s = strings.ReplaceAll(s, "&lt;", "<")
+	s = strings.ReplaceAll(s, "&gt;", ">")
+	s = strings.ReplaceAll(s, "&amp;", "&")
+	return s
+}
+
+// composeMentionTitle builds the enriched entity title the async TitleResolver
+// writes once it has resolved the sender's display name and the channel name:
+// `Alice said "what can you do?" in #general`. Either name may be empty (its
+// lookup failed or was skipped); the frame degrades gracefully — no "said"
+// frame without a sender, no "in #…" without a channel. With neither, it
+// returns just the humanized message text, identical to the synchronous
+// mentionTitle, so a caller can detect "nothing to enrich" and skip the write.
+//
+// The message text is truncated to whatever budget the fixed frame leaves so
+// the "who/where" survives — a long message loses its tail, not its context.
+func composeMentionTitle(senderName, channelName, rawText string) string {
+	text := strings.Join(strings.Fields(humanizeSlackText(rawText)), " ")
+
+	var prefix, suffix, quote string
+	if senderName != "" {
+		prefix = senderName + " said "
+		quote = `"` // quote the message only inside a "X said …" frame
+	}
+	if channelName != "" {
+		suffix = " in #" + channelName
+	}
+
+	budget := mentionTitleMaxRunes - utf8.RuneCountInString(prefix+quote+quote+suffix)
+	if budget < 10 {
+		budget = 10 // pathological long name/channel — keep a sliver of message
+	}
+	return truncateRunes(prefix+quote+truncateRunes(text, budget)+quote+suffix, mentionTitleMaxRunes)
 }
 
 // truncateRunes caps s at maxRunes codepoints, replacing the last rune with

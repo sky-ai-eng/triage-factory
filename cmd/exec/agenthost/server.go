@@ -16,7 +16,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // strictlyWithin reports whether path is a strict descendant of root — not
@@ -455,32 +454,24 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		// Resolve the run root ONCE: the create builds under it, and the
-		// post-create chown + cleanup containment gate below are judged
-		// against the very same value — no second read that could disagree.
-		hostRoot, _, err := client.WorkspaceRoots(ctx)
-		if err != nil {
-			return nil, err
-		}
-		path, err := client.createWorkspaceCheckoutIn(ctx, hostRoot, a.Owner, a.Repo, a.Ref, a.PR)
-		if err != nil {
-			return nil, err
-		}
-		// The create ran as the host process; hand the subtree to the sandbox
-		// UID or the jailed agent can't write its own checkout. On failure,
-		// remove the checkout so a released reservation can retry the create
-		// cleanly (git clone refuses a non-empty target) — but ONLY when the
-		// path is provably a strict descendant of the run root. One chown
-		// failure mode is precisely "this path is not inside the run root"
-		// (a regressed create contract), and RemoveAll on an unverified path
-		// would turn that bug into deleting an arbitrary host directory.
-		if cerr := agentproc.ChownWorkspaceCheckoutForSandbox(ctx, hostRoot, path); cerr != nil {
-			if strictlyWithin(hostRoot, path) {
-				_ = sandbox.RemoveRunTree(context.Background(), path)
-			} else {
-				agenthostLog.Warn("leaving un-chowned checkout in place; path is not verifiably inside the run root", "path", path, "host_root", hostRoot)
+		// The executor's credential sidecar (proxyCreds set) owns neither the
+		// shared bare cache nor the run-root — both belong to the orchestrator /
+		// jail — so its uid can't materialize a checkout. Relay the whole create
+		// to the orchestrator, which owns them and clones through the run's git
+		// proxy exactly like the eager-PR path. all/local (proxyCreds nil) owns
+		// the FS and materializes in-process. The orchestrator serves the relayed
+		// op via RelayServer, never through this method, so proxyCreds here
+		// unambiguously means "this is the sidecar."
+		if client.proxyCreds != nil {
+			var res createWorkspaceCheckoutResult
+			if err := client.rt.Relay(ctx, agentproc.RelayNamespaceCore, opCreateWorkspaceCheckout, a, &res); err != nil {
+				return nil, err
 			}
-			return nil, fmt.Errorf("hand checkout to sandbox user: %w", cerr)
+			return res, nil
+		}
+		path, err := client.materializeWorkspaceCheckout(ctx, a.Owner, a.Repo, a.Ref, a.PR)
+		if err != nil {
+			return nil, err
 		}
 		return createWorkspaceCheckoutResult{Path: path}, nil
 

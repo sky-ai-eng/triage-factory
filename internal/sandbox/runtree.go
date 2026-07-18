@@ -61,11 +61,12 @@ func RemoveRunTree(ctx context.Context, path string) error {
 	return removeRunTree(ctx, path)
 }
 
-// CaptureRunDelta runs the parked-run git-delta capture in a child
-// dropped to the sandbox uid inside an empty network namespace and
-// returns its raw JSON stdout (a worktree.GitDelta — decoded by the
-// caller). Linux-only by construction; the non-Linux stub errors, and
-// the delegate caller never routes here off Linux.
-func CaptureRunDelta(ctx context.Context, worktree string) ([]byte, error) {
-	return captureRunDelta(ctx, worktree)
+// CaptureRunDelta runs the parked-run capture in a child dropped to the
+// sandbox uid inside an empty network namespace and returns its raw JSON
+// stdout (a worktree.CapturedState — the git delta plus, when sessionID is
+// set, the session transcript — decoded by the caller). Linux-only by
+// construction; the non-Linux stub errors, and the delegate caller never
+// routes here off Linux.
+func CaptureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error) {
+	return captureRunDelta(ctx, worktree, sessionID)
 }

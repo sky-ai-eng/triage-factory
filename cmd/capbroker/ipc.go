@@ -207,7 +207,7 @@ func captureSocketPath() (string, error) {
 // authoritative outcome, e.g. it may yet report a child failure) are each
 // insufficient alone. captureTimeout bounds the whole round trip on both
 // sides: the RPC call, the accept, and the capped read.
-func (c *IPCClient) CaptureRunDelta(ctx context.Context, worktree string) ([]byte, error) {
+func (c *IPCClient) CaptureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error) {
 	sockPath, err := captureSocketPath()
 	if err != nil {
 		return nil, err
@@ -254,7 +254,7 @@ func (c *IPCClient) CaptureRunDelta(ctx context.Context, worktree string) ([]byt
 	}()
 
 	var res captureRunDeltaResult
-	args := captureRunDeltaArgs{Worktree: worktree, StdoutSocketPath: sockPath}
+	args := captureRunDeltaArgs{Worktree: worktree, StdoutSocketPath: sockPath, SessionID: sessionID}
 	if err := c.callWithCap(ctx, methodCaptureRunDelta, args, &res, captureTimeout); err != nil {
 		// The RPC is authoritative on failure (dial failure, child failure) —
 		// discard whatever, if anything, crossed the stream, and stop it from

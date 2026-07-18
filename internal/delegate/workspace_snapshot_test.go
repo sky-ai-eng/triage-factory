@@ -136,6 +136,82 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	assertFileContains(t, sessPath2, `"sid":"cold"`)
 }
 
+// TestEnsureWorkspace_ColdPath_TranscriptBearingSnapshotIsResumable: a snapshot
+// that captured the session transcript rehydrates one back into place, so the
+// resume guard (sessionTranscriptExists) sees the run as resumable and a
+// --resume is safe. The positive half of the pair below.
+func TestEnsureWorkspace_ColdPath_TranscriptBearingSnapshotIsResumable(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s := newStorageSpawner(t)
+
+	const runID = "wt-has-transcript"
+	// A non-git run-root keeps the focus on the session member (git delta is
+	// exercised by the fuller round-trip test above). Rooting it at the
+	// deterministic RunRoot(keyID) — where the cold path rebuilds — keeps
+	// wtDir == run.WorktreePath, so ensureWorkspace doesn't take the
+	// persist-new-path branch (SetWorktreePathSystem is unwired in this spawner).
+	wtPath := worktree.RunRoot(runID)
+	t.Cleanup(func() { _ = os.RemoveAll(wtPath) })
+	writeFile(t, filepath.Join(wtPath, "_scratch", "notes.txt"), "scratch survived")
+	const sessionID = "sess-present"
+	writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"present"}`)
+
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, sessionID); err != nil {
+		t.Fatalf("snapshotWorkspace: %v", err)
+	}
+	if err := os.RemoveAll(wtPath); err != nil { // host loss: only the snapshot remains
+		t.Fatalf("rm worktree: %v", err)
+	}
+
+	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID, SessionID: sessionID}
+	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "", "", "")
+	if err != nil {
+		t.Fatalf("ensureWorkspace (cold): %v", err)
+	}
+	if !sessionTranscriptExists(got, sessionID) {
+		t.Fatal("sessionTranscriptExists = false after rehydrating a transcript-bearing snapshot; the resume guard would wrongly fail a resumable run")
+	}
+}
+
+// TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable: the exact
+// shape behind the resume-fails-with-no-reason report — a run with a session id
+// whose transcript was NOT captured (writeSnapshotTar skips the member and
+// warns). The workspace rebuilds, but the resume guard must see it as
+// unresumable so the delivery path fails with an actionable reason rather than
+// handing the SDK a doomed --resume ("No conversation found").
+func TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s := newStorageSpawner(t)
+
+	const runID = "wt-no-transcript"
+	wtPath := worktree.RunRoot(runID)
+	t.Cleanup(func() { _ = os.RemoveAll(wtPath) })
+	writeFile(t, filepath.Join(wtPath, "_scratch", "notes.txt"), "scratch survived")
+	const sessionID = "sess-lost"
+	// Deliberately NO writeSession: the run carries a session id but its
+	// transcript is not on disk when the snapshot is taken.
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, sessionID); err != nil {
+		t.Fatalf("snapshotWorkspace: %v", err)
+	}
+	if err := os.RemoveAll(wtPath); err != nil {
+		t.Fatalf("rm worktree: %v", err)
+	}
+
+	run := &domain.AgentRun{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID, SessionID: sessionID}
+	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "", "", "")
+	if err != nil {
+		t.Fatalf("ensureWorkspace (cold): %v", err)
+	}
+	// The workspace itself rebuilt...
+	assertFileContains(t, filepath.Join(got, "_scratch", "notes.txt"), "scratch survived")
+	// ...but no transcript rode along, so the guard must report it unresumable.
+	if sessionTranscriptExists(got, sessionID) {
+		t.Fatal("sessionTranscriptExists = true for a transcript-less snapshot; the resume guard would not fire and the SDK would get a doomed --resume")
+	}
+}
+
 // TestSnapshotWorkspace_StoresGzip: the stored blob is gzip-compressed — the
 // two fat members (session transcript, ci-logs) make uncompressed storage
 // pathological, so the staged tar is wrapped in gzip before Put. Asserts on
@@ -251,8 +327,10 @@ func TestSnapshotWorkspace_CompressionShrinksTranscriptHeavyBlob(t *testing.T) {
 	}
 
 	// The same workspace through the tar writer alone = the plain equivalent.
+	// The transcript now rides in as bytes (captured agent-side), so pass the
+	// same JSONL the on-disk session holds.
 	var plain bytes.Buffer
-	if err := writeSnapshotTar(&plain, nil, wtPath, sessionID); err != nil {
+	if err := writeSnapshotTar(&plain, nil, wtPath, sessionID, []byte(jsonl.String())); err != nil {
 		t.Fatalf("writeSnapshotTar (plain): %v", err)
 	}
 	if gzSize >= int64(plain.Len())/2 {

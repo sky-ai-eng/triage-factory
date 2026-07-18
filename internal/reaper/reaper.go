@@ -121,6 +121,27 @@ func RunRegistryGC(ctx context.Context, store Store, interval time.Duration, sta
 	if interval <= 0 {
 		interval = DefaultGCInterval
 	}
+	sweep := func() {
+		n, err := store.DeleteStaleInstances(ctx, staleAfter)
+		if err != nil {
+			reaperLog.Warn("registry GC sweep failed; retrying next tick", "error", err)
+			return
+		}
+		if n > 0 {
+			reaperLog.Info("registry GC deleted stale instance rows", "count", n, "stale_after", staleAfter)
+		}
+	}
+	// Sweep once the moment the brain starts, then on the (long) interval. The
+	// interval is a steady-state cadence, not a grace period: a freshly promoted
+	// leader — or a restart of the only one — should reconcile the registry now
+	// rather than let already-abandoned rows linger up to a full day for the
+	// first tick.
+	select {
+	case <-ctx.Done():
+		return
+	default:
+		sweep()
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -128,14 +149,7 @@ func RunRegistryGC(ctx context.Context, store Store, interval time.Duration, sta
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			n, err := store.DeleteStaleInstances(ctx, staleAfter)
-			if err != nil {
-				reaperLog.Warn("registry GC sweep failed; retrying next tick", "error", err)
-				continue
-			}
-			if n > 0 {
-				reaperLog.Info("registry GC deleted stale instance rows", "count", n, "stale_after", staleAfter)
-			}
+			sweep()
 		}
 	}
 }
