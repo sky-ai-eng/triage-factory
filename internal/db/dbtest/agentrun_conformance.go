@@ -972,27 +972,29 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 
 	t.Run("ActiveAutoRunIDForEntitySystem", func(t *testing.T) {
 		// Same predicate as HasActiveAutoRunForEntity (non-terminal,
-		// trigger_type='event'), but returns the run ID instead of a
-		// bool — the router's additive-injection branch (TFAC-594)
-		// needs the ID to target StageOrDeliverInjection.
+		// trigger_type='event'), but returns the run ID plus the ID of
+		// the task the run belongs to instead of a bool — the router's
+		// additive-injection branch needs the run ID to target
+		// StageOrDeliverInjection, and the absorption rule needs the
+		// task ID to confirm the run belongs to the firing's own task.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		ent := seed.Entity(t, "ha-id-ent")
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
-		// No runs → "".
-		if id, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != "" {
-			t.Errorf("with no runs: id=%q err=%v, want empty/nil", id, err)
+		// No runs → ("", "").
+		if id, tid, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != "" || tid != "" {
+			t.Errorf("with no runs: id=%q taskID=%q err=%v, want empty/empty/nil", id, tid, err)
 		}
 
 		// Manual run only — must NOT resolve.
 		_ = seedAgentRunForTaskTest(t, store, orgID, taskID, "running", seed)
-		if id, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != "" {
-			t.Errorf("manual-only: id=%q err=%v, want empty (event-only)", id, err)
+		if id, tid, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != "" || tid != "" {
+			t.Errorf("manual-only: id=%q taskID=%q err=%v, want empty (event-only)", id, tid, err)
 		}
 
-		// Active event-trigger run → resolves to its ID.
+		// Active event-trigger run → resolves to its run ID and owning task ID.
 		eventRunID := uuid.New().String()
 		if err := store.Create(ctx, orgID, domain.AgentRun{
 			ID: eventRunID, TaskID: taskID, PromptID: agentRunTestPrompt(t),
@@ -1001,17 +1003,17 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}); err != nil {
 			t.Fatalf("Create event-triggered: %v", err)
 		}
-		if id, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != eventRunID {
-			t.Errorf("ActiveAutoRunIDForEntitySystem = %q err=%v, want %q", id, err, eventRunID)
+		if id, tid, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != eventRunID || tid != taskID {
+			t.Errorf("ActiveAutoRunIDForEntitySystem = (%q, %q) err=%v, want (%q, %q)", id, tid, err, eventRunID, taskID)
 		}
 
 		// Terminate it — terminal-only, plus the still-active manual run,
-		// resolves back to "".
+		// resolves back to ("", "").
 		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
-		if id, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != "" {
-			t.Errorf("terminal event run + active manual: id=%q err=%v, want empty", id, err)
+		if id, tid, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != "" || tid != "" {
+			t.Errorf("terminal event run + active manual: id=%q taskID=%q err=%v, want empty", id, tid, err)
 		}
 	})
 

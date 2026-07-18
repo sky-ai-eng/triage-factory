@@ -298,7 +298,7 @@ func (r *Router) enqueueBusyFiring(orgID, entityID string, task *domain.Task, tr
 // apply time) — this method must NOT record it here, or a slow/failed
 // remote apply could leave a duplicate or premature bookkeeping row.
 func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string) bool {
-	runID, err := r.agentRuns.ActiveAutoRunIDForEntitySystem(ctx, orgID, entityID)
+	runID, _, err := r.agentRuns.ActiveAutoRunIDForEntitySystem(ctx, orgID, entityID)
 	if err != nil || runID == "" {
 		return false
 	}

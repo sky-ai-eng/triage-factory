@@ -288,13 +288,16 @@ type AgentRunStore interface {
 	HasActiveAutoRunForEntitySystem(ctx context.Context, orgID, entityID string) (bool, error)
 
 	// ActiveAutoRunIDForEntitySystem returns the ID of the entity's active
-	// event-triggered run, or "" when none. Same predicate as
+	// event-triggered run together with the ID of the task that run belongs
+	// to, or ("", "") when none. Same predicate as
 	// HasActiveAutoRunForEntitySystem (trigger_type='event', non-terminal);
 	// if the at-most-one-active-auto-run-per-entity invariant is ever
 	// violated, returns the most recently created. Admin pool only — the
 	// router's additive-event injection branch is the sole consumer, from
-	// the same claims-less background goroutine as the Has* sibling.
-	ActiveAutoRunIDForEntitySystem(ctx context.Context, orgID, entityID string) (string, error)
+	// the same claims-less background goroutine as the Has* sibling. The
+	// task id lets the absorption rule confirm the active run belongs to the
+	// firing's own task before folding into it.
+	ActiveAutoRunIDForEntitySystem(ctx context.Context, orgID, entityID string) (runID, taskID string, err error)
 
 	// ActiveIDsForTaskSystem mirrors ActiveIDsForTask but routes through
 	// the admin pool in Postgres. The router's task-close cascade uses
