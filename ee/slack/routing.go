@@ -24,11 +24,11 @@ func slackChannelOwner(bundle *slackstore.Bundle) func(ctx context.Context, orgI
 	return func(ctx context.Context, orgID string, evt domain.Event, entityID string) (string, []string) {
 		var meta SlackMessageMetadata
 		if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-			slackLog.Error("slack owner resolution: mention metadata is not valid JSON", "org_id", orgID, "entity_id", entityID, "error", err)
+			slackLog.Error("slack owner resolution: message metadata is not valid JSON", "org_id", orgID, "entity_id", entityID, "error", err)
 			return "", nil
 		}
 		if meta.Channel == "" {
-			slackLog.Error("slack owner resolution: mention metadata missing channel", "org_id", orgID, "entity_id", entityID)
+			slackLog.Error("slack owner resolution: message metadata missing channel", "org_id", orgID, "entity_id", entityID)
 			return "", nil
 		}
 		team, err := bundle.TeamChannels.PrimaryTeamForChannelSystem(ctx, orgID, meta.Channel)

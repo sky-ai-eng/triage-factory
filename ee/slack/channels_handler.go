@@ -186,15 +186,15 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 		if e := bundle.TeamChannels.ReplaceForTeam(r.Context(), orgID, teamID, desired); e != nil {
 			return e
 		}
-		// Default blueprint, first-track only (TFAC-543): the prior set was
-		// empty, the new set isn't, and the team hasn't already configured
-		// its own slack:message trigger.
+		// Default blueprint, first-track only: the prior set was empty, the
+		// new set isn't, and the team hasn't already configured its own
+		// slack:message trigger.
 		if len(prior) == 0 && len(desired) > 0 {
-			hasMention, e := teamHasSlackMessageTrigger(r.Context(), tx, orgID, teamID)
+			hasTrigger, e := teamHasSlackMessageTrigger(r.Context(), tx, orgID, teamID)
 			if e != nil {
 				return e
 			}
-			if !hasMention {
+			if !hasTrigger {
 				if e := seedDefaultSlackMessageBlueprint(r.Context(), tx, orgID, teamID); e != nil {
 					return e
 				}
@@ -643,21 +643,26 @@ func teamHasSlackMessageTrigger(ctx context.Context, tx db.TxStores, orgID, team
 }
 
 // slackMessagePromptName/Body are the shipped-content for the default
-// slack:message blueprint TFAC-543 seeds on a team's first tracked channel.
-// Body interpolates the literal {{EVENT_METADATA_JSON}} placeholder
-// (TFAC-596) — the mention's channel/thread_ts/sender/text otherwise never
-// reach the run, since a task carries only its title. Greenfield: pre-
-// release, existing seeded rows are dogfood-only and are not migrated.
+// slack:message blueprint seeded on a team's first tracked channel. Body
+// interpolates the literal {{EVENT_METADATA_JSON}} placeholder — the
+// message's channel/thread_ts/sender/text otherwise never reach the run,
+// since a task carries only its title. Deliberately doesn't hinge on
+// whether the triggering message was an explicit @-mention or an
+// engaged-thread follow-up — the agent's job is the same either way, and
+// mention-ness is metadata, not a different situation (see
+// domain.EventSlackMessage's doc). Greenfield: pre-release, existing
+// seeded rows are dogfood-only and are not migrated.
 const (
-	slackMessagePromptName = "Slack mention assistant"
-	slackMessagePromptBody = "A teammate @mentioned the agent in a Slack thread. The task's entity is the thread. " +
-		"Parse the channel, thread_ts, sender, and message text out of this event's metadata:\n\n" +
+	slackMessagePromptName = "Slack assistant"
+	slackMessagePromptBody = "A teammate reached out to the agent in a Slack thread. The task's entity is the " +
+		"thread. Parse the channel, thread_ts, sender, and message text out of this event's metadata:\n\n" +
 		"{{EVENT_METADATA_JSON}}\n\n" +
 		"Read the thread (`exec slack read thread --channel <channel> --ts <thread_ts>`, or `--ts <ts>` when " +
-		"thread_ts is empty — a root-message mention) to see the full request in context, gather what you need " +
-		"from the linked entity and any referenced repos/issues, do the work using the triagefactory exec " +
-		"subcommands available to you, and reply in that same thread with `exec slack send` — your stdout is not " +
-		"visible to the user, so the send is the only way they see your answer."
+		"thread_ts is empty — the triggering message itself started the thread) to see the full request in " +
+		"context, gather what you need from the linked entity and any referenced repos/issues, do the work using " +
+		"the triagefactory exec subcommands available to you, and reply in that same thread with " +
+		"`exec slack send` — your stdout is not visible to the user, so the send is the only way they see your " +
+		"answer."
 )
 
 // slackMessageTriggerBreakerThreshold / MinAutonomySuitability match the
@@ -681,7 +686,7 @@ func seedDefaultSlackMessageBlueprint(ctx context.Context, tx db.TxStores, orgID
 		Body:   slackMessagePromptBody,
 		Source: "user",
 	}); err != nil {
-		return fmt.Errorf("seed slack mention prompt: %w", err)
+		return fmt.Errorf("seed slack message prompt: %w", err)
 	}
 
 	blueprintID := uuid.New().String()
@@ -690,10 +695,10 @@ func seedDefaultSlackMessageBlueprint(ctx context.Context, tx db.TxStores, orgID
 		Name:   slackMessagePromptName,
 		Source: "user",
 	}); err != nil {
-		return fmt.Errorf("seed slack mention blueprint: %w", err)
+		return fmt.Errorf("seed slack message blueprint: %w", err)
 	}
 	if err := tx.Blueprints.ReplaceSteps(ctx, orgID, blueprintID, []string{promptID}, []string{""}); err != nil {
-		return fmt.Errorf("seed slack mention blueprint steps: %w", err)
+		return fmt.Errorf("seed slack message blueprint steps: %w", err)
 	}
 
 	predicate := `{"channel_in":[]}`
@@ -712,7 +717,7 @@ func seedDefaultSlackMessageBlueprint(ctx context.Context, tx db.TxStores, orgID
 		BreakerThreshold:       &threshold,
 		MinAutonomySuitability: &minAutonomy,
 	}); err != nil {
-		return fmt.Errorf("seed slack mention trigger: %w", err)
+		return fmt.Errorf("seed slack message trigger: %w", err)
 	}
 	return nil
 }

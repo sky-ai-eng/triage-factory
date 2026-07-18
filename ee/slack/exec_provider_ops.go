@@ -82,7 +82,7 @@ func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agentho
 // slackOpResolveWorkspace resolves which (workspace, app) IDENTITY to act as for
 // a channel — the non-secret half of the old resolveWorkspaceAndToken. Channel
 // registry unknown → error. If this run's task is a slack:message naming this
-// SAME channel, that mention's (workspace_id, api_app_id) is authoritative;
+// SAME channel, that message's (workspace_id, api_app_id) is authoritative;
 // otherwise every connected workspace matching the channel's WorkspaceID is
 // listed: exactly one → use it; more than one → refuse rather than guess.
 func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agenthost.RunInfo, args json.RawMessage) (any, error) {
@@ -132,7 +132,7 @@ func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agentho
 
 // slackOpResolveWorkspaceForDownload resolves which (workspace, app) IDENTITY to
 // speak as for `download`, which carries no channel: prefer this run's own
-// mention-task metadata, else the org's sole connected workspace (refuse on
+// message-task metadata, else the org's sole connected workspace (refuse on
 // zero or ambiguous). This picks an identity ONLY; the file's real channel
 // membership is authorized separately (slackOpAuthorizeFileChannels).
 func slackOpResolveWorkspaceForDownload(ctx context.Context, stores db.Stores, info agenthost.RunInfo, _ json.RawMessage) (any, error) {
@@ -181,7 +181,7 @@ func slackOpAuthorizeFileChannels(ctx context.Context, stores db.Stores, info ag
 }
 
 // workspaceFromRunTaskMetadata resolves the run's own Slack context — its task,
-// if a slack:message task, and that mention's event metadata — via
+// if a slack:message task, and that message's event metadata — via
 // AgentRuns.GetSystem → Task → PrimaryEventID → Events.GetMetadataSystem. Every
 // store call propagates its error; only a genuine "not found" maps to (ok=false,
 // nil), so a masked failure never silently falls through to the org-wide
