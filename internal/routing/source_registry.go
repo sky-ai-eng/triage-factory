@@ -21,12 +21,12 @@ import (
 // (TracksScope).
 //
 // Hooks must fail OPEN on store errors (return the permissive result + log),
-// mirroring teamTracksEventRepo (team_routing.go:77): dropping legitimate
-// work on a transient DB blip is worse than a briefly-wide gate.
+// mirroring teamTracksEventRepo: dropping legitimate work on a transient DB
+// blip is worse than a briefly-wide gate.
 type SourceHooks struct {
 	// ResolveOwner resolves (owner, ownerSet) for an Owned event — the
-	// analogue of authorCentricOwner's return contract (see its doc,
-	// team_routing.go:236): owner=="" + ownerSet==nil means nothing resolved.
+	// analogue of authorCentricOwner's return contract (see its doc):
+	// owner=="" + ownerSet==nil means nothing resolved.
 	// Required unconditionally, even for a source whose event types never
 	// declare OwnershipOwned: registration can't see what event types this
 	// source will add in the future, and dispatch calls this hook whenever a

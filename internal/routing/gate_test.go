@@ -334,6 +334,122 @@ func jiraAssignedEvent(t *testing.T, entityID, project string) domain.Event {
 	}
 }
 
+// enrollOnTeam adds an existing user to an additional team, modeling one
+// person who belongs to multiple teams (the founder auto-joined to every team
+// they create). seedUserOnTeam mints a fresh user per call; this reuses one.
+func enrollOnTeam(t *testing.T, database *sql.DB, userID, teamID string) {
+	t.Helper()
+	if _, err := database.Exec(
+		`INSERT INTO memberships (user_id, team_id, role) VALUES (?, ?, 'admin')`,
+		userID, teamID,
+	); err != nil {
+		t.Fatalf("enroll %s→%s: %v", userID, teamID, err)
+	}
+}
+
+// TestGate_MultiTeamAuthor_UntrackedTeamGatedFromOwnerLadder is the regression
+// guard for the queued-column team-filter leak. A PR author belongs to two
+// teams: A (tracks the repo) and B (unconfigured, tracks nothing). The event is
+// on A's repo. The task must be owned by and visible to A ONLY.
+//
+// Before the owner ladder's tier-4 identity resolution was tracking-gated, the
+// author's membership alone pulled B into the set: ownership resolved ambiguous
+// (NULL owner) and task_teams became {A, B}, so filtering the board to B still
+// surfaced A's queued work — the card was visible to a team that could never
+// claim or act on the repo. B's own match-all watch rule is already gated out at
+// match time (B tracks nothing), so the author ladder is the only path B could
+// have entered — which is exactly what this asserts is now closed.
+func TestGate_MultiTeamAuthor_UntrackedTeamGatedFromOwnerLadder(t *testing.T) {
+	dbh := newGateDB(t)
+	st := sqlitestore.New(dbh)
+	ctx := context.Background()
+
+	teamA := runmode.LocalDefaultTeamID
+	teamB := seedGateTeam(t, dbh, "team-b")
+
+	// A tracks repo-a; B (unconfigured) tracks nothing.
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-a"}}); err != nil {
+		t.Fatalf("teamA track: %v", err)
+	}
+
+	// The author is on BOTH teams — the founder-on-every-team shape.
+	setReviewHost(t, dbh)
+	uid := seedUserOnTeam(t, dbh, teamA, "aidan")
+	enrollOnTeam(t, dbh, uid, teamB)
+
+	seedMatchAllCIRule(t, dbh, teamA)
+	seedMatchAllCIRule(t, dbh, teamB)
+
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "owner/repo-a#1", "pr", "A PR", "https://example.com/a")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	gateRouter(dbh).HandleEvent(ciEvent(t, entity.ID, "owner/repo-a"))
+
+	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
+	if err != nil || len(active) != 1 {
+		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
+	}
+	vis, err := testTaskStore(dbh).VisibilityTeams(ctx, runmode.LocalDefaultOrgID, active[0].ID)
+	if err != nil {
+		t.Fatalf("VisibilityTeams: %v", err)
+	}
+	if len(vis) != 1 || vis[0] != teamA {
+		t.Fatalf("visibility = %v, want only teamA %q (teamB must be gated out of the owner ladder)", vis, teamA)
+	}
+	if teamIDValue(&active[0]) != teamA {
+		t.Errorf("owner = %q, want teamA %q (a NULL owner means teamB leaked in as an ambiguous co-owner)", teamIDValue(&active[0]), teamA)
+	}
+}
+
+// TestGate_MultiTeamAuthor_BothTrack_StaysAmbiguous guards the opposite edge:
+// when BOTH of the author's teams track the repo, the task is genuinely shared —
+// visible to both, NULL owner (the first member to claim consolidates). The
+// tracking gate must narrow ownership to reality without collapsing a
+// legitimately ambiguous owner.
+func TestGate_MultiTeamAuthor_BothTrack_StaysAmbiguous(t *testing.T) {
+	dbh := newGateDB(t)
+	st := sqlitestore.New(dbh)
+	ctx := context.Background()
+
+	teamA := runmode.LocalDefaultTeamID
+	teamB := seedGateTeam(t, dbh, "team-b")
+	shared := []domain.TeamGitHubRepo{{Owner: "owner", Repo: "shared"}}
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, shared); err != nil {
+		t.Fatalf("teamA track: %v", err)
+	}
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, shared); err != nil {
+		t.Fatalf("teamB track: %v", err)
+	}
+
+	setReviewHost(t, dbh)
+	uid := seedUserOnTeam(t, dbh, teamA, "aidan")
+	enrollOnTeam(t, dbh, uid, teamB)
+
+	seedMatchAllCIRule(t, dbh, teamA)
+	seedMatchAllCIRule(t, dbh, teamB)
+
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "owner/shared#1", "pr", "Shared PR", "https://example.com/s")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	gateRouter(dbh).HandleEvent(ciEvent(t, entity.ID, "owner/shared"))
+
+	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
+	if err != nil || len(active) != 1 {
+		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
+	}
+	vis := visTeamsOf(t, dbh, active[0].ID)
+	want := []string{teamA, teamB}
+	sort.Strings(want)
+	if len(vis) != 2 || vis[0] != want[0] || vis[1] != want[1] {
+		t.Fatalf("visibility = %v, want both teams %v (a legitimately ambiguous owner must be preserved)", vis, want)
+	}
+	if teamIDValue(&active[0]) != "" {
+		t.Errorf("owner = %q, want NULL (both teams track the repo → ambiguous membership, consolidated on first claim)", teamIDValue(&active[0]))
+	}
+}
+
 // TestGate_LocalN1_NoOp is acceptance #7: in local N=1 the single default
 // team tracks every configured repo (because repo_profiles is its union),
 // so the gate never drops anything — identical behavior to pre-ticket.
