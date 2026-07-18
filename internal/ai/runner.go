@@ -244,6 +244,16 @@ func (r *Runner) run(ctx context.Context) {
 	aiLog.Info("scored tasks successfully", "count", len(updates))
 
 	if r.callbacks.OnScoringCompleted != nil {
-		r.callbacks.OnScoringCompleted(r.orgID, taskIDs)
+		// Pass only the IDs of tasks that actually received fresh scores
+		// (the updates slice), not taskIDs (all originally-picked tasks).
+		// When some batches fail, the skipped tasks are reset to 'pending'
+		// and excluded from updates — calling OnScoringCompleted with their
+		// IDs would let ReDeriveAfterScoring fire triggers against stale
+		// scores from a prior cycle.
+		scoredIDs := make([]string, len(updates))
+		for i, u := range updates {
+			scoredIDs[i] = u.ID
+		}
+		r.callbacks.OnScoringCompleted(r.orgID, scoredIDs)
 	}
 }

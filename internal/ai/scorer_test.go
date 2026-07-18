@@ -134,6 +134,99 @@ func TestRunner_StopIdempotent(t *testing.T) {
 	r.Stop() // must not panic
 }
 
+// stubScoreStore is a minimal db.ScoreStore for testing Runner.run end-to-end
+// without a real database. UnscoredTasks returns the configured task list
+// exactly once; the mutation methods are no-ops.
+type stubScoreStore struct {
+	tasks   []domain.Task
+	fetched bool
+}
+
+func (s *stubScoreStore) UnscoredTasks(_ context.Context, _ string) ([]domain.Task, error) {
+	if s.fetched {
+		return nil, nil
+	}
+	s.fetched = true
+	return s.tasks, nil
+}
+func (s *stubScoreStore) MarkScoring(_ context.Context, _ string, _ []string) error {
+	return nil
+}
+func (s *stubScoreStore) ResetScoringToPending(_ context.Context, _ string, _ []string) error {
+	return nil
+}
+func (s *stubScoreStore) UpdateTaskScores(_ context.Context, _ string, _ []domain.TaskScoreUpdate) error {
+	return nil
+}
+
+// TestRun_OnScoringCompletedReceivesOnlyFreshlyScored pins that Runner.run
+// passes only the IDs of tasks that actually received fresh scores to
+// OnScoringCompleted — not the full set picked at cycle start. When some
+// batches fail, the skipped tasks are reset to 'pending' and excluded from
+// updates; their IDs must not appear in the callback or ReDeriveAfterScoring
+// would fire triggers against stale scores from a prior cycle.
+func TestRun_OnScoringCompletedReceivesOnlyFreshlyScored(t *testing.T) {
+	// 25 tasks → 3 batches (10, 10, 5). The poisoned task lands in the
+	// second batch so 10 tasks are skipped; the other 15 score fine.
+	allTasks := make([]domain.Task, 25)
+	for i := range allTasks {
+		allTasks[i] = domain.Task{ID: fmt.Sprintf("t-%d", i)}
+	}
+	allTasks[12].ID = "fail-me" // poisons the second batch (indices 10-19)
+
+	store := &stubScoreStore{tasks: allTasks}
+	r := NewRunner(store, nil, "org-y", nil, nil, nil, nil, RunnerCallbacks{})
+
+	r.scoreFn = func(_ context.Context, tasks []TaskInput, _ string, _ agentproc.SecretsReader) ([]TaskScore, error) {
+		for _, in := range tasks {
+			if in.ID == "fail-me" {
+				return nil, errors.New("simulated batch failure")
+			}
+		}
+		out := make([]TaskScore, len(tasks))
+		for i, in := range tasks {
+			out[i] = TaskScore{ID: in.ID, PriorityScore: 50}
+		}
+		return out, nil
+	}
+
+	var mu sync.Mutex
+	var gotOrgID string
+	var gotIDs []string
+	r.callbacks.OnScoringCompleted = func(orgID string, ids []string) {
+		mu.Lock()
+		defer mu.Unlock()
+		gotOrgID = orgID
+		gotIDs = append(gotIDs, ids...)
+	}
+
+	r.run(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if gotOrgID != "org-y" {
+		t.Errorf("OnScoringCompleted orgID = %q; want org-y", gotOrgID)
+	}
+	if len(gotIDs) != 15 {
+		t.Errorf("OnScoringCompleted received %d IDs; want 15 (only the 15 successfully-scored tasks, not the 10 skipped)", len(gotIDs))
+	}
+	idSet := make(map[string]bool, len(gotIDs))
+	for _, id := range gotIDs {
+		idSet[id] = true
+	}
+	if idSet["fail-me"] {
+		t.Error(`OnScoringCompleted received "fail-me"; want only IDs of tasks that went through UpdateTaskScores`)
+	}
+	// All tasks in the failed second batch (indices 10-19) must be absent.
+	for i := 10; i < 20; i++ {
+		id := fmt.Sprintf("t-%d", i)
+		if idSet[id] {
+			t.Errorf("OnScoringCompleted received skipped task %s; want only freshly-scored IDs", id)
+		}
+	}
+}
+
 // TestScoreTasks_EmptyReturnsZero pins the early-out: no tasks means no scoreFn
 // calls and a clean zero result.
 func TestScoreTasks_EmptyReturnsZero(t *testing.T) {
