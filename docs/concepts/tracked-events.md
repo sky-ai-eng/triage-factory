@@ -54,6 +54,35 @@ Events are emitted once per transition, not continuously. If a PR stays in the s
 | **Status Changed** | `jira:issue:status_changed` | The `status` field changes (e.g. To Do → In Progress) |
 | **Issue Completed** | `jira:issue:completed` | The `status` changes to Done, Closed, or Resolved |
 
+## Slack Events
+
+Slack support is an Enterprise, multi-mode-only feature, configured per-org from **Settings → Slack** (operator setup: [self-hosting/slack.md](../self-hosting/slack.md)). Unlike GitHub and Jira, Slack events don't come from the snapshot-diff poller — they arrive over the app's Events API webhook or Socket Mode connection and are ingested as they happen.
+
+| Event | ID | Trigger |
+|-------|----|---------|
+| **Message to bot** | `slack:message` | A human addressed the TF bot in a Slack channel — either an explicit @-mention, or a follow-up in a thread the bot already owns (an *engaged thread*) |
+
+`slack:message` was formerly `slack:mention`. Whether the message carried an explicit @-mention doesn't change whether the situation needs attention, so mention-ness is metadata (`SlackMessageMetadata.Mentioned`), not a separate event type — the same taxonomy rule that only splits an event when the two cases are genuinely different situations. A handler can still narrow to explicit mentions with the predicate's `mentioned_only` flag, or to specific channels with `channel_in`.
+
+### Engaged threads
+
+A Slack thread is **engaged** when the bot is the reason it exists:
+
+- its root message @-mentioned the bot, or
+- a delegated run posted the root message itself.
+
+Engagement is encoded on the thread's entity as `kind="thread"` (contrast `kind="message"`, a mid-thread summons that @-mentions the bot inside a thread someone else started). Closing the entity ends engagement.
+
+**Every human message in an engaged thread is ingested** and published as `slack:message` (with `mentioned=false`), so a follow-up no longer has to re-@-mention the bot to be heard — when the mention *started* the thread, requiring a second @ was confusing. Explicit @-mentions keep working everywhere, engaged or not (published with `mentioned=true`).
+
+Follow-up ingestion (the un-mentioned `message.channels` / `message.groups` deliveries) is deliberately narrow — the vast majority of channel traffic is dropped before it's even recorded. A follow-up publishes only when all of these hold:
+
+- it's a plain reply or a reply also broadcast to the channel (subtype `""` or `thread_broadcast`) — edits, deletions, joins, and bot messages are dropped;
+- it's inside a thread (has a `thread_ts`) — root-channel chatter is never ingested;
+- it wasn't authored by the bot itself or any other bot;
+- it doesn't explicitly @-mention the bot — that copy is owned by the twin `app_mention` delivery, so dropping it here avoids a double publish;
+- the thread's entity already exists, is `kind="thread"`, and is still active.
+
 ## System Events
 
 These are internal signals, not shown in the triage UI.
