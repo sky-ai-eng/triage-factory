@@ -39,7 +39,20 @@ type RelayServer struct {
 	// nil for a run with no git surface (a Jira-only run) — authorize_repo then
 	// fails closed (deny), the audit ops no-op.
 	git *agentproc.GitProxyConfig
+
+	// proxyCreds are the run's per-run proxy coordinates (REST + git proxy, with
+	// placeholder tokens), set once the sidecar bring-up returns them (SetProxyCreds).
+	// The workspace materialization served here clones + GetPRs through them, so the
+	// orchestrator holds no real credential for either. nil until bring-up completes.
+	proxyCreds *ProxyCredentials
 }
+
+// SetProxyCreds records the run's proxy coordinates once the sidecar bring-up
+// has returned them — the create_workspace_checkout op clones and fetches PRs
+// through them. Bring-up completes before the agent runs, so the coords are
+// always set by the time a `workspace add` arrives; a materialize before that
+// (proxyCreds still nil) fails clean rather than cloning unauthenticated.
+func (s *RelayServer) SetProxyCreds(pc *ProxyCredentials) { s.proxyCreds = pc }
 
 // NewRelayServer builds the run's relay op server. git may be nil (no git
 // surface); stores/info are the run's own, admin-pool + RunInfo-bound.
@@ -241,6 +254,31 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 			return nil, err
 		}
 		return json.Marshal(checkEntitlementResult{Allowed: allowed})
+
+	case opCreateWorkspaceCheckout:
+		var a createWorkspaceCheckoutArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		if s.proxyCreds == nil {
+			return nil, fmt.Errorf("agenthost: workspace materialization requested before the run's git proxy was ready")
+		}
+		// Materialize on the orchestrator, which owns the bare cache + run-root
+		// and clones / fetches PRs through the run's proxies. Identity is the
+		// run's own RunInfo, so the repo-config + team-tracking gate re-binds to
+		// THIS run's team — a sidecar cannot steer it at another team's repo.
+		client := &LocalClient{
+			stores:     s.stores,
+			info:       s.info,
+			rt:         s.rt,
+			proxyCreds: s.proxyCreds,
+			gateWired:  s.stores.TeamGitHubRepos != nil && s.stores.RunWorktrees != nil,
+		}
+		path, err := client.materializeWorkspaceCheckout(ctx, a.Owner, a.Repo, a.Ref, a.PR)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(createWorkspaceCheckoutResult{Path: path})
 
 	default:
 		return nil, fmt.Errorf("agenthost: unsupported core relay call op %q", op)

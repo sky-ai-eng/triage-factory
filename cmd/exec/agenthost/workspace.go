@@ -6,7 +6,9 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -89,6 +91,40 @@ func (c *LocalClient) CreateWorkspaceCheckout(ctx context.Context, owner, repo, 
 		return "", fmt.Errorf("create workspace checkout: %w", err)
 	}
 	return c.createWorkspaceCheckoutIn(ctx, hostRoot, owner, repo, ref, prNumber)
+}
+
+// materializeWorkspaceCheckout is the full host-side `workspace add`: resolve the
+// run root once, build the checkout under it, and hand the tree to the sandbox
+// uid. It writes the shared bare cache and the run-root, so it runs ONLY where
+// those are owned — an all/local process, or the orchestrator serving a sidecar's
+// relayed op. The capless credential sidecar owns neither (its uid can't write
+// either), so its dispatch relays here instead of calling this.
+func (c *LocalClient) materializeWorkspaceCheckout(ctx context.Context, owner, repo, ref string, prNumber int) (string, error) {
+	// One WorkspaceRoots read serves the create AND the post-create chown/cleanup
+	// containment gate, so both judge against the same root.
+	hostRoot, _, err := c.WorkspaceRoots(ctx)
+	if err != nil {
+		return "", err
+	}
+	path, err := c.createWorkspaceCheckoutIn(ctx, hostRoot, owner, repo, ref, prNumber)
+	if err != nil {
+		return "", err
+	}
+	// The create ran as the host process; hand the subtree to the sandbox uid or
+	// the jailed agent can't write its own checkout. On failure, remove the
+	// checkout so a released reservation can retry cleanly (git clone refuses a
+	// non-empty target) — but ONLY when the path is provably a strict descendant
+	// of the run root, since a regressed create contract would otherwise turn
+	// RemoveAll into deleting an arbitrary host directory.
+	if cerr := agentproc.ChownWorkspaceCheckoutForSandbox(ctx, hostRoot, path); cerr != nil {
+		if strictlyWithin(hostRoot, path) {
+			_ = sandbox.RemoveRunTree(context.Background(), path)
+		} else {
+			agenthostLog.Warn("leaving un-chowned checkout in place; path is not verifiably inside the run root", "path", path, "host_root", hostRoot)
+		}
+		return "", fmt.Errorf("hand checkout to sandbox user: %w", cerr)
+	}
+	return path, nil
 }
 
 // createWorkspaceCheckoutIn is CreateWorkspaceCheckout with the host run root
