@@ -132,8 +132,9 @@ const (
 )
 
 type webhookRig struct {
-	h         *webhookHandler
-	published *[]domain.Event
+	h          *webhookHandler
+	published  *[]domain.Event
+	deliveries *fakeDeliveries
 }
 
 // newWebhookRig builds a webhookHandler wired to fakes: a single connected
@@ -165,12 +166,13 @@ func newWebhookRig(t *testing.T, signingSecretRef string, licensed bool) *webhoo
 	}
 
 	published := &[]domain.Event{}
+	deliveries := newFakeDeliveries()
 	pipeline := &ingestPipeline{
 		entities:   newFakeEntities(),
-		deliveries: newFakeDeliveries(),
+		deliveries: deliveries,
 		publish:    func(evt domain.Event) { *published = append(*published, evt) },
 	}
-	return &webhookRig{h: &webhookHandler{stores: stores, pipeline: pipeline}, published: published}
+	return &webhookRig{h: &webhookHandler{stores: stores, pipeline: pipeline}, published: published, deliveries: deliveries}
 }
 
 // sign computes a valid X-Slack-Signature for (secret, timestamp, body) per
@@ -484,6 +486,9 @@ func TestHandleWebhook_UnengagedThreadReply_NoPublish(t *testing.T) {
 	}
 	if len(*r.published) != 0 {
 		t.Errorf("published %d events; want 0 (no engaged thread)", len(*r.published))
+	}
+	if len(r.deliveries.seen) != 0 {
+		t.Errorf("recorded %d deliveries; want 0 — a dropped message must never insert into slack_deliveries", len(r.deliveries.seen))
 	}
 }
 
