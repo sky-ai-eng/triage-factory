@@ -86,10 +86,9 @@ func TestRun_NonGitRoot(t *testing.T) {
 func TestRun_CapturesSessionTranscript(t *testing.T) {
 	dir := t.TempDir()
 	const sessionID = "sess-xyz"
-	sessPath, err := worktree.ClaudeSessionPath(worktree.ResolveClaudeProjectCwd(dir), sessionID)
-	if err != nil {
-		t.Fatalf("ClaudeSessionPath: %v", err)
-	}
+	// The child reads a sandboxed run's transcript from the run-root layout, so
+	// seed it exactly where ReadSandboxSessionTranscript looks.
+	sessPath := worktree.SandboxClaudeSessionPath(dir, sessionID)
 	if err := os.MkdirAll(filepath.Dir(sessPath), 0o700); err != nil {
 		t.Fatal(err)
 	}

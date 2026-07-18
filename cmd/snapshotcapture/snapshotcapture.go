@@ -57,7 +57,11 @@ func Run(ctx context.Context, wtPath, sessionID string, w io.Writer) error {
 		return err
 	}
 	state := worktree.CapturedState{Delta: delta}
-	if transcript, ok := worktree.ReadClaudeSessionTranscript(wtPath, sessionID); ok {
+	// The child is spawned only for a multi-mode sandboxed run (see
+	// delegate.captureWorkspaceGit), and carries no TF_MODE, so it reads the
+	// transcript from the run-root sandbox layout directly rather than via the
+	// runmode-aware path — and confined against a symlink escape.
+	if transcript, ok := worktree.ReadSandboxSessionTranscript(wtPath, sessionID); ok {
 		state.Transcript = transcript
 	}
 	if err := json.NewEncoder(w).Encode(state); err != nil {
