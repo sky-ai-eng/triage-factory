@@ -35,8 +35,10 @@ type EntitySeeder struct {
 // RunEntityStoreConformance covers the entity-store contract every
 // backend impl must hold:
 //
-//   - FindOrCreate inserts then re-reads on the same key.
-//   - Get / GetBySource return (nil, nil) on miss.
+//   - FindOrCreate inserts then re-reads on the same key, never rewriting
+//     kind on an already-known row.
+//   - Get / GetBySource return (nil, nil) on miss; GetBySourceSystem
+//     mirrors GetBySource.
 //   - Update* mutations land on the right column, with UpdateSnapshot
 //     also stamping last_polled_at and PatchSnapshot deliberately
 //     leaving it alone.
@@ -133,6 +135,39 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
+	t.Run("FindOrCreate_never_rewrites_kind_on_an_existing_row", func(t *testing.T) {
+		// Slack's two ingest paths (a root mention vs. a run's own root post)
+		// each mint kind="thread"; a mid-thread summons and the generic
+		// touched-entity resolver default to kind="message". Whichever
+		// resolves the entity first must stick — a later resolve under a
+		// different kind (e.g. a reply/edit landing on an already-"thread"
+		// entity) must not downgrade it back to "message".
+		s, orgID, _ := mk(t)
+
+		const sid = "C0777/1700000000.000400"
+		first, created, err := s.FindOrCreate(ctx, orgID, "slack", sid, "thread", "root text", "")
+		if err != nil {
+			t.Fatalf("FindOrCreate(thread): %v", err)
+		}
+		if !created {
+			t.Fatalf("expected created=true on first resolve")
+		}
+
+		second, created2, err := s.FindOrCreate(ctx, orgID, "slack", sid, "message", "ignored", "")
+		if err != nil {
+			t.Fatalf("FindOrCreate(message, re-resolve): %v", err)
+		}
+		if created2 {
+			t.Errorf("re-resolving the same entity must return created=false")
+		}
+		if second.ID != first.ID {
+			t.Errorf("re-resolve id = %s, want %s", second.ID, first.ID)
+		}
+		if second.Kind != "thread" {
+			t.Errorf("kind = %q, want thread (unchanged by the later message-kind resolve)", second.Kind)
+		}
+	})
+
 	t.Run("Get_and_GetBySource_return_nil_on_miss", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
@@ -152,6 +187,31 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 		if gotBySrc != nil {
 			t.Errorf("GetBySource on miss returned %+v, want nil", gotBySrc)
+		}
+	})
+
+	t.Run("GetBySourceSystem_mirrors_GetBySource", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+
+		want, _, err := s.FindOrCreate(ctx, orgID, "slack", "C0999/1700000000.000300", "thread", "root text", "")
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+
+		got, err := s.GetBySourceSystem(ctx, orgID, "slack", "C0999/1700000000.000300")
+		if err != nil {
+			t.Fatalf("GetBySourceSystem: %v", err)
+		}
+		if got == nil || got.ID != want.ID || got.Kind != "thread" {
+			t.Errorf("GetBySourceSystem = %+v, want the seeded entity %+v", got, want)
+		}
+
+		miss, err := s.GetBySourceSystem(ctx, orgID, "slack", "C0999/nonexistent")
+		if err != nil {
+			t.Fatalf("GetBySourceSystem(miss): %v", err)
+		}
+		if miss != nil {
+			t.Errorf("GetBySourceSystem on miss returned %+v, want nil", miss)
 		}
 	})
 

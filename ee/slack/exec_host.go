@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -110,12 +111,24 @@ func (h *slackExecHandler) authorizeChannel(ctx context.Context, rt agenthost.Ex
 	return rt.Relay(ctx, "slack", opAuthorizeChannel, slackChannelArg{Channel: channelID}, nil)
 }
 
+// resolveWorkspaceIdentity relays the workspace-identity decision for
+// channelID — the shared first step behind resolveToken (which only needs it
+// to select a token) and send's root-post bookkeeping (which also needs it
+// to address opRecordThreadRoot's permalink dispatch at the right workspace).
+func (h *slackExecHandler) resolveWorkspaceIdentity(ctx context.Context, rt agenthost.ExtensionRuntime, channelID string) (slackWorkspaceIdentity, error) {
+	var ws slackWorkspaceIdentity
+	if err := rt.Relay(ctx, "slack", opResolveWorkspace, slackChannelArg{Channel: channelID}, &ws); err != nil {
+		return slackWorkspaceIdentity{}, err
+	}
+	return ws, nil
+}
+
 // resolveToken resolves which bot token to act as for channelID: relay the
 // workspace-identity decision, then select that (workspace, app)'s token from
 // the sealed bundle.
 func (h *slackExecHandler) resolveToken(ctx context.Context, rt agenthost.ExtensionRuntime, channelID string) (string, error) {
-	var ws slackWorkspaceIdentity
-	if err := rt.Relay(ctx, "slack", opResolveWorkspace, slackChannelArg{Channel: channelID}, &ws); err != nil {
+	ws, err := h.resolveWorkspaceIdentity(ctx, rt, channelID)
+	if err != nil {
 		return "", err
 	}
 	return selectBotToken(ctx, rt, ws)
@@ -169,7 +182,11 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 	if err := h.authorizeChannel(ctx, rt, a.Channel); err != nil {
 		return slackSendResult{}, err
 	}
-	token, err := h.resolveToken(ctx, rt, a.Channel)
+	ws, err := h.resolveWorkspaceIdentity(ctx, rt, a.Channel)
+	if err != nil {
+		return slackSendResult{}, err
+	}
+	token, err := selectBotToken(ctx, rt, ws)
 	if err != nil {
 		return slackSendResult{}, err
 	}
@@ -219,11 +236,52 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 	if rootTS == "" {
 		rootTS = ts
 	}
-	h.recordMessage(ctx, rt, domain.ActionSlackMessagePosted, a.Channel, rootTS, ts, h.permalinkBestEffort(ctx, token, a.Channel, ts))
-	if attachErr != nil {
-		return slackSendResult{Channel: a.Channel, TS: ts}, attachErr
+	var threadRootErr error
+	if a.ThreadTS == "" {
+		// This send IS the thread root: mint/find its entity as kind="thread"
+		// before recordMessage's generic touched-entity resolution below sees
+		// the same (channel, ts) key — awaited so it lands first, since
+		// FindOrCreate never rewrites kind on an already-known row.
+		threadRootErr = h.recordThreadRoot(ctx, rt, ws, a.Channel, ts, sendTitleText(a))
 	}
-	return slackSendResult{Channel: a.Channel, TS: ts}, nil
+	// recordMessage always runs next, even when threadRootErr is set: the
+	// Slack message already posted, and skipping the artifacts/external_actions
+	// write over a bookkeeping race would drop its audit trail entirely — a
+	// strictly worse outcome than the mis-tagged kind="message" fallback
+	// threadRootErr already reports below. There is deliberately no gate here
+	// to prevent that fallback from firing; recordThreadRoot's retries are the
+	// mitigation, not a hard guarantee.
+	h.recordMessage(ctx, rt, domain.ActionSlackMessagePosted, a.Channel, rootTS, ts, h.permalinkBestEffort(ctx, token, a.Channel, ts))
+	switch {
+	case attachErr != nil && threadRootErr != nil:
+		return slackSendResult{Channel: a.Channel, TS: ts}, fmt.Errorf("%w; %w", attachErr, threadRootErr)
+	case attachErr != nil:
+		return slackSendResult{Channel: a.Channel, TS: ts}, attachErr
+	case threadRootErr != nil:
+		return slackSendResult{Channel: a.Channel, TS: ts}, threadRootErr
+	default:
+		return slackSendResult{Channel: a.Channel, TS: ts}, nil
+	}
+}
+
+// slackDefaultAttachmentName is the label an unnamed attachment falls back
+// to — shared by sendTitleText (the thread-root entity's title) and
+// decodeAttachment (the uploaded file's name) so the two defaults can't
+// drift apart.
+const slackDefaultAttachmentName = "attachment"
+
+// sendTitleText picks the text a channel-root send's thread-root entity is
+// titled from: the message body, falling back to the attachment's name for
+// a file-only send (no --body) — mentionTitle("") would otherwise leave a
+// freshly-minted kind="thread" entity's title blank.
+func sendTitleText(a slackSendArgs) string {
+	if a.Body != "" {
+		return a.Body
+	}
+	if a.AttachName != "" {
+		return a.AttachName
+	}
+	return slackDefaultAttachmentName
 }
 
 func (h *slackExecHandler) edit(ctx context.Context, rt agenthost.ExtensionRuntime, a slackEditArgs) (slackEditResult, error) {
@@ -277,6 +335,62 @@ func (h *slackExecHandler) react(ctx context.Context, rt agenthost.ExtensionRunt
 		DetailJSON: string(detail),
 	})
 	return slackReactResult{}, nil
+}
+
+// recordThreadRootMaxAttempts / recordThreadRootRetryDelay bound
+// recordThreadRoot's retries. Unlike most best-effort writes in this
+// package, a dropped call here isn't a "the next poll/touch fixes it" gap:
+// FindOrCreate never revisits kind once a row exists, so if this relay never
+// lands before recordMessage's generic touched-entity resolver
+// (cmd/exec/agenthost/record.go) creates the same entity with its
+// kind="message" default, the thread is mis-tagged for good. A few quick
+// retries absorb a transient relay/DB hiccup — the common case — rather than
+// gambling the engagement signal on a single round trip.
+//
+// recordThreadRootRetryDelay is a var, not a const — mirroring
+// slackConversationsRepliesCap's rationale (api.go) — so a test can shrink
+// it instead of paying the real delay across several exhausted retries.
+const recordThreadRootMaxAttempts = 3
+
+var recordThreadRootRetryDelay = 200 * time.Millisecond
+
+// recordThreadRoot relays opRecordThreadRoot for a channel-root send (no
+// --thread-ts): the orchestrator idempotently finds-or-creates the thread's
+// entity as kind="thread" and, only on first creation, dispatches permalink
+// resolution. Awaited (not fire-and-forget) so it lands before recordMessage
+// runs next — see send()'s call site. Retries on failure (see the constants'
+// doc); if every attempt fails, the error is returned (send() surfaces it
+// alongside the already-successful post, mirroring attachErr) rather than
+// silently swallowed — a silent failure here has a permanent consequence, so
+// it must be loud instead.
+func (h *slackExecHandler) recordThreadRoot(ctx context.Context, rt agenthost.ExtensionRuntime, ws slackWorkspaceIdentity, channel, ts, text string) error {
+	args := slackThreadRootArg{WorkspaceID: ws.WorkspaceID, APIAppID: ws.APIAppID, Channel: channel, TS: ts, Text: text}
+	var err error
+retry:
+	for attempt := 1; attempt <= recordThreadRootMaxAttempts; attempt++ {
+		if err = rt.Relay(ctx, "slack", opRecordThreadRoot, args, nil); err == nil {
+			return nil
+		}
+		if attempt < recordThreadRootMaxAttempts {
+			// A labeled break: bare "break" here would only exit the select,
+			// leaving the for loop to immediately retry against an already-
+			// cancelled ctx instead of giving up right away.
+			select {
+			case <-ctx.Done():
+				err = ctx.Err()
+				break retry
+			case <-time.After(recordThreadRootRetryDelay):
+			}
+		}
+	}
+	slackLog.Error("record thread-root entity failed after retries; thread will be mis-tagged kind=message instead of kind=thread",
+		"channel", channel, "ts", ts, "attempts", recordThreadRootMaxAttempts, "error", err)
+	// Explicitly states the message already posted (mirroring attachErr's
+	// phrasing in send()) so a caller reading only this error — not the
+	// discarded slackSendResult, see dispatchSlackExec — doesn't mistake it
+	// for a failed send and retry, which would double-post to the channel.
+	return fmt.Errorf("slack: message posted (ts=%s) but recording its thread-root entity failed after %d attempts (this thread will show as a mid-thread summons, not an engaged root): %w",
+		ts, recordThreadRootMaxAttempts, err)
 }
 
 // recordMessage records the send/edit matrix: an `artifacts` row keyed
@@ -375,7 +489,7 @@ func decodeAttachment(name, base64Body string) (decoded []byte, resolvedName str
 		return nil, "", fmt.Errorf("slack: attachment is %d bytes, exceeds the %d-byte cap", len(decoded), slackExecMaxFileBytes)
 	}
 	if name == "" {
-		name = "attachment"
+		name = slackDefaultAttachmentName
 	}
 	return decoded, name, nil
 }

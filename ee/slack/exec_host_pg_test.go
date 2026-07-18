@@ -407,6 +407,153 @@ func TestSlackExecHandler_Send_RecordsArtifactAndAction(t *testing.T) {
 	}
 }
 
+// TestSlackExecHandler_Send_RootPostMintsThreadKind pins exec slack send's
+// thread-engagement half: a channel-root post (no --thread-ts) is the run's
+// own thread, so its entity is minted kind="thread" — titled from the
+// posted text — the same engagement signal a root mention gets at ingest.
+func TestSlackExecHandler_Send_RootPostMintsThreadKind(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-send-root-kind")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	out, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "kicking off a new thread"})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	sourceID := domain.SlackSourceID("C1", out.TS)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", sourceID)
+	if err != nil {
+		t.Fatalf("GetBySourceSystem: %v", err)
+	}
+	if ent == nil {
+		t.Fatalf("no entity found for source_id %q", sourceID)
+	}
+	if ent.Kind != "thread" {
+		t.Errorf("kind = %q, want thread", ent.Kind)
+	}
+	if ent.Title != "kicking off a new thread" {
+		t.Errorf("title = %q, want the posted text", ent.Title)
+	}
+}
+
+// TestSlackExecHandler_Send_ThreadedReplyMintsMessageKind pins the negative
+// case: a reply into an existing thread (--thread-ts set) is a summons into
+// a thread this run did not root, so its entity falls to the generic
+// touched-entity default of kind="message" — recordThreadRoot never fires
+// for it.
+func TestSlackExecHandler_Send_ThreadedReplyMintsMessageKind(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-send-reply-kind")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	const rootTS = "1699999999.000001"
+	if _, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{
+		Channel: "C1", ThreadTS: rootTS, Body: "a reply into someone else's thread",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	sourceID := domain.SlackSourceID("C1", rootTS)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", sourceID)
+	if err != nil {
+		t.Fatalf("GetBySourceSystem: %v", err)
+	}
+	if ent == nil {
+		t.Fatalf("no entity found for source_id %q", sourceID)
+	}
+	if ent.Kind != "message" {
+		t.Errorf("kind = %q, want message", ent.Kind)
+	}
+}
+
+// TestSlackExecHandler_Send_RootPostThenEdit_PreservesThreadKind pins the
+// "find never rewrites kind" invariant end-to-end: editing (and thereby
+// re-touching) a root post's own message must not flip its entity back to
+// the generic kind="message" default.
+func TestSlackExecHandler_Send_RootPostThenEdit_PreservesThreadKind(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-send-root-edit-kind")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	out, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "C1", Body: "root message"})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if _, err := r.hdl.edit(context.Background(), r.rt(info), slackEditArgs{Channel: "C1", TS: out.TS, Body: "edited root message"}); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+
+	sourceID := domain.SlackSourceID("C1", out.TS)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", sourceID)
+	if err != nil {
+		t.Fatalf("GetBySourceSystem: %v", err)
+	}
+	if ent == nil || ent.Kind != "thread" {
+		t.Fatalf("entity = %+v, want kind=thread (unchanged by the later edit)", ent)
+	}
+}
+
+// TestSlackExecHandler_Send_FileOnlyRootPost_TitlesFromAttachmentName pins a
+// channel-root send with no --body (a pure file upload): mentionTitle("")
+// would otherwise leave the freshly-minted kind="thread" entity's title
+// blank, so send() falls back to the attachment's name.
+func TestSlackExecHandler_Send_FileOnlyRootPost_TitlesFromAttachmentName(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-send-file-root-title")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	// findRecentMessageTSForFile (the file-only path's ts resolution) scans
+	// conversations.history for a message carrying the uploaded file id —
+	// "F-ATTACH" is what fakeExecSlack's files.getUploadURLExternal always
+	// answers with.
+	const postedTS = "1700000005.000100"
+	r.fake.historyMessages = []map[string]any{
+		{"ts": postedTS, "files": []map[string]any{{"id": "F-ATTACH", "name": "report.pdf"}}},
+	}
+
+	out, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{
+		Channel: "C1", AttachName: "report.pdf", AttachBase64: base64.StdEncoding.EncodeToString([]byte("file contents")),
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if out.TS != postedTS {
+		t.Fatalf("send ts = %q, want %q", out.TS, postedTS)
+	}
+
+	sourceID := domain.SlackSourceID("C1", out.TS)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", sourceID)
+	if err != nil {
+		t.Fatalf("GetBySourceSystem: %v", err)
+	}
+	if ent == nil {
+		t.Fatalf("no entity found for source_id %q", sourceID)
+	}
+	if ent.Kind != "thread" {
+		t.Errorf("kind = %q, want thread", ent.Kind)
+	}
+	if ent.Title != "report.pdf" {
+		t.Errorf("title = %q, want the attachment name (mentionTitle(\"\") would otherwise leave this blank)", ent.Title)
+	}
+}
+
 func TestSlackExecHandler_Edit_UpsertsSameArtifactRow(t *testing.T) {
 	r := newSlackExecRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-edit")

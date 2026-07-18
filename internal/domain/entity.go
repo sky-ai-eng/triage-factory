@@ -6,7 +6,9 @@ import "time"
 // "<channel_id>/<thread_ts>". It is the Slack analogue of the tracker's
 // ghSourceID ("owner/repo#N") and Jira's raw issue key — the natural-key
 // vocabulary that maps a (source, source_id) pair onto exactly one entities
-// row (source='slack', kind='message').
+// row (source='slack', kind='thread' when the bot is the reason the thread
+// exists — its root was a mention or a run's own post — else 'message' for
+// a mid-thread summons into someone else's thread; see Entity.Kind).
 //
 // The thread root is the entity grain. Slack delivers most mentions inside a
 // thread (the webhook carries thread_ts); a mention on a *root* channel message
@@ -29,10 +31,17 @@ func SlackSourceID(channel, threadTS string) string {
 // first-poll until closed/merged. All events, tasks, and runs hang off it.
 // Mirrors the `entities` table in internal/db/db.go.
 type Entity struct {
-	ID           string  `json:"id"`
-	Source       string  `json:"source"`    // "github" | "jira" | "linear" | "slack"
-	SourceID     string  `json:"source_id"` // "owner/repo#18", a Jira issue key, etc.
-	Kind         string  `json:"kind"`      // "pr" | "issue" | "epic" | "message"
+	ID       string `json:"id"`
+	Source   string `json:"source"`    // "github" | "jira" | "linear" | "slack"
+	SourceID string `json:"source_id"` // "owner/repo#18", a Jira issue key, etc.
+	// Kind is "pr" | "issue" | "epic" for the poller-backed sources. For
+	// Slack, kind encodes thread engagement: "thread" when the bot is why
+	// the thread exists (its root message was a mention, or a run posted
+	// the root itself), "message" when it's a mid-thread summons into
+	// someone else's thread. Set once at creation from whichever caller
+	// first resolves the entity (ingest.go's root-mention check, or exec
+	// slack send's root-post op) and never rewritten afterward.
+	Kind         string  `json:"kind"`
 	Title        string  `json:"title"`
 	URL          string  `json:"url"`
 	SnapshotJSON string  `json:"snapshot_json"`        // opaque poller state — diff scope only, kept small

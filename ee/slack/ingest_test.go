@@ -186,15 +186,19 @@ func TestHandleEventCallback_PublishesCorrectEventShape(t *testing.T) {
 }
 
 // TestHandleEventCallback_ThreadRootVsRootMessage pins the thread-root
-// resolution rule: thread_ts when present, else the message's own ts.
+// resolution rule (thread_ts when present, else the message's own ts) and
+// the thread-engagement kind it implies: a root-message mention is why the
+// thread exists ("thread"); a threaded mention is a summons into a thread
+// someone else rooted ("message").
 func TestHandleEventCallback_ThreadRootVsRootMessage(t *testing.T) {
 	cases := []struct {
 		name         string
 		ts, threadTS string
 		wantSourceID string
+		wantKind     string
 	}{
-		{"threaded mention uses thread_ts", "1600000000.000100", "1599999999.000001", "C1/1599999999.000001"},
-		{"root-message mention uses its own ts", "1600000000.000100", "", "C1/1600000000.000100"},
+		{"threaded mention uses thread_ts", "1600000000.000100", "1599999999.000001", "C1/1599999999.000001", "message"},
+		{"root-message mention uses its own ts", "1600000000.000100", "", "C1/1600000000.000100", "thread"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -205,8 +209,12 @@ func TestHandleEventCallback_ThreadRootVsRootMessage(t *testing.T) {
 				t.Fatalf("handleEventCallback: %v", err)
 			}
 			key := "org-1/slack/" + tc.wantSourceID
-			if _, ok := entities.byKey[key]; !ok {
-				t.Errorf("no entity created under source_id %q; entities = %v", tc.wantSourceID, entities.byKey)
+			ent, ok := entities.byKey[key]
+			if !ok {
+				t.Fatalf("no entity created under source_id %q; entities = %v", tc.wantSourceID, entities.byKey)
+			}
+			if ent.Kind != tc.wantKind {
+				t.Errorf("kind = %q, want %q", ent.Kind, tc.wantKind)
 			}
 		})
 	}

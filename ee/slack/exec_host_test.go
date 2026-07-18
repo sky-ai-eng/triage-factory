@@ -1,6 +1,103 @@
 package slack
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
+
+// withFastThreadRootRetries shrinks recordThreadRootRetryDelay to near-zero
+// for the test's duration and restores it on cleanup — recordThreadRootRetryDelay
+// is a var (not a const) precisely so tests exercising several exhausted
+// retries don't pay the real 200ms-per-attempt delay.
+func withFastThreadRootRetries(t *testing.T) {
+	t.Helper()
+	orig := recordThreadRootRetryDelay
+	recordThreadRootRetryDelay = time.Millisecond
+	t.Cleanup(func() { recordThreadRootRetryDelay = orig })
+}
+
+// fakeRelayRuntime is a minimal agenthost.ExtensionRuntime fake that lets a
+// test script Relay's per-call outcome — used to pin recordThreadRoot's
+// retry behavior without a real store/relay round trip. relayErrs is
+// consumed in call order; once exhausted, Relay succeeds.
+type fakeRelayRuntime struct {
+	relayErrs  []error
+	relayCalls int
+}
+
+func (f *fakeRelayRuntime) Info() agenthost.RunInfo { return agenthost.RunInfo{} }
+
+func (f *fakeRelayRuntime) Relay(_ context.Context, _, _ string, _, _ any) error {
+	i := f.relayCalls
+	f.relayCalls++
+	if i < len(f.relayErrs) {
+		return f.relayErrs[i]
+	}
+	return nil
+}
+
+func (f *fakeRelayRuntime) RelayNotify(context.Context, string, string, any) {}
+
+func (f *fakeRelayRuntime) ProviderCredential(context.Context, string) (json.RawMessage, error) {
+	return nil, nil
+}
+
+func (f *fakeRelayRuntime) Record(context.Context, *domain.Artifact, *domain.ExternalAction) {}
+
+var _ agenthost.ExtensionRuntime = (*fakeRelayRuntime)(nil)
+
+// TestRecordThreadRoot_RetriesTransientFailures pins that recordThreadRoot
+// retries a failed relay call rather than giving up on the first error —
+// the mitigation for a failure here otherwise permanently mis-tagging the
+// thread's entity kind="message" instead of "thread" (see the touched-entity
+// resolver in cmd/exec/agenthost/record.go).
+func TestRecordThreadRoot_RetriesTransientFailures(t *testing.T) {
+	withFastThreadRootRetries(t)
+	rt := &fakeRelayRuntime{relayErrs: []error{errors.New("transient"), errors.New("transient")}}
+	h := &slackExecHandler{}
+	ws := slackWorkspaceIdentity{WorkspaceID: "T1", APIAppID: "A1"}
+
+	err := h.recordThreadRoot(context.Background(), rt, ws, "C1", "1700000000.000100", "hello")
+	if err != nil {
+		t.Fatalf("recordThreadRoot: %v", err)
+	}
+	if rt.relayCalls != 3 {
+		t.Errorf("relay calls = %d, want 3 (2 failures then a success)", rt.relayCalls)
+	}
+}
+
+// TestRecordThreadRoot_ExhaustsRetriesAndReturnsError pins the other half:
+// once every attempt fails, recordThreadRoot surfaces the error (rather than
+// swallowing it) so send() can report it — a silent failure here has a
+// permanent consequence, unlike most best-effort writes in this package. The
+// error must say the message already posted: a caller seeing only "thread-
+// root recording failed" (with no such signal) could reasonably retry send()
+// and double-post to the channel.
+func TestRecordThreadRoot_ExhaustsRetriesAndReturnsError(t *testing.T) {
+	withFastThreadRootRetries(t)
+	rt := &fakeRelayRuntime{relayErrs: []error{errors.New("down"), errors.New("down"), errors.New("down")}}
+	h := &slackExecHandler{}
+	ws := slackWorkspaceIdentity{WorkspaceID: "T1", APIAppID: "A1"}
+	const ts = "1700000000.000100"
+
+	err := h.recordThreadRoot(context.Background(), rt, ws, "C1", ts, "hello")
+	if err == nil {
+		t.Fatal("expected an error once every retry is exhausted")
+	}
+	if rt.relayCalls != recordThreadRootMaxAttempts {
+		t.Errorf("relay calls = %d, want %d", rt.relayCalls, recordThreadRootMaxAttempts)
+	}
+	if !strings.Contains(err.Error(), "message posted") || !strings.Contains(err.Error(), ts) {
+		t.Errorf("error = %q, want it to state the message already posted (ts=%s) so a caller doesn't retry and double-post", err, ts)
+	}
+}
 
 // TestParseSlackTSParts pins the (seconds, fractional-nanoseconds) decomposition
 // parseSlackTSParts uses instead of a float64 parse — see sortMessagesByTS's

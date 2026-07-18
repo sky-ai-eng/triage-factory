@@ -215,6 +215,13 @@ type EntityStore interface {
 	// connection and the two variants collapse.
 
 	GetSystem(ctx context.Context, orgID, id string) (*domain.Entity, error)
+
+	// GetBySourceSystem mirrors GetBySource on the admin pool — the
+	// system-ingest-path variant a claims-free caller (the Slack ingest
+	// pipeline's future engaged-thread lookup) needs to resolve an entity
+	// by its natural key with no request JWT claims to route through the
+	// app pool.
+	GetBySourceSystem(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error)
 	ListActiveSystem(ctx context.Context, orgID, source string) ([]domain.Entity, error)
 	ListUnclassifiedSystem(ctx context.Context, orgID string) ([]domain.Entity, error)
 	FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)

@@ -120,6 +120,10 @@ func (s *entityStore) GetBySource(ctx context.Context, orgID, source, sourceID s
 	return getEntityBySource(ctx, s.q, orgID, source, sourceID)
 }
 
+func (s *entityStore) GetBySourceSystem(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error) {
+	return getEntityBySource(ctx, s.admin, orgID, source, sourceID)
+}
+
 func getEntityBySource(ctx context.Context, q queryer, orgID, source, sourceID string) (*domain.Entity, error) {
 	row := q.QueryRowContext(ctx, `SELECT `+pgEntitySelectCols+` FROM entities WHERE org_id = $1 AND source = $2 AND source_id = $3`, orgID, source, sourceID)
 	return scanEntityRow(row)
