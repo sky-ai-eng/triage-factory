@@ -992,8 +992,16 @@ func (c *Client) doTransition(ctx context.Context, issueKey, transitionID string
 
 // doRequest issues method+url (with an optional JSON body) and returns the
 // final response's status and fully-read body after any rate-limit-aware
-// retries. It is the shared core behind get/put/postJSON/post; each of those
-// keeps its own status-to-error mapping so their error strings are unchanged.
+// retries. It is the shared core behind get/put/postJSON/post.
+//
+// Each of those keeps its own status-to-error mapping, so the "returned <code>:
+// <body>" strings a caller matches on (e.g. CreateIssue's parent/epic-link
+// fallback) are unchanged. A failure with no response — request build,
+// authorize, transport (after retries), body read, or a ctx cancellation during
+// backoff — is returned as-is and picks up that one helper's wrapping prefix
+// (request %s / PUT %s / POST %s), rather than the assorted per-call-site
+// wording the inlined versions used (raw errors, "read response", ...); no
+// caller inspects those.
 //
 // idempotent selects the retry policy (see retryableStatus): a GET retries a
 // 429 or a 5xx; a mutation (PUT/POST) retries only a 429 — a throttled request
