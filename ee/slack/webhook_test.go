@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -135,6 +137,9 @@ type webhookRig struct {
 	h          *webhookHandler
 	published  *[]domain.Event
 	deliveries *fakeDeliveries
+	// metrics reads back what the rig's ingestStats recorded — see
+	// newTestStats/sumByAttr (stats_test.go).
+	metrics *sdkmetric.ManualReader
 }
 
 // newWebhookRig builds a webhookHandler wired to fakes: a single connected
@@ -167,12 +172,19 @@ func newWebhookRig(t *testing.T, signingSecretRef string, licensed bool) *webhoo
 
 	published := &[]domain.Event{}
 	deliveries := newFakeDeliveries()
+	stats, metrics := newTestStats()
 	pipeline := &ingestPipeline{
 		entities:   newFakeEntities(),
 		deliveries: deliveries,
 		publish:    func(evt domain.Event) { *published = append(*published, evt) },
+		stats:      stats,
 	}
-	return &webhookRig{h: &webhookHandler{stores: stores, pipeline: pipeline}, published: published, deliveries: deliveries}
+	return &webhookRig{
+		h:          &webhookHandler{stores: stores, pipeline: pipeline, stats: stats},
+		published:  published,
+		deliveries: deliveries,
+		metrics:    metrics,
+	}
 }
 
 // sign computes a valid X-Slack-Signature for (secret, timestamp, body) per

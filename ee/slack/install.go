@@ -28,6 +28,7 @@ import (
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
+	"go.opentelemetry.io/otel"
 
 	// Link the Slack store factories (postgres + sqlite) so the Slack
 	// bundle is built into every TxStores / Stores once this package is in
@@ -69,6 +70,12 @@ func install(api server.ExtensionAPI) {
 		TracksScope:  slackTeamTracksChannel(bundle),
 	})
 
+	// One stats instance spans the pipeline and both transports: outcome
+	// counts land in the shared pipeline; retry / rate-limit signals are
+	// transport-specific and recorded at their receivers. Instruments come
+	// off the global provider — app boot installs the real SDK (or leaves
+	// the no-op) before routes() runs this installer.
+	stats := newIngestStats(otel.GetMeterProvider())
 	pipeline := &ingestPipeline{
 		entities:    stores.Entities,
 		deliveries:  bundle.Deliveries,
@@ -78,8 +85,10 @@ func install(api server.ExtensionAPI) {
 		channelName: NewChannelResolver(stores),
 		permalink:   NewPermalinkResolver(stores),
 		title:       NewTitleResolver(stores),
+		stats:       stats,
 	}
 	sockets := newSocketManager(stores, pipeline, slackHTTPClient, socketConfigChanged)
+	sockets.stats = stats
 
 	h := &workspacesHandler{
 		tx:        api.Tx(),
@@ -103,7 +112,7 @@ func install(api server.ExtensionAPI) {
 	api.APIMutating("PUT /api/slack/teams/{team_id}/channels", ch.handlePut)
 	api.APIMutating("POST /api/slack/channels/{channel_id}/primary", ch.handlePrimary)
 
-	wh := &webhookHandler{stores: stores, pipeline: pipeline}
+	wh := &webhookHandler{stores: stores, pipeline: pipeline, stats: stats}
 	api.Raw("POST /api/webhooks/slack/{org_id}", api.SignedWebhookRateLimit(http.HandlerFunc(wh.handleWebhook)))
 
 	// Agent-facing exec verbs (TFAC-596) register from this package's init()
