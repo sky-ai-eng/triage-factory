@@ -244,6 +244,13 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 		// FindOrCreate never rewrites kind on an already-known row.
 		threadRootErr = h.recordThreadRoot(ctx, rt, ws, a.Channel, ts, sendTitleText(a))
 	}
+	// recordMessage always runs next, even when threadRootErr is set: the
+	// Slack message already posted, and skipping the artifacts/external_actions
+	// write over a bookkeeping race would drop its audit trail entirely — a
+	// strictly worse outcome than the mis-tagged kind="message" fallback
+	// threadRootErr already reports below. There is deliberately no gate here
+	// to prevent that fallback from firing; recordThreadRoot's retries are the
+	// mitigation, not a hard guarantee.
 	h.recordMessage(ctx, rt, domain.ActionSlackMessagePosted, a.Channel, rootTS, ts, h.permalinkBestEffort(ctx, token, a.Channel, ts))
 	switch {
 	case attachErr != nil && threadRootErr != nil:
@@ -257,6 +264,12 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 	}
 }
 
+// slackDefaultAttachmentName is the label an unnamed attachment falls back
+// to — shared by sendTitleText (the thread-root entity's title) and
+// decodeAttachment (the uploaded file's name) so the two defaults can't
+// drift apart.
+const slackDefaultAttachmentName = "attachment"
+
 // sendTitleText picks the text a channel-root send's thread-root entity is
 // titled from: the message body, falling back to the attachment's name for
 // a file-only send (no --body) — mentionTitle("") would otherwise leave a
@@ -268,7 +281,7 @@ func sendTitleText(a slackSendArgs) string {
 	if a.AttachName != "" {
 		return a.AttachName
 	}
-	return "attachment"
+	return slackDefaultAttachmentName
 }
 
 func (h *slackExecHandler) edit(ctx context.Context, rt agenthost.ExtensionRuntime, a slackEditArgs) (slackEditResult, error) {
@@ -333,8 +346,13 @@ func (h *slackExecHandler) react(ctx context.Context, rt agenthost.ExtensionRunt
 // kind="message" default, the thread is mis-tagged for good. A few quick
 // retries absorb a transient relay/DB hiccup — the common case — rather than
 // gambling the engagement signal on a single round trip.
+//
+// recordThreadRootRetryDelay is a var, not a const — mirroring
+// slackConversationsRepliesCap's rationale (api.go) — so a test can shrink
+// it instead of paying the real delay across several exhausted retries.
 const recordThreadRootMaxAttempts = 3
-const recordThreadRootRetryDelay = 200 * time.Millisecond
+
+var recordThreadRootRetryDelay = 200 * time.Millisecond
 
 // recordThreadRoot relays opRecordThreadRoot for a channel-root send (no
 // --thread-ts): the orchestrator idempotently finds-or-creates the thread's
@@ -367,8 +385,12 @@ retry:
 	}
 	slackLog.Error("record thread-root entity failed after retries; thread will be mis-tagged kind=message instead of kind=thread",
 		"channel", channel, "ts", ts, "attempts", recordThreadRootMaxAttempts, "error", err)
-	return fmt.Errorf("slack: record thread-root entity failed after %d attempts (this thread will show as a mid-thread summons, not an engaged root): %w",
-		recordThreadRootMaxAttempts, err)
+	// Explicitly states the message already posted (mirroring attachErr's
+	// phrasing in send()) so a caller reading only this error — not the
+	// discarded slackSendResult, see dispatchSlackExec — doesn't mistake it
+	// for a failed send and retry, which would double-post to the channel.
+	return fmt.Errorf("slack: message posted (ts=%s) but recording its thread-root entity failed after %d attempts (this thread will show as a mid-thread summons, not an engaged root): %w",
+		ts, recordThreadRootMaxAttempts, err)
 }
 
 // recordMessage records the send/edit matrix: an `artifacts` row keyed
@@ -467,7 +489,7 @@ func decodeAttachment(name, base64Body string) (decoded []byte, resolvedName str
 		return nil, "", fmt.Errorf("slack: attachment is %d bytes, exceeds the %d-byte cap", len(decoded), slackExecMaxFileBytes)
 	}
 	if name == "" {
-		name = "attachment"
+		name = slackDefaultAttachmentName
 	}
 	return decoded, name, nil
 }

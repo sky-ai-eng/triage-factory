@@ -4,11 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// withFastThreadRootRetries shrinks recordThreadRootRetryDelay to near-zero
+// for the test's duration and restores it on cleanup — recordThreadRootRetryDelay
+// is a var (not a const) precisely so tests exercising several exhausted
+// retries don't pay the real 200ms-per-attempt delay.
+func withFastThreadRootRetries(t *testing.T) {
+	t.Helper()
+	orig := recordThreadRootRetryDelay
+	recordThreadRootRetryDelay = time.Millisecond
+	t.Cleanup(func() { recordThreadRootRetryDelay = orig })
+}
 
 // fakeRelayRuntime is a minimal agenthost.ExtensionRuntime fake that lets a
 // test script Relay's per-call outcome — used to pin recordThreadRoot's
@@ -46,6 +59,7 @@ var _ agenthost.ExtensionRuntime = (*fakeRelayRuntime)(nil)
 // thread's entity kind="message" instead of "thread" (see the touched-entity
 // resolver in cmd/exec/agenthost/record.go).
 func TestRecordThreadRoot_RetriesTransientFailures(t *testing.T) {
+	withFastThreadRootRetries(t)
 	rt := &fakeRelayRuntime{relayErrs: []error{errors.New("transient"), errors.New("transient")}}
 	h := &slackExecHandler{}
 	ws := slackWorkspaceIdentity{WorkspaceID: "T1", APIAppID: "A1"}
@@ -62,18 +76,26 @@ func TestRecordThreadRoot_RetriesTransientFailures(t *testing.T) {
 // TestRecordThreadRoot_ExhaustsRetriesAndReturnsError pins the other half:
 // once every attempt fails, recordThreadRoot surfaces the error (rather than
 // swallowing it) so send() can report it — a silent failure here has a
-// permanent consequence, unlike most best-effort writes in this package.
+// permanent consequence, unlike most best-effort writes in this package. The
+// error must say the message already posted: a caller seeing only "thread-
+// root recording failed" (with no such signal) could reasonably retry send()
+// and double-post to the channel.
 func TestRecordThreadRoot_ExhaustsRetriesAndReturnsError(t *testing.T) {
+	withFastThreadRootRetries(t)
 	rt := &fakeRelayRuntime{relayErrs: []error{errors.New("down"), errors.New("down"), errors.New("down")}}
 	h := &slackExecHandler{}
 	ws := slackWorkspaceIdentity{WorkspaceID: "T1", APIAppID: "A1"}
+	const ts = "1700000000.000100"
 
-	err := h.recordThreadRoot(context.Background(), rt, ws, "C1", "1700000000.000100", "hello")
+	err := h.recordThreadRoot(context.Background(), rt, ws, "C1", ts, "hello")
 	if err == nil {
 		t.Fatal("expected an error once every retry is exhausted")
 	}
 	if rt.relayCalls != recordThreadRootMaxAttempts {
 		t.Errorf("relay calls = %d, want %d", rt.relayCalls, recordThreadRootMaxAttempts)
+	}
+	if !strings.Contains(err.Error(), "message posted") || !strings.Contains(err.Error(), ts) {
+		t.Errorf("error = %q, want it to state the message already posted (ts=%s) so a caller doesn't retry and double-post", err, ts)
 	}
 }
 
