@@ -15,11 +15,15 @@ copy-paste. In **Settings → Slack**:
 
 1. Copy the generated app **manifest**. Two variants are offered, one per
    transport:
-   - **Socket Mode** — events arrive over an outbound websocket; no inbound URL
-     needed. Simplest when the deployment isn't reachable at a public HTTPS URL.
-   - **Events API** — events are delivered to
-     `https://<your-host>/api/webhooks/slack/<org-id>`. Requires a public HTTPS
-     URL Slack can reach (the deployment's external base URL must be set).
+   - **Socket Mode** — events arrive over an outbound websocket; no public
+     inbound URL needed. Simplest for dev or any deployment that can't expose a
+     public HTTPS endpoint — but the socket runs as a single lease-held worker,
+     so every workspace's events funnel through one pod.
+   - **Events API** — Slack POSTs events to
+     `https://<your-host>/api/webhooks/slack/<org-id>` (needs a public HTTPS URL
+     Slack can reach). Delivery is stateless HTTP that any control pod behind the
+     load balancer serves, so it scales horizontally instead of pinning to one
+     pod — the production choice, and Slack's own recommendation.
 2. Create the app at <https://api.slack.com/apps> → **Create an app from a
    manifest**, pasting the copied manifest.
 3. Install the app to the workspace.
