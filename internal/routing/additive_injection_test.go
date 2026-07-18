@@ -94,8 +94,8 @@ type activeAutoRunIDOverrideStore struct {
 	db.AgentRunStore
 }
 
-func (activeAutoRunIDOverrideStore) ActiveAutoRunIDForEntitySystem(ctx context.Context, orgID, entityID string) (string, error) {
-	return "", nil
+func (activeAutoRunIDOverrideStore) ActiveAutoRunIDForEntitySystem(ctx context.Context, orgID, entityID string) (string, string, error) {
+	return "", "", nil
 }
 
 // setupAdditiveScenario seeds entity + prompt + a trigger on
