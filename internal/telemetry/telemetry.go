@@ -157,7 +157,18 @@ func Serve(ctx context.Context, addr string) error {
 func serveOn(ctx context.Context, ln net.Listener) error {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", handler)
-	httpSrv := &http.Server{Handler: mux}
+	httpSrv := &http.Server{
+		Handler: mux,
+		// Same slowloris posture as the per-run proxy listeners (apiproxy/
+		// llmproxy/gitproxy): this endpoint is unauthenticated, so a client
+		// must never be able to hold a connection open for free. Unlike the
+		// proxies, nothing here streams — a scrape is one small GET — so the
+		// whole exchange is bounded too, not just the header read.
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
 	serverExited := make(chan struct{})
 	shutdownDone := make(chan struct{})
