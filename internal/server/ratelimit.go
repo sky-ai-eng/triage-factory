@@ -27,11 +27,14 @@ import (
 //     impossible — the edge/WAF layer (explicitly out of scope here) is
 //     the airtight tier; this blunts a single-source flood.
 //
-// Single-tier on purpose: the ticket's locked proposal is one wrapper
-// over the whole allowlist. Per-route tiers (a tighter cap on discovery,
-// a looser one on the login-retry paths) and a shared/distributed store
-// for multi-replica deployments are noted there as open questions —
-// deferred, not built here.
+// Single-tier on purpose for the human-login allowlist: the ticket's locked
+// proposal was one wrapper over the whole allowlist. Per-route tiers within
+// that allowlist (a tighter cap on discovery, a looser one on the
+// login-retry paths) and a shared/distributed store for multi-replica
+// deployments are noted there as open questions — deferred, not built here.
+// A signed, self-authenticating webhook is a genuinely different shape of
+// route rather than a variant of the allowlist, so it gets its own tier
+// below instead of a subdivision of this one.
 const (
 	// preAuthRatePerSec is the sustained per-IP token refill (1/sec =
 	// 60/min) once the burst is spent.
@@ -39,12 +42,41 @@ const (
 	// preAuthBurst is the bucket capacity — the largest instantaneous
 	// flurry from one IP that passes before the sustained rate bites.
 	preAuthBurst = 20.0
-	// preAuthBucketTTL bounds how long an idle per-IP bucket is retained.
-	// A flood of distinct source IPs is the workload that grows the map,
-	// and it is also what drives the opportunistic sweep that reclaims it,
-	// so the live set stays roughly proportional to recently-active IPs.
-	preAuthBucketTTL = 10 * time.Minute
 )
+
+// Signed-webhook pre-auth rate-limit tuning. A route in this tier
+// authenticates every request itself via a cryptographic signature (Slack's
+// Events API receiver today) before any side effect, so the anti-recon
+// rationale behind the tight human-login tier above doesn't apply — a
+// forged request fails signature verification regardless of how generous
+// this budget is. What this tier actually defends is the failure mode where
+// the budget is too TIGHT: Slack's own delivery cap is 30k events/hr per
+// (app, workspace) ≈ 8.3 req/s average, well past the 1 req/s human tier, so
+// sharing that tier would 429 legitimate deliveries from a subscribed
+// workspace — Slack then retries (amplifying the flood it's already
+// causing), the failure ratio stays high, and Slack eventually disables the
+// app's event subscription outright, taking ingest down with it. The
+// numbers here are sized to clear that ceiling with real headroom (several
+// apps/workspaces potentially sharing one of Slack's small set of static
+// egress IPs) rather than to resist recon — cheap pre-verification
+// rejection at this rate is the actual DoS defense on this route.
+const (
+	// signedWebhookRatePerSec is the sustained per-IP token refill. Well
+	// above Slack's ~8.3 req/s per-(app,workspace) average so a legitimate
+	// subscription is never throttled into looking like a failing endpoint.
+	signedWebhookRatePerSec = 20.0
+	// signedWebhookBurst is deliberately generous — five seconds of
+	// sustained-rate traffic — to absorb a delivery flurry (a busy channel,
+	// or Slack redelivering a backlog after a brief outage) without a 429.
+	signedWebhookBurst = 100.0
+)
+
+// rateLimitBucketTTL bounds how long an idle per-IP bucket is retained,
+// shared by both tiers above. A flood of distinct source IPs is the
+// workload that grows the map, and it is also what drives the opportunistic
+// sweep that reclaims it, so the live set stays roughly proportional to
+// recently-active IPs.
+const rateLimitBucketTTL = 10 * time.Minute
 
 // ipRateLimiter is an in-process, per-client-IP token-bucket limiter. One
 // bucket per IP refills at a fixed rate up to a burst ceiling; each
@@ -172,12 +204,30 @@ func (l *ipRateLimiter) sweepLocked(now time.Time) {
 // check keeps the wrapper correct regardless of wiring order and lets
 // tests flip mode per case.
 func (s *Server) preAuthRateLimit(next http.Handler) http.Handler {
+	return rateLimitWith(s.preAuthLimiter, next)
+}
+
+// signedWebhookRateLimit caps per-IP request rate on pre-auth mounts that
+// authenticate every request themselves via a cryptographic signature
+// before any side effect (the Slack Events API receiver; see
+// signedWebhookRatePerSec above for why this is a separate, much
+// higher-throughput tier than preAuthRateLimit's human-login budget).
+// Same no-op-in-local-mode and 429/Retry-After contract as preAuthRateLimit.
+func (s *Server) signedWebhookRateLimit(next http.Handler) http.Handler {
+	return rateLimitWith(s.signedWebhookLimiter, next)
+}
+
+// rateLimitWith is the shared wrapper body behind preAuthRateLimit and
+// signedWebhookRateLimit — same bucket-check, 429, and Retry-After
+// mechanics; the two callers differ only in which limiter (and therefore
+// which tier's rate/burst) they consult.
+func rateLimitWith(limiter *ipRateLimiter, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.preAuthLimiter == nil || runmode.Current() == runmode.ModeLocal {
+		if limiter == nil || runmode.Current() == runmode.ModeLocal {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if ok, retryAfter := s.preAuthLimiter.allow(clientIP(r)); !ok {
+		if ok, retryAfter := limiter.allow(clientIP(r)); !ok {
 			// Retry-After is delay-seconds (RFC 7231). Round up so a
 			// sub-second wait still tells the caller to back off, and floor
 			// at 1 — a 0 would invite an instant retry that is still capped.

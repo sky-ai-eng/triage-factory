@@ -44,6 +44,16 @@ type ExtensionAPI interface {
 	// PreAuthRateLimit wraps a handler in the per-IP pre-auth token bucket
 	// (no-op in local mode), for anonymous-reachable routes.
 	PreAuthRateLimit(h http.Handler) http.Handler
+	// SignedWebhookRateLimit wraps a handler in the per-IP signed-webhook
+	// token bucket (no-op in local mode) — a separate, much higher-
+	// throughput tier than PreAuthRateLimit for a route that authenticates
+	// every request itself via a cryptographic signature before any side
+	// effect (e.g. the Slack Events API receiver). Use this instead of
+	// PreAuthRateLimit for that route shape: the signature makes
+	// PreAuthRateLimit's anti-recon rationale moot, and its 1 req/s budget
+	// would throttle a legitimate high-volume sender into looking like a
+	// failing endpoint to its own delivery system.
+	SignedWebhookRateLimit(h http.Handler) http.Handler
 
 	// Tx is the transaction runner (claims-set tx; RLS).
 	Tx() db.TxRunner
@@ -234,6 +244,9 @@ func (a serverExtensionAPI) APIMutating(pattern string, h http.HandlerFunc) {
 func (a serverExtensionAPI) Raw(pattern string, h http.Handler) { a.s.mux.Handle(pattern, h) }
 func (a serverExtensionAPI) PreAuthRateLimit(h http.Handler) http.Handler {
 	return a.s.preAuthRateLimit(h)
+}
+func (a serverExtensionAPI) SignedWebhookRateLimit(h http.Handler) http.Handler {
+	return a.s.signedWebhookRateLimit(h)
 }
 func (a serverExtensionAPI) Tx() db.TxRunner            { return a.s.tx }
 func (a serverExtensionAPI) Authz() *authz.Checker      { return a.s.az }

@@ -273,6 +273,15 @@ type Server struct {
 	// flood (e.g. SSO-discovery domain enumeration). Constructed in New so
 	// it's never nil; the wrapper no-ops in local mode. See ratelimit.go.
 	preAuthLimiter *ipRateLimiter
+	// signedWebhookLimiter is the per-IP token-bucket cap for pre-auth
+	// mounts that authenticate themselves via a cryptographic signature
+	// before any side effect (the Slack Events API receiver) — a separate,
+	// much higher-throughput tier than preAuthLimiter's human-login budget,
+	// since a legitimate sender at this tier already proves its
+	// authenticity and a shared low budget would 429 it into looking like a
+	// failing endpoint. Constructed in New so it's never nil; the wrapper
+	// no-ops in local mode. See ratelimit.go.
+	signedWebhookLimiter *ipRateLimiter
 
 	// readyHooks are brain-gated OnReady hooks registered by extensions
 	// during installExtensions (routes()). Collected single-threaded at
@@ -548,10 +557,11 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 		mux:          http.NewServeMux(),
 		ws:           websocket.NewHub(),
 	}
-	// Per-IP rate limiter for the pre-auth allowlist (TFAC-433). Built here
-	// (not injected) so a Server is always usable without external wiring;
-	// the wrapper that consults it no-ops in local mode.
-	s.preAuthLimiter = newIPRateLimiter(preAuthRatePerSec, preAuthBurst, preAuthBucketTTL)
+	// Per-IP rate limiters for the pre-auth allowlist and the signed-webhook
+	// tier. Built here (not injected) so a Server is always usable without
+	// external wiring; both wrappers that consult them no-op in local mode.
+	s.preAuthLimiter = newIPRateLimiter(preAuthRatePerSec, preAuthBurst, rateLimitBucketTTL)
+	s.signedWebhookLimiter = newIPRateLimiter(signedWebhookRatePerSec, signedWebhookBurst, rateLimitBucketTTL)
 	// GitHub credential resolver + its installation-token cache, built from
 	// the same stores. Constructed here (not injected) so a Server is always
 	// usable without external wiring — tests that call New directly get a
