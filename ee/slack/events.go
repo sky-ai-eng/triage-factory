@@ -9,8 +9,8 @@ import (
 // SlackMessageMetadata is the durable audit shape for one inbound Slack
 // message addressed to the bot — everything the ingest pipeline
 // (ingest.go) captures, JSON-marshaled into events.metadata_json. Today
-// every delivery is an app_mention; TFAC-650 adds engaged-thread
-// follow-ups that carry Mentioned=false.
+// every delivery is an app_mention; future engaged-thread follow-ups may
+// carry Mentioned=false.
 type SlackMessageMetadata struct {
 	// WorkspaceID is the Slack team ID. The entity key (domain.SlackSourceID)
 	// deliberately excludes workspace context (channel IDs are stable across
