@@ -186,10 +186,10 @@ func seedLifecycleWorkspace(t *testing.T, stores db.Stores, orgID, userID, works
 	}
 }
 
-// seedSlackMentionEvent seeds a bare entity + slack:mention event (no task,
+// seedSlackMessageEvent seeds a bare entity + slack:message event (no task,
 // no run) — enough for the disposition consumer, which only ever reads
 // event metadata.
-func seedSlackMentionEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, apiAppID, channel, ts, threadTS string) (eventID string, meta SlackMentionMetadata) {
+func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, apiAppID, channel, ts, threadTS string) (eventID string, meta SlackMessageMetadata) {
 	t.Helper()
 	entityID := uuid.New().String()
 	root := threadTS
@@ -203,7 +203,7 @@ func seedSlackMentionEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, 
 		t.Fatalf("seed entity: %v", err)
 	}
 
-	meta = SlackMentionMetadata{
+	meta = SlackMessageMetadata{
 		WorkspaceID: workspaceID, APIAppID: apiAppID, Channel: channel, TS: ts, ThreadTS: threadTS,
 		SenderID: "U1", Text: "hey <@BOT>", EventID: "Ev" + uuid.New().String(),
 	}
@@ -215,29 +215,29 @@ func seedSlackMentionEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, 
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO events (id, org_id, entity_id, event_type, metadata_json)
 		VALUES ($1, $2, $3, $4, $5)
-	`, eventID, orgID, entityID, domain.EventSlackMention, string(metaJSON)); err != nil {
+	`, eventID, orgID, entityID, domain.EventSlackMessage, string(metaJSON)); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
 	return eventID, meta
 }
 
-// slackRunFixture is what seedSlackMentionRun returns: the ids a run-status
+// slackRunFixture is what seedSlackMessageRun returns: the ids a run-status
 // test needs to fire synthetic sentinels against.
 type slackRunFixture struct {
 	EventID, TaskID, RunID string
-	Meta                   SlackMentionMetadata
+	Meta                   SlackMessageMetadata
 }
 
-// seedSlackMentionRun seeds the full chain resolveRunEntry walks: entity
-// (source='slack') -> event (slack:mention, carrying SlackMentionMetadata)
-// -> task (event_type=slack:mention, primary_event_id=event) -> run
+// seedSlackMessageRun seeds the full chain resolveRunEntry walks: entity
+// (source='slack') -> event (slack:message, carrying SlackMessageMetadata)
+// -> task (event_type=slack:message, primary_event_id=event) -> run
 // (task_id=task). Mirrors exec_host_pg_test.go's seedNonSlackTask/seedRun
 // shape, but for the Slack-sourced case those tests deliberately avoid.
-func seedSlackMentionRun(t *testing.T, h *pgtest.Harness, orgID, creatorID, teamID, workspaceID, apiAppID, channel, ts, threadTS string) slackRunFixture {
+func seedSlackMessageRun(t *testing.T, h *pgtest.Harness, orgID, creatorID, teamID, workspaceID, apiAppID, channel, ts, threadTS string) slackRunFixture {
 	t.Helper()
-	eventID, meta := seedSlackMentionEvent(t, h, orgID, workspaceID, apiAppID, channel, ts, threadTS)
+	eventID, meta := seedSlackMessageEvent(t, h, orgID, workspaceID, apiAppID, channel, ts, threadTS)
 
-	// seedSlackMentionEvent already created the entity; find it via the event
+	// seedSlackMessageEvent already created the entity; find it via the event
 	// row so the task can point at the same entity_id.
 	var entityID string
 	if err := h.AdminDB.QueryRow(`SELECT entity_id FROM events WHERE id = $1`, eventID).Scan(&entityID); err != nil {
@@ -248,7 +248,7 @@ func seedSlackMentionRun(t *testing.T, h *pgtest.Harness, orgID, creatorID, team
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO tasks (id, org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, taskID, orgID, creatorID, teamID, entityID, domain.EventSlackMention, eventID); err != nil {
+	`, taskID, orgID, creatorID, teamID, entityID, domain.EventSlackMessage, eventID); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 
@@ -383,10 +383,10 @@ func TestLifecycleAdapter_Disposition_TaskCreatedOrBumped_ReactsWithEyes(t *test
 		t.Run(disp, func(t *testing.T) {
 			h, stores, fake, orgID, owner, _ := newLifecycleTestRig(t)
 			seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-			eventID, meta := seedSlackMentionEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000100", "")
+			eventID, meta := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000100", "")
 
 			adapter := newTestLifecycleAdapter(stores, staticURL(""))
-			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMention, disp), map[string]*runEntry{})
+			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*runEntry{})
 
 			calls := fake.reactionCalls()
 			if len(calls) != 1 {
@@ -409,11 +409,11 @@ func TestLifecycleAdapter_Disposition_TaskCreatedOrBumped_ReactsWithEyes(t *test
 func TestLifecycleAdapter_Disposition_AlreadyReacted_StillSuccess(t *testing.T) {
 	h, stores, fake, orgID, owner, _ := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-	eventID, _ := seedSlackMentionEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000100", "")
+	eventID, _ := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000100", "")
 	fake.reactionError = "already_reacted"
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMention, events.DispositionTaskCreated), map[string]*runEntry{})
+	adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, events.DispositionTaskCreated), map[string]*runEntry{})
 
 	if len(fake.reactionCalls()) != 1 {
 		t.Fatalf("reactions.add calls = %d, want 1", len(fake.reactionCalls()))
@@ -427,10 +427,10 @@ func TestLifecycleAdapter_Disposition_TasklessNoHandlerOrOwner_PostsNotConfigure
 		t.Run(disp, func(t *testing.T) {
 			h, stores, fake, orgID, owner, _ := newLifecycleTestRig(t)
 			seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-			eventID, meta := seedSlackMentionEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000200", "1700000000.000100")
+			eventID, meta := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000200", "1700000000.000100")
 
 			adapter := newTestLifecycleAdapter(stores, staticURL(""))
-			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMention, disp), map[string]*runEntry{})
+			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*runEntry{})
 
 			posts := fake.postCalls()
 			if len(posts) != 1 {
@@ -455,10 +455,10 @@ func TestLifecycleAdapter_Disposition_TasklessNoHandlerOrOwner_PostsNotConfigure
 func TestLifecycleAdapter_Disposition_TasklessNoHandler_RootMessage_RepliesInOwnThread(t *testing.T) {
 	h, stores, fake, orgID, owner, _ := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-	eventID, meta := seedSlackMentionEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000300", "")
+	eventID, meta := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000300", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMention, events.DispositionTasklessNoHandler), map[string]*runEntry{})
+	adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, events.DispositionTasklessNoHandler), map[string]*runEntry{})
 
 	posts := fake.postCalls()
 	if len(posts) != 1 || posts[0].ThreadTS != meta.TS {
@@ -472,10 +472,10 @@ func TestLifecycleAdapter_Disposition_TasklessNoHandler_RootMessage_RepliesInOwn
 func TestLifecycleAdapter_Disposition_MissingWorkspace_NoCallNoPanic(t *testing.T) {
 	h, stores, fake, orgID, _, _ := newLifecycleTestRig(t)
 	// Deliberately no seedLifecycleWorkspace call.
-	eventID, _ := seedSlackMentionEvent(t, h, orgID, "T-missing", "A-missing", "C1", "1700000000.000400", "")
+	eventID, _ := seedSlackMessageEvent(t, h, orgID, "T-missing", "A-missing", "C1", "1700000000.000400", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
-	adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMention, events.DispositionTaskCreated), map[string]*runEntry{})
+	adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, events.DispositionTaskCreated), map[string]*runEntry{})
 
 	if len(fake.reactionCalls()) != 0 || len(fake.postCalls()) != 0 {
 		t.Errorf("expected no Slack calls with no connected workspace, got reactions=%v posts=%v", fake.reactionCalls(), fake.postCalls())
@@ -489,10 +489,10 @@ func TestLifecycleAdapter_Disposition_InertOutcomes_NoOp(t *testing.T) {
 		t.Run(disp, func(t *testing.T) {
 			h, stores, fake, orgID, owner, _ := newLifecycleTestRig(t)
 			seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-			eventID, _ := seedSlackMentionEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000500", "")
+			eventID, _ := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000500", "")
 
 			adapter := newTestLifecycleAdapter(stores, staticURL(""))
-			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMention, disp), map[string]*runEntry{})
+			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*runEntry{})
 
 			if len(fake.reactionCalls()) != 0 || len(fake.postCalls()) != 0 {
 				t.Errorf("%s must be inert, got reactions=%v posts=%v", disp, fake.reactionCalls(), fake.postCalls())
@@ -502,7 +502,7 @@ func TestLifecycleAdapter_Disposition_InertOutcomes_NoOp(t *testing.T) {
 }
 
 // TestLifecycleAdapter_Disposition_NonSlackEventType_Ignored pins the
-// EventType != slack:mention filter — a disposition for a GitHub/Jira event
+// EventType != slack:message filter — a disposition for a GitHub/Jira event
 // must never reach the mention-specific handling at all (which would
 // otherwise misinterpret its EventID as a Slack mention's).
 func TestLifecycleAdapter_Disposition_NonSlackEventType_Ignored(t *testing.T) {
@@ -511,7 +511,7 @@ func TestLifecycleAdapter_Disposition_NonSlackEventType_Ignored(t *testing.T) {
 	adapter.dispatch(context.Background(), dispositionEvent(orgID, "some-github-event-id", domain.EventGitHubPRCICheckFailed, events.DispositionTaskCreated), map[string]*runEntry{})
 
 	if len(fake.reactionCalls()) != 0 || len(fake.postCalls()) != 0 {
-		t.Error("a non-slack:mention disposition must never call Slack")
+		t.Error("a non-slack:message disposition must never call Slack")
 	}
 }
 
@@ -521,7 +521,7 @@ func TestLifecycleAdapter_RunStatus_RunningThenActivity_SetsDescriptionDerivedTe
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-	fx := seedSlackMentionRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
+	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
 	runs := map[string]*runEntry{}
@@ -559,7 +559,7 @@ func TestLifecycleAdapter_RunStatus_PreRunningPhases_ShowSetupProgress(t *testin
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-	fx := seedSlackMentionRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
+	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
 	runs := map[string]*runEntry{}
@@ -609,7 +609,7 @@ func TestLifecycleAdapter_RunStatus_ActivityBurst_DebounceCollapsesToOneCall(t *
 
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-	fx := seedSlackMentionRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
+	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
 	runs := map[string]*runEntry{}
@@ -647,7 +647,7 @@ func TestLifecycleAdapter_RunStatus_TickerRefresh_Fires(t *testing.T) {
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-	fx := seedSlackMentionRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
+	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
 	runs := map[string]*runEntry{}
@@ -671,7 +671,7 @@ func TestLifecycleAdapter_RunStatus_Failed_ClearsAndPostsFailureReplyWithURL(t *
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-	fx := seedSlackMentionRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
+	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL("https://tf.example.com"))
 	runs := map[string]*runEntry{}
@@ -705,7 +705,7 @@ func TestLifecycleAdapter_RunStatus_Failed_NoPublicURL_NoURLFragment(t *testing.
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-	fx := seedSlackMentionRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
+	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
 	runs := map[string]*runEntry{}
@@ -732,7 +732,7 @@ func TestLifecycleAdapter_RunStatus_Parked_ClearsWithoutFailureReply(t *testing.
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-	fx := seedSlackMentionRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
+	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
 	runs := map[string]*runEntry{}
@@ -780,7 +780,7 @@ func TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker(t *testing.T)
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-	fx := seedSlackMentionRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
+	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
 	runs := map[string]*runEntry{}
@@ -854,7 +854,7 @@ func TestLifecycleAdapter_RunStatus_GatedStopChainSurvivesChurn(t *testing.T) {
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-	fx := seedSlackMentionRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
+	fx := seedSlackMessageRun(t, h, orgID, owner, teamID, "T1", "A1", "C1", "1700000000.000100", "")
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
 	runs := map[string]*runEntry{}
@@ -932,7 +932,7 @@ func TestLifecycleAdapter_RunStatus_GatedStopChainSurvivesChurn(t *testing.T) {
 // TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup pins the
 // per-runID cache: after the first system:run:status resolves a run as
 // non-Slack, the underlying data is mutated to look Slack-shaped (entity
-// source flipped to 'slack', task's event_type flipped to slack:mention) —
+// source flipped to 'slack', task's event_type flipped to slack:message) —
 // if resolution were re-run on a later sentinel for the SAME runID, it would
 // now (incorrectly) start a worker and call Slack. It must not: the cached
 // negative verdict is never re-queried.
@@ -964,7 +964,7 @@ func TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup(t *testin
 	if _, err := h.AdminDB.Exec(`UPDATE entities SET source = 'slack' WHERE id = $1`, entityID); err != nil {
 		t.Fatalf("mutate entity source: %v", err)
 	}
-	if _, err := h.AdminDB.Exec(`UPDATE tasks SET event_type = $1 WHERE id = $2`, domain.EventSlackMention, taskID); err != nil {
+	if _, err := h.AdminDB.Exec(`UPDATE tasks SET event_type = $1 WHERE id = $2`, domain.EventSlackMessage, taskID); err != nil {
 		t.Fatalf("mutate task event_type: %v", err)
 	}
 

@@ -108,8 +108,15 @@ const (
 // still live here, universal-seed like every other event type (TFAC-524's
 // seed-universally-gate-at-access design), but the schema + ownership
 // declaration are ee/slack's own.
+//
+// slack:message is "a human addressed the bot in Slack" — whether the
+// message carried an explicit @-mention doesn't change whether the
+// situation needs attention (contrast github:pr:mentioned, where comment
+// vs mention are genuinely different situations), so mention-ness stays
+// metadata (SlackMessageMetadata.Mentioned) rather than a second event
+// type, per the splitting rule above.
 const (
-	EventSlackMention = "slack:mention"
+	EventSlackMessage = "slack:message"
 )
 
 // System events
@@ -188,7 +195,7 @@ func AllEventTypes() []EventType {
 		{ID: EventJiraIssueBecameAtomic, Source: "jira", Category: "issue", Label: "Issue Became Atomic", Description: "Last open subtask closed — parent is now an atomic work unit"},
 
 		// --- Slack (schema + ownership registered by ee/slack) ---
-		{ID: EventSlackMention, Source: "slack", Category: "message", Label: "Bot Mentioned", Description: "The TF bot was @mentioned in a Slack channel"},
+		{ID: EventSlackMessage, Source: "slack", Category: "message", Label: "Message to bot", Description: "A human addressed the TF bot in a Slack channel"},
 
 		// --- System events (never user-visible) ---
 		{ID: EventSystemPollCompleted, Source: "system", Category: "poll", Label: "Poll Complete", Description: "A poller finished a cycle"},

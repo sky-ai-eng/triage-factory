@@ -70,7 +70,7 @@ func builtinRoutedPrefixes() map[string]bool {
 }
 
 // RegisterSource registers hooks for an event-source prefix — the segment
-// before the first ':' in an event type (e.g. "slack" for "slack:mention").
+// before the first ':' in an event type (e.g. "slack" for "slack:message").
 // Registration also marks the prefix router-bound (see RouterBound). Panics
 // on an empty, reserved, or already-registered source, or nil required
 // hooks (wiring bug, fail at boot). The duplicate check mirrors

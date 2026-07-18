@@ -6,7 +6,7 @@
 // (system:run:status, system:run:activity, system:routing:disposition) and
 // drives four surfaces purely off them:
 //
-//   - a 👀 reaction on a routed slack:mention (the ONLY reaction — no
+//   - a 👀 reaction on a routed slack:message (the ONLY reaction — no
 //     ⏳/✅/❌/⚠️ lifecycle, ratified out),
 //   - the assistant.threads.setStatus working indicator — both the
 //     "<app name> is …" status line and, via loading_messages, the animated
@@ -203,7 +203,7 @@ func (a *lifecycleAdapter) dispatch(ctx context.Context, evt domain.Event, runs 
 
 // --- disposition consumer: 👀 acknowledge + no-match reply ---
 
-// handleDisposition reacts to system:routing:disposition for slack:mention
+// handleDisposition reacts to system:routing:disposition for slack:message
 // events only. task_created/task_bumped both get the single 👀 reaction — a
 // bump with an active run means the core inject branch (events.go's
 // Additive=true) already folded the re-mention into that run, so there is
@@ -217,7 +217,7 @@ func (a *lifecycleAdapter) handleDisposition(ctx context.Context, evt domain.Eve
 		slackLog.Warn("slack lifecycle: decode routing disposition failed", "error", err)
 		return
 	}
-	if disp.EventType != domain.EventSlackMention {
+	if disp.EventType != domain.EventSlackMessage {
 		return
 	}
 
@@ -260,27 +260,27 @@ func (a *lifecycleAdapter) replyNotConfigured(ctx context.Context, orgID, eventI
 	}
 }
 
-// mentionContext resolves eventID's SlackMentionMetadata plus the bot token
+// mentionContext resolves eventID's SlackMessageMetadata plus the bot token
 // to act as. ok=false covers every "can't proceed" case alike (no metadata
 // row, unparsable metadata, unresolvable workspace/token) — the ticket's
 // "only possible when the workspace row + token resolve; otherwise log and
 // drop."
-func (a *lifecycleAdapter) mentionContext(ctx context.Context, orgID, eventID string) (meta SlackMentionMetadata, token string, ok bool) {
+func (a *lifecycleAdapter) mentionContext(ctx context.Context, orgID, eventID string) (meta SlackMessageMetadata, token string, ok bool) {
 	metaJSON, err := a.stores.Events.GetMetadataSystem(ctx, orgID, eventID)
 	if err != nil {
 		slackLog.Warn("slack lifecycle: load mention metadata failed", "error", err)
-		return SlackMentionMetadata{}, "", false
+		return SlackMessageMetadata{}, "", false
 	}
 	if metaJSON == "" {
-		return SlackMentionMetadata{}, "", false
+		return SlackMessageMetadata{}, "", false
 	}
 	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
 		slackLog.Warn("slack lifecycle: parse mention metadata failed", "error", err)
-		return SlackMentionMetadata{}, "", false
+		return SlackMessageMetadata{}, "", false
 	}
 	token, ok = a.resolveBotToken(ctx, orgID, meta.WorkspaceID, meta.APIAppID)
 	if !ok {
-		return SlackMentionMetadata{}, "", false
+		return SlackMessageMetadata{}, "", false
 	}
 	return meta, token, true
 }
@@ -503,7 +503,7 @@ func (a *lifecycleAdapter) resolveRunEntry(ctx context.Context, orgID, runID str
 		slackLog.Warn("slack lifecycle: load task failed", "run", runID, "error", err)
 		return entry
 	}
-	if task == nil || task.EntitySource != "slack" || task.EventType != domain.EventSlackMention || task.PrimaryEventID == "" {
+	if task == nil || task.EntitySource != "slack" || task.EventType != domain.EventSlackMessage || task.PrimaryEventID == "" {
 		return entry
 	}
 
@@ -515,7 +515,7 @@ func (a *lifecycleAdapter) resolveRunEntry(ctx context.Context, orgID, runID str
 	if metaJSON == "" {
 		return entry
 	}
-	var meta SlackMentionMetadata
+	var meta SlackMessageMetadata
 	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
 		slackLog.Warn("slack lifecycle: parse event metadata failed", "run", runID, "error", err)
 		return entry

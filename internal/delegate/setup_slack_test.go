@@ -27,12 +27,12 @@ func slackTaskFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, domain.Ta
 		t.Fatalf("create slack entity: %v", err)
 	}
 	eventID, err := stores.Events.Record(ctx, org, domain.Event{
-		EventType: domain.EventSlackMention, EntityID: &entity.ID, MetadataJSON: `{}`,
+		EventType: domain.EventSlackMessage, EntityID: &entity.ID, MetadataJSON: `{}`,
 	})
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := stores.Tasks.FindOrCreate(ctx, org, runmode.LocalDefaultTeamID, entity.ID, domain.EventSlackMention, suffix, eventID, 0.5)
+	task, _, err := stores.Tasks.FindOrCreate(ctx, org, runmode.LocalDefaultTeamID, entity.ID, domain.EventSlackMessage, suffix, eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -209,7 +209,7 @@ func slackBlueprintFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, stri
 
 // TestBuildStepConfig_Slack_FirstClaim pins wire point 1 (dispatch.go's
 // first-claim switch): a slack task no longer hits the "unsupported task
-// source" error TFAC-510's enabled-by-default slack:mention trigger was
+// source" error TFAC-510's enabled-by-default slack:message trigger was
 // tripping on — buildStepConfig routes it through setupSlack and stamps the
 // resolved worktree path onto the blueprint_run.
 func TestBuildStepConfig_Slack_FirstClaim(t *testing.T) {

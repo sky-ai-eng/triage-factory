@@ -7640,7 +7640,7 @@ GRANT SELECT ON public.slack_channels TO tf_app;
 
 -- Slack channel tracking (TFAC-541): team_slack_channels — the team<->
 -- channel bind, the tracking half of the registry/tracking split above.
--- The stage-1 scope gate for slack:mention routing (a sibling leaf) and the
+-- The stage-1 scope gate for slack:message routing (a sibling leaf) and the
 -- source of a channel's primary owning team.
 --
 -- Deliberate deviation from team_github_repos (which carries no org_id —

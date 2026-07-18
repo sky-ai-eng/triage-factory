@@ -6,7 +6,7 @@ import (
 )
 
 // eventSourceGates maps an event source prefix (the segment before the first
-// ':' in an event_type, e.g. "slack" in "slack:mention") to the Feature that
+// ':' in an event_type, e.g. "slack" in "slack:message") to the Feature that
 // must be held for an org to see or use events of that source. Guarded by the
 // same mu as provider (entitlements.go) — unlike TFAC-523's routing source
 // registry, this map is consulted from request handlers as well as init-time

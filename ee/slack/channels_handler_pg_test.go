@@ -436,12 +436,12 @@ func TestChannelsHandler_FirstTrack_SeedsDefaultBlueprint(t *testing.T) {
 	}
 	var mention *domain.EventHandler
 	for i := range handlers {
-		if handlers[i].EventType == domain.EventSlackMention {
+		if handlers[i].EventType == domain.EventSlackMessage {
 			mention = &handlers[i]
 		}
 	}
 	if mention == nil {
-		t.Fatalf("no slack:mention trigger seeded; handlers=%+v", handlers)
+		t.Fatalf("no slack:message trigger seeded; handlers=%+v", handlers)
 	}
 	if !mention.Enabled {
 		t.Errorf("seeded trigger Enabled = false, want true")
@@ -513,12 +513,12 @@ func TestChannelsHandler_SecondPUT_NoDuplicateTrigger(t *testing.T) {
 	}
 	count := 0
 	for _, h := range handlers {
-		if h.EventType == domain.EventSlackMention {
+		if h.EventType == domain.EventSlackMessage {
 			count++
 		}
 	}
 	if count != 1 {
-		t.Errorf("slack:mention triggers after second PUT = %d, want 1 (no duplicate)", count)
+		t.Errorf("slack:message triggers after second PUT = %d, want 1 (no duplicate)", count)
 	}
 }
 
@@ -526,7 +526,7 @@ func TestChannelsHandler_PreexistingTrigger_NoSeed(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-preexisting")
 
-	// Team already configured its own slack:mention trigger before ever
+	// Team already configured its own slack:message trigger before ever
 	// tracking a channel.
 	promptID := "00000000-0000-0000-0000-0000000000c1"
 	blueprintID := "00000000-0000-0000-0000-0000000000c2"
@@ -543,7 +543,7 @@ func TestChannelsHandler_PreexistingTrigger_NoSeed(t *testing.T) {
 		threshold, minAutonomy := 5, 0.2
 		return tx.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
 			ID: "00000000-0000-0000-0000-0000000000c3", Kind: domain.EventHandlerKindTrigger,
-			EventType: domain.EventSlackMention, Enabled: true, Source: domain.EventHandlerSourceUser,
+			EventType: domain.EventSlackMessage, Enabled: true, Source: domain.EventHandlerSourceUser,
 			BlueprintID: blueprintID, TriggerType: domain.TriggerTypeEvent,
 			BreakerThreshold: &threshold, MinAutonomySuitability: &minAutonomy,
 		})
@@ -568,12 +568,12 @@ func TestChannelsHandler_PreexistingTrigger_NoSeed(t *testing.T) {
 	}
 	count := 0
 	for _, h := range handlers {
-		if h.EventType == domain.EventSlackMention {
+		if h.EventType == domain.EventSlackMessage {
 			count++
 		}
 	}
 	if count != 1 {
-		t.Errorf("slack:mention triggers = %d, want 1 (pre-existing kept, no default seeded)", count)
+		t.Errorf("slack:message triggers = %d, want 1 (pre-existing kept, no default seeded)", count)
 	}
 }
 
@@ -595,7 +595,7 @@ func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 			return e
 		}
 		for i := range handlers {
-			if handlers[i].EventType == domain.EventSlackMention {
+			if handlers[i].EventType == domain.EventSlackMessage {
 				seeded = &handlers[i]
 			}
 		}
@@ -630,12 +630,12 @@ func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 	}
 	count := 0
 	for _, h := range handlers {
-		if h.EventType == domain.EventSlackMention {
+		if h.EventType == domain.EventSlackMessage {
 			count++
 		}
 	}
 	if count != 0 {
-		t.Errorf("slack:mention triggers after delete + re-PUT = %d, want 0 (no resurrection)", count)
+		t.Errorf("slack:message triggers after delete + re-PUT = %d, want 0 (no resurrection)", count)
 	}
 }
 

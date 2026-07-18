@@ -9,8 +9,8 @@ import (
 // type and includes the metadata JSON, plus tells the agent it won't spawn a
 // separate run.
 func TestAdditiveEventInjection_NamesTypeAndMetadata(t *testing.T) {
-	injection := AdditiveEventInjection("slack:mention", `{"channel":"C123","ts":"1.2"}`)
-	for _, want := range []string{"slack:mention", `"channel":"C123"`, "will not spawn a separate run"} {
+	injection := AdditiveEventInjection("slack:message", `{"channel":"C123","ts":"1.2"}`)
+	for _, want := range []string{"slack:message", `"channel":"C123"`, "will not spawn a separate run"} {
 		if !strings.Contains(injection, want) {
 			t.Errorf("injection missing %q: %q", want, injection)
 		}

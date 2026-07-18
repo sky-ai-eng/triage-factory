@@ -133,7 +133,7 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 		p.title.dispatch(ws, entity.ID, ev.Channel, ev.User, ev.Text)
 	}
 
-	metaJSON, err := json.Marshal(SlackMentionMetadata{
+	metaJSON, err := json.Marshal(SlackMessageMetadata{
 		WorkspaceID: ws.WorkspaceID,
 		APIAppID:    ws.APIAppID,
 		Channel:     ev.Channel,
@@ -142,14 +142,15 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 		SenderID:    ev.User,
 		Text:        ev.Text,
 		EventID:     ev.EventID,
+		Mentioned:   true,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal slack mention metadata: %w", err)
+		return fmt.Errorf("marshal slack message metadata: %w", err)
 	}
 
 	p.publish(domain.Event{
 		OrgID:        ws.OrgID,
-		EventType:    domain.EventSlackMention,
+		EventType:    domain.EventSlackMessage,
 		EntityID:     &entity.ID,
 		MetadataJSON: string(metaJSON),
 		OccurredAt:   occurredAt,

@@ -6,10 +6,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
 
-// SlackMentionMetadata is the durable audit shape for one app_mention
-// delivery — everything the ingest pipeline (ingest.go) captures, JSON-
-// marshaled into events.metadata_json.
-type SlackMentionMetadata struct {
+// SlackMessageMetadata is the durable audit shape for one inbound Slack
+// message addressed to the bot — everything the ingest pipeline
+// (ingest.go) captures, JSON-marshaled into events.metadata_json. Today
+// every delivery is an app_mention; TFAC-650 adds engaged-thread
+// follow-ups that carry Mentioned=false.
+type SlackMessageMetadata struct {
 	// WorkspaceID is the Slack team ID. The entity key (domain.SlackSourceID)
 	// deliberately excludes workspace context (channel IDs are stable across
 	// Enterprise Grid / Slack Connect shared channels) — downstream
@@ -17,7 +19,7 @@ type SlackMentionMetadata struct {
 	// field, never from the entity key.
 	WorkspaceID string `json:"workspace_id"`
 	// APIAppID is the Slack app id, alongside WorkspaceID, needed to resolve
-	// the exact org_slack_workspaces row this mention belongs to — since
+	// the exact org_slack_workspaces row this message belongs to — since
 	// TFAC-533's re-key, one org can hold two Slack apps in the same
 	// workspace, so WorkspaceID alone can't select the row (and the wrong
 	// row means acting as the wrong bot identity). Downstream consumers
@@ -25,35 +27,55 @@ type SlackMentionMetadata struct {
 	// apiAppID). No fallback for pre-release events — none exist.
 	APIAppID string `json:"api_app_id"`
 	Channel  string `json:"channel"`
-	TS       string `json:"ts"`                  // the mention message's own ts
+	TS       string `json:"ts"`                  // the message's own ts
 	ThreadTS string `json:"thread_ts,omitempty"` // parent thread root; empty on a root-message mention
-	SenderID string `json:"sender_id"`           // Slack user ID of the mentioning human
+	SenderID string `json:"sender_id"`           // Slack user ID of the sender
 	Text     string `json:"text"`
 	EventID  string `json:"event_id"` // Slack's Ev… id — the dedup key
+	// Mentioned records whether this message explicitly @-mentioned the
+	// bot, as opposed to arriving as a follow-up in an already-engaged
+	// thread. Transport detail, not a different situation — see
+	// domain.EventSlackMessage's doc. Always true until TFAC-650 ingests
+	// non-mention follow-ups.
+	Mentioned bool `json:"mentioned"`
 }
 
-// SlackMentionPredicate narrows which mentions a handler fires on.
-type SlackMentionPredicate struct {
-	ChannelIn []string `json:"channel_in,omitempty" doc:"Match only mentions in these Slack channel IDs (empty = no filter, matches any channel)."`
+// SlackMessagePredicate narrows which messages a handler fires on.
+type SlackMessagePredicate struct {
+	ChannelIn []string `json:"channel_in,omitempty" doc:"Match only messages in these Slack channel IDs (empty = no filter, matches any channel)."`
+	// MentionedOnly, when true, restricts to messages that explicitly
+	// @-mentioned the bot — excluding engaged-thread follow-ups that
+	// didn't. false (the default) matches both.
+	MentionedOnly bool `json:"mentioned_only,omitempty" doc:"Match only messages that explicitly @-mentioned the bot (excludes engaged-thread follow-ups)."`
 }
 
 // Matches applies the *_in convention: an empty ChannelIn means "no
 // filter," matching everything. Channel IDs are case-sensitive Slack
 // tokens, so this is a strict == rather than events.stringInSliceFold's
 // case-fold (that helper is also unexported outside package events).
-func (p SlackMentionPredicate) Matches(m SlackMentionMetadata) bool {
-	if len(p.ChannelIn) == 0 {
-		return true
-	}
-	for _, c := range p.ChannelIn {
-		if c == m.Channel {
-			return true
+// MentionedOnly is a one-directional narrowing flag, not a *_in-style
+// filter: unset (false) matches every message, set (true) requires
+// m.Mentioned.
+func (p SlackMessagePredicate) Matches(m SlackMessageMetadata) bool {
+	if len(p.ChannelIn) > 0 {
+		matched := false
+		for _, c := range p.ChannelIn {
+			if c == m.Channel {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
 		}
 	}
-	return false
+	if p.MentionedOnly && !m.Mentioned {
+		return false
+	}
+	return true
 }
 
-// init registers slack:mention's schema and dormancy gate — the "inert
+// init registers slack:message's schema and dormancy gate — the "inert
 // declaration" half of TFAC-530. OwnershipOwned is the settled
 // classification (channel-primary owns; watch semantics apply);
 // registering it now is data-only — resolution behavior (which team
@@ -65,14 +87,14 @@ func (p SlackMentionPredicate) Matches(m SlackMentionMetadata) bool {
 // root parity test (TestRegisteredFeaturesAreDeclared) passes.
 //
 // Additive=true (TFAC-597) flips the auto-delegation defer/inject
-// decision: a re-mention on an entity whose task already has an active
-// auto run injects a <system-note> into that live run (internal/routing's
-// tryAutoDelegate, via events.AdditiveFor) instead of enqueueing a second
-// pending_firing. A fresh mention (no active run) is unaffected — it still
-// fires a new run exactly as before.
+// decision: a follow-up message on an entity whose task already has an
+// active auto run injects a <system-note> into that live run
+// (internal/routing's tryAutoDelegate, via events.AdditiveFor) instead of
+// enqueueing a second pending_firing. A fresh message (no active run) is
+// unaffected — it still fires a new run exactly as before.
 func init() {
-	schema := events.NewSchema[SlackMentionMetadata, SlackMentionPredicate](
-		domain.EventSlackMention, events.OwnershipOwned)
+	schema := events.NewSchema[SlackMessageMetadata, SlackMessagePredicate](
+		domain.EventSlackMessage, events.OwnershipOwned)
 	schema.Additive = true
 	events.Register(schema)
 	entitlements.GateEventSource("slack", entitlements.FeatureSlack)

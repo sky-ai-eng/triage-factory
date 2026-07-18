@@ -172,7 +172,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 				// HasActiveAutoRunForEntitySystem's doc comment) — the
 				// active run's task may differ from THIS task (e.g. a
 				// ci_check_failed-derived task owns the live run while a
-				// separate slack:mention-derived task on the same entity
+				// separate slack:message-derived task on the same entity
 				// additively fires). Commit the claim on task here
 				// exactly like the deferral path does post-Enqueue: the
 				// bot has taken responsibility for this task by folding

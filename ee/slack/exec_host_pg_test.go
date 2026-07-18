@@ -259,7 +259,7 @@ func (r *slackExecRig) trackChannel(orgID, userID, teamID, channelID string) {
 }
 
 // seedNonSlackTask seeds a minimal entity + event + task chain with a
-// GitHub (not slack:mention) event type, and returns the task id. Every run
+// GitHub (not slack:message) event type, and returns the task id. Every run
 // this rig seeds carries one: AgentRunStore.GetSystem's column list
 // (pgRunColumns) selects task_id with no COALESCE, so scanning a run whose
 // task_id is genuinely NULL errors — harmless in production (every run
@@ -267,7 +267,7 @@ func (r *slackExecRig) trackChannel(orgID, userID, teamID, channelID string) {
 // immediately here since workspaceFromRunTaskMetadata unconditionally reads
 // the run first. Giving every seeded run a real, non-slack-mention task
 // keeps that read clean while still exercising the intended "no Slack
-// context" fallback path (task.EventType != domain.EventSlackMention) these
+// context" fallback path (task.EventType != domain.EventSlackMessage) these
 // tests are actually about — a GitHub/Jira-triggered run using the Slack
 // verbs is exactly the "general-purpose" shape the ticket describes.
 func (r *slackExecRig) seedNonSlackTask(orgID, creatorID, teamID string) string {
