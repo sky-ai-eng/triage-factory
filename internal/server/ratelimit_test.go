@@ -287,7 +287,7 @@ func TestPreAuthRateLimit_NilLimiterNoOp(t *testing.T) {
 }
 
 // TestSignedWebhookRateLimit_SustainedTenPerSecondNeverThrottles locks in
-// the TFAC-647 acceptance bar directly against the production tier
+// the required acceptance bar directly against the production tier
 // constants: a synthetic signed-delivery stream sustained at exactly
 // 10 req/s (Slack's own floor for a single subscribed app/workspace is
 // ~8.3 req/s) must never see a 429, however long it runs. Unlike the
