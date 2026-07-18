@@ -1,8 +1,9 @@
 # Monitoring & health checks
 
-Triage Factory exposes three health endpoints. Point liveness at `/api/health`,
-readiness/load-balancer rotation at `/readyz`, and (in a scaled fleet) the
-container HEALTHCHECK for each executor at its localhost `/healthz`.
+Triage Factory exposes three health endpoints and a Prometheus metrics
+endpoint. Point liveness at `/api/health`, readiness/load-balancer rotation at
+`/readyz`, (in a scaled fleet) the container HEALTHCHECK for each executor at
+its localhost `/healthz`, and your metrics scraper at `:9464/metrics`.
 
 ## Readiness — `GET /readyz`
 
@@ -55,6 +56,54 @@ needed.
 In an HA (multiple control pods) topology `/readyz` also carries a `lease` field
 and a standby hard-checks only DB + migrations — see
 [Scaling out](scaling.md#multiple-control-pods-ha).
+
+## Metrics — `GET /metrics`
+
+Every pod (control and executor alike) serves Prometheus-format metrics on its
+own dedicated listener — **`:9464` by default in multi mode** — instrumented
+through the OpenTelemetry SDK. Nothing is bundled and nothing is required:
+point whatever you already run at it (Prometheus, an OTel Collector's
+`prometheus` receiver, a vendor agent), or just read it by hand:
+
+```sh
+curl -fsS http://localhost:9464/metrics | grep '^tf_'
+```
+
+`TF_METRICS_ADDR` overrides the bind (a bare port or a full `host:port`);
+`TF_METRICS_ADDR=off` disables the listener. In local mode it is off unless
+explicitly set, and a bare port binds loopback. The endpoint is
+unauthenticated by design, same posture as `/readyz` — it carries only counts
+and opaque IDs, never tenant data — and its port is deliberately separate
+from the user-facing server so it stays network-internal: **don't publish or
+route `9464` externally**; scrape it from inside the compose network / cluster.
+
+Beyond the standard Go runtime and process collectors (`go_*`, `process_*`),
+the TF-specific set today covers Slack message-event volume, per Slack app
+(`message.channels`/`message.groups` are a firehose, unlike mentions — watch
+that volume):
+
+- `tf_slack_ingest_events_total{app_id, outcome}` — every delivery reaching
+  the ingest pipeline; `outcome` is `accepted` or the drop reason
+  (`duplicate`, `not_engaged`, `not_thread_reply`, `unsupported_subtype`, …),
+  so the sum over outcomes is the received total.
+- `tf_slack_retry_deliveries_total{app_id, transport}` — deliveries Slack
+  marked as retries (`X-Slack-Retry-Num` > 0, or a Socket Mode envelope's
+  `retry_attempt` > 0). **This is the alertable signal**: on the Events API,
+  sustained retries are the precursor to Slack disabling the app's event
+  subscription. Each occurrence is also a `WARN` log line for log-based
+  alerting.
+- `tf_slack_app_rate_limited_total{app_id}` — `app_rate_limited` notices:
+  Slack exhausted the app's Events API budget (30k events/workspace/hour) and
+  is dropping deliveries at the source (they are never retried). Also a
+  `WARN` log line. If this fires, move the app to Socket Mode or reduce the
+  channels the bot is in.
+
+An example alert, in Prometheus terms (counters are per-process; `sum` across
+pods in an HA topology):
+
+```
+sum(increase(tf_slack_retry_deliveries_total[15m])) > 0
+```
 
 ## Executor health — `GET /healthz`
 

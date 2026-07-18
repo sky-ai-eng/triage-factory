@@ -39,6 +39,11 @@ type slackEventEnvelope struct {
 	Challenge string          `json:"challenge"`
 	EventID   string          `json:"event_id"`
 	Event     json.RawMessage `json:"event"`
+	// MinuteRateLimited is set on a type=app_rate_limited envelope: the unix
+	// timestamp of the minute Slack started dropping this app's event
+	// deliveries (its 30k events/workspace/hour Events API budget was
+	// exhausted — deliveries in excess are never retried later).
+	MinuteRateLimited int64 `json:"minute_rate_limited"`
 }
 
 // slackInnerEvent is the subset of the event_callback's nested "event"
@@ -69,6 +74,10 @@ type slackInnerEvent struct {
 type webhookHandler struct {
 	stores   db.Stores
 	pipeline *ingestPipeline
+	// stats records the transport-level volume signals (retry deliveries,
+	// app_rate_limited notices); the per-delivery outcome counters live in
+	// the pipeline. Nil-safe, like the pipeline's optional collaborators.
+	stats *ingestStats
 }
 
 // handleWebhook mirrors the GitHub receiver's discipline
@@ -147,6 +156,19 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Past the signature: the delivery is authentically Slack's, so its
+	// retry marker is a trustworthy operational signal. X-Slack-Retry-Num > 0
+	// means an earlier attempt wasn't acked in time (or 5xxed) — sustained
+	// retries are the early warning of the disable cascade (Slack turns off
+	// an app's event subscription after enough consecutive failures), so
+	// this Warn is the line operators alert on.
+	if n, err := strconv.Atoi(r.Header.Get("X-Slack-Retry-Num")); err == nil && n > 0 {
+		slackLog.Warn("slack events api: delivery is a Slack retry — sustained retries precede Slack disabling the event subscription",
+			"workspace", ws.WorkspaceID, "app", ws.APIAppID,
+			"retry_num", n, "retry_reason", r.Header.Get("X-Slack-Retry-Reason"))
+		h.stats.recordRetry(r.Context(), ws.APIAppID, transportEventsAPI)
+	}
+
 	switch envelope.Type {
 	case "url_verification":
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"challenge": envelope.Challenge})
@@ -156,9 +178,23 @@ func (h *webhookHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.handleEventCallback(w, r, *ws, envelope)
+	case "app_rate_limited":
+		// Slack exhausted this app's Events API budget (30k events per
+		// workspace per hour) and is DROPPING deliveries at the source —
+		// they will not be retried once the limit lifts. Nothing to
+		// process; the ack keeps the subscription healthy. Logged at Warn
+		// (not gated on entitlement — it's operational telemetry about
+		// volume, not work) so operators see the loss the moment it starts;
+		// with the message.* firehose this is the "volume outgrew the
+		// transport" signal that says move to Socket Mode or split apps.
+		slackLog.Warn("slack events api: app_rate_limited — Slack is dropping this app's event deliveries",
+			"workspace", ws.WorkspaceID, "app", ws.APIAppID,
+			"minute_rate_limited", envelope.MinuteRateLimited)
+		h.stats.recordRateLimited(r.Context(), ws.APIAppID)
+		ackEmpty(w)
 	default:
-		// Slack documents other envelope types (app_rate_limited, …) this
-		// leaf has no use for — ack so Slack doesn't retry.
+		// Slack documents other envelope types this leaf has no use for —
+		// ack so Slack doesn't retry.
 		ackEmpty(w)
 	}
 }

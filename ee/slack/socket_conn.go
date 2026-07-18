@@ -28,6 +28,14 @@ type socketEnvelope struct {
 	EnvelopeID string          `json:"envelope_id"`
 	Payload    json.RawMessage `json:"payload"`
 	Reason     string          `json:"reason,omitempty"`
+	// RetryAttempt/RetryReason are Socket Mode's counterpart of the Events
+	// API's X-Slack-Retry-Num/-Reason headers: attempt > 0 means Slack is
+	// redelivering an envelope an earlier connection (or a slow ack) let
+	// lapse. No disable cascade on this transport — Slack just keeps
+	// redelivering — but sustained retries are the same "acks aren't keeping
+	// up with volume" warning.
+	RetryAttempt int    `json:"retry_attempt"`
+	RetryReason  string `json:"retry_reason"`
 }
 
 // appConnection is one running Socket Mode connection: a goroutine (run,
@@ -42,6 +50,11 @@ type appConnection struct {
 
 	cancel context.CancelFunc // stops just this connection, independent of its siblings
 	done   chan struct{}      // closed when run returns
+
+	// stats records retry-marked envelopes (stats.go) — set by
+	// socketManager.startConn from the manager's shared instance; nil-safe
+	// for tests that construct appConnection directly.
+	stats *ingestStats
 
 	mu        sync.Mutex
 	status    connStatus
@@ -359,6 +372,15 @@ func ackEnvelope(ctx context.Context, conn *slackws.Conn, envelopeID string) err
 // ackEmpty, and only for a successful pipeline run; false is reserved for a
 // genuine processing failure, so Slack's redelivery gives it another shot.
 func (c *appConnection) processEventsAPIEnvelope(ctx context.Context, stores db.Stores, pipeline *ingestPipeline, env socketEnvelope) (ack bool) {
+	// Recorded before any payload parsing: the retry marker sits on the
+	// envelope and is meaningful even when the payload turns out to be
+	// nothing this leaf processes — it measures the ack loop, not the event.
+	if env.RetryAttempt > 0 {
+		slackLog.Warn("slack socket mode: envelope is a Slack retry — an earlier delivery went unacked",
+			"app", c.appID, "retry_attempt", env.RetryAttempt, "retry_reason", env.RetryReason)
+		c.stats.recordRetry(ctx, c.appID, transportSocket)
+	}
+
 	var payload slackEventEnvelope
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
 		slackLog.Error("slack socket mode: malformed events_api payload", "app", c.appID, "error", err)

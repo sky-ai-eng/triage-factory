@@ -47,6 +47,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -184,6 +185,14 @@ type App struct {
 	// nil-checked the same way a.reaperStore is.
 	credProvisioner *credprovision.Manager
 
+	// metricsAddr is the resolved /metrics bind address telemetry.Init
+	// returned at boot ("" = metrics disabled) — kept so Run can start the
+	// listener after the workers are up. Role-independent: an executor
+	// serves metrics exactly like a control pod (its run/dispatch counters
+	// are the ones a future ticket instruments), on its own port, never on
+	// the user-facing server.
+	metricsAddr string
+
 	// runCtx is the ctx Run(ctx) was called with, captured so startBrain
 	// (invoked later, from a lease-manager callback or directly at
 	// role=all) can derive a cancellable brain-lifetime context from it
@@ -223,6 +232,12 @@ type App struct {
 func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	a := &App{cfg: cfg, plan: planForRole(runmode.Role())}
 	appLog.Info("boot role", "role", a.plan.role, "mode", runmode.Current())
+
+	// Install the OTel meter provider before anything downstream constructs
+	// instruments, so every subsystem records against the real SDK from its
+	// first sample (disabled → the global stays a no-op and instruments cost
+	// nothing). The listener itself starts in Run, once workers are up.
+	a.metricsAddr = telemetry.Init(cfg.Version)
 
 	// Resolve this process's persistent instance identity before anything
 	// else touches the state root: the identity file's exclusive
@@ -351,6 +366,11 @@ func (a *App) Run(ctx context.Context) error {
 
 	a.runStartupTasks(ctx)
 	a.startWorkers(ctx)
+	if a.metricsAddr != "" {
+		// Fire-and-forget on every role: Serve logs its own bind failure and
+		// a dead metrics listener must never take the process with it.
+		go func() { _ = telemetry.Serve(ctx, a.metricsAddr) }()
+	}
 	if a.plan.serveHTTP {
 		a.srv.StartExtensionWorkers(ctx) // replica-safe EE hooks only; brain-gated ones start with the brain below
 	}

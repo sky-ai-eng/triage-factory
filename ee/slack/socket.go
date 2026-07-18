@@ -112,6 +112,10 @@ type socketManager struct {
 	pipeline      *ingestPipeline
 	httpClient    *http.Client
 	configChanged <-chan struct{}
+	// stats is handed to each appConnection at start (retry-envelope
+	// counting) — the same shared instance the pipeline records outcomes
+	// into. Nil-safe downstream, so tests may leave it unset.
+	stats *ingestStats
 
 	mu    sync.Mutex
 	conns map[string]*appConnection // keyed by api_app_id
@@ -283,6 +287,7 @@ func (m *socketManager) startConn(ctx context.Context, d desiredApp) {
 		appID:       d.appID,
 		orgID:       d.orgID,
 		appTokenRef: d.appTokenRef,
+		stats:       m.stats,
 		cancel:      cancel,
 		done:        make(chan struct{}),
 		sightings:   map[string]*sightingView{},

@@ -46,7 +46,19 @@ func (a *App) runExecutorHealthz(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", a.handleExecutorHealthz)
 
-	httpSrv := &http.Server{Addr: addr, Handler: mux}
+	httpSrv := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+		// Loopback-only shrinks the audience to local processes, but the
+		// auth-free listener still shouldn't hand out held-open connections
+		// for free — same bounded posture as the /metrics listener
+		// (internal/telemetry): a health probe is one small GET, so the
+		// whole exchange is bounded, not just the header read.
+		ReadHeaderTimeout: 30 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
 	serverExited := make(chan struct{})
 	shutdownDone := make(chan struct{})

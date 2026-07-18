@@ -83,6 +83,10 @@ type ingestPipeline struct {
 	// names resolve, best-effort and detached — see TitleResolver.dispatch.
 	// Nil-safe for the same reason as identity.
 	title *TitleResolver
+	// stats records each delivery's outcome (stats.go) — the message-volume
+	// counters TFAC-650's channel-firehose subscriptions made necessary.
+	// Nil-safe for the same reason as identity.
+	stats *ingestStats
 }
 
 // handleEventCallback is the one function both transports call for an inbound
@@ -94,23 +98,36 @@ type ingestPipeline struct {
 // failure (store error, marshal failure); every "nothing to do" case is a
 // nil-error early return, logged at debug — none of those are failures the
 // caller should retry or 5xx on.
+//
+// Exactly one outcome is recorded per call — each branch names its return
+// path (accepted, or the drop reason), and an error return overrides it as
+// outcomeError — so tf_slack_ingest_events_total's sum over outcomes IS the
+// received total.
 func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.Workspace, ev inboundMention) error {
+	var outcome string
+	var err error
 	switch ev.Type {
 	case "app_mention":
-		return p.handleAppMention(ctx, ws, ev)
+		outcome, err = p.handleAppMention(ctx, ws, ev)
 	case "message":
-		return p.handleThreadMessage(ctx, ws, ev)
+		outcome, err = p.handleThreadMessage(ctx, ws, ev)
 	default:
 		slackLog.Debug("dropping unsupported slack event type", "type", ev.Type, "workspace", ws.WorkspaceID)
-		return nil
+		outcome = dropUnsupportedType
 	}
+	if err != nil {
+		outcome = outcomeError
+	}
+	p.stats.recordIngest(ctx, ws.APIAppID, outcome)
+	return err
 }
 
 // handleAppMention ingests an explicit @-mention. It is deliberately
 // synchronous: one dedup insert, one entity find-or-create, one publish — well
 // inside Slack's 3-second webhook ack budget. Publishes slack:message with
-// Mentioned=true.
-func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Workspace, ev inboundMention) error {
+// Mentioned=true. Returns the delivery's outcome label for
+// handleEventCallback's single recordIngest.
+func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Workspace, ev inboundMention) (string, error) {
 	// EventID feeds the dedup key and Channel/TS feed the entity source_id
 	// (domain.SlackSourceID) — an empty value in any of them (a malformed
 	// or unexpectedly-shaped payload) would dedup unrelated deliveries
@@ -118,20 +135,20 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 	// malformed and drop rather than deriving a garbage key from it.
 	if ev.EventID == "" || ev.Channel == "" || ev.TS == "" {
 		slackLog.Debug("dropping malformed app_mention: missing event_id/channel/ts", "workspace", ws.WorkspaceID)
-		return nil
+		return dropMalformed, nil
 	}
 	if ev.BotID != "" || (ws.BotUserID != "" && ev.User == ws.BotUserID) {
 		slackLog.Debug("dropping self/bot-authored slack mention", "workspace", ws.WorkspaceID)
-		return nil
+		return dropSelfOrBot, nil
 	}
 
 	fresh, err := p.deliveries.MarkDeliveredSystem(ctx, ws.APIAppID, ev.EventID)
 	if err != nil {
-		return fmt.Errorf("mark slack delivery: %w", err)
+		return outcomeError, fmt.Errorf("mark slack delivery: %w", err)
 	}
 	if !fresh {
 		slackLog.Debug("dropping duplicate slack delivery", "workspace", ws.WorkspaceID, "app", ws.APIAppID, "event_id", ev.EventID)
-		return nil
+		return dropDuplicate, nil
 	}
 
 	occurredAt := parseSlackTS(ev.TS)
@@ -152,7 +169,7 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 
 	entity, created, err := p.entities.FindOrCreateSystem(ctx, ws.OrgID, "slack", sourceID, kind, mentionTitle(ev.Text), "")
 	if err != nil {
-		return fmt.Errorf("find or create slack entity: %w", err)
+		return outcomeError, fmt.Errorf("find or create slack entity: %w", err)
 	}
 	// Only on create: the thread-root permalink is stable once minted, and
 	// repeat mentions on an already-known thread shouldn't re-resolve it.
@@ -166,7 +183,7 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 	}
 
 	if err := p.publishMessage(ws, ev, entity.ID, true, occurredAt); err != nil {
-		return err
+		return outcomeError, err
 	}
 
 	// Best-effort sender identity capture (TFAC-531), detached from the
@@ -177,7 +194,7 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 		go p.identity.resolveSender(context.Background(), ws, ev.User)
 	}
 
-	return nil
+	return outcomeAccepted, nil
 }
 
 // handleThreadMessage ingests an engaged-thread follow-up — an un-mentioned
@@ -187,22 +204,23 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 // not in an engaged thread, and recording a delivery row for each would let
 // the firehose grow the table without bound. Publishes slack:message with
 // Mentioned=false — in an engaged thread every message is addressed to the
-// bot, the @ being transport detail the thread doesn't require.
-func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.Workspace, ev inboundMention) error {
+// bot, the @ being transport detail the thread doesn't require. Returns the
+// delivery's outcome label for handleEventCallback's single recordIngest.
+func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.Workspace, ev inboundMention) (string, error) {
 	// (1) subtype gate: a plain reply ("") or a reply also broadcast to the
 	// channel ("thread_broadcast") is a real human message; every other
 	// subtype (message_changed, message_deleted, channel_join, bot_message, …)
 	// is an edit/system/bot variant this pipeline has no use for.
 	if ev.Subtype != "" && ev.Subtype != "thread_broadcast" {
 		slackLog.Debug("dropping slack message: unsupported subtype", "subtype", ev.Subtype, "workspace", ws.WorkspaceID)
-		return nil
+		return dropUnsupportedSubtype, nil
 	}
 	// (2) thread reply gate: only a message inside a thread can be an
 	// engaged-thread follow-up. Root-channel chatter (no thread_ts) never
 	// ingests — the bot listens only to threads it owns.
 	if ev.ThreadTS == "" {
 		slackLog.Debug("dropping slack message: not a thread reply", "workspace", ws.WorkspaceID)
-		return nil
+		return dropNotThreadReply, nil
 	}
 	// EventID feeds the dedup key, Channel + ThreadTS feed the entity source_id
 	// (domain.SlackSourceID); TS feeds the occurred-at. Drop a payload missing
@@ -210,14 +228,14 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 	// app_mention path.
 	if ev.EventID == "" || ev.Channel == "" || ev.TS == "" {
 		slackLog.Debug("dropping malformed slack message: missing event_id/channel/ts", "workspace", ws.WorkspaceID)
-		return nil
+		return dropMalformed, nil
 	}
 	// (3) bot/self-authored: TF's own thread posts (and any other bot's)
 	// arrive here too — never ingest them, or a run's own reply would feed
 	// itself back in.
 	if ev.BotID != "" || (ws.BotUserID != "" && ev.User == ws.BotUserID) {
 		slackLog.Debug("dropping self/bot-authored slack message", "workspace", ws.WorkspaceID)
-		return nil
+		return dropSelfOrBot, nil
 	}
 	// (4) explicit-mention dedup: a threaded message that @-mentions the bot
 	// ALSO arrives as an app_mention delivery (a distinct event_id), and that
@@ -227,7 +245,7 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 	// still owns the mention regardless.
 	if ws.BotUserID != "" && strings.Contains(ev.Text, "<@"+ws.BotUserID+">") {
 		slackLog.Debug("dropping slack message: explicit mention owned by app_mention delivery", "workspace", ws.WorkspaceID)
-		return nil
+		return dropMentionDedup, nil
 	}
 	// (5) engagement gate: the thread's entity must already exist, be a
 	// bot-owned thread (kind="thread", not a mid-thread "message" summons into
@@ -236,11 +254,11 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 	sourceID := domain.SlackSourceID(ev.Channel, ev.ThreadTS)
 	entity, err := p.entities.GetBySourceSystem(ctx, ws.OrgID, "slack", sourceID)
 	if err != nil {
-		return fmt.Errorf("get slack thread entity: %w", err)
+		return outcomeError, fmt.Errorf("get slack thread entity: %w", err)
 	}
 	if entity == nil || entity.Kind != "thread" || entity.State != "active" {
 		slackLog.Debug("dropping slack message: no active engaged thread", "workspace", ws.WorkspaceID, "source_id", sourceID)
-		return nil
+		return dropNotEngaged, nil
 	}
 
 	// (6) Past every drop: record the delivery (dedup Slack's redeliveries)
@@ -248,14 +266,17 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 	// exactly the messages TF acts on.
 	fresh, err := p.deliveries.MarkDeliveredSystem(ctx, ws.APIAppID, ev.EventID)
 	if err != nil {
-		return fmt.Errorf("mark slack delivery: %w", err)
+		return outcomeError, fmt.Errorf("mark slack delivery: %w", err)
 	}
 	if !fresh {
 		slackLog.Debug("dropping duplicate slack delivery", "workspace", ws.WorkspaceID, "app", ws.APIAppID, "event_id", ev.EventID)
-		return nil
+		return dropDuplicate, nil
 	}
 
-	return p.publishMessage(ws, ev, entity.ID, false, parseSlackTS(ev.TS))
+	if err := p.publishMessage(ws, ev, entity.ID, false, parseSlackTS(ev.TS)); err != nil {
+		return outcomeError, err
+	}
+	return outcomeAccepted, nil
 }
 
 // publishMessage marshals the durable audit metadata and publishes the
