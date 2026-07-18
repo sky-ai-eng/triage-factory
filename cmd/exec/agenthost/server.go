@@ -88,6 +88,12 @@ type Server struct {
 	// own TokenSource handles any brain refresh-sweep remint behind the proxy).
 	proxyCreds *ProxyCredentials
 
+	// upstreamGate bounds per-upstream (Jira / GitHub) in-flight REST calls for
+	// this run — a per-run governor on how many concurrent requests one agent
+	// makes against the shared org bot identity. nil is a no-op (no throttling);
+	// both constructors wire one sized from the environment.
+	upstreamGate *upstreamThrottle
+
 	// shutdown signals the accept loop to stop accepting new conns
 	// and lets in-flight handlers drain.
 	shutdown chan struct{}
@@ -105,13 +111,14 @@ type Server struct {
 // resolver exactly as before.
 func NewServer(stores db.Stores, info RunInfo, proxyCreds *ProxyCredentials) *Server {
 	return &Server{
-		rt:         newDirectRuntime(stores, info),
-		stores:     stores,
-		info:       info,
-		gateWired:  stores.TeamGitHubRepos != nil && stores.RunWorktrees != nil,
-		ghResolver: ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil),
-		proxyCreds: proxyCreds,
-		shutdown:   make(chan struct{}),
+		rt:           newDirectRuntime(stores, info),
+		stores:       stores,
+		info:         info,
+		gateWired:    stores.TeamGitHubRepos != nil && stores.RunWorktrees != nil,
+		ghResolver:   ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil),
+		proxyCreds:   proxyCreds,
+		upstreamGate: newUpstreamThrottle(maxUpstreamConcurrencyFromEnv()),
+		shutdown:     make(chan struct{}),
 	}
 }
 
@@ -124,11 +131,12 @@ func NewServer(stores db.Stores, info RunInfo, proxyCreds *ProxyCredentials) *Se
 // comes from the runtime; the repo gate is always wired (the relay serves it).
 func NewServerWithRuntime(rt Runtime, proxyCreds *ProxyCredentials) *Server {
 	return &Server{
-		rt:         rt,
-		info:       rt.Info(),
-		gateWired:  true,
-		proxyCreds: proxyCreds,
-		shutdown:   make(chan struct{}),
+		rt:           rt,
+		info:         rt.Info(),
+		gateWired:    true,
+		proxyCreds:   proxyCreds,
+		upstreamGate: newUpstreamThrottle(maxUpstreamConcurrencyFromEnv()),
+		shutdown:     make(chan struct{}),
 	}
 }
 
@@ -298,6 +306,18 @@ func (s *Server) sendError(conn net.Conn, msg string) {
 // generated-from-spec version of this file would just expand to the
 // same shape.
 func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMessage) (any, error) {
+	// Bound this run's concurrent calls to the shared upstream identity before
+	// doing any work: an over-cap call waits here until a slot frees or the
+	// dispatch deadline fires (graceful degradation, not an error into the
+	// agent). DB/core methods are upstreamNone and acquire instantly.
+	if up := upstreamForMethod(method); up != upstreamNone {
+		release, err := s.upstreamGate.acquire(ctx, up)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+	}
+
 	// The per-request LocalClient shares the Server's runtime (its DB effects go
 	// direct-to-stores on all/local, or relay to the orchestrator on the
 	// sidecar), its resolver + token cache (all/local only; nil on the sidecar),
