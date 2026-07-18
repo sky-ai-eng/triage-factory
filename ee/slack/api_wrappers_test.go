@@ -355,26 +355,35 @@ func TestSlackChatGetPermalink_NotOk(t *testing.T) {
 
 // --- assistant.threads.setStatus ---
 
-// TestSlackAssistantSetStatus_GoldenParams pins the form encoding: status
-// always present (even when clearing), loading_messages comma-joined.
+// TestSlackAssistantSetStatus_GoldenParams pins the JSON encoding: status
+// always present (even when clearing), loading_messages a real string array
+// (never a joined scalar — a message containing a comma must survive
+// intact).
 func TestSlackAssistantSetStatus_GoldenParams(t *testing.T) {
 	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			t.Fatalf("ParseForm: %v", err)
+		var body struct {
+			ChannelID       string   `json:"channel_id"`
+			ThreadTS        string   `json:"thread_ts"`
+			Status          string   `json:"status"`
+			LoadingMessages []string `json:"loading_messages"`
 		}
-		if r.FormValue("channel_id") != "C1" || r.FormValue("thread_ts") != "1700000000.000000" {
-			t.Errorf("form = %v; want channel_id/thread_ts carried over", r.Form)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
 		}
-		if r.FormValue("status") != "is thinking..." {
-			t.Errorf("status = %q", r.FormValue("status"))
+		if body.ChannelID != "C1" || body.ThreadTS != "1700000000.000000" {
+			t.Errorf("body = %+v; want channel_id/thread_ts carried over", body)
 		}
-		if r.FormValue("loading_messages") != "step one,step two" {
-			t.Errorf("loading_messages = %q; want comma-joined", r.FormValue("loading_messages"))
+		if body.Status != "is thinking..." {
+			t.Errorf("status = %q", body.Status)
+		}
+		want := []string{"step one, with a comma", "step two"}
+		if len(body.LoadingMessages) != 2 || body.LoadingMessages[0] != want[0] || body.LoadingMessages[1] != want[1] {
+			t.Errorf("loading_messages = %q; want %q", body.LoadingMessages, want)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
 	err := slackAssistantSetStatus(context.Background(), srv.Client(), "xoxb-test", "C1", "1700000000.000000",
-		"is thinking...", []string{"step one", "step two"})
+		"is thinking...", []string{"step one, with a comma", "step two"})
 	if err != nil {
 		t.Fatalf("slackAssistantSetStatus: %v", err)
 	}
@@ -382,17 +391,22 @@ func TestSlackAssistantSetStatus_GoldenParams(t *testing.T) {
 
 // TestSlackAssistantSetStatus_EmptyStatusClears pins that an empty status
 // is still sent on the wire (Slack's own "empty clears" contract), not
-// omitted.
+// omitted — and that no loading_messages key rides along on a clear.
 func TestSlackAssistantSetStatus_EmptyStatusClears(t *testing.T) {
 	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			t.Fatalf("ParseForm: %v", err)
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
 		}
-		if _, present := r.Form["status"]; !present {
-			t.Error("status key missing from the form; must be sent even when empty")
+		status, present := body["status"]
+		if !present {
+			t.Error("status key missing from the body; must be sent even when empty")
 		}
-		if r.FormValue("status") != "" {
-			t.Errorf("status = %q; want empty", r.FormValue("status"))
+		if status != "" {
+			t.Errorf("status = %q; want empty", status)
+		}
+		if _, present := body["loading_messages"]; present {
+			t.Error("loading_messages key present on a clearing call; must be omitted")
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
@@ -405,12 +419,14 @@ func TestSlackAssistantSetStatus_EmptyStatusClears(t *testing.T) {
 // documented 10-message cap.
 func TestSlackAssistantSetStatus_TruncatesLoadingMessagesOver10(t *testing.T) {
 	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			t.Fatalf("ParseForm: %v", err)
+		var body struct {
+			LoadingMessages []string `json:"loading_messages"`
 		}
-		got := strings.Split(r.FormValue("loading_messages"), ",")
-		if len(got) != slackAssistantLoadingMessagesMax {
-			t.Errorf("loading_messages count = %d; want %d (truncated)", len(got), slackAssistantLoadingMessagesMax)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if len(body.LoadingMessages) != slackAssistantLoadingMessagesMax {
+			t.Errorf("loading_messages count = %d; want %d (truncated)", len(body.LoadingMessages), slackAssistantLoadingMessagesMax)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})

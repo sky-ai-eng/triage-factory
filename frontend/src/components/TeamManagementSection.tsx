@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Plus, RotateCcw, Users } from 'lucide-react'
+import { Archive, Plus, RotateCcw, Users } from 'lucide-react'
 import { useTeams } from '../hooks/useTeams'
 import { fetchArchivedTeams, restoreTeam, type ArchivedTeam } from '../lib/teamLifecycle'
 import { toast } from './Toast/toastStore'
+import ArchiveTeamModal from './ArchiveTeamModal'
 
 // TeamManagementSection is the org-admin "add team" affordance.
 // It lives in Settings (org admin), NOT in the scope dropdowns — it's how
@@ -30,6 +31,11 @@ export default function TeamManagementSection() {
   const [archived, setArchived] = useState<ArchivedTeam[] | null>(null)
   const [archivedError, setArchivedError] = useState<string | null>(null)
   const [restoringId, setRestoringId] = useState<string | null>(null)
+
+  // Which team's archive confirm is open, if any (ArchiveTeamModal,
+  // reused here so the org-wide list gets the same destructive-confirm as the
+  // per-team Settings danger zone).
+  const [archiveTarget, setArchiveTarget] = useState<{ id: string; name: string } | null>(null)
 
   const loadArchived = useCallback(async () => {
     setArchivedError(null)
@@ -95,7 +101,17 @@ export default function TeamManagementSection() {
               className="flex items-center justify-between rounded-lg border border-border-subtle bg-white/50 px-3 py-1.5 text-[13px]"
             >
               <span className="text-text-primary">{t.name}</span>
-              <span className="text-[11px] text-text-tertiary">{t.slug}</span>
+              <div className="flex items-center gap-3">
+                <span className="text-[11px] text-text-tertiary">{t.slug}</span>
+                <button
+                  type="button"
+                  onClick={() => setArchiveTarget({ id: t.id, name: t.name })}
+                  className="inline-flex items-center gap-1 text-[12px] font-medium text-dismiss hover:text-dismiss/80"
+                >
+                  <Archive size={12} />
+                  Archive…
+                </button>
+              </div>
             </li>
           ))}
         </ul>
@@ -175,6 +191,26 @@ export default function TeamManagementSection() {
           </div>
         )}
       </div>
+
+      {archiveTarget && (
+        <ArchiveTeamModal
+          teamId={archiveTarget.id}
+          teamName={archiveTarget.name}
+          onClose={() => setArchiveTarget(null)}
+          onDone={(runs, sessions) => {
+            toast.success(
+              `Team archived — stopped ${runs} ${runs === 1 ? 'delegation' : 'delegations'} and ${sessions} curator ${
+                sessions === 1 ? 'session' : 'sessions'
+              }.`,
+            )
+            setArchiveTarget(null)
+            // Force a refetch next time the archived list is revealed (or right
+            // away if it's already open) so the newly archived team shows up.
+            setArchived(null)
+            void refreshTeams()
+          }}
+        />
+      )}
     </section>
   )
 }
