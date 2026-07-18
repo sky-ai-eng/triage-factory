@@ -208,6 +208,10 @@ type removeRunTreeArgs struct {
 type captureRunDeltaArgs struct {
 	Worktree         string `json:"worktree"`
 	StdoutSocketPath string `json:"stdout_socket_path"`
+	// SessionID, when set, tells the capture child to also read the run's
+	// Claude session transcript (owner-only to the sandbox uid) into the
+	// emitted worktree.CapturedState. Empty for a run with no session.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // captureRunDeltaResult carries only success/error plus a bounded stderr

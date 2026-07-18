@@ -58,6 +58,42 @@ type GitDelta struct {
 	Patch []byte
 }
 
+// CapturedState is everything one snapshot-capture pass emits from inside the
+// agent-uid child: the git delta (nil for a non-git run root) AND the Claude
+// session transcript (empty when the run carries no session, or the file was
+// absent). Both are agent-owned — the transcript sits at 0600 under a 0700
+// projects dir the SDK locks to its owner — so both have to be read as the
+// sandbox uid. Reading them in the same dropped-privilege child is exactly why
+// the orchestrator, which can read neither, never needs to: it decodes this
+// envelope rather than touching the files. Transcript is a []byte, so JSON
+// carries it base64-encoded, tolerating any bytes without escaping.
+type CapturedState struct {
+	Delta      *GitDelta `json:"delta"`
+	Transcript []byte    `json:"transcript,omitempty"`
+}
+
+// ReadClaudeSessionTranscript reads the Claude session transcript for sessionID
+// under wtPath's project encoding, returning (bytes, true) on success and
+// (nil, false) when there is no session id or the file is absent/unreadable.
+// Meant to run inside the agent-uid capture child, where the process IS the
+// transcript's owner: a symlink planted where the transcript should be resolves
+// against that same unprivileged identity, so this can never read past what the
+// agent itself could.
+func ReadClaudeSessionTranscript(wtPath, sessionID string) ([]byte, bool) {
+	if sessionID == "" {
+		return nil, false
+	}
+	p, err := ClaudeSessionPath(ResolveClaudeProjectCwd(wtPath), sessionID)
+	if err != nil {
+		return nil, false
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
+}
+
 // IsGitWorktree reports whether wtPath is the root of a git working tree (a
 // `.git` file for a linked worktree, or a `.git` directory for a plain
 // checkout). False for an empty path or a Jira lazy run-root that holds only

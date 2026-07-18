@@ -23,8 +23,8 @@ func removeRunTree(ctx context.Context, path string) error {
 	return defaultOps.RemoveRunTree(ctx, path)
 }
 
-func captureRunDelta(ctx context.Context, worktree string) ([]byte, error) {
-	return defaultOps.CaptureRunDelta(ctx, worktree)
+func captureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error) {
+	return defaultOps.CaptureRunDelta(ctx, worktree, sessionID)
 }
 
 // runTreeOwnerExtraUID is the orchestrator's uid when this code runs

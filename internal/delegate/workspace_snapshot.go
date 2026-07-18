@@ -94,14 +94,15 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 		return fmt.Errorf("snapshot: empty worktree path")
 	}
 
-	// Git delta — nil for a non-git run-root (e.g. a Jira lazy run), in which
-	// case the snapshot carries only _scratch + the session transcript. In multi
-	// mode this runs in a dropped-privilege, network-isolated child so the
-	// capture's filter-honoring git never executes agent-planted drivers as root
-	// (see captureWorkspaceGit).
-	delta, err := captureWorkspaceGit(ctx, wtPath)
+	// Non-recoverable state — the git delta (nil for a non-git run-root, e.g. a
+	// Jira lazy run) AND the session transcript. In multi mode both are read
+	// inside a dropped-privilege, network-isolated child running as the sandbox
+	// uid: the git capture's filter-honoring commands never execute
+	// agent-planted drivers as root, and the SDK's owner-only transcript is
+	// readable there when it is not to the orchestrator (see captureWorkspaceGit).
+	delta, transcript, err := captureWorkspaceGit(ctx, wtPath, sessionID)
 	if err != nil {
-		return fmt.Errorf("snapshot: capture git: %w", err)
+		return fmt.Errorf("snapshot: capture: %w", err)
 	}
 
 	// Stage the tar on disk, then stream it into Put. A large workspace (the
@@ -118,7 +119,7 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 	name := f.Name()
 	defer func() { _ = os.Remove(name) }()
 	gzw := gzip.NewWriter(f)
-	if err := writeSnapshotTar(gzw, delta, wtPath, sessionID); err != nil {
+	if err := writeSnapshotTar(gzw, delta, wtPath, sessionID, transcript); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -150,7 +151,7 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 // bundle + uncommitted patch (bounded — they're the delta, not full history),
 // the ephemeral _scratch tree (streamed file by file), the Claude session
 // transcript, and the manifest.
-func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID string) error {
+func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID string, transcript []byte) error {
 	tw := tar.NewWriter(w)
 	man := snapshotManifest{SessionID: sessionID}
 	if delta != nil {
@@ -172,17 +173,17 @@ func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID s
 		return fmt.Errorf("snapshot: tar scratch: %w", err)
 	}
 	if sessionID != "" {
-		if data, ok := readSessionTranscript(wtPath, sessionID); ok {
-			if err := writeTarBytes(tw, snapSession, data); err != nil {
+		if len(transcript) > 0 {
+			if err := writeTarBytes(tw, snapSession, transcript); err != nil {
 				return err
 			}
 		} else {
-			// The run has a session but we couldn't read its transcript to
-			// snapshot it (unreadable, or not where we looked). The blob is still
-			// written — worktree state matters on its own — but a resume from it
-			// will hit the transcript-missing guard and fail. Surface it: this is
-			// otherwise silent, and it's exactly the shape that produced a
-			// resume-fails-with-no-reason report.
+			// The run has a session but the capture came back without its
+			// transcript (absent on disk, or a capture that couldn't read it). The
+			// blob is still written — worktree state matters on its own — but a
+			// resume from it will hit the transcript-missing guard and fail.
+			// Surface it: this is otherwise silent, and it's exactly the shape that
+			// produced a resume-fails-with-no-reason report.
 			delegateLog.Warn("snapshot omits session transcript; a resume of this run will not be able to continue the conversation", "session", sessionID, "worktree", wtPath)
 		}
 	}
@@ -448,25 +449,6 @@ func stageScratchMember(stagingDir, relPath string, r io.Reader) error {
 		return fmt.Errorf("rehydrate: flush scratch %s: %w", relPath, err)
 	}
 	return nil
-}
-
-// readSessionTranscript reads the Claude session JSONL for the agent's cwd,
-// returning ok=false when there's no transcript on disk (a run that never
-// reached an init message). A read error other than "missing" is logged and
-// treated as absent — the resume still works off the warm worktree if present.
-func readSessionTranscript(wtPath, sessionID string) ([]byte, bool) {
-	p, err := worktree.ClaudeSessionPath(worktree.ResolveClaudeProjectCwd(wtPath), sessionID)
-	if err != nil {
-		return nil, false
-	}
-	data, err := os.ReadFile(p)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			delegateLog.Warn("snapshot: read session transcript failed", "path", p, "error", err)
-		}
-		return nil, false
-	}
-	return data, true
 }
 
 // restoreSessionTranscript writes the carried transcript to the new cwd's

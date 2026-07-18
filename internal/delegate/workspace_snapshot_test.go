@@ -327,8 +327,10 @@ func TestSnapshotWorkspace_CompressionShrinksTranscriptHeavyBlob(t *testing.T) {
 	}
 
 	// The same workspace through the tar writer alone = the plain equivalent.
+	// The transcript now rides in as bytes (captured agent-side), so pass the
+	// same JSONL the on-disk session holds.
 	var plain bytes.Buffer
-	if err := writeSnapshotTar(&plain, nil, wtPath, sessionID); err != nil {
+	if err := writeSnapshotTar(&plain, nil, wtPath, sessionID, []byte(jsonl.String())); err != nil {
 		t.Fatalf("writeSnapshotTar (plain): %v", err)
 	}
 	if gzSize >= int64(plain.Len())/2 {

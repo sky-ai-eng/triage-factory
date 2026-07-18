@@ -18,7 +18,7 @@ import (
 // capture with a stand-in that writes directly to the caller-supplied
 // *os.File — exercising the RPC/socket-passthrough wiring without needing
 // root.
-func withStubCaptureRunDeltaTo(t *testing.T, fn func(ctx context.Context, worktree string, stdout *os.File) (string, error)) {
+func withStubCaptureRunDeltaTo(t *testing.T, fn func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error)) {
 	t.Helper()
 	orig := captureRunDeltaTo
 	captureRunDeltaTo = fn
@@ -107,7 +107,7 @@ func TestIPCRoundTrip_CaptureRunDelta_StreamsByteIdentical(t *testing.T) {
 	withTempCaptureSocketDir(t)
 	opaque := []byte{'{', 0x00, 0xff, 0xfe, '"', ':'}
 	var gotWorktree string
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree string, stdout *os.File) (string, error) {
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error) {
 		gotWorktree = worktree
 		_, err := stdout.Write(opaque)
 		_ = stdout.Close()
@@ -115,7 +115,7 @@ func TestIPCRoundTrip_CaptureRunDelta_StreamsByteIdentical(t *testing.T) {
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	delta, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-5")
+	delta, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-5", "")
 	if err != nil {
 		t.Fatalf("CaptureRunDelta: %v", err)
 	}
@@ -135,14 +135,14 @@ func TestIPCRoundTrip_CaptureRunDelta_StreamsByteIdentical(t *testing.T) {
 func TestIPCRoundTrip_CaptureRunDelta_LargeDelta(t *testing.T) {
 	withTempCaptureSocketDir(t)
 	big := bytes.Repeat([]byte{0xAB}, 3*maxFrameSize) // 3 MiB > the RPC frame cap
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree string, stdout *os.File) (string, error) {
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error) {
 		_, err := stdout.Write(big)
 		_ = stdout.Close()
 		return "", err
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	delta, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-3")
+	delta, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-3", "")
 	if err != nil {
 		t.Fatalf("CaptureRunDelta: %v", err)
 	}
@@ -156,13 +156,13 @@ func TestIPCRoundTrip_CaptureRunDelta_LargeDelta(t *testing.T) {
 // not an error — the caller's null-delta handling depends on it.
 func TestIPCRoundTrip_CaptureRunDelta_EmptyMeansNoDelta(t *testing.T) {
 	withTempCaptureSocketDir(t)
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree string, stdout *os.File) (string, error) {
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error) {
 		_ = stdout.Close()
 		return "", nil
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	delta, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-4")
+	delta, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-4", "")
 	if err != nil {
 		t.Fatalf("CaptureRunDelta: %v", err)
 	}
@@ -182,14 +182,14 @@ func TestIPCRoundTrip_CaptureRunDelta_OverCapFailsCleanly(t *testing.T) {
 	sandbox.CaptureMaxBytes = 1024
 	t.Cleanup(func() { sandbox.CaptureMaxBytes = origCap })
 
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree string, stdout *os.File) (string, error) {
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error) {
 		defer stdout.Close()
 		_, err := stdout.Write(bytes.Repeat([]byte{0x01}, 4096)) // well past the shrunk cap
 		return "", err
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	if _, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-cap"); err == nil {
+	if _, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-cap", ""); err == nil {
 		t.Fatal("expected an over-cap error, got nil")
 	}
 }
@@ -210,7 +210,7 @@ func TestIPCRoundTrip_CaptureRunDelta_WaitsForStreamAfterRPCSuccess(t *testing.T
 
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree string, stdout *os.File) (string, error) {
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error) {
 		go func() {
 			<-release
 			_ = stdout.Close()
@@ -220,7 +220,7 @@ func TestIPCRoundTrip_CaptureRunDelta_WaitsForStreamAfterRPCSuccess(t *testing.T
 	client := serveTestBroker(t, &fakeOps{})
 
 	start := time.Now()
-	_, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-wait")
+	_, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-wait", "")
 	if err == nil {
 		t.Fatal("expected a timeout waiting for the stream after RPC success, got nil")
 	}
@@ -243,7 +243,7 @@ func TestIPCRoundTrip_CaptureRunDelta_ClosesStreamPromptlyOnRPCFailure(t *testin
 	withTempCaptureSocketDir(t)
 
 	peerClosed := make(chan struct{})
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree string, stdout *os.File) (string, error) {
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error) {
 		t.Cleanup(func() { _ = stdout.Close() })
 		go func() {
 			buf := make([]byte, 16)
@@ -254,7 +254,7 @@ func TestIPCRoundTrip_CaptureRunDelta_ClosesStreamPromptlyOnRPCFailure(t *testin
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	if _, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-fail"); err == nil {
+	if _, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-fail", ""); err == nil {
 		t.Fatal("expected the simulated RPC failure to propagate")
 	}
 
@@ -270,13 +270,13 @@ func TestIPCRoundTrip_CaptureRunDelta_ClosesStreamPromptlyOnRPCFailure(t *testin
 // with an always-appended, now-empty "(stderr: )" suffix.
 func TestIPCRoundTrip_CaptureRunDelta_ErrorHasNoEmptyStderrSuffix(t *testing.T) {
 	withTempCaptureSocketDir(t)
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree string, stdout *os.File) (string, error) {
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error) {
 		_ = stdout.Close()
 		return "", errors.New("simulated capture failure")
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	_, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-errfmt")
+	_, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-errfmt", "")
 	if err == nil {
 		t.Fatal("expected the simulated failure to propagate")
 	}

@@ -20,6 +20,6 @@ func removeRunTree(_ context.Context, path string) error {
 
 // captureRunDelta has no non-Linux implementation; the delegate caller
 // routes to the in-process capture before ever reaching this.
-func captureRunDelta(_ context.Context, _ string) ([]byte, error) {
+func captureRunDelta(_ context.Context, _, _ string) ([]byte, error) {
 	return nil, ErrUnsupportedPlatform
 }

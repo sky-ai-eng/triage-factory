@@ -40,7 +40,8 @@ func TestGitDeltaJSONRoundTrip(t *testing.T) {
 }
 
 // TestGitDeltaNilJSON pins that a nil delta (a non-git run root) marshals to
-// "null", which captureIsolated maps back to (nil, nil).
+// "null" — how it rides inside the CapturedState envelope's `delta` field, which
+// captureIsolated then decodes back to a nil delta.
 func TestGitDeltaNilJSON(t *testing.T) {
 	b, err := json.Marshal((*worktree.GitDelta)(nil))
 	if err != nil {
