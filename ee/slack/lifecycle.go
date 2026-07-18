@@ -275,7 +275,7 @@ func (a *lifecycleAdapter) mentionContext(ctx context.Context, orgID, eventID st
 		return SlackMessageMetadata{}, "", false
 	}
 	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
-		slackLog.Warn("slack lifecycle: parse mention metadata failed", "error", err)
+		slackLog.Warn("slack lifecycle: parse message metadata failed", "error", err)
 		return SlackMessageMetadata{}, "", false
 	}
 	token, ok = a.resolveBotToken(ctx, orgID, meta.WorkspaceID, meta.APIAppID)
