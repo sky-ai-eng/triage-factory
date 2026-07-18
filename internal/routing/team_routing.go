@@ -120,6 +120,36 @@ func (r *Router) teamTracksEventProject(evt domain.Event, teamID string) bool {
 	return tracks
 }
 
+// trackingTeams filters an identity-derived team set — the owner ladder's
+// tier-4 result (a PR author's / Jira assignee's member teams) — down to the
+// teams that actually track the event's entity. It applies the same team↔repo
+// (GitHub) / team↔project (Jira) gate matchHandlers applies to handlers, closing
+// the one path that reached the visibility/owner set ungated: a team the author
+// merely belongs to but that tracks none of this entity's repo would otherwise
+// enter the set as an ambiguous co-owner, land in task_teams, and surface the
+// entity on that team's board even though the team could never act on it (the
+// task's automation can't fire, and a member can't claim work for a repo the
+// team doesn't track).
+//
+// Input order is preserved (callers pass an already-deterministic set). Fails
+// open per team via teamTracksEventScope — an unwired tracking store, malformed
+// metadata, or a transient store error keeps the team — so the gate is inert in
+// exactly the wiring where handlerScopeMatchesEvent is (pre-config / tests that
+// don't thread the tracking stores), and local N=1 is unaffected (the sole team
+// tracks every configured repo).
+func (r *Router) trackingTeams(evt domain.Event, teams []string) []string {
+	if len(teams) == 0 {
+		return teams
+	}
+	out := make([]string, 0, len(teams))
+	for _, t := range teams {
+		if r.teamTracksEventScope(evt, t) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // handlerTeamID resolves the team a matched event_handler routes its
 // tasks to. Every handler is team-scoped — user-source
 // rows carry the user's team, system-source rows are materialized
@@ -249,8 +279,16 @@ func (r *Router) reviewRequestVisibilityTeams(orgID string, evt domain.Event) (t
 //	                                       (tier 4 ambiguous): no single owner,
 //	                                       visible to all of them, NULL owner;
 //	owner == "",   ownerSet == nil      — nothing resolved (external/non-TF
-//	                                       author): no task unless an explicit
-//	                                       watch rule pulls a team in.
+//	                                       author, or no member team tracks the
+//	                                       entity's repo): no task unless an
+//	                                       explicit watch rule pulls a team in.
+//
+// The identity tier (tier 4) is gated to teams that track the entity's repo (see
+// trackingTeams), so a team the author belongs to but which tracks nothing never
+// becomes an owner candidate or lands in the visibility set. Tiers 1–3 (a
+// structural project/override owner, a prior owned task) are already repo-relevant
+// by construction and stay ungated — matching the forward-only tracking-change
+// rule, which never retroactively reassigns an already-owned entity.
 //
 // Claims-free ...System lookups throughout: the router runs on the eventbus
 // goroutine with no JWT context.
@@ -277,8 +315,15 @@ func (r *Router) authorCentricOwner(orgID string, evt domain.Event, entityID str
 		}
 	}
 
-	// Tier 4 — the PR author's identity → TF user(s) → teams.
-	teams := r.authorTeams(orgID, evt)
+	// Tier 4 — the PR author's identity → TF user(s) → teams, gated to the teams
+	// that actually track this repo. Without the gate a team the author merely
+	// belongs to (e.g. an unconfigured team that tracks no repos) would enter the
+	// set as an ambiguous co-owner and surface the entity on that team's board,
+	// even though it can never act on the repo — the queue-column leak this gate
+	// closes. If the gate empties the set (no member team tracks the repo) the
+	// author is treated like an external one: no member owner, deferring to any
+	// explicit watch handler exactly as an external/non-TF author would.
+	teams := r.trackingTeams(evt, r.authorTeams(orgID, evt))
 	switch len(teams) {
 	case 0:
 		return "", nil
@@ -346,9 +391,14 @@ func (r *Router) authorTeams(orgID string, evt domain.Event) []string {
 //	                                       (tier 4 ambiguous): no single owner,
 //	                                       visible to all of them, NULL owner;
 //	owner == "",   ownerSet == nil      — nothing resolved (the assignee isn't a
-//	                                       TF user, or the issue is unassigned):
+//	                                       TF user, the issue is unassigned, or no
+//	                                       member team tracks the entity's project):
 //	                                       no task unless an explicit watch rule
 //	                                       pulls a team in.
+//
+// As with the GitHub author ladder, the identity tier (tier 4) is gated to teams
+// that track the entity's Jira project (trackingTeams); tiers 1 and 3 stay
+// ungated (already project-relevant, forward-only).
 //
 // Tiers 1 and 3 are provider-agnostic and shared with authorCentricOwner; only
 // the identity tier (4) differs — the Jira assignee account id instead of the
@@ -390,8 +440,12 @@ func (r *Router) assigneeCentricJiraOwner(orgID string, evt domain.Event, entity
 		}
 	}
 
-	// Tier 4 — the issue assignee's identity → TF user(s) → teams.
-	teams := r.assigneeTeams(orgID, evt)
+	// Tier 4 — the issue assignee's identity → TF user(s) → teams, gated to the
+	// teams that actually track this Jira project (same reason as the GitHub
+	// author ladder: a team the assignee merely belongs to but that tracks none
+	// of this project must not become a co-owner in the visibility set). An empty
+	// gated set falls through to the external-assignee semantics below.
+	teams := r.trackingTeams(evt, r.assigneeTeams(orgID, evt))
 	switch len(teams) {
 	case 0:
 		return "", nil
