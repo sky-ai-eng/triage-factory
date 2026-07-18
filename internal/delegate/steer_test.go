@@ -91,6 +91,58 @@ func TestSendMessage_OpenRoutesToResume(t *testing.T) {
 	}
 }
 
+// TestSendMessage_RunningRemoteRoutesToController pins the multi-mode fix: a
+// running run with NO process in THIS pod's registry — the shape a control pod
+// always sees, since a running run's process lives on an executor — must route
+// through the controller (which delivers over run_signals to the owner), NOT be
+// misread as unsteerable because the LOCAL registry missed. Before the fix this
+// fell through to the resumable check (running isn't resumable) and 409'd.
+func TestSendMessage_RunningRemoteRoutesToController(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-run", "sess-run", "/tmp/wt-run")
+	if _, err := database.Exec(`UPDATE runs SET status='running' WHERE id='r-run'`); err != nil {
+		t.Fatalf("running: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	fc := &fakeController{}
+	s.controller = fc
+	// Deliberately do NOT registerProc: getProc stays nil, exactly as on a control
+	// pod whose running run's process lives on an executor. The controller (real
+	// crossPodController in production) is what resolves the remote owner; here the
+	// fake stands in to assert the routing decision, not the delivery.
+
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-run", runmode.LocalDefaultUserID, "steer me"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if fc.steerCalls != 1 || fc.steerRunID != "r-run" || fc.steerText != "steer me" {
+		t.Errorf("steer = {calls:%d runID:%q text:%q}, want {1 r-run \"steer me\"} — a running-but-remote run must route to the controller, not 409", fc.steerCalls, fc.steerRunID, fc.steerText)
+	}
+}
+
+// TestSendMessage_QueuedNotSteerable pins the boundary the status switch draws:
+// a queued run is claimed by no one yet, so there is no owner to signal and it is
+// not yet parked to resume — it must be ErrRunNotSteerable, NOT routed to the
+// controller (which would find no owner). Guards against widening the active
+// branch to pre-claim states.
+func TestSendMessage_QueuedNotSteerable(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-q", "sess-q", "/tmp/wt-q")
+	if _, err := database.Exec(`UPDATE runs SET status='queued' WHERE id='r-q'`); err != nil {
+		t.Fatalf("queued: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	fc := &fakeController{}
+	s.controller = fc
+
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-q", runmode.LocalDefaultUserID, "hi")
+	if !errors.Is(err, ErrRunNotSteerable) {
+		t.Errorf("err = %v, want ErrRunNotSteerable for a queued run", err)
+	}
+	if fc.steerCalls != 0 {
+		t.Errorf("steer calls = %d, want 0 — a queued run has no owner to steer", fc.steerCalls)
+	}
+}
+
 // TestSendMessage_TerminalNotSteerable: a terminal finish run (no live process,
 // completed without an abort outcome) can take no message — SendMessage returns
 // ErrRunNotSteerable for the handler to map to 409.

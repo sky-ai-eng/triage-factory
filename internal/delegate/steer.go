@@ -64,34 +64,54 @@ func resumableState(status, outcome string) bool {
 // writes under that user's synthetic claims (a resume is user-initiated
 // regardless of the run's original trigger).
 func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text string) error {
-	// A warm process is steered in place — getProc is the liveness gate, so the
-	// server stays out of s.procs entirely by routing through here.
+	// Fast path: the run's process is in THIS pod's registry → steer in place
+	// with no DB read. Self-selecting — it hits in local mode and on the pod that
+	// owns the process, and is a cheap miss on a multi control pod (whose
+	// steerable processes all live on executors), which the status switch below
+	// then routes. This is only an optimization now, NOT the live-vs-parked
+	// discriminator: that is the run's status, resolved below.
 	if s.getProc(runID) != nil {
 		return s.Steer(ctx, runID, text)
 	}
-	// No warm process: only a resumable run can be woken. GetSystem is scoped by
-	// its orgID arg, so a run in another tenant reads as absent → not steerable.
-	// A getProc-nil → GetSystem race (the run registers a process between the two
-	// reads) can't slip a message past: a now-running run reads as not resumable,
-	// and a concurrent resume/approval that already moved the row makes
-	// ResumeOpenRun's MarkQueuedForResume compare-and-swap lose the race →
-	// ErrRunNotResumable. Both map to 409, so the client just re-reads and retries.
+	// No LOCAL process. Route on the run's STATUS, not on whether the process
+	// happens to sit in this pod's memory — the old code used the local registry
+	// as the liveness gate, so on a control pod every running run (its process on
+	// an executor) fell through to "not resumable" and 409'd. GetSystem is scoped
+	// by its orgID arg, so a run in another tenant reads as absent → not steerable.
 	run, err := s.agentRuns.GetSystem(ctx, orgID, runID)
 	if err != nil {
 		return fmt.Errorf("load run: %w", err)
 	}
-	if run == nil || !resumableState(run.Status, run.Outcome) {
+	if run == nil {
 		return ErrRunNotSteerable
 	}
-	// Note: unlike the live-steer branch above, the out-of-band
-	// <system-note> prepends (staged injections + artifact ledger) are NOT
-	// composed here. Resume-by-enqueue (TFAC-585) defers actual delivery
-	// to whichever executor eventually claims the re-queued row — composing
-	// the prepend now would destructively flush the staged-injection queue
-	// at enqueue time, silently losing anything staged in the gap before
-	// the claim. Spawner.dispatchResumeClaim composes it immediately
-	// before delivery instead.
-	return s.ResumeOpenRun(ctx, orgID, runID, text, userID)
+	switch {
+	case domain.IsActiveRunStatus(run.Status):
+		// In flight on an executor (claimed, setting up or running). s.Steer routes
+		// through the controller: it retries THIS pod's registry — covering the
+		// getProc→GetSystem race where the process just registered here — and, on a
+		// miss, delivers over run_signals to the owning executor. A run mid-setup
+		// whose owner has no process registered yet acks "gone" and degrades to the
+		// same 409 the old path returned, never a lost message. In local mode the
+		// controller is local-only, so an active run absent from this (sole)
+		// process's registry is a genuine race → ErrNoLiveProcess.
+		return s.Steer(ctx, runID, text)
+	case resumableState(run.Status, run.Outcome):
+		// Parked (open / completed+abort) → wake via resume-by-enqueue. Unlike the
+		// live-steer branch, the out-of-band <system-note> prepends (staged
+		// injections + artifact ledger) are NOT composed here: resume-by-enqueue
+		// (TFAC-585) defers delivery to whichever executor claims the re-queued row,
+		// and composing the prepend now would destructively flush the
+		// staged-injection queue at enqueue time, silently losing anything staged in
+		// the gap before the claim. Spawner.dispatchResumeClaim composes it
+		// immediately before delivery instead.
+		return s.ResumeOpenRun(ctx, orgID, runID, text, userID)
+	default:
+		// queued (not yet claimed — no owner to signal, not yet parked to resume)
+		// or a terminal finish/failed/cancelled run: nothing live to steer and
+		// nothing parked to resume.
+		return ErrRunNotSteerable
+	}
 }
 
 // resumeSystemPrepends assembles the out-of-band <system-note> blocks prepended
