@@ -8,9 +8,9 @@ import (
 
 // SlackMessageMetadata is the durable audit shape for one inbound Slack
 // message addressed to the bot — everything the ingest pipeline
-// (ingest.go) captures, JSON-marshaled into events.metadata_json. Today
-// every delivery is an app_mention; future engaged-thread follow-ups may
-// carry Mentioned=false.
+// (ingest.go) captures, JSON-marshaled into events.metadata_json. A delivery
+// is either an explicit @-mention (Mentioned=true) or an engaged-thread
+// follow-up in a thread the bot already owns (Mentioned=false).
 type SlackMessageMetadata struct {
 	// WorkspaceID is the Slack team ID. The entity key (domain.SlackSourceID)
 	// deliberately excludes workspace context (channel IDs are stable across
@@ -35,8 +35,8 @@ type SlackMessageMetadata struct {
 	// Mentioned records whether this message explicitly @-mentioned the
 	// bot, as opposed to arriving as a follow-up in an already-engaged
 	// thread. Transport detail, not a different situation — see
-	// domain.EventSlackMessage's doc. Always true until non-mention follow-ups
-	// are ingested.
+	// domain.EventSlackMessage's doc. True for an app_mention delivery, false
+	// for an engaged-thread follow-up (message.channels / message.groups).
 	Mentioned bool `json:"mentioned"`
 }
 

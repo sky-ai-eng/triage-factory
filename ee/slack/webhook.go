@@ -46,7 +46,14 @@ type slackEventEnvelope struct {
 // blocks, attachments) is out of scope for this leaf — no write-back, no
 // rich rendering.
 type slackInnerEvent struct {
-	Type     string `json:"type"`
+	Type string `json:"type"`
+	// Subtype discriminates message.channels / message.groups deliveries: a
+	// plain thread reply carries no subtype (""), a reply also broadcast to the
+	// channel carries "thread_broadcast", and every edit/delete/system/bot
+	// variant carries its own (message_changed, message_deleted, channel_join,
+	// bot_message, …). Empty on app_mention. See the engaged-thread branch in
+	// ingest.go.
+	Subtype  string `json:"subtype"`
 	User     string `json:"user"`
 	BotID    string `json:"bot_id"`
 	Channel  string `json:"channel"`
@@ -165,6 +172,7 @@ func (h *webhookHandler) handleEventCallback(w http.ResponseWriter, r *http.Requ
 
 	ev := inboundMention{
 		Type:     inner.Type,
+		Subtype:  inner.Subtype,
 		EventID:  envelope.EventID,
 		Channel:  inner.Channel,
 		User:     inner.User,

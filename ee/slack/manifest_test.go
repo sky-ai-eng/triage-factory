@@ -7,8 +7,8 @@ import (
 )
 
 // TestBuildSlackManifest_Socket: socket_mode_enabled true, bot_events carries
-// exactly app_mention, no request_url, the full scope list, and the org name
-// folded into display_information.name.
+// the mention + engaged-thread message subscriptions, no request_url, the full
+// scope list, and the org name folded into display_information.name.
 func TestBuildSlackManifest_Socket(t *testing.T) {
 	m := buildSlackManifest("Acme", transportSocket, "https://tf.acme.example", "org-123")
 
@@ -21,9 +21,7 @@ func TestBuildSlackManifest_Socket(t *testing.T) {
 	if m.Settings.EventSubscriptions.RequestURL != "" {
 		t.Errorf("request_url = %q, want empty for socket transport", m.Settings.EventSubscriptions.RequestURL)
 	}
-	if got := m.Settings.EventSubscriptions.BotEvents; len(got) != 1 || got[0] != "app_mention" {
-		t.Errorf("bot_events = %v, want [app_mention] only", got)
-	}
+	assertBotEvents(t, m.Settings.EventSubscriptions.BotEvents)
 	assertFullScopeSet(t, m.OAuthConfig.Scopes.Bot)
 
 	// Round-trips through JSON with no "request_url" key present at all —
@@ -42,8 +40,8 @@ func TestBuildSlackManifest_Socket(t *testing.T) {
 
 // TestBuildSlackManifest_EventsAPI: request_url carries the publicURL +
 // per-org webhook path, socket_mode_enabled is entirely absent from the
-// wire JSON (omitempty on a nil pointer), bot_events still exactly
-// [app_mention].
+// wire JSON (omitempty on a nil pointer), bot_events carries the mention +
+// engaged-thread message subscriptions.
 func TestBuildSlackManifest_EventsAPI(t *testing.T) {
 	m := buildSlackManifest("Acme", transportEventsAPI, "https://tf.acme.example", "org-123")
 
@@ -54,9 +52,7 @@ func TestBuildSlackManifest_EventsAPI(t *testing.T) {
 	if m.Settings.SocketModeEnabled != nil {
 		t.Errorf("socket_mode_enabled = %v, want nil (omitted) for events_api transport", *m.Settings.SocketModeEnabled)
 	}
-	if got := m.Settings.EventSubscriptions.BotEvents; len(got) != 1 || got[0] != "app_mention" {
-		t.Errorf("bot_events = %v, want [app_mention] only", got)
-	}
+	assertBotEvents(t, m.Settings.EventSubscriptions.BotEvents)
 	assertFullScopeSet(t, m.OAuthConfig.Scopes.Bot)
 
 	raw, err := json.Marshal(m)
@@ -65,6 +61,23 @@ func TestBuildSlackManifest_EventsAPI(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "socket_mode_enabled") {
 		t.Errorf("events_api manifest JSON unexpectedly carries socket_mode_enabled: %s", raw)
+	}
+}
+
+// assertBotEvents pins the exact bot_events set: the explicit @-mention plus
+// the two engaged-thread message subscriptions (public + private channels).
+// message.im / message.mpim are deliberately absent — DM support is a separate
+// future ticket, and un-subscribed message types must never reach the binary.
+func assertBotEvents(t *testing.T, got []string) {
+	t.Helper()
+	want := []string{"app_mention", "message.channels", "message.groups"}
+	if len(got) != len(want) {
+		t.Fatalf("bot_events = %v (%d); want %v", got, len(got), want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("bot_events[%d] = %q; want %q", i, got[i], w)
+		}
 	}
 }
 

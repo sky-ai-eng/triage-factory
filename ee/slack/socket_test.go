@@ -277,6 +277,12 @@ func mentionInner(channel, user, ts string) map[string]any {
 	return map[string]any{"type": "app_mention", "channel": channel, "user": user, "ts": ts}
 }
 
+// threadReplyInner builds a message.channels inner event: an un-mentioned human
+// reply inside a thread (inner type "message", thread_ts set, no subtype).
+func threadReplyInner(channel, user, ts, threadTS, text string) map[string]any {
+	return map[string]any{"type": "message", "channel": channel, "user": user, "ts": ts, "thread_ts": threadTS, "text": text}
+}
+
 // ---------- backoff ----------
 
 func TestBackoffDuration_WithinBoundsAndGrows(t *testing.T) {
@@ -426,6 +432,53 @@ func TestSocketManager_HappyPath_PublishesAndAcks(t *testing.T) {
 	status, ok := rig.mgr.StatusFor(socketTestAppID)
 	if !ok || status.State != stateOpen {
 		t.Errorf("StatusFor = %+v, ok=%v; want state=open", status, ok)
+	}
+}
+
+// TestSocketManager_EngagedThreadFollowUp_PublishesUnmentioned is the
+// socket-transport twin of the webhook engaged-thread acceptance: a
+// root-message mention over the socket mints the thread entity, then an
+// un-mentioned message.channels reply on the same connection publishes a
+// second slack:message with Mentioned=false — the full socket parse →
+// engaged-thread branch → publish path.
+func TestSocketManager_EngagedThreadFollowUp_PublishesUnmentioned(t *testing.T) {
+	withFastSocketTimings(t)
+	fake := newFakeSlackSocket(t)
+	rig := newSocketTestRig(t, socketTestRow(socketTestOrgID))
+	runManager(t, rig.mgr)
+
+	conn := fake.nextConn(t)
+
+	// Root mention (no thread_ts) mints the kind="thread" entity the follow-up
+	// looks for.
+	root := eventCallbackPayload(socketTestWorkspace, socketTestAppID, "Ev-root", map[string]any{
+		"type": "app_mention", "channel": "C1", "user": "U1", "text": "<@U0BOT> review my PRs", "ts": "1600000000.000100",
+	})
+	sendEventsAPI(t, conn, "Env-root", root)
+	expectAck(t, conn, "Env-root")
+
+	// Un-mentioned reply in that same thread.
+	follow := eventCallbackPayload(socketTestWorkspace, socketTestAppID, "Ev-followup",
+		threadReplyInner("C1", "U1", "1600000000.000200", "1600000000.000100", "here are the numbers"))
+	sendEventsAPI(t, conn, "Env-followup", follow)
+	expectAck(t, conn, "Env-followup")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(*rig.published) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(*rig.published) != 2 {
+		t.Fatalf("published %d events (root + follow-up); want 2", len(*rig.published))
+	}
+	var meta SlackMessageMetadata
+	if err := json.Unmarshal([]byte((*rig.published)[1].MetadataJSON), &meta); err != nil {
+		t.Fatalf("follow-up metadata round-trip: %v", err)
+	}
+	if meta.Mentioned {
+		t.Error("follow-up Mentioned = true; want false (un-mentioned engaged-thread reply)")
+	}
+	if meta.ThreadTS != "1600000000.000100" {
+		t.Errorf("follow-up ThreadTS = %q; want the root ts", meta.ThreadTS)
 	}
 }
 

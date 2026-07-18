@@ -24,7 +24,13 @@ const mentionTitleMaxRunes = 120
 // leaf) parse their payload into before calling handleEventCallback —
 // Slack's inner "event" object carries the same fields on both transports.
 type inboundMention struct {
-	Type     string // the inner event's own "type", e.g. "app_mention"
+	Type string // the inner event's own "type", e.g. "app_mention" or "message"
+	// Subtype is the inner message event's "subtype" — empty on an app_mention
+	// and on a plain thread reply, "thread_broadcast" on a reply also sent to
+	// the channel, and one of Slack's edit/delete/system/bot values otherwise.
+	// The engaged-thread branch (handleThreadMessage) admits only "" and
+	// "thread_broadcast".
+	Subtype  string
 	EventID  string // the outer envelope's Slack event id (Ev…) — the dedup key
 	Channel  string
 	User     string // the mentioning human's Slack user id
@@ -42,6 +48,11 @@ type inboundMention struct {
 // adapter.
 type entityFinder interface {
 	FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)
+	// GetBySourceSystem resolves an entity by its natural (source, source_id)
+	// key without creating one — the engaged-thread branch's engagement gate
+	// (handleThreadMessage) needs to check a thread entity's existence, kind,
+	// and state before deciding to ingest a follow-up, never mint one.
+	GetBySourceSystem(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error)
 }
 
 // ingestPipeline is the transport-neutral core both the Events API receiver
@@ -74,18 +85,32 @@ type ingestPipeline struct {
 	title *TitleResolver
 }
 
-// handleEventCallback is the one function both transports call for an
-// inbound Slack event. It is deliberately synchronous: one dedup insert,
-// one entity find-or-create, one publish — well inside Slack's 3-second
-// webhook ack budget. Returns an error only for a genuine failure (store
-// error, marshal failure); every "nothing to do" case (wrong event type,
-// self/bot mention, duplicate delivery) is a nil-error early return, logged
-// at debug — none of those are failures the caller should retry or 5xx on.
+// handleEventCallback is the one function both transports call for an inbound
+// Slack event. It dispatches on the inner event type: an explicit @-mention
+// (app_mention) mints/re-derives the thread entity and always publishes; an
+// un-mentioned message.channels / message.groups delivery is an engaged-thread
+// follow-up that publishes only if it lands in a thread the bot already owns.
+// Any other type is dropped defensively. Returns an error only for a genuine
+// failure (store error, marshal failure); every "nothing to do" case is a
+// nil-error early return, logged at debug — none of those are failures the
+// caller should retry or 5xx on.
 func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.Workspace, ev inboundMention) error {
-	if ev.Type != "app_mention" {
-		slackLog.Debug("dropping non-app_mention slack event", "type", ev.Type, "workspace", ws.WorkspaceID)
+	switch ev.Type {
+	case "app_mention":
+		return p.handleAppMention(ctx, ws, ev)
+	case "message":
+		return p.handleThreadMessage(ctx, ws, ev)
+	default:
+		slackLog.Debug("dropping unsupported slack event type", "type", ev.Type, "workspace", ws.WorkspaceID)
 		return nil
 	}
+}
+
+// handleAppMention ingests an explicit @-mention. It is deliberately
+// synchronous: one dedup insert, one entity find-or-create, one publish — well
+// inside Slack's 3-second webhook ack budget. Publishes slack:message with
+// Mentioned=true.
+func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Workspace, ev inboundMention) error {
 	// EventID feeds the dedup key and Channel/TS feed the entity source_id
 	// (domain.SlackSourceID) — an empty value in any of them (a malformed
 	// or unexpectedly-shaped payload) would dedup unrelated deliveries
@@ -140,28 +165,9 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 		p.title.dispatch(ws, entity.ID, ev.Channel, ev.User, ev.Text)
 	}
 
-	metaJSON, err := json.Marshal(SlackMessageMetadata{
-		WorkspaceID: ws.WorkspaceID,
-		APIAppID:    ws.APIAppID,
-		Channel:     ev.Channel,
-		TS:          ev.TS,
-		ThreadTS:    ev.ThreadTS,
-		SenderID:    ev.User,
-		Text:        ev.Text,
-		EventID:     ev.EventID,
-		Mentioned:   true,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal slack message metadata: %w", err)
+	if err := p.publishMessage(ws, ev, entity.ID, true, occurredAt); err != nil {
+		return err
 	}
-
-	p.publish(domain.Event{
-		OrgID:        ws.OrgID,
-		EventType:    domain.EventSlackMessage,
-		EntityID:     &entity.ID,
-		MetadataJSON: string(metaJSON),
-		OccurredAt:   occurredAt,
-	})
 
 	// Best-effort sender identity capture (TFAC-531), detached from the
 	// publish above: it must never make a real Slack mention wait on a
@@ -171,6 +177,113 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 		go p.identity.resolveSender(context.Background(), ws, ev.User)
 	}
 
+	return nil
+}
+
+// handleThreadMessage ingests an engaged-thread follow-up — an un-mentioned
+// human message.channels / message.groups delivery inside a thread the bot
+// already owns. Every drop reason returns BEFORE MarkDeliveredSystem so
+// slack_deliveries stays bounded: the vast majority of channel messages are
+// not in an engaged thread, and recording a delivery row for each would let
+// the firehose grow the table without bound. Publishes slack:message with
+// Mentioned=false — in an engaged thread every message is addressed to the
+// bot, the @ being transport detail the thread doesn't require.
+func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.Workspace, ev inboundMention) error {
+	// (1) subtype gate: a plain reply ("") or a reply also broadcast to the
+	// channel ("thread_broadcast") is a real human message; every other
+	// subtype (message_changed, message_deleted, channel_join, bot_message, …)
+	// is an edit/system/bot variant this pipeline has no use for.
+	if ev.Subtype != "" && ev.Subtype != "thread_broadcast" {
+		slackLog.Debug("dropping slack message: unsupported subtype", "subtype", ev.Subtype, "workspace", ws.WorkspaceID)
+		return nil
+	}
+	// (2) thread reply gate: only a message inside a thread can be an
+	// engaged-thread follow-up. Root-channel chatter (no thread_ts) never
+	// ingests — the bot listens only to threads it owns.
+	if ev.ThreadTS == "" {
+		slackLog.Debug("dropping slack message: not a thread reply", "workspace", ws.WorkspaceID)
+		return nil
+	}
+	// EventID feeds the dedup key, Channel + ThreadTS feed the entity source_id
+	// (domain.SlackSourceID); TS feeds the occurred-at. Drop a payload missing
+	// any of them rather than deriving a garbage key — same discipline as the
+	// app_mention path.
+	if ev.EventID == "" || ev.Channel == "" || ev.TS == "" {
+		slackLog.Debug("dropping malformed slack message: missing event_id/channel/ts", "workspace", ws.WorkspaceID)
+		return nil
+	}
+	// (3) bot/self-authored: TF's own thread posts (and any other bot's)
+	// arrive here too — never ingest them, or a run's own reply would feed
+	// itself back in.
+	if ev.BotID != "" || (ws.BotUserID != "" && ev.User == ws.BotUserID) {
+		slackLog.Debug("dropping self/bot-authored slack message", "workspace", ws.WorkspaceID)
+		return nil
+	}
+	// (4) explicit-mention dedup: a threaded message that @-mentions the bot
+	// ALSO arrives as an app_mention delivery (a distinct event_id), and that
+	// delivery owns it. Dropping here keeps a single mention from publishing
+	// twice. BotUserID unset (a workspace whose bot id we haven't captured)
+	// can't build the token, so this guard is skipped — the app_mention path
+	// still owns the mention regardless.
+	if ws.BotUserID != "" && strings.Contains(ev.Text, "<@"+ws.BotUserID+">") {
+		slackLog.Debug("dropping slack message: explicit mention owned by app_mention delivery", "workspace", ws.WorkspaceID)
+		return nil
+	}
+	// (5) engagement gate: the thread's entity must already exist, be a
+	// bot-owned thread (kind="thread", not a mid-thread "message" summons into
+	// someone else's thread), and still be active. An unknown thread, someone
+	// else's thread, or a closed one is chatter the bot doesn't listen to.
+	sourceID := domain.SlackSourceID(ev.Channel, ev.ThreadTS)
+	entity, err := p.entities.GetBySourceSystem(ctx, ws.OrgID, "slack", sourceID)
+	if err != nil {
+		return fmt.Errorf("get slack thread entity: %w", err)
+	}
+	if entity == nil || entity.Kind != "thread" || entity.State != "active" {
+		slackLog.Debug("dropping slack message: no active engaged thread", "workspace", ws.WorkspaceID, "source_id", sourceID)
+		return nil
+	}
+
+	// (6) Past every drop: record the delivery (dedup Slack's redeliveries)
+	// and publish. The delivery insert lands only here so the table tracks
+	// exactly the messages TF acts on.
+	fresh, err := p.deliveries.MarkDeliveredSystem(ctx, ws.APIAppID, ev.EventID)
+	if err != nil {
+		return fmt.Errorf("mark slack delivery: %w", err)
+	}
+	if !fresh {
+		slackLog.Debug("dropping duplicate slack delivery", "workspace", ws.WorkspaceID, "app", ws.APIAppID, "event_id", ev.EventID)
+		return nil
+	}
+
+	return p.publishMessage(ws, ev, entity.ID, false, parseSlackTS(ev.TS))
+}
+
+// publishMessage marshals the durable audit metadata and publishes the
+// slack:message event both ingest branches emit — identical but for the
+// Mentioned flag (an explicit @-mention vs an engaged-thread follow-up) and
+// the resolved entity the event hangs off.
+func (p *ingestPipeline) publishMessage(ws slackstore.Workspace, ev inboundMention, entityID string, mentioned bool, occurredAt time.Time) error {
+	metaJSON, err := json.Marshal(SlackMessageMetadata{
+		WorkspaceID: ws.WorkspaceID,
+		APIAppID:    ws.APIAppID,
+		Channel:     ev.Channel,
+		TS:          ev.TS,
+		ThreadTS:    ev.ThreadTS,
+		SenderID:    ev.User,
+		Text:        ev.Text,
+		EventID:     ev.EventID,
+		Mentioned:   mentioned,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal slack message metadata: %w", err)
+	}
+	p.publish(domain.Event{
+		OrgID:        ws.OrgID,
+		EventType:    domain.EventSlackMessage,
+		EntityID:     &entityID,
+		MetadataJSON: string(metaJSON),
+		OccurredAt:   occurredAt,
+	})
 	return nil
 }
 

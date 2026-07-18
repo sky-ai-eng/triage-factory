@@ -413,6 +413,7 @@ func (c *appConnection) processEventsAPIEnvelope(ctx context.Context, stores db.
 	}
 	ev := inboundMention{
 		Type:     inner.Type,
+		Subtype:  inner.Subtype,
 		EventID:  payload.EventID,
 		Channel:  inner.Channel,
 		User:     inner.User,

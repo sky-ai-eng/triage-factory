@@ -37,6 +37,25 @@ func (f *fakeEntities) FindOrCreateSystem(_ context.Context, orgID, source, sour
 	return e, true, nil
 }
 
+// GetBySourceSystem resolves a previously-created entity by its natural key,
+// returning (nil, nil) on a miss — mirrors GetBySourceSystem's real contract,
+// which the engaged-thread branch's engagement gate reads.
+func (f *fakeEntities) GetBySourceSystem(_ context.Context, orgID, source, sourceID string) (*domain.Entity, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.byKey[orgID+"/"+source+"/"+sourceID], nil
+}
+
+// seedThread inserts a pre-existing entity under (orgID, "slack", sourceID)
+// with the given kind and state — the fixtures the engaged-thread tests use to
+// stand up (or deliberately mis-configure) the thread a follow-up lands in,
+// without routing through a root-mention first.
+func (f *fakeEntities) seedThread(orgID, sourceID, kind, state string) {
+	key := orgID + "/slack/" + sourceID
+	f.byKey[key] = &domain.Entity{ID: "entity-" + key, Source: "slack", SourceID: sourceID, Kind: kind, State: state}
+}
+
 // fakeDeliveries is a minimal slackstore.DeliveryStore fake: an in-memory
 // set of (workspaceID, eventID) pairs already seen.
 type fakeDeliveries struct {
@@ -245,18 +264,169 @@ func TestHandleEventCallback_DropsSelfAndBotMentions(t *testing.T) {
 	}
 }
 
-// TestHandleEventCallback_NonAppMentionDropped: anything other than
-// app_mention is dropped defensively, even though the manifest subscribes
-// to nothing else.
-func TestHandleEventCallback_NonAppMentionDropped(t *testing.T) {
+// TestHandleEventCallback_UnsupportedTypeDropped: an inner event type this
+// pipeline dispatches on neither branch (app_mention / message) is dropped
+// defensively, even though the manifest subscribes to nothing else.
+func TestHandleEventCallback_UnsupportedTypeDropped(t *testing.T) {
 	p, _, _, published := newTestPipeline()
 	ws := testWorkspaceRow("org-1")
-	ev := inboundMention{Type: "message", EventID: "Ev1", Channel: "C1", User: "U1", TS: "1.0"}
+	ev := inboundMention{Type: "reaction_added", EventID: "Ev1", Channel: "C1", User: "U1", TS: "1.0"}
 	if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
 		t.Fatalf("handleEventCallback: %v", err)
 	}
 	if len(*published) != 0 {
-		t.Errorf("published %d events; want 0 (non-app_mention dropped)", len(*published))
+		t.Errorf("published %d events; want 0 (unsupported type dropped)", len(*published))
+	}
+}
+
+// engagedThreadTS / engagedReplyTS / engagedSourceID are the fixture keys the
+// engaged-thread tests share: a follow-up (engagedReplyTS) inside the thread
+// rooted at engagedThreadTS in channel C1.
+const (
+	engagedThreadTS = "1500000000.000001"
+	engagedReplyTS  = "1500000000.000100"
+	engagedSourceID = "C1/" + engagedThreadTS
+	engagedEntityID = "entity-org-1/slack/" + engagedSourceID
+)
+
+// engagedFollowUp is the canonical valid engaged-thread follow-up: a plain
+// (no-subtype) human reply in channel C1's engaged thread that does NOT
+// @-mention the bot.
+func engagedFollowUp() inboundMention {
+	return inboundMention{
+		Type: "message", EventID: "Ev-followup", Channel: "C1", User: "U1",
+		Text: "here are the PR numbers", TS: engagedReplyTS, ThreadTS: engagedThreadTS,
+	}
+}
+
+// TestHandleThreadMessage_DropReasonsAndAccept is the table-driven core of the
+// engaged-thread branch: one case per drop reason plus the two accept shapes.
+// Every case asserts BOTH the published-event count AND the delivery-row count
+// — a drop must leave slack_deliveries untouched (the delivery insert is the
+// last step, gated behind every filter), so an accidentally-recorded delivery
+// on a dropped message is its own regression.
+func TestHandleThreadMessage_DropReasonsAndAccept(t *testing.T) {
+	seedActive := func(f *fakeEntities) { f.seedThread("org-1", engagedSourceID, "thread", "active") }
+	// with returns a copy of the canonical follow-up with fn applied, keeping
+	// each case to only its one distinguishing tweak.
+	with := func(fn func(*inboundMention)) inboundMention {
+		ev := engagedFollowUp()
+		fn(&ev)
+		return ev
+	}
+
+	cases := []struct {
+		name      string
+		seed      func(*fakeEntities) // entity fixtures; nil = no thread entity
+		ev        inboundMention
+		wantPub   int
+		wantDeliv int
+	}{
+		{"accept: plain thread reply", seedActive, engagedFollowUp(), 1, 1},
+		{"accept: thread_broadcast reply", seedActive, with(func(e *inboundMention) { e.Subtype = "thread_broadcast" }), 1, 1},
+		{"drop: unsupported subtype", seedActive, with(func(e *inboundMention) { e.Subtype = "message_changed" }), 0, 0},
+		{"drop: not a thread reply (no thread_ts)", seedActive, with(func(e *inboundMention) { e.ThreadTS = "" }), 0, 0},
+		{"drop: bot-authored (bot_id present)", seedActive, with(func(e *inboundMention) { e.BotID = "B1" }), 0, 0},
+		{"drop: self-authored (sender is the workspace bot)", seedActive, with(func(e *inboundMention) { e.User = "U0BOT" }), 0, 0},
+		{"drop: explicit @-mention (owned by app_mention)", seedActive, with(func(e *inboundMention) { e.Text = "hey <@U0BOT> follow up" }), 0, 0},
+		{"drop: no entity for the thread", nil, engagedFollowUp(), 0, 0},
+		{"drop: entity is a mid-thread summons (kind=message)", func(f *fakeEntities) { f.seedThread("org-1", engagedSourceID, "message", "active") }, engagedFollowUp(), 0, 0},
+		{"drop: engaged thread is closed (state=closed)", func(f *fakeEntities) { f.seedThread("org-1", engagedSourceID, "thread", "closed") }, engagedFollowUp(), 0, 0},
+		{"drop: malformed (missing event_id)", seedActive, with(func(e *inboundMention) { e.EventID = "" }), 0, 0},
+		{"drop: malformed (missing channel)", seedActive, with(func(e *inboundMention) { e.Channel = "" }), 0, 0},
+		{"drop: malformed (missing ts)", seedActive, with(func(e *inboundMention) { e.TS = "" }), 0, 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, entities, deliveries, published := newTestPipeline()
+			if tc.seed != nil {
+				tc.seed(entities)
+			}
+			ws := testWorkspaceRow("org-1")
+			if err := p.handleEventCallback(context.Background(), ws, tc.ev); err != nil {
+				t.Fatalf("handleEventCallback: %v", err)
+			}
+			if len(*published) != tc.wantPub {
+				t.Errorf("published %d events; want %d", len(*published), tc.wantPub)
+			}
+			if len(deliveries.seen) != tc.wantDeliv {
+				t.Errorf("recorded %d deliveries; want %d (drops must precede the delivery insert)", len(deliveries.seen), tc.wantDeliv)
+			}
+		})
+	}
+}
+
+// TestHandleThreadMessage_AcceptPublishesFollowUpShape pins the accepted
+// follow-up's event shape: it hangs off the pre-existing thread entity (no new
+// entity minted) and carries Mentioned=false — the honest "addressed the bot
+// without an @" the engaged-thread semantics encode.
+func TestHandleThreadMessage_AcceptPublishesFollowUpShape(t *testing.T) {
+	p, entities, _, published := newTestPipeline()
+	entities.seedThread("org-1", engagedSourceID, "thread", "active")
+	before := len(entities.byKey)
+	ws := testWorkspaceRow("org-1")
+
+	if err := p.handleEventCallback(context.Background(), ws, engagedFollowUp()); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+	if len(entities.byKey) != before {
+		t.Errorf("entity count changed from %d to %d; a follow-up must reuse the engaged thread, never mint one", before, len(entities.byKey))
+	}
+	if len(*published) != 1 {
+		t.Fatalf("published %d events; want 1", len(*published))
+	}
+	got := (*published)[0]
+	if got.EventType != domain.EventSlackMessage {
+		t.Errorf("EventType = %q; want %q", got.EventType, domain.EventSlackMessage)
+	}
+	if got.EntityID == nil || *got.EntityID != engagedEntityID {
+		t.Errorf("EntityID = %v; want the seeded thread entity %q", got.EntityID, engagedEntityID)
+	}
+	var meta SlackMessageMetadata
+	if err := json.Unmarshal([]byte(got.MetadataJSON), &meta); err != nil {
+		t.Fatalf("metadata round-trip: %v", err)
+	}
+	if meta.Mentioned {
+		t.Error("Mentioned = true; want false (an engaged-thread follow-up carried no explicit @-mention)")
+	}
+	if meta.ThreadTS != engagedThreadTS || meta.TS != engagedReplyTS || meta.SenderID != "U1" || meta.EventID != "Ev-followup" {
+		t.Errorf("metadata = %+v; want fields carried from the follow-up", meta)
+	}
+}
+
+// TestHandleThreadMessage_MentionInsideEngagedThread_PublishesOnce is the
+// double-delivery dedup: a single user message that @-mentions the bot inside
+// an engaged thread fans out into TWO Slack deliveries (an app_mention AND a
+// message.channels twin, each with its own event_id). The app_mention owns it;
+// the message twin is dropped by the explicit-mention guard — so exactly one
+// event publishes and exactly one delivery row is recorded.
+func TestHandleThreadMessage_MentionInsideEngagedThread_PublishesOnce(t *testing.T) {
+	p, entities, deliveries, published := newTestPipeline()
+	entities.seedThread("org-1", engagedSourceID, "thread", "active")
+	ws := testWorkspaceRow("org-1")
+
+	const sharedText = "hey <@U0BOT> another one"
+	appMention := inboundMention{Type: "app_mention", EventID: "Ev-appmention", Channel: "C1", User: "U1", Text: sharedText, TS: "1500000000.000200", ThreadTS: engagedThreadTS}
+	messageTwin := inboundMention{Type: "message", EventID: "Ev-message", Channel: "C1", User: "U1", Text: sharedText, TS: "1500000000.000200", ThreadTS: engagedThreadTS}
+
+	for _, ev := range []inboundMention{appMention, messageTwin} {
+		if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
+			t.Fatalf("handleEventCallback(%s): %v", ev.Type, err)
+		}
+	}
+	if len(*published) != 1 {
+		t.Fatalf("published %d events across the mention + its message twin; want exactly 1", len(*published))
+	}
+	var meta SlackMessageMetadata
+	if err := json.Unmarshal([]byte((*published)[0].MetadataJSON), &meta); err != nil {
+		t.Fatalf("metadata round-trip: %v", err)
+	}
+	if !meta.Mentioned {
+		t.Error("the surviving event is Mentioned=false; want true (the app_mention delivery is the one that published)")
+	}
+	if len(deliveries.seen) != 1 {
+		t.Errorf("recorded %d deliveries; want 1 (only the app_mention; its message twin drops before the delivery insert)", len(deliveries.seen))
 	}
 }
 
