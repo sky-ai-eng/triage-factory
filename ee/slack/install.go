@@ -49,10 +49,17 @@ func init() {
 // transports on the core server through the extension API. The workspace
 // routes go through API/APIMutating (session + CSRF, like core's own
 // routes); the webhook is pre-auth (Slack has no session) so it mounts
-// through Raw + PreAuthRateLimit and authorizes itself per-request via the
-// workspace's signing secret. The Socket Mode connection manager has no
-// HTTP surface of its own — it starts via api.OnReady once app wiring is
-// complete and its status is read out through workspacesHandler.sockets.
+// through Raw + SignedWebhookRateLimit and authorizes itself per-request
+// via the workspace's signing secret. It deliberately does NOT use
+// PreAuthRateLimit: that tier's 1 req/s budget is sized for anonymous human
+// login flows, and a subscribed workspace's own delivery volume routinely
+// clears it — the signing-secret check downstream already makes the
+// anti-recon rationale for a tight budget moot, so sharing that tier would
+// only 429 legitimate deliveries (Slack retries, amplifying the flood,
+// until it disables the app's event subscription entirely). The Socket
+// Mode connection manager has no HTTP surface of its own — it starts via
+// api.OnReady once app wiring is complete and its status is read out
+// through workspacesHandler.sockets.
 func install(api server.ExtensionAPI) {
 	stores := api.Stores()
 
@@ -97,7 +104,7 @@ func install(api server.ExtensionAPI) {
 	api.APIMutating("POST /api/slack/channels/{channel_id}/primary", ch.handlePrimary)
 
 	wh := &webhookHandler{stores: stores, pipeline: pipeline}
-	api.Raw("POST /api/webhooks/slack/{org_id}", api.PreAuthRateLimit(http.HandlerFunc(wh.handleWebhook)))
+	api.Raw("POST /api/webhooks/slack/{org_id}", api.SignedWebhookRateLimit(http.HandlerFunc(wh.handleWebhook)))
 
 	// Agent-facing exec verbs (TFAC-596) register from this package's init()
 	// (stores-free — the handler relays for policy and selects its token from

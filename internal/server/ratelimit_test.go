@@ -285,3 +285,149 @@ func TestPreAuthRateLimit_NilLimiterNoOp(t *testing.T) {
 		t.Fatalf("nil-limiter request got %d, want 200 (pass-through)", rec.Code)
 	}
 }
+
+// TestSignedWebhookRateLimit_SustainedTenPerSecondNeverThrottles locks in
+// the TFAC-647 acceptance bar directly against the production tier
+// constants: a synthetic signed-delivery stream sustained at exactly
+// 10 req/s (Slack's own floor for a single subscribed app/workspace is
+// ~8.3 req/s) must never see a 429, however long it runs. Unlike the
+// burst-then-refill tests above, this drives the limiter for enough
+// simulated wall-clock time (20s @ 10/s = 200 requests) that a tier sized
+// too low would eventually drain its bucket and start refusing — the
+// production rate (20/s) comfortably outpaces a 10/s arrival rate, so the
+// bucket never runs dry.
+func TestSignedWebhookRateLimit_SustainedTenPerSecondNeverThrottles(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+
+	clk := time.Now()
+	s := &Server{signedWebhookLimiter: frozenLimiter(signedWebhookRatePerSec, signedWebhookBurst, time.Minute, &clk)}
+	h := s.signedWebhookRateLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	const perSecond = 10
+	const seconds = 20
+	for i := 0; i < perSecond*seconds; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/webhooks/slack/org1", nil)
+		req.Header.Set("X-Forwarded-For", "34.1.2.3") // one of Slack's static egress IPs
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d (t=%.1fs) got %d, want 200 — sustained 10/s must never 429 at the signed-webhook tier",
+				i+1, float64(i)/perSecond, rec.Code)
+		}
+		clk = clk.Add(time.Second / perSecond)
+	}
+}
+
+// TestSignedWebhookRateLimit_MultiMode429 mirrors
+// TestPreAuthRateLimit_MultiMode429 for the signed-webhook tier: a burst is
+// allowed, the next request 429s with a Retry-After, and the cap is
+// independent per IP. Uses small test-only rate/burst values (not the real
+// tier constants) purely so the burst boundary is reachable in a few
+// iterations.
+func TestSignedWebhookRateLimit_MultiMode429(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	runmode.SetClientIPPolicyForTest(t, "192.0.2.0/24", true)
+
+	clk := time.Now()
+	s := &Server{signedWebhookLimiter: frozenLimiter(10.0, 3.0, time.Minute, &clk)}
+	h := s.signedWebhookRateLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	fire := func(ip string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/webhooks/slack/org1", nil)
+		req.Header.Set("X-Forwarded-For", ip)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for i := 0; i < 3; i++ {
+		if rec := fire("203.0.113.7"); rec.Code != http.StatusOK {
+			t.Fatalf("burst request %d got %d, want 200", i+1, rec.Code)
+		}
+	}
+	rec := fire("203.0.113.7")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("over-cap request got %d, want 429", rec.Code)
+	}
+	if ra := rec.Header().Get("Retry-After"); ra == "" {
+		t.Fatalf("429 missing Retry-After header")
+	}
+
+	// A different IP still has its own full budget — the cap is per client,
+	// same as the human pre-auth tier.
+	if rec := fire("198.51.100.4"); rec.Code != http.StatusOK {
+		t.Fatalf("distinct IP got %d, want 200 (independent bucket)", rec.Code)
+	}
+}
+
+// TestSignedWebhookRateLimit_LocalModeNoOp mirrors
+// TestPreAuthRateLimit_LocalModeNoOp: the signed-webhook tier also no-ops in
+// local mode (Slack is Postgres-only / multi-mode-only today, but the
+// wrapper's contract should hold regardless).
+func TestSignedWebhookRateLimit_LocalModeNoOp(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+
+	clk := time.Now()
+	s := &Server{signedWebhookLimiter: frozenLimiter(10.0, 3.0, time.Minute, &clk)}
+	h := s.signedWebhookRateLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for i := 0; i < 50; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/webhooks/slack/org1", nil)
+		req.Header.Set("X-Forwarded-For", "9.9.9.9")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("local-mode request %d got %d, want 200 (no limiting at N=1)", i+1, rec.Code)
+		}
+	}
+}
+
+// TestPreAuthAndSignedWebhookLimiters_Independent asserts the two tiers are
+// wholly separate budgets: draining the human pre-auth burst on an IP must
+// not cost that same IP anything against its signed-webhook budget, and
+// vice versa. Without this, one Server-wide limiter shared across both
+// wrappers would let a flood against one route starve the other.
+func TestPreAuthAndSignedWebhookLimiters_Independent(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	runmode.SetClientIPPolicyForTest(t, "192.0.2.0/24", true)
+
+	clk := time.Now()
+	s := &Server{
+		preAuthLimiter:       frozenLimiter(preAuthRatePerSec, 2.0, time.Minute, &clk),
+		signedWebhookLimiter: frozenLimiter(signedWebhookRatePerSec, 2.0, time.Minute, &clk),
+	}
+	preAuth := s.preAuthRateLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	webhook := s.signedWebhookRateLimit(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	const ip = "203.0.113.9"
+	drain := func(h http.Handler) {
+		for i := 0; i < 2; i++ {
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			req.Header.Set("X-Forwarded-For", ip)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("priming request %d got %d, want 200", i+1, rec.Code)
+			}
+		}
+	}
+	drain(preAuth) // exhausts this IP's pre-auth burst
+
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set("X-Forwarded-For", ip)
+	rec := httptest.NewRecorder()
+	webhook.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("signed-webhook request got %d, want 200 — draining the pre-auth budget must not affect it", rec.Code)
+	}
+}

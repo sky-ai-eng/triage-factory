@@ -258,7 +258,10 @@ the feature constants, not an archaeology project.
    `ExtensionAPI.PublishEvent`.
 5. Routes via `server.RegisterExtension`; per-request entitlement gating in
    every handler; pre-auth ingest through `Raw` + `PreAuthRateLimit` with its
-   own signature verification.
+   own signature verification — or `Raw` + `SignedWebhookRateLimit` when the
+   sender authenticates every request itself and its legitimate delivery
+   volume can exceed the human-login tier's 1 req/s budget (e.g. the Slack
+   Events API receiver).
 6. If it gives agents CLI verbs: `exec.RegisterSubcommand` +
    `agenthost.RegisterExtension` — logic and audit writes in the host-side
    handler, never in the verb.
