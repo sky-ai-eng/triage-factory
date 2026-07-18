@@ -205,8 +205,8 @@ func (a *lifecycleAdapter) dispatch(ctx context.Context, evt domain.Event, runs 
 
 // handleDisposition reacts to system:routing:disposition for slack:message
 // events only. task_created/task_bumped both get the single 👀 reaction — a
-// bump with an active run means the core inject branch (events.go's
-// Additive=true) already folded the re-mention into that run, so there is
+// bump with an active run means the core inject branch (routing's same-task
+// absorption) already folded the follow-up into that run, so there is
 // nothing further to acknowledge. taskless_no_handler/taskless_no_owner get
 // the one-line not-configured reply. frozen/taskless_unroutable/error are
 // inert by design. Every step here is best-effort: log-and-drop on any

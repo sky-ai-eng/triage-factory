@@ -8,7 +8,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -145,12 +144,19 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	// Compose the per-entity firing gate from its two halves:
 	// AgentRunStore owns the runs-shaped predicate, PendingFiringsStore
 	// owns the queue-shaped one. canFire = neither side blocks.
+	//
+	// The active-run read resolves the run's ID and owning task in one
+	// shot: a non-empty runID is exactly "an auto run is active on this
+	// entity" (identical predicate to the boolean active-run check), and
+	// the owning task decides same-task absorption below — so the gate
+	// needs no second round-trip to compare task identities.
 	gateCtx := context.Background()
-	hasActive, err := r.agentRuns.HasActiveAutoRunForEntitySystem(gateCtx, orgID, entityID)
+	activeRunID, activeRunTaskID, err := r.agentRuns.ActiveAutoRunIDForEntitySystem(gateCtx, orgID, entityID)
 	if err != nil {
 		routerLog.Error("entity gate active-run query failed", "entity", entityID, "error", err)
 		return false
 	}
+	hasActive := activeRunID != ""
 	hasPending := false
 	if !hasActive {
 		hasPending, err = r.firings.HasPendingForEntity(gateCtx, orgID, entityID)
@@ -160,32 +166,31 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		}
 	}
 	if hasActive || hasPending {
-		// Additive events (TFAC-594): a second firing of a type declared
-		// Additive against an entity with an already-active auto run is a
-		// follow-up to the conversation in progress, not a request for a
-		// second one — inject into the live run via the staged-injection
-		// seam instead of deferring. hasPending-only (no active run) always
-		// keeps the deferral: injection needs a live target to fold into.
-		if hasActive && events.AdditiveFor(trigger.EventType) {
-			if r.tryAdditiveInjection(gateCtx, orgID, entityID, task, trigger, triggeringEventID) {
-				// The gate is entity-wide, not task-scoped (see
-				// HasActiveAutoRunForEntitySystem's doc comment) — the
-				// active run's task may differ from THIS task (e.g. a
-				// ci_check_failed-derived task owns the live run while a
-				// separate slack:message-derived task on the same entity
-				// additively fires). Commit the claim on task here
-				// exactly like the deferral path does post-Enqueue: the
-				// bot has taken responsibility for this task by folding
-				// its event into the live conversation, even though the
-				// run belongs to another task. A same-task repeat firing
-				// makes this a no-op (bot already owns it).
+		// Universal same-task absorption: a firing whose OWN task already
+		// holds the entity's live auto run folds into that run (inject +
+		// claim) instead of deferring a second one. Every other firing —
+		// a different task's, or hasPending-only with no live run to fold
+		// into — defers to pending_firings exactly as before. Same-task ⇒
+		// same owner team, so the principal boundary needs no separate
+		// guard, and a cross-task intent (an approve→merge, a
+		// label-blueprint firing) can never be swallowed by an unrelated
+		// run.
+		if hasActive && activeRunTaskID == task.ID {
+			if r.tryAdditiveInjection(gateCtx, orgID, entityID, activeRunID, task, trigger, triggeringEventID) {
+				// Commit the claim on this task exactly like the deferral
+				// path does post-Enqueue: the bot has taken responsibility
+				// by folding the event into the live run. The run belongs to
+				// this same task, so the standing claim is already the bot's
+				// and this is a race-safe no-op in the common case (it
+				// re-stamps only if the task was user-requeued while its run
+				// stayed live).
 				r.stampAgentClaim(orgID, task, actingTeamID, agentID)
 				return
 			}
-			// Resolution failed, or the active run went terminal in the
-			// race between the gate read and the injection attempt — fall
-			// through to the normal deferral so the firing is never
-			// silently dropped.
+			// The run went terminal between the gate read and the injection
+			// attempt, or the injection couldn't be delivered durably — fall
+			// through to the normal deferral so the firing is never silently
+			// dropped.
 		}
 		return r.enqueueBusyFiring(orgID, entityID, task, trigger, triggeringEventID, actingTeamID, agentID)
 	}
@@ -275,34 +280,27 @@ func (r *Router) enqueueBusyFiring(orgID, entityID string, task *domain.Task, tr
 	return true
 }
 
-// tryAdditiveInjection folds an additive event into the entity's already-
-// active auto run via the cross-pod-aware injection seam (TFAC-594,
-// extended cross-pod by TFAC-585), instead of deferring a second run onto
-// pending_firings. Returns true when the caller should treat the firing as
-// handled; false when the caller must fall through to the normal deferral
-// so the firing is never silently dropped. Two distinct cases fall
-// through:
+// tryAdditiveInjection folds a same-task firing into the entity's already-
+// active auto run via the cross-pod-aware injection seam, instead of
+// deferring a second run onto pending_firings. runID is the entity's active
+// run, resolved by the caller and already confirmed to belong to the
+// firing's own task. Returns true when the caller should treat the firing
+// as handled; false when the caller must fall through to the normal
+// deferral so the firing is never silently dropped.
 //
-//   - the active run couldn't be resolved to an ID (the busy-gate read
-//     raced the run going terminal);
-//   - StageOrDeliverAdditiveEvent reports InjectNotDelivered — dropped
-//     outright (no live process anywhere, and the durable append itself
-//     failed), or durably staged onto a run that's since gone fully
-//     terminal (a staged row only flushes on the run's next resume, so a
-//     run that can never resume would silently lose it). Both cases have
-//     no durable row to fall back on, so this always defers.
+// The one fall-through is StageOrDeliverAdditiveEvent reporting
+// InjectNotDelivered — dropped outright (no live process anywhere, and the
+// durable append itself failed), or durably staged onto a run that's since
+// gone fully terminal (a staged row only flushes on the run's next resume,
+// so a run that can never resume would silently lose it). Neither case has
+// a durable row to fall back on, so this defers.
 //
 // InjectDeliveredRemote is distinct from the other "handled" outcomes: a
 // live remote executor now owns recording task_events 'injected' (or
 // compensating with a pending_firing enqueue if the run turns out dead by
 // apply time) — this method must NOT record it here, or a slow/failed
 // remote apply could leave a duplicate or premature bookkeeping row.
-func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string) bool {
-	runID, _, err := r.agentRuns.ActiveAutoRunIDForEntitySystem(ctx, orgID, entityID)
-	if err != nil || runID == "" {
-		return false
-	}
-
+func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string) bool {
 	// Best-effort: an empty metadataJSON still renders a body naming the
 	// event type alone, so a lookup failure degrades rather than drops the
 	// injection.
@@ -340,9 +338,11 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID strin
 // per-claim lanes. Called from the three commitment points in
 // tryAutoDelegate (post-fireDelegate success, post-EnqueuePendingFiring
 // success, post-tryAdditiveInjection success). All three converge on "the
-// bot has committed to this task" — including the additive-injection case,
-// where the task committed to may not be the task that owns the run the
-// event got folded into (the busy gate is entity-wide, not task-scoped).
+// bot has committed to this task." In the same-task absorption case the run
+// the event folded into belongs to this same task (the same-task gate
+// guarantees it), so the claim is normally already the bot's and the stamp
+// is a race-safe no-op — kept for the edge where the task was user-requeued
+// while its run stayed live.
 //
 // agentID is the org agent resolved ONCE by the caller (tryAutoDelegate) — the
 // same id frozen onto the run's blueprint_run actor — so the claim and the run's

@@ -18,52 +18,60 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// additiveTestEventType is a synthetic event type these tests register with
-// Additive=true, mirroring fakeEventType's out-of-core-source pattern
+// Universal same-task absorption: a trigger firing whose OWN task already
+// holds the entity's live auto run folds into that run (inject + claim);
+// every cross-task firing defers to pending_firings exactly as before.
+// These tests exercise that gate through the retained injection delivery
+// seam (StageOrDeliverAdditiveEvent / AdditiveFiringRef).
+
+// absorbTestEventType is a synthetic event type these tests register with a
+// match-all predicate, mirroring fakeEventType's out-of-core-source pattern
 // (source_registry_test.go) rather than mutating a real registered type
 // (e.g. ci_check_failed) for the duration of a test. Registered per-test
 // (not via init()) and cleaned up with t.Cleanup(events.Reset(...)), so it
-// never leaks into sibling tests.
-const additiveTestEventType = "fake:additive:mentioned"
+// never leaks into sibling tests. absorbOtherEventType is a second type used
+// by the cross-task case, so its task is a different task on the same entity.
+const (
+	absorbTestEventType  = "fake:absorption:mentioned"
+	absorbOtherEventType = "fake:absorption:other"
+)
 
-// registerAdditiveTestEventType registers additiveTestEventType as
-// Additive=true (match-all predicate) and schedules its removal from the
-// registry at test end.
-func registerAdditiveTestEventType(t *testing.T) {
+// registerAbsorbEventType registers eventType with a match-all predicate and
+// schedules its removal from the registry at test end. Absorption is decided
+// by same-task identity now, not a per-type flag, so no schema field is set.
+func registerAbsorbEventType(t *testing.T, eventType string) {
 	t.Helper()
 	events.Register(events.EventSchema{
-		EventType: additiveTestEventType,
+		EventType: eventType,
 		Ownership: events.OwnershipOwned,
-		Additive:  true,
 		Match: func(predJSON, metaJSON string) (bool, error) {
 			return true, nil
 		},
 	})
-	t.Cleanup(func() { events.Reset(additiveTestEventType) })
+	t.Cleanup(func() { events.Reset(eventType) })
 }
 
-// seedAdditiveTestEventCatalog inserts the events_catalog row
-// additiveTestEventType needs to satisfy the event_handlers.event_type /
-// events.event_type / tasks.event_type FKs — mirrors
-// seedFakeEventCatalog in source_registry_test.go.
-func seedAdditiveTestEventCatalog(t *testing.T, database *sql.DB) {
+// seedAbsorbEventCatalog inserts the events_catalog row eventType needs to
+// satisfy the event_handlers.event_type / events.event_type /
+// tasks.event_type FKs — mirrors seedFakeEventCatalog in
+// source_registry_test.go.
+func seedAbsorbEventCatalog(t *testing.T, database *sql.DB, eventType string) {
 	t.Helper()
 	if _, err := database.Exec(`
 		INSERT OR IGNORE INTO events_catalog (id, source, category, label, description)
-		VALUES (?, 'fake', 'additive', 'Fake Additive Mentioned', 'additive-injection test fixture')
-	`, additiveTestEventType); err != nil {
-		t.Fatalf("seed events_catalog for %s: %v", additiveTestEventType, err)
+		VALUES (?, 'fake', 'absorption', ?, 'same-task absorption test fixture')
+	`, eventType, eventType); err != nil {
+		t.Fatalf("seed events_catalog for %s: %v", eventType, err)
 	}
 }
 
-// injectingStubDelegator is a Delegator fake for the additive-injection
-// gate tests: it never fires a new run (the busy-entity branch under test
-// never calls Delegate) and records every StageOrDeliverAdditiveEvent call
-// (including the firing ref) so tests can assert what got routed, where.
-// outcome controls the return value — tryAdditiveInjection's dispatch logic
-// is what these tests exercise; StageOrDeliverAdditiveEvent's own internal
-// decision-making (local/remote/staged/resumable) is covered directly in
-// internal/delegate.
+// injectingStubDelegator is a Delegator fake for the absorption gate tests:
+// it never fires a new run (the busy-entity branch under test never calls
+// Delegate) and records every StageOrDeliverAdditiveEvent call (including the
+// firing ref) so tests can assert what got routed, where. outcome controls
+// the return value — the gate's dispatch logic is what these tests exercise;
+// StageOrDeliverAdditiveEvent's own internal decision-making
+// (local/remote/staged/resumable) is covered directly in internal/delegate.
 type injectingStubDelegator struct {
 	outcome delegate.InjectOutcome
 	calls   []injectCall
@@ -75,7 +83,7 @@ type injectCall struct {
 }
 
 func (s *injectingStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
-	return "", fmt.Errorf("unexpected Delegate call: additive-injection tests only exercise the busy-entity branch")
+	return "", fmt.Errorf("unexpected Delegate call: absorption tests only exercise the busy-entity branch")
 }
 
 func (s *injectingStubDelegator) Cancel(orgID, runID, userID string) error { return nil }
@@ -85,41 +93,28 @@ func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context
 	return s.outcome
 }
 
-// activeAutoRunIDOverrideStore wraps a real AgentRunStore, overriding
-// ActiveAutoRunIDForEntitySystem to always report no resolvable run — models
-// the TOCTOU race where HasActiveAutoRunForEntitySystem (read moments
-// earlier by the gate) saw an active run, but by the time the injection
-// branch tries to resolve its ID, it's gone (raced to terminal).
-type activeAutoRunIDOverrideStore struct {
-	db.AgentRunStore
-}
-
-func (activeAutoRunIDOverrideStore) ActiveAutoRunIDForEntitySystem(ctx context.Context, orgID, entityID string) (string, string, error) {
-	return "", "", nil
-}
-
-// setupAdditiveScenario seeds entity + prompt + a trigger on
-// additiveTestEventType + an initial event, then delegates it into an
-// active run (mirroring a real in-flight auto run) via stubDelegateRun.
-// Returns the entity, the task the trigger matches, the trigger (with its
-// real resolved blueprint id), and the active run's ID.
-func setupAdditiveScenario(t *testing.T, database *sql.DB) (entityID string, task *domain.Task, trigger domain.EventHandler, activeRunID string) {
+// setupAbsorbScenario seeds entity + prompt + a trigger on
+// absorbTestEventType + an initial event, then delegates it into an active
+// run (mirroring a real in-flight auto run) via stubDelegateRun. Returns the
+// entity, the task the trigger matches (which owns the active run), the
+// trigger (with its real resolved blueprint id), and the active run's ID.
+func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task *domain.Task, trigger domain.EventHandler, activeRunID string) {
 	t.Helper()
-	registerAdditiveTestEventType(t)
-	seedAdditiveTestEventCatalog(t, database)
+	registerAbsorbEventType(t, absorbTestEventType)
+	seedAbsorbEventCatalog(t, database, absorbTestEventType)
 
 	st := sqlitestore.New(database)
 	entity, _, err := st.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "fake", "fake/thing#"+uuid.New().String()[:8], "thing",
-		"Additive Thing", "https://example.com/additive")
+		"Absorption Thing", "https://example.com/absorption")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
 	entityID = entity.ID
 
-	createTestPrompt(t, database, domain.Prompt{ID: "p-additive", Name: "Additive", Body: "x", Source: "user"})
+	createTestPrompt(t, database, domain.Prompt{ID: "p-absorb", Name: "Absorb", Body: "x", Source: "user"})
 
 	firstEventID, err := st.Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		EventType:    additiveTestEventType,
+		EventType:    absorbTestEventType,
 		EntityID:     &entityID,
 		MetadataJSON: `{"first":true}`,
 		CreatedAt:    time.Now(),
@@ -130,18 +125,18 @@ func setupAdditiveScenario(t *testing.T, database *sql.DB) (entityID string, tas
 	}
 
 	gotTask, _, err := testTaskStore(database).FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
-		entityID, additiveTestEventType, "", firstEventID, 0.5)
+		entityID, absorbTestEventType, "", firstEventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
 	task = gotTask
 
 	trig := domain.EventHandler{
-		ID:                     "trigger-additive",
+		ID:                     "trigger-absorb",
 		Kind:                   domain.EventHandlerKindTrigger,
-		BlueprintID:            "p-additive",
+		BlueprintID:            "p-absorb",
 		TriggerType:            domain.TriggerTypeEvent,
-		EventType:              additiveTestEventType,
+		EventType:              absorbTestEventType,
 		BreakerThreshold:       intPtr(4),
 		MinAutonomySuitability: floatPtr(0),
 		Enabled:                true,
@@ -181,11 +176,10 @@ func setupAdditiveScenario(t *testing.T, database *sql.DB) (entityID string, tas
 // already-active task — BEFORE the test goes on to exercise the injection
 // branch. Without this, a masking test's "second event" never occupied
 // (task.ID, eventID) in task_events at all, so MarkEventInjectedSystem's
-// UPDATE (and, before the fix, RecordEventSystem's now-redundant INSERT)
-// both look like they work even if the real collision they're meant to
-// resolve was never reproduced. This is the fix TFAC-621 part 2 calls for:
-// a state production cannot produce (the event that triggers injection is
-// exactly the event that bumped the task) must exist before injection runs.
+// UPDATE both looks like it works even if the real collision it's meant to
+// resolve was never reproduced. A state production cannot produce (the event
+// that triggers injection is exactly the event that bumped the task) must
+// exist before injection runs.
 func bumpTaskViaRealUpsert(t *testing.T, router *Router, task *domain.Task, trigger domain.EventHandler, entityID, eventID string) {
 	t.Helper()
 	routing := eventRouting{
@@ -195,7 +189,7 @@ func bumpTaskViaRealUpsert(t *testing.T, router *Router, task *domain.Task, trig
 		teamTriggers: map[string][]domain.EventHandler{runmode.LocalDefaultTeamID: {trigger}},
 		taskPriority: 0.5,
 	}
-	bumped, created, err := router.upsertTaskForEvent(runmode.LocalDefaultOrgID, domain.Event{EventType: additiveTestEventType, ID: eventID}, entityID, routing)
+	bumped, created, err := router.upsertTaskForEvent(runmode.LocalDefaultOrgID, domain.Event{EventType: absorbTestEventType, ID: eventID}, entityID, routing)
 	if err != nil {
 		t.Fatalf("upsertTaskForEvent (bump): %v", err)
 	}
@@ -204,9 +198,9 @@ func bumpTaskViaRealUpsert(t *testing.T, router *Router, task *domain.Task, trig
 	}
 }
 
-// newAdditiveTestRouter builds a Router wired for the additive-injection
-// gate tests, sharing the same store construction every test below needs.
-func newAdditiveTestRouter(database *sql.DB, agentRuns db.AgentRunStore, stub *injectingStubDelegator) *Router {
+// newAbsorbTestRouter builds a Router wired for the absorption gate tests,
+// sharing the same store construction every test below needs.
+func newAbsorbTestRouter(database *sql.DB, agentRuns db.AgentRunStore, stub *injectingStubDelegator) *Router {
 	st := sqlitestore.New(database)
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
 		testTaskStore(database), agentRuns, st.Entities, st.PendingFirings,
@@ -214,17 +208,17 @@ func newAdditiveTestRouter(database *sql.DB, agentRuns db.AgentRunStore, stub *i
 		stub, noopScorer{}, websocket.NewHub())
 }
 
-// TestTryAutoDelegate_AdditiveEvent_InjectsIntoActiveRun is the ticket's
-// primary acceptance: an Additive-flagged trigger firing against an entity
-// with an active auto run injects into that run (StageOrDeliverAdditiveEvent
-// reporting InjectDeliveredLocal) instead of deferring — no pending_firings
-// row lands, and the task_events row records the injection.
-func TestTryAutoDelegate_AdditiveEvent_InjectsIntoActiveRun(t *testing.T) {
+// TestTryAutoDelegate_SameTask_InjectsIntoActiveRun is the ticket's primary
+// acceptance: a firing whose own task already holds the entity's active auto
+// run injects into that run (StageOrDeliverAdditiveEvent reporting
+// InjectDeliveredLocal) instead of deferring — no pending_firings row lands,
+// and the task_events row records the injection.
+func TestTryAutoDelegate_SameTask_InjectsIntoActiveRun(t *testing.T) {
 	database := newTestDB(t)
-	entityID, task, trigger, activeRunID := setupAdditiveScenario(t, database)
+	entityID, task, trigger, activeRunID := setupAbsorbScenario(t, database)
 
 	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		EventType:    additiveTestEventType,
+		EventType:    absorbTestEventType,
 		EntityID:     &entityID,
 		MetadataJSON: `{"mention":"second"}`,
 		CreatedAt:    time.Now(),
@@ -235,7 +229,7 @@ func TestTryAutoDelegate_AdditiveEvent_InjectsIntoActiveRun(t *testing.T) {
 	}
 
 	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
-	router := newAdditiveTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
+	router := newAbsorbTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
 	// Reproduce the real collision: production's own upsertTaskForEvent
 	// already wrote a "bumped" task_events row for (task.ID, secondEventID)
 	// before tryAutoDelegate/tryAdditiveInjection ever runs.
@@ -250,8 +244,8 @@ func TestTryAutoDelegate_AdditiveEvent_InjectsIntoActiveRun(t *testing.T) {
 	if got.runID != activeRunID {
 		t.Errorf("injected run_id = %q, want the active run %q", got.runID, activeRunID)
 	}
-	if got.producer != additiveTestEventType {
-		t.Errorf("injected producer = %q, want %q", got.producer, additiveTestEventType)
+	if got.producer != absorbTestEventType {
+		t.Errorf("injected producer = %q, want %q", got.producer, absorbTestEventType)
 	}
 	if got.body == "" {
 		t.Error("injected body is empty")
@@ -277,17 +271,17 @@ func TestTryAutoDelegate_AdditiveEvent_InjectsIntoActiveRun(t *testing.T) {
 	}
 }
 
-// TestTryAutoDelegate_AdditiveEvent_StagedResumableRunHandled is the success
+// TestTryAutoDelegate_SameTask_StagedResumableRunHandled is the success
 // counterpart above for the "durably staged onto a resumable run" outcome —
 // StageOrDeliverAdditiveEvent reporting InjectStagedResumable must be
 // treated as handled exactly like InjectDeliveredLocal: task_events
 // recorded, no pending_firings row.
-func TestTryAutoDelegate_AdditiveEvent_StagedResumableRunHandled(t *testing.T) {
+func TestTryAutoDelegate_SameTask_StagedResumableRunHandled(t *testing.T) {
 	database := newTestDB(t)
-	entityID, task, trigger, activeRunID := setupAdditiveScenario(t, database)
+	entityID, task, trigger, activeRunID := setupAbsorbScenario(t, database)
 
 	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		EventType:    additiveTestEventType,
+		EventType:    absorbTestEventType,
 		EntityID:     &entityID,
 		MetadataJSON: `{"mention":"second"}`,
 		CreatedAt:    time.Now(),
@@ -298,7 +292,7 @@ func TestTryAutoDelegate_AdditiveEvent_StagedResumableRunHandled(t *testing.T) {
 	}
 
 	stub := &injectingStubDelegator{outcome: delegate.InjectStagedResumable}
-	router := newAdditiveTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
+	router := newAbsorbTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
 	// Reproduce the real collision: see the comment on the sibling
 	// InjectDeliveredLocal test above.
 	bumpTaskViaRealUpsert(t, router, task, trigger, entityID, secondEventID)
@@ -329,19 +323,19 @@ func TestTryAutoDelegate_AdditiveEvent_StagedResumableRunHandled(t *testing.T) {
 	}
 }
 
-// TestTryAutoDelegate_AdditiveEvent_DeliveredRemoteHandledWithoutRecording
-// pins TFAC-585's cross-pod outcome: InjectDeliveredRemote means a live
+// TestTryAutoDelegate_SameTask_DeliveredRemoteHandledWithoutRecording
+// pins the cross-pod outcome: InjectDeliveredRemote means a live
 // remote executor now owns recording task_events 'injected' (or
 // compensating with a pending_firing if the run turns out dead by apply
 // time) — the router must treat the firing as handled but must NOT record
 // the task_event itself, or a slow/failed remote apply could leave a
 // duplicate or premature bookkeeping row.
-func TestTryAutoDelegate_AdditiveEvent_DeliveredRemoteHandledWithoutRecording(t *testing.T) {
+func TestTryAutoDelegate_SameTask_DeliveredRemoteHandledWithoutRecording(t *testing.T) {
 	database := newTestDB(t)
-	entityID, task, trigger, activeRunID := setupAdditiveScenario(t, database)
+	entityID, task, trigger, activeRunID := setupAbsorbScenario(t, database)
 
 	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		EventType:    additiveTestEventType,
+		EventType:    absorbTestEventType,
 		EntityID:     &entityID,
 		MetadataJSON: `{"mention":"second"}`,
 		CreatedAt:    time.Now(),
@@ -352,14 +346,13 @@ func TestTryAutoDelegate_AdditiveEvent_DeliveredRemoteHandledWithoutRecording(t 
 	}
 
 	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredRemote}
-	router := newAdditiveTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
+	router := newAbsorbTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
 
 	// tryAutoDelegate's `fired` return is a bare `return` (the named
-	// return's zero value) on every additive-injection branch — a
-	// pre-existing quirk this test doesn't re-litigate; "handled" is
-	// verified through the side effects below (no deferral, no local
-	// bookkeeping), matching the sibling InjectDeliveredLocal/
-	// InjectStagedResumable tests' convention.
+	// return's zero value) on every injection branch — a pre-existing quirk
+	// this test doesn't re-litigate; "handled" is verified through the side
+	// effects below (no deferral, no local bookkeeping), matching the
+	// sibling InjectDeliveredLocal/InjectStagedResumable tests' convention.
 	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
 	if len(stub.calls) != 1 {
 		t.Fatalf("expected 1 StageOrDeliverAdditiveEvent attempt, got %d", len(stub.calls))
@@ -385,103 +378,87 @@ func TestTryAutoDelegate_AdditiveEvent_DeliveredRemoteHandledWithoutRecording(t 
 	}
 }
 
-// TestTryAutoDelegate_NonAdditiveEvent_StillDefers pins that the injection
-// branch is additive-only: a busy entity with a non-additive trigger keeps
-// today's behavior exactly — deferred onto pending_firings, no injection
-// attempted.
-func TestTryAutoDelegate_NonAdditiveEvent_StillDefers(t *testing.T) {
+// TestTryAutoDelegate_CrossTask_Defers is the ticket's negative case: a
+// firing whose OWN task differs from the task that owns the entity's live
+// auto run must never be absorbed into that unrelated run — it defers to
+// pending_firings exactly as before. This is the structural guarantee the
+// universal rule buys (approve→merge or a label-blueprint intent can never
+// be swallowed by an in-flight fix run; cross-team injection is impossible).
+func TestTryAutoDelegate_CrossTask_Defers(t *testing.T) {
 	database := newTestDB(t)
-	entityID, task, trigger, _ := setupAdditiveScenario(t, database)
-	// Overwrite the registration without Additive so this test's trigger
-	// fires a non-additive type — same event type, different schema, still
-	// cleaned up by setupAdditiveScenario's registerAdditiveTestEventType
-	// t.Cleanup (Reset is idempotent on a since-overwritten entry).
-	events.Reset(additiveTestEventType)
-	events.Register(events.EventSchema{
-		EventType: additiveTestEventType,
-		Ownership: events.OwnershipOwned,
-		Additive:  false,
-		Match:     func(predJSON, metaJSON string) (bool, error) { return true, nil },
-	})
+	// Task A owns the entity's active auto run.
+	entityID, _, _, _ := setupAbsorbScenario(t, database)
 
-	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		EventType:    additiveTestEventType,
+	// Task B is a DIFFERENT task on the SAME entity, from a different event
+	// type. Its firing lands while task A's run is live.
+	registerAbsorbEventType(t, absorbOtherEventType)
+	seedAbsorbEventCatalog(t, database, absorbOtherEventType)
+
+	st := sqlitestore.New(database)
+	otherEventID, err := st.Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		EventType:    absorbOtherEventType,
 		EntityID:     &entityID,
-		MetadataJSON: `{"mention":"second"}`,
+		MetadataJSON: `{"cross":"task"}`,
 		CreatedAt:    time.Now(),
 		OrgID:        runmode.LocalDefaultOrgID,
 	})
 	if err != nil {
-		t.Fatalf("record second event: %v", err)
+		t.Fatalf("record cross-task event: %v", err)
+	}
+
+	createTestPrompt(t, database, domain.Prompt{ID: "p-cross", Name: "Cross", Body: "x", Source: "user"})
+	taskB, _, err := testTaskStore(database).FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		entityID, absorbOtherEventType, "", otherEventID, 0.5)
+	if err != nil {
+		t.Fatalf("create cross task: %v", err)
+	}
+
+	trigB := domain.EventHandler{
+		ID:                     "trigger-cross",
+		Kind:                   domain.EventHandlerKindTrigger,
+		BlueprintID:            "p-cross",
+		TriggerType:            domain.TriggerTypeEvent,
+		EventType:              absorbOtherEventType,
+		BreakerThreshold:       intPtr(4),
+		MinAutonomySuitability: floatPtr(0),
+		Enabled:                true,
+	}
+	createTriggerForTestRouting(t, database, trigB)
+	if err := database.QueryRow(`SELECT blueprint_id FROM event_handlers WHERE id = ?`, trigB.ID).Scan(&trigB.BlueprintID); err != nil {
+		t.Fatalf("resolve cross trigger blueprint id: %v", err)
 	}
 
 	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
-	router := newAdditiveTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
+	router := newAbsorbTestRouter(database, st.AgentRuns, stub)
 
-	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
+	router.tryAutoDelegate(runmode.LocalDefaultOrgID, taskB, trigB, entityID, otherEventID, "")
 
 	if len(stub.calls) != 0 {
-		t.Errorf("expected no StageOrDeliverAdditiveEvent call for a non-additive type, got %d", len(stub.calls))
+		t.Errorf("expected no injection for a cross-task firing, got %d StageOrDeliverAdditiveEvent call(s)", len(stub.calls))
 	}
-	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	rows, err := st.PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		t.Fatalf("list pending firings: %v", err)
 	}
 	if len(rows) != 1 {
-		t.Fatalf("expected 1 deferred pending_firings row, got %d", len(rows))
+		t.Fatalf("expected the cross-task firing to defer (1 pending_firings row), got %d", len(rows))
+	}
+	if rows[0].TaskID != taskB.ID {
+		t.Errorf("deferred firing belongs to task %q, want the cross task %q", rows[0].TaskID, taskB.ID)
 	}
 }
 
-// TestTryAutoDelegate_AdditiveEvent_RunIDRaceFallsThroughToDeferral covers
-// the load-bearing race the ticket calls out: the busy gate saw an active
-// run (HasActiveAutoRunForEntitySystem=true), but by the time the injection
-// branch tries to resolve its ID, ActiveAutoRunIDForEntitySystem comes back
-// empty (the run ended in between). The firing must never be silently
-// dropped — it falls through to the normal deferral.
-func TestTryAutoDelegate_AdditiveEvent_RunIDRaceFallsThroughToDeferral(t *testing.T) {
-	database := newTestDB(t)
-	entityID, task, trigger, _ := setupAdditiveScenario(t, database)
-
-	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		EventType:    additiveTestEventType,
-		EntityID:     &entityID,
-		MetadataJSON: `{"mention":"second"}`,
-		CreatedAt:    time.Now(),
-		OrgID:        runmode.LocalDefaultOrgID,
-	})
-	if err != nil {
-		t.Fatalf("record second event: %v", err)
-	}
-
-	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
-	racedStore := activeAutoRunIDOverrideStore{AgentRunStore: sqlitestore.New(database).AgentRuns}
-	router := newAdditiveTestRouter(database, racedStore, stub)
-
-	router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
-
-	if len(stub.calls) != 0 {
-		t.Errorf("expected no StageOrDeliverAdditiveEvent call when the run ID can't be resolved, got %d", len(stub.calls))
-	}
-	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
-	if err != nil {
-		t.Fatalf("list pending firings: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("expected the firing to fall through to the normal deferral, got %d pending_firings rows", len(rows))
-	}
-}
-
-// TestTryAutoDelegate_AdditiveEvent_NotDeliveredFallsThroughToDeferral pins
-// that a StageOrDeliverAdditiveEvent report of InjectNotDelivered (dropped
+// TestTryAutoDelegate_SameTask_NotDeliveredFallsThroughToDeferral pins that
+// a StageOrDeliverAdditiveEvent report of InjectNotDelivered (dropped
 // outright, or staged onto a run that's since gone fully terminal — both
 // decided inside internal/delegate now) always falls through to the normal
 // deferral rather than being silently dropped.
-func TestTryAutoDelegate_AdditiveEvent_NotDeliveredFallsThroughToDeferral(t *testing.T) {
+func TestTryAutoDelegate_SameTask_NotDeliveredFallsThroughToDeferral(t *testing.T) {
 	database := newTestDB(t)
-	entityID, task, trigger, _ := setupAdditiveScenario(t, database)
+	entityID, task, trigger, _ := setupAbsorbScenario(t, database)
 
 	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		EventType:    additiveTestEventType,
+		EventType:    absorbTestEventType,
 		EntityID:     &entityID,
 		MetadataJSON: `{"mention":"second"}`,
 		CreatedAt:    time.Now(),
@@ -492,7 +469,7 @@ func TestTryAutoDelegate_AdditiveEvent_NotDeliveredFallsThroughToDeferral(t *tes
 	}
 
 	stub := &injectingStubDelegator{outcome: delegate.InjectNotDelivered}
-	router := newAdditiveTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
+	router := newAbsorbTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
 
 	fired := router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
 	if !fired {
@@ -510,12 +487,12 @@ func TestTryAutoDelegate_AdditiveEvent_NotDeliveredFallsThroughToDeferral(t *tes
 	}
 }
 
-// TestTryAutoDelegate_AdditiveEvent_StageToNonResumableRun_NoOrphanedRow is
-// the routing-level regression test for TFAC-621 part 4. Unlike the sibling
-// tests above, this one wires a REAL *delegate.Spawner as the Delegator
+// TestTryAutoDelegate_SameTask_StageToNonResumableRun_NoOrphanedRow is the
+// routing-level regression test for staging onto a non-resumable run.
+// Unlike the sibling tests above, this one wires a REAL *delegate.Spawner as the Delegator
 // (not injectingStubDelegator) so StageOrDeliverAdditiveEvent's actual DB
 // side effects — the staged_agent_injections append AND its cleanup — are
-// observable. setupAdditiveScenario's active run is status="running" with
+// observable. setupAbsorbScenario's active run is status="running" with
 // no live process registered against this fresh spawner instance, so
 // getProc returns nil (no local delivery) and there's no run_signals wired
 // (no remote path either) — StageOrDeliverAdditiveEvent falls to staging,
@@ -524,12 +501,12 @@ func TestTryAutoDelegate_AdditiveEvent_NotDeliveredFallsThroughToDeferral(t *tes
 // false) and reports InjectNotDelivered. The caller must fall through to
 // the normal pending_firings deferral, AND the staged row it appended along
 // the way must be deleted rather than orphaned.
-func TestTryAutoDelegate_AdditiveEvent_StageToNonResumableRun_NoOrphanedRow(t *testing.T) {
+func TestTryAutoDelegate_SameTask_StageToNonResumableRun_NoOrphanedRow(t *testing.T) {
 	database := newTestDB(t)
-	entityID, task, trigger, activeRunID := setupAdditiveScenario(t, database)
+	entityID, task, trigger, activeRunID := setupAbsorbScenario(t, database)
 
 	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		EventType:    additiveTestEventType,
+		EventType:    absorbTestEventType,
 		EntityID:     &entityID,
 		MetadataJSON: `{"mention":"second"}`,
 		CreatedAt:    time.Now(),
@@ -567,17 +544,15 @@ func TestTryAutoDelegate_AdditiveEvent_StageToNonResumableRun_NoOrphanedRow(t *t
 	}
 }
 
-// TestTryAutoDelegate_AdditiveEvent_StampsAgentClaimOnInjectedTask pins that
-// a successful injection is a commitment point exactly like the deferral
-// path (post-Enqueue): the firing's OWN task gets claimed for the bot, even
-// though — per HasActiveAutoRunForEntitySystem's doc comment, the busy
-// gate is entity-wide, not task-scoped — the run the event got folded into
-// may belong to a DIFFERENT task on the same entity. Without this, an
-// injected task could sit unclaimed in the board's queue lanes despite its
-// event already having been forwarded into a live agent conversation.
-func TestTryAutoDelegate_AdditiveEvent_StampsAgentClaimOnInjectedTask(t *testing.T) {
+// TestTryAutoDelegate_SameTask_StampsAgentClaimOnInjectedTask pins that a
+// successful injection is a commitment point exactly like the deferral path
+// (post-Enqueue): the firing's own task gets claimed for the bot. In the
+// same-task absorption model the run the event folds into belongs to this
+// same task, so the claim is normally already the bot's — this asserts the
+// stamp still lands (and doesn't regress) on the injected task.
+func TestTryAutoDelegate_SameTask_StampsAgentClaimOnInjectedTask(t *testing.T) {
 	database := newTestDB(t)
-	entityID, task, trigger, _ := setupAdditiveScenario(t, database)
+	entityID, task, trigger, _ := setupAbsorbScenario(t, database)
 
 	if _, err := database.Exec(
 		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
@@ -590,7 +565,7 @@ func TestTryAutoDelegate_AdditiveEvent_StampsAgentClaimOnInjectedTask(t *testing
 	}
 
 	secondEventID, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
-		EventType:    additiveTestEventType,
+		EventType:    absorbTestEventType,
 		EntityID:     &entityID,
 		MetadataJSON: `{"mention":"second"}`,
 		CreatedAt:    time.Now(),
