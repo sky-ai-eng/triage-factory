@@ -41,14 +41,6 @@ type EventSchema struct {
 	// schema built without setting it explicitly falls to the
 	// handler-team-grouping default.
 	Ownership OwnershipModel `json:"-"`
-	// Additive classifies whether a second firing of this event type against
-	// an entity that already has an active auto run is a follow-up to that
-	// conversation (inject into the live run) rather than a request for a
-	// separate one (defer to pending_firings). Per-type DATA, same pattern as
-	// Ownership: zero value is false, so a schema built without setting it
-	// explicitly keeps today's defer-always behavior. internal/routing's
-	// tryAutoDelegate is the sole consumer, via AdditiveFor.
-	Additive bool `json:"-"`
 }
 
 // FieldSchema describes one predicate field for the frontend editor.

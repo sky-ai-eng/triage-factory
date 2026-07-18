@@ -34,6 +34,35 @@ func TestAllDomainEventTypesRegistered(t *testing.T) {
 	}
 }
 
+// TestReset_RemovesRegistration pins the test-cleanup helper: after Reset,
+// the type is unregistered (Get reports ok=false) and can be re-registered
+// without tripping Register's duplicate panic.
+func TestReset_RemovesRegistration(t *testing.T) {
+	const eventType = "fake:reset_test:thing"
+
+	Register(EventSchema{
+		EventType: eventType,
+		Ownership: OwnershipPool,
+		Match:     func(string, string) (bool, error) { return true, nil },
+	})
+	if _, ok := Get(eventType); !ok {
+		t.Fatal("expected the type to be registered")
+	}
+
+	Reset(eventType)
+	if _, ok := Get(eventType); ok {
+		t.Error("expected Reset to remove the registration")
+	}
+
+	// Must not panic — Reset cleared the slot.
+	Register(EventSchema{
+		EventType: eventType,
+		Ownership: OwnershipPool,
+		Match:     func(string, string) (bool, error) { return true, nil },
+	})
+	t.Cleanup(func() { Reset(eventType) })
+}
+
 // TestRegistryFieldSchemaGeneration asserts the reflect-based FieldSchema
 // derivation handles pointer/bool/string/slice kinds correctly for a
 // realistic predicate.
