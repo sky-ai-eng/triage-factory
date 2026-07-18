@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -235,18 +236,39 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 	if rootTS == "" {
 		rootTS = ts
 	}
+	var threadRootErr error
 	if a.ThreadTS == "" {
 		// This send IS the thread root: mint/find its entity as kind="thread"
 		// before recordMessage's generic touched-entity resolution below sees
 		// the same (channel, ts) key — awaited so it lands first, since
 		// FindOrCreate never rewrites kind on an already-known row.
-		h.recordThreadRoot(ctx, rt, ws, a.Channel, ts, a.Body)
+		threadRootErr = h.recordThreadRoot(ctx, rt, ws, a.Channel, ts, sendTitleText(a))
 	}
 	h.recordMessage(ctx, rt, domain.ActionSlackMessagePosted, a.Channel, rootTS, ts, h.permalinkBestEffort(ctx, token, a.Channel, ts))
-	if attachErr != nil {
+	switch {
+	case attachErr != nil && threadRootErr != nil:
+		return slackSendResult{Channel: a.Channel, TS: ts}, fmt.Errorf("%w; %w", attachErr, threadRootErr)
+	case attachErr != nil:
 		return slackSendResult{Channel: a.Channel, TS: ts}, attachErr
+	case threadRootErr != nil:
+		return slackSendResult{Channel: a.Channel, TS: ts}, threadRootErr
+	default:
+		return slackSendResult{Channel: a.Channel, TS: ts}, nil
 	}
-	return slackSendResult{Channel: a.Channel, TS: ts}, nil
+}
+
+// sendTitleText picks the text a channel-root send's thread-root entity is
+// titled from: the message body, falling back to the attachment's name for
+// a file-only send (no --body) — mentionTitle("") would otherwise leave a
+// freshly-minted kind="thread" entity's title blank.
+func sendTitleText(a slackSendArgs) string {
+	if a.Body != "" {
+		return a.Body
+	}
+	if a.AttachName != "" {
+		return a.AttachName
+	}
+	return "attachment"
 }
 
 func (h *slackExecHandler) edit(ctx context.Context, rt agenthost.ExtensionRuntime, a slackEditArgs) (slackEditResult, error) {
@@ -302,17 +324,51 @@ func (h *slackExecHandler) react(ctx context.Context, rt agenthost.ExtensionRunt
 	return slackReactResult{}, nil
 }
 
+// recordThreadRootMaxAttempts / recordThreadRootRetryDelay bound
+// recordThreadRoot's retries. Unlike most best-effort writes in this
+// package, a dropped call here isn't a "the next poll/touch fixes it" gap:
+// FindOrCreate never revisits kind once a row exists, so if this relay never
+// lands before recordMessage's generic touched-entity resolver
+// (cmd/exec/agenthost/record.go) creates the same entity with its
+// kind="message" default, the thread is mis-tagged for good. A few quick
+// retries absorb a transient relay/DB hiccup — the common case — rather than
+// gambling the engagement signal on a single round trip.
+const recordThreadRootMaxAttempts = 3
+const recordThreadRootRetryDelay = 200 * time.Millisecond
+
 // recordThreadRoot relays opRecordThreadRoot for a channel-root send (no
 // --thread-ts): the orchestrator idempotently finds-or-creates the thread's
 // entity as kind="thread" and, only on first creation, dispatches permalink
 // resolution. Awaited (not fire-and-forget) so it lands before recordMessage
-// runs next — see send()'s call site. Best-effort: a failure is logged and
-// swallowed, never surfaced past the already-successful Slack post.
-func (h *slackExecHandler) recordThreadRoot(ctx context.Context, rt agenthost.ExtensionRuntime, ws slackWorkspaceIdentity, channel, ts, text string) {
+// runs next — see send()'s call site. Retries on failure (see the constants'
+// doc); if every attempt fails, the error is returned (send() surfaces it
+// alongside the already-successful post, mirroring attachErr) rather than
+// silently swallowed — a silent failure here has a permanent consequence, so
+// it must be loud instead.
+func (h *slackExecHandler) recordThreadRoot(ctx context.Context, rt agenthost.ExtensionRuntime, ws slackWorkspaceIdentity, channel, ts, text string) error {
 	args := slackThreadRootArg{WorkspaceID: ws.WorkspaceID, APIAppID: ws.APIAppID, Channel: channel, TS: ts, Text: text}
-	if err := rt.Relay(ctx, "slack", opRecordThreadRoot, args, nil); err != nil {
-		slackLog.Warn("record thread-root entity failed", "channel", channel, "ts", ts, "error", err)
+	var err error
+retry:
+	for attempt := 1; attempt <= recordThreadRootMaxAttempts; attempt++ {
+		if err = rt.Relay(ctx, "slack", opRecordThreadRoot, args, nil); err == nil {
+			return nil
+		}
+		if attempt < recordThreadRootMaxAttempts {
+			// A labeled break: bare "break" here would only exit the select,
+			// leaving the for loop to immediately retry against an already-
+			// cancelled ctx instead of giving up right away.
+			select {
+			case <-ctx.Done():
+				err = ctx.Err()
+				break retry
+			case <-time.After(recordThreadRootRetryDelay):
+			}
+		}
 	}
+	slackLog.Error("record thread-root entity failed after retries; thread will be mis-tagged kind=message instead of kind=thread",
+		"channel", channel, "ts", ts, "attempts", recordThreadRootMaxAttempts, "error", err)
+	return fmt.Errorf("slack: record thread-root entity failed after %d attempts (this thread will show as a mid-thread summons, not an engaged root): %w",
+		recordThreadRootMaxAttempts, err)
 }
 
 // recordMessage records the send/edit matrix: an `artifacts` row keyed

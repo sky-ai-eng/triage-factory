@@ -506,6 +506,54 @@ func TestSlackExecHandler_Send_RootPostThenEdit_PreservesThreadKind(t *testing.T
 	}
 }
 
+// TestSlackExecHandler_Send_FileOnlyRootPost_TitlesFromAttachmentName pins a
+// channel-root send with no --body (a pure file upload): mentionTitle("")
+// would otherwise leave the freshly-minted kind="thread" entity's title
+// blank, so send() falls back to the attachment's name.
+func TestSlackExecHandler_Send_FileOnlyRootPost_TitlesFromAttachmentName(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-send-file-root-title")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	// findRecentMessageTSForFile (the file-only path's ts resolution) scans
+	// conversations.history for a message carrying the uploaded file id —
+	// "F-ATTACH" is what fakeExecSlack's files.getUploadURLExternal always
+	// answers with.
+	const postedTS = "1700000005.000100"
+	r.fake.historyMessages = []map[string]any{
+		{"ts": postedTS, "files": []map[string]any{{"id": "F-ATTACH", "name": "report.pdf"}}},
+	}
+
+	out, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{
+		Channel: "C1", AttachName: "report.pdf", AttachBase64: base64.StdEncoding.EncodeToString([]byte("file contents")),
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if out.TS != postedTS {
+		t.Fatalf("send ts = %q, want %q", out.TS, postedTS)
+	}
+
+	sourceID := domain.SlackSourceID("C1", out.TS)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", sourceID)
+	if err != nil {
+		t.Fatalf("GetBySourceSystem: %v", err)
+	}
+	if ent == nil {
+		t.Fatalf("no entity found for source_id %q", sourceID)
+	}
+	if ent.Kind != "thread" {
+		t.Errorf("kind = %q, want thread", ent.Kind)
+	}
+	if ent.Title != "report.pdf" {
+		t.Errorf("title = %q, want the attachment name (mentionTitle(\"\") would otherwise leave this blank)", ent.Title)
+	}
+}
+
 func TestSlackExecHandler_Edit_UpsertsSameArtifactRow(t *testing.T) {
 	r := newSlackExecRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-edit")
