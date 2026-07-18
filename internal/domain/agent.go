@@ -79,6 +79,13 @@ const (
 	// A run that still had attempts left is requeued and re-claimed
 	// instead — this kind only marks the case that ran out of retries.
 	RunFailureExecutorLost RunFailureKind = "executor_lost"
+	// RunFailureSessionLost — a resume could not continue because the
+	// run's Claude session transcript was not on disk after the workspace
+	// rehydrate: the parking executor snapshotted without it, or nothing
+	// restored it (e.g. the executor was rebuilt and its warm copy was on
+	// wiped ephemeral storage). The run is failed with an actionable reason
+	// rather than handed an opaque "No conversation found" from the SDK.
+	RunFailureSessionLost RunFailureKind = "session_lost"
 )
 
 // AgentRun represents a delegated agent execution.

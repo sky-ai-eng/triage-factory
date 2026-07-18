@@ -176,6 +176,14 @@ func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID s
 			if err := writeTarBytes(tw, snapSession, data); err != nil {
 				return err
 			}
+		} else {
+			// The run has a session but we couldn't read its transcript to
+			// snapshot it (unreadable, or not where we looked). The blob is still
+			// written — worktree state matters on its own — but a resume from it
+			// will hit the transcript-missing guard and fail. Surface it: this is
+			// otherwise silent, and it's exactly the shape that produced a
+			// resume-fails-with-no-reason report.
+			delegateLog.Warn("snapshot omits session transcript; a resume of this run will not be able to continue the conversation", "session", sessionID, "worktree", wtPath)
 		}
 	}
 	manBytes, err := json.Marshal(man)
