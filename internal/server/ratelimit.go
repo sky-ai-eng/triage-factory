@@ -42,11 +42,6 @@ const (
 	// preAuthBurst is the bucket capacity — the largest instantaneous
 	// flurry from one IP that passes before the sustained rate bites.
 	preAuthBurst = 20.0
-	// preAuthBucketTTL bounds how long an idle per-IP bucket is retained.
-	// A flood of distinct source IPs is the workload that grows the map,
-	// and it is also what drives the opportunistic sweep that reclaims it,
-	// so the live set stays roughly proportional to recently-active IPs.
-	preAuthBucketTTL = 10 * time.Minute
 )
 
 // Signed-webhook pre-auth rate-limit tuning. A route in this tier
@@ -75,6 +70,13 @@ const (
 	// or Slack redelivering a backlog after a brief outage) without a 429.
 	signedWebhookBurst = 100.0
 )
+
+// rateLimitBucketTTL bounds how long an idle per-IP bucket is retained,
+// shared by both tiers above. A flood of distinct source IPs is the
+// workload that grows the map, and it is also what drives the opportunistic
+// sweep that reclaims it, so the live set stays roughly proportional to
+// recently-active IPs.
+const rateLimitBucketTTL = 10 * time.Minute
 
 // ipRateLimiter is an in-process, per-client-IP token-bucket limiter. One
 // bucket per IP refills at a fixed rate up to a burst ceiling; each

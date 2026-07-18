@@ -560,8 +560,8 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 	// Per-IP rate limiters for the pre-auth allowlist and the signed-webhook
 	// tier. Built here (not injected) so a Server is always usable without
 	// external wiring; both wrappers that consult them no-op in local mode.
-	s.preAuthLimiter = newIPRateLimiter(preAuthRatePerSec, preAuthBurst, preAuthBucketTTL)
-	s.signedWebhookLimiter = newIPRateLimiter(signedWebhookRatePerSec, signedWebhookBurst, preAuthBucketTTL)
+	s.preAuthLimiter = newIPRateLimiter(preAuthRatePerSec, preAuthBurst, rateLimitBucketTTL)
+	s.signedWebhookLimiter = newIPRateLimiter(signedWebhookRatePerSec, signedWebhookBurst, rateLimitBucketTTL)
 	// GitHub credential resolver + its installation-token cache, built from
 	// the same stores. Constructed here (not injected) so a Server is always
 	// usable without external wiring — tests that call New directly get a
