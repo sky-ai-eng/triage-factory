@@ -34,33 +34,3 @@ install — and subscribes the bot to these events:
   which back **engaged-thread follow-ups**: replies in a thread the bot already
   owns, with no re-@-mention required.
 
-## Migrating an existing app
-
-**Engaged-thread follow-ups (`message.channels` / `message.groups`) were added
-to the manifest after the original one shipped only `app_mention`.** An app
-created from that earlier manifest is still subscribed to `app_mention` alone,
-so un-mentioned thread replies never reach Triage Factory — every follow-up
-silently requires another @-mention, the exact gap engaged threads close.
-
-Slack does not apply a manifest edit in place for you. To pick up the new event
-subscriptions on an already-connected app, **update the app from the current
-manifest and reinstall it**:
-
-1. In **Settings → Slack**, copy the current manifest (Socket Mode or Events
-   API, matching your transport).
-2. At <https://api.slack.com/apps>, open the app's **App Manifest** page and
-   replace its contents with the copied manifest (or create a fresh app from it).
-3. Reinstall the app to the workspace so the new event subscriptions take
-   effect.
-4. If you created a fresh app, paste the new credentials back into **Settings →
-   Slack**.
-
-The history scopes the follow-up events need (`channels:history` /
-`groups:history`) were already in the original scope set, so this adds **event
-subscriptions**, not new permissions. But Slack only delivers events an
-installed app is subscribed to, so the reinstall is required for follow-ups to
-flow.
-
-> Slack is multi-mode-only and has not shipped in any release, so this migration
-> only affects preview / dogfooding installs — there are no
-> backwards-compatibility concerns for released deployments.

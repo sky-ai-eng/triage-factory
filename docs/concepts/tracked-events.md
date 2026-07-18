@@ -62,7 +62,7 @@ Slack support is an Enterprise, multi-mode-only feature, configured per-org from
 |-------|----|---------|
 | **Message to bot** | `slack:message` | A human addressed the TF bot in a Slack channel — either an explicit @-mention, or a follow-up in a thread the bot already owns (an *engaged thread*) |
 
-`slack:message` was formerly `slack:mention`. Whether the message carried an explicit @-mention doesn't change whether the situation needs attention, so mention-ness is metadata (`SlackMessageMetadata.Mentioned`), not a separate event type — the same taxonomy rule that only splits an event when the two cases are genuinely different situations. A handler can still narrow to explicit mentions with the predicate's `mentioned_only` flag, or to specific channels with `channel_in`.
+Mention-ness is metadata (`SlackMessageMetadata.Mentioned`), not a separate event type — the same taxonomy rule that only splits an event when the two cases are genuinely different situations. A handler can still narrow to explicit mentions with the predicate's `mentioned_only` flag, or to specific channels with `channel_in`.
 
 ### Engaged threads
 
