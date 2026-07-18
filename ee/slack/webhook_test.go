@@ -132,8 +132,9 @@ const (
 )
 
 type webhookRig struct {
-	h         *webhookHandler
-	published *[]domain.Event
+	h          *webhookHandler
+	published  *[]domain.Event
+	deliveries *fakeDeliveries
 }
 
 // newWebhookRig builds a webhookHandler wired to fakes: a single connected
@@ -165,12 +166,13 @@ func newWebhookRig(t *testing.T, signingSecretRef string, licensed bool) *webhoo
 	}
 
 	published := &[]domain.Event{}
+	deliveries := newFakeDeliveries()
 	pipeline := &ingestPipeline{
 		entities:   newFakeEntities(),
-		deliveries: newFakeDeliveries(),
+		deliveries: deliveries,
 		publish:    func(evt domain.Event) { *published = append(*published, evt) },
 	}
-	return &webhookRig{h: &webhookHandler{stores: stores, pipeline: pipeline}, published: published}
+	return &webhookRig{h: &webhookHandler{stores: stores, pipeline: pipeline}, published: published, deliveries: deliveries}
 }
 
 // sign computes a valid X-Slack-Signature for (secret, timestamp, body) per
@@ -427,6 +429,66 @@ func TestHandleWebhook_EventCallback_PublishesAndAcks(t *testing.T) {
 	}
 	if got := (*r.published)[0]; got.EventType != domain.EventSlackMessage || got.OrgID != webhookTestOrgID {
 		t.Errorf("published event = %+v; want slack:message for %s", got, webhookTestOrgID)
+	}
+}
+
+// TestHandleWebhook_EngagedThreadFollowUp_PublishesUnmentioned is the
+// events_api-transport acceptance for the engaged-thread follow-up: a
+// root-message @-mention creates the thread entity, then an un-mentioned
+// message.channels reply in that same thread reaches the pipeline and publishes
+// a second slack:message with Mentioned=false — the full transport → parse →
+// engaged-thread-branch → publish path, not just handleThreadMessage in
+// isolation.
+func TestHandleWebhook_EngagedThreadFollowUp_PublishesUnmentioned(t *testing.T) {
+	r := newWebhookRig(t, webhookTestSigningRef, true)
+
+	// Root-message mention (no thread_ts): mints the kind="thread" entity the
+	// follow-up's engagement gate looks for.
+	rootBody := []byte(`{"type":"event_callback","team_id":"` + webhookTestWorkspaceID + `","api_app_id":"` + webhookTestAppID + `","event_id":"Ev-root","event":{"type":"app_mention","channel":"C1","user":"U1","text":"<@U0BOT> review my PRs","ts":"1600000000.000100"}}`)
+	ts := nowTimestamp()
+	if rec := postSlackWebhook(t, r.h, webhookTestOrgID, rootBody, ts, sign(webhookTestSecret, ts, rootBody)); rec.Code != http.StatusOK {
+		t.Fatalf("root mention: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Un-mentioned reply in the same thread (thread_ts = the root's ts), inner
+	// type "message" (message.channels), no subtype, no @-mention.
+	followBody := []byte(`{"type":"event_callback","team_id":"` + webhookTestWorkspaceID + `","api_app_id":"` + webhookTestAppID + `","event_id":"Ev-followup","event":{"type":"message","channel":"C1","user":"U1","text":"here are the numbers","ts":"1600000000.000200","thread_ts":"1600000000.000100"}}`)
+	ts = nowTimestamp()
+	if rec := postSlackWebhook(t, r.h, webhookTestOrgID, followBody, ts, sign(webhookTestSecret, ts, followBody)); rec.Code != http.StatusOK {
+		t.Fatalf("follow-up: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	if len(*r.published) != 2 {
+		t.Fatalf("published %d events (root + follow-up); want 2", len(*r.published))
+	}
+	var meta SlackMessageMetadata
+	if err := json.Unmarshal([]byte((*r.published)[1].MetadataJSON), &meta); err != nil {
+		t.Fatalf("follow-up metadata round-trip: %v", err)
+	}
+	if meta.Mentioned {
+		t.Error("follow-up Mentioned = true; want false (un-mentioned engaged-thread reply)")
+	}
+	if meta.ThreadTS != "1600000000.000100" {
+		t.Errorf("follow-up ThreadTS = %q; want the root ts", meta.ThreadTS)
+	}
+}
+
+// TestHandleWebhook_UnengagedThreadReply_NoPublish is the negative twin: an
+// un-mentioned reply in a thread the bot never engaged (no root mention ever
+// created an entity) publishes nothing and — critically — records no delivery
+// row, so the message firehose can't grow slack_deliveries without bound.
+func TestHandleWebhook_UnengagedThreadReply_NoPublish(t *testing.T) {
+	r := newWebhookRig(t, webhookTestSigningRef, true)
+	body := []byte(`{"type":"event_callback","team_id":"` + webhookTestWorkspaceID + `","api_app_id":"` + webhookTestAppID + `","event_id":"Ev-orphan","event":{"type":"message","channel":"C1","user":"U1","text":"idle channel chatter","ts":"1600000000.000200","thread_ts":"1600000000.000001"}}`)
+	ts := nowTimestamp()
+	if rec := postSlackWebhook(t, r.h, webhookTestOrgID, body, ts, sign(webhookTestSecret, ts, body)); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if len(*r.published) != 0 {
+		t.Errorf("published %d events; want 0 (no engaged thread)", len(*r.published))
+	}
+	if len(r.deliveries.seen) != 0 {
+		t.Errorf("recorded %d deliveries; want 0 — a dropped message must never insert into slack_deliveries", len(r.deliveries.seen))
 	}
 }
 

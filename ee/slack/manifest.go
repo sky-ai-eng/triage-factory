@@ -8,13 +8,13 @@ import "fmt"
 // later — Slack scope grants are all-or-nothing per install, so adding a
 // scope after the fact means every connected workspace re-authorizes.
 //
-//	app_mentions:read   - see @mentions of the bot (the only inbound signal this leaf's ingest follow-on needs)
+//	app_mentions:read   - see @mentions of the bot (the explicit-summons inbound signal)
 //	chat:write          - post messages / replies
 //	reactions:write     - add emoji reactions (progress/ack signaling)
 //	users:read          - resolve a Slack user id to a profile (identity capture, later leaf)
 //	users:read.email    - resolve a Slack user's verified email (TF-user auto-match, later leaf)
-//	channels:history    - read public-channel message history (thread context for a mention)
-//	groups:history      - read private-channel ("group") message history, same reason
+//	channels:history    - read public-channel messages; backs the message.channels event subscription (engaged-thread follow-ups) + thread context for a mention
+//	groups:history      - read private-channel ("group") messages; backs message.groups, same reason
 //	channels:read       - list public channels + resolve channel id -> name + bot-membership checks (channel tracking UX)
 //	groups:read         - same, for private channels the bot is a member of
 //	channels:join       - bot self-joins a public channel when a team tracks it (private channels always need a human /invite)
@@ -121,7 +121,13 @@ func buildSlackManifest(orgName, transport, publicURL, orgID string) slackManife
 		},
 		OAuthConfig: slackManifestOAuth{Scopes: slackManifestScopes{Bot: slackBotScopes}},
 		Settings: slackManifestSettings{
-			EventSubscriptions: slackManifestEventSubs{BotEvents: []string{"app_mention"}},
+			// app_mention is the explicit @-summons; message.channels /
+			// message.groups deliver the un-mentioned follow-ups in a thread
+			// the bot already owns (ingest.go's engaged-thread branch filters
+			// the firehose down to those). The history scopes both need
+			// (channels:history / groups:history) are already in
+			// slackBotScopes, so subscribing here rescopes nothing.
+			EventSubscriptions: slackManifestEventSubs{BotEvents: []string{"app_mention", "message.channels", "message.groups"}},
 		},
 	}
 	switch transport {
