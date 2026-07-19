@@ -668,7 +668,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 	})
 
-	// --- user_modified stamping (TFAC-657) -----------------------------
+	// --- user_modified stamping ------------------------------------------
 	//
 	// An upcoming sync feature will treat user_modified as "this team edited
 	// its copy, never overwrite it." These pin the contract documented on
