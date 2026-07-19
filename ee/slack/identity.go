@@ -1,10 +1,10 @@
 // Slack identity capture: auto-resolve the human behind an ingested
 // message — an @mention or an engaged-thread follow-up — to a TF user via
 // a verified-email match against the auth-principal bridge, so a later
-// leaf can grant that user run-visibility and render audit attribution. Capture infrastructure only
-// — the sender never affects routing or ownership (the settled 3-axis
-// model: visibility is channel/team, acting identity is the bot, audit is
-// per-message).
+// leaf can grant that user run-visibility and render audit attribution.
+// Capture infrastructure only — the sender never affects routing or
+// ownership (the settled 3-axis model: visibility is channel/team, acting
+// identity is the bot, audit is per-message).
 //
 // Best-effort, never gating: resolution runs in a detached goroutine
 // started AFTER the triggering event has already published, off
