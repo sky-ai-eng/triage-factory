@@ -6,8 +6,9 @@
 // (system:run:status, system:run:activity, system:routing:disposition) and
 // drives four surfaces purely off them:
 //
-//   - a 👀 reaction on a routed slack:message (the ONLY reaction — no
-//     ⏳/✅/❌/⚠️ lifecycle, ratified out),
+//   - a 👀 reaction acknowledging an explicit @-mention (the ONLY reaction —
+//     no ⏳/✅/❌/⚠️ lifecycle, ratified out; an un-mentioned follow-up in a
+//     thread the bot already owns gets none),
 //   - the assistant.threads.setStatus working indicator — both the
 //     "<app name> is …" status line and, via loading_messages, the animated
 //     in-conversation loading bubble (left unset, Slack rotates its own
@@ -204,13 +205,16 @@ func (a *lifecycleAdapter) dispatch(ctx context.Context, evt domain.Event, runs 
 // --- disposition consumer: 👀 acknowledge + no-match reply ---
 
 // handleDisposition reacts to system:routing:disposition for slack:message
-// events only. task_created/task_bumped both get the single 👀 reaction — a
-// bump with an active run means the core inject branch (routing's same-task
-// absorption) already folded the follow-up into that run, so there is
-// nothing further to acknowledge. taskless_no_handler/taskless_no_owner get
-// the one-line not-configured reply. frozen/taskless_unroutable/error are
-// inert by design. Every step here is best-effort: log-and-drop on any
-// store/API failure, never a retry loop.
+// events only. task_created/task_bumped route to acknowledgeMention, which
+// adds the single 👀 reaction ONLY for a message that explicitly @-mentioned
+// the bot. An un-mentioned engaged-thread follow-up (Mentioned=false) is
+// already folded into the live run by the core inject branch (routing's
+// same-task absorption); reacting to it as well — to every message in a
+// thread the bot is already engaged with — is noise, so it gets no reaction.
+// taskless_no_handler/taskless_no_owner get the one-line not-configured
+// reply. frozen/taskless_unroutable/error are inert by design. Every step
+// here is best-effort: log-and-drop on any store/API failure, never a retry
+// loop.
 func (a *lifecycleAdapter) handleDisposition(ctx context.Context, evt domain.Event) {
 	var disp events.SystemRoutingDispositionMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &disp); err != nil {
@@ -230,10 +234,17 @@ func (a *lifecycleAdapter) handleDisposition(ctx context.Context, evt domain.Eve
 }
 
 // acknowledgeMention adds the 👀 reaction to the mention message itself
-// (meta.TS, never the thread root).
+// (meta.TS, never the thread root) — but only when that message explicitly
+// @-mentioned the bot. An un-mentioned follow-up in a thread the bot already
+// owns (Mentioned=false) folds into the live run without a reaction: stamping
+// 👀 on every message in an engaged thread reads as noise, and the run's own
+// working indicator (plus any reply) already signals the follow-up was seen.
 func (a *lifecycleAdapter) acknowledgeMention(ctx context.Context, orgID, eventID string) {
 	meta, token, ok := a.mentionContext(ctx, orgID, eventID)
 	if !ok {
+		return
+	}
+	if !meta.Mentioned {
 		return
 	}
 	if err := slackReactionsAdd(ctx, a.client, token, meta.Channel, meta.TS, slackLifecycleAckReaction); err != nil {
