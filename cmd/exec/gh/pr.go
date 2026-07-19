@@ -85,7 +85,7 @@ func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 	case "files":
 		prFiles(ctx, api, flags)
 	case "thread-view":
-		prThreadView(ctx, api, flags)
+		prThreadView(ctx, api, host, flags)
 	case "review-view":
 		prReviewView(ctx, api, flags)
 	case "review-dismiss":
@@ -492,11 +492,15 @@ func prFiles(ctx context.Context, client ghAPI, args []string) {
 	printJSON(buildPRFilesResult(files))
 }
 
-func prThreadView(ctx context.Context, client ghAPI, args []string) {
+func prThreadView(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 2 {
 		exitErr("usage: gh pr thread-view <pr_number> <comment_id> [--page N]")
 	}
-	owner, repo, _ := parseRepoAndNumber(args[:1])
+	// Resolve owner/repo from the FULL args so an explicit --repo is honored
+	// (resolveRepo scans for it); firstPositional already skips flags, so the
+	// number still binds to the leading <pr_number> positional. Slicing to
+	// args[:1] here would hide --repo and silently resolve the wrong repo.
+	owner, repo, number := parseRepoAndNumber(args)
 	commentID := mustInt(args[1], "comment_id")
 	page := 1
 	if v := flagVal(args, "--page"); v != "" {
@@ -504,6 +508,11 @@ func prThreadView(ctx context.Context, client ghAPI, args []string) {
 	}
 	thread, err := client.GetCommentThread(ctx, owner, repo, commentID, page)
 	exitOnErr(err)
+	// The PR is the addressed entity; the comment thread is an attribute. The
+	// ghAPI seam (a mirror of *github.Client, which fetches a thread by comment
+	// id) can't carry the PR number, so the touch is recorded here from the CLI
+	// positional the agent supplied, after the read succeeds. Best-effort.
+	host.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), "")
 	printJSON(thread)
 }
 

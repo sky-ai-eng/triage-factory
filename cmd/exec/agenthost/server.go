@@ -834,6 +834,17 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 	// LocalClient exposes in-process, so a verb author never has to duplicate
 	// the gate for the sandbox transport. ---
 
+	case methodRecordReadTouch:
+		var a recordReadTouchArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		// Best-effort touch for an addressed read the CLI couldn't key host-side
+		// (gh pr thread-view). Routes through the same runtime the in-method
+		// reads use, so it relays to the orchestrator on the sidecar.
+		client.RecordReadTouch(ctx, a.Provider, a.Target, a.URL)
+		return emptyResult{}, nil
+
 	case methodCallExtension:
 		var a callExtensionArgs
 		if err := dec(&a); err != nil {

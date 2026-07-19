@@ -53,6 +53,15 @@ func startFakeGitHubComments(t *testing.T) *httptest.Server {
 // + client. eventTriggered picks the write path withWrite routes through: admin
 // pool (no user) when true, a synthetic-claims tx (manual run) when false.
 func newGithubRecordingClient(t *testing.T, ghURL string, eventTriggered bool) (db.Stores, RunInfo, *LocalClient) {
+	_, stores, info, client := newGithubRecordingClientConn(t, ghURL, eventTriggered)
+	return stores, info, client
+}
+
+// newGithubRecordingClientConn is newGithubRecordingClient plus the raw *sql.DB,
+// for touch tests that read run_memory_entities directly (the store interface
+// has no role-returning read) or that drop a table to exercise the best-effort
+// recording path.
+func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered bool) (*sql.DB, db.Stores, RunInfo, *LocalClient) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 	if err != nil {
@@ -81,7 +90,7 @@ func newGithubRecordingClient(t *testing.T, ghURL string, eventTriggered bool) (
 	}
 	client := NewLocal(stores, info)
 	client.ghResolver = fakeGitHubResolver{baseURL: ghURL, token: "org-pat"}
-	return stores, info, client
+	return conn, stores, info, client
 }
 
 // TestLocalClient_GithubAddComment_RecordsArtifact pins a standalone comment

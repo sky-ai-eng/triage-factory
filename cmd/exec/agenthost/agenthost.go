@@ -339,6 +339,18 @@ type Client interface {
 	// so the per-job fallback fires.
 	GithubDownloadArtifact(ctx context.Context, owner, repo, path string, dst io.Writer, maxBytes int64) (int64, error)
 
+	// RecordReadTouch records a durable run→entity touch for an addressed read
+	// whose host method can't cheaply build the entity target itself — today
+	// `gh pr thread-view`, where the PR number the touch keys on is a CLI
+	// positional the ghAPI seam (a deliberate mirror of *github.Client, which
+	// fetches a thread by comment id) does not carry. The CLI calls this after
+	// the read succeeds with the target it does hold. Every other addressed read
+	// touches inside its own host method; this is the escape hatch for the one
+	// verb that can't. Void + best-effort like the in-method touches — a read
+	// never fails on its touch — and, on the sandbox transport, a dropped RPC
+	// just costs one touch row.
+	RecordReadTouch(ctx context.Context, provider, target, url string)
+
 	// --- extensions (ee-registered agent-facing CLI verbs) ---
 
 	// CallExtension invokes a registered extension method host-side. The

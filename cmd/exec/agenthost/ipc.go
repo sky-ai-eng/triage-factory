@@ -449,6 +449,15 @@ func (c *IPCClient) GithubGetCommentThread(ctx context.Context, owner, repo stri
 	return res.Thread, nil
 }
 
+// RecordReadTouch is best-effort: a transport failure is logged and swallowed,
+// never surfaced to the read that triggered it (mirrors the void host-side
+// contract). The daemon answers with an empty result.
+func (c *IPCClient) RecordReadTouch(ctx context.Context, provider, target, url string) {
+	if err := c.call(ctx, methodRecordReadTouch, recordReadTouchArgs{Provider: provider, Target: target, URL: url}, nil); err != nil {
+		agenthostLog.Warn("read-touch RPC failed (touch dropped)", "target", target, "error", err)
+	}
+}
+
 func (c *IPCClient) GithubGetReviewDetail(ctx context.Context, owner, repo string, number, reviewID int, verbose bool) (*ghclient.ReviewDetail, error) {
 	var res githubReviewDetailResult
 	if err := c.call(ctx, methodGithubGetReviewDetail, githubReviewDetailArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number, ReviewID: reviewID, Verbose: verbose}, &res); err != nil {

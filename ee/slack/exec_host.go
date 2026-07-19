@@ -525,6 +525,12 @@ func (h *slackExecHandler) readThread(ctx context.Context, rt agenthost.Extensio
 	if err != nil {
 		return nil, fmt.Errorf("slack: read thread: %w", err)
 	}
+	// The thread (channel + root ts) is the addressed entity — record a durable
+	// touch, keyed identically to the ingest pipeline's SlackSourceID so a bot
+	// read and a human mention resolve to the same entity. Best-effort via the
+	// runtime, relayed to the orchestrator on the sidecar. `read channel` is
+	// set-returning and never touches.
+	rt.RecordReadTouch(ctx, domain.ArtifactProviderSlack, domain.SlackSourceID(a.Channel, a.TS), "")
 	return h.viewMessages(ctx, token, msgs), nil
 }
 

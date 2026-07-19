@@ -88,6 +88,28 @@ func TestRelayRuntime_RoundTripsCoreOps(t *testing.T) {
 	}
 }
 
+// TestRelayRuntime_RecordReadTouch_RoundTrips proves the sidecar path for an
+// addressed read's touch: the capless runtime relays RecordReadTouch to the
+// orchestrator, which resolves-or-creates the entity and persists the durable
+// touch row against its own stores — so a read touch is not lost when the
+// verb parser runs in the jail (where no db.Stores exists).
+func TestRelayRuntime_RecordReadTouch_RoundTrips(t *testing.T) {
+	conn, stores, info := newCaptureStoresConn(t, true)
+	srv := NewRelayServer(stores, info, nil)
+	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
+	ctx := context.Background()
+
+	rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, "octo/repo#7", "")
+
+	ent, err := stores.Entities.GetBySource(ctx, info.OrgID, "github", "octo/repo#7")
+	if err != nil || ent == nil {
+		t.Fatalf("relayed read touch did not resolve-or-create the entity: ent=%v err=%v", ent, err)
+	}
+	if role := touchRole(t, conn, info.RunID, ent.ID); role != domain.MemoryRoleTouched {
+		t.Errorf("relayed touch role = %q, want %q", role, domain.MemoryRoleTouched)
+	}
+}
+
 // TestRelayServer_BindsOrgFromRunInfoNotArgs is the org-scoping guarantee: the
 // relay envelope carries no org id, so the orchestrator binds identity from the
 // RelayServer's own RunInfo. A sidecar runtime that believes it is a DIFFERENT

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
@@ -439,5 +441,54 @@ func TestStripClaudeCodeCitation(t *testing.T) {
 				t.Errorf("stripClaudeCodeCitation:\n--- got ---\n%q\n--- want ---\n%q", got, tc.want)
 			}
 		})
+	}
+}
+
+// stubThreadGHAPI captures the owner/repo GetCommentThread is called with. It
+// embeds ghAPI (nil) so it satisfies the interface; prThreadView only ever calls
+// GetCommentThread, so no other method is reached.
+type stubThreadGHAPI struct {
+	ghAPI
+	gotOwner, gotRepo string
+}
+
+func (s *stubThreadGHAPI) GetCommentThread(_ context.Context, owner, repo string, commentID, _ int) (*ghclient.CommentThread, error) {
+	s.gotOwner, s.gotRepo = owner, repo
+	return &ghclient.CommentThread{ID: commentID}, nil
+}
+
+// touchCapturingHost captures the RecordReadTouch call prThreadView makes. It
+// embeds agenthost.Client (nil) so it satisfies the interface; only
+// RecordReadTouch is exercised.
+type touchCapturingHost struct {
+	agenthost.Client
+	calls                 int
+	provider, target, url string
+}
+
+func (h *touchCapturingHost) RecordReadTouch(_ context.Context, provider, target, url string) {
+	h.calls++
+	h.provider, h.target, h.url = provider, target, url
+}
+
+// TestPrThreadView_HonorsRepoFlag pins that `gh pr thread-view` resolves the
+// repo from an explicit --repo (not the cwd/env fallback) for BOTH the read and
+// the touch it records — a regression guard on the args-slicing that used to
+// hide the flag from resolveRepo.
+func TestPrThreadView_HonorsRepoFlag(t *testing.T) {
+	api := &stubThreadGHAPI{}
+	host := &touchCapturingHost{}
+
+	// <pr_number> <comment_id> --repo octo/repo — the flag trails the positionals.
+	prThreadView(context.Background(), api, host, []string{"42", "999", "--repo", "octo/repo"})
+
+	if api.gotOwner != "octo" || api.gotRepo != "repo" {
+		t.Errorf("GetCommentThread saw %q/%q, want octo/repo (an explicit --repo must be honored)", api.gotOwner, api.gotRepo)
+	}
+	if host.calls != 1 {
+		t.Fatalf("RecordReadTouch called %d time(s), want 1", host.calls)
+	}
+	if host.provider != domain.ArtifactProviderGitHub || host.target != "octo/repo#42" {
+		t.Errorf("touch = (%q, %q), want (github, octo/repo#42)", host.provider, host.target)
 	}
 }
