@@ -451,13 +451,14 @@ func TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped(t *testing.T) {
 	team2 := seedPgDefaultTeam(t, h, orgID, userID)
 
 	// Shared entities both teams' runs engage (entities are org-wide): a
-	// produced PR and a touched issue.
-	entB := seedPgSharedEntity(t, h, orgID, "pr", "produced-shared")
-	entC := seedPgSharedEntity(t, h, orgID, "issue", "touched-shared")
+	// produced GitHub PR and a touched Jira issue, each with its real source.
+	entB := seedPgSharedEntity(t, h, orgID, "github", "octo/repo#4242", "pr")
+	entC := seedPgSharedEntity(t, h, orgID, "jira", "SKY-9", "issue")
 
-	// Each team's run has its own primary (task) entity; both produce entB.
-	entA1 := seedPgSharedEntity(t, h, orgID, "thread", "primary-t1")
-	entA2 := seedPgSharedEntity(t, h, orgID, "thread", "primary-t2")
+	// Each team's run has its own primary (task) entity — a Slack thread, the
+	// original motivating grain (source 'slack', kind 'thread'); both produce entB.
+	entA1 := seedPgSharedEntity(t, h, orgID, "slack", domain.SlackSourceID("C0125", "1700000000.000100"), "thread")
+	entA2 := seedPgSharedEntity(t, h, orgID, "slack", domain.SlackSourceID("C0999", "1700000000.000200"), "thread")
 	run1 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team1, entA1, "attach-t1")
 	run2 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team2, entA2, "attach-t2")
 
@@ -517,17 +518,19 @@ func TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped(t *testing.T) {
 	}
 }
 
-// seedPgSharedEntity inserts a snapshot-carrying org-wide entity (kind free)
-// and returns its id — for tests that need several entities more than one run
-// engages.
-func seedPgSharedEntity(t *testing.T, h *pgtest.Harness, orgID, kind, label string) string {
+// seedPgSharedEntity inserts a snapshot-carrying org-wide entity with an
+// explicit (source, source_id, kind) — so a fixture that needs several entities
+// more than one run engages uses each provider's real source/kind pair (a
+// Slack thread is source 'slack', a Jira issue 'jira', a GitHub PR 'github')
+// rather than pinning everything to one source. Returns its id.
+func seedPgSharedEntity(t *testing.T, h *pgtest.Harness, orgID, source, sourceID, kind string) string {
 	t.Helper()
 	id := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state)
-		VALUES ($1, $2, 'github', $3, $4, $5, 'https://example/x', '{}'::jsonb, now(), 'active')
-	`, id, orgID, label+"-"+id[:8], kind, label); err != nil {
-		t.Fatalf("seed shared entity %s: %v", label, err)
+		VALUES ($1, $2, $3, $4, $5, $6, 'https://example/x', '{}'::jsonb, now(), 'active')
+	`, id, orgID, source, sourceID, kind, sourceID); err != nil {
+		t.Fatalf("seed shared entity %s/%s: %v", source, sourceID, err)
 	}
 	return id
 }
