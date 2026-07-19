@@ -81,8 +81,8 @@ func (failingAuthEventStore) ListByOrgSystem(context.Context, string, domain.Aut
 func (failingAuthEventStore) ListByUserSystem(context.Context, string, domain.AuthEventListOpts) ([]domain.AuthEvent, error) {
 	return nil, nil
 }
-func (failingAuthEventStore) SeatUsageSystem(context.Context, time.Time, string) (int, bool, error) {
-	return 0, false, nil
+func (failingAuthEventStore) ClaimSeatSystem(context.Context, string, string, int) (bool, int, error) {
+	return true, 0, nil
 }
 
 // A successful login records login_success with the principal, the defaulted org,
@@ -311,8 +311,8 @@ func (c *capturingAuthEventStore) ListByOrgSystem(context.Context, string, domai
 func (c *capturingAuthEventStore) ListByUserSystem(context.Context, string, domain.AuthEventListOpts) ([]domain.AuthEvent, error) {
 	return nil, nil
 }
-func (c *capturingAuthEventStore) SeatUsageSystem(context.Context, time.Time, string) (int, bool, error) {
-	return 0, false, nil
+func (c *capturingAuthEventStore) ClaimSeatSystem(context.Context, string, string, int) (bool, int, error) {
+	return true, 0, nil
 }
 
 // The RecordAuthEvent extension seam (ee/sso's only door to the audit log) fills

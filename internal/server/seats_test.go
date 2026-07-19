@@ -13,13 +13,18 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
 
-// fakeSeatAuthStore is a db.AuthEventStore stub whose SeatUsageSystem returns
-// canned counts and whose RecordSystem captures written rows.
+// fakeSeatAuthStore is a db.AuthEventStore stub whose ClaimSeatSystem returns a
+// canned decision (and captures its args), and whose RecordSystem captures rows.
 type fakeSeatAuthStore struct {
-	distinct int
-	active   bool
-	usageErr error
+	admitted bool
+	seats    int
+	claimErr error
 	recorded []domain.AuthEvent
+
+	claimCalls int
+	gotPeriod  string
+	gotUser    string
+	gotCap     int
 }
 
 func (f *fakeSeatAuthStore) RecordSystem(_ context.Context, e domain.AuthEvent) error {
@@ -32,8 +37,10 @@ func (f *fakeSeatAuthStore) ListByOrgSystem(context.Context, string, domain.Auth
 func (f *fakeSeatAuthStore) ListByUserSystem(context.Context, string, domain.AuthEventListOpts) ([]domain.AuthEvent, error) {
 	return nil, nil
 }
-func (f *fakeSeatAuthStore) SeatUsageSystem(_ context.Context, _ time.Time, _ string) (int, bool, error) {
-	return f.distinct, f.active, f.usageErr
+func (f *fakeSeatAuthStore) ClaimSeatSystem(_ context.Context, period, userID string, maxSeats int) (bool, int, error) {
+	f.claimCalls++
+	f.gotPeriod, f.gotUser, f.gotCap = period, userID, maxSeats
+	return f.admitted, f.seats, f.claimErr
 }
 
 var _ db.AuthEventStore = (*fakeSeatAuthStore)(nil)
@@ -60,36 +67,42 @@ const seatTestUser = "22222222-2222-2222-2222-222222222222"
 func TestEnforceSeatLimit(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/auth/callback", nil)
 
-	t.Run("uncapped is a no-op", func(t *testing.T) {
+	t.Run("uncapped is a no-op and never claims", func(t *testing.T) {
 		setSeatCap(t, 0)
-		fake := &fakeSeatAuthStore{distinct: 100, active: false}
+		fake := &fakeSeatAuthStore{admitted: false, seats: 100}
 		s := &Server{authEvents: fake}
 		if s.enforceSeatLimit(req, seatTestUser) {
 			t.Fatal("uncapped deployment must never block")
+		}
+		if fake.claimCalls != 0 {
+			t.Fatalf("uncapped must not attempt a seat claim, got %d calls", fake.claimCalls)
 		}
 		if len(fake.recorded) != 0 {
 			t.Fatalf("uncapped must record no event, got %d", len(fake.recorded))
 		}
 	})
 
-	t.Run("under cap is admitted", func(t *testing.T) {
+	t.Run("admitted claim proceeds", func(t *testing.T) {
 		setSeatCap(t, 2)
-		fake := &fakeSeatAuthStore{distinct: 1, active: false}
+		fake := &fakeSeatAuthStore{admitted: true, seats: 2}
 		s := &Server{authEvents: fake}
 		if s.enforceSeatLimit(req, seatTestUser) {
-			t.Fatal("a new user under the cap must be admitted")
+			t.Fatal("an admitted claim must not block")
+		}
+		if fake.gotUser != seatTestUser || fake.gotCap != 2 {
+			t.Errorf("claim args = (user=%q cap=%d), want (%q, 2)", fake.gotUser, fake.gotCap, seatTestUser)
 		}
 		if len(fake.recorded) != 0 {
 			t.Fatalf("no rejection event expected, got %d", len(fake.recorded))
 		}
 	})
 
-	t.Run("new distinct user at cap is blocked and recorded", func(t *testing.T) {
+	t.Run("rejected claim blocks and records", func(t *testing.T) {
 		setSeatCap(t, 2)
-		fake := &fakeSeatAuthStore{distinct: 2, active: false}
+		fake := &fakeSeatAuthStore{admitted: false, seats: 2}
 		s := &Server{authEvents: fake}
 		if !s.enforceSeatLimit(req, seatTestUser) {
-			t.Fatal("the (maxSeats+1)th distinct user must be blocked")
+			t.Fatal("a rejected claim (over cap) must block")
 		}
 		if len(fake.recorded) != 1 {
 			t.Fatalf("expected one seat_limit_rejected event, got %d", len(fake.recorded))
@@ -112,37 +125,23 @@ func TestEnforceSeatLimit(t *testing.T) {
 		}
 	})
 
-	t.Run("returning user at cap is admitted", func(t *testing.T) {
+	t.Run("fail-open on claim error", func(t *testing.T) {
 		setSeatCap(t, 2)
-		// Already active this period (holds a seat) even though the deployment is
-		// well over the cap in raw count — must not be bounced.
-		fake := &fakeSeatAuthStore{distinct: 9, active: true}
+		fake := &fakeSeatAuthStore{claimErr: errors.New("db down")}
 		s := &Server{authEvents: fake}
 		if s.enforceSeatLimit(req, seatTestUser) {
-			t.Fatal("a returning, already-active user must never be blocked")
-		}
-		if len(fake.recorded) != 0 {
-			t.Fatalf("no event expected for a returning user, got %d", len(fake.recorded))
-		}
-	})
-
-	t.Run("fail-open on count error", func(t *testing.T) {
-		setSeatCap(t, 2)
-		fake := &fakeSeatAuthStore{distinct: 5, active: false, usageErr: errors.New("db down")}
-		s := &Server{authEvents: fake}
-		if s.enforceSeatLimit(req, seatTestUser) {
-			t.Fatal("a count error must fail OPEN (allow the login)")
+			t.Fatal("a claim error must fail OPEN (allow the login)")
 		}
 		if len(fake.recorded) != 0 {
 			t.Fatalf("fail-open must record no rejection, got %d", len(fake.recorded))
 		}
 	})
 
-	t.Run("no audit store wired is a no-op", func(t *testing.T) {
+	t.Run("no seat store wired is a no-op", func(t *testing.T) {
 		setSeatCap(t, 2)
 		s := &Server{} // authEvents nil
 		if s.enforceSeatLimit(req, seatTestUser) {
-			t.Fatal("with no audit store the gate cannot count and must allow")
+			t.Fatal("with no seat store the gate cannot claim and must allow")
 		}
 	})
 }

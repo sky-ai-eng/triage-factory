@@ -157,64 +157,49 @@ func TestAuthEventStore_SQLite_AppendOnly(t *testing.T) {
 	}
 }
 
-// TestAuthEventStore_SQLite_SeatUsage pins SeatUsageSystem: it counts DISTINCT
-// login_success users in the window, ignores non-login_success rows and
-// NULL-user rows, and reports whether a given user is among them.
-func TestAuthEventStore_SQLite_SeatUsage(t *testing.T) {
-	conn := newSQLiteForArtifactTestTimed(t)
+// TestAuthEventStore_SQLite_SeatClaims pins ClaimSeatSystem: a claim is
+// idempotent per (period, user), the cap blocks a new distinct claimant once
+// reached, a returning claimant is always admitted, and the period is an
+// independent bucket.
+func TestAuthEventStore_SQLite_SeatClaims(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-
 	authUserC := "66666666-6666-6666-6666-666666666666"
-	// user A logs in twice (still ONE distinct seat), user B once. A logout by
-	// user B and a NULL-user login_failure must not count as seats.
-	seeds := []struct {
-		user, eventType, when string
-	}{
-		{authUserA, domain.AuthEventLoginSuccess, "2026-07-02 09:00:00"},
-		{authUserA, domain.AuthEventLoginSuccess, "2026-07-10 09:00:00"},
-		{authUserB, domain.AuthEventLoginSuccess, "2026-07-11 09:00:00"},
-		{authUserB, domain.AuthEventLogout, "2026-07-12 09:00:00"},
-		{"", domain.AuthEventLoginFailure, "2026-07-13 09:00:00"},
-	}
-	for i, s := range seeds {
-		sid := authSessA[:len(authSessA)-1] + string(rune('a'+i))
-		if err := stores.AuthEvents.RecordSystem(ctx, domain.AuthEvent{
-			OrgID: authOrgA, UserID: s.user, SessionID: sid, EventType: s.eventType,
-		}); err != nil {
-			t.Fatalf("seed %d: %v", i, err)
+
+	claim := func(period, user string, cap int) (bool, int) {
+		t.Helper()
+		adm, seats, err := stores.AuthEvents.ClaimSeatSystem(ctx, period, user, cap)
+		if err != nil {
+			t.Fatalf("ClaimSeatSystem(%s,%s): %v", period, user, err)
 		}
-		if _, err := conn.Exec(`UPDATE auth_events SET created_at = ? WHERE session_id = ?`, s.when, sid); err != nil {
-			t.Fatalf("pin created_at: %v", err)
-		}
+		return adm, seats
 	}
 
-	monthStart := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-
-	// Over the whole month: 2 distinct seats (A, B). A is active; C is not.
-	distinct, active, err := stores.AuthEvents.SeatUsageSystem(ctx, monthStart, authUserA)
-	if err != nil {
-		t.Fatalf("SeatUsageSystem(A): %v", err)
+	const period = "2026-07"
+	// A claims → seat 1.
+	if adm, seats := claim(period, authUserA, 2); !adm || seats != 1 {
+		t.Fatalf("A first claim = (%v, %d), want (true, 1)", adm, seats)
 	}
-	if distinct != 2 || !active {
-		t.Errorf("month/A: got (distinct=%d, active=%v), want (2, true)", distinct, active)
+	// A claims again → idempotent, still seat count 1, still admitted.
+	if adm, seats := claim(period, authUserA, 2); !adm || seats != 1 {
+		t.Fatalf("A repeat claim = (%v, %d), want (true, 1)", adm, seats)
 	}
-	distinct, active, err = stores.AuthEvents.SeatUsageSystem(ctx, monthStart, authUserC)
-	if err != nil {
-		t.Fatalf("SeatUsageSystem(C): %v", err)
+	// B claims → seat 2 (fills the cap).
+	if adm, seats := claim(period, authUserB, 2); !adm || seats != 2 {
+		t.Fatalf("B claim = (%v, %d), want (true, 2)", adm, seats)
 	}
-	if distinct != 2 || active {
-		t.Errorf("month/C: got (distinct=%d, active=%v), want (2, false)", distinct, active)
+	// C is a new distinct claimant beyond cap → rejected, count reported == cap.
+	if adm, seats := claim(period, authUserC, 2); adm || seats != 2 {
+		t.Fatalf("C over-cap claim = (%v, %d), want (false, 2)", adm, seats)
 	}
-
-	// A tighter window that starts after A's logins: only B counts, A inactive.
-	cutoff := time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC)
-	distinct, active, err = stores.AuthEvents.SeatUsageSystem(ctx, cutoff, authUserA)
-	if err != nil {
-		t.Fatalf("SeatUsageSystem(cutoff/A): %v", err)
+	// A returning over cap is still admitted (already holds a seat).
+	if adm, _ := claim(period, authUserA, 2); !adm {
+		t.Fatal("A returning claim must be admitted even at cap")
 	}
-	if distinct != 1 || active {
-		t.Errorf("cutoff/A: got (distinct=%d, active=%v), want (1, false)", distinct, active)
+	// A different period is an independent bucket — C gets in.
+	if adm, seats := claim("2026-08", authUserC, 2); !adm || seats != 1 {
+		t.Fatalf("C next-period claim = (%v, %d), want (true, 1)", adm, seats)
 	}
 }
 

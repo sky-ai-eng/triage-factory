@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -84,29 +83,55 @@ func (s *authEventStore) ListByUserSystem(ctx context.Context, userID string, op
 	return scanAuthEventRows(rows)
 }
 
-func (s *authEventStore) SeatUsageSystem(ctx context.Context, since time.Time, userID string) (int, bool, error) {
-	// One pass on the admin pool: COUNT(DISTINCT user_id) is the seat count;
-	// bool_or(user_id = $1) is the membership flag for userID. login_success +
-	// non-NULL user_id restrict to real human sign-ins — service/bot identities
-	// never traverse the OAuth login path, so they never emit login_success and
-	// are excluded for free. Deployment-wide: no org filter (a seat is a human,
-	// deployment-scoped).
+// seatClaimLockSalt namespaces the per-period seat-claim advisory lock inside
+// hashtextextended()'s key space, keeping it clear of the login identity/email
+// locks (salts 0/1). Value is "SEAT" as ASCII bytes — arbitrary but fixed.
+const seatClaimLockSalt = 0x53454154
+
+func (s *authEventStore) ClaimSeatSystem(ctx context.Context, period, userID string, maxSeats int) (bool, int, error) {
 	var (
-		distinct   int
-		userActive bool
+		admitted bool
+		seats    int
 	)
-	err := s.admin.QueryRowContext(ctx, `
-		SELECT COUNT(DISTINCT user_id),
-		       COALESCE(bool_or(user_id = $1::uuid), false)
-		  FROM auth_events
-		 WHERE event_type = $2
-		   AND user_id IS NOT NULL
-		   AND created_at >= $3
-	`, userID, domain.AuthEventLoginSuccess, since).Scan(&distinct, &userActive)
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		// Serialize every claim evaluation for this period so two concurrent
+		// first-logins can't both observe an under-cap count and both be admitted.
+		// pg_advisory_xact_lock auto-releases at commit/rollback.
+		if _, err := q.ExecContext(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, period, seatClaimLockSalt); err != nil {
+			return err
+		}
+		var have bool
+		if err := q.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM seat_claims WHERE period = $1 AND user_id = $2::uuid)`,
+			period, userID).Scan(&have); err != nil {
+			return err
+		}
+		if err := q.QueryRowContext(ctx,
+			`SELECT count(*) FROM seat_claims WHERE period = $1`, period).Scan(&seats); err != nil {
+			return err
+		}
+		if have {
+			admitted = true // returning claimant — already holds a seat this period
+			return nil
+		}
+		if seats >= maxSeats {
+			admitted = false // a new claimant beyond the cap
+			return nil
+		}
+		if _, err := q.ExecContext(ctx,
+			`INSERT INTO seat_claims (period, user_id) VALUES ($1, $2::uuid)
+			 ON CONFLICT (period, user_id) DO NOTHING`, period, userID); err != nil {
+			return err
+		}
+		admitted = true
+		seats++ // this login's fresh claim
+		return nil
+	})
 	if err != nil {
-		return 0, false, err
+		return false, 0, err
 	}
-	return distinct, userActive, nil
+	return admitted, seats, nil
 }
 
 // appendPgAuthEventFilters appends opts' optional event_type/time predicates, the

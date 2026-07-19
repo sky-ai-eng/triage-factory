@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -156,62 +158,106 @@ func TestAuthEventStore_Postgres_ListScoping(t *testing.T) {
 	}
 }
 
-// TestAuthEventStore_Postgres_SeatUsage pins SeatUsageSystem: distinct
-// login_success users in the window (deployment-wide, ignoring org), repeated
-// logins collapse to one seat, non-login_success + NULL-user rows are excluded,
-// and userActive flags membership. Seeds created_at directly (the store has no
-// created_at param) to exercise the time window.
-func TestAuthEventStore_Postgres_SeatUsage(t *testing.T) {
+// TestAuthEventStore_Postgres_SeatClaims pins ClaimSeatSystem's sequential
+// semantics: idempotent per (period, user), the cap blocks a new distinct
+// claimant, a returning claimant is always admitted, and the period is an
+// independent bucket.
+func TestAuthEventStore_Postgres_SeatClaims(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	_, userA, _ := pgtest.SeedOrgWithUser(t, h, "alice")
 	_, userB, _ := pgtest.SeedOrgWithUser(t, h, "bob")
 	_, userC, _ := pgtest.SeedOrgWithUser(t, h, "carol")
 
-	// user A logs in twice (ONE seat), user B once; a logout by B and a NULL-user
-	// failure must not count. Direct inserts pin created_at across the month.
-	ins := func(userID, eventType, ts string) {
-		var uid any
-		if userID != "" {
-			uid = userID
-		}
-		pgtest.MustExec(t, h.AdminDB, `
-			INSERT INTO auth_events (user_id, event_type, created_at)
-			VALUES ($1::uuid, $2, $3::timestamptz)`, uid, eventType, ts)
-	}
-	ins(userA, domain.AuthEventLoginSuccess, "2026-07-02 09:00:00+00")
-	ins(userA, domain.AuthEventLoginSuccess, "2026-07-10 09:00:00+00")
-	ins(userB, domain.AuthEventLoginSuccess, "2026-07-11 09:00:00+00")
-	ins(userB, domain.AuthEventLogout, "2026-07-12 09:00:00+00")
-	ins("", domain.AuthEventLoginFailure, "2026-07-13 09:00:00+00")
-
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
-	monthStart := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
-
-	distinct, active, err := stores.AuthEvents.SeatUsageSystem(ctx, monthStart, userA)
-	if err != nil {
-		t.Fatalf("SeatUsageSystem(A): %v", err)
-	}
-	if distinct != 2 || !active {
-		t.Errorf("month/A: got (distinct=%d, active=%v), want (2, true)", distinct, active)
-	}
-	distinct, active, err = stores.AuthEvents.SeatUsageSystem(ctx, monthStart, userC)
-	if err != nil {
-		t.Fatalf("SeatUsageSystem(C): %v", err)
-	}
-	if distinct != 2 || active {
-		t.Errorf("month/C: got (distinct=%d, active=%v), want (2, false)", distinct, active)
+	claim := func(period, user string, cap int) (bool, int) {
+		t.Helper()
+		adm, seats, err := stores.AuthEvents.ClaimSeatSystem(ctx, period, user, cap)
+		if err != nil {
+			t.Fatalf("ClaimSeatSystem(%s,%s): %v", period, user, err)
+		}
+		return adm, seats
 	}
 
-	// Window starting after A's logins: only B counts, A inactive.
-	cutoff := time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC)
-	distinct, active, err = stores.AuthEvents.SeatUsageSystem(ctx, cutoff, userA)
-	if err != nil {
-		t.Fatalf("SeatUsageSystem(cutoff/A): %v", err)
+	const period = "2026-07"
+	if adm, seats := claim(period, userA, 2); !adm || seats != 1 {
+		t.Fatalf("A first claim = (%v, %d), want (true, 1)", adm, seats)
 	}
-	if distinct != 1 || active {
-		t.Errorf("cutoff/A: got (distinct=%d, active=%v), want (1, false)", distinct, active)
+	if adm, seats := claim(period, userA, 2); !adm || seats != 1 {
+		t.Fatalf("A repeat claim = (%v, %d), want (true, 1) — idempotent", adm, seats)
+	}
+	if adm, seats := claim(period, userB, 2); !adm || seats != 2 {
+		t.Fatalf("B claim = (%v, %d), want (true, 2)", adm, seats)
+	}
+	if adm, seats := claim(period, userC, 2); adm || seats != 2 {
+		t.Fatalf("C over-cap claim = (%v, %d), want (false, 2)", adm, seats)
+	}
+	if adm, _ := claim(period, userA, 2); !adm {
+		t.Fatal("A returning claim must be admitted even at cap")
+	}
+	if adm, seats := claim("2026-08", userC, 2); !adm || seats != 1 {
+		t.Fatalf("C next-period claim = (%v, %d), want (true, 1)", adm, seats)
+	}
+}
+
+// TestAuthEventStore_Postgres_SeatClaims_Concurrent is the TOCTOU regression
+// guard: N distinct users race to claim seats against a cap of K, and EXACTLY K
+// are admitted — proving the count+insert is atomic under real concurrency (the
+// per-period advisory lock serializes claim evaluations so two first-logins can't
+// both observe an under-cap count and both slip past the cap).
+func TestAuthEventStore_Postgres_SeatClaims_Concurrent(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	const cap = 3
+	const n = 16
+	users := make([]string, n)
+	for i := range users {
+		_, u, _ := pgtest.SeedOrgWithUser(t, h, fmt.Sprintf("racer%d", i))
+		users[i] = u
+	}
+
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	const period = "2026-09"
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	admitted := 0
+	var firstErr error
+	for _, u := range users {
+		wg.Add(1)
+		go func(uid string) {
+			defer wg.Done()
+			adm, _, err := stores.AuthEvents.ClaimSeatSystem(context.Background(), period, uid, cap)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				return
+			}
+			if adm {
+				admitted++
+			}
+		}(u)
+	}
+	wg.Wait()
+
+	if firstErr != nil {
+		t.Fatalf("concurrent claim error: %v", firstErr)
+	}
+	if admitted != cap {
+		t.Fatalf("admitted=%d under concurrency, want exactly cap=%d — the cap leaked", admitted, cap)
+	}
+	// The ledger holds exactly cap rows for the period — no over-claim persisted.
+	var rows int
+	if err := h.AdminDB.QueryRow(`SELECT count(*) FROM seat_claims WHERE period = $1`, period).Scan(&rows); err != nil {
+		t.Fatalf("count seat_claims: %v", err)
+	}
+	if rows != cap {
+		t.Fatalf("seat_claims has %d rows for the period, want exactly cap=%d", rows, cap)
 	}
 }
 

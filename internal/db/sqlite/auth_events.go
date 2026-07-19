@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -86,30 +85,47 @@ func (s *authEventStore) ListByUserSystem(ctx context.Context, userID string, op
 	return scanAuthEventRows(rows)
 }
 
-func (s *authEventStore) SeatUsageSystem(ctx context.Context, since time.Time, userID string) (int, bool, error) {
-	// One pass: COUNT(DISTINCT user_id) is the seat count; MAX(CASE ...) is the
-	// membership flag for userID. login_success + non-NULL user_id restrict to
-	// real human sign-ins (bots/service accounts never emit login_success).
-	// datetime() wraps both sides so the bound compares against the
-	// CURRENT_TIMESTAMP-formatted created_at regardless of bind serialization —
-	// the same pattern appendAuthEventFilters uses. Local mode is N=1 with no
-	// GoTrue, so in practice this returns (0, false); the impl exists for parity.
+func (s *authEventStore) ClaimSeatSystem(ctx context.Context, period, userID string, maxSeats int) (bool, int, error) {
+	// SQLite serializes writers via the single database write lock, so the
+	// count-then-claim inside one transaction is atomic without an advisory lock.
+	// Local mode is N=1 with no GoTrue login, so this is parity-only in practice —
+	// per-seat enforcement runs on the multi-mode (Postgres) login path.
 	var (
-		distinct   int
-		userActive int
+		admitted bool
+		seats    int
 	)
-	err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(DISTINCT user_id),
-		       COALESCE(MAX(CASE WHEN user_id = ? THEN 1 ELSE 0 END), 0)
-		  FROM auth_events
-		 WHERE event_type = ?
-		   AND user_id IS NOT NULL
-		   AND datetime(created_at) >= datetime(?)
-	`, userID, domain.AuthEventLoginSuccess, since).Scan(&distinct, &userActive)
+	err := inTx(ctx, s.q, func(q queryer) error {
+		var have int
+		if err := q.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM seat_claims WHERE period = ? AND user_id = ?)`,
+			period, userID).Scan(&have); err != nil {
+			return err
+		}
+		if err := q.QueryRowContext(ctx,
+			`SELECT count(*) FROM seat_claims WHERE period = ?`, period).Scan(&seats); err != nil {
+			return err
+		}
+		if have == 1 {
+			admitted = true // returning claimant — already holds a seat this period
+			return nil
+		}
+		if seats >= maxSeats {
+			admitted = false // a new claimant beyond the cap
+			return nil
+		}
+		if _, err := q.ExecContext(ctx,
+			`INSERT INTO seat_claims (period, user_id) VALUES (?, ?)
+			 ON CONFLICT (period, user_id) DO NOTHING`, period, userID); err != nil {
+			return err
+		}
+		admitted = true
+		seats++ // this login's fresh claim
+		return nil
+	})
 	if err != nil {
-		return 0, false, err
+		return false, 0, err
 	}
-	return distinct, userActive == 1, nil
+	return admitted, seats, nil
 }
 
 // appendAuthEventFilters appends opts' optional event_type/time predicates, the

@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -42,20 +41,24 @@ type AuthEventStore interface {
 	// will scope on.
 	ListByUserSystem(ctx context.Context, userID string, opts domain.AuthEventListOpts) ([]domain.AuthEvent, error)
 
-	// SeatUsageSystem reports per-seat license consumption for the whole
-	// deployment since `since`: distinct is the number of DISTINCT users with a
-	// successful login (login_success) in [since, now), and userActive reports
-	// whether userID is among them. Admin pool, DEPLOYMENT-WIDE (no org filter) —
-	// a per-seat cap is a deployment property and a human is one seat regardless
-	// of how many orgs they belong to.
+	// ClaimSeatSystem atomically claims a per-seat license slot for userID in the
+	// given billing period (an opaque bucket key like "2026-07"), capping the
+	// number of DISTINCT claimants at maxSeats. It owns the seat_claims ledger
+	// (a login-critical-edge, admin-pool, deployment-scoped system table — the
+	// same posture as auth_events, so it rides this store rather than a parallel
+	// one). Returns:
+	//   - admitted=true if userID already holds a claim for the period (idempotent
+	//     returning user, count unchanged) OR a new claim was inserted within the
+	//     cap; seats is the resulting claimant count.
+	//   - admitted=false if granting a new claim would exceed maxSeats (the caller
+	//     hard-blocks the login); seats is the count observed (== maxSeats).
 	//
-	// Counts AUTHENTICATED users, not provisioned accounts: login_success is
-	// emitted only for a real GoTrue human sign-in, so service/bot identities
-	// (the GitHub App bot, the Jira service account) — which never traverse the
-	// OAuth login path — are excluded for free. NULL-user rows (pre-identity
-	// failures) are excluded. Enforcement calls this at the login critical edge
-	// BEFORE recording the current login, so `distinct` is the count of OTHER
-	// seats and userActive tells the caller whether this login is a returning
-	// seat (no new consumption) or a fresh one.
-	SeatUsageSystem(ctx context.Context, since time.Time, userID string) (distinct int, userActive bool, err error)
+	// The count AND the claim run inside ONE transaction serialized per period
+	// (Postgres advisory xact lock; SQLite's single-writer lock), so concurrent
+	// first-logins cannot both read an under-cap count and both be admitted — the
+	// TOCTOU a separate count-then-insert would leave open. Counts AUTHENTICATED
+	// users: only the OAuth login path claims, so service/bot identities that
+	// never traverse it are excluded for free. Admin pool, DEPLOYMENT-WIDE (no org
+	// filter — a human is one seat regardless of how many orgs they belong to).
+	ClaimSeatSystem(ctx context.Context, period, userID string, maxSeats int) (admitted bool, seats int, err error)
 }
