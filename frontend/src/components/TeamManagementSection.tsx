@@ -16,10 +16,9 @@ import ArchiveTeamModal from './ArchiveTeamModal'
 // ticket). It lists the org's teams (so the admin sees what exists) and
 // takes a name to create another.
 //
-// The defaults a new team inherits (prompts + handlers) are edited from the
-// Org page's Template tab (TFAC-436), not this section (a
-// distinct surface was pinned so the template never reads as just another team).
-// See pages/OrgTemplate.tsx.
+// A new team's prompts + handlers seed directly from TF's shipped defaults
+// (ai.ShippedPrompts() / ai.ShippedBlueprints() / db.ShippedEventHandlers) —
+// there is no per-org editable source for this section to point at.
 export default function TeamManagementSection() {
   const { teams, createTeam, refresh: refreshTeams } = useTeams()
   const [name, setName] = useState('')

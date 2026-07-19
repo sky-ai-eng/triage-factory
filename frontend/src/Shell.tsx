@@ -32,8 +32,6 @@ export default function Shell() {
   // The /org surface is admin-gated in the nav (owner/admin of the active
   // org). Non-admins can still deep-link to it for a read-only roster + Leave,
   // but it doesn't earn a nav slot for them. False in local mode (no auth).
-  // The org template (low-frequency admin config) is reached via the Org pill →
-  // Template tab, not a standalone nav entry (TFAC-436).
   const { isAdmin: orgAdmin } = useOrgRole()
 
   // Fleet console (TFAC-589) — the sandbox-fleet admin surface. Composes the two

@@ -15,9 +15,11 @@ import (
 //     server/projects.go) — full CRUD.
 //   - Delegated agents (delegate/*, curator/skill.go) — read prompt body
 //     before dispatch + bump usage_count.
-//   - Startup seeder (seed.go) — SeedOrUpdate per shipped system prompt.
 //   - Skills importer (skills/importer.go) — Get/Create/UpdateImported/Hide
 //     to mirror local SKILL.md files into the prompts table.
+//
+// SeedOrUpdate has no production caller — new teams seed a team's prompts
+// directly from the shipped Go slices via ShippedDefaultsStore instead.
 //
 // Postgres / RLS note: in multi mode, system_prompt_versions has
 // INSERT/UPDATE/DELETE REVOKE'd from tf_app per D3 — only the deploy

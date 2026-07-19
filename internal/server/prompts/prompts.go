@@ -1,10 +1,10 @@
 // Package prompts holds the prompt primitives shared across the handler
-// surfaces that read or write prompts — the standalone prompts API, the
-// blueprint editor (whose steps are prompts), and the org-template editor.
-// These are the pieces three different handler packages need in common: the
-// model-override allow-list, the create/update request shapes, and the
-// source-aware soft delete. The prompt HTTP handlers themselves will migrate
-// into this package; for now it is the shared contract they all import.
+// surfaces that read or write prompts — the standalone prompts API and the
+// blueprint editor (whose steps are prompts). These are the pieces the
+// handler packages need in common: the model-override allow-list, the
+// create/update request shapes, and the source-aware soft delete. The
+// prompt HTTP handlers themselves will migrate into this package; for now
+// it is the shared contract they all import.
 package prompts
 
 import (
@@ -15,8 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// CreateRequest is the body of a prompt create. Shared by the prompts API and
-// the org-template editor, which mints template prompts the same way.
+// CreateRequest is the body of a prompt create.
 type CreateRequest struct {
 	Name  string `json:"name"`
 	Body  string `json:"body"`

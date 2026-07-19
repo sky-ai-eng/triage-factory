@@ -81,7 +81,6 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Curator:          newCuratorStore(tx),
 		GitHubApps:       newGitHubAppsStore(tx, newSecretStore()),
 		JiraApps:         newJiraAppsStore(tx),
-		OrgTemplate:      newOrgTemplateStore(tx),
 		ShippedDefaults:  newTxShippedDefaultsStore(tx, newEventHandlerStore(tx)),
 		Invites:          newInvitesStore(tx, tx),
 		SystemLLMRuns:    newSystemLLMRunStore(tx),

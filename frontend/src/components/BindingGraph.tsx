@@ -21,13 +21,7 @@ import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import MarketplacePublishControl from './MarketplacePublishControl'
-import {
-  type BindingScope,
-  isTemplateScope,
-  blueprintsBase,
-  promptsBase,
-  handlersBase,
-} from '../lib/scope'
+import { type BindingScope, blueprintsBase, promptsBase, handlersBase } from '../lib/scope'
 
 interface EventType {
   id: string
@@ -38,14 +32,11 @@ interface EventType {
 }
 
 interface GraphProps {
-  // The editor scope: a single team's prompts+triggers, or the org
-  // template. Picks the endpoint set; everything downstream is identical. For
-  // team scope, teamId '' means solo/local (the server resolves the sole team).
+  // The editor scope: a single team's prompts+triggers. teamId '' means
+  // solo/local (the server resolves the sole team).
   scope: BindingScope
-  // False until the scope resolves. For team scope this gates on the active
-  // team being a concrete id (a multi-team user can't post team_id:'' in the
-  // cold-load window → 400); for template scope it gates on org-admin + multi
-  // confirming. The connect gesture no-ops while false.
+  // False until the scope resolves — a multi-team user can't post team_id:''
+  // in the cold-load window (→ 400). The connect gesture no-ops while false.
   scopeReady: boolean
   onPromptClick?: (promptId: string) => void
   onTriggerClick?: (trigger: TriggerHandler) => void
@@ -281,17 +272,15 @@ function Sidebar({ eventTypes, activeIds }: { eventTypes: EventType[]; activeIds
 }
 
 // --- Persistence ---
-// Node positions are persisted per scope so a team's canvas and the org
-// template's canvas (and one team vs another) don't share — and overwrite —
-// each other's layout (event-type node ids are the same system registry across
-// scopes, so a shared key would bleed positions and make an event placed on
-// one canvas appear on the other). The key is derived from the scope below.
+// Node positions are persisted per team so one team's canvas doesn't share —
+// and overwrite — another's layout (event-type node ids are the same system
+// registry across teams, so a shared key would bleed positions and make an
+// event placed on one canvas appear on the other). The key is derived from
+// the scope below.
 const STORAGE_KEY_PREFIX = 'binding-graph-layout'
 
-function layoutStorageKey(template: boolean, teamId: string): string {
-  return template
-    ? `${STORAGE_KEY_PREFIX}:template`
-    : `${STORAGE_KEY_PREFIX}:team:${teamId || 'local'}`
+function layoutStorageKey(teamId: string): string {
+  return `${STORAGE_KEY_PREFIX}:team:${teamId || 'local'}`
 }
 
 interface SavedLayout {
@@ -512,15 +501,13 @@ function BindingGraphInner({
   onTriggerClick,
   onTriggerDeleted,
 }: GraphProps) {
-  // The graph is scoped to one team OR the org template. For team
-  // scope it shows that team's prompts + triggers and stamps new triggers with
-  // it; because only the active team's prompts are ever on the canvas, a
-  // connect can't bind another team's prompt (the trigger's team always
-  // matches the prompt's, closing the cross-team hole by construction).
-  // Template scope is org-scoped — no team_id is sent. Solo/local team scope →
-  // teamId '' → the server resolves the sole team.
-  const template = isTemplateScope(scope)
-  const teamId = scope.kind === 'team' ? scope.teamId : ''
+  // The graph is scoped to one team: it shows that team's prompts + triggers
+  // and stamps new triggers with it; because only the active team's prompts
+  // are ever on the canvas, a connect can't bind another team's prompt (the
+  // trigger's team always matches the prompt's, closing the cross-team hole
+  // by construction). Solo/local → teamId '' → the server resolves the sole
+  // team.
+  const teamId = scope.teamId
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [triggers, setTriggers] = useState<TriggerHandler[]>([])
@@ -555,13 +542,13 @@ function BindingGraphInner({
   // when the Delete-key target needs a confirm (any blueprint, or >1 element);
   // the dialog names what's affected and runs executeDeletePlan on confirm.
   const [deleteConfirm, setDeleteConfirm] = useState<DeletePlan | null>(null)
-  // Persisted layout, keyed per scope (team vs template, and per team) so the
-  // canvases don't overwrite each other's node positions. storageKeyRef keeps
-  // the key fresh for the save callbacks (which have empty/narrow dep arrays),
-  // matching this component's "refs so callbacks don't go stale" idiom; the
-  // effect below reloads layoutRef when the scope changes (the /prompts page
-  // switches teams without remounting).
-  const storageKey = layoutStorageKey(template, teamId)
+  // Persisted layout, keyed per team so the canvases don't overwrite each
+  // other's node positions. storageKeyRef keeps the key fresh for the save
+  // callbacks (which have empty/narrow dep arrays), matching this
+  // component's "refs so callbacks don't go stale" idiom; the effect below
+  // reloads layoutRef when the scope changes (the /prompts page switches
+  // teams without remounting).
+  const storageKey = layoutStorageKey(teamId)
   const storageKeyRef = useRef(storageKey)
   storageKeyRef.current = storageKey
   const layoutRef = useRef<SavedLayout>(loadLayout(storageKey))
@@ -611,8 +598,8 @@ function BindingGraphInner({
   const onTriggerDeletedRef = useRef(onTriggerDeleted)
   onTriggerDeletedRef.current = onTriggerDeleted
   // In-canvas clipboard backing Cmd/Ctrl+C → V. Same-scope only: it carries the
-  // scope's storage key so a copy in one team/template can't paste into another
-  // (the endpoint would reject the cross-scope ids anyway; this fails the gesture
+  // scope's storage key so a copy in one team can't paste into another (the
+  // endpoint would reject the cross-team ids anyway; this fails the gesture
   // cleanly first). Page-local — not persisted across reloads (a non-goal).
   const clipboardRef = useRef<{ scopeKey: string; promptIds: string[] } | null>(null)
   // Prompt ids to mark selected after the next fetch rebuilds the nodes — set by a
@@ -643,12 +630,11 @@ function BindingGraphInner({
   deleteConfirmRef.current = deleteConfirm
 
   const fetchAll = useCallback(async () => {
-    // Hold in the loading state until the scope resolves. For team scope, a
-    // multi-team user before /api/teams loads has an unvalidated teamId (''
-    // or a stale stored id) and fetching now would pull every visible team's
-    // prompts + triggers onto the canvas; for template scope, scopeReady gates
-    // on org-admin + multi confirming. scopeReady is in this callback's deps so
-    // the effect re-runs the real (scoped) fetch once it flips true. Re-assert
+    // Hold in the loading state until the scope resolves. A multi-team user
+    // before /api/teams loads has an unvalidated teamId ('' or a stale
+    // stored id) and fetching now would pull every visible team's prompts +
+    // triggers onto the canvas. scopeReady is in this callback's deps so the
+    // effect re-runs the real (scoped) fetch once it flips true. Re-assert
     // loading so a ready→not-ready transition (an org switch) clears the prior
     // canvas rather than leaving it interactive during the swap.
     if (!scopeReady) {
@@ -659,23 +645,21 @@ function BindingGraphInner({
       if (!r.ok) throw new Error(`${label}: HTTP ${r.status}`)
       return r.json()
     }
-    // Team scope narrows prompts + triggers to the active team (empty =
-    // unfiltered, the solo/local case); template scope is org-scoped (no
-    // team_id). event-types is a system registry — never scoped.
-    const teamQuery = !template && teamId ? `team_id=${encodeURIComponent(teamId)}` : ''
+    // Narrows prompts + triggers to the active team (empty = unfiltered, the
+    // solo/local case). event-types is a system registry — never scoped.
+    const teamQuery = teamId ? `team_id=${encodeURIComponent(teamId)}` : ''
     // The canvas renders PROMPTS (a blueprint's steps) as nodes, with a
     // procedural box drawn around each multi-step blueprint. We need the
     // blueprint list + each blueprint's steps (the step→prompt mapping, the
     // entry prompt, and the order that draws the sequence edges), plus the
-    // prompt list for titles + bodies. Both scopes are symmetric — team from
-    // /api/*, template from /api/org-template/*.
-    const blueprintsURL = `${blueprintsBase(template)}${teamQuery ? `?${teamQuery}` : ''}`
-    const promptsURL = `${promptsBase(template)}${teamQuery ? `?${teamQuery}` : ''}`
-    const triggersURL = `${handlersBase(template)}?kind=trigger${teamQuery ? `&${teamQuery}` : ''}`
+    // prompt list for titles + bodies.
+    const blueprintsURL = `${blueprintsBase()}${teamQuery ? `?${teamQuery}` : ''}`
+    const promptsURL = `${promptsBase()}${teamQuery ? `?${teamQuery}` : ''}`
+    const triggersURL = `${handlersBase()}?kind=trigger${teamQuery ? `&${teamQuery}` : ''}`
     // One bulk steps read for the whole scope (grouped client-side) rather than
     // a GET .../{id}/steps per blueprint — folded into the parallel fetch below
     // so the canvas loads in a single round-trip.
-    const stepsURL = `${template ? '/api/org-template/blueprint-steps' : '/api/blueprint-steps'}${teamQuery ? `?${teamQuery}` : ''}`
+    const stepsURL = `/api/blueprint-steps${teamQuery ? `?${teamQuery}` : ''}`
     try {
       const [etRes, bpRes, promptRes, tRes, stepsRes] = await Promise.all([
         fetch('/api/event-types').then((r) => parseOrThrow(r, 'event-types')),
@@ -738,7 +722,7 @@ function BindingGraphInner({
     } finally {
       setLoading(false)
     }
-  }, [template, teamId, scopeReady])
+  }, [teamId, scopeReady])
 
   useEffect(() => {
     fetchAll()
@@ -746,13 +730,13 @@ function BindingGraphInner({
 
   // Close any open context menu / pending delete when the scope changes — a
   // held-open edge/box menu or confirm dialog would otherwise carry a stale
-  // trigger / blueprint reference from the previous team or template.
+  // trigger / blueprint reference from the previous team.
   useEffect(() => {
     setEdgeMenu(null)
     setBoxMenu(null)
     setBoxDeleteConfirm(false)
     setDeleteConfirm(null)
-  }, [template, teamId])
+  }, [teamId])
 
   // Remove event from canvas
   const removeEvent = useCallback(
@@ -761,7 +745,7 @@ function BindingGraphInner({
       try {
         const results = await Promise.all(
           toDelete.map((t) =>
-            fetch(`${handlersBase(template)}/${encodeURIComponent(t.id)}`, { method: 'DELETE' }),
+            fetch(`${handlersBase()}/${encodeURIComponent(t.id)}`, { method: 'DELETE' }),
           ),
         )
         const failed = results.find((r) => !r.ok)
@@ -784,7 +768,7 @@ function BindingGraphInner({
         toast.error(`Failed to remove event: ${err instanceof Error ? err.message : String(err)}`)
       }
     },
-    [fetchAll, template],
+    [fetchAll],
   )
 
   // Open the blueprint details popup at the edit button's location.
@@ -794,23 +778,19 @@ function BindingGraphInner({
     setBoxMenu({ x: clientX, y: clientY, blueprintId })
   }, [])
 
-  // Rename a blueprint (its name is independent of its entry prompt's). Both
-  // scopes have the endpoint — team via PUT /api/blueprints/{id}, template via
-  // the org-template mirror — so the URL is scope-derived like every other call.
+  // Rename a blueprint (its name is independent of its entry prompt's) via
+  // PUT /api/blueprints/{id}.
   const saveBoxName = useCallback(
     async (blueprintId: string, rawName: string) => {
       const name = rawName.trim()
       if (!name) return
       await renameGuard.run(async () => {
         try {
-          const res = await fetch(
-            `${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}`,
-            {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ name }),
-            },
-          )
+          const res = await fetch(`${blueprintsBase()}/${encodeURIComponent(blueprintId)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+          })
           if (!res.ok) {
             toast.error(await readError(res, 'Failed to rename blueprint'))
             return
@@ -824,34 +804,28 @@ function BindingGraphInner({
         }
       })
     },
-    [template, fetchAll, renameGuard],
+    [fetchAll, renameGuard],
   )
 
   // Delete a whole blueprint (server soft-deletes the box + its copy-only step
   // prompts and detaches the bound trigger). Core does the request + error toast
   // only — no UI side effects, no refetch — so it composes inside a bulk batch
-  // (one refetch at the end). Scope-derived URL like rename/duplicate; both the
-  // team and org-template families expose the DELETE.
-  const deleteBlueprintCore = useCallback(
-    async (blueprintId: string): Promise<boolean> => {
-      try {
-        const res = await fetch(`${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}`, {
-          method: 'DELETE',
-        })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to delete blueprint'))
-          return false
-        }
-        return true
-      } catch (err) {
-        toast.error(
-          `Failed to delete blueprint: ${err instanceof Error ? err.message : String(err)}`,
-        )
+  // (one refetch at the end).
+  const deleteBlueprintCore = useCallback(async (blueprintId: string): Promise<boolean> => {
+    try {
+      const res = await fetch(`${blueprintsBase()}/${encodeURIComponent(blueprintId)}`, {
+        method: 'DELETE',
+      })
+      if (!res.ok) {
+        toast.error(await readError(res, 'Failed to delete blueprint'))
         return false
       }
-    },
-    [template],
-  )
+      return true
+    } catch (err) {
+      toast.error(`Failed to delete blueprint: ${err instanceof Error ? err.message : String(err)}`)
+      return false
+    }
+  }, [])
 
   // Delete a prompt (split semantics: a mid-blueprint prompt fragments its
   // chain; the steps after it become a new untriggered blueprint, flagged by
@@ -860,7 +834,7 @@ function BindingGraphInner({
   const deletePromptCore = useCallback(
     async (promptId: string): Promise<{ ok: boolean; orphaned: boolean }> => {
       try {
-        const res = await fetch(`${promptsBase(template)}/${encodeURIComponent(promptId)}`, {
+        const res = await fetch(`${promptsBase()}/${encodeURIComponent(promptId)}`, {
           method: 'DELETE',
         })
         if (!res.ok) {
@@ -874,7 +848,7 @@ function BindingGraphInner({
         return { ok: false, orphaned: false }
       }
     },
-    [template],
+    [],
   )
 
   // Whole-blueprint delete from the box details popup (kept as its own affordance
@@ -1094,9 +1068,7 @@ function BindingGraphInner({
     // Only wire to prompts that are actually on the canvas — a step whose prompt
     // is absent (e.g. mid-fetch or a deleted prompt) gets no dangling edge.
     const presentPrompts = new Set(prompts.map((p) => p.id))
-    // Reconnection (rule 4) is enabled on the head (target) end only, in both
-    // team and org-template scope (each has its own reconnect / retarget routes,
-    // reached via the scope-derived bases).
+    // Reconnection (rule 4) is enabled on the head (target) end only.
     const reconnectable: Edge['reconnectable'] = 'target'
     const triggerEdges: Edge[] = triggers
       // Drop triggers whose blueprint has no resolvable entry prompt so we never
@@ -1253,9 +1225,8 @@ function BindingGraphInner({
   // an atomic merge. Both re-render from the resulting membership.
   const onConnect = useCallback(
     async (connection: Connection) => {
-      // Wait for the scope to resolve. For team scope before /api/teams loads,
-      // teamId is '' and posting it would 400 (ambiguous); for template scope,
-      // scopeReady gates on org-admin + multi. The gesture no-ops rather than
+      // Wait for the scope to resolve. Before /api/teams loads, teamId is ''
+      // and posting it would 400 (ambiguous). The gesture no-ops rather than
       // failing silently — the edge simply doesn't stick (edges derive from
       // backend state, not the live graph).
       if (!scopeReady) return
@@ -1272,15 +1243,14 @@ function BindingGraphInner({
       }
 
       if (plan.kind === 'trigger') {
-        // Team scope stamps the acting team; template scope is org-scoped.
         const body: Record<string, unknown> = {
           kind: 'trigger',
           blueprint_id: plan.blueprintId,
           event_type: plan.eventType,
+          team_id: teamId,
         }
-        if (!template) body.team_id = teamId
         try {
-          const res = await fetch(handlersBase(template), {
+          const res = await fetch(handlersBase(), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -1298,19 +1268,15 @@ function BindingGraphInner({
         return
       }
 
-      // Merge the trigger-less downstream chain onto this tail. The atomic
-      // endpoint exists at both scopes (team + org template), so the URL is
-      // scope-derived like every other call.
+      // Merge the trigger-less downstream chain onto this tail via the atomic
+      // merge endpoint.
       await mergeGuard.run(async () => {
         try {
-          const res = await fetch(
-            `${blueprintsBase(template)}/${encodeURIComponent(plan.host)}/merge`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ source_blueprint_id: plan.source }),
-            },
-          )
+          const res = await fetch(`${blueprintsBase()}/${encodeURIComponent(plan.host)}/merge`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_blueprint_id: plan.source }),
+          })
           if (!res.ok) {
             toast.error(await readError(res, 'Failed to merge blueprints'))
             return
@@ -1323,7 +1289,7 @@ function BindingGraphInner({
         }
       })
     },
-    [scopeReady, template, teamId, fetchAll, mergeGuard],
+    [scopeReady, teamId, fetchAll, mergeGuard],
   )
 
   // Deep-copy a flat set of prompt ids into new trigger-less blueprint(s) via the
@@ -1332,8 +1298,7 @@ function BindingGraphInner({
   // so the canvas just resolves the selection to prompt ids and sends the set; the
   // returned blueprints come back in a deterministic order that orderSelectedPromptIds
   // mirrors, letting each copy land at its original's position + offset (relative
-  // layout preserved, shifted as a group). Both scopes share the call — only the
-  // REST root differs (blueprintsBase).
+  // layout preserved, shifted as a group).
   const duplicatePromptIds = useCallback(
     async (promptIds: string[]) => {
       if (!scopeReady) return
@@ -1351,11 +1316,9 @@ function BindingGraphInner({
       )
       if (origOrdered.length === 0) return
       await duplicateGuard.run(async () => {
-        // Team scope stamps the acting team; template scope is org-scoped.
-        const body: Record<string, unknown> = { prompt_ids: origOrdered }
-        if (!template) body.team_id = teamId
+        const body: Record<string, unknown> = { prompt_ids: origOrdered, team_id: teamId }
         try {
-          const res = await fetch(`${blueprintsBase(template)}/duplicate`, {
+          const res = await fetch(`${blueprintsBase()}/duplicate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -1408,7 +1371,7 @@ function BindingGraphInner({
         }
       })
     },
-    [scopeReady, template, teamId, fetchAll, duplicateGuard],
+    [scopeReady, teamId, fetchAll, duplicateGuard],
   )
 
   // The currently-selected prompt nodes' prompt ids (event nodes are
@@ -1440,7 +1403,7 @@ function BindingGraphInner({
   }, [selectedPromptIds])
 
   // Cmd/Ctrl+V — paste the clipboard via the duplicate endpoint. Same-scope only:
-  // a clipboard from another team/template is ignored.
+  // a clipboard from another team is ignored.
   const pasteClipboard = useCallback(() => {
     const clip = clipboardRef.current
     if (!clip || clip.promptIds.length === 0) return false
@@ -1499,7 +1462,7 @@ function BindingGraphInner({
         // Capture trigger info before deletion for the forgiving banner callback.
         const deleted = triggersRef.current.find((t) => t.id === triggerId)
         try {
-          const res = await fetch(`${handlersBase(template)}/${encodeURIComponent(triggerId)}`, {
+          const res = await fetch(`${handlersBase()}/${encodeURIComponent(triggerId)}`, {
             method: 'DELETE',
           })
           if (!res.ok) {
@@ -1518,22 +1481,19 @@ function BindingGraphInner({
         }
       })
     },
-    [fetchAll, template, removeTriggerGuard],
+    [fetchAll, removeTriggerGuard],
   )
 
-  // Split the blueprint before the given step index. Available at both scopes.
+  // Split the blueprint before the given step index.
   const doSplit = useCallback(
     async (blueprintId: string, atStepIndex: number) => {
       await splitGuard.run(async () => {
         try {
-          const res = await fetch(
-            `${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}/split`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ at_step_index: atStepIndex }),
-            },
-          )
+          const res = await fetch(`${blueprintsBase()}/${encodeURIComponent(blueprintId)}/split`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ at_step_index: atStepIndex }),
+          })
           if (!res.ok) {
             toast.error(await readError(res, 'Failed to split blueprint'))
             return
@@ -1546,27 +1506,22 @@ function BindingGraphInner({
         }
       })
     },
-    [template, fetchAll, splitGuard],
+    [fetchAll, splitGuard],
   )
 
   // --- Edge reconnection (rule 4: drag an arrow's head onto a new target) ---
-  // Re-target lands on a free chain entry; drop-on-empty detaches. Both scopes
-  // (team + org template) have their own reconnect / retarget routes, reached
-  // via the scope-derived bases below.
+  // Re-target lands on a free chain entry; drop-on-empty detaches.
 
   // Re-point a trigger edge onto a different blueprint's entry: an in-place
   // blueprint_id move that preserves the trigger row + its run history.
   const doRetargetTrigger = useCallback(
     async (triggerId: string, targetBlueprintId: string) => {
       try {
-        const res = await fetch(
-          `${handlersBase(template)}/${encodeURIComponent(triggerId)}/retarget`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ blueprint_id: targetBlueprintId }),
-          },
-        )
+        const res = await fetch(`${handlersBase()}/${encodeURIComponent(triggerId)}/retarget`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ blueprint_id: targetBlueprintId }),
+        })
         if (!res.ok) {
           toast.error(await readError(res, 'Failed to move trigger'))
         }
@@ -1576,7 +1531,7 @@ function BindingGraphInner({
         fetchAll()
       }
     },
-    [template, fetchAll],
+    [fetchAll],
   )
 
   // Re-point a sequence edge onto a different blueprint's entry: atomic
@@ -1585,7 +1540,7 @@ function BindingGraphInner({
     async (blueprintId: string, atStepIndex: number, targetBlueprintId: string) => {
       try {
         const res = await fetch(
-          `${blueprintsBase(template)}/${encodeURIComponent(blueprintId)}/reconnect`,
+          `${blueprintsBase()}/${encodeURIComponent(blueprintId)}/reconnect`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1606,7 +1561,7 @@ function BindingGraphInner({
         fetchAll()
       }
     },
-    [template, fetchAll],
+    [fetchAll],
   )
 
   const onReconnectStart = useCallback(() => {
@@ -2021,20 +1976,17 @@ function BindingGraphInner({
 
             {/* Marketplace publish/republish/delist (TFAC-536) — blueprints
                 publish whole. Multi-mode only (renders nothing in local
-                mode); the org template has no owning team, so this is
-                withheld there. Event-type suggestion comes from the
-                blueprint's own trigger, already loaded for the canvas. */}
-            {!isTemplateScope(scope) && (
-              <div className="mt-2.5 pt-2.5 border-t border-border-subtle">
-                <MarketplacePublishControl
-                  kind="blueprint"
-                  sourceId={boxMenu.blueprintId}
-                  defaultName={blueprintNames[boxMenu.blueprintId] ?? ''}
-                  suggestedEventTypes={boxMenuTrigger ? [boxMenuTrigger.event_type] : undefined}
-                  compact
-                />
-              </div>
-            )}
+                mode). Event-type suggestion comes from the blueprint's own
+                trigger, already loaded for the canvas. */}
+            <div className="mt-2.5 pt-2.5 border-t border-border-subtle">
+              <MarketplacePublishControl
+                kind="blueprint"
+                sourceId={boxMenu.blueprintId}
+                defaultName={blueprintNames[boxMenu.blueprintId] ?? ''}
+                suggestedEventTypes={boxMenuTrigger ? [boxMenuTrigger.event_type] : undefined}
+                compact
+              />
+            </div>
             {/* Delete the whole blueprint — soft-deletes the box + its step
                 prompts and detaches the trigger server-side; the canvas refetch
                 drops the box and its nodes. Two-stage so an accidental click in

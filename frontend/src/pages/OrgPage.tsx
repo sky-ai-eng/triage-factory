@@ -5,13 +5,11 @@ import * as Switch from '@radix-ui/react-switch'
 import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { useActiveOrgId } from '../contexts/OrgContext'
 import { useOrgRole } from '../hooks/useOrgRole'
-import { useTemplateScope } from '../hooks/useTemplateScope'
 import { useInvites } from '../hooks/useInvites'
 import MemberRoster from '../components/MemberRoster'
 import InviteModal from '../components/InviteModal'
 import PendingInviteRow from '../components/PendingInviteRow'
 import OrgSettings from './settings/stack/OrgSettings'
-import OrgTemplate from './OrgTemplate'
 import { toast } from '../components/Toast/toastStore'
 import type { MemberRosterAdapter, RosterMember } from '../hooks/useMemberRoster'
 import type { PendingInvite } from '../types'
@@ -81,21 +79,18 @@ function useOrgRosterAdapter(orgId: string): MemberRosterAdapter {
   )
 }
 
-type OrgTab = 'people' | 'settings' | 'template'
+type OrgTab = 'people' | 'settings'
 
 const TABS: { id: OrgTab; label: string }[] = [
   { id: 'people', label: 'People' },
   { id: 'settings', label: 'Settings' },
-  { id: 'template', label: 'Template' },
 ]
 
-// OrgPage is the multi-mode org surface: the [People · Settings · Template]
-// shell. People is the shared roster + invite surface (TFAC-417/418); Settings
-// and Template host the relocated OrgSettings / OrgTemplate surfaces (TFAC-419)
-// — the org-scoped config moved off the global Settings page, and the template
-// new teams inherit is reached here (the standalone route + top-bar pill are
-// gone — TFAC-436). The active tab is URL-driven so the surfaces stay
-// deep-linkable.
+// OrgPage is the multi-mode org surface: the [People · Settings] shell.
+// People is the shared roster + invite surface (TFAC-417/418); Settings hosts
+// the relocated OrgSettings surface (TFAC-419) — the org-scoped config moved
+// off the global Settings page. The active tab is URL-driven so the surfaces
+// stay deep-linkable.
 export default function OrgPage() {
   const orgId = useActiveOrgId()
 
@@ -113,41 +108,23 @@ export default function OrgPage() {
 // OrgPageBody is the org shell, rendered once the active org is known and keyed
 // on orgId by the parent — so switching orgs remounts it from scratch and the
 // People tab's adapter always gets a concrete orgId. The active tab is
-// URL-driven (?tab=) so the relocated Settings/Template surfaces are
-// deep-linkable and survive a refresh.
+// URL-driven (?tab=) so the relocated Settings surface is deep-linkable and
+// survives a refresh.
 function OrgPageBody({ orgId }: { orgId: string }) {
   const { isAdmin } = useOrgRole()
-  // Gate Template on the SAME hook OrgTemplate uses to decide render-vs-redirect,
-  // not just isAdmin — so a visible Template tab can never click through to
-  // OrgTemplate's non-admin redirect. Today templateAvailable === isAdmin, but
-  // keeping the gate on one hook keeps the tab and the surface it opens from
-  // ever drifting apart.
-  const { available: templateAvailable } = useTemplateScope()
   const [searchParams, setSearchParams] = useSearchParams()
-  const tab = resolveTab(searchParams.get('tab'), isAdmin, templateAvailable)
+  const tab = resolveTab(searchParams.get('tab'), isAdmin)
   // People owns the bare URL (drop the param); the admin tabs carry an explicit
   // ?tab=. replace so flipping tabs doesn't pile up history entries.
   const setTab = (t: OrgTab) => setSearchParams(t === 'people' ? {} : { tab: t }, { replace: true })
 
-  // People (the roster) is everyone's; Settings is org-admin; Template needs
-  // template access. Non-admins see just People, and an admin without template
-  // access never gets a Template tab that would bounce them on click. /org is
-  // multi-mode only (no local route), so OrgSettings always renders multi
-  // (isLocal=false).
-  const tabs = isAdmin
-    ? TABS.filter((t) => t.id !== 'template' || templateAvailable)
-    : TABS.filter((t) => t.id === 'people')
+  // People (the roster) is everyone's; Settings is org-admin. Non-admins see
+  // just People. /org is multi-mode only (no local route), so OrgSettings
+  // always renders multi (isLocal=false).
+  const tabs = isAdmin ? TABS : TABS.filter((t) => t.id === 'people')
 
   return (
-    // Template is a full binding-graph canvas: give it a viewport-tall flex
-    // column (nav + page padding ≈ 8rem) so the embedded editor fills the space
-    // below the header + tab strip instead of overflowing. People + Settings
-    // stay a narrow auto-height settings column.
-    <div
-      className={`mx-auto ${
-        tab === 'template' ? 'flex h-[calc(100vh-8rem)] max-w-6xl flex-col' : 'max-w-3xl'
-      }`}
-    >
+    <div className="mx-auto max-w-3xl">
       <div className="mb-5 flex shrink-0 items-center gap-2.5">
         <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent-soft text-accent">
           <Users size={15} />
@@ -156,9 +133,7 @@ function OrgPageBody({ orgId }: { orgId: string }) {
           <h1 className="text-[17px] font-semibold leading-tight text-text-primary">
             Organization
           </h1>
-          <p className="text-[11px] leading-tight text-text-tertiary">
-            People, settings, and the template new teams inherit.
-          </p>
+          <p className="text-[11px] leading-tight text-text-tertiary">People and settings.</p>
         </div>
       </div>
 
@@ -181,18 +156,16 @@ function OrgPageBody({ orgId }: { orgId: string }) {
 
       {tab === 'people' && <OrgPeople orgId={orgId} canManage={isAdmin} />}
       {tab === 'settings' && <OrgSettings orgId={orgId} isLocal={false} />}
-      {tab === 'template' && <OrgTemplate />}
     </div>
   )
 }
 
-// resolveTab maps the ?tab= param to a concrete tab, gating each admin tab on
-// its own access (Settings → org admin, Template → template access) so a stale
-// or hand-typed ?tab= can't surface a tab the viewer can't use. People is the
-// default + floor — belt-and-suspenders to the tab-strip filter.
-function resolveTab(raw: string | null, isAdmin: boolean, templateAvailable: boolean): OrgTab {
+// resolveTab maps the ?tab= param to a concrete tab, gating Settings on org
+// admin so a stale or hand-typed ?tab= can't surface a tab the viewer can't
+// use. People is the default + floor — belt-and-suspenders to the tab-strip
+// filter.
+function resolveTab(raw: string | null, isAdmin: boolean): OrgTab {
   if (raw === 'settings' && isAdmin) return 'settings'
-  if (raw === 'template' && templateAvailable) return 'template'
   return 'people'
 }
 

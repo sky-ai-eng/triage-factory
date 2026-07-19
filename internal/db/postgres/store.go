@@ -309,15 +309,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// JiraApps: app pool for request-handler reads/writes (RLS-gated);
 		// admin pool for the no-claims read the OAuth-app resolver needs.
 		JiraApps: newJiraAppsStore(app, admin),
-		// OrgTemplate needs both pools: the editor CRUD runs on app
-		// (org_template_*_all RLS gates on tf.user_is_org_admin), while
-		// SeedFromShipped + MaterializeIntoTeam run on admin (claims-less
-		// bootstrap; MaterializeIntoTeam also writes the team's
-		// prompts/event_handlers/system_prompt_versions). The impl picks
-		// per-method internally — same split as PromptStore.
-		OrgTemplate: newOrgTemplateStore(app, admin),
-		// ShippedDefaults is admin-pool only (claims-less bootstrap work,
-		// same posture as OrgTemplate.SeedFromShipped/MaterializeIntoTeam).
+		// ShippedDefaults is admin-pool only (claims-less bootstrap work).
 		// Phase 3 (handlers) reuses the eventHandlers store built above
 		// instead of duplicating its Seed SQL.
 		ShippedDefaults: newShippedDefaultsStore(admin, eventHandlers),
@@ -487,7 +479,6 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		// it use New(admin, app, key) directly, same as the SecretStore tests.
 		GitHubApps:      newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
 		JiraApps:        newJiraAppsStore(tx, tx),
-		OrgTemplate:     newTxOrgTemplateStore(tx),
 		ShippedDefaults: newTxShippedDefaultsStore(tx, newTxEventHandlerStore(tx)),
 		Invites:         newInvitesStore(tx, tx),
 		SystemLLMRuns:   newSystemLLMRunStore(tx),

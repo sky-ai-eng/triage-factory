@@ -29,7 +29,6 @@ var (
 	jiraIdentityLog    = logging.Component("jira-identity")
 	jiraRuleLog        = logging.Component("jira-rule")
 	membershipLog      = logging.Component("membership")
-	orgTemplateLog     = logging.Component("org_template")
 	orgsLog            = logging.Component("orgs")
 	projectsLog        = logging.Component("projects")
 	reposLog           = logging.Component("repos")

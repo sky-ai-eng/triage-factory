@@ -250,8 +250,7 @@ type renameBlueprintRequest struct {
 
 // handleBlueprintUpdate renames a blueprint header. A blueprint's name is
 // independent of its entry prompt's (auto-wrap defaults them equal, but the box
-// chrome lets a user rename the blueprint without touching the prompt). The
-// org-template family has the same endpoint; this is the team-scope mirror.
+// chrome lets a user rename the blueprint without touching the prompt).
 func (bh *blueprintsHandler) handleBlueprintUpdate(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -297,10 +296,10 @@ func (bh *blueprintsHandler) handleBlueprintUpdate(w http.ResponseWriter, r *htt
 	writeJSON(w, http.StatusOK, updated)
 }
 
-// handleBlueprintDelete soft-deletes a whole blueprint and cascades, in one tx.
-// Mirrors handleOrgTemplateBlueprintDelete's shape (team-scoped, mutating, RLS
-// under the acting team), but the team-scope cascade is richer because team
-// blueprints carry copy-only step prompts and a bound trigger:
+// handleBlueprintDelete soft-deletes a whole blueprint and cascades, in one
+// tx (team-scoped, mutating, RLS under the acting team). The cascade is
+// richer than a plain delete because team blueprints carry copy-only step
+// prompts and a bound trigger:
 //
 //   - The header is soft-deleted (Blueprints.Delete stamps deleted_at). The row
 //     and its blueprint_steps stay as durable audit so the ...System reads keep

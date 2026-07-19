@@ -16,11 +16,6 @@ interface Props {
   // label — the page's active team is the single source of truth. Empty /
   // undefined keeps the modal's own write picker (standalone / solo use).
   lockedTeamId?: string
-  // When true (the org-template editor), CRUD targets the
-  // /api/org-template/prompts family instead of /api/prompts: org-scoped,
-  // no team picker, leaf-only (templates don't carry chain steps or run
-  // stats). Mutually exclusive with lockedTeamId.
-  templateScope?: boolean
   // When true the drawer is a read-only viewer of an existing prompt (TFAC-447):
   // inputs are disabled and the Save/Delete affordances are withheld, so a
   // team viewer can inspect a prompt without being offered writes that 403
@@ -65,14 +60,12 @@ export default function PromptDrawer({
   promptId,
   isNew,
   lockedTeamId,
-  templateScope = false,
   readOnly = false,
   onClose,
   onSaved,
   onDeleted,
 }: Props) {
-  // REST root for this scope — /api/prompts (team) or /api/org-template/prompts.
-  const base = promptsBase(templateScope)
+  const base = promptsBase()
   const [name, setName] = useState('')
   const [body, setBody] = useState('')
   const [source, setSource] = useState('user')
@@ -117,10 +110,7 @@ export default function PromptDrawer({
   // is created under this team, and per-team DefaultModel can differ.
   // '' (solo/local) falls back to the "default" alias the backend accepts.
   useEffect(() => {
-    // Template scope has no team, so no per-team DefaultModel to resolve — the
-    // "Default" option just reads "Default" (the org/global model applies at
-    // dispatch, per the team that copies the template).
-    if (!open || templateScope) return
+    if (!open) return
     let cancelled = false
     const settingsTeam = effectiveTeam || 'default'
     fetch(`/api/settings/team/${encodeURIComponent(settingsTeam)}`)
@@ -133,7 +123,7 @@ export default function PromptDrawer({
     return () => {
       cancelled = true
     }
-  }, [open, effectiveTeam, templateScope])
+  }, [open, effectiveTeam])
 
   useEffect(() => {
     if (isNew) {
@@ -164,27 +154,22 @@ export default function PromptDrawer({
         if (!cancelled) setError('Failed to load prompt')
       })
 
-    // Run stats are a team-prompt concern — the org template has no run
-    // history, so skip the fetch there (the endpoint doesn't exist at
-    // template scope).
-    if (!templateScope) {
-      fetch(`${base}/${promptId}/stats`)
-        .then((res) => {
-          if (!res.ok) throw new Error(`HTTP ${res.status}`)
-          return res.json()
-        })
-        .then((data) => {
-          if (!cancelled) setStats(data)
-        })
-        .catch(() => {
-          if (!cancelled) setStats(null)
-        })
-    }
+    fetch(`${base}/${promptId}/stats`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return res.json()
+      })
+      .then((data) => {
+        if (!cancelled) setStats(data)
+      })
+      .catch(() => {
+        if (!cancelled) setStats(null)
+      })
 
     return () => {
       cancelled = true
     }
-  }, [promptId, isNew, templateScope, base])
+  }, [promptId, isNew, base])
 
   // Seed the acting team for create mode once the teams load. Kept in its
   // own effect (not the form-reset above) so a late teams fetch reseeds
@@ -253,12 +238,8 @@ export default function PromptDrawer({
       let res: Response
       if (isNew) {
         const firstPrompt = { name, body, model }
-        // Template scope is org-scoped — no team_id (the server ignores it
-        // anyway, but we keep the body clean).
-        const createBody = templateScope
-          ? { first_prompt: firstPrompt }
-          : { first_prompt: firstPrompt, team_id: effectiveTeam }
-        res = await fetch(blueprintsBase(templateScope), {
+        const createBody = { first_prompt: firstPrompt, team_id: effectiveTeam }
+        res = await fetch(blueprintsBase(), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(createBody),
@@ -274,7 +255,7 @@ export default function PromptDrawer({
         toast.error(await readError(res, `Failed to ${isNew ? 'create' : 'save'} prompt`))
         return
       }
-      if (!templateScope && isNew && effectiveTeam) noteWrittenTeam(effectiveTeam)
+      if (isNew && effectiveTeam) noteWrittenTeam(effectiveTeam)
 
       onSaved()
     } catch (err) {
@@ -363,16 +344,10 @@ export default function PromptDrawer({
 
             {/* Body — scrollable */}
             <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
-              {/* Template scope is org-scoped — no team. */}
-              {templateScope ? (
-                <div className="text-[12px] text-text-tertiary">
-                  Scope: <span className="font-medium text-text-secondary">Org template</span>
-                </div>
-              ) : (
-                /* Team (create mode only — a prompt's team is fixed after creation).
-                   Locked to the page's active team on the single-team prompts page;
-                   otherwise the modal's own write picker (≥2 teams). */
-                isNew &&
+              {/* Team (create mode only — a prompt's team is fixed after creation).
+                  Locked to the page's active team on the single-team prompts page;
+                  otherwise the modal's own write picker (≥2 teams). */}
+              {isNew &&
                 (lockedTeamId ? (
                   <div className="text-[12px] text-text-tertiary">
                     Team:{' '}
@@ -382,8 +357,7 @@ export default function PromptDrawer({
                   </div>
                 ) : (
                   <TeamPicker value={team} onChange={setTeam} label="Team" />
-                ))
-              )}
+                ))}
               {/* Name */}
               <div>
                 <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
@@ -517,9 +491,8 @@ export default function PromptDrawer({
 
               {/* Marketplace publish/republish/delist (TFAC-536) — standalone
                   prompts are kind=prompt listings. Multi-mode only (the
-                  control renders nothing in local mode); org-template prompts
-                  have no owning team, so this is withheld there too. */}
-              {!isNew && !templateScope && promptId && (
+                  control renders nothing in local mode). */}
+              {!isNew && promptId && (
                 <div>
                   <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
                     Marketplace
@@ -584,9 +557,7 @@ export default function PromptDrawer({
                     </button>
                     <button
                       onClick={save}
-                      disabled={
-                        saving || (isNew && !templateScope && !lockedTeamId && !teamsLoaded)
-                      }
+                      disabled={saving || (isNew && !lockedTeamId && !teamsLoaded)}
                       className="text-[12px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-1.5 rounded-full transition-colors disabled:opacity-50"
                     >
                       {saving ? 'Saving...' : isNew ? 'Create' : 'Save'}

@@ -8,9 +8,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// Blueprint-duplication sentinel errors. DuplicatePrompts (+ the org-template
-// mirror) returns one of these for the handler to translate into a clean
-// status code rather than a raw 500.
+// Blueprint-duplication sentinel errors. DuplicatePrompts returns one of
+// these for the handler to translate into a clean status code rather than a
+// raw 500.
 var (
 	// ErrDuplicateNoPrompts is returned when the prompt-id set is empty after
 	// de-duplication — there is nothing to copy.
@@ -45,7 +45,7 @@ var (
 // DuplicationStep is one selected prompt resolved to its place in a source
 // blueprint, carrying everything the deep-copy needs. It is scope-neutral
 // (no team/org field): the team-scoped impl validates team membership
-// separately, and the org-template mirror has no team dimension.
+// separately.
 type DuplicationStep struct {
 	BlueprintID    string // source blueprint the prompt is a step of
 	BlueprintName  string // source blueprint name (full-run copy naming)

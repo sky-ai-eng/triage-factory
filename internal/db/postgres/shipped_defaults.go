@@ -16,13 +16,11 @@ import (
 // shippedDefaultsStore is the Postgres impl of db.ShippedDefaultsStore.
 //
 // SeedShippedIntoTeam runs entirely on the admin pool (supabase_admin,
-// BYPASSRLS) — it is claims-less bootstrap work, the same posture as
-// OrgTemplateStore.SeedFromShipped / MaterializeIntoTeam. Phases 1+2
-// (prompts, blueprints+steps) run in one admin-pool transaction; phase 3
-// delegates to the composed EventHandlerStore.Seed, which manages its own
-// admin-pool writes. Inside WithTx, admin points at the caller's *sql.Tx and
-// inTx is true; SeedShippedIntoTeam refuses to run there (matches
-// OrgTemplateStore).
+// BYPASSRLS) — it is claims-less bootstrap work. Phases 1+2 (prompts,
+// blueprints+steps) run in one admin-pool transaction; phase 3 delegates to
+// the composed EventHandlerStore.Seed, which manages its own admin-pool
+// writes. Inside WithTx, admin points at the caller's *sql.Tx and inTx is
+// true; SeedShippedIntoTeam refuses to run there.
 type shippedDefaultsStore struct {
 	admin         queryer
 	inTx          bool
@@ -34,8 +32,7 @@ func newShippedDefaultsStore(admin queryer, eventHandlers db.EventHandlerStore) 
 }
 
 // newTxShippedDefaultsStore composes a tx-bound ShippedDefaultsStore for
-// WithTx / NewForTx. SeedShippedIntoTeam refuses to run there (inTx=true) —
-// mirrors newTxOrgTemplateStore.
+// WithTx / NewForTx. SeedShippedIntoTeam refuses to run there (inTx=true).
 func newTxShippedDefaultsStore(tx queryer, eventHandlers db.EventHandlerStore) db.ShippedDefaultsStore {
 	return &shippedDefaultsStore{admin: tx, inTx: true, eventHandlers: eventHandlers}
 }
