@@ -63,10 +63,12 @@ type ingestPipeline struct {
 	entities   entityFinder
 	deliveries slackstore.DeliveryStore
 	publish    func(domain.Event)
-	// identity resolves the mention's sender to a TF user (TFAC-531),
-	// best-effort and detached — see resolveSender's doc. nil-safe: tests
-	// and any future caller that doesn't need identity capture simply
-	// construct ingestPipeline without it.
+	// identity resolves a message's sender to a TF user (TFAC-531) — both
+	// ingest branches dispatch it, since an engaged-thread follow-up's
+	// sender may never appear in an app_mention. Best-effort and detached —
+	// see resolveSender's doc. nil-safe: tests and any future caller that
+	// doesn't need identity capture simply construct ingestPipeline
+	// without it.
 	identity *IdentityResolver
 	// channels records the sighting registry (slack_channels, TFAC-541);
 	// channelName resolves a sighted channel's display name (TFAC-542),
@@ -275,6 +277,17 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 
 	if err := p.publishMessage(ws, ev, entity.ID, false, parseSlackTS(ev.TS)); err != nil {
 		return outcomeError, err
+	}
+
+	// Same best-effort sender identity capture as the app_mention path, for
+	// the same reasons (detached, never gating the ack). Follow-up senders
+	// are the ones who never type an @-mention — an engaged thread is the
+	// only place many participants ever address the bot — so capturing only
+	// on app_mention would systematically exclude them from
+	// user_slack_identities. resolveSender's resolved-row / negative-cache
+	// early exit keeps the per-message cost to one indexed read.
+	if p.identity != nil {
+		go p.identity.resolveSender(context.Background(), ws, ev.User)
 	}
 	return outcomeAccepted, nil
 }
