@@ -63,7 +63,10 @@ func (s *Server) enforceSeatLimit(r *http.Request, userID string) (blocked bool)
 		return false // uncapped — nothing to enforce
 	}
 	if s.authEvents == nil {
-		// No seat store wired (a bare test rig) — cannot claim, so allow.
+		// Unreachable in production: New() always wires authEvents from
+		// stores.AuthEvents, which both dialects' constructors build non-nil. The
+		// guard exists only for a bare &Server{} test rig — with no seat store the
+		// gate cannot claim, so it allows rather than nil-panicking.
 		return false
 	}
 	period := billingPeriodStart(timeNow()).Format("2006-01")
