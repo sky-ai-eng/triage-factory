@@ -150,36 +150,14 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info RunInf
 	if stores.Entities == nil {
 		return "", nil
 	}
-	var kind string
-	switch provider {
-	case domain.ArtifactProviderGitHub:
-		// owner/repo#N is a PR entity; bare owner/repo is a repo-level action.
-		// NOTE: this assumes every github target is a PR (kind="pr"). Exec only
-		// writes PRs/reviews today, so that holds — but a GitHub *issue* shares
-		// the "owner/repo#N" shape, and the poller's resolveStubNodeID would then
-		// 404 against /pulls/{n} every cycle. GitHub issue support must branch on
-		// kind here (and give the poller an issue-aware enrichment path).
-		if _, _, _, ok := domain.ParsePRTarget(target); !ok {
-			return "", nil
-		}
-		kind = "pr"
-	case domain.ArtifactProviderJira:
-		if target == "" {
-			return "", nil
-		}
-		kind = "issue"
-	case domain.ArtifactProviderSlack:
-		if target == "" {
-			return "", nil
-		}
-		kind = "message"
-	default:
+	source, sourceID, kind, ok := domain.EntityRefForExternal(provider, target)
+	if !ok {
 		return "", nil
 	}
 	// title is left empty — neither an ExternalAction nor an addressed read
 	// carries a human title, and the poll cycle (or, for Slack, the ingest
 	// pipeline) seeds it from context. url rides through when present.
-	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, provider, target, kind, "", url)
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, source, sourceID, kind, "", url)
 	if err != nil {
 		return "", err
 	}

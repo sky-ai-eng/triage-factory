@@ -430,6 +430,108 @@ func TestTaskMemoryStore_Postgres_BackfillProducesPrimaryJoinRows(t *testing.T) 
 	}
 }
 
+// TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped is the run-end
+// attach acceptance on Postgres, where the team-scoped read matters: a run's
+// memory, once attached to every entity it engaged (primary ∪ produced ∪
+// touched), is reachable through the join from all three roles — and that
+// reachability stays team-scoped. Two teams in ONE org each run a completion
+// that PRODUCES the SAME shared entity; a team-scoped System read of that
+// produced entity must surface only the reading team's memory, proving the
+// join-based read applies runs_select team visibility regardless of the join
+// role (not just the denormalized primary the SystemReadTeamScoped pin covers).
+func TestTaskMemoryStore_Postgres_MultiEntityAttachTeamScoped(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, userID := seedPgTaskMemoryOrg(t, h)
+	promptID := seedPgTaskMemoryPrompt(t, h, orgID, userID)
+	team1 := firstTeamForOrg(t, h, orgID)
+	team2 := seedPgDefaultTeam(t, h, orgID, userID)
+
+	// Shared entities both teams' runs engage (entities are org-wide): a
+	// produced PR and a touched issue.
+	entB := seedPgSharedEntity(t, h, orgID, "pr", "produced-shared")
+	entC := seedPgSharedEntity(t, h, orgID, "issue", "touched-shared")
+
+	// Each team's run has its own primary (task) entity; both produce entB.
+	entA1 := seedPgSharedEntity(t, h, orgID, "thread", "primary-t1")
+	entA2 := seedPgSharedEntity(t, h, orgID, "thread", "primary-t2")
+	run1 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team1, entA1, "attach-t1")
+	run2 := seedPgTeamRunOnEntity(t, h, orgID, userID, promptID, team2, entA2, "attach-t2")
+
+	// The attach sequence run-end runs for each: memory upsert, then primary +
+	// produced (+ touched for run1) join rows.
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, run1, entA1, "", "team1 narrative"); err != nil {
+		t.Fatalf("upsert memory run1: %v", err)
+	}
+	for entID, role := range map[string]string{
+		entA1: domain.MemoryRolePrimary, entB: domain.MemoryRoleProduced, entC: domain.MemoryRoleTouched,
+	} {
+		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, run1, entID, role); err != nil {
+			t.Fatalf("attach run1 %s: %v", role, err)
+		}
+	}
+	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, run2, entA2, "", "team2 narrative"); err != nil {
+		t.Fatalf("upsert memory run2: %v", err)
+	}
+	for entID, role := range map[string]string{
+		entA2: domain.MemoryRolePrimary, entB: domain.MemoryRoleProduced,
+	} {
+		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, run2, entID, role); err != nil {
+			t.Fatalf("attach run2 %s: %v", role, err)
+		}
+	}
+
+	// team1's memory is reachable from all three entities it engaged.
+	for name, id := range map[string]string{"primary A1": entA1, "produced B": entB, "touched C": entC} {
+		mems, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, id, team1)
+		if err != nil {
+			t.Fatalf("GetMemoriesForEntitySystem team1 %s: %v", name, err)
+		}
+		if len(mems) != 1 || mems[0].RunID != run1 || mems[0].Content != "team1 narrative" {
+			t.Errorf("team1 read of %s = %+v, want only run1's team1 narrative", name, mems)
+		}
+	}
+
+	// The produced entity is shared, but the team-scoped read still separates
+	// the two teams' memory — team scoping is role-agnostic across the join.
+	memsB2, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entB, team2)
+	if err != nil {
+		t.Fatalf("GetMemoriesForEntitySystem team2 produced B: %v", err)
+	}
+	if len(memsB2) != 1 || memsB2[0].RunID != run2 || memsB2[0].Content != "team2 narrative" {
+		t.Errorf("team2 read of produced B = %+v, want only run2's team2 narrative (no team1 bleed)", memsB2)
+	}
+
+	// The recorded roles are what the attach wrote.
+	if role := roleForPgJoinRow(t, h, run1, entB); role != domain.MemoryRoleProduced {
+		t.Errorf("run1/B role = %q, want produced", role)
+	}
+	if role := roleForPgJoinRow(t, h, run1, entC); role != domain.MemoryRoleTouched {
+		t.Errorf("run1/C role = %q, want touched", role)
+	}
+	if role := roleForPgJoinRow(t, h, run1, entA1); role != domain.MemoryRolePrimary {
+		t.Errorf("run1/A1 role = %q, want primary", role)
+	}
+}
+
+// seedPgSharedEntity inserts a snapshot-carrying org-wide entity (kind free)
+// and returns its id — for tests that need several entities more than one run
+// engages.
+func seedPgSharedEntity(t *testing.T, h *pgtest.Harness, orgID, kind, label string) string {
+	t.Helper()
+	id := uuid.New().String()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state)
+		VALUES ($1, $2, 'github', $3, $4, $5, 'https://example/x', '{}'::jsonb, now(), 'active')
+	`, id, orgID, label+"-"+id[:8], kind, label); err != nil {
+		t.Fatalf("seed shared entity %s: %v", label, err)
+	}
+	return id
+}
+
 // seedPgTeamRunOnEntity seeds the event + task + blueprint + blueprint_run +
 // run FK chain for a run owned by teamID on a PRE-EXISTING entity, returning
 // the runID. Unlike seedPgRunForTaskMemory (which mints a fresh entity and
