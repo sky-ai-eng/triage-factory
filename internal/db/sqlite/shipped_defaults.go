@@ -16,8 +16,17 @@ import (
 // has one connection: SeedShippedIntoTeam's phase 1+2 writes wrap in a tx via
 // the inTx helper, then phase 3 delegates to the composed EventHandlerStore
 // (bound to the same connection).
+//
+// inTx mirrors the Postgres impl's guard: constructed via
+// newTxShippedDefaultsStore (the TxStores wiring in tx.go), SeedShippedIntoTeam
+// refuses to run. SQLite has no genuine pool-escape hazard the way Postgres
+// does — everything shares one connection — but enforcing the same "must run
+// outside WithTx" contract on both dialects means a misuse fails loudly in
+// SQLite/local-mode tests instead of silently working there and only
+// surfacing as a Postgres/multi-mode production error.
 type shippedDefaultsStore struct {
 	q             queryer
+	inTx          bool
 	eventHandlers db.EventHandlerStore
 }
 
@@ -25,9 +34,19 @@ func newShippedDefaultsStore(q queryer, eventHandlers db.EventHandlerStore) db.S
 	return &shippedDefaultsStore{q: q, eventHandlers: eventHandlers}
 }
 
+// newTxShippedDefaultsStore composes a tx-bound ShippedDefaultsStore for
+// TxStores. SeedShippedIntoTeam refuses to run there — mirrors
+// newTxOrgTemplateStore / the Postgres newTxShippedDefaultsStore.
+func newTxShippedDefaultsStore(tx queryer, eventHandlers db.EventHandlerStore) db.ShippedDefaultsStore {
+	return &shippedDefaultsStore{q: tx, inTx: true, eventHandlers: eventHandlers}
+}
+
 var _ db.ShippedDefaultsStore = (*shippedDefaultsStore)(nil)
 
 func (s *shippedDefaultsStore) SeedShippedIntoTeam(ctx context.Context, orgID, teamID string, shippedPrompts []domain.Prompt, shippedBlueprints []domain.SeedBlueprint) error {
+	if s.inTx {
+		return errors.New("sqlite shipped_defaults: SeedShippedIntoTeam must not be called inside WithTx; call stores.ShippedDefaults.SeedShippedIntoTeam directly")
+	}
 	if teamID == "" {
 		return errors.New("sqlite shipped_defaults: SeedShippedIntoTeam requires team_id")
 	}

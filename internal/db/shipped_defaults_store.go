@@ -21,9 +21,13 @@ import (
 //
 // SeedShippedIntoTeam is modeled on OrgTemplateStore.MaterializeIntoTeam:
 // same three-phase shape, same (org_id, team_id, system_slug) idempotency
-// keys, same admin-pool / outside-WithTx constraints — it just reads from
-// the shipped Go slices instead of the org_template_* tables, and does not
-// maintain the system_prompt_versions sidecar (nothing reads it).
+// keys, same admin-pool / outside-WithTx posture — it just reads from the
+// shipped Go slices instead of the org_template_* tables, and does not
+// maintain the system_prompt_versions sidecar (nothing reads it). Unlike
+// OrgTemplateStore/PromptStore, both dialects enforce the outside-WithTx
+// constraint (SQLite has no genuine pool-escape hazard to guard against, but
+// enforcing it anyway keeps a misuse from silently working in SQLite/local
+// mode and only surfacing as a Postgres/multi-mode production error).
 type ShippedDefaultsStore interface {
 	// SeedShippedIntoTeam seeds teamID's prompts + blueprints (+ steps) +
 	// event_handlers from shippedPrompts + shippedBlueprints + the
@@ -45,7 +49,6 @@ type ShippedDefaultsStore interface {
 	//     through the phase-2 map.
 	//
 	// Does not write system_prompt_versions. Runs on the admin pool; must
-	// run OUTSIDE any WithTx (same constraint as
-	// OrgTemplateStore.MaterializeIntoTeam and PromptStore.SeedOrUpdate).
+	// run OUTSIDE any WithTx — enforced by both dialects' impls.
 	SeedShippedIntoTeam(ctx context.Context, orgID, teamID string, shippedPrompts []domain.Prompt, shippedBlueprints []domain.SeedBlueprint) error
 }
