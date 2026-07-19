@@ -40,7 +40,8 @@ func TestOrgTemplate_Postgres_ForwardOnlyAndIsolation(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	// Org-create seeds each org's template + founder team from the shipped lists.
+	// Org-create seeds each org's founder team directly from the shipped
+	// lists (BootstrapNewOrg no longer touches the org template — TFAC-658).
 	if err := db.BootstrapNewOrg(ctx, stores, orgA, founderTeamA, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg A: %v", err)
 	}
@@ -69,16 +70,18 @@ func TestOrgTemplate_Postgres_ForwardOnlyAndIsolation(t *testing.T) {
 		t.Fatalf("admin CreatePrompt: %v", err)
 	}
 
-	// A 2nd team in org A, created AFTER the edit, copies the edited template.
+	// A 2nd team in org A, created AFTER the edit, materializes the edited
+	// template (the org template's own forward-only behavior — no longer
+	// reached via Bootstrap*, so drive OrgTemplateStore directly).
 	team2A := pgtest.SeedTeam(t, h, orgA, "team2-a")
-	if err := db.BootstrapNewTeam(ctx, stores, orgA, team2A); err != nil {
-		t.Fatalf("BootstrapNewTeam A team2: %v", err)
+	if err := stores.OrgTemplate.MaterializeIntoTeam(ctx, orgA, team2A); err != nil {
+		t.Fatalf("OrgTemplate.MaterializeIntoTeam A team2: %v", err)
 	}
 
 	// A team in org B, to confirm B never sees A's edit.
 	team2B := pgtest.SeedTeam(t, h, orgB, "team2-b")
-	if err := db.BootstrapNewTeam(ctx, stores, orgB, team2B); err != nil {
-		t.Fatalf("BootstrapNewTeam B team2: %v", err)
+	if err := stores.OrgTemplate.MaterializeIntoTeam(ctx, orgB, team2B); err != nil {
+		t.Fatalf("OrgTemplate.MaterializeIntoTeam B team2: %v", err)
 	}
 
 	countPrompt := func(org, team, slug string) int {
@@ -140,6 +143,12 @@ func TestOrgTemplate_Postgres_MultiStepDeepCopy(t *testing.T) {
 	if err := db.BootstrapNewOrg(ctx, stores, orgA, founderTeamA, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
+	// This test exercises the org template's own multi-step authoring +
+	// materialize path (BootstrapNewOrg no longer seeds it — TFAC-658), so
+	// seed it explicitly.
+	if err := stores.OrgTemplate.SeedFromShipped(ctx, orgA, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("OrgTemplate.SeedFromShipped: %v", err)
+	}
 
 	// A non-admin member's template-blueprint write is refused by RLS.
 	memberErr := h.WithUser(t, memberA, orgA, func(tx *sql.Tx) error {
@@ -187,8 +196,8 @@ func TestOrgTemplate_Postgres_MultiStepDeepCopy(t *testing.T) {
 
 	// Materialize a new team from the edited template.
 	team2 := pgtest.SeedTeam(t, h, orgA, "team2-deepcopy")
-	if err := db.BootstrapNewTeam(ctx, stores, orgA, team2); err != nil {
-		t.Fatalf("BootstrapNewTeam: %v", err)
+	if err := stores.OrgTemplate.MaterializeIntoTeam(ctx, orgA, team2); err != nil {
+		t.Fatalf("OrgTemplate.MaterializeIntoTeam: %v", err)
 	}
 
 	// The new team got a real multi-step blueprint copy (read via admin pool).
@@ -248,8 +257,8 @@ func TestOrgTemplate_Postgres_MultiStepDeepCopy(t *testing.T) {
 		`DELETE FROM blueprint_steps WHERE org_id = $1 AND blueprint_id = $2 AND step_index = 1`, orgA, teamBPID); err != nil {
 		t.Fatalf("delete team step: %v", err)
 	}
-	if err := db.BootstrapNewTeam(ctx, stores, orgA, team2); err != nil {
-		t.Fatalf("BootstrapNewTeam re-run: %v", err)
+	if err := stores.OrgTemplate.MaterializeIntoTeam(ctx, orgA, team2); err != nil {
+		t.Fatalf("OrgTemplate.MaterializeIntoTeam re-run: %v", err)
 	}
 	var stepsAfterRerun int
 	if err := h.AdminDB.QueryRowContext(ctx,

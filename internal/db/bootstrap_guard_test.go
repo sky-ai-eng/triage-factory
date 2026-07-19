@@ -70,14 +70,12 @@ func TestBootstrapUsesAdminPoolStoreCalls(t *testing.T) {
 		// teamAgentStore.AddForTeam — admin-pool INSERT, inTx-guarded
 		// (team_agents.go).
 		"TeamAgents.AddForTeam": true,
-		// orgTemplateStore.SeedFromShipped — admin-pool tx, inTx-guarded
-		// (org_template.go). Replaced the old direct Prompts.SeedOrUpdate /
-		// EventHandlers.Seed bootstrap writes when seeding was routed
-		// through the org template.
-		"OrgTemplate.SeedFromShipped": true,
-		// orgTemplateStore.MaterializeIntoTeam — admin-pool tx, inTx-guarded
-		// (org_template.go).
-		"OrgTemplate.MaterializeIntoTeam": true,
+		// shippedDefaultsStore.SeedShippedIntoTeam — admin-pool tx,
+		// inTx-guarded (shipped_defaults.go). Replaced the org-template
+		// detour (OrgTemplate.SeedFromShipped / MaterializeIntoTeam) —
+		// bootstrap now seeds a team's prompts/blueprints/handlers
+		// directly from the shipped Go slices.
+		"ShippedDefaults.SeedShippedIntoTeam": true,
 		// orgsStore.CreateLocalTenant — local-mode (SQLite N=1) only; the
 		// Postgres impl returns an explicit "not supported in multi mode"
 		// error and never touches the app pool (orgs.go).

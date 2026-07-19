@@ -263,14 +263,22 @@ type Stores struct {
 	Invites InvitesStore
 
 	// OrgTemplate owns org_template_prompts + org_template_handlers — the
-	// per-org, org-admin-editable template BootstrapNewOrg/NewTeam copy into
-	// each new team's prompts + event_handlers. App pool for the
-	// editor CRUD (org_template_*_all RLS gates on tf.user_is_org_admin);
-	// admin pool for SeedFromShipped (org-create seed) + MaterializeIntoTeam
-	// (per-team copy, which also writes the team's prompts/event_handlers/
-	// system_prompt_versions). Multi-mode only; the SQLite impl exists so the
-	// bootstrap tests can run without Postgres.
+	// per-org, org-admin-editable template. No longer wired into
+	// BootstrapNewOrg/BootstrapNewTeam (see ShippedDefaults below) —
+	// those now seed straight from the shipped Go slices. OrgTemplate
+	// remains a standalone editor surface (App pool for the CRUD,
+	// org_template_*_all RLS gates on tf.user_is_org_admin; admin pool for
+	// SeedFromShipped + MaterializeIntoTeam, still callable directly) until
+	// a follow-up ticket removes the template concept entirely.
 	OrgTemplate OrgTemplateStore
+
+	// ShippedDefaults seeds a team's prompts + blueprints (+ steps) +
+	// event_handlers directly from the compile-time shipped lists
+	// (ai.ShippedPrompts() / ai.ShippedBlueprints() / db.ShippedEventHandlers).
+	// This is what BootstrapNewOrg/BootstrapNewTeam call — every new team,
+	// first or Nth, is seeded the same way. Admin pool; the SQLite impl
+	// exists so the bootstrap tests can run without Postgres.
+	ShippedDefaults ShippedDefaultsStore
 
 	// SystemLLMRuns owns the system_llm_runs table — per-call cost +
 	// token accounting for the headless LLM jobs (scorer, repo-profiler,
@@ -463,6 +471,7 @@ type TxStores struct {
 	GitHubApps       GitHubAppsStore
 	JiraApps         JiraAppsStore
 	OrgTemplate      OrgTemplateStore
+	ShippedDefaults  ShippedDefaultsStore
 	Invites          InvitesStore
 	SystemLLMRuns    SystemLLMRunStore
 	AccessChangeLog  AccessChangeLogStore

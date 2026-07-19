@@ -30,6 +30,12 @@ func TestOrgTemplate_UpdateHandler_MatchedSemantics(t *testing.T) {
 	if err := db.BootstrapNewOrg(ctx, stores, org, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
+	// BootstrapNewOrg no longer touches the org template (TFAC-658); seed it
+	// directly so this test — which exercises the template's own
+	// UpdateHandler semantics — has shipped rows to work against.
+	if err := stores.OrgTemplate.SeedFromShipped(ctx, org, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("OrgTemplate.SeedFromShipped: %v", err)
+	}
 
 	rules, err := stores.OrgTemplate.ListHandlers(ctx, org, domain.EventHandlerKindRule)
 	if err != nil || len(rules) == 0 {
@@ -195,10 +201,15 @@ func TestOrgTemplate_MultiStepBlueprint_DeepCopy(t *testing.T) {
 	ctx := t.Context()
 	org := runmode.LocalDefaultOrgID
 
-	// Org-create seeds the template (prompts + blueprints + handlers) and
-	// materializes the founder's team from it.
+	// Org-create seeds the founder's team directly from the shipped lists
+	// (BootstrapNewOrg no longer touches the org template — TFAC-658).
 	if err := db.BootstrapNewOrg(ctx, stores, org, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
+	}
+	// This test exercises the org template's own multi-step authoring +
+	// materialize path, so seed the template explicitly.
+	if err := stores.OrgTemplate.SeedFromShipped(ctx, org, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("OrgTemplate.SeedFromShipped: %v", err)
 	}
 
 	// --- Author a 2-step template blueprint (the new authoring capability) ---
@@ -257,8 +268,8 @@ func TestOrgTemplate_MultiStepBlueprint_DeepCopy(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert team: %v", err)
 	}
-	if err := db.BootstrapNewTeam(ctx, stores, org, newTeamID); err != nil {
-		t.Fatalf("BootstrapNewTeam: %v", err)
+	if err := stores.OrgTemplate.MaterializeIntoTeam(ctx, org, newTeamID); err != nil {
+		t.Fatalf("OrgTemplate.MaterializeIntoTeam: %v", err)
 	}
 
 	// (1) The new team has a REAL multi-step blueprint copy.
@@ -325,8 +336,8 @@ func TestOrgTemplate_MultiStepBlueprint_DeepCopy(t *testing.T) {
 		`DELETE FROM blueprint_steps WHERE blueprint_id = ? AND step_index = 1`, teamBP.ID); err != nil {
 		t.Fatalf("delete team step: %v", err)
 	}
-	if err := db.BootstrapNewTeam(ctx, stores, org, newTeamID); err != nil {
-		t.Fatalf("BootstrapNewTeam re-run: %v", err)
+	if err := stores.OrgTemplate.MaterializeIntoTeam(ctx, org, newTeamID); err != nil {
+		t.Fatalf("OrgTemplate.MaterializeIntoTeam re-run: %v", err)
 	}
 	stepsAfter, err := stores.Blueprints.ListSteps(ctx, org, teamBP.ID)
 	if err != nil {

@@ -7,33 +7,34 @@ import (
 )
 
 // OrgTemplateStore owns the org_template_prompts + org_template_blueprints
-// (+ org_template_blueprint_steps) + org_template_handlers tables — the
-// org-level template that BootstrapNewOrg / BootstrapNewTeam copy into a new
-// team's prompts + blueprints + event_handlers. It is the editable
-// source that sits between TF's shipped defaults and the per-team seed:
+// (+ org_template_blueprint_steps) + org_template_handlers tables — an
+// org-level, org-admin-editable mirror of TF's shipped defaults:
 //
 //	ai.ShippedPrompts() + ai.ShippedBlueprints() + db.ShippedEventHandlers
-//	        │  SeedFromShipped — once, at org-create
+//	        │  SeedFromShipped
 //	        ▼
 //	org_template_*  (per-org, admin-editable)
-//	        │  MaterializeIntoTeam — at every team-create (first + Nth)
+//	        │  MaterializeIntoTeam
 //	        ▼
 //	prompts + blueprints + event_handlers  (per-team copies, the real rows)
 //
-// Editing the template is forward-only: it changes what the *next* new team
-// inherits and never touches a team that already exists (consistent with the
-// CLAUDE.md tracking-changes invariant).
+// As of TFAC-658, BootstrapNewOrg / BootstrapNewTeam no longer route through
+// this chain — they seed a new team's prompts/blueprints/event_handlers
+// directly from the shipped Go slices via ShippedDefaultsStore. OrgTemplate
+// remains a standalone editor surface (its SeedFromShipped/MaterializeIntoTeam
+// methods still work, just uncalled by the bootstrap chain) until a
+// follow-up ticket removes the template concept entirely.
+//
+// Editing the template is forward-only: it changes what the *next*
+// MaterializeIntoTeam call would inherit and never touches a team that
+// already exists (consistent with the CLAUDE.md tracking-changes invariant).
 //
 // # Both modes
 //
-// The template is a multi-tenant concept that local mode now reuses at N=1:
-// the local provision action (db.BootstrapLocalOrg, fired by POST
-// /api/setup/start) runs the same SeedFromShipped → MaterializeIntoTeam chain
-// multi-mode uses, so the sole local team is seeded *through* the template
-// rather than straight from the shipped lists. The template's editor HTTP
-// surface stays org-admin + multi-mode gated, but the seed path is shared —
-// "tenant exists ⇒ provisioned & seeded through the template" holds in both
-// modes.
+// The template is a multi-tenant concept; local mode's provision action
+// (db.BootstrapLocalOrg) no longer touches it either — same TFAC-658
+// rewire as multi mode. The template's editor HTTP surface stays org-admin +
+// multi-mode gated.
 //
 // # Pool split (Postgres)
 //

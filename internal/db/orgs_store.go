@@ -41,7 +41,8 @@ type OrgsStore interface {
 	// memberships / org_settings / team_settings) for the
 	// runmode.LocalDefault* sentinels. It is the local "Start your
 	// Triage Factory" provision action's first step, before
-	// BootstrapNewOrg seeds the template + materializes the team.
+	// BootstrapNewOrg seeds the team's prompts/blueprints/handlers
+	// directly from the shipped defaults.
 	// Re-entrant (INSERT OR IGNORE) so a re-run reaches the same end
 	// state. Local-mode only: the Postgres (multi-mode) impl returns a
 	// clear "not supported in multi mode" error — multi-mode provisions

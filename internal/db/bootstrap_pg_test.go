@@ -109,3 +109,77 @@ func TestAppPoolRead_NoClaims_WrapsPermErr(t *testing.T) {
 		t.Errorf("error does not point at the *System fix: %v", err)
 	}
 }
+
+// TestSeedShippedIntoTeam_Postgres_TwoTeamsAndIdempotent is the TFAC-658
+// acceptance pin on the real two-pool Postgres store: a fresh org's first
+// team (BootstrapNewOrg) and a later second team (BootstrapNewTeam) both get
+// the full shipped set as their own distinct rows, with rules enabled /
+// triggers disabled and the per-prompt model override preserved, and
+// re-running bootstrap against the first team is a no-op (same row ids).
+func TestSeedShippedIntoTeam_Postgres_TwoTeamsAndIdempotent(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgID, _, team1 := pgtest.SeedOrgWithUser(t, h, "sky658")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	if err := db.BootstrapNewOrg(ctx, stores, orgID, team1, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("BootstrapNewOrg: %v", err)
+	}
+	team2 := pgtest.SeedTeam(t, h, orgID, "team2-sky658")
+	if err := db.BootstrapNewTeam(ctx, stores, orgID, team2, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("BootstrapNewTeam: %v", err)
+	}
+
+	// stores.Prompts.GetBySystemSlug is app-pool (RLS-gated); read back
+	// through the admin pool directly, same as org_template_pg_test.go's
+	// countPrompt helper.
+	readPrompt := func(team, slug string) (id, model string) {
+		t.Helper()
+		if err := h.AdminDB.QueryRowContext(ctx,
+			`SELECT id, model FROM prompts WHERE org_id = $1 AND team_id = $2 AND system_slug = $3`,
+			orgID, team, slug,
+		).Scan(&id, &model); err != nil {
+			t.Fatalf("read prompt %s/%s: %v", team, slug, err)
+		}
+		return id, model
+	}
+	p1ID, p1Model := readPrompt(team1, "system-pr-review-aggregate")
+	p2ID, p2Model := readPrompt(team2, "system-pr-review-aggregate")
+	if p1ID == p2ID {
+		t.Errorf("both teams' system-pr-review-aggregate prompt share id %q; want distinct per-team UUIDs", p1ID)
+	}
+	if p1Model != "haiku" || p2Model != "haiku" {
+		t.Errorf("system-pr-review-aggregate model: team1=%q team2=%q; want haiku on both", p1Model, p2Model)
+	}
+
+	handlerEnabled := func(team, slug string) bool {
+		t.Helper()
+		var enabled bool
+		if err := h.AdminDB.QueryRowContext(ctx,
+			`SELECT enabled FROM event_handlers WHERE org_id = $1 AND team_id = $2 AND system_slug = $3`,
+			orgID, team, slug,
+		).Scan(&enabled); err != nil {
+			t.Fatalf("read handler %s/%s: %v", team, slug, err)
+		}
+		return enabled
+	}
+	for _, team := range []string{team1, team2} {
+		if !handlerEnabled(team, "system-rule-ci-check-failed") {
+			t.Errorf("team %s: shipped rule system-rule-ci-check-failed is disabled; want enabled", team)
+		}
+		if handlerEnabled(team, "system-trigger-ci-fix") {
+			t.Errorf("team %s: shipped trigger system-trigger-ci-fix is enabled; want disabled (shipped convention)", team)
+		}
+	}
+
+	// Re-running bootstrap against team1 is a no-op: same prompt row id.
+	if err := db.BootstrapNewOrg(ctx, stores, orgID, team1, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("BootstrapNewOrg re-run: %v", err)
+	}
+	p1IDAgain, _ := readPrompt(team1, "system-pr-review-aggregate")
+	if p1IDAgain != p1ID {
+		t.Errorf("re-run changed team1's prompt id: %s -> %s; want unchanged", p1ID, p1IDAgain)
+	}
+}
