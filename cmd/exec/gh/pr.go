@@ -496,7 +496,11 @@ func prThreadView(ctx context.Context, client ghAPI, host agenthost.Client, args
 	if len(args) < 2 {
 		exitErr("usage: gh pr thread-view <pr_number> <comment_id> [--page N]")
 	}
-	owner, repo, number := parseRepoAndNumber(args[:1])
+	// Resolve owner/repo from the FULL args so an explicit --repo is honored
+	// (resolveRepo scans for it); firstPositional already skips flags, so the
+	// number still binds to the leading <pr_number> positional. Slicing to
+	// args[:1] here would hide --repo and silently resolve the wrong repo.
+	owner, repo, number := parseRepoAndNumber(args)
 	commentID := mustInt(args[1], "comment_id")
 	page := 1
 	if v := flagVal(args, "--page"); v != "" {
