@@ -262,16 +262,6 @@ type Stores struct {
 	// SQLite impl is a stub returning ErrNotApplicableInLocal.
 	Invites InvitesStore
 
-	// OrgTemplate owns org_template_prompts + org_template_handlers — the
-	// per-org, org-admin-editable template. No longer wired into
-	// BootstrapNewOrg/BootstrapNewTeam (see ShippedDefaults below) —
-	// those now seed straight from the shipped Go slices. OrgTemplate
-	// remains a standalone editor surface (App pool for the CRUD,
-	// org_template_*_all RLS gates on tf.user_is_org_admin; admin pool for
-	// SeedFromShipped + MaterializeIntoTeam, still callable directly) until
-	// a follow-up ticket removes the template concept entirely.
-	OrgTemplate OrgTemplateStore
-
 	// ShippedDefaults seeds a team's prompts + blueprints (+ steps) +
 	// event_handlers directly from the compile-time shipped lists
 	// (ai.ShippedPrompts() / ai.ShippedBlueprints() / db.ShippedEventHandlers).
@@ -470,7 +460,6 @@ type TxStores struct {
 	Curator          CuratorStore
 	GitHubApps       GitHubAppsStore
 	JiraApps         JiraAppsStore
-	OrgTemplate      OrgTemplateStore
 	ShippedDefaults  ShippedDefaultsStore
 	Invites          InvitesStore
 	SystemLLMRuns    SystemLLMRunStore

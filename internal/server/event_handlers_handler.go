@@ -95,8 +95,7 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 
 // filterEventHandlersByGate drops handlers bound to a gated-off event type
 // (TFAC-524). Rows persist regardless of entitlement state — this is
-// visibility only. Shared by the team-scoped and org-template list
-// endpoints. Always returns a non-nil slice so callers get a clean []
+// visibility only. Always returns a non-nil slice so callers get a clean []
 // on the wire rather than null.
 func filterEventHandlersByGate(orgID string, handlers []domain.EventHandler) []domain.EventHandler {
 	visible := make([]domain.EventHandler, 0, len(handlers))

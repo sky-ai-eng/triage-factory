@@ -55,11 +55,9 @@ type EventHandler struct {
 	// NULL-owned and nothing fires.
 	AppliesToUnowned bool `json:"applies_to_unowned"`
 	// SystemSlug is the stable identifier for shipped handlers
-	// ("system-rule-ci-check-failed", "system-trigger-ci-fix") and for the
-	// org-template handlers (a generated tmpl-<uuid> for
-	// admin-authored rows). Empty for user-authored team handlers — the team
-	// event_handlers scanners don't surface it (it's a seed/idempotency key,
-	// not request data); the org_template store populates it because the
+	// ("system-rule-ci-check-failed", "system-trigger-ci-fix"). Empty for
+	// user-authored team handlers — the team event_handlers scanners don't
+	// surface it (it's a seed/idempotency key, not request data); the
 	// per-team copy keys on (org_id, team_id, system_slug). omitempty so it
 	// stays absent from team-handler responses that never set it.
 	SystemSlug string    `json:"system_slug,omitempty"`

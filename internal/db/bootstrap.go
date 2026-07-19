@@ -47,10 +47,10 @@ import (
 //
 // Fully re-entrant for crash-mid-provision recovery: re-running after a
 // partial provision reaches the same end state. Note that if it runs
-// again after a user has deleted shipped defaults, the seed/materialize
-// steps can re-create them — POST /api/setup/start avoids that by
-// no-op'ing once a tenant exists, which is where the non-resurrection
-// guarantee lives. shippedPrompts + shippedBlueprints are passed in
+// again after a user has deleted shipped defaults, the seed step can
+// re-create them — POST /api/setup/start avoids that by no-op'ing once a
+// tenant exists, which is where the non-resurrection guarantee lives.
+// shippedPrompts + shippedBlueprints are passed in
 // (rather than read from internal/ai) so internal/db stays free of the
 // ai dependency — the caller supplies ai.ShippedPrompts() /
 // ai.ShippedBlueprints().
@@ -154,8 +154,8 @@ func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string, 
 //
 // Order is load-bearing: agent → seed shipped defaults into the first team →
 // team_agents. The first team is seeded the exact same way every later team
-// is (BootstrapNewTeam) — straight from the shipped Go slices, no org
-// template detour. The team_agents row needs the agent created in step 1.
+// is (BootstrapNewTeam) — straight from the shipped Go slices. The
+// team_agents row needs the agent created in step 1.
 //
 // Like BootstrapNewTeam this must run OUTSIDE any WithTx (admin-pool
 // seeders) and is fully idempotent. The org-provisioning caller runs it

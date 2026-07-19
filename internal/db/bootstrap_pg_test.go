@@ -133,8 +133,7 @@ func TestSeedShippedIntoTeam_Postgres_TwoTeamsAndIdempotent(t *testing.T) {
 	}
 
 	// stores.Prompts.GetBySystemSlug is app-pool (RLS-gated); read back
-	// through the admin pool directly, same as org_template_pg_test.go's
-	// countPrompt helper.
+	// through the admin pool directly.
 	readPrompt := func(team, slug string) (id, model string) {
 		t.Helper()
 		if err := h.AdminDB.QueryRowContext(ctx,

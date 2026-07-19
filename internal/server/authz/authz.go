@@ -490,35 +490,6 @@ func (az *Checker) RequireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgI
 	return rawOrgID, userID, true
 }
 
-// RequireOrgTemplate gates an org-template endpoint: multi-mode only, active
-// org resolved, caller is an org admin. Returns (orgID, userID, true) on
-// success. Local mode 404s (no template concept) — mirrors the POST /api/teams
-// local-absent posture. The org-admin check is also enforced server-side by
-// the org_template_*_all RLS policies; this is the friendly front gate.
-func (az *Checker) RequireOrgTemplate(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
-	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
-		return "", "", false
-	}
-	orgID, ok = httpx.RequireOrg(w, r)
-	if !ok {
-		return "", "", false
-	}
-	claims := httpx.ClaimsFrom(r.Context())
-	if claims == nil {
-		// Fail closed per the httpx.ClaimsFrom contract — the session
-		// middleware populates claims before any multi-mode endpoint, so a
-		// nil here is a route-registration bug, not an anonymous caller.
-		httpx.WriteUnauth(w)
-		return "", "", false
-	}
-	userID = claims.Subject
-	if !az.RequireOrgAdminRole(w, r, orgID, userID) {
-		return "", "", false
-	}
-	return orgID, userID, true
-}
-
 // resolveError carries whether a failed team-ID resolve should render as a 404
 // (a missing/invalid team) or a 500 (a real lookup failure). ResolveTeamID
 // returns it; WriteResolveError renders it.

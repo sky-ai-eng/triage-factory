@@ -35,8 +35,8 @@ func newShippedDefaultsStore(q queryer, eventHandlers db.EventHandlerStore) db.S
 }
 
 // newTxShippedDefaultsStore composes a tx-bound ShippedDefaultsStore for
-// TxStores. SeedShippedIntoTeam refuses to run there — mirrors
-// newTxOrgTemplateStore / the Postgres newTxShippedDefaultsStore.
+// TxStores. SeedShippedIntoTeam refuses to run there — mirrors the
+// Postgres newTxShippedDefaultsStore.
 func newTxShippedDefaultsStore(tx queryer, eventHandlers db.EventHandlerStore) db.ShippedDefaultsStore {
 	return &shippedDefaultsStore{q: tx, inTx: true, eventHandlers: eventHandlers}
 }

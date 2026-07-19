@@ -56,14 +56,14 @@ func TestBootstrapUsesAdminPoolStoreCalls(t *testing.T) {
 	// fully-qualified `<Store>.<Method>` pair, NOT the bare method name: an
 	// admin-pool write is a property of one specific store's
 	// implementation, not of a method name. `Create` is admin-routed on
-	// agentStore but app-routed on, e.g., orgTemplateStore.CreatePrompt's
-	// peers — pinning the pair stops a future stores.<OtherStore>.Create()
-	// (or any reused name) from passing on the strength of a name match
-	// alone. Extending this list is a CONSCIOUS act: only add a pair here
-	// after confirming that store's impl actually targets s.admin (see the
-	// per-store "Pool split" doc comments in internal/db/postgres/*.go).
-	// Adding an app-pool read here would defeat the whole guard — see the
-	// invariant documented above.
+	// agentStore but app-routed on other stores' `Create` peers — pinning
+	// the pair stops a future stores.<OtherStore>.Create() (or any reused
+	// name) from passing on the strength of a name match alone. Extending
+	// this list is a CONSCIOUS act: only add a pair here after confirming
+	// that store's impl actually targets s.admin (see the per-store "Pool
+	// split" doc comments in internal/db/postgres/*.go). Adding an
+	// app-pool read here would defeat the whole guard — see the invariant
+	// documented above.
 	adminWrites := map[string]bool{
 		// agentStore.Create — admin-pool INSERT, inTx-guarded (agents.go).
 		"Agents.Create": true,
@@ -71,10 +71,8 @@ func TestBootstrapUsesAdminPoolStoreCalls(t *testing.T) {
 		// (team_agents.go).
 		"TeamAgents.AddForTeam": true,
 		// shippedDefaultsStore.SeedShippedIntoTeam — admin-pool tx,
-		// inTx-guarded (shipped_defaults.go). Replaced the org-template
-		// detour (OrgTemplate.SeedFromShipped / MaterializeIntoTeam) —
-		// bootstrap now seeds a team's prompts/blueprints/handlers
-		// directly from the shipped Go slices.
+		// inTx-guarded (shipped_defaults.go). Bootstrap seeds a team's
+		// prompts/blueprints/handlers directly from the shipped Go slices.
 		"ShippedDefaults.SeedShippedIntoTeam": true,
 		// orgsStore.CreateLocalTenant — local-mode (SQLite N=1) only; the
 		// Postgres impl returns an explicit "not supported in multi mode"

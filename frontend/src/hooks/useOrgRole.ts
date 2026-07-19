@@ -19,9 +19,8 @@ export interface OrgRoleState {
 
 // useOrgRole reports the viewer's role in the active org. Safe in both modes:
 // useOptionalAuth + useActiveOrgId both return null without their providers
-// (local mode), so it simply reports "no role / not admin" there. Mirrors the
-// active-org resolution in useTemplateScope — when no org is explicit but the
-// viewer belongs to exactly one, that org is implied.
+// (local mode), so it simply reports "no role / not admin" there. When no
+// org is explicit but the viewer belongs to exactly one, that org is implied.
 export function useOrgRole(): OrgRoleState {
   const auth = useOptionalAuth()
   const activeOrgId = useActiveOrgId()

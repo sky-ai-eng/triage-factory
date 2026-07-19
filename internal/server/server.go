@@ -52,7 +52,6 @@ type Server struct {
 	orgs         db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
 	jiraRules    db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
 	githubApps   db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
-	orgTemplate  db.OrgTemplateStore     // org-admin-editable template new teams are seeded from
 	authEvents   db.AuthEventStore       // TFAC-76: SOC2 authentication audit log of record — written best-effort via recordAuthEvent at the auth write-sites
 	// serverPort is the stored instance_config.server_port value
 	// surfaced to the settings GET response. The actual bind port
@@ -547,7 +546,6 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 		jiraRules:    stores.JiraStatusRules,
 		githubApps:   stores.GitHubApps,
 		jiraApps:     stores.JiraApps,
-		orgTemplate:  stores.OrgTemplate,
 		authEvents:   stores.AuthEvents,
 		tx:           stores.Tx,
 		az:           authz.New(database, stores.Tx),
@@ -1179,37 +1177,6 @@ func (s *Server) routes() {
 	// Install/"copy to my team" (TFAC-538) — materializes the listing's
 	// current snapshot into the caller's team as a brand-new fork.
 	s.apiMutating("POST /api/marketplace/listings/{id}/install", mh.handleMarketplaceInstall)
-
-	// Org template editor — org-admin-gated, multi-mode only.
-	// Mirrors the /api/prompts + /api/event-handlers families at org-template
-	// scope (no team_id); each handler gates via requireOrgTemplate.
-	ot := &orgTemplateHandler{tx: s.tx, az: s.az}
-	s.api("GET /api/org-template/prompts", ot.handleOrgTemplatePromptsList)
-	s.apiMutating("POST /api/org-template/prompts", ot.handleOrgTemplatePromptCreate)
-	s.api("GET /api/org-template/prompts/{id}", ot.handleOrgTemplatePromptGet)
-	s.apiMutating("PUT /api/org-template/prompts/{id}", ot.handleOrgTemplatePromptPut)
-	s.apiMutating("DELETE /api/org-template/prompts/{id}", ot.handleOrgTemplatePromptDelete)
-	s.api("GET /api/org-template/blueprints", ot.handleOrgTemplateBlueprintsList)
-	s.apiMutating("POST /api/org-template/blueprints", ot.handleOrgTemplateBlueprintCreate)
-	s.apiMutating("POST /api/org-template/blueprints/duplicate", ot.handleOrgTemplateBlueprintDuplicate)
-	s.api("GET /api/org-template/blueprints/{id}", ot.handleOrgTemplateBlueprintGet)
-	s.apiMutating("PUT /api/org-template/blueprints/{id}", ot.handleOrgTemplateBlueprintPut)
-	s.apiMutating("DELETE /api/org-template/blueprints/{id}", ot.handleOrgTemplateBlueprintDelete)
-	s.api("GET /api/org-template/blueprint-steps", ot.handleOrgTemplateBlueprintStepsAll)
-	s.api("GET /api/org-template/blueprints/{id}/steps", ot.handleOrgTemplateBlueprintStepsGet)
-	s.apiMutating("PUT /api/org-template/blueprints/{id}/steps", ot.handleOrgTemplateBlueprintStepsPut)
-	s.apiMutating("POST /api/org-template/blueprints/{id}/merge", ot.handleOrgTemplateBlueprintMerge)
-	s.apiMutating("POST /api/org-template/blueprints/{id}/split", ot.handleOrgTemplateBlueprintSplit)
-	s.apiMutating("POST /api/org-template/blueprints/{id}/reconnect", ot.handleOrgTemplateBlueprintReconnect)
-	s.api("GET /api/org-template/event-handlers", ot.handleOrgTemplateHandlersList)
-	s.apiMutating("POST /api/org-template/event-handlers", ot.handleOrgTemplateHandlerCreate)
-	s.apiMutating("PUT /api/org-template/event-handlers/reorder", ot.handleOrgTemplateHandlerReorder)
-	s.apiMutating("PATCH /api/org-template/event-handlers/{id}", ot.handleOrgTemplateHandlerUpdate)
-	s.apiMutating("PUT /api/org-template/event-handlers/{id}", ot.handleOrgTemplateHandlerUpdate)
-	s.apiMutating("DELETE /api/org-template/event-handlers/{id}", ot.handleOrgTemplateHandlerDelete)
-	s.apiMutating("POST /api/org-template/event-handlers/{id}/toggle", ot.handleOrgTemplateHandlerToggle)
-	s.apiMutating("POST /api/org-template/event-handlers/{id}/promote", ot.handleOrgTemplateHandlerPromote)
-	s.apiMutating("POST /api/org-template/event-handlers/{id}/retarget", ot.handleOrgTemplateHandlerRetarget)
 
 	// GitHub App manifest registration. The launch endpoint serves a
 	// script-free bounce page (carrying its own per-response CSP) that

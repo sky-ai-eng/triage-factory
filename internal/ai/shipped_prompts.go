@@ -6,7 +6,7 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // the single source of truth shared by the local provision action
 // (db.BootstrapLocalOrg, fired by POST /api/setup/start) and the
 // multi-mode org-create bootstrap (db.BootstrapNewOrg). Both run the same
-// org-template seed chain, so the two paths can't drift.
+// seed chain, so the two paths can't drift.
 //
 // Order is not significant for prompts (each upserts independently), but
 // note the seed chains through blueprints: each shipped prompt is wrapped by

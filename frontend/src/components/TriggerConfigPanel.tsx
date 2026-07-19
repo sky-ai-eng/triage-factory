@@ -14,9 +14,6 @@ import { blueprintsBase, handlersBase } from '../lib/scope'
 interface TriggerConfigPanelProps {
   open: boolean
   trigger: TriggerHandler | null
-  // When true (the org-template editor), reads/writes target the
-  // /api/org-template/* families instead of /api/event-handlers + /api/prompts.
-  templateScope?: boolean
   // When true the panel is read-only (TFAC-447): inputs are disabled and the
   // Save/Delete affordances are withheld, so a team viewer can inspect a
   // trigger's config without being offered writes that 403 server-side.
@@ -30,14 +27,13 @@ interface TriggerConfigPanelProps {
 export default function TriggerConfigPanel({
   open,
   trigger,
-  templateScope = false,
   readOnly = false,
   onClose,
   onSaved,
   onDeleted,
   onRefresh,
 }: TriggerConfigPanelProps) {
-  const handlerBase = handlersBase(templateScope)
+  const handlerBase = handlersBase()
   const [predicate, setPredicate] = useState<Record<string, unknown>>({})
   const [minAutonomy, setMinAutonomy] = useState(0)
   const [breakerThreshold, setBreakerThreshold] = useState(4)
@@ -54,10 +50,9 @@ export default function TriggerConfigPanel({
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
 
   // Fetch the catalog once when the panel opens — it's session-static, so there's
-  // no need to re-fetch on every trigger selection. Skipped in template scope
-  // (the toggle is hidden there regardless).
+  // no need to re-fetch on every trigger selection.
   useEffect(() => {
-    if (!open || templateScope) return
+    if (!open) return
     let cancelled = false
     fetch('/api/event-types')
       .then((r) => (r.ok ? r.json() : []))
@@ -68,7 +63,7 @@ export default function TriggerConfigPanel({
     return () => {
       cancelled = true
     }
-  }, [open, templateScope])
+  }, [open])
 
   // Hide the watch toggle only when the catalog EXPLICITLY marks this event inert
   // (pool / requested-party). Fail-open: an unloaded/failed catalog leaves the
@@ -89,32 +84,22 @@ export default function TriggerConfigPanel({
     setConfirmDelete(false)
     setPromptName('')
 
-    // Resolve the bound blueprint's name for the badge. Template scope has a
-    // single-get on its blueprint family; team-scope blueprints expose only a
-    // list endpoint, so fetch the list and find by id.
-    if (templateScope) {
-      fetch(`${blueprintsBase(true)}/${encodeURIComponent(trigger.blueprint_id)}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((p) => {
-          if (!cancelled && p) setPromptName(p.name)
-        })
-        .catch(() => {})
-    } else {
-      fetch(blueprintsBase(false))
-        .then((r) => (r.ok ? r.json() : []))
-        .then((list: Array<{ id: string; name: string }>) => {
-          const match = Array.isArray(list)
-            ? list.find((b) => b.id === trigger.blueprint_id)
-            : undefined
-          if (!cancelled && match) setPromptName(match.name)
-        })
-        .catch(() => {})
-    }
+    // Resolve the bound blueprint's name for the badge — blueprints expose
+    // only a list endpoint, so fetch the list and find by id.
+    fetch(blueprintsBase())
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list: Array<{ id: string; name: string }>) => {
+        const match = Array.isArray(list)
+          ? list.find((b) => b.id === trigger.blueprint_id)
+          : undefined
+        if (!cancelled && match) setPromptName(match.name)
+      })
+      .catch(() => {})
 
     return () => {
       cancelled = true
     }
-  }, [trigger, templateScope])
+  }, [trigger])
 
   const handleToggle = async (checked: boolean) => {
     if (!trigger) return
@@ -293,11 +278,10 @@ export default function TriggerConfigPanel({
                 {/* Apply to unowned entities — the explicit "watch" reach opt-in
                     (TFAC-517). On a trigger this grants orphan reach AND fires, so
                     the whole orphan auto-delegation is configured here. Off by
-                    default; carries an eyes-open warning. Hidden in org-template
-                    scope — the flag is a team-routing concept the template doesn't
-                    carry (mirrors TaskRuleEditor). Also hidden for events the catalog
-                    marks inert (pool / requested-party — supports_watch=false). */}
-                {!templateScope && !eventWatchInert && (
+                    default; carries an eyes-open warning. Hidden for events the
+                    catalog marks inert (pool / requested-party —
+                    supports_watch=false). */}
+                {!eventWatchInert && (
                   <>
                     <div className="border-t border-border-subtle" />
                     <div>

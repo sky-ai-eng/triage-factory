@@ -10,21 +10,14 @@ import (
 // event_handlers directly from TF's compile-time shipped lists —
 // ai.ShippedPrompts() / ai.ShippedBlueprints() (passed in so internal/db
 // stays free of the internal/ai dependency) plus the in-package
-// db.ShippedEventHandlers. This is the direct-seed replacement for the
-// org_template detour (OrgTemplateStore.SeedFromShipped →
-// MaterializeIntoTeam) in the bootstrap chain: every new team — the
-// founder's first team and every later one — is seeded the same way,
-// straight from the shipped Go slices, so the org template is no longer
-// wired into team creation. The org_template_* tables/store/routes are
-// unaffected (a follow-up ticket removes them); this store just stops
-// BootstrapNewOrg/BootstrapNewTeam from routing through them.
+// db.ShippedEventHandlers. Every new team — the founder's first team and
+// every later one — is seeded the same way, straight from the shipped Go
+// slices.
 //
-// SeedShippedIntoTeam is modeled on OrgTemplateStore.MaterializeIntoTeam:
-// same three-phase shape, same (org_id, team_id, system_slug) idempotency
-// keys, same admin-pool / outside-WithTx posture — it just reads from the
-// shipped Go slices instead of the org_template_* tables, and does not
-// maintain the system_prompt_versions sidecar (nothing reads it). Unlike
-// OrgTemplateStore/PromptStore, both dialects enforce the outside-WithTx
+// SeedShippedIntoTeam: three-phase shape, (org_id, team_id, system_slug)
+// idempotency keys, admin-pool / outside-WithTx posture — it reads from
+// the shipped Go slices and does not maintain the system_prompt_versions
+// sidecar (nothing reads it). Both dialects enforce the outside-WithTx
 // constraint (SQLite has no genuine pool-escape hazard to guard against, but
 // enforcing it anyway keeps a misuse from silently working in SQLite/local
 // mode and only surfacing as a Postgres/multi-mode production error).

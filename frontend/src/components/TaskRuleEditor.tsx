@@ -21,10 +21,6 @@ interface TaskRuleEditorProps {
   // standalone path (TaskRulesPanel on Cards) passes nothing and is
   // unchanged.
   lockedTeamId?: string
-  // When true (the org-template editor), CRUD targets
-  // /api/org-template/event-handlers instead of /api/event-handlers:
-  // org-scoped, no team picker. Mutually exclusive with lockedTeamId.
-  templateScope?: boolean
   onClose: () => void
   onSaved: () => void
   onDeleted?: () => void
@@ -36,14 +32,12 @@ export default function TaskRuleEditor({
   prefillEventType,
   prefillPredicate,
   lockedTeamId,
-  templateScope = false,
   onClose,
   onSaved,
   onDeleted,
 }: TaskRuleEditorProps) {
   const isEdit = rule !== null
-  // REST root for this scope.
-  const base = handlersBase(templateScope)
+  const base = handlersBase()
 
   // Form state
   const [eventType, setEventType] = useState('')
@@ -82,7 +76,7 @@ export default function TaskRuleEditor({
   // marks this event inert (supports_watch === false — pool / requested-party).
   // Fail-open: if the catalog hasn't loaded yet or the fetch failed, the lookup
   // is undefined and we keep the toggle available rather than stranding the user
-  // on a valid owner-ladder event. (Also hidden in org-template scope below.)
+  // on a valid owner-ladder event.
   const eventWatchInert = eventTypes.find((et) => et.id === eventType)?.supports_watch === false
 
   // Track original predicate JSON for PATCH diff.
@@ -202,10 +196,7 @@ export default function TaskRuleEditor({
           sort_order: sortOrder,
           enabled,
           applies_to_unowned: appliesToUnowned,
-        }
-        // Team scope stamps the acting team; template scope is org-scoped.
-        if (!templateScope) {
-          body.team_id = effectiveTeam
+          team_id: effectiveTeam,
         }
         if (predicateJSON) {
           body.scope_predicate_json = predicateJSON
@@ -220,7 +211,7 @@ export default function TaskRuleEditor({
           const err = await res.json()
           throw new Error(err.error || 'Failed to create rule')
         }
-        if (!templateScope && effectiveTeam) noteWrittenTeam(effectiveTeam)
+        if (effectiveTeam) noteWrittenTeam(effectiveTeam)
       }
 
       onSaved()
@@ -240,7 +231,6 @@ export default function TaskRuleEditor({
     enabled,
     appliesToUnowned,
     effectiveTeam,
-    templateScope,
     base,
     isEdit,
     rule,
@@ -309,16 +299,10 @@ export default function TaskRuleEditor({
 
                 {/* Body — scrollable */}
                 <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5 min-h-0">
-                  {/* Template scope is org-scoped — no team. */}
-                  {templateScope ? (
-                    <div className="text-[12px] text-text-tertiary">
-                      Scope: <span className="font-medium text-text-secondary">Org template</span>
-                    </div>
-                  ) : (
-                    /* Team (create mode only — a rule's team is immutable).
-                       Locked to the page's active team on the single-team
-                       prompts page; otherwise the modal's own write picker. */
-                    !isEdit &&
+                  {/* Team (create mode only — a rule's team is immutable).
+                      Locked to the page's active team on the single-team
+                      prompts page; otherwise the modal's own write picker. */}
+                  {!isEdit &&
                     (lockedTeamId ? (
                       <div className="text-[12px] text-text-tertiary">
                         Team:{' '}
@@ -328,8 +312,7 @@ export default function TaskRuleEditor({
                       </div>
                     ) : (
                       <TeamPicker value={team} onChange={setTeam} label="Team" />
-                    ))
-                  )}
+                    ))}
                   {/* Event type */}
                   <div>
                     <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
@@ -414,11 +397,10 @@ export default function TaskRuleEditor({
                   {/* Apply to unowned entities — the explicit "watch" scope
                       opt-in (TFAC-517). Off by default; on it surfaces tasks for
                       entities outside the team (PRs/issues authored by anyone),
-                      so it carries a deliberate eyes-open warning. Hidden in
-                      org-template scope — the flag is a team-routing concept the
-                      template doesn't carry. Also hidden for event types the catalog
-                      marks inert (pool / requested-party — supports_watch=false). */}
-                  {!templateScope && !eventWatchInert && (
+                      so it carries a deliberate eyes-open warning. Hidden for
+                      event types the catalog marks inert (pool / requested-party
+                      — supports_watch=false). */}
+                  {!eventWatchInert && (
                     <div>
                       <label className="flex items-start gap-2.5 cursor-pointer">
                         <input
@@ -486,7 +468,7 @@ export default function TaskRuleEditor({
                         saving ||
                         !eventType ||
                         !name.trim() ||
-                        (!isEdit && !templateScope && !lockedTeamId && !teamsLoaded)
+                        (!isEdit && !lockedTeamId && !teamsLoaded)
                       }
                       className="text-[13px] font-semibold text-white bg-accent hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-full transition-colors"
                     >

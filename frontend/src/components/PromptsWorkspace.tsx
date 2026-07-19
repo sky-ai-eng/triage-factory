@@ -158,7 +158,7 @@ export default function PromptsWorkspace({
       <div className="min-h-0 flex-1">
         <BindingGraph
           key={graphKey}
-          scope={{ kind: 'team', teamId }}
+          scope={{ teamId }}
           scopeReady={ready}
           onPromptClick={openEdit}
           onTriggerClick={setEditingTrigger}

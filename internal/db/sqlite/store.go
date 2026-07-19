@@ -107,10 +107,6 @@ func New(conn *sql.DB) db.Stores {
 		Curator:    newCuratorStore(conn),
 		GitHubApps: newGitHubAppsStore(conn, secrets),
 		JiraApps:   newJiraAppsStore(conn),
-		// OrgTemplate is a multi-mode concept; SQLite wires it so the
-		// db-package bootstrap tests can run without Postgres. Local mode
-		// never seeds or reads it.
-		OrgTemplate: newOrgTemplateStore(conn),
 		// ShippedDefaults is what BootstrapNewOrg/BootstrapNewTeam call.
 		// Phase 3 (handlers) reuses the eventHandlers store built above
 		// instead of duplicating its Seed SQL.

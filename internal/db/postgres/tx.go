@@ -225,15 +225,9 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// DeleteForOrg); admin half stays the real admin pool so the resolver's
 		// GetForOrgSystem routes outside the tx.
 		JiraApps: newJiraAppsStore(tx, s.admin),
-		// OrgTemplate: tx-bound so the editor CRUD composes with the
-		// surrounding claims tx. SeedFromShipped + MaterializeIntoTeam refuse
-		// to run inside WithTx (admin-pool bootstrap work) — the bootstrap
-		// path reaches them through the non-tx stores.OrgTemplate instead.
-		OrgTemplate: newTxOrgTemplateStore(tx),
 		// ShippedDefaults: tx-bound so a misuse from inside WithTx fails
-		// loudly (SeedShippedIntoTeam refuses to run there — same
-		// admin-pool bootstrap posture as OrgTemplate above). The
-		// bootstrap path reaches it through the non-tx
+		// loudly (SeedShippedIntoTeam refuses to run there — admin-pool
+		// bootstrap work). The bootstrap path reaches it through the non-tx
 		// stores.ShippedDefaults instead.
 		ShippedDefaults: newTxShippedDefaultsStore(tx, newTxEventHandlerStore(tx)),
 		// Invites: app-side writes (Create/Revoke) route through the tx so

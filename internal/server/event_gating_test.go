@@ -242,14 +242,7 @@ func TestHandleEventHandlerCreate_AllowsGatedEventTypeWithFeature(t *testing.T) 
 	}
 }
 
-// --- filterEventHandlersByGate (Part 4, shared by team + org-template) --
-//
-// handleOrgTemplateHandlersList calls this exact function (org_template_handler.go)
-// so this pure unit test doubles as coverage for the org-template list-filter
-// mirror without standing up the multi-mode/org-admin/Postgres stack that
-// az.RequireOrgTemplate requires — org-template's own create-gate call is a
-// direct, un-wrapped entitlements.EventTypeAllowed check identical to the
-// team-scoped one exercised via HTTP above.
+// --- filterEventHandlersByGate (Part 4) ---
 
 func TestFilterEventHandlersByGate_DropsGatedKeepsUngated(t *testing.T) {
 	gateJiraForTest(t)

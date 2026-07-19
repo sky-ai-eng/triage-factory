@@ -13,7 +13,7 @@ import (
 // TestShippedDefaultsStore_Postgres_SeedShippedIntoTeamRejectsInsideTx pins
 // the contract that SeedShippedIntoTeam must not be invoked from a WithTx
 // closure — escaping to the admin pool from inside a caller's tx would
-// silently bypass their transaction scope. Mirrors the OrgTemplate /
+// silently bypass their transaction scope. Mirrors the
 // Agents.Create / PromptStore.SeedOrUpdate contract.
 func TestShippedDefaultsStore_Postgres_SeedShippedIntoTeamRejectsInsideTx(t *testing.T) {
 	h := pgtest.Shared(t)
