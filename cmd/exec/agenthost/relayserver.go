@@ -342,6 +342,18 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 		defer cancel()
 		s.rt.Record(recCtx, a.Artifact, a.Action)
 
+	case opRecordReadTouch:
+		var a recordReadTouchArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			agenthostLog.Warn("decode relayed read touch failed", "error", err)
+			return
+		}
+		// The read already returned; RecordReadTouch is best-effort. Cap it like
+		// the external-write path so a wedged store can't pin the frame goroutine.
+		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
+		defer cancel()
+		s.rt.RecordReadTouch(recCtx, a.Provider, a.Target, a.URL)
+
 	default:
 		agenthostLog.Warn("unsupported core relay notify op", "op", op)
 	}

@@ -60,6 +60,15 @@ type Runtime interface {
 	// already-applied action, so it needs no error return.
 	Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction)
 
+	// RecordReadTouch persists a durable run→entity touch for an addressed read
+	// (a verb targeting one entity by id/key/ts): it resolves-or-creates the
+	// entity for (provider, target, url) and records a role='touched' row. Void
+	// and best-effort like Record — a read never fails on its touch — and, like
+	// Record, relayed to the orchestrator on the sidecar so the write lands where
+	// the stores live. Set-returning reads never call it (the touched-entity
+	// rule: addressed → touch, returned-in-a-set → never).
+	RecordReadTouch(ctx context.Context, provider, target, url string)
+
 	// Relay / RelayNotify are the generic provider-op escape hatch: a provider
 	// handler (Slack, future) reaches its own org-bound policy op by namespace
 	// without a typed Runtime method per op. Core built-ins use the typed
@@ -95,6 +104,7 @@ type ExtensionRuntime interface {
 	RelayNotify(ctx context.Context, namespace, op string, args any)
 	ProviderCredential(ctx context.Context, namespace string) (json.RawMessage, error)
 	Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction)
+	RecordReadTouch(ctx context.Context, provider, target, url string)
 }
 
 // Core DB op names — the verb-trace reads/writes served under the "core"
@@ -117,6 +127,7 @@ const (
 	opUpsertArtifact          = "upsert_artifact"
 	opUpdateReviewDetails     = "update_review_details_if_pending"
 	opRecordExternalWrite     = "record_external_write"
+	opRecordReadTouch         = "record_read_touch"
 	opCheckEntitlement        = "check_entitlement"
 	// opCreateWorkspaceCheckout materializes a `workspace add` checkout. Unlike
 	// the other core ops it is FS-bearing: the sidecar relays it because it owns
@@ -159,6 +170,15 @@ type orgJiraBaseResult struct {
 type recordExternalWriteArgs struct {
 	Artifact *domain.Artifact       `json:"artifact,omitempty"`
 	Action   *domain.ExternalAction `json:"action,omitempty"`
+}
+
+// recordReadTouchArgs is the record_read_touch op's payload — the addressed
+// read's entity coordinates. Identity (org, run) is bound orchestrator-side
+// from the run's RunInfo, so the wire carries none.
+type recordReadTouchArgs struct {
+	Provider string `json:"provider"`
+	Target   string `json:"target"`
+	URL      string `json:"url,omitempty"`
 }
 
 // --- directRuntime: the in-process impl over db.Stores ---
@@ -320,6 +340,10 @@ func (r *directRuntime) UpdateReviewDetailsIfPending(ctx context.Context, artifa
 
 func (r *directRuntime) Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction) {
 	RecordExternalWrite(ctx, r.stores, r.info, a, act)
+}
+
+func (r *directRuntime) RecordReadTouch(ctx context.Context, provider, target, url string) {
+	recordEntityTouch(ctx, r.stores, r.info, provider, target, url)
 }
 
 func (r *directRuntime) CheckEntitlement(_ context.Context, feature string) (bool, error) {
@@ -508,6 +532,13 @@ func (r *relayRuntime) Record(_ context.Context, a *domain.Artifact, act *domain
 	// RecordExternalWrite). A dropped notify costs one audit row, never the
 	// agent's action.
 	r.conn.notify(agentproc.RelayNamespaceCore, opRecordExternalWrite, recordExternalWriteArgs{Artifact: a, Action: act})
+}
+
+func (r *relayRuntime) RecordReadTouch(_ context.Context, provider, target, url string) {
+	// Fire-and-forget, mirroring Record: the read already returned, so the touch
+	// must never block it. A dropped notify costs one touch row, re-established
+	// on the next addressed hit or poll.
+	r.conn.notify(agentproc.RelayNamespaceCore, opRecordReadTouch, recordReadTouchArgs{Provider: provider, Target: target, URL: url})
 }
 
 func (r *relayRuntime) Relay(ctx context.Context, namespace, op string, args, out any) error {

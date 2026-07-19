@@ -569,7 +569,14 @@ func (c *LocalClient) JiraGetIssue(ctx context.Context, key string) (*jiraclient
 	if err != nil {
 		return nil, err
 	}
-	return client.GetIssue(ctx, key)
+	issue, err := client.GetIssue(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	// The addressed issue is the touched entity — best-effort, relayed on the
+	// sidecar. URL is left empty; the poll cycle owns stub enrichment.
+	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderJira, key, "")
+	return issue, nil
 }
 
 func (c *LocalClient) JiraTransitionTo(ctx context.Context, key, status string) error {
@@ -1095,7 +1102,12 @@ func (c *LocalClient) GithubGetPR(ctx context.Context, owner, repo string, numbe
 	if err != nil {
 		return nil, err
 	}
-	return client.GetPR(ctx, owner, repo, number, verbose)
+	pr, err := client.GetPR(ctx, owner, repo, number, verbose)
+	if err != nil {
+		return nil, err
+	}
+	c.touchPR(ctx, owner, repo, number)
+	return pr, nil
 }
 
 func (c *LocalClient) GithubGetPRDiff(ctx context.Context, owner, repo string, number int, file string) (string, error) {
@@ -1103,7 +1115,12 @@ func (c *LocalClient) GithubGetPRDiff(ctx context.Context, owner, repo string, n
 	if err != nil {
 		return "", err
 	}
-	return client.GetPRDiff(ctx, owner, repo, number, file)
+	diff, err := client.GetPRDiff(ctx, owner, repo, number, file)
+	if err != nil {
+		return "", err
+	}
+	c.touchPR(ctx, owner, repo, number)
+	return diff, nil
 }
 
 func (c *LocalClient) GithubGetPRFiles(ctx context.Context, owner, repo string, number int) ([]ghclient.PRFile, error) {
@@ -1111,9 +1128,18 @@ func (c *LocalClient) GithubGetPRFiles(ctx context.Context, owner, repo string, 
 	if err != nil {
 		return nil, err
 	}
-	return client.GetPRFiles(ctx, owner, repo, number)
+	files, err := client.GetPRFiles(ctx, owner, repo, number)
+	if err != nil {
+		return nil, err
+	}
+	c.touchPR(ctx, owner, repo, number)
+	return files, nil
 }
 
+// GithubGetCommentThread fetches a review/issue comment thread by comment id.
+// It does NOT touch here: the ghAPI seam (a mirror of *github.Client) carries
+// no PR number, so `gh pr thread-view` records the PR touch CLI-side via
+// Client.RecordReadTouch after this returns (cmd/exec/gh/pr.go).
 func (c *LocalClient) GithubGetCommentThread(ctx context.Context, owner, repo string, commentID, page int) (*ghclient.CommentThread, error) {
 	client, err := c.githubClientForRepo(ctx, owner, repo)
 	if err != nil {
@@ -1127,7 +1153,32 @@ func (c *LocalClient) GithubGetReviewDetail(ctx context.Context, owner, repo str
 	if err != nil {
 		return nil, err
 	}
-	return client.GetReviewDetail(ctx, owner, repo, number, reviewID, verbose)
+	detail, err := client.GetReviewDetail(ctx, owner, repo, number, reviewID, verbose)
+	if err != nil {
+		return nil, err
+	}
+	// The PR is the addressed entity; the review is an attribute of it.
+	c.touchPR(ctx, owner, repo, number)
+	return detail, nil
+}
+
+// touchPR records a durable run→entity touch for the PR owner/repo#number an
+// addressed read just resolved — best-effort via the runtime, so it relays to
+// the orchestrator on the sidecar and never fails the read. URL is left empty:
+// the poll cycle owns stub enrichment. Set-returning GitHub reads (pr list,
+// actions download-logs) never call this — the rule is addressed → touch,
+// returned-in-a-set → never.
+func (c *LocalClient) touchPR(ctx context.Context, owner, repo string, number int) {
+	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), "")
+}
+
+// RecordReadTouch is the Client-interface escape hatch for an addressed read
+// whose host method can't build the entity target itself (gh pr thread-view —
+// the PR number is a CLI positional the ghAPI seam doesn't carry). It routes to
+// the same best-effort runtime touch the in-method reads use, so the sidecar
+// relay and the local write behave identically.
+func (c *LocalClient) RecordReadTouch(ctx context.Context, provider, target, url string) {
+	c.rt.RecordReadTouch(ctx, provider, target, url)
 }
 
 func (c *LocalClient) GithubDismissReview(ctx context.Context, owner, repo string, number, reviewID int, message string) error {

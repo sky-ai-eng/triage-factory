@@ -663,4 +663,6 @@ const (
 	methodGithubAddPendingReviewComment = "GithubAddPendingReviewComment"
 
 	methodCallExtension = "CallExtension"
+
+	methodRecordReadTouch = "RecordReadTouch"
 )

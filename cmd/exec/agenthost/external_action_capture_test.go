@@ -30,6 +30,14 @@ import (
 // admin pool (no user) when true, a synthetic-claims tx (manual run, with a user)
 // when false.
 func newCaptureStores(t *testing.T, eventTriggered bool) (db.Stores, RunInfo) {
+	_, stores, info := newCaptureStoresConn(t, eventTriggered)
+	return stores, info
+}
+
+// newCaptureStoresConn is newCaptureStores plus the raw *sql.DB, for touch tests
+// that read run_memory_entities directly (the store interface has no
+// role-returning read).
+func newCaptureStoresConn(t *testing.T, eventTriggered bool) (*sql.DB, db.Stores, RunInfo) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 	if err != nil {
@@ -49,7 +57,7 @@ func newCaptureStores(t *testing.T, eventTriggered bool) (db.Stores, RunInfo) {
 	if !eventTriggered {
 		userID = runmode.LocalDefaultUserID
 	}
-	return sqlitestore.New(conn), RunInfo{
+	return conn, sqlitestore.New(conn), RunInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		TeamID:           runmode.LocalDefaultTeamID,
 		RunID:            runID,

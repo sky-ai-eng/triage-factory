@@ -64,6 +64,13 @@ func startFakeJira(t *testing.T) *httptest.Server {
 // admin pool (no user) when true, a synthetic-claims tx (manual run) when
 // false — both are exercised across the tests below.
 func newJiraRecordingStores(t *testing.T, jiraURL string, eventTriggered bool) (db.Stores, RunInfo) {
+	_, stores, info := newJiraRecordingStoresConn(t, jiraURL, eventTriggered)
+	return stores, info
+}
+
+// newJiraRecordingStoresConn is newJiraRecordingStores plus the raw *sql.DB, for
+// touch tests that read run_memory_entities directly.
+func newJiraRecordingStoresConn(t *testing.T, jiraURL string, eventTriggered bool) (*sql.DB, db.Stores, RunInfo) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 	if err != nil {
@@ -91,7 +98,7 @@ func newJiraRecordingStores(t *testing.T, jiraURL string, eventTriggered bool) (
 		RunID:            runID,
 		IsEventTriggered: eventTriggered,
 	}
-	return stores, info
+	return conn, stores, info
 }
 
 func listRunArtifacts(t *testing.T, stores db.Stores, runID string) []domain.Artifact {

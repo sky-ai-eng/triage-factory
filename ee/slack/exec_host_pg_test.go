@@ -2,8 +2,10 @@ package slack
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -349,6 +351,34 @@ func (r *slackExecRig) actionsForRun(orgID, runID string) []domain.ExternalActio
 		}
 	}
 	return out
+}
+
+// touchRole reads run_memory_entities.role for (runID, entityID) directly — the
+// store interface exposes no role-returning read. "" when no row exists.
+func (r *slackExecRig) touchRole(runID, entityID string) string {
+	r.t.Helper()
+	var role string
+	err := r.h.AdminDB.QueryRow(
+		`SELECT role FROM run_memory_entities WHERE run_id = $1 AND entity_id = $2`, runID, entityID,
+	).Scan(&role)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ""
+	}
+	if err != nil {
+		r.t.Fatalf("read run_memory_entities role: %v", err)
+	}
+	return role
+}
+
+// touchRowCount counts every run_memory_entities row for a run — a set-returning
+// read must leave this at 0.
+func (r *slackExecRig) touchRowCount(runID string) int {
+	r.t.Helper()
+	var n int
+	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM run_memory_entities WHERE run_id = $1`, runID).Scan(&n); err != nil {
+		r.t.Fatalf("count run_memory_entities: %v", err)
+	}
+	return n
 }
 
 // ---------- send / edit / react golden paths ----------
@@ -1084,6 +1114,69 @@ func TestSlackExecHandler_ReadChannel_AuthzRefusal(t *testing.T) {
 		t.Fatal("expected an authz refusal, got nil")
 	} else if !strings.Contains(err.Error(), "does not track") {
 		t.Errorf("error = %q, want it to mention the team doesn't track the channel", err)
+	}
+}
+
+// TestSlackExecHandler_ReadThread_RecordsTouch pins the addressed-read half of
+// the touched-entity rule for Slack: `read thread` targets one thread by
+// (channel, root ts), so it records a durable run→entity touch keyed on the
+// same SlackSourceID the ingest pipeline uses — a bot read and a human mention
+// resolve to the identical entity.
+func TestSlackExecHandler_ReadThread_RecordsTouch(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-read-thread-touch")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	const rootTS = "1700000000.000100"
+	r.fake.repliesMessages = []map[string]any{
+		{"ts": rootTS, "user": "U1", "text": "root message"},
+	}
+
+	if _, err := r.hdl.readThread(context.Background(), r.rt(info), slackReadThreadArgs{Channel: "C1", TS: rootTS, Limit: 50}); err != nil {
+		t.Fatalf("readThread: %v", err)
+	}
+
+	sourceID := domain.SlackSourceID("C1", rootTS)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", sourceID)
+	if err != nil {
+		t.Fatalf("GetBySourceSystem: %v", err)
+	}
+	if ent == nil {
+		t.Fatalf("read thread recorded no touched entity for source_id %q", sourceID)
+	}
+	if ent.Kind != "message" {
+		t.Errorf("entity kind = %q, want message", ent.Kind)
+	}
+	if role := r.touchRole(runID, ent.ID); role != domain.MemoryRoleTouched {
+		t.Errorf("touch role = %q, want %q", role, domain.MemoryRoleTouched)
+	}
+}
+
+// TestSlackExecHandler_ReadChannel_RecordsNoTouch is the negative: `read
+// channel` returns a set, so it never records a touch — the rule is addressed →
+// touch, returned-in-a-set → never.
+func TestSlackExecHandler_ReadChannel_RecordsNoTouch(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-read-channel-notouch")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "C1")
+	r.trackChannel(orgID, owner, teamID, "C1")
+	runID := r.seedRun(orgID, teamID, owner, true)
+	info := agenthost.RunInfo{OrgID: orgID, UserID: owner, RunID: runID, TeamID: teamID, IsEventTriggered: true}
+
+	r.fake.historyMessages = []map[string]any{
+		{"ts": "1700000000.000000", "user": "U2", "text": "hello"},
+	}
+	if _, err := r.hdl.readChannel(context.Background(), r.rt(info), slackReadChannelArgs{Channel: "C1", Limit: 20}); err != nil {
+		t.Fatalf("readChannel: %v", err)
+	}
+
+	if n := r.touchRowCount(runID); n != 0 {
+		t.Errorf("read channel recorded %d touch row(s), want 0", n)
 	}
 }
 

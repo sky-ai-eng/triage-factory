@@ -135,21 +135,23 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info RunInfo, a 
 // (provider, target) into an entities row, returning an existing entity or a
 // freshly-minted snapshot-less stub.
 
-// resolveTouchedEntityInfo is the free-function counterpart of
-// LocalClient.resolveTouchedEntity. See that method's doc for the full
-// rationale; kept here so RecordExternalWrite (and any ee caller reaching
-// this seam) can use it without a LocalClient.
+// resolveTouchedEntityInfo maps a (provider, target, url) triple to an entities
+// row, returning an existing entity or a freshly-minted snapshot-less stub, and
+// "" for anything the touched-entity rule skips (a repo-level GitHub target with
+// no '#N', an empty key, an unmapped provider). It is the free-function
+// counterpart of the former LocalClient.resolveTouchedEntity; kept here so the
+// write funnel and the read path both reach it without a LocalClient.
 //
-// The Slack case mints a "message" entity keyed on act.Target — expected to
-// already be domain.SlackSourceID(channel, rootTS), the same key the ingest
-// pipeline uses (ee/slack/ingest.go), so a bot-authored write on a thread
+// The Slack case mints a "message" entity keyed on target — expected to already
+// be domain.SlackSourceID(channel, rootTS), the same key the ingest pipeline
+// uses (ee/slack/ingest.go), so a bot-authored write on a thread
 // resolves/creates the identical entity a human mention would.
-func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info RunInfo, act *domain.ExternalAction) (string, error) {
-	if act == nil || stores.Entities == nil {
+func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info RunInfo, provider, target, url string) (string, error) {
+	if stores.Entities == nil {
 		return "", nil
 	}
 	var kind string
-	switch act.Provider {
+	switch provider {
 	case domain.ArtifactProviderGitHub:
 		// owner/repo#N is a PR entity; bare owner/repo is a repo-level action.
 		// NOTE: this assumes every github target is a PR (kind="pr"). Exec only
@@ -157,51 +159,68 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info RunInf
 		// the "owner/repo#N" shape, and the poller's resolveStubNodeID would then
 		// 404 against /pulls/{n} every cycle. GitHub issue support must branch on
 		// kind here (and give the poller an issue-aware enrichment path).
-		if _, _, _, ok := domain.ParsePRTarget(act.Target); !ok {
+		if _, _, _, ok := domain.ParsePRTarget(target); !ok {
 			return "", nil
 		}
 		kind = "pr"
 	case domain.ArtifactProviderJira:
-		if act.Target == "" {
+		if target == "" {
 			return "", nil
 		}
 		kind = "issue"
 	case domain.ArtifactProviderSlack:
-		if act.Target == "" {
+		if target == "" {
 			return "", nil
 		}
 		kind = "message"
 	default:
 		return "", nil
 	}
-	// title is left empty — ExternalAction carries no human title, and the poll
-	// cycle (or, for Slack, the ingest pipeline) seeds it from context. url
-	// rides through when present.
-	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, act.Provider, act.Target, kind, "", act.URL)
+	// title is left empty — neither an ExternalAction nor an addressed read
+	// carries a human title, and the poll cycle (or, for Slack, the ingest
+	// pipeline) seeds it from context. url rides through when present.
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, provider, target, kind, "", url)
 	if err != nil {
 		return "", err
 	}
 	return entity.ID, nil
 }
 
-// recordTouchInfo resolves-or-creates the touched entity as a best-effort
-// side step in the recording funnels: a failure is logged and swallowed so it
-// never fails the agent's already-applied write (the entity self-heals on a
-// later touch or poll). It MUST run outside the audit tx — local mode holds
-// the single SQLite connection for the life of a synthetic-claims tx, so a
-// System write inside that closure would deadlock; every caller invokes this
-// only after withWriteInfo returns.
+// recordEntityTouch resolves-or-creates the touched entity for (provider,
+// target, url) and, when it maps to a real entity, persists a durable
+// (run_id, entity_id, role='touched') row. Shared by the write funnel
+// (recordTouchInfo) and the addressed-read path (Runtime.RecordReadTouch).
+//
+// Best-effort throughout: a resolve or record failure is logged and swallowed
+// so it never fails the agent's already-applied write or the read that
+// triggered it — the entity self-heals on a later touch or poll, and the touch
+// row on the next addressed hit. It MUST run outside any audit tx: local mode
+// holds the single SQLite connection for the life of a synthetic-claims tx, so
+// these ...System (admin-pool) writes inside that closure would deadlock. Every
+// funnel caller invokes it only after withWriteInfo returns; the read path
+// carries no tx.
+func recordEntityTouch(ctx context.Context, stores db.Stores, info RunInfo, provider, target, url string) {
+	id, err := resolveTouchedEntityInfo(ctx, stores, info, provider, target, url)
+	if err != nil {
+		agenthostLog.Warn("touched-entity resolve failed (will retry on next poll)",
+			"run", info.RunID, "target", target, "error", err)
+		return
+	}
+	if id == "" || stores.TaskMemory == nil {
+		return
+	}
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, info.OrgID, info.RunID, id, domain.MemoryRoleTouched); err != nil {
+		agenthostLog.Warn("touched-entity record failed", "run", info.RunID, "entity", id, "error", err)
+	}
+}
+
+// recordTouchInfo persists the write funnel's touched entity: it unwraps the
+// external action into its (provider, target, url) and records the run→entity
+// touch. A nil action (an audit-only write with no external action) touches
+// nothing. See recordEntityTouch for the best-effort + outside-the-tx contract.
 func recordTouchInfo(ctx context.Context, stores db.Stores, info RunInfo, act *domain.ExternalAction) {
 	if act == nil {
 		return
 	}
-	id, err := resolveTouchedEntityInfo(ctx, stores, info, act)
-	if err != nil {
-		agenthostLog.Warn("touched-entity resolve failed (will retry on next poll)",
-			"run", info.RunID, "target", act.Target, "error", err)
-		return
-	}
-	if id != "" {
-		agenthostLog.Debug("resolved touched entity", "run", info.RunID, "entity", id, "target", act.Target)
-	}
+	recordEntityTouch(ctx, stores, info, act.Provider, act.Target, act.URL)
 }
