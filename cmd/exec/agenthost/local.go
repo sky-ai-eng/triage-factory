@@ -1031,38 +1031,52 @@ func (c *LocalClient) legacyRepoClient(ctx context.Context, owner, repo string) 
 // fail-closed backend error record a git_denied audit row before returning, so
 // a transient DB blip during a denied gh op still leaves an audit trail —
 // symmetric with the proxy's "authorize-error" path.
+//
+// The two hard-deny outcomes are deliberately distinct, because the agent's
+// recovery differs and a bare "not authorized" left it guessing (the common
+// case: a Slack-triggered taskless run that hasn't cloned anything yet, so no
+// repo is materialized):
+//
+//   - Untracked ("repo-not-tracked") — the repo isn't attached to this run's
+//     team, so it never appears in this run's `workspace list` and the agent
+//     cannot self-serve. Only a team admin adding it as a tracked repo helps.
+//   - Tracked but not materialized ("repo-not-materialized") — the repo IS in
+//     this run's `workspace list` ("available"), just not persisted into the
+//     run's worktrees yet. The agent fixes it itself with `workspace add`.
 func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) error {
 	if !c.gateWired {
 		return nil
 	}
+	repoID := owner + "/" + repo
 	tracks, err := c.rt.TeamTracksRepo(ctx, owner, repo)
 	if err != nil {
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, err)
 	}
-	if tracks {
-		repoID := owner + "/" + repo
-		// Curator turns carry their authorized set explicitly (no run_worktrees
-		// ledger); a delegated run passes an empty PinnedRepos so this arm is
-		// inert and the ledger check below is the sole gate, unchanged.
-		for _, p := range c.info.PinnedRepos {
-			if strings.EqualFold(p, repoID) {
-				return nil
-			}
-		}
-		rows, lerr := c.rt.ListRunWorktrees(ctx)
-		if lerr != nil {
-			c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
-			return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, lerr)
-		}
-		for _, w := range rows {
-			if strings.EqualFold(w.RepoID, repoID) {
-				return nil
-			}
+	if !tracks {
+		c.RecordGitDenied(ctx, owner, repo, "", "gh", "repo-not-tracked")
+		return fmt.Errorf("repo %s is not tracked by this team, so this run cannot access it; a team admin must add it as a tracked repo in Settings before it can be used", repoID)
+	}
+	// Curator turns carry their authorized set explicitly (no run_worktrees
+	// ledger); a delegated run passes an empty PinnedRepos so this arm is
+	// inert and the ledger check below is the sole gate, unchanged.
+	for _, p := range c.info.PinnedRepos {
+		if strings.EqualFold(p, repoID) {
+			return nil
 		}
 	}
-	c.RecordGitDenied(ctx, owner, repo, "", "gh", "repo-not-authorized")
-	return fmt.Errorf("repo %s/%s not authorized for this run", owner, repo)
+	rows, lerr := c.rt.ListRunWorktrees(ctx)
+	if lerr != nil {
+		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
+		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, lerr)
+	}
+	for _, w := range rows {
+		if strings.EqualFold(w.RepoID, repoID) {
+			return nil
+		}
+	}
+	c.RecordGitDenied(ctx, owner, repo, "", "gh", "repo-not-materialized")
+	return fmt.Errorf("repo %s is tracked by this team but not yet materialized in this run; run 'workspace add %s' to persist it, then retry", repoID, repoID)
 }
 
 func (c *LocalClient) GithubGetPR(ctx context.Context, owner, repo string, number int, verbose bool) (*ghclient.PRView, error) {
