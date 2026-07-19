@@ -414,9 +414,7 @@ export default function PromptDrawer({
                   className="w-full px-3 py-2.5 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary font-mono leading-relaxed placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors resize-y disabled:opacity-60"
                 />
                 <p className="text-[10px] text-text-tertiary mt-1.5">
-                  Every run automatically receives the task&rsquo;s context — repo, PR/ticket
-                  identifiers, and event details — plus tool guidance and the completion format.
-                  Write instructions, not templates.
+                  Every run automatically receives the task's context.
                 </p>
               </div>
 
