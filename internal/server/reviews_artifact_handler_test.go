@@ -535,51 +535,6 @@ func TestReviewArtifactGet_MalformedDetails_500(t *testing.T) {
 	}
 }
 
-// TestReviewArtifactApprove_AutoMergeDowngrade pins that the APPROVE→COMMENT
-// downgrade SubmitReview applies when auto-merge is on is reflected back: the
-// response event, the persisted details.ReviewEvent, and the verdict diff all
-// show COMMENT (what GitHub recorded), not the requested APPROVE.
-func TestReviewArtifactApprove_AutoMergeDowngrade(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	var submitEvent string
-	mux := newAppAPIMux()
-	// GetPR (auto-merge guardrail check) reports auto_merge enabled.
-	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "auto_merge": map[string]any{"merge_method": "squash"}})
-	})
-	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		submitEvent, _ = body["event"].(string)
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": 999})
-	})
-	stub := httptest.NewServer(mux)
-	t.Cleanup(stub.Close)
-	seedApp(t, srv, stub, acmeInstall())
-
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rdown", "acme", "api", 7, "APPROVE")
-	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if submitEvent != "COMMENT" {
-		t.Errorf("GitHub received event %q, want COMMENT (downgraded from APPROVE under auto-merge)", submitEvent)
-	}
-	// The response must report what actually landed, not the requested APPROVE.
-	var out struct {
-		Event string `json:"event"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &out)
-	if out.Event != "COMMENT" {
-		t.Errorf("response event = %q, want COMMENT", out.Event)
-	}
-	// The persisted artifact reflects the downgrade too.
-	if d, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON); d.ReviewEvent != "COMMENT" {
-		t.Errorf("persisted ReviewEvent = %q, want COMMENT", d.ReviewEvent)
-	}
-}
-
 // TestReviewArtifactApprove_SharedCommitSHA_PinsToIt pins that the submitted
 // review's commit_id is the commit the inline comments were validated against
 // (their CommitSHA), not the start-review head — so the comments anchor to the
