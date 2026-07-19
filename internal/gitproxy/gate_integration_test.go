@@ -135,6 +135,48 @@ func TestGatedProxy_AuthorizeDenyReturns403(t *testing.T) {
 	}
 }
 
+// TestGatedProxy_DenyReasonAndMessagePropagate pins that a Decision carrying a
+// specific DenyReason/DenyMessage surfaces both: the reason lands in the audit
+// row and the message becomes the 403 body the agent reads in git's remote
+// output — the plumbing that lets a tracked-but-unmaterialized clone tell the
+// agent to run `workspace add` instead of a flat "not authorized".
+func TestGatedProxy_DenyReasonAndMessagePropagate(t *testing.T) {
+	rec := &fakeUpstreamRecord{}
+	upstream := fakeGitHub(rec)
+	defer upstream.Close()
+	ts := &constantTokenSource{value: "ghs", expiresAt: time.Now().Add(time.Hour)}
+	deny := func(_ context.Context, _, _ string) (gitproxy.Decision, error) {
+		return gitproxy.Decision{
+			Allowed:     false,
+			DenyReason:  "repo-not-materialized",
+			DenyMessage: "gitproxy: repo octo/repo is tracked by this team but not yet materialized in this run; run 'workspace add octo/repo' to persist it, then retry",
+		}, nil
+	}
+	sink := newDenialSink()
+	_, proxyURL := startGatedProxy(t, ts.source, upstream.URL, deny, sink.record)
+
+	req, _ := http.NewRequest("GET", proxyURL+"/octo/repo/info/refs", nil)
+	resp, err := directClient().Do(req)
+	if err != nil {
+		t.Fatalf("roundtrip: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "workspace add octo/repo") {
+		t.Errorf("403 body = %q, want the workspace-add recovery hint", string(body))
+	}
+	if rec.hits.Load() != 0 {
+		t.Errorf("upstream hit on a denied repo; want fail-closed")
+	}
+	if d := sink.next(t); d.Reason != "repo-not-materialized" {
+		t.Errorf("denial reason = %q, want repo-not-materialized", d.Reason)
+	}
+}
+
 // TestGatedProxy_AuthorizeErrorFailsClosedAndAudits pins that an authz-backend
 // error fails closed (502, no upstream) AND still records a denial, so an
 // outage/misconfig leaves an audit trail of blocked git activity.

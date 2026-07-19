@@ -3,6 +3,7 @@ package agenthost
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -37,6 +38,42 @@ func TestRelayServer_AuthorizeRepoRoutesToGate(t *testing.T) {
 	}
 	if sawOwner != "acme" || sawRepo != "widgets" {
 		t.Fatalf("gate saw wrong repo: %s/%s", sawOwner, sawRepo)
+	}
+}
+
+// TestRelayServer_AuthorizeRepoPropagatesDenyFields pins that a denied gate
+// decision's actionable DenyReason/DenyMessage survive the relay reply — the
+// wire fields the sandboxed gitproxy needs to emit the specific 403 body +
+// audit reason instead of the generic "repo not authorized" fallback.
+func TestRelayServer_AuthorizeRepoPropagatesDenyFields(t *testing.T) {
+	git := &agentproc.GitProxyConfig{
+		Authorize: func(_ context.Context, _, _ string) (gitproxy.Decision, error) {
+			return gitproxy.Decision{
+				Allowed:     false,
+				DenyReason:  "repo-not-materialized",
+				DenyMessage: "gitproxy: repo acme/widgets is tracked by this team but not yet materialized in this run; run 'workspace add acme/widgets' to persist it, then retry",
+			}, nil
+		},
+	}
+	s := NewRelayServer(db.Stores{}, RunInfo{OrgID: "org1"}, git)
+
+	args, _ := json.Marshal(agentproc.AuthorizeRepoArgs{Owner: "acme", Repo: "widgets"})
+	raw, err := s.DispatchCall(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpAuthorizeRepo, args)
+	if err != nil {
+		t.Fatalf("DispatchCall: %v", err)
+	}
+	var reply agentproc.AuthorizeRepoReply
+	if err := json.Unmarshal(raw, &reply); err != nil {
+		t.Fatalf("unmarshal reply: %v", err)
+	}
+	if reply.Allowed {
+		t.Fatal("expected a deny")
+	}
+	if reply.DenyReason != "repo-not-materialized" {
+		t.Errorf("DenyReason = %q, want repo-not-materialized", reply.DenyReason)
+	}
+	if !strings.Contains(reply.DenyMessage, "workspace add acme/widgets") {
+		t.Errorf("DenyMessage = %q, want the workspace-add recovery hint", reply.DenyMessage)
 	}
 }
 

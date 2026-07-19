@@ -58,11 +58,17 @@ func TestAuthorizeRepo_CuratorPinnedSet(t *testing.T) {
 	})
 
 	t.Run("tracked_but_not_pinned_is_denied", func(t *testing.T) {
-		rt := &gateRuntime{tracks: true} // tracked, but no ledger row and not pinned
+		rt := &gateRuntime{tracks: true} // tracked, but not in this curator turn's pinned set
 		c := newGateClient([]string{"acme/other"}, rt)
 		err := c.authorizeRepo(ctx, "acme", "widgets")
-		if err == nil || !strings.Contains(err.Error(), "not authorized") {
-			t.Fatalf("authorizeRepo = %v, want a not-authorized error (not in pinned set, no ledger row)", err)
+		// A curator turn (non-empty pinned set) materializes nothing, so the
+		// message must NOT suggest `workspace add`; the repo is outside the
+		// project.
+		if err == nil || !strings.Contains(err.Error(), "not attached to this project") {
+			t.Fatalf("authorizeRepo = %v, want a 'not attached to this project' hint (curator turn, repo not pinned)", err)
+		}
+		if strings.Contains(err.Error(), "workspace add") {
+			t.Errorf("curator not-attached message %q should not suggest 'workspace add'", err)
 		}
 		if len(rt.denied) != 1 || rt.denied[0] != "acme/widgets" {
 			t.Errorf("recorded denials %v, want [acme/widgets]", rt.denied)
@@ -72,8 +78,14 @@ func TestAuthorizeRepo_CuratorPinnedSet(t *testing.T) {
 	t.Run("pinned_but_untracked_is_denied", func(t *testing.T) {
 		rt := &gateRuntime{tracks: false} // pinned but the team does not track it
 		c := newGateClient([]string{"acme/widgets"}, rt)
-		if err := c.authorizeRepo(ctx, "acme", "widgets"); err == nil {
-			t.Fatal("authorizeRepo = nil, want denied (pinned but untracked — tracks gate still applies)")
+		err := c.authorizeRepo(ctx, "acme", "widgets")
+		// Untracked: the agent can't self-serve, so the message must point at a
+		// team admin adding a tracked repo, NOT at `workspace add`.
+		if err == nil || !strings.Contains(err.Error(), "team admin") {
+			t.Fatalf("authorizeRepo = %v, want an admin/tracked-repo hint (pinned but untracked — tracks gate still applies)", err)
+		}
+		if strings.Contains(err.Error(), "workspace add") {
+			t.Errorf("untracked message %q should not suggest 'workspace add' (agent cannot self-serve an untracked repo)", err)
 		}
 	})
 }
@@ -95,8 +107,11 @@ func TestAuthorizeRepo_DelegatedRunUnchanged(t *testing.T) {
 	t.Run("tracked_but_not_in_ledger_is_denied", func(t *testing.T) {
 		rt := &gateRuntime{tracks: true} // tracked, empty ledger, empty pinned set
 		c := newGateClient(nil, rt)
-		if err := c.authorizeRepo(ctx, "acme", "widgets"); err == nil {
-			t.Fatal("authorizeRepo = nil, want denied (empty ledger, empty pinned set)")
+		err := c.authorizeRepo(ctx, "acme", "widgets")
+		// A delegated run that hasn't materialized the repo gets the same
+		// self-serve `workspace add` recovery hint as the curator arm.
+		if err == nil || !strings.Contains(err.Error(), "workspace add acme/widgets") {
+			t.Fatalf("authorizeRepo = %v, want a 'workspace add' recovery hint (empty ledger, empty pinned set)", err)
 		}
 	})
 }

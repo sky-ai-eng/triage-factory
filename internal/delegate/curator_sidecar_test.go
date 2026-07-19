@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,6 +56,10 @@ func TestCuratorGitAuthorizeDecision(t *testing.T) {
 		if err != nil || d.Allowed {
 			t.Errorf("decision = (%+v, %v), want denied", d, err)
 		}
+		// Pinned-but-untracked is an admin problem, not a self-serve one.
+		if d.DenyReason != "repo-not-tracked" || !strings.Contains(d.DenyMessage, "team admin") {
+			t.Errorf("deny = (%q, %q), want reason repo-not-tracked + an admin hint", d.DenyReason, d.DenyMessage)
+		}
 	})
 
 	t.Run("tracked_but_not_pinned_denied", func(t *testing.T) {
@@ -62,6 +67,27 @@ func TestCuratorGitAuthorizeDecision(t *testing.T) {
 		d, err := curatorGitAuthorizeDecision(ctx, stores, info, []string{"acme/other"}, "acme", "widgets")
 		if err != nil || d.Allowed {
 			t.Errorf("decision = (%+v, %v), want denied (not pinned)", d, err)
+		}
+		// A curator turn can't `workspace add`; the repo is outside the project.
+		if d.DenyReason != "repo-not-attached" || !strings.Contains(d.DenyMessage, "not attached to this project") {
+			t.Errorf("deny = (%q, %q), want reason repo-not-attached + a project hint", d.DenyReason, d.DenyMessage)
+		}
+		if strings.Contains(d.DenyMessage, "workspace add") {
+			t.Errorf("curator deny message %q should not suggest 'workspace add'", d.DenyMessage)
+		}
+	})
+
+	t.Run("unpinned_and_untracked_reports_not_tracked", func(t *testing.T) {
+		// Both conditions fail. Tracking is the deeper, admin-actionable
+		// problem, so it must win — matching the exec-gh gate's ordering — and
+		// the agent must NOT be told it's merely "not attached to this project".
+		stores := db.Stores{TeamGitHubRepos: &fakeCuratorTeamRepos{tracked: map[string]bool{}}}
+		d, err := curatorGitAuthorizeDecision(ctx, stores, info, []string{"acme/other"}, "acme", "widgets")
+		if err != nil || d.Allowed {
+			t.Errorf("decision = (%+v, %v), want denied", d, err)
+		}
+		if d.DenyReason != "repo-not-tracked" {
+			t.Errorf("DenyReason = %q, want repo-not-tracked (tracking checked before pinned membership)", d.DenyReason)
 		}
 	})
 

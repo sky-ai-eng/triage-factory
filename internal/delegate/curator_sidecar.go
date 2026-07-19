@@ -194,34 +194,35 @@ func (s *Spawner) executorCuratorGitGate(ctx context.Context, info agenthost.Run
 }
 
 // curatorGitAuthorizeDecision is the curator git proxy's live per-repo gate: a
-// repo is authorized only if it is in the turn's pinned set AND the team tracks
-// it. Returns Allowed with no AllowedRefs — enough for a fetch (upload-pack),
+// repo is authorized only if the team tracks it AND it is in the turn's pinned
+// set. Returns Allowed with no AllowedRefs — enough for a fetch (upload-pack),
 // which is all a curator turn does, while the empty ref allowlist means any
 // push (receive-pack) is refused. Fails closed (deny) when a store it needs is
 // absent or a lookup errors.
+//
+// Tracking is checked before pinned-set membership so the denial matches the
+// exec-gh gate's ordering (cmd/exec/agenthost/local.go authorizeRepo): an
+// untracked repo is an admin problem (repo-not-tracked) whether or not it was
+// pinned, and only a tracked-but-unpinned repo is the curator-specific
+// "not attached to this project" (repo-not-attached).
 func curatorGitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.RunInfo, pinnedRepos []string, owner, repo string) (gitproxy.Decision, error) {
 	if stores.TeamGitHubRepos == nil {
 		return gitproxy.Decision{Allowed: false}, nil
 	}
 	repoID := owner + "/" + repo
-	pinned := false
-	for _, p := range pinnedRepos {
-		if strings.EqualFold(p, repoID) {
-			pinned = true
-			break
-		}
-	}
-	if !pinned {
-		return gitproxy.Decision{Allowed: false}, nil
-	}
 	tracks, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, info.TeamID, owner, repo)
 	if err != nil {
 		return gitproxy.Decision{}, err
 	}
 	if !tracks {
-		return gitproxy.Decision{Allowed: false}, nil
+		return gitDenyNotTracked(repoID), nil
 	}
-	return gitproxy.Decision{Allowed: true}, nil
+	for _, p := range pinnedRepos {
+		if strings.EqualFold(p, repoID) {
+			return gitproxy.Decision{Allowed: true}, nil
+		}
+	}
+	return gitDenyNotAttached(repoID), nil
 }
 
 // orgHasJira reports whether the org has a Jira base URL configured — the

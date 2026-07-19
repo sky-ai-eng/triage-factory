@@ -41,10 +41,16 @@ type AuthorizeRepoArgs struct {
 	Repo  string `json:"repo"`
 }
 
-// AuthorizeRepoReply is authorize_repo's result.
+// AuthorizeRepoReply is authorize_repo's result. DenyReason/DenyMessage carry
+// gitproxy.Decision's actionable-denial fields across the wire so a sandboxed
+// run's denied clone/fetch surfaces the same specific 403 body + audit reason
+// (workspace-add vs admin) the in-process path does, instead of the generic
+// fallback. Both empty on an allowed decision.
 type AuthorizeRepoReply struct {
 	Allowed     bool     `json:"allowed"`
 	AllowedRefs []string `json:"allowed_refs,omitempty"`
+	DenyReason  string   `json:"deny_reason,omitempty"`
+	DenyMessage string   `json:"deny_message,omitempty"`
 }
 
 // RecordDenialArgs is record_denial's payload: a denied git op for the

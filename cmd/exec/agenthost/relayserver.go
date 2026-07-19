@@ -106,7 +106,12 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(agentproc.AuthorizeRepoReply{Allowed: dec.Allowed, AllowedRefs: dec.AllowedRefs})
+		return json.Marshal(agentproc.AuthorizeRepoReply{
+			Allowed:     dec.Allowed,
+			AllowedRefs: dec.AllowedRefs,
+			DenyReason:  dec.DenyReason,
+			DenyMessage: dec.DenyMessage,
+		})
 
 	case opGetAgentRun:
 		run, err := s.rt.GetAgentRun(ctx)

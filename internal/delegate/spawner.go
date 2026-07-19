@@ -860,18 +860,18 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	if stores.TeamGitHubRepos == nil || stores.RunWorktrees == nil || stores.Repos == nil {
 		return gitproxy.Decision{Allowed: false}, nil
 	}
+	repoID := owner + "/" + repo
 	tracks, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, info.TeamID, owner, repo)
 	if err != nil {
 		return gitproxy.Decision{}, err
 	}
 	if !tracks {
-		return gitproxy.Decision{Allowed: false}, nil
+		return gitDenyNotTracked(repoID), nil
 	}
 	rows, err := stores.RunWorktrees.ListSystem(ctx, info.OrgID, info.RunID)
 	if err != nil {
 		return gitproxy.Decision{}, err
 	}
-	repoID := owner + "/" + repo
 
 	// Base / protected refs are never pushable, regardless of what the worktree
 	// is checked out on. A failure to resolve them fails the whole decision
@@ -915,9 +915,43 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 		if isTaskOwnRepo(ctx, stores, info, owner, repo) {
 			return gitproxy.Decision{Allowed: true}, nil
 		}
-		return gitproxy.Decision{Allowed: false}, nil
+		return gitDenyNotMaterialized(repoID), nil
 	}
 	return gitproxy.Decision{Allowed: true, AllowedRefs: allowedRefs}, nil
+}
+
+// The git-proxy deny builders below mirror the exec-gh repo gate
+// (cmd/exec/agenthost/local.go authorizeRepo) so a clone/fetch and a gh verb
+// that fail on the same repo tell the agent the same thing. The "gitproxy: "
+// prefix matches the proxy's other 403 bodies; the agent reads these in git's
+// remote output. Keep the wording in sync with authorizeRepo's messages.
+func gitDenyNotTracked(repoID string) gitproxy.Decision {
+	return gitproxy.Decision{
+		Allowed:     false,
+		DenyReason:  "repo-not-tracked",
+		DenyMessage: fmt.Sprintf("gitproxy: repo %s is not tracked by this team; a team admin must add it as a tracked repo in Settings before it can be used", repoID),
+	}
+}
+
+func gitDenyNotMaterialized(repoID string) gitproxy.Decision {
+	return gitproxy.Decision{
+		Allowed:     false,
+		DenyReason:  "repo-not-materialized",
+		DenyMessage: fmt.Sprintf("gitproxy: repo %s is tracked by this team but not yet materialized in this run; run 'workspace add %s' to persist it, then retry", repoID, repoID),
+	}
+}
+
+// gitDenyNotAttached is the curator-turn analog: a curator turn's authorized
+// set is the fixed pinned set of the project, so a repo outside it cannot be
+// reached and — unlike a delegated run — `workspace add` is not the fix (a
+// curator turn materializes nothing). Point the agent at the project's own
+// repos instead.
+func gitDenyNotAttached(repoID string) gitproxy.Decision {
+	return gitproxy.Decision{
+		Allowed:     false,
+		DenyReason:  "repo-not-attached",
+		DenyMessage: fmt.Sprintf("gitproxy: repo %s is not attached to this project, so it cannot be accessed here; use a repo attached to this project instead", repoID),
+	}
 }
 
 // isTaskOwnRepo reports whether (owner, repo) is the GitHub repo of the run's

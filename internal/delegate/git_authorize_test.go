@@ -80,12 +80,15 @@ func TestGitAuthorizeDecision(t *testing.T) {
 		owner, repo string
 		wantAllowed bool
 		wantRefs    []string
+		// wantReason is the DenyReason a denied decision must carry so the agent
+		// gets an actionable next step (empty for an allowed decision).
+		wantReason string
 	}{
-		{"tracked and materialized → allow with the live branch", "acme", "api", true, []string{"refs/heads/agent/feature-1"}},
-		{"case-insensitive repo match", "Acme", "API", true, []string{"refs/heads/agent/feature-1"}},
-		{"tracked but not materialized → deny", "acme", "tracked-only", false, nil},
-		{"materialized but untracked → deny", "acme", "materialized-only", false, nil},
-		{"neither tracked nor materialized → deny", "ghost", "repo", false, nil},
+		{"tracked and materialized → allow with the live branch", "acme", "api", true, []string{"refs/heads/agent/feature-1"}, ""},
+		{"case-insensitive repo match", "Acme", "API", true, []string{"refs/heads/agent/feature-1"}, ""},
+		{"tracked but not materialized → deny (workspace add)", "acme", "tracked-only", false, nil, "repo-not-materialized"},
+		{"materialized but untracked → deny (admin)", "acme", "materialized-only", false, nil, "repo-not-tracked"},
+		{"neither tracked nor materialized → deny (admin)", "ghost", "repo", false, nil, "repo-not-tracked"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -95,6 +98,9 @@ func TestGitAuthorizeDecision(t *testing.T) {
 			}
 			if d.Allowed != c.wantAllowed {
 				t.Errorf("Allowed = %v, want %v", d.Allowed, c.wantAllowed)
+			}
+			if d.DenyReason != c.wantReason {
+				t.Errorf("DenyReason = %q, want %q", d.DenyReason, c.wantReason)
 			}
 			if !equalRefs(d.AllowedRefs, c.wantRefs) {
 				t.Errorf("AllowedRefs = %v, want %v", d.AllowedRefs, c.wantRefs)
