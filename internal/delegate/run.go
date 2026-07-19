@@ -573,6 +573,14 @@ func (s *Spawner) processCompletion(
 		delegateLog.Debug("memory file unreadable at termination (agent_content NULL)", "run", runID)
 	}
 
+	// Attach the run's memory to every entity it materially engaged — the
+	// primary (task) entity plus everything it produced — so the narrative is
+	// reachable from all of them, not just the denormalized primary on
+	// run_memory.entity_id. context.Background() (not ctx) for the same reason
+	// the upsert above uses it: a cancelled turn still owns its terminal
+	// bookkeeping.
+	s.attachRunMemoryEntities(context.Background(), orgID, runID, task.EntityID)
+
 	// Every run is a step of a blueprint_run now (a single prompt is a 1-step
 	// blueprint), so this helper never owns task disposition: it persists
 	// outcome/status only and leaves advancement + task close to the orchestrator

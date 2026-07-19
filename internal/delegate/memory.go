@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
@@ -166,6 +167,62 @@ func lookupEntityProjectID(entities db.EntityStore, orgID, entityID string) *str
 		return nil
 	}
 	return entity.ProjectID
+}
+
+// attachRunMemoryEntities makes a terminated run's memory reachable from every
+// entity the run materially engaged: the primary (task) entity, plus every
+// entity it produced (derived from the run's artifacts). Touched entities are
+// recorded durably at verb time by the exec funnel; role precedence in
+// RecordEntityTouchSystem (primary > produced > touched) converges all three
+// sets, so this needs no ordering care against those mid-run writes — a
+// touched row upgrades to produced here, and the primary entity ends primary
+// even if it was also touched or produced.
+//
+// Best-effort and non-fatal throughout: it runs after the run_memory upsert
+// has already landed, so a join-row failure is logged and skipped, never
+// aborts completion.
+//
+// The primary attach is unconditional, exactly like the upsert — the task's
+// entity carries the run's memory even when the agent wrote no file
+// (agent_content NULL). On the produced side, FindOrCreate (not lookup-only)
+// is deliberate: a PR the run just opened may not have been polled yet, so the
+// attach mints the create-minimal stub the poller/enrichment path later fills
+// (the artifact URL links it out). A repo-level artifact target (a branch
+// push, or owner/repo with no '#N') maps to no entity and is skipped.
+func (s *Spawner) attachRunMemoryEntities(ctx context.Context, orgID, runID, primaryEntityID string) {
+	if s.taskMemory == nil {
+		return
+	}
+	// primary — the task's entity always carries the run's memory.
+	if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, runID, primaryEntityID, domain.MemoryRolePrimary); err != nil {
+		delegateLog.Warn("attach primary entity to run memory failed", "run", runID, "entity", primaryEntityID, "error", err)
+	}
+
+	if s.artifacts == nil || s.entities == nil {
+		return
+	}
+	// produced — every external object the run created/mutated, resolved from
+	// its artifacts. A listing failure leaves the upsert + primary row intact.
+	arts, err := s.artifacts.ListByRunSystem(ctx, orgID, runID)
+	if err != nil {
+		delegateLog.Warn("list artifacts for produced-entity attach failed", "run", runID, "error", err)
+		return
+	}
+	for _, a := range arts {
+		source, sourceID, kind, ok := domain.EntityRefForExternal(a.Provider, a.Target)
+		if !ok {
+			continue
+		}
+		ent, _, err := s.entities.FindOrCreateSystem(ctx, orgID, source, sourceID, kind, "", a.URL)
+		if err != nil || ent == nil {
+			delegateLog.Warn("resolve produced entity for run memory failed",
+				"run", runID, "provider", a.Provider, "target", a.Target, "error", err)
+			continue
+		}
+		if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, runID, ent.ID, domain.MemoryRoleProduced); err != nil {
+			delegateLog.Warn("attach produced entity to run memory failed", "run", runID, "entity", ent.ID, "error", err)
+		}
+	}
 }
 
 // projectKnowledgeWarnBytes is the soft cap on per-project knowledge-base

@@ -27,6 +27,49 @@ func SlackSourceID(channel, threadTS string) string {
 	return channel + "/" + threadTS
 }
 
+// EntityRefForExternal maps an external write/artifact coordinate to the
+// entity natural key it concerns: source is the entities.source column
+// (== provider for the mapped providers), sourceID is the natural key
+// (== target), kind is the entities.kind. ok=false for anything the
+// touched/produced rule skips — a repo-level GitHub target (owner/repo with
+// no '#N'), an empty key, or an unmapped provider — so the caller resolves,
+// creates, and records nothing.
+//
+// It is the single home of the (provider, target) → entity mapping shared by
+// the exec-funnel touch resolver (resolveTouchedEntityInfo) and the run-end
+// produced-artifact attach (the delegate spawner). GitHub targets must parse
+// as owner/repo#N; Jira targets are issue keys; Slack targets are a
+// SlackSourceID channel/root_ts.
+//
+// NOTE: this assumes every GitHub target is a PR (kind="pr"). Exec only writes
+// PRs/reviews today, so that holds — but a GitHub *issue* shares the
+// "owner/repo#N" shape, and the poller's stub enrichment would then 404 against
+// /pulls/{n} every cycle. GitHub issue support must branch on kind here (and
+// give the poller an issue-aware enrichment path).
+func EntityRefForExternal(provider, target string) (source, sourceID, kind string, ok bool) {
+	switch provider {
+	case ArtifactProviderGitHub:
+		// owner/repo#N is a PR entity; a bare owner/repo is a repo-level
+		// action (a branch push's shape too) and maps to no entity.
+		if _, _, _, parsed := ParsePRTarget(target); !parsed {
+			return "", "", "", false
+		}
+		return provider, target, "pr", true
+	case ArtifactProviderJira:
+		if target == "" {
+			return "", "", "", false
+		}
+		return provider, target, "issue", true
+	case ArtifactProviderSlack:
+		if target == "" {
+			return "", "", "", false
+		}
+		return provider, target, "message", true
+	default:
+		return "", "", "", false
+	}
+}
+
 // Entity is a long-lived source object (PR, issue, epic, message). Lives from
 // first-poll until closed/merged. All events, tasks, and runs hang off it.
 // Mirrors the `entities` table in internal/db/db.go.
