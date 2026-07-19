@@ -458,6 +458,19 @@ func (c *IPCClient) RecordReadTouch(ctx context.Context, provider, target, url s
 	}
 }
 
+// MemoryLoad ships the load to the daemon, which resolves the entity + reads
+// its team-scoped memory + records the touch host-side. A pre-ProtocolVersion
+// daemon that predates this method answers with the dispatch default case's
+// clean "unknown method" error rather than misbehaving — the reason this
+// backward-compatible addition does NOT bump ProtocolVersion.
+func (c *IPCClient) MemoryLoad(ctx context.Context, source, sourceID string, limit int) (*MemoryLoadResult, error) {
+	var res memoryLoadResult
+	if err := c.call(ctx, methodMemoryLoad, memoryLoadArgs{Source: source, SourceID: sourceID, Limit: limit}, &res); err != nil {
+		return nil, err
+	}
+	return res.Result, nil
+}
+
 func (c *IPCClient) GithubGetReviewDetail(ctx context.Context, owner, repo string, number, reviewID int, verbose bool) (*ghclient.ReviewDetail, error) {
 	var res githubReviewDetailResult
 	if err := c.call(ctx, methodGithubGetReviewDetail, githubReviewDetailArgs{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number, ReviewID: reviewID, Verbose: verbose}, &res); err != nil {

@@ -39,7 +39,7 @@ var extensionRegistry = map[string]extensionRegistration{}
 // the built-in exec subcommands, whose logic lives in core and never goes
 // through the extension seam. Mirrors routing.reservedSourcePrefixes.
 var reservedExtensionNamespaces = map[string]bool{
-	"gh": true, "jira": true, "workspace": true,
+	"gh": true, "jira": true, "workspace": true, "memory": true,
 }
 
 // RegisterExtension registers a handler for a verb namespace (the exec

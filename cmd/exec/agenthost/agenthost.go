@@ -39,6 +39,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -120,6 +121,32 @@ var ErrProtocolVersion = errors.New("agenthost: protocol version mismatch")
 // reconstructs the same sentinel (errors.Is matches on both the in-process and
 // daemon paths).
 var ErrReviewAlreadyFinalized = errors.New("agenthost: this run's review has already been finalized for human approval; do not call finalize-review again")
+
+// MemoryLoadResult is what MemoryLoad returns: the entity's coordinates plus
+// the prior run memory attached to it, team-visibility-scoped to the run's
+// team. EntityID is empty and Memories empty when the entity is unknown (a
+// miss is a normal outcome, not an error). Count is the total number of
+// memories under the visibility scope BEFORE the limit is applied, so the
+// agent can tell "there are more than I asked for" from "that's everything".
+type MemoryLoadResult struct {
+	Source   string            `json:"source"`
+	SourceID string            `json:"source_id"`
+	EntityID string            `json:"entity_id,omitempty"` // empty when the entity is unknown
+	Title    string            `json:"title,omitempty"`
+	Count    int               `json:"count"` // total under visibility scope, pre-limit
+	Memories []MemoryLoadEntry `json:"memories"`
+}
+
+// MemoryLoadEntry is one prior run's memory on the entity — the agent
+// narrative composed with the human's post-run verdict, exactly as the
+// spawn-time materializer composes it (agent content + a
+// "## Human feedback (post-run)" separator).
+type MemoryLoadEntry struct {
+	RunID          string    `json:"run_id"`
+	BlueprintRunID string    `json:"blueprint_run_id,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	Content        string    `json:"content"`
+}
 
 // Client is the surface every cmd/exec/* subcommand consumes. Every
 // state-mutating operation that used to call stores.X.Y directly with
@@ -350,6 +377,18 @@ type Client interface {
 	// never fails on its touch — and, on the sandbox transport, a dropped RPC
 	// just costs one touch row.
 	RecordReadTouch(ctx context.Context, provider, target, url string)
+
+	// MemoryLoad returns the prior run memory attached to the entity identified
+	// by (source, sourceID), team-visibility-scoped to the run's team. source is
+	// an entity source value ("github" | "jira" | "slack"); sourceID is that
+	// source's natural key (github "owner/repo#N", jira "KEY-123", slack
+	// "<channel>/<thread_ts>"). A lookup of an unknown entity is a miss, not an
+	// error: it returns an empty result with no EntityID and records no touch —
+	// memory load never mints an entity (unlike the addressed-read touch path).
+	// A hit records a run→entity 'touched' row best-effort (loading IS an
+	// address) and returns up to limit of the most recent memories, with Count
+	// the pre-limit total under the visibility scope.
+	MemoryLoad(ctx context.Context, source, sourceID string, limit int) (*MemoryLoadResult, error)
 
 	// --- extensions (ee-registered agent-facing CLI verbs) ---
 

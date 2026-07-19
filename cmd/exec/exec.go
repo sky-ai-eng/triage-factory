@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/gh"
 	jiraexec "github.com/sky-ai-eng/triage-factory/cmd/exec/jira"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/memory"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/workspace"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -129,6 +130,20 @@ func Handle(args []string) {
 		defer func() { _ = host.Close() }()
 		workspace.Handle(host, cmdArgs)
 
+	case "memory":
+		// `memory load` reads entity memory host-side through the agenthost
+		// client (DB in local mode, IPC in the sandbox where the read + the
+		// best-effort touch land on the daemon). No credentials — like
+		// workspace. Mirrors the gh case's host lifecycle: help routes skip
+		// buildAgentHost() (no run identity needed), otherwise Close is deferred.
+		if isHelp(cmdArgs) {
+			memory.Handle(context.Background(), nil, cmdArgs)
+			return
+		}
+		host := buildAgentHost()
+		defer func() { _ = host.Close() }()
+		memory.Handle(context.Background(), host, cmdArgs)
+
 	default:
 		// EE-registered verbs (agenthost.RegisterExtension's exec-side
 		// counterpart, e.g. "slack") land here — the switch's fallthrough
@@ -165,5 +180,5 @@ func printHelp() {
 	// internal `triagefactory hook` namespace (see cmd/hook), off the agent's
 	// `Bash(<bin> exec *)` allowlist, so a stuck agent scanning this help can
 	// neither see nor invoke it.
-	fmt.Printf("Usage: triagefactory exec <command> [args]\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", gh.HelpText, jiraexec.HelpText, workspace.HelpText)
+	fmt.Printf("Usage: triagefactory exec <command> [args]\n\n%s\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", gh.HelpText, jiraexec.HelpText, workspace.HelpText, memory.HelpText)
 }

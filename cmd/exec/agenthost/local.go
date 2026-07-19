@@ -1181,6 +1181,29 @@ func (c *LocalClient) RecordReadTouch(ctx context.Context, provider, target, url
 	c.rt.RecordReadTouch(ctx, provider, target, url)
 }
 
+// memoryLoadSources is the set of entity source values `memory load` accepts —
+// the sources memory can attach to (internal/domain entity.Source). An
+// unrecognized source is a usage error, distinct from a valid-source-but-
+// unknown-entity miss the runtime returns as an empty result.
+var memoryLoadSources = map[string]bool{
+	domain.ArtifactProviderGitHub: true,
+	domain.ArtifactProviderJira:   true,
+	domain.ArtifactProviderSlack:  true,
+}
+
+// MemoryLoad validates the source and delegates to the runtime, which does the
+// entity lookup + team-scoped memory read + best-effort touch (all direct-to-
+// stores on all/local, relayed to the orchestrator on the executor sidecar
+// where this LocalClient holds no stores). Validation lives here — not just in
+// the CLI — so every caller of the Client seam gets the same guard, and an
+// invalid source fails fast without a relay round-trip.
+func (c *LocalClient) MemoryLoad(ctx context.Context, source, sourceID string, limit int) (*MemoryLoadResult, error) {
+	if !memoryLoadSources[source] {
+		return nil, fmt.Errorf("invalid source %q: expected one of github, jira, slack", source)
+	}
+	return c.rt.MemoryLoad(ctx, source, sourceID, limit)
+}
+
 func (c *LocalClient) GithubDismissReview(ctx context.Context, owner, repo string, number, reviewID int, message string) error {
 	client, err := c.githubClientForRepo(ctx, owner, repo)
 	if err != nil {

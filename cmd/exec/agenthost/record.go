@@ -224,3 +224,71 @@ func recordTouchInfo(ctx context.Context, stores db.Stores, info RunInfo, act *d
 	}
 	recordEntityTouch(ctx, stores, info, act.Provider, act.Target, act.URL)
 }
+
+// loadEntityMemory is the host side of `exec memory load`: it looks up the
+// entity for (source, sourceID) by its natural key — LOOKUP ONLY, never
+// FindOrCreate, so a load of something unknown is a miss, not a stub mint — and
+// on a hit returns that entity's prior run memory scoped to the run's team,
+// plus records a best-effort run→entity 'touched' row (loading IS an address).
+//
+// Unlike recordEntityTouch's resolve-or-create, a miss here records NOTHING and
+// returns an empty result with an empty EntityID — the deliberate asymmetry the
+// ticket calls out: an addressed WRITE/read on a live object legitimately mints
+// a stub the poll cycle enriches, but reading another entity's memory must not
+// conjure the entity into existence.
+//
+// Content is composed by the store read (agent narrative + the
+// "## Human feedback (post-run)" separator), the same materialization the
+// spawn-time materializer emits — so the on-demand pull reads identically to
+// the auto-staged files. Count is the pre-limit scoped total (its dedicated
+// count method); Memories is the most recent `limit` (the store returns ASC, so
+// take the tail). The touch is best-effort — a read never fails on its touch.
+func loadEntityMemory(ctx context.Context, stores db.Stores, info RunInfo, source, sourceID string, limit int) (*MemoryLoadResult, error) {
+	res := &MemoryLoadResult{Source: source, SourceID: sourceID, Memories: []MemoryLoadEntry{}}
+	if stores.Entities == nil {
+		return res, nil
+	}
+	entity, err := stores.Entities.GetBySourceSystem(ctx, info.OrgID, source, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	if entity == nil {
+		// Miss: unknown entity. No touch, no entity minted.
+		return res, nil
+	}
+	res.EntityID = entity.ID
+	res.Title = entity.Title
+
+	if stores.TaskMemory != nil {
+		count, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, info.OrgID, entity.ID, info.TeamID)
+		if err != nil {
+			return nil, err
+		}
+		res.Count = count
+
+		mems, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, info.OrgID, entity.ID, info.TeamID)
+		if err != nil {
+			return nil, err
+		}
+		// The store returns oldest-first; the most recent `limit` is the tail.
+		if limit > 0 && len(mems) > limit {
+			mems = mems[len(mems)-limit:]
+		}
+		for _, m := range mems {
+			res.Memories = append(res.Memories, MemoryLoadEntry{
+				RunID:          m.RunID,
+				BlueprintRunID: m.BlueprintRunID,
+				CreatedAt:      m.CreatedAt,
+				Content:        m.Content,
+			})
+		}
+
+		// Record the touch strictly after the reads (loading is an address).
+		// Best-effort: a load never fails on its touch — the row self-heals on the
+		// next addressed hit, and on the sidecar a dropped relay costs one row.
+		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, info.OrgID, info.RunID, entity.ID, domain.MemoryRoleTouched); err != nil {
+			agenthostLog.Warn("memory-load touch record failed", "run", info.RunID, "entity", entity.ID, "error", err)
+		}
+	}
+	return res, nil
+}

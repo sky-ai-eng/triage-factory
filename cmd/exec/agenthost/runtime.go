@@ -69,6 +69,16 @@ type Runtime interface {
 	// rule: addressed → touch, returned-in-a-set → never).
 	RecordReadTouch(ctx context.Context, provider, target, url string)
 
+	// MemoryLoad resolves the entity for (source, sourceID) by its natural key
+	// — LOOKUP ONLY, it never mints an entity — and, on a hit, returns that
+	// entity's prior run memory (team-visibility-scoped to the run's team,
+	// composed exactly as the spawn-time materializer composes it) capped at the
+	// most recent `limit`, with Count the pre-limit scoped total. A hit records a
+	// run→entity 'touched' row best-effort (loading IS an address); a miss
+	// returns an empty result and records nothing. Relayed to the orchestrator on
+	// the sidecar so the reads + the touch land where the stores live.
+	MemoryLoad(ctx context.Context, source, sourceID string, limit int) (*MemoryLoadResult, error)
+
 	// Relay / RelayNotify are the generic provider-op escape hatch: a provider
 	// handler (Slack, future) reaches its own org-bound policy op by namespace
 	// without a typed Runtime method per op. Core built-ins use the typed
@@ -128,6 +138,7 @@ const (
 	opUpdateReviewDetails     = "update_review_details_if_pending"
 	opRecordExternalWrite     = "record_external_write"
 	opRecordReadTouch         = "record_read_touch"
+	opMemoryLoad              = "memory_load"
 	opCheckEntitlement        = "check_entitlement"
 	// opCreateWorkspaceCheckout materializes a `workspace add` checkout. Unlike
 	// the other core ops it is FS-bearing: the sidecar relays it because it owns
@@ -346,6 +357,10 @@ func (r *directRuntime) RecordReadTouch(ctx context.Context, provider, target, u
 	recordEntityTouch(ctx, r.stores, r.info, provider, target, url)
 }
 
+func (r *directRuntime) MemoryLoad(ctx context.Context, source, sourceID string, limit int) (*MemoryLoadResult, error) {
+	return loadEntityMemory(ctx, r.stores, r.info, source, sourceID, limit)
+}
+
 func (r *directRuntime) CheckEntitlement(_ context.Context, feature string) (bool, error) {
 	return entitlements.For(r.info.OrgID).Has(entitlements.Feature(feature)), nil
 }
@@ -539,6 +554,18 @@ func (r *relayRuntime) RecordReadTouch(_ context.Context, provider, target, url 
 	// must never block it. A dropped notify costs one touch row, re-established
 	// on the next addressed hit or poll.
 	r.conn.notify(agentproc.RelayNamespaceCore, opRecordReadTouch, recordReadTouchArgs{Provider: provider, Target: target, URL: url})
+}
+
+// MemoryLoad relays as a call (not a notify): unlike the fire-and-forget touch,
+// the agent waits on the returned memory. The best-effort touch it records
+// happens orchestrator-side inside loadEntityMemory, so a relay round-trip
+// carries only the read result back.
+func (r *relayRuntime) MemoryLoad(ctx context.Context, source, sourceID string, limit int) (*MemoryLoadResult, error) {
+	var res memoryLoadResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opMemoryLoad, memoryLoadArgs{Source: source, SourceID: sourceID, Limit: limit}, &res); err != nil {
+		return nil, err
+	}
+	return res.Result, nil
 }
 
 func (r *relayRuntime) Relay(ctx context.Context, namespace, op string, args, out any) error {

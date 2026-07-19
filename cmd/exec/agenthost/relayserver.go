@@ -260,6 +260,21 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(checkEntitlementResult{Allowed: allowed})
 
+	case opMemoryLoad:
+		var a memoryLoadArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		// The sidecar relays `memory load` here so the entity lookup, the team-
+		// scoped memory read, and the best-effort touch all land where the stores
+		// live. Identity is the run's own RunInfo (s.rt), so a sidecar cannot
+		// steer the read at another org/team's memory.
+		res, err := s.rt.MemoryLoad(ctx, a.Source, a.SourceID, a.Limit)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(memoryLoadResult{Result: res})
+
 	case opCreateWorkspaceCheckout:
 		var a createWorkspaceCheckoutArgs
 		if err := json.Unmarshal(args, &a); err != nil {
