@@ -33,13 +33,17 @@ func New(conn *sql.DB) db.Stores {
 	// one connection — both args collapse to conn here.
 	users := newUsersStore(conn, conn)
 	secrets := newSecretStore()
+	// Built once and shared with ShippedDefaults below: SeedShippedIntoTeam's
+	// phase 3 (handlers) delegates to EventHandlers.Seed rather than
+	// duplicating its SQL.
+	eventHandlers := newEventHandlerStore(conn)
 	s.stores = db.Stores{
 		Scores:         newScoreStore(conn),
 		Prompts:        newPromptStore(conn, conn),
 		Swipes:         newSwipeStore(conn),
 		Dashboard:      newDashboardStore(conn),
 		Secrets:        secrets,
-		EventHandlers:  newEventHandlerStore(conn),
+		EventHandlers:  eventHandlers,
 		Blueprints:     newBlueprintStore(conn, conn),
 		Agents:         newAgentStore(conn, conn),
 		TeamAgents:     newTeamAgentStore(conn),
@@ -107,6 +111,10 @@ func New(conn *sql.DB) db.Stores {
 		// db-package bootstrap tests can run without Postgres. Local mode
 		// never seeds or reads it.
 		OrgTemplate: newOrgTemplateStore(conn),
+		// ShippedDefaults is what BootstrapNewOrg/BootstrapNewTeam call.
+		// Phase 3 (handlers) reuses the eventHandlers store built above
+		// instead of duplicating its Seed SQL.
+		ShippedDefaults: newShippedDefaultsStore(conn, eventHandlers),
 		// Invites is multi-mode only; the SQLite stub returns
 		// ErrNotApplicableInLocal. Wired so the bundle is complete in both
 		// modes — local never mounts the invite routes.

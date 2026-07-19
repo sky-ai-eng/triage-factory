@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -331,16 +332,15 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Materialize the defaults for the new team — its default-enabled bot
-	// membership + its own copies of the prompts and event handlers (rules +
-	// triggers), copied from the *org template* so the team inherits
-	// the org's house rules, not just the TF-shipped set. Runs AFTER the team
-	// row commits because the seeders route through the admin pool and refuse
-	// to run inside the request's WithTx. Idempotent. Log-and-continue on
-	// failure: the team exists and is usable; a missing-defaults team is
-	// degraded (auto-delegation won't fire) but repairable by re-running
-	// bootstrap, whereas failing the create after the row committed would
-	// orphan it.
-	if err := db.BootstrapNewTeam(r.Context(), th.allStores, orgID, created.ID); err != nil {
+	// membership + its own copies of the prompts, blueprints, and event
+	// handlers (rules + triggers), seeded directly from the TF-shipped set.
+	// Runs AFTER the team row commits because the seeders route through the
+	// admin pool and refuse to run inside the request's WithTx. Idempotent.
+	// Log-and-continue on failure: the team exists and is usable; a
+	// missing-defaults team is degraded (auto-delegation won't fire) but
+	// repairable by re-running bootstrap, whereas failing the create after
+	// the row committed would orphan it.
+	if err := db.BootstrapNewTeam(r.Context(), th.allStores, orgID, created.ID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		teamsLog.Warn("new team created but bootstrap failed, prompts/rules/bot may be missing", "org", orgID, "team", created.ID, "error", err)
 	}
 

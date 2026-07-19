@@ -230,6 +230,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// to run inside WithTx (admin-pool bootstrap work) — the bootstrap
 		// path reaches them through the non-tx stores.OrgTemplate instead.
 		OrgTemplate: newTxOrgTemplateStore(tx),
+		// ShippedDefaults: tx-bound so a misuse from inside WithTx fails
+		// loudly (SeedShippedIntoTeam refuses to run there — same
+		// admin-pool bootstrap posture as OrgTemplate above). The
+		// bootstrap path reaches it through the non-tx
+		// stores.ShippedDefaults instead.
+		ShippedDefaults: newTxShippedDefaultsStore(tx, newTxEventHandlerStore(tx)),
 		// Invites: app-side writes (Create/Revoke) route through the tx so
 		// they compose with the surrounding claims tx; admin half stays
 		// pinned to s.admin so the redeem reads (GetByTokenHashSystem +

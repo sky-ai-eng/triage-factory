@@ -104,6 +104,10 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 	// the App PEM via the same SecretStore the bundle exposes (GetSystem,
 	// admin pool).
 	secrets := s.buildSecrets(app, admin)
+	// Built once and shared with ShippedDefaults below: SeedShippedIntoTeam's
+	// phase 3 (handlers) delegates to EventHandlers.Seed rather than
+	// duplicating its SQL.
+	eventHandlers := newEventHandlerStore(app, admin)
 	s.stores = db.Stores{
 		Scores: newScoreStore(admin),
 		// PromptStore needs both pools: SeedOrUpdate writes to
@@ -129,7 +133,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// routes Seed to admin (BYPASSRLS) and every CRUD method to
 		// app — same pool-split pattern PromptStore + the predecessor
 		// stores used.
-		EventHandlers: newEventHandlerStore(app, admin),
+		EventHandlers: eventHandlers,
 		// Blueprints wires both pools. CreateRun routes internally on
 		// trigger_type (event → admin with NULL creator, manual → app
 		// with COALESCE fallback), mirroring AgentRunStore.Create. The
@@ -312,6 +316,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// prompts/event_handlers/system_prompt_versions). The impl picks
 		// per-method internally — same split as PromptStore.
 		OrgTemplate: newOrgTemplateStore(app, admin),
+		// ShippedDefaults is admin-pool only (claims-less bootstrap work,
+		// same posture as OrgTemplate.SeedFromShipped/MaterializeIntoTeam).
+		// Phase 3 (handlers) reuses the eventHandlers store built above
+		// instead of duplicating its Seed SQL.
+		ShippedDefaults: newShippedDefaultsStore(admin, eventHandlers),
 		// Invites needs both pools: app for the admin-facing create/list/
 		// revoke (org_invites_{select,insert,update} RLS gates on org-admin),
 		// admin for the redeem reads (GetByTokenHashSystem +
@@ -479,6 +488,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		GitHubApps:      newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
 		JiraApps:        newJiraAppsStore(tx, tx),
 		OrgTemplate:     newTxOrgTemplateStore(tx),
+		ShippedDefaults: newTxShippedDefaultsStore(tx, newTxEventHandlerStore(tx)),
 		Invites:         newInvitesStore(tx, tx),
 		SystemLLMRuns:   newSystemLLMRunStore(tx),
 		AccessChangeLog: newAccessChangeLogStore(tx, tx),

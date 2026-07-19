@@ -14,7 +14,7 @@ import (
 // team / local bootstrap can run at every signup, handler call, or
 // explicit provision action without changing user state — INSERT-OR-
 // IGNORE semantics live in the AgentStore + TeamAgentStore impls and
-// the OrgTemplate copy.
+// the ShippedDefaults seed.
 //
 // Callers:
 //
@@ -34,8 +34,8 @@ import (
 // memberships / org_settings / team_settings(auto_delegate_enabled=1)
 // rows for the runmode.LocalDefault* sentinels (via
 // OrgsStore.CreateLocalTenant), then runs the shared BootstrapNewOrg
-// chain to seed the org template + materialize the founder team's
-// agent + prompts + blueprints + handlers.
+// chain to seed the founder team's agent + prompts + blueprints +
+// handlers directly from the shipped defaults.
 //
 // This is the ONE shared provision operation, triggered by a deliberate
 // user action: multi fires it via the admin's create-org flow,
@@ -113,35 +113,31 @@ func BootstrapTeamAgent(ctx context.Context, stores Stores, orgID, teamID string
 
 // BootstrapNewTeam materializes the structural defaults for a *new team
 // in an existing org*: the team's default-enabled bot
-// membership (team_agents) plus its own copies of the prompts + event
-// handlers (rules/triggers) — copied from the org template.
+// membership (team_agents) plus its own copies of the prompts + blueprints +
+// event handlers (rules/triggers) — seeded directly from the TF-shipped Go
+// slices (ai.ShippedPrompts() / ai.ShippedBlueprints() / db.ShippedEventHandlers),
+// same as the founder's first team (BootstrapNewOrg). shippedPrompts +
+// shippedBlueprints are passed in (rather than read from internal/ai) so
+// internal/db stays free of the ai dependency — the caller supplies
+// ai.ShippedPrompts() / ai.ShippedBlueprints().
 //
 // Per-team seeding is correct: handler + prompt rows carry a
 // random-UUID id and a system_slug, deduped on (org_id, team_id,
 // system_slug), so a 2nd+ team materializes its own distinct copies instead
 // of ON CONFLICT-vanishing against the org's first team.
 //
-// The *source* of those copies is the org template, not the TF-shipped Go
-// slices: an org admin edits org_template_prompts +
-// org_template_handlers, and MaterializeIntoTeam copies the *current*
-// template into the new team — so the team inherits the org's house rules
-// (an extra trigger, a tweaked prompt body, an enabled trigger). Editing the
-// template is forward-only: it changes what the next new team inherits and
-// never touches existing teams. The org template is seeded from the shipped
-// lists once at org-create (BootstrapNewOrg), so every org always has one.
-//
 // The bot row is enabled, so manual delegation (swipe / factory drag) to
 // the new team works immediately.
 //
-// Must run OUTSIDE any caller WithTx: TeamAgents.AddForTeam + MaterializeIntoTeam
+// Must run OUTSIDE any caller WithTx: TeamAgents.AddForTeam + SeedShippedIntoTeam
 // route through the Postgres admin pool and guard against being called inside
 // an app-pool tx. Idempotent — re-runs no-op via ON CONFLICT, and never flips a
 // team's bot back to enabled if the team disabled it.
-func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string) error {
+func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string, shippedPrompts []domain.Prompt, shippedBlueprints []domain.SeedBlueprint) error {
 	if err := BootstrapTeamAgent(ctx, stores, orgID, teamID); err != nil {
 		return err
 	}
-	if err := stores.OrgTemplate.MaterializeIntoTeam(ctx, orgID, teamID); err != nil {
+	if err := stores.ShippedDefaults.SeedShippedIntoTeam(ctx, orgID, teamID, shippedPrompts, shippedBlueprints); err != nil {
 		return fmt.Errorf("bootstrap new team: %w", err)
 	}
 	return nil
@@ -149,22 +145,17 @@ func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string) 
 
 // BootstrapNewOrg materializes the defaults for a brand-new org + its
 // default team (the multi-mode founder-signup path, D7):
-// the org's single agents row, the org template (seeded from the shipped
-// lists), the founder's first team's prompts + blueprints + handlers (copied
-// *from the template*), and the team's default-enabled bot membership.
-// shippedPrompts + shippedBlueprints are passed in (rather than read from
-// internal/ai) so internal/db stays free of the ai dependency — main / server
-// supply ai.ShippedPrompts() / ai.ShippedBlueprints().
+// the org's single agents row, the founder's first team's prompts +
+// blueprints + handlers (seeded directly from the shipped lists), and the
+// team's default-enabled bot membership. shippedPrompts + shippedBlueprints
+// are passed in (rather than read from internal/ai) so internal/db stays
+// free of the ai dependency — main / server supply ai.ShippedPrompts() /
+// ai.ShippedBlueprints().
 //
-// Order is load-bearing: agent → seed template → materialize first team →
-// team_agents. The org template is seeded from the shipped lists first
-// (SeedFromShipped), then the founder's team is materialized by *copying the
-// template* rather than the shipped lists directly — the path is now
-// uniform (template → team) for the first team and every later one, and an
-// org admin who edits the template before adding a 2nd team gets those edits
-// in the 2nd team. First-team contents are unchanged from the direct shipped
-// seed because the template == the shipped lists at org-create. The
-// team_agents row needs the agent created in step 1.
+// Order is load-bearing: agent → seed shipped defaults into the first team →
+// team_agents. The first team is seeded the exact same way every later team
+// is (BootstrapNewTeam) — straight from the shipped Go slices, no org
+// template detour. The team_agents row needs the agent created in step 1.
 //
 // Like BootstrapNewTeam this must run OUTSIDE any WithTx (admin-pool
 // seeders) and is fully idempotent. The org-provisioning caller runs it
@@ -176,11 +167,8 @@ func BootstrapNewOrg(ctx context.Context, stores Stores, orgID, teamID string, s
 	if _, err := BootstrapAgentForOrg(ctx, stores, orgID); err != nil {
 		return err
 	}
-	if err := stores.OrgTemplate.SeedFromShipped(ctx, orgID, shippedPrompts, shippedBlueprints); err != nil {
-		return fmt.Errorf("bootstrap new org: seed template: %w", err)
-	}
-	if err := stores.OrgTemplate.MaterializeIntoTeam(ctx, orgID, teamID); err != nil {
-		return fmt.Errorf("bootstrap new org: materialize first team: %w", err)
+	if err := stores.ShippedDefaults.SeedShippedIntoTeam(ctx, orgID, teamID, shippedPrompts, shippedBlueprints); err != nil {
+		return fmt.Errorf("bootstrap new org: seed shipped defaults: %w", err)
 	}
 	if err := BootstrapTeamAgent(ctx, stores, orgID, teamID); err != nil {
 		return err

@@ -228,7 +228,7 @@ func TestBootstrapNewTeam_SeedsPerTeamDefaults(t *testing.T) {
 		t.Fatalf("insert second team: %v", err)
 	}
 
-	if err := db.BootstrapNewTeam(ctx, stores, runmode.LocalDefaultOrgID, newTeamID); err != nil {
+	if err := db.BootstrapNewTeam(ctx, stores, runmode.LocalDefaultOrgID, newTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewTeam: %v", err)
 	}
 
@@ -322,22 +322,205 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 	}
 }
 
+// TestSeedShippedIntoTeam_DistinctUUIDsAcrossTeams pins the TFAC-658
+// acceptance property that a fresh org's first team (BootstrapNewOrg) and a
+// later second team (BootstrapNewTeam) both get the full shipped set — as
+// their own distinct rows, not shared/aliased ids — plus the per-kind
+// enabled state (rules enabled, triggers disabled) and the previously-
+// dropped per-prompt model override (the PR-review aggregate ships
+// Model="haiku"; the retired PromptStore.SeedOrUpdate-based seeder lost it).
+func TestSeedShippedIntoTeam_DistinctUUIDsAcrossTeams(t *testing.T) {
+	conn := openInMemorySQLite(t)
+	stores := sqlitestore.New(conn)
+	ctx := t.Context()
+	org := runmode.LocalDefaultOrgID
+	team1 := runmode.LocalDefaultTeamID
+
+	if err := db.BootstrapNewOrg(ctx, stores, org, team1, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("BootstrapNewOrg: %v", err)
+	}
+
+	const newTeamID = "00000000-0000-0000-0000-0000000000e5"
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'epsilon', 'Epsilon')`, newTeamID, org,
+	); err != nil {
+		t.Fatalf("insert second team: %v", err)
+	}
+	if err := db.BootstrapNewTeam(ctx, stores, org, newTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("BootstrapNewTeam: %v", err)
+	}
+
+	// Both teams have their own copy of the same shipped prompt, at
+	// distinct row ids.
+	p1, err := stores.Prompts.GetBySystemSlug(ctx, org, team1, "system-pr-review-aggregate")
+	if err != nil || p1 == nil {
+		t.Fatalf("team1 GetBySystemSlug: p=%v err=%v", p1, err)
+	}
+	p2, err := stores.Prompts.GetBySystemSlug(ctx, org, newTeamID, "system-pr-review-aggregate")
+	if err != nil || p2 == nil {
+		t.Fatalf("team2 GetBySystemSlug: p=%v err=%v", p2, err)
+	}
+	if p1.ID == p2.ID {
+		t.Errorf("both teams' system-pr-review-aggregate prompt share id %q; want distinct per-team UUIDs", p1.ID)
+	}
+	// The per-step model override (dropped by the retired seeder) must
+	// carry through on both teams' copies.
+	if p1.Model != "haiku" {
+		t.Errorf("team1 system-pr-review-aggregate model=%q, want haiku", p1.Model)
+	}
+	if p2.Model != "haiku" {
+		t.Errorf("team2 system-pr-review-aggregate model=%q, want haiku", p2.Model)
+	}
+	// A sibling step prompt with no override still inherits (empty model).
+	if sec, err := stores.Prompts.GetBySystemSlug(ctx, org, team1, "system-pr-review-security"); err != nil || sec == nil || sec.Model != "" {
+		t.Errorf("team1 system-pr-review-security model=%v err=%v, want empty (inherit)", sec, err)
+	}
+
+	// Both teams have their own distinct blueprint copies too.
+	b1, err := stores.Blueprints.GetBySystemSlug(ctx, org, team1, "system-ci-fix")
+	if err != nil || b1 == nil {
+		t.Fatalf("team1 blueprint GetBySystemSlug: b=%v err=%v", b1, err)
+	}
+	b2, err := stores.Blueprints.GetBySystemSlug(ctx, org, newTeamID, "system-ci-fix")
+	if err != nil || b2 == nil {
+		t.Fatalf("team2 blueprint GetBySystemSlug: b=%v err=%v", b2, err)
+	}
+	if b1.ID == b2.ID {
+		t.Errorf("both teams' system-ci-fix blueprint share id %q; want distinct per-team UUIDs", b1.ID)
+	}
+
+	// Rules ship enabled; triggers ship disabled — on both teams.
+	handlerEnabled := func(team, slug string) bool {
+		t.Helper()
+		var enabled bool
+		if err := conn.QueryRowContext(ctx,
+			`SELECT enabled FROM event_handlers WHERE org_id = ? AND team_id = ? AND system_slug = ?`, org, team, slug,
+		).Scan(&enabled); err != nil {
+			t.Fatalf("read handler %s/%s: %v", team, slug, err)
+		}
+		return enabled
+	}
+	for _, team := range []string{team1, newTeamID} {
+		if !handlerEnabled(team, "system-rule-ci-check-failed") {
+			t.Errorf("team %s: shipped rule system-rule-ci-check-failed is disabled; want enabled", team)
+		}
+		if handlerEnabled(team, "system-trigger-ci-fix") {
+			t.Errorf("team %s: shipped trigger system-trigger-ci-fix is enabled; want disabled (shipped convention)", team)
+		}
+	}
+}
+
+// TestSeedShippedIntoTeam_AllowedToolsRoundTrips pins the phase-1 contract
+// directly against ShippedDefaultsStore (no real shipped prompt currently
+// sets AllowedTools, so this drives the store with a synthetic fixture): a
+// shipped prompt's allowed_tools value must survive the seed verbatim, the
+// same as model.
+func TestSeedShippedIntoTeam_AllowedToolsRoundTrips(t *testing.T) {
+	conn := openInMemorySQLite(t)
+	stores := sqlitestore.New(conn)
+	ctx := t.Context()
+	org := runmode.LocalDefaultOrgID
+	team := runmode.LocalDefaultTeamID
+
+	// EventHandlerStore.Seed (phase 3) unconditionally resolves every
+	// shipped trigger's blueprint slug, so the fixture must carry the real
+	// shipped lists alongside the synthetic prompt/blueprint under test —
+	// not just the synthetic pair on their own.
+	prompts := append(append([]domain.Prompt{}, ai.ShippedPrompts()...),
+		domain.Prompt{SystemSlug: "test-tools-prompt", Name: "Tools Test", Body: "b", Source: "system", Model: "opus", AllowedTools: "WebFetch,Bash"},
+	)
+	blueprints := append(append([]domain.SeedBlueprint{}, ai.ShippedBlueprints()...),
+		domain.SeedBlueprint{SystemSlug: "test-tools-prompt", Name: "Tools Test", StepPromptSlugs: []string{"test-tools-prompt"}},
+	)
+	if err := db.BootstrapNewOrg(ctx, stores, org, team, prompts, blueprints); err != nil {
+		t.Fatalf("BootstrapNewOrg: %v", err)
+	}
+
+	got, err := stores.Prompts.GetBySystemSlug(ctx, org, team, "test-tools-prompt")
+	if err != nil || got == nil {
+		t.Fatalf("GetBySystemSlug: got=%v err=%v", got, err)
+	}
+	if got.Model != "opus" {
+		t.Errorf("Model=%q, want opus", got.Model)
+	}
+	if got.AllowedTools != "WebFetch,Bash" {
+		t.Errorf("AllowedTools=%q, want %q", got.AllowedTools, "WebFetch,Bash")
+	}
+}
+
+// TestSeedShippedIntoTeam_ReRunIsExactNoOp pins that re-running the seed
+// against a team that already has the shipped set doesn't just leave the
+// row *count* unchanged (TestBootstrapLocalOrg_Idempotent already covers
+// that) but leaves the existing rows' IDENTITY untouched — same row ids,
+// same content — proving the phase-1/phase-2 probes genuinely skip existing
+// rows rather than delete-and-reinsert.
+func TestSeedShippedIntoTeam_ReRunIsExactNoOp(t *testing.T) {
+	conn := openInMemorySQLite(t)
+	stores := sqlitestore.New(conn)
+	ctx := t.Context()
+	org := runmode.LocalDefaultOrgID
+	team := runmode.LocalDefaultTeamID
+
+	if err := db.BootstrapNewOrg(ctx, stores, org, team, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("BootstrapNewOrg: %v", err)
+	}
+
+	before, err := stores.Prompts.GetBySystemSlug(ctx, org, team, "system-ci-fix")
+	if err != nil || before == nil {
+		t.Fatalf("GetBySystemSlug before re-run: p=%v err=%v", before, err)
+	}
+	beforeBP, err := stores.Blueprints.GetBySystemSlug(ctx, org, team, "system-ci-fix")
+	if err != nil || beforeBP == nil {
+		t.Fatalf("Blueprints.GetBySystemSlug before re-run: b=%v err=%v", beforeBP, err)
+	}
+
+	if err := stores.ShippedDefaults.SeedShippedIntoTeam(ctx, org, team, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("re-run SeedShippedIntoTeam: %v", err)
+	}
+
+	after, err := stores.Prompts.GetBySystemSlug(ctx, org, team, "system-ci-fix")
+	if err != nil || after == nil {
+		t.Fatalf("GetBySystemSlug after re-run: p=%v err=%v", after, err)
+	}
+	if after.ID != before.ID {
+		t.Errorf("re-run changed prompt id: %s -> %s; want unchanged", before.ID, after.ID)
+	}
+	afterBP, err := stores.Blueprints.GetBySystemSlug(ctx, org, team, "system-ci-fix")
+	if err != nil || afterBP == nil {
+		t.Fatalf("Blueprints.GetBySystemSlug after re-run: b=%v err=%v", afterBP, err)
+	}
+	if afterBP.ID != beforeBP.ID {
+		t.Errorf("re-run changed blueprint id: %s -> %s; want unchanged", beforeBP.ID, afterBP.ID)
+	}
+}
+
 // TestOrgTemplate_ForwardOnly pins the load-bearing invariant: editing
 // the org template affects FUTURE team creations only. An admin who adds a
 // prompt and enables a trigger in the template AFTER the founder's team exists
 // sees those edits in the next new team but NOT in the team that already
 // existed. It also pins that the enabled state flows (an org enables a shipped
 // trigger once in the template; new teams get it enabled — the value prop).
+//
+// The org template is no longer wired into the bootstrap chain (TFAC-658 —
+// BootstrapNewOrg/BootstrapNewTeam now seed straight from the shipped Go
+// slices), so this test drives OrgTemplateStore's own seed/materialize
+// methods directly rather than through Bootstrap*, to keep pinning the
+// template's own forward-only behavior until a follow-up ticket removes it.
 func TestOrgTemplate_ForwardOnly(t *testing.T) {
 	conn := openInMemorySQLite(t)
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()
 	org := runmode.LocalDefaultOrgID
 
-	// Org-create: agent + template + founder's (sentinel) team materialized
-	// from the template-as-shipped.
+	// Org-create: agent + founder's (sentinel) team, seeded directly from the
+	// shipped lists (BootstrapNewOrg no longer touches the template).
 	if err := db.BootstrapNewOrg(ctx, stores, org, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
+	}
+	// Seed the template itself (standalone editor surface) so this test can
+	// exercise its own forward-only materialize path.
+	if err := stores.OrgTemplate.SeedFromShipped(ctx, org, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		t.Fatalf("OrgTemplate.SeedFromShipped: %v", err)
 	}
 
 	// --- Edit the template (after the founder's team already exists) ---
@@ -365,8 +548,8 @@ func TestOrgTemplate_ForwardOnly(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert team: %v", err)
 	}
-	if err := db.BootstrapNewTeam(ctx, stores, org, newTeamID); err != nil {
-		t.Fatalf("BootstrapNewTeam: %v", err)
+	if err := stores.OrgTemplate.MaterializeIntoTeam(ctx, org, newTeamID); err != nil {
+		t.Fatalf("OrgTemplate.MaterializeIntoTeam: %v", err)
 	}
 
 	count := func(team, slug string) int {
