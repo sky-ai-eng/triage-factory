@@ -178,6 +178,31 @@ func DedupPreserveOrder(ids []string) []string {
 //
 // SeedOrUpdate routes through the admin pool (claims-less system rows);
 // every other method runs on the app pool.
+//
+// # user_modified stamping contract
+//
+// An upcoming sync feature (separate ticket) will treat blueprints.user_modified
+// as the durable signal that a team edited a shipped blueprint, so its copy
+// must never be overwritten by a future re-seed. For that flag to be
+// trustworthy, every structural edit that changes what a blueprint contains —
+// not just cosmetic bookkeeping — must stamp it true on the affected
+// surviving row(s):
+//
+//   - Rename stamps the renamed blueprint.
+//   - ReplaceSteps stamps the blueprint whose step list changed.
+//   - MergeInto stamps the host (the source is retired, not stamped).
+//   - SplitAt stamps the kept upstream blueprint AND creates the new
+//     downstream blueprint with user_modified already true (a split product
+//     is never a shipped row, so it never carries a system_slug either).
+//   - DeleteStep stamps the original blueprint (whether it keeps steps or is
+//     retired) and, if a downstream is minted, creates it the same way
+//     SplitAt does.
+//
+// Create and SeedOrUpdate insert fresh rows with user_modified left false — a
+// brand-new row hasn't diverged from anything yet, and non-shipped (no
+// system_slug) rows are invisible to sync regardless. Delete,
+// IncrementUsage/IncrementUsageSystem, and DuplicatePrompts (fresh
+// user-source copies; originals untouched) never touch the flag.
 type BlueprintStore interface {
 	// --- Blueprint header CRUD (modeled on PromptStore) ----------------
 
@@ -189,6 +214,9 @@ type BlueprintStore interface {
 	// inserted) so the caller can resolve slug→id for the trigger seed's
 	// same-team FK and for wiring the steps. b.Source must be "" (defaulted
 	// to "system") or "system" and b.SystemSlug must be non-empty.
+	// user_modified is always inserted false — a freshly seeded row hasn't
+	// diverged yet, and a re-seed hit (DO NOTHING) leaves the existing row,
+	// including its user_modified, untouched.
 	SeedOrUpdate(ctx context.Context, orgID, teamID string, b domain.Blueprint) (string, error)
 
 	// List returns non-hidden blueprints ordered by updated_at DESC, scoped
@@ -213,12 +241,14 @@ type BlueprintStore interface {
 	// Create inserts a new blueprint (user or imported source) owned by
 	// teamID. Caller-provided ID. The Postgres impl binds teamID directly
 	// (it satisfies the team-membership RLS); the SQLite impl ignores it.
+	// user_modified stays false — a fresh row hasn't diverged from anything.
 	Create(ctx context.Context, orgID, teamID string, b domain.Blueprint) error
 
 	// Rename updates a blueprint's name (its only mutable header field — steps
 	// are managed via ReplaceSteps, composition via merge/split). Lets a
 	// blueprint carry a name independent of its entry prompt's. No-op on a
-	// missing / soft-deleted row; the handler 404s by re-reading.
+	// missing / soft-deleted row; the handler 404s by re-reading. Stamps
+	// user_modified true on the renamed row (see the stamping contract above).
 	Rename(ctx context.Context, orgID, id, name string) error
 
 	// Delete soft-deletes a blueprint (stamps deleted_at). The row + its
@@ -268,7 +298,8 @@ type BlueprintStore interface {
 
 	// ReplaceSteps replaces the entire step list for a blueprint in a single
 	// transaction. step_index is densely packed 0..N-1 by the writer; briefs
-	// are taken positionally and may be empty.
+	// are taken positionally and may be empty. Stamps user_modified true on
+	// blueprintID (see the stamping contract above).
 	ReplaceSteps(ctx context.Context, orgID string, blueprintID string, stepPromptIDs []string, briefs []string) error
 
 	// MergeInto absorbs the source blueprint's steps onto the tail of the host
@@ -290,6 +321,9 @@ type BlueprintStore interface {
 	// unique event_handlers index is the hard backstop. MergeInto itself does
 	// not touch event_handlers — the source carrying no trigger is a
 	// precondition, not something this method enforces or repairs.
+	//
+	// Stamps user_modified true on the host (see the stamping contract
+	// above); the source is retired, not stamped.
 	MergeInto(ctx context.Context, orgID string, hostID, sourceID string) error
 
 	// SplitAt partitions a blueprint at atIndex into two, atomically: steps
@@ -303,6 +337,11 @@ type BlueprintStore interface {
 	// The caller validates 0 < atIndex < N (a split that keeps one side empty
 	// is a no-op) and supplies newName (defaulted to the new step-0 prompt's
 	// name, consistent with auto-wrap).
+	//
+	// Stamps user_modified true on the kept upstream blueprint (id) and
+	// creates newBlueprintID with user_modified already true and no
+	// system_slug — a split product is never a shipped row (see the
+	// stamping contract above).
 	SplitAt(ctx context.Context, orgID string, id string, atIndex int, newBlueprintID, newName string) (string, error)
 
 	// DeleteStep removes the step at stepIndex from a multi-step blueprint
@@ -340,6 +379,13 @@ type BlueprintStore interface {
 	// isolation blueprint id is minted by the store (it is never surfaced — a
 	// soft-deleted audit wrapper). Returns the new downstream blueprint id
 	// (head / mid) or "" (tail).
+	//
+	// Stamps user_modified true on the original blueprintID row — whether it
+	// keeps steps (tail/mid) or is retired (head) — and, when a downstream is
+	// minted (head/mid), creates it the same way SplitAt does: user_modified
+	// already true, no system_slug (see the stamping contract above). The
+	// internal isolation wrapper is not part of this contract — it is a
+	// born-soft-deleted audit row sync never resurrects regardless of the flag.
 	DeleteStep(ctx context.Context, orgID, blueprintID string, stepIndex int, newName string) (downstreamID string, err error)
 
 	// DuplicatePrompts deep-copies a flat set of prompt ids into new,

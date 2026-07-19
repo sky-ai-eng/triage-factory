@@ -185,9 +185,12 @@ func (s *blueprintStore) Create(ctx context.Context, orgID, teamID string, b dom
 	return err
 }
 
+// Rename stamps user_modified=TRUE alongside the name change — the sync
+// signal (see db.BlueprintStore's stamping contract) that this team's copy
+// diverged from shipped content.
 func (s *blueprintStore) Rename(ctx context.Context, orgID, id, name string) error {
 	_, err := s.app.ExecContext(ctx, `
-		UPDATE blueprints SET name = $1, updated_at = now()
+		UPDATE blueprints SET name = $1, updated_at = now(), user_modified = TRUE
 		WHERE org_id = $2 AND id = $3 AND deleted_at IS NULL
 	`, name, orgID, id)
 	return err
@@ -348,6 +351,13 @@ func (s *blueprintStore) ReplaceSteps(ctx context.Context, orgID, blueprintID st
 				return fmt.Errorf("insert step %d: %w", i, err)
 			}
 		}
+		// Stamp user_modified — the step list is part of the sync unit's
+		// content (see db.BlueprintStore's stamping contract).
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2`,
+			orgID, blueprintID); err != nil {
+			return fmt.Errorf("stamp user_modified: %w", err)
+		}
 		return nil
 	})
 }
@@ -394,9 +404,10 @@ func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID 
 			return fmt.Errorf("blueprint %s not found or already deleted", sourceID)
 		}
 		// Bump host.updated_at (the set_updated_at trigger also stamps it, but
-		// the row must be touched for the trigger to fire).
+		// the row must be touched for the trigger to fire) and stamp
+		// user_modified true (the source is retired, not stamped).
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE blueprints SET updated_at = now() WHERE org_id = $1 AND id = $2`, orgID, hostID); err != nil {
+			`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2`, orgID, hostID); err != nil {
 			return fmt.Errorf("bump host updated_at: %w", err)
 		}
 		return nil
@@ -407,13 +418,15 @@ func (s *blueprintStore) MergeInto(ctx context.Context, orgID, hostID, sourceID 
 // deriving its team (and the same-team FK target) from srcBlueprintID so the
 // reparented steps' (blueprint_id, team_id) FK still resolves. Mirrors Create's
 // COALESCE(current_user_id, org owner) creator default. Shared by SplitAt and
-// DeleteStep.
+// DeleteStep. Born with user_modified=TRUE: a split/delete product is never a
+// shipped row (system_slug stays NULL, omitted below), so it starts already
+// diverged per db.BlueprintStore's stamping contract.
 func insertTriggerlessBlueprintPG(ctx context.Context, q queryer, orgID, id, name, srcBlueprintID string) error {
 	res, err := q.ExecContext(ctx, `
-		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source, usage_count, created_at, updated_at)
+		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source, usage_count, user_modified, created_at, updated_at)
 		SELECT $1, $2,
 			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
-			b.team_id, $3, 'user', 0, now(), now()
+			b.team_id, $3, 'user', 0, TRUE, now(), now()
 		FROM blueprints b WHERE b.id = $4 AND b.org_id = $2
 	`, id, orgID, name, srcBlueprintID)
 	if err != nil {
@@ -432,11 +445,12 @@ func insertTriggerlessBlueprintPG(ctx context.Context, q queryer, orgID, id, nam
 	return nil
 }
 
-// softDeleteBlueprintTxPG stamps deleted_at inside an open tx (mirrors
-// Delete / MergeInto). Errors when the row is missing or already deleted.
+// softDeleteBlueprintTxPG stamps deleted_at (+ user_modified, since retiring a
+// blueprint via DeleteStep's head case is itself a structural edit — its only
+// caller) inside an open tx. Errors when the row is missing or already deleted.
 func softDeleteBlueprintTxPG(ctx context.Context, q queryer, orgID, id string) error {
 	res, err := q.ExecContext(ctx,
-		`UPDATE blueprints SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, id)
+		`UPDATE blueprints SET deleted_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, id)
 	if err != nil {
 		return err
 	}
@@ -493,7 +507,7 @@ func (s *blueprintStore) SplitAt(ctx context.Context, orgID, id string, atIndex 
 			return fmt.Errorf("reparent tail steps: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE blueprints SET updated_at = now() WHERE org_id = $1 AND id = $2`, orgID, id); err != nil {
+			`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2`, orgID, id); err != nil {
 			return fmt.Errorf("bump upstream updated_at: %w", err)
 		}
 		return nil
@@ -545,7 +559,7 @@ func (s *blueprintStore) DeleteStep(ctx context.Context, orgID, blueprintID stri
 				return fmt.Errorf("isolate deleted step: %w", err)
 			}
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE blueprints SET updated_at = now() WHERE org_id = $1 AND id = $2`, orgID, blueprintID); err != nil {
+				`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2`, orgID, blueprintID); err != nil {
 				return fmt.Errorf("bump upstream updated_at: %w", err)
 			}
 		default:
@@ -567,7 +581,7 @@ func (s *blueprintStore) DeleteStep(ctx context.Context, orgID, blueprintID stri
 				return fmt.Errorf("isolate deleted step: %w", err)
 			}
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE blueprints SET updated_at = now() WHERE org_id = $1 AND id = $2`, orgID, blueprintID); err != nil {
+				`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2`, orgID, blueprintID); err != nil {
 				return fmt.Errorf("bump upstream updated_at: %w", err)
 			}
 		}
