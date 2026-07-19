@@ -79,10 +79,11 @@ func BuildTaskContext(task domain.Task, metadataJSON string) string {
 	// For a slack:message task it is the only carrier of event content
 	// (channel, thread, message text) — nothing is flattened into a labeled
 	// line — so its inclusion is load-bearing, not decorative.
-	if hasMetadata(metadataJSON) {
-		sections = append(sections, "Raw event metadata:\n```json\n"+metadataJSON+"\n```")
+	hasMeta := hasMetadata(metadataJSON)
+	if hasMeta {
+		sections = append(sections, metadataFence(metadataJSON))
 	}
-	if len(lines) == 0 && !hasMetadata(metadataJSON) {
+	if len(lines) == 0 && !hasMeta {
 		sections = append(sections, "No structured context is available for this run.")
 	}
 
@@ -90,13 +91,54 @@ func BuildTaskContext(task domain.Task, metadataJSON string) string {
 }
 
 // hasMetadata reports whether metadataJSON carries anything worth emitting.
-// An empty blob or the two shapes of "nothing here" (an empty object, an
-// explicit null) produce no fence.
+// An empty blob, an explicit null, or an empty object/array — including one
+// padded with insignificant JSON whitespace ("{ }", "{\n}") — produces no
+// fence. A blob that doesn't parse is treated as present so a malformed
+// payload surfaces rather than being silently dropped.
 func hasMetadata(metadataJSON string) bool {
-	switch strings.TrimSpace(metadataJSON) {
-	case "", "{}", "null":
+	if strings.TrimSpace(metadataJSON) == "" {
 		return false
+	}
+	var v any
+	if err := json.Unmarshal([]byte(metadataJSON), &v); err != nil {
+		return true
+	}
+	switch t := v.(type) {
+	case nil:
+		return false
+	case map[string]any:
+		return len(t) > 0
+	case []any:
+		return len(t) > 0
 	default:
 		return true
 	}
+}
+
+// metadataFence wraps the raw metadata blob in a fenced code block, sizing the
+// fence to outrun the longest backtick run inside the blob. Event metadata
+// carries externally-authored text (a Slack message body, a PR title) that can
+// itself contain a ``` sequence; a fixed three-backtick fence would let that
+// content close the block early, making the bytes after it read as fresh
+// instructions rather than data. A fence one backtick longer than the longest
+// run inside can never be closed by the content — three backticks in the common
+// case, wider only when the payload would otherwise escape.
+func metadataFence(metadataJSON string) string {
+	longest, run := 0, 0
+	for i := 0; i < len(metadataJSON); i++ {
+		if metadataJSON[i] == '`' {
+			run++
+			if run > longest {
+				longest = run
+			}
+		} else {
+			run = 0
+		}
+	}
+	n := longest + 1
+	if n < 3 {
+		n = 3
+	}
+	ticks := strings.Repeat("`", n)
+	return "Raw event metadata:\n" + ticks + "json\n" + metadataJSON + "\n" + ticks
 }

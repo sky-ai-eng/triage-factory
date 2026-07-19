@@ -175,11 +175,37 @@ func TestBuildTaskContext_NegativeSpace(t *testing.T) {
 		t.Errorf("expected the check line to survive;\n%s", got)
 	}
 
-	// The fence is absent for empty / empty-object / null metadata.
-	for _, empty := range []string{"", "{}", "null", "  {}  "} {
+	// The fence is absent for every shape of "nothing here": empty, explicit
+	// null, and an empty object/array — including ones padded with
+	// insignificant JSON whitespace, which a bare string compare would miss.
+	for _, empty := range []string{"", "{}", "null", "  {}  ", "{ }", "{\n}", "[]", "  \n "} {
 		if strings.Contains(BuildTaskContext(task, empty), "Raw event metadata:") {
 			t.Errorf("metadata %q must not produce a fence", empty)
 		}
+	}
+}
+
+func TestBuildTaskContext_MetadataFenceOutrunsBackticks(t *testing.T) {
+	// Externally-authored content (a Slack message body) can carry its own ```
+	// run. The fence must be sized wider than that run so the payload cannot
+	// close the code block early and make trailing bytes read as instructions.
+	metaJSON := "{\"text\":\"```rogue``` payload\"}"
+	task := domain.Task{Title: "t", EventType: "slack:message", EntitySource: "slack"}
+
+	got := BuildTaskContext(task, metaJSON)
+
+	// The blob is embedded verbatim, wrapped in a 4-backtick fence (one wider
+	// than the 3-backtick run it contains).
+	if !strings.Contains(got, "````json\n"+metaJSON+"\n````") {
+		t.Errorf("expected a 4-backtick fence wrapping the 3-backtick content;\n%s", got)
+	}
+	// The block stays a single well-bounded region: exactly one closing tag,
+	// and it terminates the string.
+	if n := strings.Count(got, "</task_context>"); n != 1 {
+		t.Errorf("expected exactly one closing tag, got %d;\n%s", n, got)
+	}
+	if !strings.HasSuffix(got, "\n</task_context>") {
+		t.Errorf("block must terminate with its closing tag;\n%s", got)
 	}
 }
 
