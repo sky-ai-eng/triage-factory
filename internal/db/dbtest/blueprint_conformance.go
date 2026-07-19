@@ -15,8 +15,8 @@ import (
 //   - the wired BlueprintStore impl
 //   - the orgID to pass to every method (SQLite returns
 //     runmode.LocalDefaultOrgID, Postgres a fresh org UUID)
-//   - the teamID Create/SeedOrUpdate should attribute blueprints to (every
-//     blueprint is team-scoped)
+//   - the teamID Create should attribute blueprints to (every blueprint is
+//     team-scoped)
 //   - a PromptSeeder hook the harness invokes to materialize step prompts. A
 //     blueprint_steps row FKs the step prompt on (step_prompt_id, team_id), so
 //     ReplaceSteps needs real same-team prompt rows; the backend owns that
@@ -28,61 +28,24 @@ type BlueprintStoreFactory func(t *testing.T) (store db.BlueprintStore, orgID, t
 // knowing each backend's prompt-insert shape.
 type PromptSeederForBlueprints func(t *testing.T, idHint string) string
 
-// RunBlueprintStoreConformance runs the shared seed-idempotency + CRUD +
-// step round-trip suite against any db.BlueprintStore impl. It mirrors the
-// prompt SeedOrUpdate idempotency tests:
+// RunBlueprintStoreConformance runs the shared CRUD + step round-trip +
+// composition suite against any db.BlueprintStore impl:
 //
-//   - SeedOrUpdate a system blueprint twice → same id, no duplicate row.
-//   - List returns the seeded blueprint.
-//   - GetBySystemSlug resolves it (and returns nil for an unknown slug).
+//   - List returns a created blueprint.
 //   - ReplaceSteps then ListSteps round-trips the ordered step list.
-//   - Context cancellation fails fast rather than blocking.
+//   - Merge / split / delete-step composition and the user_modified stamping
+//     contract.
+//
+// Shipped-content seeding (system_slug, NULL creator) and its boot-time sync
+// live in RunShippedSyncConformance; these tests use plain Create because they
+// only need a blueprint to exist, not the shipped shape.
 func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Helper()
 
-	t.Run("SeedOrUpdate_IsIdempotent", func(t *testing.T) {
+	t.Run("List_ReturnsCreated", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		id1, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
-			SystemSlug: "system-bp", Name: "BP", Source: "system",
-		})
-		if err != nil {
-			t.Fatalf("seed #1: %v", err)
-		}
-		id2, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
-			SystemSlug: "system-bp", Name: "BP", Source: "system",
-		})
-		if err != nil {
-			t.Fatalf("seed #2: %v", err)
-		}
-		if id1 != id2 {
-			t.Fatalf("re-seed minted a new id (%s) instead of resolving the existing copy (%s)", id2, id1)
-		}
-		// No duplicate row: List must show exactly one blueprint for this slug.
-		list, err := store.List(ctx, orgID, teamID)
-		if err != nil {
-			t.Fatalf("list: %v", err)
-		}
-		var seen int
-		for _, b := range list {
-			if b.SystemSlug == "system-bp" {
-				seen++
-			}
-		}
-		if seen != 1 {
-			t.Fatalf("List shows %d copies of system-bp; want exactly 1 (re-seed duplicated)", seen)
-		}
-	})
-
-	t.Run("List_ReturnsSeeded", func(t *testing.T) {
-		store, orgID, teamID, _ := factory(t)
-		ctx := context.Background()
-		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
-			SystemSlug: "system-list-bp", Name: "Listed", Source: "system",
-		})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		id := seedBlueprint(t, store, orgID, teamID, "Listed")
 		list, err := store.List(ctx, orgID, teamID)
 		if err != nil {
 			t.Fatalf("list: %v", err)
@@ -95,44 +58,14 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 			}
 		}
 		if !found {
-			t.Fatalf("List did not return the seeded blueprint %s", id)
-		}
-	})
-
-	t.Run("GetBySystemSlug_ResolvesSeededCopy", func(t *testing.T) {
-		store, orgID, teamID, _ := factory(t)
-		ctx := context.Background()
-		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
-			SystemSlug: "system-slug-bp", Name: "Slugged", Source: "system",
-		})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
-		got, err := store.GetBySystemSlug(ctx, orgID, teamID, "system-slug-bp")
-		if err != nil {
-			t.Fatalf("GetBySystemSlug: %v", err)
-		}
-		if got == nil || got.ID != id {
-			t.Fatalf("GetBySystemSlug returned %+v; want id=%s", got, id)
-		}
-		missing, err := store.GetBySystemSlug(ctx, orgID, teamID, "no-such-slug")
-		if err != nil {
-			t.Fatalf("GetBySystemSlug(missing): %v", err)
-		}
-		if missing != nil {
-			t.Fatalf("GetBySystemSlug(missing) = %+v; want nil", missing)
+			t.Fatalf("List did not return the created blueprint %s", id)
 		}
 	})
 
 	t.Run("ReplaceSteps_ListSteps_RoundTrip", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bpID, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
-			SystemSlug: "system-steps-bp", Name: "Steps", Source: "system",
-		})
-		if err != nil {
-			t.Fatalf("seed blueprint: %v", err)
-		}
+		bpID := seedBlueprint(t, store, orgID, teamID, "Steps")
 		p1 := seedPrompt(t, "step-1")
 		p2 := seedPrompt(t, "step-2")
 		if err := store.ReplaceSteps(ctx, orgID, bpID, []string{p1, p2}, []string{"first", "second"}); err != nil {
@@ -170,14 +103,8 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		// blueprint. Adding it to a second blueprint must fail at the DB layer.
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bp1, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "copyonly-bp1", Name: "BP1", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed bp1: %v", err)
-		}
-		bp2, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "copyonly-bp2", Name: "BP2", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed bp2: %v", err)
-		}
+		bp1 := seedBlueprint(t, store, orgID, teamID, "BP1")
+		bp2 := seedBlueprint(t, store, orgID, teamID, "BP2")
 		p := seedPrompt(t, "shared")
 		if err := store.ReplaceSteps(ctx, orgID, bp1, []string{p}, nil); err != nil {
 			t.Fatalf("ReplaceSteps bp1: %v", err)
@@ -190,10 +117,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("StepPromptOwner_ResolvesOwningBlueprint", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "owner-bp", Name: "Owner", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		bp := seedBlueprint(t, store, orgID, teamID, "Owner")
 		p := seedPrompt(t, "owned")
 		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
@@ -215,10 +139,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("SoftDelete_HidesFromRequestReadsButSystemResolves", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "softdel-bp", Name: "Soft", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		bp := seedBlueprint(t, store, orgID, teamID, "Soft")
 		if err := store.Delete(ctx, orgID, bp); err != nil {
 			t.Fatalf("Delete: %v", err)
 		}
@@ -249,12 +170,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		// a new blueprint with a phantom 422.
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
-			SystemSlug: "softdel-owner-bp", Name: "SoftDelOwner", Source: "system",
-		})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		bp := seedBlueprint(t, store, orgID, teamID, "SoftDelOwner")
 		p := seedPrompt(t, "paired-prompt")
 		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
@@ -279,12 +195,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("Rename_UpdatesName", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
-			SystemSlug: "rename-bp", Name: "Before", Source: "system",
-		})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		id := seedBlueprint(t, store, orgID, teamID, "Before")
 		if err := store.Rename(ctx, orgID, id, "After"); err != nil {
 			t.Fatalf("Rename: %v", err)
 		}
@@ -300,18 +211,9 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("ListAllSteps_GroupsAndExcludesDeleted", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bpA, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "all-a", Name: "A", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed A: %v", err)
-		}
-		bpB, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "all-b", Name: "B", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed B: %v", err)
-		}
-		bpDel, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "all-del", Name: "Del", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed Del: %v", err)
-		}
+		bpA := seedBlueprint(t, store, orgID, teamID, "A")
+		bpB := seedBlueprint(t, store, orgID, teamID, "B")
+		bpDel := seedBlueprint(t, store, orgID, teamID, "Del")
 		a1, a2 := seedPrompt(t, "all-a1"), seedPrompt(t, "all-a2")
 		b1 := seedPrompt(t, "all-b1")
 		d1 := seedPrompt(t, "all-d1")
@@ -352,14 +254,8 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("MergeInto_AppendsSourceStepsAndRetiresSource", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		host, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "merge-host", Name: "Host", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed host: %v", err)
-		}
-		source, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "merge-source", Name: "Source", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed source: %v", err)
-		}
+		host := seedBlueprint(t, store, orgID, teamID, "Host")
+		source := seedBlueprint(t, store, orgID, teamID, "Source")
 		h1, h2 := seedPrompt(t, "host-1"), seedPrompt(t, "host-2")
 		s1, s2 := seedPrompt(t, "src-1"), seedPrompt(t, "src-2")
 		if err := store.ReplaceSteps(ctx, orgID, host, []string{h1, h2}, []string{"h1", "h2"}); err != nil {
@@ -412,10 +308,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("SplitAt_PartitionsAndCreatesTriggerlessDownstream", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "split-bp", Name: "Split", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		bp := seedBlueprint(t, store, orgID, teamID, "Split")
 		p0, p1, p2, p3 := seedPrompt(t, "sp-0"), seedPrompt(t, "sp-1"), seedPrompt(t, "sp-2"), seedPrompt(t, "sp-3")
 		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2, p3}, []string{"b0", "b1", "b2", "b3"}); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
@@ -481,10 +374,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("DeleteStep_TailDropsLastKeepsId", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "del-tail", Name: "Tail", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		bp := seedBlueprint(t, store, orgID, teamID, "Tail")
 		p0, p1, p2 := seedPrompt(t, "dt-0"), seedPrompt(t, "dt-1"), seedPrompt(t, "dt-2")
 		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
@@ -510,10 +400,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("DeleteStep_HeadDetachesEntryRetiresId", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "del-head", Name: "Head", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		bp := seedBlueprint(t, store, orgID, teamID, "Head")
 		p0, p1, p2 := seedPrompt(t, "dh-0"), seedPrompt(t, "dh-1"), seedPrompt(t, "dh-2")
 		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
@@ -542,10 +429,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("DeleteStep_MidSplitsKeepsUpstreamId", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "del-mid", Name: "Mid", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		bp := seedBlueprint(t, store, orgID, teamID, "Mid")
 		p0, p1, p2, p3 := seedPrompt(t, "dm-0"), seedPrompt(t, "dm-1"), seedPrompt(t, "dm-2"), seedPrompt(t, "dm-3")
 		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2, p3}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
@@ -586,10 +470,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("DeleteStep_MinSizeHead", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "del-min-head", Name: "MinHead", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		bp := seedBlueprint(t, store, orgID, teamID, "MinHead")
 		p0, p1 := seedPrompt(t, "dmh-0"), seedPrompt(t, "dmh-1")
 		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
@@ -614,10 +495,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("DeleteStep_MinSizeTail", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "del-min-tail", Name: "MinTail", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		bp := seedBlueprint(t, store, orgID, teamID, "MinTail")
 		p0, p1 := seedPrompt(t, "dmt-0"), seedPrompt(t, "dmt-1")
 		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
@@ -642,10 +520,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("DeleteStep_RejectsSingleStep", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "del-single", Name: "Single", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		bp := seedBlueprint(t, store, orgID, teamID, "Single")
 		p := seedPrompt(t, "ds-0")
 		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
@@ -657,24 +532,24 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 	})
 
-	t.Run("SeedOrUpdate_CtxCancellation_FailsFast", func(t *testing.T) {
+	t.Run("Create_CtxCancellation_FailsFast", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if _, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
-			SystemSlug: "system-ctx-bp", Name: "Ctx", Source: "system",
+		if err := store.Create(ctx, orgID, teamID, domain.Blueprint{
+			ID: uuid.New().String(), Name: "Ctx", Source: "user",
 		}); err == nil {
-			t.Fatalf("SeedOrUpdate with cancelled ctx returned nil error")
+			t.Fatalf("Create with cancelled ctx returned nil error")
 		}
 	})
 
 	// --- user_modified stamping ------------------------------------------
 	//
-	// An upcoming sync feature will treat user_modified as "this team edited
-	// its copy, never overwrite it." These pin the contract documented on
+	// The boot-time shipped-defaults sync treats user_modified as "this team
+	// edited its copy, never overwrite it." These pin the contract documented on
 	// db.BlueprintStore: every structural edit stamps true on the affected
-	// surviving row(s); Create/SeedOrUpdate insert false; usage bookkeeping
-	// never touches the flag.
+	// surviving row(s); Create inserts false; usage bookkeeping never touches the
+	// flag.
 
 	t.Run("Create_LeavesUserModifiedFalse", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
@@ -692,33 +567,10 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 	})
 
-	t.Run("SeedOrUpdate_LeavesUserModifiedFalse", func(t *testing.T) {
-		store, orgID, teamID, _ := factory(t)
-		ctx := context.Background()
-		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
-			SystemSlug: "system-um-seed", Name: "SeedUM", Source: "system",
-		})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
-		got, err := store.Get(ctx, orgID, id)
-		if err != nil || got == nil {
-			t.Fatalf("Get after seed = (%v, %v), want a row", got, err)
-		}
-		if got.UserModified {
-			t.Errorf("seeded blueprint has user_modified=true, want false")
-		}
-	})
-
 	t.Run("Rename_StampsUserModified", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
-			SystemSlug: "system-um-rename", Name: "Before", Source: "system",
-		})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		id := seedBlueprint(t, store, orgID, teamID, "Before")
 		if err := store.Rename(ctx, orgID, id, "After"); err != nil {
 			t.Fatalf("Rename: %v", err)
 		}
@@ -734,12 +586,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("ReplaceSteps_StampsUserModified", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
-			SystemSlug: "system-um-steps", Name: "StepsUM", Source: "system",
-		})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		id := seedBlueprint(t, store, orgID, teamID, "StepsUM")
 		p := seedPrompt(t, "um-steps-p")
 		if err := store.ReplaceSteps(ctx, orgID, id, []string{p}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
@@ -756,14 +603,8 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("MergeInto_StampsHostNotSource", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		host, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "um-merge-host", Name: "Host", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed host: %v", err)
-		}
-		source, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "um-merge-source", Name: "Source", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed source: %v", err)
-		}
+		host := seedBlueprint(t, store, orgID, teamID, "Host")
+		source := seedBlueprint(t, store, orgID, teamID, "Source")
 		s1 := seedPrompt(t, "um-merge-s1")
 		if err := store.ReplaceSteps(ctx, orgID, source, []string{s1}, nil); err != nil {
 			t.Fatalf("ReplaceSteps source: %v", err)
@@ -790,10 +631,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("SplitAt_DownstreamBornModifiedWithNoSystemSlug", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "um-split-bp", Name: "SplitUM", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		bp := seedBlueprint(t, store, orgID, teamID, "SplitUM")
 		p0, p1 := seedPrompt(t, "um-split-0"), seedPrompt(t, "um-split-1")
 		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
@@ -821,10 +659,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("DeleteStep_StampsUserModified_Head", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "um-del-head", Name: "HeadUM", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		bp := seedBlueprint(t, store, orgID, teamID, "HeadUM")
 		p0, p1 := seedPrompt(t, "um-dh-0"), seedPrompt(t, "um-dh-1")
 		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
@@ -856,10 +691,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("DeleteStep_StampsUserModified_Tail", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "um-del-tail", Name: "TailUM", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		bp := seedBlueprint(t, store, orgID, teamID, "TailUM")
 		p0, p1 := seedPrompt(t, "um-dt-0"), seedPrompt(t, "um-dt-1")
 		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
@@ -883,10 +715,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("DeleteStep_StampsUserModified_Mid", func(t *testing.T) {
 		store, orgID, teamID, seedPrompt := factory(t)
 		ctx := context.Background()
-		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "um-del-mid", Name: "MidUM", Source: "system"})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		bp := seedBlueprint(t, store, orgID, teamID, "MidUM")
 		p0, p1, p2 := seedPrompt(t, "um-dm-0"), seedPrompt(t, "um-dm-1"), seedPrompt(t, "um-dm-2")
 		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
@@ -917,12 +746,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Run("IncrementUsage_LeavesUserModifiedUntouched", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
-			SystemSlug: "um-usage", Name: "UsageUM", Source: "system",
-		})
-		if err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		id := seedBlueprint(t, store, orgID, teamID, "UsageUM")
 		if err := store.IncrementUsage(ctx, orgID, id); err != nil {
 			t.Fatalf("IncrementUsage: %v", err)
 		}
@@ -937,6 +761,22 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 			t.Errorf("UsageCount = %d, want 1", got.UsageCount)
 		}
 	})
+}
+
+// seedBlueprint creates a user-source blueprint owned by the conformance team
+// and returns its id. It replaces the removed BlueprintStore.SeedOrUpdate as
+// the fixture path: the CRUD / step / composition tests below only need a
+// blueprint to exist, not the shipped system-slug/NULL-creator shape (that
+// path is covered by RunShippedSyncConformance).
+func seedBlueprint(t *testing.T, store db.BlueprintStore, orgID, teamID, name string) string {
+	t.Helper()
+	id := uuid.New().String()
+	if err := store.Create(context.Background(), orgID, teamID, domain.Blueprint{
+		ID: id, Name: name, Source: "user",
+	}); err != nil {
+		t.Fatalf("seed blueprint %q: %v", name, err)
+	}
+	return id
 }
 
 // assertDenseSteps reads a blueprint's steps and asserts they are exactly
@@ -994,10 +834,7 @@ func RunBlueprintDuplicationConformance(t *testing.T, factory BlueprintDuplicati
 	seedRun := func(t *testing.T, store db.BlueprintStore, orgID, teamID, slug string, prompts []domain.Prompt, seed DuplicationPromptSeeder, briefs []string) (string, []string) {
 		t.Helper()
 		ctx := context.Background()
-		bpID, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: slug, Name: slug, Source: "system"})
-		if err != nil {
-			t.Fatalf("seed blueprint %s: %v", slug, err)
-		}
+		bpID := seedBlueprint(t, store, orgID, teamID, slug)
 		ids := make([]string, len(prompts))
 		for i, p := range prompts {
 			ids[i] = seed(t, p)

@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -30,11 +32,12 @@ func seedTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 	t.Helper()
 	store := testPromptStore(database)
 	ctx := context.Background()
-	// System prompts seed through SeedOrUpdate so they carry a system_slug
-	// (the curator's default-spec fallback resolves them by slug, not id —
-	// the row's id is a random UUID). The fixture's ID field
-	// is reinterpreted as the slug. User/imported prompts keep their explicit
-	// id via Create (the project-override path resolves those by id).
+	// System prompts carry a system_slug (the curator's default-spec fallback
+	// resolves them by slug, not id — the row's id is a random UUID). The
+	// fixture's ID field is reinterpreted as the slug. PromptStore no longer
+	// carries a shipped seeder, so the shipped shape (source='system', creator
+	// NULL, a system_slug) goes through a raw INSERT. User/imported prompts keep
+	// their explicit id via Create (the project-override path resolves those by id).
 	if p.Source == "system" {
 		if p.SystemSlug == "" {
 			p.SystemSlug = p.ID
@@ -42,7 +45,11 @@ func seedTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 		if existing, _ := store.GetBySystemSlug(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, p.SystemSlug); existing != nil {
 			return
 		}
-		if _, err := store.SeedOrUpdate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, p); err != nil {
+		now := time.Now().UTC()
+		if _, err := database.Exec(`
+			INSERT INTO prompts (id, name, body, source, allowed_tools, model, usage_count, user_modified, team_id, system_slug, creator_user_id, created_at, updated_at)
+			VALUES (?, ?, ?, 'system', ?, ?, 0, 0, ?, ?, NULL, ?, ?)
+		`, uuid.New().String(), p.Name, p.Body, p.AllowedTools, p.Model, runmode.LocalDefaultTeamID, p.SystemSlug, now, now); err != nil {
 			t.Fatalf("seedTestPrompt %s: %v", p.SystemSlug, err)
 		}
 		return
@@ -86,13 +93,17 @@ func seedTestBlueprint(t *testing.T, database *sql.DB, promptID, systemSlug stri
 	ctx := context.Background()
 	var blueprintID string
 	if systemSlug != "" {
-		id, err := stores.Blueprints.SeedOrUpdate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
-			SystemSlug: systemSlug, Name: systemSlug, Source: "system",
-		})
-		if err != nil {
+		// A system-source blueprint (resolvable via GetBySystemSlug) — the
+		// shipped shape (creator NULL, a system_slug) is seeded by raw INSERT
+		// now that BlueprintStore has no shipped seeder.
+		blueprintID = uuid.New().String()
+		now := time.Now().UTC()
+		if _, err := database.Exec(`
+			INSERT INTO blueprints (id, name, source, usage_count, user_modified, team_id, system_slug, creator_user_id, created_at, updated_at)
+			VALUES (?, ?, 'system', 0, 0, ?, ?, NULL, ?, ?)
+		`, blueprintID, systemSlug, runmode.LocalDefaultTeamID, systemSlug, now, now); err != nil {
 			t.Fatalf("seedTestBlueprint system %s: %v", systemSlug, err)
 		}
-		blueprintID = id
 	} else {
 		blueprintID = "bp-" + promptID
 		if err := stores.Blueprints.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{

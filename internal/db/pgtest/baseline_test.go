@@ -29,7 +29,6 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"event_handlers", "tasks", "task_events", "runs", "artifacts",
 		"run_messages", "run_memory", "run_memory_entities", "pending_firings", "run_worktrees",
 		"swipe_events", "poller_state", "repo_profiles",
-		"system_prompt_versions",
 		"curator_requests", "curator_messages", "curator_pending_context",
 		// org_secrets replaces the Supabase Vault secret path (TFAC-402):
 		// app-encrypted ciphertext in a normal RLS table.
@@ -1889,15 +1888,6 @@ func TestPrompts_SemanticIDsAccepted(t *testing.T) {
 	}
 	_ = alice // user prompt INSERT below still uses alice as creator
 
-	// system_prompt_versions can reference it. org_id required since
-	// prompts are per-org and the version table mirrors that scoping.
-	if _, err := h.AdminDB.Exec(`
-		INSERT INTO system_prompt_versions (org_id, prompt_id, content_hash)
-		VALUES ($1, 'system-pr-review', 'sha256:abc')
-	`, orgA); err != nil {
-		t.Fatalf("system_prompt_versions INSERT: %v", err)
-	}
-
 	// User prompt picks up the default (UUID-shaped string). team_id
 	// resolved inline from the org's first team.
 	var userPromptID string
@@ -1918,77 +1908,6 @@ func TestPrompts_SemanticIDsAccepted(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("got %d prompts, want 2", n)
-	}
-}
-
-// TestSystemPromptSeeding_DeployActorOnly — system prompt seeding is
-// a deploy-time operation that must run on the migration actor
-// (supabase_admin in tests, deploy role in prod), NOT on tf_app at
-// request time. Test pins the boundary: AdminDB can write
-// system_prompt_versions; tf_app cannot.
-//
-// This is the rule D2 will rely on when it wires up the Postgres
-// store: seedDefaultPrompts(database) must take the connection that
-// ran db.Migrate(...), not the app's tf_app request pool.
-func TestSystemPromptSeeding_DeployActorOnly(t *testing.T) {
-	h := Shared(t)
-	h.Reset(t)
-
-	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
-
-	// Deploy actor (AdminDB) can INSERT both prompts and
-	// system_prompt_versions. System rows ship with creator_user_id
-	// NULL per prompts_system_has_no_creator — there's no human author
-	// for shipped content. team_id required (NOT NULL, no visibility column).
-	if _, err := h.AdminDB.Exec(`
-		INSERT INTO prompts (id, org_id, creator_user_id, team_id, source, name, body)
-		VALUES ('system-pr-review', $1, NULL, $2, 'system', 'PR Review', 'v1 body')
-	`, orgA, teamA); err != nil {
-		t.Fatalf("AdminDB system prompt INSERT: %v", err)
-	}
-	if _, err := h.AdminDB.Exec(`
-		INSERT INTO system_prompt_versions (org_id, prompt_id, content_hash)
-		VALUES ($1, 'system-pr-review', 'sha256:abc')
-	`, orgA); err != nil {
-		t.Fatalf("AdminDB system_prompt_versions INSERT: %v", err)
-	}
-
-	// tf_app (the request-time actor) cannot. Even with full claims
-	// (alice + orgA), system_prompt_versions writes are REVOKE'd.
-	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		_, err := tx.Exec(`
-			INSERT INTO system_prompt_versions (org_id, prompt_id, content_hash)
-			VALUES ($1, 'system-pr-review', 'sha256:xyz')
-			ON CONFLICT (org_id, prompt_id) DO UPDATE SET content_hash = excluded.content_hash
-		`, orgA)
-		return err
-	})
-	if err == nil {
-		t.Fatalf("tf_app wrote to system_prompt_versions — revoke broken")
-	}
-	assertPgCode(t, err, "42501", "tf_app write to system_prompt_versions")
-
-	// Same for UPDATE.
-	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		_, err := tx.Exec(
-			`UPDATE system_prompt_versions SET content_hash = 'forged' WHERE org_id = $1 AND prompt_id = 'system-pr-review'`, orgA,
-		)
-		return err
-	})
-	if err == nil {
-		t.Fatalf("tf_app UPDATE'd system_prompt_versions — revoke broken")
-	}
-	assertPgCode(t, err, "42501", "tf_app UPDATE system_prompt_versions")
-
-	// tf_app CAN read (SELECT remains granted via the bulk GRANT).
-	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		var hash string
-		return tx.QueryRow(
-			`SELECT content_hash FROM system_prompt_versions WHERE prompt_id = 'system-pr-review'`,
-		).Scan(&hash)
-	})
-	if err != nil {
-		t.Errorf("tf_app SELECT on system_prompt_versions failed (should be allowed): %v", err)
 	}
 }
 

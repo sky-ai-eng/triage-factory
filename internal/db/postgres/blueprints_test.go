@@ -57,11 +57,7 @@ func TestBlueprintStore_Postgres_DuplicationConformance(t *testing.T) {
 		seed := func(t *testing.T, p domain.Prompt) string {
 			t.Helper()
 			if p.Source == "system" {
-				id, err := stores.Prompts.SeedOrUpdate(ctx, orgID, teamID, p)
-				if err != nil {
-					t.Fatalf("seed system prompt: %v", err)
-				}
-				return id
+				return seedPgSystemPrompt(t, h, orgID, teamID, p)
 			}
 			if p.ID == "" {
 				p.ID = uuid.New().String()
@@ -699,6 +695,23 @@ func seedPgPrompt(t *testing.T, h *pgtest.Harness, orgID, userID, id string) {
 	`, id, orgID, teamID, userID, id); err != nil {
 		t.Fatalf("seed prompt %s: %v", id, err)
 	}
+}
+
+// seedPgSystemPrompt inserts a shipped-shape prompt row directly: source='system',
+// creator_user_id NULL, and the given system_slug — the shape PromptStore.Create
+// can't produce (it forces a non-NULL creator). Returns the id.
+func seedPgSystemPrompt(t *testing.T, h *pgtest.Harness, orgID, teamID string, p domain.Prompt) string {
+	t.Helper()
+	if p.ID == "" {
+		p.ID = uuid.New().String()
+	}
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO prompts (id, org_id, team_id, system_slug, creator_user_id, name, body, source, allowed_tools, model, usage_count, user_modified, created_at, updated_at)
+		VALUES ($1, $2, $3::uuid, $4, NULL, $5, $6, 'system', $7, $8, 0, FALSE, now(), now())
+	`, p.ID, orgID, teamID, p.SystemSlug, p.Name, p.Body, p.AllowedTools, p.Model); err != nil {
+		t.Fatalf("seed system prompt %s: %v", p.ID, err)
+	}
+	return p.ID
 }
 
 // seedPgNamedTeam creates a second team (+ admin membership) in an org so the

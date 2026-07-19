@@ -19,9 +19,8 @@ type Stores struct {
 	// Subsequent waves add the remaining 21 fields here.
 	Scores ScoreStore
 
-	// Prompts owns prompts + system_prompt_versions. SeedOrUpdate is
-	// routed to the admin pool in Postgres (sidecar writes are
-	// REVOKE'd from tf_app); every other method runs on the app pool.
+	// Prompts owns the prompts table. Request-facing methods run on the app
+	// pool; the ...System reads route through the admin pool in Postgres.
 	Prompts PromptStore
 
 	// Swipes owns the swipe_events audit log + the task-status

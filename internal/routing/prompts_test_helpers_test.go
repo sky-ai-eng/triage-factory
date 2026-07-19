@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -188,14 +189,17 @@ func seedHandlerFKTargets(t *testing.T, database *sql.DB) map[string]string {
 	}
 	out := map[string]string{}
 	for _, s := range slugs {
-		promptID, err := prompts.SeedOrUpdate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
-			domain.Prompt{SystemSlug: s.slug, Name: s.name, Body: "x", Source: "system"})
-		if err != nil {
+		// The handler FK only needs a same-team prompt + blueprint to exist; plain
+		// user rows satisfy it (this test resolves the trigger's blueprint through
+		// the returned slug→id map, not by system_slug). The id is a random UUID.
+		promptID := uuid.New().String()
+		if err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+			domain.Prompt{ID: promptID, Name: s.name, Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("seed prompt %s: %v", s.slug, err)
 		}
-		bpID, err := blueprints.SeedOrUpdate(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
-			domain.Blueprint{SystemSlug: s.slug, Name: s.name, Source: "system"})
-		if err != nil {
+		bpID := uuid.New().String()
+		if err := blueprints.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+			domain.Blueprint{ID: bpID, Name: s.name, Source: "user"}); err != nil {
 			t.Fatalf("seed blueprint %s: %v", s.slug, err)
 		}
 		if err := blueprints.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, bpID, []string{promptID}, nil); err != nil {

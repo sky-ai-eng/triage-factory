@@ -8,8 +8,7 @@ import (
 
 //go:generate go run github.com/vektra/mockery/v2 --name=PromptStore --output=./mocks --case=underscore --with-expecter
 
-// PromptStore owns prompts + the system_prompt_versions sidecar that
-// tracks shipped-content hashes. Three audiences:
+// PromptStore owns the prompts table. Three audiences:
 //
 //   - HTTP handlers (server/prompts_handler.go, server/triggers_handler.go,
 //     server/projects.go) — full CRUD.
@@ -18,49 +17,18 @@ import (
 //   - Skills importer (skills/importer.go) — Get/Create/UpdateImported/Hide
 //     to mirror local SKILL.md files into the prompts table.
 //
-// SeedOrUpdate has no production caller — new teams seed a team's prompts
-// directly from the shipped Go slices via ShippedDefaultsStore instead.
+// New teams seed their prompts directly from the shipped Go slices via
+// ShippedDefaultsStore, and a boot-time sync keeps every unmodified team copy
+// equal to the current shipped content (ShippedDefaultsStore.SyncShippedIntoTeam,
+// which decides "unmodified equals shipped" by direct content comparison).
+// PromptStore itself carries no shipped-content seeder.
 //
-// Postgres / RLS note: in multi mode, system_prompt_versions has
-// INSERT/UPDATE/DELETE REVOKE'd from tf_app per D3 — only the deploy
-// actor (supabase_admin) can write the sidecar. SeedOrUpdate is the
-// one method that touches that sidecar, so the Postgres impl routes
-// it to the admin pool internally; every other method runs on the
-// app pool. SQLite has no role concept; both pools collapse to one
-// connection and assertLocalOrg pins orgID to LocalDefaultOrgID.
+// Postgres / RLS note: the request-facing methods run on the app pool
+// (RLS-gated); the ...System reads (GetSystem, IncrementUsageSystem) route
+// through the admin pool for the claims-less delegation goroutines. SQLite has
+// no role concept; both pools collapse to one connection and assertLocalOrg
+// pins orgID to LocalDefaultOrgID.
 type PromptStore interface {
-	// SeedOrUpdate inserts a shipped system prompt as the team's own copy
-	// if missing, or updates it when the shipped (name, body, source) hash
-	// changed since the last seed, skipping user-modified rows so local
-	// customizations survive a re-seed. Identity is per-team: the row is
-	// keyed by (org_id, team_id, system_slug) — p.SystemSlug carries the
-	// shipped slug ("system-ci-fix", …) and the id is a random UUID minted
-	// per team copy. Recorded in system_prompt_versions so identical
-	// re-seeds are no-ops (no churn to prompts.updated_at — the UI orders
-	// by it).
-	//
-	// Returns the team copy's prompt id (existing or freshly inserted) so
-	// callers can resolve slug→id for the trigger seed's same-team FK
-	// (two-phase seed).
-	//
-	// Atomic: prompts insert/update + system_prompt_versions upsert
-	// happen in one transaction so the version row never races ahead
-	// of the prompt row.
-	//
-	// Source contract: p.Source must be "" (defaulted to "system") or
-	// "system" and p.SystemSlug must be non-empty. Non-system sources are
-	// rejected — SeedOrUpdate is the shipped-content seeder; anything else
-	// (user prompts via the HTTP handler, imported skills via the file
-	// importer) goes through Create / UpdateImported. The version-sidecar
-	// would otherwise track non-system rows and re-seeds could silently
-	// overwrite them.
-	//
-	// Postgres-only: must run on the admin connection because
-	// system_prompt_versions writes are REVOKE'd from tf_app. The
-	// impl picks the right pool internally — callers don't (and
-	// shouldn't) choose.
-	SeedOrUpdate(ctx context.Context, orgID, teamID string, p domain.Prompt) (string, error)
-
 	// List returns non-hidden prompts ordered by updated_at DESC. When
 	// teamID is non-empty — the multi-team prompts page narrowed to one
 	// team — the result is scoped to that team's prompts (team_id=teamID).
@@ -95,9 +63,9 @@ type PromptStore interface {
 	Create(ctx context.Context, orgID, teamID string, p domain.Prompt) error
 
 	// Update changes name + body + model and stamps user_modified=true.
-	// The flag tells SeedOrUpdate to leave the row alone on subsequent
-	// shipped-content updates. model="" means "inherit the global default
-	// at dispatch time".
+	// The flag tells the boot-time shipped-defaults sync to leave the row
+	// (and its whole blueprint unit) alone on subsequent shipped-content
+	// updates. model="" means "inherit the global default at dispatch time".
 	Update(ctx context.Context, orgID string, id, name, body, model string) error
 
 	// UpdateImported updates a re-imported skill's metadata + body

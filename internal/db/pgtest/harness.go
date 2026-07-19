@@ -455,8 +455,8 @@ var orgScopedTables = []string{
 	"repo_profiles", "poller_state",
 	"prompts",
 	// marketplace_listings cascades into its version/event/vote/install
-	// children via their own org_id-CASCADE FKs, same as prompts →
-	// system_prompt_versions below — only the parent needs listing here.
+	// children via their own org_id-CASCADE FKs — only the parent needs
+	// listing here.
 	"marketplace_listings",
 	// slack_event_deliveries carries no org_id column and no FK (keyed on
 	// workspace_id text alone; see the migration), so unlike
@@ -496,10 +496,8 @@ var orgScopedTables = []string{
 	"instance_stats", "operators",
 	// users last — most other tables FK into it.
 	"users",
-	// NOT INCLUDED explicitly: system_prompt_versions, events_catalog.
-	// events_catalog survives Reset, but system_prompt_versions does not:
-	// TRUNCATE ... CASCADE reaches it transitively because it FK-depends
-	// on prompts, which is truncated above.
+	// NOT INCLUDED explicitly: events_catalog — it is a read-only system
+	// registry seeded once and deliberately survives Reset.
 }
 
 // Reset truncates all org-scoped tables (CASCADE follows FKs into

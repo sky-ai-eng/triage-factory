@@ -12,7 +12,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -30,19 +29,6 @@ func TestPromptStore_SQLite(t *testing.T) {
 		}
 		return stores.Prompts, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seeder
 	})
-}
-
-// TestPromptStore_SQLite_SeedOrUpdate_AssertsLocalOrg pins the local-org
-// guard: any orgID other than runmode.LocalDefaultOrgID must fail loudly
-// rather than silently writing to a table with no org_id column.
-func TestPromptStore_SQLite_SeedOrUpdate_AssertsLocalOrg(t *testing.T) {
-	conn := openSQLiteForTest(t)
-	stores := sqlitestore.New(conn)
-	_, err := stores.Prompts.SeedOrUpdate(t.Context(), "some-real-uuid", runmode.LocalDefaultTeamID,
-		domain.Prompt{SystemSlug: "system-bad", Name: "X", Body: "x", Source: "system"})
-	if err == nil {
-		t.Fatalf("SeedOrUpdate accepted non-local orgID; should reject")
-	}
 }
 
 // openSQLiteForTest returns a fresh in-memory SQLite handle with the
@@ -75,7 +61,7 @@ func seedSQLiteRunsForStats(t *testing.T, conn *sql.DB, promptID string, statusB
 	now := time.Now().UTC()
 
 	// The prompt is assumed to already exist (the harness seeds via
-	// SeedOrUpdate before calling). Runs needs a task + entity to
+	// Create before calling). Runs needs a task + entity to
 	// satisfy FKs.
 	entityID := uuid.New().String()
 	taskID := uuid.New().String()

@@ -33,9 +33,9 @@ func TestBlueprintStore_SQLite_Conformance(t *testing.T) {
 }
 
 // TestBlueprintStore_SQLite_DuplicationConformance runs the shared
-// DuplicatePrompts deep-copy suite against the SQLite impl. Prompts are seeded
-// via the store (Create for user, SeedOrUpdate for system) so the
-// system-has-no-creator + slug invariants are honored without raw INSERTs.
+// DuplicatePrompts deep-copy suite against the SQLite impl. User prompts seed
+// via the store; system prompts (source='system', creator NULL, a system_slug)
+// go through a raw INSERT since PromptStore no longer carries a shipped seeder.
 func TestBlueprintStore_SQLite_DuplicationConformance(t *testing.T) {
 	dbtest.RunBlueprintDuplicationConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, dbtest.DuplicationPromptSeeder, dbtest.DuplicationPromptGetter) {
 		t.Helper()
@@ -46,11 +46,7 @@ func TestBlueprintStore_SQLite_DuplicationConformance(t *testing.T) {
 		seed := func(t *testing.T, p domain.Prompt) string {
 			t.Helper()
 			if p.Source == "system" {
-				id, err := stores.Prompts.SeedOrUpdate(ctx, org, team, p)
-				if err != nil {
-					t.Fatalf("seed system prompt: %v", err)
-				}
-				return id
+				return insertSystemPromptForTest(t, conn, p)
 			}
 			if p.ID == "" {
 				p.ID = uuid.New().String()
@@ -85,6 +81,24 @@ func insertPromptForBlueprintTest(t *testing.T, conn *sql.DB, p domain.Prompt) {
 	`, p.ID, p.Name, p.Body, p.Source, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, now, now); err != nil {
 		t.Fatalf("seed prompt %s: %v", p.ID, err)
 	}
+}
+
+// insertSystemPromptForTest seeds a shipped-shape prompt row directly:
+// source='system', creator_user_id NULL, and the given system_slug — the shape
+// PromptStore.Create can't produce (it forces a non-NULL creator). Returns the id.
+func insertSystemPromptForTest(t *testing.T, conn *sql.DB, p domain.Prompt) string {
+	t.Helper()
+	if p.ID == "" {
+		p.ID = uuid.New().String()
+	}
+	now := time.Now().UTC()
+	if _, err := conn.Exec(`
+		INSERT INTO prompts (id, name, body, source, allowed_tools, model, usage_count, user_modified, team_id, system_slug, creator_user_id, created_at, updated_at)
+		VALUES (?, ?, ?, 'system', ?, ?, 0, 0, ?, ?, NULL, ?, ?)
+	`, p.ID, p.Name, p.Body, p.AllowedTools, p.Model, runmode.LocalDefaultTeamID, p.SystemSlug, now, now); err != nil {
+		t.Fatalf("seed system prompt %s: %v", p.ID, err)
+	}
+	return p.ID
 }
 
 // insertBlueprintForTest creates a user-source blueprint row owned by the

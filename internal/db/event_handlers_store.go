@@ -179,7 +179,7 @@ type ShippedEventHandler struct {
 // triggers ship with Enabled=false per project convention.
 //
 // BlueprintID values on trigger entries reference shipped blueprints seeded
-// by BlueprintStore.SeedOrUpdate. Call order at boot is prompts →
+// by ShippedDefaultsStore.SeedShippedIntoTeam. Its phase order is prompts →
 // blueprints(+steps) → EventHandlerStore.Seed so the FK from event_handlers
 // (blueprint_id, org_id) → blueprints (id, org_id) is satisfied at seed time
 // in Postgres.

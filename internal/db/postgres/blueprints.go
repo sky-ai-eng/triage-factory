@@ -25,9 +25,8 @@ import (
 //     orchestrator goroutine — delegateBlueprint / runBlueprint /
 //     terminateBlueprint — detaches from the kicking-off handler's context
 //     the moment it spawns, so it has no JWT-claims in scope and routes
-//     through admin via the `...System` variants. The header seeder also
-//     runs here (claims-less system rows). org_id stays in the WHERE clause
-//     as defense in depth.
+//     through admin via the `...System` variants. org_id stays in the WHERE
+//     clause as defense in depth.
 //
 // CreateRun routes internally on BlueprintRun.TriggerType, mirroring the
 // AgentRunStore.Create pattern: event-triggered runs land on the admin pool
@@ -45,42 +44,6 @@ func newBlueprintStore(app, admin queryer) db.BlueprintStore {
 var _ db.BlueprintStore = (*blueprintStore)(nil)
 
 // --- Blueprint header CRUD -----------------------------------------------
-
-func (s *blueprintStore) SeedOrUpdate(ctx context.Context, orgID, teamID string, b domain.Blueprint) (string, error) {
-	if teamID == "" {
-		return "", errors.New("postgres blueprints: SeedOrUpdate requires team_id (blueprints are team-scoped)")
-	}
-	if b.Source == "" {
-		b.Source = "system"
-	}
-	if b.Source != "system" {
-		return "", fmt.Errorf("postgres blueprints: SeedOrUpdate only accepts Source=\"system\" (got %q)", b.Source)
-	}
-	if b.SystemSlug == "" {
-		return "", fmt.Errorf("postgres blueprints: SeedOrUpdate requires a non-empty SystemSlug")
-	}
-	now := time.Now().UTC()
-	newID := uuid.New().String()
-	// ON CONFLICT DO NOTHING (no versions sidecar — pushing step-list updates
-	// to shipped blueprints is a future concern). System rows are team-owned
-	// with no human author (blueprints_system_has_no_creator pins
-	// source='system' ↔ creator_user_id NULL).
-	if _, err := s.admin.ExecContext(ctx, `
-		INSERT INTO blueprints (id, org_id, team_id, system_slug, creator_user_id, name, source, usage_count, user_modified, created_at, updated_at)
-		VALUES ($1, $2, $3::uuid, $4, NULL, $5, $6, 0, FALSE, $7, $7)
-		ON CONFLICT (org_id, team_id, system_slug) DO NOTHING
-	`, newID, orgID, teamID, b.SystemSlug, b.Name, b.Source, now); err != nil {
-		return "", fmt.Errorf("insert blueprint: %w", err)
-	}
-	var id string
-	if err := s.admin.QueryRowContext(ctx,
-		`SELECT id FROM blueprints WHERE org_id = $1 AND team_id = $2::uuid AND system_slug = $3`,
-		orgID, teamID, b.SystemSlug,
-	).Scan(&id); err != nil {
-		return "", fmt.Errorf("resolve blueprint id: %w", err)
-	}
-	return id, nil
-}
 
 func (s *blueprintStore) List(ctx context.Context, orgID string, teamID string) ([]domain.Blueprint, error) {
 	args := []any{orgID}

@@ -4,7 +4,9 @@ import (
 	"context"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -130,6 +132,23 @@ func (a *App) startBrain(term int64) {
 		refreshInterval, refreshAfter = credprovision.RefreshCadenceForTTL(a.llmResolver.TTL())
 	}
 	go credprovision.RunRefreshSweep(brainCtx, a.credProvisioner, refreshInterval, refreshAfter)
+	// Shipped-defaults sync (TFAC-660): bring every provisioned team's
+	// UNMODIFIED copies of the shipped prompts/blueprints up to the current
+	// compile-time content. Leader-only (this is the brain), idempotent, and
+	// cheap to repeat every boot — the equality check makes an already-synced
+	// team a pure read. Spawned so the non-blocking contract above holds.
+	go a.runShippedDefaultsSync(brainCtx)
+}
+
+// runShippedDefaultsSync sweeps every provisioned org × team, bringing each
+// team's unmodified shipped-default copies equal to the current shipped content
+// (db.SyncShippedDefaultsForAllTeams). Per-team failures are logged and skipped
+// so a bad team never blocks boot; a fresh install with no tenant no-ops. Honors
+// ctx so a demoted lease holder stops mid-fleet.
+func (a *App) runShippedDefaultsSync(ctx context.Context) {
+	if err := db.SyncShippedDefaultsForAllTeams(ctx, a.stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		appLog.Warn("shipped defaults sync: completed with per-team errors", "err", err)
+	}
 }
 
 // stopBrain stops the background brain. Idempotent under brainMu.

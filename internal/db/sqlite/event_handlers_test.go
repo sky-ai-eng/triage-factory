@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -25,10 +26,13 @@ func TestEventHandlerStore_SQLite(t *testing.T) {
 			t.Helper()
 			out := make(map[string]string, len(slugs))
 			for _, slug := range slugs {
-				id, err := stores.Blueprints.SeedOrUpdate(t.Context(), orgID, teamID, domain.Blueprint{
-					SystemSlug: slug, Name: slug, Source: "system",
-				})
-				if err != nil {
+				// The trigger→blueprint FK only needs a same-team blueprint row to
+				// exist; a plain user blueprint satisfies it (the seeded system-slug
+				// shape is exercised in the shipped-defaults sync suite).
+				id := uuid.New().String()
+				if err := stores.Blueprints.Create(t.Context(), orgID, teamID, domain.Blueprint{
+					ID: id, Name: slug, Source: "user",
+				}); err != nil {
 					t.Fatalf("seed blueprint %s: %v", slug, err)
 				}
 				out[slug] = id
