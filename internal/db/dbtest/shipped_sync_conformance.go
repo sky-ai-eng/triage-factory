@@ -276,6 +276,18 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 		}
 	})
 
+	t.Run("InconsistentShippedList_Errors", func(t *testing.T) {
+		stores, orgID, teamID, _ := factory(t)
+		// A shipped blueprint references a step slug with no matching shipped
+		// prompt (a release-authoring mistake). The sync must fail loudly rather
+		// than resolve it to empty content and clobber/insert an empty row.
+		prompts := []domain.Prompt{syncPrompt("real", "Real", "r", "", "")}
+		bps := []domain.SeedBlueprint{syncBlueprint("u", "U", "real", "ghost")}
+		if err := stores.ShippedDefaults.SyncShippedIntoTeam(ctx, orgID, teamID, prompts, bps); err == nil {
+			t.Fatal("SyncShippedIntoTeam accepted a blueprint referencing a slug absent from the shipped prompt list; want an error")
+		}
+	})
+
 	t.Run("Backfill_StampsDivergedUnflagged_Once", func(t *testing.T) {
 		stores, orgID, teamID, resetBackfill := factory(t)
 		promptsA := []domain.Prompt{

@@ -148,10 +148,13 @@ func (s *shippedDefaultsStore) SyncShippedIntoTeam(ctx context.Context, orgID, t
 	if teamID == "" {
 		return errors.New("sqlite shipped_defaults: SyncShippedIntoTeam requires team_id")
 	}
+	shippedBySlug := db.ShippedPromptsBySlug(shippedPrompts)
+	if err := db.ValidateShippedConsistency(shippedBlueprints, shippedBySlug); err != nil {
+		return fmt.Errorf("shipped defaults sync: %w", err)
+	}
 	if err := s.backfillShippedDefaults(ctx, orgID, teamID, shippedBlueprints); err != nil {
 		return fmt.Errorf("shipped defaults sync backfill: %w", err)
 	}
-	shippedBySlug := db.ShippedPromptsBySlug(shippedPrompts)
 	for _, b := range shippedBlueprints {
 		if b.SystemSlug == "" {
 			return fmt.Errorf("shipped defaults sync: shipped blueprint %q has empty system_slug", b.Name)
@@ -171,7 +174,7 @@ func (s *shippedDefaultsStore) backfillShippedDefaults(ctx context.Context, orgI
 	return inTx(ctx, s.q, func(q queryer) error {
 		var backfilledAt sql.NullTime
 		switch err := q.QueryRowContext(ctx,
-			`SELECT shipped_defaults_backfilled_at FROM teams WHERE id = ?`, teamID,
+			`SELECT shipped_defaults_backfilled_at FROM teams WHERE org_id = ? AND id = ?`, orgID, teamID,
 		).Scan(&backfilledAt); {
 		case errors.Is(err, sql.ErrNoRows):
 			return nil // team vanished mid-sweep; nothing to backfill
@@ -201,15 +204,21 @@ func (s *shippedDefaultsStore) backfillShippedDefaults(ctx context.Context, orgI
 				return err
 			}
 			if db.SlugsDiverged(slugs, b.StepPromptSlugs) {
+				// Deliberately leaves updated_at untouched: the grandfather stamp
+				// is a silent correction that shouldn't reorder the (updated_at
+				// DESC) blueprint list for local users. Postgres bumps updated_at
+				// here via its unconditional set_updated_at trigger, an accepted
+				// cosmetic divergence — multi-mode has no users yet and the pass
+				// is one-time.
 				if _, err := q.ExecContext(ctx,
-					`UPDATE blueprints SET user_modified = 1 WHERE id = ?`, bpID,
+					`UPDATE blueprints SET user_modified = 1 WHERE org_id = ? AND id = ?`, orgID, bpID,
 				); err != nil {
 					return fmt.Errorf("stamp user_modified on %s: %w", b.SystemSlug, err)
 				}
 			}
 		}
 		if _, err := q.ExecContext(ctx,
-			`UPDATE teams SET shipped_defaults_backfilled_at = ? WHERE id = ?`, now, teamID,
+			`UPDATE teams SET shipped_defaults_backfilled_at = ? WHERE org_id = ? AND id = ?`, now, orgID, teamID,
 		); err != nil {
 			return fmt.Errorf("set backfill marker: %w", err)
 		}

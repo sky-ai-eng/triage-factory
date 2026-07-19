@@ -190,6 +190,9 @@ func PlanUnitSync(shipped domain.SeedBlueprint, shippedPromptBySlug map[string]d
 func planPromptWrites(shipped domain.SeedBlueprint, shippedPromptBySlug map[string]domain.Prompt, st TeamUnitState) ([]PromptContentWrite, string) {
 	var writes []PromptContentWrite
 	for _, slug := range shipped.StepPromptSlugs {
+		// Every step slug is guaranteed present by ValidateShippedConsistency,
+		// which SyncShippedIntoTeam runs before any planning — so this index
+		// never resolves to a zero-value (empty-content) prompt.
 		want := shippedPromptBySlug[slug]
 		row := st.PromptsBySlug[slug]
 		switch {
@@ -264,6 +267,25 @@ func ShippedPromptsBySlug(prompts []domain.Prompt) map[string]domain.Prompt {
 		m[p.SystemSlug] = p
 	}
 	return m
+}
+
+// ValidateShippedConsistency fails loudly when a shipped blueprint references a
+// step prompt slug that has no entry in the shipped prompt list — an authoring
+// mistake in the compile-time lists. Without this the planner would resolve the
+// slug to a zero-value prompt and silently overwrite (or insert) empty content.
+// The provision seeder guards the same invariant; the sync mirrors it. Because
+// the shipped lists are identical for every org/team, a violation fails every
+// team's sync loudly rather than corrupting data — exactly the signal a release
+// bug wants.
+func ValidateShippedConsistency(shippedBlueprints []domain.SeedBlueprint, shippedPromptBySlug map[string]domain.Prompt) error {
+	for _, b := range shippedBlueprints {
+		for _, slug := range b.StepPromptSlugs {
+			if _, ok := shippedPromptBySlug[slug]; !ok {
+				return fmt.Errorf("shipped blueprint %q references step prompt slug %q missing from the shipped prompt list", b.SystemSlug, slug)
+			}
+		}
+	}
+	return nil
 }
 
 // SyncShippedDefaultsForAllTeams runs the boot-time shipped-defaults sync across

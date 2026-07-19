@@ -157,10 +157,13 @@ func (s *shippedDefaultsStore) SyncShippedIntoTeam(ctx context.Context, orgID, t
 	if !ok {
 		return fmt.Errorf("postgres shipped_defaults: SyncShippedIntoTeam requires a *sql.DB admin handle, got %T", s.admin)
 	}
+	shippedBySlug := db.ShippedPromptsBySlug(shippedPrompts)
+	if err := db.ValidateShippedConsistency(shippedBlueprints, shippedBySlug); err != nil {
+		return fmt.Errorf("shipped defaults sync: %w", err)
+	}
 	if err := s.backfillShippedDefaults(ctx, conn, orgID, teamID, shippedBlueprints); err != nil {
 		return fmt.Errorf("shipped defaults sync backfill: %w", err)
 	}
-	shippedBySlug := db.ShippedPromptsBySlug(shippedPrompts)
 	for _, b := range shippedBlueprints {
 		if b.SystemSlug == "" {
 			return fmt.Errorf("shipped defaults sync: shipped blueprint %q has empty system_slug", b.Name)
@@ -212,6 +215,11 @@ func (s *shippedDefaultsStore) backfillShippedDefaults(ctx context.Context, conn
 			return err
 		}
 		if db.SlugsDiverged(slugs, b.StepPromptSlugs) {
+			// The blueprints set_updated_at BEFORE-UPDATE trigger bumps updated_at
+			// on this stamp — unlike SQLite, which deliberately preserves it. That
+			// cosmetic divergence is accepted: multi-mode has no users yet and the
+			// grandfather pass runs once. Suppressing the trigger here would need
+			// schema surgery for no present benefit.
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE blueprints SET user_modified = TRUE WHERE org_id = $1 AND id = $2`, orgID, bpID,
 			); err != nil {
