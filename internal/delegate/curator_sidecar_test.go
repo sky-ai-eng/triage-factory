@@ -77,6 +77,20 @@ func TestCuratorGitAuthorizeDecision(t *testing.T) {
 		}
 	})
 
+	t.Run("unpinned_and_untracked_reports_admin_not_attached", func(t *testing.T) {
+		// Both conditions fail. Tracking is the deeper, admin-actionable
+		// problem, so it must win — matching the exec-gh gate's ordering — and
+		// the agent must NOT be told it's merely "not attached to this project".
+		stores := db.Stores{TeamGitHubRepos: &fakeCuratorTeamRepos{tracked: map[string]bool{}}}
+		d, err := curatorGitAuthorizeDecision(ctx, stores, info, []string{"acme/other"}, "acme", "widgets")
+		if err != nil || d.Allowed {
+			t.Errorf("decision = (%+v, %v), want denied", d, err)
+		}
+		if d.DenyReason != "repo-not-tracked" {
+			t.Errorf("DenyReason = %q, want repo-not-tracked (tracking checked before pinned membership)", d.DenyReason)
+		}
+	})
+
 	t.Run("nil_store_fails_closed", func(t *testing.T) {
 		d, err := curatorGitAuthorizeDecision(ctx, db.Stores{}, info, pinned, "acme", "widgets")
 		if err != nil || d.Allowed {

@@ -393,7 +393,12 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 				// must not slip through unauthorized.
 				return gitproxy.Decision{Allowed: false}, err
 			}
-			return gitproxy.Decision{Allowed: reply.Allowed, AllowedRefs: reply.AllowedRefs}, nil
+			return gitproxy.Decision{
+				Allowed:     reply.Allowed,
+				AllowedRefs: reply.AllowedRefs,
+				DenyReason:  reply.DenyReason,
+				DenyMessage: reply.DenyMessage,
+			}, nil
 		},
 		RecordDenial: func(_ context.Context, denied gitproxy.DeniedGitOp) {
 			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordDenial,
