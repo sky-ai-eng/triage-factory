@@ -127,9 +127,19 @@ type TokenSource func(ctx context.Context, owner, repo string) (Token, error)
 // refs (refs/heads/...) it may update. An empty AllowedRefs on an Allowed
 // decision means "no push is permitted" (every receive-pack ref will be
 // rejected); a fetch/advertise only needs Allowed.
+//
+// DenyReason and DenyMessage refine a !Allowed decision so the agent gets an
+// actionable next step instead of a flat 403. DenyReason is the machine token
+// recorded in the audit trail (falls back to "repo-not-authorized" when
+// empty); DenyMessage is the 403 body the agent sees in git's remote output
+// (falls back to the generic "repo not authorized for this run" when empty).
+// Both are ignored on an Allowed decision. Loopback/test allow-all wiring
+// leaves them empty and keeps the original generic denial.
 type Decision struct {
 	Allowed     bool
 	AllowedRefs []string
+	DenyReason  string
+	DenyMessage string
 }
 
 // DeniedGitOp is one denied git operation handed to Config.RecordDenial for
@@ -428,8 +438,20 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 			if !d.Allowed {
-				s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: "repo-not-authorized"})
-				http.Error(w, "gitproxy: repo not authorized for this run", http.StatusForbidden)
+				// The decision may carry a specific reason/message (tracked-but-
+				// unmaterialized vs untracked, so the agent knows whether to run
+				// `workspace add` or escalate to an admin); fall back to the
+				// generic denial for allow-all/test wiring that sets neither.
+				reason := d.DenyReason
+				if reason == "" {
+					reason = "repo-not-authorized"
+				}
+				msg := d.DenyMessage
+				if msg == "" {
+					msg = "gitproxy: repo not authorized for this run"
+				}
+				s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: reason})
+				http.Error(w, msg, http.StatusForbidden)
 				return
 			}
 			decision = d

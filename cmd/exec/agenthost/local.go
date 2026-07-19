@@ -1032,17 +1032,22 @@ func (c *LocalClient) legacyRepoClient(ctx context.Context, owner, repo string) 
 // a transient DB blip during a denied gh op still leaves an audit trail —
 // symmetric with the proxy's "authorize-error" path.
 //
-// The two hard-deny outcomes are deliberately distinct, because the agent's
+// The three hard-deny outcomes are deliberately distinct, because the agent's
 // recovery differs and a bare "not authorized" left it guessing (the common
 // case: a Slack-triggered taskless run that hasn't cloned anything yet, so no
-// repo is materialized):
+// repo is materialized). The git proxy's deny path mirrors these same three —
+// keep the wording in sync with internal/delegate's gitDeny* builders:
 //
 //   - Untracked ("repo-not-tracked") — the repo isn't attached to this run's
 //     team, so it never appears in this run's `workspace list` and the agent
 //     cannot self-serve. Only a team admin adding it as a tracked repo helps.
-//   - Tracked but not materialized ("repo-not-materialized") — the repo IS in
-//     this run's `workspace list` ("available"), just not persisted into the
-//     run's worktrees yet. The agent fixes it itself with `workspace add`.
+//   - Tracked, delegated run, not materialized ("repo-not-materialized") — the
+//     repo IS in this run's `workspace list` ("available"), just not persisted
+//     into the run's worktrees yet. The agent fixes it with `workspace add`.
+//   - Tracked, curator turn, not in the pinned set ("repo-not-attached") — a
+//     curator turn authorizes off its fixed pinned set and materializes
+//     nothing, so `workspace add` is NOT the fix; the repo is simply outside
+//     the project. Point the agent at a repo the project already carries.
 func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) error {
 	if !c.gateWired {
 		return nil
@@ -1055,7 +1060,7 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 	}
 	if !tracks {
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "repo-not-tracked")
-		return fmt.Errorf("repo %s is not tracked by this team, so this run cannot access it; a team admin must add it as a tracked repo in Settings before it can be used", repoID)
+		return fmt.Errorf("repo %s is not tracked by this team; a team admin must add it as a tracked repo in Settings before it can be used", repoID)
 	}
 	// Curator turns carry their authorized set explicitly (no run_worktrees
 	// ledger); a delegated run passes an empty PinnedRepos so this arm is
@@ -1064,6 +1069,12 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 		if strings.EqualFold(p, repoID) {
 			return nil
 		}
+	}
+	// A non-empty pinned set marks a curator turn: it materializes nothing, so
+	// a tracked-but-unpinned repo is outside the project, not merely un-cloned.
+	if len(c.info.PinnedRepos) > 0 {
+		c.RecordGitDenied(ctx, owner, repo, "", "gh", "repo-not-attached")
+		return fmt.Errorf("repo %s is not attached to this project, so it cannot be accessed here; use a repo attached to this project instead", repoID)
 	}
 	rows, lerr := c.rt.ListRunWorktrees(ctx)
 	if lerr != nil {

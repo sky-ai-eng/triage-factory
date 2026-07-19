@@ -58,13 +58,17 @@ func TestAuthorizeRepo_CuratorPinnedSet(t *testing.T) {
 	})
 
 	t.Run("tracked_but_not_pinned_is_denied", func(t *testing.T) {
-		rt := &gateRuntime{tracks: true} // tracked, but no ledger row and not pinned
+		rt := &gateRuntime{tracks: true} // tracked, but not in this curator turn's pinned set
 		c := newGateClient([]string{"acme/other"}, rt)
 		err := c.authorizeRepo(ctx, "acme", "widgets")
-		// Tracked but not materialized: the message must tell the agent to
-		// self-serve with `workspace add`, since that is the recovery.
-		if err == nil || !strings.Contains(err.Error(), "workspace add acme/widgets") {
-			t.Fatalf("authorizeRepo = %v, want a 'workspace add' recovery hint (tracked, not in pinned set, no ledger row)", err)
+		// A curator turn (non-empty pinned set) materializes nothing, so the
+		// message must NOT suggest `workspace add`; the repo is outside the
+		// project.
+		if err == nil || !strings.Contains(err.Error(), "not attached to this project") {
+			t.Fatalf("authorizeRepo = %v, want a 'not attached to this project' hint (curator turn, repo not pinned)", err)
+		}
+		if strings.Contains(err.Error(), "workspace add") {
+			t.Errorf("curator not-attached message %q should not suggest 'workspace add'", err)
 		}
 		if len(rt.denied) != 1 || rt.denied[0] != "acme/widgets" {
 			t.Errorf("recorded denials %v, want [acme/widgets]", rt.denied)

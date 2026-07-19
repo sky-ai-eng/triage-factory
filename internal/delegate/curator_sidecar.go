@@ -212,14 +212,14 @@ func curatorGitAuthorizeDecision(ctx context.Context, stores db.Stores, info age
 		}
 	}
 	if !pinned {
-		return gitproxy.Decision{Allowed: false}, nil
+		return gitDenyNotAttached(repoID), nil
 	}
 	tracks, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, info.TeamID, owner, repo)
 	if err != nil {
 		return gitproxy.Decision{}, err
 	}
 	if !tracks {
-		return gitproxy.Decision{Allowed: false}, nil
+		return gitDenyNotTracked(repoID), nil
 	}
 	return gitproxy.Decision{Allowed: true}, nil
 }
