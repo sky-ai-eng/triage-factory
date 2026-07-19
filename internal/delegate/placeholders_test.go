@@ -207,6 +207,26 @@ func TestBuildPromptReplacer_RunURL(t *testing.T) {
 	}
 }
 
+func TestBuildPromptReplacer_KnownAndUnknownPlaceholders(t *testing.T) {
+	// Back-compat lock: a known placeholder still interpolates, and an
+	// unknown name passes through as literal braces so a prompt author sees
+	// it plainly on first run. Both survive the placeholder feature's
+	// retirement from the UI — interpolation stays as internal plumbing.
+	task := domain.Task{
+		EventType:      domain.EventGitHubPRCICheckFailed,
+		EntitySource:   "github",
+		EntitySourceID: "owner/repo#42",
+	}
+
+	r := BuildPromptReplacer(task, "", "run-xyz", "/bin/tf", "/work", "bp-run-1", "tfac/<ticket-id>", "")
+
+	got := interpolate(r, "pr={{PR_NUMBER}} unknown={{NOT_A_THING}}")
+	want := "pr=42 unknown={{NOT_A_THING}}"
+	if got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+}
+
 func TestParseGitHubEntitySourceID(t *testing.T) {
 	cases := []struct {
 		in              string

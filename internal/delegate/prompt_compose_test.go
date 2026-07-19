@@ -54,3 +54,113 @@ func TestBuildPrompt_InterpolatesInjectedSections(t *testing.T) {
 		t.Errorf("expected concrete entity-memory write path in the composed prompt;\n%s", out)
 	}
 }
+
+// TestBuildPrompt_BeginsWithTaskContext asserts every composed prompt leads
+// with the injected task-context block, across the four task shapes the block
+// must handle: a fully-populated GitHub CI failure, a Jira task, a Slack task
+// (metadata-fence-only), and a zero-valued taskless run.
+func TestBuildPrompt_BeginsWithTaskContext(t *testing.T) {
+	cases := []struct {
+		name     string
+		task     domain.Task
+		metadata string
+	}{
+		{
+			name: "github ci",
+			task: domain.Task{
+				Title:          "Fix CI",
+				EventType:      domain.EventGitHubPRCICheckFailed,
+				EntitySource:   "github",
+				EntitySourceID: "owner/repo#18",
+			},
+			metadata: `{"check_name":"go-test","workflow_run_id":12345,"head_sha":"abc123"}`,
+		},
+		{
+			name: "jira",
+			task: domain.Task{
+				Title:          "SKY-1 assigned",
+				EventType:      domain.EventJiraIssueAssigned,
+				EntitySource:   "jira",
+				EntitySourceID: "SKY-1",
+			},
+			metadata: `{"assignee":"Jane","status":"To Do"}`,
+		},
+		{
+			name: "slack",
+			task: domain.Task{
+				Title:        "Slack mention",
+				EventType:    "slack:message",
+				EntitySource: "slack",
+			},
+			metadata: `{"channel":"C1","text":"look at this"}`,
+		},
+		{
+			name:     "zero valued",
+			task:     domain.Task{},
+			metadata: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := buildPrompt(tc.task, tc.metadata, "mission body", "Repository: owner/repo",
+				"", "/bin/tf", "run-1", "/work", "bp-run-1", "tfac/<ticket-id>", "")
+			if !strings.HasPrefix(out, "<task_context>\n") {
+				t.Errorf("composed prompt must begin with the task-context block;\n%s", out)
+			}
+		})
+	}
+}
+
+// TestBuildPrompt_PrependOnly locks the composition contract: for any existing
+// prompt, the composed output differs from the pre-injection output by exactly
+// the prepended block plus its separator — nothing else changes.
+func TestBuildPrompt_PrependOnly(t *testing.T) {
+	task := domain.Task{
+		Title:          "review PR #7",
+		EventType:      domain.EventGitHubPRReviewRequested,
+		EntitySource:   "github",
+		EntitySourceID: "owner/repo#7",
+	}
+	metadata := `{"reviewer":"octocat","review_type":"changes_requested"}`
+	mission := "mission body with {{PR_NUMBER}}"
+	scope := "Repository: owner/repo"
+	toolsRef := ai.GHToolsTemplate
+
+	out := buildPrompt(task, metadata, mission, scope, toolsRef,
+		"/bin/tf", "run-1", "/work", "bp-run-1", "tfac/SKY-9", "")
+
+	// Reconstruct the pre-injection return value: the same shim + section
+	// pre-pass + replacer pass buildPrompt runs, without the prepended block.
+	body := strings.ReplaceAll(mission, "triagefactory exec", "/bin/tf exec")
+	full := body + "\n\n" + ai.EnvelopeTemplate
+	full = strings.NewReplacer("{{TOOLS_REFERENCE}}", toolsRef, "{{SCOPE}}", scope).Replace(full)
+	prev := BuildPromptReplacer(task, metadata, "run-1", "/bin/tf", "/work", "bp-run-1", "tfac/SKY-9", "").Replace(full)
+
+	want := BuildTaskContext(task, metadata) + "\n\n" + prev
+	if out != want {
+		t.Errorf("composed output must be exactly the block + separator + prior output;\n--- got ---\n%s\n--- want ---\n%s", out, want)
+	}
+}
+
+// TestBuildPrompt_ExternalTextNotInterpolated proves the ordering is what makes
+// external placeholder-shaped text inert: a task title carrying literal
+// {{RUN_ID}} survives verbatim in the block, while a real body placeholder in
+// the mission still interpolates.
+func TestBuildPrompt_ExternalTextNotInterpolated(t *testing.T) {
+	task := domain.Task{
+		Title:          "handle {{RUN_ID}} in the retry path",
+		EventType:      domain.EventGitHubPRCICheckFailed,
+		EntitySource:   "github",
+		EntitySourceID: "owner/repo#5",
+	}
+
+	out := buildPrompt(task, "", "mission for run {{RUN_ID}}", "", "",
+		"/bin/tf", "the-real-run-id", "/work", "bp-run-1", "tfac/<ticket-id>", "")
+
+	if !strings.Contains(out, "handle {{RUN_ID}} in the retry path") {
+		t.Errorf("external {{RUN_ID}} in the title must survive uninterpolated;\n%s", out)
+	}
+	if !strings.Contains(out, "mission for run the-real-run-id") {
+		t.Errorf("a genuine body placeholder must still interpolate;\n%s", out)
+	}
+}
