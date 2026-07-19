@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -287,11 +288,12 @@ func TestHandleEventHandlerDelete_UserRowHardDeletes(t *testing.T) {
 	}
 }
 
-// TestHandleEventHandlerDelete_SystemRowHardDeletes pins the current
-// behavior: a shipped (system) handler hard-deletes unconditionally — no
-// soft-disable fallback, no resurrection. Nothing re-seeds at boot, so the
-// deletion is durable.
-func TestHandleEventHandlerDelete_SystemRowHardDeletes(t *testing.T) {
+// TestHandleEventHandlerDelete_SystemRowSoftDeletes pins the current
+// behavior: a shipped (system_slug) handler soft-deletes — deleted_at is
+// stamped, but the row survives so its (org_id, team_id, system_slug)
+// identity stays occupied and the boot-time shipped-content sync never
+// resurrects it.
+func TestHandleEventHandlerDelete_SystemRowSoftDeletes(t *testing.T) {
 	s := newTestServer(t)
 	// Insert a system-source handler directly (newTestServer seeds the
 	// tenant but no handlers; provisioning would, but a single row keeps
@@ -312,15 +314,23 @@ func TestHandleEventHandlerDelete_SystemRowHardDeletes(t *testing.T) {
 	var got map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
 	if got["status"] != "deleted" {
-		t.Errorf("status=%v want deleted (system rows now hard-delete)", got["status"])
+		t.Errorf("status=%v want deleted", got["status"])
 	}
-	// The row is gone, not merely disabled.
-	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM event_handlers WHERE id = ?`, id).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
+	// GET returns 404 (deleted_at IS NULL filter), same observable shape as a
+	// hard delete to every caller except the sync.
+	follow := doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+id, map[string]any{"name": "x"})
+	if follow.Code != http.StatusNotFound {
+		t.Errorf("expected 404 after delete, got %d", follow.Code)
 	}
-	if n != 0 {
-		t.Errorf("system handler row count=%d after delete; want 0 (hard delete, not soft-disable)", n)
+	// The row survives (deleted_at stamped, not removed) so the slug slot
+	// stays occupied — not a soft-disable (enabled untouched, still hidden
+	// from every read path).
+	var deletedAt sql.NullString
+	if err := s.db.QueryRow(`SELECT deleted_at FROM event_handlers WHERE id = ?`, id).Scan(&deletedAt); err != nil {
+		t.Fatalf("query row: %v", err)
+	}
+	if !deletedAt.Valid {
+		t.Errorf("deleted_at not stamped on the shipped row; want it soft-deleted, not gone")
 	}
 }
 

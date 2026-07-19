@@ -16,7 +16,7 @@ import (
 // exercisable.
 func TestShippedSync_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
-	dbtest.RunShippedSyncConformance(t, func(t *testing.T) (db.Stores, string, string, func(*testing.T)) {
+	factory := func(t *testing.T) (db.Stores, string, string, func(*testing.T)) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
@@ -32,5 +32,7 @@ func TestShippedSync_Postgres(t *testing.T) {
 			}
 		}
 		return stores, orgID, teamID, reset
-	})
+	}
+	dbtest.RunShippedSyncConformance(t, factory)
+	dbtest.RunShippedHandlerSyncConformance(t, factory)
 }

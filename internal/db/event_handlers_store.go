@@ -71,18 +71,25 @@ type EventHandlerStore interface {
 	// filter. The SQLite impl ignores it (local mode is single-team).
 	List(ctx context.Context, orgID string, kind string, teamID string) ([]domain.EventHandler, error)
 
-	// Get returns one handler by id, or (nil, nil) if not found.
+	// Get returns one handler by id, or (nil, nil) if not found or soft-deleted.
 	Get(ctx context.Context, orgID string, id string) (*domain.EventHandler, error)
 
-	// GetEnabledForEvent returns enabled handlers (both kinds) matching
-	// event_type, ordered rule-before-trigger so the router can process
-	// them in one pass with the same observable shape as the pre-unification
-	// two-phase loop.
+	// GetBySystemSlug resolves a team's copy of a shipped handler by its
+	// stable system_slug. Returns (nil, nil) when the team has no copy or its
+	// copy is soft-deleted — the sync's "does this slot need an insert"
+	// probe.
+	GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.EventHandler, error)
+
+	// GetEnabledForEvent returns enabled, non-deleted handlers (both kinds)
+	// matching event_type, ordered rule-before-trigger so the router can
+	// process them in one pass with the same observable shape as the
+	// pre-unification two-phase loop.
 	GetEnabledForEvent(ctx context.Context, orgID string, eventType string) ([]domain.EventHandler, error)
 
-	// ListForBlueprint returns all trigger handlers referencing the given
-	// blueprint (any source), ordered by created_at DESC. Used to surface
-	// "triggers firing this blueprint." Returns only kind='trigger' rows.
+	// ListForBlueprint returns all non-deleted trigger handlers referencing
+	// the given blueprint (any source), ordered by created_at DESC. Used to
+	// surface "triggers firing this blueprint." Returns only kind='trigger'
+	// rows.
 	ListForBlueprint(ctx context.Context, orgID string, blueprintID string) ([]domain.EventHandler, error)
 
 	// Create inserts a new user-source handler owned by teamID — the
@@ -96,33 +103,49 @@ type EventHandlerStore interface {
 
 	// Update changes a handler's mutable fields. ID, kind, source,
 	// event_type, and created_at are immutable. For triggers,
-	// blueprint_id is also immutable. updated_at is refreshed.
+	// blueprint_id is also immutable (see RetargetBlueprint). updated_at is
+	// refreshed.
+	//
+	// Stamps user_modified=true when a content field actually changed —
+	// scope_predicate_json, name, default_priority (rules), or
+	// breaker_threshold / min_autonomy_suitability (triggers). Never stamps
+	// for enabled or sort_order alone: activation state and presentation
+	// order are the user's to own regardless of content drift, matching the
+	// dedicated SetEnabled / Reorder methods below. Determined by comparing
+	// against the row's current content, so a caller that resends unchanged
+	// content alongside a new enabled value does not spuriously stamp.
 	Update(ctx context.Context, orgID string, h domain.EventHandler) error
 
 	// SetEnabled flips just the enabled bit — the user-facing enable/disable
-	// toggle. (It is no longer the system-row "disable instead of delete" path:
-	// system rows hard-delete like any other now that Seed runs only at
-	// provisioning time, not every boot — see Delete.)
+	// toggle, and (per the automations-as-toggles product direction) the
+	// primary way most users interact with a shipped handler. Never stamps
+	// user_modified: activation state is not content.
 	SetEnabled(ctx context.Context, orgID string, id string, enabled bool) error
 
-	// Delete hard-deletes a handler unconditionally — system rows included.
-	// Nothing re-seeds at boot anymore (provisioning's materializer runs once
-	// per fresh tenant via Bootstrap*), so a deleted shipped default is durable;
-	// there is no soft-disable-instead-of-delete fallback for system rows. The
-	// "disable, don't delete" convention was a relic of boot-time re-seeding.
+	// Delete removes a handler. A row with a system_slug (a shipped copy)
+	// soft-deletes — stamps deleted_at, leaving the
+	// (org_id, team_id, system_slug) identity occupied so the shipped-content
+	// sync never re-inserts (never resurrect) and never mistakes the empty
+	// slot for "add this new shipped default." A user-created row (no
+	// system_slug) hard-deletes, matching the pre-sync behavior. Every read
+	// path filters deleted_at IS NULL, so a soft-deleted row is
+	// indistinguishable from a hard-deleted one to every caller except the
+	// sync itself.
 	Delete(ctx context.Context, orgID string, id string) error
 
 	// Reorder updates sort_order for each rule based on its position
 	// in the given ID list. Rule-only — trigger IDs in the list are
 	// silently skipped (sort_order is rule-only by CHECK constraint).
-	// Wrapped in a transaction.
+	// Wrapped in a transaction. Never stamps user_modified — sort_order is
+	// presentation order the user owns, not shipped content.
 	Reorder(ctx context.Context, orgID string, ids []string) error
 
 	// Promote converts a kind='rule' row to kind='trigger' atomically:
 	// validates the incoming trigger-only fields, clears rule-only
 	// fields, writes both in one UPDATE. ID is preserved. Errors if
 	// the row isn't found, isn't a rule, or the new trigger fields
-	// don't satisfy the CHECK constraints.
+	// don't satisfy the CHECK constraints. Always stamps user_modified=true —
+	// a kind change is never something the sync should undo.
 	Promote(ctx context.Context, orgID string, id string, t domain.EventHandler) error
 
 	// RetargetBlueprint re-points a trigger at a different blueprint in a single
@@ -132,16 +155,53 @@ type EventHandlerStore interface {
 	// history and trip the FK). Trigger-only: the WHERE pins kind='trigger', so a
 	// rule id is a no-op. The caller validates that the new blueprint exists, is
 	// same-team, and is not already triggered; the one-trigger-per-blueprint
-	// partial-unique index is the hard backstop.
+	// partial-unique index is the hard backstop. Always stamps
+	// user_modified=true — a user-initiated retarget must never be silently
+	// reverted by a later sync pass (which re-resolves an unmodified trigger's
+	// blueprint binding from the shipped slug on every boot).
 	RetargetBlueprint(ctx context.Context, orgID string, id string, newBlueprintID string) error
+
+	// Sync brings teamID's unmodified copies of shippedHandlers up to current
+	// shipped content, one handler at a time. Production callers always pass
+	// db.ShippedEventHandlers — the parameter (mirroring
+	// SyncShippedIntoTeam's shippedPrompts/shippedBlueprints) exists so tests
+	// can sync against fixture content instead of the real compile-time list.
+	// See db.ShippedDefaultsStore.SyncShippedIntoTeam for the normative
+	// rules; this is its handler-sync phase, called after the blueprint sync
+	// phase so blueprintIDsBySlug reflects post-sync state. Per shipped
+	// handler:
+	//
+	//   - Skip if the team's row is soft-deleted or user_modified.
+	//   - Skip a trigger whose shipped blueprint slug isn't present in
+	//     blueprintIDsBySlug (the team's copy of that blueprint doesn't exist
+	//     or is itself soft-deleted) — never wire a trigger to a blueprint
+	//     that isn't there.
+	//   - Insert if the team has no row for the shipped system_slug, honoring
+	//     the shipped convention (rules enabled=true, triggers enabled=false)
+	//     and initial sort_order — matching Seed.
+	//   - No-op if already equal to shipped content (no updated_at churn).
+	//   - Otherwise update only the content fields (scope_predicate_json,
+	//     name, default_priority for rules; blueprint_id, breaker_threshold,
+	//     min_autonomy_suitability for triggers) — never enabled, never
+	//     sort_order, never user_modified.
+	//
+	// blueprintIDsBySlug maps each shipped blueprint's system_slug to the
+	// team's current (non-deleted) blueprint-copy id — the same shape Seed
+	// takes, built fresh by the caller from post-blueprint-sync state.
+	//
+	// Runs on the admin pool; must run OUTSIDE any WithTx (mirrors Seed).
+	Sync(ctx context.Context, orgID, teamID string, shippedHandlers []ShippedEventHandler, blueprintIDsBySlug map[string]string) error
 
 	// --- Admin-pool variants (`...System`) ---
 	//
 	// The router consumes these from its eventbus subscriber
 	// goroutine, which has no JWT-claims context. Admin-pool routing
 	// in Postgres; SQLite collapses to the non-System variants.
-	// org_id stays in the WHERE clause as defense in depth.
-
+	// org_id stays in the WHERE clause as defense in depth. Both filter
+	// deleted_at IS NULL like their app-pool counterparts — a soft-deleted
+	// trigger must resolve to "not found" for the router (no longer fires)
+	// and for pending-firing resolution (treated as trigger-disabled), not
+	// silently keep acting as if it were live.
 	GetSystem(ctx context.Context, orgID string, id string) (*domain.EventHandler, error)
 	GetEnabledForEventSystem(ctx context.Context, orgID string, eventType string) ([]domain.EventHandler, error)
 }

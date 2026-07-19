@@ -59,7 +59,7 @@ func (eh *eventHandlersHandler) gateHandlerWrite(w http.ResponseWriter, r *http.
 //                                                       trigger-style "send
 //                                                       the full mutable set"
 //                                                       calls — same handler)
-//   DELETE /api/event-handlers/{id}                   — hard delete (system rows included)
+//   DELETE /api/event-handlers/{id}                   — delete (soft for shipped rows)
 //   POST   /api/event-handlers/{id}/toggle            — flip enabled bit
 //   POST   /api/event-handlers/{id}/promote           — rule → trigger
 //   PUT    /api/event-handlers/reorder                — rules-only sort_order
@@ -510,11 +510,11 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 
 // DELETE /api/event-handlers/{id}
 //
-// Hard-deletes unconditionally — system rows included. Nothing re-seeds
-// at boot anymore (provisioning is the one-time explicit BootstrapLocalOrg
-// action, and its materializer only runs against a fresh tenant), so a
-// deleted shipped default is durable. No source branch, no soft-disable
-// fallback, no resurrection marker.
+// A shipped copy (system_slug set) soft-deletes: EventHandlers.Delete stamps
+// deleted_at, leaving the (org_id, team_id, system_slug) slot occupied so the
+// boot-time shipped-content sync never resurrects it. A user-created handler
+// (no system_slug) hard-deletes. Every read path filters deleted_at IS NULL,
+// so the two are indistinguishable to callers other than the sync itself.
 func (eh *eventHandlersHandler) handleEventHandlerDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {

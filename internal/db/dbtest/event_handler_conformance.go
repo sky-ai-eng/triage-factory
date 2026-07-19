@@ -555,4 +555,240 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			t.Error("Promote of a trigger row succeeded; want error")
 		}
 	})
+
+	t.Run("SetEnabled_DoesNotStampUserModified", func(t *testing.T) {
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		priority, sortOrder := 0.5, 0
+		h := domain.EventHandler{
+			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
+			EventType: domain.EventGitHubPRCICheckFailed,
+			Name:      "toggle-no-stamp", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
+		}
+		if err := store.Create(ctx, orgID, teamID, h); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := store.SetEnabled(ctx, orgID, h.ID, false); err != nil {
+			t.Fatalf("SetEnabled: %v", err)
+		}
+		got, _ := store.Get(ctx, orgID, h.ID)
+		if got == nil || got.UserModified {
+			t.Errorf("UserModified=%v after SetEnabled; want false (activation state is not content)", got != nil && got.UserModified)
+		}
+	})
+
+	t.Run("Reorder_DoesNotStampUserModified", func(t *testing.T) {
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		priority := 0.5
+		s0, s1 := 0, 1
+		h1 := domain.EventHandler{
+			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
+			EventType: domain.EventGitHubPRCICheckFailed,
+			Name:      "reorder-a", DefaultPriority: &priority, SortOrder: &s0, Enabled: true,
+		}
+		h2 := domain.EventHandler{
+			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
+			EventType: domain.EventGitHubPRCICheckFailed,
+			Name:      "reorder-b", DefaultPriority: &priority, SortOrder: &s1, Enabled: true,
+		}
+		if err := store.Create(ctx, orgID, teamID, h1); err != nil {
+			t.Fatalf("Create h1: %v", err)
+		}
+		if err := store.Create(ctx, orgID, teamID, h2); err != nil {
+			t.Fatalf("Create h2: %v", err)
+		}
+		if err := store.Reorder(ctx, orgID, []string{h2.ID, h1.ID}); err != nil {
+			t.Fatalf("Reorder: %v", err)
+		}
+		for _, id := range []string{h1.ID, h2.ID} {
+			got, _ := store.Get(ctx, orgID, id)
+			if got == nil || got.UserModified {
+				t.Errorf("id=%s UserModified=%v after Reorder; want false (sort_order is presentation order the user owns)", id, got != nil && got.UserModified)
+			}
+		}
+	})
+
+	t.Run("Update_StampsUserModifiedOnlyWhenContentChanges", func(t *testing.T) {
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		priority, sortOrder := 0.5, 0
+		h := domain.EventHandler{
+			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
+			EventType: domain.EventGitHubPRCICheckFailed,
+			Name:      "update-stamp", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
+		}
+		if err := store.Create(ctx, orgID, teamID, h); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+
+		// Update carrying enabled alongside unchanged content: no stamp.
+		got, _ := store.Get(ctx, orgID, h.ID)
+		got.Enabled = false
+		if err := store.Update(ctx, orgID, *got); err != nil {
+			t.Fatalf("Update (enabled-only): %v", err)
+		}
+		afterEnabledOnly, _ := store.Get(ctx, orgID, h.ID)
+		if afterEnabledOnly == nil || afterEnabledOnly.UserModified {
+			t.Fatalf("UserModified=%v after an enabled-only Update; want false", afterEnabledOnly != nil && afterEnabledOnly.UserModified)
+		}
+
+		// Update changing a content field: stamps.
+		afterEnabledOnly.Name = "update-stamp-renamed"
+		if err := store.Update(ctx, orgID, *afterEnabledOnly); err != nil {
+			t.Fatalf("Update (content change): %v", err)
+		}
+		afterContent, _ := store.Get(ctx, orgID, h.ID)
+		if afterContent == nil || !afterContent.UserModified {
+			t.Errorf("UserModified=%v after a content-changing Update; want true", afterContent != nil && afterContent.UserModified)
+		}
+	})
+
+	t.Run("Promote_StampsUserModified", func(t *testing.T) {
+		store, orgID, teamID, seedBlueprints := factory(t)
+		ctx := context.Background()
+		ids := seedBlueprints(t, "p-promote-stamp")
+		priority, sortOrder := 0.5, 0
+		ruleID := uuid.New().String()
+		if err := store.Create(ctx, orgID, teamID, domain.EventHandler{
+			ID: ruleID, Kind: domain.EventHandlerKindRule,
+			EventType: domain.EventGitHubPRCICheckFailed,
+			Name:      "promote-stamp", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
+		}); err != nil {
+			t.Fatalf("Create rule: %v", err)
+		}
+		breaker := 3
+		minAutonomy := 0.0
+		if err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
+			Kind: domain.EventHandlerKindTrigger, BlueprintID: ids["p-promote-stamp"],
+			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
+		}); err != nil {
+			t.Fatalf("Promote: %v", err)
+		}
+		got, _ := store.Get(ctx, orgID, ruleID)
+		if got == nil || !got.UserModified {
+			t.Errorf("UserModified=%v after Promote; want true (a kind change is never sync-revertible)", got != nil && got.UserModified)
+		}
+	})
+
+	t.Run("RetargetBlueprint_StampsUserModified", func(t *testing.T) {
+		store, orgID, teamID, seedBlueprints := factory(t)
+		ctx := context.Background()
+		ids := seedBlueprints(t, "p-retarget-stamp-from", "p-retarget-stamp-to")
+		breaker := 3
+		minAutonomy := 0.0
+		h := domain.EventHandler{
+			ID: uuid.New().String(), Kind: domain.EventHandlerKindTrigger,
+			BlueprintID: ids["p-retarget-stamp-from"], EventType: domain.EventGitHubPRCICheckFailed,
+			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
+		}
+		if err := store.Create(ctx, orgID, teamID, h); err != nil {
+			t.Fatalf("Create trigger: %v", err)
+		}
+		if err := store.RetargetBlueprint(ctx, orgID, h.ID, ids["p-retarget-stamp-to"]); err != nil {
+			t.Fatalf("RetargetBlueprint: %v", err)
+		}
+		got, _ := store.Get(ctx, orgID, h.ID)
+		if got == nil || !got.UserModified {
+			t.Errorf("UserModified=%v after RetargetBlueprint; want true (a user-initiated retarget must survive sync)", got != nil && got.UserModified)
+		}
+	})
+
+	t.Run("Delete_SoftDeletesSystemRow_SlugStaysOccupiedAndInvisible", func(t *testing.T) {
+		store, orgID, teamID, seedBlueprints := factory(t)
+		ctx := context.Background()
+		ids := seedBlueprints(t,
+			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
+			"system-jira-implement", "system-fix-review-feedback",
+		)
+		if err := store.Seed(ctx, orgID, teamID, ids); err != nil {
+			t.Fatalf("Seed: %v", err)
+		}
+		const slug = "system-rule-ci-check-failed"
+		before, err := store.GetBySystemSlug(ctx, orgID, teamID, slug)
+		if err != nil || before == nil {
+			t.Fatalf("GetBySystemSlug before delete: (%v, %v)", before, err)
+		}
+		if err := store.Delete(ctx, orgID, before.ID); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+
+		if got, err := store.Get(ctx, orgID, before.ID); err != nil || got != nil {
+			t.Errorf("Get after soft-delete = (%v, %v); want (nil, nil)", got, err)
+		}
+		if got, err := store.GetSystem(ctx, orgID, before.ID); err != nil || got != nil {
+			t.Errorf("GetSystem after soft-delete = (%v, %v); want (nil, nil) — a soft-deleted trigger/rule must never resolve as live", got, err)
+		}
+		if got, err := store.GetBySystemSlug(ctx, orgID, teamID, slug); err != nil || got != nil {
+			t.Errorf("GetBySystemSlug after soft-delete = (%v, %v); want (nil, nil)", got, err)
+		}
+		all, err := store.List(ctx, orgID, "", "")
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		for _, h := range all {
+			if h.ID == before.ID {
+				t.Errorf("soft-deleted handler %s leaked into List", h.ID)
+			}
+		}
+		enabled, err := store.GetEnabledForEvent(ctx, orgID, domain.EventGitHubPRCICheckFailed)
+		if err != nil {
+			t.Fatalf("GetEnabledForEvent: %v", err)
+		}
+		for _, h := range enabled {
+			if h.ID == before.ID {
+				t.Errorf("soft-deleted handler %s leaked into GetEnabledForEvent — it would still fire", h.ID)
+			}
+		}
+
+		// Never resurrect: re-seeding must not re-insert a row for the
+		// slug's occupied slot.
+		if err := store.Seed(ctx, orgID, teamID, ids); err != nil {
+			t.Fatalf("re-seed: %v", err)
+		}
+		if got, err := store.GetBySystemSlug(ctx, orgID, teamID, slug); err != nil || got != nil {
+			t.Errorf("GetBySystemSlug after re-seed = (%v, %v); want (nil, nil) — re-seed must not resurrect a soft-deleted shipped row", got, err)
+		}
+	})
+
+	t.Run("Delete_SoftDeletedSystemTrigger_FreesBlueprintSlotForANewTrigger", func(t *testing.T) {
+		store, orgID, teamID, seedBlueprints := factory(t)
+		ctx := context.Background()
+		ids := seedBlueprints(t,
+			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
+			"system-jira-implement", "system-fix-review-feedback",
+		)
+		if err := store.Seed(ctx, orgID, teamID, ids); err != nil {
+			t.Fatalf("Seed: %v", err)
+		}
+		blueprintID := ids["system-ci-fix"]
+		shipped, err := store.GetBySystemSlug(ctx, orgID, teamID, "system-trigger-ci-fix")
+		if err != nil || shipped == nil {
+			t.Fatalf("GetBySystemSlug(system-trigger-ci-fix) before delete: (%v, %v)", shipped, err)
+		}
+
+		// Deleting the shipped (system_slug) trigger soft-deletes it — verify
+		// the dedup index doesn't keep the blueprint permanently claimed by the
+		// now-invisible row.
+		if err := store.Delete(ctx, orgID, shipped.ID); err != nil {
+			t.Fatalf("Delete shipped trigger: %v", err)
+		}
+		existing, err := store.ListForBlueprint(ctx, orgID, blueprintID)
+		if err != nil {
+			t.Fatalf("ListForBlueprint: %v", err)
+		}
+		if len(existing) != 0 {
+			t.Fatalf("ListForBlueprint after soft-delete = %d rows; want 0 (a spurious \"already triggered\" 409 otherwise)", len(existing))
+		}
+		breaker := 3
+		minAutonomy := 0.0
+		replacement := domain.EventHandler{
+			ID: uuid.New().String(), Kind: domain.EventHandlerKindTrigger,
+			BlueprintID: blueprintID, EventType: domain.EventGitHubPRCICheckFailed,
+			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
+		}
+		if err := store.Create(ctx, orgID, teamID, replacement); err != nil {
+			t.Fatalf("Create replacement trigger on the freed blueprint: %v", err)
+		}
+	})
 }
