@@ -324,9 +324,10 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 
 	// Create + submit the review in one POST, pinned to commitID (the commit its
 	// inline comments were validated against), with the staged body + event +
-	// footer. SubmitReview returns the event GitHub actually recorded — capture it
-	// so the persisted artifact, the verdict diff, and the response all reflect
-	// what landed, not what was requested.
+	// footer. SubmitReview returns the event it submitted (it doesn't parse an
+	// authoritative event back from GitHub's response) — capture it so the
+	// persisted artifact, the verdict diff, and the response all reflect the
+	// same value that was requested.
 	body := details.ReviewBody + agentmeta.Build(ah.agentRuns, orgID, fresh.RunID, "review")
 	reviewID, submittedEvent, err := gh.SubmitReview(r.Context(), owner, repo, number, commitID, details.ReviewEvent, body, submitComments)
 	if err != nil {
@@ -337,8 +338,8 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
 		return
 	}
-	// Record the event GitHub actually applied so a later reader — and the
-	// proposed-vs-final diff below — sees the truth.
+	// Record the event we submitted so a later reader — and the
+	// proposed-vs-final diff below — sees what was sent.
 	details.ReviewEvent = submittedEvent
 
 	cleanupCtx := context.WithoutCancel(r.Context())
