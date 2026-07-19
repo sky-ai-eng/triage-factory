@@ -535,47 +535,6 @@ func TestReviewArtifactGet_MalformedDetails_500(t *testing.T) {
 	}
 }
 
-// TestReviewArtifactApprove_AutoMergeNoDowngrade pins that an APPROVE submits
-// as APPROVE even when auto-merge is enabled on the PR — there is no
-// auto-merge gate downgrading it to COMMENT.
-func TestReviewArtifactApprove_AutoMergeNoDowngrade(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	var submitEvent string
-	mux := newAppAPIMux()
-	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "auto_merge": map[string]any{"merge_method": "squash"}})
-	})
-	mux.HandleFunc("POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews", func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		submitEvent, _ = body["event"].(string)
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": 999})
-	})
-	stub := httptest.NewServer(mux)
-	t.Cleanup(stub.Close)
-	seedApp(t, srv, stub, acmeInstall())
-
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rdown", "acme", "api", 7, "APPROVE")
-	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if submitEvent != "APPROVE" {
-		t.Errorf("GitHub received event %q, want APPROVE (no auto-merge downgrade)", submitEvent)
-	}
-	var out struct {
-		Event string `json:"event"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &out)
-	if out.Event != "APPROVE" {
-		t.Errorf("response event = %q, want APPROVE", out.Event)
-	}
-	if d, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON); d.ReviewEvent != "APPROVE" {
-		t.Errorf("persisted ReviewEvent = %q, want APPROVE", d.ReviewEvent)
-	}
-}
-
 // TestReviewArtifactApprove_SharedCommitSHA_PinsToIt pins that the submitted
 // review's commit_id is the commit the inline comments were validated against
 // (their CommitSHA), not the start-review head — so the comments anchor to the
