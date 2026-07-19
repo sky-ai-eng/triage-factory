@@ -103,6 +103,25 @@ func TestLocalClient_MemoryLoad_Postgres_TeamScoped(t *testing.T) {
 	if got["team2 narrative"] {
 		t.Errorf("team2's team-visible narrative leaked into team1's read: %v", got)
 	}
+	// The bounded read returns oldest-first (DESC LIMIT reversed to ASC): team1's
+	// run was seeded before the org-visible one, so its narrative comes first.
+	if res.Memories[0].Content != "team1 narrative" || res.Memories[1].Content != "org-wide narrative" {
+		t.Errorf("Memories order = [%q, %q], want ASC [team1, org-wide]", res.Memories[0].Content, res.Memories[1].Content)
+	}
+
+	// A tighter limit caps the set IN the query (not sliced after a full fetch)
+	// while Count stays the pre-limit total — team1's single most-recent visible
+	// memory is the org-visible one (seeded last).
+	resLim, err := client.MemoryLoad(ctx, "github", "octo/repo#7", 1)
+	if err != nil {
+		t.Fatalf("MemoryLoad(limit 1): %v", err)
+	}
+	if resLim.Count != 2 {
+		t.Errorf("Count under limit 1 = %d, want 2 (pre-limit total)", resLim.Count)
+	}
+	if len(resLim.Memories) != 1 || resLim.Memories[0].Content != "org-wide narrative" {
+		t.Errorf("limit 1 = %+v, want just the most recent visible memory (org-wide narrative)", resLim.Memories)
+	}
 
 	// Loading recorded the touch for the reading run.
 	var role string

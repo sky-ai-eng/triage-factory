@@ -241,8 +241,10 @@ func recordTouchInfo(ctx context.Context, stores db.Stores, info RunInfo, act *d
 // "## Human feedback (post-run)" separator), the same materialization the
 // spawn-time materializer emits — so the on-demand pull reads identically to
 // the auto-staged files. Count is the pre-limit scoped total (its dedicated
-// count method); Memories is the most recent `limit` (the store returns ASC, so
-// take the tail). The touch is best-effort — a read never fails on its touch.
+// count method); Memories is the most recent `limit`, capped IN the query (not
+// fetched-all-then-sliced) so a hot entity's long history isn't transferred to
+// keep only the tail. The touch is best-effort — a read never fails on its
+// touch.
 func loadEntityMemory(ctx context.Context, stores db.Stores, info RunInfo, source, sourceID string, limit int) (*MemoryLoadResult, error) {
 	res := &MemoryLoadResult{Source: source, SourceID: sourceID, Memories: []MemoryLoadEntry{}}
 	if stores.Entities == nil {
@@ -266,13 +268,15 @@ func loadEntityMemory(ctx context.Context, stores db.Stores, info RunInfo, sourc
 		}
 		res.Count = count
 
-		mems, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, info.OrgID, entity.ID, info.TeamID)
+		// A non-positive limit — a direct Client caller bypassing the CLI's
+		// positive-int guard — means "the default", never unbounded (which the
+		// prior fetch-all-then-slice quietly did) and never a negative SQL LIMIT.
+		if limit <= 0 {
+			limit = defaultMemoryLoadLimit
+		}
+		mems, err := stores.TaskMemory.GetRecentMemoriesForEntitySystem(ctx, info.OrgID, entity.ID, info.TeamID, limit)
 		if err != nil {
 			return nil, err
-		}
-		// The store returns oldest-first; the most recent `limit` is the tail.
-		if limit > 0 && len(mems) > limit {
-			mems = mems[len(mems)-limit:]
 		}
 		for _, m := range mems {
 			res.Memories = append(res.Memories, MemoryLoadEntry{
@@ -292,3 +296,9 @@ func loadEntityMemory(ctx context.Context, stores db.Stores, info RunInfo, sourc
 	}
 	return res, nil
 }
+
+// defaultMemoryLoadLimit is the cap loadEntityMemory applies when a caller
+// passes a non-positive limit (the CLI never does — it defaults to and enforces
+// a positive value — so this only guards direct Client / IPC / relay callers).
+// Mirrors the CLI's default so both surfaces agree on "20 most recent".
+const defaultMemoryLoadLimit = 20

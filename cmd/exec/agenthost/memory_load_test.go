@@ -174,6 +174,43 @@ func TestLocalClient_MemoryLoad_InvalidSource(t *testing.T) {
 	}
 }
 
+// TestLocalClient_MemoryLoad_NonPositiveLimit_DefaultsBounded pins that a
+// non-positive limit (a direct Client caller bypassing the CLI's positive-int
+// guard) is treated as the default cap — NOT as unbounded, which the prior
+// fetch-all-then-slice quietly did. With 25 memories seeded, limit 0 and limit
+// -5 both return the 20 most recent, and Count stays the true pre-limit total.
+func TestLocalClient_MemoryLoad_NonPositiveLimit_DefaultsBounded(t *testing.T) {
+	conn, stores, _, client := newGithubRecordingClientConn(t, "http://unused", true)
+	ctx := context.Background()
+
+	entityID := seedEntity(t, stores, runmode.LocalDefaultOrgID, "github", "octo/repo#8", "Busy PR")
+	const total = 25
+	for i := 0; i < total; i++ {
+		content := "m" + string(rune('A'+i)) // mA, mB, … distinct + ordered by seed time
+		seedAuthoringMemory(t, conn, runmode.LocalDefaultOrgID, entityID, uuid.New().String(), content, "", memBase.Add(time.Duration(i)*time.Hour), domain.MemoryRolePrimary)
+	}
+
+	for _, limit := range []int{0, -5} {
+		res, err := client.MemoryLoad(ctx, "github", "octo/repo#8", limit)
+		if err != nil {
+			t.Fatalf("MemoryLoad(limit %d): %v", limit, err)
+		}
+		if res.Count != total {
+			t.Errorf("limit %d: Count = %d, want %d (pre-limit total)", limit, res.Count, total)
+		}
+		if len(res.Memories) != defaultMemoryLoadLimit {
+			t.Fatalf("limit %d: len(Memories) = %d, want the default cap %d (NOT unbounded %d)", limit, len(res.Memories), defaultMemoryLoadLimit, total)
+		}
+		// The 20 most recent, ASC: the oldest 5 (mA..mE) are dropped, newest (mY) last.
+		if res.Memories[0].Content != "mF" {
+			t.Errorf("limit %d: Memories[0] = %q, want mF (oldest 5 dropped by the default cap)", limit, res.Memories[0].Content)
+		}
+		if last := res.Memories[len(res.Memories)-1].Content; last != "mY" {
+			t.Errorf("limit %d: last = %q, want the newest mY", limit, last)
+		}
+	}
+}
+
 // TestServer_MemoryLoad_RoundTrip exercises the full Server.Serve →
 // IPCClient.MemoryLoad loop over a real unix socket (mirrors
 // TestServer_LookupRun_RoundTrip): the composed result survives the wire intact.

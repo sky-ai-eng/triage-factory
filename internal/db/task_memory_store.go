@@ -142,6 +142,18 @@ type TaskMemoryStore interface {
 	// possible locally.
 	GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) ([]domain.TaskMemory, error)
 
+	// GetRecentMemoriesForEntitySystem is GetMemoriesForEntitySystem capped to
+	// the most recent `limit` rows, with the cap pushed INTO the query (ORDER BY
+	// created_at DESC LIMIT) rather than fetched-all-then-sliced — so an
+	// on-demand read on an entity with a long run history doesn't transfer and
+	// materialize its entire memory just to keep the tail. Returns oldest-first
+	// (ASC), identical to the unbounded read's ordering, so callers compose the
+	// same way. Same team-visibility scope as GetMemoriesForEntitySystem. limit
+	// must be positive — a non-positive limit returns no rows (the store never
+	// treats it as unbounded, and Postgres rejects a negative LIMIT); callers
+	// resolve a non-positive request to a default before calling.
+	GetRecentMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string, limit int) ([]domain.TaskMemory, error)
+
 	// RecordEntityTouchSystem upserts a (run_id, entity_id) row in
 	// run_memory_entities with role-precedence upgrade: insert if
 	// absent; on conflict, set role only if the new role outranks the

@@ -127,6 +127,39 @@ func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID,
 	return s.GetMemoriesForEntity(ctx, orgID, entityID)
 }
 
+// GetRecentMemoriesForEntitySystem ignores teamID like its unbounded sibling
+// (local mode is single-team) and pushes the cap into the query so a
+// long-history entity isn't fully fetched to keep only the tail. A non-positive
+// limit returns no rows (never unbounded); the host resolves it to a default
+// first. The query orders DESC LIMIT (the most recent N) and the result is
+// reversed to ASC so the composition matches the unbounded read.
+func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string, limit int) ([]domain.TaskMemory, error) {
+	_ = teamID
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT rm.id, rm.run_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
+		FROM run_memory rm
+		WHERE rm.run_id IN (SELECT run_id FROM run_memory_entities WHERE entity_id = ?)
+		ORDER BY rm.created_at DESC
+		LIMIT ?
+	`, entityID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	mems, err := scanTaskMemories(rows)
+	if err != nil {
+		return nil, err
+	}
+	reverseTaskMemories(mems)
+	return mems, nil
+}
+
 func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]domain.TaskMemory, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT rm.id, rm.run_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
@@ -138,7 +171,12 @@ func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]do
 		return nil, err
 	}
 	defer rows.Close()
+	return scanTaskMemories(rows)
+}
 
+// scanTaskMemories drains a run_memory result set (the shared column list) into
+// materialized TaskMemory rows.
+func scanTaskMemories(rows *sql.Rows) ([]domain.TaskMemory, error) {
 	var out []domain.TaskMemory
 	for rows.Next() {
 		var m domain.TaskMemory
@@ -153,6 +191,15 @@ func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]do
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// reverseTaskMemories flips a DESC-ordered slice in place to ASC — used by the
+// bounded read, whose ORDER BY created_at DESC LIMIT selects the most recent N
+// but must hand them back oldest-first to match the unbounded read's contract.
+func reverseTaskMemories(mems []domain.TaskMemory) {
+	for i, j := 0, len(mems)-1; i < j; i, j = i+1, j-1 {
+		mems[i], mems[j] = mems[j], mems[i]
+	}
 }
 
 // memoryRoleRankCASE is the SQL CASE expression mapping a role column
