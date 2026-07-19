@@ -6,8 +6,9 @@
 // (system:run:status, system:run:activity, system:routing:disposition) and
 // drives four surfaces purely off them:
 //
-//   - a 👀 reaction on a routed slack:message (the ONLY reaction — no
-//     ⏳/✅/❌/⚠️ lifecycle, ratified out),
+//   - a 👀 reaction acknowledging an explicit @-mention (the ONLY reaction —
+//     no ⏳/✅/❌/⚠️ lifecycle, ratified out; an un-mentioned follow-up in a
+//     thread the bot already owns gets none),
 //   - the assistant.threads.setStatus working indicator — both the
 //     "<app name> is …" status line and, via loading_messages, the animated
 //     in-conversation loading bubble (left unset, Slack rotates its own
@@ -204,13 +205,17 @@ func (a *lifecycleAdapter) dispatch(ctx context.Context, evt domain.Event, runs 
 // --- disposition consumer: 👀 acknowledge + no-match reply ---
 
 // handleDisposition reacts to system:routing:disposition for slack:message
-// events only. task_created/task_bumped both get the single 👀 reaction — a
-// bump with an active run means the core inject branch (routing's same-task
-// absorption) already folded the follow-up into that run, so there is
-// nothing further to acknowledge. taskless_no_handler/taskless_no_owner get
-// the one-line not-configured reply. frozen/taskless_unroutable/error are
-// inert by design. Every step here is best-effort: log-and-drop on any
-// store/API failure, never a retry loop.
+// events only, and every reactive surface here fires ONLY for a message that
+// explicitly @-mentioned the bot. task_created/task_bumped add the single 👀
+// reaction (acknowledgeMention); taskless_no_handler/taskless_no_owner post
+// the one-line not-configured reply (replyNotConfigured). Both load the
+// message metadata, gate on its explicit-mention flag, and only then resolve
+// the bot token: an un-mentioned follow-up in a thread the bot already owns is
+// handled silently — a per-message reaction or reply on top of the task/run it
+// already drives (whether that absorbs into an in-flight run or starts a fresh
+// one) is just noise. frozen/taskless_unroutable/error are inert by design.
+// Every step here is best-effort: log-and-drop on any store/API failure, never
+// a retry loop.
 func (a *lifecycleAdapter) handleDisposition(ctx context.Context, evt domain.Event) {
 	var disp events.SystemRoutingDispositionMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &disp); err != nil {
@@ -230,9 +235,17 @@ func (a *lifecycleAdapter) handleDisposition(ctx context.Context, evt domain.Eve
 }
 
 // acknowledgeMention adds the 👀 reaction to the mention message itself
-// (meta.TS, never the thread root).
+// (meta.TS, never the thread root) — but only when that message explicitly
+// @-mentioned the bot. An un-mentioned follow-up in a thread the bot already
+// owns (Mentioned=false) gets no reaction: stamping 👀 on every message in an
+// engaged thread is noise, and any run the follow-up drives already shows a
+// working indicator that signals it landed.
 func (a *lifecycleAdapter) acknowledgeMention(ctx context.Context, orgID, eventID string) {
-	meta, token, ok := a.mentionContext(ctx, orgID, eventID)
+	meta, ok := a.messageMetadata(ctx, orgID, eventID)
+	if !ok || !meta.Mentioned {
+		return
+	}
+	token, ok := a.resolveBotToken(ctx, orgID, meta.WorkspaceID, meta.APIAppID)
 	if !ok {
 		return
 	}
@@ -243,9 +256,17 @@ func (a *lifecycleAdapter) acknowledgeMention(ctx context.Context, orgID, eventI
 
 // replyNotConfigured posts the taskless one-liner as a thread reply, rooted
 // at ThreadTS when the mention was already inside a thread, else the
-// mention's own ts (a root-message mention starts its own thread).
+// mention's own ts (a root-message mention starts its own thread). Like
+// acknowledgeMention, it fires only for an explicit @-mention — an
+// un-mentioned engaged-thread follow-up (Mentioned=false) never draws an
+// automated reply, so a config-changed thread the bot already owns doesn't
+// suddenly answer a plain follow-up with "not configured".
 func (a *lifecycleAdapter) replyNotConfigured(ctx context.Context, orgID, eventID string) {
-	meta, token, ok := a.mentionContext(ctx, orgID, eventID)
+	meta, ok := a.messageMetadata(ctx, orgID, eventID)
+	if !ok || !meta.Mentioned {
+		return
+	}
+	token, ok := a.resolveBotToken(ctx, orgID, meta.WorkspaceID, meta.APIAppID)
 	if !ok {
 		return
 	}
@@ -260,29 +281,28 @@ func (a *lifecycleAdapter) replyNotConfigured(ctx context.Context, orgID, eventI
 	}
 }
 
-// mentionContext resolves eventID's SlackMessageMetadata plus the bot token
-// to act as. ok=false covers every "can't proceed" case alike (no metadata
-// row, unparsable metadata, unresolvable workspace/token) — the ticket's
-// "only possible when the workspace row + token resolve; otherwise log and
-// drop."
-func (a *lifecycleAdapter) mentionContext(ctx context.Context, orgID, eventID string) (meta SlackMessageMetadata, token string, ok bool) {
+// messageMetadata loads and parses eventID's SlackMessageMetadata. ok=false
+// covers a missing/empty/unparsable row alike — a best-effort "can't
+// proceed", logged and dropped. Resolving the bot token is a deliberately
+// SEPARATE step (resolveBotToken) rather than folded in here: both callers
+// gate on meta.Mentioned first, so an un-mentioned engaged-thread follow-up
+// never touches the workspace row or the secret store (and never emits their
+// warning logs) just to be dropped.
+func (a *lifecycleAdapter) messageMetadata(ctx context.Context, orgID, eventID string) (SlackMessageMetadata, bool) {
 	metaJSON, err := a.stores.Events.GetMetadataSystem(ctx, orgID, eventID)
 	if err != nil {
 		slackLog.Warn("slack lifecycle: load message metadata failed", "error", err)
-		return SlackMessageMetadata{}, "", false
+		return SlackMessageMetadata{}, false
 	}
 	if metaJSON == "" {
-		return SlackMessageMetadata{}, "", false
+		return SlackMessageMetadata{}, false
 	}
+	var meta SlackMessageMetadata
 	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
 		slackLog.Warn("slack lifecycle: parse message metadata failed", "error", err)
-		return SlackMessageMetadata{}, "", false
+		return SlackMessageMetadata{}, false
 	}
-	token, ok = a.resolveBotToken(ctx, orgID, meta.WorkspaceID, meta.APIAppID)
-	if !ok {
-		return SlackMessageMetadata{}, "", false
-	}
-	return meta, token, true
+	return meta, true
 }
 
 // resolveBotToken resolves the (workspace, api_app_id) pair to its bot

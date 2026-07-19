@@ -189,7 +189,7 @@ func seedLifecycleWorkspace(t *testing.T, stores db.Stores, orgID, userID, works
 // seedSlackMessageEvent seeds a bare entity + slack:message event (no task,
 // no run) — enough for the disposition consumer, which only ever reads
 // event metadata.
-func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, apiAppID, channel, ts, threadTS string) (eventID string, meta SlackMessageMetadata) {
+func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, apiAppID, channel, ts, threadTS string, mentioned bool) (eventID string, meta SlackMessageMetadata) {
 	t.Helper()
 	entityID := uuid.New().String()
 	root := threadTS
@@ -203,9 +203,15 @@ func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, 
 		t.Fatalf("seed entity: %v", err)
 	}
 
+	// Keep the body coherent with the mention flag: an explicit @-mention
+	// carries the bot token, an engaged-thread follow-up is plain text.
+	text := "any update on this?"
+	if mentioned {
+		text = "hey <@BOT> can you take a look?"
+	}
 	meta = SlackMessageMetadata{
 		WorkspaceID: workspaceID, APIAppID: apiAppID, Channel: channel, TS: ts, ThreadTS: threadTS,
-		SenderID: "U1", Text: "hey <@BOT>", EventID: "Ev" + uuid.New().String(),
+		SenderID: "U1", Text: text, EventID: "Ev" + uuid.New().String(), Mentioned: mentioned,
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
@@ -235,7 +241,10 @@ type slackRunFixture struct {
 // shape, but for the Slack-sourced case those tests deliberately avoid.
 func seedSlackMessageRun(t *testing.T, h *pgtest.Harness, orgID, creatorID, teamID, workspaceID, apiAppID, channel, ts, threadTS string) slackRunFixture {
 	t.Helper()
-	eventID, meta := seedSlackMessageEvent(t, h, orgID, workspaceID, apiAppID, channel, ts, threadTS)
+	// A run exists because the bot was engaged; the run-status tests that use
+	// this fixture don't depend on the mention flag, so seed the explicit-
+	// mention case (Mentioned=true) as the representative one.
+	eventID, meta := seedSlackMessageEvent(t, h, orgID, workspaceID, apiAppID, channel, ts, threadTS, true)
 
 	// seedSlackMessageEvent already created the entity; find it via the event
 	// row so the task can point at the same entity_id.
@@ -378,12 +387,16 @@ func stopAllLifecycleWorkers(t *testing.T, runs map[string]*runEntry) {
 
 // ---------- disposition consumer: 👀 acknowledge ----------
 
-func TestLifecycleAdapter_Disposition_TaskCreatedOrBumped_ReactsWithEyes(t *testing.T) {
+// TestLifecycleAdapter_Disposition_ExplicitMention_ReactsWithEyes pins that an
+// explicit @-mention (Mentioned=true) gets the single 👀 acknowledgement on the
+// mention message itself — whether it minted a fresh task or bumped an
+// existing one.
+func TestLifecycleAdapter_Disposition_ExplicitMention_ReactsWithEyes(t *testing.T) {
 	for _, disp := range []string{events.DispositionTaskCreated, events.DispositionTaskBumped} {
 		t.Run(disp, func(t *testing.T) {
 			h, stores, fake, orgID, owner, _ := newLifecycleTestRig(t)
 			seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-			eventID, meta := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000100", "")
+			eventID, meta := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000100", "", true)
 
 			adapter := newTestLifecycleAdapter(stores, staticURL(""))
 			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*runEntry{})
@@ -402,6 +415,32 @@ func TestLifecycleAdapter_Disposition_TaskCreatedOrBumped_ReactsWithEyes(t *test
 	}
 }
 
+// TestLifecycleAdapter_Disposition_UnmentionedFollowUp_NoReaction pins that an
+// un-mentioned follow-up in a thread the bot already owns (Mentioned=false)
+// folds into the live run WITHOUT a 👀 reaction — reacting to every message in
+// an engaged thread is noise. Holds for both task_bumped (the common case:
+// absorbed into the active run) and task_created (the thread's prior task had
+// closed, so the follow-up minted a fresh one).
+func TestLifecycleAdapter_Disposition_UnmentionedFollowUp_NoReaction(t *testing.T) {
+	for _, disp := range []string{events.DispositionTaskCreated, events.DispositionTaskBumped} {
+		t.Run(disp, func(t *testing.T) {
+			h, stores, fake, orgID, owner, _ := newLifecycleTestRig(t)
+			seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
+			eventID, _ := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000200", "1700000000.000100", false)
+
+			adapter := newTestLifecycleAdapter(stores, staticURL(""))
+			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*runEntry{})
+
+			if len(fake.reactionCalls()) != 0 {
+				t.Errorf("an un-mentioned engaged-thread follow-up must not react, got %+v", fake.reactionCalls())
+			}
+			if len(fake.postCalls()) != 0 {
+				t.Error("must not post a message for task_created/task_bumped")
+			}
+		})
+	}
+}
+
 // TestLifecycleAdapter_Disposition_AlreadyReacted_StillSuccess pins that
 // Slack's own "already_reacted" idempotency (slackReactionsAdd's contract)
 // flows through the adapter cleanly — the call happens, nothing panics or
@@ -409,7 +448,7 @@ func TestLifecycleAdapter_Disposition_TaskCreatedOrBumped_ReactsWithEyes(t *test
 func TestLifecycleAdapter_Disposition_AlreadyReacted_StillSuccess(t *testing.T) {
 	h, stores, fake, orgID, owner, _ := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-	eventID, _ := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000100", "")
+	eventID, _ := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000100", "", true)
 	fake.reactionError = "already_reacted"
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
@@ -427,7 +466,7 @@ func TestLifecycleAdapter_Disposition_TasklessNoHandlerOrOwner_PostsNotConfigure
 		t.Run(disp, func(t *testing.T) {
 			h, stores, fake, orgID, owner, _ := newLifecycleTestRig(t)
 			seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-			eventID, meta := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000200", "1700000000.000100")
+			eventID, meta := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000200", "1700000000.000100", true)
 
 			adapter := newTestLifecycleAdapter(stores, staticURL(""))
 			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*runEntry{})
@@ -449,13 +488,39 @@ func TestLifecycleAdapter_Disposition_TasklessNoHandlerOrOwner_PostsNotConfigure
 	}
 }
 
+// TestLifecycleAdapter_Disposition_UnmentionedFollowUp_NoNotConfiguredReply
+// pins that an un-mentioned follow-up (Mentioned=false) landing on a
+// taskless_no_handler/taskless_no_owner disposition draws no automated
+// "not configured" reply — the same engaged-thread noise rule that suppresses
+// the 👀 reaction. An explicit @-mention in an unconfigured channel still gets
+// the reply (see ..._PostsNotConfiguredReply).
+func TestLifecycleAdapter_Disposition_UnmentionedFollowUp_NoNotConfiguredReply(t *testing.T) {
+	for _, disp := range []string{events.DispositionTasklessNoHandler, events.DispositionTasklessNoOwner} {
+		t.Run(disp, func(t *testing.T) {
+			h, stores, fake, orgID, owner, _ := newLifecycleTestRig(t)
+			seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
+			eventID, _ := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000200", "1700000000.000100", false)
+
+			adapter := newTestLifecycleAdapter(stores, staticURL(""))
+			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*runEntry{})
+
+			if len(fake.postCalls()) != 0 {
+				t.Errorf("an un-mentioned follow-up must not draw a not-configured reply, got %+v", fake.postCalls())
+			}
+			if len(fake.reactionCalls()) != 0 {
+				t.Errorf("taskless disposition must not react, got %+v", fake.reactionCalls())
+			}
+		})
+	}
+}
+
 // TestLifecycleAdapter_Disposition_TasklessNoHandler_RootMessage_RepliesInOwnThread
 // covers a root-message mention (no ThreadTS) — the reply's thread root must
 // fall back to the mention's own ts, starting a new thread there.
 func TestLifecycleAdapter_Disposition_TasklessNoHandler_RootMessage_RepliesInOwnThread(t *testing.T) {
 	h, stores, fake, orgID, owner, _ := newLifecycleTestRig(t)
 	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-	eventID, meta := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000300", "")
+	eventID, meta := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000300", "", true)
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
 	adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, events.DispositionTasklessNoHandler), map[string]*runEntry{})
@@ -472,7 +537,7 @@ func TestLifecycleAdapter_Disposition_TasklessNoHandler_RootMessage_RepliesInOwn
 func TestLifecycleAdapter_Disposition_MissingWorkspace_NoCallNoPanic(t *testing.T) {
 	h, stores, fake, orgID, _, _ := newLifecycleTestRig(t)
 	// Deliberately no seedLifecycleWorkspace call.
-	eventID, _ := seedSlackMessageEvent(t, h, orgID, "T-missing", "A-missing", "C1", "1700000000.000400", "")
+	eventID, _ := seedSlackMessageEvent(t, h, orgID, "T-missing", "A-missing", "C1", "1700000000.000400", "", true)
 
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
 	adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, events.DispositionTaskCreated), map[string]*runEntry{})
@@ -489,7 +554,7 @@ func TestLifecycleAdapter_Disposition_InertOutcomes_NoOp(t *testing.T) {
 		t.Run(disp, func(t *testing.T) {
 			h, stores, fake, orgID, owner, _ := newLifecycleTestRig(t)
 			seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
-			eventID, _ := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000500", "")
+			eventID, _ := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000500", "", true)
 
 			adapter := newTestLifecycleAdapter(stores, staticURL(""))
 			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*runEntry{})
