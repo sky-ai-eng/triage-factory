@@ -667,6 +667,276 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 			t.Fatalf("SeedOrUpdate with cancelled ctx returned nil error")
 		}
 	})
+
+	// --- user_modified stamping (TFAC-657) -----------------------------
+	//
+	// An upcoming sync feature will treat user_modified as "this team edited
+	// its copy, never overwrite it." These pin the contract documented on
+	// db.BlueprintStore: every structural edit stamps true on the affected
+	// surviving row(s); Create/SeedOrUpdate insert false; usage bookkeeping
+	// never touches the flag.
+
+	t.Run("Create_LeavesUserModifiedFalse", func(t *testing.T) {
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		id := uuid.New().String()
+		if err := store.Create(ctx, orgID, teamID, domain.Blueprint{ID: id, Name: "Created", Source: "user"}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, id)
+		if err != nil || got == nil {
+			t.Fatalf("Get after Create = (%v, %v), want a row", got, err)
+		}
+		if got.UserModified {
+			t.Errorf("Created blueprint has user_modified=true, want false")
+		}
+	})
+
+	t.Run("SeedOrUpdate_LeavesUserModifiedFalse", func(t *testing.T) {
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
+			SystemSlug: "system-um-seed", Name: "SeedUM", Source: "system",
+		})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, id)
+		if err != nil || got == nil {
+			t.Fatalf("Get after seed = (%v, %v), want a row", got, err)
+		}
+		if got.UserModified {
+			t.Errorf("seeded blueprint has user_modified=true, want false")
+		}
+	})
+
+	t.Run("Rename_StampsUserModified", func(t *testing.T) {
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
+			SystemSlug: "system-um-rename", Name: "Before", Source: "system",
+		})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := store.Rename(ctx, orgID, id, "After"); err != nil {
+			t.Fatalf("Rename: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, id)
+		if err != nil || got == nil {
+			t.Fatalf("Get after rename = (%v, %v)", got, err)
+		}
+		if !got.UserModified {
+			t.Errorf("Rename did not stamp user_modified true")
+		}
+	})
+
+	t.Run("ReplaceSteps_StampsUserModified", func(t *testing.T) {
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
+			SystemSlug: "system-um-steps", Name: "StepsUM", Source: "system",
+		})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		p := seedPrompt(t, "um-steps-p")
+		if err := store.ReplaceSteps(ctx, orgID, id, []string{p}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, id)
+		if err != nil || got == nil {
+			t.Fatalf("Get after ReplaceSteps = (%v, %v)", got, err)
+		}
+		if !got.UserModified {
+			t.Errorf("ReplaceSteps did not stamp user_modified true")
+		}
+	})
+
+	t.Run("MergeInto_StampsHostNotSource", func(t *testing.T) {
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		host, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "um-merge-host", Name: "Host", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed host: %v", err)
+		}
+		source, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "um-merge-source", Name: "Source", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed source: %v", err)
+		}
+		s1 := seedPrompt(t, "um-merge-s1")
+		if err := store.ReplaceSteps(ctx, orgID, source, []string{s1}, nil); err != nil {
+			t.Fatalf("ReplaceSteps source: %v", err)
+		}
+		// Host is freshly seeded with no steps of its own — user_modified starts
+		// false, so a flip after MergeInto is attributable to MergeInto itself
+		// (not to some prior ReplaceSteps on the host).
+		before, err := store.Get(ctx, orgID, host)
+		if err != nil || before == nil || before.UserModified {
+			t.Fatalf("pre-merge host = (%+v, %v), want a fresh unmodified row", before, err)
+		}
+		if err := store.MergeInto(ctx, orgID, host, source); err != nil {
+			t.Fatalf("MergeInto: %v", err)
+		}
+		gotHost, err := store.Get(ctx, orgID, host)
+		if err != nil || gotHost == nil {
+			t.Fatalf("Get(host) after merge = (%v, %v)", gotHost, err)
+		}
+		if !gotHost.UserModified {
+			t.Errorf("MergeInto did not stamp host user_modified true")
+		}
+	})
+
+	t.Run("SplitAt_DownstreamBornModifiedWithNoSystemSlug", func(t *testing.T) {
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "um-split-bp", Name: "SplitUM", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		p0, p1 := seedPrompt(t, "um-split-0"), seedPrompt(t, "um-split-1")
+		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		newID := uuid.New().String()
+		if _, err := store.SplitAt(ctx, orgID, bp, 1, newID, "Downstream"); err != nil {
+			t.Fatalf("SplitAt: %v", err)
+		}
+		up, err := store.Get(ctx, orgID, bp)
+		if err != nil || up == nil || !up.UserModified {
+			t.Fatalf("upstream after split = (%+v, %v), want user_modified=true", up, err)
+		}
+		down, err := store.Get(ctx, orgID, newID)
+		if err != nil || down == nil {
+			t.Fatalf("Get(downstream) = (%v, %v), want a row", down, err)
+		}
+		if !down.UserModified {
+			t.Errorf("downstream blueprint user_modified = false, want true (minted already-diverged)")
+		}
+		if down.SystemSlug != "" {
+			t.Errorf("downstream blueprint system_slug = %q, want empty (a split product is never a shipped row)", down.SystemSlug)
+		}
+	})
+
+	t.Run("DeleteStep_StampsUserModified_Head", func(t *testing.T) {
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "um-del-head", Name: "HeadUM", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		p0, p1 := seedPrompt(t, "um-dh-0"), seedPrompt(t, "um-dh-1")
+		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		down, err := store.DeleteStep(ctx, orgID, bp, 0, "Downstream")
+		if err != nil {
+			t.Fatalf("DeleteStep: %v", err)
+		}
+		// The retired original is soft-deleted — GetSystem still resolves it.
+		orig, err := store.GetSystem(ctx, orgID, bp)
+		if err != nil || orig == nil {
+			t.Fatalf("GetSystem(original) = (%v, %v), want a row", orig, err)
+		}
+		if !orig.UserModified {
+			t.Errorf("retired original user_modified = false, want true")
+		}
+		downBP, err := store.Get(ctx, orgID, down)
+		if err != nil || downBP == nil {
+			t.Fatalf("Get(downstream) = (%v, %v), want a row", downBP, err)
+		}
+		if !downBP.UserModified {
+			t.Errorf("downstream user_modified = false, want true")
+		}
+		if downBP.SystemSlug != "" {
+			t.Errorf("downstream system_slug = %q, want empty", downBP.SystemSlug)
+		}
+	})
+
+	t.Run("DeleteStep_StampsUserModified_Tail", func(t *testing.T) {
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "um-del-tail", Name: "TailUM", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		p0, p1 := seedPrompt(t, "um-dt-0"), seedPrompt(t, "um-dt-1")
+		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		down, err := store.DeleteStep(ctx, orgID, bp, 1, "")
+		if err != nil {
+			t.Fatalf("DeleteStep: %v", err)
+		}
+		if down != "" {
+			t.Fatalf("tail delete minted a downstream blueprint %q; want none", down)
+		}
+		orig, err := store.Get(ctx, orgID, bp)
+		if err != nil || orig == nil {
+			t.Fatalf("Get(original) = (%v, %v), want a row", orig, err)
+		}
+		if !orig.UserModified {
+			t.Errorf("original user_modified = false, want true")
+		}
+	})
+
+	t.Run("DeleteStep_StampsUserModified_Mid", func(t *testing.T) {
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		bp, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{SystemSlug: "um-del-mid", Name: "MidUM", Source: "system"})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		p0, p1, p2 := seedPrompt(t, "um-dm-0"), seedPrompt(t, "um-dm-1"), seedPrompt(t, "um-dm-2")
+		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		down, err := store.DeleteStep(ctx, orgID, bp, 1, "Downstream")
+		if err != nil {
+			t.Fatalf("DeleteStep: %v", err)
+		}
+		if down == "" {
+			t.Fatalf("mid delete minted no downstream blueprint; want one")
+		}
+		orig, err := store.Get(ctx, orgID, bp)
+		if err != nil || orig == nil || !orig.UserModified {
+			t.Fatalf("original after mid delete = (%+v, %v), want user_modified=true", orig, err)
+		}
+		downBP, err := store.Get(ctx, orgID, down)
+		if err != nil || downBP == nil {
+			t.Fatalf("Get(downstream) = (%v, %v), want a row", downBP, err)
+		}
+		if !downBP.UserModified {
+			t.Errorf("downstream user_modified = false, want true")
+		}
+		if downBP.SystemSlug != "" {
+			t.Errorf("downstream system_slug = %q, want empty", downBP.SystemSlug)
+		}
+	})
+
+	t.Run("IncrementUsage_LeavesUserModifiedUntouched", func(t *testing.T) {
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		id, err := store.SeedOrUpdate(ctx, orgID, teamID, domain.Blueprint{
+			SystemSlug: "um-usage", Name: "UsageUM", Source: "system",
+		})
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := store.IncrementUsage(ctx, orgID, id); err != nil {
+			t.Fatalf("IncrementUsage: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, id)
+		if err != nil || got == nil {
+			t.Fatalf("Get = (%v, %v)", got, err)
+		}
+		if got.UserModified {
+			t.Errorf("IncrementUsage flipped user_modified true; want untouched (false)")
+		}
+		if got.UsageCount != 1 {
+			t.Errorf("UsageCount = %d, want 1", got.UsageCount)
+		}
+	})
 }
 
 // assertDenseSteps reads a blueprint's steps and asserts they are exactly
@@ -761,6 +1031,9 @@ func RunBlueprintDuplicationConformance(t *testing.T, factory BlueprintDuplicati
 		if bp.Name != "dup-full (copy)" {
 			t.Errorf("full clone name = %q, want %q", bp.Name, "dup-full (copy)")
 		}
+		if bp.UserModified {
+			t.Errorf("duplicated blueprint user_modified = true, want false (a fresh user-source copy hasn't diverged from anything)")
+		}
 		steps, err := store.ListSteps(ctx, orgID, newIDs[0])
 		if err != nil {
 			t.Fatalf("ListSteps(new): %v", err)
@@ -804,6 +1077,12 @@ func RunBlueprintDuplicationConformance(t *testing.T, factory BlueprintDuplicati
 		}
 		if len(srcSteps) != 2 || srcSteps[0].StepPromptID != srcPrompts[0] || srcSteps[1].StepPromptID != srcPrompts[1] {
 			t.Fatalf("source steps mutated: %+v", srcSteps)
+		}
+		// seedRun's ReplaceSteps already stamped the source user_modified=true;
+		// DuplicatePrompts must leave that alone (it never touches the source).
+		src, err := store.Get(ctx, orgID, srcID)
+		if err != nil || src == nil || !src.UserModified {
+			t.Fatalf("source after duplicate = (%+v, %v), want user_modified=true (untouched)", src, err)
 		}
 	})
 
