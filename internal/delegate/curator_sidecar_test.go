@@ -77,7 +77,7 @@ func TestCuratorGitAuthorizeDecision(t *testing.T) {
 		}
 	})
 
-	t.Run("unpinned_and_untracked_reports_admin_not_attached", func(t *testing.T) {
+	t.Run("unpinned_and_untracked_reports_not_tracked", func(t *testing.T) {
 		// Both conditions fail. Tracking is the deeper, admin-actionable
 		// problem, so it must win — matching the exec-gh gate's ordering — and
 		// the agent must NOT be told it's merely "not attached to this project".
