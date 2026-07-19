@@ -986,7 +986,17 @@ const sqliteTaskColumnsWithEntity = `
 			ELSE NULL
 		END,
 		0
-	)`
+	),
+	-- Slack thread message count: the messages addressed to the bot on this
+	-- entity. Gated on source so only Slack tasks pay the correlated count;
+	-- entity_id is globally unique, so no org filter is needed here.
+	CASE
+		WHEN e.source = 'slack' THEN (
+			SELECT COUNT(*) FROM events ev
+			WHERE ev.entity_id = t.entity_id AND ev.event_type = 'slack:message'
+		)
+		ELSE 0
+	END`
 
 // taskScanState holds the NullX intermediates for one row of
 // sqliteTaskColumnsWithEntity. Keeping the helper here means
@@ -1014,7 +1024,7 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 		&s.closedAt, &t.CreatedAt,
 		&s.claimedByAgentID, &s.claimedByUserID,
 		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
-		&t.OpenSubtaskCount,
+		&t.OpenSubtaskCount, &t.SlackMessageCount,
 	}
 }
 

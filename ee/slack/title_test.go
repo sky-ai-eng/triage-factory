@@ -63,47 +63,34 @@ func TestMentionTitle_StripsSlackMarkup(t *testing.T) {
 	}
 }
 
-func TestComposeMentionTitle(t *testing.T) {
-	cases := []struct {
-		name, sender, channel, text, want string
-	}{
-		{"both", "Ada", "general", "<@U0BOT> what can you do?", `Ada said "what can you do?" in #general`},
-		{"sender only", "Ada", "", "hi there", `Ada said "hi there"`},
-		{"channel only", "", "general", "hi there", "hi there in #general"},
-		{"neither equals plain text", "", "", "<@U0BOT> hi there", "hi there"},
-		{"markup inside", "Ada", "general", "look at <#C9|releases>", `Ada said "look at #releases" in #general`},
+func TestComposeThreadTitle(t *testing.T) {
+	cases := []struct{ name, channel, want string }{
+		{"with channel", "general", "New thread messages in #general"},
+		{"empty channel falls back to the channel-less form", "", slackThreadTitle},
 	}
 	for _, c := range cases {
-		if got := composeMentionTitle(c.sender, c.channel, c.text); got != c.want {
-			t.Errorf("%s: composeMentionTitle(%q,%q,%q) = %q; want %q", c.name, c.sender, c.channel, c.text, got, c.want)
+		if got := composeThreadTitle(c.channel); got != c.want {
+			t.Errorf("%s: composeThreadTitle(%q) = %q; want %q", c.name, c.channel, got, c.want)
 		}
 	}
 
-	t.Run("keeps the who/where frame when the message is long", func(t *testing.T) {
-		long := strings.Repeat("a", 300)
-		got := composeMentionTitle("Ada", "general", long)
+	t.Run("caps a pathologically long channel name", func(t *testing.T) {
+		long := strings.Repeat("z", 300)
+		got := composeThreadTitle(long)
 		if r := []rune(got); len(r) > mentionTitleMaxRunes {
 			t.Errorf("length = %d runes; want <= %d", len(r), mentionTitleMaxRunes)
-		}
-		if !strings.HasPrefix(got, `Ada said "`) || !strings.HasSuffix(got, `" in #general`) {
-			t.Errorf("frame lost on a long message: %q", got)
 		}
 	})
 }
 
 // TestHandleEventCallback_DispatchesTitleResolutionOnCreated is the call-site
 // wiring test: a fresh thread entity dispatches resolveTitle, which resolves
-// the sender + channel names and rewrites entities.title into the enriched
-// form. Mirrors the identity/channel/permalink dispatch tests' shape; the
-// fake Slack API answers both users.info and conversations.info by path.
+// the channel name and rewrites entities.title into "New thread messages in
+// #<channel>". Mirrors the identity/channel/permalink dispatch tests' shape;
+// the fake Slack API answers conversations.info by path.
 func TestHandleEventCallback_DispatchesTitleResolutionOnCreated(t *testing.T) {
 	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case strings.Contains(r.URL.Path, "users.info"):
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"ok":   true,
-				"user": map[string]any{"profile": map[string]any{"display_name": "Ada", "real_name": "Ada Lovelace"}},
-			})
 		case strings.Contains(r.URL.Path, "conversations.info"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "channel": map[string]any{"name": "general"}})
 		default:
@@ -136,7 +123,7 @@ func TestHandleEventCallback_DispatchesTitleResolutionOnCreated(t *testing.T) {
 	}
 
 	entityID := "entity-org-1/slack/C1/1600000000.000100"
-	if got, want := titles.get(entityID), `Ada said "what can you do?" in #general`; got != want {
+	if got, want := titles.get(entityID), "New thread messages in #general"; got != want {
 		t.Errorf("title = %q; want %q", got, want)
 	}
 }
