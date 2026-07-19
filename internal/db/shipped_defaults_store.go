@@ -44,12 +44,15 @@ type ShippedDefaultsStore interface {
 	SeedShippedIntoTeam(ctx context.Context, orgID, teamID string, shippedPrompts []domain.Prompt, shippedBlueprints []domain.SeedBlueprint) error
 
 	// SyncShippedIntoTeam brings teamID's UNMODIFIED copies of the shipped
-	// defaults up to the current shipped content, one shipped blueprint "sync
-	// unit" at a time. A unit is a shipped blueprint's header row + its ordered
-	// step list (prompt slugs + briefs) + every step prompt's content (name,
-	// body, model, allowed_tools; source stays 'system'). It replaces the old
-	// version-hash sidecar: "unmodified equals shipped" is decided by direct
-	// content comparison. Per unit:
+	// defaults up to the current shipped content: shipped blueprints (see
+	// below), then db.ShippedEventHandlers via EventHandlerStore.Sync — run
+	// after the blueprint pass so a trigger's blueprint-slug re-resolution
+	// sees post-sync blueprint ids. Each shipped blueprint is synced as one
+	// "sync unit" at a time. A unit is a shipped blueprint's header row + its
+	// ordered step list (prompt slugs + briefs) + every step prompt's content
+	// (name, body, model, allowed_tools; source stays 'system'). It replaces
+	// the old version-hash sidecar: "unmodified equals shipped" is decided by
+	// direct content comparison. Per unit:
 	//
 	//   - Skip if the blueprint row OR any step prompt row is user_modified, or
 	//     if the blueprint row (or any current step prompt row) is soft-deleted

@@ -311,9 +311,12 @@ func (bh *blueprintsHandler) handleBlueprintUpdate(w http.ResponseWriter, r *htt
 //     presence. We resolve the steps and soft-delete each via the shared
 //     source-dispatch — the other half of the prompt-delete sole-owner pairing.
 //   - The bound trigger is detached: every handler ListForBlueprint resolves is
-//     hard-deleted unconditionally, system rows included, matching
-//     handleEventHandlerDelete and the prompt head-delete path. Nothing re-seeds
-//     at boot, so a deleted shipped default is durable.
+//     deleted via EventHandlers.Delete, matching handleEventHandlerDelete and
+//     the prompt head-delete path — a system_slug (shipped) trigger
+//     soft-deletes so the shipped-content sync never resurrects it, a
+//     user-created trigger hard-deletes. The blueprint header stays present
+//     (soft-deleted, not gone), so the trigger's (blueprint_id, org_id) /
+//     (blueprint_id, team_id) FKs are always satisfied regardless of order.
 //
 // 404 by re-read (Get filters soft-deleted) when the blueprint is missing or
 // already deleted.

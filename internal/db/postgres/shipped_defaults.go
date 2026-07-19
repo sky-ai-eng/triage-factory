@@ -172,7 +172,41 @@ func (s *shippedDefaultsStore) SyncShippedIntoTeam(ctx context.Context, orgID, t
 			return fmt.Errorf("shipped defaults sync: blueprint %s: %w", b.SystemSlug, err)
 		}
 	}
+
+	// Handlers sync last: a trigger's blueprint binding re-resolves by shipped
+	// slug against the blueprint state the loop above just produced (fresh
+	// inserts included), so it must run after every blueprint unit has synced.
+	blueprintIDsBySlug, err := resolveBlueprintIDsBySlugPG(ctx, conn, orgID, teamID, shippedBlueprints)
+	if err != nil {
+		return fmt.Errorf("shipped defaults sync: resolve blueprint ids: %w", err)
+	}
+	if err := s.eventHandlers.Sync(ctx, orgID, teamID, db.ShippedEventHandlers, blueprintIDsBySlug); err != nil {
+		return fmt.Errorf("shipped defaults sync: handlers: %w", err)
+	}
 	return nil
+}
+
+// resolveBlueprintIDsBySlugPG reads each shipped blueprint's current
+// non-deleted team-copy id, for EventHandlerStore.Sync to resolve a shipped
+// trigger's blueprint slug against. A slug with no non-deleted row (missing,
+// or soft-deleted by the user) is omitted — Sync then skips any trigger that
+// targets it rather than wiring a dangling or resurrected reference.
+func resolveBlueprintIDsBySlugPG(ctx context.Context, conn *sql.DB, orgID, teamID string, shippedBlueprints []domain.SeedBlueprint) (map[string]string, error) {
+	ids := make(map[string]string, len(shippedBlueprints))
+	for _, b := range shippedBlueprints {
+		var id string
+		switch err := conn.QueryRowContext(ctx,
+			`SELECT id FROM blueprints WHERE org_id = $1 AND team_id = $2 AND system_slug = $3 AND deleted_at IS NULL`,
+			orgID, teamID, b.SystemSlug,
+		).Scan(&id); {
+		case errors.Is(err, sql.ErrNoRows):
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("resolve blueprint %s: %w", b.SystemSlug, err)
+		}
+		ids[b.SystemSlug] = id
+	}
+	return ids, nil
 }
 
 // backfillShippedDefaults runs the one-time grandfather pass on the admin pool.

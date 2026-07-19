@@ -848,6 +848,14 @@ CREATE TABLE public.event_handlers (
     min_autonomy_suitability real,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- user_modified / deleted_at mirror prompts and blueprints: the
+    -- shipped-content sync's "never clobber a user edit" signal, and a
+    -- soft-delete that keeps (org_id, team_id, system_slug) occupied so sync
+    -- never resurrects a deleted shipped row. No multi-mode deployment exists
+    -- yet, so this lands in the baseline directly (the SQLite side gets a
+    -- forward migration instead).
+    user_modified boolean DEFAULT false NOT NULL,
+    deleted_at timestamp with time zone,
     CONSTRAINT event_handlers_kind_check CHECK ((kind = ANY (ARRAY['rule'::text, 'trigger'::text]))),
     CONSTRAINT event_handlers_rule_shape CHECK (((kind <> 'rule'::text) OR ((blueprint_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (name IS NOT NULL) AND (default_priority IS NOT NULL) AND (sort_order IS NOT NULL)))),
     -- source is app-validated, not CHECK-constrained (the source_check was
@@ -2563,8 +2571,10 @@ CREATE INDEX idx_event_handlers_blueprint ON public.event_handlers USING btree (
 -- one keeps a prompt in one blueprint, this one keeps a blueprint behind one
 -- event. Events still fan out 1:many (one event_type may fire many blueprints
 -- via many distinct trigger rows); this only bounds the per-blueprint side.
+-- deleted_at IS NULL so a soft-deleted trigger frees its blueprint slot
+-- instead of permanently blocking a replacement.
 
-CREATE UNIQUE INDEX event_handlers_one_trigger_per_blueprint ON public.event_handlers USING btree (org_id, blueprint_id) WHERE (blueprint_id IS NOT NULL);
+CREATE UNIQUE INDEX event_handlers_one_trigger_per_blueprint ON public.event_handlers USING btree (org_id, blueprint_id) WHERE (blueprint_id IS NOT NULL AND deleted_at IS NULL);
 
 
 --

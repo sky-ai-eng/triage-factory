@@ -14,7 +14,7 @@ import (
 // teams.shipped_defaults_backfilled_at, so the team row must exist); resetBackfill
 // clears that marker so the grandfather backfill is exercisable.
 func TestShippedSync_SQLite(t *testing.T) {
-	dbtest.RunShippedSyncConformance(t, func(t *testing.T) (db.Stores, string, string, func(*testing.T)) {
+	factory := func(t *testing.T) (db.Stores, string, string, func(*testing.T)) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
@@ -29,5 +29,7 @@ func TestShippedSync_SQLite(t *testing.T) {
 			}
 		}
 		return stores, runmode.LocalDefaultOrgID, teamID, reset
-	})
+	}
+	dbtest.RunShippedSyncConformance(t, factory)
+	dbtest.RunShippedHandlerSyncConformance(t, factory)
 }

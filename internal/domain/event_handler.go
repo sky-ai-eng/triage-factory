@@ -63,6 +63,14 @@ type EventHandler struct {
 	SystemSlug string    `json:"system_slug,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
+	// UserModified is the shipped-content sync's "never clobber a user edit"
+	// signal (mirrors domain.Blueprint.UserModified): true once a team's copy
+	// of a shipped handler has diverged from current shipped content via a
+	// content-mutating write (Update on a non-enabled field, Promote,
+	// RetargetBlueprint). SetEnabled and Reorder never set it — activation
+	// state and presentation order are the user's to own regardless. Always
+	// false for user-authored (non-system_slug) rows.
+	UserModified bool `json:"user_modified"`
 
 	// Rule-only (nil for triggers).
 	Name            string   `json:"name"`             // required for rules
