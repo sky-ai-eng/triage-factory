@@ -22,10 +22,10 @@ func softDeleteHandler(t *testing.T, database *sql.DB, id string) {
 	}
 }
 
-// TestRouter_SoftDeletedTrigger_NoLongerFires is the router-level proof for
-// TFAC-661: GetEnabledForEventSystem — the router's query — filters
-// deleted_at IS NULL, so a soft-deleted trigger stops firing immediately,
-// with no need to wait for a poll cycle or re-derive pass.
+// TestRouter_SoftDeletedTrigger_NoLongerFires proves GetEnabledForEventSystem
+// — the router's query — filters deleted_at IS NULL, so a soft-deleted
+// trigger stops firing immediately, with no need to wait for a poll cycle or
+// re-derive pass.
 func TestRouter_SoftDeletedTrigger_NoLongerFires(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
