@@ -211,11 +211,11 @@ func (a *lifecycleAdapter) dispatch(ctx context.Context, evt domain.Event, runs 
 // the one-line not-configured reply (replyNotConfigured). Both load the
 // message metadata, gate on its explicit-mention flag, and only then resolve
 // the bot token: an un-mentioned follow-up in a thread the bot already owns is
-// handled silently — its content already folds into the live run (routing's
-// same-task absorption), and stamping a reaction or a reply on every message
-// in an engaged thread is noise. frozen/taskless_unroutable/error are inert
-// by design. Every step here is best-effort: log-and-drop on any store/API
-// failure, never a retry loop.
+// handled silently — a per-message reaction or reply on top of the task/run it
+// already drives (whether that absorbs into an in-flight run or starts a fresh
+// one) is just noise. frozen/taskless_unroutable/error are inert by design.
+// Every step here is best-effort: log-and-drop on any store/API failure, never
+// a retry loop.
 func (a *lifecycleAdapter) handleDisposition(ctx context.Context, evt domain.Event) {
 	var disp events.SystemRoutingDispositionMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &disp); err != nil {
@@ -237,9 +237,9 @@ func (a *lifecycleAdapter) handleDisposition(ctx context.Context, evt domain.Eve
 // acknowledgeMention adds the 👀 reaction to the mention message itself
 // (meta.TS, never the thread root) — but only when that message explicitly
 // @-mentioned the bot. An un-mentioned follow-up in a thread the bot already
-// owns (Mentioned=false) folds into the live run without a reaction: stamping
-// 👀 on every message in an engaged thread reads as noise, and the run's own
-// working indicator (plus any reply) already signals the follow-up was seen.
+// owns (Mentioned=false) gets no reaction: stamping 👀 on every message in an
+// engaged thread is noise, and any run the follow-up drives already shows a
+// working indicator that signals it landed.
 func (a *lifecycleAdapter) acknowledgeMention(ctx context.Context, orgID, eventID string) {
 	meta, ok := a.messageMetadata(ctx, orgID, eventID)
 	if !ok || !meta.Mentioned {
