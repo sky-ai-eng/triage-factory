@@ -988,12 +988,14 @@ const sqliteTaskColumnsWithEntity = `
 		0
 	),
 	-- Slack thread message count: the messages addressed to the bot on this
-	-- entity. Gated on source so only Slack tasks pay the correlated count;
-	-- entity_id is globally unique, so no org filter is needed here.
+	-- entity. Gated on source so only Slack tasks pay the correlated count.
+	-- (event_type, entity_id) seeks idx_events_type_entity; SQLite entities
+	-- carry no org_id column (local mode is single-tenant), and that index is
+	-- not org-prefixed, so no org predicate is added or needed here.
 	CASE
 		WHEN e.source = 'slack' THEN (
 			SELECT COUNT(*) FROM events ev
-			WHERE ev.entity_id = t.entity_id AND ev.event_type = 'slack:message'
+			WHERE ev.event_type = 'slack:message' AND ev.entity_id = t.entity_id
 		)
 		ELSE 0
 	END`

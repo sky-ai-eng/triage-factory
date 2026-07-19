@@ -1083,12 +1083,17 @@ const pgTaskColumnsWithEntity = `
 	COALESCE(e.title, ''), COALESCE(e.url, ''), e.source_id, e.source, e.kind,
 	COALESCE((e.snapshot_json->>'open_subtask_count')::int, 0),
 	-- Slack thread message count: the messages addressed to the bot on this
-	-- entity. Gated on source so only Slack tasks pay the correlated count;
-	-- entity_id is globally unique, so no org filter is needed here.
+	-- entity. Gated on source so only Slack tasks pay the correlated count.
+	-- The org_id predicate is redundant for correctness (entity_id is globally
+	-- unique) but lets the planner seek idx_events_org_type_entity
+	-- (org_id, event_type, entity_id) instead of scanning; predicates are
+	-- written in that leading-column order.
 	CASE
 		WHEN e.source = 'slack' THEN (
 			SELECT COUNT(*) FROM events ev
-			WHERE ev.entity_id = t.entity_id AND ev.event_type = 'slack:message'
+			WHERE ev.org_id = e.org_id
+			  AND ev.event_type = 'slack:message'
+			  AND ev.entity_id = t.entity_id
 		)
 		ELSE 0
 	END`
