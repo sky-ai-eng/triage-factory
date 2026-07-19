@@ -63,12 +63,11 @@ type ingestPipeline struct {
 	entities   entityFinder
 	deliveries slackstore.DeliveryStore
 	publish    func(domain.Event)
-	// identity resolves a message's sender to a TF user (TFAC-531) — both
-	// ingest branches dispatch it, since an engaged-thread follow-up's
-	// sender may never appear in an app_mention. Best-effort and detached —
-	// see resolveSender's doc. nil-safe: tests and any future caller that
-	// doesn't need identity capture simply construct ingestPipeline
-	// without it.
+	// identity resolves a message's sender to a TF user — both ingest branches
+	// dispatch it, since an engaged-thread follow-up's sender may never appear
+	// in an app_mention. Best-effort and detached — see resolveSender's doc.
+	// nil-safe: tests and any future caller that doesn't need identity capture
+	// simply construct ingestPipeline without it.
 	identity *IdentityResolver
 	// channels records the sighting registry (slack_channels, TFAC-541);
 	// channelName resolves a sighted channel's display name (TFAC-542),
