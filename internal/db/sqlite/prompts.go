@@ -2,14 +2,10 @@ package sqlite
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -18,148 +14,22 @@ import (
 
 // promptStore is the SQLite impl of db.PromptStore. SQL bodies are
 // ported verbatim from the pre-D2 internal/db/prompts.go +
-// internal/db/prompt_stats.go; the only behavioral changes are:
+// internal/db/prompt_stats.go; the only behavioral changes are
+// assertLocalOrg at every method entry (defends against mis-configured
+// callers passing a real UUID) and context propagation on every
+// Exec/Query (the old free-functions used non-ctx variants).
 //
-//   - assertLocalOrg at every method entry (defends against
-//     mis-configured callers passing a real UUID),
-//   - context propagation on every Exec/Query (the old free-functions
-//     used non-ctx variants),
-//   - SeedOrUpdate's tx is opened with BeginTx so it observes ctx
-//     cancellation instead of hanging on a dead caller.
-//
-// Both pools collapse to one *sql.DB in SQLite (no role concept).
-// The seeder field is wired identically to q at construction; the
-// Postgres impl is where the split actually matters.
+// SQLite has no role concept, so the two pools the Postgres impl keeps
+// distinct (app vs admin) collapse to one *sql.DB here.
 type promptStore struct {
-	q      queryer
-	seeder queryer
+	q queryer
 }
 
-func newPromptStore(app, admin queryer) db.PromptStore {
-	return &promptStore{q: app, seeder: admin}
+func newPromptStore(q queryer) db.PromptStore {
+	return &promptStore{q: q}
 }
 
 var _ db.PromptStore = (*promptStore)(nil)
-
-// --- SeedOrUpdate --------------------------------------------------
-
-func (s *promptStore) SeedOrUpdate(ctx context.Context, orgID, teamID string, p domain.Prompt) (string, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return "", err
-	}
-	if teamID == "" {
-		teamID = runmode.LocalDefaultTeamID
-	}
-	if p.Source == "" {
-		p.Source = "system"
-	}
-	if p.Source != "system" {
-		return "", fmt.Errorf("sqlite prompts: SeedOrUpdate only accepts Source=\"system\" (got %q); use Create or UpdateImported for non-system rows", p.Source)
-	}
-	if p.SystemSlug == "" {
-		return "", fmt.Errorf("sqlite prompts: SeedOrUpdate requires a non-empty SystemSlug (the shipped slug to dedupe on)")
-	}
-	hash := shippedContentHash(p)
-	now := time.Now().UTC()
-
-	// Wrap the read-modify-write in a tx so the prompt insert/update
-	// + the system_prompt_versions upsert are atomic. A mid-stream
-	// failure would otherwise leave the version row stamped without
-	// the corresponding prompt update applied (or vice versa) and
-	// the next seed cycle would see inconsistent state.
-	var resultID string
-	err := inTx(ctx, s.seeder, func(q queryer) error {
-		// Identity is per-team: (org_id, team_id, system_slug). A second
-		// team gets its own copy (same slug, different team) and re-seeds
-		// resolve the existing row by this key.
-		var (
-			existingID   string
-			userModified int
-		)
-		switch err := q.QueryRowContext(ctx,
-			`SELECT id, user_modified FROM prompts WHERE org_id = ? AND team_id = ? AND system_slug = ?`,
-			orgID, teamID, p.SystemSlug,
-		).Scan(&existingID, &userModified); {
-		case errors.Is(err, sql.ErrNoRows):
-			// Fresh insert — mint a random UUID for this team's copy.
-			newID := uuid.New().String()
-			if _, err := q.ExecContext(ctx, `
-				INSERT INTO prompts (id, org_id, team_id, system_slug, name, body, source, usage_count, user_modified, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
-			`, newID, orgID, teamID, p.SystemSlug, p.Name, p.Body, p.Source, now, now); err != nil {
-				return err
-			}
-			resultID = newID
-			return upsertSystemPromptVersionSQLite(ctx, q, newID, hash, now)
-		case err != nil:
-			return fmt.Errorf("read prompt: %w", err)
-		}
-		resultID = existingID
-
-		// User-modified rows are intentional local edits — never
-		// overwrite, never claim a new shipped hash was applied.
-		if userModified != 0 {
-			return nil
-		}
-
-		// Identical-shipped-content fast path: skip the writes so
-		// prompts.updated_at + system_prompt_versions.applied_at
-		// don't churn on every startup (the UI orders by updated_at).
-		var priorHash sql.NullString
-		if err := q.QueryRowContext(ctx,
-			`SELECT content_hash FROM system_prompt_versions WHERE prompt_id = ?`, existingID,
-		).Scan(&priorHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("read prior prompt version: %w", err)
-		}
-		if priorHash.Valid && priorHash.String == hash {
-			return nil
-		}
-
-		if _, err := q.ExecContext(ctx, `
-			UPDATE prompts
-			SET name = ?, body = ?, source = ?, updated_at = ?
-			WHERE id = ?
-		`, p.Name, p.Body, p.Source, now, existingID); err != nil {
-			return err
-		}
-		return upsertSystemPromptVersionSQLite(ctx, q, existingID, hash, now)
-	})
-	if err != nil {
-		return "", err
-	}
-	return resultID, nil
-}
-
-// shippedContentHash digests the shipped (name, body, source) triple
-// with null-byte separators so rename + re-source trigger an update
-// even when body is unchanged, and so distinct field combinations
-// can't collide on a shared prefix ("Foo"+"" vs ""+"Foo").
-func shippedContentHash(p domain.Prompt) string {
-	h := sha256.Sum256([]byte(p.Name + "\x00" + p.Body + "\x00" + p.Source))
-	return hex.EncodeToString(h[:])
-}
-
-func upsertSystemPromptVersionSQLite(ctx context.Context, q queryer, promptID, hash string, now time.Time) error {
-	// applied_at only bumps when content_hash actually changed —
-	// the WHERE on the DO UPDATE branch makes this a no-op on
-	// identical-hash reseeds. Important: this is the secondary
-	// defense; the SeedOrUpdate body already short-circuits before
-	// getting here on identical content. Both defenses matter
-	// because legacy rows without a version sidecar fall through
-	// to this upsert with a fresh hash, and they should not
-	// re-write applied_at every startup once first written.
-	if _, err := q.ExecContext(ctx, `
-		INSERT INTO system_prompt_versions (prompt_id, content_hash, applied_at)
-		VALUES (?, ?, ?)
-		ON CONFLICT(prompt_id) DO UPDATE SET
-			content_hash = excluded.content_hash,
-			applied_at = excluded.applied_at
-		WHERE system_prompt_versions.content_hash != excluded.content_hash
-	`, promptID, hash, now); err != nil {
-		return fmt.Errorf("upsert system prompt version: %w", err)
-	}
-	return nil
-}
 
 // --- CRUD ----------------------------------------------------------
 
@@ -277,9 +147,10 @@ func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, system
 // caller, which is a deliberate divergence from the Postgres impl:
 //
 //   - Postgres Create derives creator_user_id from tf.current_user_id()
-//     (request context). System prompts there go through SeedOrUpdate
-//     only — the prompts_system_has_no_creator CHECK rejects
-//     source='system' rows that come through this path.
+//     (request context). System prompts there are seeded by
+//     ShippedDefaultsStore.SeedShippedIntoTeam on the admin pool — the
+//     prompts_system_has_no_creator CHECK rejects source='system' rows
+//     that come through this Create path.
 //   - SQLite Create handles both source='system' (system tests +
 //     curator skill seeds) and source∈('user','imported') in one
 //     entry point because local mode has no request context to

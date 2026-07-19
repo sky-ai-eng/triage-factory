@@ -52,12 +52,12 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 	users := newUsersStore(tx, tx)
 	txStores := db.TxStores{
 		Scores:           newScoreStore(tx),
-		Prompts:          newPromptStore(tx, tx),
+		Prompts:          newPromptStore(tx),
 		Swipes:           newSwipeStore(tx),
 		Dashboard:        newDashboardStore(tx),
 		Secrets:          newSecretStore(),
 		EventHandlers:    newEventHandlerStore(tx),
-		Blueprints:       newBlueprintStore(tx, tx),
+		Blueprints:       newBlueprintStore(tx),
 		Agents:           newAgentStore(tx, tx),
 		TeamAgents:       newTeamAgentStore(tx),
 		Users:            users,

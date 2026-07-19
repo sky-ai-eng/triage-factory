@@ -17,19 +17,14 @@ import (
 )
 
 // TestPromptStore_Postgres runs the shared PromptStore conformance suite
-// against the Postgres impl. The store is constructed via pgstore.New
-// — same wiring as production main.go — so SeedOrUpdate hits the admin
-// pool and every other method hits the app pool, exactly as it will
-// in multi mode.
+// against the Postgres impl. The store is constructed via pgstore.New — same
+// wiring as production main.go.
 //
 // Each subtest gets a fresh org + user via h.Reset; the per-test
 // fixture is owned by the factory closure.
 //
 // What this test pins (in addition to the shared assertions):
 //
-//   - SeedOrUpdate's atomic prompt + system_prompt_versions write
-//     succeeds under the actual D3 REVOKE — admin pool can write the
-//     sidecar; app pool can't.
 //   - The COALESCE-to-org-owner fallback for creator_user_id satisfies
 //     the NOT NULL constraint without needing JWT claims set on the
 //     test connection.
@@ -67,57 +62,6 @@ func TestPromptStore_Postgres(t *testing.T) {
 		_ = userID
 		return stores.Prompts, orgID, teamID, seeder
 	})
-}
-
-// TestPromptStore_Postgres_SeedOrUpdate_AdminOnly is the explicit pin
-// for the D3 REVOKE invariant: system_prompt_versions writes MUST go
-// through the admin pool. Running SeedOrUpdate via a tf_app connection
-// has to fail with the privilege error, otherwise the deploy-time
-// separation is broken.
-//
-// We construct two stores: one wired admin-on-both (the conformance
-// pattern above), and one wired app-on-both. The first must succeed,
-// the second must fail. If both succeed, the REVOKE is missing or the
-// store is wired wrong. If both fail, something else is broken.
-func TestPromptStore_Postgres_SeedOrUpdate_AdminOnly(t *testing.T) {
-	h := pgtest.Shared(t)
-	h.Reset(t)
-	orgID, _ := seedPgOrgAndUserForPrompts(t, h)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	// Admin-pool store — must succeed.
-	adminStores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	teamID := firstTeamForOrg(t, h, orgID)
-	seededID, err := adminStores.Prompts.SeedOrUpdate(ctx, orgID, teamID, domain.Prompt{
-		SystemSlug: "sys-admin-ok", Name: "OK", Body: "x", Source: "system",
-	})
-	if err != nil {
-		t.Fatalf("admin-pool SeedOrUpdate should succeed, got: %v", err)
-	}
-
-	// App-pool store with SET LOCAL ROLE tf_app — must fail on the
-	// version-row write. We build a separate, claims-set tx so the
-	// store's INSERT into system_prompt_versions hits tf_app's REVOKE.
-	if err := h.WithUser(t, uuid.New().String(), orgID, func(tx *sql.Tx) error {
-		// SeedOrUpdate inside a tx is explicitly rejected by the
-		// store (escaping to admin would bypass tx semantics), so
-		// instead we invoke the underlying SQL directly under
-		// tf_app to confirm the REVOKE bites.
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO system_prompt_versions (org_id, prompt_id, content_hash, applied_at)
-			VALUES ($1, $2, $3, now())
-		`, orgID, seededID, "deadbeef")
-		if err == nil {
-			t.Fatalf("tf_app INSERT on system_prompt_versions should fail with privilege error")
-		}
-		return nil
-	}); err != nil {
-		// WithUser surfaces the test failure via t.Fatalf; if we got
-		// a transport-level error reaching here that's a bug in the
-		// harness, not the store.
-		t.Logf("WithUser cleanup error (expected on rollback after privilege failure): %v", err)
-	}
 }
 
 // TestPromptStore_Postgres_CrossOrgRLSDenied pins the production RLS

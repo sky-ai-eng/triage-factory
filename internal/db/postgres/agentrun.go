@@ -24,8 +24,8 @@ import (
 // CHECK, but the runs_insert RLS policy requires
 // `creator_user_id = tf.current_user_id()` — mutually exclusive, so
 // the app pool can't insert them at all. Routing event-triggered
-// Create through admin is the same shape PromptStore.SeedOrUpdate
-// uses for its system-write path.
+// Create through admin is the same shape the shipped-defaults seeder
+// (ShippedDefaultsStore.SeedShippedIntoTeam) uses for its system writes.
 //
 // SQL is written fresh against D3's schema: org_id in every WHERE
 // clause as defense in depth alongside RLS, $N placeholders, JSONB
@@ -78,7 +78,7 @@ func (s *agentRunStore) Create(ctx context.Context, orgID string, run domain.Age
 //     system-emitted (eventbus → spawner). Pool routing enforces
 //     "only server-side code with admin pool access can create
 //     event-triggered runs" rather than relying on application
-//     layer guards. Same pattern as PromptStore.SeedOrUpdate.
+//     layer guards. Same pattern as the shipped-defaults admin-pool seeder.
 //
 // **Nuance**: the admin pool is a separate connection, so this
 // insert commits autonomously from any outer WithTx the caller

@@ -1649,18 +1649,6 @@ ALTER SEQUENCE public.swipe_events_id_seq OWNED BY public.swipe_events.id;
 
 
 --
--- Name: system_prompt_versions; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.system_prompt_versions (
-    org_id uuid NOT NULL,
-    prompt_id text NOT NULL,
-    content_hash text NOT NULL,
-    applied_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
 -- Name: task_events; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1801,7 +1789,14 @@ CREATE TABLE public.teams (
     -- from selectors); the ...System reads omit the filter so the archive /
     -- restore / preview paths + in-flight reaping still resolve it. The team's
     -- durable work (tasks, runs, memory) is never hard-deleted.
-    deleted_at timestamp with time zone
+    deleted_at timestamp with time zone,
+    -- shipped_defaults_backfilled_at is the durable per-team marker that the
+    -- one-time grandfather backfill preceding the boot-time shipped-defaults
+    -- sync has run for this team: before the first sync stamps user_modified on
+    -- any system-slugged blueprint whose step structure already diverges from
+    -- shipped, then sets this timestamp. NULL = backfill still owed; a timestamp
+    -- = done, so the clobber-guard runs at most once per team.
+    shipped_defaults_backfilled_at timestamp with time zone
 );
 
 
@@ -2345,14 +2340,6 @@ ALTER TABLE ONLY public.sessions
 
 ALTER TABLE ONLY public.swipe_events
     ADD CONSTRAINT swipe_events_pkey PRIMARY KEY (id);
-
-
---
--- Name: system_prompt_versions system_prompt_versions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.system_prompt_versions
-    ADD CONSTRAINT system_prompt_versions_pkey PRIMARY KEY (org_id, prompt_id);
 
 
 --
@@ -3758,22 +3745,6 @@ ALTER TABLE ONLY public.swipe_events
 
 
 --
--- Name: system_prompt_versions system_prompt_versions_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.system_prompt_versions
-    ADD CONSTRAINT system_prompt_versions_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-
-
---
--- Name: system_prompt_versions system_prompt_versions_prompt_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.system_prompt_versions
-    ADD CONSTRAINT system_prompt_versions_prompt_id_org_id_fkey FOREIGN KEY (prompt_id, org_id) REFERENCES public.prompts(id, org_id) ON DELETE CASCADE;
-
-
---
 -- Name: task_events task_events_event_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4746,19 +4717,6 @@ CREATE POLICY swipe_events_select ON public.swipe_events FOR SELECT USING (((org
 
 
 --
--- Name: system_prompt_versions; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.system_prompt_versions ENABLE ROW LEVEL SECURITY;
-
---
--- Name: system_prompt_versions system_prompt_versions_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY system_prompt_versions_select ON public.system_prompt_versions FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
-
-
---
 -- Name: task_events; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -5581,17 +5539,6 @@ GRANT ALL ON SEQUENCE public.swipe_events_id_seq TO anon;
 GRANT ALL ON SEQUENCE public.swipe_events_id_seq TO authenticated;
 GRANT ALL ON SEQUENCE public.swipe_events_id_seq TO service_role;
 GRANT SELECT,USAGE ON SEQUENCE public.swipe_events_id_seq TO tf_app;
-
-
---
--- Name: TABLE system_prompt_versions; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON TABLE public.system_prompt_versions TO postgres;
-GRANT ALL ON TABLE public.system_prompt_versions TO anon;
-GRANT ALL ON TABLE public.system_prompt_versions TO authenticated;
-GRANT ALL ON TABLE public.system_prompt_versions TO service_role;
-GRANT SELECT ON TABLE public.system_prompt_versions TO tf_app;
 
 
 --
@@ -7833,7 +7780,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.marketplace_installs TO tf_
 -- multi-mode read-scoping standing rule forbids. Browse/detail reads join
 -- this table like any other listing column, under ordinary RLS. No
 -- INSERT/UPDATE/DELETE policy is declared below: only the admin pool ever
--- writes here (same shape as system_prompt_versions / events_catalog).
+-- writes here (same shape as events_catalog).
 --
 -- root_object_id persists on marketplace_installs after a copy is deleted
 -- (TFAC-535), so total_runs counts historical runs from deleted copies too —

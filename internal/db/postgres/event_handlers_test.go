@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
@@ -37,14 +38,14 @@ func TestEventHandlerStore_Postgres(t *testing.T) {
 			t.Helper()
 			out := make(map[string]string, len(slugs))
 			for _, slug := range slugs {
-				// system-source rows ship with creator_user_id NULL and a
-				// system_slug. The id is a random UUID; seed via SeedOrUpdate
-				// (admin pool) and capture the minted id for the
-				// trigger→blueprint same-team FK.
-				id, err := stores.Blueprints.SeedOrUpdate(t.Context(), orgID, teamID, domain.Blueprint{
-					SystemSlug: slug, Name: slug, Source: "system",
-				})
-				if err != nil {
+				// The trigger→blueprint same-team FK only needs a blueprint row to
+				// exist; a plain user blueprint satisfies it (the shipped system-slug
+				// shape is exercised in the shipped-defaults sync suite). The id is a
+				// random UUID, captured for the FK wiring.
+				id := uuid.New().String()
+				if err := stores.Blueprints.Create(t.Context(), orgID, teamID, domain.Blueprint{
+					ID: id, Name: slug, Source: "user",
+				}); err != nil {
 					t.Fatalf("seed blueprint %s: %v", slug, err)
 				}
 				out[slug] = id

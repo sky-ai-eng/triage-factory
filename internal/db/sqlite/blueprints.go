@@ -16,64 +16,20 @@ import (
 
 // blueprintStore is the SQLite impl of db.BlueprintStore.
 //
-// The constructor takes two queryers for signature parity with the
-// Postgres impl's (app, admin) split. SQLite has one connection so the
-// second arg is the seeder; `...System` admin-pool variants are thin
-// wrappers around their non-System counterparts.
+// SQLite has one connection, so the (app, admin) pool split the Postgres
+// impl keeps distinct collapses to a single queryer here; the `...System`
+// admin-pool variants are thin wrappers around their non-System counterparts.
 type blueprintStore struct {
-	q      queryer
-	seeder queryer
+	q queryer
 }
 
-func newBlueprintStore(app, admin queryer) db.BlueprintStore {
-	return &blueprintStore{q: app, seeder: admin}
+func newBlueprintStore(q queryer) db.BlueprintStore {
+	return &blueprintStore{q: q}
 }
 
 var _ db.BlueprintStore = (*blueprintStore)(nil)
 
 // --- Blueprint header CRUD -----------------------------------------------
-
-func (s *blueprintStore) SeedOrUpdate(ctx context.Context, orgID, teamID string, b domain.Blueprint) (string, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return "", err
-	}
-	if teamID == "" {
-		teamID = runmode.LocalDefaultTeamID
-	}
-	if b.Source == "" {
-		b.Source = "system"
-	}
-	if b.Source != "system" {
-		return "", fmt.Errorf("sqlite blueprints: SeedOrUpdate only accepts Source=\"system\" (got %q)", b.Source)
-	}
-	if b.SystemSlug == "" {
-		return "", fmt.Errorf("sqlite blueprints: SeedOrUpdate requires a non-empty SystemSlug")
-	}
-	now := time.Now().UTC()
-
-	// Identity is per-team: (org_id, team_id, system_slug). Re-seed resolves
-	// the existing row by this key (ON CONFLICT DO NOTHING semantics, no
-	// versions sidecar — step-list updates to shipped blueprints are a future
-	// concern).
-	var existingID string
-	switch err := s.seeder.QueryRowContext(ctx,
-		`SELECT id FROM blueprints WHERE org_id = ? AND team_id = ? AND system_slug = ?`,
-		orgID, teamID, b.SystemSlug,
-	).Scan(&existingID); {
-	case errors.Is(err, sql.ErrNoRows):
-		newID := uuid.New().String()
-		if _, err := s.seeder.ExecContext(ctx, `
-			INSERT INTO blueprints (id, org_id, team_id, system_slug, name, source, usage_count, user_modified, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
-		`, newID, orgID, teamID, b.SystemSlug, b.Name, b.Source, now, now); err != nil {
-			return "", fmt.Errorf("insert blueprint: %w", err)
-		}
-		return newID, nil
-	case err != nil:
-		return "", fmt.Errorf("read blueprint: %w", err)
-	}
-	return existingID, nil
-}
 
 // List ignores teamID: local mode is single-team.
 func (s *blueprintStore) List(ctx context.Context, orgID string, _ string) ([]domain.Blueprint, error) {

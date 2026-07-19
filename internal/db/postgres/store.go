@@ -110,10 +110,10 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 	eventHandlers := newEventHandlerStore(app, admin)
 	s.stores = db.Stores{
 		Scores: newScoreStore(admin),
-		// PromptStore needs both pools: SeedOrUpdate writes to
-		// system_prompt_versions (REVOKE'd from tf_app — admin only),
-		// every other method runs on the app pool. The impl picks
-		// per-method internally.
+		// PromptStore needs both pools: the ...System reads (GetSystem,
+		// IncrementUsageSystem) run on the admin pool for claims-less
+		// delegation goroutines, every other method on the app pool. The
+		// impl picks per-method internally.
 		Prompts:   newPromptStore(app, admin),
 		Swipes:    newSwipeStore(app),
 		Dashboard: newDashboardStore(app),

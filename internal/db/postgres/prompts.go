@@ -2,14 +2,10 @@ package postgres
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -19,11 +15,10 @@ import (
 //
 // # Pool split
 //
-// Most methods run on the app pool (tf_app, RLS-active). SeedOrUpdate
-// is the exception — system_prompt_versions has INSERT/UPDATE/DELETE
-// REVOKE'd from tf_app per D3, so the sidecar write can ONLY happen
-// on the admin pool. The impl holds both pools at construction and
-// picks per-method.
+// Most methods run on the app pool (tf_app, RLS-active). The ...System reads
+// (GetSystem, IncrementUsageSystem) route through the admin pool for the
+// claims-less delegation goroutines. The impl holds both pools at construction
+// and picks per-method.
 //
 // # Composite PK + RLS
 //
@@ -42,7 +37,6 @@ import (
 type promptStore struct {
 	app   queryer
 	admin queryer
-	inTx  bool // when constructed inside WithTx, both fields point at the same *sql.Tx
 }
 
 func newPromptStore(app, admin queryer) db.PromptStore {
@@ -50,147 +44,12 @@ func newPromptStore(app, admin queryer) db.PromptStore {
 }
 
 func newTxPromptStore(tx queryer) db.PromptStore {
-	// Inside a tx, SeedOrUpdate cannot escape to the admin pool —
-	// it would break tx semantics and bypass the caller's WithTx
-	// scope. SeedOrUpdate inside a tx-bound store returns an error
-	// (see method body); the only production caller is the startup
-	// seeder, which runs outside any tx.
-	return &promptStore{app: tx, admin: tx, inTx: true}
+	// Inside a WithTx both pools collapse to the caller's *sql.Tx; the
+	// ...System reads run against it rather than escaping to the admin pool.
+	return &promptStore{app: tx, admin: tx}
 }
 
 var _ db.PromptStore = (*promptStore)(nil)
-
-// --- SeedOrUpdate --------------------------------------------------
-
-func (s *promptStore) SeedOrUpdate(ctx context.Context, orgID, teamID string, p domain.Prompt) (string, error) {
-	if s.inTx {
-		// system_prompt_versions writes need the admin pool;
-		// inside WithTx we have an app-pool tx. Escaping to the
-		// admin pool would silently bypass the caller's tx scope.
-		// The startup seeder is the only legit caller and runs
-		// outside WithTx.
-		return "", errors.New("postgres prompts: SeedOrUpdate must not be called inside WithTx; call stores.Prompts.SeedOrUpdate directly")
-	}
-	if teamID == "" {
-		return "", errors.New("postgres prompts: SeedOrUpdate requires team_id (prompts are team-scoped; seed one copy per team)")
-	}
-	if p.Source == "" {
-		p.Source = "system"
-	}
-	if p.Source != "system" {
-		return "", fmt.Errorf("postgres prompts: SeedOrUpdate only accepts Source=\"system\" (got %q); use Create or UpdateImported for non-system rows", p.Source)
-	}
-	if p.SystemSlug == "" {
-		return "", fmt.Errorf("postgres prompts: SeedOrUpdate requires a non-empty SystemSlug (the shipped slug to dedupe on)")
-	}
-	hash := shippedContentHash(p)
-	now := time.Now().UTC()
-
-	// Open a tx on the admin pool so the prompt + version row writes
-	// commit atomically. Admin bypasses RLS so no JWT claim plumbing
-	// is needed — supabase_admin sees every row.
-	conn, ok := s.admin.(*sql.DB)
-	if !ok {
-		return "", fmt.Errorf("postgres prompts: SeedOrUpdate requires a *sql.DB admin handle, got %T", s.admin)
-	}
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return "", fmt.Errorf("begin admin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// Identity is per-team: (org_id, team_id, system_slug). A second team
-	// gets its own copy (same slug, different team_id); re-seeds resolve
-	// the existing row by this key.
-	var (
-		existingID   string
-		userModified bool
-	)
-	switch err := tx.QueryRowContext(ctx,
-		`SELECT id, user_modified FROM prompts WHERE org_id = $1 AND team_id = $2 AND system_slug = $3`,
-		orgID, teamID, p.SystemSlug,
-	).Scan(&existingID, &userModified); {
-	case errors.Is(err, sql.ErrNoRows):
-		// Fresh insert — mint a random UUID for this team's copy. Shipped
-		// system prompts have no human author (prompts_system_has_no_creator
-		// pins source='system' ↔ creator_user_id NULL); they're team-owned
-		// like every prompt (no visibility column).
-		newID := uuid.New().String()
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO prompts (id, org_id, team_id, system_slug, creator_user_id, name, body, source, usage_count, user_modified, created_at, updated_at)
-			VALUES ($1, $2, $3::uuid, $4, NULL, $5, $6, $7, 0, FALSE, $8, $8)
-		`, newID, orgID, teamID, p.SystemSlug, p.Name, p.Body, p.Source, now); err != nil {
-			return "", fmt.Errorf("insert prompt: %w", err)
-		}
-		if err := upsertSystemPromptVersionPG(ctx, tx, orgID, newID, hash, now); err != nil {
-			return "", err
-		}
-		if err := tx.Commit(); err != nil {
-			return "", err
-		}
-		return newID, nil
-	case err != nil:
-		return "", fmt.Errorf("read prompt: %w", err)
-	}
-
-	if userModified {
-		return existingID, tx.Commit()
-	}
-
-	var priorHash sql.NullString
-	if err := tx.QueryRowContext(ctx,
-		`SELECT content_hash FROM system_prompt_versions WHERE org_id = $1 AND prompt_id = $2`, orgID, existingID,
-	).Scan(&priorHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("read prior prompt version: %w", err)
-	}
-	if priorHash.Valid && priorHash.String == hash {
-		return existingID, tx.Commit()
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE prompts
-		SET name = $1, body = $2, source = $3, updated_at = $4
-		WHERE org_id = $5 AND id = $6
-	`, p.Name, p.Body, p.Source, now, orgID, existingID); err != nil {
-		return "", fmt.Errorf("update prompt: %w", err)
-	}
-	if err := upsertSystemPromptVersionPG(ctx, tx, orgID, existingID, hash, now); err != nil {
-		return "", err
-	}
-	if err := tx.Commit(); err != nil {
-		return "", err
-	}
-	return existingID, nil
-}
-
-// shippedContentHash digests the shipped (name, body, source) triple
-// with null-byte separators. Identical to the SQLite helper — kept
-// in this package too because Go's package-private visibility forbids
-// the SQLite version reaching here, and duplicating 4 lines beats
-// pulling a "shared internals" package for one helper.
-func shippedContentHash(p domain.Prompt) string {
-	h := sha256.Sum256([]byte(p.Name + "\x00" + p.Body + "\x00" + p.Source))
-	return hex.EncodeToString(h[:])
-}
-
-func upsertSystemPromptVersionPG(ctx context.Context, q queryer, orgID, promptID, hash string, now time.Time) error {
-	// applied_at only bumps when content_hash actually changed —
-	// the WHERE on the conflict branch makes identical-hash
-	// reseeds a no-op even for legacy rows that fall through to
-	// this upsert (the seed body's own short-circuit would also
-	// have prevented this for non-legacy rows).
-	if _, err := q.ExecContext(ctx, `
-		INSERT INTO system_prompt_versions (org_id, prompt_id, content_hash, applied_at)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (org_id, prompt_id) DO UPDATE SET
-			content_hash = EXCLUDED.content_hash,
-			applied_at = EXCLUDED.applied_at
-		WHERE system_prompt_versions.content_hash <> EXCLUDED.content_hash
-	`, orgID, promptID, hash, now); err != nil {
-		return fmt.Errorf("upsert system prompt version: %w", err)
-	}
-	return nil
-}
 
 // --- CRUD ----------------------------------------------------------
 
@@ -304,10 +163,10 @@ func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain
 	//     call.
 	//
 	// System / deploy-time seeding of shipped prompts goes through
-	// SeedOrUpdate on the admin pool, NOT through this method —
-	// shipped rows have creator_user_id NULL + visibility='org' per
-	// prompts_system_has_no_creator, which neither branch above
-	// supports. Don't read this fallback as a deploy-time path.
+	// ShippedDefaultsStore.SeedShippedIntoTeam on the admin pool, NOT through
+	// this method — shipped rows have creator_user_id NULL per
+	// prompts_system_has_no_creator, which neither branch above supports.
+	// Don't read this fallback as a deploy-time path.
 	//
 	// team_id is the acting team the handler resolved for this request —
 	// no "first/any team in org" fallback. visibility defaults to 'team',

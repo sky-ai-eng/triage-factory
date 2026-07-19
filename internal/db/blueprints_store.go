@@ -150,8 +150,7 @@ func DedupPreserveOrder(ids []string) []string {
 // BlueprintStore owns the blueprint primitive and its in-flight tables:
 //
 //   - blueprints          — the triggerable, team-scoped header (header CRUD
-//     modeled on PromptStore: Create / Get / List / GetBySystemSlug /
-//     SeedOrUpdate).
+//     modeled on PromptStore: Create / Get / List / GetBySystemSlug).
 //   - blueprint_steps      — ordered membership list for a blueprint.
 //   - blueprint_runs       — one row per multi-step delegateBlueprint instance,
 //     owning the worktree shared across every step.
@@ -176,8 +175,8 @@ func DedupPreserveOrder(ids []string) []string {
 // defense in depth and lets RLS enforce the rest; SQLite collapses orgID to
 // runmode.LocalDefaultOrgID via assertLocalOrg.
 //
-// SeedOrUpdate routes through the admin pool (claims-less system rows);
-// every other method runs on the app pool.
+// The ...System methods route through the admin pool (claims-less system
+// callers); every other method runs on the app pool.
 //
 // # user_modified stamping contract
 //
@@ -198,26 +197,14 @@ func DedupPreserveOrder(ids []string) []string {
 //     retired) and, if a downstream is minted, creates it the same way
 //     SplitAt does.
 //
-// Create and SeedOrUpdate insert fresh rows with user_modified left false — a
-// brand-new row hasn't diverged from anything yet, and non-shipped (no
-// system_slug) rows are invisible to sync regardless. Delete,
-// IncrementUsage/IncrementUsageSystem, and DuplicatePrompts (fresh
+// Create inserts fresh rows with user_modified left false — a brand-new row
+// hasn't diverged from anything yet, and non-shipped (no system_slug) rows are
+// invisible to the sync regardless (the shipped seeder,
+// ShippedDefaultsStore.SeedShippedIntoTeam, likewise inserts them unflagged).
+// Delete, IncrementUsage/IncrementUsageSystem, and DuplicatePrompts (fresh
 // user-source copies; originals untouched) never touch the flag.
 type BlueprintStore interface {
 	// --- Blueprint header CRUD (modeled on PromptStore) ----------------
-
-	// SeedOrUpdate inserts a shipped system blueprint as the team's own copy
-	// if missing, keyed by (org_id, team_id, system_slug). Re-seed is
-	// ON CONFLICT (org_id, team_id, system_slug) DO NOTHING — no versions
-	// sidecar (pushing step-list updates to shipped blueprints is a future
-	// concern). Returns the team copy's blueprint id (existing or freshly
-	// inserted) so the caller can resolve slug→id for the trigger seed's
-	// same-team FK and for wiring the steps. b.Source must be "" (defaulted
-	// to "system") or "system" and b.SystemSlug must be non-empty.
-	// user_modified is always inserted false — a freshly seeded row hasn't
-	// diverged yet, and a re-seed hit (DO NOTHING) leaves the existing row,
-	// including its user_modified, untouched.
-	SeedOrUpdate(ctx context.Context, orgID, teamID string, b domain.Blueprint) (string, error)
 
 	// List returns non-hidden blueprints ordered by updated_at DESC, scoped
 	// to teamID when non-empty (the multi-team page narrowed to one team).
