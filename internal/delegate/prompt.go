@@ -175,7 +175,16 @@ func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binar
 		"{{SCOPE}}", scope,
 	).Replace(full)
 
-	return BuildPromptReplacer(task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID, branchTemplate, runURL).Replace(full)
+	// Prepend the system-rendered task context AFTER the replacer pass, never
+	// before. strings.Replacer does not re-scan replacement values, so today no
+	// externally-influenced text (a PR title, a metadata blob) is ever
+	// interpolated. The context block is built entirely from that same class of
+	// external data; folding it into `full` before .Replace would open a fresh
+	// interpolation path over attacker-influenced text. Composing after keeps
+	// the block's own contents inert while every existing prompt interpolates
+	// exactly as before.
+	return BuildTaskContext(task, metadataJSON) + "\n\n" +
+		BuildPromptReplacer(task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID, branchTemplate, runURL).Replace(full)
 }
 
 // resolveBranchTemplate returns the team's branch-naming convention with the
