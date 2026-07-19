@@ -203,9 +203,15 @@ func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, 
 		t.Fatalf("seed entity: %v", err)
 	}
 
+	// Keep the body coherent with the mention flag: an explicit @-mention
+	// carries the bot token, an engaged-thread follow-up is plain text.
+	text := "any update on this?"
+	if mentioned {
+		text = "hey <@BOT> can you take a look?"
+	}
 	meta = SlackMessageMetadata{
 		WorkspaceID: workspaceID, APIAppID: apiAppID, Channel: channel, TS: ts, ThreadTS: threadTS,
-		SenderID: "U1", Text: "hey <@BOT>", EventID: "Ev" + uuid.New().String(), Mentioned: mentioned,
+		SenderID: "U1", Text: text, EventID: "Ev" + uuid.New().String(), Mentioned: mentioned,
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
