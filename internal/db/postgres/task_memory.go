@@ -176,6 +176,48 @@ func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string
 // (in practice impossible) empty team_id degrades to "org-visible only"
 // rather than a uuid cast error. org_id stays in the WHERE clause and on
 // the JOIN as defense in depth alongside the now-bypassed RLS policy.
+// GetRecentMemoriesForEntitySystem is getMemoriesForEntityTeamScoped with the
+// cap pushed into the query (ORDER BY created_at DESC LIMIT), so an on-demand
+// read on a hot entity doesn't transfer its whole history to keep the tail. A
+// non-positive limit returns no rows (never unbounded — Postgres rejects a
+// negative LIMIT); the host resolves it to a default first. The DESC LIMIT
+// selects the most recent N; the result is reversed to ASC so callers compose
+// identically to the unbounded read.
+func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string, limit int) ([]domain.TaskMemory, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT rm.id, rm.run_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
+		FROM run_memory rm
+		JOIN runs r ON r.id = rm.run_id AND r.org_id = rm.org_id
+		WHERE rm.org_id = $1
+		  AND rm.run_id IN (SELECT run_id FROM run_memory_entities WHERE org_id = $1 AND entity_id = $2)
+		  AND (r.visibility = 'org' OR (r.visibility = 'team' AND r.team_id = NULLIF($3, '')::uuid))
+		ORDER BY rm.created_at DESC
+		LIMIT $4
+	`, orgID, entityID, teamID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	mems, err := scanTaskMemories(rows)
+	if err != nil {
+		return nil, err
+	}
+	reverseTaskMemories(mems)
+	return mems, nil
+}
+
+// reverseTaskMemories flips a DESC-ordered slice in place to ASC — used by the
+// bounded read, whose ORDER BY created_at DESC LIMIT selects the most recent N
+// but must hand them back oldest-first to match the unbounded read's contract.
+func reverseTaskMemories(mems []domain.TaskMemory) {
+	for i, j := 0, len(mems)-1; i < j; i, j = i+1, j-1 {
+		mems[i], mems[j] = mems[j], mems[i]
+	}
+}
+
 func getMemoriesForEntityTeamScoped(ctx context.Context, q queryer, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT rm.id, rm.run_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at

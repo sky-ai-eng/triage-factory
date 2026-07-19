@@ -845,6 +845,17 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		client.RecordReadTouch(ctx, a.Provider, a.Target, a.URL)
 		return emptyResult{}, nil
 
+	case methodMemoryLoad:
+		var a memoryLoadArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		res, err := client.MemoryLoad(ctx, a.Source, a.SourceID, a.Limit)
+		if err != nil {
+			return nil, err
+		}
+		return memoryLoadResult{Result: res}, nil
+
 	case methodCallExtension:
 		var a callExtensionArgs
 		if err := dec(&a); err != nil {

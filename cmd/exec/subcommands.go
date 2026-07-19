@@ -22,12 +22,12 @@ var subcommandRegistry = map[string]SubcommandRunner{}
 // built-in switch cases in Handle, plus the help flags, none of which a
 // registered verb may shadow.
 var reservedSubcommandNames = map[string]bool{
-	"gh": true, "jira": true, "workspace": true, "--help": true, "-h": true,
+	"gh": true, "jira": true, "workspace": true, "memory": true, "--help": true, "-h": true,
 }
 
 // RegisterSubcommand registers an exec verb under name. Called from an ee
 // package's init(). Panics on empty/duplicate name or a name colliding with
-// a built-in switch case ("gh", "jira", "workspace", "--help", "-h").
+// a built-in switch case ("gh", "jira", "workspace", "memory", "--help", "-h").
 func RegisterSubcommand(name string, run SubcommandRunner) {
 	if name == "" {
 		panic("exec.RegisterSubcommand: name must not be empty")

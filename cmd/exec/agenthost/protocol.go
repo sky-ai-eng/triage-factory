@@ -605,6 +605,20 @@ type emptyArgs struct{}
 
 type emptyResult struct{}
 
+// memoryLoadArgs / memoryLoadResult are the `memory load` wire shapes, shared
+// by the IPC method (methodMemoryLoad) and the sidecar relay op (opMemoryLoad)
+// — the two hops a sandboxed executor run makes. Result wraps the pointer so a
+// miss (nil entity) still round-trips as a well-formed envelope.
+type memoryLoadArgs struct {
+	Source   string `json:"source"`
+	SourceID string `json:"source_id"`
+	Limit    int    `json:"limit"`
+}
+
+type memoryLoadResult struct {
+	Result *MemoryLoadResult `json:"result"`
+}
+
 // methodCallNames are the wire-name constants. Used by both client
 // and server so a rename here is the only edit needed to propagate.
 const (
@@ -665,4 +679,6 @@ const (
 	methodCallExtension = "CallExtension"
 
 	methodRecordReadTouch = "RecordReadTouch"
+
+	methodMemoryLoad = "MemoryLoad"
 )
