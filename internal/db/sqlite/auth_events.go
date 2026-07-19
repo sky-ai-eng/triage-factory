@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -83,6 +84,32 @@ func (s *authEventStore) ListByUserSystem(ctx context.Context, userID string, op
 		return nil, err
 	}
 	return scanAuthEventRows(rows)
+}
+
+func (s *authEventStore) SeatUsageSystem(ctx context.Context, since time.Time, userID string) (int, bool, error) {
+	// One pass: COUNT(DISTINCT user_id) is the seat count; MAX(CASE ...) is the
+	// membership flag for userID. login_success + non-NULL user_id restrict to
+	// real human sign-ins (bots/service accounts never emit login_success).
+	// datetime() wraps both sides so the bound compares against the
+	// CURRENT_TIMESTAMP-formatted created_at regardless of bind serialization —
+	// the same pattern appendAuthEventFilters uses. Local mode is N=1 with no
+	// GoTrue, so in practice this returns (0, false); the impl exists for parity.
+	var (
+		distinct   int
+		userActive int
+	)
+	err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT user_id),
+		       COALESCE(MAX(CASE WHEN user_id = ? THEN 1 ELSE 0 END), 0)
+		  FROM auth_events
+		 WHERE event_type = ?
+		   AND user_id IS NOT NULL
+		   AND datetime(created_at) >= datetime(?)
+	`, userID, domain.AuthEventLoginSuccess, since).Scan(&distinct, &userActive)
+	if err != nil {
+		return 0, false, err
+	}
+	return distinct, userActive == 1, nil
 }
 
 // appendAuthEventFilters appends opts' optional event_type/time predicates, the

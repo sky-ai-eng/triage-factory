@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -81,6 +82,31 @@ func (s *authEventStore) ListByUserSystem(ctx context.Context, userID string, op
 		return nil, err
 	}
 	return scanAuthEventRows(rows)
+}
+
+func (s *authEventStore) SeatUsageSystem(ctx context.Context, since time.Time, userID string) (int, bool, error) {
+	// One pass on the admin pool: COUNT(DISTINCT user_id) is the seat count;
+	// bool_or(user_id = $1) is the membership flag for userID. login_success +
+	// non-NULL user_id restrict to real human sign-ins — service/bot identities
+	// never traverse the OAuth login path, so they never emit login_success and
+	// are excluded for free. Deployment-wide: no org filter (a seat is a human,
+	// deployment-scoped).
+	var (
+		distinct   int
+		userActive bool
+	)
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT user_id),
+		       COALESCE(bool_or(user_id = $1::uuid), false)
+		  FROM auth_events
+		 WHERE event_type = $2
+		   AND user_id IS NOT NULL
+		   AND created_at >= $3
+	`, userID, domain.AuthEventLoginSuccess, since).Scan(&distinct, &userActive)
+	if err != nil {
+		return 0, false, err
+	}
+	return distinct, userActive, nil
 }
 
 // appendPgAuthEventFilters appends opts' optional event_type/time predicates, the

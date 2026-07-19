@@ -72,7 +72,15 @@ func Install() {
 	}
 	lp := licenseProvider{
 		claims: claims,
-		ent:    entitlements.New(feats, nil), // features auto-all; the license's deployment-wide Limits are NOT per-org
+		// Per-org: features auto-all; deployment-wide Limits (the seat cap) are
+		// deliberately NOT surfaced per-org — a per-seat cap is a deployment
+		// property, read through Active() below, and the login critical edge that
+		// enforces it has no org to scope on anyway.
+		ent: entitlements.New(feats, nil),
+		// Deployment: the same features plus the committed seat cap. Enforcement
+		// reads entitlements.Active().Limit(entitlements.LimitSeats) — core never
+		// names a license/EE type to get the number.
+		deploymentEnt: entitlements.New(feats, seatLimits(claims)),
 	}
 	entitlements.RegisterProvider(lp)
 	// The deployment-scoped resolver Active() reads: for self-host the
@@ -113,14 +121,28 @@ func loadPublicKey() *ecdsa.PublicKey {
 	return ec
 }
 
-// licenseProvider adapts verified license claims to the per-org
-// entitlements.Provider seam: self-host licensing is "auto-all" — one
-// license grants its features to every org in the deployment. Fails closed:
-// once the clock passes exp, For returns the zero-value Entitlements
-// (denies everything).
+// seatLimits builds the deployment-scoped limits map from the license's
+// maxSeats claim. MaxSeats <= 0 (absent / uncapped) yields nil, so
+// Active().Limit(LimitSeats) reports (0, false) — uncapped — rather than a
+// concrete zero cap that would (wrongly) block every login.
+func seatLimits(claims license.Claims) map[entitlements.Limit]int {
+	if claims.MaxSeats <= 0 {
+		return nil
+	}
+	return map[entitlements.Limit]int{entitlements.LimitSeats: claims.MaxSeats}
+}
+
+// licenseProvider adapts verified license claims to the entitlements seams:
+// self-host licensing is "auto-all" — one license grants its features to every
+// org in the deployment. Fails closed: once the clock passes exp, both For and
+// Active return the zero-value Entitlements (denies everything, reports every
+// limit unset). The per-org (ent) and deployment (deploymentEnt) snapshots
+// carry the same features; only deploymentEnt carries the seat cap, keeping the
+// deployment-wide limit off the per-org seam.
 type licenseProvider struct {
-	claims license.Claims
-	ent    entitlements.Entitlements
+	claims        license.Claims
+	ent           entitlements.Entitlements
+	deploymentEnt entitlements.Entitlements
 }
 
 func (p licenseProvider) For(string) entitlements.Entitlements {
@@ -132,12 +154,13 @@ func (p licenseProvider) For(string) entitlements.Entitlements {
 
 // Active backs entitlements.Active() — the deployment-scoped snapshot. Same
 // expiry-checked feature set as For (self-host licensing is deployment-wide),
-// so a lapsed license darkens the fleet console exactly as it darkens per-org
-// features. This is what lets is_operator AND Active().Has(FeatureFleet) gate
-// the console without naming an org.
+// plus the committed seat cap (LimitSeats), so a lapsed license both darkens
+// the fleet console and drops the cap to uncapped. This is the snapshot seat
+// enforcement and the fleet-console gate (is_operator AND Active().Has(
+// FeatureFleet)) resolve through, without naming an org.
 func (p licenseProvider) Active() entitlements.Entitlements {
 	if !p.claims.Valid(time.Now()) {
 		return entitlements.Entitlements{}
 	}
-	return p.ent
+	return p.deploymentEnt
 }

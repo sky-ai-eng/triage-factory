@@ -157,6 +157,67 @@ func TestAuthEventStore_SQLite_AppendOnly(t *testing.T) {
 	}
 }
 
+// TestAuthEventStore_SQLite_SeatUsage pins SeatUsageSystem: it counts DISTINCT
+// login_success users in the window, ignores non-login_success rows and
+// NULL-user rows, and reports whether a given user is among them.
+func TestAuthEventStore_SQLite_SeatUsage(t *testing.T) {
+	conn := newSQLiteForArtifactTestTimed(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	authUserC := "66666666-6666-6666-6666-666666666666"
+	// user A logs in twice (still ONE distinct seat), user B once. A logout by
+	// user B and a NULL-user login_failure must not count as seats.
+	seeds := []struct {
+		user, eventType, when string
+	}{
+		{authUserA, domain.AuthEventLoginSuccess, "2026-07-02 09:00:00"},
+		{authUserA, domain.AuthEventLoginSuccess, "2026-07-10 09:00:00"},
+		{authUserB, domain.AuthEventLoginSuccess, "2026-07-11 09:00:00"},
+		{authUserB, domain.AuthEventLogout, "2026-07-12 09:00:00"},
+		{"", domain.AuthEventLoginFailure, "2026-07-13 09:00:00"},
+	}
+	for i, s := range seeds {
+		sid := authSessA[:len(authSessA)-1] + string(rune('a'+i))
+		if err := stores.AuthEvents.RecordSystem(ctx, domain.AuthEvent{
+			OrgID: authOrgA, UserID: s.user, SessionID: sid, EventType: s.eventType,
+		}); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+		if _, err := conn.Exec(`UPDATE auth_events SET created_at = ? WHERE session_id = ?`, s.when, sid); err != nil {
+			t.Fatalf("pin created_at: %v", err)
+		}
+	}
+
+	monthStart := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	// Over the whole month: 2 distinct seats (A, B). A is active; C is not.
+	distinct, active, err := stores.AuthEvents.SeatUsageSystem(ctx, monthStart, authUserA)
+	if err != nil {
+		t.Fatalf("SeatUsageSystem(A): %v", err)
+	}
+	if distinct != 2 || !active {
+		t.Errorf("month/A: got (distinct=%d, active=%v), want (2, true)", distinct, active)
+	}
+	distinct, active, err = stores.AuthEvents.SeatUsageSystem(ctx, monthStart, authUserC)
+	if err != nil {
+		t.Fatalf("SeatUsageSystem(C): %v", err)
+	}
+	if distinct != 2 || active {
+		t.Errorf("month/C: got (distinct=%d, active=%v), want (2, false)", distinct, active)
+	}
+
+	// A tighter window that starts after A's logins: only B counts, A inactive.
+	cutoff := time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC)
+	distinct, active, err = stores.AuthEvents.SeatUsageSystem(ctx, cutoff, authUserA)
+	if err != nil {
+		t.Fatalf("SeatUsageSystem(cutoff/A): %v", err)
+	}
+	if distinct != 1 || active {
+		t.Errorf("cutoff/A: got (distinct=%d, active=%v), want (1, false)", distinct, active)
+	}
+}
+
 // TestAuthEventStore_SQLite_FiltersAndPaging pins the event_type filter, the
 // half-open since/until time window, newest-first ordering, and limit/offset
 // paging — over a _time_format=sqlite conn so a bound Since/Until compares

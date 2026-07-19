@@ -156,6 +156,65 @@ func TestAuthEventStore_Postgres_ListScoping(t *testing.T) {
 	}
 }
 
+// TestAuthEventStore_Postgres_SeatUsage pins SeatUsageSystem: distinct
+// login_success users in the window (deployment-wide, ignoring org), repeated
+// logins collapse to one seat, non-login_success + NULL-user rows are excluded,
+// and userActive flags membership. Seeds created_at directly (the store has no
+// created_at param) to exercise the time window.
+func TestAuthEventStore_Postgres_SeatUsage(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	_, userA, _ := pgtest.SeedOrgWithUser(t, h, "alice")
+	_, userB, _ := pgtest.SeedOrgWithUser(t, h, "bob")
+	_, userC, _ := pgtest.SeedOrgWithUser(t, h, "carol")
+
+	// user A logs in twice (ONE seat), user B once; a logout by B and a NULL-user
+	// failure must not count. Direct inserts pin created_at across the month.
+	ins := func(userID, eventType, ts string) {
+		var uid any
+		if userID != "" {
+			uid = userID
+		}
+		pgtest.MustExec(t, h.AdminDB, `
+			INSERT INTO auth_events (user_id, event_type, created_at)
+			VALUES ($1::uuid, $2, $3::timestamptz)`, uid, eventType, ts)
+	}
+	ins(userA, domain.AuthEventLoginSuccess, "2026-07-02 09:00:00+00")
+	ins(userA, domain.AuthEventLoginSuccess, "2026-07-10 09:00:00+00")
+	ins(userB, domain.AuthEventLoginSuccess, "2026-07-11 09:00:00+00")
+	ins(userB, domain.AuthEventLogout, "2026-07-12 09:00:00+00")
+	ins("", domain.AuthEventLoginFailure, "2026-07-13 09:00:00+00")
+
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+	monthStart := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+
+	distinct, active, err := stores.AuthEvents.SeatUsageSystem(ctx, monthStart, userA)
+	if err != nil {
+		t.Fatalf("SeatUsageSystem(A): %v", err)
+	}
+	if distinct != 2 || !active {
+		t.Errorf("month/A: got (distinct=%d, active=%v), want (2, true)", distinct, active)
+	}
+	distinct, active, err = stores.AuthEvents.SeatUsageSystem(ctx, monthStart, userC)
+	if err != nil {
+		t.Fatalf("SeatUsageSystem(C): %v", err)
+	}
+	if distinct != 2 || active {
+		t.Errorf("month/C: got (distinct=%d, active=%v), want (2, false)", distinct, active)
+	}
+
+	// Window starting after A's logins: only B counts, A inactive.
+	cutoff := time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC)
+	distinct, active, err = stores.AuthEvents.SeatUsageSystem(ctx, cutoff, userA)
+	if err != nil {
+		t.Fatalf("SeatUsageSystem(cutoff/A): %v", err)
+	}
+	if distinct != 1 || active {
+		t.Errorf("cutoff/A: got (distinct=%d, active=%v), want (1, false)", distinct, active)
+	}
+}
+
 // TestAuthEventStore_Postgres_DeniedToAppRole proves auth_events is a system-only
 // table: tf_app (the app pool, under claims) is REVOKEd all access and has no RLS
 // policy, so a read is denied — exactly the public.user_identities posture. The

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -40,4 +41,21 @@ type AuthEventStore interface {
 	// by opts. Admin pool. The personal "your logins" read the deferred viewer
 	// will scope on.
 	ListByUserSystem(ctx context.Context, userID string, opts domain.AuthEventListOpts) ([]domain.AuthEvent, error)
+
+	// SeatUsageSystem reports per-seat license consumption for the whole
+	// deployment since `since`: distinct is the number of DISTINCT users with a
+	// successful login (login_success) in [since, now), and userActive reports
+	// whether userID is among them. Admin pool, DEPLOYMENT-WIDE (no org filter) —
+	// a per-seat cap is a deployment property and a human is one seat regardless
+	// of how many orgs they belong to.
+	//
+	// Counts AUTHENTICATED users, not provisioned accounts: login_success is
+	// emitted only for a real GoTrue human sign-in, so service/bot identities
+	// (the GitHub App bot, the Jira service account) — which never traverse the
+	// OAuth login path — are excluded for free. NULL-user rows (pre-identity
+	// failures) are excluded. Enforcement calls this at the login critical edge
+	// BEFORE recording the current login, so `distinct` is the count of OTHER
+	// seats and userActive tells the caller whether this login is a returning
+	// seat (no new consumption) or a fresh one.
+	SeatUsageSystem(ctx context.Context, since time.Time, userID string) (distinct int, userActive bool, err error)
 }

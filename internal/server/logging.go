@@ -32,6 +32,7 @@ var (
 	orgsLog            = logging.Component("orgs")
 	projectsLog        = logging.Component("projects")
 	reposLog           = logging.Component("repos")
+	seatsLog           = logging.Component("license/seats")
 	serverLog          = logging.Component("server")
 	settingsLog        = logging.Component("settings")
 	settingsOrgLog     = logging.Component("settings/org")
