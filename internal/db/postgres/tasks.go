@@ -1081,7 +1081,22 @@ const pgTaskColumnsWithEntity = `
 	t.closed_at, t.created_at,
 	t.claimed_by_agent_id, t.claimed_by_user_id,
 	COALESCE(e.title, ''), COALESCE(e.url, ''), e.source_id, e.source, e.kind,
-	COALESCE((e.snapshot_json->>'open_subtask_count')::int, 0)`
+	COALESCE((e.snapshot_json->>'open_subtask_count')::int, 0),
+	-- Slack thread message count: the messages addressed to the bot on this
+	-- entity. Gated on source so only Slack tasks pay the correlated count.
+	-- The org_id predicate is redundant for correctness (entity_id is globally
+	-- unique) but lets the planner seek idx_events_org_type_entity
+	-- (org_id, event_type, entity_id) instead of scanning; predicates are
+	-- written in that leading-column order.
+	CASE
+		WHEN e.source = 'slack' THEN (
+			SELECT COUNT(*) FROM events ev
+			WHERE ev.org_id = e.org_id
+			  AND ev.event_type = 'slack:message'
+			  AND ev.entity_id = t.entity_id
+		)
+		ELSE 0
+	END`
 
 type taskScanState struct {
 	teamID                             sql.NullString
@@ -1104,7 +1119,7 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 		&s.closedAt, &t.CreatedAt,
 		&s.claimedByAgentID, &s.claimedByUserID,
 		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
-		&t.OpenSubtaskCount,
+		&t.OpenSubtaskCount, &t.SlackMessageCount,
 	}
 }
 

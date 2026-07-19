@@ -31,6 +31,11 @@ export interface Task {
   // the task was created before subtasks appeared, or the user added them
   // after starting work. Always 0 for GitHub tasks.
   open_subtask_count?: number
+  // Number of messages addressed to the bot on a Slack thread's entity.
+  // A Slack thread carries one long-lived task whose title names only the
+  // channel, so the card shows this count as a badge — it rises as
+  // follow-ups land while a run is in flight. Absent/0 for non-Slack tasks.
+  slack_message_count?: number
   // Claim cols, exposed so the assignee picker on the board
   // can render current state without a second fetch. Exactly one is
   // set when claimed; both absent (omitempty on the wire) when

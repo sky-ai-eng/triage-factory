@@ -861,7 +861,7 @@ func TestMentionTitle(t *testing.T) {
 		long += "a"
 	}
 	got := mentionTitle(long)
-	if r := []rune(got); len(r) != mentionTitleMaxRunes {
-		t.Errorf("mentionTitle length = %d runes; want %d", len(r), mentionTitleMaxRunes)
+	if r := []rune(got); len(r) != slackTitleMaxRunes {
+		t.Errorf("mentionTitle length = %d runes; want %d", len(r), slackTitleMaxRunes)
 	}
 }

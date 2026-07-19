@@ -1,4 +1,5 @@
 import { forwardRef } from 'react'
+import { MessageSquare } from 'lucide-react'
 import type { Task } from '../types'
 import RequestedReviewerBadge from './RequestedReviewerBadge'
 import { CardPlane, EventTag, HudHeader, SourceTag } from './board/cardChrome'
@@ -32,6 +33,7 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
   ) => {
     const age = formatAge(task.created_at)
     const subtaskCount = task.open_subtask_count ?? 0
+    const slackMessageCount = task.slack_message_count ?? 0
     // Snooze is only expected on unclaimed tasks; we render the
     // badge whenever snooze_until is in the future (a past time means the
     // snooze elapsed and the next wake path will requeue it).
@@ -52,6 +54,9 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
                 <SourceTag task={task} />
                 <EventTag eventType={task.event_type} />
                 <RequestedReviewerBadge task={task} />
+                {task.source === 'slack' && slackMessageCount > 0 && (
+                  <SlackThreadBadge count={slackMessageCount} />
+                )}
                 {subtaskCount > 0 && <SubtaskHint count={subtaskCount} />}
                 {isSnoozed && <SnoozedBadge until={snoozedUntil} />}
                 {delegateFailed && <DelegateFailedBadge message={delegateFailed.message} />}
@@ -138,6 +143,24 @@ function SubtaskHint({ count }: { count: number }) {
       className="inline-flex shrink-0 items-center gap-1 text-[10px] font-medium text-snooze"
     >
       <span aria-hidden>⋮</span>
+      {label}
+    </span>
+  )
+}
+
+// SlackThreadBadge shows how many messages have been addressed to the bot in a
+// Slack thread. The thread's task title names only the channel (a thread has no
+// inherent name), so this count is the card's "how much is waiting" signal — it
+// rises as follow-ups land while a run is in flight. Neutral tertiary tone:
+// informational, not a warning.
+function SlackThreadBadge({ count }: { count: number }) {
+  const label = count === 1 ? '1 message' : `${count} messages`
+  return (
+    <span
+      title={`${label} addressed to the bot in this thread`}
+      className="inline-flex shrink-0 items-center gap-1 text-[10px] font-medium text-text-tertiary"
+    >
+      <MessageSquare aria-hidden size={10} className="shrink-0" />
       {label}
     </span>
   )

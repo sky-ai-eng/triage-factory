@@ -8,16 +8,40 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// mentionTitleMaxRunes bounds the entity title derived from a mention's
-// text — enough to be recognizable in a task list without pulling in the
-// whole message body (that stays in the event's metadata_json).
-const mentionTitleMaxRunes = 120
+// slackTitleMaxRunes bounds a Slack entity's title — enough to be
+// recognizable in a task list without pulling in a whole message body (that
+// stays in the event's metadata_json). Applies to both the thread title
+// (composeThreadTitle) and the bot-outbound post title (mentionTitle).
+const slackTitleMaxRunes = 120
+
+// slackThreadTitle is the channel-less form of a thread entity's title,
+// written synchronously at ingest before the channel name resolves. A Slack
+// thread is a live conversation with no inherent name, and a single message's
+// text is the wrong grain for a card that outlives it (a thread accrues
+// follow-ups, each of which bumps the same task) — so the title names the
+// situation, not the opening message, and the async resolver (title.go)
+// upgrades it to "<this> in #<channel>" once the channel name is known. The
+// per-message content lives on each event's metadata_json; the message count
+// rides the task card as a badge.
+const slackThreadTitle = "New thread messages"
+
+// composeThreadTitle appends the resolved channel name to slackThreadTitle:
+// "New thread messages in #general". An empty channelName (its lookup failed
+// or hasn't run) returns the channel-less form unchanged, so a caller can
+// detect "nothing to enrich" and skip the redundant write. Capped at
+// slackTitleMaxRunes so a pathologically long channel name can't unbound
+// the title.
+func composeThreadTitle(channelName string) string {
+	if channelName == "" {
+		return slackThreadTitle
+	}
+	return truncateRunes(slackThreadTitle+" in #"+channelName, slackTitleMaxRunes)
+}
 
 // inboundMention is the transport-neutral shape both the Events API
 // receiver (this leaf, webhook.go) and the Socket Mode client (the next
@@ -79,10 +103,10 @@ type ingestPipeline struct {
 	// URL into entities.url (TFAC-595), best-effort and detached — see
 	// PermalinkResolver.dispatch. Nil-safe for the same reason as identity.
 	permalink *PermalinkResolver
-	// title recomposes a freshly-created thread entity's title into
-	// "<sender> said "<message>" in #<channel>" once the sender + channel
-	// names resolve, best-effort and detached — see TitleResolver.dispatch.
-	// Nil-safe for the same reason as identity.
+	// title upgrades a freshly-created thread entity's title into
+	// "New thread messages in #<channel>" once the channel name resolves,
+	// best-effort and detached — see TitleResolver.dispatch. Nil-safe for the
+	// same reason as identity.
 	title *TitleResolver
 	// stats records each delivery's outcome (stats.go) — the message-volume
 	// counters TFAC-650's channel-firehose subscriptions made necessary.
@@ -168,7 +192,7 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 	}
 	sourceID := domain.SlackSourceID(ev.Channel, root)
 
-	entity, created, err := p.entities.FindOrCreateSystem(ctx, ws.OrgID, "slack", sourceID, kind, mentionTitle(ev.Text), "")
+	entity, created, err := p.entities.FindOrCreateSystem(ctx, ws.OrgID, "slack", sourceID, kind, slackThreadTitle, "")
 	if err != nil {
 		return outcomeError, fmt.Errorf("find or create slack entity: %w", err)
 	}
@@ -177,10 +201,10 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 	if created && p.permalink != nil {
 		p.permalink.dispatch(ws, entity.ID, ev.Channel, root)
 	}
-	// Only on create, for the same reason: the enriched title is written once
-	// against the thread-creating mention, not re-derived per re-mention.
+	// Only on create, for the same reason: the channel name is resolved once
+	// and folded into the thread title, not re-derived per re-mention.
 	if created && p.title != nil {
-		p.title.dispatch(ws, entity.ID, ev.Channel, ev.User, ev.Text)
+		p.title.dispatch(ws, entity.ID, ev.Channel)
 	}
 
 	if err := p.publishMessage(ws, ev, entity.ID, true, occurredAt); err != nil {
@@ -372,9 +396,9 @@ var slackEntityRe = regexp.MustCompile(`<([^>]+)>`)
 // "<@U0BHY927K34> What can you do?". humanizeSlackText turns those tokens
 // into their readable form (dropping the leading bot mention, keeping named
 // mentions as "@name"/"#name", links as their label), then whitespace is
-// collapsed and the result capped at mentionTitleMaxRunes.
+// collapsed and the result capped at slackTitleMaxRunes.
 func mentionTitle(text string) string {
-	return truncateRunes(strings.Join(strings.Fields(humanizeSlackText(text)), " "), mentionTitleMaxRunes)
+	return truncateRunes(strings.Join(strings.Fields(humanizeSlackText(text)), " "), slackTitleMaxRunes)
 }
 
 // humanizeSlackText rewrites Slack's mrkdwn entity tokens into plain,
@@ -426,35 +450,6 @@ func htmlUnescapeSlack(s string) string {
 	s = strings.ReplaceAll(s, "&gt;", ">")
 	s = strings.ReplaceAll(s, "&amp;", "&")
 	return s
-}
-
-// composeMentionTitle builds the enriched entity title the async TitleResolver
-// writes once it has resolved the sender's display name and the channel name:
-// `Alice said "what can you do?" in #general`. Either name may be empty (its
-// lookup failed or was skipped); the frame degrades gracefully — no "said"
-// frame without a sender, no "in #…" without a channel. With neither, it
-// returns just the humanized message text, identical to the synchronous
-// mentionTitle, so a caller can detect "nothing to enrich" and skip the write.
-//
-// The message text is truncated to whatever budget the fixed frame leaves so
-// the "who/where" survives — a long message loses its tail, not its context.
-func composeMentionTitle(senderName, channelName, rawText string) string {
-	text := strings.Join(strings.Fields(humanizeSlackText(rawText)), " ")
-
-	var prefix, suffix, quote string
-	if senderName != "" {
-		prefix = senderName + " said "
-		quote = `"` // quote the message only inside a "X said …" frame
-	}
-	if channelName != "" {
-		suffix = " in #" + channelName
-	}
-
-	budget := mentionTitleMaxRunes - utf8.RuneCountInString(prefix+quote+quote+suffix)
-	if budget < 10 {
-		budget = 10 // pathological long name/channel — keep a sliver of message
-	}
-	return truncateRunes(prefix+quote+truncateRunes(text, budget)+quote+suffix, mentionTitleMaxRunes)
 }
 
 // truncateRunes caps s at maxRunes codepoints, replacing the last rune with

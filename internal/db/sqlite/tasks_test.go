@@ -133,6 +133,75 @@ func TestTaskStore_SQLite_AssertLocalOrg(t *testing.T) {
 	}
 }
 
+// TestTaskStore_SQLite_SlackMessageCount pins the derived Slack thread
+// message-count column: a Slack task's SlackMessageCount reflects the number
+// of slack:message events on its entity, and the source gate keeps it zero for
+// non-Slack tasks.
+func TestTaskStore_SQLite_SlackMessageCount(t *testing.T) {
+	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
+	if err := db.BootstrapSchemaForTest(conn); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	store := sqlitestore.New(conn).Tasks
+	ctx := t.Context()
+	now := time.Now().UTC()
+
+	entityID := uuid.New().String()
+	taskID := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at)
+		VALUES (?, 'slack', 'C1/1600000000.000100', 'thread', 'New thread messages in #general', '', '{}', ?)
+	`, entityID, now); err != nil {
+		t.Fatalf("seed slack entity: %v", err)
+	}
+	// Three slack:message events on the thread; the first spawns the task.
+	var firstEventID string
+	for i := 0; i < 3; i++ {
+		evID := uuid.New().String()
+		if i == 0 {
+			firstEventID = evID
+		}
+		if _, err := conn.Exec(`
+			INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at)
+			VALUES (?, ?, ?, '', '{}', ?)
+		`, evID, entityID, domain.EventSlackMessage, now); err != nil {
+			t.Fatalf("seed slack event %d: %v", i, err)
+		}
+	}
+	if _, err := conn.Exec(`
+		INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id,
+		                   status, priority_score, scoring_status, created_at, team_id, visibility)
+		VALUES (?, ?, ?, '', ?, 'queued', 0.5, 'pending', ?, ?, 'team')
+	`, taskID, entityID, domain.EventSlackMessage, firstEventID, now, runmode.LocalDefaultTeamID); err != nil {
+		t.Fatalf("seed slack task: %v", err)
+	}
+
+	got, err := store.Get(ctx, runmode.LocalDefaultOrgID, taskID)
+	if err != nil {
+		t.Fatalf("Get slack task: %v", err)
+	}
+	if got.SlackMessageCount != 3 {
+		t.Errorf("SlackMessageCount = %d; want 3", got.SlackMessageCount)
+	}
+
+	// A GitHub task's count stays zero — the source gate skips the correlated
+	// count entirely, even though the entity has its own (non-slack) event.
+	_, _, ghTask := seedSQLiteTaskChain(t, conn, "ghcount")
+	ghGot, err := store.Get(ctx, runmode.LocalDefaultOrgID, ghTask)
+	if err != nil {
+		t.Fatalf("Get github task: %v", err)
+	}
+	if ghGot.SlackMessageCount != 0 {
+		t.Errorf("github SlackMessageCount = %d; want 0", ghGot.SlackMessageCount)
+	}
+}
+
 // TestTaskStore_SQLite_ReassignClaimToUser covers the TFAC-561 user↔user
 // handoff arm: a CAS that only lands when the task is presently claimed by
 // the expected "from" user AND the target shares a team with the task, and

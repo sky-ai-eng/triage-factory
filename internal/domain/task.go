@@ -68,6 +68,13 @@ type Task struct {
 	// entity has gained subtasks since the task was created — the
 	// "consider decomposing" pill.
 	OpenSubtaskCount int `json:"open_subtask_count"`
+	// SlackMessageCount is the number of slack:message events on this task's
+	// entity (the messages addressed to the bot in the thread), counted in
+	// the same entity join. Zero for non-Slack tasks. A Slack thread carries
+	// one long-lived task whose generic title names only the channel, so the
+	// card surfaces this count to say how much of the conversation is
+	// waiting — it rises as follow-ups land while a run is in flight.
+	SlackMessageCount int `json:"slack_message_count,omitempty"`
 }
 
 // TaskScoreUpdate holds the fields to update on a task after AI scoring.
