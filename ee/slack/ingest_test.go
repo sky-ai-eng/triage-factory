@@ -552,6 +552,65 @@ func TestHandleEventCallback_DispatchesIdentityResolution(t *testing.T) {
 	}
 }
 
+// TestHandleEventCallback_FollowUpDispatchesIdentityResolution is the
+// engaged-thread twin of the wiring test above: an accepted un-mentioned
+// follow-up dispatches resolveSender for its sender too. Follow-up senders
+// are exactly the participants who may never type an @-mention, so capture
+// wired only into the app_mention branch would systematically exclude them
+// from user_slack_identities.
+func TestHandleEventCallback_FollowUpDispatchesIdentityResolution(t *testing.T) {
+	client, hits := newUsersInfoServer(t, map[string]any{
+		"ok": true,
+		"user": map[string]any{
+			"is_bot": false, "deleted": false,
+			"profile": map[string]any{"email": "ada@example.com", "real_name": "Ada Lovelace"},
+		},
+	})
+	identities := newFakeIdentityStore()
+	identities.done = make(chan struct{}, 1)
+	resolver := &IdentityResolver{
+		secrets:    &fakeSecrets{token: "xoxb-test"},
+		users:      &fakeUsers{ids: []string{"user-1"}},
+		identities: identities,
+		client:     client,
+	}
+	entities := newFakeEntities()
+	published := 0
+	p := &ingestPipeline{
+		entities:   entities,
+		deliveries: newFakeDeliveries(),
+		publish:    func(domain.Event) { published++ },
+		identity:   resolver,
+	}
+	ws := testWorkspaceRow("org-1")
+	entities.seedThread("org-1", domain.SlackSourceID("C1", "1600000000.000100"), "thread", "active")
+	ev := inboundMention{
+		Type: "message", EventID: "Ev2", Channel: "C1", User: "U0SENDER1",
+		Text: "here are the PR numbers", TS: "1600000000.000200", ThreadTS: "1600000000.000100",
+	}
+
+	if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+	if published != 1 {
+		t.Fatalf("published %d events; want 1 (follow-up should have been accepted)", published)
+	}
+
+	select {
+	case <-identities.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("resolveSender never completed — the follow-up branch did not dispatch it")
+	}
+
+	if *hits != 1 {
+		t.Errorf("users.info hits = %d; want 1 (resolveSender should have called it)", *hits)
+	}
+	row := identities.rows[identityKey(ws.WorkspaceID, "U0SENDER1")]
+	if row == nil || row.UserID == nil || *row.UserID != "user-1" {
+		t.Fatalf("row = %+v; want resolved to user-1", row)
+	}
+}
+
 // TestHandleEventCallback_ChannelSightingUpsertedOnFreshDelivery pins the
 // TFAC-542 ingest-time capture: a fresh delivery records exactly one
 // sighting for its channel.
