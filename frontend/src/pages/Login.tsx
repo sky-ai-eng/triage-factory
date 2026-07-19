@@ -61,6 +61,12 @@ export default function Login() {
   // (identifier-first routes the verified domain to SSO).
   const ssoRequired = params.get('error') === 'sso_required'
 
+  // ?error=seat_limit is set by the OAuth callback when the deployment has hit
+  // its licensed seat cap and this would be a new user beyond it. The fix is an
+  // administrative one (buy more seats / free one up), so the message points
+  // there rather than offering a self-serve retry.
+  const seatLimit = params.get('error') === 'seat_limit'
+
   const startGitHub = () => {
     window.location.href = '/api/auth/oauth/github?return_to=' + encodeURIComponent(returnTo)
   }
@@ -119,6 +125,16 @@ export default function Login() {
             className="rounded-xl bg-accent/[0.08] border border-accent/20 px-4 py-2.5 text-[13px] text-text-secondary"
           >
             Your organization requires single sign-on. Enter your work email to continue via SSO.
+          </div>
+        )}
+
+        {seatLimit && (
+          <div
+            role="alert"
+            className="rounded-xl bg-accent/[0.08] border border-accent/20 px-4 py-2.5 text-[13px] text-text-secondary"
+          >
+            This deployment has reached its licensed seat limit. Ask your administrator to add seats
+            before signing in.
           </div>
         )}
 

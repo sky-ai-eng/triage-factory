@@ -86,10 +86,21 @@ var allFeatures = []Feature{FeatureSSO, FeatureGovernance, FeatureSlack, Feature
 // show up on the probe (and thus to the frontend's useEntitlements hook).
 func AllFeatures() []Feature { return slices.Clone(allFeatures) }
 
-// Limit names a quota key (per-seat/tier billing, later). The type is
-// defined here so provider implementations have a stable key type to code
-// against; no constants exist yet — they land with billing.
+// Limit names a quota key (per-seat/tier billing). The type is defined here so
+// provider implementations have a stable key type to code against.
 type Limit string
+
+const (
+	// LimitSeats is the committed per-seat cap from a license's maxSeats claim —
+	// the maximum distinct active users the deployment is licensed for. Read
+	// through the DEPLOYMENT-scoped Active() snapshot (a per-seat cap is a
+	// deployment property, like FeatureFleet — self-host licensing is auto-all,
+	// and the login critical edge has no org to scope on). Absent from the
+	// snapshot means UNCAPPED: Entitlements.Limit(LimitSeats) returns
+	// (0, false), and enforcement no-ops. The string value is a stable wire
+	// identifier; do not change it once shipped.
+	LimitSeats Limit = "seats"
+)
 
 // Entitlements is an immutable snapshot of what one org is entitled to. It
 // GROWS BY FIELDS — a quota added later touches nothing structural. The

@@ -40,8 +40,14 @@ type AuthEvent struct {
 // RecordAuthEvent extension seam (ee/sso has no direct store access). See
 // TFAC-76 §write-sites.
 const (
-	AuthEventLoginSuccess           = "login_success"
-	AuthEventLoginFailure           = "login_failure"
+	AuthEventLoginSuccess = "login_success"
+	AuthEventLoginFailure = "login_failure"
+	// AuthEventSeatLimitRejected marks a login denied by the per-seat license
+	// cap (maxSeats) — a new distinct user beyond the committed cap for the
+	// billing period. Recorded by CORE (not the EE extension seam): enforcement
+	// lives in the core login path and reads the cap through the entitlements
+	// seam. Detail carries {"max_seats":N,"active_users":M,"period":"YYYY-MM"}.
+	AuthEventSeatLimitRejected      = "seat_limit_rejected"
 	AuthEventLogout                 = "logout"
 	AuthEventLogoutAll              = "logout_all"
 	AuthEventRefreshFailure         = "refresh_failure"

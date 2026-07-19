@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -64,6 +65,55 @@ func TestSignVerifyRoundTrip_NoLimits(t *testing.T) {
 	}
 	if got.Limits != nil {
 		t.Fatalf("limits = %v, want nil when absent from the signed payload", got.Limits)
+	}
+}
+
+func TestSignVerifyRoundTrip_MaxSeats(t *testing.T) {
+	pub, priv := mustKey(t)
+	tok := signTest(t, priv, Claims{
+		Org: "acme", Features: []string{"sso"}, MaxSeats: 25,
+		Expires: time.Now().Add(time.Hour).Unix(),
+	})
+	got, err := NewVerifier(pub).Verify(tok)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if got.MaxSeats != 25 {
+		t.Fatalf("MaxSeats = %d, want 25", got.MaxSeats)
+	}
+}
+
+func TestSignVerifyRoundTrip_NoMaxSeats(t *testing.T) {
+	pub, priv := mustKey(t)
+	// A token minted without the claim (older issuer / uncapped tier) must parse
+	// as MaxSeats == 0, the uncapped sentinel — additive + backward-compatible.
+	tok := signTest(t, priv, Claims{Org: "acme", Features: []string{"sso"}, Expires: time.Now().Add(time.Hour).Unix()})
+	got, err := NewVerifier(pub).Verify(tok)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if got.MaxSeats != 0 {
+		t.Fatalf("MaxSeats = %d, want 0 (uncapped) when absent from the payload", got.MaxSeats)
+	}
+}
+
+// TestVerifyRejectsTamperedMaxSeats proves maxSeats rides inside the signed
+// payload: forging a bigger cap onto a validly-signed token (reusing its
+// signature) fails verification. A customer cannot self-raise their seat cap.
+func TestVerifyRejectsTamperedMaxSeats(t *testing.T) {
+	pub, priv := mustKey(t)
+	exp := time.Now().Add(time.Hour).Unix()
+	// A real token committed to maxSeats=5 — keep its signature.
+	realTok := signTest(t, priv, Claims{Org: "acme", Features: []string{"sso"}, MaxSeats: 5, Expires: exp})
+	_, sigB64, _ := strings.Cut(realTok, ".")
+	// Forge a payload that claims maxSeats=500, and staple the real signature on.
+	forgedPayload, err := json.Marshal(Claims{Org: "acme", Features: []string{"sso"}, MaxSeats: 500, Expires: exp})
+	if err != nil {
+		t.Fatalf("marshal forged payload: %v", err)
+	}
+	forgedTok := b64.EncodeToString(forgedPayload) + "." + sigB64
+	if _, err := NewVerifier(pub).Verify(forgedTok); err != ErrSignature {
+		t.Fatalf("want ErrSignature on a forged maxSeats, got %v", err)
 	}
 }
 

@@ -157,6 +157,52 @@ func TestAuthEventStore_SQLite_AppendOnly(t *testing.T) {
 	}
 }
 
+// TestAuthEventStore_SQLite_SeatClaims pins ClaimSeatSystem: a claim is
+// idempotent per (period, user), the cap blocks a new distinct claimant once
+// reached, a returning claimant is always admitted, and the period is an
+// independent bucket.
+func TestAuthEventStore_SQLite_SeatClaims(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	authUserC := "66666666-6666-6666-6666-666666666666"
+
+	claim := func(period, user string, cap int) (bool, int) {
+		t.Helper()
+		adm, seats, err := stores.AuthEvents.ClaimSeatSystem(ctx, period, user, cap)
+		if err != nil {
+			t.Fatalf("ClaimSeatSystem(%s,%s): %v", period, user, err)
+		}
+		return adm, seats
+	}
+
+	const period = "2026-07"
+	// A claims → seat 1.
+	if adm, seats := claim(period, authUserA, 2); !adm || seats != 1 {
+		t.Fatalf("A first claim = (%v, %d), want (true, 1)", adm, seats)
+	}
+	// A claims again → idempotent, still seat count 1, still admitted.
+	if adm, seats := claim(period, authUserA, 2); !adm || seats != 1 {
+		t.Fatalf("A repeat claim = (%v, %d), want (true, 1)", adm, seats)
+	}
+	// B claims → seat 2 (fills the cap).
+	if adm, seats := claim(period, authUserB, 2); !adm || seats != 2 {
+		t.Fatalf("B claim = (%v, %d), want (true, 2)", adm, seats)
+	}
+	// C is a new distinct claimant beyond cap → rejected, count reported == cap.
+	if adm, seats := claim(period, authUserC, 2); adm || seats != 2 {
+		t.Fatalf("C over-cap claim = (%v, %d), want (false, 2)", adm, seats)
+	}
+	// A returning over cap is still admitted (already holds a seat).
+	if adm, _ := claim(period, authUserA, 2); !adm {
+		t.Fatal("A returning claim must be admitted even at cap")
+	}
+	// A different period is an independent bucket — C gets in.
+	if adm, seats := claim("2026-08", authUserC, 2); !adm || seats != 1 {
+		t.Fatalf("C next-period claim = (%v, %d), want (true, 1)", adm, seats)
+	}
+}
+
 // TestAuthEventStore_SQLite_FiltersAndPaging pins the event_type filter, the
 // half-open since/until time window, newest-first ordering, and limit/offset
 // paging — over a _time_format=sqlite conn so a bound Since/Until compares

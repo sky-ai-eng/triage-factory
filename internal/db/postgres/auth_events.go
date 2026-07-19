@@ -83,6 +83,57 @@ func (s *authEventStore) ListByUserSystem(ctx context.Context, userID string, op
 	return scanAuthEventRows(rows)
 }
 
+// seatClaimLockSalt namespaces the per-period seat-claim advisory lock inside
+// hashtextextended()'s key space, keeping it clear of the login identity/email
+// locks (salts 0/1). Value is "SEAT" as ASCII bytes — arbitrary but fixed.
+const seatClaimLockSalt = 0x53454154
+
+func (s *authEventStore) ClaimSeatSystem(ctx context.Context, period, userID string, maxSeats int) (bool, int, error) {
+	var (
+		admitted bool
+		seats    int
+	)
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		// Serialize every claim evaluation for this period so two concurrent
+		// first-logins can't both observe an under-cap count and both be admitted.
+		// pg_advisory_xact_lock auto-releases at commit/rollback.
+		if _, err := q.ExecContext(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, period, seatClaimLockSalt); err != nil {
+			return err
+		}
+		var have bool
+		if err := q.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM seat_claims WHERE period = $1 AND user_id = $2::uuid)`,
+			period, userID).Scan(&have); err != nil {
+			return err
+		}
+		if err := q.QueryRowContext(ctx,
+			`SELECT count(*) FROM seat_claims WHERE period = $1`, period).Scan(&seats); err != nil {
+			return err
+		}
+		if have {
+			admitted = true // returning claimant — already holds a seat this period
+			return nil
+		}
+		if seats >= maxSeats {
+			admitted = false // a new claimant beyond the cap
+			return nil
+		}
+		if _, err := q.ExecContext(ctx,
+			`INSERT INTO seat_claims (period, user_id) VALUES ($1, $2::uuid)
+			 ON CONFLICT (period, user_id) DO NOTHING`, period, userID); err != nil {
+			return err
+		}
+		admitted = true
+		seats++ // this login's fresh claim
+		return nil
+	})
+	if err != nil {
+		return false, 0, err
+	}
+	return admitted, seats, nil
+}
+
 // appendPgAuthEventFilters appends opts' optional event_type/time predicates, the
 // newest-first ORDER BY, and LIMIT/OFFSET to a SELECT whose WHERE is already
 // open. Placeholders number from len(args)+1 so the leading bind (org_id /

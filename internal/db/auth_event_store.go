@@ -40,4 +40,25 @@ type AuthEventStore interface {
 	// by opts. Admin pool. The personal "your logins" read the deferred viewer
 	// will scope on.
 	ListByUserSystem(ctx context.Context, userID string, opts domain.AuthEventListOpts) ([]domain.AuthEvent, error)
+
+	// ClaimSeatSystem atomically claims a per-seat license slot for userID in the
+	// given billing period (an opaque bucket key like "2026-07"), capping the
+	// number of DISTINCT claimants at maxSeats. It owns the seat_claims ledger
+	// (a login-critical-edge, admin-pool, deployment-scoped system table — the
+	// same posture as auth_events, so it rides this store rather than a parallel
+	// one). Returns:
+	//   - admitted=true if userID already holds a claim for the period (idempotent
+	//     returning user, count unchanged) OR a new claim was inserted within the
+	//     cap; seats is the resulting claimant count.
+	//   - admitted=false if granting a new claim would exceed maxSeats (the caller
+	//     hard-blocks the login); seats is the count observed (== maxSeats).
+	//
+	// The count AND the claim run inside ONE transaction serialized per period
+	// (Postgres advisory xact lock; SQLite's single-writer lock), so concurrent
+	// first-logins cannot both read an under-cap count and both be admitted — the
+	// TOCTOU a separate count-then-insert would leave open. Counts AUTHENTICATED
+	// users: only the OAuth login path claims, so service/bot identities that
+	// never traverse it are excluded for free. Admin pool, DEPLOYMENT-WIDE (no org
+	// filter — a human is one seat regardless of how many orgs they belong to).
+	ClaimSeatSystem(ctx context.Context, period, userID string, maxSeats int) (admitted bool, seats int, err error)
 }

@@ -7078,6 +7078,42 @@ REVOKE ALL ON public.auth_events FROM PUBLIC;
 REVOKE ALL ON public.auth_events FROM anon, authenticated, service_role;
 
 
+-- seat_claims: the per-seat license ledger — one row per (billing period, user)
+-- = one committed seat held for that period. This is the ATOMIC seat-claim that
+-- makes per-seat enforcement race-free: the login critical edge counts distinct
+-- claimants for the period AND inserts this row in ONE serialized transaction (a
+-- per-period advisory lock), so concurrent first-logins can never both read an
+-- under-cap count and both slip past the maxSeats cap. The PK (period, user_id)
+-- is the idempotency + uniqueness key — a returning claimant's insert is a no-op,
+-- and count(*) for a period is the billable distinct-user total.
+--
+-- Deployment-wide (no org_id): a per-seat cap is a deployment property (self-host
+-- licensing is auto-all) and a human is one seat regardless of org membership.
+-- Admin-pool-only system table, same posture as auth_events: RLS deny-by-default,
+-- REVOKEd from the app roles; the superuser/admin pool — which owns the JWT-less
+-- login-edge writes — bypasses RLS and does all I/O. SQLite is N=1 with no GoTrue
+-- login, so the table is parity-only there.
+CREATE TABLE public.seat_claims (
+    period     text NOT NULL,
+    user_id    uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+-- PK doubles as the per-period count index (leftmost-prefix scan on period).
+ALTER TABLE ONLY public.seat_claims
+    ADD CONSTRAINT seat_claims_pkey PRIMARY KEY (period, user_id);
+
+-- ON DELETE CASCADE: a deleted user frees their held seats. Unlike the
+-- auth_events audit trail (NO ACTION, preserved), this is a transient ledger.
+ALTER TABLE ONLY public.seat_claims
+    ADD CONSTRAINT seat_claims_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+ALTER TABLE public.seat_claims ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.seat_claims FROM PUBLIC;
+REVOKE ALL ON public.seat_claims FROM anon, authenticated, service_role;
+
+
 -- staged_agent_injections (TFAC-501): the durable, producer-agnostic "stage for next
 -- resume" agent-injection queue — the generic terminal/parked half of the staged-injection
 -- delivery seam TFAC-493 shipped live-only. Rolled into the baseline (not a

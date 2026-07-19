@@ -85,6 +85,49 @@ func (s *authEventStore) ListByUserSystem(ctx context.Context, userID string, op
 	return scanAuthEventRows(rows)
 }
 
+func (s *authEventStore) ClaimSeatSystem(ctx context.Context, period, userID string, maxSeats int) (bool, int, error) {
+	// SQLite serializes writers via the single database write lock, so the
+	// count-then-claim inside one transaction is atomic without an advisory lock.
+	// Local mode is N=1 with no GoTrue login, so this is parity-only in practice —
+	// per-seat enforcement runs on the multi-mode (Postgres) login path.
+	var (
+		admitted bool
+		seats    int
+	)
+	err := inTx(ctx, s.q, func(q queryer) error {
+		var have int
+		if err := q.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM seat_claims WHERE period = ? AND user_id = ?)`,
+			period, userID).Scan(&have); err != nil {
+			return err
+		}
+		if err := q.QueryRowContext(ctx,
+			`SELECT count(*) FROM seat_claims WHERE period = ?`, period).Scan(&seats); err != nil {
+			return err
+		}
+		if have == 1 {
+			admitted = true // returning claimant — already holds a seat this period
+			return nil
+		}
+		if seats >= maxSeats {
+			admitted = false // a new claimant beyond the cap
+			return nil
+		}
+		if _, err := q.ExecContext(ctx,
+			`INSERT INTO seat_claims (period, user_id) VALUES (?, ?)
+			 ON CONFLICT (period, user_id) DO NOTHING`, period, userID); err != nil {
+			return err
+		}
+		admitted = true
+		seats++ // this login's fresh claim
+		return nil
+	})
+	if err != nil {
+		return false, 0, err
+	}
+	return admitted, seats, nil
+}
+
 // appendAuthEventFilters appends opts' optional event_type/time predicates, the
 // newest-first ORDER BY, and LIMIT/OFFSET to a SELECT whose WHERE is already
 // open. Time bounds wrap both sides in datetime() — the external_actions store

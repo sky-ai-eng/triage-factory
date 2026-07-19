@@ -45,6 +45,15 @@ type Claims struct {
 	Expires  int64 `json:"exp"`
 	// Issuer optionally names who minted the token.
 	Issuer string `json:"iss,omitempty"`
+	// MaxSeats is the committed per-seat cap for per-seat billing (Professional
+	// tier). A top-level int in the signed payload, so it is tamper-evident like
+	// every other claim. Absent / zero means UNCAPPED — additive and backward-
+	// compatible: a token minted before the claim existed, or by an issuer that
+	// omits it, verifies exactly as before and enforces no cap; an older build
+	// that doesn't know the field ignores it. Surfaced to enforcement through the
+	// entitlements seam (see ee.Install → entitlements.LimitSeats), never read
+	// directly by core.
+	MaxSeats int `json:"maxSeats,omitempty"`
 	// Limits carries deployment-wide quota values (e.g. seats), keyed by the
 	// same string values as internal/entitlements.Limit. Absent from the
 	// signed payload → nil map → no limits. Not surfaced as a per-org

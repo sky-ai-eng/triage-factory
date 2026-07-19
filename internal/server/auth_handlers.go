@@ -402,6 +402,21 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-seat license enforcement (TF_LICENSE maxSeats). Runs after principal
+	// resolution + SSO enforcement/JIT, before the session is minted: a new
+	// distinct active user beyond the committed cap for this billing period is
+	// denied a session — the same block-before-CreateSystem posture SSO domain
+	// enforcement uses. Uncapped / unlicensed → no-op. A blocked login records
+	// no login_success, so it never consumes a seat.
+	if s.enforceSeatLimit(r, userUUID.String()) {
+		q := url.Values{"error": {"seat_limit"}}
+		if state.ReturnTo != "" && state.ReturnTo != "/" {
+			q.Set("return_to", state.ReturnTo)
+		}
+		http.Redirect(w, r, "/login?"+q.Encode(), http.StatusFound)
+		return
+	}
+
 	// Non-SSO login (or SSO with no active binding): default the session to the
 	// user's earliest existing membership, or NULL for a first-time user, who
 	// lands at the zero-membership onboarding entry. Signup provisions nothing —
