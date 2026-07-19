@@ -132,8 +132,8 @@ func (a *App) startBrain(term int64) {
 		refreshInterval, refreshAfter = credprovision.RefreshCadenceForTTL(a.llmResolver.TTL())
 	}
 	go credprovision.RunRefreshSweep(brainCtx, a.credProvisioner, refreshInterval, refreshAfter)
-	// Shipped-defaults sync (TFAC-660): bring every provisioned team's
-	// UNMODIFIED copies of the shipped prompts/blueprints up to the current
+	// Shipped-defaults sync: bring every provisioned team's UNMODIFIED
+	// copies of the shipped prompts/blueprints up to the current
 	// compile-time content. Leader-only (this is the brain), idempotent, and
 	// cheap to repeat every boot — the equality check makes an already-synced
 	// team a pure read. Spawned so the non-blocking contract above holds.
