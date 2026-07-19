@@ -191,7 +191,7 @@ func TestReadTouch_JiraGetIssue_FailedRead_NoTouch(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := client.JiraGetIssue(ctx, "SKY-123"); err == nil {
-		t.Fatal("expected the Jira read to fail against the 500 backend")
+		t.Fatal("expected the Jira read to fail against the 404 backend")
 	}
 	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", "SKY-123")
 	if err != nil {
