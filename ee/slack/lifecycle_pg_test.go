@@ -482,6 +482,32 @@ func TestLifecycleAdapter_Disposition_TasklessNoHandlerOrOwner_PostsNotConfigure
 	}
 }
 
+// TestLifecycleAdapter_Disposition_UnmentionedFollowUp_NoNotConfiguredReply
+// pins that an un-mentioned follow-up (Mentioned=false) landing on a
+// taskless_no_handler/taskless_no_owner disposition draws no automated
+// "not configured" reply — the same engaged-thread noise rule that suppresses
+// the 👀 reaction. An explicit @-mention in an unconfigured channel still gets
+// the reply (see ..._PostsNotConfiguredReply).
+func TestLifecycleAdapter_Disposition_UnmentionedFollowUp_NoNotConfiguredReply(t *testing.T) {
+	for _, disp := range []string{events.DispositionTasklessNoHandler, events.DispositionTasklessNoOwner} {
+		t.Run(disp, func(t *testing.T) {
+			h, stores, fake, orgID, owner, _ := newLifecycleTestRig(t)
+			seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
+			eventID, _ := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "C1", "1700000000.000200", "1700000000.000100", false)
+
+			adapter := newTestLifecycleAdapter(stores, staticURL(""))
+			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*runEntry{})
+
+			if len(fake.postCalls()) != 0 {
+				t.Errorf("an un-mentioned follow-up must not draw a not-configured reply, got %+v", fake.postCalls())
+			}
+			if len(fake.reactionCalls()) != 0 {
+				t.Errorf("taskless disposition must not react, got %+v", fake.reactionCalls())
+			}
+		})
+	}
+}
+
 // TestLifecycleAdapter_Disposition_TasklessNoHandler_RootMessage_RepliesInOwnThread
 // covers a root-message mention (no ThreadTS) — the reply's thread root must
 // fall back to the mention's own ts, starting a new thread there.

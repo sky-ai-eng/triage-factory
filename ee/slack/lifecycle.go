@@ -205,14 +205,15 @@ func (a *lifecycleAdapter) dispatch(ctx context.Context, evt domain.Event, runs 
 // --- disposition consumer: 👀 acknowledge + no-match reply ---
 
 // handleDisposition reacts to system:routing:disposition for slack:message
-// events only. task_created/task_bumped route to acknowledgeMention, which
-// adds the single 👀 reaction ONLY for a message that explicitly @-mentioned
-// the bot. An un-mentioned engaged-thread follow-up (Mentioned=false) is
-// already folded into the live run by the core inject branch (routing's
-// same-task absorption); reacting to it as well — to every message in a
-// thread the bot is already engaged with — is noise, so it gets no reaction.
-// taskless_no_handler/taskless_no_owner get the one-line not-configured
-// reply. frozen/taskless_unroutable/error are inert by design. Every step
+// events only, and every reactive surface here fires ONLY for a message that
+// explicitly @-mentioned the bot. task_created/task_bumped add the single 👀
+// reaction (acknowledgeMention); taskless_no_handler/taskless_no_owner post
+// the one-line not-configured reply (replyNotConfigured). Both gate on the
+// explicit-mention flag inside their own mentionContext load: an un-mentioned
+// follow-up in a thread the bot already owns is handled silently — its
+// content already folds into the live run (routing's same-task absorption),
+// and stamping a reaction or a reply on every message in an engaged thread is
+// noise. frozen/taskless_unroutable/error are inert by design. Every step
 // here is best-effort: log-and-drop on any store/API failure, never a retry
 // loop.
 func (a *lifecycleAdapter) handleDisposition(ctx context.Context, evt domain.Event) {
@@ -254,10 +255,17 @@ func (a *lifecycleAdapter) acknowledgeMention(ctx context.Context, orgID, eventI
 
 // replyNotConfigured posts the taskless one-liner as a thread reply, rooted
 // at ThreadTS when the mention was already inside a thread, else the
-// mention's own ts (a root-message mention starts its own thread).
+// mention's own ts (a root-message mention starts its own thread). Like
+// acknowledgeMention, it fires only for an explicit @-mention — an
+// un-mentioned engaged-thread follow-up (Mentioned=false) never draws an
+// automated reply, so a config-changed thread the bot already owns doesn't
+// suddenly answer a plain follow-up with "not configured".
 func (a *lifecycleAdapter) replyNotConfigured(ctx context.Context, orgID, eventID string) {
 	meta, token, ok := a.mentionContext(ctx, orgID, eventID)
 	if !ok {
+		return
+	}
+	if !meta.Mentioned {
 		return
 	}
 	threadTS := meta.ThreadTS
