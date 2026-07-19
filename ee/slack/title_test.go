@@ -77,8 +77,8 @@ func TestComposeThreadTitle(t *testing.T) {
 	t.Run("caps a pathologically long channel name", func(t *testing.T) {
 		long := strings.Repeat("z", 300)
 		got := composeThreadTitle(long)
-		if r := []rune(got); len(r) > mentionTitleMaxRunes {
-			t.Errorf("length = %d runes; want <= %d", len(r), mentionTitleMaxRunes)
+		if r := []rune(got); len(r) > slackTitleMaxRunes {
+			t.Errorf("length = %d runes; want <= %d", len(r), slackTitleMaxRunes)
 		}
 	})
 }

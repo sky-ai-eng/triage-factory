@@ -13,10 +13,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// mentionTitleMaxRunes bounds the entity title derived from a mention's
-// text — enough to be recognizable in a task list without pulling in the
-// whole message body (that stays in the event's metadata_json).
-const mentionTitleMaxRunes = 120
+// slackTitleMaxRunes bounds a Slack entity's title — enough to be
+// recognizable in a task list without pulling in a whole message body (that
+// stays in the event's metadata_json). Applies to both the thread title
+// (composeThreadTitle) and the bot-outbound post title (mentionTitle).
+const slackTitleMaxRunes = 120
 
 // slackThreadTitle is the channel-less form of a thread entity's title,
 // written synchronously at ingest before the channel name resolves. A Slack
@@ -33,13 +34,13 @@ const slackThreadTitle = "New thread messages"
 // "New thread messages in #general". An empty channelName (its lookup failed
 // or hasn't run) returns the channel-less form unchanged, so a caller can
 // detect "nothing to enrich" and skip the redundant write. Capped at
-// mentionTitleMaxRunes so a pathologically long channel name can't unbound
+// slackTitleMaxRunes so a pathologically long channel name can't unbound
 // the title.
 func composeThreadTitle(channelName string) string {
 	if channelName == "" {
 		return slackThreadTitle
 	}
-	return truncateRunes(slackThreadTitle+" in #"+channelName, mentionTitleMaxRunes)
+	return truncateRunes(slackThreadTitle+" in #"+channelName, slackTitleMaxRunes)
 }
 
 // inboundMention is the transport-neutral shape both the Events API
@@ -383,9 +384,9 @@ var slackEntityRe = regexp.MustCompile(`<([^>]+)>`)
 // "<@U0BHY927K34> What can you do?". humanizeSlackText turns those tokens
 // into their readable form (dropping the leading bot mention, keeping named
 // mentions as "@name"/"#name", links as their label), then whitespace is
-// collapsed and the result capped at mentionTitleMaxRunes.
+// collapsed and the result capped at slackTitleMaxRunes.
 func mentionTitle(text string) string {
-	return truncateRunes(strings.Join(strings.Fields(humanizeSlackText(text)), " "), mentionTitleMaxRunes)
+	return truncateRunes(strings.Join(strings.Fields(humanizeSlackText(text)), " "), slackTitleMaxRunes)
 }
 
 // humanizeSlackText rewrites Slack's mrkdwn entity tokens into plain,
