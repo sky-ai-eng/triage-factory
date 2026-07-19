@@ -535,16 +535,14 @@ func TestReviewArtifactGet_MalformedDetails_500(t *testing.T) {
 	}
 }
 
-// TestReviewArtifactApprove_AutoMergeDowngrade pins that the APPROVE→COMMENT
-// downgrade SubmitReview applies when auto-merge is on is reflected back: the
-// response event, the persisted details.ReviewEvent, and the verdict diff all
-// show COMMENT (what GitHub recorded), not the requested APPROVE.
-func TestReviewArtifactApprove_AutoMergeDowngrade(t *testing.T) {
+// TestReviewArtifactApprove_AutoMergeNoDowngrade pins that an APPROVE submits
+// as APPROVE even when auto-merge is enabled on the PR — there is no
+// auto-merge gate downgrading it to COMMENT.
+func TestReviewArtifactApprove_AutoMergeNoDowngrade(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	var submitEvent string
 	mux := newAppAPIMux()
-	// GetPR (auto-merge guardrail check) reports auto_merge enabled.
 	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"number": 7, "auto_merge": map[string]any{"merge_method": "squash"}})
 	})
@@ -563,20 +561,18 @@ func TestReviewArtifactApprove_AutoMergeDowngrade(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if submitEvent != "COMMENT" {
-		t.Errorf("GitHub received event %q, want COMMENT (downgraded from APPROVE under auto-merge)", submitEvent)
+	if submitEvent != "APPROVE" {
+		t.Errorf("GitHub received event %q, want APPROVE (no auto-merge downgrade)", submitEvent)
 	}
-	// The response must report what actually landed, not the requested APPROVE.
 	var out struct {
 		Event string `json:"event"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &out)
-	if out.Event != "COMMENT" {
-		t.Errorf("response event = %q, want COMMENT", out.Event)
+	if out.Event != "APPROVE" {
+		t.Errorf("response event = %q, want APPROVE", out.Event)
 	}
-	// The persisted artifact reflects the downgrade too.
-	if d, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON); d.ReviewEvent != "COMMENT" {
-		t.Errorf("persisted ReviewEvent = %q, want COMMENT", d.ReviewEvent)
+	if d, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON); d.ReviewEvent != "APPROVE" {
+		t.Errorf("persisted ReviewEvent = %q, want APPROVE", d.ReviewEvent)
 	}
 }
 

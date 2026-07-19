@@ -27,7 +27,6 @@ type PRView struct {
 	Body         string            `json:"body"`
 	State        string            `json:"state"`
 	Merged       bool              `json:"merged"`
-	AutoMerge    bool              `json:"auto_merge"`
 	Author       string            `json:"author"`
 	Additions    int               `json:"additions"`
 	Deletions    int               `json:"deletions"`
@@ -94,7 +93,6 @@ func prViewFromRaw(raw map[string]any) *PRView {
 		Body:         strVal(raw, "body"),
 		State:        strVal(raw, "state"),
 		Merged:       boolVal(raw, "merged"),
-		AutoMerge:    raw["auto_merge"] != nil,
 		Additions:    intVal(raw, "additions"),
 		Deletions:    intVal(raw, "deletions"),
 		ChangedFiles: intVal(raw, "changed_files"),
@@ -540,17 +538,7 @@ func reviewCommentsPayload(comments []SubmitReviewComment) []map[string]any {
 
 // SubmitReview creates and submits a review atomically with all comments in one API call.
 // Event is "APPROVE", "REQUEST_CHANGES", or "COMMENT".
-// If auto_merge is enabled on the PR and event is "APPROVE", it's downgraded to "COMMENT".
 func (c *Client) SubmitReview(ctx context.Context, owner, repo string, number int, commitSHA, event, body string, comments []SubmitReviewComment) (int, string, error) {
-	// Check auto_merge guardrail
-	if event == "APPROVE" {
-		pr, err := c.GetPR(ctx, owner, repo, number, false)
-		if err == nil && pr.AutoMerge {
-			event = "COMMENT"
-			body = "[Auto-merge is enabled — downgraded from APPROVE to COMMENT]\n\n" + body
-		}
-	}
-
 	payload := map[string]any{
 		"commit_id": commitSHA,
 		"event":     event,
