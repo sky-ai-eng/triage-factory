@@ -319,6 +319,39 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A provider-side OAuth error — GoTrue relays the IdP's ?error=… back to this
+	// callback instead of a code — is a login failure to recover from, not a
+	// malformed request. The two shapes worth distinguishing for the user are the
+	// person declining consent on the provider's screen (access_denied) and a
+	// transient provider/GoTrue fault (server_error / unexpected_failure — e.g. an
+	// upstream GitHub incident that blocks the profile fetch, which surfaces here
+	// as an empty code). Bounce to /login with a friendly, category-specific
+	// banner rather than the bare "missing code" 400 the empty-code branch below
+	// would emit. The SSO verify-before-enforce test path (OnTestCallback, above)
+	// already consumed its own ?error=, so this only reaches real logins.
+	if provErr := strings.TrimSpace(r.URL.Query().Get("error")); provErr != "" {
+		method := authMethod(state.ProviderID != "")
+		cancelled := provErr == "access_denied"
+		reason := "provider_error"
+		loginError := "login_failed"
+		if cancelled {
+			reason = "provider_denied"
+			loginError = "login_cancelled"
+		}
+		authLog.Warn("oauth provider error on callback",
+			"provider_error", provErr,
+			"error_code", r.URL.Query().Get("error_code"),
+			"error_description", r.URL.Query().Get("error_description"),
+			"method", method)
+		s.recordLoginFailure(r, reason, method, "")
+		q := url.Values{"error": {loginError}}
+		if state.ReturnTo != "" && state.ReturnTo != "/" {
+			q.Set("return_to", state.ReturnTo)
+		}
+		http.Redirect(w, r, "/login?"+q.Encode(), http.StatusFound)
+		return
+	}
+
 	authCode := r.URL.Query().Get("code")
 	if authCode == "" {
 		s.recordLoginFailure(r, "missing_code", authMethod(state.ProviderID != ""), "")

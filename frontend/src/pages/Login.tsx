@@ -67,6 +67,14 @@ export default function Login() {
   // there rather than offering a self-serve retry.
   const seatLimit = params.get('error') === 'seat_limit'
 
+  // ?error=login_failed / ?error=login_cancelled are set by the OAuth callback
+  // when the provider (GitHub, or GoTrue relaying it) hands back an error instead
+  // of an auth code — a transient upstream fault vs. the user declining consent.
+  // Both are recoverable by retrying, so the banner is an informative retry hint,
+  // not a dead end.
+  const loginFailed = params.get('error') === 'login_failed'
+  const loginCancelled = params.get('error') === 'login_cancelled'
+
   const startGitHub = () => {
     window.location.href = '/api/auth/oauth/github?return_to=' + encodeURIComponent(returnTo)
   }
@@ -135,6 +143,25 @@ export default function Login() {
           >
             This deployment has reached its licensed seat limit. Ask your administrator to add seats
             before signing in.
+          </div>
+        )}
+
+        {loginFailed && (
+          <div
+            role="alert"
+            className="rounded-xl bg-dismiss/[0.08] border border-dismiss/20 px-4 py-2.5 text-[13px] text-dismiss"
+          >
+            Sign-in couldn&apos;t be completed. This is usually a temporary problem with the
+            identity provider — please try again in a moment.
+          </div>
+        )}
+
+        {loginCancelled && (
+          <div
+            role="alert"
+            className="rounded-xl bg-accent/[0.08] border border-accent/20 px-4 py-2.5 text-[13px] text-text-secondary"
+          >
+            Sign-in was cancelled. Try again below to continue.
           </div>
         )}
 
