@@ -230,6 +230,7 @@ function AddWorkspaceSection({
         <button
           type="button"
           onClick={() => setExpanded(true)}
+          aria-expanded={expanded}
           className="flex w-full items-center justify-center gap-1.5 rounded-2xl border border-dashed border-[var(--color-border-glass)] px-4 py-3 text-[12px] font-medium text-text-secondary transition-colors hover:border-accent/30 hover:text-text-primary"
         >
           <Plus size={14} />
@@ -481,7 +482,9 @@ function ConnectFlow({
       <div className="space-y-4 rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/20 px-4 py-4">
         {onCollapse && (
           <div className="flex items-center justify-between">
-            <span className="text-[12px] font-medium text-text-secondary">Add a workspace</span>
+            <span className="text-[12px] font-medium text-text-secondary">
+              Add another workspace
+            </span>
             <button
               type="button"
               onClick={onCollapse}
