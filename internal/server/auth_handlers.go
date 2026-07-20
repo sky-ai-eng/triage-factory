@@ -262,6 +262,20 @@ func (s *Server) issueOAuthStateCookie(w http.ResponseWriter, r *http.Request, r
 	return codeVerifier, csrf, true
 }
 
+// redirectLoginError bounces a recoverable callback failure to the /login page
+// as ?error=<code> — a 302 the SPA renders as a friendly banner, never a bare
+// 4xx. A meaningful returnTo (anything but the root) is preserved so the user
+// lands back where they were headed once they retry. The single place the
+// callback shapes these redirects, shared by the provider-error and seat-limit
+// branches.
+func (s *Server) redirectLoginError(w http.ResponseWriter, r *http.Request, code, returnTo string) {
+	q := url.Values{"error": {code}}
+	if returnTo != "" && returnTo != "/" {
+		q.Set("return_to", returnTo)
+	}
+	http.Redirect(w, r, "/login?"+q.Encode(), http.StatusFound)
+}
+
 // handleOAuthCallback completes the PKCE dance: validates state,
 // exchanges the auth code via server-side POST to gotrue's /token,
 // verifies the returned JWT, upserts public.users, creates an
@@ -344,11 +358,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 			"error_description", r.URL.Query().Get("error_description"),
 			"method", method)
 		s.recordLoginFailure(r, reason, method, "")
-		q := url.Values{"error": {loginError}}
-		if state.ReturnTo != "" && state.ReturnTo != "/" {
-			q.Set("return_to", state.ReturnTo)
-		}
-		http.Redirect(w, r, "/login?"+q.Encode(), http.StatusFound)
+		s.redirectLoginError(w, r, loginError, state.ReturnTo)
 		return
 	}
 
@@ -442,11 +452,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// enforcement uses. Uncapped / unlicensed → no-op. A blocked login records
 	// no login_success, so it never consumes a seat.
 	if s.enforceSeatLimit(r, userUUID.String()) {
-		q := url.Values{"error": {"seat_limit"}}
-		if state.ReturnTo != "" && state.ReturnTo != "/" {
-			q.Set("return_to", state.ReturnTo)
-		}
-		http.Redirect(w, r, "/login?"+q.Encode(), http.StatusFound)
+		s.redirectLoginError(w, r, "seat_limit", state.ReturnTo)
 		return
 	}
 
