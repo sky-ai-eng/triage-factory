@@ -32,14 +32,13 @@ A good response to a review reads as a coherent argument, not a checklist of mic
 </grouping>
 
 <process>
-1. `triagefactory exec gh pr view {{PR_NUMBER}} -v` — find the most recent review (or reviews — multiple may have landed).
-2. `triagefactory exec gh pr review-view <review_id> --pr {{PR_NUMBER}} -v` for each review. Read every inline comment in full.
-3. Read `./_scratch/entity-memory/` before making changes. Prior iterations may have already addressed or argued against some of these points. If a comment reappears that a prior run already pushed back on with the same evidence, push back again rather than capitulating. If a prior fix attempt landed and the reviewer is asking again, the prior fix missed the spirit of the request — try a different angle.
-4. Categorize every comment as AGREE / PARTIAL / DISAGREE per the rules above before making any edits. Doing this in scratch first keeps the eventual diff coherent.
-5. Implement the AGREE and PARTIAL fixes. Group related changes into the smallest number of meaningful commits — usually one. Run the tests that exist for the touched code.
-6. Commit with a message that names the review's concerns, not just the file changes. "Address review: tighten validation in handleX; add regression test for Y" beats "fix bug".
-7. Push to the PR branch.
-8. Reply to every DISAGREE thread, every PARTIAL thread (explaining what you did and didn't), and the top-level review with a short summary. Use `triagefactory exec gh pr comment-reply` for inline threads. AGREE threads usually don't need a reply — the commit speaks for itself.
+1. Find the most recent review (or reviews — multiple may have landed) and read every inline comment in full.
+2. Check prior task memory before making changes. If a comment reappears that a prior run already pushed back on with the same evidence, push back again rather than capitulating. If a prior fix attempt landed and the reviewer is asking again, the prior fix missed the spirit of the request — try a different angle.
+3. Categorize every comment as AGREE / PARTIAL / DISAGREE per the rules above before making any edits. Doing this before touching code keeps the eventual diff coherent.
+4. Implement the AGREE and PARTIAL fixes. Group related changes into the smallest number of meaningful commits — usually one. Run the tests that exist for the touched code.
+5. Commit with a message that names the review's concerns, not just the file changes. "Address review: tighten validation in handleX; add regression test for Y" beats "fix bug".
+6. Push to the PR branch.
+7. Reply to every DISAGREE thread and every PARTIAL thread (explaining what you did and didn't), plus post a short summary reply to the review as a whole. AGREE threads usually don't need a reply — the commit speaks for itself. Do not submit your own review in response -- you should be using the comment tools instead.
 </process>
 
 <reply_discipline>

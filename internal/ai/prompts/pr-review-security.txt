@@ -79,20 +79,19 @@ Schema:
 Field rules:
 - `file` is the path as it appears in the diff. `line` is the line on the new side of the diff. `start_line` is the first line of a multi-line range, else null.
 - `severity` is one of blocker | major | minor | clean (lowercase).
-- `in_diff` — set true ONLY when `line` falls inside a changed hunk you can see in `pr diff`. GitHub accepts inline comments only on added or context lines within a hunk. If the vulnerable line is outside every hunk (e.g. an unchanged sink this change newly feeds), set `in_diff` to false and describe it in `summary` — it cannot be posted inline.
+- `in_diff` — set true ONLY when `line` falls inside a changed hunk of the diff. GitHub accepts inline comments only on added or context lines within a hunk. If the vulnerable line is outside every hunk (e.g. an unchanged sink this change newly feeds), set `in_diff` to false and describe it in `summary` — it cannot be posted inline.
 - `body` is the exact comment text to post.
 
 If the change introduces no vulnerability, write `{"findings": [], "summary": "<short take saying so>"}`. Do not invent findings to fill space — an empty security review is the correct answer for most PRs.
 </handoff>
 
 <process>
-1. `{{BINARY_PATH}} exec gh pr view {{PR_NUMBER}} -v` — read the title, body, and existing reviews. Don't repeat a point a prior review already raised.
-2. `{{BINARY_PATH}} exec gh pr files {{PR_NUMBER}}` — see what changed.
-3. `{{BINARY_PATH}} exec gh pr diff {{PR_NUMBER}}` — read the diff (walk file by file with `--file <path>` on large PRs).
-4. Run the data-flow <method>. Read beyond the diff freely — the enclosing function, the sink's definition, the call sites — both to confirm a real vulnerability and to rule one out.
-5. Write the findings file per <handoff>.
+1. Read the PR — title, body, and any existing reviews — so you don't repeat a point a prior review already raised.
+2. Read the diff, file by file if it's large.
+3. Run the data-flow <method>. Read beyond the diff freely — the enclosing function, the sink's definition, the call sites — both to confirm a real vulnerability and to rule one out.
+4. Write the findings file per <handoff>.
 
-This task is read-only. Do not edit, stage, commit, or push anything, and do not call `start-review`, `add-review-comment`, or `finalize-review` — posting the review is a later step's job.
+This task is read-only. Do not edit, stage, commit, or push anything, and do not post any part of the review yourself — that's a later step's job.
 </process>
 
 <verify>

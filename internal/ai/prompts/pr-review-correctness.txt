@@ -109,20 +109,19 @@ Field rules:
 - `file` is the path as it appears in the diff. `line` is the line on the new side of the diff.
 - `start_line` is for a multi-line comment (the first line of the range); use null for a single-line comment.
 - `severity` is one of blocker | major | minor | clean (lowercase).
-- `in_diff` — set true ONLY when `line` falls inside a changed hunk you can see in `pr diff`. GitHub accepts inline comments only on added or context lines within a hunk. If the defect is on a line outside every hunk (e.g. an unchanged line of a touched function, far from the change), set `in_diff` to false and describe the finding in `summary` instead — it cannot be posted inline.
+- `in_diff` — set true ONLY when `line` falls inside a changed hunk of the diff. GitHub accepts inline comments only on added or context lines within a hunk. If the defect is on a line outside every hunk (e.g. an unchanged line of a touched function, far from the change), set `in_diff` to false and describe the finding in `summary` instead — it cannot be posted inline.
 - `body` is the exact comment text to post — diagnosis first, then any suggestion block.
 
 If the change is sound, write `{"findings": [], "summary": "<short natural take saying so>"}`. An empty-but-correct review is worth more than a noisy one; do not invent findings to fill space.
 </handoff>
 
 <process>
-1. `{{BINARY_PATH}} exec gh pr view {{PR_NUMBER}} -v` — read the title, body, and existing reviews. If a prior review already raised a point, do not repeat it. To expand a prior review's inline comments: `{{BINARY_PATH}} exec gh pr review-view <review_id> --pr {{PR_NUMBER}} -v`.
-2. `{{BINARY_PATH}} exec gh pr files {{PR_NUMBER}}` — see what changed.
-3. `{{BINARY_PATH}} exec gh pr diff {{PR_NUMBER}}` — read the diff. For large PRs, walk file by file with `--file <path>`.
-4. Run the passes in <how_to_find>. Read beyond the diff freely — surrounding source, callers, neighboring files — both to confirm a real bug and to kill a low-confidence one. The earlier security pass may have written `{{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/security.json`; if it's there, skim it so you don't duplicate what it already flagged.
-5. Write the findings file per <handoff>.
+1. Read the PR — title, body, and existing reviews, including their inline comments — so you don't repeat a point already raised.
+2. Read the diff, file by file if it's large.
+3. Run the passes in <how_to_find>. Read beyond the diff freely — surrounding source, callers, neighboring files — both to confirm a real bug and to kill a low-confidence one. A parallel security pass may have already written its findings to `{{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/security.json`; if it's there, skim it so you don't duplicate what it already flagged.
+4. Write the findings file per <handoff>.
 
-This task is read-only. Do not edit, stage, commit, or push anything, and do not call `start-review`, `add-review-comment`, or `finalize-review` — assembling and posting the review is a later step's job. The worktree exists for reading context.
+This task is read-only. Do not edit, stage, commit, or push anything, and do not post any part of the review yourself — that's a later step's job. The worktree exists for reading context.
 </process>
 
 <verify>
