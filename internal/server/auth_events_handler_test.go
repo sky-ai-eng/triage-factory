@@ -473,3 +473,80 @@ func TestAuthEvents_LoginFailure_Branches(t *testing.T) {
 		}
 	})
 }
+
+// fireCallbackWithError drives /api/auth/callback with a valid state cookie but a
+// provider-relayed ?error= (and no code) — the shape GoTrue hands back when the
+// IdP fails or the user declines consent — returning the response.
+func (r *authRig) fireCallbackWithError(provErr, desc string) *http.Response {
+	r.t.Helper()
+	csrf := "csrf-" + uuid.NewString()
+	stateVal := r.signStateCookie("/dashboard", csrf, "verifier")
+	q := url.Values{}
+	q.Set("state", csrf)
+	q.Set("error", provErr)
+	if desc != "" {
+		q.Set("error_description", desc)
+	}
+	req := httptest.NewRequest("GET", "/api/auth/callback?"+q.Encode(), nil)
+	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: stateVal})
+	rec := httptest.NewRecorder()
+	r.srv.mux.ServeHTTP(rec, req)
+	return rec.Result()
+}
+
+// A provider-relayed OAuth error (GoTrue bounces the IdP's ?error= back to the
+// callback instead of a code — e.g. an upstream GitHub incident, which is the
+// production case this handles) redirects to /login with a friendly, recoverable
+// banner rather than the bare "missing code" 400, records ONE login_failure with
+// the category in detail, and preserves return_to.
+func TestAuthEvents_LoginFailure_ProviderError(t *testing.T) {
+	// A transient provider/GoTrue fault → login_failed banner, provider_error reason.
+	t.Run("server_error", func(t *testing.T) {
+		r := newAuthRig(t)
+		resp := r.fireCallbackWithError("server_error", "Error getting user profile from external provider")
+		if resp.StatusCode != http.StatusFound {
+			t.Fatalf("provider-error callback status=%d, want 302", resp.StatusCode)
+		}
+		loc := resp.Header.Get("Location")
+		if !strings.HasPrefix(loc, "/login?") || !strings.Contains(loc, "error=login_failed") {
+			t.Errorf("Location=%q, want a /login?error=login_failed bounce", loc)
+		}
+		if !strings.Contains(loc, "return_to=%2Fdashboard") {
+			t.Errorf("Location=%q, want return_to preserved", loc)
+		}
+		ev := r.oneAuthEvent(domain.AuthEventLoginFailure)
+		if ev.detail["reason"] != "provider_error" || ev.detail["method"] != "github" {
+			t.Errorf("detail=%v, want reason=provider_error method=github", ev.detail)
+		}
+	})
+
+	// The user declining consent (access_denied) → login_cancelled banner,
+	// provider_denied reason. Distinguished so the copy isn't alarming.
+	t.Run("access_denied", func(t *testing.T) {
+		r := newAuthRig(t)
+		resp := r.fireCallbackWithError("access_denied", "The user has denied your application access.")
+		if resp.StatusCode != http.StatusFound {
+			t.Fatalf("access-denied callback status=%d, want 302", resp.StatusCode)
+		}
+		loc := resp.Header.Get("Location")
+		if !strings.Contains(loc, "error=login_cancelled") {
+			t.Errorf("Location=%q, want error=login_cancelled", loc)
+		}
+		ev := r.oneAuthEvent(domain.AuthEventLoginFailure)
+		if ev.detail["reason"] != "provider_denied" {
+			t.Errorf("detail=%v, want reason=provider_denied", ev.detail)
+		}
+	})
+
+	// A provider error must NOT be mistaken for the missing-code branch: no
+	// 400, and never a session cookie.
+	t.Run("no session minted", func(t *testing.T) {
+		r := newAuthRig(t)
+		resp := r.fireCallbackWithError("server_error", "")
+		for _, c := range resp.Cookies() {
+			if c.Name == r.srv.sidCookieName() && c.Value != "" {
+				t.Fatalf("provider error minted a session cookie %q", c.Value)
+			}
+		}
+	})
+}

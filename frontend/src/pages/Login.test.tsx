@@ -132,4 +132,16 @@ describe('Login (identifier-first, TFAC-427)', () => {
     renderAt()
     expect(navigateMock).toHaveBeenCalledWith('/', { replace: true })
   })
+
+  it('?error=login_failed → shows a recoverable "try again" banner, GitHub still available', () => {
+    renderAt('/login?error=login_failed')
+    expect(screen.getByText(/sign-in couldn.t be completed/i)).toBeInTheDocument()
+    expect(githubBtn()).toBeInTheDocument()
+  })
+
+  it('?error=login_cancelled → shows the gentler "cancelled" banner', () => {
+    renderAt('/login?error=login_cancelled')
+    expect(screen.getByText(/sign-in was cancelled/i)).toBeInTheDocument()
+    expect(githubBtn()).toBeInTheDocument()
+  })
 })

@@ -262,6 +262,20 @@ func (s *Server) issueOAuthStateCookie(w http.ResponseWriter, r *http.Request, r
 	return codeVerifier, csrf, true
 }
 
+// redirectLoginError bounces a recoverable callback failure to the /login page
+// as ?error=<code> — a 302 the SPA renders as a friendly banner, never a bare
+// 4xx. A meaningful returnTo (anything but the root) is preserved so the user
+// lands back where they were headed once they retry. The single place the
+// callback shapes these redirects, shared by the provider-error and seat-limit
+// branches.
+func (s *Server) redirectLoginError(w http.ResponseWriter, r *http.Request, code, returnTo string) {
+	q := url.Values{"error": {code}}
+	if returnTo != "" && returnTo != "/" {
+		q.Set("return_to", returnTo)
+	}
+	http.Redirect(w, r, "/login?"+q.Encode(), http.StatusFound)
+}
+
 // handleOAuthCallback completes the PKCE dance: validates state,
 // exchanges the auth code via server-side POST to gotrue's /token,
 // verifies the returned JWT, upserts public.users, creates an
@@ -316,6 +330,35 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// and a normal login continues. Branch here, before authCode is read,
 	// because the test path handles a GoTrue ?error= ACS rejection itself.
 	if s.loginExtension().OnTestCallback(w, r, toLoginState(state)) {
+		return
+	}
+
+	// A provider-side OAuth error — GoTrue relays the IdP's ?error=… back to this
+	// callback instead of a code — is a login failure to recover from, not a
+	// malformed request. The two shapes worth distinguishing for the user are the
+	// person declining consent on the provider's screen (access_denied) and a
+	// transient provider/GoTrue fault (server_error / unexpected_failure — e.g. an
+	// upstream GitHub incident that blocks the profile fetch, which surfaces here
+	// as an empty code). Bounce to /login with a friendly, category-specific
+	// banner rather than the bare "missing code" 400 the empty-code branch below
+	// would emit. The SSO verify-before-enforce test path (OnTestCallback, above)
+	// already consumed its own ?error=, so this only reaches real logins.
+	if provErr := strings.TrimSpace(r.URL.Query().Get("error")); provErr != "" {
+		method := authMethod(state.ProviderID != "")
+		cancelled := provErr == "access_denied"
+		reason := "provider_error"
+		loginError := "login_failed"
+		if cancelled {
+			reason = "provider_denied"
+			loginError = "login_cancelled"
+		}
+		authLog.Warn("oauth provider error on callback",
+			"provider_error", provErr,
+			"error_code", r.URL.Query().Get("error_code"),
+			"error_description", r.URL.Query().Get("error_description"),
+			"method", method)
+		s.recordLoginFailure(r, reason, method, "")
+		s.redirectLoginError(w, r, loginError, state.ReturnTo)
 		return
 	}
 
@@ -409,11 +452,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// enforcement uses. Uncapped / unlicensed → no-op. A blocked login records
 	// no login_success, so it never consumes a seat.
 	if s.enforceSeatLimit(r, userUUID.String()) {
-		q := url.Values{"error": {"seat_limit"}}
-		if state.ReturnTo != "" && state.ReturnTo != "/" {
-			q.Set("return_to", state.ReturnTo)
-		}
-		http.Redirect(w, r, "/login?"+q.Encode(), http.StatusFound)
+		s.redirectLoginError(w, r, "seat_limit", state.ReturnTo)
 		return
 	}
 
