@@ -161,13 +161,43 @@ export default function SlackWorkspacesCard({ orgId }: { orgId: string }) {
   )
 }
 
+// COLLAPSE_MS is the height/opacity transition length. It's duplicated as the
+// `visibility` hide-delay below and must stay in step with the `duration-300`
+// utility on the animated container.
+const COLLAPSE_MS = 300
+
+// Collapsible animates its child between height 0 and its natural height (the
+// grid-rows 0fr↔1fr trick over an overflow-hidden inner child — no measuring)
+// with an opacity cross-fade. Keyboard/AT safety rides on `visibility`, not
+// `inert`: when closed, the inner subtree flips to `visibility: hidden`, which
+// every browser and screen reader honors by dropping the whole subtree from
+// the tab order and the accessibility tree. That covers the connect form's
+// anchor and its inputs alike — a disabled <fieldset> would leave the <a>
+// tabbable, and `inert` support is uneven. The hide is delayed by the
+// transition length so the content stays on screen through the collapse;
+// showing is immediate so it's focusable the instant it starts expanding.
+function Collapsible({ open, children }: { open: boolean; children: React.ReactNode }) {
+  return (
+    <div
+      className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out ${
+        open ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
+      }`}
+    >
+      <div
+        className={`overflow-hidden ${open ? 'visible' : 'invisible'}`}
+        style={{ transition: `visibility 0s linear ${open ? '0s' : `${COLLAPSE_MS}ms`}` }}
+      >
+        {children}
+      </div>
+    </div>
+  )
+}
+
 // AddWorkspaceSection decides how the connect form is presented. Before the
 // first workspace is connected the form is the primary action and stays open.
 // Once at least one workspace exists, connecting another is the rare case, so
 // the form collapses behind a single "Add another workspace" row and expands
-// back — with a close affordance — on demand. Both directions animate via the
-// grid-rows 0fr↔1fr height trick (an overflow-hidden inner child), which
-// transitions to the content's natural height without measuring it.
+// back — with a close affordance — on demand.
 function AddWorkspaceSection({
   hasWorkspaces,
   onConnected,
@@ -192,39 +222,24 @@ function AddWorkspaceSection({
 
   return (
     <div>
-      {/* Collapsed trigger — height-collapses out as the form expands in, so
-          the two cross-fade through each other rather than popping. `inert`
-          drops whichever half is hidden out of the tab order and a11y tree
-          while it stays mounted for the animation. */}
-      <div
-        className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out ${
-          expanded ? 'grid-rows-[0fr] opacity-0' : 'grid-rows-[1fr] opacity-100'
-        }`}
-        inert={expanded || undefined}
-      >
-        <div className="overflow-hidden">
-          <button
-            type="button"
-            onClick={() => setExpanded(true)}
-            className="flex w-full items-center justify-center gap-1.5 rounded-2xl border border-dashed border-[var(--color-border-glass)] px-4 py-3 text-[12px] font-medium text-text-secondary transition-colors hover:border-accent/30 hover:text-text-primary"
-          >
-            <Plus size={14} />
-            Add another workspace
-          </button>
-        </div>
-      </div>
+      {/* The trigger and the form are two halves of one control: whichever
+          isn't showing collapses to height 0 and (via Collapsible) visibility
+          hidden, so exactly one is interactive at a time and they cross-fade
+          rather than pop. */}
+      <Collapsible open={!expanded}>
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className="flex w-full items-center justify-center gap-1.5 rounded-2xl border border-dashed border-[var(--color-border-glass)] px-4 py-3 text-[12px] font-medium text-text-secondary transition-colors hover:border-accent/30 hover:text-text-primary"
+        >
+          <Plus size={14} />
+          Add another workspace
+        </button>
+      </Collapsible>
 
-      {/* Expanded form — same grid-rows trick in reverse. */}
-      <div
-        className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out ${
-          expanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
-        }`}
-        inert={!expanded || undefined}
-      >
-        <div className="overflow-hidden">
-          <ConnectFlow onConnected={handleConnected} onCollapse={() => setExpanded(false)} />
-        </div>
-      </div>
+      <Collapsible open={expanded}>
+        <ConnectFlow onConnected={handleConnected} onCollapse={() => setExpanded(false)} />
+      </Collapsible>
     </div>
   )
 }
