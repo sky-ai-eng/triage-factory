@@ -131,7 +131,7 @@ Adjacent work that came up while writing this spec but is consciously deferred. 
 
 - **Always show the user your full draft in chat first.** They will refine the framing; respect their edits — don't re-draft from scratch unless asked.
 - **Confirm the destination before filing anything.** If the user hasn't already named one (Jira, Linear, Notion, GitHub, "leave it as a doc," etc.), ask once. Don't guess — different destinations have different APIs, field names, and constraints, and the wrong one creates cleanup work for the user.
-- **File it via the right tool for that destination.** The list of tools available to you depends on what the host environment provides — that may be `triagefactory exec jira ticket create`, an equivalent Linear command, a Notion or GitHub MCP integration the user has installed, or none of the above. If the destination the user named isn't reachable from your toolset, say so plainly and offer to leave the spec in chat for them to copy.
+- **File it via the right tool for that destination.** Which tools are available depends on what the host environment provides — a ticket-tracker integration, a Notion or GitHub integration, or none of the above. If the destination the user named isn't reachable from your toolset, say so plainly and offer to leave the spec in chat for them to copy.
 - **On success, quote the result back** — the ticket / issue ID, the page URL, or "left as a doc above" — so the outcome is visible in chat. Don't claim a filing succeeded without confirmation from the tool.
 - **If you don't have enough information to write a useful spec, say what's missing** rather than writing a thin one. A "what would help me write this?" question is better than a placeholder.
 
