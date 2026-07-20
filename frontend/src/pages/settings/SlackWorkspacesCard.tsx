@@ -18,7 +18,7 @@
 
 import { useEffect, useState } from 'react'
 import * as Tooltip from '@radix-ui/react-tooltip'
-import { Check, Copy, ExternalLink, HelpCircle, Trash2 } from 'lucide-react'
+import { Check, Copy, ExternalLink, HelpCircle, Plus, Trash2, X } from 'lucide-react'
 import { apiFetch, apiJSON, httpErrorMessage } from '../../lib/apiClient'
 import { toast } from '../../components/Toast/toastStore'
 import { glassInputClass } from './primitives'
@@ -153,7 +153,94 @@ export default function SlackWorkspacesCard({ orgId }: { orgId: string }) {
         </ul>
       )}
 
-      <ConnectFlow onConnected={upsertInList} />
+      <AddWorkspaceSection
+        hasWorkspaces={!!workspaces && workspaces.length > 0}
+        onConnected={upsertInList}
+      />
+    </div>
+  )
+}
+
+// COLLAPSE_MS is the height/opacity transition length. It's duplicated as the
+// `visibility` hide-delay below and must stay in step with the `duration-300`
+// utility on the animated container.
+const COLLAPSE_MS = 300
+
+// Collapsible animates its child between height 0 and its natural height (the
+// grid-rows 0fr↔1fr trick over an overflow-hidden inner child — no measuring)
+// with an opacity cross-fade. Keyboard/AT safety rides on `visibility`, not
+// `inert`: when closed, the inner subtree flips to `visibility: hidden`, which
+// every browser and screen reader honors by dropping the whole subtree from
+// the tab order and the accessibility tree. That covers the connect form's
+// anchor and its inputs alike — a disabled <fieldset> would leave the <a>
+// tabbable, and `inert` support is uneven. The hide is delayed by the
+// transition length so the content stays on screen through the collapse;
+// showing is immediate so it's focusable the instant it starts expanding.
+function Collapsible({ open, children }: { open: boolean; children: React.ReactNode }) {
+  return (
+    <div
+      className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out ${
+        open ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
+      }`}
+    >
+      <div
+        className={`overflow-hidden ${open ? 'visible' : 'invisible'}`}
+        style={{ transition: `visibility 0s linear ${open ? '0s' : `${COLLAPSE_MS}ms`}` }}
+      >
+        {children}
+      </div>
+    </div>
+  )
+}
+
+// AddWorkspaceSection decides how the connect form is presented. Before the
+// first workspace is connected the form is the primary action and stays open.
+// Once at least one workspace exists, connecting another is the rare case, so
+// the form collapses behind a single "Add another workspace" row and expands
+// back — with a close affordance — on demand.
+function AddWorkspaceSection({
+  hasWorkspaces,
+  onConnected,
+}: {
+  hasWorkspaces: boolean
+  onConnected: (ws: SlackWorkspace) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+
+  // A successful connect from the "add another" flow folds the form back up so
+  // the newly connected workspace lands in the list above, not under an open
+  // form the user has to dismiss.
+  const handleConnected = (ws: SlackWorkspace) => {
+    onConnected(ws)
+    setExpanded(false)
+  }
+
+  // First connect: no collapse chrome, the form is simply the content.
+  if (!hasWorkspaces) {
+    return <ConnectFlow onConnected={onConnected} />
+  }
+
+  return (
+    <div>
+      {/* The trigger and the form are two halves of one control: whichever
+          isn't showing collapses to height 0 and (via Collapsible) visibility
+          hidden, so exactly one is interactive at a time and they cross-fade
+          rather than pop. */}
+      <Collapsible open={!expanded}>
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          aria-expanded={expanded}
+          className="flex w-full items-center justify-center gap-1.5 rounded-2xl border border-dashed border-[var(--color-border-glass)] px-4 py-3 text-[12px] font-medium text-text-secondary transition-colors hover:border-accent/30 hover:text-text-primary"
+        >
+          <Plus size={14} />
+          Add another workspace
+        </button>
+      </Collapsible>
+
+      <Collapsible open={expanded}>
+        <ConnectFlow onConnected={handleConnected} onCollapse={() => setExpanded(false)} />
+      </Collapsible>
     </div>
   )
 }
@@ -255,15 +342,33 @@ function ConnectionStatusChip({ workspace }: { workspace: SlackWorkspace }) {
   }
   const display = CONNECTION_STATUS_DISPLAY[status.state] ?? CONNECTION_STATUS_DISPLAY.dialing
   return (
-    <span title={status.last_error || undefined}>
-      <StatusDot label={display.label} dot={display.dot} text={display.text} />
-    </span>
+    <StatusDot
+      label={display.label}
+      dot={display.dot}
+      text={display.text}
+      title={status.last_error || undefined}
+    />
   )
 }
 
-function StatusDot({ label, dot, text }: { label: string; dot: string; text: string }) {
+// StatusDot carries its own `title` rather than being wrapped in an outer span:
+// a plain inline wrapper would sit on the text baseline and nudge the pill a
+// hair below the sibling TransportChip, so keeping every chip a single
+// inline-flex flex item is what lets the flex row's items-center line them up.
+function StatusDot({
+  label,
+  dot,
+  text,
+  title,
+}: {
+  label: string
+  dot: string
+  text: string
+  title?: string
+}) {
   return (
     <span
+      title={title}
       className={`inline-flex shrink-0 items-center gap-1 rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] font-medium ${text}`}
     >
       <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
@@ -315,7 +420,15 @@ function humanizeConnectError(raw: string): string {
 // Fields carry the "leave blank to keep current" convention for re-submits
 // (re-pasting the same bot token to update signing_secret/app_token without
 // retyping the one that isn't changing).
-function ConnectFlow({ onConnected }: { onConnected: (ws: SlackWorkspace) => void }) {
+function ConnectFlow({
+  onConnected,
+  onCollapse,
+}: {
+  onConnected: (ws: SlackWorkspace) => void
+  // Present only when the form is a collapsible "add another" panel; renders
+  // the close affordance that folds it back to the trigger row.
+  onCollapse?: () => void
+}) {
   const [botToken, setBotToken] = useState('')
   const [signingSecret, setSigningSecret] = useState('')
   const [appToken, setAppToken] = useState('')
@@ -367,6 +480,21 @@ function ConnectFlow({ onConnected }: { onConnected: (ws: SlackWorkspace) => voi
   return (
     <Tooltip.Provider delayDuration={150}>
       <div className="space-y-4 rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/20 px-4 py-4">
+        {onCollapse && (
+          <div className="flex items-center justify-between">
+            <span className="text-[12px] font-medium text-text-secondary">
+              Add another workspace
+            </span>
+            <button
+              type="button"
+              onClick={onCollapse}
+              aria-label="Collapse"
+              className="inline-flex shrink-0 items-center rounded-full p-1 text-text-tertiary transition-colors hover:text-text-secondary"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           <a
             href={SLACK_APP_CREATE_URL}
