@@ -11,7 +11,7 @@ host vs a ~90-run memory cap, ~8× lower). The tax scales with syscall rate, and
 ~72% of a real run's syscalls are JS-runtime churn (JavaScriptCore GC + Bun
 event loop — the engine is a Bun binary). gVisor config is exhausted;
 `--platform=kvm` cuts it ~3× but needs hardware virt TF can't mandate on
-self-host, whose "runs on any Linux" portability is the product moat. Per-run
+self-host, whose "runs on any Linux" portability is a hard constraint. Per-run
 isolation against BOTH the host and neighbor runs is required in every
 deployment tier, so hardened containers are insufficient and per-tier
 relaxation is ruled out. The moat-preserving lever is a compiled agent harness
