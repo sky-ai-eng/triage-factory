@@ -180,7 +180,7 @@ allocator/GC-driven.
 ### The open lever — must be measured on the real engine
 
 The synthetic proxy's syscall mix may not match a real delegated run: it opens
-a fresh connection per request (a real run keep-alives to the LLM proxy) and
+a fresh connection per request (a real run keeps a connection alive to the LLM proxy) and
 never fork/execs (a real run spawns Bash/git constantly — gVisor's worst case).
 **Next step: run the same two instruments (sentry pprof + strace histogram)
 against a real `agentproc.Run` engine** to learn whether the real dominant
