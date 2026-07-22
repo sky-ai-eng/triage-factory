@@ -1311,6 +1311,12 @@ CREATE TABLE public.run_messages (
     id bigint NOT NULL,
     org_id uuid NOT NULL,
     run_id uuid NOT NULL,
+    -- role is app-validated, not CHECK-constrained (no CHECK exists today):
+    -- 'assistant' | 'tool' | 'user' (the native loop's injected-input rows).
+    -- Reserved subtypes for the 'user' role, minted by later phases, not this
+    -- one: 'injection:compaction-request', 'injection:steer'; a
+    -- 'injection:compaction-result' row is minted with role='user' too. See
+    -- db.AgentRunStore's doc comment for the authoritative allowed-value list.
     role text NOT NULL,
     content text,
     subtype text DEFAULT 'text'::text,
@@ -1323,7 +1329,41 @@ CREATE TABLE public.run_messages (
     output_tokens integer,
     cache_read_tokens integer,
     cache_creation_tokens integer,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- reasoning is an array of reasoning-detail objects mirroring bifrost's
+    -- ChatReasoningDetails shape ({index, type, text?, signature?, data?}) —
+    -- the provider's replay reference for a prior turn's chain-of-thought.
+    -- NULL means no reasoning on this message. Reference-only: the API
+    -- validates each block's signature, not their ordering, so this is never
+    -- reconstructed or reordered, only replayed verbatim.
+    reasoning jsonb,
+    -- content_blocks is an array of neutral content-block objects (bifrost's
+    -- ChatContentBlock shape: text / image / file). NULL means the message's
+    -- content is fully represented by the flat `content` column above.
+    -- Applies to every role, not just assistant — a tool row uses this for an
+    -- image result the flat text column can't carry.
+    content_blocks jsonb,
+    -- delivered=false marks a durable pending input (a steer / follow-up
+    -- message) not yet folded into any context assembly. The native loop
+    -- flips it at its injection points (before each provider call, and the
+    -- late recheck at completion); ordering among pending rows is plain
+    -- insertion order (id ASC). Every row inserted by today's SDK runtime is
+    -- delivered immediately, hence the true default.
+    delivered boolean DEFAULT true NOT NULL,
+    -- window_state is app-validated (no CHECK — same house pattern as
+    -- runs.origin): 'active' (default; assembled normally) | 'elided'
+    -- (renders as a deterministic stub, content + is_error retained on the
+    -- row) | 'inactive' (superseded by compaction, never assembled). Flips
+    -- are policy-gated — elided only in a batched cold-moment pass, inactive
+    -- only via compaction — and sticky by construction (row state, no
+    -- watermark). Nothing flips this column in production yet.
+    window_state text DEFAULT 'active'::text NOT NULL,
+    -- seq is the assembly-order override: the effective sort key is
+    -- COALESCE(seq, id). NULL for every normally-appended row — no backfill,
+    -- no insert-time dance. Only a synthetic insertion (a compaction result)
+    -- sets a fractional value to land between two existing rows without
+    -- renumbering either of them.
+    seq double precision
 );
 
 
@@ -1383,6 +1423,17 @@ CREATE TABLE public.runs (
     -- origin discriminates blueprint-step runs from a future interactive kind;
     -- app-validated (no value CHECK, mirrors source). See the SQLite twin.
     origin text DEFAULT 'blueprint'::text NOT NULL,
+    -- runtime picks the executing engine: 'sdk' (the Claude Code SDK
+    -- subprocess — every run today) or 'native' (the executor-side agent
+    -- loop hydrating straight from run_messages). App-validated, no value
+    -- CHECK (mirrors origin/source). A native run's assembly-affecting
+    -- run_messages columns (reasoning / content_blocks / delivered /
+    -- window_state / seq) are populated per that table's contract; an sdk
+    -- run may carry values in reasoning/content_blocks too (the stream
+    -- parser captures them for display and future migration) but they are
+    -- never read back for replay — the SDK's own session file is truth for
+    -- an sdk run's resume.
+    runtime text DEFAULT 'sdk'::text NOT NULL,
     status text DEFAULT 'cloning'::text NOT NULL,
     model text,
     session_id text,
@@ -2765,6 +2816,17 @@ CREATE INDEX idx_run_memory_entities_entity ON public.run_memory_entities USING 
 --
 
 CREATE INDEX idx_run_messages_run ON public.run_messages USING btree (run_id);
+
+
+--
+-- Name: idx_run_messages_run_seq; Type: INDEX; Schema: public; Owner: -
+--
+
+-- Assembly order: the effective sort key is COALESCE(seq, id), so this
+-- expression index is what a native loop's ListForAssembly actually walks —
+-- idx_run_messages_run above stays for the plain id-order transcript reads
+-- (UI, spend sums) that never touch seq.
+CREATE INDEX idx_run_messages_run_seq ON public.run_messages (run_id, (COALESCE(seq, (id)::double precision)));
 
 
 --

@@ -218,6 +218,26 @@ func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) 
 				t.Fatalf("seed memory: %v", err)
 			}
 		},
+		SeedRawMessage: func(t *testing.T, runID, column, rawJSON string) int64 {
+			t.Helper()
+			if column != "reasoning" && column != "content_blocks" {
+				t.Fatalf("SeedRawMessage: unsupported column %q", column)
+			}
+			// column is a fixed test-controlled name (not user input), so
+			// string-building the column into the statement is safe here.
+			// rawJSON must be syntactically valid JSON — jsonb enforces that
+			// at the storage layer — but can be any shape, including one
+			// that fails to unmarshal into the target Go slice.
+			var id int64
+			if err := conn.QueryRow(
+				`INSERT INTO run_messages (org_id, run_id, role, subtype, content, `+column+`)
+				 VALUES ($1, $2, 'assistant', 'text', 'x', $3::jsonb) RETURNING id`,
+				orgID, runID, rawJSON,
+			).Scan(&id); err != nil {
+				t.Fatalf("seed raw message (%s): %v", column, err)
+			}
+			return id
+		},
 		AgentID: agentID,
 	}
 }
@@ -707,6 +727,61 @@ func seedPgBlueprintRun(t *testing.T, h *pgtest.Harness, orgID, userID, taskID s
 		t.Fatalf("seed blueprint_run: %v", err)
 	}
 	return brID
+}
+
+// TestAgentRunStore_Postgres_RuntimeDefaultsToSDK pins the
+// runs.runtime schema fact the columnar-canon epic depends on: a
+// freshly created run — the only shape any code in this repo
+// produces today — lands as 'sdk', not the native loop's 'native'.
+// domain.AgentRun has no Runtime field (nothing writes 'native' until
+// the executor-side loop lands), so this reads the column directly.
+func TestAgentRunStore_Postgres_RuntimeDefaultsToSDK(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, _ := seedPgAgentRunOrg(t, h)
+	seedPgAgentRunPromptIn(t, h, "p_runtime_test", orgID, userID)
+
+	entityID := uuid.New().String()
+	eventID := uuid.New().String()
+	taskID := uuid.New().String()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Runtime Test', '', '{}'::jsonb, now())
+	`, entityID, orgID, "runtime-"+orgID[:8]); err != nil {
+		t.Fatalf("entity: %v", err)
+	}
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, 'github:pr:opened', '', '{}'::jsonb, now())
+	`, eventID, orgID, entityID); err != nil {
+		t.Fatalf("event: %v", err)
+	}
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key, primary_event_id, status, scoring_status, priority_score)
+		VALUES ($1, $2, $3,
+		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+		        'team', $4, 'github:pr:opened', '', $5, 'queued', 'pending', 0.5)
+	`, taskID, orgID, userID, entityID, eventID); err != nil {
+		t.Fatalf("task: %v", err)
+	}
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	runID := uuid.New().String()
+	if err := stores.AgentRuns.Create(context.Background(), orgID, domain.AgentRun{
+		ID: runID, TaskID: taskID, PromptID: "p_runtime_test", Status: "running", Model: "m",
+		CreatorUserID:  userID,
+		BlueprintRunID: seedPgBlueprintRun(t, h, orgID, userID, taskID),
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var runtime string
+	if err := h.AdminDB.QueryRow(`SELECT runtime FROM runs WHERE id = $1`, runID).Scan(&runtime); err != nil {
+		t.Fatalf("read runtime: %v", err)
+	}
+	if runtime != "sdk" {
+		t.Errorf("runtime = %q, want sdk", runtime)
+	}
 }
 
 // seedPgAgentRunPromptIn is a small variant that inserts a prompt

@@ -178,6 +178,26 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 				t.Fatalf("seed memory: %v", err)
 			}
 		},
+		SeedRawMessage: func(t *testing.T, runID, column, rawJSON string) int64 {
+			t.Helper()
+			if column != "reasoning" && column != "content_blocks" {
+				t.Fatalf("SeedRawMessage: unsupported column %q", column)
+			}
+			// column is a fixed test-controlled name (not user input), so
+			// string-building the column into the statement is safe here.
+			res, err := conn.Exec(
+				`INSERT INTO run_messages (run_id, role, subtype, content, `+column+`) VALUES (?, 'assistant', 'text', 'x', ?)`,
+				runID, rawJSON,
+			)
+			if err != nil {
+				t.Fatalf("seed raw message (%s): %v", column, err)
+			}
+			id, err := res.LastInsertId()
+			if err != nil {
+				t.Fatalf("seed raw message lastInsertId: %v", err)
+			}
+			return id
+		},
 		AgentID: runmode.LocalDefaultAgentID,
 	}
 }
@@ -191,6 +211,38 @@ func TestAgentRunStore_SQLite_AssertLocalOrg(t *testing.T) {
 	store := sqlitestore.New(conn).AgentRuns
 	if _, err := store.HasActiveForTask(t.Context(), "some-other-org", uuid.New().String()); err == nil {
 		t.Error("HasActiveForTask accepted non-LocalDefaultOrgID without error")
+	}
+}
+
+// TestAgentRunStore_SQLite_RuntimeDefaultsToSDK pins the runs.runtime schema
+// fact the columnar-canon epic depends on: a freshly created run — the only
+// shape any code in this repo produces today — lands as 'sdk', not the
+// native loop's 'native'. domain.AgentRun has no Runtime field (nothing
+// writes 'native' until the executor-side loop lands), so this reads the
+// column directly.
+func TestAgentRunStore_SQLite_RuntimeDefaultsToSDK(t *testing.T) {
+	conn := newSQLiteForAgentRunTest(t)
+	seed := newSQLiteAgentRunSeeder(conn)
+	store := sqlitestore.New(conn).AgentRuns
+	ctx := context.Background()
+
+	ent := seed.Entity(t, "runtime")
+	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+	runID := uuid.New().String()
+	if err := store.Create(ctx, runmode.LocalDefaultOrgID, domain.AgentRun{
+		ID: runID, TaskID: taskID, PromptID: "p_agentrun_test", Status: "running", Model: "m",
+		BlueprintRunID: seed.BlueprintRun(t, taskID),
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var runtime string
+	if err := conn.QueryRow(`SELECT runtime FROM runs WHERE id = ?`, runID).Scan(&runtime); err != nil {
+		t.Fatalf("read runtime: %v", err)
+	}
+	if runtime != "sdk" {
+		t.Errorf("runtime = %q, want sdk", runtime)
 	}
 }
 
