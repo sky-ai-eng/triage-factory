@@ -975,9 +975,9 @@ func TestCuratorStore_SQLite_CancelStrandedRequestsForHomeSystem(t *testing.T) {
 
 // TestCuratorStore_SQLite_MessageRoundTripsReasoningAndContentBlocks pins
 // that curator_messages carries the same reasoning/content_blocks fidelity
-// run_messages does (TFAC-665) — curator turns run through the same SDK
-// stream parser as delegated runs, so a message with thinking or an image
-// tool result must round-trip without loss here too.
+// run_messages does — curator turns run through the same SDK stream parser
+// as delegated runs, so a message with thinking or an image tool result
+// must round-trip without loss here too.
 func TestCuratorStore_SQLite_MessageRoundTripsReasoningAndContentBlocks(t *testing.T) {
 	conn := newSQLiteForCuratorTest(t)
 	stores := sqlitestore.New(conn)

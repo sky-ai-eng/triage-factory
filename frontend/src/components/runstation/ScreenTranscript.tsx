@@ -215,8 +215,8 @@ function buildRows(messages: AgentMessage[], worktree: string | undefined): Reac
     // so it reads as the agent's interior voice, distinct from prose output.
     // Legacy transcripts carry this as a standalone subtype:"thinking" row;
     // current writes ride it on the owning assistant message's Reasoning
-    // field instead (TFAC-665) — both render with the same ThinkingLine
-    // treatment, and the legacy row still renders for historical runs.
+    // field instead — both render with the same ThinkingLine treatment,
+    // and the legacy row still renders for historical runs.
     if (msg.Subtype === 'thinking') {
       if (msg.Content) {
         rows.push(

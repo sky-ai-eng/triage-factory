@@ -533,7 +533,7 @@ CREATE TABLE public.curator_messages (
     cache_creation_tokens integer,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     -- reasoning / content_blocks mirror run_messages' columns of the same
-    -- name (TFAC-664): reasoning is the model's replay-only chain-of-thought
+    -- name: reasoning is the model's replay-only chain-of-thought
     -- ({index, type, text?, signature?, data?} entries); content_blocks
     -- carries non-text content (e.g. an image tool result) the flat
     -- `content` column can't. Curator turns run through the same SDK stream

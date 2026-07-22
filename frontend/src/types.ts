@@ -237,7 +237,7 @@ export interface AgentMessage {
   CacheCreationTokens?: number
   CreatedAt: string
   // Reasoning/ContentBlocks mirror domain.AgentMessage's fields of the same
-  // name (TFAC-665) — nil/absent on messages that carry neither. Reasoning
+  // name — nil/absent on messages that carry neither. Reasoning
   // rides the assistant message it belongs to rather than arriving as a
   // separate subtype:"thinking" row; ContentBlocks holds non-text content
   // (e.g. an image tool result) the flat Content string can't carry.
