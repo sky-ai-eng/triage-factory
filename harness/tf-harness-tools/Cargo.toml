@@ -1,0 +1,31 @@
+[package]
+name = "tf-harness-tools"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+description = "Rust port of pi's seven coding-agent tools, optimized for low syscall volume inside gVisor sandboxes"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+encoding_rs = "0.8"
+unicode-normalization = "0.1"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+grep-matcher = "0.1"
+ignore = "0.4"
+globset = "0.4"
+libc = "0.2"
+base64 = "0.22"
+getrandom = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "rayon"] }
+kamadak-exif = "0.6"
+
+[dev-dependencies]
+tempfile = "3"
+base64 = "0.22"
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[[bin]]
+name = "tf-harness-tools"
+path = "src/bin/tf-harness-tools.rs"

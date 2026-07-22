@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["tf-harness-tools"]
+
+[workspace.package]
+edition = "2021"
+# Covered by the repo-level Triage Factory License (source-available); the
+# pi- and jsdiff-derived portions carry their permissive notices in
+# tf-harness-tools/LICENSE-pi and tf-harness-tools/LICENSE-jsdiff.
+repository = "https://github.com/sky-ai-eng/triage-factory"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
