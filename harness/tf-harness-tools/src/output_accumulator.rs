@@ -55,21 +55,31 @@ fn fill_spill_name_bytes(bytes: &mut [u8; 8]) {
     }
 }
 
-fn default_temp_file_path(prefix: &str) -> String {
+fn default_temp_file_path(spill_dir: &str, prefix: &str) -> String {
     let mut bytes = [0u8; 8];
     fill_spill_name_bytes(&mut bytes);
     let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    format!("{}/{prefix}-{id}.log", tmpdir())
+    format!("{spill_dir}/{prefix}-{id}.log")
 }
+
+/// Cap on in-memory buffering when the spill file cannot be created, so a
+/// runaway command with a broken TMPDIR degrades to marked loss instead of
+/// unbounded memory growth.
+const SPILL_FALLBACK_CAP_BYTES: usize = 16 * 1024 * 1024;
 
 pub struct OutputAccumulator {
     max_lines: usize,
     max_bytes: usize,
     max_rolling_bytes: usize,
     temp_file_prefix: String,
+    spill_dir: String,
     decoder: encoding_rs::Decoder,
 
     raw_chunks: Vec<Vec<u8>>,
+    raw_chunks_bytes: usize,
+    /// Some raw output could be neither written nor buffered; the spill
+    /// file (if any) is incomplete and must never be advertised.
+    spill_lost: bool,
     tail_text: String,
     tail_bytes: usize,
     tail_starts_at_line_boundary: bool,
@@ -87,14 +97,21 @@ pub struct OutputAccumulator {
 
 impl OutputAccumulator {
     pub fn new(temp_file_prefix: &str) -> Self {
+        Self::with_spill_dir(temp_file_prefix, &tmpdir())
+    }
+
+    pub fn with_spill_dir(temp_file_prefix: &str, spill_dir: &str) -> Self {
         let max_bytes = DEFAULT_MAX_BYTES;
         OutputAccumulator {
             max_lines: DEFAULT_MAX_LINES,
             max_bytes,
             max_rolling_bytes: (max_bytes * 2).max(1),
             temp_file_prefix: temp_file_prefix.to_string(),
+            spill_dir: spill_dir.to_string(),
             decoder: encoding_rs::UTF_8.new_decoder(),
             raw_chunks: Vec::new(),
+            raw_chunks_bytes: 0,
+            spill_lost: false,
             tail_text: String::new(),
             tail_bytes: 0,
             tail_starts_at_line_boundary: true,
@@ -122,12 +139,33 @@ impl OutputAccumulator {
 
         if self.temp_file.is_some() || self.should_use_temp_file() {
             self.ensure_temp_file();
-            if let Some(file) = &mut self.temp_file {
-                let _ = file.write_all(data);
+            match &mut self.temp_file {
+                Some(file) => {
+                    if file.write_all(data).is_err() {
+                        // Disk full mid-write: the file is incomplete forever.
+                        self.spill_lost = true;
+                    }
+                }
+                None => self.buffer_chunk(data),
             }
         } else if !data.is_empty() {
-            self.raw_chunks.push(data.to_vec());
+            self.buffer_chunk(data);
         }
+    }
+
+    /// Keep a chunk in memory (bounded) so a later successful spill-file
+    /// creation still gets the complete output; past the cap, mark loss
+    /// rather than grow without bound.
+    fn buffer_chunk(&mut self, data: &[u8]) {
+        if data.is_empty() || self.spill_lost {
+            return;
+        }
+        if self.raw_chunks_bytes + data.len() > SPILL_FALLBACK_CAP_BYTES {
+            self.spill_lost = true;
+            return;
+        }
+        self.raw_chunks_bytes += data.len();
+        self.raw_chunks.push(data.to_vec());
     }
 
     pub fn finish(&mut self) {
@@ -190,7 +228,13 @@ impl OutputAccumulator {
         OutputSnapshot {
             content: truncation.content.clone(),
             truncation,
-            full_output_path: self.temp_file_path.clone(),
+            // An incomplete spill file must not be advertised as the full
+            // output.
+            full_output_path: if self.spill_lost {
+                None
+            } else {
+                self.temp_file_path.clone()
+            },
         }
     }
 
@@ -275,23 +319,42 @@ impl OutputAccumulator {
     }
 
     fn ensure_temp_file(&mut self) {
-        if self.temp_file_path.is_some() {
+        if self.temp_file_path.is_some() || self.spill_lost {
+            // Once anything was dropped, a file could only ever be
+            // incomplete; never create (or advertise) one.
             return;
         }
-        let path = default_temp_file_path(&self.temp_file_prefix);
-        if let Ok(mut file) = std::fs::File::create(&path) {
-            for chunk in self.raw_chunks.drain(..) {
-                let _ = file.write_all(&chunk);
+        // create_new refuses to follow or truncate anything already at the
+        // guessed path; a collision just retries with a fresh name.
+        for _attempt in 0..2 {
+            let path = default_temp_file_path(&self.spill_dir, &self.temp_file_prefix);
+            match std::fs::File::options()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    for chunk in self.raw_chunks.drain(..) {
+                        if file.write_all(&chunk).is_err() {
+                            self.spill_lost = true;
+                            return;
+                        }
+                    }
+                    self.raw_chunks_bytes = 0;
+                    self.temp_file = Some(file);
+                    self.temp_file_path = Some(path);
+                    return;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return,
             }
-            self.temp_file = Some(file);
-            self.temp_file_path = Some(path);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fallback_spill_name_bytes;
+    use super::{fallback_spill_name_bytes, OutputAccumulator};
 
     #[test]
     fn fallback_names_are_unique_and_nonzero() {
@@ -299,5 +362,39 @@ mod tests {
         let b = fallback_spill_name_bytes();
         assert_ne!(a, [0u8; 8]);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn spill_failure_buffers_and_suppresses_path() {
+        let mut acc =
+            OutputAccumulator::with_spill_dir("tf-bash", "/nonexistent-spill-dir-xyz/sub");
+        for i in 1..=3000 {
+            acc.append(format!("{i}\n").as_bytes());
+        }
+        acc.finish();
+        let snapshot = acc.snapshot(true);
+
+        // The displayed tail is unaffected; no path is claimed for a file
+        // that could not be created; the chunks stayed buffered (not lost)
+        // under the fallback cap.
+        assert!(snapshot.truncation.truncated);
+        assert!(snapshot.content.contains("3000"));
+        assert!(snapshot.full_output_path.is_none());
+        assert!(!acc.spill_lost);
+        assert!(acc.raw_chunks_bytes > 0);
+    }
+
+    #[test]
+    fn spill_fallback_cap_marks_loss() {
+        let mut acc =
+            OutputAccumulator::with_spill_dir("tf-bash", "/nonexistent-spill-dir-xyz/sub");
+        let chunk = vec![b'x'; 1024 * 1024];
+        for _ in 0..20 {
+            acc.append(&chunk);
+        }
+        acc.finish();
+        let snapshot = acc.snapshot(true);
+        assert!(acc.spill_lost);
+        assert!(snapshot.full_output_path.is_none());
     }
 }

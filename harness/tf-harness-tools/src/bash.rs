@@ -287,21 +287,27 @@ pub fn execute(
             });
             let start_line = truncation.total_lines - truncation.output_lines + 1;
             let end_line = truncation.total_lines;
-            let full_output_path = snapshot.full_output_path.as_deref().unwrap_or("undefined");
+            // pi renders a missing path as the literal "undefined"; tell the
+            // model the truth instead so it doesn't try to read a
+            // nonexistent file.
+            let full_output_ref = match snapshot.full_output_path.as_deref() {
+                Some(path) => format!("Full output: {path}"),
+                None => "Full output unavailable: spill file could not be written".to_string(),
+            };
             if truncation.last_line_partial {
                 let last_line_size = format_size(acc_last_line_bytes);
                 text.push_str(&format!(
-                    "\n\n[Showing last {} of line {end_line} (line is {last_line_size}). Full output: {full_output_path}]",
+                    "\n\n[Showing last {} of line {end_line} (line is {last_line_size}). {full_output_ref}]",
                     format_size(truncation.output_bytes)
                 ));
             } else if truncation.truncated_by == Some("lines") {
                 text.push_str(&format!(
-                    "\n\n[Showing lines {start_line}-{end_line} of {}. Full output: {full_output_path}]",
+                    "\n\n[Showing lines {start_line}-{end_line} of {}. {full_output_ref}]",
                     truncation.total_lines
                 ));
             } else {
                 text.push_str(&format!(
-                    "\n\n[Showing lines {start_line}-{end_line} of {} ({} limit). Full output: {full_output_path}]",
+                    "\n\n[Showing lines {start_line}-{end_line} of {} ({} limit). {full_output_ref}]",
                     truncation.total_lines,
                     format_size(DEFAULT_MAX_BYTES)
                 ));

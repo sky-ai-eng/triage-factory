@@ -730,6 +730,33 @@ fn find_glob_parse_error() {
 }
 
 #[test]
+fn find_smart_case() {
+    let dir = tmp_dir();
+    write_file(dir.path(), "README.md", "x");
+    write_file(dir.path(), "readme.md", "x");
+    write_file(dir.path(), "other.md", "x");
+
+    // Lowercase pattern: case-insensitive, like fd's smart case.
+    let result = find_tool(
+        dir.path().to_str().unwrap(),
+        serde_json::json!({ "pattern": "readme.md", "path": dir.path().to_str().unwrap() }),
+    )
+    .unwrap();
+    let output = text_output(&result);
+    let mut lines: Vec<&str> = output.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(lines, vec!["README.md", "readme.md"]);
+
+    // Uppercase anywhere in the pattern: case-sensitive.
+    let result = find_tool(
+        dir.path().to_str().unwrap(),
+        serde_json::json!({ "pattern": "README.md", "path": dir.path().to_str().unwrap() }),
+    )
+    .unwrap();
+    assert_eq!(text_output(&result), "README.md");
+}
+
+#[test]
 fn find_flag_like_pattern_is_search_text() {
     let dir = tmp_dir();
     write_file(dir.path(), "a.txt", "x");

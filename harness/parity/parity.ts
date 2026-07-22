@@ -742,6 +742,27 @@ const cases: Case[] = [
     args: (d) => ({ pattern: "*.txt", path: d }),
   },
   {
+    name: "find-smart-case-insensitive",
+    sortLines: true,
+    tool: "find",
+    setup: (d) => {
+      file(d, "README.md", "x");
+      file(d, "readme_lower.md", "x");
+      file(d, "Readme.txt", "x");
+    },
+    args: (d) => ({ pattern: "readme*", path: d }),
+  },
+  {
+    name: "find-smart-case-sensitive",
+    sortLines: true,
+    tool: "find",
+    setup: (d) => {
+      file(d, "README.md", "x");
+      file(d, "readme.md", "x");
+    },
+    args: (d) => ({ pattern: "README.md", path: d }),
+  },
+  {
     name: "find-star-star",
     sortLines: true,
     tool: "find",

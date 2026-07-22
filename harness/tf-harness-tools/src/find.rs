@@ -2,8 +2,9 @@
 //! replaced by an in-process reimplementation of the exact invocation pi
 //! uses: `fd --glob --color=never --hidden [--no-require-git] --max-results N
 //! [--full-path] -- PATTERN SEARCHPATH` (verified against fd 10.2.0 source:
-//! glob built with literal_separator, basename vs absolute-path candidates,
-//! ignore chain incl. .fdignore, trailing slash on directory results).
+//! glob built with literal_separator, smart case, basename vs
+//! absolute-path candidates, ignore chain incl. .fdignore, trailing slash
+//! on directory results).
 
 use globset::GlobBuilder;
 use ignore::WalkBuilder;
@@ -78,11 +79,17 @@ pub fn execute(cwd: &str, args: &FindArgs) -> ToolResultOrError<FindToolDetails>
         effective_pattern = format!("**/{}", args.pattern);
     }
 
+    // fd applies smart case in glob mode too: construct_config computes
+    // case sensitivity from the converted pattern (uppercase anywhere makes
+    // it sensitive) and compiles the glob-derived regex with it.
+    let has_uppercase = effective_pattern.chars().any(char::is_uppercase);
+
     // The bare globset message ("error parsing glob '...': ...") without
     // fd's "[fd error]:" stderr framing — no fd binary exists here, and
     // agent-facing text stays unbranded or TF-branded.
     let glob = GlobBuilder::new(&effective_pattern)
         .literal_separator(true)
+        .case_insensitive(!has_uppercase)
         .build()
         .map_err(|e| ToolError::new(e.to_string()))?;
     let matcher = glob.compile_matcher();

@@ -250,3 +250,39 @@ pub fn truncate_line(line: &str, max_chars: usize) -> (String, bool) {
         true,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{truncate_str_to_bytes_from_end, truncate_tail, TruncationOptions};
+
+    #[test]
+    fn tail_byte_trim_lands_on_char_boundary() {
+        // "€" is 3 bytes (E2 82 AC); a 7-byte budget over "€€€€" lands
+        // mid-character and must advance to the next boundary, exactly like
+        // pi's continuation-byte skip over the UTF-8 buffer.
+        let s = "€€€€";
+        let out = truncate_str_to_bytes_from_end(s, 7);
+        assert_eq!(out, "€€");
+        assert_eq!(truncate_str_to_bytes_from_end(s, 12), s);
+        assert_eq!(truncate_str_to_bytes_from_end(s, 2), "");
+    }
+
+    #[test]
+    fn tail_partial_line_respects_multibyte_boundary() {
+        // A single oversized line forces the partial-line edge case; the
+        // kept tail must start at a character boundary and stay within the
+        // byte budget.
+        let line = "€".repeat(20_000);
+        let result = truncate_tail(
+            &line,
+            TruncationOptions {
+                max_lines: Some(2000),
+                max_bytes: Some(50 * 1024),
+            },
+        );
+        assert!(result.truncated);
+        assert!(result.last_line_partial);
+        assert!(result.content.len() <= 50 * 1024);
+        assert!(result.content.chars().all(|c| c == '€'));
+    }
+}
