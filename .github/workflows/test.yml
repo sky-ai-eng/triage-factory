@@ -37,6 +37,8 @@ jobs:
         with:
           fetch-depth: 2
 
+      # harness/ (Rust) has its own job below with the same skip pattern, so
+      # a harness-only PR doesn't need the Go/frontend steps either.
       - name: Detect docs-only change
         id: docs
         run: |
@@ -45,7 +47,7 @@ jobs:
             exit 0
           fi
           changed=$(git diff --name-only HEAD^1 HEAD)
-          if [ -z "$changed" ] || echo "$changed" | grep -qvE '(^docs/|\.md$)'; then
+          if [ -z "$changed" ] || echo "$changed" | grep -qvE '(^docs/|^harness/|\.md$)'; then
             echo "only=false" >> "$GITHUB_OUTPUT"
           else
             echo "only=true" >> "$GITHUB_OUTPUT"
@@ -103,4 +105,65 @@ jobs:
 
       - name: Docs-only change, build/test skipped
         if: steps.docs.outputs.only == 'true'
-        run: echo "All changed files are documentation (docs/** or *.md); skipping build and test steps."
+        run: echo "All changed files are documentation (docs/** or *.md) or harness/ (tested by the harness job); skipping Go/frontend build and test steps."
+
+  # Rust workspace under harness/ (the in-sandbox agent tools). Mirrors the
+  # skip pattern above: the job always runs and reports success so it can be
+  # a required check, but the toolchain/test steps only fire when harness/
+  # files changed (push to main always runs everything).
+  harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect harness change
+        id: harness
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only HEAD^1 HEAD | grep -q '^harness/'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The runner image ships rustup; pin to whatever stable it resolves so
+      # fmt/clippy drift arrives with runner updates, not silently mid-PR.
+      - name: Install Rust toolchain
+        if: steps.harness.outputs.changed == 'true'
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - uses: actions/cache@v4
+        if: steps.harness.outputs.changed == 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            harness/target
+          key: harness-cargo-${{ runner.os }}-${{ hashFiles('harness/Cargo.lock') }}
+          restore-keys: harness-cargo-${{ runner.os }}-
+
+      - name: Rust format
+        if: steps.harness.outputs.changed == 'true'
+        run: cd harness && cargo fmt --check
+
+      - name: Rust clippy
+        if: steps.harness.outputs.changed == 'true'
+        run: cd harness && cargo clippy --all-targets -- -D warnings
+
+      # The 81 ported pi tests + validation tests. The differential parity
+      # suite (parity/parity.ts) needs a local pi checkout + bun and stays a
+      # local pre-merge step for harness changes — see harness/README.md.
+      - name: Rust test
+        if: steps.harness.outputs.changed == 'true'
+        run: cd harness && cargo test
+
+      - name: No harness changes, Rust steps skipped
+        if: steps.harness.outputs.changed == 'false'
+        run: echo "No files under harness/ changed; skipping Rust build and test steps."
