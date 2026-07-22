@@ -194,6 +194,38 @@ func TestAgentRunStore_SQLite_AssertLocalOrg(t *testing.T) {
 	}
 }
 
+// TestAgentRunStore_SQLite_RuntimeDefaultsToSDK pins the runs.runtime schema
+// fact the columnar-canon epic depends on: a freshly created run — the only
+// shape any code in this repo produces today — lands as 'sdk', not the
+// native loop's 'native'. domain.AgentRun has no Runtime field (nothing
+// writes 'native' until the executor-side loop lands), so this reads the
+// column directly.
+func TestAgentRunStore_SQLite_RuntimeDefaultsToSDK(t *testing.T) {
+	conn := newSQLiteForAgentRunTest(t)
+	seed := newSQLiteAgentRunSeeder(conn)
+	store := sqlitestore.New(conn).AgentRuns
+	ctx := context.Background()
+
+	ent := seed.Entity(t, "runtime")
+	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+	runID := uuid.New().String()
+	if err := store.Create(ctx, runmode.LocalDefaultOrgID, domain.AgentRun{
+		ID: runID, TaskID: taskID, PromptID: "p_agentrun_test", Status: "running", Model: "m",
+		BlueprintRunID: seed.BlueprintRun(t, taskID),
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var runtime string
+	if err := conn.QueryRow(`SELECT runtime FROM runs WHERE id = ?`, runID).Scan(&runtime); err != nil {
+		t.Fatalf("read runtime: %v", err)
+	}
+	if runtime != "sdk" {
+		t.Errorf("runtime = %q, want sdk", runtime)
+	}
+}
+
 // TestAgentRunStore_SQLite_ActiveIDsForTeamSystem pins the team-archive
 // force-stop enumeration (TFAC-448): runs on the team in the active set
 // (NOT completed/failed/cancelled/task_unsolvable/pending_approval) are

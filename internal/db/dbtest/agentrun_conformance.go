@@ -1227,6 +1227,250 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	t.Run("InsertMessage_DefaultsDeliveredTrueAndWindowStateActive", func(t *testing.T) {
+		// Every existing caller in the repo leaves Delivered nil and
+		// WindowState "" — the columnar-canon columns must not change their
+		// observed behavior: delivered=true, window_state='active', seq=NULL.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		msg := &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "hi"}
+		if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		if len(msgs) != 1 {
+			t.Fatalf("len = %d, want 1", len(msgs))
+		}
+		got := msgs[0]
+		if got.Delivered == nil || !*got.Delivered {
+			t.Errorf("Delivered = %v, want true (the schema default)", got.Delivered)
+		}
+		if got.WindowState != domain.MessageWindowActive {
+			t.Errorf("WindowState = %q, want %q (the schema default)", got.WindowState, domain.MessageWindowActive)
+		}
+		if got.Seq != nil {
+			t.Errorf("Seq = %v, want nil (no backfill, no insert-time dance)", *got.Seq)
+		}
+	})
+
+	t.Run("Messages_RoundTripsReasoningContentBlocksAndExplicitOverrides", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		delivered := false
+		seq := 12.5
+		msg := &domain.AgentMessage{
+			RunID:   runID,
+			Role:    "assistant",
+			Content: "thinking then answering",
+			Subtype: "text",
+			Reasoning: []domain.ReasoningDetail{
+				{Index: 0, Type: "text", Text: "step one", Signature: "sig-abc"},
+			},
+			ContentBlocks: []domain.ContentBlock{
+				{Type: domain.ContentBlockImage, ImageURL: &domain.ContentImageURL{URL: "https://example/img.png"}},
+			},
+			Delivered:   &delivered,
+			WindowState: domain.MessageWindowElided,
+			Seq:         &seq,
+		}
+		if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		if len(msgs) != 1 {
+			t.Fatalf("len = %d, want 1", len(msgs))
+		}
+		got := msgs[0]
+		if len(got.Reasoning) != 1 || got.Reasoning[0].Signature != "sig-abc" || got.Reasoning[0].Text != "step one" {
+			t.Errorf("Reasoning round-trip: %+v", got.Reasoning)
+		}
+		if len(got.ContentBlocks) != 1 || got.ContentBlocks[0].Type != domain.ContentBlockImage ||
+			got.ContentBlocks[0].ImageURL == nil || got.ContentBlocks[0].ImageURL.URL != "https://example/img.png" {
+			t.Errorf("ContentBlocks round-trip: %+v", got.ContentBlocks)
+		}
+		if got.Delivered == nil || *got.Delivered {
+			t.Errorf("Delivered = %v, want false (explicit override)", got.Delivered)
+		}
+		if got.WindowState != domain.MessageWindowElided {
+			t.Errorf("WindowState = %q, want %q (explicit override)", got.WindowState, domain.MessageWindowElided)
+		}
+		if got.Seq == nil || *got.Seq != 12.5 {
+			t.Errorf("Seq = %v, want 12.5", got.Seq)
+		}
+	})
+
+	t.Run("ListForAssembly_OrdersByCoalesceSeqAndIncludesEverythingButInactive", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+
+		idA, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "a"})
+		if err != nil {
+			t.Fatalf("InsertMessage a: %v", err)
+		}
+		idB, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "b"})
+		if err != nil {
+			t.Fatalf("InsertMessage b: %v", err)
+		}
+		// c's seq lands it between a (COALESCE→id a) and b (COALESCE→id b) —
+		// the compaction-result insertion shape.
+		seqC := float64(idA) + (float64(idB)-float64(idA))/2
+		if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{
+			RunID: runID, Role: "user", Subtype: "injection:compaction-result", Content: "c", Seq: &seqC,
+		}); err != nil {
+			t.Fatalf("InsertMessage c: %v", err)
+		}
+		delivered := false
+		if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{
+			RunID: runID, Role: "user", Subtype: "injection:steer", Content: "pending", Delivered: &delivered,
+		}); err != nil {
+			t.Fatalf("InsertMessage pending: %v", err)
+		}
+		if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{
+			RunID: runID, Role: "assistant", Subtype: "text", Content: "elided", WindowState: domain.MessageWindowElided,
+		}); err != nil {
+			t.Fatalf("InsertMessage elided: %v", err)
+		}
+		if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{
+			RunID: runID, Role: "assistant", Subtype: "text", Content: "inactive", WindowState: domain.MessageWindowInactive,
+		}); err != nil {
+			t.Fatalf("InsertMessage inactive: %v", err)
+		}
+
+		got, err := store.ListForAssembly(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("ListForAssembly: %v", err)
+		}
+		var contents []string
+		for _, m := range got {
+			contents = append(contents, m.Content)
+		}
+		want := []string{"a", "c", "b", "pending", "elided"}
+		if len(contents) != len(want) {
+			t.Fatalf("contents = %v, want %v (inactive must be excluded)", contents, want)
+		}
+		for i := range want {
+			if contents[i] != want[i] {
+				t.Errorf("contents[%d] = %q, want %q — full: %v", i, contents[i], want[i], contents)
+			}
+		}
+		// The pending row surfaces its undelivered state rather than being
+		// silently filtered — the loop decides when to consume it.
+		for _, m := range got {
+			if m.Content == "pending" && (m.Delivered == nil || *m.Delivered) {
+				t.Errorf("pending row Delivered = %v, want false", m.Delivered)
+			}
+		}
+	})
+
+	t.Run("MarkDelivered_FlipsOnlyGivenIDsScopedToRun", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		otherRunID := seedAgentRunForTest(t, store, orgID, seed, "running")
+
+		delivered := false
+		id1, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "user", Subtype: "injection:steer", Content: "1", Delivered: &delivered})
+		if err != nil {
+			t.Fatalf("InsertMessage 1: %v", err)
+		}
+		id2, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "user", Subtype: "injection:steer", Content: "2", Delivered: &delivered})
+		if err != nil {
+			t.Fatalf("InsertMessage 2: %v", err)
+		}
+		idOther, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: otherRunID, Role: "user", Subtype: "injection:steer", Content: "other", Delivered: &delivered})
+		if err != nil {
+			t.Fatalf("InsertMessage other: %v", err)
+		}
+
+		// Ask to flip id1 (belongs to runID) and idOther (belongs to a
+		// DIFFERENT run) via a call scoped to runID — idOther must NOT flip.
+		if err := store.MarkDelivered(ctx, orgID, runID, []int{int(id1), int(idOther)}); err != nil {
+			t.Fatalf("MarkDelivered: %v", err)
+		}
+
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages(runID): %v", err)
+		}
+		byID := map[int]*domain.AgentMessage{}
+		for i := range msgs {
+			byID[msgs[i].ID] = &msgs[i]
+		}
+		if d := byID[int(id1)].Delivered; d == nil || !*d {
+			t.Errorf("id1 Delivered = %v, want true", d)
+		}
+		if d := byID[int(id2)].Delivered; d == nil || *d {
+			t.Errorf("id2 Delivered = %v, want false (not in the flip list)", d)
+		}
+
+		otherMsgs, err := store.Messages(ctx, orgID, otherRunID)
+		if err != nil {
+			t.Fatalf("Messages(otherRunID): %v", err)
+		}
+		if len(otherMsgs) != 1 || otherMsgs[0].Delivered == nil || *otherMsgs[0].Delivered {
+			t.Errorf("otherRunID message Delivered = %+v, want still false (run-scoped, must not leak across runs)", otherMsgs)
+		}
+	})
+
+	t.Run("SetWindowState_BatchFlipsBeforeThresholdAndReturnsCount", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+
+		var ids []int64
+		for _, c := range []string{"m1", "m2", "m3", "m4"} {
+			id, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: c})
+			if err != nil {
+				t.Fatalf("InsertMessage %s: %v", c, err)
+			}
+			ids = append(ids, id)
+		}
+
+		// Elide everything strictly before m3's assembly key — m1, m2 flip;
+		// m3, m4 stay active.
+		n, err := store.SetWindowState(ctx, orgID, runID, float64(ids[2]), domain.MessageWindowActive, domain.MessageWindowElided)
+		if err != nil {
+			t.Fatalf("SetWindowState: %v", err)
+		}
+		if n != 2 {
+			t.Errorf("flipped count = %d, want 2", n)
+		}
+
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		byID := map[int64]domain.MessageWindowState{}
+		for _, m := range msgs {
+			byID[int64(m.ID)] = m.WindowState
+		}
+		if byID[ids[0]] != domain.MessageWindowElided || byID[ids[1]] != domain.MessageWindowElided {
+			t.Errorf("m1/m2 window_state = %v/%v, want elided/elided", byID[ids[0]], byID[ids[1]])
+		}
+		if byID[ids[2]] != domain.MessageWindowActive || byID[ids[3]] != domain.MessageWindowActive {
+			t.Errorf("m3/m4 window_state = %v/%v, want active/active (at/after threshold)", byID[ids[2]], byID[ids[3]])
+		}
+
+		// Re-running the identical flip now matches nothing (m1/m2 are no
+		// longer in the `from` state) — idempotent, not cumulative.
+		n2, err := store.SetWindowState(ctx, orgID, runID, float64(ids[2]), domain.MessageWindowActive, domain.MessageWindowElided)
+		if err != nil {
+			t.Fatalf("SetWindowState (rerun): %v", err)
+		}
+		if n2 != 0 {
+			t.Errorf("rerun flipped count = %d, want 0", n2)
+		}
+	})
+
 	t.Run("MessagesForRuns_BatchedAcrossRuns", func(t *testing.T) {
 		// The batched twin of Messages: one query returns every message
 		// for many runs, grouped by RunID with each run's messages still

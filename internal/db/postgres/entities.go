@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -545,6 +546,21 @@ func pgUUIDArray(ids []string) string {
 		return "{}"
 	}
 	return "{" + strings.Join(ids, ",") + "}"
+}
+
+// pgIntArray formats a Go int slice as a Postgres array literal (bigint[],
+// per run_messages.id) for binding through a single $N parameter, the same
+// textual-literal technique as pgUUIDArray. No escaping needed — ints have
+// no characters the {…} envelope needs quoted.
+func pgIntArray(ids []int) string {
+	if len(ids) == 0 {
+		return "{}"
+	}
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = strconv.Itoa(id)
+	}
+	return "{" + strings.Join(parts, ",") + "}"
 }
 
 func scanEntityRow(row *sql.Row) (*domain.Entity, error) {

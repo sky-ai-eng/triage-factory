@@ -240,7 +240,7 @@ type SnapshotReapKey struct {
 type AgentMessage struct {
 	ID                  int
 	RunID               string
-	Role                string // "assistant" | "tool"
+	Role                string // "assistant" | "tool" | "user" — see AgentRunStore's doc comment for the full allowed set incl. reserved subtypes
 	Content             string
 	Subtype             string // "text" | "thinking" | "tool_use" | "tool"
 	ToolCalls           []ToolCall
@@ -253,6 +253,38 @@ type AgentMessage struct {
 	CacheReadTokens     *int
 	CacheCreationTokens *int
 	CreatedAt           time.Time
+
+	// Reasoning is the model's persisted chain-of-thought for this message —
+	// nil when the message carries none. Reference-only (see ReasoningDetail):
+	// never reconstructed or reordered, only replayed verbatim.
+	Reasoning []ReasoningDetail
+
+	// ContentBlocks carries non-text content (images, files) the flat Content
+	// string can't represent — nil when Content is the whole story. Applies
+	// to any role: a tool row uses this for an image result.
+	ContentBlocks []ContentBlock
+
+	// Delivered is nil for "apply the schema default" (true — the message is
+	// immediately part of context, exactly today's SDK-runtime behavior).
+	// Only a native loop's durable pending input (a steer / follow-up not yet
+	// folded into any assembly) sets this to a non-nil false. A *bool rather
+	// than bool so every existing caller — none of which know about this
+	// field — keeps writing the correct default instead of silently writing
+	// the bool zero value (false) on every insert.
+	Delivered *bool
+
+	// WindowState is "" for "apply the schema default" (MessageWindowActive)
+	// and otherwise one of the MessageWindowState vocabulary. The
+	// empty-means-default convention mirrors AgentRun.TriggerType / origin
+	// elsewhere in this package.
+	WindowState MessageWindowState
+
+	// Seq overrides assembly order: the effective sort key is
+	// COALESCE(Seq, ID). nil for every normally-appended row — no backfill,
+	// no insert-time dance. Only a synthetic insertion (a compaction result)
+	// sets a value, to land between two existing rows without renumbering
+	// either of them.
+	Seq *float64
 }
 
 // ToolCall represents a single tool invocation within a message.
@@ -261,3 +293,75 @@ type ToolCall struct {
 	Name  string         `json:"name"`
 	Input map[string]any `json:"input"`
 }
+
+// ReasoningDetailType discriminates a ReasoningDetail entry, mirroring
+// bifrost's BifrostReasoningDetailsType wire values.
+type ReasoningDetailType string
+
+// ReasoningDetail is one entry in AgentMessage.Reasoning: a reference-only
+// replay unit for a slice of the model's persisted chain-of-thought,
+// mirroring bifrost's ChatReasoningDetails shape (the subset a replay needs:
+// index/type/text/signature/data). The provider keeps the canonical
+// reasoning; Signature and Data are opaque tokens the API validates
+// per-block on the next turn — never reconstructed or reordered here.
+// Defined in domain, not imported from bifrost, so this package stays free
+// of a bifrost dependency until the P1 inference package wires the real
+// thing in.
+type ReasoningDetail struct {
+	Index     int                 `json:"index"`
+	Type      ReasoningDetailType `json:"type"`
+	Text      string              `json:"text,omitempty"`
+	Signature string              `json:"signature,omitempty"`
+	Data      string              `json:"data,omitempty"`
+}
+
+// ContentBlockType discriminates a ContentBlock's payload, mirroring
+// bifrost's ChatContentBlockType wire values.
+type ContentBlockType string
+
+const (
+	ContentBlockText  ContentBlockType = "text"
+	ContentBlockImage ContentBlockType = "image_url"
+	ContentBlockFile  ContentBlockType = "file"
+)
+
+// ContentBlock is one entry in AgentMessage.ContentBlocks: non-text content
+// (an image or a file), neutral-shaped after bifrost's ChatContentBlock.
+// Applies to any role — a tool row uses this for an image result the flat
+// Content string can't carry. Defined in domain, not imported from bifrost,
+// for the same zero-bifrost-import reason as ReasoningDetail.
+type ContentBlock struct {
+	Type     ContentBlockType `json:"type"`
+	Text     string           `json:"text,omitempty"`
+	ImageURL *ContentImageURL `json:"image_url,omitempty"`
+	File     *ContentFile     `json:"file,omitempty"`
+}
+
+// ContentImageURL is a ContentBlock's image payload — a remote URL or a
+// data: URI, mirroring bifrost's ChatInputImage.
+type ContentImageURL struct {
+	URL    string `json:"url,omitempty"`
+	FileID string `json:"file_id,omitempty"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// ContentFile is a ContentBlock's file payload, mirroring bifrost's
+// ChatInputFile.
+type ContentFile struct {
+	FileData string `json:"file_data,omitempty"`
+	FileURL  string `json:"file_url,omitempty"`
+	FileID   string `json:"file_id,omitempty"`
+	Filename string `json:"filename,omitempty"`
+	FileType string `json:"file_type,omitempty"`
+}
+
+// MessageWindowState is run_messages.window_state's app-validated vocabulary
+// (see AgentRunStore's doc comment for the full assembly contract each value
+// implies).
+type MessageWindowState string
+
+const (
+	MessageWindowActive   MessageWindowState = "active"
+	MessageWindowElided   MessageWindowState = "elided"
+	MessageWindowInactive MessageWindowState = "inactive"
+)

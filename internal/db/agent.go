@@ -326,12 +326,36 @@ type AgentRunStore interface {
 	EntitiesWithOpenRuns(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error)
 
 	// --- Transcript / messages ---
+	//
+	// run_messages.role is app-validated (no CHECK): "assistant" | "tool" |
+	// "user". "user" covers both a human's free-form message and the native
+	// loop's injected input; subtype further discriminates the latter via
+	// the reserved (not yet minted by any code in this repo) subtypes
+	// "injection:compaction-request", "injection:compaction-result", and
+	// "injection:steer".
+	//
+	// InsertMessage/InsertMessageSystem/Messages/MessagesForRuns/TokenTotals
+	// below serve today's readers (the SDK runtime's live stream, the UI
+	// transcript endpoints, spend sums) and are unchanged in observable
+	// behavior by this ticket's new columns. ListForAssembly/MarkDelivered/
+	// SetWindowState exist for the native loop (P1+): assembly is a pure
+	// function of run_messages rows and nothing else — no run-level or
+	// process-level side-state may influence what a loop reconstructs from
+	// these three methods, only the rows themselves.
 
 	// InsertMessage inserts a run_messages row and returns its
 	// auto-assigned id. If msg.CreatedAt is zero, it is stamped
 	// with time.Now().UTC() and written back to the caller so a
 	// subsequent WS broadcast can carry the same value without a
 	// re-read.
+	//
+	// msg.Delivered nil writes the schema default (true — delivered
+	// immediately, today's only behavior); a non-nil value writes it
+	// explicitly (a native loop's pending-input insert passes false).
+	// msg.WindowState "" writes the schema default (domain.MessageWindowActive);
+	// a non-empty value writes it explicitly. Neither existing caller in this
+	// repo sets either field, so every current insert keeps writing exactly
+	// what it always wrote (delivered=true, window_state='active').
 	InsertMessage(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
 
 	// Messages returns all messages for a given run, ordered by id.
@@ -345,6 +369,38 @@ type AgentRunStore interface {
 	// Backs the Board's aggregated include=messages read. Empty runIDs
 	// returns nil.
 	MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.AgentMessage, error)
+
+	// ListForAssembly returns every row a native loop needs to rebuild this
+	// run's exact LLM context, ordered by the effective assembly key
+	// COALESCE(seq, id). window_state='inactive' rows are excluded
+	// (superseded by compaction, permanently out of the window);
+	// 'elided' rows ARE included (the loop renders their deterministic stub
+	// from the retained content/is_error) and so are undelivered
+	// (delivered=false) rows, flagged as such via AgentMessage.Delivered —
+	// the loop, not this method, decides whether a pending row is due for
+	// consumption at this call site.
+	//
+	// Assembly purity: this reads run_messages and nothing else. No caller
+	// may layer additional filtering that depends on run-level or
+	// process-level state — if a future rule needs to change what gets
+	// assembled, it must become a column on this table, per the epic's
+	// standing rule.
+	ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error)
+
+	// MarkDelivered flips delivered=true on the given message ids — the
+	// batch primitive a native loop calls once it has folded a run of
+	// pending rows into an assembly. ids outside runID, already delivered,
+	// or nonexistent are silently skipped (no error, no-op).
+	MarkDelivered(ctx context.Context, orgID, runID string, ids []int) error
+
+	// SetWindowState is the elision/compaction primitive: a batched range
+	// flip of window_state from `from` to `to`, restricted to rows currently
+	// in state `from` whose effective assembly key (COALESCE(seq, id)) is
+	// strictly less than beforeSeq. Returns the number of rows flipped.
+	// Called only from a batched cold-moment pass (elision) or compaction —
+	// never per-step — per the epic's KV-cache discipline; no production
+	// caller exists yet (this ships the primitive, not the policy — P3).
+	SetWindowState(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error)
 
 	// TokenTotals sums token usage across all assistant messages
 	// in a run. Model is MAX(model) (preserves the

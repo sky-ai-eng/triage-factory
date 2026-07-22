@@ -831,7 +831,7 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}
-	var toolCallsJSON, metadataJSON sql.NullString
+	var toolCallsJSON, metadataJSON, reasoningJSON, contentBlocksJSON sql.NullString
 
 	if len(msg.ToolCalls) > 0 {
 		b, err := json.Marshal(msg.ToolCalls)
@@ -847,9 +847,37 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 		}
 		metadataJSON = sql.NullString{String: string(b), Valid: true}
 	}
+	if len(msg.Reasoning) > 0 {
+		b, err := json.Marshal(msg.Reasoning)
+		if err != nil {
+			return 0, fmt.Errorf("marshal reasoning: %w", err)
+		}
+		reasoningJSON = sql.NullString{String: string(b), Valid: true}
+	}
+	if len(msg.ContentBlocks) > 0 {
+		b, err := json.Marshal(msg.ContentBlocks)
+		if err != nil {
+			return 0, fmt.Errorf("marshal content_blocks: %w", err)
+		}
+		contentBlocksJSON = sql.NullString{String: string(b), Valid: true}
+	}
 
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now().UTC()
+	}
+
+	// delivered/window_state apply the schema default in Go rather than
+	// relying on the column DEFAULT — every column is named explicitly below,
+	// so the DEFAULT clause never fires. nil/"" is what every caller in this
+	// repo passes today, so this preserves exactly today's behavior
+	// (delivered=true, window_state='active') for every existing insert.
+	delivered := true
+	if msg.Delivered != nil {
+		delivered = *msg.Delivered
+	}
+	windowState := msg.WindowState
+	if windowState == "" {
+		windowState = domain.MessageWindowActive
 	}
 
 	// SQLite uses AUTOINCREMENT on run_messages.id, so LastInsertId
@@ -858,14 +886,16 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 	result, err := s.q.ExecContext(ctx, `
 		INSERT INTO run_messages (run_id, role, content, subtype, tool_calls, tool_call_id,
 		                          is_error, metadata, model,
-		                          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at,
+		                          reasoning, content_blocks, delivered, window_state, seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		msg.RunID, msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, sqliteNullStr(msg.ToolCallID), msg.IsError, metadataJSON,
 		sqliteNullStr(msg.Model), sqliteNullInt(msg.InputTokens), sqliteNullInt(msg.OutputTokens),
 		sqliteNullInt(msg.CacheReadTokens), sqliteNullInt(msg.CacheCreationTokens),
 		msg.CreatedAt,
+		reasoningJSON, contentBlocksJSON, delivered, string(windowState), sqliteNullFloat(msg.Seq),
 	)
 	if err != nil {
 		return 0, err
@@ -874,7 +904,8 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 }
 
 const sqliteMessageColumns = `id, run_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
-	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at`
+	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at,
+	reasoning, content_blocks, delivered, window_state, seq`
 
 // scanAgentMessageRows drains a run_messages result set selecting
 // sqliteMessageColumns into domain.AgentMessage values. Shared by the
@@ -885,11 +916,16 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		var m domain.AgentMessage
 		var content, subtype, toolCallsStr, toolCallID, metadataStr, model sql.NullString
 		var inputTok, outputTok, cacheReadTok, cacheCreateTok sql.NullInt64
+		var reasoningStr, contentBlocksStr sql.NullString
+		var delivered bool
+		var windowState string
+		var seq sql.NullFloat64
 
 		if err := rows.Scan(
 			&m.ID, &m.RunID, &m.Role, &content, &subtype, &toolCallsStr,
 			&toolCallID, &m.IsError, &metadataStr, &model,
 			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &m.CreatedAt,
+			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq,
 		); err != nil {
 			return nil, err
 		}
@@ -904,6 +940,12 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		}
 		if metadataStr.Valid {
 			_ = json.Unmarshal([]byte(metadataStr.String), &m.Metadata)
+		}
+		if reasoningStr.Valid {
+			_ = json.Unmarshal([]byte(reasoningStr.String), &m.Reasoning)
+		}
+		if contentBlocksStr.Valid {
+			_ = json.Unmarshal([]byte(contentBlocksStr.String), &m.ContentBlocks)
 		}
 		if inputTok.Valid {
 			v := int(inputTok.Int64)
@@ -920,6 +962,16 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		if cacheCreateTok.Valid {
 			v := int(cacheCreateTok.Int64)
 			m.CacheCreationTokens = &v
+		}
+		// Read back the concrete stored value (the column is NOT NULL) —
+		// unlike on insert, nil here would just mean "unknown", which is
+		// never the case for a persisted row.
+		deliveredVal := delivered
+		m.Delivered = &deliveredVal
+		m.WindowState = domain.MessageWindowState(windowState)
+		if seq.Valid {
+			v := seq.Float64
+			m.Seq = &v
 		}
 
 		messages = append(messages, m)
@@ -979,6 +1031,81 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 		messages = append(messages, batch...)
 	}
 	return messages, nil
+}
+
+// ListForAssembly returns every row a native loop needs to rebuild this run's
+// exact LLM context, ordered by the effective assembly key COALESCE(seq, id).
+// window_state='inactive' rows are excluded (superseded by compaction);
+// 'elided' and undelivered rows are included — see the interface doc for the
+// full contract. Pure read over run_messages; no other table or in-process
+// state feeds in.
+func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+sqliteMessageColumns+`
+		FROM run_messages
+		WHERE run_id = ? AND window_state <> 'inactive'
+		ORDER BY COALESCE(seq, id) ASC
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAgentMessageRows(rows)
+}
+
+// MarkDelivered flips delivered=true on the given message ids, scoped to
+// runID. ids outside the run or already delivered are silently unaffected.
+func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, ids []int) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	for start := 0; start < len(ids); start += inListChunkSize {
+		end := start + inListChunkSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, runID)
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		if _, err := s.q.ExecContext(ctx, `
+			UPDATE run_messages SET delivered = 1
+			WHERE run_id = ? AND id IN (`+strings.Join(placeholders, ",")+`)
+		`, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetWindowState is the elision/compaction primitive: a batched range flip of
+// window_state from `from` to `to`, restricted to rows currently in state
+// `from` whose effective assembly key (COALESCE(seq, id)) is strictly less
+// than beforeSeq. Returns the number of rows flipped.
+func (s *agentRunStore) SetWindowState(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	result, err := s.q.ExecContext(ctx, `
+		UPDATE run_messages
+		SET window_state = ?
+		WHERE run_id = ? AND window_state = ? AND COALESCE(seq, id) < ?
+	`, string(to), runID, string(from), beforeSeq)
+	if err != nil {
+		return 0, err
+	}
+	n, err := result.RowsAffected()
+	return int(n), err
 }
 
 func (s *agentRunStore) TokenTotals(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error) {

@@ -906,7 +906,7 @@ func (s *agentRunStore) LastAgentActivityAtSystem(ctx context.Context, orgID, ru
 }
 
 func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.AgentMessage) (int64, error) {
-	var toolCallsJSON, metadataJSON []byte
+	var toolCallsJSON, metadataJSON, reasoningJSON, contentBlocksJSON []byte
 
 	if len(msg.ToolCalls) > 0 {
 		b, err := json.Marshal(msg.ToolCalls)
@@ -922,9 +922,37 @@ func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.
 		}
 		metadataJSON = b
 	}
+	if len(msg.Reasoning) > 0 {
+		b, err := json.Marshal(msg.Reasoning)
+		if err != nil {
+			return 0, fmt.Errorf("marshal reasoning: %w", err)
+		}
+		reasoningJSON = b
+	}
+	if len(msg.ContentBlocks) > 0 {
+		b, err := json.Marshal(msg.ContentBlocks)
+		if err != nil {
+			return 0, fmt.Errorf("marshal content_blocks: %w", err)
+		}
+		contentBlocksJSON = b
+	}
 
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now().UTC()
+	}
+
+	// delivered/window_state apply the schema default in Go rather than
+	// relying on the column DEFAULT — every column is named explicitly below,
+	// so the DEFAULT clause never fires. nil/"" is what every caller in this
+	// repo passes today, so this preserves exactly today's behavior
+	// (delivered=true, window_state='active') for every existing insert.
+	delivered := true
+	if msg.Delivered != nil {
+		delivered = *msg.Delivered
+	}
+	windowState := msg.WindowState
+	if windowState == "" {
+		windowState = domain.MessageWindowActive
 	}
 
 	// Postgres uses a sequence on run_messages.id, so we get the
@@ -935,8 +963,10 @@ func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.
 		INSERT INTO run_messages (org_id, run_id, role, content, subtype, tool_calls,
 		                          tool_call_id, is_error, metadata, model,
 		                          input_tokens, output_tokens,
-		                          cache_read_tokens, cache_creation_tokens, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		                          cache_read_tokens, cache_creation_tokens, created_at,
+		                          reasoning, content_blocks, delivered, window_state, seq)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+		        $16, $17, $18, $19, $20)
 		RETURNING id
 	`,
 		orgID, msg.RunID, msg.Role, msg.Content, msg.Subtype,
@@ -945,11 +975,20 @@ func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.
 		nullIntPtr(msg.InputTokens), nullIntPtr(msg.OutputTokens),
 		nullIntPtr(msg.CacheReadTokens), nullIntPtr(msg.CacheCreationTokens),
 		msg.CreatedAt,
+		nullableJSONB(reasoningJSON), nullableJSONB(contentBlocksJSON), delivered,
+		string(windowState), nullFloatPtr(msg.Seq),
 	).Scan(&id)
 	if err != nil {
 		return 0, err
 	}
 	return id, nil
+}
+
+func nullFloatPtr(p *float64) any {
+	if p == nil {
+		return nil
+	}
+	return *p
 }
 
 // nullableJSONB returns NULL for empty input so the JSONB column
@@ -970,7 +1009,8 @@ func nullIntPtr(p *int) any {
 }
 
 const pgMessageColumns = `id, run_id, role, content, subtype, tool_calls::text, tool_call_id, is_error, metadata::text,
-	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at`
+	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at,
+	reasoning::text, content_blocks::text, delivered, window_state, seq`
 
 // scanAgentMessageRows drains a run_messages result set selecting
 // pgMessageColumns into domain.AgentMessage values. Shared by the
@@ -981,11 +1021,16 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		var m domain.AgentMessage
 		var content, subtype, toolCallsStr, toolCallID, metadataStr, model sql.NullString
 		var inputTok, outputTok, cacheReadTok, cacheCreateTok sql.NullInt64
+		var reasoningStr, contentBlocksStr sql.NullString
+		var delivered bool
+		var windowState string
+		var seq sql.NullFloat64
 
 		if err := rows.Scan(
 			&m.ID, &m.RunID, &m.Role, &content, &subtype, &toolCallsStr,
 			&toolCallID, &m.IsError, &metadataStr, &model,
 			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &m.CreatedAt,
+			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq,
 		); err != nil {
 			return nil, err
 		}
@@ -1000,6 +1045,12 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		}
 		if metadataStr.Valid && metadataStr.String != "" {
 			_ = json.Unmarshal([]byte(metadataStr.String), &m.Metadata)
+		}
+		if reasoningStr.Valid && reasoningStr.String != "" {
+			_ = json.Unmarshal([]byte(reasoningStr.String), &m.Reasoning)
+		}
+		if contentBlocksStr.Valid && contentBlocksStr.String != "" {
+			_ = json.Unmarshal([]byte(contentBlocksStr.String), &m.ContentBlocks)
 		}
 		if inputTok.Valid {
 			v := int(inputTok.Int64)
@@ -1016,6 +1067,16 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		if cacheCreateTok.Valid {
 			v := int(cacheCreateTok.Int64)
 			m.CacheCreationTokens = &v
+		}
+		// Read back the concrete stored value (the column is NOT NULL) —
+		// unlike on insert, nil here would just mean "unknown", which is
+		// never the case for a persisted row.
+		deliveredVal := delivered
+		m.Delivered = &deliveredVal
+		m.WindowState = domain.MessageWindowState(windowState)
+		if seq.Valid {
+			v := seq.Float64
+			m.Seq = &v
 		}
 
 		messages = append(messages, m)
@@ -1060,6 +1121,57 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 	}
 	defer rows.Close()
 	return scanAgentMessageRows(rows)
+}
+
+// ListForAssembly returns every row a native loop needs to rebuild this run's
+// exact LLM context, ordered by the effective assembly key COALESCE(seq,
+// id). window_state='inactive' rows are excluded (superseded by
+// compaction); 'elided' and undelivered rows are included — see the
+// interface doc for the full contract. Pure read over run_messages; no
+// other table or in-process state feeds in.
+func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT `+pgMessageColumns+`
+		FROM run_messages
+		WHERE org_id = $1 AND run_id = $2 AND window_state <> 'inactive'
+		ORDER BY COALESCE(seq, (id)::double precision) ASC
+	`, orgID, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAgentMessageRows(rows)
+}
+
+// MarkDelivered flips delivered=true on the given message ids, scoped to
+// runID. ids outside the run or already delivered are silently unaffected.
+func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, ids []int) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE run_messages SET delivered = true
+		WHERE org_id = $1 AND run_id = $2 AND id = ANY($3)
+	`, orgID, runID, pgIntArray(ids))
+	return err
+}
+
+// SetWindowState is the elision/compaction primitive: a batched range flip of
+// window_state from `from` to `to`, restricted to rows currently in state
+// `from` whose effective assembly key (COALESCE(seq, id)) is strictly less
+// than beforeSeq. Returns the number of rows flipped.
+func (s *agentRunStore) SetWindowState(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error) {
+	result, err := s.q.ExecContext(ctx, `
+		UPDATE run_messages
+		SET window_state = $1
+		WHERE org_id = $2 AND run_id = $3 AND window_state = $4
+		  AND COALESCE(seq, (id)::double precision) < $5
+	`, string(to), orgID, runID, string(from), beforeSeq)
+	if err != nil {
+		return 0, err
+	}
+	n, err := result.RowsAffected()
+	return int(n), err
 }
 
 func (s *agentRunStore) TokenTotals(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error) {
