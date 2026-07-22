@@ -1,0 +1,7 @@
+{
+  "name": "harness-parity",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "^1.2.0"
+  }
+}
