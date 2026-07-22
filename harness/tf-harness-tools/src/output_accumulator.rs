@@ -67,6 +67,10 @@ fn default_temp_file_path(spill_dir: &str, prefix: &str) -> String {
 /// unbounded memory growth.
 const SPILL_FALLBACK_CAP_BYTES: usize = 16 * 1024 * 1024;
 
+/// After a failed spill-file creation, wait for this much newly buffered
+/// output before trying again.
+const SPILL_RETRY_STRIDE_BYTES: usize = 1024 * 1024;
+
 pub struct OutputAccumulator {
     max_lines: usize,
     max_bytes: usize,
@@ -80,6 +84,13 @@ pub struct OutputAccumulator {
     /// Some raw output could be neither written nor buffered; the spill
     /// file (if any) is incomplete and must never be advertised.
     spill_lost: bool,
+    /// raw_chunks_bytes level that must be reached before the next
+    /// non-forced creation attempt (None until a failure).
+    spill_retry_after_bytes: Option<usize>,
+    /// Generated name kept across failed attempts.
+    pending_spill_name: Option<String>,
+    /// Creation attempts made; observable for retry-bound tests.
+    spill_attempts: usize,
     tail_text: String,
     tail_bytes: usize,
     tail_starts_at_line_boundary: bool,
@@ -112,6 +123,9 @@ impl OutputAccumulator {
             raw_chunks: Vec::new(),
             raw_chunks_bytes: 0,
             spill_lost: false,
+            spill_retry_after_bytes: None,
+            pending_spill_name: None,
+            spill_attempts: 0,
             tail_text: String::new(),
             tail_bytes: 0,
             tail_starts_at_line_boundary: true,
@@ -138,7 +152,7 @@ impl OutputAccumulator {
         self.append_decoded_text(&decoded);
 
         if self.temp_file.is_some() || self.should_use_temp_file() {
-            self.ensure_temp_file();
+            self.ensure_temp_file(false);
             match &mut self.temp_file {
                 Some(file) => {
                     if file.write_all(data).is_err() {
@@ -176,7 +190,7 @@ impl OutputAccumulator {
         let flushed = self.decode_chunk(&[], true);
         self.append_decoded_text(&flushed);
         if self.should_use_temp_file() {
-            self.ensure_temp_file();
+            self.ensure_temp_file(true);
         }
     }
 
@@ -222,7 +236,7 @@ impl OutputAccumulator {
         };
 
         if persist_if_truncated && truncation.truncated {
-            self.ensure_temp_file();
+            self.ensure_temp_file(true);
         }
 
         OutputSnapshot {
@@ -318,16 +332,33 @@ impl OutputAccumulator {
             || self.total_lines > self.max_lines
     }
 
-    fn ensure_temp_file(&mut self) {
+    fn ensure_temp_file(&mut self, force: bool) {
         if self.temp_file_path.is_some() || self.spill_lost {
             // Once anything was dropped, a file could only ever be
             // incomplete; never create (or advertise) one.
             return;
         }
+        // A persistently broken spill dir must not cost an open() per
+        // chunk: after a failure, retry only once per stride of newly
+        // buffered bytes (self-healing for transient failures), plus a
+        // forced final attempt at finish/persist time.
+        if !force {
+            if let Some(gate) = self.spill_retry_after_bytes {
+                if self.raw_chunks_bytes < gate {
+                    return;
+                }
+            }
+        }
+        self.spill_attempts += 1;
         // create_new refuses to follow or truncate anything already at the
-        // guessed path; a collision just retries with a fresh name.
+        // guessed path; a collision just retries with a fresh name. A
+        // failed name is kept for the next retry so retries don't re-enter
+        // getrandom.
         for _attempt in 0..2 {
-            let path = default_temp_file_path(&self.spill_dir, &self.temp_file_prefix);
+            let path = self
+                .pending_spill_name
+                .take()
+                .unwrap_or_else(|| default_temp_file_path(&self.spill_dir, &self.temp_file_prefix));
             match std::fs::File::options()
                 .write(true)
                 .create_new(true)
@@ -346,9 +377,15 @@ impl OutputAccumulator {
                     return;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(_) => return,
+                Err(_) => {
+                    self.pending_spill_name = Some(path);
+                    self.spill_retry_after_bytes =
+                        Some(self.raw_chunks_bytes + SPILL_RETRY_STRIDE_BYTES);
+                    return;
+                }
             }
         }
+        self.spill_retry_after_bytes = Some(self.raw_chunks_bytes + SPILL_RETRY_STRIDE_BYTES);
     }
 }
 
@@ -382,6 +419,9 @@ mod tests {
         assert!(snapshot.full_output_path.is_none());
         assert!(!acc.spill_lost);
         assert!(acc.raw_chunks_bytes > 0);
+        // Thousands of appends must not mean thousands of failed opens:
+        // one initial attempt plus stride-gated and forced-final retries.
+        assert!(acc.spill_attempts <= 4, "attempts: {}", acc.spill_attempts);
     }
 
     #[test]
@@ -396,5 +436,7 @@ mod tests {
         let snapshot = acc.snapshot(true);
         assert!(acc.spill_lost);
         assert!(snapshot.full_output_path.is_none());
+        // 20MiB of 1MiB chunks: bounded by the retry stride, not per-chunk.
+        assert!(acc.spill_attempts <= 20, "attempts: {}", acc.spill_attempts);
     }
 }
