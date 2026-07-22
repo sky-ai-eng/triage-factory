@@ -178,6 +178,26 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 				t.Fatalf("seed memory: %v", err)
 			}
 		},
+		SeedRawMessage: func(t *testing.T, runID, column, rawJSON string) int64 {
+			t.Helper()
+			if column != "reasoning" && column != "content_blocks" {
+				t.Fatalf("SeedRawMessage: unsupported column %q", column)
+			}
+			// column is a fixed test-controlled name (not user input), so
+			// string-building the column into the statement is safe here.
+			res, err := conn.Exec(
+				`INSERT INTO run_messages (run_id, role, subtype, content, `+column+`) VALUES (?, 'assistant', 'text', 'x', ?)`,
+				runID, rawJSON,
+			)
+			if err != nil {
+				t.Fatalf("seed raw message (%s): %v", column, err)
+			}
+			id, err := res.LastInsertId()
+			if err != nil {
+				t.Fatalf("seed raw message lastInsertId: %v", err)
+			}
+			return id
+		},
 		AgentID: runmode.LocalDefaultAgentID,
 	}
 }

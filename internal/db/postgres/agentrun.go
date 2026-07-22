@@ -1046,11 +1046,20 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		if metadataStr.Valid && metadataStr.String != "" {
 			_ = json.Unmarshal([]byte(metadataStr.String), &m.Metadata)
 		}
+		// Unlike tool_calls/metadata above, reasoning/content_blocks are part
+		// of the canonical replay context a native loop reconstructs via
+		// ListForAssembly — a decode failure here must surface, not silently
+		// yield an empty Reasoning/ContentBlocks that looks like "no
+		// reasoning on this message" when the row actually has some.
 		if reasoningStr.Valid && reasoningStr.String != "" {
-			_ = json.Unmarshal([]byte(reasoningStr.String), &m.Reasoning)
+			if err := json.Unmarshal([]byte(reasoningStr.String), &m.Reasoning); err != nil {
+				return nil, fmt.Errorf("unmarshal reasoning (message %d): %w", m.ID, err)
+			}
 		}
 		if contentBlocksStr.Valid && contentBlocksStr.String != "" {
-			_ = json.Unmarshal([]byte(contentBlocksStr.String), &m.ContentBlocks)
+			if err := json.Unmarshal([]byte(contentBlocksStr.String), &m.ContentBlocks); err != nil {
+				return nil, fmt.Errorf("unmarshal content_blocks (message %d): %w", m.ID, err)
+			}
 		}
 		if inputTok.Valid {
 			v := int(inputTok.Int64)

@@ -218,6 +218,26 @@ func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) 
 				t.Fatalf("seed memory: %v", err)
 			}
 		},
+		SeedRawMessage: func(t *testing.T, runID, column, rawJSON string) int64 {
+			t.Helper()
+			if column != "reasoning" && column != "content_blocks" {
+				t.Fatalf("SeedRawMessage: unsupported column %q", column)
+			}
+			// column is a fixed test-controlled name (not user input), so
+			// string-building the column into the statement is safe here.
+			// rawJSON must be syntactically valid JSON — jsonb enforces that
+			// at the storage layer — but can be any shape, including one
+			// that fails to unmarshal into the target Go slice.
+			var id int64
+			if err := conn.QueryRow(
+				`INSERT INTO run_messages (org_id, run_id, role, subtype, content, `+column+`)
+				 VALUES ($1, $2, 'assistant', 'text', 'x', $3::jsonb) RETURNING id`,
+				orgID, runID, rawJSON,
+			).Scan(&id); err != nil {
+				t.Fatalf("seed raw message (%s): %v", column, err)
+			}
+			return id
+		},
 		AgentID: agentID,
 	}
 }

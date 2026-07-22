@@ -79,6 +79,16 @@ type AgentRunSeeder struct {
 	// NullMemorySentinel inserts SQL NULL.
 	SetRunMemory func(t *testing.T, runID, entityID, content string)
 
+	// SeedRawMessage inserts a run_messages row with rawJSON written
+	// directly into the given column ("reasoning" or "content_blocks"),
+	// bypassing InsertMessage's json.Marshal. Used to stage
+	// well-formed-but-wrong-shaped JSON (a valid jsonb value in Postgres,
+	// which enforces syntax at the storage layer, that nonetheless fails to
+	// unmarshal into the target Go slice) so a test can assert the read
+	// path surfaces the decode error instead of silently discarding it.
+	// Returns the row's id.
+	SeedRawMessage func(t *testing.T, runID, column, rawJSON string) int64
+
 	// AgentID returns an identifier suitable for the
 	// StampAgentClaim agentID and the run row's actor_agent_id.
 	// Backends use this to thread their own seeded agent row (the
@@ -1304,6 +1314,36 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 		if got.Seq == nil || *got.Seq != 12.5 {
 			t.Errorf("Seq = %v, want 12.5", got.Seq)
+		}
+	})
+
+	t.Run("Messages_SurfacesReasoningDecodeError", func(t *testing.T) {
+		// reasoning/content_blocks are canonical replay context (read via
+		// ListForAssembly by a future native loop) — a decode failure must
+		// return an error, not silently produce an empty slice that reads
+		// identically to "no reasoning on this message".
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		seed.SeedRawMessage(t, runID, "reasoning", `{"wrong":"shape"}`)
+		if _, err := store.Messages(ctx, orgID, runID); err == nil {
+			t.Fatal("Messages: want a decode error for wrong-shaped reasoning JSON, got nil")
+		}
+		if _, err := store.ListForAssembly(ctx, orgID, runID); err == nil {
+			t.Fatal("ListForAssembly: want a decode error for wrong-shaped reasoning JSON, got nil")
+		}
+	})
+
+	t.Run("Messages_SurfacesContentBlocksDecodeError", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		seed.SeedRawMessage(t, runID, "content_blocks", `{"wrong":"shape"}`)
+		if _, err := store.Messages(ctx, orgID, runID); err == nil {
+			t.Fatal("Messages: want a decode error for wrong-shaped content_blocks JSON, got nil")
+		}
+		if _, err := store.ListForAssembly(ctx, orgID, runID); err == nil {
+			t.Fatal("ListForAssembly: want a decode error for wrong-shaped content_blocks JSON, got nil")
 		}
 	})
 
