@@ -135,7 +135,12 @@ pub fn execute(cwd: &str, args: &GrepArgs) -> ToolResultOrError<GrepToolDetails>
     if is_directory {
         let overrides = match &args.glob {
             Some(glob) => {
-                let mut ob = OverrideBuilder::new(cwd);
+                // Rooted at the search path, deliberately diverging from
+                // rg/pi (which root at the process cwd): anchored globs like
+                // "src/*.ts" then work uniformly however the search
+                // directory was named, instead of silently matching nothing
+                // whenever it isn't the cwd itself.
+                let mut ob = OverrideBuilder::new(&search_path);
                 ob.add(glob).map_err(|e| ToolError::new(e.to_string()))?;
                 Some(ob.build().map_err(|e| ToolError::new(e.to_string()))?)
             }

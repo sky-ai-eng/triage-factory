@@ -617,6 +617,32 @@ fn grep_flag_like_pattern_is_search_text() {
 }
 
 #[test]
+fn grep_anchored_glob_relative_to_search_path() {
+    // Deliberate divergence from rg/pi (documented in README): the glob
+    // roots at the searched directory, so anchored patterns match when the
+    // search path is a subdirectory of cwd.
+    let dir = tmp_dir();
+    write_file(dir.path(), "sub/src/x.ts", "match in src ts\n");
+    write_file(dir.path(), "sub/other/y.ts", "match in other ts\n");
+
+    let result = grep_tool(
+        dir.path().to_str().unwrap(),
+        serde_json::json!({
+            "pattern": "match",
+            "path": dir.path().join("sub").to_str().unwrap(),
+            "glob": "src/*.ts",
+        }),
+    )
+    .unwrap();
+    let output = text_output(&result);
+    assert!(
+        output.contains("src/x.ts:1: match in src ts"),
+        "got: {output}"
+    );
+    assert!(!output.contains("other"), "got: {output}");
+}
+
+#[test]
 fn grep_no_matches() {
     let dir = tmp_dir();
     write_file(dir.path(), "a.txt", "nothing here\n");

@@ -8,21 +8,24 @@ pub struct ShellConfig {
     pub args: Vec<&'static str>,
 }
 
+/// In-process PATH walk with `which`'s semantics (first entry holding an
+/// executable `bash`; an empty PATH segment means the current directory).
+/// pi shells out to `which` here; a fork/exec — and a dependency on `which`
+/// existing in minimal images — has no place in this harness, and this
+/// codepath only runs at all when /bin/bash is absent.
 fn find_bash_on_path() -> Option<String> {
-    let output = std::process::Command::new("which")
-        .arg("bash")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    let path_var = std::env::var("PATH").ok()?;
+    for dir in path_var.split(':') {
+        let dir = if dir.is_empty() { "." } else { dir };
+        let candidate = format!("{dir}/bash");
+        let Ok(c_path) = std::ffi::CString::new(candidate.as_bytes()) else {
+            continue;
+        };
+        if unsafe { libc::access(c_path.as_ptr(), libc::X_OK) } == 0 {
+            return Some(candidate);
+        }
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .trim()
-        .lines()
-        .next()
-        .map(str::to_string)
-        .filter(|s| !s.is_empty())
+    None
 }
 
 /// Resolution order: explicit shell path, /bin/bash, bash on PATH, sh.

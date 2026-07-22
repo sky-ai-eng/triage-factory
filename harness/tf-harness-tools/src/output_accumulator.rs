@@ -22,9 +22,42 @@ fn tmpdir() -> String {
     }
 }
 
+/// Entropy-free spill-name bytes: pid + monotonic time + a process-global
+/// counter. Unique within a process by the counter, across processes by
+/// pid+time.
+fn fallback_spill_name_bytes() -> [u8; 8] {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    let mix = (ts.tv_sec as u64)
+        .wrapping_mul(1_000_000_007)
+        .wrapping_add(ts.tv_nsec as u64)
+        .wrapping_add(u64::from(std::process::id()) << 32)
+        .wrapping_add(
+            COUNTER
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15),
+        );
+    mix.to_le_bytes()
+}
+
+/// Fill spill-name bytes with OS randomness, falling back to the
+/// counter-based mix when getrandom fails — an all-zero name would be
+/// deterministic and let concurrent runs overwrite each other's spill
+/// files.
+fn fill_spill_name_bytes(bytes: &mut [u8; 8]) {
+    if getrandom::fill(bytes).is_err() {
+        *bytes = fallback_spill_name_bytes();
+    }
+}
+
 fn default_temp_file_path(prefix: &str) -> String {
     let mut bytes = [0u8; 8];
-    let _ = getrandom::fill(&mut bytes);
+    fill_spill_name_bytes(&mut bytes);
     let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     format!("{}/{prefix}-{id}.log", tmpdir())
 }
@@ -253,5 +286,18 @@ impl OutputAccumulator {
             self.temp_file = Some(file);
             self.temp_file_path = Some(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fallback_spill_name_bytes;
+
+    #[test]
+    fn fallback_names_are_unique_and_nonzero() {
+        let a = fallback_spill_name_bytes();
+        let b = fallback_spill_name_bytes();
+        assert_ne!(a, [0u8; 8]);
+        assert_ne!(a, b);
     }
 }

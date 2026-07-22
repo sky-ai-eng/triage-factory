@@ -95,6 +95,12 @@ All model-visible strings match pi. The differences that exist:
 - **grep/find engine error text** — regex/glob parse errors come from the
   same upstream crates rg/fd use, but without their stderr framing (no
   `rg:` / `[fd error]:` prefixes).
+- **grep `--glob` rooting** — glob filters are matched relative to the
+  *search path*, not the process cwd. rg (and therefore pi) roots them at
+  the cwd, so anchored globs like `src/*.ts` silently match nothing when
+  the searched directory isn't the cwd itself; here they work uniformly.
+  Basename-style globs (`*.ts`, `**/*.spec.ts`) behave identically in
+  both.
 - **fd's global ignore file** (`~/.config/fd/ignore`) is not read; the
   sandbox has none.
 - **TF branding on agent-facing strings** — the bash spill file is
