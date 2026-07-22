@@ -972,3 +972,62 @@ func TestCuratorStore_SQLite_CancelStrandedRequestsForHomeSystem(t *testing.T) {
 		t.Errorf("token roll-up = (%d,%d,%d,%d), want (3,5,7,11)", in, out, cr, cc)
 	}
 }
+
+// TestCuratorStore_SQLite_MessageRoundTripsReasoningAndContentBlocks pins
+// that curator_messages carries the same reasoning/content_blocks fidelity
+// run_messages does (TFAC-665) — curator turns run through the same SDK
+// stream parser as delegated runs, so a message with thinking or an image
+// tool result must round-trip without loss here too.
+func TestCuratorStore_SQLite_MessageRoundTripsReasoningAndContentBlocks(t *testing.T) {
+	conn := newSQLiteForCuratorTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	user := runmode.LocalDefaultUserID
+
+	projectID, err := stores.Projects.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Project{Name: "p"})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	var requestID string
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, org, user, func(ts db.TxStores) error {
+		id, err := ts.Curator.CreateRequest(ctx, org, projectID, user, "", "hello")
+		if err != nil {
+			return err
+		}
+		requestID = id
+		_, err = ts.Curator.InsertMessage(ctx, org, &domain.CuratorMessage{
+			RequestID: requestID,
+			Role:      "assistant",
+			Subtype:   "text",
+			Content:   "thinking then answering",
+			Reasoning: []domain.ReasoningDetail{
+				{Index: 0, Type: "text", Text: "step one", Signature: "sig-abc"},
+			},
+			ContentBlocks: []domain.ContentBlock{
+				{Type: domain.ContentBlockImage, ImageURL: &domain.ContentImageURL{URL: "https://example/img.png"}},
+			},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	byReq, err := stores.Curator.ListMessagesByRequestIDs(ctx, org, []string{requestID})
+	if err != nil {
+		t.Fatalf("ListMessagesByRequestIDs: %v", err)
+	}
+	msgs := byReq[requestID]
+	if len(msgs) != 1 {
+		t.Fatalf("len = %d, want 1", len(msgs))
+	}
+	got := msgs[0]
+	if len(got.Reasoning) != 1 || got.Reasoning[0].Signature != "sig-abc" || got.Reasoning[0].Text != "step one" {
+		t.Errorf("Reasoning round-trip: %+v", got.Reasoning)
+	}
+	if len(got.ContentBlocks) != 1 || got.ContentBlocks[0].Type != domain.ContentBlockImage ||
+		got.ContentBlocks[0].ImageURL == nil || got.ContentBlocks[0].ImageURL.URL != "https://example/img.png" {
+		t.Errorf("ContentBlocks round-trip: %+v", got.ContentBlocks)
+	}
+}

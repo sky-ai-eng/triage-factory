@@ -671,6 +671,16 @@ function ToolCallCard({
               tone={isError ? 'error' : undefined}
             />
           )}
+          {result?.content_blocks
+            ?.filter((b) => b.type === 'image_url' && b.image_url?.url)
+            .map((b, i) => (
+              <img
+                key={i}
+                src={b.image_url?.url}
+                alt="tool result"
+                className="max-h-64 max-w-full rounded-lg border border-border-subtle"
+              />
+            ))}
         </div>
       )}
     </div>

@@ -99,4 +99,11 @@ type CuratorMessage struct {
 	CacheReadTokens     *int           `json:"cache_read_tokens,omitempty"`
 	CacheCreationTokens *int           `json:"cache_creation_tokens,omitempty"`
 	CreatedAt           time.Time      `json:"created_at"`
+
+	// Reasoning and ContentBlocks mirror domain.AgentMessage's fields of the
+	// same name — see that type's doc comment. Curator turns run through the
+	// same SDK stream parser as delegated runs, so they carry the same
+	// fidelity data; nil when the message has none.
+	Reasoning     []ReasoningDetail `json:"reasoning,omitempty"`
+	ContentBlocks []ContentBlock    `json:"content_blocks,omitempty"`
 }

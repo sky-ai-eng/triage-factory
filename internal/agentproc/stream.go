@@ -16,11 +16,20 @@ import (
 
 // StreamState tracks the current assistant message being accumulated
 // across multiple NDJSON lines (thinking → text → tool_use all share
-// one msg ID).
+// one msg ID). Thinking rides the same message as reasoning entries
+// rather than flushing as its own row.
 type StreamState struct {
 	currentMsgID string
 	current      *domain.AgentMessage
 	sessionID    string // captured from the system/init event at stream start
+
+	// currentBlocks accumulates the pending message's text/image content
+	// blocks (never tool_use or thinking — those land on ToolCalls and
+	// Reasoning respectively) in stream order. Promoted onto
+	// current.ContentBlocks at flush only when there's more than one block
+	// or a non-text block, matching the single-text-block message's
+	// existing flat-Content-only shape.
+	currentBlocks []domain.ContentBlock
 }
 
 // NewStreamState returns a fresh state ready for ParseLine.
@@ -37,8 +46,15 @@ func (s *StreamState) SessionID() string { return s.sessionID }
 // flush returns the accumulated assistant message (if any) and resets state.
 func (s *StreamState) flush() *domain.AgentMessage {
 	msg := s.current
+	if msg != nil && len(s.currentBlocks) > 0 {
+		nonText := len(s.currentBlocks) > 1 || s.currentBlocks[0].Type != domain.ContentBlockText
+		if nonText {
+			msg.ContentBlocks = s.currentBlocks
+		}
+	}
 	s.current = nil
 	s.currentMsgID = ""
+	s.currentBlocks = nil
 	return msg
 }
 
@@ -73,14 +89,15 @@ func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.AgentMes
 		return s.handleAssistant(raw, traceID), nil
 
 	case "user":
-		// Tool result — flush any pending assistant message first.
+		// Tool result(s) — flush any pending assistant message first. A
+		// single "user" line can carry multiple tool_result blocks (parallel
+		// tool calls from one assistant turn all resolve together), so this
+		// walks the whole content array rather than just its first entry.
 		var out []*domain.AgentMessage
 		if flushed := s.flush(); flushed != nil {
 			out = append(out, flushed)
 		}
-		if msg := parseToolResult(raw, traceID); msg != nil {
-			out = append(out, msg)
-		}
+		out = append(out, parseToolResult(raw, traceID)...)
 		return out, nil
 
 	case "result":
@@ -137,23 +154,32 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 
 		switch b["type"] {
 		case "thinking":
-			// Reasoning surfaces as its own message row, emitted immediately
-			// so it lands ahead of the text/tool_use siblings that accumulate
-			// on s.current (same assistant message, flushed later) — matching
-			// the order the blocks were produced in.
-			if t, _ := b["thinking"].(string); t != "" {
-				flushed = append(flushed, &domain.AgentMessage{
-					RunID:   traceID,
-					Role:    "assistant",
-					Subtype: "thinking",
-					Content: t,
-					Model:   s.current.Model,
-				})
-			}
+			// Reasoning accumulates onto the pending assistant message in
+			// stream order rather than flushing as its own row — the
+			// assistant row carries the full chain-of-thought alongside the
+			// text/tool_use siblings it belongs to.
+			text, _ := b["thinking"].(string)
+			signature, _ := b["signature"].(string)
+			s.current.Reasoning = append(s.current.Reasoning, domain.ReasoningDetail{
+				Index:     len(s.current.Reasoning),
+				Type:      "text",
+				Text:      text,
+				Signature: signature,
+			})
 
 		case "text":
+			// Multiple text blocks concatenate (newline-joined) rather than
+			// the last one winning; the full block list rides ContentBlocks
+			// (promoted at flush) whenever there's more than one.
 			text, _ := b["text"].(string)
-			s.current.Content = text
+			if s.current.Content != "" && text != "" {
+				s.current.Content += "\n"
+			}
+			s.current.Content += text
+			s.currentBlocks = append(s.currentBlocks, domain.ContentBlock{
+				Type: domain.ContentBlockText,
+				Text: text,
+			})
 
 		case "tool_use":
 			toolName, _ := b["name"].(string)
@@ -177,66 +203,133 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 	return flushed
 }
 
-func parseToolResult(raw map[string]any, traceID string) *domain.AgentMessage {
+// parseToolResult walks every tool_result block in a "user" line's content
+// array — a single line can carry multiple parallel tool results, one per
+// tool_use_id from the preceding assistant turn — and returns one message per
+// block. Each block's own content is walked in turn: text sub-blocks flatten
+// into the display Content string, non-text sub-blocks (images) land in
+// ContentBlocks so they aren't silently dropped.
+func parseToolResult(raw map[string]any, traceID string) []*domain.AgentMessage {
 	msgObj, ok := raw["message"].(map[string]any)
 	if !ok {
 		return nil
 	}
 
 	contentBlocks, _ := msgObj["content"].([]any)
-	if len(contentBlocks) == 0 {
-		return nil
+	var toolResults []map[string]any
+	for _, block := range contentBlocks {
+		b, ok := block.(map[string]any)
+		if !ok || b["type"] != "tool_result" {
+			continue
+		}
+		toolResults = append(toolResults, b)
 	}
 
-	b, ok := contentBlocks[0].(map[string]any)
-	if !ok {
-		return nil
-	}
+	var out []*domain.AgentMessage
+	for _, b := range toolResults {
+		toolUseID, _ := b["tool_use_id"].(string)
+		isError, _ := b["is_error"].(bool)
+		content, blocks := flattenToolResultContent(b["content"])
 
-	if b["type"] != "tool_result" {
-		return nil
-	}
-
-	content, _ := b["content"].(string)
-	toolUseID, _ := b["tool_use_id"].(string)
-	isError, _ := b["is_error"].(bool)
-
-	// tool_result content arrives either as a plain string or as a block
-	// array ([{type:"text",text:...}, ...]); flatten the text blocks so the
-	// array form doesn't store an empty result.
-	if content == "" {
-		if blocks, ok := b["content"].([]any); ok {
-			var sb strings.Builder
-			for _, bl := range blocks {
-				m, ok := bl.(map[string]any)
-				if !ok || m["type"] != "text" {
-					continue
-				}
-				if t, _ := m["text"].(string); t != "" {
-					if sb.Len() > 0 {
-						sb.WriteString("\n")
-					}
-					sb.WriteString(t)
-				}
+		// The legacy fallback only applies unambiguously when this line
+		// carries exactly one tool_result — a single top-level string can't
+		// be attributed to one of several parallel results.
+		if content == "" && len(toolResults) == 1 {
+			if r, ok := raw["tool_use_result"].(string); ok {
+				content = r
 			}
-			content = sb.String()
 		}
+
+		out = append(out, &domain.AgentMessage{
+			RunID:         traceID,
+			Role:          "tool",
+			Subtype:       "tool",
+			Content:       content,
+			ToolCallID:    toolUseID,
+			IsError:       isError,
+			ContentBlocks: blocks,
+		})
+	}
+	return out
+}
+
+// flattenToolResultContent normalizes a tool_result block's `content` field,
+// which arrives as either a plain string or an array of content blocks
+// (text/image). Text blocks flatten into the display string (newline-
+// joined, matching the plain-string case); image blocks are preserved in
+// full as ContentBlocks so results like screenshots or a Read on an image
+// aren't silently dropped.
+func flattenToolResultContent(raw any) (string, []domain.ContentBlock) {
+	if s, ok := raw.(string); ok {
+		return s, nil
 	}
 
-	if content == "" {
-		if r, ok := raw["tool_use_result"].(string); ok {
-			content = r
-		}
+	blocks, ok := raw.([]any)
+	if !ok {
+		return "", nil
 	}
 
-	return &domain.AgentMessage{
-		RunID:      traceID,
-		Role:       "tool",
-		Subtype:    "tool",
-		Content:    content,
-		ToolCallID: toolUseID,
-		IsError:    isError,
+	var sb strings.Builder
+	var out []domain.ContentBlock
+	for _, bl := range blocks {
+		m, ok := bl.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch m["type"] {
+		case "text":
+			t, _ := m["text"].(string)
+			if t == "" {
+				continue
+			}
+			if sb.Len() > 0 {
+				sb.WriteString("\n")
+			}
+			sb.WriteString(t)
+		case "image":
+			if cb, ok := parseImageBlock(m); ok {
+				out = append(out, cb)
+			}
+		}
 	}
+	return sb.String(), out
+}
+
+// parseImageBlock converts an Anthropic-shaped image content block
+// ({"type":"image","source":{...}}) into the neutral domain.ContentBlock
+// shape, supporting both the base64 source form (data: URI) and the url
+// source form.
+func parseImageBlock(m map[string]any) (domain.ContentBlock, bool) {
+	source, ok := m["source"].(map[string]any)
+	if !ok {
+		return domain.ContentBlock{}, false
+	}
+
+	switch source["type"] {
+	case "base64":
+		data, _ := source["data"].(string)
+		if data == "" {
+			return domain.ContentBlock{}, false
+		}
+		mediaType, _ := source["media_type"].(string)
+		if mediaType == "" {
+			mediaType = "image/png"
+		}
+		return domain.ContentBlock{
+			Type:     domain.ContentBlockImage,
+			ImageURL: &domain.ContentImageURL{URL: "data:" + mediaType + ";base64," + data},
+		}, true
+	case "url":
+		url, _ := source["url"].(string)
+		if url == "" {
+			return domain.ContentBlock{}, false
+		}
+		return domain.ContentBlock{
+			Type:     domain.ContentBlockImage,
+			ImageURL: &domain.ContentImageURL{URL: url},
+		}, true
+	}
+	return domain.ContentBlock{}, false
 }
 
 // Result is the terminal `result` event from a claude -p stream:

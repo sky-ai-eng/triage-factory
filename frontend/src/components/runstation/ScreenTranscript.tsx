@@ -213,6 +213,10 @@ function buildRows(messages: AgentMessage[], worktree: string | undefined): Reac
 
     // Reasoning gets its own quiet row — dim italic under a THINKING tag —
     // so it reads as the agent's interior voice, distinct from prose output.
+    // Legacy transcripts carry this as a standalone subtype:"thinking" row;
+    // current writes ride it on the owning assistant message's Reasoning
+    // field instead (TFAC-665) — both render with the same ThinkingLine
+    // treatment, and the legacy row still renders for historical runs.
     if (msg.Subtype === 'thinking') {
       if (msg.Content) {
         rows.push(
@@ -222,6 +226,19 @@ function buildRows(messages: AgentMessage[], worktree: string | undefined): Reac
         )
       }
       continue
+    }
+
+    if (msg.Reasoning?.length) {
+      const reasoningText = msg.Reasoning.map((r) => r.text)
+        .filter(Boolean)
+        .join('\n\n')
+      if (reasoningText) {
+        rows.push(
+          <ScreenRow key={`r-${msg.ID}`} time={time}>
+            <ThinkingLine text={reasoningText} />
+          </ScreenRow>,
+        )
+      }
     }
 
     if (msg.Content) {
@@ -352,6 +369,8 @@ const ToolLine = memo(function ToolLine({
   const resultText = stripWorktree(result?.Content ?? '', worktree)
   const isError = !!result?.IsError
   const long = resultText.length > 400
+  const images =
+    result?.ContentBlocks?.filter((b) => b.type === 'image_url' && b.image_url?.url) ?? []
 
   return (
     <div>
@@ -388,11 +407,30 @@ const ToolLine = memo(function ToolLine({
               {resultText || (isError ? '(no error body)' : 'ok')}
             </Pane>
           )}
+          {images.length > 0 && <ToolResultImages images={images} />}
         </div>
       )}
     </div>
   )
 })
+
+// ToolResultImages — non-text tool-result content (a screenshot, a Read on
+// an image) that ContentBlocks carries and the flat Content string can't.
+function ToolResultImages({ images }: { images: NonNullable<AgentMessage['ContentBlocks']> }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {images.map((b, i) => (
+        <img
+          key={i}
+          src={b.image_url?.url}
+          alt="tool result"
+          className="max-h-64 max-w-full rounded-[4px]"
+          style={{ boxShadow: 'inset 0 0 0 1px var(--hmi-line)' }}
+        />
+      ))}
+    </div>
+  )
+}
 
 // Pane — a segmented IN / OUT block on the screen. Shows the (optionally
 // truncated) content with a faded copy affordance that flips to a check for a

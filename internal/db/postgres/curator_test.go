@@ -65,6 +65,62 @@ func TestCuratorStore_Postgres_AttributesPerUser(t *testing.T) {
 	}
 }
 
+// TestCuratorStore_Postgres_MessageRoundTripsReasoningAndContentBlocks pins
+// that curator_messages carries the same reasoning/content_blocks fidelity
+// run_messages does (TFAC-665) — curator turns run through the same SDK
+// stream parser as delegated runs, so a message with thinking or an image
+// tool result must round-trip without loss here too.
+func TestCuratorStore_Postgres_MessageRoundTripsReasoningAndContentBlocks(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, alice, _ := seedPgProjectOrg(t, h)
+	projectID := seedPgEntityProject(t, h, orgID, alice, "reasoning-round-trip")
+
+	var requestID string
+	var messages map[string][]domain.CuratorMessage
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, alice, func(ts db.TxStores) error {
+		id, err := ts.Curator.CreateRequest(ctx, orgID, projectID, alice, "", "hello")
+		if err != nil {
+			return err
+		}
+		requestID = id
+		if _, err := ts.Curator.InsertMessage(ctx, orgID, &domain.CuratorMessage{
+			RequestID: requestID,
+			Role:      "assistant",
+			Subtype:   "text",
+			Content:   "thinking then answering",
+			Reasoning: []domain.ReasoningDetail{
+				{Index: 0, Type: "text", Text: "step one", Signature: "sig-abc"},
+			},
+			ContentBlocks: []domain.ContentBlock{
+				{Type: domain.ContentBlockImage, ImageURL: &domain.ContentImageURL{URL: "https://example/img.png"}},
+			},
+		}); err != nil {
+			return err
+		}
+		messages, err = ts.Curator.ListMessagesByRequestIDs(ctx, orgID, []string{requestID})
+		return err
+	}); err != nil {
+		t.Fatalf("seed + read: %v", err)
+	}
+
+	msgs := messages[requestID]
+	if len(msgs) != 1 {
+		t.Fatalf("len = %d, want 1", len(msgs))
+	}
+	got := msgs[0]
+	if len(got.Reasoning) != 1 || got.Reasoning[0].Signature != "sig-abc" || got.Reasoning[0].Text != "step one" {
+		t.Errorf("Reasoning round-trip: %+v", got.Reasoning)
+	}
+	if len(got.ContentBlocks) != 1 || got.ContentBlocks[0].Type != domain.ContentBlockImage ||
+		got.ContentBlocks[0].ImageURL == nil || got.ContentBlocks[0].ImageURL.URL != "https://example/img.png" {
+		t.Errorf("ContentBlocks round-trip: %+v", got.ContentBlocks)
+	}
+}
+
 // TestCuratorStore_Postgres_CrossOrgLeakage pins the defense-in-depth
 // org filter: even if Alice in orgA somehow submitted a malformed
 // request scoped to orgB's project, the RLS policies + per-statement
