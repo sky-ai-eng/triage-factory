@@ -39,7 +39,8 @@ type llmResolver interface {
 var log = slog.Default().With("component", "credprovision")
 
 // DefaultAwaitingSweepInterval is the backstop-sweep cadence for runs
-// parked in status='awaiting_credentials' — the fast path is the
+// whose active claim is parked in phase='awaiting_credentials' — the fast
+// path is the
 // executor's cred_request tf_ctl notification; this recovers anything that
 // notification dropped (the relay is lossy by design). Short, because it
 // gates run START latency.

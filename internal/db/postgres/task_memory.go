@@ -60,8 +60,8 @@ func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, ru
 }
 
 // upsertAgentMemory is the shared body for the app- and admin-pool
-// variants. ON CONFLICT(run_id) is supported on both Postgres and
-// SQLite given the UNIQUE(run_id) constraint; the OVERWRITE only
+// variants. ON CONFLICT(conversation_id) is supported on both Postgres and
+// SQLite given the UNIQUE(conversation_id) constraint; the OVERWRITE only
 // touches agent_content so any already-attached human_content stays
 // intact across retries.
 //
@@ -81,9 +81,9 @@ func upsertAgentMemory(ctx context.Context, q queryer, orgID, runID, entityID, b
 		blueprintRun = blueprintRunID
 	}
 	_, err := q.ExecContext(ctx, `
-		INSERT INTO run_memory (id, org_id, run_id, entity_id, blueprint_run_id, agent_content, created_at)
+		INSERT INTO run_memory (id, org_id, conversation_id, entity_id, blueprint_run_id, agent_content, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (run_id) DO UPDATE SET agent_content = EXCLUDED.agent_content, blueprint_run_id = EXCLUDED.blueprint_run_id
+		ON CONFLICT (conversation_id) DO UPDATE SET agent_content = EXCLUDED.agent_content, blueprint_run_id = EXCLUDED.blueprint_run_id
 	`, uuid.New().String(), orgID, runID, entityID, blueprintRun, agentContent, time.Now().UTC())
 	return err
 }
@@ -108,7 +108,7 @@ func updateRunMemoryHumanContent(ctx context.Context, q queryer, orgID, runID, c
 		humanContent = content
 	}
 	res, err := q.ExecContext(ctx,
-		`UPDATE run_memory SET human_content = $1 WHERE org_id = $2 AND run_id = $3`,
+		`UPDATE run_memory SET human_content = $1 WHERE org_id = $2 AND conversation_id = $3`,
 		humanContent, orgID, runID,
 	)
 	if err != nil {
@@ -122,16 +122,16 @@ func updateRunMemoryHumanContent(ctx context.Context, q queryer, orgID, runID, c
 		// what matters.
 		var exists int
 		err := q.QueryRowContext(ctx,
-			`SELECT 1 FROM run_memory WHERE org_id = $1 AND run_id = $2 LIMIT 1`,
+			`SELECT 1 FROM run_memory WHERE org_id = $1 AND conversation_id = $2 LIMIT 1`,
 			orgID, runID,
 		).Scan(&exists)
 		switch err {
 		case nil:
 			// Row exists; UPDATE was a no-op.
 		case sql.ErrNoRows:
-			memoryLog.Warn("no run_memory row; human_content not recorded", "run_id", runID)
+			memoryLog.Warn("no run_memory row; human_content not recorded", "conversation_id", runID)
 		default:
-			memoryLog.Warn("verify run_memory row after no-op human_content update failed", "run_id", runID, "error", err)
+			memoryLog.Warn("verify run_memory row after no-op human_content update failed", "conversation_id", runID, "error", err)
 		}
 	}
 	return nil
@@ -151,10 +151,10 @@ func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID,
 
 func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string) ([]domain.TaskMemory, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT rm.id, rm.run_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
+		SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
 		FROM run_memory rm
 		WHERE rm.org_id = $1
-		  AND rm.run_id IN (SELECT run_id FROM run_memory_entities WHERE org_id = $1 AND entity_id = $2)
+		  AND rm.conversation_id IN (SELECT conversation_id FROM run_memory_entities WHERE org_id = $1 AND entity_id = $2)
 		ORDER BY rm.created_at ASC
 	`, orgID, entityID)
 	if err != nil {
@@ -188,11 +188,11 @@ func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, 
 		return nil, nil
 	}
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT rm.id, rm.run_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
+		SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
 		FROM run_memory rm
-		JOIN runs r ON r.id = rm.run_id AND r.org_id = rm.org_id
+		JOIN conversations r ON r.id = rm.conversation_id AND r.org_id = rm.org_id
 		WHERE rm.org_id = $1
-		  AND rm.run_id IN (SELECT run_id FROM run_memory_entities WHERE org_id = $1 AND entity_id = $2)
+		  AND rm.conversation_id IN (SELECT conversation_id FROM run_memory_entities WHERE org_id = $1 AND entity_id = $2)
 		  AND (r.visibility = 'org' OR (r.visibility = 'team' AND r.team_id = NULLIF($3, '')::uuid))
 		ORDER BY rm.created_at DESC
 		LIMIT $4
@@ -220,11 +220,11 @@ func reverseTaskMemories(mems []domain.TaskMemory) {
 
 func getMemoriesForEntityTeamScoped(ctx context.Context, q queryer, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT rm.id, rm.run_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
+		SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
 		FROM run_memory rm
-		JOIN runs r ON r.id = rm.run_id AND r.org_id = rm.org_id
+		JOIN conversations r ON r.id = rm.conversation_id AND r.org_id = rm.org_id
 		WHERE rm.org_id = $1
-		  AND rm.run_id IN (SELECT run_id FROM run_memory_entities WHERE org_id = $1 AND entity_id = $2)
+		  AND rm.conversation_id IN (SELECT conversation_id FROM run_memory_entities WHERE org_id = $1 AND entity_id = $2)
 		  AND (r.visibility = 'org' OR (r.visibility = 'team' AND r.team_id = NULLIF($3, '')::uuid))
 		ORDER BY rm.created_at ASC
 	`, orgID, entityID, teamID)
@@ -263,9 +263,9 @@ const memoryRoleRankCASE = "(CASE %s WHEN 'primary' THEN 3 WHEN 'produced' THEN 
 
 func (s *taskMemoryStore) RecordEntityTouchSystem(ctx context.Context, orgID, runID, entityID, role string) error {
 	query := `
-		INSERT INTO run_memory_entities (org_id, run_id, entity_id, role, created_at)
+		INSERT INTO run_memory_entities (org_id, conversation_id, entity_id, role, created_at)
 		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (run_id, entity_id) DO UPDATE SET role = EXCLUDED.role
+		ON CONFLICT (conversation_id, entity_id) DO UPDATE SET role = EXCLUDED.role
 		WHERE ` + fmt.Sprintf(memoryRoleRankCASE, "EXCLUDED.role") + ` > ` + fmt.Sprintf(memoryRoleRankCASE, "run_memory_entities.role")
 	_, err := s.admin.ExecContext(ctx, query, orgID, runID, entityID, role, time.Now().UTC())
 	return err
@@ -276,9 +276,9 @@ func (s *taskMemoryStore) CountMemoriesForEntitySystem(ctx context.Context, orgI
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM run_memory rm
-		JOIN runs r ON r.id = rm.run_id AND r.org_id = rm.org_id
+		JOIN conversations r ON r.id = rm.conversation_id AND r.org_id = rm.org_id
 		WHERE rm.org_id = $1
-		  AND rm.run_id IN (SELECT run_id FROM run_memory_entities WHERE org_id = $1 AND entity_id = $2)
+		  AND rm.conversation_id IN (SELECT conversation_id FROM run_memory_entities WHERE org_id = $1 AND entity_id = $2)
 		  AND (r.visibility = 'org' OR (r.visibility = 'team' AND r.team_id = NULLIF($3, '')::uuid))
 	`, orgID, entityID, teamID).Scan(&n)
 	return n, err

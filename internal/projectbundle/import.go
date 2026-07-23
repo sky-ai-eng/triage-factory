@@ -87,13 +87,18 @@ func (r *countingReader) Read(p []byte) (int, error) {
 //
 // Ordering: files are extracted to their final org-scoped locations
 // FIRST (they're invisible until the project row commits, and the
-// rollbackTracker removes them on any failure), then every DB write
-// runs inside ONE claims-bound WithTx — so Postgres RLS gates the
+// rollbackTracker removes them on any failure), then the project + repo
+// writes run inside ONE claims-bound WithTx — so Postgres RLS gates the
 // inserts under the importing user's identity, and the tx never holds
-// a claims-bound pool connection through multi-GiB zip extraction.
+// a claims-bound pool connection through multi-GiB zip extraction. The
+// curator conversation state (conversation + claims + messages) restores
+// AFTER that tx through the admin-pool curatorStore door — claims have no
+// app-pool write — with a best-effort project delete unwinding the commit
+// if the restore fails.
 func Import(
 	ctx context.Context,
 	txr db.TxRunner,
+	curatorStore db.CuratorStore,
 	kb *kbstore.Store,
 	orgID, teamID, userID string,
 	readerAt io.ReaderAt,
@@ -205,6 +210,13 @@ func Import(
 		}
 	}
 
+	// Decode the curator conversation state up front (cheap, bounded) so a
+	// malformed bundle fails before any DB write.
+	bundleConv, bundleClaims, bundleMsgs, err := decodeCuratorState(entries, newProjectID, newSessionID, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	var project *domain.Project
 	if err := txr.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		if err := ensureUniqueProjectName(ctx, tx.Projects, orgID, manifest.Project.Name); err != nil {
@@ -215,28 +227,17 @@ func Import(
 			ID:               newProjectID,
 			Name:             strings.TrimSpace(manifest.Project.Name),
 			Description:      manifest.Project.Description,
-			CuratorSessionID: newSessionID,
 			PinnedRepos:      pinned,
 			JiraProjectKey:   manifest.Project.JiraProjectKey,
 			LinearProjectKey: manifest.Project.LinearProjectKey,
 		}); err != nil {
 			return fmt.Errorf("insert imported project: %w", err)
 		}
-
-		requestIDMap, err := importCuratorRequests(ctx, tx.Curator, orgID, newProjectID, entries[curatorRequestsPath])
-		if err != nil {
-			return err
-		}
-		if err := importCuratorMessages(ctx, tx.Curator, orgID, requestIDMap, entries[curatorMessagesPath]); err != nil {
-			return err
-		}
-		if err := importPendingContext(ctx, tx.Curator, orgID, newProjectID, newSessionID, requestIDMap, entries[curatorPendingContextPath]); err != nil {
-			return err
-		}
 		if err := trackImportedRepos(ctx, tx, orgID, teamID, manifest.Project.PinnedRepos, cloneURLs); err != nil {
 			return err
 		}
 
+		var err error
 		project, err = tx.Projects.Get(ctx, orgID, newProjectID)
 		if err != nil {
 			return fmt.Errorf("load imported project: %w", err)
@@ -247,6 +248,22 @@ func Import(
 		return nil
 	}); err != nil {
 		return nil, nil, err
+	}
+
+	// Restore the curator conversation after the project committed: claims
+	// have no app-pool write door, so this rides the admin-pool System
+	// method. A failure unwinds the just-committed project (cascade removes
+	// any partial conversation state) so the import stays all-or-nothing
+	// from the caller's perspective.
+	if bundleConv != nil {
+		if err := curatorStore.ImportConversationStateSystem(ctx, orgID, *bundleConv, bundleClaims, bundleMsgs); err != nil {
+			if delErr := txr.WithTx(context.WithoutCancel(ctx), orgID, userID, func(tx db.TxStores) error {
+				return tx.Projects.Delete(ctx, orgID, newProjectID)
+			}); delErr != nil {
+				bundleLog.Warn("rollback: delete imported project after curator restore failure failed", "project", newProjectID, "error", delErr)
+			}
+			return nil, nil, fmt.Errorf("restore curator conversation: %w", err)
+		}
 	}
 	committed = true
 
@@ -362,101 +379,76 @@ func preflightPinnedRepos(ctx context.Context, pinned []string, probe GitHubProb
 	return cloneURLs, nil
 }
 
-// importCuratorRequests restores curator history into the new project.
-// Runs inside the caller's WithTx: creator_user_id stamps to the
-// importing user and team_id snapshots from the destination project row
-// (TFAC-476) inside CuratorStore.ImportRequest.
-func importCuratorRequests(ctx context.Context, curator db.CuratorStore, orgID, projectID string, zf *zip.File) (map[string]string, error) {
-	idMap := make(map[string]string)
-	err := decodeZipJSONLines(
-		zf,
+// decodeCuratorState reads the bundle's curator payload — the exported
+// conversation (curator/conversation.json), its claims, and its messages —
+// re-keyed for the destination install: fresh conversation + claim ids,
+// creator/user stamped to the importing user (the original creator is not a
+// user here), the sdk_session_id swapped for the freshly-materialized
+// session, and message claim references remapped (an unknown reference
+// drops to unattributed rather than tripping the FK). Returns a nil
+// conversation when the bundle carries no curator payload.
+func decodeCuratorState(entries map[string]*zip.File, projectID, newSessionID, userID string) (*domain.Conversation, []domain.Claim, []domain.AgentMessage, error) {
+	convFile, ok := entries[curatorConversationPath]
+	if !ok {
+		return nil, nil, nil, nil
+	}
+	body, err := readZipFileLimited(convFile, maxImportJSONLEntryBytes)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var conv domain.Conversation
+	if err := json.Unmarshal(body, &conv); err != nil {
+		return nil, nil, nil, fmt.Errorf("decode %s: %w", curatorConversationPath, err)
+	}
+	conv.ID = uuid.New().String()
+	conv.ProjectID = projectID
+	conv.CreatorUserID = userID
+	conv.SessionID = newSessionID
+
+	claimIDMap := make(map[string]string)
+	var claims []domain.Claim
+	if err := decodeZipJSONLines(
+		entries[curatorClaimsPath],
 		maxImportJSONLEntryBytes,
 		maxImportJSONLRows,
-		func(row domain.CuratorRequest) error {
+		func(row domain.Claim) error {
 			oldID := strings.TrimSpace(row.ID)
 			if oldID == "" {
 				return nil
 			}
-			newID := idMap[oldID]
+			newID := claimIDMap[oldID]
 			if newID == "" {
 				newID = uuid.New().String()
-				idMap[oldID] = newID
+				claimIDMap[oldID] = newID
 			}
 			row.ID = newID
-			row.ProjectID = projectID
-			if err := curator.ImportRequest(ctx, orgID, row); err != nil {
-				return fmt.Errorf("insert curator_request %s: %w", oldID, err)
-			}
+			row.ConversationID = conv.ID
+			claims = append(claims, row)
 			return nil
 		},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("decode %s: %w", curatorRequestsPath, err)
+	); err != nil {
+		return nil, nil, nil, fmt.Errorf("decode %s: %w", curatorClaimsPath, err)
 	}
-	return idMap, nil
-}
 
-func importCuratorMessages(ctx context.Context, curator db.CuratorStore, orgID string, requestIDMap map[string]string, zf *zip.File) error {
-	err := decodeZipJSONLines(
-		zf,
+	var msgs []domain.AgentMessage
+	if err := decodeZipJSONLines(
+		entries[curatorMessagesPath],
 		maxImportJSONLEntryBytes,
 		maxImportJSONLRows,
-		func(row domain.CuratorMessage) error {
-			requestID := requestIDMap[row.RequestID]
-			if requestID == "" {
-				return fmt.Errorf("curator message references unknown request_id %q", row.RequestID)
-			}
-			row.RequestID = requestID
+		func(row domain.AgentMessage) error {
 			row.ID = 0 // let the destination DB assign the message id
-			if _, err := curator.InsertMessage(ctx, orgID, &row); err != nil {
-				return fmt.Errorf("insert curator_message for request %s: %w", row.RequestID, err)
+			row.RunID = conv.ID
+			if row.UserID != "" {
+				row.UserID = userID
 			}
+			row.ClaimID = claimIDMap[row.ClaimID]
+			msgs = append(msgs, row)
 			return nil
 		},
-	)
-	if err != nil {
-		return fmt.Errorf("decode %s: %w", curatorMessagesPath, err)
+	); err != nil {
+		return nil, nil, nil, fmt.Errorf("decode %s: %w", curatorMessagesPath, err)
 	}
-	return nil
-}
-
-func importPendingContext(
-	ctx context.Context,
-	curator db.CuratorStore,
-	orgID string,
-	projectID string,
-	newSessionID string,
-	requestIDMap map[string]string,
-	zf *zip.File,
-) error {
-	err := decodeZipJSONLines(
-		zf,
-		maxImportJSONLEntryBytes,
-		maxImportJSONLRows,
-		func(row domain.CuratorPendingContext) error {
-			if strings.TrimSpace(newSessionID) == "" {
-				return errors.New("bundle has pending context rows but no session payload")
-			}
-			if row.ConsumedByRequestID != "" {
-				mapped := requestIDMap[row.ConsumedByRequestID]
-				if mapped == "" {
-					return fmt.Errorf("pending context references unknown consumed_by_request_id %q", row.ConsumedByRequestID)
-				}
-				row.ConsumedByRequestID = mapped
-			}
-			row.ProjectID = projectID
-			row.CuratorSessionID = newSessionID
-			row.ID = 0
-			if err := curator.ImportPendingContext(ctx, orgID, row); err != nil {
-				return fmt.Errorf("insert pending context row: %w", err)
-			}
-			return nil
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("decode %s: %w", curatorPendingContextPath, err)
-	}
-	return nil
+	return &conv, claims, msgs, nil
 }
 
 // trackImportedRepos materializes the imported project's pinned repos —

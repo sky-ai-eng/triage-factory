@@ -1,0 +1,301 @@
+package curator
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// corruptProject breaks the project row so BeginTurn fails permanently (the
+// pinned_repos JSON no longer parses) — the poisoned-input shape the
+// dead-letter cap exists for.
+func corruptProject(t *testing.T, database *sql.DB, projectID string) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE projects SET pinned_repos = 'not-json' WHERE id = ?`, projectID); err != nil {
+		t.Fatalf("corrupt project: %v", err)
+	}
+}
+
+func healProject(t *testing.T, database *sql.DB, projectID string) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE projects SET pinned_repos = '[]' WHERE id = ?`, projectID); err != nil {
+		t.Fatalf("heal project: %v", err)
+	}
+}
+
+// waitForClaims polls until the conversation has exactly n claims, all
+// released, and returns them.
+func waitForClaims(t *testing.T, stores db.Stores, convID string, n int) []domain.Claim {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		claims, err := stores.Curator.ListClaims(context.Background(), runmode.LocalDefaultOrgID, convID)
+		if err != nil {
+			t.Fatalf("list claims: %v", err)
+		}
+		if len(claims) == n && (n == 0 || claims[n-1].ReleasedAt != nil) {
+			return claims
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("claims = %d (last released=%v), want %d released", len(claims), len(claims) > 0 && claims[len(claims)-1].ReleasedAt != nil, n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestDispatch_BeginTurnFailureCapDeadLetters pins the retry cap: a turn
+// whose BeginTurn fails permanently is retried up to the cap and then
+// dead-lettered — delivered out of the claimable scan, its final claim
+// released failed with the give-up error — instead of looping forever and
+// leaking a zero-message failed claim per scan.
+func TestDispatch_BeginTurnFailureCapDeadLetters(t *testing.T) {
+	database := newTestDB(t)
+	projectID := seedProject(t, database, "poisoned")
+	corruptProject(t, database, projectID)
+	stores := sqlitestore.New(database)
+	c := New(stores, nil, "claude-sonnet-4-6")
+	c.SetTurnMaxAttempts(2)
+	c.SetTurnRetryDelay(time.Millisecond)
+	t.Cleanup(c.Shutdown)
+
+	var agentRan atomic.Bool
+	c.runAgent = func(context.Context, agentproc.RunOptions, agentproc.Sink) (*agentproc.Outcome, error) {
+		agentRan.Store(true)
+		return nil, errors.New("must never run for a turn that can't begin")
+	}
+
+	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+	reqID, err := c.SendMessage(t.Context(), projectID, org, user, "hi")
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	conv, err := stores.Curator.GetLiveConversation(t.Context(), org, projectID, user)
+	if err != nil || conv == nil {
+		t.Fatalf("get conversation: %v (%v)", conv, err)
+	}
+
+	// The ONLY feed is the in-process send: every subsequent pickup must be
+	// the session's own retry — the claim loop's handed-off dedup skips a
+	// still-claimable turn, and local mode has no loop at all, so anything
+	// beyond one claim here proves the self-retry engine is the driver.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		status, errMsg := turnState(t, stores, projectID, reqID)
+		if status == "failed" {
+			if !strings.Contains(errMsg, "curator turn failed 2 times, giving up") || !strings.Contains(errMsg, "begin turn") {
+				t.Fatalf("dead-letter error = %q, want the give-up message carrying the last error", errMsg)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status = %q, want failed (dead-lettered)", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	claims := waitForClaims(t, stores, conv.ID, 3)
+	final := claims[2]
+	if final.Outcome != "failed" || !strings.Contains(final.Error, "giving up") {
+		t.Errorf("final claim = %+v, want the dead-letter release", final)
+	}
+	// Terminal for good: the message left the claimable set.
+	if inFlight, err := stores.Curator.InFlightTurn(t.Context(), org, projectID, user); err != nil || inFlight != nil {
+		t.Errorf("InFlightTurn after dead-letter = %+v (err=%v), want nil", inFlight, err)
+	}
+	if agentRan.Load() {
+		t.Error("agent ran for a turn that never began")
+	}
+}
+
+// TestDispatch_TransientBeginTurnFailureRetries pins the other half of the
+// cap's contract: one failed pickup must not retire the turn — a re-feed
+// after the fault clears runs the turn normally.
+func TestDispatch_TransientBeginTurnFailureRetries(t *testing.T) {
+	database := newTestDB(t)
+	projectID := seedProject(t, database, "transient")
+	corruptProject(t, database, projectID)
+	stores := sqlitestore.New(database)
+	c := New(stores, nil, "claude-sonnet-4-6")
+	c.SetTurnRetryDelay(10 * time.Millisecond)
+	t.Cleanup(c.Shutdown)
+
+	var agentRan atomic.Bool
+	c.runAgent = func(context.Context, agentproc.RunOptions, agentproc.Sink) (*agentproc.Outcome, error) {
+		agentRan.Store(true)
+		return nil, errors.New("stub failure")
+	}
+
+	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+	reqID, err := c.SendMessage(t.Context(), projectID, org, user, "hi")
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	conv, err := stores.Curator.GetLiveConversation(t.Context(), org, projectID, user)
+	if err != nil || conv == nil {
+		t.Fatalf("get conversation: %v (%v)", conv, err)
+	}
+	waitForClaims(t, stores, conv.ID, 1)
+
+	// The fault clears; the session's own retry must dispatch normally
+	// (reach the agent) rather than dead-letter — no manual re-feed.
+	healProject(t, database, projectID)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		status, errMsg := turnState(t, stores, projectID, reqID)
+		if status == "failed" && agentRan.Load() {
+			if strings.Contains(errMsg, "giving up") {
+				t.Fatalf("transient failure dead-lettered: %q", errMsg)
+			}
+			if !strings.Contains(errMsg, "stub failure") {
+				t.Fatalf("retried turn error = %q, want the agent stub's", errMsg)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status = %q agentRan = %v, want a retried turn reaching the agent", status, agentRan.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestFailQueued_RacedCancelSettlesCancelled pins the raced-cancel gate: a
+// turn cancelled (its queued row deleted) between an admission error and
+// failQueued's pickup must stay cancelled — the mint skips the withdrawn
+// row, so no claim exists for a 'failed' release to land on.
+func TestFailQueued_RacedCancelSettlesCancelled(t *testing.T) {
+	database := newTestDB(t)
+	projectID := seedProject(t, database, "raced-cancel")
+	stores := sqlitestore.New(database)
+	c := New(stores, nil, "")
+	t.Cleanup(c.Shutdown)
+
+	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+	var convID string
+	var msgID int64
+	if err := stores.Tx.SyntheticClaimsWithTx(t.Context(), org, user, func(ts db.TxStores) error {
+		conv, err := ts.Curator.GetOrCreateConversation(t.Context(), org, projectID, user)
+		if err != nil {
+			return err
+		}
+		convID = conv.ID
+		msgID, err = ts.Curator.EnqueueUserMessage(t.Context(), org, conv.ID, user, "doomed")
+		return err
+	}); err != nil {
+		t.Fatalf("seed turn: %v", err)
+	}
+
+	// The raced cancel: the queued row is withdrawn before failQueued runs.
+	if err := stores.Tx.SyntheticClaimsWithTx(t.Context(), org, user, func(ts db.TxStores) error {
+		deleted, err := ts.Curator.DeleteQueuedTurn(t.Context(), org, convID, msgID)
+		if err == nil && !deleted {
+			return errors.New("queued row not deleted")
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("cancel queued turn: %v", err)
+	}
+
+	s := &projectSession{curator: c, projectID: projectID, orgID: org, ctx: context.Background()}
+	s.failQueued(queueItem{
+		conversationID: convID,
+		messageID:      msgID,
+		requestID:      turnRequestID(msgID),
+		orgID:          org,
+		creatorUserID:  user,
+	}, "turn admission: gate exploded")
+
+	claims, err := stores.Curator.ListClaims(t.Context(), org, convID)
+	if err != nil {
+		t.Fatalf("list claims: %v", err)
+	}
+	if len(claims) != 0 {
+		t.Errorf("claims = %+v, want none — a withdrawn turn's pickup must leave zero writes, and failed must not overwrite a raced cancel", claims)
+	}
+}
+
+// TestCancelProject_DrainsQueuedTurnAndStopsRetry pins the force-stop
+// contract: a project cancelled while a BeginTurn-failure retry is pending
+// must not be resurrectable — the queued row is drained, the pending timer
+// observes the torn-down session and never re-feeds, and no fresh session or
+// second pickup appears afterwards.
+func TestCancelProject_DrainsQueuedTurnAndStopsRetry(t *testing.T) {
+	database := newTestDB(t)
+	projectID := seedProject(t, database, "force-stopped")
+	corruptProject(t, database, projectID)
+	stores := sqlitestore.New(database)
+	c := New(stores, nil, "claude-sonnet-4-6")
+	c.SetTurnRetryDelay(20 * time.Millisecond)
+	t.Cleanup(c.Shutdown)
+
+	var agentRan atomic.Bool
+	c.runAgent = func(context.Context, agentproc.RunOptions, agentproc.Sink) (*agentproc.Outcome, error) {
+		agentRan.Store(true)
+		return nil, errors.New("must never run for a force-stopped project")
+	}
+
+	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+	if _, err := c.SendMessage(t.Context(), projectID, org, user, "doomed"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	conv, err := stores.Curator.GetLiveConversation(t.Context(), org, projectID, user)
+	if err != nil || conv == nil {
+		t.Fatalf("get conversation: %v (%v)", conv, err)
+	}
+
+	// Catch the first failed pickup with a tight poll: CancelProject must
+	// land inside the retry-pacing window so exactly one pickup ever runs.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		claims, err := stores.Curator.ListClaims(context.Background(), org, conv.ID)
+		if err != nil {
+			t.Fatalf("list claims: %v", err)
+		}
+		if len(claims) == 1 && claims[0].ReleasedAt != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("claims = %d, want the first pickup released", len(claims))
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	c.CancelProject(org, projectID, "team archived")
+
+	// Long enough for the pending timer (and several would-be retry cycles)
+	// to have fired.
+	time.Sleep(150 * time.Millisecond)
+
+	claims, err := stores.Curator.ListClaims(context.Background(), org, conv.ID)
+	if err != nil {
+		t.Fatalf("list claims: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Errorf("claims = %d, want 1 — no pickup may follow the force-stop", len(claims))
+	}
+	msgs, err := stores.Curator.ListConversationMessages(context.Background(), org, conv.ID)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	for _, m := range msgs {
+		if m.Delivered != nil && !*m.Delivered {
+			t.Errorf("undelivered row %d survived the drain — the turn is still claimable", m.ID)
+		}
+	}
+	if inFlight, err := stores.Curator.InFlightTurn(context.Background(), org, projectID, user); err != nil || inFlight != nil {
+		t.Errorf("InFlightTurn after force-stop = %+v (err=%v), want nil", inFlight, err)
+	}
+	if c.HasLiveSession(projectID) {
+		t.Error("a session goroutine exists after CancelProject — the retry re-fed a torn-down project")
+	}
+	if agentRan.Load() {
+		t.Error("agent ran for a force-stopped project")
+	}
+}

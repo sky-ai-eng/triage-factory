@@ -2,7 +2,6 @@ package delegate
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"testing"
 
@@ -91,32 +90,33 @@ func TestSpawnerExecutorIdentityIndependentPerInstance(t *testing.T) {
 }
 
 // TestStampExecutor_WritesExecutorID is the acceptance check for "a live run
-// stamps executor_id": stampExecutor writes the wired instance id onto the
-// row — and an unwired spawner (no SetExecutorID) stamps NULL, never a
-// fabricated id.
+// stamps executor_id": stampExecutor confirms the wired instance id on the
+// conversation's active claim — and an unwired spawner (no SetExecutorID)
+// leaves the conversation unclaimed, never claiming under a fabricated id.
 func TestStampExecutor_WritesExecutorID(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-exec", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	// Unwired: the stamp must bind NULL (empty string is nullIfEmpty'd),
-	// not invent an identity.
+	// Unwired: the empty id releases rather than mints, so no active claim
+	// may exist — an invented identity would show up here.
 	s.stampExecutor(runmode.LocalDefaultOrgID, "r-exec")
-	var got sql.NullString
-	if err := database.QueryRow(`SELECT executor_id FROM runs WHERE id='r-exec'`).Scan(&got); err != nil {
-		t.Fatalf("read executor_id: %v", err)
+	var active int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM claims WHERE conversation_id='r-exec' AND released_at IS NULL`).Scan(&active); err != nil {
+		t.Fatalf("count active claims: %v", err)
 	}
-	if got.Valid {
-		t.Errorf("executor_id = %v, want NULL from an unwired spawner", got)
+	if active != 0 {
+		t.Errorf("active claims = %d, want 0 from an unwired spawner", active)
 	}
 
 	s.SetExecutorID("persistent-registry-id", 5)
 	s.stampExecutor(runmode.LocalDefaultOrgID, "r-exec")
-	if err := database.QueryRow(`SELECT executor_id FROM runs WHERE id='r-exec'`).Scan(&got); err != nil {
-		t.Fatalf("read executor_id: %v", err)
+	var got string
+	if err := database.QueryRow(`SELECT executor_id FROM claims WHERE conversation_id='r-exec' AND released_at IS NULL`).Scan(&got); err != nil {
+		t.Fatalf("read active claim executor_id: %v", err)
 	}
-	if !got.Valid || got.String != "persistent-registry-id" {
-		t.Errorf("executor_id = %v, want the wired registry id", got)
+	if got != "persistent-registry-id" {
+		t.Errorf("executor_id = %q, want the wired registry id", got)
 	}
 }
 
@@ -331,7 +331,7 @@ func TestNoteCapSaturationTransitions(t *testing.T) {
 		t.Error("blocked acquire with an empty queue must not open a saturation episode")
 	}
 
-	if _, err := database.Exec(`UPDATE runs SET status = 'queued' WHERE id = ?`, run0); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'queued' WHERE id = ?`, run0); err != nil {
 		t.Fatalf("force queued: %v", err)
 	}
 	s.noteCapAcquireBlocked(ctx, 4)

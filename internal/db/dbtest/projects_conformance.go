@@ -87,7 +87,6 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 		input := domain.Project{
 			Name:             "Round-Trip",
 			Description:      "spec body",
-			CuratorSessionID: "sess-abc",
 			PinnedRepos:      []string{"octo/widget", "octo/api"},
 			JiraProjectKey:   "SKY",
 			LinearProjectKey: "LIN",
@@ -102,9 +101,6 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 		}
 		if got.Name != input.Name || got.Description != input.Description {
 			t.Errorf("name/desc mismatch: %+v", got)
-		}
-		if got.CuratorSessionID != input.CuratorSessionID {
-			t.Errorf("CuratorSessionID = %q, want %q", got.CuratorSessionID, input.CuratorSessionID)
 		}
 		if got.JiraProjectKey != "SKY" || got.LinearProjectKey != "LIN" {
 			t.Errorf("project keys mismatch: jira=%q linear=%q", got.JiraProjectKey, got.LinearProjectKey)
@@ -206,7 +202,6 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 		updated.Description = "after"
 		updated.PinnedRepos = []string{"x/y", "z/w"}
 		updated.JiraProjectKey = "SKY"
-		updated.CuratorSessionID = "sess-2"
 		if err := s.Update(ctx, orgID, updated); err != nil {
 			t.Fatalf("Update: %v", err)
 		}
@@ -217,7 +212,7 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 		if !reflect.DeepEqual(got.PinnedRepos, []string{"x/y", "z/w"}) {
 			t.Errorf("PinnedRepos = %v, want [x/y z/w]", got.PinnedRepos)
 		}
-		if got.JiraProjectKey != "SKY" || got.CuratorSessionID != "sess-2" {
+		if got.JiraProjectKey != "SKY" {
 			t.Errorf("optional fields not written: %+v", got)
 		}
 		if !got.UpdatedAt.After(before.UpdatedAt) && !got.UpdatedAt.Equal(before.UpdatedAt) {

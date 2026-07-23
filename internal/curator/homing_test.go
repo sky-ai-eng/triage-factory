@@ -2,7 +2,6 @@ package curator
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
@@ -205,13 +204,22 @@ func TestSendMessage_ForwardsToHomeExecutor(t *testing.T) {
 	if len(doorbells) != 1 || doorbells[0] != "curator_new" {
 		t.Fatalf("expected one curator_new doorbell, got %v", doorbells)
 	}
-	// The row is stamped with the home executor.
-	var home sql.NullString
-	if err := database.QueryRow(`SELECT home_instance_id FROM curator_requests WHERE id = ?`, reqID).Scan(&home); err != nil {
-		t.Fatalf("read back row: %v", err)
+	// The durable delivery exists: an undelivered user message on the
+	// sender's conversation, and the project is homed to the executor —
+	// exactly what the home's claim-loop scan keys on.
+	var delivered bool
+	if err := database.QueryRow(`SELECT delivered FROM messages WHERE id = ?`, reqID).Scan(&delivered); err != nil {
+		t.Fatalf("read back turn: %v", err)
 	}
-	if home.String != "e1" {
-		t.Fatalf("home_instance_id = %q, want e1", home.String)
+	if delivered {
+		t.Fatal("forwarded turn must stay undelivered until the home executor claims it")
+	}
+	home, err := stores.CuratorHomes.Get(t.Context(), runmode.LocalDefaultOrgID, projectID)
+	if err != nil || home == nil {
+		t.Fatalf("read curator home: %v (home=%v)", err, home)
+	}
+	if home.HomeInstanceID != "e1" {
+		t.Fatalf("curator home = %q, want e1", home.HomeInstanceID)
 	}
 }
 
@@ -237,13 +245,17 @@ func TestSendMessage_NoExecutorFailsFast(t *testing.T) {
 	if err != ErrNoCuratorExecutor {
 		t.Fatalf("err = %v, want ErrNoCuratorExecutor", err)
 	}
-	// No row created — nothing can run it, so nothing to show or sweep.
+	// No turn recorded — nothing can run it, so nothing to show or sweep.
 	var n int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM curator_requests WHERE project_id = ?`, projectID).Scan(&n); err != nil {
+	if err := database.QueryRow(`
+		SELECT COUNT(*) FROM messages m
+		JOIN conversations c ON c.id = m.conversation_id
+		WHERE c.project_id = ?
+	`, projectID).Scan(&n); err != nil {
 		t.Fatalf("count rows: %v", err)
 	}
 	if n != 0 {
-		t.Fatalf("no row should be created when no executor is available, got %d", n)
+		t.Fatalf("no turn should be recorded when no executor is available, got %d", n)
 	}
 }
 

@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -23,9 +26,10 @@ import (
 // coherent.
 //
 // The per-project goroutine processes each turn under the requesting
-// user's identity (curator_requests.creator_user_id), wrapping every
-// store call in stores.Tx.SyntheticClaimsWithTx so multi-mode RLS
-// policies on (org_id, creator_user_id) gate the writes.
+// user's identity (the conversation's creator), wrapping every message
+// write in stores.Tx.SyntheticClaimsWithTx so multi-mode RLS gates the
+// rows through the conversation's private-visibility arm; claim writes
+// ride the admin-pool System doors.
 type Curator struct {
 	stores db.Stores
 	wsHub  *websocket.Hub
@@ -52,10 +56,17 @@ type Curator struct {
 	// (curator homing, spec §6.3). Wired ONLY on multi-mode control pods
 	// (SetHoming); nil on local / role=all / executor, where SendMessage runs
 	// in-process on this pod exactly as before. selfID is this pod's instance
-	// id — the home stamped when a turn runs in-process (so the ownership-scoped
-	// boot sweep can find it).
+	// id, used only to compute forward (home != self).
 	homer  *Homer
 	selfID string
+
+	// executorID/bootEpoch are this process's persistent instance-registry
+	// identity (SetExecutorIdentity), stamped onto every claims row a
+	// dispatch mints so the engagement is attributed to the process that ran
+	// it and the ownership-scoped boot sweep can find its own strays. Empty
+	// in tests — claims then carry the '' sentinel.
+	executorID string
+	bootEpoch  int64
 
 	// doorbell publishes a cross-pod tf_ctl notification (SetDoorbell). Wired on
 	// control pods to nudge the home executor's claim loop ("curator_new") and
@@ -73,6 +84,24 @@ type Curator struct {
 	// (not a delegate import) to avoid a dependency cycle, exactly how admitTurn
 	// avoids importing delegate.
 	bringUpTurnSandbox BringUpTurnSandboxFunc
+
+	// turnRetryDelay paces the session's own re-feed after a BeginTurn
+	// failure — the one failure class that leaves the turn queued with
+	// nothing else driving it (the executor claim loop's handed-off dedup
+	// only clears once a pickup mints a claim, and local mode has no loop
+	// at all). Small enough to feel responsive, large enough that a hard
+	// DB outage doesn't spin the mint/fail cycle.
+	turnRetryDelay time.Duration
+
+	// turnMaxAttempts caps how many failed pickups (claim minted, BeginTurn
+	// failed, claim released 'failed' with the message still undelivered) a
+	// queued turn may accumulate before dispatch dead-letters it instead of
+	// feeding it into another doomed cycle — without the cap, a permanent
+	// BeginTurn failure (e.g. a corrupt project row) loops forever, leaking
+	// one zero-message failed claim per scan. Defaults to
+	// DefaultTurnMaxAttempts; SetTurnMaxAttempts overrides from
+	// TF_CURATOR_TURN_MAX_ATTEMPTS at app wiring.
+	turnMaxAttempts int
 
 	// admitTurn gates one turn's execution through the host's shared agent
 	// capacity — in production the delegation spawner's AcquireTurnSlot, so a
@@ -102,25 +131,81 @@ type Curator struct {
 	closed bool
 }
 
-// New constructs a Curator. Call
-// stores.Curator.CancelOrphanedNonTerminalRequests at startup
-// before constructing — see main.go wiring.
+// New constructs a Curator. Run the boot recovery sweep
+// (stores.Curator.CancelOrphanedTurnsSystem, or the ownership-scoped
+// CancelStrandedTurnsForHomeSystem on multi split roles) before
+// constructing — see the app wiring.
 //
 // stores carries the Tx runner (for SyntheticClaimsWithTx wraps), the
-// CuratorStore (per-turn writes plus the admin-pool …System cancel
-// variants the system-driven cleanup paths use), the ProjectStore
-// (session-id bookkeeping), the PromptStore (skill materialization),
-// and the RepoStore (pinned-repo materialization). Every row read/write
-// the curator issues now goes through a claims-bound tx or an
-// admin-pool door, so no raw *sql.DB handle is retained (TFAC-64).
+// CuratorStore (per-turn message writes plus the admin-pool …System claim
+// doors), the AgentRunStore (transcript inserts), the PromptStore (skill
+// materialization), and the RepoStore (pinned-repo materialization). Every
+// row read/write the curator issues goes through a claims-bound tx or an
+// admin-pool door, so no raw *sql.DB handle is retained.
 func New(stores db.Stores, wsHub *websocket.Hub, model string) *Curator {
 	return &Curator{
-		stores:   stores,
-		wsHub:    wsHub,
-		model:    model,
-		sessions: make(map[string]*projectSession),
-		runAgent: agentproc.Run,
+		stores:          stores,
+		wsHub:           wsHub,
+		model:           model,
+		sessions:        make(map[string]*projectSession),
+		runAgent:        agentproc.Run,
+		turnMaxAttempts: DefaultTurnMaxAttempts,
+		turnRetryDelay:  DefaultTurnRetryDelay,
 	}
+}
+
+// DefaultTurnMaxAttempts is the failed-pickup budget a queued turn gets
+// before dispatch dead-letters it. Distinct from the delegation side's
+// TF_RUN_MAX_ATTEMPTS: this caps repeated BeginTurn failures on one turn's
+// message, not executor-loss re-claims.
+const DefaultTurnMaxAttempts = 3
+
+// DefaultTurnRetryDelay paces the self-retry after a failed BeginTurn.
+const DefaultTurnRetryDelay = 5 * time.Second
+
+// ParseTurnMaxAttempts parses TF_CURATOR_TURN_MAX_ATTEMPTS. Empty maps to
+// DefaultTurnMaxAttempts; anything else must parse as a positive integer.
+// Mirrors reaper.ParseMaxAttempts (TF_RUN_MAX_ATTEMPTS).
+func ParseTurnMaxAttempts(raw string) (int, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return DefaultTurnMaxAttempts, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid TF_CURATOR_TURN_MAX_ATTEMPTS=%q (want a positive integer)", raw)
+	}
+	return n, nil
+}
+
+// SetTurnMaxAttempts overrides the dead-letter cap. Called once at app
+// wiring with the ParseTurnMaxAttempts result.
+func (c *Curator) SetTurnMaxAttempts(n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.turnMaxAttempts = n
+}
+
+// getTurnMaxAttempts returns the cap under the lock, matching getSecrets'
+// race-free accessor shape.
+func (c *Curator) getTurnMaxAttempts() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.turnMaxAttempts
+}
+
+// SetTurnRetryDelay overrides the BeginTurn-failure re-feed pacing (tests
+// shrink it to keep the retry cycle fast).
+func (c *Curator) SetTurnRetryDelay(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.turnRetryDelay = d
+}
+
+func (c *Curator) getTurnRetryDelay() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.turnRetryDelay
 }
 
 // SetRunCredentialResolvers wires the per-org run-credential seam: the GitHub
@@ -190,6 +275,24 @@ func (c *Curator) getLLMResolver() func(context.Context, string) (map[string]str
 	return c.llmResolve
 }
 
+// SetExecutorIdentity wires this process's persistent instance-registry
+// identity, stamped onto every claims row a dispatch mints. Called once at
+// startup on every pod that builds a curator.
+func (c *Curator) SetExecutorIdentity(id string, bootEpoch int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.executorID = id
+	c.bootEpoch = bootEpoch
+}
+
+// getExecutorIdentity returns the wired identity under the lock, matching
+// getSecrets' race-free accessor shape.
+func (c *Curator) getExecutorIdentity() (string, int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.executorID, c.bootEpoch
+}
+
 // SetHoming wires the curator homing seam (spec §6.3): the Homer that resolves
 // a project's home executor and this pod's instance id. Called once at startup
 // on a multi-mode control pod only — where a chat POST lands but the turn must
@@ -232,10 +335,12 @@ type TurnSandbox interface {
 }
 
 // BringUpTurnSandboxFunc stands up a homed curator turn's sandbox before the
-// turn runs. Its shape matches Spawner.BringUpCuratorSandbox, which returns
-// (nil, nil) on every non-executor role and unwired fixture — the caller then
-// keeps the in-process path.
-type BringUpTurnSandboxFunc func(ctx context.Context, orgID, requestID, userID, teamID string, pinnedRepos []string) (TurnSandbox, error)
+// turn runs, keyed by the conversation id (the claim-credentials channel's
+// key — one active turn per conversation, so it also names the per-turn
+// network/socket uniquely). Its shape matches Spawner.BringUpCuratorSandbox,
+// which returns (nil, nil) on every non-executor role and unwired fixture —
+// the caller then keeps the in-process path.
+type BringUpTurnSandboxFunc func(ctx context.Context, orgID, conversationID, userID, teamID string, pinnedRepos []string) (TurnSandbox, error)
 
 // SetTurnSandbox wires the executor-side turn-sandbox bring-up — the
 // delegation spawner's BringUpCuratorSandbox. Called once at startup on a
@@ -389,29 +494,36 @@ func (c *Curator) getSecrets() agentproc.SecretsReader {
 // queueItem carries everything the per-project goroutine needs to
 // dispatch a turn under the requesting user's identity. orgID +
 // creatorUserID are captured at enqueue time (SendMessage's handler
-// context) so the goroutine doesn't have to read the curator_requests
-// row again just to figure out who to bill the writes to — that read
-// would itself need claims set under Postgres RLS, creating a chicken-
-// and-egg problem.
+// context, or the claim loop's scan projection) so the goroutine doesn't
+// have to read rows again just to figure out who to bill the writes to —
+// that read would itself need claims set under Postgres RLS, creating a
+// chicken-and-egg problem. requestID is messageID rendered decimal — the
+// turn id on the wire.
 type queueItem struct {
-	requestID     string
-	orgID         string
-	creatorUserID string
+	conversationID string
+	messageID      int64
+	requestID      string
+	orgID          string
+	creatorUserID  string
 }
 
-// SendMessage records the user's input as a queued curator_request,
-// hands it to the project's goroutine, and returns the request id.
-// The HTTP handler returns 202 + this id; the per-project goroutine
-// flips status to running on pickup and to terminal on completion.
+// turnRequestID renders a turn's user-message id as the wire request id.
+func turnRequestID(messageID int64) string {
+	return strconv.FormatInt(messageID, 10)
+}
+
+// SendMessage records the user's input as an undelivered user message on the
+// sender's live curator conversation (minting the conversation on first
+// contact), hands the turn to the project's goroutine, and returns the turn
+// id — the message id as a decimal string. The HTTP handler returns 202 +
+// this id; the per-project goroutine claims the turn on pickup and releases
+// the claim on completion.
 //
-// orgID + creatorUserID identify the requesting user — every write
-// the goroutine produces for this turn (running flip, agent stream
-// messages, pending-context consume/finalize/revert, terminal status)
-// runs inside Stores.Tx.SyntheticClaimsWithTx with these claims set
-// so multi-mode RLS attributes the rows correctly. In local mode the
-// handler passes runmode.LocalDefaultOrgID + LocalDefaultUserID; the
-// D9 sweep will replace those with values from request
-// context.
+// orgID + creatorUserID identify the requesting user — every message write
+// the goroutine produces for this turn runs inside
+// Stores.Tx.SyntheticClaimsWithTx with these claims set so multi-mode RLS
+// attributes the rows correctly (claim writes ride the admin-pool System
+// doors instead — tf_app cannot write claims).
 //
 // The user's content is required (empty/whitespace-only is rejected
 // at the handler before reaching us); the project must exist
@@ -423,98 +535,130 @@ type queueItem struct {
 // races Shutdown either (a) wins the lock first and gets a session
 // that Shutdown then tears down — the session ctx kills the dispatch
 // before it spawns claude — or (b) loses the lock and gets nil back,
-// in which case the persisted row is flipped to cancelled before we
-// return. Either way, no message reaches a non-running goroutine.
+// in which case the queued message is deleted before we return (it never
+// entered context). Either way, no message reaches a non-running goroutine.
 func (c *Curator) SendMessage(ctx context.Context, projectID, orgID, creatorUserID, content string) (string, error) {
-	// Resolve where this turn executes before minting the row so the home is
-	// stamped atomically at creation (curator homing, spec §6.3). local /
-	// role=all / no-homer leaves it "" (the untouched in-process path); a
-	// capless control pod with no eligible executor fails fast rather than
-	// creating a row that can never run.
-	homeInstanceID, mode := c.resolveHome(ctx, orgID, projectID)
+	// Resolve where this turn executes before minting the row (curator
+	// homing, spec §6.3) — the Homer upserts the durable curator_homes
+	// mapping the executor claim loop scans against. local / role=all /
+	// no-homer runs in-process; a capless control pod with no eligible
+	// executor fails fast rather than queueing a turn that can never run.
+	_, mode := c.resolveHome(ctx, orgID, projectID)
 	if mode == homeUnavailable {
 		return "", ErrNoCuratorExecutor
 	}
 
-	var requestID string
+	var (
+		conversationID string
+		messageID      int64
+	)
 	if err := c.stores.Tx.SyntheticClaimsWithTx(ctx, orgID, creatorUserID, func(ts db.TxStores) error {
-		id, err := ts.Curator.CreateRequest(ctx, orgID, projectID, creatorUserID, homeInstanceID, content)
+		conv, err := ts.Curator.GetOrCreateConversation(ctx, orgID, projectID, creatorUserID)
 		if err != nil {
 			return err
 		}
-		requestID = id
+		if conv == nil {
+			return errors.New("conversation mint returned nothing")
+		}
+		conversationID = conv.ID
+		id, err := ts.Curator.EnqueueUserMessage(ctx, orgID, conv.ID, creatorUserID, content)
+		if err != nil {
+			return err
+		}
+		messageID = id
 		return nil
 	}); err != nil {
-		return "", fmt.Errorf("create curator request: %w", err)
+		return "", fmt.Errorf("enqueue curator turn: %w", err)
 	}
+	requestID := turnRequestID(messageID)
 
 	if mode == homeForward {
 		// Homed to a remote executor — do NOT run a session on this control
-		// pod. The durable queued row (home_instance_id = the executor) IS the
-		// delivery; the doorbell just nudges the home's claim loop so it need
-		// not wait for its backstop poll. Output streams back to this browser
-		// over the WS backplane from wherever the turn runs, so nothing else is
-		// needed here.
+		// pod. The durable undelivered message IS the delivery; the doorbell
+		// just nudges the home's claim loop so it need not wait for its
+		// backstop poll. Output streams back to this browser over the WS
+		// backplane from wherever the turn runs, so nothing else is needed
+		// here.
 		c.broadcastRequestUpdate(orgID, projectID, requestID, "queued")
 		c.ringDoorbell("curator_new", orgID, projectID)
 		return requestID, nil
 	}
 
+	item := queueItem{
+		conversationID: conversationID,
+		messageID:      messageID,
+		requestID:      requestID,
+		orgID:          orgID,
+		creatorUserID:  creatorUserID,
+	}
+
 	session := c.getOrStartSession(orgID, projectID)
 	if session == nil {
-		// Best-effort cancel via the admin-pool …System door — the
-		// "curator is shut down" path runs from the handler goroutine
-		// (not the per-project goroutine) with no synthetic-claims tx in
-		// scope, so the RLS-gated app pool would reject the UPDATE and
-		// leave the freshly created row dangling. WithoutCancel so a
-		// canceled/timed-out request ctx can't skip the terminal
-		// write — that would re-introduce the dangling row. TFAC-64.
-		_, _ = c.stores.Curator.MarkRequestCancelledIfActiveSystem(context.WithoutCancel(ctx), orgID, requestID, "curator is shut down")
+		// A queued turn that will never run must not linger as a phantom
+		// undelivered row — delete it (it never entered context), exactly the
+		// queued-cancel semantic. WithoutCancel so a canceled/timed-out
+		// request ctx can't skip the cleanup.
+		c.deleteQueuedTurn(context.WithoutCancel(ctx), item)
 		return "", errors.New("curator is shut down")
 	}
 
-	item := queueItem{requestID: requestID, orgID: orgID, creatorUserID: creatorUserID}
 	select {
 	case session.queue <- item:
 		c.broadcastRequestUpdate(orgID, projectID, requestID, "queued")
 		return requestID, nil
 	default:
-		// Queue is full — should not happen at the per-project depth
-		// we configure, but if it ever does, fail the row up-front
-		// rather than blocking the HTTP handler. Admin-pool …System door
-		// for the same no-claims reason as the shutdown path above;
-		// WithoutCancel so a canceled request ctx can't skip the
-		// terminal write and strand the row in `queued`. TFAC-64.
-		_, _ = c.stores.Curator.CompleteRequestSystem(context.WithoutCancel(ctx), orgID, requestID, "failed", "curator queue full", 0, 0, 0)
+		// Queue is full — should not happen at the per-project depth we
+		// configure, but if it ever does, drop the row up-front rather than
+		// blocking the HTTP handler (or leaving an undelivered message the
+		// in-process path would never revisit).
+		c.deleteQueuedTurn(context.WithoutCancel(ctx), item)
 		c.broadcastRequestUpdate(orgID, projectID, requestID, "failed")
 		return "", errors.New("curator queue is full")
 	}
 }
 
-// EnqueueClaimed feeds an already-created curator_requests row (claimed off the
-// home executor's claim loop, spec §6.3) into its per-project session goroutine
-// — the executor-side counterpart of SendMessage's in-process enqueue, minus
-// the row creation (the control pod already minted the row and stamped the
-// home). Returns true when the turn was handed to a session; false when the
-// curator is shut down or the per-project queue is momentarily full, so the
-// claim loop leaves the row queued and retries on its next scan.
+// deleteQueuedTurn best-effort removes a queued turn's undelivered user
+// message under the requesting user's claims — the shared fallback for the
+// shutdown / queue-full paths where the turn can never run.
+func (c *Curator) deleteQueuedTurn(ctx context.Context, item queueItem) {
+	if err := c.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
+		_, err := ts.Curator.DeleteQueuedTurn(ctx, item.orgID, item.conversationID, item.messageID)
+		return err
+	}); err != nil {
+		curatorLog.Warn("delete queued turn failed", "request", item.requestID, "error", err)
+	}
+}
+
+// EnqueueClaimed feeds a claimable turn (scanned off the home executor's
+// claim loop, spec §6.3) into its per-project session goroutine — the
+// executor-side counterpart of SendMessage's in-process enqueue, minus the
+// row creation (the control pod already recorded the undelivered message).
+// Returns true when the turn was handed to a session; false when the curator
+// is shut down or the per-project queue is momentarily full, so the claim
+// loop leaves the turn queued and retries on its next scan.
 //
-// Idempotency: feeding the same request twice is safe — the second dispatch's
-// MarkRequestRunning sees a non-queued row (sql.ErrNoRows) and returns without
-// re-running the agent — so a duplicated doorbell or a scan/mark race never
-// double-executes a turn.
-func (c *Curator) EnqueueClaimed(orgID, projectID, requestID, creatorUserID string) bool {
+// Idempotency: feeding the same turn twice is safe — the second dispatch's
+// claim mint skips (the first engagement is still live, or already
+// delivered the message) and returns without re-running the agent — so a
+// duplicated doorbell or a scan race never double-executes a turn.
+func (c *Curator) EnqueueClaimed(orgID, projectID, conversationID string, messageID int64, creatorUserID string) bool {
 	session := c.getOrStartSession(orgID, projectID)
 	if session == nil {
 		return false // curator shut down
 	}
-	item := queueItem{requestID: requestID, orgID: orgID, creatorUserID: creatorUserID}
+	item := queueItem{
+		conversationID: conversationID,
+		messageID:      messageID,
+		requestID:      turnRequestID(messageID),
+		orgID:          orgID,
+		creatorUserID:  creatorUserID,
+	}
 	select {
 	case session.queue <- item:
-		c.broadcastRequestUpdate(orgID, projectID, requestID, "queued")
+		c.broadcastRequestUpdate(orgID, projectID, item.requestID, "queued")
 		return true
 	default:
-		return false // queue full — leave the row queued for the next scan
+		return false // queue full — leave the turn queued for the next scan
 	}
 }
 
@@ -579,20 +723,21 @@ func (c *Curator) InFlightProjectCount(projectIDs []string) int {
 	return n
 }
 
-// CancelProject is the project-teardown hook: cancel any in-flight
-// request, drain queued requests to cancelled (so the project doesn't
-// have ghost queued rows), and stop the goroutine so nothing runs after
-// the teardown.
+// CancelProject is the project-teardown hook: cancel any in-flight turn and
+// stop the goroutine so nothing runs after the teardown.
 //
-// reason is recorded on the cancelled rows' error_msg and surfaced in
-// the cancellation broadcast — "project deleted" for the project-delete
-// path, "team archived" for the team-archive force-stop (TFAC-448) — so
-// the audit trail distinguishes the two.
+// reason is recorded on the released claim's error and surfaced in the
+// cancellation broadcast — "project deleted" for the project-delete path,
+// "team archived" for the team-archive force-stop (TFAC-448) — so the audit
+// trail distinguishes the two.
 //
-// Called BEFORE the projects DELETE (delete path) so the FK cascade
-// doesn't race a still-running goroutine. The DB cascade (curator_requests
-// → curator_messages) takes care of row removal once the project row is
-// dropped.
+// Called BEFORE the projects DELETE (delete path) so the FK cascade doesn't
+// race a still-running goroutine. Delivered history removal is the cascade's
+// job once the project row drops (projects → conversations →
+// messages/claims), but queued turns are drained HERE rather than left to
+// it: the team-archive force-stop keeps the project row, and an undrained
+// queued turn stays claimable — the executor claim loop or a pending retry
+// timer would resurrect work for a project that was just force-stopped.
 //
 // orgID is the project's owning tenant, threaded through to
 // broadcast events so the cancellation toast/update only reaches
@@ -608,15 +753,21 @@ func (c *Curator) CancelProject(orgID, projectID, reason string) {
 	if ok {
 		session.shutdown(reason)
 	}
-	// Drain queued rows at the DB level so the FK cascade on project delete
-	// doesn't leave behind status confusion (catches rows homed to executors
-	// too — QueuedRequestsForProjectSystem is org-scoped, not home-scoped).
-	c.cancelQueuedRows(orgID, projectID, reason)
+
+	// The force-stop drain, after the session teardown so the dispatch can't
+	// re-enqueue behind it. Background ctx: teardown fires outside any
+	// request/JWT context, and the drain spans every creator's conversation,
+	// which only the admin-pool System door reaches.
+	if n, err := c.stores.Curator.DeleteQueuedTurnsForProjectSystem(context.Background(), orgID, projectID); err != nil {
+		curatorLog.Warn("drain queued curator turns on project teardown failed", "org", orgID, "project", projectID, "error", err)
+	} else if n > 0 {
+		curatorLog.Info("drained queued curator turns on project teardown", "org", orgID, "project", projectID, "count", n)
+	}
 
 	// Curator homing (spec §6.3): when the live session lives on a remote
 	// executor, the local session teardown above is a no-op — route a cross-pod
 	// cancel so the home executor SIGKILLs its subprocess promptly rather than
-	// running the turn to completion against a row the FK cascade is about to
+	// running the turn to completion against rows the FK cascade is about to
 	// delete. Then drop the home mapping so it can't outlive the project (no FK
 	// to projects — curator_homes is placement coordination).
 	c.ringDoorbell("curator_cancel", orgID, projectID)
@@ -628,9 +779,10 @@ func (c *Curator) CancelProject(orgID, projectID, reason string) {
 // Shutdown stops every per-project goroutine and rejects further
 // SendMessage calls. Called from main.go on graceful shutdown so
 // in-flight CC subprocesses are SIGKILLed before the process exits.
-// In-flight rows land as cancelled with reason "process shutting
-// down"; queued rows are not resumed by the next process and will
-// instead be cancelled on restart by orphaned-request cleanup.
+// In-flight claims release as cancelled with reason "process shutting
+// down"; still-queued turns stay durable undelivered messages — the boot
+// sweep releases only stranded claims, and a queued turn is re-claimed
+// (multi) or cancellable by the user (local) after restart.
 func (c *Curator) Shutdown() {
 	c.mu.Lock()
 	c.closed = true
@@ -640,46 +792,6 @@ func (c *Curator) Shutdown() {
 
 	for _, s := range sessions {
 		s.shutdown("process shutting down")
-	}
-}
-
-// cancelQueuedRows flips never-picked-up queued curator_requests for a
-// project to cancelled. Called from CancelProject (handler-side) and
-// from the fallback path in SendMessage when the curator is shut down.
-//
-// Only `queued` rows are drained — `running` rows are covered by two
-// orthogonal paths that both complete before this runs: the startup
-// sweep (CancelOrphanedNonTerminalRequests) retires a previous
-// process's in-flight rows, and CancelProject's session.shutdown waits
-// (<-s.done) for the goroutine to mark the current in-flight row
-// terminal before this drain fires. So no `running` row is observable
-// here.
-//
-// System-driven cancel: there is no live request/JWT context here (the
-// rows may have been enqueued by any user, possibly in a previous
-// process), so both the list and the per-row cancel route through the
-// admin-pool …System doors. Under multi-mode RLS the app pool would
-// hide the queued rows from the SELECT and reject the UPDATE, leaving
-// them dangling past the project FK cascade. The row already records
-// its creator (creator_user_id) for audit; a system cancel isn't a user
-// action, so it doesn't reconstruct per-user claims. orgID scopes the
-// admin-pool query. TFAC-64.
-func (c *Curator) cancelQueuedRows(orgID, projectID, reason string) {
-	ctx := context.Background()
-	queued, err := c.stores.Curator.QueuedRequestsForProjectSystem(ctx, orgID, projectID)
-	if err != nil {
-		curatorLog.Warn("list queued requests failed", "project", projectID, "error", err)
-		return
-	}
-	for _, req := range queued {
-		flipped, err := c.stores.Curator.MarkRequestCancelledIfActiveSystem(ctx, orgID, req.ID, reason)
-		if err != nil {
-			curatorLog.Warn("cancel queued request failed", "request", req.ID, "error", err)
-			continue
-		}
-		if flipped {
-			c.broadcastRequestUpdate(orgID, projectID, req.ID, "cancelled")
-		}
 	}
 }
 

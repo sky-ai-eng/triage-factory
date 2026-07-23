@@ -32,15 +32,15 @@ func TestResumeOpenRun_ValidationGuards(t *testing.T) {
 		mutate  string // SQL to blank the field under test
 		wantSub string
 	}{
-		{"no session", `UPDATE runs SET session_id = NULL WHERE id = ?`, "session id"},
-		{"no worktree", `UPDATE runs SET worktree_path = NULL WHERE id = ?`, "worktree path"},
-		{"no model", `UPDATE runs SET model = NULL WHERE id = ?`, "model"},
+		{"no session", `UPDATE conversations SET sdk_session_id = NULL WHERE id = ?`, "session id"},
+		{"no worktree", `UPDATE conversations SET worktree_path = NULL WHERE id = ?`, "worktree path"},
+		{"no model", `UPDATE conversations SET model = NULL WHERE id = ?`, "model"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			database := newDelegateTestDB(t)
 			seedRun(t, database, "r-guard", "sess", "/tmp/wt")
-			if _, err := database.Exec(`UPDATE runs SET status='open' WHERE id='r-guard'`); err != nil {
+			if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-guard'`); err != nil {
 				t.Fatalf("open: %v", err)
 			}
 			if _, err := database.Exec(tc.mutate, "r-guard"); err != nil {
@@ -62,7 +62,7 @@ func TestResumeOpenRun_ValidationGuards(t *testing.T) {
 func TestResumeOpenRun_NotResumable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-term", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='finish' WHERE id='r-term'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish' WHERE id='r-term'`); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
@@ -82,7 +82,7 @@ func TestResumeOpenRun_NotResumable(t *testing.T) {
 func TestResumeOpenRun_EnqueuesRatherThanSpawning(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-wake", "sess-wake", "/tmp/does-not-exist-wake")
-	if _, err := database.Exec(`UPDATE runs SET status='open' WHERE id='r-wake'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-wake'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -92,7 +92,7 @@ func TestResumeOpenRun_EnqueuesRatherThanSpawning(t *testing.T) {
 	}
 
 	var status string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-wake'`).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-wake'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status != "queued" {
@@ -125,7 +125,7 @@ func TestResumeOpenRun_EnqueuesRatherThanSpawning(t *testing.T) {
 func TestResumeOpenRun_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-ab", "sess-ab", "/tmp/wt-ab")
-	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='abort' WHERE id='r-ab'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort' WHERE id='r-ab'`); err != nil {
 		t.Fatalf("completed+abort: %v", err)
 	}
 	bpr := blueprintRunIDForRun(t, database, "r-ab")
@@ -177,7 +177,7 @@ func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-deliver", "sess-deliver", "/tmp/does-not-exist-deliver")
-	if _, err := database.Exec(`UPDATE runs SET status='open' WHERE id='r-deliver'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-deliver'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -196,7 +196,7 @@ func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 	// The run left `queued`/`open` — delivery was attempted (and failed
 	// fast here for lack of a warm worktree/snapshot, landing terminal).
 	var status string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-deliver'`).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-deliver'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status == "queued" || status == "open" {
@@ -227,7 +227,7 @@ func TestDispatchResumeClaim_WorkspaceFailureFinalizesBlueprint(t *testing.T) {
 	bpr := blueprintRunIDForRun(t, database, run)
 	wireBlobStore(t, s)
 	putTestSnapshot(t, s, bpr) // garbage blob: passes Exists, fails rehydrate
-	if _, err := database.Exec(`UPDATE runs SET status='open', worktree_path='/tmp/does-not-exist-open-strand' WHERE id=?`, run); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path='/tmp/does-not-exist-open-strand' WHERE id=?`, run); err != nil {
 		t.Fatalf("park open: %v", err)
 	}
 
@@ -258,7 +258,7 @@ func TestResumeOpenRun_ExpiredWorkspaceRefusedAtEnqueue(t *testing.T) {
 	s, database, run, _ := setupAdvanceFixture(t, "expired")
 	bpr := blueprintRunIDForRun(t, database, run)
 	wireBlobStore(t, s) // storage present but empty: no snapshot to recover from
-	if _, err := database.Exec(`UPDATE runs SET status='open', worktree_path='/tmp/does-not-exist-expired' WHERE id=?`, run); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path='/tmp/does-not-exist-expired' WHERE id=?`, run); err != nil {
 		t.Fatalf("park open: %v", err)
 	}
 
@@ -268,18 +268,18 @@ func TestResumeOpenRun_ExpiredWorkspaceRefusedAtEnqueue(t *testing.T) {
 	}
 
 	var status string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id=?`, run).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id=?`, run).Scan(&status); err != nil {
 		t.Fatalf("read run status: %v", err)
 	}
 	if status != "open" {
 		t.Errorf("run status = %q after refused wake; want unchanged 'open'", status)
 	}
 	var pending int
-	if err := database.QueryRow(`SELECT count(*) FROM run_pending_input WHERE run_id=?`, run).Scan(&pending); err != nil {
+	if err := database.QueryRow(`SELECT count(*) FROM messages WHERE conversation_id=? AND delivered=0`, run).Scan(&pending); err != nil {
 		t.Fatalf("count pending input: %v", err)
 	}
 	if pending != 0 {
-		t.Errorf("run_pending_input rows = %d after refused wake; want 0 (no side effect)", pending)
+		t.Errorf("undelivered message rows = %d after refused wake; want 0 (no side effect)", pending)
 	}
 	var bpStatus string
 	if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id=?`, bpr).Scan(&bpStatus); err != nil {

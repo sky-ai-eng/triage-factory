@@ -9,19 +9,20 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestDispatch_AdmissionHoldsTurnQueued pins the gate's position in the turn
-// lifecycle: a turn waiting on admission stays visibly 'queued', never
-// reaches the agent, and a cancel during the wait lands the row cancelled —
-// the wait must not burn a capacity slot or strand the row.
+// lifecycle: a turn waiting on admission stays visibly 'queued' (an
+// undelivered user message, no claim), never reaches the agent, and a cancel
+// during the wait lands the turn cancelled — the wait must not burn a
+// capacity slot or strand the turn.
 func TestDispatch_AdmissionHoldsTurnQueued(t *testing.T) {
 	database := newTestDB(t)
 	projectID := seedProject(t, database, "gated")
-	c := New(sqlitestore.New(database), nil, "")
+	stores := sqlitestore.New(database)
+	c := New(stores, nil, "")
 	t.Cleanup(c.Shutdown)
 
 	var agentRan atomic.Bool
@@ -39,34 +40,28 @@ func TestDispatch_AdmissionHoldsTurnQueued(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	// While the gate holds the turn, the row must sit in 'queued'.
+	// While the gate holds the turn, it must sit queued.
 	time.Sleep(100 * time.Millisecond)
-	got, err := db.GetCuratorRequest(database, reqID)
-	if err != nil {
-		t.Fatalf("get request: %v", err)
-	}
-	if got.Status != "queued" {
-		t.Fatalf("status while gated = %q, want queued", got.Status)
+	if status, _ := turnState(t, stores, projectID, reqID); status != "queued" {
+		t.Fatalf("status while gated = %q, want queued", status)
 	}
 	if agentRan.Load() {
 		t.Fatal("agent ran while the admission gate held the turn")
 	}
 
-	// A cancel during the wait must land the row cancelled. Retried in a
-	// loop because CancelLocal is a no-op in the narrow window before the
-	// session goroutine arms the in-flight cancel handle.
+	// A cancel during the wait must land the turn cancelled (its undelivered
+	// message deleted — it never entered context). Retried in a loop because
+	// CancelLocal is a no-op in the narrow window before the session
+	// goroutine arms the in-flight cancel handle.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		c.CancelLocal(projectID)
-		got, err = db.GetCuratorRequest(database, reqID)
-		if err != nil {
-			t.Fatalf("get request: %v", err)
-		}
-		if got.Status == "cancelled" {
+		status, _ := turnState(t, stores, projectID, reqID)
+		if status == "cancelled" {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("status after cancel = %q, want cancelled", got.Status)
+			t.Fatalf("status after cancel = %q, want cancelled", status)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -77,12 +72,13 @@ func TestDispatch_AdmissionHoldsTurnQueued(t *testing.T) {
 
 // TestDispatch_AdmissionFailureIsLegible pins the error attribution: a gate
 // that fails for a reason OTHER than the turn's ctx (a miswire, an internal
-// error) must land the row 'failed' carrying the gate's own error — not
+// error) must land the turn 'failed' carrying the gate's own error — not
 // 'cancelled', which would pin the failure on the user and mask it.
 func TestDispatch_AdmissionFailureIsLegible(t *testing.T) {
 	database := newTestDB(t)
 	projectID := seedProject(t, database, "broken-gate")
-	c := New(sqlitestore.New(database), nil, "")
+	stores := sqlitestore.New(database)
+	c := New(stores, nil, "")
 	t.Cleanup(c.Shutdown)
 
 	var agentRan atomic.Bool
@@ -101,21 +97,18 @@ func TestDispatch_AdmissionFailureIsLegible(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		got, gerr := db.GetCuratorRequest(database, reqID)
-		if gerr != nil {
-			t.Fatalf("get request: %v", gerr)
-		}
-		if got.Status == "failed" {
-			if !strings.Contains(got.ErrorMsg, "gate exploded") {
-				t.Fatalf("error_msg = %q, want the gate's own error surfaced", got.ErrorMsg)
+		status, errMsg := turnState(t, stores, projectID, reqID)
+		if status == "failed" {
+			if !strings.Contains(errMsg, "gate exploded") {
+				t.Fatalf("claim error = %q, want the gate's own error surfaced", errMsg)
 			}
 			break
 		}
-		if got.Status == "cancelled" {
-			t.Fatalf("gate failure written as cancelled (error_msg = %q), want failed", got.ErrorMsg)
+		if status == "cancelled" {
+			t.Fatalf("gate failure written as cancelled (error = %q), want failed", errMsg)
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("status = %q, want failed", got.Status)
+			t.Fatalf("status = %q, want failed", status)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -131,7 +124,8 @@ func TestDispatch_AdmissionFailureIsLegible(t *testing.T) {
 func TestDispatch_AdmittedTurnRunsAndReleases(t *testing.T) {
 	database := newTestDB(t)
 	projectID := seedProject(t, database, "admitted")
-	c := New(sqlitestore.New(database), nil, "claude-sonnet-4-6")
+	stores := sqlitestore.New(database)
+	c := New(stores, nil, "claude-sonnet-4-6")
 	t.Cleanup(c.Shutdown)
 
 	var agentRan, released atomic.Bool
@@ -151,20 +145,17 @@ func TestDispatch_AdmittedTurnRunsAndReleases(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var last string
 	for {
-		got, gerr := db.GetCuratorRequest(database, reqID)
-		if gerr != nil {
-			t.Fatalf("get request: %v", gerr)
-		}
-		last = got.ErrorMsg
-		if got.Status == "failed" && released.Load() {
+		status, errMsg := turnState(t, stores, projectID, reqID)
+		last = errMsg
+		if status == "failed" && released.Load() {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("status = %q released = %v, want failed + released (error_msg = %q)", got.Status, released.Load(), got.ErrorMsg)
+			t.Fatalf("status = %q released = %v, want failed + released (error = %q)", status, released.Load(), errMsg)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !agentRan.Load() {
-		t.Fatalf("admitted turn never reached the agent (error_msg = %q)", last)
+		t.Fatalf("admitted turn never reached the agent (error = %q)", last)
 	}
 }

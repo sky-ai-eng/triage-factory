@@ -7,9 +7,9 @@ import (
 )
 
 // EncodeStringSliceBaseline serializes a pinned_repos snapshot for
-// storage in curator_pending_context.baseline_value. Caller is the
-// projects PATCH handler; the curator runtime reads it back via
-// decodeStringSlice. Always returns a JSON array string ("[]" for
+// storage in a pending 'injection:context' message's metadata
+// baseline_value. Caller is the projects PATCH handler; the curator
+// runtime reads it back via decodeStringSlice. Always returns a JSON array string ("[]" for
 // nil/empty), never an empty string — the column is NOT NULL.
 func EncodeStringSliceBaseline(values []string) (string, error) {
 	if values == nil {

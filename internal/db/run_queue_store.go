@@ -108,11 +108,12 @@ type RunQueueStore interface {
 	RequeueRun(ctx context.Context, orgID, runID, lastErr string) error
 
 	// ResetProcessingRuns is the boot reconcile sweep: every run left
-	// mid-flight by a crash (claimed/running/setup statuses — non-terminal and
-	// non-dormant, but not already 'queued') is flipped back to 'queued' so the
-	// dispatcher re-claims and re-runs it. Dormant runs (open,
-	// pending_approval) are intentionally left parked — they resume through
-	// their own paths, not the queue. attempts is retained (mirrors
+	// mid-flight by a crash (status='running' — claimed, whether mid-setup
+	// or executing; setup progress is claim phase, not status) is flipped
+	// back to 'queued' so the dispatcher re-claims and re-runs it. Dormant
+	// runs (open, pending_approval) are intentionally left parked — they
+	// resume through their own paths, not the queue. attempts is retained
+	// (mirrors
 	// EventQueue.ResetProcessing) so a run that keeps hard-crashing the process
 	// eventually fails out rather than crash-looping the boot.
 	//
@@ -125,19 +126,21 @@ type RunQueueStore interface {
 	// still-live process owns. Returns the count reset.
 	ResetProcessingRuns(ctx context.Context, executorID string, bootEpoch int64) (int, error)
 
-	// MarkAwaitingCredentials flips a freshly-claimed run (status=
-	// 'running', stamped by ClaimNextRun) to status='awaiting_credentials'
+	// MarkAwaitingCredentials parks a freshly-claimed run's ACTIVE claim in
+	// phase='awaiting_credentials' (the conversation stays status='running')
 	// and — Postgres only — fires the tf_ctl cred_request doorbell so the
 	// brain's credential provisioner (internal/credprovision) resolves and
 	// seals this run's bundle without waiting for the backstop sweep.
 	// credPubKey (base64 X25519) is the per-run sidecar public key the
 	// brain seals the bundle to — recorded here, in the same statement as
-	// the status flip, so the provisioner never sees a parked run without
+	// the phase stamp, so the provisioner never sees a parked run without
 	// the key it needs; empty stores NULL (a caller that has no sidecar
-	// key yet). Guarded on 'running' so a stale/duplicate call can't
-	// reopen a run that already moved past this gate — the guard also
-	// keeps a late duplicate from overwriting the key the brain may
-	// already have sealed to. matched is false when the guard didn't hold.
+	// key yet). Guarded on phase IS NULL, which gives the same protection
+	// window the former status='running' guard did: a stale/duplicate call
+	// can't re-park a claim that is already parked or mid-setup, so a late
+	// duplicate never overwrites the key the brain may already have sealed
+	// to. matched is false when the guard didn't hold (no active claim, or
+	// one already carrying a phase).
 	MarkAwaitingCredentials(ctx context.Context, orgID, runID, credPubKey string) (matched bool, err error)
 
 	// GetClaim returns the run's current claim identity (team, claiming
@@ -148,35 +151,35 @@ type RunQueueStore interface {
 	// the time it's handled. Returns ok=false when runID is unknown.
 	GetClaim(ctx context.Context, orgID, runID string) (claim AwaitingCredentialsRun, ok bool, err error)
 
-	// RequeueAwaitingCredentials releases a run parked in status=
-	// 'awaiting_credentials' back to 'queued', clearing ownership — the
-	// executor-side timeout path (TFAC-614). Guarded on
-	// 'awaiting_credentials' so a stale/duplicate timeout can't resurrect
-	// a row that already moved on. Returns matched=false when the guard
-	// didn't hold (bundle arrived just after the deadline check, or the
-	// run was reaped in the meantime).
+	// RequeueAwaitingCredentials releases a run whose active claim is
+	// parked in phase='awaiting_credentials' back to 'queued', clearing
+	// ownership — the executor-side timeout path. Guarded on that parked
+	// claim so a stale/duplicate timeout can't resurrect a row that
+	// already moved on. Returns matched=false when the guard didn't hold
+	// (bundle arrived just after the deadline check, or the run was
+	// reaped in the meantime).
 	RequeueAwaitingCredentials(ctx context.Context, orgID, runID string) (matched bool, err error)
 
-	// ListAwaitingCredentials returns every run currently parked in
-	// status='awaiting_credentials' (TFAC-614) — the brain-side
+	// ListAwaitingCredentials returns every run whose active claim is
+	// currently parked in phase='awaiting_credentials' — the brain-side
 	// provisioner's backstop-sweep input. Primary provisioning happens
 	// synchronously off the executor's cred_request tf_ctl notification;
 	// this recovers any run whose notification the lossy relay dropped.
 	ListAwaitingCredentials(ctx context.Context) ([]AwaitingCredentialsRun, error)
 
-	// ListActiveNeedingCredentialRefresh returns every non-terminal,
-	// actively-running (claimed, not awaiting_credentials) run whose
-	// sealed bundle is older than olderThan (TFAC-614) — the brain-side
-	// refresh sweep's input: GitHub installation tokens are hour-lived,
-	// runs aren't, so a long-running run's git token needs periodic
-	// re-minting.
+	// ListActiveNeedingCredentialRefresh returns every actively-running
+	// run (status='running', active claim not parked in
+	// phase='awaiting_credentials') whose sealed bundle is older than
+	// olderThan — the brain-side refresh sweep's input: GitHub
+	// installation tokens are hour-lived, runs aren't, so a long-running
+	// run's git token needs periodic re-minting.
 	ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan time.Time) ([]AwaitingCredentialsRun, error)
 
 	// FleetQueueShares returns the run-queue occupancy of every org with any
 	// active or queued work, newest-pressure first — the per-org shares the
 	// operator fleet queue view (GET /api/fleet/queue) surfaces and
 	// the claim's fairness ordering acts on. Active counts runs occupying a
-	// live executor slot (status running/awaiting_credentials); Queued counts
+	// live executor slot (status='running'); Queued counts
 	// runs still waiting to be claimed; MaxConcurrentRuns is the org's
 	// configured cap (nil = unlimited, also nil for a non-positive value). An
 	// org with neither active nor queued runs is omitted. Admin-pool,
@@ -194,8 +197,18 @@ type RunQueueStore interface {
 	// forever, keeping the dispatcher on phantom work and pinning its feature
 	// branch in a worktree (any sibling fetch then requeues forever). The atomic
 	// cancel in BlueprintStore.MarkRunStatus prevents the desync going forward;
-	// this heals rows already broken at boot. Cross-org system sweep; returns the
-	// count cancelled.
+	// this heals rows already broken at boot.
+	//
+	// It also runs the two claim-desync janitor arms (Postgres:
+	// healClaimDesyncs; SQLite mirrors them) for the shapes the app-pool
+	// terminal writes can strand — a terminal conversation with a dangling
+	// active claim is released (outcome mapped from status), and an in-flight
+	// delegation conversation with no active claim under a running parent
+	// goes back to 'queued' for re-claim. The leader reaper repeats the same
+	// two arms periodically; here they run at boot in both modes.
+	//
+	// Cross-org system sweep; returns the total count of rows healed across
+	// all arms.
 	ReconcileOrphanedRuns(ctx context.Context) (int, error)
 
 	// CountQueuedSystem returns how many runs are currently in status='queued'
@@ -243,8 +256,9 @@ type RunQueueStore interface {
 type OrgQueueShare struct {
 	OrgID string
 	// Active is the org's runs currently occupying a live executor slot
-	// (status running/awaiting_credentials) — the value the per-org cap and
-	// the fairness ordering compare against.
+	// (status='running' — a claim parked awaiting credentials still holds
+	// its slot) — the value the per-org cap and the fairness ordering
+	// compare against.
 	Active int
 	// Queued is the org's runs still waiting to be claimed.
 	Queued int
@@ -256,7 +270,7 @@ type OrgQueueShare struct {
 }
 
 // AwaitingCredentialsRun is one row from ListAwaitingCredentials /
-// ListActiveNeedingCredentialRefresh (TFAC-614) — the narrow shape the
+// ListActiveNeedingCredentialRefresh / GetClaim — the narrow shape the
 // brain's credential provisioner needs to resolve and seal a run's bundle:
 // enough to look up the org's credentials, the run's authorized repo set
 // (via TeamID), and the key to seal to (CredPubKey, with the claiming

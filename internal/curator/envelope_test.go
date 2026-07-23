@@ -50,7 +50,7 @@ func TestRenderEnvelope_PinnedReposIncludePath(t *testing.T) {
 // TestPendingChangesNote_PinnedRepoDiff covers the basic add/remove
 // rendering — what the agent actually sees in the [system note] block.
 func TestPendingChangesNote_PinnedRepoDiff(t *testing.T) {
-	rows := []domain.CuratorPendingContext{{
+	rows := []domain.CuratorContextChange{{
 		ChangeType:    domain.ChangeTypePinnedRepos,
 		BaselineValue: `["a/b","c/d"]`,
 	}}
@@ -73,7 +73,7 @@ func TestPendingChangesNote_PinnedRepoDiff(t *testing.T) {
 // consume time, which renders as no diff and gets dropped — so the
 // agent isn't told about a "change" that has no observable effect.
 func TestPendingChangesNote_RoundTripSuppressed(t *testing.T) {
-	rows := []domain.CuratorPendingContext{{
+	rows := []domain.CuratorContextChange{{
 		ChangeType:    domain.ChangeTypePinnedRepos,
 		BaselineValue: `["a/b"]`,
 	}}
@@ -100,7 +100,7 @@ func TestPendingChangesNote_TrackerLinkUnlink(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rows := []domain.CuratorPendingContext{{
+			rows := []domain.CuratorContextChange{{
 				ChangeType:    domain.ChangeTypeJiraProjectKey,
 				BaselineValue: tc.baseline,
 			}}

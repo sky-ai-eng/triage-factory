@@ -10,8 +10,11 @@ import (
 )
 
 const (
-	// FormatVersion is the manifest format version.
-	FormatVersion = 1
+	// FormatVersion is the manifest format version. v2 re-keyed the curator
+	// payload onto conversation + claims + messages (the shared-tables data
+	// model); v1 bundles (curator/requests.jsonl et al.) are rejected with
+	// UnsupportedFormatError.
+	FormatVersion = 2
 
 	manifestPath                      = "manifest.yaml"
 	knowledgePrefix                   = "knowledge-base/"
@@ -19,11 +22,11 @@ const (
 	sessionTranscriptPath             = "session/transcript.jsonl"
 	sessionSubagentsPrefix            = "session/subagents/"
 	sessionToolResultsPrefix          = "session/tool-results/"
-	curatorRequestsPath               = "curator/requests.jsonl"
+	curatorConversationPath           = "curator/conversation.json"
+	curatorClaimsPath                 = "curator/claims.jsonl"
 	curatorMessagesPath               = "curator/messages.jsonl"
-	curatorPendingContextPath         = "curator/pending_context.jsonl"
 	defaultExportFilenameSuffix       = ".tfproject"
-	maxManifestBytes            int64 = 4 << 20 // 4MB is ample for v1 metadata.
+	maxManifestBytes            int64 = 4 << 20 // 4MB is ample for the metadata.
 )
 
 var (

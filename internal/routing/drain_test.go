@@ -79,19 +79,18 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 	} else if _, err := store.Blueprints.CreateRun(context.Background(), runmode.LocalDefaultOrgID, br); err != nil {
 		return "", err
 	}
-	stepIdx := 0
-	if err := store.AgentRuns.Create(context.Background(), runmode.LocalDefaultOrgID, domain.AgentRun{
-		ID:                 uuid.New().String(),
-		TaskID:             task.ID,
-		PromptID:           promptID,
-		Status:             "running",
-		Model:              "stub",
-		TriggerType:        opts.TriggerType,
-		TriggerID:          opts.TriggerID,
-		CreatorUserID:      opts.CreatorUserID,
-		BlueprintRunID:     brID,
-		BlueprintStepIndex: &stepIdx,
-	}); err != nil {
+	// Raw insert rather than a store call: conversation rows are minted by
+	// EnqueueRun in production, and this stub runs on drain goroutines where
+	// a testing.TB-based seeding helper can't fail safely.
+	if _, err := database.Exec(`
+		INSERT INTO conversations (id, task_id, prompt_id, status, model, trigger_type, trigger_id,
+			team_id, visibility, creator_user_id, origin, blueprint_run_id, blueprint_step_index)
+		VALUES (?, ?, ?, 'running', 'stub', ?, ?, ?, 'team', ?, 'blueprint', ?, 0)
+	`, uuid.New().String(), task.ID, promptID, opts.TriggerType,
+		sql.NullString{String: opts.TriggerID, Valid: opts.TriggerID != ""},
+		runmode.LocalDefaultTeamID,
+		sql.NullString{String: opts.CreatorUserID, Valid: opts.CreatorUserID != ""},
+		brID); err != nil {
 		return "", err
 	}
 	return brID, nil

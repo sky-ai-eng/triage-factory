@@ -43,7 +43,7 @@ func newTestStores(t *testing.T) (db.Stores, string) {
 	// non-blueprint origin so the parent-pairing CHECKs don't demand a
 	// task/prompt/blueprint chain. org_id/team_id default to the local
 	// sentinels. The artifact only needs run_id to satisfy its FK.
-	if _, err := conn.Exec(`INSERT INTO runs (id, trigger_type, creator_user_id, origin) VALUES ('r1', 'event', NULL, 'interactive')`); err != nil {
+	if _, err := conn.Exec(`INSERT INTO conversations (id, trigger_type, creator_user_id, origin, status) VALUES ('r1', 'event', NULL, 'interactive', 'running')`); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	return sqlitestore.New(conn), "r1"

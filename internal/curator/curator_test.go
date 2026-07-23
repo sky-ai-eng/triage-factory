@@ -1,7 +1,9 @@
 package curator
 
 import (
+	"context"
 	"database/sql"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -38,16 +40,74 @@ func seedProject(t *testing.T, database *sql.DB, name string) string {
 	return id
 }
 
+// turnState derives a turn's wire status + error the way the history
+// handler does — from the user message's delivered flag and the
+// conversation's claims — so tests can poll turn lifecycle without a
+// curator_requests table. A deleted queued message reads as "cancelled"
+// (the queued-cancel semantic).
+func turnState(t *testing.T, stores db.Stores, projectID, requestID string) (status, errMsg string) {
+	t.Helper()
+	ctx := context.Background()
+	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+	conv, err := stores.Curator.GetLiveConversation(ctx, org, projectID, user)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if conv == nil {
+		return "cancelled", ""
+	}
+	msgID, err := strconv.Atoi(requestID)
+	if err != nil {
+		t.Fatalf("parse request id %q: %v", requestID, err)
+	}
+	msgs, err := stores.Curator.ListConversationMessages(ctx, org, conv.ID)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	found := false
+	for _, m := range msgs {
+		if m.ID == msgID {
+			found = true
+			if m.Delivered != nil && !*m.Delivered {
+				return "queued", ""
+			}
+		}
+	}
+	if !found {
+		return "cancelled", ""
+	}
+	claims, err := stores.Curator.ListClaims(ctx, org, conv.ID)
+	if err != nil {
+		t.Fatalf("list claims: %v", err)
+	}
+	if len(claims) == 0 {
+		return "done", ""
+	}
+	last := claims[len(claims)-1]
+	if last.ReleasedAt == nil {
+		return "running", ""
+	}
+	switch last.Outcome {
+	case "completed":
+		return "done", last.Error
+	case "cancelled":
+		return "cancelled", last.Error
+	default:
+		return "failed", last.Error
+	}
+}
+
 // TestCurator_SendMessage_RejectsAfterShutdown pins the contract that
 // downstream HTTP handlers can rely on: once Shutdown has been called,
-// SendMessage refuses the request AND, if a row was already inserted
-// before the closed check (which is the realistic interleaving — DB
-// write happens before getOrStartSession), that row is flipped to
-// cancelled rather than left dangling in `queued`.
+// SendMessage refuses the request AND the user message it recorded before
+// the closed check (which is the realistic interleaving — the DB write
+// happens before getOrStartSession) is deleted rather than left dangling as
+// a phantom queued turn no goroutine will ever pick up.
 func TestCurator_SendMessage_RejectsAfterShutdown(t *testing.T) {
 	database := newTestDB(t)
 	projectID := seedProject(t, database, "p")
-	c := New(sqlitestore.New(database), nil, "")
+	stores := sqlitestore.New(database)
+	c := New(stores, nil, "")
 	c.Shutdown()
 
 	_, err := c.SendMessage(t.Context(), projectID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "hi")
@@ -55,41 +115,19 @@ func TestCurator_SendMessage_RejectsAfterShutdown(t *testing.T) {
 		t.Fatal("expected error after shutdown, got nil")
 	}
 
-	// The row that SendMessage persisted before the closed check
-	// must not be left in `queued` — otherwise it would dangle
-	// forever (no goroutine ever picks it up).
-	requests, err := sqlitestore.New(database).Curator.ListRequestsByProject(t.Context(), runmode.LocalDefaultOrgID, projectID)
+	conv, err := stores.Curator.GetLiveConversation(t.Context(), runmode.LocalDefaultOrgID, projectID, runmode.LocalDefaultUserID)
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatalf("get conversation: %v", err)
 	}
-	if len(requests) != 1 {
-		t.Fatalf("expected 1 request row, got %d", len(requests))
+	if conv == nil {
+		t.Fatal("conversation should have been minted before the closed check")
 	}
-	if requests[0].Status != "cancelled" {
-		t.Errorf("post-shutdown row status = %q, want cancelled", requests[0].Status)
+	msgs, err := stores.Curator.ListConversationMessages(t.Context(), runmode.LocalDefaultOrgID, conv.ID)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
 	}
-}
-
-// TestCurator_CancelProject_FlipsQueuedRows is the project-delete
-// hook: queued rows for the deleted project must land terminal so
-// they aren't left dangling. Verified without spawning agentproc by
-// pre-seeding queued rows directly and checking status post-cancel.
-func TestCurator_CancelProject_FlipsQueuedRows(t *testing.T) {
-	database := newTestDB(t)
-	projectID := seedProject(t, database, "p")
-
-	id1, _ := db.CreateCuratorRequest(database, projectID, "first")
-	id2, _ := db.CreateCuratorRequest(database, projectID, "second")
-
-	c := New(sqlitestore.New(database), nil, "")
-	t.Cleanup(c.Shutdown)
-	c.CancelProject(runmode.LocalDefaultOrgID, projectID, "project deleted")
-
-	for _, id := range []string{id1, id2} {
-		got, _ := db.GetCuratorRequest(database, id)
-		if got.Status != "cancelled" {
-			t.Errorf("request %s status = %q, want cancelled", id, got.Status)
-		}
+	if len(msgs) != 0 {
+		t.Errorf("post-shutdown conversation has %d messages, want 0 (queued turn deleted)", len(msgs))
 	}
 }
 

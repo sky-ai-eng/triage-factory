@@ -42,18 +42,18 @@ func (f *fakeProjects) GetSystem(context.Context, string, string) (*domain.Proje
 }
 
 type putCall struct {
-	orgID, requestID, executorID string
-	bootEpoch                    int64
-	sealed                       []byte
+	orgID, conversationID, executorID string
+	bootEpoch                         int64
+	sealed                            []byte
 }
 
-type fakeCuratorTurnCredentials struct {
-	db.CuratorTurnCredentialsStore
+type fakeRunCredentials struct {
+	db.RunCredentialsStore
 	puts []putCall
 }
 
-func (f *fakeCuratorTurnCredentials) Put(_ context.Context, orgID, requestID, executorID string, bootEpoch int64, sealed []byte) error {
-	f.puts = append(f.puts, putCall{orgID, requestID, executorID, bootEpoch, sealed})
+func (f *fakeRunCredentials) Put(_ context.Context, orgID, runID, executorID string, bootEpoch int64, sealed []byte) error {
+	f.puts = append(f.puts, putCall{orgID, runID, executorID, bootEpoch, sealed})
 	return nil
 }
 
@@ -65,7 +65,7 @@ func (f *fakeLLM) ResolveForBundle(context.Context, string, string) (llmcred.Mat
 
 // curatorTurnManager builds a Manager wired with the curator fakes plus a
 // keypair the test can unseal the written bundle with.
-func curatorTurnManager(t *testing.T, turn *domain.CuratorTurnProvision, project *domain.Project, tracked map[string]bool) (*Manager, *fakeCuratorTurnCredentials, *credseal.KeyPair) {
+func curatorTurnManager(t *testing.T, turn *domain.CuratorTurnProvision, project *domain.Project, tracked map[string]bool) (*Manager, *fakeRunCredentials, *credseal.KeyPair) {
 	t.Helper()
 	kp, err := credseal.GenerateKeyPair()
 	if err != nil {
@@ -74,14 +74,14 @@ func curatorTurnManager(t *testing.T, turn *domain.CuratorTurnProvision, project
 	if turn != nil && turn.CredPubKey == "seal-to-me" {
 		turn.CredPubKey = base64.StdEncoding.EncodeToString(kp.Public[:])
 	}
-	ctc := &fakeCuratorTurnCredentials{}
+	rc := &fakeRunCredentials{}
 	m := &Manager{
 		stores: db.Stores{
-			Curator:                &fakeCurator{turn: turn, ok: turn != nil},
-			Instances:              &fakeInstances{inst: &domain.Instance{BootEpoch: 7}},
-			Projects:               &fakeProjects{project: project},
-			TeamGitHubRepos:        &fakeTeamRepos{tracked: tracked},
-			CuratorTurnCredentials: ctc,
+			Curator:         &fakeCurator{turn: turn, ok: turn != nil},
+			Instances:       &fakeInstances{inst: &domain.Instance{BootEpoch: 7}},
+			Projects:        &fakeProjects{project: project},
+			TeamGitHubRepos: &fakeTeamRepos{tracked: tracked},
+			RunCredentials:  rc,
 		},
 		ghResolver: &fakeScopedResolver{
 			base:    "https://ghe.example",
@@ -92,31 +92,33 @@ func curatorTurnManager(t *testing.T, turn *domain.CuratorTurnProvision, project
 		},
 		llm: &fakeLLM{mat: llmcred.Material{Env: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}},
 	}
-	return m, ctc, kp
+	return m, rc, kp
 }
 
 // TestProvisionForCuratorTurn_SealsPinnedIntersectTracked pins the happy path:
-// the bundle's GitHub authorized set is the project's pinned repos ∩ the team's
-// tracked set (an untracked pinned repo is filtered out), it seals to the turn's
-// published pubkey and boot epoch, and the orchestrator can't read it (only the
-// keypair's private half unseals).
+// the bundle's GitHub authorized set is the project's pinned repos ∩ the
+// conversation-snapshot team's tracked set (an untracked pinned repo is
+// filtered out), it seals to the active claim's published pubkey and the
+// home's boot epoch, and the orchestrator can't read it (only the keypair's
+// private half unseals). The write lands on the shared claim_credentials
+// channel keyed by the conversation id.
 func TestProvisionForCuratorTurn_SealsPinnedIntersectTracked(t *testing.T) {
 	turn := &domain.CuratorTurnProvision{
-		ID: "req-1", OrgID: "org-1", ProjectID: "proj-1",
-		HomeInstanceID: "home-1", Status: "queued", CredPubKey: "seal-to-me",
+		ConversationID: "conv-1", OrgID: "org-1", ProjectID: "proj-1", TeamID: "team-1",
+		HomeInstanceID: "home-1", CredPubKey: "seal-to-me",
 	}
 	project := &domain.Project{TeamID: "team-1", PinnedRepos: []string{"acme/widgets", "acme/untracked"}}
-	m, ctc, kp := curatorTurnManager(t, turn, project, map[string]bool{"acme/widgets": true})
+	m, rc, kp := curatorTurnManager(t, turn, project, map[string]bool{"acme/widgets": true})
 
-	if err := m.ProvisionForCuratorTurn(context.Background(), "org-1", "req-1"); err != nil {
+	if err := m.ProvisionForCuratorTurn(context.Background(), "org-1", "conv-1"); err != nil {
 		t.Fatalf("ProvisionForCuratorTurn: %v", err)
 	}
-	if len(ctc.puts) != 1 {
-		t.Fatalf("Put called %d times, want 1", len(ctc.puts))
+	if len(rc.puts) != 1 {
+		t.Fatalf("Put called %d times, want 1", len(rc.puts))
 	}
-	p := ctc.puts[0]
-	if p.orgID != "org-1" || p.requestID != "req-1" || p.executorID != "home-1" || p.bootEpoch != 7 {
-		t.Errorf("Put args = (%q, %q, %q, %d), want (org-1, req-1, home-1, 7)", p.orgID, p.requestID, p.executorID, p.bootEpoch)
+	p := rc.puts[0]
+	if p.orgID != "org-1" || p.conversationID != "conv-1" || p.executorID != "home-1" || p.bootEpoch != 7 {
+		t.Errorf("Put args = (%q, %q, %q, %d), want (org-1, conv-1, home-1, 7)", p.orgID, p.conversationID, p.executorID, p.bootEpoch)
 	}
 
 	plaintext, err := kp.Open(p.sealed)
@@ -144,27 +146,27 @@ func TestProvisionForCuratorTurn_SealsPinnedIntersectTracked(t *testing.T) {
 	}
 }
 
-// TestProvisionForCuratorTurn_NoOps pins the tolerant no-op cases: a terminal,
-// un-homed, or keyless turn (and an unknown turn) writes nothing.
+// TestProvisionForCuratorTurn_NoOps pins the tolerant no-op cases: an
+// un-homed or keyless active claim (and a conversation with NO active claim
+// — the turn finished or was never claimed) writes nothing.
 func TestProvisionForCuratorTurn_NoOps(t *testing.T) {
 	project := &domain.Project{TeamID: "team-1", PinnedRepos: []string{"acme/widgets"}}
 	cases := []struct {
 		name string
 		turn *domain.CuratorTurnProvision
 	}{
-		{"terminal", &domain.CuratorTurnProvision{ID: "r", OrgID: "org-1", ProjectID: "proj-1", HomeInstanceID: "home-1", Status: "done", CredPubKey: "seal-to-me"}},
-		{"un-homed", &domain.CuratorTurnProvision{ID: "r", OrgID: "org-1", ProjectID: "proj-1", HomeInstanceID: "", Status: "queued", CredPubKey: "seal-to-me"}},
-		{"keyless", &domain.CuratorTurnProvision{ID: "r", OrgID: "org-1", ProjectID: "proj-1", HomeInstanceID: "home-1", Status: "queued", CredPubKey: ""}},
-		{"unknown", nil},
+		{"un-homed", &domain.CuratorTurnProvision{ConversationID: "c", OrgID: "org-1", ProjectID: "proj-1", TeamID: "team-1", HomeInstanceID: "", CredPubKey: "seal-to-me"}},
+		{"keyless", &domain.CuratorTurnProvision{ConversationID: "c", OrgID: "org-1", ProjectID: "proj-1", TeamID: "team-1", HomeInstanceID: "home-1", CredPubKey: ""}},
+		{"no_active_claim", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m, ctc, _ := curatorTurnManager(t, tc.turn, project, map[string]bool{"acme/widgets": true})
-			if err := m.ProvisionForCuratorTurn(context.Background(), "org-1", "r"); err != nil {
+			m, rc, _ := curatorTurnManager(t, tc.turn, project, map[string]bool{"acme/widgets": true})
+			if err := m.ProvisionForCuratorTurn(context.Background(), "org-1", "c"); err != nil {
 				t.Fatalf("ProvisionForCuratorTurn: %v", err)
 			}
-			if len(ctc.puts) != 0 {
-				t.Errorf("Put called %d times, want 0 (no-op)", len(ctc.puts))
+			if len(rc.puts) != 0 {
+				t.Errorf("Put called %d times, want 0 (no-op)", len(rc.puts))
 			}
 		})
 	}

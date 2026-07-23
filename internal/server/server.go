@@ -44,7 +44,7 @@ type Server struct {
 	agentRuns    db.AgentRunStore        // agent run lifecycle + transcript
 	repos        db.RepoStore            // repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
 	projects     db.ProjectStore         // projects CRUD for projects/curator/backfill/project_entities handlers
-	curatorStore db.CuratorStore         // curator-runtime CRUD (curator_requests / curator_messages / curator_pending_context) — handler-side writes go through here so Postgres mode honors RLS and uses the right placeholder syntax
+	curatorStore db.CuratorStore         // curator view of conversations/messages/claims — handler-side System writes (cancel release, pending-context producer) go through here; claims-bound reads ride tx.Curator
 	events       db.EventStore           // events audit log Record/Latest for stock carry-over + factory drag-to-delegate
 	taskMemory   db.TaskMemoryStore      // run_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
 	secrets      db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
@@ -1033,7 +1033,7 @@ func (s *Server) routes() {
 	// Curator chat per project. The Curator package owns the
 	// long-lived CC session lifecycle; these endpoints are the API
 	// the Projects page will hit.
-	ch := &curatorHandler{tx: s.tx, ws: s.ws, runtime: func() *curator.Curator { return s.curator }}
+	ch := &curatorHandler{tx: s.tx, curatorStore: s.curatorStore, ws: s.ws, runtime: func() *curator.Curator { return s.curator }}
 	s.apiMutating("POST /api/projects/{id}/curator/messages", ch.handleCuratorSend)
 	s.api("GET /api/projects/{id}/curator/messages", ch.handleCuratorHistory)
 	s.apiMutating("DELETE /api/projects/{id}/curator/messages/in-flight", ch.handleCuratorCancel)

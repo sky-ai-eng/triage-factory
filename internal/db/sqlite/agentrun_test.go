@@ -45,7 +45,7 @@ func newSQLiteForAgentRunTest(t *testing.T) *sql.DB {
 	if err := db.BootstrapSchemaForTest(conn); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
-	// agents row backs runs.actor_agent_id and task claim stamps —
+	// agents row backs conversations.actor_agent_id and task claim stamps —
 	// migration seeds the sentinel user/team but not the agent row
 	// itself (production does that via BootstrapLocalAgent).
 	if _, err := conn.Exec(
@@ -62,6 +62,41 @@ func newSQLiteForAgentRunTest(t *testing.T) *sql.DB {
 		t.Fatalf("seed prompt: %v", err)
 	}
 	return conn
+}
+
+// seedSQLiteConversation inserts a conversations row directly (the seeder's
+// Run callback + the direct tests below share it). Raw SQL keeps the seed
+// independent of the store under test; the trigger_type↔creator CHECK is
+// satisfied by pairing 'manual' with the sentinel user and 'event' with
+// NULL.
+func seedSQLiteConversation(t *testing.T, conn *sql.DB, run domain.AgentRun) string {
+	t.Helper()
+	id := run.ID
+	if id == "" {
+		id = uuid.New().String()
+	}
+	trigger := run.TriggerType
+	if trigger == "" {
+		trigger = "manual"
+	}
+	var creator any
+	if trigger == "manual" {
+		creator = runmode.LocalDefaultUserID
+	}
+	var triggerID any
+	if run.TriggerID != "" {
+		triggerID = run.TriggerID
+	}
+	if _, err := conn.Exec(`
+		INSERT INTO conversations (id, task_id, prompt_id, status, model,
+		                           trigger_type, trigger_id, team_id, visibility,
+		                           creator_user_id, blueprint_run_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?)
+	`, id, run.TaskID, run.PromptID, run.Status, run.Model,
+		trigger, triggerID, runmode.LocalDefaultTeamID, creator, run.BlueprintRunID); err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	return id
 }
 
 // newSQLiteAgentRunSeeder returns the FactorySeeder-style bag of
@@ -105,6 +140,32 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 			}
 			return id
 		},
+		Run: func(t *testing.T, run domain.AgentRun) string {
+			return seedSQLiteConversation(t, conn, run)
+		},
+		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {
+			t.Helper()
+			rows, err := conn.Query(`
+				SELECT id, executor_id, boot_epoch, COALESCE(phase, ''), released_at IS NOT NULL, COALESCE(outcome, '')
+				FROM claims WHERE conversation_id = ? ORDER BY rowid ASC
+			`, conversationID)
+			if err != nil {
+				t.Fatalf("read claims: %v", err)
+			}
+			defer rows.Close()
+			var out []dbtest.ClaimRow
+			for rows.Next() {
+				var c dbtest.ClaimRow
+				if err := rows.Scan(&c.ID, &c.ExecutorID, &c.BootEpoch, &c.Phase, &c.Released, &c.Outcome); err != nil {
+					t.Fatalf("scan claim: %v", err)
+				}
+				out = append(out, c)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("claims rows: %v", err)
+			}
+			return out
+		},
 		StampAgentClaim: func(t *testing.T, taskID, agentID string) {
 			t.Helper()
 			if _, err := conn.Exec(
@@ -114,29 +175,13 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 				t.Fatalf("stamp claim: %v", err)
 			}
 		},
-		EventHandler: func(t *testing.T, eventType string) string {
-			t.Helper()
-			id := uuid.New().String()
-			// Minimal rule shape: name/default_priority/sort_order non-NULL,
-			// trigger-only cols NULL (the event_handlers rule CHECK). org_id
-			// takes its local-sentinel DEFAULT.
-			if _, err := conn.Exec(`
-				INSERT INTO event_handlers
-					(id, creator_user_id, team_id, kind, event_type, enabled, source,
-					 name, default_priority, sort_order)
-				VALUES (?, ?, ?, 'rule', ?, 1, 'user', 'fence-fk', 0.5, 100)
-			`, id, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID, eventType); err != nil {
-				t.Fatalf("seed event_handler: %v", err)
-			}
-			return id
-		},
 		BlueprintRun: func(t *testing.T, taskID string) string {
 			t.Helper()
-			// runs.blueprint_run_id is NOT NULL — a single prompt is a
-			// 1-step blueprint, so every run needs a parent blueprint_run.
-			// Mint a fresh blueprint + blueprint_run per call. SQLite
-			// blueprint_runs has no org_id/creator_user_id columns; org_id
-			// on blueprints takes its local-sentinel DEFAULT.
+			// conversations.blueprint_run_id is required by the origin CHECK —
+			// a single prompt is a 1-step blueprint, so every run needs a
+			// parent blueprint_run. Mint a fresh blueprint + blueprint_run per
+			// call. SQLite blueprint_runs has no org_id/creator_user_id
+			// columns; org_id on blueprints takes its local-sentinel DEFAULT.
 			bpID := uuid.New().String()
 			if _, err := conn.Exec(`
 				INSERT INTO blueprints (id, name, source, team_id, creator_user_id)
@@ -166,14 +211,14 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
-					INSERT INTO run_memory (id, run_id, entity_id, agent_content) VALUES (?, ?, ?, NULL)
+					INSERT INTO run_memory (id, conversation_id, entity_id, agent_content) VALUES (?, ?, ?, NULL)
 				`, memID, runID, entityID); err != nil {
 					t.Fatalf("seed null memory: %v", err)
 				}
 				return
 			}
 			if _, err := conn.Exec(`
-				INSERT INTO run_memory (id, run_id, entity_id, agent_content) VALUES (?, ?, ?, ?)
+				INSERT INTO run_memory (id, conversation_id, entity_id, agent_content) VALUES (?, ?, ?, ?)
 			`, memID, runID, entityID, content); err != nil {
 				t.Fatalf("seed memory: %v", err)
 			}
@@ -186,7 +231,7 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 			// column is a fixed test-controlled name (not user input), so
 			// string-building the column into the statement is safe here.
 			res, err := conn.Exec(
-				`INSERT INTO run_messages (run_id, role, subtype, content, `+column+`) VALUES (?, 'assistant', 'text', 'x', ?)`,
+				`INSERT INTO messages (conversation_id, role, subtype, content, `+column+`) VALUES (?, 'assistant', 'text', 'x', ?)`,
 				runID, rawJSON,
 			)
 			if err != nil {
@@ -209,36 +254,31 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 func TestAgentRunStore_SQLite_AssertLocalOrg(t *testing.T) {
 	conn := newSQLiteForAgentRunTest(t)
 	store := sqlitestore.New(conn).AgentRuns
-	if _, err := store.HasActiveForTask(t.Context(), "some-other-org", uuid.New().String()); err == nil {
-		t.Error("HasActiveForTask accepted non-LocalDefaultOrgID without error")
+	if _, err := store.ActiveIDsForTask(t.Context(), "some-other-org", uuid.New().String()); err == nil {
+		t.Error("ActiveIDsForTask accepted non-LocalDefaultOrgID without error")
 	}
 }
 
-// TestAgentRunStore_SQLite_RuntimeDefaultsToSDK pins the runs.runtime schema
-// fact the columnar-canon epic depends on: a freshly created run — the only
-// shape any code in this repo produces today — lands as 'sdk', not the
-// native loop's 'native'. domain.AgentRun has no Runtime field (nothing
-// writes 'native' until the executor-side loop lands), so this reads the
-// column directly.
+// TestAgentRunStore_SQLite_RuntimeDefaultsToSDK pins the
+// conversations.runtime schema fact the columnar-canon epic depends on: a
+// freshly seeded delegation row lands as 'sdk', not the native loop's
+// 'native'. domain.AgentRun has no write path for Runtime (nothing writes
+// 'native' until the executor-side loop lands), so this reads the column
+// directly.
 func TestAgentRunStore_SQLite_RuntimeDefaultsToSDK(t *testing.T) {
 	conn := newSQLiteForAgentRunTest(t)
 	seed := newSQLiteAgentRunSeeder(conn)
-	store := sqlitestore.New(conn).AgentRuns
-	ctx := context.Background()
 
 	ent := seed.Entity(t, "runtime")
 	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-	runID := uuid.New().String()
-	if err := store.Create(ctx, runmode.LocalDefaultOrgID, domain.AgentRun{
-		ID: runID, TaskID: taskID, PromptID: "p_agentrun_test", Status: "running", Model: "m",
+	runID := seedSQLiteConversation(t, conn, domain.AgentRun{
+		TaskID: taskID, PromptID: "p_agentrun_test", Status: "running", Model: "m",
 		BlueprintRunID: seed.BlueprintRun(t, taskID),
-	}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
+	})
 
 	var runtime string
-	if err := conn.QueryRow(`SELECT runtime FROM runs WHERE id = ?`, runID).Scan(&runtime); err != nil {
+	if err := conn.QueryRow(`SELECT runtime FROM conversations WHERE id = ?`, runID).Scan(&runtime); err != nil {
 		t.Fatalf("read runtime: %v", err)
 	}
 	if runtime != "sdk" {
@@ -247,11 +287,11 @@ func TestAgentRunStore_SQLite_RuntimeDefaultsToSDK(t *testing.T) {
 }
 
 // TestAgentRunStore_SQLite_ActiveIDsForTeamSystem pins the team-archive
-// force-stop enumeration (TFAC-448): runs on the team in the active set
+// force-stop enumeration: runs on the team in the active set
 // (NOT completed/failed/cancelled/task_unsolvable/pending_approval) are
 // returned; terminal and pending_approval runs are excluded. SQLite hardcodes
-// runs.team_id to the local sentinel, so the cross-team negative case lives in
-// the Postgres tests; here we pin the status predicate + team scoping.
+// conversations.team_id to the local sentinel, so the cross-team negative case
+// lives in the Postgres tests; here we pin the status predicate + team scoping.
 func TestAgentRunStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
 	conn := newSQLiteForAgentRunTest(t)
 	seed := newSQLiteAgentRunSeeder(conn)
@@ -263,14 +303,10 @@ func TestAgentRunStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
 	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
 	mk := func(status string) string {
-		id := uuid.New().String()
-		if err := store.Create(ctx, runmode.LocalDefaultOrgID, domain.AgentRun{
-			ID: id, TaskID: taskID, PromptID: "p_agentrun_test", Status: status, Model: "m",
+		return seedSQLiteConversation(t, conn, domain.AgentRun{
+			TaskID: taskID, PromptID: "p_agentrun_test", Status: status, Model: "m",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
-		}); err != nil {
-			t.Fatalf("create %s run: %v", status, err)
-		}
-		return id
+		})
 	}
 
 	running := mk("running")

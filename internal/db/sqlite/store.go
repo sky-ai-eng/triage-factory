@@ -98,12 +98,10 @@ func New(conn *sql.DB) db.Stores {
 		// the one connection. ReplaceForTeam's repo_profiles reconcile
 		// runs in the same tx as the team-row write here.
 		TeamGitHubRepos: newTeamGitHubReposStore(conn, conn),
-		// Curator: the goroutine wraps each turn in
-		// Stores.Tx.SyntheticClaimsWithTx so the tx-bound variant
-		// (composed inside the tx.go runTx body) is what handles
-		// production writes. The non-tx variant wired here exists
-		// for completeness — handler-side helpers stay on the
-		// package-level *sql.DB calls until D9.
+		// Curator: the session goroutine wraps each turn's message writes in
+		// Stores.Tx.SyntheticClaimsWithTx (the tx-bound variant composed in
+		// tx.go); the non-tx variant wired here carries the `...System`
+		// claim writes and sweeps, which collapse onto the one connection.
 		Curator:    newCuratorStore(conn),
 		GitHubApps: newGitHubAppsStore(conn, secrets),
 		JiraApps:   newJiraAppsStore(conn),
@@ -176,11 +174,6 @@ func New(conn *sql.DB) db.Stores {
 		// role=all, the bundle path is executor-role-only) — exists for
 		// store-interface + conformance-test symmetry. See TFAC-614.
 		RunCredentials: newRunCredentialsStore(conn),
-		// CuratorTurnCredentials is admin-pool only in Postgres; SQLite
-		// collapses to the one connection. Never populated in local mode (the
-		// bundle path is executor-role-only) — exists for store-interface +
-		// conformance-test symmetry.
-		CuratorTurnCredentials: newCuratorTurnCredentialsStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

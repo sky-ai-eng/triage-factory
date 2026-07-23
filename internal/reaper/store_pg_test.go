@@ -27,9 +27,9 @@ type reaperFixture struct {
 
 // seedReaperFixture mints an org, a blueprint/task/prompt chain, a running
 // blueprint_run, and one claimed run under a freshly-registered executor
-// instance. attempts is set via repeated claims (ClaimNextRun bumps
-// attempts on every claim — the real production mechanism, not a raw
-// UPDATE) so the fixture exercises the same column the reaper reads.
+// instance. attempts is set via repeated claims (each ClaimNextRun mints a
+// claims row — the real production mechanism, not a raw INSERT) so the
+// fixture exercises the same claims count the reaper reads.
 func seedReaperFixture(t *testing.T, h *pgtest.Harness, attempts int) reaperFixture {
 	t.Helper()
 	ctx := context.Background()
@@ -125,8 +125,8 @@ func backdateHeartbeat(t *testing.T, h *pgtest.Harness, executorID string, age t
 
 // TestReapDeadExecutors_RequeuesUnderAttemptBudget pins the primary
 // recovery path: a claimed run under a stale-heartbeat executor, still
-// within its attempt budget, is requeued (ownership stamp cleared,
-// attempts left untouched) rather than failed.
+// within its attempt budget, is requeued (active claim released with
+// outcome 'reaped', no new claim minted) rather than failed.
 func TestReapDeadExecutors_RequeuesUnderAttemptBudget(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -145,20 +145,38 @@ func TestReapDeadExecutors_RequeuesUnderAttemptBudget(t *testing.T) {
 	}
 
 	var status string
-	var executorID, bootEpoch, attempts any
 	if err := h.AdminDB.QueryRowContext(ctx,
-		`SELECT status, executor_id, boot_epoch, attempts FROM runs WHERE id = $1`, fx.runID,
-	).Scan(&status, &executorID, &bootEpoch, &attempts); err != nil {
+		`SELECT status FROM conversations WHERE id = $1`, fx.runID,
+	).Scan(&status); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
 	if status != "queued" {
 		t.Errorf("status = %q, want queued", status)
 	}
-	if executorID != nil || bootEpoch != nil {
-		t.Errorf("ownership stamp not cleared: executor_id=%v boot_epoch=%v", executorID, bootEpoch)
+	// The dead engagement is released — a requeued row has no owner — and
+	// the release carries the claim-level 'reaped' outcome.
+	var active int
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, fx.runID,
+	).Scan(&active); err != nil {
+		t.Fatalf("count active claims: %v", err)
 	}
-	if attempts != int64(1) {
-		t.Errorf("attempts = %v, want 1 (the reaper's requeue must not bump it — only a re-claim does)", attempts)
+	if active != 0 {
+		t.Errorf("active claims = %d, want 0 (ownership released on requeue)", active)
+	}
+	var outcome string
+	var total int
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT outcome, (SELECT COUNT(*) FROM claims WHERE conversation_id = $1)
+		   FROM claims WHERE conversation_id = $1 ORDER BY claimed_at DESC LIMIT 1`, fx.runID,
+	).Scan(&outcome, &total); err != nil {
+		t.Fatalf("read released claim: %v", err)
+	}
+	if outcome != "reaped" {
+		t.Errorf("released claim outcome = %q, want reaped", outcome)
+	}
+	if total != 1 {
+		t.Errorf("claims count = %d, want 1 (the reaper's requeue must not mint a claim — only a re-claim does)", total)
 	}
 }
 
@@ -185,7 +203,7 @@ func TestReapDeadExecutors_TerminalFailsExecutorLostPastAttemptBudget(t *testing
 
 	var status, failureKind string
 	if err := h.AdminDB.QueryRowContext(ctx,
-		`SELECT status, COALESCE(failure_kind, '') FROM runs WHERE id = $1`, fx.runID,
+		`SELECT status, COALESCE(failure_kind, '') FROM conversations WHERE id = $1`, fx.runID,
 	).Scan(&status, &failureKind); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
@@ -227,7 +245,7 @@ func TestReapDeadExecutors_CancelRequestedFinalizesCancelledNotRequeued(t *testi
 	}
 
 	var runStatus, brStatus string
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM runs WHERE id = $1`, fx.runID).Scan(&runStatus); err != nil {
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM conversations WHERE id = $1`, fx.runID).Scan(&runStatus); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
 	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM blueprint_runs WHERE id = $1`, fx.blueprintRunID).Scan(&brStatus); err != nil {
@@ -266,7 +284,7 @@ func TestReapDeadExecutors_FreshHeartbeatNeverReaped(t *testing.T) {
 	}
 
 	var status string
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM runs WHERE id = $1`, fx.runID).Scan(&status); err != nil {
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM conversations WHERE id = $1`, fx.runID).Scan(&status); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
 	if status != "running" {
@@ -275,11 +293,11 @@ func TestReapDeadExecutors_FreshHeartbeatNeverReaped(t *testing.T) {
 }
 
 // TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesRunsExecutorID pins
-// the registry GC: only rows past staleAfter are deleted, and a run row
+// the registry GC: only rows past staleAfter are deleted, and the claim
 // that referenced the GC'd instance survives with its executor_id intact —
-// runs.executor_id carries no FK to instances (verified separately by
-// TestRunsExecutorID_HasNoForeignKeyToInstances), so a delete here can never
-// cascade into audit history.
+// claims.executor_id carries no FK to instances (verified separately by
+// TestClaimsExecutorID_HasNoForeignKeyToInstances), so a delete here can
+// never cascade into audit history.
 func TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesRunsExecutorID(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -311,11 +329,11 @@ func TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesRunsExecutorID(t *test
 	}
 
 	var executorID string
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT executor_id FROM runs WHERE id = $1`, fx.runID).Scan(&executorID); err != nil {
-		t.Fatalf("read back run after GC'd its executor: %v", err)
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT executor_id FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, fx.runID).Scan(&executorID); err != nil {
+		t.Fatalf("read back claim after GC'd its executor: %v", err)
 	}
 	if executorID != fx.executorID {
-		t.Errorf("runs.executor_id = %q after GC, want it to survive unchanged as %q", executorID, fx.executorID)
+		t.Errorf("claims.executor_id = %q after GC, want it to survive unchanged as %q", executorID, fx.executorID)
 	}
 
 	// A GC'd id that comes back alive simply re-registers at boot_epoch 1
@@ -330,11 +348,89 @@ func TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesRunsExecutorID(t *test
 	}
 }
 
-// TestRunsExecutorID_HasNoForeignKeyToInstances pins the schema invariant
-// the GC's safety argument depends on: runs.executor_id is a plain text
+// TestHealClaimDesyncs_HealsBothStrandedShapes pins the periodic janitor: a
+// terminal conversation with a dangling active claim gets the claim released
+// (outcome mapped from status), an in-flight claimless run under a running
+// parent is requeued, and a healthy claimed running run is untouched. These
+// are the two shapes the non-atomic app-pool terminal writes can strand;
+// the reaper repeating the boot-time arms bounds their lifetime to a tick.
+func TestHealClaimDesyncs_HealsBothStrandedShapes(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	// Crash-after-flip: the conversation committed terminal but its claim
+	// release never landed.
+	terminal := seedReaperFixture(t, h, 1)
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = 'completed' WHERE id = $1`, terminal.runID)
+
+	// Rolled-back flip: the claim release committed but the conversation
+	// stayed in-flight, with a stale placement stamp to clear.
+	stranded := seedReaperFixture(t, h, 1)
+	pgtest.MustExec(t, h.AdminDB, `
+		UPDATE claims SET released_at = now(), outcome = 'failed'
+		WHERE conversation_id = $1 AND released_at IS NULL
+	`, stranded.runID)
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = 'exec-dead' WHERE id = $1`, stranded.runID)
+
+	// Healthy: running with a live claim.
+	healthy := seedReaperFixture(t, h, 1)
+
+	store := reaper.NewPostgresStore(h.AdminDB)
+	requeued, released, err := store.HealClaimDesyncs(ctx)
+	if err != nil {
+		t.Fatalf("HealClaimDesyncs: %v", err)
+	}
+	if requeued != 1 || released != 1 {
+		t.Fatalf("healed = (requeued=%d, released=%d), want (1, 1)", requeued, released)
+	}
+
+	var rel bool
+	var outcome string
+	if err := h.AdminDB.QueryRowContext(ctx, `
+		SELECT released_at IS NOT NULL, COALESCE(outcome, '') FROM claims
+		WHERE conversation_id = $1 ORDER BY claimed_at DESC LIMIT 1
+	`, terminal.runID).Scan(&rel, &outcome); err != nil {
+		t.Fatalf("read terminal row's claim: %v", err)
+	}
+	if !rel || outcome != "completed" {
+		t.Errorf("terminal row's claim = (released=%v, outcome=%q), want (true, completed)", rel, outcome)
+	}
+
+	var status string
+	var pref any
+	if err := h.AdminDB.QueryRowContext(ctx, `
+		SELECT status, preferred_executor_id FROM conversations WHERE id = $1
+	`, stranded.runID).Scan(&status, &pref); err != nil {
+		t.Fatalf("read stranded row: %v", err)
+	}
+	if status != "queued" || pref != nil {
+		t.Errorf("stranded row = (status=%q, preferred=%v), want (queued, cleared)", status, pref)
+	}
+
+	var healthyStatus string
+	var active int
+	if err := h.AdminDB.QueryRowContext(ctx, `
+		SELECT c.status, (SELECT COUNT(*) FROM claims WHERE conversation_id = c.id AND released_at IS NULL)
+		FROM conversations c WHERE c.id = $1
+	`, healthy.runID).Scan(&healthyStatus, &active); err != nil {
+		t.Fatalf("read healthy row: %v", err)
+	}
+	if healthyStatus != "running" || active != 1 {
+		t.Errorf("healthy row = (status=%q, active claims=%d), want (running, 1)", healthyStatus, active)
+	}
+
+	// Idempotent: a second sweep finds nothing.
+	if requeued, released, err := store.HealClaimDesyncs(ctx); err != nil || requeued != 0 || released != 0 {
+		t.Errorf("second sweep = (%d, %d, %v), want (0, 0, nil)", requeued, released, err)
+	}
+}
+
+// TestClaimsExecutorID_HasNoForeignKeyToInstances pins the schema invariant
+// the GC's safety argument depends on: claims.executor_id is a plain text
 // column with no FK constraint into instances, so deleting an instances row
-// can never cascade into (or be blocked by) runs.
-func TestRunsExecutorID_HasNoForeignKeyToInstances(t *testing.T) {
+// can never cascade into (or be blocked by) claims.
+func TestClaimsExecutorID_HasNoForeignKeyToInstances(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
@@ -344,20 +440,22 @@ func TestRunsExecutorID_HasNoForeignKeyToInstances(t *testing.T) {
 		FROM information_schema.table_constraints tc
 		JOIN information_schema.key_column_usage kcu
 		  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-		WHERE tc.table_name = 'runs' AND kcu.column_name = 'executor_id' AND tc.constraint_type = 'FOREIGN KEY'
+		WHERE tc.table_name = 'claims' AND kcu.column_name = 'executor_id' AND tc.constraint_type = 'FOREIGN KEY'
 	`).Scan(&count); err != nil {
 		t.Fatalf("query constraints: %v", err)
 	}
 	if count != 0 {
-		t.Fatalf("runs.executor_id has %d foreign key constraint(s), want 0 — a FK here would make GC deletes cascade into (or be blocked by) audit history", count)
+		t.Fatalf("claims.executor_id has %d foreign key constraint(s), want 0 — a FK here would make GC deletes cascade into (or be blocked by) audit history", count)
 	}
 }
 
 // TestCancelStrandedCuratorTurns_CancelsDeadHomeOnly pins the curator homing
-// recovery (spec §6.3): queued/running turns homed to a dead (missing or
-// stale-heartbeat) executor are cancelled so they stop showing in-flight, while
-// a turn homed to a live executor is left untouched. Recovery is retire-only —
-// the user's next turn re-homes to a live executor.
+// recovery (spec §6.3): the active claim of a turn homed to a dead (missing
+// or stale-heartbeat) executor is released with outcome 'cancelled' so it
+// stops showing in-flight, while a claim homed to a live executor is left
+// untouched. Recovery is retire-only — the user's next turn re-homes to a
+// live executor. A queued turn is an unowned undelivered message with no
+// claim, so it needs no reaping and is untouched by construction.
 func TestCancelStrandedCuratorTurns_CancelsDeadHomeOnly(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -383,32 +481,31 @@ func TestCancelStrandedCuratorTurns_CancelsDeadHomeOnly(t *testing.T) {
 	}
 	backdateHeartbeat(t, h, deadExec, time.Hour)
 
-	// A running turn homed to the dead executor (stranded) and a running turn
-	// homed to the live executor (must survive). A NULL-home turn (the local
-	// in-process path) must also survive — the sweep only touches homed turns.
-	strandedID := uuid.New().String()
-	survivorID := uuid.New().String()
-	localID := uuid.New().String()
-	insertTurn := func(id, home string) {
-		var homeArg any
-		if home != "" {
-			homeArg = home
-		}
+	// Two curator conversations, each mid-turn: one active claim homed to the
+	// dead executor (stranded) and one homed to the live executor (survives).
+	insertTurn := func(home string) (convID, claimID string) {
+		convID = uuid.New().String()
 		pgtest.MustExec(t, h.AdminDB, `
-			INSERT INTO curator_requests (id, org_id, project_id, creator_user_id, team_id, status, user_input, home_instance_id, created_at)
-			VALUES ($1, $2, $3, $4, $5, 'running', 'x', $6, now())
-		`, id, orgID, projectID, userID, teamID, homeArg)
+			INSERT INTO conversations (id, org_id, type, creator_user_id, team_id, visibility, trigger_type, origin, status, project_id)
+			VALUES ($1, $2, 'curator', $3, $4, 'private', 'manual', 'curator', NULL, $5)
+		`, convID, orgID, userID, teamID, projectID)
+		claimID = uuid.New().String()
+		pgtest.MustExec(t, h.AdminDB, `
+			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch)
+			VALUES ($1, $2, $3, $4, 1)
+		`, claimID, orgID, convID, home)
+		return convID, claimID
 	}
-	insertTurn(strandedID, deadExec)
-	insertTurn(survivorID, liveExec)
-	insertTurn(localID, "")
+	strandedConv, strandedClaim := insertTurn(deadExec)
+	_, survivorClaim := insertTurn(liveExec)
 
 	// The stranded turn already streamed a token-bearing message before its
-	// home died — the sweep must roll those up, not strand llm_spend at 0.
+	// home died — the ledger keeps it; the sweep is an outcome/error release
+	// only and must not disturb the row.
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO curator_messages (org_id, creator_user_id, request_id, role, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
-		VALUES ($1, $2, $3, 'assistant', 7, 13, 5, 9)
-	`, orgID, userID, strandedID)
+		INSERT INTO messages (org_id, conversation_id, user_id, claim_id, role, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+		VALUES ($1, $2, $3, $4, 'assistant', 7, 13, 5, 9)
+	`, orgID, strandedConv, userID, strandedClaim)
 
 	store := reaper.NewPostgresStore(h.AdminDB)
 	n, err := store.CancelStrandedCuratorTurns(ctx, 30*time.Second)
@@ -416,33 +513,39 @@ func TestCancelStrandedCuratorTurns_CancelsDeadHomeOnly(t *testing.T) {
 		t.Fatalf("CancelStrandedCuratorTurns: %v", err)
 	}
 	if n != 1 {
-		t.Fatalf("cancelled %d turns, want 1 (only the dead-home turn)", n)
+		t.Fatalf("cancelled %d turns, want 1 (only the dead-home claim)", n)
 	}
-	// Token roll-up landed on the cancelled stranded turn.
+	// The stranded claim is released cancelled; the streamed tokens still
+	// read through the ledger.
+	var released bool
+	var outcome string
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT released_at IS NOT NULL, COALESCE(outcome, '') FROM claims WHERE id = $1`, strandedClaim,
+	).Scan(&released, &outcome); err != nil {
+		t.Fatalf("read back stranded claim: %v", err)
+	}
+	if !released || outcome != "cancelled" {
+		t.Errorf("stranded claim = (released=%v outcome=%q), want (true, cancelled)", released, outcome)
+	}
 	var in, out, cr, cc int
 	if err := h.AdminDB.QueryRowContext(ctx,
-		`SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens FROM curator_requests WHERE id = $1`, strandedID,
+		`SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+		        COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_creation_tokens), 0)
+		   FROM messages WHERE claim_id = $1`, strandedClaim,
 	).Scan(&in, &out, &cr, &cc); err != nil {
-		t.Fatalf("read back stranded turn tokens: %v", err)
+		t.Fatalf("read back stranded ledger: %v", err)
 	}
 	if in != 7 || out != 13 || cr != 5 || cc != 9 {
-		t.Errorf("stranded-turn token roll-up = (%d,%d,%d,%d), want (7,13,5,9)", in, out, cr, cc)
+		t.Errorf("stranded-turn ledger tokens = (%d,%d,%d,%d), want (7,13,5,9)", in, out, cr, cc)
 	}
 
-	statusOf := func(id string) string {
-		var s string
-		if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM curator_requests WHERE id = $1`, id).Scan(&s); err != nil {
-			t.Fatalf("read back %s: %v", id, err)
-		}
-		return s
+	// The live-home claim is untouched (still active, no outcome).
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT released_at IS NOT NULL, COALESCE(outcome, '') FROM claims WHERE id = $1`, survivorClaim,
+	).Scan(&released, &outcome); err != nil {
+		t.Fatalf("read back survivor claim: %v", err)
 	}
-	if got := statusOf(strandedID); got != "cancelled" {
-		t.Errorf("stranded turn status = %q, want cancelled", got)
-	}
-	if got := statusOf(survivorID); got != "running" {
-		t.Errorf("live-home turn status = %q, want running (untouched)", got)
-	}
-	if got := statusOf(localID); got != "running" {
-		t.Errorf("NULL-home turn status = %q, want running (sweep must ignore unhomed turns)", got)
+	if released || outcome != "" {
+		t.Errorf("live-home claim = (released=%v outcome=%q), want (false, \"\") — the sweep must ignore live homes", released, outcome)
 	}
 }

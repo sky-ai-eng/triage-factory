@@ -288,7 +288,7 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("EnqueueRun orphan: %v", err)
 	}
-	if _, err := h.AdminDB.Exec(`UPDATE runs SET status = 'running' WHERE id = $1`, orphanID); err != nil {
+	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = 'running' WHERE id = $1`, orphanID); err != nil {
 		t.Fatalf("set orphan running: %v", err)
 	}
 	// A queued orphan under the same terminal parent (never claimed) must also
@@ -313,8 +313,17 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("EnqueueRun healthy: %v", err)
 	}
-	if _, err := h.AdminDB.Exec(`UPDATE runs SET status = 'running' WHERE id = $1`, healthyID); err != nil {
+	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = 'running' WHERE id = $1`, healthyID); err != nil {
 		t.Fatalf("set healthy running: %v", err)
+	}
+	// A genuinely running child holds an active claim (ClaimNextRun mints
+	// it); without one, the claim-desync requeue arm would rightly treat the
+	// row as stranded.
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch)
+		VALUES ($1, $2, $3, 'exec-healthy', 1)
+	`, uuid.New().String(), orgID, healthyID); err != nil {
+		t.Fatalf("seed healthy claim: %v", err)
 	}
 
 	n, err := stores.RunQueue.ReconcileOrphanedRuns(ctx)
@@ -334,6 +343,110 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	// Idempotent: a second sweep finds nothing.
 	if n2, err := stores.RunQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
 		t.Errorf("second ReconcileOrphanedRuns = (%d, %v), want (0, nil)", n2, err)
+	}
+}
+
+// TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs pins the janitor arms
+// for the two shapes the non-atomic app-pool terminal writes can strand: a
+// terminal conversation with a dangling active claim gets the claim released
+// (outcome mapped from status, task_unsolvable → failed), and an in-flight
+// delegation conversation with no active claim under a running parent goes
+// back to 'queued' with its placement stamp cleared — while a running row
+// with a live claim and a claimless queued row are untouched.
+func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	step0 := 0
+
+	seedChild := func(status string) string {
+		t.Helper()
+		id := uuid.New().String()
+		if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+			ID: id, TaskID: taskID, PromptID: promptID, Model: "m",
+			TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
+		}); err != nil {
+			t.Fatalf("EnqueueRun: %v", err)
+		}
+		if status != "queued" {
+			pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = $2 WHERE id = $1`, id, status)
+		}
+		return id
+	}
+	activeClaim := func(convID string) string {
+		t.Helper()
+		claimID := uuid.New().String()
+		pgtest.MustExec(t, h.AdminDB, `
+			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch)
+			VALUES ($1, $2, $3, 'exec-ds', 1)
+		`, claimID, orgID, convID)
+		return claimID
+	}
+
+	// Dangling claims on terminal rows (the crash-after-flip shape).
+	doneID := seedChild("completed")
+	doneClaim := activeClaim(doneID)
+	unsolvableID := seedChild("task_unsolvable")
+	unsolvableClaim := activeClaim(unsolvableID)
+	// Claimless running row (the rolled-back-flip shape) with a stale
+	// placement stamp the requeue must clear.
+	strandedID := seedChild("running")
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = 'exec-dead' WHERE id = $1`, strandedID)
+	// Healthy shapes.
+	healthyID := seedChild("running")
+	healthyClaim := activeClaim(healthyID)
+	queuedID := seedChild("queued")
+
+	n, err := stores.RunQueue.ReconcileOrphanedRuns(ctx)
+	if err != nil {
+		t.Fatalf("ReconcileOrphanedRuns: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("healed count = %d, want 3 (two released claims + one requeue)", n)
+	}
+
+	claimState := func(id string) (released bool, outcome string) {
+		t.Helper()
+		if err := h.AdminDB.QueryRow(
+			`SELECT released_at IS NOT NULL, COALESCE(outcome, '') FROM claims WHERE id = $1`, id,
+		).Scan(&released, &outcome); err != nil {
+			t.Fatalf("read claim %s: %v", id, err)
+		}
+		return released, outcome
+	}
+	if rel, out := claimState(doneClaim); !rel || out != "completed" {
+		t.Errorf("completed row's claim = (released=%v, outcome=%q), want (true, completed)", rel, out)
+	}
+	if rel, out := claimState(unsolvableClaim); !rel || out != "failed" {
+		t.Errorf("task_unsolvable row's claim = (released=%v, outcome=%q), want (true, failed)", rel, out)
+	}
+	var strandedStatus string
+	var pref any
+	if err := h.AdminDB.QueryRow(
+		`SELECT status, preferred_executor_id FROM conversations WHERE id = $1`, strandedID,
+	).Scan(&strandedStatus, &pref); err != nil {
+		t.Fatalf("read stranded row: %v", err)
+	}
+	if strandedStatus != "queued" || pref != nil {
+		t.Errorf("stranded row = (status=%q, preferred=%v), want (queued, cleared)", strandedStatus, pref)
+	}
+	if rel, _ := claimState(healthyClaim); rel {
+		t.Error("healthy running row's live claim was released")
+	}
+	if st, _ := pgRunStatus(t, h, healthyID); st != "running" {
+		t.Errorf("healthy running row status = %q, want running", st)
+	}
+	if st, _ := pgRunStatus(t, h, queuedID); st != "queued" {
+		t.Errorf("claimless queued row status = %q, want queued (already claimable, nothing to heal)", st)
+	}
+
+	// Idempotent: a second sweep finds nothing.
+	if n2, err := stores.RunQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
+		t.Errorf("second sweep = (%d, %v), want (0, nil)", n2, err)
 	}
 }
 
@@ -449,10 +562,21 @@ func TestRunQueueStore_Postgres_Credentials(t *testing.T) {
 				}
 				return runID
 			},
-			ForceStatus: func(t *testing.T, runID, status string) {
+			RunStatus: func(t *testing.T, runID string) string {
 				t.Helper()
-				if _, err := h.AdminDB.Exec(`UPDATE runs SET status = $1 WHERE id = $2`, status, runID); err != nil {
-					t.Fatalf("force status %q: %v", status, err)
+				var status string
+				if err := h.AdminDB.QueryRow(`SELECT status FROM conversations WHERE id = $1`, runID).Scan(&status); err != nil {
+					t.Fatalf("read status: %v", err)
+				}
+				return status
+			},
+			SetActivePhase: func(t *testing.T, runID, phase string) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(`
+					UPDATE claims SET phase = NULLIF($1, '')
+					WHERE conversation_id = $2 AND released_at IS NULL
+				`, phase, runID); err != nil {
+					t.Fatalf("set active phase %q: %v", phase, err)
 				}
 			},
 		}
@@ -491,7 +615,7 @@ func TestRunQueueStore_Postgres_FleetQueueShares(t *testing.T) {
 			},
 			ForceStatus: func(t *testing.T, runID, status string) {
 				t.Helper()
-				if _, err := h.AdminDB.Exec(`UPDATE runs SET status = $1 WHERE id = $2`, status, runID); err != nil {
+				if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = $1 WHERE id = $2`, status, runID); err != nil {
 					t.Fatalf("force status %q: %v", status, err)
 				}
 			},
@@ -513,7 +637,7 @@ func TestRunQueueStore_Postgres_FleetQueueShares(t *testing.T) {
 func pgRunStatus(t *testing.T, h *pgtest.Harness, runID string) (status string, completed bool) {
 	t.Helper()
 	var completedAt *string
-	if err := h.AdminDB.QueryRow(`SELECT status, completed_at::text FROM runs WHERE id = $1`, runID).
+	if err := h.AdminDB.QueryRow(`SELECT status, completed_at::text FROM conversations WHERE id = $1`, runID).
 		Scan(&status, &completedAt); err != nil {
 		t.Fatalf("read run %s: %v", runID, err)
 	}
@@ -597,24 +721,28 @@ func TestRunQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 	if requeued.QueuedAt == nil || requeued.QueuedAt.Before(firstQueuedAt) {
 		t.Fatalf("QueuedAt after requeue = %v, want re-stamped at/after the first stamp %v", requeued.QueuedAt, firstQueuedAt)
 	}
-	if requeued.ClaimedAt != nil {
-		t.Fatalf("ClaimedAt = %v after requeue, want nil (a queued row has no claim)", requeued.ClaimedAt)
+	// The claims model keeps engagement history: ClaimedAt stays the released
+	// claim's stamp, but the row reads unowned (no active claim).
+	if requeued.ClaimedAt == nil {
+		t.Fatal("ClaimedAt = nil after requeue, want the released engagement's stamp retained")
+	}
+	if requeued.ExecutorID != "" {
+		t.Fatalf("ExecutorID = %q after requeue, want empty (a queued row has no active claim)", requeued.ExecutorID)
 	}
 }
 
-// TestRunQueueStore_Postgres_RequeueFromSetupStatus is the production-dialect
-// regression for a run stranded in `cloning`: the claim sets `running`, but the
-// dispatcher advances the row through granular setup statuses before the agent
-// runs, so a workspace-setup failure requeues from one of those. A guard
-// matching only `running` left the UPDATE hitting zero rows and the run sat
-// active-but-idle forever. RequeueRun must requeue from every mid-setup status.
-func TestRunQueueStore_Postgres_RequeueFromSetupStatus(t *testing.T) {
+// TestRunQueueStore_Postgres_RequeueFromSetupPhase pins that RequeueRun fires
+// no matter which setup phase the run's active claim is in: setup progress
+// (fetching/cloning/agent_starting/awaiting_credentials) lives on the claim,
+// the conversation stays 'running' the whole time, so a workspace-setup
+// failure mid-phase must still requeue the row and make it re-claimable.
+func TestRunQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	for _, setupStatus := range []string{"initializing", "cloning", "fetching", "worktree_created", "agent_starting"} {
-		t.Run(setupStatus, func(t *testing.T) {
+	for _, phase := range []string{"fetching", "cloning", "agent_starting", "awaiting_credentials"} {
+		t.Run(phase, func(t *testing.T) {
 			h.Reset(t)
 			orgID, userID := seedPgOrgForBlueprints(t, h)
 			brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
@@ -630,10 +758,11 @@ func TestRunQueueStore_Postgres_RequeueFromSetupStatus(t *testing.T) {
 			if got, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
 				t.Fatalf("ClaimNextRun: (%v, %v)", got, err)
 			}
-			// Advance to the granular setup status the dispatcher would have set
-			// before the workspace-setup failure fired the requeue.
-			if _, err := h.AdminDB.ExecContext(ctx, `UPDATE runs SET status = $2 WHERE id = $1`, runID, setupStatus); err != nil {
-				t.Fatalf("advance to %s: %v", setupStatus, err)
+			// Advance the claim into the setup phase the dispatcher would
+			// have recorded before the workspace-setup failure fired the
+			// requeue.
+			if err := stores.AgentRuns.SetActiveClaimPhaseSystem(ctx, orgID, runID, phase); err != nil {
+				t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", phase, err)
 			}
 
 			if err := stores.RunQueue.RequeueRun(ctx, orgID, runID, "workspace setup: boom"); err != nil {
@@ -644,10 +773,10 @@ func TestRunQueueStore_Postgres_RequeueFromSetupStatus(t *testing.T) {
 				t.Fatalf("GetSystem after requeue: (%v, %v)", after, err)
 			}
 			if after.Status != "queued" {
-				t.Fatalf("status after requeue from %q = %q, want queued (requeue must not no-op on a mid-setup status)", setupStatus, after.Status)
+				t.Fatalf("status after requeue from phase %q = %q, want queued (a mid-setup phase must not block the requeue)", phase, after.Status)
 			}
 			if reclaimed, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || reclaimed == nil {
-				t.Fatalf("re-ClaimNextRun after requeue from %q: (%v, %v)", setupStatus, reclaimed, err)
+				t.Fatalf("re-ClaimNextRun after requeue from phase %q: (%v, %v)", phase, reclaimed, err)
 			}
 		})
 	}

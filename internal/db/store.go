@@ -87,8 +87,9 @@ type Stores struct {
 	// TxStores instead.
 	Factory FactoryReadStore
 
-	// AgentRuns owns runs + run_messages — agent run lifecycle and
-	// transcript. App pool in Postgres; every consumer is
+	// AgentRuns owns conversations + messages — agent conversation
+	// lifecycle and transcript (per-engagement execution state lives on
+	// claims). App pool in Postgres; every consumer is
 	// request-equivalent or runs in a delegate goroutine launched from
 	// a request handler.
 	AgentRuns AgentRunStore
@@ -149,8 +150,9 @@ type Stores struct {
 
 	// RunQueue owns the run queue — the work list the delegation dispatcher
 	// drains to drive blueprints through their steps (sibling of EventQueue).
-	// A blueprint step is enqueued as a runs row in status='queued'; a worker
-	// claims it, runs the agent, and the reactor advances the blueprint_run.
+	// A blueprint step is enqueued as a conversations row in status='queued';
+	// a worker claims it (minting a claims row), runs the agent, and the
+	// reactor advances the blueprint_run.
 	// A system-service store (admin pool in Postgres): the dispatcher runs as
 	// a background worker with no per-user identity.
 	RunQueue RunQueueStore
@@ -165,7 +167,7 @@ type Stores struct {
 	TaskMemory TaskMemoryStore
 
 	// RunWorktrees owns the run_worktrees table — one row per
-	// (run_id, repo_id) lazy worktree reservation a Jira-style run
+	// (conversation_id, repo_id) lazy worktree reservation a Jira-style run
 	// accumulates as the agent materializes repos via `workspace
 	// add`. Holds both pools: app for the cmd/exec workspace CLI
 	// (its synthetic-claims wrap is owned by a separate cmd/exec
@@ -230,13 +232,14 @@ type Stores struct {
 	// org-wide UNION of every team's rows, a derived cache).
 	TeamGitHubRepos TeamGitHubReposStore
 
-	// Curator owns the curator-runtime tables (curator_requests,
-	// curator_messages, curator_pending_context). App pool in
-	// Postgres — the per-project goroutine wraps each turn's
-	// writes in Tx.SyntheticClaimsWithTx with the requesting
-	// user's identity (creator_user_id read from the request row
-	// at dequeue). RLS policies gate every row on the
-	// (org_id, creator_user_id) pair.
+	// Curator owns the curator's view of the shared conversations /
+	// messages / claims tables — one private conversation per (project,
+	// creator), queued turns as undelivered user messages, one claim per
+	// executed turn. Holds both pools in Postgres: app for the claims-bound
+	// send/history/dispatch message writes (the per-project goroutine wraps
+	// each turn in Tx.SyntheticClaimsWithTx under the requesting user's
+	// identity), admin for the `...System` claim writes, claim-loop scan,
+	// boot sweeps, pending-context producer, and provisioning reads.
 	Curator CuratorStore
 
 	// GitHubApps owns the org_github_apps table — per-org GitHub
@@ -300,8 +303,8 @@ type Stores struct {
 	ExternalActions ExternalActionStore
 
 	// Spend is the read-only aggregation over the llm_spend view — the unified
-	// shape that UNION-ALLs runs + curator_requests + system_llm_runs onto the
-	// category axis (TFAC-472). App pool in Postgres: the view is
+	// shape that UNION-ALLs delegation conversations + curator claims +
+	// system_llm_runs onto the category axis (TFAC-472). App pool in Postgres: the view is
 	// security_invoker, so the base tables' RLS scopes the read under the
 	// querying user (a team member sees their team's runs, not another team's;
 	// system/curator at org scope). Owns no table; the spine the dashboards +
@@ -320,12 +323,12 @@ type Stores struct {
 	// TFAC-76.
 	AuthEvents AuthEventStore
 
-	// StagedInjections owns the staged_agent_injections table — the durable,
-	// producer-agnostic "stage for next resume" agent-injection queue (TFAC-501,
-	// the generic terminal half of TFAC-493's feedback seam). Admin-pool-only
-	// in Postgres: both the producer (an eventbus subscriber) and the consumer
-	// (a detached resume goroutine) run without JWT claims; the table inherits
-	// runs' team-scoped RLS. SQLite is N=1. Written/read by the delegate
+	// StagedInjections is the durable, producer-agnostic "stage for next
+	// resume" agent-injection queue (TFAC-501, the generic terminal half of
+	// TFAC-493's feedback seam), stored as undelivered messages rows.
+	// Admin-pool-only in Postgres: both the producer (an eventbus
+	// subscriber) and the consumer (a detached resume goroutine) run
+	// without JWT claims. SQLite is N=1. Written/read by the delegate
 	// spawner's staged-injection API.
 	StagedInjections StagedInjectionStore
 
@@ -363,11 +366,11 @@ type Stores struct {
 	// owner, so no code path may reach this store there.
 	RunSignals RunSignalStore
 
-	// RunPendingInput owns the run_pending_input table — the durable half
-	// of resume-by-enqueue (TFAC-585): the message recorded before a
-	// parked run's continuation is re-queued as ordinary claimable work.
-	// Both dialects (unlike RunSignals): local mode's dispatcher claims
-	// its own resumed runs through the identical queue path.
+	// RunPendingInput is the durable half of resume-by-enqueue (TFAC-585):
+	// the message recorded before a parked run's continuation is re-queued
+	// as ordinary claimable work, stored as an undelivered user messages
+	// row. Both dialects (unlike RunSignals): local mode's dispatcher
+	// claims its own resumed runs through the identical queue path.
 	RunPendingInput RunPendingInputStore
 
 	// PollReadiness owns the poll_readiness table — the org-scoped
@@ -389,19 +392,13 @@ type Stores struct {
 	// PlacementOverrides: placement coordination, not a browsable RLS surface.
 	CuratorHomes CuratorHomeStore
 
-	// RunCredentials owns the run_credentials table — the sealed per-run
-	// credential bundle channel (TFAC-614). Admin-pool-only, same shape as
+	// RunCredentials owns the claim_credentials table — the sealed
+	// per-claim credential bundle channel (TFAC-614), keyed by the run's
+	// active claim. Admin-pool-only, same shape as
 	// Instances/RunSignals: never a request-handler surface, and unlike
 	// RunPendingInput its payload is credential-bearing ciphertext, so
 	// there is no app-pool grant at all.
 	RunCredentials RunCredentialsStore
-
-	// CuratorTurnCredentials owns the curator_turn_credentials table — the
-	// sealed per-turn credential bundle channel, the curator-turn
-	// analog of RunCredentials keyed on the curator_requests id. Admin-pool-
-	// only, same posture as RunCredentials: credential-bearing ciphertext,
-	// never a request-handler surface, no app-pool grant.
-	CuratorTurnCredentials CuratorTurnCredentialsStore
 
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
 	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —

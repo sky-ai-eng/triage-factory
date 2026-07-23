@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -178,13 +179,11 @@ func seedJiraRun(t *testing.T, database *db.DB, runID, issueKey string) {
 	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	if err := sqlitestore.New(database.Conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
+	dbtest.SeedConversation(t, database.Conn, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
 		BlueprintRunID: seedBlueprintRun(t, database.Conn, task.ID),
-	}); err != nil {
-		t.Fatalf("run: %v", err)
-	}
+	})
 }
 
 func seedGitHubRun(t *testing.T, database *db.DB, runID string) {
@@ -208,13 +207,11 @@ func seedGitHubRun(t *testing.T, database *db.DB, runID string) {
 	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	if err := sqlitestore.New(database.Conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
+	dbtest.SeedConversation(t, database.Conn, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
 		BlueprintRunID: seedBlueprintRun(t, database.Conn, task.ID),
-	}); err != nil {
-		t.Fatalf("run: %v", err)
-	}
+	})
 }
 
 func seedRepoProfile(t *testing.T, database *db.DB, owner, repo, cloneURL, defaultBranch string) {
@@ -1012,14 +1009,12 @@ func seedEventTriggeredJiraRun(t *testing.T, database *db.DB, runID, issueKey st
 	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	if err := sqlitestore.New(database.Conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
+	dbtest.SeedConversation(t, database.Conn, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
 		TriggerType:    "event",
 		BlueprintRunID: seedBlueprintRun(t, database.Conn, task.ID),
-	}); err != nil {
-		t.Fatalf("run: %v", err)
-	}
+	})
 }
 
 // TestMaterializeWorkspace_EventTriggeredRunRouting verifies that an

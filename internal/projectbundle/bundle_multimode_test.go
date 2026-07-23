@@ -46,15 +46,15 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	const slug = "sky-ai-eng/triage-factory"
 	const sessionID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
-	// Source project with a curator session + one pinned repo.
+	// Source project with one pinned repo; the curator session handle lands
+	// on the exporter's conversation below.
 	var projectID string
 	if err := stores.Tx.WithTx(ctx, srcOrg, srcUser, func(tx db.TxStores) error {
 		var e error
 		projectID, e = tx.Projects.Create(ctx, srcOrg, srcTeam, domain.Project{
-			Name:             "Multi source",
-			Description:      "multi fixture",
-			CuratorSessionID: sessionID,
-			PinnedRepos:      []string{slug},
+			Name:        "Multi source",
+			Description: "multi fixture",
+			PinnedRepos: []string{slug},
 		})
 		return e
 	}); err != nil {
@@ -90,26 +90,45 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 		t.Fatalf("write transcript: %v", err)
 	}
 
-	// One completed curator turn + a pending-context row, claims-bound.
+	// One completed curator turn (claims-bound message writes + System-door
+	// claim writes, the production split) plus a pending injection.
+	var convID string
+	var msgID int64
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, srcOrg, srcUser, func(tx db.TxStores) error {
-		reqID, e := tx.Curator.CreateRequest(ctx, srcOrg, projectID, srcUser, "", "hi")
+		conv, e := tx.Curator.GetOrCreateConversation(ctx, srcOrg, projectID, srcUser)
 		if e != nil {
 			return e
 		}
-		if e = tx.Curator.MarkRequestRunning(ctx, srcOrg, reqID); e != nil {
-			return e
-		}
-		if _, e = tx.Curator.InsertMessage(ctx, srcOrg, &domain.CuratorMessage{
-			RequestID: reqID, Role: "assistant", Subtype: "text", Content: "ack", CreatedAt: time.Now().UTC(),
-		}); e != nil {
-			return e
-		}
-		if _, e = tx.Curator.CompleteRequest(ctx, srcOrg, reqID, "done", "", 0.01, 10, 1); e != nil {
-			return e
-		}
-		return tx.Curator.InsertPendingContext(ctx, srcOrg, projectID, sessionID, domain.ChangeTypePinnedRepos, `["`+slug+`"]`)
+		convID = conv.ID
+		msgID, e = tx.Curator.EnqueueUserMessage(ctx, srcOrg, conv.ID, srcUser, "hi")
+		return e
 	}); err != nil {
 		t.Fatalf("seed curator turn: %v", err)
+	}
+	claimID, ok, err := stores.Curator.ClaimTurnSystem(ctx, srcOrg, convID, msgID, "src-exec", 1)
+	if err != nil || !ok {
+		t.Fatalf("claim turn: ok=%v err=%v", ok, err)
+	}
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, srcOrg, srcUser, func(tx db.TxStores) error {
+		if _, e := tx.Curator.BeginTurn(ctx, srcOrg, projectID, convID, msgID); e != nil {
+			return e
+		}
+		if e := tx.Curator.SetSDKSession(ctx, srcOrg, convID, sessionID); e != nil {
+			return e
+		}
+		_, e := tx.AgentRuns.InsertMessage(ctx, srcOrg, &domain.AgentMessage{
+			RunID: convID, UserID: srcUser, ClaimID: claimID,
+			Role: "assistant", Subtype: "text", Content: "ack", CreatedAt: time.Now().UTC(),
+		})
+		return e
+	}); err != nil {
+		t.Fatalf("run curator turn: %v", err)
+	}
+	if _, err := stores.Curator.ReleaseActiveTurnSystem(ctx, srcOrg, convID, "completed", "", 0.01, 10, 1); err != nil {
+		t.Fatalf("release turn: %v", err)
+	}
+	if err := stores.Curator.QueueContextChangeSystem(ctx, srcOrg, projectID, domain.ChangeTypePinnedRepos, `["`+slug+`"]`); err != nil {
+		t.Fatalf("queue pending context: %v", err)
 	}
 
 	// Export under the exporting user's claims.
@@ -146,6 +165,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	imported, warnings, err := Import(
 		ctx,
 		stores.Tx,
+		stores.Curator,
 		nil,
 		dstOrg, dstTeam, dstUser,
 		bytes.NewReader(bundleBytes),
@@ -158,8 +178,20 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	if len(warnings) != 0 {
 		t.Fatalf("unexpected import warnings: %+v", warnings)
 	}
-	if imported.ID == projectID || imported.CuratorSessionID == sessionID || imported.CuratorSessionID == "" {
-		t.Fatalf("import must mint fresh ids: project=%s session=%s", imported.ID, imported.CuratorSessionID)
+	var importedConv *domain.Conversation
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, dstOrg, dstUser, func(tx db.TxStores) error {
+		c, e := tx.Curator.GetLiveConversation(ctx, dstOrg, imported.ID, dstUser)
+		importedConv = c
+		return e
+	}); err != nil {
+		t.Fatalf("read imported conversation: %v", err)
+	}
+	if importedConv == nil {
+		t.Fatal("import did not restore the curator conversation")
+	}
+	newSessionID := importedConv.SessionID
+	if imported.ID == projectID || newSessionID == sessionID || newSessionID == "" {
+		t.Fatalf("import must mint fresh ids: project=%s session=%s", imported.ID, newSessionID)
 	}
 
 	// KB file landed under the DESTINATION org's state root.
@@ -182,7 +214,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	if !strings.HasPrefix(newSessionDir, newRoot) {
 		t.Fatalf("imported session dir %q must live under the new project root %q", newSessionDir, newRoot)
 	}
-	body, err := os.ReadFile(filepath.Join(newSessionDir, imported.CuratorSessionID+".jsonl"))
+	body, err := os.ReadFile(filepath.Join(newSessionDir, newSessionID+".jsonl"))
 	if err != nil {
 		t.Fatalf("read imported transcript: %v", err)
 	}
@@ -196,19 +228,31 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	// Curator history restored under the IMPORTING user's identity, and
 	// visible to them under RLS.
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, dstOrg, dstUser, func(tx db.TxStores) error {
-		reqs, e := tx.Curator.ListRequestsByProject(ctx, dstOrg, imported.ID)
+		if importedConv.CreatorUserID != dstUser {
+			t.Errorf("imported conversation creator = %s, want the importer %s", importedConv.CreatorUserID, dstUser)
+		}
+		claims, e := tx.Curator.ListClaims(ctx, dstOrg, importedConv.ID)
 		if e != nil {
 			return e
 		}
-		if len(reqs) != 1 || reqs[0].Status != "done" || reqs[0].CreatorUserID != dstUser {
-			t.Errorf("imported requests = %+v, want one done row created by %s", reqs, dstUser)
+		if len(claims) != 1 || claims[0].Outcome != "completed" {
+			t.Errorf("imported claims = %+v, want one completed engagement", claims)
 		}
-		pending, e := tx.Curator.ListPendingContext(ctx, dstOrg, imported.ID)
+		msgs, e := tx.Curator.ListConversationMessages(ctx, dstOrg, importedConv.ID)
 		if e != nil {
 			return e
 		}
-		if len(pending) != 1 || pending[0].CuratorSessionID != imported.CuratorSessionID {
-			t.Errorf("imported pending = %+v, want one row on session %s", pending, imported.CuratorSessionID)
+		var pendingInjections int
+		for _, m := range msgs {
+			if m.Subtype == "injection:context" && m.Delivered != nil && !*m.Delivered {
+				pendingInjections++
+			}
+			if m.UserID != "" && m.UserID != dstUser {
+				t.Errorf("imported message user = %s, want the importer %s", m.UserID, dstUser)
+			}
+		}
+		if pendingInjections != 1 {
+			t.Errorf("imported pending injections = %d, want 1", pendingInjections)
 		}
 		return nil
 	}); err != nil {

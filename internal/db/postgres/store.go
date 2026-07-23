@@ -286,19 +286,13 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// TracksRepoSystem (router gate, no JWT claims) + the
 		// repo_profiles reconcile (org-wide union, commits autonomously).
 		TeamGitHubRepos: newTeamGitHubReposStore(app, admin),
-		// Curator wires the app pool. The per-project goroutine
-		// wraps each turn's writes in Tx.SyntheticClaimsWithTx
-		// under the requesting user's identity; the tx-bound
-		// variant composed inside tx.go's txStoresFromTx body is
-		// what actually services those calls. The handler-side
-		// CreateRequest / GetRequest reads (where the request has
-		// a user identity but not yet via the D9 context plumb)
-		// also route through this app-pool wiring.
-		// Curator holds both pools: app for per-turn writes (claims-
-		// bound via SyntheticClaimsWithTx, RLS gates on the
-		// (org_id, creator_user_id) pair), admin for the boot-time
-		// CancelOrphanedNonTerminalRequests sweep that runs before
-		// any JWT-claims context exists.
+		// Curator holds both pools: app for the claims-bound send/history/
+		// dispatch message writes (the per-project goroutine wraps each
+		// turn in Tx.SyntheticClaimsWithTx under the requesting user's
+		// identity; the tx-bound variant composed inside tx.go is what
+		// services those calls), admin for the `...System` claim writes,
+		// the executor claim loop's cross-user scan, the boot sweeps, the
+		// pending-context producer, and the brain's provisioning reads.
 		Curator: newCuratorStore(app, admin),
 		// GitHubApps: app pool for request-handler reads/writes
 		// (RLS-gated); admin pool for installation-mirror writes (tf_app
@@ -402,10 +396,6 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// RunSignals: the sealed per-run credential bundle channel
 		// (TFAC-614) never serves a request handler.
 		RunCredentials: newRunCredentialsStore(admin),
-		// CuratorTurnCredentials is admin-pool only, same posture as
-		// RunCredentials: the sealed per-turn credential bundle channel
-		// never serves a request handler.
-		CuratorTurnCredentials: newCuratorTurnCredentialsStore(admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),

@@ -57,7 +57,7 @@ func setPgOrgCap(t *testing.T, h *pgtest.Harness, orgID string, cap *int) {
 
 func forcePgRunning(t *testing.T, h *pgtest.Harness, runID string) {
 	t.Helper()
-	pgtest.MustExec(t, h.AdminDB, `UPDATE runs SET status = 'running' WHERE id = $1`, runID)
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = 'running' WHERE id = $1`, runID)
 }
 
 // TestClaimFairness_BurstDoesNotStarveOtherOrg is the headline acceptance: org
@@ -80,7 +80,7 @@ func TestClaimFairness_BurstDoesNotStarveOtherOrg(t *testing.T) {
 	// Make every A run strictly older than B's so pure FIFO would drain all 100
 	// A runs before ever reaching B — isolating fairness as the reason B jumps
 	// the queue.
-	pgtest.MustExec(t, h.AdminDB, `UPDATE runs SET started_at = now() - interval '1 hour' WHERE org_id = $1`, a.orgID)
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET started_at = now() - interval '1 hour' WHERE org_id = $1`, a.orgID)
 
 	claim := func() *domain.AgentRun {
 		got, err := stores.RunQueue.ClaimNextRun(ctx, "exec-1", 1, db.ClaimPlacement{})
@@ -205,7 +205,7 @@ func TestClaimFairness_ComposesWithinPlacementTiers(t *testing.T) {
 		forcePgRunning(t, h, a.enqueue(t, stores, ""))
 		aTier1 := a.enqueue(t, stores, "exec-a")
 		bTier2 := b.enqueue(t, stores, "exec-other")
-		pgtest.MustExec(t, h.AdminDB, `UPDATE runs SET started_at = now() - interval '2 minutes' WHERE id = $1`, bTier2)
+		pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET started_at = now() - interval '2 minutes' WHERE id = $1`, bTier2)
 
 		got, err := stores.RunQueue.ClaimNextRun(ctx, "exec-a", 1, cfg)
 		if err != nil || got == nil {
@@ -246,11 +246,11 @@ func TestClaimFairness_ExplainAnalyzeSanity(t *testing.T) {
 		EXPLAIN (ANALYZE, FORMAT JSON)
 		WITH org_active AS (
 			SELECT org_id, count(*)::int AS active
-			FROM runs
-			WHERE status IN ('running', 'awaiting_credentials')
+			FROM conversations
+			WHERE status IN ('running')
 			GROUP BY org_id
 		)
-		SELECT r.id FROM runs r
+		SELECT r.id FROM conversations r
 		JOIN blueprint_runs br ON br.id = r.blueprint_run_id
 		LEFT JOIN org_active oa ON oa.org_id = r.org_id
 		LEFT JOIN org_settings os ON os.org_id = r.org_id

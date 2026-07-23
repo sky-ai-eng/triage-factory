@@ -934,7 +934,7 @@ func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entit
 					PARTITION BY COALESCE(r.blueprint_run_id, r.id)
 					ORDER BY r.started_at ASC
 				) AS step_rank
-			FROM runs r
+			FROM conversations r
 			JOIN tasks t ON r.task_id = t.id
 			LEFT JOIN blueprint_runs cr ON cr.id = r.blueprint_run_id
 			WHERE t.entity_id = ?

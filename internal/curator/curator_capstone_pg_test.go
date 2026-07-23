@@ -40,6 +40,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -134,52 +135,98 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 	}
 
 	// --- TFAC-64: every turn write attributed to alice/orgA ---
-	if got := requestCreator(t, h, reqID); got != alice {
-		t.Errorf("curator_requests.creator_user_id = %s, want alice %s", got, alice)
+	if got := turnCreator(t, h, reqID); got != alice {
+		t.Errorf("user message user_id = %s, want alice %s", got, alice)
 	}
-	if n := textMessageCount(t, h, reqID); n != 1 {
-		t.Errorf("curator_messages rows = %d, want 1 (sink wrote one under claims)", n)
+	if n := assistantMessageCount(t, h, reqID); n != 1 {
+		t.Errorf("assistant messages = %d, want 1 (sink wrote one under claims)", n)
 	}
-	if got := firstTextMessageCreator(t, h, reqID); got != alice {
-		t.Errorf("curator_messages.creator_user_id = %s, want alice %s", got, alice)
+	if got := firstAssistantMessageCreator(t, h, reqID); got != alice {
+		t.Errorf("assistant message user_id = %s, want alice %s", got, alice)
 	}
-	if sid := projectSessionID(t, h, projectA); sid != "sess-capstone" {
-		t.Errorf("projects.curator_session_id = %q, want sess-capstone (session capture under claims)", sid)
+	if sid := conversationSessionID(t, h, projectA); sid != "sess-capstone" {
+		t.Errorf("conversations.sdk_session_id = %q, want sess-capstone (session capture under claims)", sid)
 	}
 
-	// --- TFAC-473: per-message tokens rolled up onto the request ---
-	// The dispatch's requestSink persisted the streamed message (with its
-	// token usage) to curator_messages, and CompleteRequest SET the request's
-	// token columns from the curator_messages SUM. Read back under alice's
-	// claims (exercises the PG token read-scan too).
+	// --- the ledger carries the turn's tokens + the release's cost lump ---
+	// The dispatch's sink persisted the streamed message (with its token
+	// usage + claim id) and the release settled the reported cost as one
+	// lump on the claim's last row; the claim itself keeps the reported
+	// duration/turns telemetry. Read back under alice's claims (exercises
+	// the app-pool claims read-scan too).
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgA, alice, func(ts db.TxStores) error {
-		r, err := ts.Curator.GetRequest(ctx, orgA, reqID)
+		conv, err := ts.Curator.GetLiveConversation(ctx, orgA, projectA, alice)
 		if err != nil {
 			return err
 		}
-		if r == nil {
-			t.Fatal("alice cannot read her own completed request")
+		if conv == nil {
+			t.Fatal("alice cannot read her own conversation")
 			return nil
 		}
-		if r.InputTokens != capstoneInputTokens || r.OutputTokens != capstoneOutputTokens ||
-			r.CacheReadTokens != capstoneCacheReadTokens || r.CacheCreationTokens != capstoneCacheCreationTokens {
-			t.Errorf("curator_requests tokens = (%d,%d,%d,%d), want (%d,%d,%d,%d) — curator_messages SUM not rolled up",
-				r.InputTokens, r.OutputTokens, r.CacheReadTokens, r.CacheCreationTokens,
+		claims, err := ts.Curator.ListClaims(ctx, orgA, conv.ID)
+		if err != nil {
+			return err
+		}
+		if len(claims) != 1 {
+			t.Fatalf("claims = %d, want 1", len(claims))
+		}
+		cl := claims[0]
+		if cl.DurationMs == nil || *cl.DurationMs != 5 || cl.NumTurns == nil || *cl.NumTurns != 1 {
+			t.Errorf("claim telemetry = (%v, %v), want (5, 1) — the stub result's reported duration/turns", cl.DurationMs, cl.NumTurns)
+		}
+		msgs, err := ts.Curator.ListConversationMessages(ctx, orgA, conv.ID)
+		if err != nil {
+			return err
+		}
+		var in, out, crd, ccr int
+		var cost float64
+		for _, m := range msgs {
+			if m.InputTokens != nil {
+				in += *m.InputTokens
+			}
+			if m.OutputTokens != nil {
+				out += *m.OutputTokens
+			}
+			if m.CacheReadTokens != nil {
+				crd += *m.CacheReadTokens
+			}
+			if m.CacheCreationTokens != nil {
+				ccr += *m.CacheCreationTokens
+			}
+			if m.CostUSD != nil {
+				cost += *m.CostUSD
+			}
+		}
+		if in != capstoneInputTokens || out != capstoneOutputTokens ||
+			crd != capstoneCacheReadTokens || ccr != capstoneCacheCreationTokens {
+			t.Errorf("ledger tokens = (%d,%d,%d,%d), want (%d,%d,%d,%d)",
+				in, out, crd, ccr,
 				capstoneInputTokens, capstoneOutputTokens, capstoneCacheReadTokens, capstoneCacheCreationTokens)
+		}
+		if cost < 0.0009 || cost > 0.0011 {
+			t.Errorf("ledger cost = %v, want ~0.001 (the release's settlement lump)", cost)
 		}
 		return nil
 	}); err != nil {
 		t.Fatalf("alice read tokens: %v", err)
 	}
 
-	// --- no cross-tenant leakage: bob (orgB) cannot read alice's request ---
+	// --- no cross-tenant leakage: bob (orgB) cannot read alice's turn ---
+	aliceConvID := conversationIDFor(t, h, reqID)
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgB, bob, func(ts db.TxStores) error {
-		r, err := ts.Curator.GetRequest(ctx, orgA, reqID)
+		msgs, err := ts.Curator.ListConversationMessages(ctx, orgB, aliceConvID)
 		if err != nil {
 			return err
 		}
-		if r != nil {
-			t.Errorf("bob (orgB) read alice's request %s — RLS leak across tenants", reqID)
+		if len(msgs) != 0 {
+			t.Errorf("bob (orgB) read %d of alice's messages — RLS leak across tenants", len(msgs))
+		}
+		claims, err := ts.Curator.ListClaims(ctx, orgB, aliceConvID)
+		if err != nil {
+			return err
+		}
+		if len(claims) != 0 {
+			t.Errorf("bob (orgB) read %d of alice's claims — RLS leak across tenants", len(claims))
 		}
 		return nil
 	}); err != nil {
@@ -382,12 +429,11 @@ func TestCurator_Postgres_Multimode_CancelMidFlight(t *testing.T) {
 }
 
 // TestCurator_Postgres_Multimode_SimulatedRestartSweepsOrphans drives the
-// boot-recovery sequence: a process restart strands every queued/running
-// turn, and main.go's startup sweep (admin pool) must retire them across
-// ALL tenants before the new Curator comes up. The admin-pool routing is
-// pinned in detail by TestCuratorStore_Postgres_CancelOrphanedNonTerminalRequests;
-// here it's exercised as part of the capstone's "simulated restart leaves
-// no non-terminal row" acceptance, end to end with a live post-restart turn.
+// boot-recovery sequence: a process restart strands every RUNNING turn (a
+// live claim whose session goroutine died), and the startup sweep (admin
+// pool) must release them across ALL tenants before the new Curator comes
+// up. Queued turns are unowned undelivered messages and deliberately
+// survive. Exercised end to end with a live post-restart turn.
 func TestCurator_Postgres_Multimode_SimulatedRestartSweepsOrphans(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -400,33 +446,28 @@ func TestCurator_Postgres_Multimode_SimulatedRestartSweepsOrphans(t *testing.T) 
 	projA := seedPgProject(t, h, orgA, alice, teamA, "a")
 	projB := seedPgProject(t, h, orgB, bob, teamB, "b")
 
-	// Each tenant leaves a running row behind, as if its per-project
+	// Each tenant leaves a live engagement behind, as if its per-project
 	// goroutine was killed mid-turn by the restart.
-	strandedA := seedRequest(t, ctx, stores, orgA, alice, projA, "stranded-a")
-	strandedB := seedRequest(t, ctx, stores, orgB, bob, projB, "stranded-b")
-	for _, r := range []struct{ org, user, id string }{{orgA, alice, strandedA}, {orgB, bob, strandedB}} {
-		if err := stores.Tx.SyntheticClaimsWithTx(ctx, r.org, r.user, func(ts db.TxStores) error {
-			return ts.Curator.MarkRequestRunning(ctx, r.org, r.id)
-		}); err != nil {
-			t.Fatalf("mark running %s: %v", r.id, err)
-		}
-	}
+	convA, msgA := seedTurn(t, ctx, stores, orgA, alice, projA, "stranded-a")
+	convB, msgB := seedTurn(t, ctx, stores, orgB, bob, projB, "stranded-b")
+	beginSeededTurn(t, ctx, stores, orgA, alice, projA, convA, msgA)
+	beginSeededTurn(t, ctx, stores, orgB, bob, projB, convB, msgB)
 
 	// Boot recovery: the sweep runs BEFORE the new Curator is constructed
 	// (internal/app/subsystems.go) with no JWT-claims context. It must reach
-	// BOTH tenants' stranded rows via the admin pool.
-	n, err := stores.Curator.CancelOrphanedNonTerminalRequests(ctx)
+	// BOTH tenants' stranded engagements via the admin pool.
+	n, err := stores.Curator.CancelOrphanedTurnsSystem(ctx)
 	if err != nil {
 		t.Fatalf("orphan sweep: %v", err)
 	}
 	if n < 2 {
-		t.Errorf("sweep flipped %d rows, want >= 2 (both tenants' stranded rows)", n)
+		t.Errorf("sweep released %d claims, want >= 2 (both tenants' stranded engagements)", n)
 	}
-	if got := requestStatus(t, h, strandedA); got != "cancelled" {
-		t.Errorf("orgA stranded row = %q, want cancelled", got)
+	if got := turnStatusPg(t, h, msgA); got != "cancelled" {
+		t.Errorf("orgA stranded turn = %q, want cancelled", got)
 	}
-	if got := requestStatus(t, h, strandedB); got != "cancelled" {
-		t.Errorf("orgB stranded row = %q, want cancelled (cross-tenant boot sweep)", got)
+	if got := turnStatusPg(t, h, msgB); got != "cancelled" {
+		t.Errorf("orgB stranded turn = %q, want cancelled (cross-tenant boot sweep)", got)
 	}
 
 	// Recovery complete: a freshly-constructed Curator accepts a new turn.
@@ -443,7 +484,7 @@ func TestCurator_Postgres_Multimode_SimulatedRestartSweepsOrphans(t *testing.T) 
 // --- stub agent -----------------------------------------------------------
 
 // Token usage the driveSink stub streams on its one assistant message, so
-// tests can assert the curator_messages → curator_requests roll-up (TFAC-473).
+// tests can assert the ledger carries the turn's tokens.
 const (
 	capstoneInputTokens         = 111
 	capstoneOutputTokens        = 22
@@ -474,11 +515,10 @@ func (s *stubAgent) run(ctx context.Context, opts agentproc.RunOptions, sink age
 
 	if s.driveSink {
 		// The real per-turn RLS-attributed write set: session-id capture
-		// onto the project + one streamed message row, both wrapped in
+		// onto the conversation + one streamed message row, both wrapped in
 		// SyntheticClaimsWithTx by the curator sink. The message carries a
-		// token usage block that the requestSink persists onto
-		// curator_messages; CompleteRequest then rolls those rows up onto
-		// curator_requests — TFAC-473.
+		// token usage block the sink persists claim-stamped; the release
+		// then rolls the per-claim SUM onto the claim's token columns.
 		_ = sink.OnSession("sess-capstone")
 		_ = sink.OnMessage(&domain.AgentMessage{
 			Role: "assistant", Subtype: "text", Content: "capstone ack",
@@ -687,20 +727,25 @@ func linkedWorktreeCount(t *testing.T, bareDir string) int {
 	return n
 }
 
-// waitForStatus polls the (admin-pool) request status until it equals want
-// or the deadline elapses.
+// waitForStatus polls the (admin-pool) derived turn status until it equals
+// want or the deadline elapses. id is the wire request id — the turn's user
+// message id rendered decimal.
 func waitForStatus(t *testing.T, h *pgtest.Harness, id, want string) {
 	t.Helper()
+	msgID, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		t.Fatalf("parse request id %q: %v", id, err)
+	}
 	deadline := time.Now().Add(20 * time.Second)
 	var last string
 	for time.Now().Before(deadline) {
-		last = requestStatus(t, h, id)
+		last = turnStatusPg(t, h, msgID)
 		if last == want {
 			return
 		}
 		time.Sleep(15 * time.Millisecond)
 	}
-	t.Fatalf("request %s status = %q, want %q (timed out)", id, last, want)
+	t.Fatalf("turn %s status = %q, want %q (timed out)", id, last, want)
 }
 
 // waitInFlight drains n in-flight signals from the stub (i.e. waits for n
@@ -717,58 +762,96 @@ func waitInFlight(t *testing.T, s *stubAgent, n int) {
 	}
 }
 
-func requestCreator(t *testing.T, h *pgtest.Harness, id string) string {
+// turnID parses a wire request id back to the user message id.
+func turnID(t *testing.T, id string) int64 {
+	t.Helper()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		t.Fatalf("parse request id %q: %v", id, err)
+	}
+	return n
+}
+
+func conversationIDFor(t *testing.T, h *pgtest.Harness, requestID string) string {
+	t.Helper()
+	var conv string
+	if err := h.AdminDB.QueryRow(
+		`SELECT conversation_id::text FROM messages WHERE id = $1`, turnID(t, requestID),
+	).Scan(&conv); err != nil {
+		t.Fatalf("read conversation for turn %s: %v", requestID, err)
+	}
+	return conv
+}
+
+func turnCreator(t *testing.T, h *pgtest.Harness, requestID string) string {
 	t.Helper()
 	var got string
 	if err := h.AdminDB.QueryRow(
-		`SELECT creator_user_id::text FROM curator_requests WHERE id = $1`, id,
+		`SELECT user_id::text FROM messages WHERE id = $1`, turnID(t, requestID),
 	).Scan(&got); err != nil {
-		t.Fatalf("read request creator %s: %v", id, err)
+		t.Fatalf("read turn creator %s: %v", requestID, err)
 	}
 	return got
 }
 
-func textMessageCount(t *testing.T, h *pgtest.Harness, requestID string) int {
+func assistantMessageCount(t *testing.T, h *pgtest.Harness, requestID string) int {
 	t.Helper()
 	var n int
-	if err := h.AdminDB.QueryRow(
-		`SELECT count(*) FROM curator_messages WHERE request_id = $1 AND subtype = 'text'`, requestID,
-	).Scan(&n); err != nil {
+	if err := h.AdminDB.QueryRow(`
+		SELECT count(*) FROM messages
+		WHERE conversation_id = (SELECT conversation_id FROM messages WHERE id = $1)
+		  AND role = 'assistant' AND subtype = 'text'
+	`, turnID(t, requestID)).Scan(&n); err != nil {
 		t.Fatalf("count messages %s: %v", requestID, err)
 	}
 	return n
 }
 
-func firstTextMessageCreator(t *testing.T, h *pgtest.Harness, requestID string) string {
+func firstAssistantMessageCreator(t *testing.T, h *pgtest.Harness, requestID string) string {
 	t.Helper()
 	var got string
-	if err := h.AdminDB.QueryRow(
-		`SELECT creator_user_id::text FROM curator_messages WHERE request_id = $1 AND subtype = 'text' ORDER BY id LIMIT 1`,
-		requestID,
-	).Scan(&got); err != nil {
+	if err := h.AdminDB.QueryRow(`
+		SELECT user_id::text FROM messages
+		WHERE conversation_id = (SELECT conversation_id FROM messages WHERE id = $1)
+		  AND role = 'assistant' AND subtype = 'text'
+		ORDER BY id LIMIT 1
+	`, turnID(t, requestID)).Scan(&got); err != nil {
 		t.Fatalf("read message creator %s: %v", requestID, err)
 	}
 	return got
 }
 
-func projectSessionID(t *testing.T, h *pgtest.Harness, projectID string) string {
+func conversationSessionID(t *testing.T, h *pgtest.Harness, projectID string) string {
 	t.Helper()
 	var sid sql.NullString
-	if err := h.AdminDB.QueryRow(
-		`SELECT curator_session_id FROM projects WHERE id = $1`, projectID,
-	).Scan(&sid); err != nil {
-		t.Fatalf("read project session %s: %v", projectID, err)
+	if err := h.AdminDB.QueryRow(`
+		SELECT sdk_session_id FROM conversations
+		WHERE project_id = $1 AND type = 'curator' AND archived_at IS NULL
+		ORDER BY started_at ASC LIMIT 1
+	`, projectID).Scan(&sid); err != nil {
+		t.Fatalf("read conversation session %s: %v", projectID, err)
 	}
 	return sid.String
 }
 
+// nonTerminalCount counts live turn state on the project's curator
+// conversations: undelivered user messages (queued turns) + active claims
+// (running engagements).
 func nonTerminalCount(t *testing.T, h *pgtest.Harness, projectID string) int {
 	t.Helper()
 	var n int
-	if err := h.AdminDB.QueryRow(
-		`SELECT count(*) FROM curator_requests WHERE project_id = $1 AND status NOT IN ('done','cancelled','failed')`,
-		projectID,
-	).Scan(&n); err != nil {
+	if err := h.AdminDB.QueryRow(`
+		SELECT (
+		    SELECT count(*) FROM messages m
+		    JOIN conversations c ON c.id = m.conversation_id
+		    WHERE c.project_id = $1 AND c.type = 'curator'
+		      AND m.role = 'user' AND m.subtype = 'text' AND m.delivered = false
+		) + (
+		    SELECT count(*) FROM claims cl
+		    JOIN conversations c ON c.id = cl.conversation_id
+		    WHERE c.project_id = $1 AND c.type = 'curator' AND cl.released_at IS NULL
+		)
+	`, projectID).Scan(&n); err != nil {
 		t.Fatalf("count non-terminal %s: %v", projectID, err)
 	}
 	return n

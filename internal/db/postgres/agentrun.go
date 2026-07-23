@@ -10,28 +10,27 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/wakebus"
 )
 
-// agentRunStore is the Postgres impl of db.AgentRunStore. Holds two
-// pools (see postgres.New): `q` is the app pool (or a *sql.Tx
-// composed from it via WithTx) — every request-equivalent path
-// runs here, RLS-active under tf_app. `admin` is the supabase_admin
-// BYPASSRLS pool, used for the one write path that can't satisfy
-// the app-pool RLS predicate: event-triggered run inserts. Those
-// rows have creator_user_id NULL by the runs_creator_matches_trigger_type
-// CHECK, but the runs_insert RLS policy requires
-// `creator_user_id = tf.current_user_id()` — mutually exclusive, so
-// the app pool can't insert them at all. Routing event-triggered
-// Create through admin is the same shape the shipped-defaults seeder
-// (ShippedDefaultsStore.SeedShippedIntoTeam) uses for its system writes.
+// agentRunStore is the Postgres impl of db.AgentRunStore over the
+// conversations + messages + claims tables. Holds two pools (see
+// postgres.New): `q` is the app pool (or a *sql.Tx composed from it via
+// WithTx) — every request-equivalent path runs here, RLS-active under
+// tf_app. `admin` is the supabase_admin BYPASSRLS pool. Claims are a
+// system-written table (tf_app holds SELECT only), so every claim release /
+// stamp routes through `admin` regardless of which pool flipped the
+// conversation; on the `...System` lifecycle variants both writes share one
+// admin-pool transaction, while the app-pool variants pair an RLS-scoped
+// conversation flip with an adjacent admin-side release.
 //
-// SQL is written fresh against D3's schema: org_id in every WHERE
-// clause as defense in depth alongside RLS, $N placeholders, JSONB
+// SQL is written against the conversations-era schema: org_id in every
+// WHERE clause as defense in depth alongside RLS, $N placeholders, JSONB
 // extraction for tool_calls / metadata, RETURNING id for the
-// run_messages auto-increment (Postgres has a sequence, not
-// AUTOINCREMENT).
+// messages auto-increment (Postgres has a sequence, not AUTOINCREMENT).
+var agentRunLog = logging.Component("db/agentrun")
+
 type agentRunStore struct {
 	q     queryer
 	admin queryer
@@ -45,219 +44,191 @@ var _ db.AgentRunStore = (*agentRunStore)(nil)
 
 // --- Lifecycle ---
 
-func (s *agentRunStore) Create(ctx context.Context, orgID string, run domain.AgentRun) error {
-	triggerType := run.TriggerType
-	if triggerType == "" {
-		triggerType = "manual"
+// claimOutcomeForStatus maps a conversation's terminal status onto the
+// claims outcome vocabulary: the engagement that produced a failed (or
+// unsolvable) conversation failed, a cancelled one was cancelled, and
+// everything else completed.
+func claimOutcomeForStatus(status string) string {
+	switch status {
+	case "failed", "task_unsolvable":
+		return "failed"
+	case "cancelled":
+		return "cancelled"
 	}
-	var stepIdx any
-	if run.BlueprintStepIndex != nil {
-		stepIdx = *run.BlueprintStepIndex
-	}
-	// team_id resolves from the parent task — runs inherit team
-	// scope from their task so team-scoped queue / Board filters
-	// attribute the run consistently. Pre-fix this read the org's
-	// oldest team, which misattributed runs whose task belonged to
-	// a different team.
-	if triggerType == "event" {
-		return s.createEventTriggered(ctx, orgID, run, stepIdx)
-	}
-	return s.createManual(ctx, orgID, run, stepIdx)
+	return "completed"
 }
 
-// createEventTriggered routes through the admin pool (BYPASSRLS).
-// Two reasons:
+// releaseActiveClaim stamps released_at + outcome on the conversation's
+// active claim, if one exists. A no-op (no error) when the conversation has
+// no live engagement — a terminal write may land on a row whose claim was
+// already released (requeue, boot sweep). q must be admin-backed: tf_app
+// has no UPDATE grant on claims.
 //
-//   - The runs_creator_matches_trigger_type CHECK requires
-//     trigger_type='event' rows to have creator_user_id IS NULL,
-//     but the runs_insert RLS policy requires
-//     creator_user_id = tf.current_user_id() for every insert under
-//     tf_app — the two conditions are mutually exclusive, so the
-//     app pool can't insert event-triggered runs at all.
-//   - The boundary is also a security guarantee: event runs are
-//     system-emitted (eventbus → spawner). Pool routing enforces
-//     "only server-side code with admin pool access can create
-//     event-triggered runs" rather than relying on application
-//     layer guards. Same pattern as the shipped-defaults admin-pool seeder.
-//
-// **Nuance**: the admin pool is a separate connection, so this
-// insert commits autonomously from any outer WithTx the caller
-// might be composed inside. If a future caller wraps an
-// event-triggered Create + another write under WithTx, the run
-// insert will land even if the outer tx rolls back. No caller
-// composes this path today; document the edge for whoever
-// eventually needs atomic event-create + adjacent writes.
-//
-// The SQL is split from the manual path because Postgres needs
-// USAGE on schema `tf` to plan a reference to `tf.current_user_id()`,
-// and the admin role (supabase_admin) running this insert
-// shouldn't need to touch `tf` at all.
-func (s *agentRunStore) createEventTriggered(ctx context.Context, orgID string, run domain.AgentRun, stepIdx any) error {
-	_, err := s.admin.ExecContext(ctx, `
-		INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
-		                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
-		                  actor_agent_id, blueprint_run_id, blueprint_step_index)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'event', $8,
-		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
-		        'team', NULL,
-		        $9, $10, $11)
-	`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
-		nullIfEmpty(run.TriggerID),
-		nullIfEmpty(run.ActorAgentID), nullIfEmpty(run.BlueprintRunID), stepIdx)
+// On the non-System paths this release is deliberately ADJACENT to the
+// app-pool conversation flip rather than atomic with it: tf_app's
+// SELECT-only posture on claims is the structural guarantee that no
+// request-path tx can write claims, and it is worth more than
+// single-statement atomicity here. The two commits can therefore land
+// without each other — a rolled-back outer tx leaves an in-flight
+// conversation with no active claim, a crash between the commits leaves a
+// terminal conversation with a dangling one — and both shapes are healed by
+// the claim-desync janitor arms (RunQueueStore.ReconcileOrphanedRuns at
+// boot in both modes; the leader reaper's HealClaimDesyncs every tick), so
+// neither can strand a row past a sweep.
+func releaseActiveClaim(ctx context.Context, q queryer, orgID, runID, outcome string) error {
+	_, err := q.ExecContext(ctx, `
+		UPDATE claims SET released_at = now(), outcome = $1
+		WHERE org_id = $2 AND conversation_id = $3 AND released_at IS NULL
+	`, outcome, orgID, runID)
 	return err
 }
 
-// createManual runs on the app pool (RLS-active under tf_app).
-// CreatorUserID resolution: the SQLite-shaped LocalDefaultUserID
-// sentinel has no FK target in a multi-mode `users` table, so any
-// caller that still passes it (the pre-store-migration spawner does
-// for manual delegations) would fail runs_creator_user_id_fkey.
-// Treat the sentinel as empty here so the COALESCE walks to
-// tf.current_user_id() (the JWT-claimed user, set by WithTx) or
-// the org owner. The schema CHECK requires non-NULL creator for
-// trigger_type='manual'; org-owner is the only universally
-// available non-null in production multi-mode.
-//
-// The sentinel filter is transitional: D9 will rewire
-// the spawner to pass the request user from auth context, after
-// which this filter becomes dead code.
-func (s *agentRunStore) createManual(ctx context.Context, orgID string, run domain.AgentRun, stepIdx any) error {
-	creatorBind := run.CreatorUserID
-	if creatorBind == runmode.LocalDefaultUserID {
-		creatorBind = ""
-	}
-	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
-		                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
-		                  actor_agent_id, blueprint_run_id, blueprint_step_index)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'manual', $8,
-		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
-		        'team',
-		        COALESCE(
-		            NULLIF($9, '')::uuid,
-		            tf.current_user_id(),
-		            (SELECT owner_user_id FROM orgs WHERE id = $2)
-		        ),
-		        $10, $11, $12)
-	`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
-		nullIfEmpty(run.TriggerID),
-		creatorBind, nullIfEmpty(run.ActorAgentID),
-		nullIfEmpty(run.BlueprintRunID), stepIdx)
-	return err
-}
-
-// CreateIfNotFiredSystem is the event-path fenced insert. Same
-// admin-pool routing and team_id derivation as createEventTriggered (the
-// runs_creator_matches_trigger_type CHECK + runs_insert RLS make the app
-// pool unable to write trigger_type='event' rows), plus triggering_event_id
-// and ON CONFLICT … DO NOTHING against the runs_event_trigger_fence partial
-// unique index. inserted=false means a run for this (triggering_event_id,
-// trigger_id) already committed — a replayed event, skipped cleanly. The
-// run insert is the crash-consistent commit point, so the fence is exact:
-// fence row exists iff run exists.
-func (s *agentRunStore) CreateIfNotFiredSystem(ctx context.Context, orgID string, run domain.AgentRun) (bool, error) {
-	// Both halves of the fence key are required: an empty value binds NULL,
-	// the partial unique index treats NULL as distinct, and the insert would
-	// silently skip the fence. Fail loud — this is the fenced path, and an
-	// unfenced run here would defeat its purpose.
-	if run.TriggeringEventID == "" || run.TriggerID == "" {
-		return false, db.ErrFenceRequiresEventAndTrigger
-	}
-	var stepIdx any
-	if run.BlueprintStepIndex != nil {
-		stepIdx = *run.BlueprintStepIndex
-	}
-	res, err := s.admin.ExecContext(ctx, `
-		INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
-		                  trigger_type, trigger_id, triggering_event_id, team_id, visibility, creator_user_id,
-		                  actor_agent_id, blueprint_run_id, blueprint_step_index)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'event', $8, $9,
-		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
-		        'team', NULL,
-		        $10, $11, $12)
-		ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
-	`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
-		nullIfEmpty(run.TriggerID), nullIfEmpty(run.TriggeringEventID),
-		nullIfEmpty(run.ActorAgentID), nullIfEmpty(run.BlueprintRunID), stepIdx)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
-}
-
+// Complete pairs the app-pool status flip + cost-lump stamp with an
+// adjacent admin-pool claim release — non-atomic by design; see
+// releaseActiveClaim for why the split is acceptable (the janitor arms make
+// both crash shapes self-healing). The cost stamp rides the app pool: the
+// messages ledger is app-writable (tf_app holds UPDATE) and the row is the
+// caller's own conversation.
 func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
-	return completeRun(ctx, s.q, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind)
+	if err := completeRun(ctx, s.q, orgID, runID, status, costUSD, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+		return err
+	}
+	return releaseActiveClaimWithTelemetry(ctx, s.admin, orgID, runID, claimOutcomeForStatus(status), durationMs, numTurns)
 }
 
 func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
-	return completeRun(ctx, s.admin, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind)
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if err := completeRun(ctx, q, orgID, runID, status, costUSD, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+			return err
+		}
+		return releaseActiveClaimWithTelemetry(ctx, q, orgID, runID, claimOutcomeForStatus(status), durationMs, numTurns)
+	})
 }
 
-func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
-	// Token columns are SET to the absolute SUM over run_messages (the
-	// streaming sink wrote every session's rows before this terminal
-	// write), NOT accumulated like total_cost_usd — the SUM is already the
-	// full total, so re-running Complete on a resume re-sets the same
-	// correct value rather than doubling. The subqueries reuse the org/run
-	// binds ($11/$12); org_id scopes run_messages for defense-in-depth
-	// (and so the admin-pool BYPASSRLS path stays tenant-correct). TFAC-473.
+func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+	// The conversation carries no accounting cache — cost settles as one
+	// lump on the invocation's last message row (the ledger) below. A
+	// resume's Complete stamps its own invocation's lump on its own last
+	// row, so nothing accumulates or doubles.
 	_, err := q.ExecContext(ctx, `
-		UPDATE runs
+		UPDATE conversations
 		SET status = $1,
 		    completed_at = $2,
-		    total_cost_usd = COALESCE(total_cost_usd, 0) + $3,
-		    duration_ms = COALESCE(duration_ms, 0) + $4,
-		    num_turns = COALESCE(num_turns, 0) + $5,
-		    stop_reason = $6,
-		    result_summary = $7,
-		    outcome = NULLIF($8, ''),
-		    outcome_reason = NULLIF($9, ''),
-		    failure_kind = NULLIF($10, ''),
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE org_id = $11 AND run_id = $12),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE org_id = $11 AND run_id = $12),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE org_id = $11 AND run_id = $12),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE org_id = $11 AND run_id = $12)
-		WHERE org_id = $11 AND id = $12
-	`, status, time.Now(), costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind, orgID, runID)
-	return err
+		    stop_reason = $3,
+		    result_summary = $4,
+		    outcome = NULLIF($5, ''),
+		    outcome_reason = NULLIF($6, ''),
+		    failure_kind = NULLIF($7, '')
+		WHERE org_id = $8 AND id = $9
+	`, status, time.Now(), stopReason, resultSummary, outcome, outcomeReason, failureKind, orgID, runID)
+	if err != nil {
+		return err
+	}
+	// The active claim this terminal write releases identifies the
+	// engagement's own message rows (they insert claim-stamped), so the
+	// lump settles claim-keyed — the curator turn release's shape. Read
+	// before the release below: a released claim is no longer findable.
+	var claimID string
+	err = q.QueryRowContext(ctx, `
+		SELECT id FROM claims
+		WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL
+	`, orgID, runID).Scan(&claimID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if claimID != "" {
+		// Overwrite, not add: the engagement's newest claim-attributed row
+		// is its own fresh row, and the lump is that invocation's whole
+		// total.
+		res, err := q.ExecContext(ctx, `
+			UPDATE messages SET cost_usd = $1
+			WHERE org_id = $2 AND conversation_id = $3
+			  AND id = (SELECT MAX(id) FROM messages WHERE claim_id = $4)
+		`, costUSD, orgID, runID, claimID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			return nil
+		}
+	}
+	if costUSD == 0 {
+		return nil
+	}
+	// An invocation can bill real tokens while streaming zero rows of its
+	// own (system-prompt/cache overhead on an errored run), and the
+	// messages ledger is the only spend record — so the lump settles on the
+	// conversation's newest existing row rather than being dropped. ADDITIVE,
+	// unlike the overwrite above: that row may already carry an earlier
+	// invocation's lump. The caveat: a rowless resume's spend lands on an
+	// older invocation's row — totals stay exact, per-row time attribution
+	// smears; accepted for this narrow corner.
+	res, err := q.ExecContext(ctx, `
+		UPDATE messages SET cost_usd = COALESCE(cost_usd, 0) + $1
+		WHERE org_id = $2 AND conversation_id = $3
+		  AND id = (SELECT MAX(id) FROM messages WHERE org_id = $2 AND conversation_id = $3)
+	`, costUSD, orgID, runID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		// No message rows at all: the spend has no ledger row to live on.
+		// Loud, so the dropped dollars are at least observable.
+		agentRunLog.Warn("run cost has no message row to settle on; spend unrecorded",
+			"conversation_id", runID, "org_id", orgID, "cost_usd", costUSD)
+	}
+	return nil
 }
 
-func (s *agentRunStore) AddPartialTotals(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error {
-	return addPartialTotals(ctx, s.q, orgID, runID, costUSD, durationMs, numTurns)
-}
-
-func (s *agentRunStore) AddPartialTotalsSystem(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error {
-	return addPartialTotals(ctx, s.admin, orgID, runID, costUSD, durationMs, numTurns)
-}
-
-func addPartialTotals(ctx context.Context, q queryer, orgID, runID string, costUSD float64, durationMs, numTurns int) error {
+// releaseActiveClaimWithTelemetry is releaseActiveClaim plus the terminal
+// duration/turns stamp — the engagement telemetry the runtime reports per
+// invocation, which lives on the claim because messages can't derive it.
+func releaseActiveClaimWithTelemetry(ctx context.Context, q queryer, orgID, runID, outcome string, durationMs, numTurns int) error {
 	_, err := q.ExecContext(ctx, `
-		UPDATE runs
-		SET total_cost_usd = COALESCE(total_cost_usd, 0) + $1,
-		    duration_ms = COALESCE(duration_ms, 0) + $2,
-		    num_turns = COALESCE(num_turns, 0) + $3
-		WHERE org_id = $4 AND id = $5
-	`, costUSD, durationMs, numTurns, orgID, runID)
+		UPDATE claims SET released_at = now(), outcome = $1, duration_ms = $2, num_turns = $3
+		WHERE org_id = $4 AND conversation_id = $5 AND released_at IS NULL
+	`, outcome, durationMs, numTurns, orgID, runID)
 	return err
 }
 
+// MarkOpen's park release is adjacent, not atomic — see releaseActiveClaim.
+// An 'open' row with a dangling claim needs no janitor arm of its own: the
+// resume flip (MarkQueuedForResume) releases any active claim on its way
+// back to the queue.
 func (s *agentRunStore) MarkOpen(ctx context.Context, orgID, runID string) (bool, error) {
-	return markOpen(ctx, s.q, orgID, runID)
+	flipped, err := markOpen(ctx, s.q, orgID, runID)
+	if err != nil || !flipped {
+		return flipped, err
+	}
+	return true, releaseActiveClaim(ctx, s.admin, orgID, runID, "parked")
 }
 
 func (s *agentRunStore) MarkOpenSystem(ctx context.Context, orgID, runID string) (bool, error) {
-	return markOpen(ctx, s.admin, orgID, runID)
+	var flipped bool
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		var err error
+		flipped, err = markOpen(ctx, q, orgID, runID)
+		if err != nil || !flipped {
+			return err
+		}
+		return releaseActiveClaim(ctx, q, orgID, runID, "parked")
+	})
+	return flipped, err
 }
 
 func markOpen(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
 	// pending_approval stays in the exclusion list as a backward-compat guard:
 	// runs no longer park in it, but a legacy row must not be re-opened from it.
 	res, err := q.ExecContext(ctx, `
-		UPDATE runs
+		UPDATE conversations
 		SET status = 'open', parked_at = now()
 		WHERE org_id = $1 AND id = $2
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
@@ -270,30 +241,19 @@ func markOpen(ctx context.Context, q queryer, orgID, runID string) (bool, error)
 	return n > 0, err
 }
 
-func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) (bool, error) {
-	return markResuming(ctx, s.q, orgID, runID, executorID, bootEpoch)
-}
-
-func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) (bool, error) {
-	return markResuming(ctx, s.admin, orgID, runID, executorID, bootEpoch)
-}
-
-// MarkQueuedForResume is resume-by-enqueue's status flip (TFAC-585): see
+// MarkQueuedForResume is resume-by-enqueue's status flip: see
 // the interface doc comment. Always claims-scoped — resume is always
-// user-initiated, so there is no admin-pool "...System" variant. It clears
-// executor_id/boot_epoch alongside the flip: a queued row has no owner, the
-// same invariant RequeueRun/ResetProcessingRuns hold, and the fleet reaper's
-// ownership sweep would otherwise mis-attribute this row to its prior owner.
-// preferred_executor_id is cleared for the same reason (TFAC-587): a
+// user-initiated, so there is no admin-pool "...System" variant. The active
+// claim releases as 'requeued' (ownership is re-established by ClaimNextRun
+// minting a fresh claim at the actual claim, exactly like a fresh
+// EnqueueRun'd row). preferred_executor_id is cleared: a
 // long-parked run's old stamp is exactly the outlives-a-dwell case placement
 // calls out — NULL re-queues it as unowned/immediately-claimable, and the
 // claiming executor re-warms and re-earns affinity on the next enqueue.
 func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error) {
 	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', queued_at = now(),
-		                parked_at = NULL, claimed_at = NULL,
-		                executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL,
-		                preferred_executor_id = NULL
+		UPDATE conversations SET status = 'queued', queued_at = now(),
+		                parked_at = NULL, preferred_executor_id = NULL
 		WHERE org_id = $1 AND id = $2
 		  AND (status = 'open'
 		       OR (status = 'completed' AND outcome = 'abort'))
@@ -307,7 +267,10 @@ func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID st
 	}
 	flipped := n > 0
 	if flipped {
-		// tf_wake doorbell (TFAC-586): resume-by-enqueue re-queues an
+		if err := releaseActiveClaim(ctx, s.admin, orgID, runID, "requeued"); err != nil {
+			return false, err
+		}
+		// tf_wake doorbell: resume-by-enqueue re-queues an
 		// EXISTING row rather than inserting one, so it needs its own
 		// notify — RunQueueStore.EnqueueRun's doesn't fire for this path.
 		// Best-effort, same "never the only path" contract as there.
@@ -326,7 +289,7 @@ func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cuto
 	// retention sweep is a tenant-spanning system job with no JWT claims.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT org_id, blueprint_run_id
-		FROM runs
+		FROM conversations
 		WHERE status = 'open'
 		   OR (status = 'completed' AND outcome = 'abort')
 		GROUP BY org_id, blueprint_run_id
@@ -347,34 +310,6 @@ func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cuto
 	return keys, rows.Err()
 }
 
-func markResuming(ctx context.Context, q queryer, orgID, runID, executorID string, bootEpoch int64) (bool, error) {
-	// Wake any non-finish parked/terminal state: open, or an aborted run
-	// (completed + outcome='abort'). Keyed on (status, outcome) so a finish run
-	// (completed + outcome='finish') is excluded and a racing resume that already
-	// moved the row loses this compare-and-swap. pending_approval is gone
-	// Runs never park for approval.
-	//
-	// The ownership stamp rides the same statement: a parked row still
-	// wears the identity of whichever instance last ran it, and flipping
-	// it 'running' without re-stamping would leave the whole
-	// rehydrate+spawn window attributed to that instance — whose next
-	// boot (or the reaper) would sweep a run this process is live-resuming.
-	// Empty executorID → NULL for both columns (un-wired test spawner).
-	res, err := q.ExecContext(ctx, `
-		UPDATE runs SET status = 'running', parked_at = NULL,
-			executor_id = NULLIF($3, ''),
-			boot_epoch  = CASE WHEN $3 = '' THEN NULL ELSE $4::bigint END
-		WHERE org_id = $1 AND id = $2
-		  AND (status = 'open'
-		       OR (status = 'completed' AND outcome = 'abort'))
-	`, orgID, runID, executorID, bootEpoch)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
-}
-
 func (s *agentRunStore) SetSession(ctx context.Context, orgID, runID, sessionID string) error {
 	return setRunSession(ctx, s.q, orgID, runID, sessionID)
 }
@@ -385,37 +320,51 @@ func (s *agentRunStore) SetSessionSystem(ctx context.Context, orgID, runID, sess
 
 func setRunSession(ctx context.Context, q queryer, orgID, runID, sessionID string) error {
 	_, err := q.ExecContext(ctx, `
-		UPDATE runs SET session_id = $1 WHERE org_id = $2 AND id = $3
+		UPDATE conversations SET sdk_session_id = $1 WHERE org_id = $2 AND id = $3
 	`, sessionID, orgID, runID)
 	return err
 }
 
 func (s *agentRunStore) SetExecutorSystem(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) error {
-	// Clearing the pointer (executorID == "") clears boot_epoch with it —
-	// the two columns are always either both set or both NULL, never a
-	// stale boot_epoch left behind for no owner.
-	var epoch any
-	if executorID != "" {
-		epoch = bootEpoch
+	// An empty executorID keeps the legacy clear semantics: the live
+	// engagement is over, so its claim releases as requeued.
+	if executorID == "" {
+		return releaseActiveClaim(ctx, s.admin, orgID, runID, "requeued")
 	}
+	// Idempotent go-live confirmation: update the active claim's identity
+	// if one exists, mint one if none does — the live process must never
+	// run unattributed.
+	return inTx(ctx, s.admin, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE claims SET executor_id = $1, boot_epoch = $2
+			WHERE org_id = $3 AND conversation_id = $4 AND released_at IS NULL
+		`, executorID, bootEpoch, orgID, runID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			return nil
+		}
+		_, err = q.ExecContext(ctx, `
+			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at)
+			VALUES ($1, $2, $3, $4, now())
+		`, orgID, runID, executorID, bootEpoch)
+		return err
+	})
+}
+
+// SetActiveClaimPhaseSystem scopes the write to the ACTIVE claim only: a
+// released claim's phase is inert history, and a conversation with no live
+// engagement has no sub-state to record — both fall through as a no-op.
+func (s *agentRunStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID, runID, phase string) error {
 	_, err := s.admin.ExecContext(ctx, `
-		UPDATE runs SET executor_id = $1, boot_epoch = $2 WHERE org_id = $3 AND id = $4
-	`, nullIfEmpty(executorID), epoch, orgID, runID)
-	return err
-}
-
-func (s *agentRunStore) SetStatus(ctx context.Context, orgID, runID, status string) error {
-	return setRunStatus(ctx, s.q, orgID, runID, status)
-}
-
-func (s *agentRunStore) SetStatusSystem(ctx context.Context, orgID, runID, status string) error {
-	return setRunStatus(ctx, s.admin, orgID, runID, status)
-}
-
-func setRunStatus(ctx context.Context, q queryer, orgID, runID, status string) error {
-	_, err := q.ExecContext(ctx, `
-		UPDATE runs SET status = $1 WHERE org_id = $2 AND id = $3
-	`, status, orgID, runID)
+		UPDATE claims SET phase = NULLIF($1, '')
+		WHERE org_id = $2 AND conversation_id = $3 AND released_at IS NULL
+	`, phase, orgID, runID)
 	return err
 }
 
@@ -429,45 +378,42 @@ func (s *agentRunStore) SetWorktreePathSystem(ctx context.Context, orgID, runID,
 
 func setRunWorktreePath(ctx context.Context, q queryer, orgID, runID, path string) error {
 	_, err := q.ExecContext(ctx, `
-		UPDATE runs SET worktree_path = $1 WHERE org_id = $2 AND id = $3
+		UPDATE conversations SET worktree_path = $1 WHERE org_id = $2 AND id = $3
 	`, path, orgID, runID)
 	return err
 }
 
-func (s *agentRunStore) HasOtherActiveRunForTask(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error) {
-	return hasOtherActiveRunForTask(ctx, s.q, orgID, taskID, excludeRunID)
-}
-
-func (s *agentRunStore) HasOtherActiveRunForTaskSystem(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error) {
-	return hasOtherActiveRunForTask(ctx, s.admin, orgID, taskID, excludeRunID)
-}
-
+// MarkFailedIfActive's release is adjacent, not atomic — see
+// releaseActiveClaim for the crash shapes and the janitor arms that heal
+// them.
 func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID, failureKind string) (bool, error) {
-	return markFailedIfActive(ctx, s.q, orgID, runID, failureKind)
+	flipped, err := markFailedIfActive(ctx, s.q, orgID, runID, failureKind)
+	if err != nil || !flipped {
+		return flipped, err
+	}
+	return true, releaseActiveClaim(ctx, s.admin, orgID, runID, "failed")
 }
 
 func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, runID, failureKind string) (bool, error) {
-	return markFailedIfActive(ctx, s.admin, orgID, runID, failureKind)
+	var flipped bool
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		var err error
+		flipped, err = markFailedIfActive(ctx, q, orgID, runID, failureKind)
+		if err != nil || !flipped {
+			return err
+		}
+		return releaseActiveClaim(ctx, q, orgID, runID, "failed")
+	})
+	return flipped, err
 }
 
 func markFailedIfActive(ctx context.Context, q queryer, orgID, runID, failureKind string) (bool, error) {
 	// 'open' is deliberately failable here (unlike 'pending_approval') — see
 	// AgentRunStore.MarkFailedIfActive: a warm 'open' run has no durable
 	// snapshot yet, so an infra error reaching failRun must terminate it.
-	//
-	// Refresh the denormalized token columns from the run_messages SUM, same as
-	// completeRun — an infra-failed run still streamed (and paid for) messages,
-	// so the cache must reflect them rather than strand at 0. The subqueries
-	// reuse the org/run binds ($3/$4); org_id scopes run_messages for
-	// defense-in-depth (and so the admin-pool BYPASSRLS path stays
-	// tenant-correct). TFAC-473.
 	res, err := q.ExecContext(ctx, `
-		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, $1),
-		    failure_kind = NULLIF($2, ''),
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE org_id = $3 AND run_id = $4),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE org_id = $3 AND run_id = $4),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE org_id = $3 AND run_id = $4),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE org_id = $3 AND run_id = $4)
+		UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, $1),
+		    failure_kind = NULLIF($2, '')
 		WHERE org_id = $3 AND id = $4
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
 		                     'pending_approval')
@@ -479,81 +425,39 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, runID, failureKin
 	return n > 0, err
 }
 
-func (s *agentRunStore) MarkCompletedIfPendingApproval(ctx context.Context, orgID, runID string) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'completed'
-		WHERE org_id = $1 AND id = $2 AND status = 'pending_approval'
-	`, orgID, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
-}
-
-func hasOtherActiveRunForTask(ctx context.Context, q queryer, orgID, taskID, excludeRunID string) (bool, error) {
-	var exists bool
-	err := q.QueryRowContext(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM runs
-			WHERE org_id = $1 AND task_id = $2 AND id != $3
-			  AND status NOT IN ('completed','failed','cancelled','task_unsolvable','pending_approval')
-		)
-	`, orgID, taskID, excludeRunID).Scan(&exists)
-	if err != nil {
-		return false, err
-	}
-	return exists, nil
-}
-
+// MarkCancelledIfActive's release is adjacent, not atomic — see
+// releaseActiveClaim for the crash shapes and the janitor arms that heal
+// them.
 func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
-	return markCancelledIfActive(ctx, s.q, orgID, runID, stopReason, summary)
+	flipped, err := markCancelledIfActive(ctx, s.q, orgID, runID, stopReason, summary)
+	if err != nil || !flipped {
+		return flipped, err
+	}
+	return true, releaseActiveClaim(ctx, s.admin, orgID, runID, "cancelled")
 }
 
 func (s *agentRunStore) MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
-	return markCancelledIfActive(ctx, s.admin, orgID, runID, stopReason, summary)
+	var flipped bool
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		var err error
+		flipped, err = markCancelledIfActive(ctx, q, orgID, runID, stopReason, summary)
+		if err != nil || !flipped {
+			return err
+		}
+		return releaseActiveClaim(ctx, q, orgID, runID, "cancelled")
+	})
+	return flipped, err
 }
 
 func markCancelledIfActive(ctx context.Context, q queryer, orgID, runID, stopReason, summary string) (bool, error) {
 	now := time.Now()
-	// Refresh the denormalized token columns from the run_messages SUM, same as
-	// completeRun — a run cancelled while running/open still streamed (and paid
-	// for) messages, so the cache must reflect them rather than strand at 0. The
-	// subqueries reuse the org/run binds ($4/$5); org_id scopes run_messages for
-	// defense-in-depth (and so the admin-pool BYPASSRLS path stays
-	// tenant-correct). TFAC-473.
 	res, err := q.ExecContext(ctx, `
-		UPDATE runs
-		SET status = 'cancelled', completed_at = $1, stop_reason = $2, result_summary = $3,
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE org_id = $4 AND run_id = $5),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE org_id = $4 AND run_id = $5),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE org_id = $4 AND run_id = $5),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE org_id = $4 AND run_id = $5)
+		UPDATE conversations
+		SET status = 'cancelled', completed_at = $1, stop_reason = $2, result_summary = $3
 		WHERE org_id = $4 AND id = $5
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
 		                     'pending_approval')
 	`, now, stopReason, summary, orgID, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
-}
-
-func (s *agentRunStore) MarkDiscarded(ctx context.Context, orgID, runID, stopReason string) (bool, error) {
-	now := time.Now()
-	// No token roll-up here (unlike the other terminal writes): this acts only
-	// on 'pending_approval' rows, which already rolled up at the
-	// completed→pending_approval transition via completeRun — run_messages can't
-	// grow after that, so the cache is already current (TFAC-473).
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs
-		SET status = 'cancelled',
-		    completed_at = COALESCE(completed_at, $1),
-		    stop_reason = $2,
-		    result_summary = COALESCE(NULLIF(result_summary, ''), $3)
-		WHERE org_id = $4 AND id = $5 AND status = 'pending_approval'
-	`, now, stopReason, "Review discarded by user.", orgID, runID)
 	if err != nil {
 		return false, err
 	}
@@ -568,24 +472,69 @@ func (s *agentRunStore) MarkDiscarded(ctx context.Context, orgID, runID, stopRea
 // stores that need to project a run (e.g. factoryReadStore.ActiveRuns)
 // already use their own copy because they also project task+entity
 // JOINs. Keeping this here keeps the simple "just the run" projection
-// uncoupled from those.
+// uncoupled from those. task_id/status/team_id COALESCE to ” because a
+// non-delegation conversation may carry NULLs there; the claim-derived
+// fields (incl. duration/turns telemetry) come from the `cl` lateral and
+// the ledger-derived accounting (cost + tokens) from the `msum` lateral
+// (see runClaimLateral / runLedgerLateral). Status coalesces the active
+// claim's phase over the stored status so a live engagement's setup
+// sub-state (fetching/cloning/agent_starting/awaiting_credentials) surfaces
+// through the field the wire has always carried; predicates elsewhere keep
+// using the stored column.
 const pgRunColumns = `
-	r.id, r.task_id, r.status, COALESCE(r.model, ''), r.started_at, r.queued_at, r.claimed_at, r.completed_at,
-	r.total_cost_usd, r.duration_ms, r.num_turns,
+	r.id, COALESCE(r.task_id::text, ''), COALESCE(cl.phase, r.status, ''), COALESCE(r.model, ''), r.started_at, r.queued_at, cl.claimed_at, r.completed_at,
+	msum.total_cost_usd, cl.duration_ms, cl.num_turns,
 	COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
 	COALESCE(r.result_summary, ''),
 	COALESCE(r.outcome, ''), COALESCE(r.outcome_reason, ''),
 	COALESCE(r.failure_kind, ''),
-	COALESCE(r.session_id, ''),
+	COALESCE(r.sdk_session_id, ''),
 	COALESCE(r.actor_agent_id::text, ''),
 	COALESCE(r.trigger_type, ''),
 	COALESCE(r.creator_user_id::text, ''),
-	r.team_id::text,
-	COALESCE(r.executor_id, ''),
+	COALESCE(r.team_id::text, ''),
+	COALESCE(cl.executor_id, ''),
+	cl.attempts,
 	r.blueprint_run_id, r.blueprint_step_index,
-	r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_creation_tokens,
+	msum.input_tokens, msum.output_tokens, msum.cache_read_tokens, msum.cache_creation_tokens,
 	(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing,
 	COALESCE(a.display_name, '') AS actor_agent_name
+`
+
+// runClaimLateral derives the claim-facing AgentRun fields from claims:
+// ClaimedAt is the latest claim's claimed_at, Attempts the count of
+// engagements, ExecutorID and phase the active (unreleased) claim's, and
+// duration_ms/num_turns the SUM of the per-engagement telemetry. The
+// aggregate lateral always yields exactly one row, so a never-claimed
+// conversation reads (NULL, 0, NULL, NULL, NULL, NULL).
+const runClaimLateral = `
+	LEFT JOIN LATERAL (
+		SELECT MAX(c2.claimed_at) AS claimed_at,
+		       COUNT(*)::int      AS attempts,
+		       MAX(c2.executor_id) FILTER (WHERE c2.released_at IS NULL) AS executor_id,
+		       MAX(c2.phase)       FILTER (WHERE c2.released_at IS NULL) AS phase,
+		       SUM(c2.duration_ms)::bigint AS duration_ms,
+		       SUM(c2.num_turns)::bigint   AS num_turns
+		FROM claims c2
+		WHERE c2.conversation_id = r.id
+	) cl ON true
+`
+
+// runLedgerLateral derives the money/token accounting from the messages
+// ledger: total_cost_usd is the SUM of the settlement stamps (NULL until
+// anything settles — the frozen wire semantics of the former stored
+// column), the token columns the SUM over every row. Always exactly one
+// row, so a message-less conversation reads (NULL, 0, 0, 0, 0).
+const runLedgerLateral = `
+	LEFT JOIN LATERAL (
+		SELECT SUM(m2.cost_usd)                            AS total_cost_usd,
+		       COALESCE(SUM(m2.input_tokens), 0)::bigint          AS input_tokens,
+		       COALESCE(SUM(m2.output_tokens), 0)::bigint         AS output_tokens,
+		       COALESCE(SUM(m2.cache_read_tokens), 0)::bigint     AS cache_read_tokens,
+		       COALESCE(SUM(m2.cache_creation_tokens), 0)::bigint AS cache_creation_tokens
+		FROM messages m2
+		WHERE m2.conversation_id = r.id AND m2.org_id = r.org_id
+	) msum ON true
 `
 
 func (s *agentRunStore) Get(ctx context.Context, orgID, runID string) (*domain.AgentRun, error) {
@@ -598,7 +547,7 @@ func (s *agentRunStore) GetSystem(ctx context.Context, orgID, runID string) (*do
 
 func (s *agentRunStore) LookupOrgForRunSystem(ctx context.Context, runID string) (string, error) {
 	var orgID string
-	err := s.admin.QueryRowContext(ctx, `SELECT org_id::text FROM runs WHERE id = $1`, runID).Scan(&orgID)
+	err := s.admin.QueryRowContext(ctx, `SELECT org_id::text FROM conversations WHERE id = $1`, runID).Scan(&orgID)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -608,9 +557,11 @@ func (s *agentRunStore) LookupOrgForRunSystem(ctx context.Context, runID string)
 func getRun(ctx context.Context, q queryer, orgID, runID string) (*domain.AgentRun, error) {
 	row := q.QueryRowContext(ctx, `
 		SELECT `+pgRunColumns+`
-		FROM runs r
-		LEFT JOIN run_memory rm ON rm.run_id = r.id AND rm.org_id = r.org_id
+		FROM conversations r
+		LEFT JOIN run_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
+		`+runClaimLateral+`
+		`+runLedgerLateral+`
 		WHERE r.org_id = $1 AND r.id = $2
 	`, orgID, runID)
 
@@ -627,9 +578,11 @@ func getRun(ctx context.Context, q queryer, orgID, runID string) (*domain.AgentR
 func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) ([]domain.AgentRun, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgRunColumns+`
-		FROM runs r
-		LEFT JOIN run_memory rm ON rm.run_id = r.id AND rm.org_id = r.org_id
+		FROM conversations r
+		LEFT JOIN run_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
+		`+runClaimLateral+`
+		`+runLedgerLateral+`
 		WHERE r.org_id = $1 AND r.task_id = $2
 		ORDER BY r.started_at DESC
 	`, orgID, taskID)
@@ -665,9 +618,11 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 	// flat result by run.TaskID.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgRunColumns+`
-		FROM runs r
-		LEFT JOIN run_memory rm ON rm.run_id = r.id AND rm.org_id = r.org_id
+		FROM conversations r
+		LEFT JOIN run_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
+		`+runClaimLateral+`
+		`+runLedgerLateral+`
 		WHERE r.org_id = $1 AND r.task_id = ANY($2)
 		ORDER BY r.started_at DESC
 	`, orgID, pgUUIDArray(taskIDs))
@@ -687,33 +642,8 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 	return runs, rows.Err()
 }
 
-func (s *agentRunStore) PendingApprovalIDForTask(ctx context.Context, orgID, taskID string) (string, error) {
-	var id string
-	err := s.q.QueryRowContext(ctx, `
-		SELECT id FROM runs
-		WHERE org_id = $1 AND task_id = $2 AND status = 'pending_approval'
-		LIMIT 1
-	`, orgID, taskID).Scan(&id)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return id, err
-}
-
-func (s *agentRunStore) HasActiveForTask(ctx context.Context, orgID, taskID string) (bool, error) {
-	var count int
-	err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM runs
-		WHERE org_id = $1 AND task_id = $2
-		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                     'pending_approval')
-	`, orgID, taskID).Scan(&count)
-	return count > 0, err
-}
-
-// HasActiveAutoRunForEntity is the per-entity sibling of
-// HasActiveForTask: any non-terminal trigger_type='event' run on any
-// task that belongs to the entity. Manual delegations are excluded.
+// HasActiveAutoRunForEntity: any non-terminal trigger_type='event' run on
+// any task that belongs to the entity. Manual delegations are excluded.
 // Used by the router's per-entity firing gate.
 func (s *agentRunStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
 	return hasActiveAutoRunForEntity(ctx, s.q, orgID, entityID)
@@ -726,7 +656,7 @@ func (s *agentRunStore) HasActiveAutoRunForEntitySystem(ctx context.Context, org
 func hasActiveAutoRunForEntity(ctx context.Context, q queryer, orgID, entityID string) (bool, error) {
 	var count int
 	err := q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM runs r
+		SELECT COUNT(*) FROM conversations r
 		JOIN tasks t ON t.id = r.task_id AND t.org_id = r.org_id
 		WHERE r.org_id = $1
 		  AND t.entity_id = $2
@@ -748,7 +678,7 @@ func (s *agentRunStore) ActiveIDsForTaskSystem(ctx context.Context, orgID, taskI
 func (s *agentRunStore) ActiveAutoRunIDForEntitySystem(ctx context.Context, orgID, entityID string) (string, string, error) {
 	var id, taskID string
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT r.id, r.task_id FROM runs r
+		SELECT r.id, r.task_id FROM conversations r
 		JOIN tasks t ON t.id = r.task_id AND t.org_id = r.org_id
 		WHERE r.org_id = $1
 		  AND t.entity_id = $2
@@ -766,7 +696,7 @@ func (s *agentRunStore) ActiveAutoRunIDForEntitySystem(ctx context.Context, orgI
 
 func activeRunIDsForTask(ctx context.Context, q queryer, orgID, taskID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id FROM runs
+		SELECT id FROM conversations
 		WHERE org_id = $1 AND task_id = $2
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
 		                     'pending_approval')
@@ -788,7 +718,7 @@ func activeRunIDsForTask(ctx context.Context, q queryer, orgID, taskID string) (
 
 func (s *agentRunStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, teamID string) ([]string, error) {
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT id FROM runs
+		SELECT id FROM conversations
 		WHERE org_id = $1 AND team_id = $2
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
 		                     'pending_approval')
@@ -808,24 +738,17 @@ func (s *agentRunStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, teamI
 	return ids, rows.Err()
 }
 
-func (s *agentRunStore) ListParkedWorktreePaths(ctx context.Context, orgID string) ([]string, error) {
-	return listParkedWorktreePaths(ctx, s.q, orgID)
-}
-
+// ListParkedWorktreePathsSystem returns the worktree dirs the startup sweep
+// must keep warm — parked `open` runs whose owning blueprint_run is still
+// 'running'. A parked run under an already-terminal blueprint_run is NOT
+// resumable (every resume path gates on cr.Status == running), so its
+// worktree must NOT be preserved: preserving it would leave a checked-out
+// branch on disk that the boot reconcile then orphans by cancelling the row,
+// reviving the "refusing to fetch into a branch checked out in a worktree"
+// loop. Admin pool — the startup sweep has no JWT-claims context.
 func (s *agentRunStore) ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error) {
-	return listParkedWorktreePaths(ctx, s.admin, orgID)
-}
-
-// listParkedWorktreePaths returns the worktree dirs the startup sweep must keep
-// warm — parked `open` runs whose owning blueprint_run is still 'running'. A
-// parked run under an already-terminal blueprint_run is NOT resumable (every
-// resume path gates on cr.Status == running), so its worktree must NOT be
-// preserved: preserving it would leave a checked-out branch on disk that the
-// boot reconcile then orphans by cancelling the row, reviving the "refusing to
-// fetch into a branch checked out in a worktree" loop.
-func listParkedWorktreePaths(ctx context.Context, q queryer, orgID string) ([]string, error) {
-	rows, err := q.QueryContext(ctx, `
-		SELECT r.worktree_path FROM runs r
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT r.worktree_path FROM conversations r
 		LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
 		WHERE r.org_id = $1
 		  AND r.status = 'open'
@@ -854,7 +777,7 @@ func (s *agentRunStore) EntitiesWithOpenRuns(ctx context.Context, orgID string, 
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT DISTINCT t.entity_id
-		FROM runs r
+		FROM conversations r
 		JOIN tasks t ON t.id = r.task_id AND t.org_id = r.org_id
 		WHERE r.org_id = $1
 		  AND r.status = 'open'
@@ -885,15 +808,15 @@ func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, m
 }
 
 // LastAgentActivityAtSystem returns the created_at of the run's newest non-user
-// message (the artifact-change ledger watermark, TFAC-493). Ordered by id DESC
+// message (the artifact-change ledger watermark). Ordered by id DESC
 // (the monotonic sequence) so the watermark is the genuinely last-inserted agent
 // row. Admin pool: the resume path holds no JWT claims. ok=false when the run has
 // no agent message yet.
 func (s *agentRunStore) LastAgentActivityAtSystem(ctx context.Context, orgID, runID string) (time.Time, bool, error) {
 	var at time.Time
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT created_at FROM run_messages
-		WHERE org_id = $1 AND run_id = $2 AND role <> 'user'
+		SELECT created_at FROM messages
+		WHERE org_id = $1 AND conversation_id = $2 AND role <> 'user'
 		ORDER BY id DESC LIMIT 1
 	`, orgID, runID).Scan(&at)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -905,6 +828,14 @@ func (s *agentRunStore) LastAgentActivityAtSystem(ctx context.Context, orgID, ru
 	return at, true, nil
 }
 
+// insertRunMessage attributes the row to an engagement: an explicit
+// non-empty msg.ClaimID always wins (the curator sink names its own
+// claim), otherwise claim_id resolves server-side to the conversation's
+// active claim. Rows written during an engagement belong to it; rows
+// written outside one (pending inputs, queued turns, injections)
+// correctly resolve NULL. A message racing its claim's release lands
+// NULL — harmless, the terminal settle's newest-row fallback still
+// reaches it.
 func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.AgentMessage) (int64, error) {
 	var toolCallsJSON, metadataJSON, reasoningJSON, contentBlocksJSON []byte
 
@@ -955,26 +886,30 @@ func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.
 		windowState = domain.MessageWindowActive
 	}
 
-	// Postgres uses a sequence on run_messages.id, so we get the
+	// Postgres uses a sequence on messages.id, so we get the
 	// auto-assigned id back via RETURNING rather than the
 	// LastInsertId Result method (which pgx doesn't implement).
 	var id int64
 	err := q.QueryRowContext(ctx, `
-		INSERT INTO run_messages (org_id, run_id, role, content, subtype, tool_calls,
-		                          tool_call_id, is_error, metadata, model,
-		                          input_tokens, output_tokens,
-		                          cache_read_tokens, cache_creation_tokens, created_at,
-		                          reasoning, content_blocks, delivered, window_state, seq)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-		        $16, $17, $18, $19, $20)
+		INSERT INTO messages (org_id, conversation_id, user_id, claim_id, role, content, subtype, tool_calls,
+		                      tool_call_id, is_error, metadata, model,
+		                      input_tokens, output_tokens,
+		                      cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
+		                      reasoning, content_blocks, delivered, window_state, seq)
+		VALUES ($1, $2, $3,
+		        COALESCE($4, (SELECT id FROM claims
+		                      WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL)),
+		        $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+		        $16, $17, $18, $19, $20, $21, $22, $23)
 		RETURNING id
 	`,
-		orgID, msg.RunID, msg.Role, msg.Content, msg.Subtype,
+		orgID, msg.RunID, nullIfEmpty(msg.UserID), nullIfEmpty(msg.ClaimID),
+		msg.Role, msg.Content, msg.Subtype,
 		nullableJSONB(toolCallsJSON), nullIfEmpty(msg.ToolCallID), msg.IsError,
 		nullableJSONB(metadataJSON), nullIfEmpty(msg.Model),
 		nullIntPtr(msg.InputTokens), nullIntPtr(msg.OutputTokens),
 		nullIntPtr(msg.CacheReadTokens), nullIntPtr(msg.CacheCreationTokens),
-		msg.CreatedAt,
+		nullFloatPtr(msg.CostUSD), msg.CreatedAt,
 		nullableJSONB(reasoningJSON), nullableJSONB(contentBlocksJSON), delivered,
 		string(windowState), nullFloatPtr(msg.Seq),
 	).Scan(&id)
@@ -1008,11 +943,12 @@ func nullIntPtr(p *int) any {
 	return *p
 }
 
-const pgMessageColumns = `id, run_id, role, content, subtype, tool_calls::text, tool_call_id, is_error, metadata::text,
-	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at,
+const pgMessageColumns = `id, conversation_id, COALESCE(user_id::text, ''), COALESCE(claim_id::text, ''),
+	role, content, subtype, tool_calls::text, tool_call_id, is_error, metadata::text,
+	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 	reasoning::text, content_blocks::text, delivered, window_state, seq`
 
-// scanAgentMessageRows drains a run_messages result set selecting
+// scanAgentMessageRows drains a messages result set selecting
 // pgMessageColumns into domain.AgentMessage values. Shared by the
 // single-run Messages and the batched MessagesForRuns.
 func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
@@ -1021,15 +957,16 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		var m domain.AgentMessage
 		var content, subtype, toolCallsStr, toolCallID, metadataStr, model sql.NullString
 		var inputTok, outputTok, cacheReadTok, cacheCreateTok sql.NullInt64
+		var costUSD sql.NullFloat64
 		var reasoningStr, contentBlocksStr sql.NullString
 		var delivered bool
 		var windowState string
 		var seq sql.NullFloat64
 
 		if err := rows.Scan(
-			&m.ID, &m.RunID, &m.Role, &content, &subtype, &toolCallsStr,
+			&m.ID, &m.RunID, &m.UserID, &m.ClaimID, &m.Role, &content, &subtype, &toolCallsStr,
 			&toolCallID, &m.IsError, &metadataStr, &model,
-			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &m.CreatedAt,
+			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
 			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq,
 		); err != nil {
 			return nil, err
@@ -1077,6 +1014,10 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 			v := int(cacheCreateTok.Int64)
 			m.CacheCreationTokens = &v
 		}
+		if costUSD.Valid {
+			v := costUSD.Float64
+			m.CostUSD = &v
+		}
 		// Read back the concrete stored value (the column is NOT NULL) —
 		// unlike on insert, nil here would just mean "unknown", which is
 		// never the case for a persisted row.
@@ -1094,10 +1035,15 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 }
 
 func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error) {
+	// Withdrawn-pending rows (undelivered + inactive — a staged injection
+	// that was withdrawn before any flush) never happened, so the display
+	// read hides them. delivered + inactive stays visible: that is compacted
+	// history, still part of the rendered transcript.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
-		FROM run_messages
-		WHERE org_id = $1 AND run_id = $2
+		FROM messages
+		WHERE org_id = $1 AND conversation_id = $2
+		  AND NOT (delivered = false AND window_state = 'inactive')
 		ORDER BY id ASC
 	`, orgID, runID)
 	if err != nil {
@@ -1108,22 +1054,25 @@ func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]do
 }
 
 func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.AgentMessage, error) {
-	// run_id is a uuid column; drop any non-UUID id (22P02 → 500 guard, same
-	// read convention as ListForTasks). These ids are server-derived today, so
-	// this is defense in depth against a future caller passing raw input.
+	// conversation_id is a uuid column; drop any non-UUID id (22P02 → 500
+	// guard, same read convention as ListForTasks). These ids are
+	// server-derived today, so this is defense in depth against a future
+	// caller passing raw input.
 	runIDs = filterValidUUIDs(runIDs)
 	if len(runIDs) == 0 {
 		return nil, nil
 	}
-	// App pool (RLS-active): run_id is a uuid column, so the slice binds
-	// as a uuid[] literal through one $N (pgUUIDArray), mirroring
-	// artifactStore.ListByRuns. ORDER BY (run_id, id) so the caller groups
-	// by RunID with each run's messages in insertion order.
+	// App pool (RLS-active): conversation_id is a uuid column, so the slice
+	// binds as a uuid[] literal through one $N (pgUUIDArray), mirroring
+	// artifactStore.ListByRuns. ORDER BY (conversation_id, id) so the caller
+	// groups by RunID with each run's messages in insertion order.
+	// Withdrawn-pending rows are hidden, same as Messages.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
-		FROM run_messages
-		WHERE org_id = $1 AND run_id = ANY($2)
-		ORDER BY run_id ASC, id ASC
+		FROM messages
+		WHERE org_id = $1 AND conversation_id = ANY($2)
+		  AND NOT (delivered = false AND window_state = 'inactive')
+		ORDER BY conversation_id ASC, id ASC
 	`, orgID, pgUUIDArray(runIDs))
 	if err != nil {
 		return nil, err
@@ -1136,13 +1085,13 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 // exact LLM context, ordered by the effective assembly key COALESCE(seq,
 // id). window_state='inactive' rows are excluded (superseded by
 // compaction); 'elided' and undelivered rows are included — see the
-// interface doc for the full contract. Pure read over run_messages; no
+// interface doc for the full contract. Pure read over messages; no
 // other table or in-process state feeds in.
 func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
-		FROM run_messages
-		WHERE org_id = $1 AND run_id = $2 AND window_state <> 'inactive'
+		FROM messages
+		WHERE org_id = $1 AND conversation_id = $2 AND window_state <> 'inactive'
 		ORDER BY COALESCE(seq, (id)::double precision) ASC
 	`, orgID, runID)
 	if err != nil {
@@ -1159,8 +1108,8 @@ func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, 
 		return nil
 	}
 	_, err := s.q.ExecContext(ctx, `
-		UPDATE run_messages SET delivered = true
-		WHERE org_id = $1 AND run_id = $2 AND id = ANY($3)
+		UPDATE messages SET delivered = true
+		WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3)
 	`, orgID, runID, pgIntArray(ids))
 	return err
 }
@@ -1171,9 +1120,9 @@ func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, 
 // than beforeSeq. Returns the number of rows flipped.
 func (s *agentRunStore) SetWindowState(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error) {
 	result, err := s.q.ExecContext(ctx, `
-		UPDATE run_messages
+		UPDATE messages
 		SET window_state = $1
-		WHERE org_id = $2 AND run_id = $3 AND window_state = $4
+		WHERE org_id = $2 AND conversation_id = $3 AND window_state = $4
 		  AND COALESCE(seq, (id)::double precision) < $5
 	`, string(to), orgID, runID, string(from), beforeSeq)
 	if err != nil {
@@ -1183,20 +1132,32 @@ func (s *agentRunStore) SetWindowState(ctx context.Context, orgID, runID string,
 	return int(n), err
 }
 
-func (s *agentRunStore) TokenTotals(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error) {
-	return tokenTotals(ctx, s.q, orgID, runID)
-}
-
 func (s *agentRunStore) TokenTotalsSystem(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error) {
-	return tokenTotals(ctx, s.admin, orgID, runID)
+	row := s.admin.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(model), ''),
+		       COALESCE(SUM(input_tokens), 0),
+		       COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(cache_read_tokens), 0),
+		       COALESCE(SUM(cache_creation_tokens), 0),
+		       COUNT(*)
+		FROM messages
+		WHERE org_id = $1 AND conversation_id = $2 AND role = 'assistant'
+	`, orgID, runID)
+
+	var t domain.TokenTotals
+	if err := row.Scan(&t.Model, &t.InputTokens, &t.OutputTokens, &t.CacheReadTokens, &t.CacheCreationTokens, &t.NumTurns); err != nil {
+		return nil, err
+	}
+	return &t, nil
 }
 
 func (s *agentRunStore) BlueprintSiblingCostUSDSystem(ctx context.Context, orgID, blueprintRunID, excludeRunID string) (float64, error) {
 	var cost sql.NullFloat64
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(total_cost_usd), 0)
-		FROM runs
-		WHERE org_id = $1 AND blueprint_run_id = $2 AND id <> $3
+		SELECT COALESCE(SUM(m.cost_usd), 0)
+		FROM messages m
+		JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
+		WHERE c.org_id = $1 AND c.blueprint_run_id = $2 AND c.id <> $3
 	`, orgID, blueprintRunID, excludeRunID).Scan(&cost)
 	if err != nil {
 		return 0, err
@@ -1207,33 +1168,15 @@ func (s *agentRunStore) BlueprintSiblingCostUSDSystem(ctx context.Context, orgID
 func (s *agentRunStore) BlueprintSiblingDurationMsSystem(ctx context.Context, orgID, blueprintRunID, excludeRunID string) (int, error) {
 	var ms sql.NullInt64
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(duration_ms), 0)
-		FROM runs
-		WHERE org_id = $1 AND blueprint_run_id = $2 AND id <> $3
+		SELECT COALESCE(SUM(cl.duration_ms), 0)
+		FROM claims cl
+		JOIN conversations c ON c.id = cl.conversation_id AND c.org_id = cl.org_id
+		WHERE c.org_id = $1 AND c.blueprint_run_id = $2 AND c.id <> $3
 	`, orgID, blueprintRunID, excludeRunID).Scan(&ms)
 	if err != nil {
 		return 0, err
 	}
 	return int(ms.Int64), nil
-}
-
-func tokenTotals(ctx context.Context, q queryer, orgID, runID string) (*domain.TokenTotals, error) {
-	row := q.QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(model), ''),
-		       COALESCE(SUM(input_tokens), 0),
-		       COALESCE(SUM(output_tokens), 0),
-		       COALESCE(SUM(cache_read_tokens), 0),
-		       COALESCE(SUM(cache_creation_tokens), 0),
-		       COUNT(*)
-		FROM run_messages
-		WHERE org_id = $1 AND run_id = $2 AND role = 'assistant'
-	`, orgID, runID)
-
-	var t domain.TokenTotals
-	if err := row.Scan(&t.Model, &t.InputTokens, &t.OutputTokens, &t.CacheReadTokens, &t.CacheCreationTokens, &t.NumTurns); err != nil {
-		return nil, err
-	}
-	return &t, nil
 }
 
 // --- Helpers ---
@@ -1251,7 +1194,7 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
-		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &blueprintRunID, &blueprintStep,
+		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName,
 	); err != nil {
@@ -1272,7 +1215,7 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
-		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &blueprintRunID, &blueprintStep,
+		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName,
 	); err != nil {
@@ -1316,9 +1259,7 @@ func finalizeAgentRun(r *domain.AgentRun, queuedAt, claimedAt, completedAt sql.N
 // nullIfEmpty is the small reusable helper many Postgres stores want
 // — empty string → SQL NULL bind, non-empty passes through. Defined
 // once per package; sibling stores that also need it import the same
-// symbol. Currently agentrun.go is the first store to declare it on
-// the Postgres side; if another store grows the same need we can
-// lift this to a shared util file then.
+// symbol.
 func nullIfEmpty(s string) any {
 	if s == "" {
 		return nil

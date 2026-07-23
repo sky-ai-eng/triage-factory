@@ -429,6 +429,7 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	project, warnings, err := projectbundle.Import(
 		r.Context(),
 		s.tx,
+		s.curatorStore,
 		s.kb,
 		orgID,
 		teamID,
@@ -725,34 +726,16 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Queue context-change deltas for the Curator session, if any. This
-	// only fires when the project already has an active session
-	// (CuratorSessionID populated) — there is no point queueing a delta
-	// for a project the user has never chatted with: the next session's
-	// static envelope will render fresh values directly. Failures here
-	// are logged but do not abort the PATCH; the user's settings change
-	// has already been persisted, and the worst case is the agent
-	// missing one delta on its next turn (which a follow-up PATCH or
-	// the user's next message itself can correct).
-	//
-	// Coalescing on (project, session, change_type) is enforced by the
-	// partial unique index on curator_pending_context — the
-	// InsertPendingContext helper uses ON CONFLICT DO NOTHING so a
-	// second PATCH between user messages preserves the *earliest*
-	// baseline_value, which is the correct anchor for diffing at
-	// consume time.
-	if existing.CuratorSessionID != "" {
-		// Wrap under the request user's claims so the Postgres impl's
-		// InsertPendingContext sees tf.current_user_id() for the NOT
-		// NULL creator_user_id bind and for the curator_pending_context_modify
-		// RLS WITH CHECK predicate. SQLite ignores the claims.
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			queuePendingContextChanges(r.Context(), tx.Curator, orgID, *existing, updated)
-			return nil
-		}); err != nil {
-			projectsLog.Warn("queue pending context failed", "project", id, "error", err)
-		}
-	}
+	// Queue context-change deltas for every LIVE curator conversation of
+	// the project (all creators — a teammate's mid-session agent needs the
+	// note just as much as the PATCHing user's, and the app-pool
+	// private-visibility RLS couldn't reach their conversations, which is
+	// why the producer is an admin-pool System method that no-ops when no
+	// live conversation exists). Failures here are logged but do not abort
+	// the PATCH; the user's settings change has already been persisted, and
+	// the worst case is the agent missing one delta on its next turn (which
+	// a follow-up PATCH or the user's next message itself can correct).
+	queuePendingContextChanges(r.Context(), s.curatorStore, orgID, *existing, updated)
 	var fresh *domain.Project
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -805,12 +788,13 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Stop any in-flight Curator chat for this project BEFORE the DB
-	// delete: the goroutine writes terminal cancelled status into
-	// curator_requests rows, which the FK cascade is about to drop.
-	// Doing it in the right order means a user who deletes a project
-	// mid-chat sees a deterministic terminal state on every row
-	// rather than relying on cascade behavior to handle in-flight
-	// rows. No-op when the curator runtime hasn't been wired (test
+	// delete: the goroutine releases the turn's claim, and the claim rows
+	// are what the FK cascade is about to drop. Doing it in the right
+	// order means a user who deletes a project mid-chat sees a
+	// deterministic terminal state rather than relying on cascade
+	// behavior to handle a live engagement. Queued turns are undelivered
+	// messages the cascade simply deletes — the queued-cancel semantic.
+	// No-op when the curator runtime hasn't been wired (test
 	// harnesses, fresh-install before first message).
 	if s.curator != nil {
 		s.curator.CancelProject(orgID, id, "project deleted")
@@ -1028,11 +1012,16 @@ func validateTrackerKeys(teamRules []domain.JiraProjectStatusRules, jiraKey, lin
 	return "", "", "jira_project_key: " + jiraNorm + " is not in the configured Jira projects list (add it on the Settings page first)"
 }
 
-// queuePendingContextChanges diffs the project's pre-PATCH state
-// against the freshly-merged value and writes a curator_pending_context
-// row for each field that meaningfully changed. Caller has already
-// confirmed CuratorSessionID is non-empty — there's no point queuing
-// for a session that doesn't exist yet.
+// queuePendingContextChanges diffs the project's pre-PATCH state against the
+// freshly-merged value and records an 'injection:context' delta on every
+// live curator conversation of the project for each field that meaningfully
+// changed. The store's producer no-ops when no live conversation exists —
+// there's no point queueing for a project nobody has chatted with: the next
+// conversation's static envelope renders fresh values directly.
+//
+// One-pending-per-type: the producer replaces an existing undelivered row of
+// the same change_type per conversation, so a run of PATCHes between user
+// messages leaves one delta per field.
 //
 // Failures are logged, not returned. The PATCH itself has already
 // committed (queueing is best-effort context decoration), and the
@@ -1041,15 +1030,11 @@ func validateTrackerKeys(teamRules []domain.JiraProjectStatusRules, jiraKey, lin
 // failure as a 500 would imply the settings change failed, which is
 // strictly worse.
 func queuePendingContextChanges(ctx context.Context, curatorStore db.CuratorStore, orgID string, before, after domain.Project) {
-	sessionID := after.CuratorSessionID
-	if sessionID == "" {
-		return
-	}
 	if !pinnedReposSetEqual(before.PinnedRepos, after.PinnedRepos) {
 		baseline, err := curator.EncodeStringSliceBaseline(before.PinnedRepos)
 		if err != nil {
 			projectsLog.Warn("encode pinned-repos baseline failed", "project", before.ID, "error", err)
-		} else if err := curatorStore.InsertPendingContext(ctx, orgID, before.ID, sessionID, domain.ChangeTypePinnedRepos, baseline); err != nil {
+		} else if err := curatorStore.QueueContextChangeSystem(ctx, orgID, before.ID, domain.ChangeTypePinnedRepos, baseline); err != nil {
 			projectsLog.Warn("queue pinned-repos pending context failed", "project", before.ID, "error", err)
 		}
 	}
@@ -1057,7 +1042,7 @@ func queuePendingContextChanges(ctx context.Context, curatorStore db.CuratorStor
 		baseline, err := curator.EncodeNullableStringBaseline(before.JiraProjectKey)
 		if err != nil {
 			projectsLog.Warn("encode jira baseline failed", "project", before.ID, "error", err)
-		} else if err := curatorStore.InsertPendingContext(ctx, orgID, before.ID, sessionID, domain.ChangeTypeJiraProjectKey, baseline); err != nil {
+		} else if err := curatorStore.QueueContextChangeSystem(ctx, orgID, before.ID, domain.ChangeTypeJiraProjectKey, baseline); err != nil {
 			projectsLog.Warn("queue jira pending context failed", "project", before.ID, "error", err)
 		}
 	}
@@ -1065,7 +1050,7 @@ func queuePendingContextChanges(ctx context.Context, curatorStore db.CuratorStor
 		baseline, err := curator.EncodeNullableStringBaseline(before.LinearProjectKey)
 		if err != nil {
 			projectsLog.Warn("encode linear baseline failed", "project", before.ID, "error", err)
-		} else if err := curatorStore.InsertPendingContext(ctx, orgID, before.ID, sessionID, domain.ChangeTypeLinearProjectKey, baseline); err != nil {
+		} else if err := curatorStore.QueueContextChangeSystem(ctx, orgID, before.ID, domain.ChangeTypeLinearProjectKey, baseline); err != nil {
 			projectsLog.Warn("queue linear pending context failed", "project", before.ID, "error", err)
 		}
 	}

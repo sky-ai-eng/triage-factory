@@ -234,7 +234,7 @@ func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) error
 func (s *promptStore) CountRunReferences(ctx context.Context, orgID, id string) (int, error) {
 	var n int
 	err := s.app.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM runs WHERE org_id = $1 AND prompt_id = $2`, orgID, id,
+		`SELECT COUNT(*) FROM conversations WHERE org_id = $1 AND prompt_id = $2`, orgID, id,
 	).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("count run references: %w", err)
@@ -277,15 +277,24 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 	// COALESCE on the SUM(CASE…) columns because SUM over zero rows
 	// is NULL in Postgres and *int Scan rejects NULL — the
 	// never-used-prompt path otherwise blows up the whole stats panel.
+	// Per-run cost/duration derive in the inner projection (cost = the
+	// messages ledger's settlement SUM, duration = the claims' telemetry
+	// SUM); a run with nothing settled yields NULL there, which AVG
+	// ignores — the former stored-column semantics.
 	if err := s.app.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0),
-			COALESCE(AVG(total_cost_usd), 0),
-			COALESCE(AVG(duration_ms), 0)::bigint,
-			COALESCE(SUM(total_cost_usd), 0)
-		FROM runs WHERE org_id = $1 AND prompt_id = $2
+			COALESCE(AVG(run_cost), 0),
+			COALESCE(AVG(run_duration), 0)::bigint,
+			COALESCE(SUM(run_cost), 0)
+		FROM (
+			SELECT c.status,
+			       (SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = c.id AND m.org_id = c.org_id) AS run_cost,
+			       (SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = c.id)                     AS run_duration
+			FROM conversations c WHERE c.org_id = $1 AND c.prompt_id = $2
+		) runs
 	`, orgID, promptID).Scan(
 		&stats.TotalRuns,
 		&stats.CompletedRuns,
@@ -302,7 +311,7 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 
 	var lastUsed sql.NullTime
 	if err := s.app.QueryRowContext(ctx,
-		`SELECT MAX(started_at) FROM runs WHERE org_id = $1 AND prompt_id = $2`, orgID, promptID,
+		`SELECT MAX(started_at) FROM conversations WHERE org_id = $1 AND prompt_id = $2`, orgID, promptID,
 	).Scan(&lastUsed); err != nil {
 		promptStatsLog.Error("scan max started_at failed", "prompt_id", promptID, "error", err)
 	}
@@ -314,7 +323,7 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 	cutoff := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
 	rows, err := s.app.QueryContext(ctx, `
 		SELECT started_at::date AS day, COUNT(*) AS cnt
-		FROM runs
+		FROM conversations
 		WHERE org_id = $1 AND prompt_id = $2 AND started_at::date >= $3::date
 		GROUP BY day ORDER BY day
 	`, orgID, promptID, cutoff)

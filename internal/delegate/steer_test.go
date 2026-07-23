@@ -62,14 +62,14 @@ func TestSendMessage_LiveRoutesToSteer(t *testing.T) {
 }
 
 // TestSendMessage_OpenRoutesToResume: a run with no live process but status
-// `open` is woken via ResumeOpenRun — resume-by-enqueue (TFAC-585), so
-// "woken" means the row flips to `queued` and the message lands on
-// run_pending_input, not that a goroutine ran. Delivery is a separate,
+// `open` is woken via ResumeOpenRun — resume-by-enqueue, so "woken" means
+// the row flips to `queued` and the message lands as durable pending
+// input, not that a goroutine ran. Delivery is a separate,
 // later concern exercised by TestDispatchResumeClaim_DeliversRecordedInput.
 func TestSendMessage_OpenRoutesToResume(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-open", "sess-open", "/tmp/does-not-exist-open")
-	if _, err := database.Exec(`UPDATE runs SET status='open' WHERE id='r-open'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-open'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -79,7 +79,7 @@ func TestSendMessage_OpenRoutesToResume(t *testing.T) {
 	}
 
 	var status string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-open'`).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-open'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status != "queued" {
@@ -100,7 +100,7 @@ func TestSendMessage_OpenRoutesToResume(t *testing.T) {
 func TestSendMessage_RunningRemoteRoutesToController(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-run", "sess-run", "/tmp/wt-run")
-	if _, err := database.Exec(`UPDATE runs SET status='running' WHERE id='r-run'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-run'`); err != nil {
 		t.Fatalf("running: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
@@ -127,7 +127,7 @@ func TestSendMessage_RunningRemoteRoutesToController(t *testing.T) {
 func TestSendMessage_QueuedNotSteerable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-q", "sess-q", "/tmp/wt-q")
-	if _, err := database.Exec(`UPDATE runs SET status='queued' WHERE id='r-q'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='queued' WHERE id='r-q'`); err != nil {
 		t.Fatalf("queued: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
@@ -149,7 +149,7 @@ func TestSendMessage_QueuedNotSteerable(t *testing.T) {
 func TestSendMessage_TerminalNotSteerable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-done", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET status='completed' WHERE id='r-done'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='completed' WHERE id='r-done'`); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
@@ -161,8 +161,8 @@ func TestSendMessage_TerminalNotSteerable(t *testing.T) {
 }
 
 // TestResumableState pins the (status, outcome) wake gate the routing and the
-// MarkResuming CAS both key on: every non-finish parked/terminal state is
-// resumable, a finish run is not.
+// MarkQueuedForResume CAS both key on: every non-finish parked/terminal state
+// is resumable, a finish run is not.
 func TestResumableState(t *testing.T) {
 	cases := []struct {
 		status, outcome string
@@ -191,7 +191,7 @@ func TestResumableState(t *testing.T) {
 func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-ab", "sess-ab", "/tmp/does-not-exist-ab")
-	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='abort' WHERE id='r-ab'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort' WHERE id='r-ab'`); err != nil {
 		t.Fatalf("completed+abort: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -201,7 +201,7 @@ func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 		t.Errorf("completed+abort run rejected at the steerable gate: %v", err)
 	}
 	var status string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-ab'`).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-ab'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status != "queued" {
@@ -214,7 +214,7 @@ func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 func TestSendMessage_CompletedFinishNotSteerable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-fin", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='finish' WHERE id='r-fin'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish' WHERE id='r-fin'`); err != nil {
 		t.Fatalf("completed+finish: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")

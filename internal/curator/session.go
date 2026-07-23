@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -42,18 +43,20 @@ type projectSession struct {
 
 	// done closes when the run() goroutine returns. Shutdown blocks
 	// on this so the process exits cleanly: the goroutine writes its
-	// terminal cancelled status BEFORE we let the database close out
+	// terminal claim release BEFORE we let the database close out
 	// from under it. Without the wait, a graceful shutdown would
 	// race with the goroutine's last DB write and log spurious
 	// "database is closed" errors.
 	done chan struct{}
 
-	// inFlightMu guards inFlightCancel and inFlightRequestID — the
-	// per-message ctx is recreated for each agentproc.Run invocation
-	// and the cancel button reads it from outside the goroutine.
-	inFlightMu        sync.Mutex
-	inFlightCancel    context.CancelFunc
-	inFlightRequestID string
+	// inFlightMu guards the in-flight turn state — the per-message ctx is
+	// recreated for each agentproc.Run invocation and the cancel button /
+	// shutdown read it from outside the goroutine. inFlightConversationID
+	// lets shutdown release the active claim without the queueItem in scope.
+	inFlightMu             sync.Mutex
+	inFlightCancel         context.CancelFunc
+	inFlightRequestID      string
+	inFlightConversationID string
 }
 
 // run drains the queue serially. Exits when ctx is cancelled (via
@@ -79,31 +82,62 @@ func (s *projectSession) run() {
 	}
 }
 
-// dispatch processes one queued request under the requesting user's
-// identity (item.orgID, item.creatorUserID). Each per-turn write is
-// wrapped in stores.Tx.SyntheticClaimsWithTx so multi-mode RLS gates
-// the row on the same (org_id, creator_user_id) pair the schema
-// columns carry. Owns the row's lifecycle from queued → running →
-// terminal; broadcasts each transition so the Projects page can
-// update without re-fetching.
+// dispatch processes one queued turn under the requesting user's identity
+// (item.orgID, item.creatorUserID). Message writes wrap in
+// stores.Tx.SyntheticClaimsWithTx so multi-mode RLS gates the rows through
+// the conversation's private-visibility arm; claim writes ride the
+// admin-pool System doors (tf_app cannot write claims). Owns the turn's
+// lifecycle from queued → claimed → released; broadcasts each transition so
+// the Projects page can update without re-fetching.
 //
-// Cancel ordering: msgCtx and inFlightCancel are registered BEFORE
-// MarkRequestRunning so that by the time any external observer can
-// see the row in `running` state, the cancel handle is already armed.
-// Without this, a cancel that landed in the window between "row is
-// running" and "inFlightCancel registered" would see a nil cancel
-// handle and be a no-op — the goroutine would then run agentproc to
-// completion, and even though the cancel handler also flips the row
-// at the DB level, the goroutine's terminal write could clobber it.
-// The SQL filter on CompleteRequest belt-and-suspenders that, but
-// registering early closes the race window in the first place.
+// Cancel ordering: msgCtx and inFlightCancel are registered BEFORE the claim
+// mint so that by the time any external observer can see the turn running,
+// the cancel handle is already armed. Without this, a cancel that landed in
+// the window between "claim exists" and "inFlightCancel registered" would
+// see a nil cancel handle and be a no-op — the goroutine would then run
+// agentproc to completion. The released_at IS NULL filter on the release
+// belt-and-suspenders that (first terminal writer wins), but registering
+// early closes the race window in the first place.
 func (s *projectSession) dispatch(item queueItem) {
 	requestID := item.requestID
 	if err := s.ctx.Err(); err != nil {
-		// Shutdown raced ahead of the dequeue — flip the row to
-		// cancelled so it doesn't sit forever in queued.
-		s.markCancelled(item, "process shutting down")
+		// Shutdown raced ahead of the dequeue — the un-begun turn never
+		// entered context, so cancelling it is deleting its undelivered row.
+		s.cancelQueued(item)
 		return
+	}
+
+	// Dead-letter gate: a turn whose prior pickups keep failing at BeginTurn
+	// is poisoned input — every re-feed would just mint another doomed claim
+	// (and leak it released-failed), so at the cap the turn retires
+	// terminally instead of dispatching. Checked before admission so a
+	// poisoned turn never waits on (or occupies) a capacity slot. A counter
+	// read error fails open into a normal dispatch — worst case one more
+	// ordinary attempt, never a stuck turn.
+	if maxAttempts := s.curator.getTurnMaxAttempts(); maxAttempts > 0 {
+		gateCtx := context.WithoutCancel(s.ctx)
+		prior, lastErr, cntErr := s.curator.stores.Curator.FailedTurnAttemptsSystem(gateCtx, item.orgID, item.conversationID, item.messageID)
+		if cntErr != nil {
+			curatorLog.Warn("count failed turn attempts failed; dispatching anyway", "request", requestID, "error", cntErr)
+		} else if prior >= maxAttempts {
+			errMsg := fmt.Sprintf("curator turn failed %d times, giving up", prior)
+			if lastErr != "" {
+				errMsg += ": " + lastErr
+			}
+			executorID, bootEpoch := s.curator.getExecutorIdentity()
+			matched, dlErr := s.curator.stores.Curator.DeadLetterTurnSystem(gateCtx, item.orgID, item.conversationID, item.messageID, executorID, bootEpoch, errMsg)
+			if dlErr != nil {
+				curatorLog.Warn("dead-letter turn failed", "request", requestID, "error", dlErr)
+				return
+			}
+			if matched {
+				// Only the writer that actually retired the row announces —
+				// a raced cancel already broadcast its own terminal state.
+				curatorLog.Warn("dead-lettered poisoned curator turn", "request", requestID, "attempts", prior)
+				s.curator.broadcastRequestUpdate(item.orgID, s.projectID, requestID, "failed")
+			}
+			return
+		}
 	}
 
 	// Per-message ctx is a child of the session ctx. SIGKILL of the
@@ -113,87 +147,115 @@ func (s *projectSession) dispatch(item queueItem) {
 	s.inFlightMu.Lock()
 	s.inFlightCancel = msgCancel
 	s.inFlightRequestID = requestID
+	s.inFlightConversationID = item.conversationID
 	s.inFlightMu.Unlock()
 
 	defer func() {
 		s.inFlightMu.Lock()
 		s.inFlightCancel = nil
 		s.inFlightRequestID = ""
+		s.inFlightConversationID = ""
 		s.inFlightMu.Unlock()
 		msgCancel()
 	}()
 
-	// Admission: hold the turn at 'queued' until the host's shared agent
-	// capacity admits it — the same memory guardrail + concurrency
-	// semaphore delegated runs pass through — so N projects turning at
-	// once queue here instead of fanning into N concurrent sandboxes. The
-	// cancel handle is already armed above, so a cancel (or shutdown)
-	// fires msgCtx and ends the wait with the row landing cancelled,
-	// never having held a slot.
+	// Admission: hold the turn at queued (no claim yet) until the host's
+	// shared agent capacity admits it — the same memory guardrail +
+	// concurrency semaphore delegated runs pass through — so N projects
+	// turning at once queue here instead of fanning into N concurrent
+	// sandboxes. The cancel handle is already armed above, so a cancel (or
+	// shutdown) fires msgCtx and ends the wait with the turn never having
+	// held a slot or minted a claim.
 	if admit := s.curator.getAdmitTurn(); admit != nil {
 		release, admitErr := admit(msgCtx)
 		if admitErr != nil {
 			// Only a fired ctx is a cancellation; any other gate error is
-			// the gate's own failure and must stay legible as one — writing
-			// it as "user cancelled" would misattribute and mask it.
-			switch {
-			case s.ctx.Err() != nil:
-				s.markCancelled(item, "process shutting down")
-			case msgCtx.Err() != nil:
-				s.markCancelled(item, "user cancelled")
-			default:
-				s.failRequest(item, fmt.Sprintf("turn admission: %v", admitErr))
+			// the gate's own failure and must stay legible as one.
+			if s.ctx.Err() != nil || msgCtx.Err() != nil {
+				s.cancelQueued(item)
+			} else {
+				s.failQueued(item, fmt.Sprintf("turn admission: %v", admitErr))
 			}
 			return
 		}
 		defer release()
 	}
 
-	// MarkRequestRunning + the immediate GetRequest read happen in
-	// one short tx — same identity, single round-trip on Postgres.
-	// Cancellation that lands during this tx is observed via msgCtx
-	// after the wrap returns; the SQL filter on the UPDATE makes a
-	// double-flip safe.
-	markCtx := context.WithoutCancel(msgCtx)
-	var req *domain.CuratorRequest
-	wrapErr := s.curator.stores.Tx.SyntheticClaimsWithTx(markCtx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
-		if err := ts.Curator.MarkRequestRunning(markCtx, item.orgID, requestID); err != nil {
-			return err
-		}
-		got, err := ts.Curator.GetRequest(markCtx, item.orgID, requestID)
+	// Mint the turn's claim (admin pool — the one door that writes claims).
+	// A skip means another engagement is live on this conversation (a stale
+	// claim the reaper hasn't released yet, or a duplicate feed) — leave the
+	// turn queued for a later scan rather than fighting it — or the queued
+	// row itself is gone: a raced cancel withdrew the turn, and cancelled
+	// stands with no claim minted on top of it.
+	executorID, bootEpoch := s.curator.getExecutorIdentity()
+	claimCtx := context.WithoutCancel(msgCtx)
+	claimID, ok, err := s.curator.stores.Curator.ClaimTurnSystem(claimCtx, item.orgID, item.conversationID, item.messageID, executorID, bootEpoch)
+	if err != nil {
+		curatorLog.Warn("mint turn claim failed", "request", requestID, "error", err)
+		return
+	}
+	if !ok {
+		curatorLog.Warn("turn not claimable (live engagement or withdrawn row); skipping", "request", requestID, "conversation", item.conversationID)
+		return
+	}
+
+	// Deliver the turn: flip the user message delivered, consume every
+	// pending injection:context row, and snapshot project + resume handle in
+	// ONE tx — the diff below compares each consumed baseline against the
+	// project state read here, so a PATCH landing mid-dispatch can't be
+	// consumed while the note (built from an older read) suppresses it.
+	var start *db.CuratorTurnStart
+	wrapErr := s.curator.stores.Tx.SyntheticClaimsWithTx(claimCtx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
+		got, err := ts.Curator.BeginTurn(claimCtx, item.orgID, s.projectID, item.conversationID, item.messageID)
 		if err != nil {
 			return err
 		}
-		req = got
+		start = got
 		return nil
 	})
 	if wrapErr != nil {
 		if errors.Is(wrapErr, sql.ErrNoRows) {
-			// Already terminal — usually because Cancel raced before
-			// pickup. Skip; the canceller already wrote the row.
+			// The queued row is gone (user cancelled before pickup) or already
+			// delivered (duplicate feed). Release the just-minted claim
+			// quietly — the canceller already broadcast, and a duplicate feed
+			// has nothing to run.
+			_, _ = s.curator.stores.Curator.ReleaseActiveTurnSystem(claimCtx, item.orgID, item.conversationID, "cancelled", "queued turn withdrawn before pickup", 0, 0, 0)
 			return
 		}
-		curatorLog.Warn("mark request running failed", "request", requestID, "error", wrapErr)
-		s.failRequest(item, fmt.Sprintf("mark running: %v", wrapErr))
+		curatorLog.Warn("begin turn failed", "request", requestID, "error", wrapErr)
+		s.releaseFailed(item, fmt.Sprintf("begin turn: %v", wrapErr))
+		// A BeginTurn failure rolls its tx back, so the message is still
+		// undelivered and claim-less — queued, with nothing else driving a
+		// retry: the executor claim loop's handed-off dedup only clears
+		// once a pickup mints a claim, and local mode has no loop at all.
+		// The session re-feeds itself until the dead-letter gate above
+		// retires the turn at the cap. Every later failure class leaves
+		// the message delivered (terminal to the user), so this is the
+		// only site that self-retries.
+		s.scheduleTurnRetry(item)
 		return
 	}
-	if req == nil {
-		s.failRequest(item, "request not found")
+	if start.Project == nil {
+		s.releaseFailed(item, "project missing")
+		s.revertTurnContext(item, start.Consumed, 0)
 		return
 	}
+	project := start.Project
 	s.curator.broadcastRequestUpdate(item.orgID, s.projectID, requestID, "running")
 
-	// Cancel could have fired during MarkRunning's DB call. Check
+	// Cancel could have fired during the claim/begin DB calls. Check
 	// before doing any further work so we don't pointlessly load
-	// the project / spawn claude on a cancelled request.
+	// the project / spawn claude on a cancelled turn.
 	if msgCtx.Err() != nil {
-		s.markCancelled(item, "user cancelled")
+		s.releaseCancelled(item, "user cancelled")
+		s.revertTurnContext(item, start.Consumed, 0)
 		return
 	}
 
 	cwd, err := ensureKnowledgeDir(item.orgID, s.projectID)
 	if err != nil {
-		s.failRequest(item, fmt.Sprintf("knowledge dir: %v", err))
+		s.releaseFailed(item, fmt.Sprintf("knowledge dir: %v", err))
+		s.revertTurnContext(item, start.Consumed, 0)
 		return
 	}
 
@@ -220,58 +282,20 @@ func (s *projectSession) dispatch(item queueItem) {
 		}()
 	}
 
-	// Consume pending context-change rows AND read the project state in
-	// one transaction. This is intentional: the diff at the bottom of
-	// this function compares each pending row's baseline against the
-	// project's current value, and if those two reads were independent
-	// a PATCH that landed between them could be claimed here while the
-	// envelope (built from the older read) showed values matching the
-	// baseline — the diff would suppress the note, finalize on `done`,
-	// and the user's delta would be lost. ConsumePendingContext returns
-	// the project state alongside the claimed rows so every downstream
-	// step (materialize, envelope render, diff) sees the same snapshot.
-	//
-	// Two-phase consume: rows are *claimed* here (consumed_at +
-	// consumed_by_request_id stamped) but not deleted. On terminal
-	// `done` we finalize (purge); on `cancelled` or `failed` we
-	// revert (un-consume) so a transient agentproc failure doesn't
-	// silently lose the user's deltas. The merge logic in
-	// RevertPendingContext handles the case where a NEW PATCH lands
-	// during dispatch.
-	var (
-		project *domain.Project
-		pending []domain.CuratorPendingContext
-	)
-	consumeCtx := context.WithoutCancel(msgCtx)
-	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(consumeCtx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
-		p, ps, err := ts.Curator.ConsumePendingContext(consumeCtx, item.orgID, s.projectID, requestID)
-		if err != nil {
-			return err
-		}
-		project = p
-		pending = ps
-		return nil
-	}); err != nil {
-		s.failRequest(item, fmt.Sprintf("consume pending context: %v", err))
-		return
-	}
-	if project == nil {
-		s.failRequest(item, "project missing")
-		return
-	}
-
 	// Executor path: stand the turn's network + credential sidecar up
 	// BEFORE the pinned-repo materialize, so the host-side fetch routes through
 	// the sidecar's git proxy while the orchestrator holds no credential. The
 	// seam is wired only on a multi-mode executor pod (buildCuratorRuntime gated
 	// on the executor runtime); control/all/local leave it nil (bringUp nil →
 	// turnSandbox nil) and keep the in-process path below byte-identical.
+	// Keyed by the conversation id — the claim-credentials channel's key, and
+	// unique per active turn (one active claim per conversation).
 	var turnSandbox TurnSandbox
 	if bringUp := s.curator.getTurnSandbox(); bringUp != nil {
-		sb, err := bringUp(msgCtx, item.orgID, requestID, item.creatorUserID, project.TeamID, project.PinnedRepos)
+		sb, err := bringUp(msgCtx, item.orgID, item.conversationID, item.creatorUserID, project.TeamID, project.PinnedRepos)
 		if err != nil {
-			s.failRequest(item, fmt.Sprintf("bring up turn sandbox: %v", err))
-			s.revertPendingFor(item)
+			s.releaseFailed(item, fmt.Sprintf("bring up turn sandbox: %v", err))
+			s.revertTurnContext(item, start.Consumed, 0)
 			return
 		}
 		if sb != nil {
@@ -329,8 +353,8 @@ func (s *projectSession) dispatch(item queueItem) {
 		// Cancel fired during repo refresh (one big bare clone can
 		// take seconds on a fresh fetch). Don't waste cycles spawning
 		// claude only to immediately cancel it.
-		s.markCancelled(item, "user cancelled")
-		s.revertPendingFor(item)
+		s.releaseCancelled(item, "user cancelled")
+		s.revertTurnContext(item, start.Consumed, 0)
 		return
 	}
 
@@ -345,11 +369,11 @@ func (s *projectSession) dispatch(item queueItem) {
 	// constructor takes "" until config loads (mirroring Spawner),
 	// and a SendMessage that lands during that window would
 	// otherwise reach agentproc.Run and emit a confusing
-	// "missing --model" error from claude itself. Fail the row up
+	// "missing --model" error from claude itself. Fail the turn up
 	// front so the user sees a clear message.
 	if model == "" {
-		s.failRequest(item, "curator AI model is not configured")
-		s.revertPendingFor(item)
+		s.releaseFailed(item, "curator AI model is not configured")
+		s.revertTurnContext(item, start.Consumed, 0)
 		return
 	}
 
@@ -361,8 +385,8 @@ func (s *projectSession) dispatch(item queueItem) {
 	// happens we'd silently disable curator tooling.
 	selfBin, err := os.Executable()
 	if err != nil {
-		s.failRequest(item, fmt.Sprintf("resolve own binary path: %v", err))
-		s.revertPendingFor(item)
+		s.releaseFailed(item, fmt.Sprintf("resolve own binary path: %v", err))
+		s.revertTurnContext(item, start.Consumed, 0)
 		return
 	}
 
@@ -384,27 +408,35 @@ func (s *projectSession) dispatch(item queueItem) {
 	}
 	systemPrompt := renderEnvelope(envelope)
 
-	message := req.UserInput
-	contextNote := pendingChangesNote(pending, envelope)
+	message := start.UserInput
+	var auditMessageID int64
+	contextNote := pendingChangesNote(start.Consumed, envelope)
 	if contextNote != "" {
 		message = contextNote + "\n\n" + message
-		// Persist the rendered note as a curator_messages audit row
-		// keyed to the consuming request. Frontend filters subtype
-		// `context_change` out of rendered chat, but having
-		// the row keyed to request_id makes the chat history
-		// reproducible: replay shows exactly what the agent saw.
-		// Best-effort — failing to write the audit row should not
-		// abort the dispatch.
-		auditMsg := &domain.CuratorMessage{
-			RequestID: requestID,
-			Role:      "system",
-			Subtype:   "context_change",
-			Content:   contextNote,
+		// Persist the rendered note as a system audit row on the
+		// conversation, stamped with this turn's claim. The frontend filters
+		// subtype `context_change` out of rendered chat, but the row makes
+		// the history reproducible: replay shows exactly what the agent saw.
+		// Its id is remembered so the failure/cancel revert can delete it —
+		// history must not show a "context noted" entry for a turn that
+		// never delivered the deltas. Best-effort — failing to write the
+		// audit row should not abort the dispatch.
+		auditMsg := &domain.AgentMessage{
+			RunID:   item.conversationID,
+			UserID:  item.creatorUserID,
+			ClaimID: claimID,
+			Role:    "system",
+			Subtype: "context_change",
+			Content: contextNote,
 		}
 		auditCtx := context.WithoutCancel(msgCtx)
 		if auditErr := s.curator.stores.Tx.SyntheticClaimsWithTx(auditCtx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
-			_, err := ts.Curator.InsertMessage(auditCtx, item.orgID, auditMsg)
-			return err
+			id, err := ts.AgentRuns.InsertMessage(auditCtx, item.orgID, auditMsg)
+			if err != nil {
+				return err
+			}
+			auditMessageID = id
+			return nil
 		}); auditErr != nil {
 			curatorLog.Warn("insert context_change audit row failed", "request", requestID, "error", auditErr)
 		}
@@ -442,15 +474,15 @@ func (s *projectSession) dispatch(item queueItem) {
 
 	// In-sandbox exec daemon (TFAC-61). The curator envelope advertises a real
 	// `triagefactory exec gh|jira` surface, so in multi mode the jailed agent
-	// needs the per-run agenthost socket to answer those calls host-side —
+	// needs the per-turn agenthost socket to answer those calls host-side —
 	// without it, exec would fail in the jail (no DB, no keychain). Mirrors the
 	// spawner (internal/delegate/run.go). The closure is only invoked in the
 	// sandbox branch (multi+linux); local/non-sandbox runs never call it.
-	// RunID is the curator request id (unique per turn → unique socket);
+	// RunID is the conversation id (unique per active turn → unique socket);
 	// identity is the requesting user's (org, user). TeamID is the curated
 	// project's owning team (this surface is project-scoped, not run-backed,
-	// so there is no runs.team_id to read — project.TeamID is the canonical
-	// team here). IsEventTriggered is false — every curator turn is user-driven.
+	// so project.TeamID is the canonical team here). IsEventTriggered is
+	// false — every curator turn is user-driven.
 	startAgentHost := func() (sandbox.Mount, io.Closer, error) {
 		if turnSandbox != nil {
 			// Executor path: the credential sidecar HOSTS the exec-verb
@@ -459,7 +491,7 @@ func (s *projectSession) dispatch(item queueItem) {
 			// daemon and keeps the hostile-input parser out of its own address
 			// space, exactly like the delegated executor branch
 			// (internal/delegate/run.go). Never reads the disabled secret store.
-			return agenthost.SocketMountFor(requestID), noopCloser{}, nil
+			return agenthost.SocketMountFor(item.conversationID), noopCloser{}, nil
 		}
 		// all/local: the orchestrator IS the credential holder, so it hosts the
 		// socket server in-process over its live stores. PinnedRepos authorizes
@@ -468,7 +500,7 @@ func (s *projectSession) dispatch(item queueItem) {
 		hd, mount, err := agenthost.Start(s.curator.stores, agenthost.RunInfo{
 			OrgID:            item.orgID,
 			UserID:           item.creatorUserID,
-			RunID:            requestID,
+			RunID:            item.conversationID,
 			TeamID:           project.TeamID,
 			IsEventTriggered: false,
 			PinnedRepos:      project.PinnedRepos,
@@ -494,7 +526,7 @@ func (s *projectSession) dispatch(item queueItem) {
 	outcome, runErr := s.curator.runAgent(msgCtx, agentproc.RunOptions{
 		Cwd:          cwd,
 		Model:        model,
-		SessionID:    project.CuratorSessionID,
+		SessionID:    start.SDKSessionID,
 		Message:      message,
 		SystemPrompt: systemPrompt,
 		AllowedTools: agentproc.BuildAllowedTools(selfBin),
@@ -516,19 +548,20 @@ func (s *projectSession) dispatch(item queueItem) {
 		PrebuiltProxyEnv:   prebuiltProxyEnv,
 		StartAgentHost:     startAgentHost,
 		ReadOnlyRepoMounts: roRepoMounts,
-	}, newRequestSink(s.curator, s.projectID, requestID, item.orgID, item.creatorUserID))
+	}, newTurnSink(s.curator, s.projectID, item.conversationID, requestID, claimID, item.orgID, item.creatorUserID))
 
-	// Cancellation observed → terminal cancelled status. Distinguish
-	// between request-level cancellation and broader session/project
-	// shutdown so the recorded terminal reason is accurate. Pending
-	// rows are reverted so the next user message picks them up again.
+	// Cancellation observed → release the claim cancelled. Distinguish
+	// between turn-level cancellation and broader session/project
+	// shutdown so the recorded terminal reason is accurate. Consumed
+	// injection rows are reverted so the next user message picks them up
+	// again.
 	if msgCtx.Err() != nil {
 		cancelReason := "user cancelled"
 		if s.ctx.Err() != nil {
 			cancelReason = "session cancelled"
 		}
-		s.markCancelled(item, cancelReason)
-		s.revertPendingFor(item)
+		s.releaseCancelled(item, cancelReason)
+		s.revertTurnContext(item, start.Consumed, auditMessageID)
 		return
 	}
 
@@ -537,108 +570,192 @@ func (s *projectSession) dispatch(item queueItem) {
 		if outcome != nil {
 			stderr = outcome.Stderr
 		}
-		s.failRequest(item, fmt.Sprintf("%v\nstderr: %s", runErr, stderr))
-		s.revertPendingFor(item)
+		s.releaseFailed(item, fmt.Sprintf("%v\nstderr: %s", runErr, stderr))
+		s.revertTurnContext(item, start.Consumed, auditMessageID)
 		return
 	}
 
 	if outcome == nil || outcome.Result == nil {
-		s.failRequest(item, "claude exited without producing a result event")
-		s.revertPendingFor(item)
+		s.releaseFailed(item, "claude exited without producing a result event")
+		s.revertTurnContext(item, start.Consumed, auditMessageID)
 		return
 	}
 
+	claimOutcome := "completed"
 	status := "done"
 	errMsg := ""
 	if outcome.Result.IsError {
+		claimOutcome = "failed"
 		status = "failed"
 		errMsg = outcome.Result.Result
 	}
 	completeCtx := context.WithoutCancel(msgCtx)
-	var flipped bool
-	completeErr := s.curator.stores.Tx.SyntheticClaimsWithTx(completeCtx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
-		f, err := ts.Curator.CompleteRequest(
-			completeCtx, item.orgID, requestID, status, errMsg,
-			outcome.Result.CostUSD, outcome.Result.DurationMs, outcome.Result.NumTurns,
-		)
-		if err != nil {
-			return err
-		}
-		flipped = f
-		return nil
-	})
+	flipped, completeErr := s.curator.stores.Curator.ReleaseActiveTurnSystem(
+		completeCtx, item.orgID, item.conversationID, claimOutcome, errMsg,
+		outcome.Result.CostUSD, outcome.Result.DurationMs, outcome.Result.NumTurns,
+	)
 	if completeErr != nil {
-		curatorLog.Warn("complete request failed", "request", requestID, "error", completeErr)
-		// We don't know whether the row landed terminal. Revert the
-		// pending rows on the conservative assumption that the agent
-		// did not see them — if the row turns out to be `done` after
+		curatorLog.Warn("release turn failed", "request", requestID, "error", completeErr)
+		// We don't know whether the claim landed released. Revert the
+		// consumed rows on the conservative assumption that the agent
+		// did not see them — if the turn turns out to be done after
 		// all, the worst case is the user gets a duplicate diff on
 		// their next message, which is far better than silently
 		// losing the deltas.
-		s.revertPendingFor(item)
+		s.revertTurnContext(item, start.Consumed, auditMessageID)
 		return
 	}
 	if !flipped {
-		// The row was already terminal — most likely a user cancel
+		// The claim was already released — most likely a user cancel
 		// landed during agentproc.Run and the handler beat us to the
-		// DB. Don't broadcast a status change that doesn't match the
-		// row's actual state; the cancel handler already broadcast
-		// cancelled. Pending rows: the cancel path will revert them
-		// when it observes msgCtx.Err() above, but we may have
-		// reached this branch from a successful agentproc with the
-		// cancel landing concurrently — revert here too as a
-		// belt-and-suspenders for the "row was already cancelled
-		// before our completion write" race.
-		curatorLog.Warn("request already terminal, skipping completion broadcast", "request", requestID, "intended_status", status)
-		s.revertPendingFor(item)
+		// DB. Don't broadcast a status that doesn't match; the cancel
+		// path already broadcast cancelled. Revert here too as a
+		// belt-and-suspenders for the "released before our completion
+		// write" race.
+		curatorLog.Warn("turn already released, skipping completion broadcast", "request", requestID, "intended_status", status)
+		s.revertTurnContext(item, start.Consumed, auditMessageID)
 		return
 	}
-	if status == "done" {
-		s.finalizePendingFor(item)
-	} else {
-		// Terminal `failed` from agentproc's IsError result: the agent
+	if status != "done" {
+		// Terminal failed from agentproc's IsError result: the agent
 		// emitted a result event marking the turn as a failure. Treat
-		// the same as a process-level failure for pending-row
-		// purposes — user retry should re-see the deltas.
-		s.revertPendingFor(item)
+		// the same as a process-level failure for injection-row
+		// purposes — user retry should re-see the deltas. A done turn
+		// needs no finalize: the consumed rows stay delivered, plain
+		// transcript history.
+		s.revertTurnContext(item, start.Consumed, auditMessageID)
 	}
 	s.curator.broadcastRequestUpdate(item.orgID, s.projectID, requestID, status)
 }
 
-// finalizePendingFor purges every pending-context row consumed by this
-// request. Best-effort logging — finalization failure leaves stale
-// rows that the next user message will skip (they are already marked
-// consumed) but does not poison the chat or block other dispatches.
-func (s *projectSession) finalizePendingFor(item queueItem) {
+// cancelQueued cancels a turn that never entered context: its undelivered
+// user message is deleted (the queued-cancel semantic — there is no claim to
+// release). Broadcasts cancelled only when this call actually removed the
+// row, so a handler-side cancel that raced ahead isn't double-announced.
+func (s *projectSession) cancelQueued(item queueItem) {
 	ctx := context.WithoutCancel(s.ctx)
-	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
-		return ts.Curator.FinalizePendingContext(ctx, item.orgID, item.requestID)
-	}); err != nil {
-		curatorLog.Warn("finalize pending context failed", "request", item.requestID, "error", err)
-	}
-}
-
-// revertPendingFor un-consumes every pending-context row claimed by
-// this request so the next user message picks them up again. Also
-// removes the curator_messages audit row keyed to this request so the
-// chat history doesn't show a phantom "context noted" entry for a
-// turn that never delivered the deltas.
-func (s *projectSession) revertPendingFor(item queueItem) {
-	ctx := context.WithoutCancel(s.ctx)
-	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
-		if err := ts.Curator.RevertPendingContext(ctx, item.orgID, item.requestID); err != nil {
-			return fmt.Errorf("revert pending: %w", err)
+	var deleted bool
+	err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
+		d, err := ts.Curator.DeleteQueuedTurn(ctx, item.orgID, item.conversationID, item.messageID)
+		if err != nil {
+			return err
 		}
-		if err := ts.Curator.DeleteMessagesBySubtype(ctx, item.orgID, item.requestID, "context_change"); err != nil {
-			return fmt.Errorf("delete audit: %w", err)
-		}
+		deleted = d
 		return nil
-	}); err != nil {
-		curatorLog.Warn("revert/delete pending context failed", "request", item.requestID, "error", err)
+	})
+	if err != nil {
+		curatorLog.Warn("cancel queued turn failed", "request", item.requestID, "error", err)
+		return
+	}
+	if deleted {
+		s.curator.broadcastRequestUpdate(item.orgID, s.projectID, item.requestID, "cancelled")
 	}
 }
 
-// hasInFlight reports whether a curator request is currently running on this
+// failQueued terminal-fails a turn whose infrastructure broke before the
+// normal claim path ran (admission-gate error): mint the claim, deliver the
+// message so the turn can't be re-fed, and release failed — the same
+// visible history a mid-dispatch failure leaves. A turn cancelled in the
+// window before the pickup is a zero-write no-op — the mint skips a
+// withdrawn row, cancelled stands, and the canceller already broadcast.
+func (s *projectSession) failQueued(item queueItem, errMsg string) {
+	ctx := context.WithoutCancel(s.ctx)
+	executorID, bootEpoch := s.curator.getExecutorIdentity()
+	_, ok, err := s.curator.stores.Curator.ClaimTurnSystem(ctx, item.orgID, item.conversationID, item.messageID, executorID, bootEpoch)
+	if err != nil {
+		curatorLog.Warn("fail queued turn: claim mint failed", "request", item.requestID, "error", err)
+		return
+	}
+	if !ok {
+		return
+	}
+	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
+		_, err := ts.Curator.BeginTurn(ctx, item.orgID, s.projectID, item.conversationID, item.messageID)
+		return err
+	}); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// The queued row vanished between the admission error and this
+			// pickup — a cancel won the race. Release the just-minted claim
+			// quietly and DON'T broadcast failed: the canceller already
+			// announced cancelled, and a late failed would overwrite it in
+			// the UI. Same withdrawn handling as the main dispatch path.
+			_, _ = s.curator.stores.Curator.ReleaseActiveTurnSystem(ctx, item.orgID, item.conversationID, "cancelled", "queued turn withdrawn before pickup", 0, 0, 0)
+			return
+		}
+		curatorLog.Warn("fail queued turn: deliver failed", "request", item.requestID, "error", err)
+	}
+	s.releaseFailed(item, errMsg)
+}
+
+// releaseCancelled releases the conversation's active claim as cancelled,
+// broadcasting only when this call won the terminal write (a racing
+// handler-side cancel already broadcast).
+func (s *projectSession) releaseCancelled(item queueItem, reason string) {
+	ctx := context.WithoutCancel(s.ctx)
+	flipped, err := s.curator.stores.Curator.ReleaseActiveTurnSystem(ctx, item.orgID, item.conversationID, "cancelled", reason, 0, 0, 0)
+	if err != nil {
+		curatorLog.Warn("cancel turn failed", "request", item.requestID, "error", err)
+		return
+	}
+	if flipped {
+		s.curator.broadcastRequestUpdate(item.orgID, s.projectID, item.requestID, "cancelled")
+	}
+}
+
+// scheduleTurnRetry re-feeds a BeginTurn-failed turn after a pacing delay.
+// The callback checks the session ctx first: a torn-down session (curator
+// shutdown OR CancelProject) must not re-feed — EnqueueClaimed's
+// getOrStartSession checks only whole-curator shutdown, so a post-teardown
+// re-feed would mint a fresh session and resurrect work for a project that
+// was just force-stopped. EnqueueClaimed still absorbs the shutdown and
+// queue-full cases that race past the check (the turn stays durably queued
+// for a boot/scan backstop).
+func (s *projectSession) scheduleTurnRetry(item queueItem) {
+	delay := s.curator.getTurnRetryDelay()
+	time.AfterFunc(delay, func() {
+		if s.ctx.Err() != nil {
+			return
+		}
+		if !s.curator.EnqueueClaimed(item.orgID, s.projectID, item.conversationID, item.messageID, item.creatorUserID) {
+			curatorLog.Warn("turn retry re-feed skipped", "request", item.requestID)
+		}
+	})
+}
+
+// releaseFailed releases the conversation's active claim as failed. A
+// no-flip means a racing cancel won — cancelled stands, and the canceller
+// already broadcast.
+func (s *projectSession) releaseFailed(item queueItem, errMsg string) {
+	ctx := context.WithoutCancel(s.ctx)
+	flipped, err := s.curator.stores.Curator.ReleaseActiveTurnSystem(ctx, item.orgID, item.conversationID, "failed", errMsg, 0, 0, 0)
+	if err != nil {
+		curatorLog.Warn("fail turn failed", "request", item.requestID, "error", err)
+		return
+	}
+	if !flipped {
+		return
+	}
+	s.curator.broadcastRequestUpdate(item.orgID, s.projectID, item.requestID, "failed")
+}
+
+// revertTurnContext un-consumes the injection rows this turn consumed and
+// deletes its context_change audit row, so a retry re-sees the deltas and
+// history doesn't show a note the agent never absorbed. Best-effort logging
+// — a revert failure leaves consumed rows the next turn simply won't
+// re-render, and must not poison the chat or block other dispatches.
+func (s *projectSession) revertTurnContext(item queueItem, consumed []domain.CuratorContextChange, auditMessageID int64) {
+	if len(consumed) == 0 && auditMessageID == 0 {
+		return
+	}
+	ctx := context.WithoutCancel(s.ctx)
+	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
+		return ts.Curator.RevertTurnContext(ctx, item.orgID, item.conversationID, consumed, auditMessageID)
+	}); err != nil {
+		curatorLog.Warn("revert turn context failed", "request", item.requestID, "error", err)
+	}
+}
+
+// hasInFlight reports whether a curator turn is currently running on this
 // session (a live subprocess). Used by Curator.InFlightProjectCount to count the
 // sessions a team archive will force-stop (TFAC-448). inFlightRequestID is set
 // before the message ctx is registered and cleared on the deferred teardown, so
@@ -652,8 +769,8 @@ func (s *projectSession) hasInFlight() bool {
 // cancelInFlight fires the active message's ctx if one exists.
 // Called from Curator.Cancel (user click) and Curator.CancelProject
 // (project delete). The goroutine observes msgCtx.Err() in its
-// agentproc.Run return and writes the cancelled terminal status
-// itself — cancelInFlight only sends the signal.
+// agentproc.Run return and releases the claim cancelled itself —
+// cancelInFlight only sends the signal.
 func (s *projectSession) cancelInFlight() {
 	s.inFlightMu.Lock()
 	cancel := s.inFlightCancel
@@ -665,86 +782,38 @@ func (s *projectSession) cancelInFlight() {
 
 // shutdown cancels the session ctx (kills any in-flight subprocess),
 // stops the goroutine, and waits for it to fully drain before
-// returning. Reason becomes the error message on any in-flight row's
-// terminal cancellation.
+// returning. Reason becomes the error on any in-flight claim's
+// terminal release.
 //
 // Blocking on the goroutine's exit matters for graceful shutdown:
 // Shutdown is called as part of process teardown, and the goroutine's
-// terminal write to curator_requests must happen before the DB closes
-// underneath it. The wait is bounded by the agentproc subprocess
-// honoring ctx.Done() promptly (it does — exec.CommandContext
-// SIGKILLs the process group) so callers don't have to time out.
+// terminal writes must happen before the DB closes underneath it. The
+// wait is bounded by the agentproc subprocess honoring ctx.Done()
+// promptly (it does — exec.CommandContext SIGKILLs the process group)
+// so callers don't have to time out.
 func (s *projectSession) shutdown(reason string) {
-	// Capture the in-flight request id before the goroutine has a
-	// chance to clear it on its own ctx.Err observation, so the
-	// terminal status carries the shutdown reason rather than the
-	// goroutine's default.
+	// Capture the in-flight turn before the goroutine has a chance to
+	// clear it on its own ctx.Err observation, so the terminal release
+	// carries the shutdown reason rather than the goroutine's default.
 	s.inFlightMu.Lock()
 	inFlightID := s.inFlightRequestID
+	inFlightConv := s.inFlightConversationID
 	s.inFlightMu.Unlock()
 
 	s.stopAll()
 
-	// If a request was in flight, flip it explicitly with the
-	// reason. The goroutine's own ctx.Err handler may also flip
-	// it; the status filter makes the second write a no-op.
-	//
-	// System-driven cancel via the admin-pool …System door: shutdown
-	// fires outside any request/JWT context (the in-flight request's
-	// identity was captured for the goroutine's claims-bound writes but
-	// shutdown runs from the caller's goroutine, and the row may not
-	// have been dequeued yet), so the RLS-gated app pool would reject
-	// the UPDATE and strand the row in `running`. TFAC-64.
-	if inFlightID != "" {
-		if flipped, err := s.curator.stores.Curator.MarkRequestCancelledIfActiveSystem(context.Background(), s.orgID, inFlightID, reason); err == nil && flipped {
+	// If a turn was in flight, release its claim explicitly with the
+	// reason. The goroutine's own ctx.Err handler may also release;
+	// the released_at IS NULL filter makes the second write a no-op.
+	// Admin-pool System door — shutdown fires outside any request/JWT
+	// context, and claim writes have no app-pool door anyway.
+	if inFlightID != "" && inFlightConv != "" {
+		if flipped, err := s.curator.stores.Curator.ReleaseActiveTurnSystem(context.Background(), s.orgID, inFlightConv, "cancelled", reason, 0, 0, 0); err == nil && flipped {
 			s.curator.broadcastRequestUpdate(s.orgID, s.projectID, inFlightID, "cancelled")
 		}
 	}
 
 	<-s.done
-}
-
-func (s *projectSession) markCancelled(item queueItem, reason string) {
-	ctx := context.WithoutCancel(s.ctx)
-	var flipped bool
-	err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
-		f, err := ts.Curator.MarkRequestCancelledIfActive(ctx, item.orgID, item.requestID, reason)
-		if err != nil {
-			return err
-		}
-		flipped = f
-		return nil
-	})
-	if err != nil {
-		curatorLog.Warn("cancel request failed", "request", item.requestID, "error", err)
-		return
-	}
-	if flipped {
-		s.curator.broadcastRequestUpdate(item.orgID, s.projectID, item.requestID, "cancelled")
-	}
-}
-
-func (s *projectSession) failRequest(item queueItem, errMsg string) {
-	ctx := context.WithoutCancel(s.ctx)
-	var flipped bool
-	err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
-		f, err := ts.Curator.CompleteRequest(ctx, item.orgID, item.requestID, "failed", errMsg, 0, 0, 0)
-		if err != nil {
-			return err
-		}
-		flipped = f
-		return nil
-	})
-	if err != nil {
-		curatorLog.Warn("fail request failed", "request", item.requestID, "error", err)
-		return
-	}
-	if !flipped {
-		// Cancel raced ahead of the failure write. Cancelled wins;
-		// the handler already broadcast that.
-		return
-	}
-	s.curator.broadcastRequestUpdate(item.orgID, s.projectID, item.requestID, "failed")
 }
 
 // noopCloser is an io.Closer that closes nothing — returned by the executor

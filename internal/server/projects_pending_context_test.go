@@ -10,29 +10,76 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// Projects PATCH inserts curator_pending_context rows for
-// pinned-repos / tracker changes whenever the project has an active
-// curator_session_id. The handler is responsible for the diff and the
-// dispatch is responsible for consume/finalize/revert; these tests
-// pin only the handler half so they don't need agentproc.
+// Projects PATCH records an 'injection:context' delta on every live curator
+// conversation of the project for pinned-repos / tracker changes. The
+// handler owns the diff; the curator dispatch owns consume/revert; these
+// tests pin only the handler half so they don't need agentproc.
 
-func seedProjectWithSessionForPatch(t *testing.T, s *Server) (id, sessionID string) {
+// seedProjectWithConversation creates a project plus a live curator
+// conversation for the local user — the state a project reaches after its
+// first chat message, which is what arms the pending-context producer.
+func seedProjectWithConversation(t *testing.T, s *Server) (projectID, convID string) {
 	t.Helper()
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+	projectID, err := s.projects.Create(t.Context(), org, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
-	sessionID = "session-1"
-	if err := db.SetProjectCuratorSessionID(s.db, id, sessionID); err != nil {
-		t.Fatalf("set session id: %v", err)
+	if err := s.tx.SyntheticClaimsWithTx(t.Context(), org, user, func(ts db.TxStores) error {
+		conv, err := ts.Curator.GetOrCreateConversation(t.Context(), org, projectID, user)
+		if err != nil {
+			return err
+		}
+		convID = conv.ID
+		return nil
+	}); err != nil {
+		t.Fatalf("mint conversation: %v", err)
 	}
-	return id, sessionID
+	return projectID, convID
+}
+
+// listPendingInjections reads the project's undelivered 'injection:context'
+// rows straight off the messages table (there is deliberately no listing
+// method on the store — the dispatch consumes them, tests peek).
+func listPendingInjections(t *testing.T, s *Server, projectID string) []domain.CuratorContextChange {
+	t.Helper()
+	rows, err := s.db.Query(`
+		SELECT m.id, COALESCE(m.metadata, '')
+		FROM messages m
+		JOIN conversations c ON c.id = m.conversation_id
+		WHERE c.project_id = ? AND c.type = 'curator'
+		  AND m.subtype = 'injection:context' AND m.delivered = 0
+		ORDER BY m.id ASC
+	`, projectID)
+	if err != nil {
+		t.Fatalf("query pending injections: %v", err)
+	}
+	defer rows.Close()
+	var out []domain.CuratorContextChange
+	for rows.Next() {
+		var (
+			id   int64
+			meta string
+		)
+		if err := rows.Scan(&id, &meta); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		var payload struct {
+			ChangeType    string `json:"change_type"`
+			BaselineValue string `json:"baseline_value"`
+		}
+		if err := json.Unmarshal([]byte(meta), &payload); err != nil {
+			t.Fatalf("decode metadata %q: %v", meta, err)
+		}
+		out = append(out, domain.CuratorContextChange{MessageID: id, ChangeType: payload.ChangeType, BaselineValue: payload.BaselineValue})
+	}
+	return out
 }
 
 func TestProjectPatch_QueuesPinnedRepoChange(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
-	id, _ := seedProjectWithSessionForPatch(t, s)
+	id, _ := seedProjectWithConversation(t, s)
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
 		"pinned_repos": []string{"sky-ai-eng/triage-factory"},
@@ -41,10 +88,7 @@ func TestProjectPatch_QueuesPinnedRepoChange(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
 
-	rows, err := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrgID, id)
-	if err != nil {
-		t.Fatalf("list pending: %v", err)
-	}
+	rows := listPendingInjections(t, s, id)
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 pending row, got %d", len(rows))
 	}
@@ -56,11 +100,11 @@ func TestProjectPatch_QueuesPinnedRepoChange(t *testing.T) {
 	}
 }
 
-// TestProjectPatch_NoQueueWithoutSession verifies the no-session
-// short-circuit: a project that has never been chatted with shouldn't
-// accumulate pending rows, since the next session's static envelope
-// renders fresh values directly.
-func TestProjectPatch_NoQueueWithoutSession(t *testing.T) {
+// TestProjectPatch_NoQueueWithoutConversation verifies the no-conversation
+// short-circuit: a project nobody has chatted with shouldn't accumulate
+// pending rows, since the first conversation's static envelope renders
+// fresh values directly.
+func TestProjectPatch_NoQueueWithoutConversation(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
 	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
@@ -74,9 +118,8 @@ func TestProjectPatch_NoQueueWithoutSession(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
-	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrgID, id)
-	if len(rows) != 0 {
-		t.Errorf("expected 0 pending rows for session-less project, got %d (%+v)", len(rows), rows)
+	if rows := listPendingInjections(t, s, id); len(rows) != 0 {
+		t.Errorf("expected 0 pending rows for conversation-less project, got %d (%+v)", len(rows), rows)
 	}
 }
 
@@ -88,15 +131,14 @@ func TestProjectPatch_NoQueueWithoutSession(t *testing.T) {
 func TestProjectPatch_NoQueueWhenNothingChanged(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
-	id, _ := seedProjectWithSessionForPatch(t, s)
+	id, _ := seedProjectWithConversation(t, s)
 
 	// Seed an initial pinned repo via direct DB write, then PATCH the
 	// same value back. The diff should fold to "no change."
 	if err := s.projects.Update(t.Context(), runmode.LocalDefaultOrgID, domain.Project{
-		ID:               id,
-		Name:             "P",
-		PinnedRepos:      []string{"sky-ai-eng/triage-factory"},
-		CuratorSessionID: "session-1",
+		ID:          id,
+		Name:        "P",
+		PinnedRepos: []string{"sky-ai-eng/triage-factory"},
 	}); err != nil {
 		t.Fatalf("seed pinned: %v", err)
 	}
@@ -107,46 +149,42 @@ func TestProjectPatch_NoQueueWhenNothingChanged(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
-	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrgID, id)
-	if len(rows) != 0 {
+	if rows := listPendingInjections(t, s, id); len(rows) != 0 {
 		t.Errorf("no-op PATCH queued %d rows: %+v", len(rows), rows)
 	}
 }
 
-// TestProjectPatch_CoalescesRepeatedPATCHes is the coalescing payoff:
-// two PATCHes between user messages must not stack into two rows.
-// The first PATCH's pre-state is the truer baseline anchor for diffs
-// at consume time, so the unique-on-pending constraint must keep it
-// in place.
+// TestProjectPatch_CoalescesRepeatedPATCHes pins the one-pending-per-type
+// invariant: two PATCHes between user messages must not stack into two
+// rows — the second REPLACES the first, so the surviving baseline is the
+// second PATCH's pre-state.
 func TestProjectPatch_CoalescesRepeatedPATCHes(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
 	seedConfiguredRepo(t, s, "sky-ai-eng", "another")
-	id, _ := seedProjectWithSessionForPatch(t, s)
+	id, _ := seedProjectWithConversation(t, s)
 
-	// First PATCH: [] → [triage-factory]. Baseline should be [].
+	// First PATCH: [] → [triage-factory]. Baseline [].
 	if rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
 		"pinned_repos": []string{"sky-ai-eng/triage-factory"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("first patch: %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Second PATCH: [triage-factory] → [triage-factory, another].
-	// Baseline must remain [] (the truer "earliest unconsumed" anchor),
-	// not [triage-factory] (which would mask that the user added
-	// triage-factory in the first place).
+	// Second PATCH: [triage-factory] → [triage-factory, another]. The
+	// replacement's baseline is the second PATCH's pre-state.
 	if rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
 		"pinned_repos": []string{"sky-ai-eng/triage-factory", "sky-ai-eng/another"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("second patch: %d %s", rec.Code, rec.Body.String())
 	}
 
-	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrgID, id)
+	rows := listPendingInjections(t, s, id)
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 coalesced row, got %d (%+v)", len(rows), rows)
 	}
-	if rows[0].BaselineValue != `[]` {
-		t.Errorf("baseline = %q, want [] (oldest snapshot wins)", rows[0].BaselineValue)
+	if rows[0].BaselineValue != `["sky-ai-eng/triage-factory"]` {
+		t.Errorf("baseline = %q, want the replacement's pre-state", rows[0].BaselineValue)
 	}
 }
 
@@ -184,23 +222,20 @@ func TestPinnedReposSetEqual_DedupesBothSides(t *testing.T) {
 // TestProjectPatch_NoQueueOnPureReorder verifies that pinned_repos is
 // treated as a set on both sides of the diff: a PATCH that only
 // reorders the existing list should not queue a row, since the
-// curator-side renderer would compute an empty add/remove diff and
-// the row would round-trip through claim/render/finalize having
-// produced nothing. Avoiding the wasted I/O at the queue side keeps
-// the audit trail and the consume path quiet.
+// curator-side renderer would compute an empty add/remove diff and the
+// row would round-trip through consume/render having produced nothing.
 func TestProjectPatch_NoQueueOnPureReorder(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
 	seedConfiguredRepo(t, s, "sky-ai-eng", "another")
-	id, _ := seedProjectWithSessionForPatch(t, s)
+	id, _ := seedProjectWithConversation(t, s)
 
 	// Seed a known order via direct DB write so the comparison below
 	// is unambiguously a reorder.
 	if err := s.projects.Update(t.Context(), runmode.LocalDefaultOrgID, domain.Project{
-		ID:               id,
-		Name:             "P",
-		PinnedRepos:      []string{"sky-ai-eng/triage-factory", "sky-ai-eng/another"},
-		CuratorSessionID: "session-1",
+		ID:          id,
+		Name:        "P",
+		PinnedRepos: []string{"sky-ai-eng/triage-factory", "sky-ai-eng/another"},
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -213,8 +248,7 @@ func TestProjectPatch_NoQueueOnPureReorder(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
 
-	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrgID, id)
-	if len(rows) != 0 {
+	if rows := listPendingInjections(t, s, id); len(rows) != 0 {
 		t.Errorf("reorder PATCH queued %d rows (set semantics broken): %+v", len(rows), rows)
 	}
 }
@@ -225,7 +259,7 @@ func TestProjectPatch_NoQueueOnPureReorder(t *testing.T) {
 // be tested through the handler.
 func TestProjectPatch_QueuesJiraChange(t *testing.T) {
 	s := newTestServer(t)
-	id, _ := seedProjectWithSessionForPatch(t, s)
+	id, _ := seedProjectWithConversation(t, s)
 
 	// Seed a configured Jira project so validateTrackerKeys accepts
 	// the value when the PATCH handler reads the team's rules. The
@@ -244,7 +278,7 @@ func TestProjectPatch_QueuesJiraChange(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
 
-	rows, _ := s.curatorStore.ListPendingContext(t.Context(), runmode.LocalDefaultOrgID, id)
+	rows := listPendingInjections(t, s, id)
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 pending row, got %d", len(rows))
 	}

@@ -55,17 +55,36 @@ type Store interface {
 	// a fresh boot_epoch 1.
 	DeleteStaleInstances(ctx context.Context, staleAfter time.Duration) (int, error)
 
-	// CancelStrandedCuratorTurns cancels queued/running curator turns whose
-	// home executor's heartbeat is missing or stale (curator homing, spec
-	// §6.3). A permanently-dead home never runs its own ownership-scoped boot
-	// sweep, so without this a turn stranded on it would show as in-flight
-	// forever. Recovery here is retire-only, not requeue: the user's NEXT turn
-	// re-homes the project to a live executor (the Homer's sticky-until-death
-	// mint), so this only needs to clear the stranded row — matching the spec's
-	// "the next turn re-homes" contract rather than re-placing work in SQL.
-	// Own DB time (now() - make_interval), same discipline as ReapDeadExecutors.
-	// Returns the count cancelled.
+	// CancelStrandedCuratorTurns releases the active claims of running
+	// curator turns whose executor's heartbeat is missing or stale (curator
+	// homing, spec §6.3). A permanently-dead home never runs its own
+	// ownership-scoped boot sweep, so without this a turn stranded on it
+	// would show as in-flight forever. Recovery here is retire-only, not
+	// requeue: the user's NEXT turn re-homes the project to a live executor
+	// (the Homer's sticky-until-death mint). A queued turn needs no reaping
+	// at all anymore — it is an unowned undelivered message with no claim,
+	// and simply waits for the re-home. Own DB time (now() -
+	// make_interval), same discipline as ReapDeadExecutors. Returns the
+	// count released.
 	CancelStrandedCuratorTurns(ctx context.Context, staleThreshold time.Duration) (int, error)
+
+	// HealClaimDesyncs runs the two janitor arms for the states the
+	// app-pool terminal writes can strand a delegation conversation in
+	// (their conversation flip and claim release commit independently):
+	// a terminal conversation with a dangling active claim gets the claim
+	// released (outcome mapped from status), and an in-flight delegation
+	// conversation with no active claim under a running blueprint parent
+	// goes back to 'queued' for re-claim. The same arms run at boot inside
+	// RunQueueStore.ReconcileOrphanedRuns; the periodic repeat here bounds
+	// the desync's lifetime to a reaper tick instead of the next restart.
+	// Both arms are idempotent and safe against in-flight healthy writes:
+	// the terminal writes stage their status UPDATE before releasing the
+	// claim, so the requeue arm blocks on that row lock and re-evaluates
+	// its WHERE post-commit — it can only match a genuinely rolled-back
+	// flip, never a completion mid-write.
+	// Curator conversations (status NULL) are never touched — their claim
+	// recovery belongs to the curator sweeps above.
+	HealClaimDesyncs(ctx context.Context) (requeued, released int, err error)
 }
 
 // pgStore is the Postgres implementation.
@@ -78,29 +97,31 @@ func NewPostgresStore(db *sql.DB) Store { return &pgStore{db: db} }
 
 var _ Store = (*pgStore)(nil)
 
-// nonProcessingStatusesSQL is the runs.status IN-list of every status the
-// reaper must NOT touch: still-queued (no owner yet), every terminal, and
-// the two dormant/parked statuses (no live process to have died). Mirrors
-// RunQueueStore.ResetProcessingRuns' own inline list (internal/db/postgres/
-// run_queue.go) — kept as its own literal here rather than shared, matching
-// that file's own precedent ("other queries that add dormant statuses keep
-// their own list").
-const nonProcessingStatusesSQL = `'queued','completed','failed','cancelled','task_unsolvable','open','pending_approval'`
-
 // reapCandidateJoin is the FROM/JOIN/base-WHERE shared by every reaper
-// query below: claimed/running runs under a still-running blueprint_run
+// query below: claimed 'running' runs (the one status a claimed run holds,
+// whatever setup phase its claim is in — queued/terminal/dormant rows have
+// no live process to have died) under a still-running blueprint_run
 // whose executor's heartbeat row is missing (GC'd, or never registered —
 // defensive) or older than the staleness threshold. Each caller appends its
 // own cancel_requested/attempts predicate and SELECTs what it needs.
 // $1 is always the staleness threshold in seconds.
 const reapCandidateJoin = `
-	FROM runs r
+	FROM conversations r
+	JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 	JOIN blueprint_runs br ON br.id = r.blueprint_run_id
-	LEFT JOIN instances i ON i.id = r.executor_id
-	WHERE r.status NOT IN (` + nonProcessingStatusesSQL + `)
-	  AND r.executor_id IS NOT NULL
+	LEFT JOIN instances i ON i.id = cl.executor_id
+	WHERE r.status = 'running'
 	  AND br.status = 'running'
 	  AND (i.id IS NULL OR i.last_heartbeat_at < now() - make_interval(secs => $1))
+`
+
+// releaseReapedClaimsSQL releases the active claims of a just-swept
+// conversation set. The claim-level outcome is always 'reaped' — the
+// engagement ended because its executor died — while the conversation-level
+// status carries the user-facing disposition (cancelled/failed/queued).
+const releaseReapedClaimsSQL = `
+	UPDATE claims SET released_at = now(), outcome = 'reaped'
+	WHERE released_at IS NULL AND conversation_id = ANY($1)
 `
 
 func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Duration, maxAttempts int) (Counts, error) {
@@ -118,14 +139,14 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	// finalization instead of requeue" (spec §4.3). No live owner to
 	// signal, so this IS the finalization: a dead executor can't apply a
 	// cancel signal to a process that no longer exists.
-	cancelledBlueprintIDs, err := reapUpdateRuns(ctx, tx, staleSecs, nil, `
-		UPDATE runs SET status = 'cancelled', completed_at = now(), stop_reason = 'cancelled',
+	cancelledBlueprintIDs, cancelledIDs, err := reapUpdateRuns(ctx, tx, staleSecs, nil, `
+		UPDATE conversations SET status = 'cancelled', completed_at = now(), stop_reason = 'cancelled',
 			result_summary = 'Cancelled: owning blueprint run was cancel-requested under a dead executor (reaper)'
 		WHERE id IN (
 			SELECT r.id `+reapCandidateJoin+`
 			  AND br.cancel_requested = true
 		)
-		RETURNING blueprint_run_id
+		RETURNING blueprint_run_id, id
 	`)
 	if err != nil {
 		return Counts{}, err
@@ -138,19 +159,22 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 		`, pgUUIDArray(cancelledBlueprintIDs)); err != nil {
 			return Counts{}, err
 		}
+		if _, err := tx.ExecContext(ctx, releaseReapedClaimsSQL, pgUUIDArray(cancelledIDs)); err != nil {
+			return Counts{}, err
+		}
 	}
 
 	// 2. Not cancel-requested, attempts exhausted: terminal-fail.
-	failedBlueprintIDs, err := reapUpdateRuns(ctx, tx, staleSecs, &maxAttempts, `
-		UPDATE runs SET status = 'failed', failure_kind = 'executor_lost', completed_at = now(),
+	failedBlueprintIDs, failedIDs, err := reapUpdateRuns(ctx, tx, staleSecs, &maxAttempts, `
+		UPDATE conversations SET status = 'failed', failure_kind = 'executor_lost', completed_at = now(),
 			stop_reason = 'executor_lost',
 			result_summary = 'Failed: executor lost and the attempt budget (TF_RUN_MAX_ATTEMPTS) is exhausted (reaper)'
 		WHERE id IN (
 			SELECT r.id `+reapCandidateJoin+`
 			  AND br.cancel_requested = false
-			  AND r.attempts >= $2
+			  AND (SELECT count(*) FROM claims a WHERE a.conversation_id = r.id) >= $2
 		)
-		RETURNING blueprint_run_id
+		RETURNING blueprint_run_id, id
 	`)
 	if err != nil {
 		return Counts{}, err
@@ -161,6 +185,9 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 			UPDATE blueprint_runs SET status = 'failed', completed_at = now(), abort_reason = 'executor_lost'
 			WHERE id = ANY($1) AND status = 'running'
 		`, pgUUIDArray(failedBlueprintIDs)); err != nil {
+			return Counts{}, err
+		}
+		if _, err := tx.ExecContext(ctx, releaseReapedClaimsSQL, pgUUIDArray(failedIDs)); err != nil {
 			return Counts{}, err
 		}
 	}
@@ -175,24 +202,26 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	// now" (no aging delay), which is the correct advisory answer here.
 	// Affinity is re-earned on the next enqueue, never carried toward a
 	// corpse.
-	res, err := tx.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', queued_at = now(), claimed_at = NULL, executor_id = NULL, boot_epoch = NULL,
-			cred_pubkey = NULL, preferred_executor_id = NULL,
+	_, requeuedIDs, err := reapUpdateRuns(ctx, tx, staleSecs, &maxAttempts, `
+		UPDATE conversations SET status = 'queued', queued_at = now(),
+			preferred_executor_id = NULL,
 			result_summary = 'Requeued: executor heartbeat stale (reaper)'
 		WHERE id IN (
 			SELECT r.id `+reapCandidateJoin+`
 			  AND br.cancel_requested = false
-			  AND r.attempts < $2
+			  AND (SELECT count(*) FROM claims a WHERE a.conversation_id = r.id) < $2
 		)
-	`, staleSecs, maxAttempts)
+		RETURNING blueprint_run_id, id
+	`)
 	if err != nil {
 		return Counts{}, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return Counts{}, err
+	out.Requeued = len(requeuedIDs)
+	if len(requeuedIDs) > 0 {
+		if _, err := tx.ExecContext(ctx, releaseReapedClaimsSQL, pgUUIDArray(requeuedIDs)); err != nil {
+			return Counts{}, err
+		}
 	}
-	out.Requeued = int(n)
 
 	if err := tx.Commit(); err != nil {
 		return Counts{}, err
@@ -204,28 +233,27 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 // and collects the affected blueprint_run ids, binding staleSecs as $1 and,
 // when maxAttempts is non-nil, the attempts threshold as $2 — factored out
 // since two of the three sweep queries share this exact shape.
-func reapUpdateRuns(ctx context.Context, tx *sql.Tx, staleSecs float64, maxAttempts *int, query string) ([]string, error) {
+func reapUpdateRuns(ctx context.Context, tx *sql.Tx, staleSecs float64, maxAttempts *int, query string) (blueprintIDs, conversationIDs []string, err error) {
 	var rows *sql.Rows
-	var err error
 	if maxAttempts != nil {
 		rows, err = tx.QueryContext(ctx, query, staleSecs, *maxAttempts)
 	} else {
 		rows, err = tx.QueryContext(ctx, query, staleSecs)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
-	var ids []string
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
+		var bid, cid string
+		if err := rows.Scan(&bid, &cid); err != nil {
+			return nil, nil, err
 		}
-		ids = append(ids, id)
+		blueprintIDs = append(blueprintIDs, bid)
+		conversationIDs = append(conversationIDs, cid)
 	}
-	return ids, rows.Err()
+	return blueprintIDs, conversationIDs, rows.Err()
 }
 
 func (s *pgStore) DeleteStaleInstances(ctx context.Context, staleAfter time.Duration) (int, error) {
@@ -239,28 +267,72 @@ func (s *pgStore) DeleteStaleInstances(ctx context.Context, staleAfter time.Dura
 	return int(n), err
 }
 
+func (s *pgStore) HealClaimDesyncs(ctx context.Context) (int, int, error) {
+	// Duplicates internal/db/postgres's healClaimDesyncs SQL rather than
+	// importing it, keeping this package dialect-independent like the rest
+	// of the file (see pgUUIDArray's rationale). Statement order matters
+	// only for accounting, not correctness — each arm's predicate is
+	// disjoint from the other's write set.
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE claims SET released_at = now(),
+		    outcome = CASE c.status
+		        WHEN 'completed' THEN 'completed'
+		        WHEN 'cancelled' THEN 'cancelled'
+		        ELSE 'failed'
+		    END
+		FROM conversations c
+		WHERE claims.conversation_id = c.id AND claims.released_at IS NULL
+		  AND c.status IN ('completed','failed','cancelled','task_unsolvable')
+	`)
+	if err != nil {
+		return 0, 0, err
+	}
+	rel, err := res.RowsAffected()
+	if err != nil {
+		return 0, 0, err
+	}
+
+	res, err = s.db.ExecContext(ctx, `
+		UPDATE conversations SET status = 'queued', queued_at = now(),
+		    preferred_executor_id = NULL
+		WHERE type = 'delegation'
+		  AND status = 'running'
+		  AND NOT EXISTS (
+		      SELECT 1 FROM claims cl
+		      WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL
+		  )
+		  AND blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
+	`)
+	if err != nil {
+		return 0, 0, err
+	}
+	req, err := res.RowsAffected()
+	if err != nil {
+		return 0, 0, err
+	}
+	return int(req), int(rel), nil
+}
+
 func (s *pgStore) CancelStrandedCuratorTurns(ctx context.Context, staleThreshold time.Duration) (int, error) {
 	// A home is dead when its instances row is missing (GC'd or never
 	// registered) or its heartbeat is older than the threshold — the same
 	// missing-or-stale predicate ReapDeadExecutors uses for a run's executor.
-	// The token columns are rolled up from the curator_messages SUM, same as
-	// every other terminal write (a 'running' turn that streamed before its home
-	// died must still report its spend — TFAC-473); this reaper runs on the
-	// leader's superuser admin pool, so no extra grant applies here.
+	// An outcome/error release only: the messages ledger already holds
+	// whatever the stranded turn streamed, and a turn whose home died never
+	// reported a cost lump to settle.
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE curator_requests
-		SET status = 'cancelled',
-		    finished_at = COALESCE(finished_at, now()),
-		    error_msg = COALESCE(error_msg, 'Cancelled: curator home executor lost (reaper) — re-send to re-home'),
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM curator_messages WHERE request_id = curator_requests.id),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM curator_messages WHERE request_id = curator_requests.id),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM curator_messages WHERE request_id = curator_requests.id),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM curator_messages WHERE request_id = curator_requests.id)
-		WHERE status IN ('queued', 'running')
-		  AND home_instance_id IS NOT NULL
+		UPDATE claims
+		SET released_at = now(),
+		    outcome = 'cancelled',
+		    error = COALESCE(error, 'Cancelled: curator home executor lost (reaper) — re-send to re-home')
+		WHERE released_at IS NULL
+		  AND EXISTS (
+		      SELECT 1 FROM conversations c
+		      WHERE c.id = claims.conversation_id AND c.type = 'curator'
+		  )
 		  AND NOT EXISTS (
 		      SELECT 1 FROM instances i
-		      WHERE i.id = curator_requests.home_instance_id
+		      WHERE i.id = claims.executor_id
 		        AND i.last_heartbeat_at >= now() - make_interval(secs => $1)
 		  )
 	`, staleThreshold.Seconds())

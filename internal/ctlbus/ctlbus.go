@@ -40,11 +40,12 @@ const Channel = "tf_ctl"
 // "trigger" uses Manager/OrgID/Force (a scorer/classifier/profiler/
 // reconciler Manager.Trigger call); "pollsoon" uses Source/OrgID (a
 // poller.Manager.PollSoon call); "cred_request" uses OrgID/RunID (TFAC-614:
-// an executor parked in status='awaiting_credentials' nudging the brain's
+// an executor whose claim is parked in phase='awaiting_credentials' nudging the brain's
 // credential provisioner — see internal/credprovision and
 // internal/app/ctl.go's dispatch case); "curator_cred_request" uses OrgID/RunID
 // too (a home executor standing a curator turn's credential sidecar up nudging
-// the same provisioner — RunID carries the curator_requests id);
+// the same provisioner — RunID carries the curator conversation id, the
+// claim-credentials channel's key);
 // "curator_new" / "curator_cancel" use
 // OrgID/ProjectID (curator homing, spec §6.3): a control pod nudging the home
 // executor's claim loop for a fresh turn, or routing a cross-pod cancel to

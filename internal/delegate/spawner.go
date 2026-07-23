@@ -89,14 +89,15 @@ type Spawner struct {
 	// (TFAC-614) — the executor's awaiting-credentials wait reads it;
 	// nil-safe (local resolves credentials directly and never gates on it).
 	runCredentials db.RunCredentialsStore
-	// curatorTurnCredentials + curatorStore are the curator-turn analogs of
-	// runCredentials + runQueue: BringUpCuratorSandbox publishes the
-	// turn's sidecar pubkey via curatorStore.PublishTurnCredPubKey and polls
-	// curatorTurnCredentials for the sealed bundle the brain wrote. nil-safe
-	// (local never brings a curator sidecar up); a nil pair makes
-	// BringUpCuratorSandbox degrade like every other nil-store seam here.
-	curatorTurnCredentials db.CuratorTurnCredentialsStore
-	curatorStore           db.CuratorStore
+	// curatorStore is the curator-turn half of the credential handshake:
+	// BringUpCuratorSandbox publishes the turn's sidecar pubkey onto the
+	// conversation's active claim via
+	// curatorStore.PublishTurnCredPubKeySystem and polls runCredentials
+	// (keyed by the conversation id — the shared claim_credentials channel)
+	// for the sealed bundle the brain wrote. nil-safe (local never brings a
+	// curator sidecar up); a nil store makes BringUpCuratorSandbox degrade
+	// like every other nil-store seam here.
+	curatorStore db.CuratorStore
 	// awaitingCredentialsTimeout overrides awaitingCredentialsTimeout (the
 	// package default) when > 0 — tests inject a short value via
 	// SetAwaitingCredentialsTimeout, mirroring idleHibernateTimeout.
@@ -473,43 +474,42 @@ type Spawner struct {
 // partial db.Stores{} — every field is a nil-safe interface.
 func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	s := &Spawner{
-		database:               database,
-		prompts:                stores.Prompts,
-		agents:                 stores.Agents,
-		blueprints:             stores.Blueprints,
-		runQueue:               stores.RunQueue,
-		runCredentials:         stores.RunCredentials,
-		curatorTurnCredentials: stores.CuratorTurnCredentials,
-		curatorStore:           stores.Curator,
-		tasks:                  stores.Tasks,
-		agentRuns:              stores.AgentRuns,
-		entities:               stores.Entities,
-		artifacts:              stores.Artifacts,
-		stagedInjections:       stores.StagedInjections,
-		events:                 stores.Events,
-		taskMemory:             stores.TaskMemory,
-		runWorktrees:           stores.RunWorktrees,
-		orgs:                   stores.Orgs,
-		spend:                  stores.Spend,
-		jiraRules:              stores.JiraStatusRules,
-		externalActions:        stores.ExternalActions,
-		teams:                  stores.Teams,
-		instances:              stores.Instances,
-		instanceStats:          stores.InstanceStats,
-		pendingInput:           stores.RunPendingInput,
-		pendingFirings:         stores.PendingFirings,
-		tx:                     stores.Tx,
-		ghClient:               ghClient,
-		wsHub:                  wsHub,
-		model:                  model,
-		cancels:                make(map[string]context.CancelFunc),
-		dispatchWake:           make(chan struct{}, 1),
-		procs:                  make(map[string]*liveRunHandle),
-		permPending:            make(map[string]*pendingPermission),
-		ackWaiters:             make(map[int64]chan struct{}),
-		signalApplyWake:        make(chan struct{}, 1),
-		runSem:                 make(chan struct{}, DefaultMaxConcurrentRuns),
-		memAvailMB:             hostmem.AvailableMB,
+		database:         database,
+		prompts:          stores.Prompts,
+		agents:           stores.Agents,
+		blueprints:       stores.Blueprints,
+		runQueue:         stores.RunQueue,
+		runCredentials:   stores.RunCredentials,
+		curatorStore:     stores.Curator,
+		tasks:            stores.Tasks,
+		agentRuns:        stores.AgentRuns,
+		entities:         stores.Entities,
+		artifacts:        stores.Artifacts,
+		stagedInjections: stores.StagedInjections,
+		events:           stores.Events,
+		taskMemory:       stores.TaskMemory,
+		runWorktrees:     stores.RunWorktrees,
+		orgs:             stores.Orgs,
+		spend:            stores.Spend,
+		jiraRules:        stores.JiraStatusRules,
+		externalActions:  stores.ExternalActions,
+		teams:            stores.Teams,
+		instances:        stores.Instances,
+		instanceStats:    stores.InstanceStats,
+		pendingInput:     stores.RunPendingInput,
+		pendingFirings:   stores.PendingFirings,
+		tx:               stores.Tx,
+		ghClient:         ghClient,
+		wsHub:            wsHub,
+		model:            model,
+		cancels:          make(map[string]context.CancelFunc),
+		dispatchWake:     make(chan struct{}, 1),
+		procs:            make(map[string]*liveRunHandle),
+		permPending:      make(map[string]*pendingPermission),
+		ackWaiters:       make(map[int64]chan struct{}),
+		signalApplyWake:  make(chan struct{}, 1),
+		runSem:           make(chan struct{}, DefaultMaxConcurrentRuns),
+		memAvailMB:       hostmem.AvailableMB,
 	}
 	s.controller = inProcessController{s: s}
 	// Report capacity by default (executor/all); a pure-control pod flips
@@ -1072,19 +1072,25 @@ func (s *Spawner) getRunSecrets() agentproc.SecretsReader {
 	return s.runSecrets
 }
 
-func (s *Spawner) updateStatus(orgID, runID, status string) {
-	// Transient progress states (fetching, cloning, agent_starting,
-	// running) — no guard needed; the caller knows the prior row is
-	// non-terminal. Goroutine-internal, no JWT claims in scope, so
-	// admin pool.
-	if err := s.agentRuns.SetStatusSystem(context.Background(), orgID, runID, status); err != nil {
-		delegateLog.Warn("update status for run failed", "run", runID, "error", err)
+// updatePhase records the live engagement's setup sub-state on its active
+// claim (phase "" clears it — the agent process is live) and broadcasts the
+// display status: the phase itself, or "running" on a clear, so the wire
+// sequence the frontend chips key on is unchanged. Goroutine-internal, no
+// JWT claims in scope, so admin pool; no guard needed — the caller knows
+// the engagement is live.
+func (s *Spawner) updatePhase(orgID, runID, phase string) {
+	if err := s.agentRuns.SetActiveClaimPhaseSystem(context.Background(), orgID, runID, phase); err != nil {
+		delegateLog.Warn("update phase for run failed", "run", runID, "error", err)
 	}
-	s.broadcastRunUpdate(orgID, runID, status)
-	// Board placement is no longer mirrored per-run from transient status here:
+	display := phase
+	if display == "" {
+		display = "running"
+	}
+	s.broadcastRunUpdate(orgID, runID, display)
+	// Board placement is not mirrored per-run from setup progress here:
 	// the blueprint orchestrator drives the aggregate column via
 	// recomputeTaskBoardColumn at its transition points (blueprint start, step
-	// start, park, resume). updateStatus stays a pure run-status + WS helper.
+	// start, park, resume). updatePhase stays a pure claim-phase + WS helper.
 }
 
 // recomputeTaskBoardColumn is the blueprint-era board placement rule: a task's

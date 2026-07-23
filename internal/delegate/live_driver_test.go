@@ -177,13 +177,13 @@ func TestDriveLiveRun_ProcessExitCarriesErr(t *testing.T) {
 func TestDriveLiveRun_IdleHibernates(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-idle", "sess-idle", "/tmp/wt-idle")
-	if _, err := database.Exec(`UPDATE runs SET status='running' WHERE id='r-idle'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-idle'`); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	var taskID string
-	if err := database.QueryRow(`SELECT task_id FROM runs WHERE id='r-idle'`).Scan(&taskID); err != nil {
+	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id='r-idle'`).Scan(&taskID); err != nil {
 		t.Fatalf("read task_id: %v", err)
 	}
 	proc := newFakeLiveProc("sess-idle")
@@ -202,7 +202,7 @@ func TestDriveLiveRun_IdleHibernates(t *testing.T) {
 		t.Error("expected the idle hibernation to close the process")
 	}
 	var status string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-idle'`).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-idle'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status != "open" {
@@ -383,13 +383,13 @@ func TestDriveLiveRun_InvalidThenValidReturns(t *testing.T) {
 func TestDriveLiveRun_NoneFlipsStatusOpen(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-none", "sess-none", "/tmp/wt-none")
-	if _, err := database.Exec(`UPDATE runs SET status='running' WHERE id='r-none'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-none'`); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	var taskID string
-	if err := database.QueryRow(`SELECT task_id FROM runs WHERE id='r-none'`).Scan(&taskID); err != nil {
+	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id='r-none'`).Scan(&taskID); err != nil {
 		t.Fatalf("read task_id: %v", err)
 	}
 	proc := newFakeLiveProc("sess-none")
@@ -408,7 +408,7 @@ func TestDriveLiveRun_NoneFlipsStatusOpen(t *testing.T) {
 		t.Fatalf("result = %+v, want the valid conclusion after the open turn", out.result)
 	}
 	var status string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-none'`).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-none'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status != "open" {
@@ -424,13 +424,13 @@ func TestDriveLiveRun_NoneFlipsStatusOpen(t *testing.T) {
 func TestDriveLiveRun_InterruptParksOpenNotTerminal(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-pause", "sess-pause", "/tmp/wt-pause")
-	if _, err := database.Exec(`UPDATE runs SET status='running' WHERE id='r-pause'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-pause'`); err != nil {
 		t.Fatalf("set running: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	var taskID string
-	if err := database.QueryRow(`SELECT task_id FROM runs WHERE id='r-pause'`).Scan(&taskID); err != nil {
+	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id='r-pause'`).Scan(&taskID); err != nil {
 		t.Fatalf("read task_id: %v", err)
 	}
 	proc := newFakeLiveProc("sess-pause")
@@ -450,7 +450,7 @@ func TestDriveLiveRun_InterruptParksOpenNotTerminal(t *testing.T) {
 		t.Fatalf("result = %+v, want the valid conclusion after the pause (pause must not be terminal)", out.result)
 	}
 	var status string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id='r-pause'`).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-pause'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status != "open" {

@@ -150,14 +150,14 @@ func TestReviewArtifactApprove(t *testing.T) {
 		t.Errorf("artifact URL = %q, want the org GitHub host %q, not hardcoded github.com", art.URL, stub.URL)
 	}
 	var runStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&runStatus); err != nil {
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, runID).Scan(&runStatus); err != nil {
 		t.Fatalf("read run: %v", err)
 	}
 	if runStatus != "completed" {
 		t.Errorf("run status = %q, want completed", runStatus)
 	}
 	var human string
-	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM run_memory WHERE run_id=?`, runID).Scan(&human); err != nil {
+	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM run_memory WHERE conversation_id=?`, runID).Scan(&human); err != nil {
 		t.Fatalf("read run_memory: %v", err)
 	}
 	if !strings.Contains(human, "as drafted") {
@@ -499,7 +499,7 @@ func TestReviewArtifactDismiss(t *testing.T) {
 		t.Errorf("artifact state = %q, want dismissed", got)
 	}
 	var runStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&runStatus); err != nil {
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, runID).Scan(&runStatus); err != nil {
 		t.Fatalf("read run: %v", err)
 	}
 	if runStatus != "completed" {

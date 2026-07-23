@@ -39,10 +39,12 @@ type SpendTokens struct {
 	Input, Output, CacheRead, CacheCreation int
 }
 
-// RunSpendFixture stages one runs row. CreatorUserID "" → NULL (pair with
-// TriggerType "event"); ActorAgentID "" → NULL; Cost nil → NULL (an in-flight
-// run). The seeder writes origin='manual' to sidestep the blueprint-parents
-// CHECK.
+// RunSpendFixture stages one delegation conversation plus ONE ledger row on
+// it — an assistant messages row carrying the fixture's model/tokens and, when
+// Cost is non-nil, the settled cost stamp (nil → NULL cost: streamed but not
+// yet settled, the in-flight shape). CreatorUserID "" → NULL (pair with
+// TriggerType "event"); ActorAgentID "" → NULL. The seeder writes
+// origin='manual' to sidestep the blueprint-parents CHECK.
 type RunSpendFixture struct {
 	TeamID        string
 	CreatorUserID string
@@ -59,13 +61,15 @@ type RunSpendFixture struct {
 	StartedAt time.Time
 }
 
-// CuratorSpendFixture stages one curator_requests row. Status "" defaults to
-// "completed" in the seeder. TeamID selects which project the curator turn is
+// CuratorSpendFixture stages one curator conversation plus ONE cost-stamped
+// assistant ledger row on it (the turn's stream + settlement lump collapsed to
+// a single row). Status is advisory only — the view reads the ledger, not any
+// turn state. TeamID selects which project the curator conversation is
 // attributed to (TFAC-476): "" → a null-team (org/private) project, so the
 // snapshotted team_id is NULL; non-empty → the fixture's team-scoped project, so
 // the snapshot carries that team. The per-backend seeder owns mapping this to a
 // project and snapshotting team_id from it via (SELECT team_id FROM projects …),
-// exactly as production does — proving project team → row team → view.
+// exactly as production does — proving project team → conversation team → view.
 type CuratorSpendFixture struct {
 	CreatorUserID string
 	Cost          float64
@@ -84,9 +88,11 @@ type SystemSpendFixture struct {
 	StartedAt time.Time
 }
 
-// SpendSeeder is the per-backend insert layer. Each closure inserts one source
-// row via the backend's admin/raw connection and returns its id (== the view's
-// source_id), so the suite can index results without knowing either schema.
+// SpendSeeder is the per-backend insert layer. Each closure inserts one
+// view-visible source row via the backend's admin/raw connection and returns
+// its source_id — the ledger message id (rendered decimal) for the two agent
+// arms, the job row id for the system arm — so the suite can index results
+// without knowing either schema.
 type SpendSeeder struct {
 	Run     func(t *testing.T, f RunSpendFixture) string
 	Curator func(t *testing.T, f CuratorSpendFixture) string
@@ -99,11 +105,12 @@ type SpendSeeder struct {
 const spendEps = 1e-4
 
 // RunSpendStoreConformance runs the dialect-agnostic assertion suite against any
-// db.SpendStore impl. Covers the contract TFAC-472 specifies: one row per source
-// row, correct category derivation (manual / autonomous / curator /
-// system_overhead), native + correct cost & token breakdown for all three
-// sources, settled-spend semantics (terminal non-completed rows carry tokens;
-// in-flight rows read 0), SpendByCategory sums, and the ListSpend filters.
+// db.SpendStore impl. Covers the contract: one row per view-visible source row
+// (a ledger message for the agent arms, a job row for the system arm), correct
+// category derivation (manual / autonomous / curator / system_overhead), native
+// + correct cost & token breakdown for all three sources, settled-spend
+// semantics (terminal non-completed rows carry tokens; in-flight rows read 0),
+// SpendByCategory sums, and the ListSpend filters.
 func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 	t.Helper()
 
@@ -164,7 +171,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		assertCost(t, "manual.cost", mr.TotalCostUSD, 1.50)
 		assertTokens(t, "manual", mr, SpendTokens{100, 200, 300, 400})
 		if !mr.OccurredAt.Truncate(time.Second).Equal(t1) {
-			t.Errorf("manual.occurred_at = %s, want %s (runs.started_at)", mr.OccurredAt, t1)
+			t.Errorf("manual.occurred_at = %s, want %s (the ledger row's created_at)", mr.OccurredAt, t1)
 		}
 
 		// Event run → category 'autonomous'; creator NULL (the CHECK pairs
@@ -189,7 +196,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		assertCost(t, "curator.cost", cr.TotalCostUSD, 0.75)
 		assertTokens(t, "curator", cr, SpendTokens{11, 22, 33, 44})
 		if !cr.OccurredAt.Truncate(time.Second).Equal(t3) {
-			t.Errorf("curator.occurred_at = %s, want %s (curator_requests.created_at)", cr.OccurredAt, t3)
+			t.Errorf("curator.occurred_at = %s, want %s (the ledger row's created_at)", cr.OccurredAt, t3)
 		}
 
 		// Curator on a null-team (org/private) project → team_id NULL: still
@@ -213,10 +220,9 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		assertTokens(t, "system", sr, SpendTokens{1, 2, 3, 4})
 	})
 
-	// Terminal-spend completeness: TFAC-473 rolls the token breakdown up on
-	// EVERY terminal write — cancel and infra-failure included, not just clean
-	// completion. The view reads columns, so a cancelled/failed run or curator
-	// turn surfaces its real token spend. Locks that guarantee at the read layer.
+	// Terminal-spend completeness: the view reads the ledger rows themselves,
+	// so a cancelled/failed run or curator turn surfaces its real token spend
+	// regardless of how it ended — no terminal roll-up exists to miss.
 	t.Run("TerminalSpend_NonCompletedRowsCarryTokens", func(t *testing.T) {
 		fx := factory(t)
 		ctx := context.Background()
@@ -247,9 +253,9 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		assertTokens(t, "cancelled-curator", byID[cancelledCurator], SpendTokens{9, 8, 7, 6})
 	})
 
-	// In-flight (non-terminal) rows: cost is NULL → COALESCE(…,0) → 0, and the
-	// token columns are still 0 (no terminal roll-up yet). Settled-spend
-	// semantics — consistent across cost and tokens.
+	// In-flight (non-terminal) rows: the streamed ledger row carries no
+	// settlement stamp yet (NULL cost → COALESCE(…,0) → 0) and its token
+	// columns read whatever streamed — 0 here. Settled-spend semantics.
 	t.Run("InFlightRows_ReadZero", func(t *testing.T) {
 		fx := factory(t)
 		ctx := context.Background()
@@ -266,7 +272,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		}
 		r := indexSpend(t, rows)[inflight]
 		if r.TotalCostUSD != 0 {
-			t.Errorf("in-flight cost = %v, want 0 (COALESCE of NULL total_cost_usd)", r.TotalCostUSD)
+			t.Errorf("in-flight cost = %v, want 0 (COALESCE of a NULL settlement stamp)", r.TotalCostUSD)
 		}
 		assertTokens(t, "in-flight", r, SpendTokens{0, 0, 0, 0})
 	})

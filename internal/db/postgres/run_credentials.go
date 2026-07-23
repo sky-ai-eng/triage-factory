@@ -9,10 +9,11 @@ import (
 )
 
 // runCredentialsStore is the Postgres impl of db.RunCredentialsStore — the
-// sealed per-run credential bundle channel (TFAC-614). Admin-pool only:
-// run_credentials carries no app-pool grant at all (see the table's RLS
+// sealed per-claim credential bundle channel. Admin-pool only:
+// claim_credentials carries no app-pool grant at all (see the table's RLS
 // comment in the baseline migration), so both the brain's write and the
-// executor's read/delete route through the superuser pool.
+// executor's read route through the superuser pool. Rows key on the run's
+// ACTIVE claim, resolved here from the conversation id the caller holds.
 type runCredentialsStore struct{ admin queryer }
 
 func newRunCredentialsStore(admin queryer) db.RunCredentialsStore {
@@ -28,24 +29,23 @@ var _ db.RunCredentialsStore = (*runCredentialsStore)(nil)
 // clause makes the UPDATE a no-op whenever the row already carries a
 // STRICTLY NEWER boot_epoch than this write's — <=, not <, so a same-epoch
 // refresh (the brain's periodic GitHub-token re-mint for the SAME still-
-// live claim) still applies. Without this a stale write landing after a
-// fresh one would leave run_credentials pointing at a bundle sealed to a
-// keypair the current claimant doesn't hold the private half of;
-// tryUnsealBundle's epoch check on the READ side means this is self-
-// healing either way (the executor just keeps polling), but closing the
-// window here means it never happens at all rather than relying on the
-// backstop sweep's retry cadence.
+// live claim) still applies. The active-claim resolution adds a second
+// layer: a reclaimed run has a NEW active claim, so the stale write keys a
+// different row entirely and the fresh claim's bundle is untouched either
+// way. A run with no active claim inserts nothing (silent no-op).
 func (s *runCredentialsStore) Put(ctx context.Context, orgID, runID, executorID string, bootEpoch int64, sealed []byte) error {
 	_, err := s.admin.ExecContext(ctx, `
-		INSERT INTO run_credentials (run_id, org_id, executor_id, boot_epoch, sealed, created_at)
-		VALUES ($1::uuid, $2::uuid, $3, $4, $5, now())
-		ON CONFLICT (run_id) DO UPDATE SET
+		INSERT INTO claim_credentials (claim_id, org_id, executor_id, boot_epoch, sealed, created_at)
+		SELECT cl.id, $2::uuid, $3, $4, $5, now()
+		FROM claims cl
+		WHERE cl.org_id = $2::uuid AND cl.conversation_id = $1::uuid AND cl.released_at IS NULL
+		ON CONFLICT (claim_id) DO UPDATE SET
 			org_id      = EXCLUDED.org_id,
 			executor_id = EXCLUDED.executor_id,
 			boot_epoch  = EXCLUDED.boot_epoch,
 			sealed      = EXCLUDED.sealed,
 			created_at  = EXCLUDED.created_at
-		WHERE run_credentials.boot_epoch <= EXCLUDED.boot_epoch
+		WHERE claim_credentials.boot_epoch <= EXCLUDED.boot_epoch
 	`, runID, orgID, executorID, bootEpoch, sealed)
 	return err
 }
@@ -55,8 +55,10 @@ func (s *runCredentialsStore) Get(ctx context.Context, orgID, runID string) (str
 	var bootEpoch int64
 	var sealed []byte
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT executor_id, boot_epoch, sealed FROM run_credentials
-		WHERE org_id = $1::uuid AND run_id = $2::uuid
+		SELECT cc.executor_id, cc.boot_epoch, cc.sealed
+		FROM claim_credentials cc
+		JOIN claims cl ON cl.id = cc.claim_id
+		WHERE cl.org_id = $1::uuid AND cl.conversation_id = $2::uuid AND cl.released_at IS NULL
 	`, orgID, runID).Scan(&executorID, &bootEpoch, &sealed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", 0, nil, false, nil
@@ -65,15 +67,4 @@ func (s *runCredentialsStore) Get(ctx context.Context, orgID, runID string) (str
 		return "", 0, nil, false, err
 	}
 	return executorID, bootEpoch, sealed, true, nil
-}
-
-func (s *runCredentialsStore) Delete(ctx context.Context, orgID, runID string) (bool, error) {
-	res, err := s.admin.ExecContext(ctx, `
-		DELETE FROM run_credentials WHERE org_id = $1::uuid AND run_id = $2::uuid
-	`, orgID, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
 }

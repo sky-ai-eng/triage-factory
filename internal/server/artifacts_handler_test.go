@@ -138,14 +138,14 @@ func TestArtifactApprove(t *testing.T) {
 		t.Errorf("artifact state = %q, want open", got)
 	}
 	var runStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&runStatus); err != nil {
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, runID).Scan(&runStatus); err != nil {
 		t.Fatalf("read run: %v", err)
 	}
 	if runStatus != "completed" {
 		t.Errorf("run status = %q, want completed", runStatus)
 	}
 	var human string
-	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM run_memory WHERE run_id=?`, runID).Scan(&human); err != nil {
+	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM run_memory WHERE conversation_id=?`, runID).Scan(&human); err != nil {
 		t.Fatalf("read run_memory: %v", err)
 	}
 	if !strings.Contains(human, "as drafted") {
@@ -279,7 +279,7 @@ func TestArtifactDismiss_PR(t *testing.T) {
 	}
 	// The run lifecycle is untouched — dismiss is a decoupled sidecar.
 	var runStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&runStatus); err != nil {
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, runID).Scan(&runStatus); err != nil {
 		t.Fatalf("read run: %v", err)
 	}
 	if runStatus != "completed" {
@@ -400,7 +400,7 @@ func TestArtifactDismiss_TaskLessRunClosesNoTask(t *testing.T) {
 	// A task-less, blueprint-less interactive run: origin='interactive' with NULL
 	// task_id and NULL blueprint_run_id (tolerated by runs_origin_requires_parents
 	// only for origin <> 'blueprint').
-	execSQL(t, srv.db, `INSERT INTO runs (id, status, trigger_type, origin, outcome, team_id, visibility) VALUES ('r_int', 'completed', 'manual', 'interactive', 'abort', ?, 'team')`, runmode.LocalDefaultTeamID)
+	execSQL(t, srv.db, `INSERT INTO conversations (id, status, trigger_type, origin, outcome, team_id, visibility) VALUES ('r_int', 'completed', 'manual', 'interactive', 'abort', ?, 'team')`, runmode.LocalDefaultTeamID)
 	a := domain.NewPullRequestArtifact("acme/api", 42, "PR_node", "feature/x", "main", "https://example.test/acme/api/pull/42", "Proposed title", "Proposed body", true)
 	a.RunID = "r_int"
 	a.OrgID = runmode.LocalDefaultOrgID
@@ -657,7 +657,7 @@ func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, n
 	execSQL(t, s.db, `INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_ab', 'P', 'b', ?, ?)`, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
 	execSQL(t, s.db, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id) VALUES ('t_ab', 'e_ab', ?, 'ev_ab', 'queued', ?)`, eventType, runmode.LocalDefaultAgentID)
 	brID := seedBlueprintRunSQLite(t, s.db, "t_ab")
-	execSQL(t, s.db, `INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, blueprint_run_id) VALUES ('r_ab', 't_ab', 'p_ab', 'completed', 'manual', ?)`, brID)
+	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id) VALUES ('r_ab', 't_ab', 'p_ab', 'completed', 'manual', ?)`, brID)
 	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_ab", "e_ab", "", "agent self-report"); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}

@@ -176,8 +176,17 @@ func (s *instanceStore) Get(ctx context.Context, id string) (*domain.Instance, e
 
 // --- Helpers ---
 
+// intPtrAny maps an *int to a bind-compatible value (nil for NULL, int
+// otherwise).
+func intPtrAny(p *int) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
 // boolPtrAny maps a *bool to a bind-compatible value (nil for NULL, bool
-// otherwise). Postgres-side sibling of intPtrAny (curator.go).
+// otherwise). Sibling of intPtrAny above.
 func boolPtrAny(p *bool) any {
 	if p == nil {
 		return nil

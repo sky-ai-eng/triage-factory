@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -38,7 +39,7 @@ func attachRoleFor(t *testing.T, database *sql.DB, runID, entityID string) strin
 	t.Helper()
 	var role string
 	err := database.QueryRow(
-		`SELECT role FROM run_memory_entities WHERE run_id = ? AND entity_id = ?`,
+		`SELECT role FROM run_memory_entities WHERE conversation_id = ? AND entity_id = ?`,
 		runID, entityID,
 	).Scan(&role)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -179,7 +180,7 @@ func TestAttachRunMemoryEntities_RepoLevelTargetsSkipped(t *testing.T) {
 	}
 	// The only join row is the primary — the skipped targets add nothing.
 	var n int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM run_memory_entities WHERE run_id = ?`, "r-skip").Scan(&n); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM run_memory_entities WHERE conversation_id = ?`, "r-skip").Scan(&n); err != nil {
 		t.Fatalf("count join rows: %v", err)
 	}
 	if n != 1 {
@@ -334,13 +335,11 @@ func TestAttachRunMemoryEntities_MultiStepPrimaryPerStep(t *testing.T) {
 	}
 	brID := seedRunBlueprint(t, database, "r-step2", run1.TaskID)
 	stepIdx := 1
-	if err := s.agentRuns.Create(ctx, org, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.AgentRun{
 		ID: "r-step2", TaskID: run1.TaskID, PromptID: "test-prompt",
 		Status: "running", Model: "claude-sonnet-4-6",
 		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
-	}); err != nil {
-		t.Fatalf("create r-step2: %v", err)
-	}
+	})
 
 	for _, runID := range []string{"r-step1", "r-step2"} {
 		if err := s.taskMemory.UpsertAgentMemorySystem(ctx, org, runID, entA.ID, "", runID+" narrative"); err != nil {

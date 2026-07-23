@@ -30,12 +30,13 @@ type FleetQueueSharesSeeder struct {
 }
 
 // RunFleetQueueSharesConformance covers the per-backend FleetQueueShares
-// contract: it counts an org's active (slot-occupying: running/
-// awaiting_credentials) and queued runs, excludes terminal and hibernated
-// (open/pending_approval) runs from both, and reports the configured cap —
-// nil for an unset or non-positive value. Multi-org fairness ordering is a
-// Postgres-only concern exercised in that backend's own tests; this suite
-// runs single-org against both dialects (SQLite is N=1).
+// contract: it counts an org's active (slot-occupying: status='running',
+// whatever phase the claim is in) and queued runs, excludes terminal and
+// hibernated (open/pending_approval) runs from both, and reports the
+// configured cap — nil for an unset or non-positive value. Multi-org
+// fairness ordering is a Postgres-only concern exercised in that backend's
+// own tests; this suite runs single-org against both dialects (SQLite is
+// N=1).
 func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -64,10 +65,10 @@ func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 			t.Fatalf("empty queue reported a share %+v, want the org omitted", s)
 		}
 
-		// 2 active (one running, one awaiting_credentials) + 1 still queued.
+		// 2 active + 1 still queued.
 		r1, r2, r3 := seed.EnqueueRun(t), seed.EnqueueRun(t), seed.EnqueueRun(t)
 		seed.ForceStatus(t, r1, "running")
-		seed.ForceStatus(t, r2, "awaiting_credentials")
+		seed.ForceStatus(t, r2, "running")
 		_ = r3 // left queued
 
 		s, found := shareFor(t, store, orgID)

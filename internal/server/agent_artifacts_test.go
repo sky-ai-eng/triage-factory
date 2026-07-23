@@ -249,7 +249,7 @@ func TestRunResponse_ArtifactCount_List(t *testing.T) {
 	const taskID = "t_lst"
 	const run2 = "r_lst2"
 	brID := seedBlueprintRunSQLite(t, s.db, taskID)
-	execSQL(t, s.db, `INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, blueprint_run_id) VALUES (?, ?, 'p_lst', 'completed', 'manual', ?)`, run2, taskID, brID)
+	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id) VALUES (?, ?, 'p_lst', 'completed', 'manual', ?)`, run2, taskID, brID)
 
 	mkComment := func(key string) domain.Artifact {
 		return domain.Artifact{

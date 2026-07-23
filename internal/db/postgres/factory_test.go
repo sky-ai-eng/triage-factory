@@ -189,7 +189,7 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			}
 			id := uuid.New().String()
 			if _, err := conn.Exec(`
-				INSERT INTO runs (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id)
+				INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id)
 				VALUES ($1, $2, $3,
 				        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 				        'team', $4, $5, 'manual', $6, $7)
@@ -212,7 +212,7 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
-					INSERT INTO run_memory (id, org_id, run_id, entity_id, agent_content)
+					INSERT INTO run_memory (id, org_id, conversation_id, entity_id, agent_content)
 					VALUES ($1, $2, $3, $4, NULL)
 				`, memID, orgID, runID, entityID); err != nil {
 					t.Fatalf("seed null run_memory: %v", err)
@@ -220,7 +220,7 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				return
 			}
 			if _, err := conn.Exec(`
-				INSERT INTO run_memory (id, org_id, run_id, entity_id, agent_content)
+				INSERT INTO run_memory (id, org_id, conversation_id, entity_id, agent_content)
 				VALUES ($1, $2, $3, $4, $5)
 			`, memID, orgID, runID, entityID, content); err != nil {
 				t.Fatalf("seed run_memory: %v", err)

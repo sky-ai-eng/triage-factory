@@ -8,9 +8,24 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
 
-// TestRunCredentialsStore_Postgres_PutGetDelete pins the basic round trip.
+// seedPgActiveClaim mints an active claims row for the run — the engagement
+// the bundle channel keys rows by.
+func seedPgActiveClaim(t *testing.T, h *pgtest.Harness, orgID, runID, executorID string, bootEpoch int64) string {
+	t.Helper()
+	var id string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch)
+		VALUES ($1, $2, $3, $4) RETURNING id::text
+	`, orgID, runID, executorID, bootEpoch).Scan(&id); err != nil {
+		t.Fatalf("seed claim: %v", err)
+	}
+	return id
+}
+
+// TestRunCredentialsStore_Postgres_PutGet pins the basic round trip through
+// the run's active claim, plus the no-active-claim no-op.
 // Skips cleanly when Docker isn't available (pgtest.Shared).
-func TestRunCredentialsStore_Postgres_PutGetDelete(t *testing.T) {
+func TestRunCredentialsStore_Postgres_PutGet(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
@@ -18,10 +33,16 @@ func TestRunCredentialsStore_Postgres_PutGetDelete(t *testing.T) {
 	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
+	// No active claim yet: Put is a silent no-op and Get finds nothing —
+	// there is no engagement to seal for.
+	if err := stores.RunCredentials.Put(ctx, orgID, runID, "executor-0", 1, []byte("orphan")); err != nil {
+		t.Fatalf("Put with no active claim: %v", err)
+	}
 	if _, _, _, ok, err := stores.RunCredentials.Get(ctx, orgID, runID); err != nil || ok {
-		t.Fatalf("Get before any Put: ok=%v err=%v, want ok=false", ok, err)
+		t.Fatalf("Get with no active claim: ok=%v err=%v, want ok=false", ok, err)
 	}
 
+	seedPgActiveClaim(t, h, orgID, runID, "executor-1", 1)
 	if err := stores.RunCredentials.Put(ctx, orgID, runID, "executor-1", 1, []byte("sealed-v1")); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -33,11 +54,15 @@ func TestRunCredentialsStore_Postgres_PutGetDelete(t *testing.T) {
 		t.Fatalf("Get = (%q, %d, %q), want (executor-1, 1, sealed-v1)", executorID, bootEpoch, sealed)
 	}
 
-	if ok, err := stores.RunCredentials.Delete(ctx, orgID, runID); err != nil || !ok {
-		t.Fatalf("Delete: ok=%v err=%v", ok, err)
+	// Releasing the claim takes the bundle out of reach (Get resolves the
+	// ACTIVE claim only) — a re-claim is a NEW claim with its own seal.
+	if _, err := h.AdminDB.Exec(`
+		UPDATE claims SET released_at = now(), outcome = 'requeued' WHERE conversation_id = $1
+	`, runID); err != nil {
+		t.Fatalf("release claim: %v", err)
 	}
 	if _, _, _, ok, err := stores.RunCredentials.Get(ctx, orgID, runID); err != nil || ok {
-		t.Fatalf("Get after Delete: ok=%v err=%v, want ok=false", ok, err)
+		t.Fatalf("Get after release: ok=%v err=%v, want ok=false", ok, err)
 	}
 }
 
@@ -52,6 +77,7 @@ func TestRunCredentialsStore_Postgres_PutNeverRegressesBootEpoch(t *testing.T) {
 	ctx := context.Background()
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
 	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	seedPgActiveClaim(t, h, orgID, runID, "executor-b", 2)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	// Executor B (boot_epoch 2) reclaims and provisions first.

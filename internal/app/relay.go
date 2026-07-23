@@ -133,7 +133,7 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 	case "curator_cred_request":
 		// The curator-turn analog of cred_request: a home executor
 		// standing a turn's credential sidecar up nudges the brain to seal that
-		// turn's bundle. msg.RunID carries the curator_requests id. Same
+		// turn's bundle. msg.RunID carries the curator conversation id. Same
 		// holder-gated, bounded-context, backstop-swept shape as cred_request
 		// above; nil at TF_ROLE=executor / local (never the brain holder).
 		if a.credProvisioner != nil {

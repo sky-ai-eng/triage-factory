@@ -88,12 +88,42 @@ const (
 	RunFailureSessionLost RunFailureKind = "session_lost"
 )
 
-// AgentRun represents a delegated agent execution.
-type AgentRun struct {
+// Conversation is the durable agent-context row: one row per transcript,
+// regardless of surface (a delegated task run, a curator chat, a future
+// interactive session or subagent). Per-engagement execution state lives on
+// Claim. Field names are the legacy wire shape (direct json.Marshal,
+// PascalCase) — the conversation-vocabulary wire rename is a separate,
+// later change, so several fields keep run-era names on purpose.
+type Conversation struct {
+	// Type names the owning surface: "delegation" | "curator" |
+	// "interactive" (reserved) | namespaced "subagent:<kind>" (reserved).
+	// Empty on legacy hydration paths that don't select it.
+	Type string `json:"type,omitempty"`
+	// Runtime is the executing engine: "sdk" | "native" — a one-way
+	// ratchet per conversation (the SDK can never continue a transcript
+	// that ran native).
+	Runtime string `json:"runtime,omitempty"`
+	// Visibility mirrors conversations.visibility ("private" | "team" |
+	// "org"). Curator conversations mint "private" — creator-scoped by the
+	// same RLS arms delegation already used.
+	Visibility string `json:"visibility,omitempty"`
+	// ProjectID anchors a curator conversation to its project; empty for
+	// every other type.
+	ProjectID string `json:"project_id,omitempty"`
+	// ParentConversationID links a subagent conversation to its spawner;
+	// empty otherwise.
+	ParentConversationID string `json:"parent_conversation_id,omitempty"`
+	// ArchivedAt retires the conversation from its surface's current view
+	// (the curator reset mechanism). KV-cache warmth is deliberately NOT a
+	// conversation field: it derives from the newest assistant message row
+	// (warmth drives elision, elision changes assembly, and assembly must
+	// be a pure function of rows).
+	ArchivedAt *time.Time `json:"archived_at,omitempty"`
+
 	ID        string
 	TaskID    string
 	PromptID  string // FK to prompts.id — which prompt was used for this run
-	Status    string // lifecycle: "queued" | "initializing" | "cloning" | "fetching" | "worktree_created" | "agent_starting" | "running" | "open" (a turn ended without a conclusion — not executing, not concluded); terminal: "completed" | "failed" | "cancelled" | "task_unsolvable". (pending_approval was removed — approval is a derived view over the unresolved-artifact set, not a stored status.)
+	Status    string // stored lifecycle: "queued" | "running" | "open" (a turn ended without a conclusion — not executing, not concluded); terminal: "completed" | "failed" | "cancelled" | "task_unsolvable". Setup sub-states ("fetching" | "cloning" | "agent_starting" | "awaiting_credentials") live on the live claim's phase and are coalesced into this field on reads, so a hydrated DTO may still carry any of those names. (pending_approval was removed — approval is a derived view over the unresolved-artifact set, not a stored status.)
 	Model     string
 	StartedAt time.Time
 	// QueuedAt is when the run last entered the queue; ClaimedAt is when the
@@ -102,23 +132,22 @@ type AgentRun struct {
 	// StartedAt stays the mint stamp and DurationMs stays pure working time
 	// (the SDK-reported per-turn duration, never wall clock across the
 	// queue). Both nil on legacy rows that predate the queue columns.
-	QueuedAt     *time.Time
-	ClaimedAt    *time.Time
-	CompletedAt  *time.Time
+	QueuedAt    *time.Time
+	ClaimedAt   *time.Time
+	CompletedAt *time.Time
+	// TotalCostUSD / DurationMs / NumTurns are derived at read time, not
+	// stored: cost is the SUM of the messages ledger's cost_usd stamps,
+	// duration/turns the SUM of the claims' per-engagement telemetry. nil
+	// when nothing has settled yet. Wire shape unchanged from the
+	// stored-column era.
 	TotalCostUSD *float64
 	DurationMs   *int
 	NumTurns     *int
 
-	// Token breakdown denormalized onto the run at completion — SET to the
-	// full SUM over run_messages by AgentRunStore.Complete (absolute, so
-	// idempotent across resumes; not additive like total_cost_usd). Plain
-	// ints because the columns are INTEGER NOT NULL DEFAULT 0 (0 for a run
-	// that never streamed a usage-bearing message). Mirrors
-	// system_llm_runs' columns so the unified spend view (TFAC-472) reads
-	// tokens natively for delegated runs. snake_case json tags match the
-	// curator_requests token fields and AgentRun's own recent additions
-	// (blueprint_run_id, attempts), so a direct json.Marshal stays
-	// consistent. TFAC-473.
+	// Token breakdown, derived at read time as the SUM over this
+	// conversation's messages (plain ints — 0 for a run that never
+	// streamed a usage-bearing message). Mirrors system_llm_runs' columns;
+	// snake_case json tags keep the frozen wire shape.
 	InputTokens         int `json:"input_tokens"`
 	OutputTokens        int `json:"output_tokens"`
 	CacheReadTokens     int `json:"cache_read_tokens"`
@@ -236,10 +265,22 @@ type SnapshotReapKey struct {
 	BlueprintRunID string
 }
 
-// AgentMessage represents a single message within an agent run.
-type AgentMessage struct {
-	ID                  int
-	RunID               string
+// Message is one transcript row: a neutral (OpenAI-shaped) API message
+// owned by exactly one conversation. Field names are the frozen legacy
+// wire shape — RunID carries the conversation id until the wire rename.
+type Message struct {
+	ID int
+	// RunID is the owning conversation id (legacy field name — frozen
+	// wire shape until the conversation-vocabulary wire rename).
+	RunID string
+	// UserID stamps the whole turn: the requesting user owns their user
+	// row and the assistant/tool rows produced in response. Empty =
+	// system-triggered.
+	UserID string
+	// ClaimID attributes the row to the executor engagement that produced
+	// it; empty for rows produced outside any claim (a queued user
+	// message, a pending injection). Never read by assembly.
+	ClaimID             string
 	Role                string // "assistant" | "tool" | "user" — see AgentRunStore's doc comment for the full allowed set incl. reserved subtypes
 	Content             string
 	Subtype             string // "text" | "thinking" | "tool_use" | "tool"
@@ -252,7 +293,12 @@ type AgentMessage struct {
 	OutputTokens        *int
 	CacheReadTokens     *int
 	CacheCreationTokens *int
-	CreatedAt           time.Time
+	// CostUSD is dollars settled at this row: nil = not a settlement row,
+	// 0 = genuinely free. The runtime stamps an invocation's reported
+	// total as one lump on the invocation's last recorded row at terminal
+	// time, so a SUM over any window is the spend in that window.
+	CostUSD   *float64
+	CreatedAt time.Time
 
 	// Reasoning is the model's persisted chain-of-thought for this message —
 	// nil when the message carries none. Reference-only (see ReasoningDetail):
@@ -365,3 +411,45 @@ const (
 	MessageWindowElided   MessageWindowState = "elided"
 	MessageWindowInactive MessageWindowState = "inactive"
 )
+
+// AgentRun is the legacy name for Conversation, kept as an alias so the
+// run-vocabulary consumer code (and the frozen wire shape it marshals)
+// compiles unchanged until the wire rename retires it.
+type AgentRun = Conversation
+
+// AgentMessage is the legacy name for Message — same alias contract as
+// AgentRun.
+type AgentMessage = Message
+
+// Claim is one executor engagement with a conversation: who drove it, when,
+// with what sealed credentials. At most one active (ReleasedAt == nil) claim
+// exists per conversation. Dollars and tokens live on Message (the ledger),
+// never here.
+type Claim struct {
+	ID             string `json:"id"`
+	OrgID          string `json:"org_id,omitempty"`
+	ConversationID string `json:"conversation_id"`
+	ExecutorID     string `json:"executor_id"`
+	BootEpoch      int64  `json:"boot_epoch,omitempty"`
+	// CredPubKey is the per-engagement credential sidecar's X25519 public
+	// key (multi-mode only; empty locally).
+	CredPubKey string `json:"-"`
+	// Phase is the setup/parked sub-state of a LIVE engagement: "fetching" |
+	// "cloning" | "agent_starting" | "awaiting_credentials". Empty = the
+	// agent process is live (or the claim is released — a released claim's
+	// phase is inert history). Display reads coalesce it over the
+	// conversation's stored status.
+	Phase     string    `json:"phase,omitempty"`
+	ClaimedAt time.Time `json:"claimed_at"`
+	// ReleasedAt nil = this claim is live. Stamped exactly once.
+	ReleasedAt *time.Time `json:"released_at,omitempty"`
+	// Outcome is how the engagement ended: "completed" | "failed" |
+	// "cancelled" | "requeued" | "parked" | "reaped". Empty while live.
+	Outcome string `json:"outcome,omitempty"`
+	Error   string `json:"error,omitempty"`
+	// Engagement telemetry the runtime reports per invocation — not
+	// derivable from messages.
+	DurationMs *int      `json:"duration_ms,omitempty"`
+	NumTurns   *int      `json:"num_turns,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}

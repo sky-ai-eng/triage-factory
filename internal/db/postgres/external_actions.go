@@ -42,7 +42,7 @@ var _ db.ExternalActionStore = (*externalActionStore)(nil)
 const pgExternalActionColumns = `
 	id::text, org_id::text, COALESCE(team_id::text, ''), provider, action, target,
 	COALESCE(external_id, ''), COALESCE(url, ''), COALESCE(from_state, ''),
-	COALESCE(to_state, ''), COALESCE(run_id::text, ''),
+	COALESCE(to_state, ''), COALESCE(conversation_id::text, ''),
 	COALESCE(actor_user_id::text, ''), credential, dedup_key,
 	COALESCE(detail_json, ''), occurred_at
 `
@@ -69,7 +69,7 @@ func (s *externalActionStore) record(ctx context.Context, q queryer, orgID strin
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO external_actions
 			(id, org_id, team_id, provider, action, target, external_id, url,
-			 from_state, to_state, run_id, actor_user_id, credential, dedup_key, detail_json)
+			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json)
 		VALUES (
 			COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2, NULLIF($3, '')::uuid,
 			$4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''),

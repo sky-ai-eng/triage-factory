@@ -187,12 +187,12 @@ func TestHandleReadyz_ActiveRunsCount(t *testing.T) {
 	s.SetPollerManager(pm.Health)
 
 	// origin='interactive' (anything other than 'blueprint') sidesteps the
-	// runs_origin_requires_parents CHECK, which otherwise demands a
+	// origin-requires-parents CHECK, which otherwise demands a
 	// blueprint_run_id/task_id/prompt_id trio — this test only cares about
 	// the status column the COUNT filters on.
 	for i, status := range []string{"queued", "running", "completed"} {
 		if _, err := s.db.Exec(
-			`INSERT INTO runs (id, status, origin) VALUES (?, ?, 'interactive')`,
+			`INSERT INTO conversations (id, status, origin) VALUES (?, ?, 'interactive')`,
 			"run_readyz_"+status, status,
 		); err != nil {
 			t.Fatalf("seed run %d (%s): %v", i, status, err)

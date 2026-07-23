@@ -811,7 +811,7 @@ func (s *blueprintStore) GetRunForRun(ctx context.Context, orgID, runID string) 
 		blueprintRunID sql.NullString
 		stepIndex      sql.NullInt64
 	)
-	err := s.q.QueryRowContext(ctx, `SELECT blueprint_run_id, blueprint_step_index FROM runs WHERE id = ?`, runID).
+	err := s.q.QueryRowContext(ctx, `SELECT blueprint_run_id, blueprint_step_index FROM conversations WHERE id = ?`, runID).
 		Scan(&blueprintRunID, &stepIndex)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, nil
@@ -894,14 +894,28 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 }
 
 // cancelOrphanedChildRuns marks every non-terminal child run of blueprintRunID
-// 'cancelled' (stamping completed_at). Called by MarkRunStatus's atomic flip;
+// 'cancelled' (stamping completed_at) and releases those children's active
+// claims. Called by MarkRunStatus's atomic flip;
 // RunQueueStore.ReconcileOrphanedRuns applies the same terminal-status filter in
 // its own boot sweep (it can't share this body — different store, different
 // scope). The filter is the canonical run terminal set used across the agentrun
 // store.
 func cancelOrphanedChildRuns(ctx context.Context, q queryer, blueprintRunID string) error {
+	// Claims first: the subquery's non-terminal predicate matches exactly the
+	// rows the cancel below is about to retire, and both statements share the
+	// caller's transaction, so the pair lands atomically either way.
+	if _, err := q.ExecContext(ctx, `
+		UPDATE claims SET released_at = ?, outcome = 'cancelled'
+		WHERE released_at IS NULL
+		  AND conversation_id IN (
+		      SELECT id FROM conversations
+		      WHERE blueprint_run_id = ?
+		        AND status NOT IN (`+runTerminalStatusesSQL+`))
+	`, time.Now().UTC(), blueprintRunID); err != nil {
+		return err
+	}
 	_, err := q.ExecContext(ctx, `
-		UPDATE runs
+		UPDATE conversations
 		SET status = 'cancelled',
 		    completed_at = COALESCE(completed_at, ?),
 		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
@@ -963,12 +977,21 @@ func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintR
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
+	// Status coalesces the active claim's phase over the stored status —
+	// the same display contract as the AgentRunStore projections.
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, task_id, prompt_id, status, model, started_at, completed_at,
-		       total_cost_usd, duration_ms, num_turns, stop_reason, worktree_path,
-		       result_summary, session_id, outcome, outcome_reason,
+		SELECT id, task_id, prompt_id,
+		       COALESCE((SELECT cl.phase FROM claims cl
+		                 WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL),
+		                status),
+		       model, started_at, completed_at,
+		       (SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = conversations.id),
+		       (SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = conversations.id),
+		       (SELECT SUM(cl.num_turns) FROM claims cl WHERE cl.conversation_id = conversations.id),
+		       stop_reason, worktree_path,
+		       result_summary, sdk_session_id, outcome, outcome_reason,
 		       blueprint_run_id, blueprint_step_index
-		FROM runs
+		FROM conversations
 		WHERE blueprint_run_id = ?
 		ORDER BY blueprint_step_index ASC, started_at ASC
 	`, blueprintRunID)
@@ -1040,7 +1063,7 @@ func (s *blueprintStore) ActiveStepRunIDs(ctx context.Context, orgID, blueprintR
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id FROM runs
+		SELECT id FROM conversations
 		WHERE blueprint_run_id = ?
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
 		                     'pending_approval','open')

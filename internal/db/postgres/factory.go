@@ -28,16 +28,13 @@ func newFactoryReadStore(q queryer) db.FactoryReadStore { return &factoryReadSto
 
 var _ db.FactoryReadStore = (*factoryReadStore)(nil)
 
-// pgFactoryActiveRunStatuses is the set of run.status values treated
+// pgFactoryActiveRunStatuses is the set of stored run.status values treated
 // as "in flight" for the factory view. Matches the X-button window in
-// AgentCard — every state before a terminal transition. Duplicated in
+// AgentCard — every state before a terminal transition (setup sub-states
+// live on the active claim's phase, under stored 'running');
+// pending_approval stays defensively for legacy rows. Duplicated in
 // sqlite/factory.go; intentional per-backend copy.
 var pgFactoryActiveRunStatuses = []string{
-	"initializing",
-	"cloning",
-	"fetching",
-	"worktree_created",
-	"agent_starting",
 	"running",
 	"pending_approval",
 }
@@ -150,18 +147,23 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 	query := `
 		SELECT
 			r.id, r.task_id, r.prompt_id,
-			r.status, COALESCE(r.model, ''), r.started_at, r.completed_at,
-			r.total_cost_usd, r.duration_ms, r.num_turns,
+			COALESCE((SELECT cl.phase FROM claims cl
+			          WHERE cl.conversation_id = r.id AND cl.released_at IS NULL),
+			         r.status),
+			COALESCE(r.model, ''), r.started_at, r.completed_at,
+			(SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id AND m.org_id = r.org_id),
+			(SELECT SUM(cl.duration_ms)::bigint FROM claims cl WHERE cl.conversation_id = r.id),
+			(SELECT SUM(cl.num_turns)::bigint FROM claims cl WHERE cl.conversation_id = r.id),
 			COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
-			COALESCE(r.result_summary, ''), COALESCE(r.session_id, ''),
+			COALESCE(r.result_summary, ''), COALESCE(r.sdk_session_id, ''),
 			(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing,
 			r.trigger_type, COALESCE(r.trigger_id::text, ''),
 			COALESCE(r.actor_agent_id::text, ''),
 			COALESCE(a.display_name, ''),
 			COALESCE(r.failure_kind, ''),
 			` + pgTaskColumnsWithEntity + `
-		FROM runs r
-		LEFT JOIN run_memory rm ON rm.run_id = r.id AND rm.org_id = r.org_id
+		FROM conversations r
+		LEFT JOIN run_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		JOIN tasks t ON r.task_id = t.id AND t.org_id = r.org_id
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id

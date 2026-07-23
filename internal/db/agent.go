@@ -2,81 +2,72 @@ package db
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// ErrFenceRequiresEventAndTrigger is returned by CreateIfNotFiredSystem
-// when run.TriggeringEventID or run.TriggerID is empty. Both bind to SQL
-// NULL, which the runs_event_trigger_fence partial unique index treats as
-// distinct — the fence would silently not engage and the method's
-// exactly-once contract would be lost without a trace. The event
-// path always supplies both (the router threads the event id + the matched
-// handler id), so an empty value is a programming error, surfaced loud
-// rather than degrading to an unfenced insert.
-var ErrFenceRequiresEventAndTrigger = errors.New("db: CreateIfNotFiredSystem requires non-empty TriggeringEventID and TriggerID")
-
 //go:generate go run github.com/vektra/mockery/v2 --name=AgentRunStore --output=./mocks --case=underscore --with-expecter
 
-// AgentRunStore owns the runs / run_messages tables — agent run
-// lifecycle, transcript messages, and the derived queries the delegate
-// spawner + agent handler + chains depend on. All methods take orgID;
-// local mode passes runmode.LocalDefaultOrgID.
+// AgentRunStore owns the conversations / messages tables — agent
+// conversation lifecycle, transcript messages, and the derived queries the
+// delegate spawner + agent handler + chains depend on. All methods take
+// orgID; local mode passes runmode.LocalDefaultOrgID.
+//
+// Per-engagement execution state (who is driving the conversation, when it
+// was claimed, how many times) lives on the claims table. The read
+// projections derive AgentRun.ClaimedAt (latest claim's claimed_at),
+// Attempts (count of claims), and ExecutorID (the active claim's executor,
+// "" when none) from claims rather than columns on the conversation, and
+// return AgentRun.Status as the active claim's phase coalesced over the
+// stored status — so a live engagement's setup sub-state surfaces through
+// the same field the wire has always carried; the
+// terminal lifecycle writes release the conversation's active claim in the
+// same operation as the status flip. Conversation rows are minted by
+// RunQueueStore.EnqueueRun; there is no direct Create here.
 //
 // Wired against the app pool in Postgres (RLS-active): every
 // consumer is request-equivalent or runs inside a delegate spawner
 // goroutine launched from a request handler. System-service reads
 // of run state are routed through the admin-pooled FactoryReadStore
 // instead — that's the snapshot path; this store is for the actor
-// lifecycle.
+// lifecycle. Claim writes always run on the admin pool (claims is a
+// system-written table); on the app-pool lifecycle variants the
+// conversation flip and the claim release are therefore adjacent
+// statements rather than one transaction.
 //
 // The MemoryMissing field returned by Get and ListForTask is
 // derived from a LEFT JOIN to run_memory rather than read
-// off a column on runs. The JOIN keeps the projection honest by
+// off a column on conversations. The JOIN keeps the projection honest by
 // construction — a denormalized column drifted from ground truth
 // whenever a memory row was written outside the spawner's gate.
 //
-// The transcript layer (Messages, InsertMessage, TokenTotals) sits on
-// run_messages.
+// The transcript layer (Messages, InsertMessage, TokenTotalsSystem) sits on
+// the messages table.
 type AgentRunStore interface {
 	// --- Lifecycle ---
 
-	// Create inserts a new agent run. CreatorUserID defaults to
-	// runmode.LocalDefaultUserID for trigger_type='manual' when
-	// the caller leaves it empty (test fixtures); for
-	// trigger_type='event' empty CreatorUserID maps to SQL NULL
-	// per the schema CHECK that pairs trigger_type and creator
-	// nullability.
-	Create(ctx context.Context, orgID string, run domain.AgentRun) error
-
-	// CreateIfNotFiredSystem inserts an event-triggered run fenced on
-	// (triggering_event_id, trigger_id) by the runs_event_trigger_fence
-	// partial unique index. Returns inserted=false (no error)
-	// when a run for this (event, trigger) already committed — the
-	// at-least-once router queue replayed an event whose first
-	// auto-delegation already happened. The run insert is the crash-
-	// consistent commit point: fence row exists iff run exists, so a crash
-	// after the run commits replays into a clean skip and a crash before it
-	// re-fires cleanly. Event path only — run.TriggerType is forced to
-	// 'event' (creator_user_id NULL per the runs_creator_matches_trigger_type
-	// CHECK), so on Postgres it routes through the admin pool like the
-	// event branch of Create. Manual runs stay on Create, whose NULL
-	// triggering_event_id never reaches the partial index.
+	// Complete finalizes a conversation (status + terminal narrative
+	// fields only — the conversation carries no accounting cache) and
+	// releases the conversation's active claim (if one exists) with an
+	// outcome mapped from status ('failed'/'task_unsolvable' release as
+	// 'failed', 'cancelled' as 'cancelled', anything else as 'completed'),
+	// stamping the invocation's reported duration/turns telemetry onto the
+	// released claim.
 	//
-	// Precondition: run.TriggeringEventID and run.TriggerID must be
-	// non-empty — both are part of the fence key, and an empty value binds
-	// NULL (which the partial index treats as distinct, silently skipping
-	// the fence). Impls reject that with ErrFenceRequiresEventAndTrigger
-	// rather than insert an unfenced row.
-	CreateIfNotFiredSystem(ctx context.Context, orgID string, run domain.AgentRun) (inserted bool, err error)
-
-	// Complete finalizes a run with the terminal totals folded
-	// into any partial totals already on the row. The resume path
-	// keeps cost/duration/turns running via AddPartialTotals; this
-	// call adds the terminal invocation's deltas to produce correct
-	// cumulative spend.
+	// costUSD is the invocation's reported total, settled as ONE lump on
+	// the engagement's own newest message row — the newest row attributed
+	// to the claim this call releases (rows insert claim-stamped while the
+	// engagement is live, so the claim locates them; the curator turn
+	// release settles the same way). An engagement can bill while
+	// recording no rows of its own (system-prompt/cache overhead on an
+	// errored run); a nonzero lump then settles, additively, onto the
+	// conversation's newest existing message row (which may already carry
+	// an earlier invocation's lump) — the ledger is the only spend record.
+	// Totals stay exact; per-row time attribution smears in that corner.
+	// With no message rows at all the lump is unattributable: logged, not
+	// stored. No proration across rows — proration without a pricing table
+	// is confidently wrong.
 	//
 	// outcome / outcomeReason persist the parsed terminal-envelope
 	// outcome and (abort-only) reason; pass "" for both on runs that
@@ -87,99 +78,63 @@ type AgentRunStore interface {
 	// is 'failed' and the caller classified the cause; "" → NULL.
 	Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
 
-	// AddPartialTotals folds an invocation's cost/duration/turns
-	// into the running totals without flipping status or
-	// completed_at. Called to accumulate spend across turns of one run.
-	AddPartialTotals(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error
-
 	// MarkOpen flips a running run to `open` — a turn ended without a
 	// conclusion (or the live process idle-closed). Stamps parked_at to the
 	// current time so the snapshot-retention sweep keys this open run off its
-	// last park rather than started_at. Returns ok=false (no error) if the row
+	// last park rather than started_at, and releases the active claim with
+	// outcome 'parked' (the engagement ended; the parked conversation has no
+	// owner until the next claim). Returns ok=false (no error) if the row
 	// already reached a terminal state.
 	MarkOpen(ctx context.Context, orgID, runID string) (bool, error)
 
-	// MarkResuming flips a resumable run back to running when it is woken by a
-	// follow-up message (a resume goroutine is about to spawn). The resumable
-	// set is every non-finish parked/terminal state: `open` and an aborted run
-	// (completed + outcome='abort'). pending_approval is gone — runs
-	// never park for approval. The (status, outcome) compare-and-swap is the wake
-	// race gate — ok=false means the run is no longer resumable (a concurrent
-	// resume already flipped it running, or a finish finalized it), so the caller
-	// must not spawn the resume and maps the miss to 409. A finish run (completed
-	// + outcome='finish') is
-	// deliberately excluded. Clears parked_at on the wake (the run is no longer
-	// parked) so an open run's next park stamps a fresh timestamp.
-	//
-	// Stamps (executor_id, boot_epoch) in the same statement: the flip to
-	// 'running' and the ownership claim must be atomic, because a parked
-	// run resumes on any instance — its row still carries the identity of
-	// whichever instance LAST ran it, and a 'running' row wearing a stale
-	// owner is exactly what a boot self-sweep (or the future reaper)
-	// requeues. Stamping later, at process go-live, leaves the whole
-	// rehydrate+spawn window misattributed. An empty executorID writes
-	// NULL for both columns (the un-wired test-spawner path).
-	MarkResuming(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) (bool, error)
-
-	// MarkQueuedForResume is resume-by-enqueue's (TFAC-585) status flip:
-	// the same (status, outcome) compare-and-swap gate as MarkResuming
-	// (every non-finish parked/terminal state — `open`, or `completed`
-	// with outcome `abort`), but the target is `queued`, not `running` —
-	// resume-by-enqueue re-queues the SAME row as ordinary claimable work
-	// instead of spawning an in-process goroutine (decision log #7: no
-	// in-process resume variant survives, in any mode). Deliberately does
-	// NOT stamp executor_id/boot_epoch — ClaimNextRun stamps ownership
-	// atomically at the actual claim, exactly like a fresh EnqueueRun'd
-	// row; stamping here would attribute the row to this pod even though
-	// any executor may claim it. Clears parked_at (mirrors MarkResuming)
-	// and claimed_at (this is a fresh claimable row again, not a stale
-	// claim). ok=false means the run is no longer resumable (a concurrent
+	// MarkQueuedForResume is resume-by-enqueue's status flip: the
+	// (status, outcome) compare-and-swap over every non-finish
+	// parked/terminal state — `open`, or `completed` with outcome `abort` —
+	// with target `queued`: resume-by-enqueue re-queues the SAME row as
+	// ordinary claimable work instead of spawning an in-process goroutine.
+	// Releases any still-active claim with outcome 'requeued' (ownership is
+	// re-established by ClaimNextRun minting a fresh claim at the actual
+	// claim, exactly like a fresh EnqueueRun'd row). Clears parked_at and
+	// stamps queued_at so the queue timer reads the fresh episode.
+	// ok=false means the run is no longer resumable (a concurrent
 	// resume/cancel/claim already moved it) — the caller maps the miss to
-	// 409, same as MarkResuming.
+	// 409.
 	MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error)
 
-	// SetSession stores the Claude Code session_id captured from
-	// the agent's init event. Persisted mid-run, before any
-	// terminal state, so the write-gate retry loop can
-	// resume a run whose initial invocation failed the memory
-	// check.
+	// SetSession stores the Claude Code session id captured from
+	// the agent's init event into conversations.sdk_session_id.
+	// Persisted mid-run, before any terminal state, so the
+	// write-gate retry loop can resume a run whose initial
+	// invocation failed the memory check.
 	SetSession(ctx context.Context, orgID, runID, sessionID string) error
 
-	// SetExecutorSystem stamps runs.executor_id + runs.boot_epoch with the
-	// identity of the executor that owns this run's live process. Called
-	// when a run goes live (an unguarded write, like SetStatus); pass "" to
-	// clear the pointer. Belt-and-suspenders by construction: both paths
-	// into 'running' already stamp atomically at the flip —
-	// RunQueueStore.ClaimNextRun at claim, MarkResuming at resume — so
-	// this go-live re-stamp is a cheap idempotent confirmation, kept
+	// SetExecutorSystem confirms the executor identity on the
+	// conversation's ACTIVE claim — an idempotent go-live re-stamp, kept
 	// because it is the one write that runs after the process actually
-	// exists (the strongest possible "this identity holds the live
-	// handle" statement). Both columns always travel together — never
-	// just executor_id — to keep the invariant "boot_epoch always
-	// reflects the most recent boot that touched this row" true
-	// everywhere. The admin pool is the right door because the run
+	// exists. If an active claim exists its executor_id/boot_epoch are
+	// updated; if none exists one is minted (claimed_at = now) so the
+	// live process is never unattributed. Passing an empty executorID
+	// keeps the legacy clear semantics by releasing the active claim
+	// with outcome 'requeued'. Both identity columns always travel
+	// together. The admin pool is the right door because the run
 	// goroutine that stamps it holds no JWT claims. No app-pool variant —
 	// ownership is a system concern, never request-scoped.
 	SetExecutorSystem(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) error
 
-	// SetStatus writes runs.status without a guard. Used by the
-	// delegate spawner for transient progress transitions
-	// (fetching, cloning, agent_starting, running). Guarded
-	// transitions go through the Mark* methods.
-	SetStatus(ctx context.Context, orgID, runID, status string) error
-
-	// SetWorktreePath writes runs.worktree_path. Set as the
+	// SetWorktreePath writes conversations.worktree_path. Set as the
 	// spawner finishes worktree setup (GitHub PR clone, Jira
 	// run-root creation).
 	SetWorktreePath(ctx context.Context, orgID, runID, path string) error
 
 	// MarkCancelledIfActive marks a run cancelled with the given
 	// stop_reason / summary, but only if the row hasn't already
-	// reached a terminal state. Used by the user-cancel path.
+	// reached a terminal state. Releases the active claim (if any) with
+	// outcome 'cancelled'. Used by the user-cancel path.
 	MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
 
 	// MarkFailedIfActive flips a run to 'failed' iff it hasn't
-	// already reached a terminal state. The delegate spawner's
+	// already reached a terminal state, releasing the active claim (if
+	// any) with outcome 'failed'. The delegate spawner's
 	// failRun path uses this so a racing terminal write
 	// (cancel, completion) isn't clobbered. Returns
 	// ok=false (no error) if the row is already terminal; the
@@ -201,28 +156,19 @@ type AgentRunStore interface {
 	// (domain.RunFailureKind vocabulary); "" → NULL (unclassified).
 	MarkFailedIfActive(ctx context.Context, orgID, runID, failureKind string) (bool, error)
 
-	// MarkCompletedIfPendingApproval flips a legacy 'pending_approval' run back
-	// to 'completed' iff the row is currently 'pending_approval'. Runs never park
-	// in pending_approval anymore, so this is a no-op on current data;
-	// it is retained only until the legacy approve/dismiss resolve endpoints that
-	// still call it are reworked. The guard prevents racing terminal
-	// writes from being clobbered if they reach the row first.
-	MarkCompletedIfPendingApproval(ctx context.Context, orgID, runID string) (bool, error)
-
-	// MarkDiscarded marks a pending_approval run as cancelled
-	// when the user requeues / dismisses the task without
-	// submitting the review the agent prepared. The agent process
-	// has already exited; this is purely a DB cleanup.
-	MarkDiscarded(ctx context.Context, orgID, runID, stopReason string) (bool, error)
-
 	// --- Queries ---
 
-	// Get returns a single agent run by ID, or nil if absent.
-	// MemoryMissing is derived from a LEFT JOIN to run_memory.
+	// Get returns a single agent run by ID, or nil if absent — any
+	// conversation type, not just delegation (curator/subagent rows
+	// hydrate the same shape). MemoryMissing is derived from a LEFT JOIN
+	// to run_memory; ClaimedAt/Attempts/ExecutorID derive from claims per
+	// the interface doc. The accounting fields are derived too:
+	// TotalCostUSD + the four token fields are SUMs over the messages
+	// ledger, DurationMs/NumTurns SUMs over the claims' telemetry.
 	Get(ctx context.Context, orgID, runID string) (*domain.AgentRun, error)
 
 	// ListForTask returns all runs for a given task, ordered
-	// started_at DESC. MemoryMissing derived per Get.
+	// started_at DESC. MemoryMissing + claim fields derived per Get.
 	ListForTask(ctx context.Context, orgID, taskID string) ([]domain.AgentRun, error)
 
 	// ListForTasks is the batched form of ListForTask: every run for
@@ -232,27 +178,8 @@ type AgentRunStore interface {
 	// read instead of N. Only per-task order is guaranteed — order
 	// across distinct tasks is unspecified (the SQLite read chunks its
 	// IN-list to stay under the variable limit). Empty taskIDs returns
-	// nil. MemoryMissing derived per Get.
+	// nil. MemoryMissing + claim fields derived per Get.
 	ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.AgentRun, error)
-
-	// PendingApprovalIDForTask returns the id of the (single) legacy
-	// pending_approval run on a task, or "" if none. Runs never park in
-	// pending_approval anymore, so on current data this always returns
-	// "" — retained only until the legacy requeue/discard resolve endpoint that
-	// still calls it is reworked. Bounded to one row by construction.
-	PendingApprovalIDForTask(ctx context.Context, orgID, taskID string) (string, error)
-
-	// HasActiveForTask returns true if the task has any agent
-	// run that hasn't reached a terminal state. Used as an
-	// in-flight gate for auto-delegation.
-	HasActiveForTask(ctx context.Context, orgID, taskID string) (bool, error)
-
-	// HasOtherActiveRunForTask returns true if the task has any
-	// non-terminal run other than excludeRunID. Used by the
-	// spawner's processCompletion to decide whether to flip the
-	// parent task to 'done' on terminal — if a newer run is in
-	// flight (user re-delegated mid-stream), the task stays open.
-	HasOtherActiveRunForTask(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error)
 
 	// HasActiveAutoRunForEntity returns true if any task on the
 	// entity has a non-terminal run with trigger_type='event'.
@@ -267,18 +194,14 @@ type AgentRunStore interface {
 	// → run-cancel cascade.
 	ActiveIDsForTask(ctx context.Context, orgID, taskID string) ([]string, error)
 
-	// ListParkedWorktreePaths returns the worktree_path of every run
+	// ListParkedWorktreePathsSystem returns the worktree_path of every run
 	// parked in `open` with a non-empty
-	// worktree_path. Read at startup so the worktree-cleanup sweep
-	// preserves a parked run's warm workspace (worktree dir + session
-	// JSONL) as the fast resume path. A swept entry still resumes via
-	// snapshot rehydrate, so this is an optimization, not a correctness
-	// gate.
-	ListParkedWorktreePaths(ctx context.Context, orgID string) ([]string, error)
-
-	// ListParkedWorktreePathsSystem mirrors ListParkedWorktreePaths but
-	// routes through the admin pool in Postgres. The startup sweep reads
-	// it before any JWT-claims context exists.
+	// worktree_path, via the admin pool in Postgres (the startup sweep
+	// reads it before any JWT-claims context exists). Read at startup so
+	// the worktree-cleanup sweep preserves a parked run's warm workspace
+	// (worktree dir + session JSONL) as the fast resume path. A swept
+	// entry still resumes via snapshot rehydrate, so this is an
+	// optimization, not a correctness gate.
 	ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error)
 
 	// HasActiveAutoRunForEntitySystem mirrors HasActiveAutoRunForEntity
@@ -305,10 +228,10 @@ type AgentRunStore interface {
 	ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 
 	// ActiveIDsForTeamSystem returns the IDs of every active run owned by the
-	// team (runs.team_id = teamID), using the same active set as
+	// team (conversations.team_id = teamID), using the same active set as
 	// ActiveIDsForTask: status NOT IN ('completed','failed','cancelled',
 	// 'task_unsolvable','pending_approval'). This is the team-archive force-stop
-	// cascade's enumeration (TFAC-448), the team-scoped sibling of
+	// cascade's enumeration, the team-scoped sibling of
 	// ActiveIDsForTaskSystem — each returned id is passed to
 	// spawner.Cancel(orgID, runID, ""), which hard-kills a live process or marks
 	// a parked `open` run cancelled. pending_approval is deliberately excluded:
@@ -317,7 +240,7 @@ type AgentRunStore interface {
 	// it), and leaving it inert means a later restore can still surface the
 	// pending review. Admin pool / org-scoped: archive runs from an org-admin
 	// handler whose caller may not be a member of the team, so the team-visibility
-	// runs_select RLS would hide the rows on the app pool.
+	// RLS would hide the rows on the app pool.
 	ActiveIDsForTeamSystem(ctx context.Context, orgID, teamID string) ([]string, error)
 
 	// EntitiesWithOpenRuns returns the subset of entityIDs that have at
@@ -327,27 +250,35 @@ type AgentRunStore interface {
 
 	// --- Transcript / messages ---
 	//
-	// run_messages.role is app-validated (no CHECK): "assistant" | "tool" |
+	// messages.role is app-validated (no CHECK): "assistant" | "tool" |
 	// "user". "user" covers both a human's free-form message and the native
 	// loop's injected input; subtype further discriminates the latter via
 	// the reserved (not yet minted by any code in this repo) subtypes
 	// "injection:compaction-request", "injection:compaction-result", and
 	// "injection:steer".
 	//
-	// InsertMessage/InsertMessageSystem/Messages/MessagesForRuns/TokenTotals
-	// below serve today's readers (the SDK runtime's live stream, the UI
-	// transcript endpoints, spend sums) and are unchanged in observable
-	// behavior by this ticket's new columns. ListForAssembly/MarkDelivered/
-	// SetWindowState exist for the native loop (P1+): assembly is a pure
-	// function of run_messages rows and nothing else — no run-level or
-	// process-level side-state may influence what a loop reconstructs from
-	// these three methods, only the rows themselves.
+	// InsertMessage/InsertMessageSystem/Messages/MessagesForRuns below serve
+	// today's readers (the SDK runtime's live stream, the UI transcript
+	// endpoints, spend sums) and are unchanged in observable behavior.
+	// ListForAssembly/MarkDelivered/SetWindowState exist for the native
+	// loop (P1+): assembly is a pure function of messages rows and nothing
+	// else — no run-level or process-level side-state may influence what a
+	// loop reconstructs from these three methods, only the rows themselves.
 
-	// InsertMessage inserts a run_messages row and returns its
+	// InsertMessage inserts a messages row and returns its
 	// auto-assigned id. If msg.CreatedAt is zero, it is stamped
 	// with time.Now().UTC() and written back to the caller so a
 	// subsequent WS broadcast can carry the same value without a
 	// re-read.
+	//
+	// msg.UserID is written when non-empty ("" → NULL): the requesting
+	// user's turn attribution. msg.ClaimID names the executor engagement
+	// that produced the row; an explicit non-empty value always wins,
+	// and an empty one resolves server-side to the conversation's active
+	// claim — rows written during an engagement belong to it, rows
+	// written outside one (pending inputs, queued turns, injections)
+	// correctly resolve NULL. A message racing its claim's release lands
+	// NULL, harmless.
 	//
 	// msg.Delivered nil writes the schema default (true — delivered
 	// immediately, today's only behavior); a non-nil value writes it
@@ -358,11 +289,16 @@ type AgentRunStore interface {
 	// what it always wrote (delivered=true, window_state='active').
 	InsertMessage(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
 
-	// Messages returns all messages for a given run, ordered by id.
+	// Messages returns the run's messages for display, ordered by id.
+	// Withdrawn-pending rows (delivered=false AND window_state='inactive' —
+	// a staged injection withdrawn before any flush) are excluded: withdrawn
+	// means "never happened", so it must not render as transcript history.
+	// Delivered inactive rows (compacted history) stay visible.
 	Messages(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error)
 
 	// MessagesForRuns is the batched form of Messages: every message
-	// for any of the given run IDs as one flat slice. Each run's
+	// for any of the given run IDs as one flat slice, with the same
+	// withdrawn-pending exclusion. Each run's
 	// messages are contiguous and in insertion order (id ASC), so the
 	// caller groups by RunID with per-run order preserved; order across
 	// distinct runs is unspecified (the SQLite read chunks its IN-list).
@@ -380,7 +316,7 @@ type AgentRunStore interface {
 	// the loop, not this method, decides whether a pending row is due for
 	// consumption at this call site.
 	//
-	// Assembly purity: this reads run_messages and nothing else. No caller
+	// Assembly purity: this reads messages and nothing else. No caller
 	// may layer additional filtering that depends on run-level or
 	// process-level state — if a future rule needs to change what gets
 	// assembled, it must become a column on this table, per the epic's
@@ -402,11 +338,6 @@ type AgentRunStore interface {
 	// caller exists yet (this ships the primitive, not the policy — P3).
 	SetWindowState(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error)
 
-	// TokenTotals sums token usage across all assistant messages
-	// in a run. Model is MAX(model) (preserves the
-	// last-wins-alphabetically pre-migration behavior).
-	TokenTotals(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error)
-
 	// --- Admin-pool variants (`...System`) ---
 	//
 	// These mirror the per-method shape of the corresponding
@@ -421,11 +352,8 @@ type AgentRunStore interface {
 	// shapes are identical. The only difference is which Postgres
 	// pool the statement runs on; SQLite has one connection and the
 	// two variants collapse.
-	//
-	// Create has no System counterpart — it routes internally on
-	// trigger_type so event-triggered runs land on the admin pool
-	// and manual runs on the app pool.
 	GetSystem(ctx context.Context, orgID, runID string) (*domain.AgentRun, error)
+	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
 	// LookupOrgForRunSystem returns the owning orgID for the given
 	// runID, or the empty string with a nil error if no such run
 	// exists. Used by the cmd/exec runident helper to discover the
@@ -434,21 +362,26 @@ type AgentRunStore interface {
 	// has been passed in. Routes through the admin pool because the
 	// agent subprocess has no JWT-claims context yet.
 	LookupOrgForRunSystem(ctx context.Context, runID string) (string, error)
-	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
-	AddPartialTotalsSystem(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error
 	MarkOpenSystem(ctx context.Context, orgID, runID string) (bool, error)
-	MarkResumingSystem(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) (bool, error)
 	SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error
-	SetStatusSystem(ctx context.Context, orgID, runID, status string) error
+	// SetActiveClaimPhaseSystem writes claims.phase on the conversation's
+	// ACTIVE claim — the setup/parked sub-state of a live engagement
+	// (fetching, cloning, agent_starting, awaiting_credentials). Empty
+	// phase clears to NULL (the agent process is live). Phase lives on the
+	// claim rather than the conversation because it is a per-engagement
+	// fact: a retry or re-claim starts its own claim with its own setup
+	// progress and never rewrites the conversation row. A no-op (no error)
+	// when the conversation has no active claim — a released claim's phase
+	// is inert history and must not be rewritten.
+	SetActiveClaimPhaseSystem(ctx context.Context, orgID, conversationID, phase string) error
 	SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error
 	MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
 	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID, failureKind string) (bool, error)
-	HasOtherActiveRunForTaskSystem(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error)
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
 
 	// LastAgentActivityAtSystem returns the created_at of the run's most
-	// recent non-user run_messages row (role <> 'user') — the "agent last
-	// ran" watermark the artifact-change feedback ledger (TFAC-493) derives
+	// recent non-user messages row (role <> 'user') — the "agent last
+	// ran" watermark the artifact-change feedback ledger derives
 	// against. ok=false (zero time) when the run has no agent messages yet,
 	// so the caller falls back to the run's start. User messages are excluded
 	// so a just-recorded resume message can't poison the watermark, and the
@@ -462,36 +395,37 @@ type AgentRunStore interface {
 	// retention reaper may safely drop. A blueprint_run with any resumable run
 	// still within the TTL is omitted (its shared blob is still wanted). The park
 	// timestamp is COALESCE(parked_at, completed_at, started_at): parked_at tracks
-	// an open run's last park (stamped by MarkOpen, cleared by MarkResuming, so a
-	// repeatedly-resumed long-lived run is keyed off its most recent park rather
+	// an open run's last park (stamped by MarkOpen, cleared by the resume flips, so
+	// a repeatedly-resumed long-lived run is keyed off its most recent park rather
 	// than its initial start), completed_at covers the completed+abort terminal,
 	// and started_at is a legacy fallback. System-wide / no org scoping — the
 	// retention sweep is a maintenance job that spans tenants; the admin pool is
 	// the right door (BYPASSRLS) since the reaper holds no JWT claims.
 	ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error)
 
-	// TokenTotalsSystem mirrors TokenTotals but routes through the
-	// admin pool in Postgres. Consumed by agentmeta.Build, which
+	// TokenTotalsSystem sums token usage across all assistant messages
+	// in a run (Model is MAX(model), preserving last-wins-alphabetically),
+	// via the admin pool in Postgres. Consumed by agentmeta.Build, which
 	// formats the run-metadata footer from contexts that don't carry
 	// JWT claims (delegate-spawned agent subprocesses calling
 	// `triagefactory exec gh pr-create`, server post-approval
-	// submit paths). Adding the read on the admin pool keeps the
+	// submit paths). The admin pool keeps the
 	// footer-building utility from having to construct a synthetic-
 	// claims tx just to read one aggregate row.
 	TokenTotalsSystem(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error)
 
-	// BlueprintSiblingCostUSDSystem sums runs.total_cost_usd across every
-	// run in blueprintRunID EXCEPT excludeRunID, counting only settled
-	// (non-NULL) costs. agentmeta.Build adds this to the authoring run's
+	// BlueprintSiblingCostUSDSystem sums the messages ledger's cost_usd
+	// stamps across every run in blueprintRunID EXCEPT excludeRunID.
+	// agentmeta.Build adds this to the authoring run's
 	// own cost so a multi-step blueprint's published review/PR discloses
 	// the total spend across all steps, not just the step that authored
 	// it. Routes through the admin pool in Postgres — the footer builds
 	// from claims-less contexts (agent subprocess, post-approval submit).
 	BlueprintSiblingCostUSDSystem(ctx context.Context, orgID, blueprintRunID, excludeRunID string) (float64, error)
 
-	// BlueprintSiblingDurationMsSystem sums runs.duration_ms across every
-	// run in blueprintRunID EXCEPT excludeRunID, counting only settled
-	// (non-NULL) durations. agentmeta.Build adds this to the authoring
+	// BlueprintSiblingDurationMsSystem sums the claims' duration_ms
+	// telemetry across every run in blueprintRunID EXCEPT excludeRunID.
+	// agentmeta.Build adds this to the authoring
 	// run's own duration so a multi-step blueprint's published review/PR
 	// discloses the total time spent across all steps, not just the step
 	// that authored it — the time analog of BlueprintSiblingCostUSDSystem.

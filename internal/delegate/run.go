@@ -314,7 +314,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	runURL := s.runURLFor(orgID, runID)
 	prompt := buildPrompt(task, metadataJSON, mission, cfg.scope, cfg.toolsRef, agentBin, runID, agentRunRoot, namespace, branchTemplate, runURL)
 
-	s.updateStatus(orgID, runID, "agent_starting")
+	s.updatePhase(orgID, runID, "agent_starting")
 	if ctx.Err() != nil {
 		s.handleCancelled(orgID, runID, startTime, cfg.wtPath, triggerType, creatorUserID)
 		return
@@ -354,7 +354,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		extraEnv = append(extraEnv, "TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER="+commitIdentity.CoAuthorTrailer)
 	}
 
-	s.updateStatus(orgID, runID, "running")
+	s.updatePhase(orgID, runID, "")
 
 	// StartAgentHost is invoked from inside agentproc.Run's sandbox branch —
 	// which only a multi-mode dispatch reaches, and every multi dispatch

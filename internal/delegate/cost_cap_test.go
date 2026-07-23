@@ -53,22 +53,29 @@ func setDailyCostCap(t *testing.T, database *sql.DB, cap float64) {
 	}
 }
 
-// seedSpendAt inserts a settled run carrying total_cost_usd at the given
-// occurred-at instant, the minimal llm_spend-visible shape (mirrors the SQLite
-// spend conformance seeder: origin='manual' sidesteps the blueprint-parents
-// CHECK; tokens 0). Used to push today's org spend above/below the cap.
+// seedSpendAt inserts a settled run at the given occurred-at instant: a
+// delegation conversation plus one cost-stamped ledger row — the minimal
+// llm_spend-visible shape (mirrors the SQLite spend conformance seeder:
+// origin='manual' sidesteps the blueprint-parents CHECK; tokens 0). Used to
+// push today's org spend above/below the cap.
 func seedSpendAt(t *testing.T, database *sql.DB, cost float64, occurredAt time.Time) {
 	t.Helper()
+	convID := uuid.New().String()
 	if _, err := database.Exec(`
-		INSERT INTO runs
-			(id, org_id, team_id, creator_user_id, trigger_type, origin, model, status,
-			 total_cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, started_at)
-		VALUES (?, ?, ?, ?, 'manual', 'manual', 'm', 'completed', ?, 0, 0, 0, 0, ?)
+		INSERT INTO conversations
+			(id, org_id, team_id, creator_user_id, trigger_type, origin, model, status, started_at)
+		VALUES (?, ?, ?, ?, 'manual', 'manual', 'm', 'completed', ?)
 	`,
-		uuid.New().String(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
-		runmode.LocalDefaultUserID, cost, occurredAt,
+		convID, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		runmode.LocalDefaultUserID, occurredAt,
 	); err != nil {
 		t.Fatalf("seed spend run: %v", err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO messages (org_id, conversation_id, role, subtype, content, cost_usd, created_at)
+		VALUES (?, ?, 'assistant', 'text', 'work', ?, ?)
+	`, runmode.LocalDefaultOrgID, convID, cost, occurredAt); err != nil {
+		t.Fatalf("seed spend ledger row: %v", err)
 	}
 }
 

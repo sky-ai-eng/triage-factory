@@ -304,7 +304,7 @@ func (r *slackExecRig) seedNonSlackTask(orgID, creatorID, teamID string) string 
 
 // seedRun inserts a minimal run row the artifacts/external_actions FK can
 // point at, matching RunInfo.RunID, carrying a real task_id (seedNonSlackTask).
-// trigger_type/creator_user_id follow the runs_creator_matches_trigger_type
+// trigger_type/creator_user_id follow the conversations_creator_matches_trigger_type
 // CHECK (event ⇒ NULL creator, manual ⇒ non-NULL) — mirrors seedPgArtifactRun
 // (internal/db/postgres/artifacts_test.go).
 func (r *slackExecRig) seedRun(orgID, teamID, userID string, eventTriggered bool) string {
@@ -313,7 +313,7 @@ func (r *slackExecRig) seedRun(orgID, teamID, userID string, eventTriggered bool
 	id := uuid.New().String()
 	if eventTriggered {
 		if _, err := r.h.AdminDB.Exec(`
-			INSERT INTO runs (id, org_id, team_id, task_id, trigger_type, origin, status, visibility)
+			INSERT INTO conversations (id, org_id, team_id, task_id, trigger_type, origin, status, visibility)
 			VALUES ($1, $2, $3, $4, 'event', 'interactive', 'running', 'team')
 		`, id, orgID, teamID, taskID); err != nil {
 			r.t.Fatalf("seed event-triggered run: %v", err)
@@ -321,7 +321,7 @@ func (r *slackExecRig) seedRun(orgID, teamID, userID string, eventTriggered bool
 		return id
 	}
 	if _, err := r.h.AdminDB.Exec(`
-		INSERT INTO runs (id, org_id, team_id, task_id, creator_user_id, trigger_type, origin, status, visibility)
+		INSERT INTO conversations (id, org_id, team_id, task_id, creator_user_id, trigger_type, origin, status, visibility)
 		VALUES ($1, $2, $3, $4, $5, 'manual', 'interactive', 'running', 'team')
 	`, id, orgID, teamID, taskID, userID); err != nil {
 		r.t.Fatalf("seed manual run: %v", err)
@@ -359,7 +359,7 @@ func (r *slackExecRig) touchRole(runID, entityID string) string {
 	r.t.Helper()
 	var role string
 	err := r.h.AdminDB.QueryRow(
-		`SELECT role FROM run_memory_entities WHERE run_id = $1 AND entity_id = $2`, runID, entityID,
+		`SELECT role FROM run_memory_entities WHERE conversation_id = $1 AND entity_id = $2`, runID, entityID,
 	).Scan(&role)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ""
@@ -375,7 +375,7 @@ func (r *slackExecRig) touchRole(runID, entityID string) string {
 func (r *slackExecRig) touchRowCount(runID string) int {
 	r.t.Helper()
 	var n int
-	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM run_memory_entities WHERE run_id = $1`, runID).Scan(&n); err != nil {
+	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM run_memory_entities WHERE conversation_id = $1`, runID).Scan(&n); err != nil {
 		r.t.Fatalf("count run_memory_entities: %v", err)
 	}
 	return n

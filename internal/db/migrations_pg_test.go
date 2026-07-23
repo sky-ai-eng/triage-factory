@@ -122,7 +122,7 @@ func TestMigrate_Postgres_ConcurrentMigrateSerializes(t *testing.T) {
 		t.Error("goose_db_version is empty after Migrate — baseline never applied")
 	}
 
-	for _, table := range []string{"entities", "events", "tasks", "runs", "orgs", "users", "instances"} {
+	for _, table := range []string{"entities", "events", "tasks", "conversations", "messages", "claims", "orgs", "users", "instances"} {
 		var exists bool
 		if err := adminDB.QueryRow(
 			`SELECT to_regclass($1) IS NOT NULL`, table,

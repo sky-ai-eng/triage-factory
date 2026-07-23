@@ -2,308 +2,287 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// CuratorStore owns the three curator-runtime tables: curator_requests,
-// curator_messages, curator_pending_context. Each write attributes to
-// the requesting user via creator_user_id — the multi-tenant RLS
-// policies (curator_requests_modify, curator_messages_modify,
-// curator_pending_context_modify) gate every row on the (org_id,
-// creator_user_id) pair matching tf.current_user_id() /
-// tf.current_org_id(), so every method here must run inside a
-// SyntheticClaimsWithTx (or admin pool) in Postgres.
+// ErrCuratorInFlight is returned by CuratorStore.ArchiveLiveConversation when
+// the conversation has an active claim (a live turn) at the moment of the
+// reset call. The HTTP handler maps this to 409 so the client can prompt the
+// user to cancel first.
+var ErrCuratorInFlight = errors.New("curator request in flight")
+
+// CuratorTurnStart is what BeginTurn returns: everything the dispatch needs
+// to run one turn, read/written inside a single transaction so the
+// pending-changes diff is computed against project state consistent with the
+// injection rows being consumed (a PATCH landing between two independent
+// reads could otherwise be claimed here while the note — built from an older
+// project read — suppressed its diff, silently losing the delta).
+type CuratorTurnStart struct {
+	// UserInput is the turn's user message content.
+	UserInput string
+	// SDKSessionID is the conversation's --resume handle ("" = fresh session).
+	SDKSessionID string
+	// Project is the owning project's state, snapshotted in the same tx.
+	Project *domain.Project
+	// Consumed is every 'injection:context' row delivered alongside the turn
+	// (ids remembered for the failure/cancel revert), oldest first.
+	Consumed []domain.CuratorContextChange
+}
+
+// CuratorInFlightTurn is the cancel endpoint's lookup result: the requesting
+// user's live turn on a project, either running (the conversation's active
+// claim) or queued (an undelivered user message that never entered context).
+type CuratorInFlightTurn struct {
+	ConversationID string
+	// MessageID is the turn's user message id — the request id on the wire.
+	MessageID int64
+	// Running is true when an active claim exists (cancel = release it);
+	// false for a queued turn (cancel = delete the undelivered row).
+	Running bool
+}
+
+// CuratorStore owns the curator's view of the shared conversations /
+// messages / claims tables: one conversation per (project, creator_user_id)
+// with type='curator' and visibility='private', a queued turn as an
+// UNDELIVERED user messages row, and one claims row per executed turn.
 //
-// Wires the app pool in Postgres for the curator goroutine's normal
-// dispatch path — each turn opens short-lived txs under the
-// requesting user's identity (read from curator_requests.creator_user_id
-// at dequeue time). The curator's own system-service cancel paths
-// (process shutdown, project-delete drain, SendMessage shutdown /
-// queue-full fallbacks) route through the admin-pool …System methods
-// below (TFAC-64). The one raw-*sql.DB curator helper still live is the
-// handler-side user-cancel in internal/server/curator.go — that has a
-// real request context and is the D9 handler sweep's job (TFAC-168),
-// out of scope here.
+// Pool split, load-bearing in Postgres:
 //
-// Read methods (Get/List) mostly live in the package-level helpers
-// for now — the goroutine's writes are the auth surface that matters
-// under RLS. The reads that DO live here (GetRequest,
-// ListPendingContext) belong on the interface because their callers
-// need a per-resource handle they can wire through (the curator
-// goroutine reads GetRequest inside the same per-turn synthetic-
-// claims wrap as MarkRunning; the project-bundle export reads
-// ListPendingContext alongside the handler-side InsertPendingContext
-// path). Both must honor RLS in Postgres, so callers run them under
-// claims-bound execution (SyntheticClaimsWithTx or WithTx).
+//   - App-pool methods run claims-bound (WithTx / SyntheticClaimsWithTx) —
+//     the conversations/messages RLS private-visibility arm scopes every row
+//     to the requesting creator. tf_app holds SELECT,INSERT,DELETE,UPDATE on
+//     messages/conversations but SELECT ONLY on claims.
+//   - Claim WRITES (mint / release / cred_pubkey stamp) therefore always
+//     route through the admin-pool `...System` methods, mirroring how the
+//     delegation side's claim writes landed — there is no app-pool variant.
+//     The org_id stays bound in every WHERE clause as defense in depth.
+//
+// SQLite collapses both pools onto its single connection and asserts the
+// local sentinel org on the org-scoped methods.
 type CuratorStore interface {
-	// CreateRequest inserts a new queued curator_request row and
-	// returns its id. creatorUserID is the requesting user — in
-	// local mode the handler passes runmode.LocalDefaultUserID
-	// (D9 retrofit will plumb the real user from request context).
-	// In Postgres the value is bound directly; in SQLite the
-	// column has a DEFAULT and the value is bound for parity.
-	//
-	// homeInstanceID is the executor that will run this turn — the resolved
-	// curator home (spec §6.3). "" for the untouched local / role=all path
-	// (which never forwards and sweeps globally); the serving pod's own id in
-	// the no-executor-available fallback; a remote executor id when a control
-	// pod forwards. Stored NULL when empty; the executor claim loop and the
-	// ownership-scoped sweeps select on it.
-	CreateRequest(ctx context.Context, orgID, projectID, creatorUserID, homeInstanceID, userInput string) (string, error)
+	// --- Send path (app pool, claims-bound) ---
 
-	// GetRequest reads a single request row, or (nil, nil) if not
-	// found. App-pool in Postgres so curator_requests_select RLS
-	// gates the read on (org_id, creator_user_id).
-	GetRequest(ctx context.Context, orgID, id string) (*domain.CuratorRequest, error)
+	// GetOrCreateConversation returns the creator's live curator conversation
+	// for the project, minting one when none exists: type='curator',
+	// visibility='private', origin='curator', trigger_type='manual', status
+	// NULL, team_id snapshotted from the project row (point-in-time, like
+	// runs.team_id — curator spend attributes to the project's team via the
+	// llm_spend view).
+	GetOrCreateConversation(ctx context.Context, orgID, projectID, creatorUserID string) (*domain.Conversation, error)
 
-	// MarkRequestRunning flips queued → running and stamps started_at.
-	// Returns sql.ErrNoRows if the row is not currently queued
-	// (cancel raced ahead of pickup).
-	MarkRequestRunning(ctx context.Context, orgID, id string) error
+	// GetLiveConversation returns the creator's live (archived_at IS NULL)
+	// curator conversation for the project, or nil when none. In Postgres the
+	// private-visibility RLS arm already scopes to the caller; the explicit
+	// creatorUserID filter is defense in depth and SQLite parity.
+	GetLiveConversation(ctx context.Context, orgID, projectID, creatorUserID string) (*domain.Conversation, error)
 
-	// CompleteRequest writes a terminal status + accounting, but
-	// ONLY if the row is non-terminal. Returns true if the flip
-	// happened. Status is one of done|cancelled|failed. The four token
-	// columns are SET from the curator_messages SUM in the same UPDATE
-	// (the streaming sink wrote every message row before this terminal
-	// write), aggregating the turn's token breakdown onto curator_requests
-	// for the unified spend view — same roll-up shape runs uses over
-	// run_messages (TFAC-473). The cancel path (MarkRequestCancelledIfActive)
-	// runs the same SUM, so the token columns are kept current at every
-	// terminal write, not just on done/failed — a request cancelled mid-turn
-	// still reflects the tokens it streamed.
-	CompleteRequest(ctx context.Context, orgID, id, status, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error)
+	// EnqueueUserMessage inserts the turn's user message UNDELIVERED
+	// (delivered=false, role='user', subtype='text', user_id=userID) and
+	// returns its id — the turn id on the wire (rendered decimal). The
+	// undelivered row IS the durable queued turn; delivery happens at
+	// BeginTurn.
+	EnqueueUserMessage(ctx context.Context, orgID, conversationID, userID, content string) (int64, error)
 
-	// MarkRequestCancelledIfActive flips any non-terminal row to
-	// cancelled. Returns true if the flip happened. Used by the
-	// goroutine's own cancel-observation paths (markCancelled) under
-	// the requesting user's synthetic claims.
-	MarkRequestCancelledIfActive(ctx context.Context, orgID, id, errMsg string) (bool, error)
+	// --- History (app pool, claims-bound) ---
 
-	// MarkRequestCancelledIfActiveSystem is the admin-pool variant of
-	// MarkRequestCancelledIfActive for the curator's system-driven
-	// cancel paths — process shutdown, project-delete drain, and the
-	// SendMessage "curator is shut down" fallback. These fire outside
-	// any request/JWT context (no live user to attribute to), so the
-	// app-pool RLS UPDATE would match zero rows and silently leave the
-	// request dangling non-terminal. The row already records who
-	// created it (creator_user_id); a system cancel is not a user
-	// action, so it routes through the admin pool (BYPASSRLS) rather
-	// than reconstructing per-user claims. orgID still scopes the
-	// UPDATE for defense-in-depth even though the admin pool bypasses
-	// RLS. TFAC-64.
-	MarkRequestCancelledIfActiveSystem(ctx context.Context, orgID, id, errMsg string) (bool, error)
+	// ListConversationMessages returns the conversation's messages rows in
+	// assembly order (COALESCE(seq, id)), with UserID / ClaimID / Delivered
+	// populated so the handler can synthesize the turn wire shape (a plain
+	// user row starts a turn; its status derives from Delivered and the
+	// claim its following rows carry, falling back to the claim stamped on
+	// the user row itself when nothing streamed). Withdrawn-pending rows
+	// (delivered=false AND window_state='inactive') are excluded — withdrawn
+	// means "never happened".
+	ListConversationMessages(ctx context.Context, orgID, conversationID string) ([]domain.AgentMessage, error)
 
-	// CompleteRequestSystem is the admin-pool variant of CompleteRequest
-	// for the curator's queue-full fallback in SendMessage — it runs
-	// from the handler goroutine with no claims context, so the
-	// app-pool UPDATE would be rejected by RLS and leave the freshly
-	// created request stuck in `queued`. See
-	// MarkRequestCancelledIfActiveSystem for the pool-attribution
-	// rationale. TFAC-64. Token columns roll up from curator_messages,
-	// same as CompleteRequest (TFAC-473).
-	CompleteRequestSystem(ctx context.Context, orgID, id, status, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error)
+	// ListClaims returns the conversation's claims oldest-first. App pool —
+	// tf_app has SELECT on claims and the RLS policy composes through the
+	// conversation.
+	ListClaims(ctx context.Context, orgID, conversationID string) ([]domain.Claim, error)
 
-	// QueuedRequestsForProjectSystem lists the queued curator_request
-	// rows for a project via the admin pool (BYPASSRLS). The
-	// project-delete drain (Curator.CancelProject → cancelQueuedRows)
-	// has no live request context, so an app-pool SELECT under RLS
-	// would see zero rows and the drain would no-op, leaving queued
-	// rows to dangle past the project FK cascade. orgID scopes the
-	// list defensively. TFAC-64.
-	QueuedRequestsForProjectSystem(ctx context.Context, orgID, projectID string) ([]domain.CuratorRequest, error)
+	// --- In-flight lookup + cancel (app pool, claims-bound) ---
 
-	// InsertMessage writes one curator_messages row and returns
-	// its id. The struct's CreatedAt is set to now if zero.
-	InsertMessage(ctx context.Context, orgID string, msg *domain.CuratorMessage) (int64, error)
+	// InFlightTurn returns the creator's live turn on the project — running
+	// (active claim; MessageID = the latest delivered plain user row) wins
+	// over queued (the oldest undelivered plain user row) — or nil when
+	// neither exists.
+	InFlightTurn(ctx context.Context, orgID, projectID, creatorUserID string) (*CuratorInFlightTurn, error)
 
-	// DeleteMessagesBySubtype removes every curator_messages row
-	// for a request with the given subtype. Used during pending-
-	// context revert to drop the `context_change` audit row so the
-	// chat history doesn't show a phantom "context noted" entry.
-	DeleteMessagesBySubtype(ctx context.Context, orgID, requestID, subtype string) error
+	// DeleteQueuedTurn removes a queued turn's undelivered user message —
+	// the cancel of a turn that never entered context. Returns false when
+	// the row is gone or already delivered (the dispatch won the race).
+	DeleteQueuedTurn(ctx context.Context, orgID, conversationID string, messageID int64) (bool, error)
 
-	// ConsumePendingContext atomically claims every unconsumed row
-	// for the given (project, request) and returns them alongside
-	// a fresh snapshot of the project — both reads happen inside
-	// the same tx so the diff at the call site is computed against
-	// project state consistent with the rows being returned. See
-	// the package-level helper for the locking-order rationale.
-	//
-	// When this method is invoked from inside a SyntheticClaimsWithTx,
-	// the outer tx is the locking boundary; the impl does not open
-	// its own tx in that case. When invoked against *sql.DB (the
-	// future non-curator-goroutine call path), the impl opens a
-	// short-lived tx internally.
-	ConsumePendingContext(ctx context.Context, orgID, projectID, requestID string) (*domain.Project, []domain.CuratorPendingContext, error)
+	// ArchiveLiveConversation is the reset: stamps archived_at on the
+	// creator's live conversation and deletes its undelivered rows (queued
+	// turns and pending injections never entered context). Returns
+	// ErrCuratorInFlight when an active claim exists — a live subprocess
+	// must be cancelled before its transcript is retired. A missing live
+	// conversation is a no-op (nil). The next send mints a fresh
+	// conversation, which is what makes reset start a fresh SDK session.
+	ArchiveLiveConversation(ctx context.Context, orgID, projectID, creatorUserID string) error
 
-	// FinalizePendingContext deletes every row consumed by
-	// requestID. Called on terminal `done` so the agent's
-	// successful absorption of the deltas retires them.
-	FinalizePendingContext(ctx context.Context, orgID, requestID string) error
+	// --- Dispatch (session goroutine) ---
 
-	// RevertPendingContext un-consumes the rows claimed by
-	// requestID so the next user message picks them up again.
-	// Used on terminal `cancelled` or `failed`. See the package-
-	// level helper for the merge semantics.
-	RevertPendingContext(ctx context.Context, orgID, requestID string) error
+	// ClaimTurnSystem mints the turn's claims row (admin pool — tf_app
+	// cannot write claims), stamping messageID — the queued turn this
+	// engagement is minted to drive — so a pickup that fails before
+	// attaching any message stays attributable to its exact turn.
+	// Single-active is enforced by the schema's partial unique index, and
+	// the mint is guarded on the queued row still being undelivered.
+	// ok=false means the turn is not claimable — another engagement is live
+	// on the conversation (the queued row stays claimable for a later
+	// scan), or the row is gone/delivered (a raced cancel or duplicate
+	// feed) — and nothing was written.
+	ClaimTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, executorID string, bootEpoch int64) (claimID string, ok bool, err error)
 
-	// InsertPendingContext queues a context-change delta for the
-	// next curator dispatch on (orgID, projectID, sessionID,
-	// changeType). Coalescing is enforced by the partial unique
-	// index on (project_id, curator_session_id, change_type)
-	// WHERE consumed_at IS NULL: a second PATCH between user
-	// messages hits ON CONFLICT DO NOTHING and the *earliest*
-	// baseline_value wins, which is the correct "snapshot before
-	// the first unconsumed change" anchor for diffing at consume
-	// time. baselineJSON must be a JSON-encoded representation of
-	// the value before the PATCH applied.
-	//
-	// Caller is responsible for ensuring sessionID is non-empty —
-	// there is no point queueing pending rows for a project whose
-	// Curator has never been spun up.
-	InsertPendingContext(ctx context.Context, orgID, projectID, sessionID, changeType, baselineJSON string) error
+	// BeginTurn delivers the turn in one transaction: flips the turn's user
+	// message delivered=true (sql.ErrNoRows when the row is gone or already
+	// delivered — a queued-cancel or duplicate dispatch raced ahead) and
+	// stamps it with the conversation's active claim — the explicit
+	// turn↔claim link. The stamp rides the tx, so a failed BeginTurn leaves
+	// no stamp behind and a retried delivery can't accumulate stale ones;
+	// its flip side is that every claim that DID deliver a turn owns at
+	// least the user message row, which is what lets
+	// FailedTurnAttemptsSystem recognize a message-less failed claim as a
+	// failed pickup. Also consumes every undelivered 'injection:context' row
+	// (delivered=true, ids remembered in Consumed for the revert), and
+	// snapshots the project row + the conversation's sdk_session_id in the
+	// same tx.
+	BeginTurn(ctx context.Context, orgID, projectID, conversationID string, messageID int64) (*CuratorTurnStart, error)
 
-	// ListPendingContext returns every row for a project regardless
-	// of consumed status, ordered by created_at. Used by the
-	// project-bundle export to inspect outstanding deltas.
-	ListPendingContext(ctx context.Context, orgID, projectID string) ([]domain.CuratorPendingContext, error)
+	// FailedTurnAttemptsSystem counts the turn's prior failed pickups —
+	// released claims minted for exactly this message (claims.message_id —
+	// no time window, so two queued turns on one conversation never count
+	// each other's failures), outcome='failed', with no messages attached
+	// (a claim that reached BeginTurn successfully always owns at least the
+	// turn's user row, which keeps post-delivery run crashes out of the
+	// cap) — and returns the most recent one's error. The dispatch's
+	// dead-letter gate: a turn whose count reaches the cap is poisoned input
+	// (BeginTurn itself keeps failing), and feeding it again just leaks
+	// another zero-message failed claim. Admin pool.
+	FailedTurnAttemptsSystem(ctx context.Context, orgID, conversationID string, messageID int64) (count int, lastError string, err error)
 
-	// DeletePendingContextForSession removes every pending or
-	// consumed row for a (projectID, sessionID). Used when the
-	// session is reset so the new session's envelope renders
-	// current values directly without phantom deltas describing
-	// transitions the new agent never witnessed.
-	DeletePendingContextForSession(ctx context.Context, orgID, projectID, sessionID string) error
+	// DeadLetterTurnSystem terminally retires a poisoned queued turn: in one
+	// transaction it marks the user message delivered=true +
+	// window_state='inactive' (out of every future assembly and out of the
+	// claimable scan, but still visible transcript history) and stamps it
+	// with a freshly minted, already-released claim (outcome='failed',
+	// error=errMsg) so history synthesis renders the turn failed. matched
+	// is false — and nothing is written — when the message is gone/already
+	// delivered (a cancel raced ahead) or another engagement is live on the
+	// conversation. Admin pool.
+	DeadLetterTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, executorID string, bootEpoch int64, errMsg string) (matched bool, err error)
 
-	// ListRequestsByProject returns the project's curator requests in
-	// chronological order — the chat-history read. Claims-bound: call
-	// inside WithTx. In Postgres the curator_requests_select policy is
-	// deliberately self-only (creator_user_id = tf.current_user_id()),
-	// so a multi-mode caller sees their own turns, not teammates'; the
-	// local single user sees everything. TFAC-109 (replaces the raw
-	// package-level ListCuratorRequestsByProject helper).
-	ListRequestsByProject(ctx context.Context, orgID, projectID string) ([]domain.CuratorRequest, error)
+	// SetSDKSession persists the SDK resume handle captured from the agent's
+	// init event onto the conversation.
+	SetSDKSession(ctx context.Context, orgID, conversationID, sessionID string) error
 
-	// ListMessagesByRequestIDs returns the agent-side stream rows for a
-	// batch of request ids, grouped by request_id — the batched half of
-	// the chat-history read (avoids an N+1 over the request list).
-	// Same claims-bound / self-only visibility contract as
-	// ListRequestsByProject. Empty input returns an empty map, not nil.
-	ListMessagesByRequestIDs(ctx context.Context, orgID string, requestIDs []string) (map[string][]domain.CuratorMessage, error)
+	// ReleaseActiveTurnSystem stamps the conversation's active claim
+	// released: released_at, outcome ('completed'|'failed'|'cancelled'),
+	// error, and the duration/turns engagement telemetry — then settles
+	// costUSD as one lump on the claim's LAST message row (the user row
+	// when nothing streamed; BeginTurn stamped it with this claim). Returns
+	// false when no active claim exists (a racing cancel/shutdown already
+	// released it) — first writer wins, exactly the old terminal-status
+	// filter. Admin pool.
+	ReleaseActiveTurnSystem(ctx context.Context, orgID, conversationID, outcome, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error)
 
-	// InFlightRequestForProject returns the queued or running request
-	// for a project, or (nil, nil) if none — the cancel endpoint's
-	// lookup. Claims-bound / self-only in Postgres: a user can locate
-	// (and therefore cancel) only their own in-flight turn.
-	InFlightRequestForProject(ctx context.Context, orgID, projectID string) (*domain.CuratorRequest, error)
+	// RevertTurnContext un-consumes a failed/cancelled turn's injection rows
+	// (delivered back to false by remembered id) and deletes the
+	// 'context_change' audit message (auditMessageID 0 = none was written).
+	// A row whose change_type meanwhile gained a NEWER undelivered injection
+	// is NOT resurrected — the replacement row already carries the pending
+	// delta, and flipping the stale one back would double it.
+	RevertTurnContext(ctx context.Context, orgID, conversationID string, consumed []domain.CuratorContextChange, auditMessageID int64) error
 
-	// ResetForProject wipes the caller-visible curator artifacts for a
-	// project so the next message starts a brand-new Claude Code
-	// session: clears curator_session_id on the project row, deletes
-	// pending-context rows, and deletes curator_request rows (cascading
-	// to messages). Returns ErrCuratorInFlight if any user has a
-	// queued/running request.
-	//
-	// Claims-bound — call inside WithTx so the deletes run under the
-	// caller's RLS. In Postgres the modify policies are self-only, so a
-	// reset removes the RESETTING user's history and clears the shared
-	// session id; other users' history rows survive (they cannot be
-	// destroyed by someone else) and the next turn simply starts a new
-	// session. The in-flight guard intentionally checks across ALL
-	// users in the org (org-scoped, admin-pool read in Postgres):
-	// resetting the shared session under a teammate's live turn is the
-	// race the guard exists to prevent, and a self-only check couldn't
-	// see it.
-	ResetForProject(ctx context.Context, orgID, projectID string) error
+	// --- Executor claim loop / sweeps (admin pool) ---
 
-	// ImportRequest restores one historical curator_request row from a
-	// project bundle: caller-supplied id, terminal status, accounting,
-	// and timestamps are preserved verbatim; creator_user_id is stamped
-	// to the importing user (the original creator is not a user in the
-	// destination install); team_id snapshots from the destination
-	// project row per the TFAC-476 invariant. Claims-bound — call
-	// inside WithTx after the project row exists in the same tx.
-	ImportRequest(ctx context.Context, orgID string, req domain.CuratorRequest) error
+	// ListClaimableTurnsForHomeSystem returns, oldest first, one claimable
+	// turn per curator conversation — live, holding an undelivered plain
+	// user message ('text' — injections don't wake a turn), with no active
+	// claim — whose project's curator_homes row points at homeInstanceID.
+	// One row per conversation (its oldest queued message) so a backlog
+	// behind a running turn is fed one turn at a time.
+	ListClaimableTurnsForHomeSystem(ctx context.Context, homeInstanceID string) ([]domain.CuratorTurn, error)
 
-	// ImportPendingContext restores one historical pending-context row
-	// from a project bundle, preserving consumed_at /
-	// consumed_by_request_id / created_at (unlike InsertPendingContext,
-	// which queues a fresh unconsumed delta). creator_user_id stamps to
-	// the importing user. Claims-bound — call inside WithTx.
-	ImportPendingContext(ctx context.Context, orgID string, row domain.CuratorPendingContext) error
+	// CancelStrandedTurnsForHomeSystem is the executor's ownership-scoped
+	// boot recovery: releases this executor's own active curator claims from
+	// strictly earlier boots (outcome 'cancelled', errMsg recorded) — a
+	// restart killed every session goroutine, so those engagements are by
+	// definition stranded. Queued turns are untouched: they are unowned
+	// undelivered messages now and survive to be re-claimed. Returns the
+	// count released.
+	CancelStrandedTurnsForHomeSystem(ctx context.Context, homeInstanceID string, bootEpoch int64, errMsg string) (int, error)
 
-	// CancelOrphanedNonTerminalRequests sweeps every queued/running
-	// curator_request row across every org in the database, flipping
-	// them to cancelled with finished_at stamped to now. Called once
-	// at process startup as the recovery pass: a binary restart kills
-	// every per-project curator goroutine + agentproc subprocess in
-	// this process, so any row left non-terminal from a previous
-	// process is by definition stranded (running rows lost their
-	// goroutine, queued rows lost the goroutine that would have
-	// picked them up). Auto-replaying a stale message after restart
-	// would surprise the user more than dropping it; cancelling lets
-	// the user re-send if they actually wanted that message
-	// processed. Returns the row-count flipped.
-	//
-	// No orgID parameter by design: this is a cross-tenant system
-	// service running outside any request context. In Postgres the
-	// impl routes through the admin pool (BYPASSRLS); in SQLite the
-	// single tenant means the sweep is equivalent to a single-org
-	// reset. Multi-pod per-org sharding would let us scope this
-	// per-pod, but pod sharding doesn't exist (single-pod multi-mode
-	// in v1).
-	CancelOrphanedNonTerminalRequests(ctx context.Context) (int, error)
+	// CancelOrphanedTurnsSystem is local/role=all's global boot recovery:
+	// releases EVERY active curator claim across every org (outcome
+	// 'cancelled') — the single process owned every engagement, and none
+	// survive a restart. Queued turns are untouched, same as the
+	// ownership-scoped sweep. Returns the count released.
+	CancelOrphanedTurnsSystem(ctx context.Context) (int, error)
 
-	// ListQueuedRequestsForHomeSystem returns the queued curator_request rows
-	// homed to homeInstanceID (id, org, project, creator), oldest first — the
-	// executor claim loop's scan (curator homing, spec §6.3). Admin-pool /
-	// BYPASSRLS: a cross-user, cross-org system read of turns this executor
-	// owns, with home_instance_id bound by argument. Only ever returns rows the
-	// resolver stamped to this executor, so it never needs a per-row lock — one
-	// home owns a project, and the per-project session serializes turns.
-	ListQueuedRequestsForHomeSystem(ctx context.Context, homeInstanceID string) ([]domain.HomedCuratorRequest, error)
+	// DeleteQueuedTurnsForProjectSystem is the force-stop drain: deletes
+	// every queued (undelivered plain user) turn across the project's
+	// curator conversations. A cancelled project's queued turns must not
+	// linger claimable — the executor claim loop or a pending retry timer
+	// would resurrect work for a project that was just force-stopped (team
+	// archive). Returns the number of rows deleted. Admin pool — the drain
+	// spans every creator's conversation, which the app pool's
+	// private-visibility arm cannot reach.
+	DeleteQueuedTurnsForProjectSystem(ctx context.Context, orgID, projectID string) (int, error)
 
-	// PublishTurnCredPubKey records requestID's per-turn credential sidecar
-	// pubkey on curator_requests.cred_pubkey and — Postgres only — fires the
-	// tf_ctl curator_cred_request doorbell so the brain's provisioner seals this
-	// turn's bundle to it without waiting for the backstop sweep.
-	// The curator-turn analog of RunQueueStore.MarkAwaitingCredentials, but a
-	// curator turn has no 'awaiting_credentials' status of its own (it stays
-	// queued/running while the sidecar comes up), so the guard is: record only
-	// while the turn is non-terminal AND has no key yet — a late/duplicate
-	// publish can't reopen a finished turn or overwrite a key the brain may
-	// already be sealing to. matched is false when the guard didn't hold. Admin
-	// pool (the executor's sidecar bring-up runs with no JWT claims); empty
-	// pubkey round-trips (recorded as '') and fires no doorbell.
-	PublishTurnCredPubKey(ctx context.Context, orgID, requestID, pubkey string) (matched bool, err error)
+	// --- Pending-context producer (admin pool) ---
 
-	// GetTurnProvisionInfoSystem reads the credential-provisioning fields of one
-	// curator turn via the admin pool — the brain's targeted single-turn read on
-	// a curator_cred_request notification: the doorbell carries only
-	// (org, request) ids, so the brain re-reads the live row rather than trusting
-	// a payload that could be stale. Returns ok=false when requestID is unknown.
-	GetTurnProvisionInfoSystem(ctx context.Context, orgID, requestID string) (*domain.CuratorTurnProvision, bool, error)
+	// QueueContextChangeSystem records a project-config delta for every LIVE
+	// curator conversation of the project (all creators — the app-pool
+	// private-visibility arm couldn't reach teammates' conversations, which
+	// is why this is a System method): one undelivered 'injection:context'
+	// message per conversation with {"change_type","baseline_value"} in
+	// metadata. One-pending-per-type: an existing undelivered row of the
+	// same change_type for the conversation is replaced. No live
+	// conversations = a no-op (nothing has a session to notify).
+	QueueContextChangeSystem(ctx context.Context, orgID, projectID, changeType, baselineJSON string) error
 
-	// ListAwaitingCredentialTurnsSystem returns every non-terminal curator turn
-	// that has published a sidecar pubkey but has no fresh sealed bundle yet — no
-	// curator_turn_credentials row, or one sealed under an older boot_epoch than
-	// the home executor's current one (a home restart). The backstop-sweep input
-	// for a dropped curator_cred_request notification (the relay is
-	// lossy by design). Admin pool / BYPASSRLS, cross-org system read.
+	// --- Per-turn credentials (multi only; admin pool) ---
+
+	// PublishTurnCredPubKeySystem records the per-turn credential sidecar's
+	// pubkey on the conversation's ACTIVE claim and — Postgres only — fires
+	// the tf_ctl curator_cred_request doorbell (payload keyed by the
+	// conversation id) so the brain seals this turn's bundle without waiting
+	// for the backstop sweep. The claim-stamp mirror of
+	// RunQueueStore.MarkAwaitingCredentials; guarded on "active AND no key
+	// yet" so a late/duplicate publish can't touch a finished turn or
+	// overwrite a key the brain may already be sealing to. matched=false
+	// when the guard didn't hold.
+	PublishTurnCredPubKeySystem(ctx context.Context, orgID, conversationID, pubkey string) (matched bool, err error)
+
+	// GetTurnProvisionInfoSystem reads the credential-provisioning
+	// projection of the conversation's active claim (joined to the
+	// conversation for project/team). ok=false when no active claim exists —
+	// the turn finished or was never claimed, so there is nothing to seal
+	// for.
+	GetTurnProvisionInfoSystem(ctx context.Context, orgID, conversationID string) (*domain.CuratorTurnProvision, bool, error)
+
+	// ListAwaitingCredentialTurnsSystem returns every active curator claim
+	// that has published a sidecar pubkey but has no fresh sealed bundle
+	// yet — no claim_credentials row, or one sealed under an older
+	// boot_epoch than the home executor's current one (a home restart). The
+	// backstop-sweep input for a dropped curator_cred_request notification
+	// (the relay is lossy by design). Postgres-only in substance; the SQLite
+	// impl returns an empty list (local mode never provisions bundles).
 	ListAwaitingCredentialTurnsSystem(ctx context.Context) ([]domain.CuratorTurnProvision, error)
 
-	// CancelStrandedRequestsForHomeSystem flips every queued/running
-	// curator_request homed to homeInstanceID to cancelled with errMsg — the
-	// ownership-scoped recovery pass (curator homing, spec §6.3). Each pod
-	// sweeps only turns homed to ITSELF: an executor cancels its own prior-boot
-	// stranded turns on boot. This replaces the fleet-unsafe global
-	// CancelOrphanedNonTerminalRequests on multi-mode split roles — a control
-	// restart must never cancel an executor's live turns. Like every other
-	// terminal write it refreshes the denormalized token columns from the
-	// curator_messages SUM so a turn killed mid-stream still reports its spend
-	// (TFAC-473), so the admin pool needs SELECT on curator_messages too.
-	// Home_instance_id bound by argument. Returns the row count flipped.
-	CancelStrandedRequestsForHomeSystem(ctx context.Context, homeInstanceID, errMsg string) (int, error)
+	// --- Project bundle import (admin pool) ---
+
+	// ImportConversationStateSystem restores one exported curator
+	// conversation — the conversation row (caller supplies the fresh id,
+	// creator, and sdk_session_id; team_id snapshots from the destination
+	// project), its claims, and its messages — with claim/conversation ids
+	// already remapped by the caller. Admin pool because claims have no
+	// app-pool write door; runs after the import's main tx committed the
+	// project row.
+	ImportConversationStateSystem(ctx context.Context, orgID string, conv domain.Conversation, claims []domain.Claim, msgs []domain.AgentMessage) error
 }

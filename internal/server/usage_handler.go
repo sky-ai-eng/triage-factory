@@ -29,8 +29,9 @@ import (
 // from the path. /me runs on the APP pool under the caller's claims (RLS + a
 // creator filter scope it to them). /teams is team-admin-only, so its names
 // resolve under the member's own claims; its spend read uses ListSpendSystem
-// because curator_requests RLS is creator-scoped (an app-pool read would miss
-// peers' curator turns) — the team-admin gate authorizes it. /org is the
+// because curator conversations are private-visibility (creator-scoped RLS —
+// an app-pool read would miss peers' curator turns) — the team-admin gate
+// authorizes it. /org is the
 // org-admin governance rollup: a cross-team ListSpendSystem read, no per-rule
 // detail. Aggregation happens in Go from the rows; per-org/-team/-month volumes
 // are modest, so we materialize nothing here.
@@ -193,9 +194,9 @@ func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 // Because the caller is a team member, every name resolves under their own RLS:
 // by_rule reads the team's event_handlers / blueprints through the app pool
 // (team-scoped RLS permits a member), and by_user reads org-scoped display
-// names. The spend READ still uses ListSpendSystem: curator_requests RLS is
-// creator-scoped, so a single admin's app-pool read would miss peers' curator
-// turns — the team-admin gate authorizes the System read that captures the whole
+// names. The spend READ still uses ListSpendSystem: curator conversations
+// are private-visibility (creator-scoped RLS), so a single admin's app-pool
+// read would miss peers' curator turns — the team-admin gate authorizes the System read that captures the whole
 // team. by_user groups manual+curator rows by creator; by_rule groups autonomous
 // rows by the firing trigger; system rows (NULL team) never appear (the TeamID
 // filter excludes them).

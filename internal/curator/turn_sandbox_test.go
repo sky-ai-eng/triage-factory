@@ -42,10 +42,10 @@ func TestDispatch_ExecutorPath_ConsumesTurnSandbox(t *testing.T) {
 	fakeEnv := []string{"LLM_PROXY_URL=http://127.0.0.1:9"}
 	sb := &fakeTurnSandbox{net: fakeNet, env: fakeEnv}
 
-	var gotOrg, gotReq, gotUser, gotTeam string
+	var gotOrg, gotConv, gotUser, gotTeam string
 	bringUpCalled := make(chan struct{}, 1)
-	c.SetTurnSandbox(func(_ context.Context, orgID, requestID, userID, teamID string, _ []string) (TurnSandbox, error) {
-		gotOrg, gotReq, gotUser, gotTeam = orgID, requestID, userID, teamID
+	c.SetTurnSandbox(func(_ context.Context, orgID, conversationID, userID, teamID string, _ []string) (TurnSandbox, error) {
+		gotOrg, gotConv, gotUser, gotTeam = orgID, conversationID, userID, teamID
 		bringUpCalled <- struct{}{}
 		return sb, nil
 	})
@@ -56,8 +56,7 @@ func TestDispatch_ExecutorPath_ConsumesTurnSandbox(t *testing.T) {
 		return &agentproc.Outcome{Result: &agentproc.Result{Result: "ok"}}, nil
 	}
 
-	reqID, err := c.SendMessage(t.Context(), projectID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "hi")
-	if err != nil {
+	if _, err := c.SendMessage(t.Context(), projectID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "hi"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
@@ -73,10 +72,14 @@ func TestDispatch_ExecutorPath_ConsumesTurnSandbox(t *testing.T) {
 	default:
 		t.Fatal("SetTurnSandbox seam was not invoked on the executor path")
 	}
-	if gotReq != reqID || gotOrg != runmode.LocalDefaultOrgID || gotUser != runmode.LocalDefaultUserID || gotTeam != runmode.LocalDefaultTeamID {
-		t.Errorf("bring-up args = (org=%q, req=%q, user=%q, team=%q), want (%q, %q, %q, %q)",
-			gotOrg, gotReq, gotUser, gotTeam,
-			runmode.LocalDefaultOrgID, reqID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
+	conv, err := sqlitestore.New(database).Curator.GetLiveConversation(t.Context(), runmode.LocalDefaultOrgID, projectID, runmode.LocalDefaultUserID)
+	if err != nil || conv == nil {
+		t.Fatalf("get conversation: %v (conv=%v)", err, conv)
+	}
+	if gotConv != conv.ID || gotOrg != runmode.LocalDefaultOrgID || gotUser != runmode.LocalDefaultUserID || gotTeam != runmode.LocalDefaultTeamID {
+		t.Errorf("bring-up args = (org=%q, conv=%q, user=%q, team=%q), want (%q, %q, %q, %q)",
+			gotOrg, gotConv, gotUser, gotTeam,
+			runmode.LocalDefaultOrgID, conv.ID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
 	}
 
 	if opts.PrebuiltNetwork != fakeNet {

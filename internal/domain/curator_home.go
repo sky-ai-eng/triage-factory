@@ -18,8 +18,8 @@ type CuratorHome struct {
 	ProjectID string
 
 	// HomeInstanceID is the executor that owns this project's live session and
-	// its warm cache. The control pod stamps every turn's curator_requests row
-	// with it and routes the turn there.
+	// its warm cache. The home's claim loop scans for the project's queued
+	// turns through this mapping; a control pod only rings the doorbell.
 	HomeInstanceID string
 
 	// HomeBootEpoch snapshots the home instance's registration epoch at mint
@@ -31,32 +31,36 @@ type CuratorHome struct {
 	UpdatedAt time.Time
 }
 
-// HomedCuratorRequest is the minimal projection the executor claim loop reads
-// off a queued curator_requests row homed to this executor: enough to feed the
-// per-project session goroutine (which re-reads the full row under the
-// requesting user's synthetic claims). OrgID + CreatorUserID are the identity
-// every per-turn write attributes to; ProjectID selects the session.
-type HomedCuratorRequest struct {
-	ID            string
-	OrgID         string
-	ProjectID     string
-	CreatorUserID string
+// CuratorTurn is the minimal projection the executor claim loop reads off a
+// claimable queued turn — a curator conversation with an undelivered plain
+// user message and no active claim, whose project is homed to this executor.
+// Enough to feed the per-project session goroutine (which re-reads full state
+// under the requesting user's synthetic claims at dispatch). OrgID +
+// CreatorUserID are the identity every per-turn write attributes to;
+// ProjectID selects the session; MessageID is the turn id on the wire.
+type CuratorTurn struct {
+	MessageID      int64
+	ConversationID string
+	OrgID          string
+	ProjectID      string
+	CreatorUserID  string
 }
 
 // CuratorTurnProvision is the brain-side projection of a curator turn's
 // credential-provisioning fields: what
 // credprovision.ProvisionForCuratorTurn reads to resolve and seal the turn's
-// bundle. The request carries the recipient key (CredPubKey, published by the
-// home executor's sidecar bring-up) and the home the bundle is sealed for
-// (HomeInstanceID → its current boot_epoch); the project it names drives the
-// GitHub authorized set (pinned ∩ tracked) and the owning team. Status gates
-// the no-op-on-terminal check. The curator-turn analog of the run path's
-// AwaitingCredentialsRun.
+// bundle — the conversation's ACTIVE claim joined to the conversation. The
+// claim carries the recipient key (CredPubKey, published by the home
+// executor's sidecar bring-up) and the home the bundle is sealed for
+// (HomeInstanceID = the claim's executor → its current boot_epoch); the
+// conversation carries the project (GitHub authorized set = pinned ∩
+// tracked) and the owning-team snapshot. No active claim = nothing to seal
+// for. The curator-turn analog of the run path's AwaitingCredentialsRun.
 type CuratorTurnProvision struct {
-	ID             string
+	ConversationID string
 	OrgID          string
 	ProjectID      string
+	TeamID         string
 	HomeInstanceID string
-	Status         string
 	CredPubKey     string
 }

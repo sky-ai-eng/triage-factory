@@ -15,23 +15,25 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 )
 
-// ProvisionForCuratorTurn resolves a homed curator turn's credentials and seals
-// them to the per-turn sidecar key its home executor published, writing
-// curator_turn_credentials. The curator-turn analog of
-// ProvisionForRun — called synchronously off the executor's curator_cred_request
-// notification (the fast path) and by the backstop sweep. Idempotent and safe
-// to call repeatedly for the same turn.
+// ProvisionForCuratorTurn resolves a homed curator turn's credentials and
+// seals them to the per-turn sidecar key its home executor published on the
+// conversation's active claim, writing the shared claim_credentials channel
+// (RunCredentials, keyed by the conversation id). The curator-turn analog of
+// ProvisionForRun — called synchronously off the executor's
+// curator_cred_request notification (the fast path) and by the backstop
+// sweep. Idempotent and safe to call repeatedly for the same turn.
 //
-// A tolerant no-op (nil error, no write) when the turn is terminal, un-homed, or
-// hasn't published a sidecar pubkey — there is nothing to seal to, and the turn
-// may have just finished or re-homed between the notification firing and this
-// handler running. Same posture as ProvisionForRun's not-claimed no-op.
-func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, requestID string) error {
-	turn, ok, err := m.stores.Curator.GetTurnProvisionInfoSystem(ctx, orgID, requestID)
+// A tolerant no-op (nil error, no write) when the conversation has no active
+// claim or the claim hasn't published a sidecar pubkey — there is nothing to
+// seal to, and the turn may have just finished between the notification
+// firing and this handler running. Same posture as ProvisionForRun's
+// not-claimed no-op.
+func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, conversationID string) error {
+	turn, ok, err := m.stores.Curator.GetTurnProvisionInfoSystem(ctx, orgID, conversationID)
 	if err != nil {
-		return fmt.Errorf("credprovision: read curator turn %s: %w", requestID, err)
+		return fmt.Errorf("credprovision: read curator turn %s: %w", conversationID, err)
 	}
-	if !ok || curatorStatusTerminal(turn.Status) || turn.HomeInstanceID == "" || turn.CredPubKey == "" {
+	if !ok || turn.HomeInstanceID == "" || turn.CredPubKey == "" {
 		return nil
 	}
 
@@ -41,7 +43,7 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, requestID 
 	}
 	if inst == nil {
 		log.Warn("curator turn home instance not found; skipping (not yet registered)",
-			"request", requestID, "home", turn.HomeInstanceID)
+			"conversation", conversationID, "home", turn.HomeInstanceID)
 		return nil
 	}
 	// Seal to the home's current boot epoch directly: a curator turn runs on the
@@ -51,20 +53,20 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, requestID 
 	// epoch check plus Put's never-regress guard cover a home restart mid-flight.
 	pubBytes, err := base64.StdEncoding.DecodeString(turn.CredPubKey)
 	if err != nil || len(pubBytes) != 32 {
-		return fmt.Errorf("credprovision: curator turn %s carries a malformed recipient pubkey", requestID)
+		return fmt.Errorf("credprovision: curator turn %s carries a malformed recipient pubkey", conversationID)
 	}
 	var pub [32]byte
 	copy(pub[:], pubBytes)
 
 	bundle := &credbundle.Bundle{BootEpoch: inst.BootEpoch}
 
-	// LLM — the request id becomes the STS RoleSessionName for per-turn
+	// LLM — the conversation id becomes the STS RoleSessionName for per-turn
 	// CloudTrail attribution, exactly like runs; fall back to raw-secret
 	// resolution when no llmcred resolver is wired.
 	if m.llm != nil {
-		mat, err := m.llm.ResolveForBundle(ctx, orgID, requestID)
+		mat, err := m.llm.ResolveForBundle(ctx, orgID, conversationID)
 		if err != nil && !llmcred.IsNoCredentials(err) {
-			return fmt.Errorf("credprovision: resolve LLM credentials for org %s (curator turn %s): %w", orgID, requestID, err)
+			return fmt.Errorf("credprovision: resolve LLM credentials for org %s (curator turn %s): %w", orgID, conversationID, err)
 		}
 		bundle.LLM = mat.Env
 		if !mat.Expiry.IsZero() {
@@ -81,20 +83,20 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, requestID 
 	// GitHub authorized set is the project's pinned repos ∩ the team's tracked
 	// set — a curator turn has no run_worktrees ledger and no task repo, it reads
 	// only the pinned repos the project surfaces. The project read is admin-pool
-	// (the brain has no JWT claims here).
-	teamID, pinned := "", []string(nil)
+	// (the brain has no JWT claims here); the team is the conversation's
+	// snapshot, carried on the provisioning projection.
+	pinned := []string(nil)
 	if m.stores.Projects != nil {
 		project, err := m.stores.Projects.GetSystem(ctx, orgID, turn.ProjectID)
 		if err != nil {
-			return fmt.Errorf("credprovision: read project %s for curator turn %s: %w", turn.ProjectID, requestID, err)
+			return fmt.Errorf("credprovision: read project %s for curator turn %s: %w", turn.ProjectID, conversationID, err)
 		}
 		if project != nil {
-			teamID = project.TeamID
 			pinned = project.PinnedRepos
 		}
 	}
-	if gh, err := m.resolveGitHubForCuratorTurn(ctx, orgID, teamID, pinned); err != nil {
-		return fmt.Errorf("credprovision: resolve github credentials for curator turn %s: %w", requestID, err)
+	if gh, err := m.resolveGitHubForCuratorTurn(ctx, orgID, turn.TeamID, pinned); err != nil {
+		return fmt.Errorf("credprovision: resolve github credentials for curator turn %s: %w", conversationID, err)
 	} else {
 		bundle.GitHub = gh
 	}
@@ -108,37 +110,26 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, requestID 
 	// Providers resolve their own sealed sets. A curator turn has no task, so
 	// TaskID is empty; the built-in resolvers key on org/team/run and tolerate it.
 	if providers, err := agenthost.ResolveProviderCredentials(ctx, m.stores, agenthost.ProvisionScope{
-		OrgID: orgID, TeamID: teamID, TaskID: "", RunID: requestID,
+		OrgID: orgID, TeamID: turn.TeamID, TaskID: "", RunID: conversationID,
 	}); err != nil {
-		return fmt.Errorf("credprovision: resolve provider credentials for curator turn %s: %w", requestID, err)
+		return fmt.Errorf("credprovision: resolve provider credentials for curator turn %s: %w", conversationID, err)
 	} else {
 		bundle.Providers = providers
 	}
 
 	plaintext, err := bundle.Marshal()
 	if err != nil {
-		return fmt.Errorf("credprovision: marshal bundle for curator turn %s: %w", requestID, err)
+		return fmt.Errorf("credprovision: marshal bundle for curator turn %s: %w", conversationID, err)
 	}
 	sealed, err := credseal.Seal(pub, plaintext)
 	if err != nil {
-		return fmt.Errorf("credprovision: seal bundle for curator turn %s: %w", requestID, err)
+		return fmt.Errorf("credprovision: seal bundle for curator turn %s: %w", conversationID, err)
 	}
-	if err := m.stores.CuratorTurnCredentials.Put(ctx, orgID, requestID, turn.HomeInstanceID, inst.BootEpoch, sealed); err != nil {
-		return fmt.Errorf("credprovision: write bundle for curator turn %s: %w", requestID, err)
+	if err := m.stores.RunCredentials.Put(ctx, orgID, conversationID, turn.HomeInstanceID, inst.BootEpoch, sealed); err != nil {
+		return fmt.Errorf("credprovision: write bundle for curator turn %s: %w", conversationID, err)
 	}
-	log.Debug("provisioned curator turn credential bundle", "request", requestID, "org", orgID, "home", turn.HomeInstanceID, "boot_epoch", inst.BootEpoch)
+	log.Debug("provisioned curator turn credential bundle", "conversation", conversationID, "org", orgID, "home", turn.HomeInstanceID, "boot_epoch", inst.BootEpoch)
 	return nil
-}
-
-// curatorStatusTerminal mirrors domain.CuratorRequest.IsTerminal for the bare
-// status string the provisioning projection carries.
-func curatorStatusTerminal(status string) bool {
-	switch status {
-	case "done", "cancelled", "failed":
-		return true
-	default:
-		return false
-	}
 }
 
 // resolveGitHubForCuratorTurn is the curator-turn analog of resolveGitHub: the

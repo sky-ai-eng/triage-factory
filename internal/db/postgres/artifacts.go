@@ -40,7 +40,7 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 // an empty string so the scan targets are plain strings, the same shape
 // pgRunColumns uses.
 const pgArtifactColumns = `
-	id, COALESCE(run_id::text, ''), org_id, team_id, provider, kind, target,
+	id, COALESCE(conversation_id::text, ''), org_id, team_id, provider, kind, target,
 	COALESCE(external_id, ''), COALESCE(url, ''), state, dedup_key,
 	COALESCE(details_json, ''), created_at, updated_at
 `
@@ -96,24 +96,24 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 	// migration path). state/details_json stay last-writer-wins by design
 	// (state tracks the latest action).
 	//
-	// run_id AND team_id are both preserved-on-conflict, NOT last-writer-wins:
+	// conversation_id AND team_id are both preserved-on-conflict, NOT last-writer-wins:
 	// the artifact belongs to its CREATING run (domain.Artifact's doc), and
 	// team_id is denormalized off THAT SAME run — not off whichever writer
 	// happens to touch the row later — so a later writer touching the same
 	// dedup key (e.g. a different run editing a Slack message, or a
 	// re-delegate updating a GitHub comment) must not reassign either. Letting
-	// team_id follow the last writer while run_id stayed pinned to the first
+	// team_id follow the last writer while conversation_id stayed pinned to the first
 	// would desync the two and mis-scope the artifact out of its owning
 	// team's reads.
 	row := q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
-			(id, run_id, org_id, team_id, provider, kind, target,
+			(id, conversation_id, org_id, team_id, provider, kind, target,
 			 external_id, url, state, dedup_key, details_json, updated_at)
 		VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()),
 		        NULLIF($2, '')::uuid, $3, $4, $5, $6, $7,
 		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now())
 		ON CONFLICT (org_id, dedup_key) DO UPDATE SET
-			run_id       = artifacts.run_id,
+			conversation_id       = artifacts.conversation_id,
 			team_id      = artifacts.team_id,
 			target       = COALESCE(NULLIF(EXCLUDED.target, ''), artifacts.target),
 			external_id  = COALESCE(EXCLUDED.external_id, artifacts.external_id),
@@ -212,7 +212,7 @@ func (s *artifactStore) ListByRun(ctx context.Context, orgID, runID string) ([]d
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgArtifactColumns+`
 		FROM artifacts
-		WHERE org_id = $1 AND run_id = $2
+		WHERE org_id = $1 AND conversation_id = $2
 		ORDER BY created_at DESC, id DESC
 	`, orgID, runID)
 	if err != nil {
@@ -229,7 +229,7 @@ func (s *artifactStore) ListByRunSystem(ctx context.Context, orgID, runID string
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT `+pgArtifactColumns+`
 		FROM artifacts
-		WHERE org_id = $1 AND run_id = $2
+		WHERE org_id = $1 AND conversation_id = $2
 		ORDER BY created_at DESC, id DESC
 	`, orgID, runID)
 	if err != nil {
@@ -263,16 +263,16 @@ func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []s
 		return counts, nil
 	}
 	// App pool (RLS-active): both callers are HTTP handlers under request
-	// claims, so the count is team-scoped exactly like ListByRun. run_id is a
+	// claims, so the count is team-scoped exactly like ListByRun. conversation_id is a
 	// uuid column, so the slice goes through pgUUIDArray (a Postgres array
 	// literal) rather than a raw []string bind — a []string encodes as text[]
-	// and `run_id = ANY(text[])` errors with "operator does not exist: uuid =
-	// text". A NULL run_id never matches ANY, so detached artifacts are excluded.
+	// and `conversation_id = ANY(text[])` errors with "operator does not exist: uuid =
+	// text". A NULL conversation_id never matches ANY, so detached artifacts are excluded.
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT run_id::text, COUNT(*)
+		SELECT conversation_id::text, COUNT(*)
 		FROM artifacts
-		WHERE org_id = $1 AND run_id = ANY($2)
-		GROUP BY run_id
+		WHERE org_id = $1 AND conversation_id = ANY($2)
+		GROUP BY conversation_id
 	`, orgID, pgUUIDArray(runIDs))
 	if err != nil {
 		return nil, err
@@ -294,14 +294,14 @@ func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []s
 		return nil, nil
 	}
 	// App pool (RLS-active): the caller is the run-list handler under request
-	// claims, so rows are team-scoped exactly like ListByRun. run_id is a uuid
+	// claims, so rows are team-scoped exactly like ListByRun. conversation_id is a uuid
 	// column, so the slice goes through pgUUIDArray (a Postgres array literal),
-	// not a raw []string bind — see CountByRun. A NULL run_id never matches ANY,
+	// not a raw []string bind — see CountByRun. A NULL conversation_id never matches ANY,
 	// so detached artifacts are excluded.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgArtifactColumns+`
 		FROM artifacts
-		WHERE org_id = $1 AND run_id = ANY($2)
+		WHERE org_id = $1 AND conversation_id = ANY($2)
 		ORDER BY created_at DESC, id DESC
 	`, orgID, pgUUIDArray(runIDs))
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -88,15 +89,11 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 	// Step 0 finished with continue → ready to advance to step 1.
 	step0 := 0
 	run0 := "freeze-run0"
-	if err := stores.AgentRuns.Create(ctx, org, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.AgentRun{
 		ID: run0, TaskID: task.ID, PromptID: "freeze-p0", Status: "completed",
-		Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step0,
-	}); err != nil {
-		t.Fatalf("create step0 run: %v", err)
-	}
-	if _, err := database.Exec(`UPDATE runs SET status = 'completed', outcome = 'continue' WHERE id = ?`, run0); err != nil {
-		t.Fatalf("set step0 outcome: %v", err)
-	}
+		Model: "claude-sonnet-4-6", Outcome: "continue",
+		BlueprintRunID: brID, BlueprintStepIndex: &step0,
+	})
 
 	// --- The mid-flight edits: a prompt-body edit AND a structural ReplaceSteps
 	// that drops step 1 entirely. If the run read its program live, either would
@@ -134,7 +131,7 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 		nextIdx      int
 	)
 	if err := database.QueryRow(
-		`SELECT prompt_id, blueprint_step_index FROM runs WHERE blueprint_run_id = ? AND status = 'queued'`, brID,
+		`SELECT prompt_id, blueprint_step_index FROM conversations WHERE blueprint_run_id = ? AND status = 'queued'`, brID,
 	).Scan(&nextPromptID, &nextIdx); err != nil {
 		t.Fatalf("read queued step-1 run: %v", err)
 	}

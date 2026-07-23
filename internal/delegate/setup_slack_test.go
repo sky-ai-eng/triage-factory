@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -104,12 +105,10 @@ func TestSetupSlack_PersistsWorktreePath(t *testing.T) {
 	runID := "slack-run-persist"
 	rootKey := brID // the run-root keys by the blueprint run id
 	t.Cleanup(func() { worktree.RemoveRunRoot(rootKey) })
-	if err := sqlitestore.New(database).AgentRuns.Create(ctx, org, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "persist-prompt", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
-	}); err != nil {
-		t.Fatalf("seed run: %v", err)
-	}
+	})
 
 	cfg, err := s.setupSlack(ctx, org, runID, rootKey, task, nil)
 	if err != nil {
@@ -117,7 +116,7 @@ func TestSetupSlack_PersistsWorktreePath(t *testing.T) {
 	}
 
 	var wtPath string
-	if err := database.QueryRow(`SELECT COALESCE(worktree_path,'') FROM runs WHERE id = ?`, runID).Scan(&wtPath); err != nil {
+	if err := database.QueryRow(`SELECT COALESCE(worktree_path,'') FROM conversations WHERE id = ?`, runID).Scan(&wtPath); err != nil {
 		t.Fatalf("read persisted worktree_path: %v", err)
 	}
 	if wtPath != cfg.wtPath {

@@ -2,65 +2,27 @@ package sqlite
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
-// runCredentialsStore is the SQLite impl of db.RunCredentialsStore — the
-// sealed per-run credential bundle channel (TFAC-614). Local mode never
-// calls Put (forced role=all, the bundle path is executor-role-only); this
-// exists for store-interface + conformance-test symmetry with Postgres.
-type runCredentialsStore struct{ q queryer }
+// runCredentialsStore is the SQLite impl of db.RunCredentialsStore. The
+// sealed-bundle channel is Postgres-only in substance — local mode (forced
+// role=all) reads the live secret store directly and never parks a run in
+// awaiting_credentials — so the SQLite schema carries no claim_credentials
+// table and this impl refuses every call.
+type runCredentialsStore struct{}
 
-func newRunCredentialsStore(q queryer) db.RunCredentialsStore {
-	return &runCredentialsStore{q: q}
+func newRunCredentialsStore(_ queryer) db.RunCredentialsStore {
+	return runCredentialsStore{}
 }
 
-var _ db.RunCredentialsStore = (*runCredentialsStore)(nil)
+var _ db.RunCredentialsStore = runCredentialsStore{}
 
-// Put is guarded on boot_epoch, mirroring the Postgres impl: a slow
-// provision must never clobber a fresher one written for a later claim of
-// the same run_id. See the Postgres Put's doc comment for the full
-// reasoning; <=, not <, so a same-epoch refresh still applies.
-func (s *runCredentialsStore) Put(ctx context.Context, orgID, runID, executorID string, bootEpoch int64, sealed []byte) error {
-	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO run_credentials (run_id, org_id, executor_id, boot_epoch, sealed, created_at)
-		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(run_id) DO UPDATE SET
-			org_id      = excluded.org_id,
-			executor_id = excluded.executor_id,
-			boot_epoch  = excluded.boot_epoch,
-			sealed      = excluded.sealed,
-			created_at  = excluded.created_at
-		WHERE run_credentials.boot_epoch <= excluded.boot_epoch
-	`, runID, orgID, executorID, bootEpoch, sealed)
-	return err
+func (runCredentialsStore) Put(ctx context.Context, orgID, runID, executorID string, bootEpoch int64, sealed []byte) error {
+	return db.ErrNotApplicableInLocal
 }
 
-func (s *runCredentialsStore) Get(ctx context.Context, orgID, runID string) (string, int64, []byte, bool, error) {
-	var executorID string
-	var bootEpoch int64
-	var sealed []byte
-	err := s.q.QueryRowContext(ctx, `
-		SELECT executor_id, boot_epoch, sealed FROM run_credentials
-		WHERE org_id = ? AND run_id = ?
-	`, orgID, runID).Scan(&executorID, &bootEpoch, &sealed)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", 0, nil, false, nil
-	}
-	if err != nil {
-		return "", 0, nil, false, err
-	}
-	return executorID, bootEpoch, sealed, true, nil
-}
-
-func (s *runCredentialsStore) Delete(ctx context.Context, orgID, runID string) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `DELETE FROM run_credentials WHERE org_id = ? AND run_id = ?`, orgID, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
+func (runCredentialsStore) Get(ctx context.Context, orgID, runID string) (string, int64, []byte, bool, error) {
+	return "", 0, nil, false, db.ErrNotApplicableInLocal
 }

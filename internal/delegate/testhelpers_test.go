@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -80,21 +81,17 @@ func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath stri
 	ensureTestPrompt(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
 	brID := seedRunBlueprint(t, database, runID, task.ID)
 	stepIdx := 0
-	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.AgentRun{
 		ID:                 runID,
 		TaskID:             task.ID,
 		PromptID:           "test-prompt",
 		Status:             "running",
 		Model:              "claude-sonnet-4-6",
+		SessionID:          sessionID,
 		WorktreePath:       worktreePath,
 		BlueprintRunID:     brID,
 		BlueprintStepIndex: &stepIdx,
-	}); err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	if _, err := database.Exec(`UPDATE runs SET status = 'running', session_id = ?, worktree_path = ? WHERE id = ?`, sessionID, worktreePath, runID); err != nil {
-		t.Fatalf("update run: %v", err)
-	}
+	})
 }
 
 // seedJiraRun is the Jira variant of seedRun: the task's entity is
@@ -121,14 +118,10 @@ func seedJiraRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath 
 	ensureTestPrompt(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
 	brID := seedRunBlueprint(t, database, runID, task.ID)
 	stepIdx := 0
-	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "test-prompt",
-		Status: "running", Model: "claude-sonnet-4-6", WorktreePath: worktreePath,
+		Status: "running", Model: "claude-sonnet-4-6", SessionID: sessionID,
+		WorktreePath:   worktreePath,
 		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
-	}); err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	if _, err := database.Exec(`UPDATE runs SET status = 'running', session_id = ?, worktree_path = ? WHERE id = ?`, sessionID, worktreePath, runID); err != nil {
-		t.Fatalf("update run: %v", err)
-	}
+	})
 }

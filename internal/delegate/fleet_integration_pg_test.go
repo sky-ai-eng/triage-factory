@@ -199,11 +199,11 @@ func TestFleet_ReaperRequeue_DeadExecutorRunClaimedBySurvivor(t *testing.T) {
 	}
 
 	var executorID string
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT executor_id FROM runs WHERE id = $1`, fx.runID).Scan(&executorID); err != nil {
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT executor_id FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, fx.runID).Scan(&executorID); err != nil {
 		t.Fatalf("read back owner: %v", err)
 	}
 	if executorID != execB {
-		t.Errorf("runs.executor_id = %q, want B's id %q — A's dead claim must never resurface", executorID, execB)
+		t.Errorf("active claim executor_id = %q, want B's id %q — A's dead claim must never resurface", executorID, execB)
 	}
 }
 
@@ -290,7 +290,7 @@ func TestFleet_Drain_DrainedInstanceStopsClaimingSurvivorDoesNot(t *testing.T) {
 
 	sA.drainRunQueue(ctx)
 	var status string
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM runs WHERE id = $1`, fx.runID).Scan(&status); err != nil {
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM conversations WHERE id = $1`, fx.runID).Scan(&status); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
 	if status != "queued" {
@@ -299,7 +299,7 @@ func TestFleet_Drain_DrainedInstanceStopsClaimingSurvivorDoesNot(t *testing.T) {
 
 	// B was never drained and claims normally.
 	sB.drainRunQueue(ctx)
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM runs WHERE id = $1`, fx.runID).Scan(&status); err != nil {
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM conversations WHERE id = $1`, fx.runID).Scan(&status); err != nil {
 		t.Fatalf("read back run after B's drainRunQueue: %v", err)
 	}
 	if status != "running" {

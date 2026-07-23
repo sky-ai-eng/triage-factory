@@ -21,17 +21,14 @@ func newFactoryReadStore(q queryer) db.FactoryReadStore { return &factoryReadSto
 
 var _ db.FactoryReadStore = (*factoryReadStore)(nil)
 
-// sqliteFactoryActiveRunStatuses is the set of run.status values we
+// sqliteFactoryActiveRunStatuses is the set of stored run.status values we
 // treat as "in flight" for the factory view. Matches the X-button
 // window in AgentCard — every state before a terminal transition
-// (completed | failed | cancelled | task_unsolvable). pending_approval
-// counts as active: the run is paused waiting for user input, not done.
+// (completed | failed | cancelled | task_unsolvable); setup sub-states
+// live on the active claim's phase, under stored 'running'.
+// pending_approval stays defensively for legacy rows: the run is paused
+// waiting for user input, not done.
 var sqliteFactoryActiveRunStatuses = []string{
-	"initializing",
-	"cloning",
-	"fetching",
-	"worktree_created",
-	"agent_starting",
 	"running",
 	"pending_approval",
 }
@@ -149,18 +146,23 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 	query := `
 		SELECT
 			r.id, r.task_id, COALESCE(r.prompt_id, ''),
-			r.status, COALESCE(r.model, ''), r.started_at, r.completed_at,
-			r.total_cost_usd, r.duration_ms, r.num_turns,
+			COALESCE((SELECT cl.phase FROM claims cl
+			          WHERE cl.conversation_id = r.id AND cl.released_at IS NULL),
+			         r.status),
+			COALESCE(r.model, ''), r.started_at, r.completed_at,
+			(SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id),
+			(SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = r.id),
+			(SELECT SUM(cl.num_turns) FROM claims cl WHERE cl.conversation_id = r.id),
 			COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
-			COALESCE(r.result_summary, ''), COALESCE(r.session_id, ''),
+			COALESCE(r.result_summary, ''), COALESCE(r.sdk_session_id, ''),
 			(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
 			r.trigger_type, COALESCE(r.trigger_id, ''),
 			COALESCE(r.actor_agent_id, ''),
 			COALESCE(a.display_name, ''),
 			COALESCE(r.failure_kind, ''),
 			` + sqliteTaskColumnsWithEntity + `
-		FROM runs r
-		LEFT JOIN run_memory rm ON rm.run_id = r.id
+		FROM conversations r
+		LEFT JOIN run_memory rm ON rm.conversation_id = r.id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id
 		JOIN tasks t ON r.task_id = t.id
 		JOIN entities e ON t.entity_id = e.id
