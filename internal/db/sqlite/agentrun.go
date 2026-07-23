@@ -230,11 +230,17 @@ func (s *agentRunStore) SetSession(ctx context.Context, orgID, runID, sessionID 
 	return err
 }
 
-func (s *agentRunStore) SetStatusSystem(ctx context.Context, orgID, runID, status string) error {
+// SetActiveClaimPhaseSystem scopes the write to the ACTIVE claim only: a
+// released claim's phase is inert history, and a conversation with no live
+// engagement has no sub-state to record — both fall through as a no-op.
+func (s *agentRunStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID, runID, phase string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE conversations SET status = ? WHERE id = ?`, status, runID)
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE claims SET phase = NULLIF(?, '')
+		WHERE conversation_id = ? AND released_at IS NULL
+	`, phase, runID)
 	return err
 }
 
@@ -353,9 +359,15 @@ func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID,
 // attempts / duration_ms / num_turns) are correlated subselects over
 // claims and the accounting columns (cost + tokens) subselects over the
 // messages ledger; claimed_at loses its declared column type inside the
-// subselect, so it scans as text and parses via parseDBDatetime.
+// subselect, so it scans as text and parses via parseDBDatetime. Status
+// coalesces the active claim's phase over the stored status so a live
+// engagement's setup sub-state surfaces through the field the wire has
+// always carried; predicates elsewhere keep using the stored column.
 const sqliteRunColumns = `
-	r.id, COALESCE(r.task_id, ''), COALESCE(r.status, ''), r.model, r.started_at, r.queued_at,
+	r.id, COALESCE(r.task_id, ''),
+	COALESCE((SELECT cl.phase FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL),
+	         r.status, ''),
+	r.model, r.started_at, r.queued_at,
 	(SELECT MAX(cl.claimed_at) FROM claims cl WHERE cl.conversation_id = r.id) AS claimed_at,
 	r.completed_at,
 	(SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id)     AS total_cost_usd,

@@ -147,7 +147,7 @@ func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) 
 		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {
 			t.Helper()
 			rows, err := conn.Query(`
-				SELECT id::text, executor_id, boot_epoch, released_at IS NOT NULL, COALESCE(outcome, '')
+				SELECT id::text, executor_id, boot_epoch, COALESCE(phase, ''), released_at IS NOT NULL, COALESCE(outcome, '')
 				FROM claims WHERE conversation_id = $1 ORDER BY claimed_at ASC, created_at ASC
 			`, conversationID)
 			if err != nil {
@@ -157,7 +157,7 @@ func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) 
 			var out []dbtest.ClaimRow
 			for rows.Next() {
 				var c dbtest.ClaimRow
-				if err := rows.Scan(&c.ID, &c.ExecutorID, &c.BootEpoch, &c.Released, &c.Outcome); err != nil {
+				if err := rows.Scan(&c.ID, &c.ExecutorID, &c.BootEpoch, &c.Phase, &c.Released, &c.Outcome); err != nil {
 					t.Fatalf("scan claim: %v", err)
 				}
 				out = append(out, c)
@@ -526,8 +526,8 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	}
 	// Back to running for the terminal writes below (the claim path is
 	// admin-side; here we only need the status precondition).
-	if err := stores.AgentRuns.SetStatusSystem(ctx, orgID, runID, "running"); err != nil {
-		t.Fatalf("SetStatusSystem: %v", err)
+	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = 'running' WHERE id = $1`, runID); err != nil {
+		t.Fatalf("reset status to running: %v", err)
 	}
 
 	// Complete twice — two invocation cycles, each going live first (the

@@ -29,7 +29,7 @@ func newRecorderStores(t *testing.T) (db.Stores, string) {
 	if err := db.Migrate(conn, "sqlite3"); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if _, err := conn.Exec(`INSERT INTO conversations (id, trigger_type, creator_user_id, origin) VALUES ('run-1', 'event', NULL, 'interactive')`); err != nil {
+	if _, err := conn.Exec(`INSERT INTO conversations (id, trigger_type, creator_user_id, origin, status) VALUES ('run-1', 'event', NULL, 'interactive', 'running')`); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	return sqlitestore.New(conn), "run-1"

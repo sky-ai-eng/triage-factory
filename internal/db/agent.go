@@ -18,7 +18,10 @@ import (
 // was claimed, how many times) lives on the claims table. The read
 // projections derive AgentRun.ClaimedAt (latest claim's claimed_at),
 // Attempts (count of claims), and ExecutorID (the active claim's executor,
-// "" when none) from claims rather than columns on the conversation; the
+// "" when none) from claims rather than columns on the conversation, and
+// return AgentRun.Status as the active claim's phase coalesced over the
+// stored status — so a live engagement's setup sub-state surfaces through
+// the same field the wire has always carried; the
 // terminal lifecycle writes release the conversation's active claim in the
 // same operation as the status flip. Conversation rows are minted by
 // RunQueueStore.EnqueueRun; there is no direct Create here.
@@ -361,11 +364,16 @@ type AgentRunStore interface {
 	LookupOrgForRunSystem(ctx context.Context, runID string) (string, error)
 	MarkOpenSystem(ctx context.Context, orgID, runID string) (bool, error)
 	SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error
-	// SetStatusSystem writes conversations.status without a guard. Used by
-	// the delegate spawner for transient progress transitions
-	// (fetching, cloning, agent_starting, running). Guarded
-	// transitions go through the Mark* methods.
-	SetStatusSystem(ctx context.Context, orgID, runID, status string) error
+	// SetActiveClaimPhaseSystem writes claims.phase on the conversation's
+	// ACTIVE claim — the setup/parked sub-state of a live engagement
+	// (fetching, cloning, agent_starting, awaiting_credentials). Empty
+	// phase clears to NULL (the agent process is live). Phase lives on the
+	// claim rather than the conversation because it is a per-engagement
+	// fact: a retry or re-claim starts its own claim with its own setup
+	// progress and never rewrites the conversation row. A no-op (no error)
+	// when the conversation has no active claim — a released claim's phase
+	// is inert history and must not be rewritten.
+	SetActiveClaimPhaseSystem(ctx context.Context, orgID, conversationID, phase string) error
 	SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error
 	MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
 	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID, failureKind string) (bool, error)

@@ -247,7 +247,7 @@ func TestClaimFairness_ExplainAnalyzeSanity(t *testing.T) {
 		WITH org_active AS (
 			SELECT org_id, count(*)::int AS active
 			FROM conversations
-			WHERE status IN ('running', 'awaiting_credentials')
+			WHERE status IN ('running')
 			GROUP BY org_id
 		)
 		SELECT r.id FROM conversations r

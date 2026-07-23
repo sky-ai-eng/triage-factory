@@ -15,24 +15,32 @@ import (
 type RunQueueCredentialsFactory func(t *testing.T) (store db.RunQueueStore, orgID string, seed RunQueueCredentialsSeeder)
 
 // RunQueueCredentialsSeeder is a bag of callbacks the conformance suite uses
-// to stage run rows in states the store's own guarded flips can't produce
+// to stage and observe states the store's own guarded flips can't produce
 // on demand.
 type RunQueueCredentialsSeeder struct {
 	// EnqueueRun stages one claimable queued run (under a running
 	// blueprint_run) and returns its id.
 	EnqueueRun func(t *testing.T) (runID string)
 
-	// ForceStatus rewrites the run's status directly, bypassing the
-	// store's guards — the harness needs states that other subsystems
-	// produce in real flows (e.g. the running state that follows a
-	// delivered bundle) without depending on those subsystems here.
-	ForceStatus func(t *testing.T, runID, status string)
+	// RunStatus reads the run's stored conversations.status directly, so
+	// the suite can assert the phase park never touches the conversation
+	// row.
+	RunStatus func(t *testing.T, runID string) string
+
+	// SetActivePhase rewrites the run's active claim's phase directly,
+	// bypassing the store's guards — the harness needs states that other
+	// subsystems produce in real flows (e.g. the cleared phase that
+	// follows a delivered bundle) without depending on those subsystems
+	// here. Empty phase writes NULL.
+	SetActivePhase func(t *testing.T, runID, phase string)
 }
 
 // RunRunQueueCredentialsConformance covers the per-run credential-pubkey
-// contract every backend impl must hold: MarkAwaitingCredentials records the
-// sidecar pubkey alongside the status flip and GetClaim / the sweep reads
-// return it, the running-only guard never overwrites a key already recorded,
+// contract every backend impl must hold: MarkAwaitingCredentials parks the
+// ACTIVE claim (phase='awaiting_credentials') with the sidecar pubkey in one
+// write while the conversation row stays 'running', GetClaim / the sweep
+// reads return the key, the phase-IS-NULL guard never overwrites a key
+// already recorded, RequeueAwaitingCredentials only fires on a parked claim,
 // and every path that releases a claim back to 'queued' clears the key with
 // the rest of the ownership stamp — a queued row has no owner and no key, so
 // the brain can never seal a fresh claim's bundle to a stale sidecar.
@@ -57,7 +65,7 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		}
 	}
 
-	t.Run("Mark_records_pubkey_and_reads_return_it", func(t *testing.T) {
+	t.Run("Mark_parks_claim_records_pubkey_and_reads_return_it", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		runID := seed.EnqueueRun(t)
 		claim(t, store, runID)
@@ -65,6 +73,11 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		matched, err := store.MarkAwaitingCredentials(ctx, orgID, runID, pubKey)
 		if err != nil || !matched {
 			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
+		}
+		// The park is claim-side only: the conversation row keeps its
+		// claimed status.
+		if st := seed.RunStatus(t, runID); st != "running" {
+			t.Errorf("conversation status after park = %q, want running", st)
 		}
 
 		got, ok, err := store.GetClaim(ctx, orgID, runID)
@@ -124,9 +137,9 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		if matched, err := store.MarkAwaitingCredentials(ctx, orgID, runID, pubKey); err != nil || !matched {
 			t.Fatalf("first MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
 		}
-		// The run is now 'awaiting_credentials', so the running-only guard
-		// must reject a duplicate — and keep the key the brain may already
-		// be sealing to.
+		// The claim is now parked (phase non-NULL), so the guard must
+		// reject a duplicate — and keep the key the brain may already be
+		// sealing to.
 		matched, err := store.MarkAwaitingCredentials(ctx, orgID, runID, "attacker-or-stale-key")
 		if err != nil {
 			t.Fatalf("second MarkAwaitingCredentials: %v", err)
@@ -143,17 +156,29 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		}
 	})
 
-	t.Run("RequeueAwaitingCredentials_clears_key_with_ownership", func(t *testing.T) {
+	t.Run("RequeueAwaitingCredentials_requires_parked_claim", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		runID := seed.EnqueueRun(t)
 		claim(t, store, runID)
+
+		// Not parked yet: the guard must refuse — a timeout racing a claim
+		// that never parked (or already moved on) must not resurrect it.
+		if matched, err := store.RequeueAwaitingCredentials(ctx, orgID, runID); err != nil || matched {
+			t.Fatalf("RequeueAwaitingCredentials before park = (%v, %v), want (false, nil)", matched, err)
+		}
+		if st := seed.RunStatus(t, runID); st != "running" {
+			t.Errorf("status after refused requeue = %q, want running", st)
+		}
+
 		if matched, err := store.MarkAwaitingCredentials(ctx, orgID, runID, pubKey); err != nil || !matched {
 			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
 		}
-
 		matched, err := store.RequeueAwaitingCredentials(ctx, orgID, runID)
 		if err != nil || !matched {
 			t.Fatalf("RequeueAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
+		}
+		if st := seed.RunStatus(t, runID); st != "queued" {
+			t.Errorf("status after requeue = %q, want queued", st)
 		}
 		got, ok, err := store.GetClaim(ctx, orgID, runID)
 		if err != nil || !ok {
@@ -165,6 +190,10 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		if got.ExecutorID != "" || got.BootEpoch != 0 {
 			t.Errorf("ownership = (%q, %d) after requeue, want cleared", got.ExecutorID, got.BootEpoch)
 		}
+		// A duplicate timeout after the release finds no parked claim.
+		if matched, err := store.RequeueAwaitingCredentials(ctx, orgID, runID); err != nil || matched {
+			t.Errorf("duplicate RequeueAwaitingCredentials = (%v, %v), want (false, nil)", matched, err)
+		}
 	})
 
 	t.Run("RequeueRun_clears_key", func(t *testing.T) {
@@ -174,10 +203,10 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		if matched, err := store.MarkAwaitingCredentials(ctx, orgID, runID, pubKey); err != nil || !matched {
 			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
 		}
-		// Stage the post-bundle shape: the bundle arrived and the run went
-		// back to running, key still recorded — then a transient dispatcher
+		// Stage the post-bundle shape: the bundle arrived and the claim's
+		// park cleared, key still recorded — then a transient dispatcher
 		// failure requeues it.
-		seed.ForceStatus(t, runID, "running")
+		seed.SetActivePhase(t, runID, "")
 
 		if err := store.RequeueRun(ctx, orgID, runID, "transient"); err != nil {
 			t.Fatalf("RequeueRun: %v", err)
@@ -194,13 +223,12 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		}
 	})
 
-	t.Run("RequeueRun_from_awaiting_credentials_requeues", func(t *testing.T) {
-		// The stranding regression: a sidecar bring-up that fails AFTER
-		// MarkAwaitingCredentials leaves the run in 'awaiting_credentials', and
-		// the setup-failure path requeues it via RequeueRun (not the unused
-		// RequeueAwaitingCredentials). A 'running'-only guard silently no-ops
-		// here, stranding the run forever while the backstop sweep re-seals its
-		// bundle every tick. RequeueRun must reset it and make it claimable.
+	t.Run("RequeueRun_from_parked_claim_requeues", func(t *testing.T) {
+		// A sidecar bring-up that fails AFTER MarkAwaitingCredentials leaves
+		// the active claim parked, and the setup-failure path requeues via
+		// RequeueRun (not the timeout-only RequeueAwaitingCredentials). The
+		// run must reset and become claimable — anything else strands it
+		// forever while the backstop sweep re-seals its bundle every tick.
 		store, orgID, seed := mk(t)
 		runID := seed.EnqueueRun(t)
 		claim(t, store, runID)
@@ -208,8 +236,7 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
 		}
 
-		// No ForceStatus back to 'running' — requeue straight from
-		// 'awaiting_credentials', the exact state the failed bring-up leaves.
+		// Requeue straight from the parked shape the failed bring-up leaves.
 		if err := store.RequeueRun(ctx, orgID, runID, "sidecar bring-up failed"); err != nil {
 			t.Fatalf("RequeueRun: %v", err)
 		}
@@ -223,8 +250,8 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		if got.ExecutorID != "" || got.BootEpoch != 0 {
 			t.Errorf("ownership = (%q, %d) after RequeueRun, want cleared", got.ExecutorID, got.BootEpoch)
 		}
-		// The run is genuinely back on the queue: it re-claims. A no-op requeue
-		// would have left it in 'awaiting_credentials', and this would fail.
+		// The run is genuinely back on the queue: it re-claims. A no-op
+		// requeue would have left it claimed-and-parked, and this would fail.
 		claim(t, store, runID)
 	})
 

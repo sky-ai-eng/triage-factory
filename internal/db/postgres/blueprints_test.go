@@ -925,7 +925,7 @@ func seedPgRun(t *testing.T, h *pgtest.Harness, orgID, userID, taskID, promptID,
 	teamID := firstTeamForOrg(t, h, orgID)
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO conversations (id, org_id, creator_user_id, team_id, task_id, prompt_id, status, model, started_at, blueprint_run_id, blueprint_step_index)
-		VALUES ($1, $2, $3, $4, $5, $6, 'initializing', 'claude-sonnet-4-6', now(), $7, $8)
+		VALUES ($1, $2, $3, $4, $5, $6, 'running', 'claude-sonnet-4-6', now(), $7, $8)
 	`, runID, orgID, userID, teamID, taskID, promptID, blueprintRunID, stepIdx); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}

@@ -68,11 +68,15 @@ Claims                              ← one row per executor engagement with a c
 **Conversations · messages · claims** is the unified agent data model (it replaced
 the former `runs` + `curator_requests` fusion tables): a *conversation* is the
 durable context — type (`delegation` | `curator` | `interactive` reserved |
-namespaced `subagent:<kind>` reserved), task/trigger/project linkage, user-facing
-status, cost rollups, `runtime` ratchet (`sdk`|`native`), `sdk_session_id`,
-archive timestamp (KV-cache warmth is derived from the newest assistant message row, never stored). A *claim* is one executor engagement (executor id
-+ boot epoch, per-engagement accounting, sealed-credential pubkey, at most one
-active per conversation — the schema enforces it). The transcript itself is the
+namespaced `subagent:<kind>` reserved), task/trigger/project linkage, work-lifecycle
+status (stored vocabulary `queued|running|open|terminals` — spend and KV-cache
+warmth are derived from `messages`, never stored), `runtime` ratchet
+(`sdk`|`native`), `sdk_session_id`, archive timestamp. A *claim* is one executor
+engagement (executor id + boot epoch, sealed-credential pubkey, `phase` — the
+live engagement's setup/parked sub-state, `fetching|cloning|agent_starting|
+awaiting_credentials`, coalesced over the conversation's stored status on display
+reads so a retry never rewrites the conversation row — at most one active per
+conversation, schema-enforced). The transcript itself is the
 `messages` table: one row per neutral API message, `delivered=false` rows are the
 universal pending-input queue (follow-ups, staged injections, curator context
 notices — the former three side-tables), `window_state`/`seq` are the native

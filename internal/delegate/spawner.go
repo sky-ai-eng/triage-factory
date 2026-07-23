@@ -1072,19 +1072,25 @@ func (s *Spawner) getRunSecrets() agentproc.SecretsReader {
 	return s.runSecrets
 }
 
-func (s *Spawner) updateStatus(orgID, runID, status string) {
-	// Transient progress states (fetching, cloning, agent_starting,
-	// running) — no guard needed; the caller knows the prior row is
-	// non-terminal. Goroutine-internal, no JWT claims in scope, so
-	// admin pool.
-	if err := s.agentRuns.SetStatusSystem(context.Background(), orgID, runID, status); err != nil {
-		delegateLog.Warn("update status for run failed", "run", runID, "error", err)
+// updatePhase records the live engagement's setup sub-state on its active
+// claim (phase "" clears it — the agent process is live) and broadcasts the
+// display status: the phase itself, or "running" on a clear, so the wire
+// sequence the frontend chips key on is unchanged. Goroutine-internal, no
+// JWT claims in scope, so admin pool; no guard needed — the caller knows
+// the engagement is live.
+func (s *Spawner) updatePhase(orgID, runID, phase string) {
+	if err := s.agentRuns.SetActiveClaimPhaseSystem(context.Background(), orgID, runID, phase); err != nil {
+		delegateLog.Warn("update phase for run failed", "run", runID, "error", err)
 	}
-	s.broadcastRunUpdate(orgID, runID, status)
-	// Board placement is no longer mirrored per-run from transient status here:
+	display := phase
+	if display == "" {
+		display = "running"
+	}
+	s.broadcastRunUpdate(orgID, runID, display)
+	// Board placement is not mirrored per-run from setup progress here:
 	// the blueprint orchestrator drives the aggregate column via
 	// recomputeTaskBoardColumn at its transition points (blueprint start, step
-	// start, park, resume). updateStatus stays a pure run-status + WS helper.
+	// start, park, resume). updatePhase stays a pure claim-phase + WS helper.
 }
 
 // recomputeTaskBoardColumn is the blueprint-era board placement rule: a task's

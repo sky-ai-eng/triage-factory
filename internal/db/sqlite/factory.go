@@ -21,17 +21,14 @@ func newFactoryReadStore(q queryer) db.FactoryReadStore { return &factoryReadSto
 
 var _ db.FactoryReadStore = (*factoryReadStore)(nil)
 
-// sqliteFactoryActiveRunStatuses is the set of run.status values we
+// sqliteFactoryActiveRunStatuses is the set of stored run.status values we
 // treat as "in flight" for the factory view. Matches the X-button
 // window in AgentCard — every state before a terminal transition
-// (completed | failed | cancelled | task_unsolvable). pending_approval
-// counts as active: the run is paused waiting for user input, not done.
+// (completed | failed | cancelled | task_unsolvable); setup sub-states
+// live on the active claim's phase, under stored 'running'.
+// pending_approval stays defensively for legacy rows: the run is paused
+// waiting for user input, not done.
 var sqliteFactoryActiveRunStatuses = []string{
-	"initializing",
-	"cloning",
-	"fetching",
-	"worktree_created",
-	"agent_starting",
 	"running",
 	"pending_approval",
 }
@@ -149,7 +146,10 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 	query := `
 		SELECT
 			r.id, r.task_id, COALESCE(r.prompt_id, ''),
-			r.status, COALESCE(r.model, ''), r.started_at, r.completed_at,
+			COALESCE((SELECT cl.phase FROM claims cl
+			          WHERE cl.conversation_id = r.id AND cl.released_at IS NULL),
+			         r.status),
+			COALESCE(r.model, ''), r.started_at, r.completed_at,
 			(SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id),
 			(SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = r.id),
 			(SELECT SUM(cl.num_turns) FROM claims cl WHERE cl.conversation_id = r.id),

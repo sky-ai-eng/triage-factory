@@ -97,17 +97,10 @@ func NewPostgresStore(db *sql.DB) Store { return &pgStore{db: db} }
 
 var _ Store = (*pgStore)(nil)
 
-// nonProcessingStatusesSQL is the runs.status IN-list of every status the
-// reaper must NOT touch: still-queued (no owner yet), every terminal, and
-// the two dormant/parked statuses (no live process to have died). Mirrors
-// RunQueueStore.ResetProcessingRuns' own inline list (internal/db/postgres/
-// run_queue.go) — kept as its own literal here rather than shared, matching
-// that file's own precedent ("other queries that add dormant statuses keep
-// their own list").
-const nonProcessingStatusesSQL = `'queued','completed','failed','cancelled','task_unsolvable','open','pending_approval'`
-
 // reapCandidateJoin is the FROM/JOIN/base-WHERE shared by every reaper
-// query below: claimed/running runs under a still-running blueprint_run
+// query below: claimed 'running' runs (the one status a claimed run holds,
+// whatever setup phase its claim is in — queued/terminal/dormant rows have
+// no live process to have died) under a still-running blueprint_run
 // whose executor's heartbeat row is missing (GC'd, or never registered —
 // defensive) or older than the staleness threshold. Each caller appends its
 // own cancel_requested/attempts predicate and SELECTs what it needs.
@@ -117,7 +110,7 @@ const reapCandidateJoin = `
 	JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 	JOIN blueprint_runs br ON br.id = r.blueprint_run_id
 	LEFT JOIN instances i ON i.id = cl.executor_id
-	WHERE r.status NOT IN (` + nonProcessingStatusesSQL + `)
+	WHERE r.status = 'running'
 	  AND br.status = 'running'
 	  AND (i.id IS NULL OR i.last_heartbeat_at < now() - make_interval(secs => $1))
 `
@@ -303,7 +296,7 @@ func (s *pgStore) HealClaimDesyncs(ctx context.Context) (int, int, error) {
 		UPDATE conversations SET status = 'queued', queued_at = now(),
 		    preferred_executor_id = NULL
 		WHERE type = 'delegation'
-		  AND status NOT IN (`+nonProcessingStatusesSQL+`)
+		  AND status = 'running'
 		  AND NOT EXISTS (
 		      SELECT 1 FROM claims cl
 		      WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL

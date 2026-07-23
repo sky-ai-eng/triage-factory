@@ -118,8 +118,8 @@ func TestMigrationDefaults_MatchRuntimeConstants(t *testing.T) {
 					t.Fatalf("seed blueprint_run: %v", err)
 				}
 			},
-			probe: `INSERT INTO conversations (id, task_id, prompt_id, trigger_type, creator_user_id, blueprint_run_id)
-			        VALUES ('probe-run', 'probe-task-r', 'probe-prompt-r', 'manual', ?, 'probe-bp-run-r')`,
+			probe: `INSERT INTO conversations (id, task_id, prompt_id, trigger_type, creator_user_id, blueprint_run_id, status)
+			        VALUES ('probe-run', 'probe-task-r', 'probe-prompt-r', 'manual', ?, 'probe-bp-run-r', 'queued')`,
 			probeArgs:      []any{runmode.LocalDefaultUserID},
 			readBackQuery:  `SELECT org_id || '|' || team_id FROM conversations WHERE id = 'probe-run'`,
 			readBackColumn: "org_id|team_id",

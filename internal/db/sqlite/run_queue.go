@@ -146,20 +146,17 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	// Guarded on the full mid-setup active set so a stale requeue can't
-	// resurrect a terminal/parked/queued row while still firing from whichever
-	// granular status the run held when setup failed (initializing → cloning →
-	// fetching → worktree_created → agent_starting → running), matching the
-	// Postgres impl — the setup-failure caller is the only one that requeues
-	// and fires before the agent executes, so none of those statuses names a
-	// live agent here. The active claim releases as 'requeued' (the claim
-	// already counted this try — Attempts is the claim count), and the
-	// placement stamp clears: a queued row has no owner.
+	// Guarded on 'running' — the one status a claimed run holds from claim
+	// until terminal/park, whatever setup phase its claim is in — matching
+	// the Postgres impl, so a stale requeue can't resurrect a
+	// terminal/parked/queued row. The active claim releases as 'requeued'
+	// (the claim already counted this try — Attempts is the claim count),
+	// and the placement stamp clears: a queued row has no owner.
 	return inTx(ctx, s.conn, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = 'queued', queued_at = CURRENT_TIMESTAMP, result_summary = ?,
 				preferred_executor_id = NULL
-			WHERE id = ? AND status IN ('initializing', 'cloning', 'fetching', 'worktree_created', 'agent_starting', 'running', 'awaiting_credentials')
+			WHERE id = ? AND status = 'running'
 		`, lastErr, runID)
 		if err != nil {
 			return err
@@ -172,39 +169,29 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 	})
 }
 
-// MarkAwaitingCredentials mirrors the Postgres impl's status flip, stamping
-// the sidecar pubkey on the ACTIVE claim. No ctlbus doorbell — the tf_ctl
+// MarkAwaitingCredentials mirrors the Postgres impl: the phase park and
+// sidecar pubkey land on the ACTIVE claim in one statement (the
+// conversation stays 'running'), guarded on phase IS NULL so a duplicate
+// can't re-park or overwrite the key. No ctlbus doorbell — the tf_ctl
 // fabric is Postgres-only (local mode has no LISTEN/NOTIFY), and never
 // reached in practice anyway: local mode is always role=all, which never
-// parks a run in this status.
+// parks a run awaiting credentials.
 func (s *runQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, runID, credPubKey string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	var matched bool
-	err := inTx(ctx, s.conn, func(q queryer) error {
-		res, err := q.ExecContext(ctx, `
-			UPDATE conversations SET status = 'awaiting_credentials'
-			WHERE id = ? AND status = 'running'
-		`, runID)
-		if err != nil {
-			return err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		matched = n > 0
-		if !matched {
-			return nil
-		}
-		_, err = q.ExecContext(ctx, `
-			UPDATE claims SET cred_pubkey = NULLIF(?, '')
-			WHERE conversation_id = ? AND released_at IS NULL
-		`, credPubKey, runID)
-		return err
-	})
-	return matched, err
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE claims SET phase = 'awaiting_credentials', cred_pubkey = NULLIF(?, '')
+		WHERE conversation_id = ? AND released_at IS NULL AND phase IS NULL
+	`, credPubKey, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // awaitingCredentialsCols is the shared projection for the claim-identity
@@ -244,11 +231,11 @@ func (s *runQueueStore) GetClaim(ctx context.Context, orgID, runID string) (db.A
 	return r, true, nil
 }
 
-// RequeueAwaitingCredentials mirrors the Postgres impl: releases
-// a run parked in status='awaiting_credentials' back to 'queued', releasing
-// its claim. Never reached in practice — local mode is always role=all,
-// which never parks a run in this status — but implemented for
-// store-interface + conformance-test symmetry.
+// RequeueAwaitingCredentials mirrors the Postgres impl: releases a run
+// whose active claim is parked in phase='awaiting_credentials' back to
+// 'queued', releasing that claim. Never reached in practice — local mode is
+// always role=all, which never parks a run awaiting credentials — but
+// implemented for store-interface + conformance-test symmetry.
 func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, runID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -258,7 +245,11 @@ func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, r
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = 'queued', queued_at = CURRENT_TIMESTAMP,
 				preferred_executor_id = NULL
-			WHERE id = ? AND status = 'awaiting_credentials'
+			WHERE id = ? AND EXISTS (
+			    SELECT 1 FROM claims cl
+			    WHERE cl.conversation_id = conversations.id
+			      AND cl.released_at IS NULL AND cl.phase = 'awaiting_credentials'
+			)
 		`, runID)
 		if err != nil {
 			return err
@@ -277,11 +268,14 @@ func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, r
 }
 
 func (s *runQueueStore) ListAwaitingCredentials(ctx context.Context) ([]db.AwaitingCredentialsRun, error) {
+	// The parked set is keyed off the active claim's phase (served by the
+	// idx_claims_active_phase partial index); an inner join is right here —
+	// a parked run by definition has the claim.
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT `+awaitingCredentialsCols+`
 		FROM conversations r
-		LEFT JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
-		WHERE r.status = 'awaiting_credentials'
+		JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
+		WHERE cl.phase = 'awaiting_credentials'
 	`)
 	if err != nil {
 		return nil, err
@@ -322,10 +316,12 @@ func scanAwaitingCredentialsRuns(rows *sql.Rows) ([]db.AwaitingCredentialsRun, e
 func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
 	// The boot self-sweep, ownership-scoped through claims: only ACTIVE
 	// claims this instance itself holds (executor_id = ?) from a strictly
-	// earlier boot (boot_epoch < ?) on still-live work are released
-	// ('reaped'), and their conversations flipped back to 'queued' for
-	// re-claim. Terminal + dormant (open/pending_approval) + already-queued
-	// conversations are untouched — dormant runs resume through their own
+	// earlier boot (boot_epoch < ?) on 'running' conversations (claimed —
+	// mid-setup or executing; setup progress is claim phase, never status)
+	// are released ('reaped'), and their conversations flipped back to
+	// 'queued' for re-claim. Terminal + dormant (open/pending_approval) +
+	// already-queued conversations are not 'running' and stay untouched —
+	// dormant runs resume through their own
 	// paths, not the queue. SQLite is N=1, so there is never a live sibling
 	// to protect, but the same predicate keeps the two backends' semantics
 	// identical.
@@ -338,11 +334,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID stri
 			WHERE cl.released_at IS NULL
 			  AND cl.executor_id = ?
 			  AND cl.boot_epoch < ?
-			  AND r.status NOT IN (
-				'queued',
-				'completed','failed','cancelled','task_unsolvable',
-				'open','pending_approval'
-			  )
+			  AND r.status = 'running'
 			  AND r.blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
 		`, executorID, bootEpoch)
 		if err != nil {
@@ -396,10 +388,10 @@ func (s *runQueueStore) FleetQueueShares(ctx context.Context) ([]db.OrgQueueShar
 		SELECT counts.org_id, counts.active, counts.queued, os.max_concurrent_runs
 		FROM (
 			SELECT org_id,
-			       SUM(CASE WHEN status IN ('running', 'awaiting_credentials') THEN 1 ELSE 0 END) AS active,
-			       SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END)                              AS queued
+			       SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS active,
+			       SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END)  AS queued
 			FROM conversations
-			WHERE status IN ('running', 'awaiting_credentials', 'queued')
+			WHERE status IN ('running', 'queued')
 			GROUP BY org_id
 		) counts
 		LEFT JOIN org_settings os ON os.org_id = counts.org_id
@@ -512,11 +504,7 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 			UPDATE conversations SET status = 'queued', queued_at = CURRENT_TIMESTAMP,
 			    preferred_executor_id = NULL
 			WHERE type = 'delegation'
-			  AND status NOT IN (
-				'queued',
-				`+runTerminalStatusesSQL+`,
-				'open','pending_approval'
-			  )
+			  AND status = 'running'
 			  AND NOT EXISTS (
 			      SELECT 1 FROM claims cl
 			      WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL

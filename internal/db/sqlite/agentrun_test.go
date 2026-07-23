@@ -146,7 +146,7 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {
 			t.Helper()
 			rows, err := conn.Query(`
-				SELECT id, executor_id, boot_epoch, released_at IS NOT NULL, COALESCE(outcome, '')
+				SELECT id, executor_id, boot_epoch, COALESCE(phase, ''), released_at IS NOT NULL, COALESCE(outcome, '')
 				FROM claims WHERE conversation_id = ? ORDER BY rowid ASC
 			`, conversationID)
 			if err != nil {
@@ -156,7 +156,7 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 			var out []dbtest.ClaimRow
 			for rows.Next() {
 				var c dbtest.ClaimRow
-				if err := rows.Scan(&c.ID, &c.ExecutorID, &c.BootEpoch, &c.Released, &c.Outcome); err != nil {
+				if err := rows.Scan(&c.ID, &c.ExecutorID, &c.BootEpoch, &c.Phase, &c.Released, &c.Outcome); err != nil {
 					t.Fatalf("scan claim: %v", err)
 				}
 				out = append(out, c)

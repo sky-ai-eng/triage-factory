@@ -950,8 +950,8 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 	bobBR := seedBlueprintRun(t, h, bobOrg, bob, bobTask)
 	var bobRun string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO conversations (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id)
-		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4, $5) RETURNING id
+		INSERT INTO conversations (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id, status)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4, $5, 'running') RETURNING id
 	`, bobOrg, bob, bobTask, bobPrompt, bobBR).Scan(&bobRun); err != nil {
 		t.Fatalf("seed bob run: %v", err)
 	}
@@ -1621,8 +1621,8 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	bpRun := seedBlueprintRun(t, h, orgA, alice, taskID)
 	var runID string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO conversations (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id)
-		VALUES ($1, $2, $3, 'private', $4, $5, $6) RETURNING id
+		INSERT INTO conversations (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id, status)
+		VALUES ($1, $2, $3, 'private', $4, $5, $6, 'running') RETURNING id
 	`, orgA, alice, teamA, taskID, prompt, bpRun).Scan(&runID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
@@ -2477,8 +2477,8 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	bpRun := seedBlueprintRun(t, h, orgA, alice, taskID)
 	var runID string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO conversations (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id)
-		VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+		INSERT INTO conversations (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id, status)
+		VALUES ($1, $2, $3, $4, $5, $6, 'running') RETURNING id
 	`, orgA, alice, teamA, taskID, promptID, bpRun).Scan(&runID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
@@ -2634,8 +2634,8 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 		},
 		{
 			label: "conversations",
-			stmt: `INSERT INTO conversations (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id)
-				VALUES ($1, $2, $3, 'org', $4, $5, $6)`,
+			stmt: `INSERT INTO conversations (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id, status)
+				VALUES ($1, $2, $3, 'org', $4, $5, $6, 'running')`,
 			args: []any{orgA, carol, teamA, parentTaskID, parentPromptID, parentBPRunID},
 		},
 		{

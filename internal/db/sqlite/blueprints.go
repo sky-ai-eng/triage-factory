@@ -977,8 +977,14 @@ func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintR
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
+	// Status coalesces the active claim's phase over the stored status —
+	// the same display contract as the AgentRunStore projections.
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, task_id, prompt_id, status, model, started_at, completed_at,
+		SELECT id, task_id, prompt_id,
+		       COALESCE((SELECT cl.phase FROM claims cl
+		                 WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL),
+		                status),
+		       model, started_at, completed_at,
 		       (SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = conversations.id),
 		       (SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = conversations.id),
 		       (SELECT SUM(cl.num_turns) FROM claims cl WHERE cl.conversation_id = conversations.id),

@@ -27,12 +27,13 @@ type AgentRunStoreFactory func(t *testing.T) (
 )
 
 // ClaimRow is the seeder's projection of one claims row, oldest-first —
-// enough for the conformance suite to assert mint/release bookkeeping
+// enough for the conformance suite to assert mint/release/phase bookkeeping
 // without the suite owning claim SQL.
 type ClaimRow struct {
 	ID         string
 	ExecutorID string
 	BootEpoch  int64
+	Phase      string
 	Released   bool
 	Outcome    string
 }
@@ -887,6 +888,74 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 				t.Errorf("refused terminal write released the claim: %+v", last)
 			}
 		})
+	})
+
+	t.Run("SetActiveClaimPhaseSystem_SetClearAndCoalesceIntoStatus", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-phase", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		// Set: the phase lands on the active claim and the display read
+		// coalesces it over the stored 'running'.
+		if err := store.SetActiveClaimPhaseSystem(ctx, orgID, runID, "cloning"); err != nil {
+			t.Fatalf("SetActiveClaimPhaseSystem set: %v", err)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 || claims[0].Phase != "cloning" {
+			t.Fatalf("claims after set = %+v, want one active claim in phase cloning", claims)
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.Status != "cloning" {
+			t.Errorf("Status = %q, want cloning (active claim's phase coalesced over stored status)", got.Status)
+		}
+
+		// Clear: empty phase writes NULL and the display falls back to the
+		// stored status.
+		if err := store.SetActiveClaimPhaseSystem(ctx, orgID, runID, ""); err != nil {
+			t.Fatalf("SetActiveClaimPhaseSystem clear: %v", err)
+		}
+		if claims := seed.ClaimRows(t, runID); len(claims) != 1 || claims[0].Phase != "" {
+			t.Fatalf("claims after clear = %+v, want the phase cleared", claims)
+		}
+		if got, _ := store.Get(ctx, orgID, runID); got.Status != "running" {
+			t.Errorf("Status after clear = %q, want running", got.Status)
+		}
+	})
+
+	t.Run("SetActiveClaimPhaseSystem_NoOpOnReleasedClaim", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-phase-rel", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		if err := store.SetActiveClaimPhaseSystem(ctx, orgID, runID, "agent_starting"); err != nil {
+			t.Fatalf("SetActiveClaimPhaseSystem: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		// A write against the released claim is a silent no-op: the released
+		// claim's phase stays whatever it held at release.
+		if err := store.SetActiveClaimPhaseSystem(ctx, orgID, runID, "cloning"); err != nil {
+			t.Fatalf("SetActiveClaimPhaseSystem on released: %v", err)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 || !claims[0].Released || claims[0].Phase != "agent_starting" {
+			t.Fatalf("claims = %+v, want one released claim still in phase agent_starting", claims)
+		}
+		// And the released claim's phase never leaks into the display: the
+		// coalesce only reads the ACTIVE claim.
+		if got, _ := store.Get(ctx, orgID, runID); got.Status != "completed" {
+			t.Errorf("Status = %q, want completed (a released claim's phase is inert history)", got.Status)
+		}
 	})
 
 	t.Run("ClaimDerivedFields_TrackLatestClaim", func(t *testing.T) {

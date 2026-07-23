@@ -52,9 +52,11 @@ PRAGMA foreign_keys = off;
 -- Stage the runs-era claim columns before the rebuild discards them; the
 -- claims mint below (step 4) reads this snapshot. duration_ms / num_turns
 -- ride along — the flattened engagement telemetry lands on the one migrated
--- claim. Dropped at the end.
+-- claim. status rides along too: the rebuild collapses the runs-era setup
+-- transients into 'running', and the mint re-keys the original transient
+-- onto the active claim's phase. Dropped at the end.
 CREATE TABLE conversations_claim_src AS
-SELECT id, executor_id, boot_epoch, cred_pubkey, claimed_at,
+SELECT id, status, executor_id, boot_epoch, cred_pubkey, claimed_at,
        duration_ms, num_turns
 FROM conversations
 WHERE executor_id IS NOT NULL;
@@ -99,10 +101,13 @@ CREATE TABLE conversations_new (
     -- conversation — once any engagement runs native, the SDK can never
     -- continue this transcript.
     runtime         TEXT NOT NULL DEFAULT 'sdk',
-    -- Work lifecycle for delegation/interactive/subagent conversations
-    -- (vocabulary unchanged from the runs era). NULL for curator
+    -- Work lifecycle for delegation/interactive/subagent conversations:
+    -- 'queued' | 'running' | 'open' | terminals. Engagement sub-state
+    -- (fetching/cloning/agent_starting/awaiting_credentials) lives on the
+    -- live claim's phase, coalesced over this on display reads — a retry
+    -- or re-claim never rewrites the conversation row. NULL for curator
     -- conversations, whose turn state is derived from messages + claims.
-    status          TEXT DEFAULT 'cloning',
+    status          TEXT,
     model           TEXT,
     -- The SDK-runtime resume handle (former runs.session_id +
     -- projects.curator_session_id). NULL under runtime='native'.
@@ -162,7 +167,14 @@ INSERT INTO conversations_new (
     preferred_executor_id)
 SELECT
     id, org_id, 'delegation', creator_user_id, team_id, visibility, task_id,
-    prompt_id, trigger_id, trigger_type, origin, 'sdk', status, model,
+    prompt_id, trigger_id, trigger_type, origin, 'sdk',
+    -- Setup transients collapse to 'running' — engagement sub-state moves
+    -- to the claim's phase (stamped in step 4 from the staged status).
+    -- 'initializing'/'worktree_created' were already write-dead vocabulary.
+    CASE WHEN status IN ('initializing','cloning','fetching','worktree_created',
+                         'agent_starting','awaiting_credentials')
+         THEN 'running' ELSE status END,
+    model,
     session_id, worktree_path, result_summary, outcome, outcome_reason,
     failure_kind, stop_reason, started_at, completed_at, parked_at,
     actor_agent_id,
@@ -250,6 +262,11 @@ CREATE TABLE claims (
     -- The per-engagement credential sidecar's X25519 pubkey (multi-mode
     -- only; stays NULL locally).
     cred_pubkey     TEXT,
+    -- Setup/parked sub-state of a LIVE engagement: 'fetching' | 'cloning' |
+    -- 'agent_starting' | 'awaiting_credentials'. NULL = the agent process
+    -- is live (or the claim is released — a released claim's phase is inert
+    -- history). Display reads coalesce this over conversations.status.
+    phase           TEXT,
     claimed_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     -- NULL = this claim is live (its executor owns the conversation's
     -- process). Stamped exactly once, on release.
@@ -268,6 +285,10 @@ CREATE TABLE claims (
 CREATE UNIQUE INDEX claims_id_org_unique   ON claims (id, org_id);
 CREATE UNIQUE INDEX idx_claims_one_active  ON claims(conversation_id) WHERE released_at IS NULL;
 CREATE INDEX        idx_claims_conversation ON claims(conversation_id, claimed_at);
+-- The credential provisioner's backstop sweep scans live claims parked in
+-- phase='awaiting_credentials'; live claims in any phase are few, so the
+-- partial index stays tiny.
+CREATE INDEX        idx_claims_active_phase ON claims(phase) WHERE released_at IS NULL AND phase IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- 4b. messages: the unified transcript canon (the columnar-canon columns from
@@ -331,13 +352,17 @@ CREATE INDEX idx_messages_user            ON messages(user_id) WHERE user_id IS 
 -- conversation that was ever claimed (executor_id survives requeues only on
 -- the final owner). Terminal rows release with a mapped outcome; a parked
 -- 'open' row releases as 'parked'; anything else was mid-flight at migration
--- time and stays an active claim for the boot sweep to reconcile.
+-- time and stays an active claim — carrying the staged setup transient as
+-- its phase — for the boot sweep to reconcile.
 INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
-                    cred_pubkey, claimed_at, released_at, outcome,
+                    cred_pubkey, phase, claimed_at, released_at, outcome,
                     duration_ms, num_turns)
 SELECT
     c.id, c.org_id, c.id, r_executor_id, COALESCE(r_boot_epoch, 0),
-    r_cred_pubkey, COALESCE(r_claimed_at, c.started_at),
+    r_cred_pubkey,
+    CASE WHEN r_status IN ('fetching','cloning','agent_starting','awaiting_credentials')
+         THEN r_status END,
+    COALESCE(r_claimed_at, c.started_at),
     CASE
       WHEN c.status IN ('completed','failed','cancelled','task_unsolvable')
         THEN COALESCE(c.completed_at, c.started_at)
@@ -353,7 +378,7 @@ SELECT
     END,
     r_duration_ms, r_num_turns
 FROM (SELECT id, org_id, status, started_at, completed_at, parked_at FROM conversations WHERE type = 'delegation') c
-JOIN (SELECT id AS rid, executor_id AS r_executor_id, boot_epoch AS r_boot_epoch,
+JOIN (SELECT id AS rid, status AS r_status, executor_id AS r_executor_id, boot_epoch AS r_boot_epoch,
              cred_pubkey AS r_cred_pubkey, claimed_at AS r_claimed_at,
              duration_ms AS r_duration_ms, num_turns AS r_num_turns
         FROM conversations_claim_src) src ON src.rid = c.id;

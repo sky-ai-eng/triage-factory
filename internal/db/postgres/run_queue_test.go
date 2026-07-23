@@ -562,10 +562,21 @@ func TestRunQueueStore_Postgres_Credentials(t *testing.T) {
 				}
 				return runID
 			},
-			ForceStatus: func(t *testing.T, runID, status string) {
+			RunStatus: func(t *testing.T, runID string) string {
 				t.Helper()
-				if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = $1 WHERE id = $2`, status, runID); err != nil {
-					t.Fatalf("force status %q: %v", status, err)
+				var status string
+				if err := h.AdminDB.QueryRow(`SELECT status FROM conversations WHERE id = $1`, runID).Scan(&status); err != nil {
+					t.Fatalf("read status: %v", err)
+				}
+				return status
+			},
+			SetActivePhase: func(t *testing.T, runID, phase string) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(`
+					UPDATE claims SET phase = NULLIF($1, '')
+					WHERE conversation_id = $2 AND released_at IS NULL
+				`, phase, runID); err != nil {
+					t.Fatalf("set active phase %q: %v", phase, err)
 				}
 			},
 		}
@@ -720,19 +731,18 @@ func TestRunQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_Postgres_RequeueFromSetupStatus is the production-dialect
-// regression for a run stranded in `cloning`: the claim sets `running`, but the
-// dispatcher advances the row through granular setup statuses before the agent
-// runs, so a workspace-setup failure requeues from one of those. A guard
-// matching only `running` left the UPDATE hitting zero rows and the run sat
-// active-but-idle forever. RequeueRun must requeue from every mid-setup status.
-func TestRunQueueStore_Postgres_RequeueFromSetupStatus(t *testing.T) {
+// TestRunQueueStore_Postgres_RequeueFromSetupPhase pins that RequeueRun fires
+// no matter which setup phase the run's active claim is in: setup progress
+// (fetching/cloning/agent_starting/awaiting_credentials) lives on the claim,
+// the conversation stays 'running' the whole time, so a workspace-setup
+// failure mid-phase must still requeue the row and make it re-claimable.
+func TestRunQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	for _, setupStatus := range []string{"initializing", "cloning", "fetching", "worktree_created", "agent_starting"} {
-		t.Run(setupStatus, func(t *testing.T) {
+	for _, phase := range []string{"fetching", "cloning", "agent_starting", "awaiting_credentials"} {
+		t.Run(phase, func(t *testing.T) {
 			h.Reset(t)
 			orgID, userID := seedPgOrgForBlueprints(t, h)
 			brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
@@ -748,10 +758,11 @@ func TestRunQueueStore_Postgres_RequeueFromSetupStatus(t *testing.T) {
 			if got, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
 				t.Fatalf("ClaimNextRun: (%v, %v)", got, err)
 			}
-			// Advance to the granular setup status the dispatcher would have set
-			// before the workspace-setup failure fired the requeue.
-			if _, err := h.AdminDB.ExecContext(ctx, `UPDATE conversations SET status = $2 WHERE id = $1`, runID, setupStatus); err != nil {
-				t.Fatalf("advance to %s: %v", setupStatus, err)
+			// Advance the claim into the setup phase the dispatcher would
+			// have recorded before the workspace-setup failure fired the
+			// requeue.
+			if err := stores.AgentRuns.SetActiveClaimPhaseSystem(ctx, orgID, runID, phase); err != nil {
+				t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", phase, err)
 			}
 
 			if err := stores.RunQueue.RequeueRun(ctx, orgID, runID, "workspace setup: boom"); err != nil {
@@ -762,10 +773,10 @@ func TestRunQueueStore_Postgres_RequeueFromSetupStatus(t *testing.T) {
 				t.Fatalf("GetSystem after requeue: (%v, %v)", after, err)
 			}
 			if after.Status != "queued" {
-				t.Fatalf("status after requeue from %q = %q, want queued (requeue must not no-op on a mid-setup status)", setupStatus, after.Status)
+				t.Fatalf("status after requeue from phase %q = %q, want queued (a mid-setup phase must not block the requeue)", phase, after.Status)
 			}
 			if reclaimed, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || reclaimed == nil {
-				t.Fatalf("re-ClaimNextRun after requeue from %q: (%v, %v)", setupStatus, reclaimed, err)
+				t.Fatalf("re-ClaimNextRun after requeue from phase %q: (%v, %v)", phase, reclaimed, err)
 			}
 		})
 	}

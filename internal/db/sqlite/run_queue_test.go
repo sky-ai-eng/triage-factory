@@ -203,22 +203,20 @@ func TestRunQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	}
 }
 
-// TestRunQueueStore_SQLite_RequeueFromSetupStatus is the regression for a run
-// stranded in `cloning`: the claim sets `running`, but the dispatcher then
-// advances the row through granular setup statuses (initializing → cloning →
-// fetching → …) before the agent runs, so a workspace-setup failure requeues
-// from one of those — not from `running`. A guard matching only `running` left
-// the UPDATE hitting zero rows, so the run sat active-but-idle forever ("awaiting
-// agent"). RequeueRun must requeue from every mid-setup status.
-func TestRunQueueStore_SQLite_RequeueFromSetupStatus(t *testing.T) {
-	for _, setupStatus := range []string{"initializing", "cloning", "fetching", "worktree_created", "agent_starting"} {
-		t.Run(setupStatus, func(t *testing.T) {
+// TestRunQueueStore_SQLite_RequeueFromSetupPhase pins that RequeueRun fires
+// no matter which setup phase the run's active claim is in: setup progress
+// (fetching/cloning/agent_starting/awaiting_credentials) lives on the claim,
+// the conversation stays 'running' the whole time, so a workspace-setup
+// failure mid-phase must still requeue the row and make it re-claimable.
+func TestRunQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
+	for _, phase := range []string{"fetching", "cloning", "agent_starting", "awaiting_credentials"} {
+		t.Run(phase, func(t *testing.T) {
 			conn := openSQLiteForTest(t)
 			stores := sqlitestore.New(conn)
 			ctx := context.Background()
 			org := runmode.LocalDefaultOrgID
 
-			task := seedEntityEventTask(t, conn, "rq-setup-"+setupStatus)
+			task := seedEntityEventTask(t, conn, "rq-setup-"+phase)
 			insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqs-p0", Name: "Step 0", Body: "b", Source: "user"})
 			insertBlueprintForTest(t, conn, "rqs-bp", "RQ Setup Blueprint")
 			if err := stores.Blueprints.ReplaceSteps(ctx, org, "rqs-bp", []string{"rqs-p0"}, nil); err != nil {
@@ -242,10 +240,11 @@ func TestRunQueueStore_SQLite_RequeueFromSetupStatus(t *testing.T) {
 			if claimed, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || claimed == nil {
 				t.Fatalf("ClaimNextRun: (%v, %v)", claimed, err)
 			}
-			// Advance to the granular setup status the dispatcher would have set
-			// before the workspace-setup failure fired the requeue.
-			if _, err := conn.ExecContext(ctx, `UPDATE conversations SET status = ? WHERE id = 'rqs-run-0'`, setupStatus); err != nil {
-				t.Fatalf("advance to %s: %v", setupStatus, err)
+			// Advance the claim into the setup phase the dispatcher would
+			// have recorded before the workspace-setup failure fired the
+			// requeue.
+			if err := stores.AgentRuns.SetActiveClaimPhaseSystem(ctx, org, "rqs-run-0", phase); err != nil {
+				t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", phase, err)
 			}
 
 			if err := stores.RunQueue.RequeueRun(ctx, org, "rqs-run-0", "workspace setup: boom"); err != nil {
@@ -256,10 +255,10 @@ func TestRunQueueStore_SQLite_RequeueFromSetupStatus(t *testing.T) {
 				t.Fatalf("GetSystem after requeue: (%v, %v)", after, err)
 			}
 			if after.Status != "queued" {
-				t.Fatalf("status after requeue from %q = %q, want queued (requeue must not no-op on a mid-setup status)", setupStatus, after.Status)
+				t.Fatalf("status after requeue from phase %q = %q, want queued (a mid-setup phase must not block the requeue)", phase, after.Status)
 			}
 			if reclaimed, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || reclaimed == nil {
-				t.Fatalf("re-ClaimNextRun after requeue from %q: (%v, %v)", setupStatus, reclaimed, err)
+				t.Fatalf("re-ClaimNextRun after requeue from phase %q: (%v, %v)", phase, reclaimed, err)
 			}
 		})
 	}
@@ -510,10 +509,21 @@ func TestRunQueueStore_SQLite_Credentials(t *testing.T) {
 				}
 				return runID
 			},
-			ForceStatus: func(t *testing.T, runID, status string) {
+			RunStatus: func(t *testing.T, runID string) string {
 				t.Helper()
-				if _, err := conn.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, status, runID); err != nil {
-					t.Fatalf("force status %q: %v", status, err)
+				var status string
+				if err := conn.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&status); err != nil {
+					t.Fatalf("read status: %v", err)
+				}
+				return status
+			},
+			SetActivePhase: func(t *testing.T, runID, phase string) {
+				t.Helper()
+				if _, err := conn.Exec(`
+					UPDATE claims SET phase = NULLIF(?, '')
+					WHERE conversation_id = ? AND released_at IS NULL
+				`, phase, runID); err != nil {
+					t.Fatalf("set active phase %q: %v", phase, err)
 				}
 			},
 		}

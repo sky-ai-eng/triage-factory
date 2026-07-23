@@ -789,7 +789,7 @@ func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID 
 
 // --- Shared scan helpers ---
 
-const pgClaimColumns = `id, org_id, conversation_id, executor_id, boot_epoch, claimed_at,
+const pgClaimColumns = `id, org_id, conversation_id, executor_id, boot_epoch, phase, claimed_at,
 	released_at, outcome, error, duration_ms, num_turns, created_at`
 
 func scanPgClaimRows(rows *sql.Rows) ([]domain.Claim, error) {
@@ -797,6 +797,7 @@ func scanPgClaimRows(rows *sql.Rows) ([]domain.Claim, error) {
 	for rows.Next() {
 		var (
 			c          domain.Claim
+			phase      sql.NullString
 			releasedAt sql.NullTime
 			outcome    sql.NullString
 			errMsg     sql.NullString
@@ -804,7 +805,7 @@ func scanPgClaimRows(rows *sql.Rows) ([]domain.Claim, error) {
 			numTurns   sql.NullInt64
 		)
 		if err := rows.Scan(
-			&c.ID, &c.OrgID, &c.ConversationID, &c.ExecutorID, &c.BootEpoch, &c.ClaimedAt,
+			&c.ID, &c.OrgID, &c.ConversationID, &c.ExecutorID, &c.BootEpoch, &phase, &c.ClaimedAt,
 			&releasedAt, &outcome, &errMsg, &durationMs, &numTurns, &c.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -813,6 +814,7 @@ func scanPgClaimRows(rows *sql.Rows) ([]domain.Claim, error) {
 			t := releasedAt.Time
 			c.ReleasedAt = &t
 		}
+		c.Phase = phase.String
 		c.Outcome = outcome.String
 		c.Error = errMsg.String
 		if durationMs.Valid {

@@ -3,8 +3,9 @@ package db
 import "context"
 
 // RunCredentialsStore owns the claim_credentials table — the sealed
-// per-claim credential bundle channel. An executor parks a claimed run in
-// status='awaiting_credentials'; the brain resolves that run's LLM/GitHub/
+// per-claim credential bundle channel. An executor parks a claimed run's
+// active claim in phase='awaiting_credentials'; the brain resolves that
+// run's LLM/GitHub/
 // Jira credentials, seals them to the claimant's published instances
 // pubkey, and writes exactly one row keyed by the run's ACTIVE claim id.
 // Method signatures still take runID (the conversation id) — the impl

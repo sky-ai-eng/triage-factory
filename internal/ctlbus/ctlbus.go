@@ -40,7 +40,7 @@ const Channel = "tf_ctl"
 // "trigger" uses Manager/OrgID/Force (a scorer/classifier/profiler/
 // reconciler Manager.Trigger call); "pollsoon" uses Source/OrgID (a
 // poller.Manager.PollSoon call); "cred_request" uses OrgID/RunID (TFAC-614:
-// an executor parked in status='awaiting_credentials' nudging the brain's
+// an executor whose claim is parked in phase='awaiting_credentials' nudging the brain's
 // credential provisioner — see internal/credprovision and
 // internal/app/ctl.go's dispatch case); "curator_cred_request" uses OrgID/RunID
 // too (a home executor standing a curator turn's credential sidecar up nudging

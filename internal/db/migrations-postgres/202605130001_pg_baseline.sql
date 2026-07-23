@@ -902,7 +902,7 @@ CREATE TABLE public.org_settings (
     -- across the whole executor fleet. NULL = unlimited (the app/claim also
     -- treats <= 0 as unlimited, mirroring max_daily_cost_usd's "0 = no cap").
     -- Enforced in ClaimNextRun: a queued run is invisible to claims while its
-    -- org's active-run count (status running/awaiting_credentials) is at or
+    -- org's active-run count (status='running') is at or
     -- above this value, so one tenant's burst can't monopolize the fleet's
     -- slots — the admission ceiling the daily *spend* cap can't express. Read
     -- live in the claim statement, so lowering it takes effect on the next
@@ -1323,13 +1323,16 @@ CREATE TABLE public.conversations (
     -- carry reasoning/content_blocks on its messages for display, but they
     -- are never read back for replay — sdk_session_id is truth for resume.
     runtime text DEFAULT 'sdk'::text NOT NULL,
-    -- status is the work lifecycle for delegation (queued / cloning /
-    -- running / awaiting_credentials / open / completed / failed /
-    -- cancelled — vocabulary unchanged from the runs era) and for future
-    -- interactive/subagent kinds. NULL for curator conversations, whose
-    -- turn state is derived from messages + claims; the delegation CHECK
-    -- below pins it NOT NULL where it is load-bearing.
-    status text DEFAULT 'cloning'::text,
+    -- status is the work lifecycle for delegation (queued / running /
+    -- open / completed / failed / cancelled / task_unsolvable) and for
+    -- future interactive/subagent kinds. Engagement sub-state (fetching /
+    -- cloning / agent_starting / awaiting_credentials) lives on the live
+    -- claim's phase, coalesced over this column on display reads — a
+    -- retry or re-claim never rewrites the conversation row. NULL for
+    -- curator conversations, whose turn state is derived from messages +
+    -- claims; the delegation CHECK below pins it NOT NULL where it is
+    -- load-bearing.
+    status text,
     model text,
     -- sdk_session_id is the SDK-runtime resume handle — the union of the
     -- former runs.session_id and projects.curator_session_id. Meaningless
@@ -5539,16 +5542,16 @@ CREATE INDEX idx_conversations_queued ON public.conversations (started_at, id) W
 -- work. Global-oldest (placement disabled) still uses idx_conversations_queued.
 CREATE INDEX idx_conversations_queued_preferred ON public.conversations (preferred_executor_id, started_at, id) WHERE (status = 'queued'::text);
 -- Per-org fairness/cap claim index: the claim computes each org's active-run
--- count (status running/awaiting_credentials) once per statement to both filter
--- orgs at their max_concurrent_runs cap and order claimable rows fewest-active
--- first. This partial index spans ONLY active rows — bounded by fleet capacity
--- (hundreds), not the whole runs history — so that GROUP BY org_id is an
--- index-only scan over the small live set rather than a seq scan. The planner
--- uses this partial index when the claim's active-count WHERE provably IMPLIES
--- this predicate (predicate implication, not textual identity — an equivalent
--- status IN-list matches regardless of spelling); keep the claim's active-run
--- status set in sync with the one here so that implication holds.
-CREATE INDEX idx_conversations_active_by_org ON public.conversations (org_id) WHERE (status = ANY (ARRAY['running'::text, 'awaiting_credentials'::text]));
+-- count (status='running' — a claimed run holds that one status from claim
+-- to terminal/park; setup progress is the claim's phase) once per statement
+-- to both filter orgs at their max_concurrent_runs cap and order claimable
+-- rows fewest-active first. This partial index spans ONLY active rows —
+-- bounded by fleet capacity (hundreds), not the whole runs history — so
+-- that GROUP BY org_id is an index-only scan over the small live set rather
+-- than a seq scan. The planner uses this partial index when the claim's
+-- active-count WHERE provably IMPLIES this predicate; keep the claim's
+-- active-run status set in sync with the one here so that implication holds.
+CREATE INDEX idx_conversations_active_by_org ON public.conversations (org_id) WHERE (status = 'running'::text);
 -- Replay fence (relocated from runs): one event firing one trigger materializes
 -- at most one blueprint_run. Partial WHERE triggering_event_id IS NOT NULL so
 -- manual blueprint runs (NULL) never participate.
@@ -7867,9 +7870,15 @@ CREATE TABLE public.claims (
     -- executor_id = self AND boot_epoch < the current boot's epoch.
     boot_epoch bigint NOT NULL,
     -- cred_pubkey is the per-engagement credential sidecar's X25519 public
-    -- key (base64), published when the executor parks the conversation in
-    -- awaiting_credentials and read by the brain at seal time.
+    -- key (base64), published when the executor parks the engagement in
+    -- phase='awaiting_credentials' and read by the brain at seal time.
     cred_pubkey text,
+    -- phase is the setup/parked sub-state of a LIVE engagement: 'fetching'
+    -- | 'cloning' | 'agent_starting' | 'awaiting_credentials'. NULL = the
+    -- agent process is live (or the claim is released — a released claim's
+    -- phase is inert history). Display reads coalesce this over the
+    -- conversation's stored status.
+    phase text,
     claimed_at timestamp with time zone DEFAULT now() NOT NULL,
     -- released_at NULL = this claim is live (its executor owns the
     -- conversation's process). Stamped exactly once, on release.
@@ -7902,6 +7911,10 @@ ALTER TABLE ONLY public.claims
 -- executor engagement at any moment.
 CREATE UNIQUE INDEX idx_claims_one_active ON public.claims USING btree (conversation_id) WHERE (released_at IS NULL);
 CREATE INDEX idx_claims_conversation ON public.claims USING btree (conversation_id, claimed_at);
+-- The credential provisioner's backstop sweep scans live claims parked in
+-- phase='awaiting_credentials'; live claims in any phase are few, so the
+-- partial index stays tiny.
+CREATE INDEX idx_claims_active_phase ON public.claims USING btree (phase) WHERE (released_at IS NULL AND phase IS NOT NULL);
 
 -- App-pool visibility composes through the conversation (the runstation
 -- shows which executor drove an engagement); every write is system-side.
@@ -7928,8 +7941,8 @@ ALTER TABLE ONLY public.messages
 -- claim_credentials: the sealed per-claim credential bundle channel — the
 -- unification of the former run_credentials and curator_turn_credentials,
 -- which were column-for-column identical because the system always sealed
--- per engagement. An executor claims a conversation and parks it in
--- status='awaiting_credentials'; the brain resolves the engagement's
+-- per engagement. An executor claims a conversation and parks the claim in
+-- phase='awaiting_credentials'; the brain resolves the engagement's
 -- LLM/GitHub/Jira credentials, seals them (credseal, an X25519 sealed box)
 -- to the claim's published cred_pubkey, and writes exactly one row here.
 -- One row per claim (PK claim_id), replaced wholesale on every write —

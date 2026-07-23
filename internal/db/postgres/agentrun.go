@@ -357,10 +357,14 @@ func (s *agentRunStore) SetExecutorSystem(ctx context.Context, orgID, runID, exe
 	})
 }
 
-func (s *agentRunStore) SetStatusSystem(ctx context.Context, orgID, runID, status string) error {
+// SetActiveClaimPhaseSystem scopes the write to the ACTIVE claim only: a
+// released claim's phase is inert history, and a conversation with no live
+// engagement has no sub-state to record — both fall through as a no-op.
+func (s *agentRunStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID, runID, phase string) error {
 	_, err := s.admin.ExecContext(ctx, `
-		UPDATE conversations SET status = $1 WHERE org_id = $2 AND id = $3
-	`, status, orgID, runID)
+		UPDATE claims SET phase = NULLIF($1, '')
+		WHERE org_id = $2 AND conversation_id = $3 AND released_at IS NULL
+	`, phase, orgID, runID)
 	return err
 }
 
@@ -472,9 +476,13 @@ func markCancelledIfActive(ctx context.Context, q queryer, orgID, runID, stopRea
 // non-delegation conversation may carry NULLs there; the claim-derived
 // fields (incl. duration/turns telemetry) come from the `cl` lateral and
 // the ledger-derived accounting (cost + tokens) from the `msum` lateral
-// (see runClaimLateral / runLedgerLateral).
+// (see runClaimLateral / runLedgerLateral). Status coalesces the active
+// claim's phase over the stored status so a live engagement's setup
+// sub-state (fetching/cloning/agent_starting/awaiting_credentials) surfaces
+// through the field the wire has always carried; predicates elsewhere keep
+// using the stored column.
 const pgRunColumns = `
-	r.id, COALESCE(r.task_id::text, ''), COALESCE(r.status, ''), COALESCE(r.model, ''), r.started_at, r.queued_at, cl.claimed_at, r.completed_at,
+	r.id, COALESCE(r.task_id::text, ''), COALESCE(cl.phase, r.status, ''), COALESCE(r.model, ''), r.started_at, r.queued_at, cl.claimed_at, r.completed_at,
 	msum.total_cost_usd, cl.duration_ms, cl.num_turns,
 	COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
 	COALESCE(r.result_summary, ''),
@@ -495,15 +503,16 @@ const pgRunColumns = `
 
 // runClaimLateral derives the claim-facing AgentRun fields from claims:
 // ClaimedAt is the latest claim's claimed_at, Attempts the count of
-// engagements, ExecutorID the active (unreleased) claim's executor, and
+// engagements, ExecutorID and phase the active (unreleased) claim's, and
 // duration_ms/num_turns the SUM of the per-engagement telemetry. The
 // aggregate lateral always yields exactly one row, so a never-claimed
-// conversation reads (NULL, 0, NULL, NULL, NULL).
+// conversation reads (NULL, 0, NULL, NULL, NULL, NULL).
 const runClaimLateral = `
 	LEFT JOIN LATERAL (
 		SELECT MAX(c2.claimed_at) AS claimed_at,
 		       COUNT(*)::int      AS attempts,
 		       MAX(c2.executor_id) FILTER (WHERE c2.released_at IS NULL) AS executor_id,
+		       MAX(c2.phase)       FILTER (WHERE c2.released_at IS NULL) AS phase,
 		       SUM(c2.duration_ms)::bigint AS duration_ms,
 		       SUM(c2.num_turns)::bigint   AS num_turns
 		FROM claims c2

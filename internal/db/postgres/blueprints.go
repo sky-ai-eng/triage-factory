@@ -1172,8 +1172,14 @@ func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID stri
 	if !isValidUUID(blueprintRunID) {
 		return nil, nil
 	}
+	// Status coalesces the active claim's phase over the stored status —
+	// the same display contract as the AgentRunStore projections.
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, task_id, prompt_id, status, model, started_at, completed_at,
+		SELECT id, task_id, prompt_id,
+		       COALESCE((SELECT cl.phase FROM claims cl
+		                 WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL),
+		                status),
+		       model, started_at, completed_at,
 		       (SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = conversations.id AND m.org_id = conversations.org_id),
 		       (SELECT SUM(cl.duration_ms)::bigint FROM claims cl WHERE cl.conversation_id = conversations.id),
 		       (SELECT SUM(cl.num_turns)::bigint FROM claims cl WHERE cl.conversation_id = conversations.id),

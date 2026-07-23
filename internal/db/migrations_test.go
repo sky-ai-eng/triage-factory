@@ -836,3 +836,72 @@ func TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages(t *testing.T) {
 		   AND json_extract(m.metadata,'$.change_type')='pinned_repos'
 		   AND json_extract(m.metadata,'$.baseline_value')='["a/b"]'`, 1)
 }
+
+// TestMigrate_CollapsesSetupTransientOntoClaimPhase covers the in-flight-run
+// conversion: a claimed run seeded in a runs-era setup transient reads back
+// as a 'running' conversation whose ACTIVE claim carries the transient as
+// its phase — so the boot sweep still sees claimed work and the display
+// coalesce still renders the setup sub-state.
+func TestMigrate_CollapsesSetupTransientOntoClaimPhase(t *testing.T) {
+	database, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { database.Close() })
+
+	goose.SetBaseFS(migrationsSQLiteFS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("set dialect: %v", err)
+	}
+
+	// Everything before the conversations refactor: runs still carries the
+	// flattened claim columns and the granular setup statuses.
+	if err := goose.UpTo(database, "migrations-sqlite", 202607200002); err != nil {
+		t.Fatalf("goose UpTo: %v", err)
+	}
+
+	if _, err := database.Exec(`
+		INSERT INTO runs (id, task_id, prompt_id, blueprint_run_id, status,
+		                  executor_id, boot_epoch, claimed_at)
+		VALUES ('r-mid', 't1', 'p1', 'b1', 'cloning', 'exec-mig', 3, CURRENT_TIMESTAMP)
+	`); err != nil {
+		t.Fatalf("seed mid-setup run: %v", err)
+	}
+
+	if err := goose.Up(database, "migrations-sqlite"); err != nil {
+		t.Fatalf("goose Up: %v", err)
+	}
+
+	var status string
+	if err := database.QueryRow(
+		`SELECT status FROM conversations WHERE id = 'r-mid'`,
+	).Scan(&status); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if status != "running" {
+		t.Errorf("conversation status = %q, want running (setup transients collapse)", status)
+	}
+
+	var (
+		phase      string
+		executorID string
+		released   bool
+	)
+	if err := database.QueryRow(`
+		SELECT COALESCE(phase, ''), executor_id, released_at IS NOT NULL
+		FROM claims WHERE conversation_id = 'r-mid'
+	`).Scan(&phase, &executorID, &released); err != nil {
+		t.Fatalf("read claim: %v", err)
+	}
+	if phase != "cloning" {
+		t.Errorf("claim phase = %q, want cloning (the staged transient)", phase)
+	}
+	if executorID != "exec-mig" {
+		t.Errorf("claim executor_id = %q, want exec-mig", executorID)
+	}
+	if released {
+		t.Error("claim released, want active (mid-flight at migration time)")
+	}
+}

@@ -21,8 +21,9 @@ import (
 // creator when none is supplied while an event trigger forces NULL (the
 // creator/trigger_type CHECK); origin is 'blueprint' only when the fixture
 // carries a blueprint_run_id (the origin CHECK requires the blueprint
-// parents), 'interactive' otherwise; status falls back to the schema default
-// so the delegation-has-status CHECK holds.
+// parents), 'interactive' otherwise; status falls back to 'running' so the
+// delegation-has-status CHECK holds (setup sub-states are claim phase, not
+// status — see SeedActiveClaim).
 func SeedConversation(tb testing.TB, database *sql.DB, run domain.AgentRun) {
 	tb.Helper()
 
@@ -52,7 +53,7 @@ func SeedConversation(tb testing.TB, database *sql.DB, run domain.AgentRun) {
 	}
 	status := run.Status
 	if status == "" {
-		status = "cloning"
+		status = "running"
 	}
 	var startedAt any
 	if !run.StartedAt.IsZero() {
