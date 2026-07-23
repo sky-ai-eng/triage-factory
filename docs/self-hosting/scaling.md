@@ -43,7 +43,7 @@ flows end-to-end:
 ```sh
 docker compose ps                 # 1 triagefactory (control) + N executor, all healthy
 # Enqueue a manual delegation through the control pod's API, then watch an
-# executor claim it (run_messages land, the run completes):
+# executor claim it (messages land, the conversation completes):
 docker compose logs -f executor
 ```
 
