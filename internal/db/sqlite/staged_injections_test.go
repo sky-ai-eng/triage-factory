@@ -30,7 +30,7 @@ func TestStagedInjectionStore_SQLite(t *testing.T) {
 			},
 			DeleteRun: func(t *testing.T, runID string) {
 				t.Helper()
-				if _, err := conn.Exec(`DELETE FROM runs WHERE id = ?`, runID); err != nil {
+				if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, runID); err != nil {
 					t.Fatalf("delete run: %v", err)
 				}
 			},
@@ -60,7 +60,7 @@ func seedSQLiteRunForStagedInjection(t *testing.T, conn *sql.DB, suffix string) 
 	t.Helper()
 	id := uuid.New().String()
 	if _, err := conn.Exec(
-		`INSERT INTO runs (id, origin, status) VALUES (?, 'interactive', 'running')`, id,
+		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, id,
 	); err != nil {
 		t.Fatalf("seed run %s (%s): %v", id, fmt.Sprintf("staged-%s", suffix), err)
 	}

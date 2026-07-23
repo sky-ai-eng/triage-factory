@@ -288,7 +288,7 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("EnqueueRun orphan: %v", err)
 	}
-	if _, err := h.AdminDB.Exec(`UPDATE runs SET status = 'running' WHERE id = $1`, orphanID); err != nil {
+	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = 'running' WHERE id = $1`, orphanID); err != nil {
 		t.Fatalf("set orphan running: %v", err)
 	}
 	// A queued orphan under the same terminal parent (never claimed) must also
@@ -313,7 +313,7 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("EnqueueRun healthy: %v", err)
 	}
-	if _, err := h.AdminDB.Exec(`UPDATE runs SET status = 'running' WHERE id = $1`, healthyID); err != nil {
+	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = 'running' WHERE id = $1`, healthyID); err != nil {
 		t.Fatalf("set healthy running: %v", err)
 	}
 
@@ -451,7 +451,7 @@ func TestRunQueueStore_Postgres_Credentials(t *testing.T) {
 			},
 			ForceStatus: func(t *testing.T, runID, status string) {
 				t.Helper()
-				if _, err := h.AdminDB.Exec(`UPDATE runs SET status = $1 WHERE id = $2`, status, runID); err != nil {
+				if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = $1 WHERE id = $2`, status, runID); err != nil {
 					t.Fatalf("force status %q: %v", status, err)
 				}
 			},
@@ -491,7 +491,7 @@ func TestRunQueueStore_Postgres_FleetQueueShares(t *testing.T) {
 			},
 			ForceStatus: func(t *testing.T, runID, status string) {
 				t.Helper()
-				if _, err := h.AdminDB.Exec(`UPDATE runs SET status = $1 WHERE id = $2`, status, runID); err != nil {
+				if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = $1 WHERE id = $2`, status, runID); err != nil {
 					t.Fatalf("force status %q: %v", status, err)
 				}
 			},
@@ -513,7 +513,7 @@ func TestRunQueueStore_Postgres_FleetQueueShares(t *testing.T) {
 func pgRunStatus(t *testing.T, h *pgtest.Harness, runID string) (status string, completed bool) {
 	t.Helper()
 	var completedAt *string
-	if err := h.AdminDB.QueryRow(`SELECT status, completed_at::text FROM runs WHERE id = $1`, runID).
+	if err := h.AdminDB.QueryRow(`SELECT status, completed_at::text FROM conversations WHERE id = $1`, runID).
 		Scan(&status, &completedAt); err != nil {
 		t.Fatalf("read run %s: %v", runID, err)
 	}
@@ -597,8 +597,13 @@ func TestRunQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 	if requeued.QueuedAt == nil || requeued.QueuedAt.Before(firstQueuedAt) {
 		t.Fatalf("QueuedAt after requeue = %v, want re-stamped at/after the first stamp %v", requeued.QueuedAt, firstQueuedAt)
 	}
-	if requeued.ClaimedAt != nil {
-		t.Fatalf("ClaimedAt = %v after requeue, want nil (a queued row has no claim)", requeued.ClaimedAt)
+	// The claims model keeps engagement history: ClaimedAt stays the released
+	// claim's stamp, but the row reads unowned (no active claim).
+	if requeued.ClaimedAt == nil {
+		t.Fatal("ClaimedAt = nil after requeue, want the released engagement's stamp retained")
+	}
+	if requeued.ExecutorID != "" {
+		t.Fatalf("ExecutorID = %q after requeue, want empty (a queued row has no active claim)", requeued.ExecutorID)
 	}
 }
 
@@ -632,7 +637,7 @@ func TestRunQueueStore_Postgres_RequeueFromSetupStatus(t *testing.T) {
 			}
 			// Advance to the granular setup status the dispatcher would have set
 			// before the workspace-setup failure fired the requeue.
-			if _, err := h.AdminDB.ExecContext(ctx, `UPDATE runs SET status = $2 WHERE id = $1`, runID, setupStatus); err != nil {
+			if _, err := h.AdminDB.ExecContext(ctx, `UPDATE conversations SET status = $2 WHERE id = $1`, runID, setupStatus); err != nil {
 				t.Fatalf("advance to %s: %v", setupStatus, err)
 			}
 

@@ -177,7 +177,7 @@ func TestArtifactStore_Postgres_RLS_TeamScoped(t *testing.T) {
 	runID := seedPgArtifactRun(t, h, orgA, teamA, alice)
 	// Seed a teamA-scoped artifact via admin (bypass RLS for setup).
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO artifacts (org_id, run_id, team_id, provider, kind, target, state, dedup_key)
+		INSERT INTO artifacts (org_id, conversation_id, team_id, provider, kind, target, state, dedup_key)
 		VALUES ($1, $2, $3, 'github', 'pull_request', 'octo/repo', 'open', 'github:pull_request:octo/repo#1')
 	`, orgA, runID, teamA); err != nil {
 		t.Fatalf("seed artifact: %v", err)
@@ -236,7 +236,7 @@ func TestArtifactStore_Postgres_RLS_WritePath(t *testing.T) {
 	pgtest.AddOrgMember(t, h, carol, orgA, teamB, "member", "member")
 	ctx := context.Background()
 
-	// run_id left empty (NULL) so this isolates artifacts_insert, not the
+	// conversation_id left empty (NULL) so this isolates artifacts_insert, not the
 	// runs FK/RLS interplay.
 	mkArtifact := func(key string) domain.Artifact {
 		return domain.Artifact{
@@ -271,9 +271,9 @@ func TestArtifactStore_Postgres_RLS_WritePath(t *testing.T) {
 }
 
 // TestArtifactStore_Postgres_ListByTeam_IncludesDetached pins the
-// audit-ledger invariant: an artifact whose run was purged (run_id NULL)
+// audit-ledger invariant: an artifact whose run was purged (conversation_id NULL)
 // is still the team's and must come back from ListByTeam. Guards against a
-// future `AND run_id IS NOT NULL` creeping into the query. TFAC-455.
+// future `AND conversation_id IS NOT NULL` creeping into the query. TFAC-455.
 func TestArtifactStore_Postgres_ListByTeam_IncludesDetached(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -293,15 +293,15 @@ func TestArtifactStore_Postgres_ListByTeam_IncludesDetached(t *testing.T) {
 
 	// Simulate a run purge: the FK is ON DELETE SET NULL, so deleting the
 	// run detaches the artifact rather than cascading it away.
-	if _, err := h.AdminDB.Exec(`DELETE FROM runs WHERE id = $1`, runID); err != nil {
+	if _, err := h.AdminDB.Exec(`DELETE FROM conversations WHERE id = $1`, runID); err != nil {
 		t.Fatalf("purge run: %v", err)
 	}
 	var nullRun sql.NullString
-	if err := h.AdminDB.QueryRow(`SELECT run_id FROM artifacts WHERE id = $1`, art.ID).Scan(&nullRun); err != nil {
+	if err := h.AdminDB.QueryRow(`SELECT conversation_id FROM artifacts WHERE id = $1`, art.ID).Scan(&nullRun); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
 	if nullRun.Valid {
-		t.Fatalf("run_id should be NULL after run purge, got %q", nullRun.String)
+		t.Fatalf("conversation_id should be NULL after run purge, got %q", nullRun.String)
 	}
 
 	rows, err := stores.Artifacts.ListByTeam(ctx, orgID, teamID, db.ArtifactListOpts{})
@@ -439,7 +439,7 @@ func TestArtifactStore_Postgres_UpsertSystem_BypassesRLS(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	// run_id left empty (NULL) so this isolates the write-policy/pool routing
+	// conversation_id left empty (NULL) so this isolates the write-policy/pool routing
 	// from the runs FK.
 	art := domain.Artifact{
 		OrgID: orgID, TeamID: teamID,
@@ -552,7 +552,7 @@ func TestArtifactStore_Postgres_ListNonTerminalBySystem(t *testing.T) {
 // (TFAC-465) on the admin pool: counts keyed by run id across a multi-run
 // batch, a run with no artifacts absent from the map, and an empty runIDs a
 // no-op. Doubles as the proof that the []string→ANY($2) bind and GROUP BY work
-// against the uuid run_id column.
+// against the uuid conversation_id column.
 func TestArtifactStore_Postgres_CountByRun(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -615,7 +615,7 @@ func TestArtifactStore_Postgres_CountByRun_TeamScoped(t *testing.T) {
 	// Two teamA-scoped artifacts on the run (admin insert bypasses RLS for setup).
 	for _, key := range []string{"github:comment:octo/repo:1", "github:comment:octo/repo:2"} {
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO artifacts (org_id, run_id, team_id, provider, kind, target, state, dedup_key)
+			INSERT INTO artifacts (org_id, conversation_id, team_id, provider, kind, target, state, dedup_key)
 			VALUES ($1, $2, $3, 'github', 'comment', 'octo/repo', 'posted', $4)
 		`, orgA, runID, teamA, key); err != nil {
 			t.Fatalf("seed artifact: %v", err)
@@ -727,7 +727,7 @@ func TestArtifactStore_Postgres_ListByRuns_TeamScoped(t *testing.T) {
 	// Two teamA-scoped artifacts on the run (admin insert bypasses RLS for setup).
 	for _, key := range []string{"github:comment:octo/repo:1", "github:comment:octo/repo:2"} {
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO artifacts (org_id, run_id, team_id, provider, kind, target, state, dedup_key)
+			INSERT INTO artifacts (org_id, conversation_id, team_id, provider, kind, target, state, dedup_key)
 			VALUES ($1, $2, $3, 'github', 'comment', 'octo/repo', 'posted', $4)
 		`, orgA, runID, teamA, key); err != nil {
 			t.Fatalf("seed artifact: %v", err)
@@ -1034,14 +1034,14 @@ func TestArtifactStore_Postgres_UpdateReviewDetailsIfPending(t *testing.T) {
 	}
 }
 
-// seedPgArtifactRun mints a minimal run the artifacts.run_id FK can point
+// seedPgArtifactRun mints a minimal run the artifacts.conversation_id FK can point
 // at. origin is non-'blueprint' so runs_origin_requires_parents doesn't
 // demand a parent chain; trigger_type='manual' needs a non-NULL creator.
 func seedPgArtifactRun(t *testing.T, h *pgtest.Harness, orgID, teamID, userID string) string {
 	t.Helper()
 	id := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO runs (id, org_id, team_id, creator_user_id, trigger_type, origin, status, visibility)
+		INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, status, visibility)
 		VALUES ($1, $2, $3, $4, 'manual', 'interactive', 'running', 'team')
 	`, id, orgID, teamID, userID); err != nil {
 		t.Fatalf("seed run: %v", err)

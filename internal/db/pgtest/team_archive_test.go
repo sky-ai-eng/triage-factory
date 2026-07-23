@@ -17,7 +17,7 @@ func seedRunOnTeam(t *testing.T, h *Harness, orgID, creatorID, teamID, status st
 	t.Helper()
 	var id string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, team_id, trigger_type, origin, status, model)
+		INSERT INTO conversations (org_id, creator_user_id, team_id, trigger_type, origin, status, model)
 		VALUES ($1, $2, $3, 'manual', 'manual', $4, 'm') RETURNING id
 	`, orgID, creatorID, teamID, status).Scan(&id); err != nil {
 		t.Fatalf("seed %s run on team %s: %v", status, teamID, err)

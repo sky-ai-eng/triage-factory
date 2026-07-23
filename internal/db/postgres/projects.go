@@ -104,19 +104,19 @@ func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domai
 	_, err = s.q.ExecContext(ctx, `
 		INSERT INTO projects
 		  (id, org_id, creator_user_id, team_id, visibility, name, description,
-		   curator_session_id, pinned_repos,
+		   pinned_repos,
 		   jira_project_key, linear_project_key, spec_authorship_blueprint_id)
 		VALUES
 		  ($1, $2,
 		   COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
 		   NULLIF($3, '')::uuid,
 		   $4,
-		   $5, $6, NULLIF($7, ''), $8::jsonb,
-		   NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''))
+		   $5, $6, $7::jsonb,
+		   NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''))
 	`,
 		id, orgID, teamBind, visibility,
 		p.Name, p.Description,
-		p.CuratorSessionID, string(pinnedJSON),
+		string(pinnedJSON),
 		p.JiraProjectKey, p.LinearProjectKey, p.SpecAuthorshipBlueprintID,
 	)
 	if err != nil {
@@ -127,7 +127,7 @@ func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domai
 
 func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Project, error) {
 	row := s.q.QueryRowContext(ctx, `
-		SELECT id, name, description, curator_session_id, pinned_repos,
+		SELECT id, name, description, pinned_repos,
 		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
 		       team_id, visibility, creator_user_id, created_at, updated_at
 		FROM projects
@@ -141,7 +141,7 @@ func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Proje
 // interface doc.
 func (s *projectStore) GetSystem(ctx context.Context, orgID, id string) (*domain.Project, error) {
 	row := s.admin.QueryRowContext(ctx, `
-		SELECT id, name, description, curator_session_id, pinned_repos,
+		SELECT id, name, description, pinned_repos,
 		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
 		       team_id, visibility, creator_user_id, created_at, updated_at
 		FROM projects
@@ -188,7 +188,7 @@ func (s *projectStore) ResolveOrgSystem(ctx context.Context, projectID string) (
 
 func listProjects(ctx context.Context, q queryer, orgID string) ([]domain.Project, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, name, description, curator_session_id, pinned_repos,
+		SELECT id, name, description, pinned_repos,
 		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
 		       team_id, visibility, creator_user_id, created_at, updated_at
 		FROM projects
@@ -224,17 +224,16 @@ func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Projec
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE projects
 		SET name = $1, description = $2,
-		    curator_session_id = NULLIF($3, ''),
-		    pinned_repos = $4::jsonb,
-		    jira_project_key = NULLIF($5, ''),
-		    linear_project_key = NULLIF($6, ''),
-		    spec_authorship_blueprint_id = NULLIF($7, ''),
-		    visibility = $8,
+		    pinned_repos = $3::jsonb,
+		    jira_project_key = NULLIF($4, ''),
+		    linear_project_key = NULLIF($5, ''),
+		    spec_authorship_blueprint_id = NULLIF($6, ''),
+		    visibility = $7,
 		    updated_at = now()
-		WHERE org_id = $9 AND id = $10
+		WHERE org_id = $8 AND id = $9
 	`,
 		p.Name, p.Description,
-		p.CuratorSessionID, string(pinnedJSON),
+		string(pinnedJSON),
 		p.JiraProjectKey, p.LinearProjectKey, p.SpecAuthorshipBlueprintID,
 		p.Visibility,
 		orgID, p.ID,
@@ -267,13 +266,11 @@ func (s *projectStore) Delete(ctx context.Context, orgID, id string) error {
 	return nil
 }
 
+// SetCuratorSessionID is a transitional no-op: the SDK resume handle moved
+// off the project row (the curator conversation's sdk_session_id absorbs
+// it), so there is no column left to write here.
 func (s *projectStore) SetCuratorSessionID(ctx context.Context, orgID, projectID, sessionID string) error {
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE projects
-		SET curator_session_id = NULLIF($1, ''), updated_at = now()
-		WHERE org_id = $2 AND id = $3
-	`, sessionID, orgID, projectID)
-	return err
+	return nil
 }
 
 func (s *projectStore) BumpUpdatedAt(ctx context.Context, orgID, id string) error {
@@ -292,7 +289,6 @@ func scanProjectRow(row interface {
 }) (*domain.Project, error) {
 	var (
 		p               domain.Project
-		sessionID       sql.NullString
 		jiraKey         sql.NullString
 		linearKey       sql.NullString
 		specBlueprintID sql.NullString
@@ -300,7 +296,7 @@ func scanProjectRow(row interface {
 		pinnedJSON      []byte
 	)
 	err := row.Scan(
-		&p.ID, &p.Name, &p.Description, &sessionID, &pinnedJSON,
+		&p.ID, &p.Name, &p.Description, &pinnedJSON,
 		&jiraKey, &linearKey, &specBlueprintID,
 		&teamID, &p.Visibility, &p.CreatorUserID, &p.CreatedAt, &p.UpdatedAt,
 	)
@@ -310,7 +306,6 @@ func scanProjectRow(row interface {
 	if err != nil {
 		return nil, err
 	}
-	p.CuratorSessionID = sessionID.String
 	p.JiraProjectKey = jiraKey.String
 	p.LinearProjectKey = linearKey.String
 	p.SpecAuthorshipBlueprintID = specBlueprintID.String

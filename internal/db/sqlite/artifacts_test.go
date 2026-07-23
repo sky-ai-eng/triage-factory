@@ -68,7 +68,7 @@ func TestArtifactStore_SQLite_RoundTrip(t *testing.T) {
 	var extID, url, details sql.NullString
 	var nullRun sql.NullString
 	if err := conn.QueryRow(
-		`SELECT run_id, external_id, url, details_json FROM artifacts WHERE dedup_key = 'git:branch:octo/repo:refs/heads/x'`,
+		`SELECT conversation_id, external_id, url, details_json FROM artifacts WHERE dedup_key = 'git:branch:octo/repo:refs/heads/x'`,
 	).Scan(&nullRun, &extID, &url, &details); err != nil {
 		t.Fatalf("read back branch: %v", err)
 	}
@@ -427,9 +427,9 @@ func TestArtifactStore_SQLite_ListByRuns(t *testing.T) {
 }
 
 // TestArtifactStore_SQLite_ListByTeam_IncludesDetached pins the
-// audit-ledger invariant: an artifact whose run was purged (run_id NULL)
+// audit-ledger invariant: an artifact whose run was purged (conversation_id NULL)
 // is still the team's and must come back from ListByTeam. Guards against a
-// future `AND run_id IS NOT NULL` creeping into the query. TFAC-455.
+// future `AND conversation_id IS NOT NULL` creeping into the query. TFAC-455.
 func TestArtifactStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
@@ -447,15 +447,15 @@ func TestArtifactStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
 
 	// Simulate a run purge: the FK is ON DELETE SET NULL, so deleting the
 	// run detaches the artifact rather than cascading it away.
-	if _, err := conn.Exec(`DELETE FROM runs WHERE id = ?`, runID); err != nil {
+	if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, runID); err != nil {
 		t.Fatalf("purge run: %v", err)
 	}
 	var nullRun sql.NullString
-	if err := conn.QueryRow(`SELECT run_id FROM artifacts WHERE id = ?`, art.ID).Scan(&nullRun); err != nil {
+	if err := conn.QueryRow(`SELECT conversation_id FROM artifacts WHERE id = ?`, art.ID).Scan(&nullRun); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
 	if nullRun.Valid {
-		t.Fatalf("run_id should be NULL after run purge, got %q", nullRun.String)
+		t.Fatalf("conversation_id should be NULL after run purge, got %q", nullRun.String)
 	}
 
 	rows, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{})
@@ -919,7 +919,7 @@ func newSQLiteForArtifactTest(t *testing.T) *sql.DB {
 	return conn
 }
 
-// seedArtifactRun inserts a minimal run the artifacts FK (run_id →
+// seedArtifactRun inserts a minimal run the artifacts FK (conversation_id →
 // runs(id)) can point at. origin is set non-'blueprint' so the
 // runs_origin_requires_parents CHECK doesn't demand a parent chain; the
 // org/team/creator columns default to the local sentinels.
@@ -933,7 +933,7 @@ func seedArtifactRun(t *testing.T, conn *sql.DB) string {
 func seedArtifactRunWithID(t *testing.T, conn *sql.DB, id string) string {
 	t.Helper()
 	if _, err := conn.Exec(
-		`INSERT INTO runs (id, origin, status) VALUES (?, 'interactive', 'running')`, id,
+		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, id,
 	); err != nil {
 		t.Fatalf("seed run %s: %v", id, err)
 	}

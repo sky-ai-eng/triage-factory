@@ -148,11 +148,11 @@ BEGIN
   END IF;
 
   -- If a run is being attributed, it must be one the caller can see
-  -- through runs RLS (their own, in their current org). A forged
-  -- p_updated_by_run from another user fails this check because runs
-  -- has SELECT policy `org_id = current_org_id AND creator = current_user`.
+  -- through conversations RLS (their own, in their current org). A forged
+  -- p_updated_by_run from another user fails this check because the
+  -- conversations SELECT policy gates on the caller's org + visibility arm.
   IF p_updated_by_run IS NOT NULL
-     AND NOT EXISTS (SELECT 1 FROM runs WHERE id = p_updated_by_run) THEN
+     AND NOT EXISTS (SELECT 1 FROM conversations WHERE id = p_updated_by_run) THEN
     RAISE EXCEPTION 'run % not accessible to caller', p_updated_by_run
       USING ERRCODE = '42501';
   END IF;

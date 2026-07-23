@@ -29,7 +29,7 @@ var _ db.ExternalActionStore = (*externalActionStore)(nil)
 const externalActionColumns = `
 	id, org_id, COALESCE(team_id, ''), provider, action, target,
 	COALESCE(external_id, ''), COALESCE(url, ''), COALESCE(from_state, ''),
-	COALESCE(to_state, ''), COALESCE(run_id, ''), COALESCE(actor_user_id, ''),
+	COALESCE(to_state, ''), COALESCE(conversation_id, ''), COALESCE(actor_user_id, ''),
 	credential, dedup_key, COALESCE(detail_json, ''), occurred_at
 `
 
@@ -52,7 +52,7 @@ func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO external_actions
 			(id, org_id, team_id, provider, action, target, external_id, url,
-			 from_state, to_state, run_id, actor_user_id, credential, dedup_key, detail_json)
+			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(org_id, dedup_key) DO NOTHING
 	`,

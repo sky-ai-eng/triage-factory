@@ -43,7 +43,7 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 // artifactColumns is the SELECT list scanned into a domain.Artifact via
 // scanArtifact. Same order the Postgres impl projects.
 const artifactColumns = `
-	id, run_id, org_id, team_id, provider, kind, target,
+	id, conversation_id, org_id, team_id, provider, kind, target,
 	external_id, url, state, dedup_key, details_json, created_at, updated_at
 `
 
@@ -78,22 +78,22 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	// migration path). state/details_json stay last-writer-wins by design
 	// (state tracks the latest action).
 	//
-	// run_id AND team_id are both preserved-on-conflict, NOT last-writer-wins:
+	// conversation_id AND team_id are both preserved-on-conflict, NOT last-writer-wins:
 	// the artifact belongs to its CREATING run (domain.Artifact's doc), and
 	// team_id is denormalized off THAT SAME run — not off whichever writer
 	// happens to touch the row later — so a later writer touching the same
 	// dedup key (e.g. a different run editing a Slack message, or a
 	// re-delegate updating a GitHub comment) must not reassign either. Letting
-	// team_id follow the last writer while run_id stayed pinned to the first
+	// team_id follow the last writer while conversation_id stayed pinned to the first
 	// would desync the two and mis-scope the artifact out of its owning
 	// team's reads.
 	row := s.q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
-			(id, run_id, org_id, team_id, provider, kind, target,
+			(id, conversation_id, org_id, team_id, provider, kind, target,
 			 external_id, url, state, dedup_key, details_json, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(org_id, dedup_key) DO UPDATE SET
-			run_id       = artifacts.run_id,
+			conversation_id       = artifacts.conversation_id,
 			team_id      = artifacts.team_id,
 			target       = COALESCE(NULLIF(excluded.target, ''), artifacts.target),
 			external_id  = COALESCE(excluded.external_id, artifacts.external_id),
@@ -204,7 +204,7 @@ func (s *artifactStore) ListByRun(ctx context.Context, orgID, runID string) ([]d
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+artifactColumns+`
 		FROM artifacts
-		WHERE org_id = ? AND run_id = ?
+		WHERE org_id = ? AND conversation_id = ?
 		ORDER BY created_at DESC, id DESC
 	`, orgID, runID)
 	if err != nil {
@@ -251,7 +251,7 @@ func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []s
 	}
 	// ?-placeholder IN list (SQLite has no array bind), chunked to stay inside
 	// SQLite's variable limit (chunkIDs) — the batched run-list path counts
-	// every run across many tasks, which can exceed the limit. A NULL run_id
+	// every run across many tasks, which can exceed the limit. A NULL conversation_id
 	// never matches IN, so detached artifacts are excluded for free.
 	for _, chunk := range chunkIDs(runIDs) {
 		placeholders := make([]string, len(chunk))
@@ -262,10 +262,10 @@ func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []s
 			args = append(args, id)
 		}
 		rows, err := s.q.QueryContext(ctx, `
-			SELECT run_id, COUNT(*)
+			SELECT conversation_id, COUNT(*)
 			FROM artifacts
-			WHERE org_id = ? AND run_id IN (`+strings.Join(placeholders, ", ")+`)
-			GROUP BY run_id
+			WHERE org_id = ? AND conversation_id IN (`+strings.Join(placeholders, ", ")+`)
+			GROUP BY conversation_id
 		`, args...)
 		if err != nil {
 			return nil, err
@@ -296,8 +296,8 @@ func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []s
 		return nil, nil
 	}
 	// ?-placeholder IN list (SQLite has no array bind), chunked to stay inside
-	// SQLite's variable limit (chunkIDs). A NULL run_id never matches IN, so
-	// detached artifacts are excluded for free. Each run_id is in one chunk, so
+	// SQLite's variable limit (chunkIDs). A NULL conversation_id never matches IN, so
+	// detached artifacts are excluded for free. Each conversation_id is in one chunk, so
 	// per-run grouping by the caller is unaffected by the chunk boundary.
 	var arts []domain.Artifact
 	for _, chunk := range chunkIDs(runIDs) {
@@ -311,7 +311,7 @@ func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []s
 		rows, err := s.q.QueryContext(ctx, `
 			SELECT `+artifactColumns+`
 			FROM artifacts
-			WHERE org_id = ? AND run_id IN (`+strings.Join(placeholders, ", ")+`)
+			WHERE org_id = ? AND conversation_id IN (`+strings.Join(placeholders, ", ")+`)
 			ORDER BY created_at DESC, id DESC
 		`, args...)
 		if err != nil {

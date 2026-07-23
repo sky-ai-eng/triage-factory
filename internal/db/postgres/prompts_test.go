@@ -234,7 +234,7 @@ func seedPgRunsForStats(t *testing.T, conn *sql.DB, orgID, userID, promptID stri
 		runID := uuid.New().String()
 		startedAt := now.AddDate(0, 0, -i)
 		if _, err := conn.Exec(`
-			INSERT INTO runs (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, status, started_at, total_cost_usd, duration_ms, blueprint_run_id)
+			INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, status, started_at, total_cost_usd, duration_ms, blueprint_run_id)
 			VALUES ($1, $2, $3, (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1), 'team', $4, $5, $6, $7, 0.01, 100, $8)
 		`, runID, orgID, userID, taskID, promptID, status, startedAt, brID); err != nil {
 			t.Fatalf("seed run %d: %v", i, err)

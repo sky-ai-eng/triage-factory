@@ -153,15 +153,15 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			r.status, COALESCE(r.model, ''), r.started_at, r.completed_at,
 			r.total_cost_usd, r.duration_ms, r.num_turns,
 			COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
-			COALESCE(r.result_summary, ''), COALESCE(r.session_id, ''),
+			COALESCE(r.result_summary, ''), COALESCE(r.sdk_session_id, ''),
 			(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing,
 			r.trigger_type, COALESCE(r.trigger_id::text, ''),
 			COALESCE(r.actor_agent_id::text, ''),
 			COALESCE(a.display_name, ''),
 			COALESCE(r.failure_kind, ''),
 			` + pgTaskColumnsWithEntity + `
-		FROM runs r
-		LEFT JOIN run_memory rm ON rm.run_id = r.id AND rm.org_id = r.org_id
+		FROM conversations r
+		LEFT JOIN run_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		JOIN tasks t ON r.task_id = t.id AND t.org_id = r.org_id
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id

@@ -811,7 +811,7 @@ func (s *blueprintStore) GetRunForRun(ctx context.Context, orgID, runID string) 
 		blueprintRunID sql.NullString
 		stepIndex      sql.NullInt64
 	)
-	err := s.q.QueryRowContext(ctx, `SELECT blueprint_run_id, blueprint_step_index FROM runs WHERE id = ?`, runID).
+	err := s.q.QueryRowContext(ctx, `SELECT blueprint_run_id, blueprint_step_index FROM conversations WHERE id = ?`, runID).
 		Scan(&blueprintRunID, &stepIndex)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, nil
@@ -901,7 +901,7 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 // store.
 func cancelOrphanedChildRuns(ctx context.Context, q queryer, blueprintRunID string) error {
 	_, err := q.ExecContext(ctx, `
-		UPDATE runs
+		UPDATE conversations
 		SET status = 'cancelled',
 		    completed_at = COALESCE(completed_at, ?),
 		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
@@ -966,9 +966,9 @@ func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintR
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id, task_id, prompt_id, status, model, started_at, completed_at,
 		       total_cost_usd, duration_ms, num_turns, stop_reason, worktree_path,
-		       result_summary, session_id, outcome, outcome_reason,
+		       result_summary, sdk_session_id, outcome, outcome_reason,
 		       blueprint_run_id, blueprint_step_index
-		FROM runs
+		FROM conversations
 		WHERE blueprint_run_id = ?
 		ORDER BY blueprint_step_index ASC, started_at ASC
 	`, blueprintRunID)
@@ -1040,7 +1040,7 @@ func (s *blueprintStore) ActiveStepRunIDs(ctx context.Context, orgID, blueprintR
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id FROM runs
+		SELECT id FROM conversations
 		WHERE blueprint_run_id = ?
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
 		                     'pending_approval','open')

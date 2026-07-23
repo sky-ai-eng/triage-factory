@@ -14,7 +14,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestAgentRunStore_Postgres runs the shared conformance suite
@@ -138,6 +137,36 @@ func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) 
 			}
 			return id
 		},
+		Run: func(t *testing.T, run domain.AgentRun) string {
+			t.Helper()
+			if run.CreatorUserID == "" && run.TriggerType != "event" {
+				run.CreatorUserID = userID
+			}
+			return seedPgConversation(t, conn, orgID, run)
+		},
+		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {
+			t.Helper()
+			rows, err := conn.Query(`
+				SELECT id::text, executor_id, boot_epoch, released_at IS NOT NULL, COALESCE(outcome, '')
+				FROM claims WHERE conversation_id = $1 ORDER BY claimed_at ASC, created_at ASC
+			`, conversationID)
+			if err != nil {
+				t.Fatalf("read claims: %v", err)
+			}
+			defer rows.Close()
+			var out []dbtest.ClaimRow
+			for rows.Next() {
+				var c dbtest.ClaimRow
+				if err := rows.Scan(&c.ID, &c.ExecutorID, &c.BootEpoch, &c.Released, &c.Outcome); err != nil {
+					t.Fatalf("scan claim: %v", err)
+				}
+				out = append(out, c)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("claims rows: %v", err)
+			}
+			return out
+		},
 		StampAgentClaim: func(t *testing.T, taskID, agent string) {
 			t.Helper()
 			if _, err := conn.Exec(
@@ -147,28 +176,9 @@ func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) 
 				t.Fatalf("stamp claim: %v", err)
 			}
 		},
-		EventHandler: func(t *testing.T, eventType string) string {
-			t.Helper()
-			id := uuid.New().String()
-			// Minimal rule shape. source='user' requires a non-NULL
-			// creator_user_id (event_handlers_system_has_no_creator CHECK);
-			// team_id resolves from the org's sole seeded team, mirroring
-			// the Task seeder's subquery.
-			if _, err := conn.Exec(`
-				INSERT INTO event_handlers
-					(id, org_id, creator_user_id, team_id, kind, event_type, enabled, source,
-					 name, default_priority, sort_order)
-				VALUES ($1, $2, $3,
-				        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-				        'rule', $4, true, 'user', 'fence-fk', 0.5, 100)
-			`, id, orgID, userID, eventType); err != nil {
-				t.Fatalf("seed event_handler: %v", err)
-			}
-			return id
-		},
 		BlueprintRun: func(t *testing.T, taskID string) string {
 			t.Helper()
-			// runs.blueprint_run_id is NOT NULL — every run needs a parent
+			// The origin CHECK requires blueprint_run_id — every run needs a parent
 			// blueprint_run. Mint a fresh blueprint + blueprint_run per
 			// call. Postgres requires org_id on both; blueprint_runs with
 			// trigger_type='manual' also needs a non-NULL creator_user_id
@@ -206,14 +216,14 @@ func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) 
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
-					INSERT INTO run_memory (id, org_id, run_id, entity_id, agent_content) VALUES ($1, $2, $3, $4, NULL)
+					INSERT INTO run_memory (id, org_id, conversation_id, entity_id, agent_content) VALUES ($1, $2, $3, $4, NULL)
 				`, memID, orgID, runID, entityID); err != nil {
 					t.Fatalf("seed null memory: %v", err)
 				}
 				return
 			}
 			if _, err := conn.Exec(`
-				INSERT INTO run_memory (id, org_id, run_id, entity_id, agent_content) VALUES ($1, $2, $3, $4, $5)
+				INSERT INTO run_memory (id, org_id, conversation_id, entity_id, agent_content) VALUES ($1, $2, $3, $4, $5)
 			`, memID, orgID, runID, entityID, content); err != nil {
 				t.Fatalf("seed memory: %v", err)
 			}
@@ -230,7 +240,7 @@ func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) 
 			// that fails to unmarshal into the target Go slice.
 			var id int64
 			if err := conn.QueryRow(
-				`INSERT INTO run_messages (org_id, run_id, role, subtype, content, `+column+`)
+				`INSERT INTO messages (org_id, conversation_id, role, subtype, content, `+column+`)
 				 VALUES ($1, $2, 'assistant', 'text', 'x', $3::jsonb) RETURNING id`,
 				orgID, runID, rawJSON,
 			).Scan(&id); err != nil {
@@ -289,13 +299,11 @@ func TestAgentRunStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		`, taskID, orgID, userID, entityID, eventID); err != nil {
 			t.Fatalf("task: %v", err)
 		}
-		if err := stores.AgentRuns.Create(ctx, orgID, domain.AgentRun{
+		seedPgConversation(t, h.AdminDB, orgID, domain.AgentRun{
 			ID: runID, TaskID: taskID, PromptID: promptID, Status: "running", Model: "m",
 			CreatorUserID:  userID,
 			BlueprintRunID: seedPgBlueprintRun(t, h, orgID, userID, taskID),
-		}); err != nil {
-			t.Fatalf("Create run: %v", err)
-		}
+		})
 		return taskID
 	}
 	runA := uuid.New().String()
@@ -370,7 +378,7 @@ func TestAgentRunStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	}
 	blueprintRunA := seedPgBlueprintRun(t, h, orgA, alice, taskA)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO runs (id, org_id, task_id, team_id, prompt_id, status, model, creator_user_id, trigger_type, blueprint_run_id)
+		INSERT INTO conversations (id, org_id, task_id, team_id, prompt_id, status, model, creator_user_id, trigger_type, blueprint_run_id)
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 		        'p_rls_A', 'running', 'm', $4, 'manual', $5)
@@ -411,140 +419,25 @@ func TestAgentRunStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		}
 	})
 
-	t.Run("cross_org_write_denied", func(t *testing.T) {
-		// bob's claims point at orgB; the row would land with
-		// org_id=orgA referencing orgA's task. We want runs_insert
-		// WITH CHECK to reject, not a missing FK target.
-		newRunID := uuid.New().String()
+	t.Run("cross_org_write_filtered", func(t *testing.T) {
+		// The insert path moved to the admin-pool run queue (nothing
+		// mints conversations under tf_app), so the write arm to pin is
+		// an UPDATE: bob's lifecycle write against orgA's run must be
+		// silently filtered by the USING clause — no rows touched.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx, pgtest.SecretKey).AgentRuns.Create(ctx, orgA, domain.AgentRun{
-				ID: newRunID, TaskID: taskA, PromptID: "p_rls_A",
-				Status: "running", Model: "m",
-				TriggerType: "manual", CreatorUserID: bob,
-				// Valid FK target in orgA so the rejection is the
-				// runs_insert WITH CHECK, not a missing blueprint_run.
-				BlueprintRunID: blueprintRunA,
-			})
+			return pgstore.NewForTx(tx, pgtest.SecretKey).AgentRuns.SetWorktreePath(ctx, orgA, runA, "/tmp/bob-was-here")
 		})
-		pgtest.AssertRLSViolation(t, err)
+		if err != nil {
+			t.Fatalf("cross-org SetWorktreePath: %v", err)
+		}
+		var wt sql.NullString
+		if err := h.AdminDB.QueryRow(`SELECT worktree_path FROM conversations WHERE id = $1`, runA).Scan(&wt); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if wt.Valid && wt.String == "/tmp/bob-was-here" {
+			t.Errorf("cross-org UPDATE landed; RLS USING filter leaked orgA's run to orgB")
+		}
 	})
-}
-
-// TestAgentRunStore_Postgres_Create_UnderAppPoolRLS pins the two
-// app-pool fixes against actual RLS, not the AdminDB-bypassed
-// conformance setup:
-//
-//  1. Event-triggered Create routes to the admin pool. Wired
-//     against AppDB for app-half + AdminDB for admin-half, calling
-//     Create with trigger_type='event' must succeed even though
-//     the runs_insert RLS policy would reject a null-creator row
-//     under tf_app.
-//
-//  2. Manual Create's COALESCE walks past the LocalDefaultUserID
-//     sentinel. Wired same way, with JWT claims bound to a real
-//     org member; if the caller passes the sentinel as
-//     CreatorUserID, the SQL strips it (via the Go-side filter)
-//     and tf.current_user_id() supplies the right value so the
-//     RLS predicate (creator_user_id = tf.current_user_id())
-//     passes.
-func TestAgentRunStore_Postgres_Create_UnderAppPoolRLS(t *testing.T) {
-	h := pgtest.Shared(t)
-	h.Reset(t)
-	orgID, userID, _ := seedPgAgentRunOrg(t, h)
-	seedPgAgentRunPromptIn(t, h, "p_rls_test", orgID, userID)
-	// Seed entity + task on the admin side so the FK chain exists
-	// before the app-pool Create lands. (The Create itself is the
-	// thing under test; setup uses admin.)
-	entityID := uuid.New().String()
-	eventID := uuid.New().String()
-	taskID := uuid.New().String()
-	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'RLS Test', '', '{}'::jsonb, now())
-	`, entityID, orgID, "rls-"+orgID[:8]); err != nil {
-		t.Fatalf("entity: %v", err)
-	}
-	if _, err := h.AdminDB.Exec(`
-		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
-		VALUES ($1, $2, $3, 'github:pr:ci_check_failed', '', '{}'::jsonb, now())
-	`, eventID, orgID, entityID); err != nil {
-		t.Fatalf("event: %v", err)
-	}
-	if _, err := h.AdminDB.Exec(`
-		INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key, primary_event_id, status, scoring_status, priority_score)
-		VALUES ($1, $2, $3,
-		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-		        'team', $4, 'github:pr:ci_check_failed', '', $5, 'queued', 'pending', 0.5)
-	`, taskID, orgID, userID, entityID, eventID); err != nil {
-		t.Fatalf("task: %v", err)
-	}
-
-	// Wire AgentRunStore against the real admin pool (BYPASSRLS)
-	// for the system-write path and the real app pool (RLS-active
-	// under tf_app via WithTx) for request-equivalent paths. Note
-	// that pgstore.New takes (admin, app) — admin first — so
-	// passing in the order shown matches the production shape.
-	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-
-	// ---- Event-triggered Create (fix #5) ----
-	// No JWT claims tx needed because the admin pool is used for
-	// the insert. The bare context call should succeed.
-	eventRunID := uuid.New().String()
-	if err := stores.AgentRuns.Create(context.Background(), orgID, domain.AgentRun{
-		ID: eventRunID, TaskID: taskID, PromptID: "p_rls_test", Status: "running", Model: "m",
-		TriggerType:    "event",
-		BlueprintRunID: seedPgBlueprintRun(t, h, orgID, userID, taskID),
-		// CreatorUserID empty — CHECK requires NULL for event runs.
-	}); err != nil {
-		t.Fatalf("event-triggered Create under app-pool wiring: %v", err)
-	}
-	// Verify it landed.
-	var landedTrigger string
-	var landedCreator sql.NullString
-	if err := h.AdminDB.QueryRow(
-		`SELECT trigger_type, creator_user_id::text FROM runs WHERE id = $1`,
-		eventRunID,
-	).Scan(&landedTrigger, &landedCreator); err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if landedTrigger != "event" {
-		t.Errorf("trigger_type = %q, want event", landedTrigger)
-	}
-	if landedCreator.Valid {
-		t.Errorf("creator_user_id = %q, want NULL (event-trigger CHECK)", landedCreator.String)
-	}
-
-	// ---- Manual Create with LocalDefaultUserID sentinel (fix #6) ----
-	// Run inside WithTx so JWT claims are set; the COALESCE in
-	// Create then resolves tf.current_user_id() to userID. With
-	// the sentinel filter, the manual path lands with the real
-	// claimed user.
-	manualRunID := uuid.New().String()
-	manualBlueprintRun := seedPgBlueprintRun(t, h, orgID, userID, taskID)
-	if err := stores.Tx.WithTx(context.Background(), orgID, userID, func(tx db.TxStores) error {
-		return tx.AgentRuns.Create(context.Background(), orgID, domain.AgentRun{
-			ID: manualRunID, TaskID: taskID, PromptID: "p_rls_test", Status: "running", Model: "m",
-			TriggerType:    "manual",
-			BlueprintRunID: manualBlueprintRun,
-			CreatorUserID:  runmode.LocalDefaultUserID, // the sentinel the pre-store spawner still passes
-		})
-	}); err != nil {
-		t.Fatalf("manual Create with sentinel under app-pool: %v", err)
-	}
-	var manualCreator sql.NullString
-	if err := h.AdminDB.QueryRow(
-		`SELECT creator_user_id::text FROM runs WHERE id = $1`,
-		manualRunID,
-	).Scan(&manualCreator); err != nil {
-		t.Fatalf("read back manual: %v", err)
-	}
-	if !manualCreator.Valid {
-		t.Fatalf("manual creator_user_id is NULL; want %s (resolved from JWT claims)", userID)
-	}
-	if manualCreator.String != userID {
-		t.Errorf("manual creator_user_id = %q, want %q (JWT-claimed user, not the SQLite sentinel)",
-			manualCreator.String, userID)
-	}
 }
 
 // TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims
@@ -601,59 +494,58 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	// Seed a manual run row owned by userID — the spawner does this
-	// via Create at goroutine spawn time, before the goroutine
-	// reaches any of the lifecycle writes under test.
-	runID := uuid.New().String()
+	// Seed a manual run row owned by userID — the queue's EnqueueRun does
+	// this in production before any lifecycle write runs.
 	lcBlueprintRun := seedPgBlueprintRun(t, h, orgID, userID, taskID)
-	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		return tx.AgentRuns.Create(ctx, orgID, domain.AgentRun{
-			ID: runID, TaskID: taskID, PromptID: "p_lc_test", Status: "running", Model: "m",
-			TriggerType: "manual", CreatorUserID: userID,
-			BlueprintRunID: lcBlueprintRun,
-		})
-	}); err != nil {
-		t.Fatalf("seed run: %v", err)
-	}
+	runID := seedPgConversation(t, h.AdminDB, orgID, domain.AgentRun{
+		TaskID: taskID, PromptID: "p_lc_test", Status: "running", Model: "m",
+		TriggerType: "manual", CreatorUserID: userID,
+		BlueprintRunID: lcBlueprintRun,
+	})
 
 	// Drive each lifecycle write through SyntheticClaimsWithTx — the
 	// shape the spawner uses for every manual-run bookkeeping point.
 
-	// MarkResuming (open-run resume entry).
-	var resumed bool
+	// MarkOpen (park) then MarkQueuedForResume (resume-by-enqueue) — the
+	// open→queued CAS the resume path drives under the user's claims.
+	var parked, requeued bool
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		// Park the run `open` first so MarkResuming's guard fires.
-		if err := tx.AgentRuns.SetStatus(ctx, orgID, runID, "open"); err != nil {
-			return err
+		p, mErr := tx.AgentRuns.MarkOpen(ctx, orgID, runID)
+		parked = p
+		if mErr != nil {
+			return mErr
 		}
-		r, mErr := tx.AgentRuns.MarkResuming(ctx, orgID, runID, "test-instance", 1)
-		resumed = r
+		r, mErr := tx.AgentRuns.MarkQueuedForResume(ctx, orgID, runID)
+		requeued = r
 		return mErr
 	}); err != nil {
-		t.Fatalf("MarkResuming under synth claims: %v", err)
+		t.Fatalf("MarkOpen/MarkQueuedForResume under synth claims: %v", err)
 	}
-	if !resumed {
-		t.Errorf("MarkResuming: flipped=false, want true (was open)")
+	if !parked || !requeued {
+		t.Errorf("park/requeue = (%v, %v), want (true, true)", parked, requeued)
+	}
+	// Back to running for the terminal writes below (the claim path is
+	// admin-side; here we only need the status precondition).
+	if err := stores.AgentRuns.SetStatusSystem(ctx, orgID, runID, "running"); err != nil {
+		t.Fatalf("SetStatusSystem: %v", err)
 	}
 
-	// AddPartialTotals (per-turn accumulation).
+	// Complete twice — the second folds into the first's totals, the
+	// accumulation the resume path relies on (the terminal write is the
+	// largest of processCompletion's routed writes).
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		return tx.AgentRuns.AddPartialTotals(ctx, orgID, runID, 0.5, 1500, 3)
+		return tx.AgentRuns.Complete(ctx, orgID, runID, "completed", 0.5, 1500, 3, "partial", "", "", "", "")
 	}); err != nil {
-		t.Fatalf("AddPartialTotals under synth claims: %v", err)
+		t.Fatalf("first Complete under synth claims: %v", err)
 	}
-
-	// Complete (terminal write — the largest of processCompletion's
-	// routed writes).
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		return tx.AgentRuns.Complete(ctx, orgID, runID, "completed", 0.25, 500, 2, "end_turn", "ok", "finish", "", "")
 	}); err != nil {
 		t.Fatalf("Complete under synth claims: %v", err)
 	}
 
-	// Verify on admin: row landed in completed (runs never park in
-	// pending_approval anymore), totals reflect the
-	// AddPartialTotals + Complete merge, creator stayed the original user.
+	// Verify on admin: row landed in completed, totals reflect the two
+	// Completes' merge, creator stayed the original user.
 	var (
 		status        string
 		totalCostUSD  float64
@@ -664,7 +556,7 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	)
 	if err := h.AdminDB.QueryRow(`
 		SELECT status, total_cost_usd, duration_ms, num_turns, stop_reason, creator_user_id::text
-		FROM runs WHERE id = $1
+		FROM conversations WHERE id = $1
 	`, runID).Scan(&status, &totalCostUSD, &durationMs, &numTurns, &stopReason, &creatorUserID); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
@@ -700,9 +592,45 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	}
 }
 
+// seedPgConversation inserts a conversations row directly — the test
+// fixture stand-in for the queue's EnqueueRun mint, staging rows in
+// arbitrary status. The trigger_type↔creator CHECK is satisfied by the
+// caller: manual rows carry CreatorUserID, event rows leave it empty.
+func seedPgConversation(t *testing.T, conn *sql.DB, orgID string, run domain.AgentRun) string {
+	t.Helper()
+	id := run.ID
+	if id == "" {
+		id = uuid.New().String()
+	}
+	trigger := run.TriggerType
+	if trigger == "" {
+		trigger = "manual"
+	}
+	var stepIdx any
+	if run.BlueprintStepIndex != nil {
+		stepIdx = *run.BlueprintStepIndex
+	}
+	var creator any
+	if run.CreatorUserID != "" {
+		creator = run.CreatorUserID
+	}
+	if _, err := conn.Exec(`
+		INSERT INTO conversations (id, org_id, task_id, team_id, prompt_id, status, model,
+		                           trigger_type, trigger_id, visibility, creator_user_id,
+		                           blueprint_run_id, blueprint_step_index)
+		VALUES ($1, $2, $3,
+		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+		        $4, $5, $6, $7, NULLIF($8, '')::uuid, 'team', $9, $10, $11)
+	`, id, orgID, run.TaskID, run.PromptID, run.Status, run.Model,
+		trigger, run.TriggerID, creator, run.BlueprintRunID, stepIdx); err != nil {
+		t.Fatalf("seed conversation %s: %v", id, err)
+	}
+	return id
+}
+
 // seedPgBlueprintRun mints a blueprint + blueprint_run pointed at the
-// given task so a standalone `runs` insert can satisfy the now NOT-NULL
-// runs.blueprint_run_id FK (→ blueprint_runs(id)). Mirrors the
+// given task so a standalone conversations insert can satisfy the origin
+// CHECK's blueprint_run_id FK (→ blueprint_runs(id)). Mirrors the
 // conformance seeder's BlueprintRun, but exposed as a plain helper for
 // the RLS/cross-org tests that seed runs outside the conformance suite.
 // Postgres requires org_id on both rows; trigger_type='manual' also
@@ -730,11 +658,11 @@ func seedPgBlueprintRun(t *testing.T, h *pgtest.Harness, orgID, userID, taskID s
 }
 
 // TestAgentRunStore_Postgres_RuntimeDefaultsToSDK pins the
-// runs.runtime schema fact the columnar-canon epic depends on: a
-// freshly created run — the only shape any code in this repo
-// produces today — lands as 'sdk', not the native loop's 'native'.
-// domain.AgentRun has no Runtime field (nothing writes 'native' until
-// the executor-side loop lands), so this reads the column directly.
+// conversations.runtime schema fact the columnar-canon epic depends on: a
+// freshly seeded delegation row lands as 'sdk', not the native loop's
+// 'native'. domain.AgentRun has no write path for Runtime (nothing writes
+// 'native' until the executor-side loop lands), so this reads the column
+// directly.
 func TestAgentRunStore_Postgres_RuntimeDefaultsToSDK(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -765,18 +693,14 @@ func TestAgentRunStore_Postgres_RuntimeDefaultsToSDK(t *testing.T) {
 		t.Fatalf("task: %v", err)
 	}
 
-	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	runID := uuid.New().String()
-	if err := stores.AgentRuns.Create(context.Background(), orgID, domain.AgentRun{
-		ID: runID, TaskID: taskID, PromptID: "p_runtime_test", Status: "running", Model: "m",
+	runID := seedPgConversation(t, h.AdminDB, orgID, domain.AgentRun{
+		TaskID: taskID, PromptID: "p_runtime_test", Status: "running", Model: "m",
 		CreatorUserID:  userID,
 		BlueprintRunID: seedPgBlueprintRun(t, h, orgID, userID, taskID),
-	}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
+	})
 
 	var runtime string
-	if err := h.AdminDB.QueryRow(`SELECT runtime FROM runs WHERE id = $1`, runID).Scan(&runtime); err != nil {
+	if err := h.AdminDB.QueryRow(`SELECT runtime FROM conversations WHERE id = $1`, runID).Scan(&runtime); err != nil {
 		t.Fatalf("read runtime: %v", err)
 	}
 	if runtime != "sdk" {

@@ -28,7 +28,7 @@ func TestRunPendingInputStore_Postgres(t *testing.T) {
 			},
 			DeleteRun: func(t *testing.T, runID string) {
 				t.Helper()
-				if _, err := h.AdminDB.Exec(`DELETE FROM runs WHERE id = $1`, runID); err != nil {
+				if _, err := h.AdminDB.Exec(`DELETE FROM conversations WHERE id = $1`, runID); err != nil {
 					t.Fatalf("delete run: %v", err)
 				}
 			},

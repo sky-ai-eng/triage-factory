@@ -88,8 +88,37 @@ const (
 	RunFailureSessionLost RunFailureKind = "session_lost"
 )
 
-// AgentRun represents a delegated agent execution.
-type AgentRun struct {
+// Conversation is the durable agent-context row: one row per transcript,
+// regardless of surface (a delegated task run, a curator chat, a future
+// interactive session or subagent). Per-engagement execution state lives on
+// Claim. Field names are the legacy wire shape (direct json.Marshal,
+// PascalCase) — the conversation-vocabulary wire rename is a separate,
+// later change, so several fields keep run-era names on purpose.
+type Conversation struct {
+	// Type names the owning surface: "delegation" | "curator" |
+	// "interactive" (reserved) | namespaced "subagent:<kind>" (reserved).
+	// Empty on legacy hydration paths that don't select it.
+	Type string `json:"type,omitempty"`
+	// Runtime is the executing engine: "sdk" | "native" — a one-way
+	// ratchet per conversation (the SDK can never continue a transcript
+	// that ran native).
+	Runtime string `json:"runtime,omitempty"`
+	// Visibility mirrors conversations.visibility ("private" | "team" |
+	// "org"). Curator conversations mint "private" — creator-scoped by the
+	// same RLS arms delegation already used.
+	Visibility string `json:"visibility,omitempty"`
+	// ProjectID anchors a curator conversation to its project; empty for
+	// every other type.
+	ProjectID string `json:"project_id,omitempty"`
+	// ParentConversationID links a subagent conversation to its spawner;
+	// empty otherwise.
+	ParentConversationID string `json:"parent_conversation_id,omitempty"`
+	// LastRequestAt is the KV-cache warmth watermark (time of the most
+	// recent provider request). ArchivedAt retires the conversation from
+	// its surface's current view (the curator reset mechanism).
+	LastRequestAt *time.Time `json:"last_request_at,omitempty"`
+	ArchivedAt    *time.Time `json:"archived_at,omitempty"`
+
 	ID        string
 	TaskID    string
 	PromptID  string // FK to prompts.id — which prompt was used for this run
@@ -236,10 +265,22 @@ type SnapshotReapKey struct {
 	BlueprintRunID string
 }
 
-// AgentMessage represents a single message within an agent run.
-type AgentMessage struct {
-	ID                  int
-	RunID               string
+// Message is one transcript row: a neutral (OpenAI-shaped) API message
+// owned by exactly one conversation. Field names are the frozen legacy
+// wire shape — RunID carries the conversation id until the wire rename.
+type Message struct {
+	ID int
+	// RunID is the owning conversation id (legacy field name — frozen
+	// wire shape until the conversation-vocabulary wire rename).
+	RunID string
+	// UserID stamps the whole turn: the requesting user owns their user
+	// row and the assistant/tool rows produced in response. Empty =
+	// system-triggered.
+	UserID string
+	// ClaimID attributes the row to the executor engagement that produced
+	// it; empty for rows produced outside any claim (a queued user
+	// message, a pending injection). Never read by assembly.
+	ClaimID             string
 	Role                string // "assistant" | "tool" | "user" — see AgentRunStore's doc comment for the full allowed set incl. reserved subtypes
 	Content             string
 	Subtype             string // "text" | "thinking" | "tool_use" | "tool"
@@ -365,3 +406,42 @@ const (
 	MessageWindowElided   MessageWindowState = "elided"
 	MessageWindowInactive MessageWindowState = "inactive"
 )
+
+// AgentRun is the legacy name for Conversation, kept as an alias so the
+// run-vocabulary consumer code (and the frozen wire shape it marshals)
+// compiles unchanged until the wire rename retires it.
+type AgentRun = Conversation
+
+// AgentMessage is the legacy name for Message — same alias contract as
+// AgentRun.
+type AgentMessage = Message
+
+// Claim is one executor engagement with a conversation: who drove it, when,
+// with what sealed credentials, at what per-engagement cost. At most one
+// active (ReleasedAt == nil) claim exists per conversation.
+type Claim struct {
+	ID             string `json:"id"`
+	OrgID          string `json:"org_id,omitempty"`
+	ConversationID string `json:"conversation_id"`
+	ExecutorID     string `json:"executor_id"`
+	BootEpoch      int64  `json:"boot_epoch,omitempty"`
+	// CredPubKey is the per-engagement credential sidecar's X25519 public
+	// key (multi-mode only; empty locally).
+	CredPubKey string    `json:"-"`
+	ClaimedAt  time.Time `json:"claimed_at"`
+	// ReleasedAt nil = this claim is live. Stamped exactly once.
+	ReleasedAt *time.Time `json:"released_at,omitempty"`
+	// Outcome is how the engagement ended: "completed" | "failed" |
+	// "cancelled" | "requeued" | "parked" | "reaped". Empty while live.
+	Outcome string `json:"outcome,omitempty"`
+	Error   string `json:"error,omitempty"`
+	// Per-engagement accounting (the curator's former per-request numbers).
+	CostUSD             *float64  `json:"cost_usd,omitempty"`
+	DurationMs          *int      `json:"duration_ms,omitempty"`
+	NumTurns            *int      `json:"num_turns,omitempty"`
+	InputTokens         int       `json:"input_tokens"`
+	OutputTokens        int       `json:"output_tokens"`
+	CacheReadTokens     int       `json:"cache_read_tokens"`
+	CacheCreationTokens int       `json:"cache_creation_tokens"`
+	CreatedAt           time.Time `json:"created_at"`
+}

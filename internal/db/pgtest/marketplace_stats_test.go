@@ -81,7 +81,7 @@ func seedPromptRun(t *testing.T, h *Harness, orgID, userID, teamID, taskID, prom
 		VALUES ($1, $2, $3, $4, $5, 'manual', 'completed', '/tmp/wt', $6, '[]')
 	`, brID, orgID, userID, bpID, taskID, startedAt)
 	MustExec(t, h.AdminDB, `
-		INSERT INTO runs (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, status, started_at, total_cost_usd, duration_ms, blueprint_run_id)
+		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, status, started_at, total_cost_usd, duration_ms, blueprint_run_id)
 		VALUES ($1, $2, $3, $4, 'team', $5, $6, $7, $8, 0.01, 100, $9)
 	`, uuid.New().String(), orgID, userID, teamID, taskID, promptID, status, startedAt, brID)
 }

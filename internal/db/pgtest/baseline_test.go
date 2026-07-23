@@ -26,10 +26,9 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
 		"team_github_groups", "team_github_repos",
 		"prompts", "projects", "events_catalog", "entities", "entity_links", "events",
-		"event_handlers", "tasks", "task_events", "runs", "artifacts",
-		"run_messages", "run_memory", "run_memory_entities", "pending_firings", "run_worktrees",
+		"event_handlers", "tasks", "task_events", "conversations", "claims", "artifacts",
+		"messages", "claim_credentials", "run_memory", "run_memory_entities", "pending_firings", "run_worktrees",
 		"swipe_events", "poller_state", "repo_profiles",
-		"curator_requests", "curator_messages", "curator_pending_context",
 		// org_secrets replaces the Supabase Vault secret path (TFAC-402):
 		// app-encrypted ciphertext in a normal RLS table.
 		"org_secrets",
@@ -621,8 +620,8 @@ func TestRLS_CuratorChatPerUserIsolation(t *testing.T) {
 	AddOrgMember(t, h, bob, org, teamID, "member", "member")
 
 	projectID := seedProject(t, h, org, alice, "demo")
-	aliceReq := seedCuratorRequest(t, h, org, alice, projectID, "alice asking")
-	bobReq := seedCuratorRequest(t, h, org, bob, projectID, "bob asking")
+	aliceReq := seedCuratorConversation(t, h, org, alice, projectID)
+	bobReq := seedCuratorConversation(t, h, org, bob, projectID)
 
 	// Shared KB row.
 	MustExec(t, h.AdminDB,
@@ -632,7 +631,7 @@ func TestRLS_CuratorChatPerUserIsolation(t *testing.T) {
 	// Alice sees her request only.
 	err := h.WithUser(t, alice, org, func(tx *sql.Tx) error {
 		var ids []string
-		rows, err := tx.Query(`SELECT id FROM curator_requests`)
+		rows, err := tx.Query(`SELECT id::text FROM conversations WHERE type = 'curator'`)
 		if err != nil {
 			return err
 		}
@@ -648,7 +647,7 @@ func TestRLS_CuratorChatPerUserIsolation(t *testing.T) {
 			return err
 		}
 		if len(ids) != 1 || ids[0] != aliceReq {
-			t.Errorf("alice saw curator_requests %v, want [%s]", ids, aliceReq)
+			t.Errorf("alice saw curator conversations %v, want [%s]", ids, aliceReq)
 		}
 
 		// But she CAN see the shared project_knowledge.
@@ -668,7 +667,7 @@ func TestRLS_CuratorChatPerUserIsolation(t *testing.T) {
 	// Bob sees his request only.
 	err = h.WithUser(t, bob, org, func(tx *sql.Tx) error {
 		var ids []string
-		rows, err := tx.Query(`SELECT id FROM curator_requests`)
+		rows, err := tx.Query(`SELECT id::text FROM conversations WHERE type = 'curator'`)
 		if err != nil {
 			return err
 		}
@@ -684,7 +683,7 @@ func TestRLS_CuratorChatPerUserIsolation(t *testing.T) {
 			return err
 		}
 		if len(ids) != 1 || ids[0] != bobReq {
-			t.Errorf("bob saw curator_requests %v, want [%s]", ids, bobReq)
+			t.Errorf("bob saw curator conversations %v, want [%s]", ids, bobReq)
 		}
 		return nil
 	})
@@ -951,7 +950,7 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 	bobBR := seedBlueprintRun(t, h, bobOrg, bob, bobTask)
 	var bobRun string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id)
+		INSERT INTO conversations (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id)
 		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4, $5) RETURNING id
 	`, bobOrg, bob, bobTask, bobPrompt, bobBR).Scan(&bobRun); err != nil {
 		t.Fatalf("seed bob run: %v", err)
@@ -1622,7 +1621,7 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	bpRun := seedBlueprintRun(t, h, orgA, alice, taskID)
 	var runID string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id)
+		INSERT INTO conversations (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id)
 		VALUES ($1, $2, $3, 'private', $4, $5, $6) RETURNING id
 	`, orgA, alice, teamA, taskID, prompt, bpRun).Scan(&runID); err != nil {
 		t.Fatalf("seed run: %v", err)
@@ -1631,18 +1630,18 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	MustExec(t, h.AdminDB, `INSERT INTO task_events (org_id, task_id, event_id, kind)
 		SELECT $1, $2, e.id, 'closed' FROM events e WHERE e.entity_id = $3 LIMIT 1`,
 		orgA, taskID, entityA)
-	MustExec(t, h.AdminDB, `INSERT INTO run_messages (org_id, run_id, role, content) VALUES ($1, $2, 'assistant', 'hi')`,
+	MustExec(t, h.AdminDB, `INSERT INTO messages (org_id, conversation_id, role, content) VALUES ($1, $2, 'assistant', 'hi')`,
 		orgA, runID)
-	MustExec(t, h.AdminDB, `INSERT INTO run_memory (org_id, run_id, entity_id, agent_content) VALUES ($1, $2, $3, 'note')`,
+	MustExec(t, h.AdminDB, `INSERT INTO run_memory (org_id, conversation_id, entity_id, agent_content) VALUES ($1, $2, $3, 'note')`,
 		orgA, runID, entityA)
-	MustExec(t, h.AdminDB, `INSERT INTO run_memory_entities (org_id, run_id, entity_id, role) VALUES ($1, $2, $3, 'primary')`,
+	MustExec(t, h.AdminDB, `INSERT INTO run_memory_entities (org_id, conversation_id, entity_id, role) VALUES ($1, $2, $3, 'primary')`,
 		orgA, runID, entityA)
-	MustExec(t, h.AdminDB, `INSERT INTO run_worktrees (org_id, run_id, repo_id, path, ref) VALUES ($1, $2, 'octo/repo', '/tmp/x', 'pr-1')`,
+	MustExec(t, h.AdminDB, `INSERT INTO run_worktrees (org_id, conversation_id, repo_id, path, ref) VALUES ($1, $2, 'octo/repo', '/tmp/x', 'pr-1')`,
 		orgA, runID)
 
 	// Alice sees all her child rows.
 	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		for _, table := range []string{"task_events", "run_messages", "run_memory", "run_memory_entities", "run_worktrees"} {
+		for _, table := range []string{"task_events", "messages", "run_memory", "run_memory_entities", "run_worktrees"} {
 			var n int
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
 				return err
@@ -1661,7 +1660,7 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	// child rows — tasks_select and runs_select gate on creator, so
 	// the EXISTS-on-parent in each child policy returns false for him.
 	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
-		for _, table := range []string{"task_events", "run_messages", "run_memory", "run_memory_entities", "run_worktrees"} {
+		for _, table := range []string{"task_events", "messages", "run_memory", "run_memory_entities", "run_worktrees"} {
 			var n int
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
 				return err
@@ -2175,14 +2174,16 @@ func seedTask(t *testing.T, h *Harness, orgID, creatorID, entityID, eventType st
 	return id
 }
 
-func seedCuratorRequest(t *testing.T, h *Harness, orgID, creatorID, projectID, input string) string {
+// seedCuratorConversation mints the creator-private curator conversation for
+// (project, creator) — the per-user chat scope the RLS isolation test reads.
+func seedCuratorConversation(t *testing.T, h *Harness, orgID, creatorID, projectID string) string {
 	t.Helper()
 	var id string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO curator_requests (org_id, creator_user_id, project_id, user_input)
-		VALUES ($1, $2, $3, $4) RETURNING id
-	`, orgID, creatorID, projectID, input).Scan(&id); err != nil {
-		t.Fatalf("seed curator_request: %v", err)
+		INSERT INTO conversations (org_id, type, creator_user_id, visibility, trigger_type, origin, status, project_id)
+		VALUES ($1, 'curator', $2, 'private', 'manual', 'curator', NULL, $3) RETURNING id
+	`, orgID, creatorID, projectID).Scan(&id); err != nil {
+		t.Fatalf("seed curator conversation: %v", err)
 	}
 	return id
 }
@@ -2476,7 +2477,7 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	bpRun := seedBlueprintRun(t, h, orgA, alice, taskID)
 	var runID string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id)
+		INSERT INTO conversations (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id)
 		VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
 	`, orgA, alice, teamA, taskID, promptID, bpRun).Scan(&runID); err != nil {
 		t.Fatalf("seed run: %v", err)
@@ -2496,7 +2497,7 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	// but the outer guard short-circuits before that even matters.
 	err := h.WithUser(t, mallory, orgA, func(tx *sql.Tx) error {
 		// SELECT — mallory must see ZERO rows on every swept table.
-		for _, tbl := range []string{"tasks", "runs", "prompts", "projects", "event_handlers"} {
+		for _, tbl := range []string{"tasks", "conversations", "prompts", "projects", "event_handlers"} {
 			var n int
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + tbl).Scan(&n); err != nil {
 				return fmt.Errorf("count %s: %w", tbl, err)
@@ -2511,14 +2512,14 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 		// so the UPDATE matches nothing.
 		updates := map[string]string{
 			"tasks":          `UPDATE tasks          SET status        = 'pwned' WHERE id = $1`,
-			"runs":           `UPDATE runs           SET stop_reason   = 'pwned' WHERE id = $1`,
+			"conversations":  `UPDATE conversations  SET stop_reason   = 'pwned' WHERE id = $1`,
 			"prompts":        `UPDATE prompts        SET body          = 'pwned' WHERE id = $1`,
 			"projects":       `UPDATE projects       SET description   = 'pwned' WHERE id = $1`,
 			"event_handlers": `UPDATE event_handlers SET name          = 'pwned' WHERE id = $1`,
 		}
 		ids := map[string]string{
 			"tasks":          taskID,
-			"runs":           runID,
+			"conversations":  runID,
 			"prompts":        promptID,
 			"projects":       projectID,
 			"event_handlers": ehID,
@@ -2555,7 +2556,7 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	// the rows we just protected from mallory. Pins that the defense
 	// doesn't over-deny.
 	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		for _, tbl := range []string{"tasks", "runs", "prompts", "projects", "event_handlers"} {
+		for _, tbl := range []string{"tasks", "conversations", "prompts", "projects", "event_handlers"} {
 			var n int
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + tbl).Scan(&n); err != nil {
 				return fmt.Errorf("count %s: %w", tbl, err)
@@ -2632,8 +2633,8 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 			args: []any{orgA, carol, teamA, entityA, evtID},
 		},
 		{
-			label: "runs",
-			stmt: `INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id)
+			label: "conversations",
+			stmt: `INSERT INTO conversations (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id)
 				VALUES ($1, $2, $3, 'org', $4, $5, $6)`,
 			args: []any{orgA, carol, teamA, parentTaskID, parentPromptID, parentBPRunID},
 		},

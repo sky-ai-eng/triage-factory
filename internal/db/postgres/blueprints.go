@@ -907,7 +907,7 @@ func readRunBlueprintPointer(ctx context.Context, q queryer, orgID, runID string
 		stepIndex      sql.NullInt64
 	)
 	err := q.QueryRowContext(ctx,
-		`SELECT blueprint_run_id, blueprint_step_index FROM runs WHERE org_id = $1 AND id = $2`,
+		`SELECT blueprint_run_id, blueprint_step_index FROM conversations WHERE org_id = $1 AND id = $2`,
 		orgID, runID).Scan(&blueprintRunID, &stepIndex)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, nil
@@ -1001,7 +1001,7 @@ func markBlueprintRunStatus(ctx context.Context, q queryer, orgID, id string, st
 // agentrun store.
 func cancelOrphanedChildRuns(ctx context.Context, q queryer, orgID, blueprintRunID string) error {
 	_, err := q.ExecContext(ctx, `
-		UPDATE runs
+		UPDATE conversations
 		SET status = 'cancelled',
 		    completed_at = COALESCE(completed_at, now()),
 		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
@@ -1084,7 +1084,7 @@ func blueprintActiveStepRunIDs(ctx context.Context, q queryer, orgID, blueprintR
 		return nil, nil
 	}
 	rows, err := q.QueryContext(ctx, `
-		SELECT id FROM runs
+		SELECT id FROM conversations
 		WHERE org_id = $1 AND blueprint_run_id = $2
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
 		                     'pending_approval','open')
@@ -1111,9 +1111,9 @@ func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID stri
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, task_id, prompt_id, status, model, started_at, completed_at,
 		       total_cost_usd, duration_ms, num_turns, stop_reason, worktree_path,
-		       result_summary, session_id, outcome, outcome_reason,
+		       result_summary, sdk_session_id, outcome, outcome_reason,
 		       blueprint_run_id, blueprint_step_index
-		FROM runs
+		FROM conversations
 		WHERE org_id = $1 AND blueprint_run_id = $2
 		ORDER BY blueprint_step_index ASC, started_at ASC
 	`, orgID, blueprintRunID)

@@ -11,7 +11,7 @@ import (
 )
 
 // mintBlueprintRunForTest inserts a blueprint + blueprint_run pair via raw SQL
-// so a runs row can satisfy the NOT NULL runs.blueprint_run_id FK without
+// so a conversations row can satisfy the origin CHECK's blueprint_run_id FK without
 // reaching for the BlueprintStore impl (which lives in internal/db/sqlite and
 // would form a circular import in package db). Returns the blueprint_run id.
 //
@@ -36,7 +36,7 @@ func mintBlueprintRunForTest(t *testing.T, database *sql.DB, taskID string) stri
 	return bpRunID
 }
 
-// createRunForTest inserts a run row directly via raw SQL so
+// createRunForTest inserts a conversations row directly via raw SQL so
 // package-db CRUD tests (pending_firings, run_worktrees, ...) have
 // a run to FK-point to without reaching for the AgentRunStore impl
 // (which lives in internal/db/sqlite and would form a circular
@@ -44,7 +44,7 @@ func mintBlueprintRunForTest(t *testing.T, database *sql.DB, taskID string) stri
 //
 // Mirrors the post-D2 raw-SQL test seeders (seedTaskForTest in
 // task_seed_helper_test.go). Each consumer here is testing a
-// different table — runs are just fixtures, not the system under
+// different table — the conversations are just fixtures, not the system under
 // test — so this minimal insert is enough.
 //
 // promptID may be empty; the raw SQL inserts NULL, which the
@@ -65,7 +65,7 @@ func createRunForTest(t *testing.T, database *sql.DB, run domain.AgentRun) error
 	if run.BlueprintStepIndex != nil {
 		stepIdx = *run.BlueprintStepIndex
 	}
-	// runs.blueprint_run_id is NOT NULL — mint a blueprint_run for this run's
+	// The origin CHECK requires blueprint_run_id — mint a blueprint_run for this run's
 	// task when the caller didn't supply one. This single fallback fixes the
 	// many package-db consumers that build a run fixture without caring about
 	// the blueprint layer.
@@ -74,7 +74,7 @@ func createRunForTest(t *testing.T, database *sql.DB, run domain.AgentRun) error
 		blueprintRunID = mintBlueprintRunForTest(t, database, run.TaskID)
 	}
 	_, err := database.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path,
+		INSERT INTO conversations (id, task_id, prompt_id, status, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility,
 		                  creator_user_id, actor_agent_id, blueprint_run_id, blueprint_step_index)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?)

@@ -55,7 +55,7 @@ func TestTaskMemoryStore_Postgres(t *testing.T) {
 func roleForPgJoinRow(t *testing.T, h *pgtest.Harness, runID, entityID string) string {
 	t.Helper()
 	var role string
-	err := h.AdminDB.QueryRow(`SELECT role FROM run_memory_entities WHERE run_id = $1 AND entity_id = $2`, runID, entityID).Scan(&role)
+	err := h.AdminDB.QueryRow(`SELECT role FROM run_memory_entities WHERE conversation_id = $1 AND entity_id = $2`, runID, entityID).Scan(&role)
 	if err == sql.ErrNoRows {
 		return ""
 	}
@@ -114,7 +114,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("orgB admin-pool read %d memories on orgA entity — data-column filter leaked", len(memsBSystem))
 	}
 
-	// A direct (org_id, run_id) lookup of orgA's run under orgB returns
+	// A direct (org_id, conversation_id) lookup of orgA's run under orgB returns
 	// nothing — the same org_id filter GetMemoriesForEntity/System apply,
 	// pinned here at the raw-row level since GetRunMemory (which used to
 	// carry this check) is gone.
@@ -123,7 +123,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 
 	// UpdateRunMemoryHumanContent under orgB on orgA's run is a
-	// no-op (no row matches the (org_id, run_id) predicate) and is
+	// no-op (no row matches the (org_id, conversation_id) predicate) and is
 	// logged-not-fatal — same shape as the missing-row case in the
 	// conformance suite.
 	if err := stores.TaskMemory.UpdateRunMemoryHumanContent(ctx, orgB, runA, "should-not-land"); err != nil {
@@ -144,12 +144,12 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 // the admin pool for a (orgID, runID) pair — a raw-row escape hatch for
 // tests that need to pin the org_id filter independent of the
 // entity-scoped read path (GetMemoriesForEntity), now that GetRunMemory
-// (a direct run_id lookup) has been removed. Returns ("", false) when no
+// (a direct conversation_id lookup) has been removed. Returns ("", false) when no
 // row matches.
 func queryRunMemoryAgentContent(t *testing.T, h *pgtest.Harness, orgID, runID string) (string, bool) {
 	t.Helper()
 	var content sql.NullString
-	err := h.AdminDB.QueryRow(`SELECT agent_content FROM run_memory WHERE org_id = $1 AND run_id = $2`, orgID, runID).Scan(&content)
+	err := h.AdminDB.QueryRow(`SELECT agent_content FROM run_memory WHERE org_id = $1 AND conversation_id = $2`, orgID, runID).Scan(&content)
 	if err == sql.ErrNoRows {
 		return "", false
 	}
@@ -394,7 +394,7 @@ func TestTaskMemoryStore_Postgres_BackfillProducesPrimaryJoinRows(t *testing.T) 
 	runID, entityID := seedPgRunForTaskMemory(t, h, orgID, userID, promptID, "backfill")
 
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO run_memory (id, org_id, run_id, entity_id, agent_content, created_at)
+		INSERT INTO run_memory (id, org_id, conversation_id, entity_id, agent_content, created_at)
 		VALUES (gen_random_uuid(), $1, $2, $3, 'pre-migration note', now())
 	`, orgID, runID, entityID); err != nil {
 		t.Fatalf("seed pre-migration run_memory row: %v", err)
@@ -409,10 +409,10 @@ func TestTaskMemoryStore_Postgres_BackfillProducesPrimaryJoinRows(t *testing.T) 
 
 	// The exact backfill statement from the baseline migration.
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO run_memory_entities (org_id, run_id, entity_id, role, created_at)
-		SELECT org_id, run_id, entity_id, 'primary', created_at FROM run_memory
+		INSERT INTO run_memory_entities (org_id, conversation_id, entity_id, role, created_at)
+		SELECT org_id, conversation_id, entity_id, 'primary', created_at FROM run_memory
 		WHERE org_id = $1
-		ON CONFLICT (run_id, entity_id) DO NOTHING
+		ON CONFLICT (conversation_id, entity_id) DO NOTHING
 	`, orgID); err != nil {
 		t.Fatalf("run backfill: %v", err)
 	}
@@ -581,7 +581,7 @@ func seedPgTeamRunOnEntity(t *testing.T, h *pgtest.Harness, orgID, userID, promp
 
 	runID := uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO runs (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id)
+		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id)
 		VALUES ($1, $2, $3, $4, 'team', $5, $6, 'manual', 'completed', $7)
 	`, runID, orgID, userID, teamID, taskID, promptID, brID); err != nil {
 		t.Fatalf("seed run: %v", err)
@@ -696,7 +696,7 @@ func seedPgRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, prom
 
 	runID := uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO runs (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id)
+		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id)
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 		        'team', $4, $5, 'manual', 'completed', $6)

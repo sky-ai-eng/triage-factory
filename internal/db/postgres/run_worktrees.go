@@ -65,9 +65,9 @@ func insertRunWorktree(
 	// inserted=false and returns the winner's path without
 	// touching git.
 	res, err := q.ExecContext(ctx, `
-		INSERT INTO run_worktrees (run_id, org_id, repo_id, path, ref)
+		INSERT INTO run_worktrees (conversation_id, org_id, repo_id, path, ref)
 		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (run_id, repo_id, ref) DO NOTHING
+		ON CONFLICT (conversation_id, repo_id, ref) DO NOTHING
 	`, w.RunID, orgID, w.RepoID, w.Path, w.Ref)
 	if err != nil {
 		return false, "", fmt.Errorf("insert run_worktree: %w", err)
@@ -84,7 +84,7 @@ func insertRunWorktree(
 		return false, "", fmt.Errorf("read existing run_worktree after conflict: %w", err)
 	}
 	if existing == nil {
-		return false, "", fmt.Errorf("run_worktree row vanished after ON CONFLICT DO NOTHING (run_id=%s, repo_id=%s, ref=%s)", w.RunID, w.RepoID, w.Ref)
+		return false, "", fmt.Errorf("run_worktree row vanished after ON CONFLICT DO NOTHING (conversation_id=%s, repo_id=%s, ref=%s)", w.RunID, w.RepoID, w.Ref)
 	}
 	return false, existing.Path, nil
 }
@@ -99,9 +99,9 @@ func (s *runWorktreeStore) GetByRepoRefSystem(ctx context.Context, orgID, runID,
 
 func getRunWorktreeByRepoRef(ctx context.Context, q queryer, orgID, runID, repoID, ref string) (*domain.RunWorktree, error) {
 	row := q.QueryRowContext(ctx, `
-		SELECT run_id, repo_id, path, ref, created_at
+		SELECT conversation_id, repo_id, path, ref, created_at
 		FROM run_worktrees
-		WHERE org_id = $1 AND run_id = $2 AND repo_id = $3 AND ref = $4
+		WHERE org_id = $1 AND conversation_id = $2 AND repo_id = $3 AND ref = $4
 	`, orgID, runID, repoID, ref)
 	var w domain.RunWorktree
 	if err := row.Scan(&w.RunID, &w.RepoID, &w.Path, &w.Ref, &w.CreatedAt); err != nil {
@@ -123,9 +123,9 @@ func (s *runWorktreeStore) ListSystem(ctx context.Context, orgID, runID string) 
 
 func listRunWorktrees(ctx context.Context, q queryer, orgID, runID string) ([]domain.RunWorktree, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT run_id, repo_id, path, ref, created_at
+		SELECT conversation_id, repo_id, path, ref, created_at
 		FROM run_worktrees
-		WHERE org_id = $1 AND run_id = $2
+		WHERE org_id = $1 AND conversation_id = $2
 		ORDER BY created_at ASC, repo_id ASC, ref ASC
 	`, orgID, runID)
 	if err != nil {
@@ -154,7 +154,7 @@ func (s *runWorktreeStore) DeleteByRepoRefSystem(ctx context.Context, orgID, run
 func deleteRunWorktreeByRepoRef(ctx context.Context, q queryer, orgID, runID, repoID, ref string) error {
 	_, err := q.ExecContext(ctx, `
 		DELETE FROM run_worktrees
-		WHERE org_id = $1 AND run_id = $2 AND repo_id = $3 AND ref = $4
+		WHERE org_id = $1 AND conversation_id = $2 AND repo_id = $3 AND ref = $4
 	`, orgID, runID, repoID, ref)
 	return err
 }
@@ -162,7 +162,7 @@ func deleteRunWorktreeByRepoRef(ctx context.Context, q queryer, orgID, runID, re
 func (s *runWorktreeStore) DeleteByPathSystem(ctx context.Context, orgID, runID, path string) error {
 	_, err := s.admin.ExecContext(ctx, `
 		DELETE FROM run_worktrees
-		WHERE org_id = $1 AND run_id = $2 AND path = $3
+		WHERE org_id = $1 AND conversation_id = $2 AND path = $3
 	`, orgID, runID, path)
 	return err
 }

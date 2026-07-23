@@ -50,7 +50,7 @@ func TestTaskMemoryStore_SQLite(t *testing.T) {
 func roleForSQLiteJoinRow(t *testing.T, conn *sql.DB, runID, entityID string) string {
 	t.Helper()
 	var role string
-	err := conn.QueryRow(`SELECT role FROM run_memory_entities WHERE run_id = ? AND entity_id = ?`, runID, entityID).Scan(&role)
+	err := conn.QueryRow(`SELECT role FROM run_memory_entities WHERE conversation_id = ? AND entity_id = ?`, runID, entityID).Scan(&role)
 	if err == sql.ErrNoRows {
 		return ""
 	}
@@ -154,7 +154,7 @@ func TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows(t *testing.T) {
 	runID, entityID := seedSQLiteRunForTaskMemory(t, conn, "backfill")
 	now := time.Now().UTC()
 	if _, err := conn.Exec(
-		`INSERT INTO run_memory (id, run_id, entity_id, agent_content, created_at) VALUES (?, ?, ?, 'pre-migration note', ?)`,
+		`INSERT INTO run_memory (id, conversation_id, entity_id, agent_content, created_at) VALUES (?, ?, ?, 'pre-migration note', ?)`,
 		uuid.New().String(), runID, entityID, now,
 	); err != nil {
 		t.Fatalf("seed pre-migration run_memory row: %v", err)
@@ -169,8 +169,8 @@ func TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows(t *testing.T) {
 
 	// The exact backfill statement from the migration.
 	if _, err := conn.Exec(`
-		INSERT OR IGNORE INTO run_memory_entities (org_id, run_id, entity_id, role, created_at)
-		SELECT org_id, run_id, entity_id, 'primary', created_at FROM run_memory
+		INSERT OR IGNORE INTO run_memory_entities (org_id, conversation_id, entity_id, role, created_at)
+		SELECT org_id, conversation_id, entity_id, 'primary', created_at FROM run_memory
 	`); err != nil {
 		t.Fatalf("run backfill: %v", err)
 	}
@@ -231,7 +231,7 @@ func seedSQLiteRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (runI
 	blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
 	runID = uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, status, blueprint_run_id) VALUES (?, ?, 'p_task_memory', 'completed', ?)
+		INSERT INTO conversations (id, task_id, prompt_id, status, blueprint_run_id) VALUES (?, ?, 'p_task_memory', 'completed', ?)
 	`, runID, taskID, blueprintRunID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}

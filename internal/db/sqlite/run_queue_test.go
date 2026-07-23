@@ -56,7 +56,7 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	// Simulate a run that got partway (captured a session) before being
 	// re-queued by a crash reconcile, so the claim must carry session_id back
 	// for runAgent's resume-on-reclaim path.
-	if _, err := conn.Exec(`UPDATE runs SET session_id = 'rq-sess' WHERE id = 'rq-run-0'`); err != nil {
+	if _, err := conn.Exec(`UPDATE conversations SET sdk_session_id = 'rq-sess' WHERE id = 'rq-run-0'`); err != nil {
 		t.Fatalf("set session_id: %v", err)
 	}
 
@@ -244,7 +244,7 @@ func TestRunQueueStore_SQLite_RequeueFromSetupStatus(t *testing.T) {
 			}
 			// Advance to the granular setup status the dispatcher would have set
 			// before the workspace-setup failure fired the requeue.
-			if _, err := conn.ExecContext(ctx, `UPDATE runs SET status = ? WHERE id = 'rqs-run-0'`, setupStatus); err != nil {
+			if _, err := conn.ExecContext(ctx, `UPDATE conversations SET status = ? WHERE id = 'rqs-run-0'`, setupStatus); err != nil {
 				t.Fatalf("advance to %s: %v", setupStatus, err)
 			}
 
@@ -293,16 +293,11 @@ func TestRunQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 	// protects the row — which is exactly the invariant being pinned
 	// (parked rows stay parked through a self-sweep of prior-boot orphans).
 	step0 := 0
-	if err := stores.AgentRuns.Create(ctx, org, domain.AgentRun{
+	insertConversationForTest(t, conn, domain.AgentRun{
 		ID: "rqd-run-0", TaskID: task.ID, PromptID: "rqd-p0", Status: "open",
 		Model: "m", TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
-	}); err != nil {
-		t.Fatalf("Create dormant run: %v", err)
-	}
-	if _, err := conn.Exec(`UPDATE runs SET executor_id = ?, boot_epoch = 0 WHERE id = 'rqd-run-0'`,
-		sqliteRQExecutorID); err != nil {
-		t.Fatalf("stamp dormant run with prior-boot ownership: %v", err)
-	}
+	})
+	insertActiveClaimForTest(t, conn, "rqd-run-0", sqliteRQExecutorID, 0)
 
 	n, err := stores.RunQueue.ResetProcessingRuns(ctx, sqliteRQExecutorID, sqliteRQBootEpoch)
 	if err != nil {
@@ -517,7 +512,7 @@ func TestRunQueueStore_SQLite_Credentials(t *testing.T) {
 			},
 			ForceStatus: func(t *testing.T, runID, status string) {
 				t.Helper()
-				if _, err := conn.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
+				if _, err := conn.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, status, runID); err != nil {
 					t.Fatalf("force status %q: %v", status, err)
 				}
 			},
@@ -568,7 +563,7 @@ func TestRunQueueStore_SQLite_FleetQueueShares(t *testing.T) {
 			},
 			ForceStatus: func(t *testing.T, runID, status string) {
 				t.Helper()
-				if _, err := conn.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
+				if _, err := conn.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, status, runID); err != nil {
 					t.Fatalf("force status %q: %v", status, err)
 				}
 			},
@@ -601,9 +596,9 @@ func TestRunQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 }
 
 // TestRunQueueStore_SQLite_QueuedAtStamps pins the queue-dwell timestamps the
-// UI's queue timer reads: enqueue stamps queued_at, a claim stamps claimed_at
-// (both surfaced through AgentRuns.Get), and a requeue re-stamps queued_at and
-// clears claimed_at so the next dwell measures from the re-entry, not the mint.
+// UI's queue timer reads: enqueue stamps queued_at, a claim mints the claims
+// row whose claimed_at Get derives, and a requeue re-stamps queued_at while
+// releasing the claim — history is kept, ownership is not.
 func TestRunQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -669,7 +664,12 @@ func TestRunQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
 	if requeued.QueuedAt == nil || requeued.QueuedAt.Before(firstQueuedAt) {
 		t.Fatalf("QueuedAt after requeue = %v, want re-stamped at/after the first stamp %v", requeued.QueuedAt, firstQueuedAt)
 	}
-	if requeued.ClaimedAt != nil {
-		t.Fatalf("ClaimedAt = %v after requeue, want nil (a queued row has no claim)", requeued.ClaimedAt)
+	// The claims model keeps engagement history: ClaimedAt stays the released
+	// claim's stamp, but the row reads unowned (no active claim).
+	if requeued.ClaimedAt == nil {
+		t.Fatal("ClaimedAt = nil after requeue, want the released engagement's stamp retained")
+	}
+	if requeued.ExecutorID != "" {
+		t.Fatalf("ExecutorID = %q after requeue, want empty (a queued row has no active claim)", requeued.ExecutorID)
 	}
 }

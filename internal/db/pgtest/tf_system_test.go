@@ -61,7 +61,7 @@ func TestTfSystem_DDLDenied(t *testing.T) {
 // SELECT that would return zero rows: sso_connections (SSO config is a
 // control-plane-only concern) and org_secrets (an executor never holds
 // TF_SECRET_ENCRYPTION_KEY at all as of TFAC-614 — its per-run credential
-// material arrives pre-resolved via sealed run_credentials bundles
+// material arrives pre-resolved via sealed claim_credentials bundles
 // instead, so the org_secrets grant this ticket originally shipped is
 // dead weight and was removed; this pins that it stays removed).
 func TestTfSystem_OffSurfaceReadDenied(t *testing.T) {
@@ -312,7 +312,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		var sigID int64
 		if err := h.AdminDB.QueryRowContext(ctx, `
-			INSERT INTO run_signals (org_id, run_id, kind, target) VALUES ($1, $2, 'interrupt', $3) RETURNING id
+			INSERT INTO run_signals (org_id, conversation_id, kind, target) VALUES ($1, $2, 'interrupt', $3) RETURNING id
 		`, orgID, runID, executorID).Scan(&sigID); err != nil {
 			t.Fatalf("seed run_signals: %v", err)
 		}
@@ -330,8 +330,11 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 
 	t.Run("run_pending_input", func(t *testing.T) {
 		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
+		// Pending input is an undelivered plain user message on the
+		// conversation's own transcript now.
 		MustExec(t, h.AdminDB, `
-			INSERT INTO run_pending_input (run_id, org_id, user_id, message) VALUES ($1, $2, $3, 'resume this')
+			INSERT INTO messages (conversation_id, org_id, user_id, role, content, subtype, delivered)
+			VALUES ($1, $2, $3, 'user', 'resume this', 'text', false)
 		`, runID, orgID, userID)
 		msg, _, ok, err := stores.RunPendingInput.Peek(ctx, orgID, runID)
 		if err != nil || !ok || msg == "" {
@@ -444,114 +447,30 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 	})
 
-	t.Run("run_credentials", func(t *testing.T) {
+	t.Run("claim_credentials", func(t *testing.T) {
 		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		// The brain seals + writes bundles on its own pool (supabase_admin,
-		// never tf_system); seed directly via AdminDB so this subtest
-		// isolates the executor's read side — RunCredentials.Get, which the
+		// never tf_system); seed the active claim + its bundle directly via
+		// AdminDB so this subtest isolates the executor's read side —
+		// RunCredentials.Get (a claims ⋈ claim_credentials SELECT), which the
 		// awaiting-credentials wait polls.
+		var claimID string
+		if err := h.AdminDB.QueryRowContext(ctx, `
+			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch)
+			VALUES ($1, $2, $3, 1) RETURNING id
+		`, orgID, runID, executorID).Scan(&claimID); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
 		MustExec(t, h.AdminDB, `
-			INSERT INTO run_credentials (run_id, org_id, executor_id, boot_epoch, sealed)
+			INSERT INTO claim_credentials (claim_id, org_id, executor_id, boot_epoch, sealed)
 			VALUES ($1, $2, $3, 1, $4)
-		`, runID, orgID, executorID, []byte("sealed-bytes"))
+		`, claimID, orgID, executorID, []byte("sealed-bytes"))
 		_, _, _, ok, err := stores.RunCredentials.Get(ctx, orgID, runID)
 		if err != nil {
 			t.Fatalf("RunCredentials.Get: %v", err)
 		}
 		if !ok {
 			t.Errorf("RunCredentials.Get: ok=false, want the seeded bundle")
-		}
-	})
-
-	t.Run("curator_homing", func(t *testing.T) {
-		// Seed a project + two turns homed to this executor: a 'queued' turn
-		// (the claim loop's ListQueuedRequestsForHomeSystem must see it) and a
-		// 'running' turn that already streamed a token-bearing message (the
-		// ownership-scoped sweep's roll-up must read curator_messages).
-		projectID := newUUID(t, h)
-		MustExec(t, h.AdminDB, `
-			INSERT INTO projects (id, org_id, creator_user_id, team_id, name, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'homing-conformance', now(), now())
-		`, projectID, orgID, userID, teamID)
-
-		queuedID := newUUID(t, h)
-		runningID := newUUID(t, h)
-		MustExec(t, h.AdminDB, `
-			INSERT INTO curator_requests (id, org_id, project_id, creator_user_id, team_id, status, user_input, home_instance_id)
-			VALUES ($1, $2, $3, $4, $5, 'queued', 'q', $6),
-			       ($7, $2, $3, $4, $5, 'running', 'r', $6)
-		`, queuedID, orgID, projectID, userID, teamID, executorID, runningID)
-		MustExec(t, h.AdminDB, `
-			INSERT INTO curator_messages (org_id, creator_user_id, request_id, role, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
-			VALUES ($1, $2, $3, 'assistant', 11, 22, 33, 44)
-		`, orgID, userID, runningID)
-
-		// List (SELECT curator_requests) — the claim loop's homed scan.
-		homed, err := stores.Curator.ListQueuedRequestsForHomeSystem(ctx, executorID)
-		if err != nil {
-			t.Fatalf("Curator.ListQueuedRequestsForHomeSystem: %v", err)
-		}
-		if len(homed) != 1 || homed[0].ID != queuedID {
-			t.Fatalf("ListQueuedRequestsForHomeSystem = %+v, want the one queued turn", homed)
-		}
-
-		// Sweep (UPDATE curator_requests + SELECT curator_messages for the
-		// token roll-up) — a missing curator_messages grant fails 42501 here.
-		n, err := stores.Curator.CancelStrandedRequestsForHomeSystem(ctx, executorID, "process restarted")
-		if err != nil {
-			t.Fatalf("Curator.CancelStrandedRequestsForHomeSystem: %v", err)
-		}
-		if n != 2 {
-			t.Fatalf("CancelStrandedRequestsForHomeSystem flipped %d turns, want 2", n)
-		}
-		// The running turn's streamed tokens rolled up (not stranded at 0) —
-		// the whole point of matching every other terminal write (TFAC-473).
-		var in, out, cr, cc int
-		if err := h.AdminDB.QueryRowContext(ctx,
-			`SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens FROM curator_requests WHERE id = $1`, runningID,
-		).Scan(&in, &out, &cr, &cc); err != nil {
-			t.Fatalf("read back running turn: %v", err)
-		}
-		if in != 11 || out != 22 || cr != 33 || cc != 44 {
-			t.Errorf("token roll-up = (%d,%d,%d,%d), want (11,22,33,44) — a stranded turn must report its streamed spend", in, out, cr, cc)
-		}
-	})
-
-	t.Run("curator_turn_credentials", func(t *testing.T) {
-		// The home executor's sidecar bring-up publishes the turn's pubkey
-		// (UPDATE curator_requests.cred_pubkey — rides the curator_requests
-		// grant) and polls / cleans up the sealed bundle (SELECT + DELETE on
-		// curator_turn_credentials). A missing grant fails 42501 here.
-		projectID := newUUID(t, h)
-		MustExec(t, h.AdminDB, `
-			INSERT INTO projects (id, org_id, creator_user_id, team_id, name, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 'turn-cred-conformance', now(), now())
-		`, projectID, orgID, userID, teamID)
-		turnID := newUUID(t, h)
-		MustExec(t, h.AdminDB, `
-			INSERT INTO curator_requests (id, org_id, project_id, creator_user_id, team_id, status, user_input, home_instance_id)
-			VALUES ($1, $2, $3, $4, $5, 'queued', 'q', $6)
-		`, turnID, orgID, projectID, userID, teamID, executorID)
-
-		// Publish the sidecar pubkey via the executor's tf_system pool.
-		if matched, err := stores.Curator.PublishTurnCredPubKey(ctx, orgID, turnID, "sidecar-pubkey"); err != nil || !matched {
-			t.Fatalf("Curator.PublishTurnCredPubKey = (%v, %v), want (true, nil)", matched, err)
-		}
-
-		// The brain seals + writes bundles on its own superuser pool (never
-		// tf_system); seed directly via AdminDB so this isolates the executor's
-		// read/delete side.
-		MustExec(t, h.AdminDB, `
-			INSERT INTO curator_turn_credentials (request_id, org_id, executor_id, boot_epoch, sealed)
-			VALUES ($1, $2, $3, 1, $4)
-		`, turnID, orgID, executorID, []byte("sealed-turn-bytes"))
-		if _, _, _, ok, err := stores.CuratorTurnCredentials.Get(ctx, orgID, turnID); err != nil {
-			t.Fatalf("CuratorTurnCredentials.Get: %v", err)
-		} else if !ok {
-			t.Errorf("CuratorTurnCredentials.Get: ok=false, want the seeded bundle")
-		}
-		if ok, err := stores.CuratorTurnCredentials.Delete(ctx, orgID, turnID); err != nil || !ok {
-			t.Errorf("CuratorTurnCredentials.Delete: ok=%v err=%v", ok, err)
 		}
 	})
 
@@ -611,7 +530,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 }
 
-// seedQueuedRun mints a fresh runs row via the tf_system-backed
+// seedQueuedRun mints a fresh conversations row via the tf_system-backed
 // RunQueue.EnqueueRun (the same INSERT the dispatcher's reactor performs
 // for every subsequent blueprint step), so each subtest below gets its
 // own run without re-running the claim subtest's side effects.

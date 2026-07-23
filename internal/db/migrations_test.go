@@ -45,7 +45,8 @@ func TestMigrate_FreshInstall(t *testing.T) {
 	}
 
 	for _, table := range []string{
-		"entities", "events", "tasks", "runs", "projects",
+		"entities", "events", "tasks", "conversations", "messages", "claims",
+		"projects",
 		"orgs", "users", "event_handlers",
 		"instance_config", "org_settings", "team_settings", "user_settings",
 		"jira_project_status_rules",
@@ -56,6 +57,22 @@ func TestMigrate_FreshInstall(t *testing.T) {
 		}
 		if !exists {
 			t.Errorf("%s table missing after fresh Migrate", table)
+		}
+	}
+
+	// The conversations refactor dissolved these; a fresh install must not
+	// resurrect them.
+	for _, table := range []string{
+		"runs", "run_messages", "curator_requests", "curator_messages",
+		"curator_pending_context", "run_pending_input",
+		"staged_agent_injections", "run_credentials", "curator_turn_credentials",
+	} {
+		exists, err := tableExists(database, table)
+		if err != nil {
+			t.Fatalf("probe %s: %v", table, err)
+		}
+		if exists {
+			t.Errorf("dissolved table %s present after fresh Migrate", table)
 		}
 	}
 }
@@ -176,16 +193,17 @@ func TestMigrationStatus_BricksPreV1110(t *testing.T) {
 	}
 }
 
-// TestMigrate_RunCuratorTokenColumnsPresent pins that the TFAC-473 token
-// columns land on both runs and curator_requests after a full fresh
-// migration. A SELECT of the four columns errors if any is missing, so the
+// TestMigrate_RunCuratorTokenColumnsPresent pins that the token
+// columns land on both conversations (the per-transcript rollup) and claims
+// (the per-engagement accounting) after a full fresh migration. A SELECT of
+// the four columns errors if any is missing, so the
 // LIMIT 0 probe is a column-existence assertion without needing rows.
 func TestMigrate_RunCuratorTokenColumnsPresent(t *testing.T) {
 	database := openMigrationsTestDB(t)
 	if err := Migrate(database, "sqlite3"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	for _, table := range []string{"runs", "curator_requests"} {
+	for _, table := range []string{"conversations", "claims"} {
 		if _, err := database.Exec(
 			`SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens FROM ` + table + ` LIMIT 0`,
 		); err != nil {
@@ -246,10 +264,12 @@ func TestMigrate_BackfillsRunTokensFromRunMessages(t *testing.T) {
 		t.Fatalf("goose Up: %v", err)
 	}
 
+	// The refactor renamed the table under the row; the backfilled totals
+	// ride along.
 	var in, out, cr, cc int
 	if err := database.QueryRow(`
 		SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
-		FROM runs WHERE id = 'r1'
+		FROM conversations WHERE id = 'r1'
 	`).Scan(&in, &out, &cr, &cc); err != nil {
 		t.Fatalf("read backfilled tokens: %v", err)
 	}
@@ -289,6 +309,15 @@ func TestMigrate_BackfillsCuratorTokensFromMessages(t *testing.T) {
 		t.Fatalf("goose UpTo %d: %v", priorVersion, err)
 	}
 
+	// The conversations refactor re-parents each request under a curator
+	// conversation whose project FK is enforced mid-migration, so the
+	// project row must exist.
+	if _, err := database.Exec(`
+		INSERT INTO users (id) VALUES ('00000000-0000-0000-0000-000000000100');
+		INSERT INTO projects (id, name, team_id) VALUES ('proj1', 'P1', '00000000-0000-0000-0000-000000000010');
+	`); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
 	// A completed request with two token-bearing curator_messages rows —
 	// history that predates the backfill.
 	if _, err := database.Exec(`
@@ -310,10 +339,12 @@ func TestMigrate_BackfillsCuratorTokensFromMessages(t *testing.T) {
 		t.Fatalf("goose Up: %v", err)
 	}
 
+	// The conversations refactor turns the request into a claim (claim id =
+	// request id) carrying the same per-turn accounting.
 	var in, out, cr, cc int
 	if err := database.QueryRow(`
 		SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
-		FROM curator_requests WHERE id = 'cr1'
+		FROM claims WHERE id = 'cr1'
 	`).Scan(&in, &out, &cr, &cc); err != nil {
 		t.Fatalf("read backfilled tokens: %v", err)
 	}
@@ -352,6 +383,12 @@ func TestMigrate_CuratorTeamIDBackfillAndView(t *testing.T) {
 	}
 
 	const teamID = "00000000-0000-0000-0000-000000000010"
+	// The conversations refactor re-parents requests under curator
+	// conversations whose creator FK must resolve; pure-goose DBs carry no
+	// tenant rows, so seed the sentinel user the DEFAULT points at.
+	if _, err := database.Exec(`INSERT INTO users (id) VALUES ('00000000-0000-0000-0000-000000000100')`); err != nil {
+		t.Fatalf("seed sentinel user: %v", err)
+	}
 	// A team-visible project (carries a team) and a null-team org-visible project.
 	// org_id / creator_user_id fall to their NOT NULL DEFAULT sentinels.
 	if _, err := database.Exec(`
@@ -375,11 +412,12 @@ func TestMigrate_CuratorTeamIDBackfillAndView(t *testing.T) {
 		t.Fatalf("goose Up: %v", err)
 	}
 
-	// Column backfilled from each row's project team.
+	// The backfilled team snapshot survives the conversations refactor: each
+	// request's claim attributes through its conversation's team.
 	assertCuratorTeamID(t, database,
-		`SELECT team_id FROM curator_requests WHERE id = 'ct'`, teamID)
+		`SELECT c.team_id FROM claims cl JOIN conversations c ON c.id = cl.conversation_id WHERE cl.id = 'ct'`, teamID)
 	assertCuratorTeamID(t, database,
-		`SELECT team_id FROM curator_requests WHERE id = 'co'`, "")
+		`SELECT c.team_id FROM claims cl JOIN conversations c ON c.id = cl.conversation_id WHERE cl.id = 'co'`, "")
 
 	// View surfaces the same team_id on the curator arm.
 	assertCuratorTeamID(t, database,
@@ -417,6 +455,9 @@ func TestMigrate_LLMSpendTriggerIDView(t *testing.T) {
 	}
 
 	const teamID = "00000000-0000-0000-0000-000000000010"
+	if _, err := database.Exec(`INSERT INTO users (id) VALUES ('00000000-0000-0000-0000-000000000100')`); err != nil {
+		t.Fatalf("seed sentinel user: %v", err)
+	}
 	if _, err := database.Exec(`
 		INSERT INTO projects (id, name, team_id, visibility) VALUES
 			('pteam', 'team-proj', ?,    'team'),
@@ -536,8 +577,8 @@ func TestMigrate_RunsTriggerIDBackfill(t *testing.T) {
 		t.Fatalf("goose Up: %v", err)
 	}
 
-	assertRunTriggerID(t, database, `SELECT trigger_id FROM runs WHERE id = 'run-ev'`, "trig1")
-	assertRunTriggerID(t, database, `SELECT trigger_id FROM runs WHERE id = 'run-man'`, "")
+	assertRunTriggerID(t, database, `SELECT trigger_id FROM conversations WHERE id = 'run-ev'`, "trig1")
+	assertRunTriggerID(t, database, `SELECT trigger_id FROM conversations WHERE id = 'run-man'`, "")
 	// And through the spend layer: the autonomous row is now rule-attributed.
 	assertRunTriggerID(t, database,
 		`SELECT trigger_id FROM llm_spend WHERE source = 'run' AND source_id = 'run-ev'`, "trig1")

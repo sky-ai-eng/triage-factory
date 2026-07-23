@@ -22,13 +22,10 @@ func TestAgentRunStore_SQLite_LookupOrgForRunSystem_ReturnsSentinelOrgID(t *test
 	eventID := seeder.Event(t, entityID, "github:pr:opened")
 	taskID := seeder.Task(t, entityID, "github:pr:opened", eventID)
 
-	runID := "run-lookup-1"
-	if err := stores.AgentRuns.Create(context.Background(), runmode.LocalDefaultOrgID, domain.AgentRun{
-		ID: runID, TaskID: taskID, PromptID: "p_agentrun_test", Status: "running", Model: "m",
+	runID := seeder.Run(t, domain.AgentRun{
+		ID: "run-lookup-1", TaskID: taskID, PromptID: "p_agentrun_test", Status: "running", Model: "m",
 		BlueprintRunID: seeder.BlueprintRun(t, taskID),
-	}); err != nil {
-		t.Fatalf("create run: %v", err)
-	}
+	})
 
 	got, err := stores.AgentRuns.LookupOrgForRunSystem(context.Background(), runID)
 	if err != nil {

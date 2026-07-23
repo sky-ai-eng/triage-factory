@@ -46,3 +46,50 @@ func seedBlueprintRunForRun(t *testing.T, conn *sql.DB, taskID string) string {
 	}
 	return blueprintRunID
 }
+
+// insertConversationForTest inserts a conversations row directly — the test
+// fixture stand-in for the queue's EnqueueRun mint, staging rows in
+// arbitrary status. The trigger_type↔creator CHECK is satisfied by pairing
+// 'manual' with the sentinel user and 'event' with NULL. Fields honored:
+// ID, TaskID, PromptID, Status, Model, TriggerType, TriggerID,
+// BlueprintRunID, BlueprintStepIndex.
+func insertConversationForTest(t *testing.T, conn *sql.DB, run domain.AgentRun) {
+	t.Helper()
+	trigger := run.TriggerType
+	if trigger == "" {
+		trigger = "manual"
+	}
+	var creator any
+	if trigger == "manual" {
+		creator = runmode.LocalDefaultUserID
+	}
+	var triggerID any
+	if run.TriggerID != "" {
+		triggerID = run.TriggerID
+	}
+	var stepIdx any
+	if run.BlueprintStepIndex != nil {
+		stepIdx = *run.BlueprintStepIndex
+	}
+	if _, err := conn.Exec(`
+		INSERT INTO conversations (id, task_id, prompt_id, status, model,
+		                           trigger_type, trigger_id, team_id, visibility,
+		                           creator_user_id, blueprint_run_id, blueprint_step_index)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?)
+	`, run.ID, run.TaskID, run.PromptID, run.Status, run.Model,
+		trigger, triggerID, runmode.LocalDefaultTeamID, creator, run.BlueprintRunID, stepIdx); err != nil {
+		t.Fatalf("insert conversation %s: %v", run.ID, err)
+	}
+}
+
+// insertActiveClaimForTest stamps prior-engagement ownership the way the
+// dispatcher's claim would: one active claims row for the conversation.
+func insertActiveClaimForTest(t *testing.T, conn *sql.DB, conversationID, executorID string, bootEpoch int64) {
+	t.Helper()
+	if _, err := conn.Exec(`
+		INSERT INTO claims (id, conversation_id, executor_id, boot_epoch)
+		VALUES (?, ?, ?, ?)
+	`, uuid.New().String(), conversationID, executorID, bootEpoch); err != nil {
+		t.Fatalf("insert claim for %s: %v", conversationID, err)
+	}
+}

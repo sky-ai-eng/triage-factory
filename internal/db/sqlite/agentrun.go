@@ -9,16 +9,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// agentRunStore is the SQLite impl of db.AgentRunStore. SQL bodies
-// are ported from the pre-D2 internal/db/agent.go; the only
-// behavioral change is the orgID assertion at each method entry
-// (SQLite is single-tenant; any non-LocalDefaultOrgID value is a
-// confused caller).
+// agentRunStore is the SQLite impl of db.AgentRunStore over the
+// conversations + messages + claims tables. SQLite is single-tenant; the
+// orgID assertion at each method entry catches a confused caller passing
+// anything but the local sentinel.
 //
 // The constructor takes a single queryer (SQLite has one connection)
 // rather than the (app, admin) pair the Postgres impl uses — the
@@ -34,128 +34,67 @@ var _ db.AgentRunStore = (*agentRunStore)(nil)
 
 // --- Lifecycle ---
 
-func (s *agentRunStore) Create(ctx context.Context, orgID string, run domain.AgentRun) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
+// claimOutcomeForStatus maps a conversation's terminal status onto the
+// claims outcome vocabulary: the engagement that produced a failed (or
+// unsolvable) conversation failed, a cancelled one was cancelled, and
+// everything else completed.
+func claimOutcomeForStatus(status string) string {
+	switch status {
+	case "failed", "task_unsolvable":
+		return "failed"
+	case "cancelled":
+		return "cancelled"
 	}
-	triggerType := run.TriggerType
-	if triggerType == "" {
-		triggerType = "manual"
-	}
-	if triggerType == "manual" && run.CreatorUserID == "" {
-		run.CreatorUserID = runmode.LocalDefaultUserID
-	}
-	var stepIdx any
-	if run.BlueprintStepIndex != nil {
-		stepIdx = *run.BlueprintStepIndex
-	}
-	// team_id is the LocalDefaultTeamID sentinel — local mode has
-	// exactly one team, so every run lands on it regardless of
-	// run.TeamID (which the read paths surface back out, TFAC-458).
-	// The schema requires a non-NULL team_id for visibility='team'
-	// rows. Multi-mode derives the real team from the parent task in the
-	// Postgres Create / EnqueueRun, never here.
-	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path,
-		                  trigger_type, trigger_id, team_id, visibility,
-		                  creator_user_id, actor_agent_id, blueprint_run_id, blueprint_step_index)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?)
-	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
-		triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID,
-		nullIfEmpty(run.CreatorUserID), nullIfEmpty(run.ActorAgentID),
-		nullIfEmpty(run.BlueprintRunID), stepIdx)
-	return err
+	return "completed"
 }
 
-// CreateIfNotFiredSystem is the event-path fenced insert. It
-// mirrors Create's column binds but forces trigger_type='event' (so
-// creator_user_id stays NULL per the schema CHECK), writes
-// triggering_event_id, and adds ON CONFLICT … DO NOTHING against the
-// runs_event_trigger_fence partial unique index. inserted=false means a
-// run for this (triggering_event_id, trigger_id) already exists — a
-// replayed event, skipped cleanly. SQLite has one connection so there is
-// no admin/app pool split; the contract matches the Postgres impl.
-func (s *agentRunStore) CreateIfNotFiredSystem(ctx context.Context, orgID string, run domain.AgentRun) (bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	// Both halves of the fence key are required: an empty value binds NULL,
-	// the partial unique index treats NULL as distinct, and the insert would
-	// silently skip the fence. Fail loud — this is the fenced path, and an
-	// unfenced run here would defeat its purpose.
-	if run.TriggeringEventID == "" || run.TriggerID == "" {
-		return false, db.ErrFenceRequiresEventAndTrigger
-	}
-	var stepIdx any
-	if run.BlueprintStepIndex != nil {
-		stepIdx = *run.BlueprintStepIndex
-	}
-	// trigger_type is hard-coded 'event': this method is the event path's
-	// only insert, and creator_user_id is left NULL to satisfy the
-	// runs_creator_matches_trigger_type CHECK.
-	res, err := s.q.ExecContext(ctx, `
-		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path,
-		                  trigger_type, trigger_id, triggering_event_id, team_id, visibility,
-		                  creator_user_id, actor_agent_id, blueprint_run_id, blueprint_step_index)
-		VALUES (?, ?, ?, ?, ?, ?, 'event', ?, ?, ?, 'team', NULL, ?, ?, ?)
-		ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
-	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
-		nullIfEmpty(run.TriggerID), nullIfEmpty(run.TriggeringEventID), runmode.LocalDefaultTeamID,
-		nullIfEmpty(run.ActorAgentID), nullIfEmpty(run.BlueprintRunID), stepIdx)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
+// releaseActiveClaim stamps released_at + outcome on the conversation's
+// active claim, if one exists. A no-op (no error) when the conversation has
+// no live engagement — a terminal write may land on a row whose claim was
+// already released (requeue, boot sweep).
+func releaseActiveClaim(ctx context.Context, q queryer, runID, outcome string) error {
+	_, err := q.ExecContext(ctx, `
+		UPDATE claims SET released_at = ?, outcome = ?
+		WHERE conversation_id = ? AND released_at IS NULL
+	`, time.Now().UTC(), outcome, runID)
+	return err
 }
 
 func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	// Token columns are SET to the absolute SUM over run_messages (the
+	// Token columns are SET to the absolute SUM over messages (the
 	// streaming sink wrote every session's messages before this terminal
 	// write), NOT accumulated like total_cost_usd — the SUM is already the
 	// full total, so re-running Complete on a resume re-sets the same
-	// correct value rather than doubling. TFAC-473.
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE runs
-		SET status = ?,
-		    completed_at = ?,
-		    total_cost_usd = COALESCE(total_cost_usd, 0) + ?,
-		    duration_ms = COALESCE(duration_ms, 0) + ?,
-		    num_turns = COALESCE(num_turns, 0) + ?,
-		    stop_reason = ?,
-		    result_summary = ?,
-		    outcome = ?,
-		    outcome_reason = ?,
-		    failure_kind = ?,
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE run_id = ?),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE run_id = ?),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE run_id = ?),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE run_id = ?)
-		WHERE id = ?
-	`, status, time.Now(), costUSD, durationMs, numTurns, stopReason, resultSummary,
-		nullIfEmpty(outcome), nullIfEmpty(outcomeReason), nullIfEmpty(failureKind),
-		runID, runID, runID, runID, runID)
-	return err
-}
-
-func (s *agentRunStore) AddPartialTotals(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
-	}
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE runs
-		SET total_cost_usd = COALESCE(total_cost_usd, 0) + ?,
-		    duration_ms = COALESCE(duration_ms, 0) + ?,
-		    num_turns = COALESCE(num_turns, 0) + ?
-		WHERE id = ?
-	`, costUSD, durationMs, numTurns, runID)
-	return err
+	// correct value rather than doubling.
+	return inTx(ctx, s.q, func(q queryer) error {
+		_, err := q.ExecContext(ctx, `
+			UPDATE conversations
+			SET status = ?,
+			    completed_at = ?,
+			    total_cost_usd = COALESCE(total_cost_usd, 0) + ?,
+			    duration_ms = COALESCE(duration_ms, 0) + ?,
+			    num_turns = COALESCE(num_turns, 0) + ?,
+			    stop_reason = ?,
+			    result_summary = ?,
+			    outcome = ?,
+			    outcome_reason = ?,
+			    failure_kind = ?,
+			    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE conversation_id = ?),
+			    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE conversation_id = ?),
+			    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE conversation_id = ?),
+			    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE conversation_id = ?)
+			WHERE id = ?
+		`, status, time.Now(), costUSD, durationMs, numTurns, stopReason, resultSummary,
+			nullIfEmpty(outcome), nullIfEmpty(outcomeReason), nullIfEmpty(failureKind),
+			runID, runID, runID, runID, runID)
+		if err != nil {
+			return err
+		}
+		return releaseActiveClaim(ctx, q, runID, claimOutcomeForStatus(status))
+	})
 }
 
 func (s *agentRunStore) MarkOpen(ctx context.Context, orgID, runID string) (bool, error) {
@@ -164,70 +103,60 @@ func (s *agentRunStore) MarkOpen(ctx context.Context, orgID, runID string) (bool
 	}
 	// pending_approval stays in the exclusion list as a backward-compat guard:
 	// runs no longer park in it, but a legacy row must not be re-opened from it.
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs
-		SET status = 'open', parked_at = ?
-		WHERE id = ?
-		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                     'pending_approval', 'open')
-	`, time.Now().UTC(), runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
+	var flipped bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE conversations
+			SET status = 'open', parked_at = ?
+			WHERE id = ?
+			  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
+			                     'pending_approval', 'open')
+		`, time.Now().UTC(), runID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		flipped = n > 0
+		if !flipped {
+			return nil
+		}
+		return releaseActiveClaim(ctx, q, runID, "parked")
+	})
+	return flipped, err
 }
 
-func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) (bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	// Wake any non-finish parked/terminal state: open, or an aborted run
-	// (completed + outcome='abort'). Keyed on (status, outcome) so a finish run
-	// (completed + outcome='finish') is excluded and a racing resume that already
-	// moved the row loses this compare-and-swap. pending_approval is gone
-	// Runs never park for approval.
-	//
-	// The ownership stamp rides the same statement — see the Postgres
-	// twin's comment; at N=1 the practical effect is that a resumed row
-	// always carries the CURRENT boot's epoch, so a same-boot reconcile
-	// never mistakes it for a prior boot's orphan. Empty executorID →
-	// NULL for both columns.
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'running', parked_at = NULL,
-			executor_id = NULLIF(?, ''),
-			boot_epoch  = CASE WHEN ? = '' THEN NULL ELSE ? END
-		WHERE id = ?
-		  AND (status = 'open'
-		       OR (status = 'completed' AND outcome = 'abort'))
-	`, executorID, executorID, bootEpoch, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
-}
-
-// MarkQueuedForResume is resume-by-enqueue's status flip (TFAC-585): see
-// the interface doc comment / the Postgres twin.
+// MarkQueuedForResume is resume-by-enqueue's status flip: see the interface
+// doc comment / the Postgres twin.
 func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'queued', queued_at = CURRENT_TIMESTAMP,
-		                parked_at = NULL, claimed_at = NULL,
-		                executor_id = NULL, boot_epoch = NULL, cred_pubkey = NULL,
-		                preferred_executor_id = NULL
-		WHERE id = ?
-		  AND (status = 'open'
-		       OR (status = 'completed' AND outcome = 'abort'))
-	`, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
+	var flipped bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE conversations SET status = 'queued', queued_at = CURRENT_TIMESTAMP,
+			                parked_at = NULL, preferred_executor_id = NULL
+			WHERE id = ?
+			  AND (status = 'open'
+			       OR (status = 'completed' AND outcome = 'abort'))
+		`, runID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		flipped = n > 0
+		if !flipped {
+			return nil
+		}
+		return releaseActiveClaim(ctx, q, runID, "requeued")
+	})
+	return flipped, err
 }
 
 func (s *agentRunStore) SetSession(ctx context.Context, orgID, runID, sessionID string) error {
@@ -235,16 +164,16 @@ func (s *agentRunStore) SetSession(ctx context.Context, orgID, runID, sessionID 
 		return err
 	}
 	_, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET session_id = ? WHERE id = ?
+		UPDATE conversations SET sdk_session_id = ? WHERE id = ?
 	`, sessionID, runID)
 	return err
 }
 
-func (s *agentRunStore) SetStatus(ctx context.Context, orgID, runID, status string) error {
+func (s *agentRunStore) SetStatusSystem(ctx context.Context, orgID, runID, status string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE runs SET status = ? WHERE id = ?`, status, runID)
+	_, err := s.q.ExecContext(ctx, `UPDATE conversations SET status = ? WHERE id = ?`, status, runID)
 	return err
 }
 
@@ -252,7 +181,7 @@ func (s *agentRunStore) SetWorktreePath(ctx context.Context, orgID, runID, path 
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE runs SET worktree_path = ? WHERE id = ?`, path, runID)
+	_, err := s.q.ExecContext(ctx, `UPDATE conversations SET worktree_path = ? WHERE id = ?`, path, runID)
 	return err
 }
 
@@ -260,14 +189,35 @@ func (s *agentRunStore) SetExecutorSystem(ctx context.Context, orgID, runID, exe
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	// Clearing the pointer (executorID == "") clears boot_epoch with it —
-	// the two columns are always either both set or both NULL.
-	var epoch any
-	if executorID != "" {
-		epoch = bootEpoch
+	// An empty executorID keeps the legacy clear semantics: the live
+	// engagement is over, so its claim releases as requeued.
+	if executorID == "" {
+		return releaseActiveClaim(ctx, s.q, runID, "requeued")
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE runs SET executor_id = ?, boot_epoch = ? WHERE id = ?`, nullIfEmpty(executorID), epoch, runID)
-	return err
+	// Idempotent go-live confirmation: update the active claim's identity
+	// if one exists, mint one if none does — the live process must never
+	// run unattributed.
+	return inTx(ctx, s.q, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE claims SET executor_id = ?, boot_epoch = ?
+			WHERE conversation_id = ? AND released_at IS NULL
+		`, executorID, bootEpoch, runID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			return nil
+		}
+		_, err = q.ExecContext(ctx, `
+			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, uuid.New().String(), orgID, runID, executorID, bootEpoch, time.Now().UTC())
+		return err
+	})
 }
 
 func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID, failureKind string) (bool, error) {
@@ -278,57 +228,36 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID, fa
 	// AgentRunStore.MarkFailedIfActive: a warm 'open' run has no durable
 	// snapshot yet, so an infra error reaching failRun must terminate it.
 	//
-	// Refresh the denormalized token columns from the run_messages SUM, same as
+	// Refresh the denormalized token columns from the messages SUM, same as
 	// Complete — an infra-failed run still streamed (and paid for) messages, so
-	// the cache must reflect them rather than strand at 0 (TFAC-473).
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, ?),
-		    failure_kind = ?,
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE run_id = ?),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE run_id = ?),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE run_id = ?),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE run_id = ?)
-		WHERE id = ?
-		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
-		                     'pending_approval')
-	`, time.Now().UTC(), nullIfEmpty(failureKind), runID, runID, runID, runID, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
-}
-
-func (s *agentRunStore) MarkCompletedIfPendingApproval(ctx context.Context, orgID, runID string) (bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs SET status = 'completed' WHERE id = ? AND status = 'pending_approval'
-	`, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
-}
-
-func (s *agentRunStore) HasOtherActiveRunForTask(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	var exists bool
-	err := s.q.QueryRowContext(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM runs
-			WHERE task_id = ? AND id != ?
-			  AND status NOT IN ('completed','failed','cancelled','task_unsolvable','pending_approval')
-		)
-	`, taskID, excludeRunID).Scan(&exists)
-	if err != nil {
-		return false, err
-	}
-	return exists, nil
+	// the cache must reflect them rather than strand at 0.
+	var flipped bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, ?),
+			    failure_kind = ?,
+			    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE conversation_id = ?),
+			    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE conversation_id = ?),
+			    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE conversation_id = ?),
+			    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE conversation_id = ?)
+			WHERE id = ?
+			  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
+			                     'pending_approval')
+		`, time.Now().UTC(), nullIfEmpty(failureKind), runID, runID, runID, runID, runID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		flipped = n > 0
+		if !flipped {
+			return nil
+		}
+		return releaseActiveClaim(ctx, q, runID, "failed")
+	})
+	return flipped, err
 }
 
 func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
@@ -336,50 +265,36 @@ func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID,
 		return false, err
 	}
 	now := time.Now()
-	// Refresh the denormalized token columns from the run_messages SUM, same as
+	// Refresh the denormalized token columns from the messages SUM, same as
 	// Complete — a run cancelled while running/open still streamed (and paid
-	// for) messages, so the cache must reflect them rather than strand at 0
-	// (TFAC-473).
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs
-		SET status = 'cancelled', completed_at = ?, stop_reason = ?, result_summary = ?,
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM run_messages WHERE run_id = ?),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM run_messages WHERE run_id = ?),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM run_messages WHERE run_id = ?),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM run_messages WHERE run_id = ?)
-		WHERE id = ?
-		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                     'pending_approval')
-	`, now, stopReason, summary, runID, runID, runID, runID, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
-}
-
-func (s *agentRunStore) MarkDiscarded(ctx context.Context, orgID, runID, stopReason string) (bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	now := time.Now()
-	// No token roll-up here (unlike the other terminal writes): this acts only
-	// on 'pending_approval' rows, which already rolled up at the
-	// completed→pending_approval transition via Complete — run_messages can't
-	// grow after that, so the cache is already current (TFAC-473).
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE runs
-		SET status = 'cancelled',
-		    completed_at = COALESCE(completed_at, ?),
-		    stop_reason = ?,
-		    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
-		WHERE id = ? AND status = 'pending_approval'
-	`, now, stopReason, "Review discarded by user.", runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
+	// for) messages, so the cache must reflect them rather than strand at 0.
+	var flipped bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE conversations
+			SET status = 'cancelled', completed_at = ?, stop_reason = ?, result_summary = ?,
+			    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE conversation_id = ?),
+			    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE conversation_id = ?),
+			    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE conversation_id = ?),
+			    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE conversation_id = ?)
+			WHERE id = ?
+			  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
+			                     'pending_approval')
+		`, now, stopReason, summary, runID, runID, runID, runID, runID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		flipped = n > 0
+		if !flipped {
+			return nil
+		}
+		return releaseActiveClaim(ctx, q, runID, "cancelled")
+	})
+	return flipped, err
 }
 
 // --- Queries ---
@@ -388,15 +303,21 @@ func (s *agentRunStore) MarkDiscarded(ctx context.Context, orgID, runID, stopRea
 // via scanAgentRun. Same shape as Postgres' pgRunColumns; the
 // memory_missing derivation uses SQLite's TRIM(...) variant with the
 // explicit whitespace charset (Postgres uses BTRIM with an E'...'
-// escape string).
+// escape string). The claim-derived columns (claimed_at / executor_id /
+// attempts) are correlated subselects over claims; claimed_at loses its
+// declared column type inside the subselect, so it scans as text and
+// parses via parseDBDatetime.
 const sqliteRunColumns = `
-	r.id, r.task_id, r.status, r.model, r.started_at, r.queued_at, r.claimed_at, r.completed_at,
+	r.id, COALESCE(r.task_id, ''), COALESCE(r.status, ''), r.model, r.started_at, r.queued_at,
+	(SELECT MAX(cl.claimed_at) FROM claims cl WHERE cl.conversation_id = r.id) AS claimed_at,
+	r.completed_at,
 	r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
-	r.result_summary, r.outcome, r.outcome_reason, r.failure_kind, r.session_id, r.actor_agent_id,
+	r.result_summary, r.outcome, r.outcome_reason, r.failure_kind, r.sdk_session_id, r.actor_agent_id,
 	COALESCE(r.trigger_type, ''),
 	r.creator_user_id,
-	r.team_id,
-	r.executor_id,
+	COALESCE(r.team_id, ''),
+	(SELECT cl.executor_id FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL) AS executor_id,
+	(SELECT COUNT(*) FROM claims cl WHERE cl.conversation_id = r.id) AS attempts,
 	r.blueprint_run_id, r.blueprint_step_index,
 	r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_creation_tokens,
 	(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
@@ -409,8 +330,8 @@ func (s *agentRunStore) Get(ctx context.Context, orgID, runID string) (*domain.A
 	}
 	row := s.q.QueryRowContext(ctx, `
 		SELECT `+sqliteRunColumns+`
-		FROM runs r
-		LEFT JOIN run_memory rm ON rm.run_id = r.id
+		FROM conversations r
+		LEFT JOIN run_memory rm ON rm.conversation_id = r.id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id
 		WHERE r.id = ?
 	`, runID)
@@ -431,8 +352,8 @@ func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) (
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+sqliteRunColumns+`
-		FROM runs r
-		LEFT JOIN run_memory rm ON rm.run_id = r.id
+		FROM conversations r
+		LEFT JOIN run_memory rm ON rm.conversation_id = r.id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id
 		WHERE r.task_id = ?
 		ORDER BY r.started_at DESC
@@ -476,8 +397,8 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 		}
 		rows, err := s.q.QueryContext(ctx, `
 			SELECT `+sqliteRunColumns+`
-			FROM runs r
-			LEFT JOIN run_memory rm ON rm.run_id = r.id
+			FROM conversations r
+			LEFT JOIN run_memory rm ON rm.conversation_id = r.id
 			LEFT JOIN agents a ON a.id = r.actor_agent_id
 			WHERE r.task_id IN (`+strings.Join(placeholders, ", ")+`)
 			ORDER BY r.started_at DESC
@@ -502,37 +423,8 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 	return runs, nil
 }
 
-func (s *agentRunStore) PendingApprovalIDForTask(ctx context.Context, orgID, taskID string) (string, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return "", err
-	}
-	var id string
-	err := s.q.QueryRowContext(ctx,
-		`SELECT id FROM runs WHERE task_id = ? AND status = 'pending_approval' LIMIT 1`,
-		taskID,
-	).Scan(&id)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return id, err
-}
-
-func (s *agentRunStore) HasActiveForTask(ctx context.Context, orgID, taskID string) (bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	var count int
-	err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM runs
-		WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled',
-		                                      'task_unsolvable', 'pending_approval')
-	`, taskID).Scan(&count)
-	return count > 0, err
-}
-
-// HasActiveAutoRunForEntity is the per-entity sibling of
-// HasActiveForTask: any non-terminal trigger_type='event' run on any
-// task that belongs to the entity. Manual delegations are excluded.
+// HasActiveAutoRunForEntity: any non-terminal trigger_type='event' run on
+// any task that belongs to the entity. Manual delegations are excluded.
 // Used by the router's per-entity firing gate.
 func (s *agentRunStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -540,7 +432,7 @@ func (s *agentRunStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, en
 	}
 	var count int
 	err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM runs r
+		SELECT COUNT(*) FROM conversations r
 		JOIN tasks t ON t.id = r.task_id
 		WHERE t.entity_id = ?
 		  AND r.trigger_type = 'event'
@@ -555,7 +447,7 @@ func (s *agentRunStore) ActiveIDsForTask(ctx context.Context, orgID, taskID stri
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id FROM runs
+		SELECT id FROM conversations
 		WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled',
 		                                      'task_unsolvable', 'pending_approval')
 	`, taskID)
@@ -596,7 +488,7 @@ func (s *agentRunStore) ActiveAutoRunIDForEntitySystem(ctx context.Context, orgI
 	}
 	var id, taskID string
 	err := s.q.QueryRowContext(ctx, `
-		SELECT r.id, r.task_id FROM runs r
+		SELECT r.id, r.task_id FROM conversations r
 		JOIN tasks t ON t.id = r.task_id
 		WHERE t.entity_id = ?
 		  AND r.trigger_type = 'event'
@@ -616,7 +508,7 @@ func (s *agentRunStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, teamI
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id FROM runs
+		SELECT id FROM conversations
 		WHERE team_id = ? AND status NOT IN ('completed', 'failed', 'cancelled',
 		                                     'task_unsolvable', 'pending_approval')
 	`, teamID)
@@ -641,7 +533,7 @@ func (s *agentRunStore) GetSystem(ctx context.Context, orgID, runID string) (*do
 
 func (s *agentRunStore) LookupOrgForRunSystem(ctx context.Context, runID string) (string, error) {
 	var orgID string
-	err := s.q.QueryRowContext(ctx, `SELECT org_id FROM runs WHERE id = ?`, runID).Scan(&orgID)
+	err := s.q.QueryRowContext(ctx, `SELECT org_id FROM conversations WHERE id = ?`, runID).Scan(&orgID)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -652,16 +544,8 @@ func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status
 	return s.Complete(ctx, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind)
 }
 
-func (s *agentRunStore) AddPartialTotalsSystem(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error {
-	return s.AddPartialTotals(ctx, orgID, runID, costUSD, durationMs, numTurns)
-}
-
 func (s *agentRunStore) MarkOpenSystem(ctx context.Context, orgID, runID string) (bool, error) {
 	return s.MarkOpen(ctx, orgID, runID)
-}
-
-func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID, executorID string, bootEpoch int64) (bool, error) {
-	return s.MarkResuming(ctx, orgID, runID, executorID, bootEpoch)
 }
 
 func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error) {
@@ -676,7 +560,7 @@ func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cuto
 	// UTC string.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT org_id, blueprint_run_id
-		FROM runs
+		FROM conversations
 		WHERE status = 'open'
 		   OR (status = 'completed' AND outcome = 'abort')
 		GROUP BY org_id, blueprint_run_id
@@ -701,16 +585,8 @@ func (s *agentRunStore) SetSessionSystem(ctx context.Context, orgID, runID, sess
 	return s.SetSession(ctx, orgID, runID, sessionID)
 }
 
-func (s *agentRunStore) SetStatusSystem(ctx context.Context, orgID, runID, status string) error {
-	return s.SetStatus(ctx, orgID, runID, status)
-}
-
 func (s *agentRunStore) SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error {
 	return s.SetWorktreePath(ctx, orgID, runID, path)
-}
-
-func (s *agentRunStore) HasOtherActiveRunForTaskSystem(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error) {
-	return s.HasOtherActiveRunForTask(ctx, orgID, taskID, excludeRunID)
 }
 
 func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, runID, failureKind string) (bool, error) {
@@ -726,7 +602,7 @@ func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, m
 }
 
 // LastAgentActivityAtSystem returns the created_at of the run's newest non-user
-// message (the artifact-change ledger watermark, TFAC-493). Ordered by id DESC —
+// message (the artifact-change ledger watermark). Ordered by id DESC —
 // the monotonic insertion order — rather than MAX(created_at), so the watermark
 // is the genuinely last-inserted agent row and never trips over mixed timestamp
 // text formats in a lexical MAX. ok=false when the run has no agent message yet.
@@ -740,8 +616,8 @@ func (s *agentRunStore) LastAgentActivityAtSystem(ctx context.Context, orgID, ru
 	}
 	var at time.Time
 	err := s.q.QueryRowContext(ctx, `
-		SELECT created_at FROM run_messages
-		WHERE org_id = ? AND run_id = ? AND role <> 'user'
+		SELECT created_at FROM messages
+		WHERE org_id = ? AND conversation_id = ? AND role <> 'user'
 		ORDER BY id DESC LIMIT 1
 	`, orgID, runID).Scan(&at)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -753,23 +629,19 @@ func (s *agentRunStore) LastAgentActivityAtSystem(ctx context.Context, orgID, ru
 	return at, true, nil
 }
 
-func (s *agentRunStore) ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error) {
-	return s.ListParkedWorktreePaths(ctx, orgID)
-}
-
-// ListParkedWorktreePaths returns the worktree dirs the startup sweep must keep
-// warm — parked `open` runs whose owning blueprint_run is still 'running'. A
+// ListParkedWorktreePathsSystem returns the worktree dirs the startup sweep must
+// keep warm — parked `open` runs whose owning blueprint_run is still 'running'. A
 // parked run under an already-terminal blueprint_run is NOT resumable (every
 // resume path gates on cr.Status == running), so its worktree must NOT be
 // preserved: preserving it would leave a checked-out branch on disk that the
 // boot reconcile then orphans by cancelling the row, reviving the "refusing to
 // fetch into a branch checked out in a worktree" loop.
-func (s *agentRunStore) ListParkedWorktreePaths(ctx context.Context, orgID string) ([]string, error) {
+func (s *agentRunStore) ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx,
-		`SELECT r.worktree_path FROM runs r
+		`SELECT r.worktree_path FROM conversations r
 		 LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
 		 WHERE r.status = 'open'
 		   AND COALESCE(r.worktree_path, '') != ''
@@ -805,7 +677,7 @@ func (s *agentRunStore) EntitiesWithOpenRuns(ctx context.Context, orgID string, 
 	}
 	query := `
 		SELECT DISTINCT t.entity_id
-		FROM runs r
+		FROM conversations r
 		JOIN tasks t ON t.id = r.task_id
 		WHERE r.status = 'open'
 		  AND t.entity_id IN (` + strings.Join(placeholders, ",") + `)
@@ -880,17 +752,18 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 		windowState = domain.MessageWindowActive
 	}
 
-	// SQLite uses AUTOINCREMENT on run_messages.id, so LastInsertId
+	// SQLite uses AUTOINCREMENT on messages.id, so LastInsertId
 	// on the Result gives us the assigned row id. Postgres uses a
 	// sequence + RETURNING — see postgres/agentrun.go.
 	result, err := s.q.ExecContext(ctx, `
-		INSERT INTO run_messages (run_id, role, content, subtype, tool_calls, tool_call_id,
-		                          is_error, metadata, model,
-		                          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at,
-		                          reasoning, content_blocks, delivered, window_state, seq)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO messages (conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id,
+		                      is_error, metadata, model,
+		                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at,
+		                      reasoning, content_blocks, delivered, window_state, seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		msg.RunID, msg.Role, msg.Content, msg.Subtype,
+		msg.RunID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID),
+		msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, sqliteNullStr(msg.ToolCallID), msg.IsError, metadataJSON,
 		sqliteNullStr(msg.Model), sqliteNullInt(msg.InputTokens), sqliteNullInt(msg.OutputTokens),
 		sqliteNullInt(msg.CacheReadTokens), sqliteNullInt(msg.CacheCreationTokens),
@@ -903,17 +776,18 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 	return result.LastInsertId()
 }
 
-const sqliteMessageColumns = `id, run_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
+const sqliteMessageColumns = `id, conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
 	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at,
 	reasoning, content_blocks, delivered, window_state, seq`
 
-// scanAgentMessageRows drains a run_messages result set selecting
+// scanAgentMessageRows drains a messages result set selecting
 // sqliteMessageColumns into domain.AgentMessage values. Shared by the
 // single-run Messages and the batched MessagesForRuns.
 func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 	var messages []domain.AgentMessage
 	for rows.Next() {
 		var m domain.AgentMessage
+		var userID, claimID sql.NullString
 		var content, subtype, toolCallsStr, toolCallID, metadataStr, model sql.NullString
 		var inputTok, outputTok, cacheReadTok, cacheCreateTok sql.NullInt64
 		var reasoningStr, contentBlocksStr sql.NullString
@@ -922,7 +796,7 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		var seq sql.NullFloat64
 
 		if err := rows.Scan(
-			&m.ID, &m.RunID, &m.Role, &content, &subtype, &toolCallsStr,
+			&m.ID, &m.RunID, &userID, &claimID, &m.Role, &content, &subtype, &toolCallsStr,
 			&toolCallID, &m.IsError, &metadataStr, &model,
 			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &m.CreatedAt,
 			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq,
@@ -930,6 +804,8 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 			return nil, err
 		}
 
+		m.UserID = userID.String
+		m.ClaimID = claimID.String
 		m.Content = content.String
 		m.Subtype = subtype.String
 		m.ToolCallID = toolCallID.String
@@ -994,7 +870,7 @@ func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]do
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+sqliteMessageColumns+`
-		FROM run_messages WHERE run_id = ? ORDER BY id ASC
+		FROM messages WHERE conversation_id = ? ORDER BY id ASC
 	`, runID)
 	if err != nil {
 		return nil, err
@@ -1012,9 +888,10 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 	}
 	// ?-placeholder IN list (SQLite has no array bind), mirroring
 	// artifactStore.ListByRuns, chunked to stay inside SQLite's variable
-	// limit (chunkIDs). A run_id falls in exactly one chunk, so ORDER BY
-	// (run_id, id) keeps each run's messages contiguous and in insertion
-	// order within the merged slice; the caller groups by RunID.
+	// limit (chunkIDs). A conversation_id falls in exactly one chunk, so
+	// ORDER BY (conversation_id, id) keeps each run's messages contiguous
+	// and in insertion order within the merged slice; the caller groups by
+	// RunID.
 	var messages []domain.AgentMessage
 	for _, chunk := range chunkIDs(runIDs) {
 		placeholders := make([]string, len(chunk))
@@ -1025,9 +902,9 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 		}
 		rows, err := s.q.QueryContext(ctx, `
 			SELECT `+sqliteMessageColumns+`
-			FROM run_messages
-			WHERE run_id IN (`+strings.Join(placeholders, ", ")+`)
-			ORDER BY run_id ASC, id ASC
+			FROM messages
+			WHERE conversation_id IN (`+strings.Join(placeholders, ", ")+`)
+			ORDER BY conversation_id ASC, id ASC
 		`, args...)
 		if err != nil {
 			return nil, err
@@ -1046,7 +923,7 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 // exact LLM context, ordered by the effective assembly key COALESCE(seq, id).
 // window_state='inactive' rows are excluded (superseded by compaction);
 // 'elided' and undelivered rows are included — see the interface doc for the
-// full contract. Pure read over run_messages; no other table or in-process
+// full contract. Pure read over messages; no other table or in-process
 // state feeds in.
 func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -1054,8 +931,8 @@ func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+sqliteMessageColumns+`
-		FROM run_messages
-		WHERE run_id = ? AND window_state <> 'inactive'
+		FROM messages
+		WHERE conversation_id = ? AND window_state <> 'inactive'
 		ORDER BY COALESCE(seq, id) ASC
 	`, runID)
 	if err != nil {
@@ -1088,8 +965,8 @@ func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, 
 			args = append(args, id)
 		}
 		if _, err := s.q.ExecContext(ctx, `
-			UPDATE run_messages SET delivered = 1
-			WHERE run_id = ? AND id IN (`+strings.Join(placeholders, ",")+`)
+			UPDATE messages SET delivered = 1
+			WHERE conversation_id = ? AND id IN (`+strings.Join(placeholders, ",")+`)
 		`, args...); err != nil {
 			return err
 		}
@@ -1106,9 +983,9 @@ func (s *agentRunStore) SetWindowState(ctx context.Context, orgID, runID string,
 		return 0, err
 	}
 	result, err := s.q.ExecContext(ctx, `
-		UPDATE run_messages
+		UPDATE messages
 		SET window_state = ?
-		WHERE run_id = ? AND window_state = ? AND COALESCE(seq, id) < ?
+		WHERE conversation_id = ? AND window_state = ? AND COALESCE(seq, id) < ?
 	`, string(to), runID, string(from), beforeSeq)
 	if err != nil {
 		return 0, err
@@ -1117,7 +994,7 @@ func (s *agentRunStore) SetWindowState(ctx context.Context, orgID, runID string,
 	return int(n), err
 }
 
-func (s *agentRunStore) TokenTotals(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error) {
+func (s *agentRunStore) TokenTotalsSystem(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -1128,8 +1005,8 @@ func (s *agentRunStore) TokenTotals(ctx context.Context, orgID, runID string) (*
 		       COALESCE(SUM(cache_read_tokens), 0),
 		       COALESCE(SUM(cache_creation_tokens), 0),
 		       COUNT(*)
-		FROM run_messages
-		WHERE run_id = ? AND role = 'assistant'
+		FROM messages
+		WHERE conversation_id = ? AND role = 'assistant'
 	`, runID)
 
 	var t domain.TokenTotals
@@ -1139,10 +1016,6 @@ func (s *agentRunStore) TokenTotals(ctx context.Context, orgID, runID string) (*
 	return &t, nil
 }
 
-func (s *agentRunStore) TokenTotalsSystem(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error) {
-	return s.TokenTotals(ctx, orgID, runID)
-}
-
 func (s *agentRunStore) BlueprintSiblingCostUSDSystem(ctx context.Context, orgID, blueprintRunID, excludeRunID string) (float64, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
@@ -1150,7 +1023,7 @@ func (s *agentRunStore) BlueprintSiblingCostUSDSystem(ctx context.Context, orgID
 	var cost sql.NullFloat64
 	err := s.q.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(total_cost_usd), 0)
-		FROM runs
+		FROM conversations
 		WHERE blueprint_run_id = ? AND id <> ?
 	`, blueprintRunID, excludeRunID).Scan(&cost)
 	if err != nil {
@@ -1166,7 +1039,7 @@ func (s *agentRunStore) BlueprintSiblingDurationMsSystem(ctx context.Context, or
 	var ms sql.NullInt64
 	err := s.q.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(duration_ms), 0)
-		FROM runs
+		FROM conversations
 		WHERE blueprint_run_id = ? AND id <> ?
 	`, blueprintRunID, excludeRunID).Scan(&ms)
 	if err != nil {
@@ -1178,7 +1051,8 @@ func (s *agentRunStore) BlueprintSiblingDurationMsSystem(ctx context.Context, or
 // --- Helpers ---
 
 func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
-	var queuedAt, claimedAt, completedAt sql.NullTime
+	var queuedAt, completedAt sql.NullTime
+	var claimedAt sql.NullString
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
@@ -1186,19 +1060,19 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
+		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName,
 	); err != nil {
 		return err
 	}
-	finalizeAgentRun(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
+	return finalizeAgentRun(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
 		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
-	return nil
 }
 
 func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
-	var queuedAt, claimedAt, completedAt sql.NullTime
+	var queuedAt, completedAt sql.NullTime
+	var claimedAt sql.NullString
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
@@ -1206,20 +1080,19 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &blueprintRunID, &blueprintStep,
+		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName,
 	); err != nil {
 		return err
 	}
-	finalizeAgentRun(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
+	return finalizeAgentRun(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
 		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
-	return nil
 }
 
-func finalizeAgentRun(r *domain.AgentRun, queuedAt, claimedAt, completedAt sql.NullTime, costUSD sql.NullFloat64,
+func finalizeAgentRun(r *domain.AgentRun, queuedAt sql.NullTime, claimedAt sql.NullString, completedAt sql.NullTime, costUSD sql.NullFloat64,
 	durationMs, numTurns, blueprintStep sql.NullInt64,
-	model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID sql.NullString) {
+	model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID sql.NullString) error {
 	r.Model = model.String
 	r.StopReason = stopReason.String
 	r.WorktreePath = worktreePath.String
@@ -1241,8 +1114,15 @@ func finalizeAgentRun(r *domain.AgentRun, queuedAt, claimedAt, completedAt sql.N
 	if queuedAt.Valid {
 		r.QueuedAt = &queuedAt.Time
 	}
-	if claimedAt.Valid {
-		r.ClaimedAt = &claimedAt.Time
+	// ClaimedAt derives from a claims subselect, which loses the declared
+	// column type, so the driver hands back raw text — parse the mixed
+	// on-disk formats the same way the factory projection does.
+	if claimedAt.Valid && claimedAt.String != "" {
+		at, err := parseDBDatetime(claimedAt.String)
+		if err != nil {
+			return fmt.Errorf("parse claimed_at %q: %w", claimedAt.String, err)
+		}
+		r.ClaimedAt = &at
 	}
 	if completedAt.Valid {
 		r.CompletedAt = &completedAt.Time
@@ -1258,6 +1138,7 @@ func finalizeAgentRun(r *domain.AgentRun, queuedAt, claimedAt, completedAt sql.N
 		v := int(numTurns.Int64)
 		r.NumTurns = &v
 	}
+	return nil
 }
 
 // nullIfEmpty maps "" to a SQL NULL bind. Local mirror of the
@@ -1271,7 +1152,7 @@ func nullIfEmpty(s string) any {
 }
 
 // sqliteNullStr / sqliteNullInt produce typed NullX values for the
-// run_messages INSERT — pre-D2 these lived as nullStr / nullInt on
+// messages INSERT — pre-D2 these lived as nullStr / nullInt on
 // internal/db/agent.go. Renamed with the sqlite prefix here to make
 // it obvious this is the SQLite path's flavor (the *sql.NullX
 // concrete types are SQLite-idiomatic; pgx accepts the same types

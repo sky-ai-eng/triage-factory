@@ -234,7 +234,7 @@ func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) error
 func (s *promptStore) CountRunReferences(ctx context.Context, orgID, id string) (int, error) {
 	var n int
 	err := s.app.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM runs WHERE org_id = $1 AND prompt_id = $2`, orgID, id,
+		`SELECT COUNT(*) FROM conversations WHERE org_id = $1 AND prompt_id = $2`, orgID, id,
 	).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("count run references: %w", err)
@@ -285,7 +285,7 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 			COALESCE(AVG(total_cost_usd), 0),
 			COALESCE(AVG(duration_ms), 0)::bigint,
 			COALESCE(SUM(total_cost_usd), 0)
-		FROM runs WHERE org_id = $1 AND prompt_id = $2
+		FROM conversations WHERE org_id = $1 AND prompt_id = $2
 	`, orgID, promptID).Scan(
 		&stats.TotalRuns,
 		&stats.CompletedRuns,
@@ -302,7 +302,7 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 
 	var lastUsed sql.NullTime
 	if err := s.app.QueryRowContext(ctx,
-		`SELECT MAX(started_at) FROM runs WHERE org_id = $1 AND prompt_id = $2`, orgID, promptID,
+		`SELECT MAX(started_at) FROM conversations WHERE org_id = $1 AND prompt_id = $2`, orgID, promptID,
 	).Scan(&lastUsed); err != nil {
 		promptStatsLog.Error("scan max started_at failed", "prompt_id", promptID, "error", err)
 	}
@@ -314,7 +314,7 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 	cutoff := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
 	rows, err := s.app.QueryContext(ctx, `
 		SELECT started_at::date AS day, COUNT(*) AS cnt
-		FROM runs
+		FROM conversations
 		WHERE org_id = $1 AND prompt_id = $2 AND started_at::date >= $3::date
 		GROUP BY day ORDER BY day
 	`, orgID, promptID, cutoff)

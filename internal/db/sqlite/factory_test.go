@@ -117,7 +117,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			id := uuid.New().String()
 			blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
 			if _, err := conn.Exec(`
-				INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, blueprint_run_id)
+				INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id)
 				VALUES (?, ?, ?, ?, 'manual', ?)
 			`, id, taskID, factoryTestPromptID, status, blueprintRunID); err != nil {
 				t.Fatalf("seed run: %v", err)
@@ -138,7 +138,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
-					INSERT INTO run_memory (id, run_id, entity_id, agent_content)
+					INSERT INTO run_memory (id, conversation_id, entity_id, agent_content)
 					VALUES (?, ?, ?, NULL)
 				`, memID, runID, entityID); err != nil {
 					t.Fatalf("seed null run_memory: %v", err)
@@ -146,7 +146,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 				return
 			}
 			if _, err := conn.Exec(`
-				INSERT INTO run_memory (id, run_id, entity_id, agent_content)
+				INSERT INTO run_memory (id, conversation_id, entity_id, agent_content)
 				VALUES (?, ?, ?, ?)
 			`, memID, runID, entityID, content); err != nil {
 				t.Fatalf("seed run_memory: %v", err)

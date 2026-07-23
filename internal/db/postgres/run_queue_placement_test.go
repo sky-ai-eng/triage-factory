@@ -46,7 +46,7 @@ func registerLiveExecutor(t *testing.T, stores db.Stores, id string) {
 
 func backdatePgRunStarted(t *testing.T, h *pgtest.Harness, runID string, age time.Duration) {
 	t.Helper()
-	pgtest.MustExec(t, h.AdminDB, `UPDATE runs SET started_at = now() - $2::interval WHERE id = $1`,
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET started_at = now() - $2::interval WHERE id = $1`,
 		runID, age.String())
 }
 
@@ -59,7 +59,7 @@ func backdatePgHeartbeat(t *testing.T, h *pgtest.Harness, id string, age time.Du
 func readPreferred(t *testing.T, h *pgtest.Harness, runID string) (string, bool) {
 	t.Helper()
 	var pref *string
-	if err := h.AdminDB.QueryRow(`SELECT preferred_executor_id FROM runs WHERE id = $1`, runID).Scan(&pref); err != nil {
+	if err := h.AdminDB.QueryRow(`SELECT preferred_executor_id FROM conversations WHERE id = $1`, runID).Scan(&pref); err != nil {
 		t.Fatalf("read preferred: %v", err)
 	}
 	if pref == nil {

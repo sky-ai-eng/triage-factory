@@ -28,7 +28,7 @@ func (s *runSignalStore) Insert(ctx context.Context, orgID, runID string, kind d
 	}
 	var id int64
 	err := s.admin.QueryRowContext(ctx, `
-		INSERT INTO run_signals (org_id, run_id, kind, payload, target, created_at)
+		INSERT INTO run_signals (org_id, conversation_id, kind, payload, target, created_at)
 		VALUES ($1::uuid, $2::uuid, $3, $4, $5, now())
 		RETURNING id
 	`, orgID, runID, string(kind), payloadArg, target).Scan(&id)
@@ -37,7 +37,7 @@ func (s *runSignalStore) Insert(ctx context.Context, orgID, runID string, kind d
 
 func (s *runSignalStore) ListUnackedForTarget(ctx context.Context, target string) ([]domain.RunSignal, error) {
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT id, org_id::text, run_id::text, kind, COALESCE(payload::text, ''), target, created_at
+		SELECT id, org_id::text, conversation_id::text, kind, COALESCE(payload::text, ''), target, created_at
 		FROM run_signals
 		WHERE target = $1 AND acked_at IS NULL
 		ORDER BY id

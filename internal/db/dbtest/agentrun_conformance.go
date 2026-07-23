@@ -2,7 +2,6 @@ package dbtest
 
 import (
 	"context"
-	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -18,7 +17,7 @@ import (
 //   - the wired AgentRunStore impl,
 //   - the orgID to pass to every call,
 //   - a userID for user-attributed write paths,
-//   - an AgentRunSeeder for entity/task/run_memory/task-claim
+//   - an AgentRunSeeder for entity/task/conversation/run_memory
 //     fixtures the harness needs but doesn't go through the store
 //     to provide.
 type AgentRunStoreFactory func(t *testing.T) (
@@ -27,8 +26,19 @@ type AgentRunStoreFactory func(t *testing.T) (
 	seed AgentRunSeeder,
 )
 
+// ClaimRow is the seeder's projection of one claims row, oldest-first —
+// enough for the conformance suite to assert mint/release bookkeeping
+// without the suite owning claim SQL.
+type ClaimRow struct {
+	ID         string
+	ExecutorID string
+	BootEpoch  int64
+	Released   bool
+	Outcome    string
+}
+
 // AgentRunSeeder is a bag of callbacks the conformance suite uses
-// to stage fixture rows that aren't agent-run-shaped. Each backend
+// to stage fixture rows that aren't store-writable. Each backend
 // test file implements them against its own SQL.
 type AgentRunSeeder struct {
 	// Entity inserts an active GitHub PR entity and returns its ID.
@@ -44,17 +54,21 @@ type AgentRunSeeder struct {
 	// hanging off it.
 	Task func(t *testing.T, entityID, eventType, primaryEventID string) string
 
-	// EventHandler inserts a minimal enabled rule handler and returns
-	// its id, used as a stable runs.trigger_id FK target for the
-	// fence subtest. A rule (not a trigger) keeps the seed
-	// cheap — no blueprint row to wire — and the fence only needs a
-	// non-NULL handler id, since the partial unique index treats NULL
-	// trigger_id as distinct (the fence would silently not engage).
-	EventHandler func(t *testing.T, eventType string) string
+	// Run inserts a conversations row directly and returns its id (run.ID
+	// when set, a fresh uuid otherwise). RunQueueStore.EnqueueRun is the
+	// only production mint; the conformance suite stages rows in arbitrary
+	// status without driving the queue. Fields honored: ID, TaskID,
+	// PromptID, Status, Model, TriggerType (default manual), TriggerID,
+	// BlueprintRunID.
+	Run func(t *testing.T, run domain.AgentRun) string
+
+	// ClaimRows returns the conversation's claims rows oldest-first, so
+	// the suite can assert mint/release bookkeeping.
+	ClaimRows func(t *testing.T, conversationID string) []ClaimRow
 
 	// BlueprintRun mints a blueprint + blueprint_run pair against the
-	// given taskID and returns the blueprint_run id. Every runs row now
-	// carries a NOT NULL blueprint_run_id FK (a single prompt is a
+	// given taskID and returns the blueprint_run id. Every conversation
+	// row carries a NOT NULL blueprint_run_id FK (a single prompt is a
 	// 1-step blueprint), so the conformance suite stages one of these
 	// per run it creates and sets domain.AgentRun.BlueprintRunID. Each
 	// call mints a fresh independent blueprint_run — that matches the
@@ -79,7 +93,7 @@ type AgentRunSeeder struct {
 	// NullMemorySentinel inserts SQL NULL.
 	SetRunMemory func(t *testing.T, runID, entityID, content string)
 
-	// SeedRawMessage inserts a run_messages row with rawJSON written
+	// SeedRawMessage inserts a messages row with rawJSON written
 	// directly into the given column ("reasoning" or "content_blocks"),
 	// bypassing InsertMessage's json.Marshal. Used to stage
 	// well-formed-but-wrong-shaped JSON (a valid jsonb value in Postgres,
@@ -99,14 +113,19 @@ type AgentRunSeeder struct {
 // RunAgentRunStoreConformance covers the agent-run contract every
 // backend impl must hold:
 //
-//   - Lifecycle methods (Create / Complete / AddPartialTotals /
-//     SetSession / MarkOpen / MarkResuming /
-//     MarkCancelledIfActive / MarkDiscarded) refuse terminal
-//     statuses and produce correct side effects when they accept.
+//   - Lifecycle methods (Complete / SetSession / MarkOpen /
+//     MarkQueuedForResume / MarkCancelledIfActive / MarkFailedIfActive)
+//     refuse terminal statuses, produce correct side effects when they
+//     accept, and release the conversation's active claim with the right
+//     outcome.
+//   - SetExecutorSystem mints/updates/releases the active claim, and the
+//     claim-derived read fields (ClaimedAt / Attempts / ExecutorID) track
+//     the claims rows.
 //   - Queries return what they advertise (status filters, sort
 //     orders, JOIN-derived projections).
 //   - Transcript layer round-trips messages including JSONB
-//     metadata + tool_calls, and TokenTotals sums correctly.
+//     metadata + tool_calls + user/claim attribution, and
+//     TokenTotalsSystem sums correctly.
 //   - Memory_missing derivation matches the four noncompliance
 //     forms (no row / NULL / "" / whitespace) + the populated
 //     baseline.
@@ -117,19 +136,10 @@ type AgentRunSeeder struct {
 func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Helper()
 
-	t.Run("Create_PersistsRun_GetReturnsIt", func(t *testing.T) {
+	t.Run("SeededRun_GetReturnsIt", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		ent := seed.Entity(t, "create")
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
-		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-		runID := uuid.New().String()
-		if err := store.Create(ctx, orgID, domain.AgentRun{
-			ID: runID, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "claude-test",
-			BlueprintRunID: seed.BlueprintRun(t, taskID),
-		}); err != nil {
-			t.Fatalf("Create: %v", err)
-		}
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		got, err := store.Get(ctx, orgID, runID)
 		if err != nil {
 			t.Fatalf("Get: %v", err)
@@ -137,204 +147,12 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if got == nil || got.ID != runID {
 			t.Fatalf("Get returned %v, want id=%s", got, runID)
 		}
-		if got.Status != "running" || got.Model != "claude-test" {
+		if got.Status != "running" || got.Model != "m" {
 			t.Errorf("Get fields drift: %+v", got)
 		}
-	})
-
-	t.Run("Create_EventTriggered_PersistsWithNullCreator", func(t *testing.T) {
-		// Event-triggered Create must succeed and
-		// land creator_user_id=NULL (the runs_creator_matches_trigger_type
-		// CHECK demands NULL for trigger_type='event'). On Postgres
-		// this routes through the admin pool because the runs_insert
-		// RLS policy is incompatible with NULL creator; on SQLite the
-		// pool distinction doesn't exist but the contract is the same.
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		ent := seed.Entity(t, "create-event")
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
-		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-		runID := uuid.New().String()
-		if err := store.Create(ctx, orgID, domain.AgentRun{
-			ID:             runID,
-			TaskID:         taskID,
-			PromptID:       agentRunTestPrompt(t),
-			Status:         "running",
-			Model:          "claude-test",
-			TriggerType:    "event",
-			BlueprintRunID: seed.BlueprintRun(t, taskID),
-			// CreatorUserID intentionally empty — the CHECK
-			// forces NULL for event-triggered runs and the
-			// store impl must accept that.
-		}); err != nil {
-			t.Fatalf("Create event-triggered: %v", err)
-		}
-		got, err := store.Get(ctx, orgID, runID)
-		if err != nil || got == nil {
-			t.Fatalf("Get: err=%v got=%v", err, got)
-		}
-		if got.Status != "running" {
-			t.Errorf("status = %q, want running", got.Status)
-		}
-		// trigger_type is part of the standard Get projection. Pinning
-		// the round-trip here so a future projection edit can't
-		// silently drop the column — when the column was missing,
-		// every caller saw "" and the resume goroutine treated event
-		// runs as manual on resume.
-		if got.TriggerType != "event" {
-			t.Errorf("TriggerType = %q, want event", got.TriggerType)
-		}
-	})
-
-	t.Run("CreateIfNotFiredSystem_FencesReplayPerEventTrigger", func(t *testing.T) {
-		// The (triggering_event_id, trigger_id) fence makes
-		// event-triggered auto-delegation exactly-once under the
-		// at-least-once router queue. A replayed event whose first run
-		// already committed must not insert a second run; two DISTINCT
-		// event instances firing the same trigger still insert
-		// independently (the fence is per event instance, not per trigger).
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		ent := seed.Entity(t, "fence")
-		ev1 := seed.Event(t, ent, domain.EventGitHubPROpened)
-		ev2 := seed.Event(t, ent, domain.EventGitHubPROpened)
-		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev1)
-		trigID := seed.EventHandler(t, domain.EventGitHubPROpened)
-
-		mkRun := func(eventID string) domain.AgentRun {
-			return domain.AgentRun{
-				ID:                uuid.New().String(),
-				TaskID:            taskID,
-				PromptID:          agentRunTestPrompt(t),
-				Status:            "initializing",
-				Model:             "claude-test",
-				TriggerType:       "event",
-				TriggerID:         trigID,
-				TriggeringEventID: eventID,
-				BlueprintRunID:    seed.BlueprintRun(t, taskID),
-			}
-		}
-
-		// First fire for (ev1, trig): inserts.
-		run1 := mkRun(ev1)
-		inserted, err := store.CreateIfNotFiredSystem(ctx, orgID, run1)
-		if err != nil {
-			t.Fatalf("first fire: %v", err)
-		}
-		if !inserted {
-			t.Fatal("first fire should insert (no prior run for this event+trigger)")
-		}
-
-		// Replay of the SAME event instance: fence trips, no row inserted.
-		replayed, err := store.CreateIfNotFiredSystem(ctx, orgID, mkRun(ev1))
-		if err != nil {
-			t.Fatalf("replay fire: %v", err)
-		}
-		if replayed {
-			t.Error("replay of the same (event, trigger) must NOT insert a second run")
-		}
-
-		// The first run still exists and is unchanged.
-		got, err := store.Get(ctx, orgID, run1.ID)
-		if err != nil || got == nil {
-			t.Fatalf("Get run1: err=%v got=%v", err, got)
-		}
-
-		// A distinct event instance firing the same trigger inserts.
-		inserted2, err := store.CreateIfNotFiredSystem(ctx, orgID, mkRun(ev2))
-		if err != nil {
-			t.Fatalf("distinct-event fire: %v", err)
-		}
-		if !inserted2 {
-			t.Error("a distinct event instance must fire independently of the fence")
-		}
-
-		// Exactly two event-fired runs on the task: ev1 once, ev2 once.
-		runs, err := store.ListForTask(ctx, orgID, taskID)
-		if err != nil {
-			t.Fatalf("ListForTask: %v", err)
-		}
-		if len(runs) != 2 {
-			t.Errorf("want exactly 2 runs (replay fenced, distinct event fired), got %d", len(runs))
-		}
-	})
-
-	t.Run("Create_ManualRuns_NotFencedByNullTriggeringEvent", func(t *testing.T) {
-		// Manual runs carry no triggering_event_id, so the
-		// partial fence index never applies — multiple manual runs of one
-		// task stay allowed. Pins that the fence didn't accidentally
-		// constrain the manual path.
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		ent := seed.Entity(t, "manual-fence")
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
-		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-
-		for i := 0; i < 2; i++ {
-			if err := store.Create(ctx, orgID, domain.AgentRun{
-				ID:             uuid.New().String(),
-				TaskID:         taskID,
-				PromptID:       agentRunTestPrompt(t),
-				Status:         "running",
-				Model:          "claude-test",
-				BlueprintRunID: seed.BlueprintRun(t, taskID),
-				// TriggerType defaults to manual; TriggeringEventID empty → NULL.
-			}); err != nil {
-				t.Fatalf("manual run %d: %v", i, err)
-			}
-		}
-		runs, err := store.ListForTask(ctx, orgID, taskID)
-		if err != nil {
-			t.Fatalf("ListForTask: %v", err)
-		}
-		if len(runs) != 2 {
-			t.Errorf("manual runs must not be fenced: want 2, got %d", len(runs))
-		}
-	})
-
-	t.Run("CreateIfNotFiredSystem_RejectsMissingEventOrTrigger", func(t *testing.T) {
-		// The fenced insert must refuse an empty TriggeringEventID or
-		// TriggerID rather than bind NULL and silently skip the fence —
-		// otherwise the method meant to enforce exactly-once would hand
-		// back an unfenced row.
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		ent := seed.Entity(t, "fence-guard")
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
-		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-		trigID := seed.EventHandler(t, domain.EventGitHubPROpened)
-
-		base := domain.AgentRun{
-			TaskID:      taskID,
-			PromptID:    agentRunTestPrompt(t),
-			Status:      "initializing",
-			Model:       "claude-test",
-			TriggerType: "event",
-		}
-
-		// Missing triggering event.
-		missingEvent := base
-		missingEvent.ID = uuid.New().String()
-		missingEvent.TriggerID = trigID
-		if inserted, err := store.CreateIfNotFiredSystem(ctx, orgID, missingEvent); inserted || !errors.Is(err, db.ErrFenceRequiresEventAndTrigger) {
-			t.Errorf("missing TriggeringEventID: got inserted=%v err=%v, want inserted=false err=ErrFenceRequiresEventAndTrigger", inserted, err)
-		}
-
-		// Missing trigger.
-		missingTrigger := base
-		missingTrigger.ID = uuid.New().String()
-		missingTrigger.TriggeringEventID = ev
-		if inserted, err := store.CreateIfNotFiredSystem(ctx, orgID, missingTrigger); inserted || !errors.Is(err, db.ErrFenceRequiresEventAndTrigger) {
-			t.Errorf("missing TriggerID: got inserted=%v err=%v, want inserted=false err=ErrFenceRequiresEventAndTrigger", inserted, err)
-		}
-
-		// Neither attempt wrote a row.
-		runs, err := store.ListForTask(ctx, orgID, taskID)
-		if err != nil {
-			t.Fatalf("ListForTask: %v", err)
-		}
-		if len(runs) != 0 {
-			t.Errorf("guard must reject before insert: want 0 runs, got %d", len(runs))
+		if got.Attempts != 0 || got.ClaimedAt != nil || got.ExecutorID != "" {
+			t.Errorf("never-claimed run carries claim state: attempts=%d claimedAt=%v executor=%q",
+				got.Attempts, got.ClaimedAt, got.ExecutorID)
 		}
 	})
 
@@ -352,13 +170,13 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Run("Complete_FoldsTotalsAndStampsCompletedAt", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 
-		// Pre-seed a partial total so Complete's COALESCE+add semantics
-		// are exercised end-to-end (a fresh run starts with NULL
-		// totals; we want to verify a resume-style accumulation).
-		if err := store.AddPartialTotals(ctx, orgID, runID, 1.25, 4000, 3); err != nil {
-			t.Fatalf("AddPartialTotals: %v", err)
+		// Two Completes exercise the COALESCE+add accumulation the resume
+		// path relies on (the first stands in for a prior invocation's
+		// partial totals).
+		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 4000, 3, "partial", "", "", "", ""); err != nil {
+			t.Fatalf("first Complete: %v", err)
 		}
 		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 2000, 5, "ok", "all done", "abort", "needs human", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
@@ -374,7 +192,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Errorf("completed_at not stamped")
 		}
 		if got.TotalCostUSD == nil || *got.TotalCostUSD != 2.0 {
-			t.Errorf("total_cost_usd = %v, want 2.0 (partial 1.25 + terminal 0.75)", got.TotalCostUSD)
+			t.Errorf("total_cost_usd = %v, want 2.0 (prior 1.25 + terminal 0.75)", got.TotalCostUSD)
 		}
 		if got.DurationMs == nil || *got.DurationMs != 6000 {
 			t.Errorf("duration_ms = %v, want 6000", got.DurationMs)
@@ -393,12 +211,12 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
-	t.Run("Complete_DenormalizesRunMessageTokens_AbsoluteAcrossResumes", func(t *testing.T) {
+	t.Run("Complete_DenormalizesMessageTokens_AbsoluteAcrossResumes", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 
-		// run_messages is the source of truth (written by the streaming
+		// messages is the source of truth (written by the streaming
 		// sink as messages arrive). Complete sums the four token columns
 		// onto the run. Two assistant rows so the SUM is non-trivial.
 		ptr := func(n int) *int { return &n }
@@ -421,12 +239,12 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Fatalf("Get: err=%v got=%v", err, got)
 		}
 		if got.InputTokens != 150 || got.OutputTokens != 25 || got.CacheReadTokens != 1500 || got.CacheCreationTokens != 10 {
-			t.Errorf("token cols = (%d,%d,%d,%d), want (150,25,1500,10) — SUM over run_messages",
+			t.Errorf("token cols = (%d,%d,%d,%d), want (150,25,1500,10) — SUM over messages",
 				got.InputTokens, got.OutputTokens, got.CacheReadTokens, got.CacheCreationTokens)
 		}
 
 		// Re-Complete simulates a resume re-running completion. Tokens are
-		// SET to the absolute run_messages SUM (not added like cost), so a
+		// SET to the absolute messages SUM (not added like cost), so a
 		// second Complete with no new messages re-sets the same value — they
 		// must stay (150,25,1500,10), NOT double.
 		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "ok", "done", "finish", "", ""); err != nil {
@@ -443,15 +261,14 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	})
 
 	// Every terminal write — not just Complete — refreshes the token cache from
-	// the run_messages SUM, so a run that ends by cancel or infra-failure still
-	// reflects the tokens it streamed rather than stranding the columns at 0
-	// (TFAC-473).
-	t.Run("CancelAndFail_DenormalizeRunMessageTokens", func(t *testing.T) {
+	// the messages SUM, so a run that ends by cancel or infra-failure still
+	// reflects the tokens it streamed rather than stranding the columns at 0.
+	t.Run("CancelAndFail_DenormalizeMessageTokens", func(t *testing.T) {
 		ptr := func(n int) *int { return &n }
 		seedRunningWithTokens := func(t *testing.T, store db.AgentRunStore, orgID string, seed AgentRunSeeder) string {
 			t.Helper()
 			ctx := context.Background()
-			runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+			runID := seedAgentRunForTest(t, orgID, seed, "running")
 			for _, m := range []*domain.AgentMessage{
 				{RunID: runID, Role: "assistant", Subtype: "text", Content: "a",
 					InputTokens: ptr(100), OutputTokens: ptr(20), CacheReadTokens: ptr(1000), CacheCreationTokens: ptr(7)},
@@ -471,7 +288,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 				t.Fatalf("Get: err=%v got=%v", err, got)
 			}
 			if got.InputTokens != 150 || got.OutputTokens != 25 || got.CacheReadTokens != 1500 || got.CacheCreationTokens != 10 {
-				t.Errorf("token cols = (%d,%d,%d,%d), want (150,25,1500,10) — terminal write did not roll up the run_messages SUM",
+				t.Errorf("token cols = (%d,%d,%d,%d), want (150,25,1500,10) — terminal write did not roll up the messages SUM",
 					got.InputTokens, got.OutputTokens, got.CacheReadTokens, got.CacheCreationTokens)
 			}
 		}
@@ -502,7 +319,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		ctx := context.Background()
 
 		// Kind supplied → hydrated back typed on Get.
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		ok, err := store.MarkFailedIfActive(ctx, orgID, runID, string(domain.RunFailureMemoryLimit))
 		if err != nil || !ok {
 			t.Fatalf("MarkFailedIfActive with kind: ok=%v err=%v", ok, err)
@@ -516,7 +333,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 
 		// Empty kind → NULL → hydrates as the unclassified zero value.
-		plainID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		plainID := seedAgentRunForTest(t, orgID, seed, "running")
 		if ok, err := store.MarkFailedIfActive(ctx, orgID, plainID, ""); err != nil || !ok {
 			t.Fatalf("MarkFailedIfActive without kind: ok=%v err=%v", ok, err)
 		}
@@ -534,7 +351,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, "", "", "", "", string(domain.RunFailureAgentError)); err != nil {
 			t.Fatalf("Complete with kind: %v", err)
 		}
@@ -550,7 +367,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 
 		// Empty kind on a failed Complete → NULL → unclassified zero value.
-		plainID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		plainID := seedAgentRunForTest(t, orgID, seed, "running")
 		if err := store.Complete(ctx, orgID, plainID, "failed", 0, 0, 0, "", "", "", "", ""); err != nil {
 			t.Fatalf("Complete without kind: %v", err)
 		}
@@ -562,13 +379,13 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Run("SetSession_PersistsSessionID", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		if err := store.SetSession(ctx, orgID, runID, "sess-abc"); err != nil {
 			t.Fatalf("SetSession: %v", err)
 		}
 		got, _ := store.Get(ctx, orgID, runID)
 		if got == nil || got.SessionID != "sess-abc" {
-			t.Errorf("session_id = %q, want sess-abc", got.SessionID)
+			t.Errorf("sdk_session_id = %q, want sess-abc", got.SessionID)
 		}
 	})
 
@@ -576,7 +393,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		// Running → ok=true.
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		ok, err := store.MarkOpen(ctx, orgID, runID)
 		if err != nil || !ok {
 			t.Fatalf("MarkOpen on running: ok=%v err=%v", ok, err)
@@ -592,65 +409,10 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Errorf("re-call on open: ok=%v err=%v, want false/nil", ok, err)
 		}
 		// Terminal → ok=false.
-		runID2 := seedAgentRunForTest(t, store, orgID, seed, "completed")
+		runID2 := seedAgentRunForTest(t, orgID, seed, "completed")
 		ok, err = store.MarkOpen(ctx, orgID, runID2)
 		if err != nil || ok {
 			t.Errorf("on completed: ok=%v err=%v, want false/nil", ok, err)
-		}
-	})
-
-	t.Run("MarkResuming_FromResumableStates", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		const resumeExec = "instance-resume-test"
-
-		// running → refused (not a parked/terminal resumable state).
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
-		if ok, err := store.MarkResuming(ctx, orgID, runID, resumeExec, 3); err != nil || ok {
-			t.Errorf("Resuming on running: ok=%v err=%v, want false", ok, err)
-		}
-		// A refused resume must not have stamped ownership either.
-		if run, err := store.GetSystem(ctx, orgID, runID); err != nil {
-			t.Fatalf("get after refused resume: %v", err)
-		} else if run.ExecutorID == resumeExec {
-			t.Errorf("refused resume stamped executor_id anyway")
-		}
-		// open → ok; the second call (now running) is refused. The flip and
-		// the ownership stamp are one statement (TFAC-578 review fix): a
-		// resumed row must carry the resuming instance's identity for the
-		// whole rehydrate+spawn window, not the previous owner's.
-		if _, err := store.MarkOpen(ctx, orgID, runID); err != nil {
-			t.Fatalf("open: %v", err)
-		}
-		if ok, err := store.MarkResuming(ctx, orgID, runID, resumeExec, 3); err != nil || !ok {
-			t.Fatalf("Resuming from open: ok=%v err=%v", ok, err)
-		}
-		if run, err := store.GetSystem(ctx, orgID, runID); err != nil {
-			t.Fatalf("get after resume: %v", err)
-		} else if run.ExecutorID != resumeExec {
-			t.Errorf("resume did not stamp ownership: executor_id=%q, want %q", run.ExecutorID, resumeExec)
-		}
-		if ok, _ := store.MarkResuming(ctx, orgID, runID, resumeExec, 3); ok {
-			t.Errorf("double-resume from running succeeded; want refused")
-		}
-
-		// completed + outcome=abort → ok (an aborted run is message-resumable).
-		abortRun := seedAgentRunForTest(t, store, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "", "stopped", "abort", "needs a human", ""); err != nil {
-			t.Fatalf("complete+abort: %v", err)
-		}
-		if ok, err := store.MarkResuming(ctx, orgID, abortRun, resumeExec, 3); err != nil || !ok {
-			t.Errorf("Resuming from completed+abort: ok=%v err=%v, want true", ok, err)
-		}
-
-		// completed + outcome=finish → refused (finish runs are deliberately
-		// excluded from the resumable set).
-		finishRun := seedAgentRunForTest(t, store, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, "", "shipped", "finish", "", ""); err != nil {
-			t.Fatalf("complete+finish: %v", err)
-		}
-		if ok, _ := store.MarkResuming(ctx, orgID, finishRun, resumeExec, 3); ok {
-			t.Errorf("Resuming from completed+finish succeeded; want refused (finish excluded)")
 		}
 	})
 
@@ -658,14 +420,14 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 
-		// running → refused (same resumable set as MarkResuming's guard).
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		// running → refused (only parked/abort states are resumable).
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, runID); err != nil || ok {
 			t.Errorf("on running: ok=%v err=%v, want false/nil", ok, err)
 		}
-		// open → ok, flips to queued. Unlike MarkResuming, this flip must
-		// NOT stamp resume-time ownership — the row goes back through
-		// ClaimNextRun, which stamps whichever executor actually claims it.
+		// open → ok, flips to queued. This flip must NOT stamp resume-time
+		// ownership — the row goes back through ClaimNextRun, which mints
+		// the claim for whichever executor actually claims it.
 		if _, err := store.MarkOpen(ctx, orgID, runID); err != nil {
 			t.Fatalf("open: %v", err)
 		}
@@ -679,6 +441,9 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if run.Status != "queued" {
 			t.Errorf("status = %q, want queued", run.Status)
 		}
+		if run.ExecutorID != "" {
+			t.Errorf("queued row carries an owner: executor_id=%q, want empty", run.ExecutorID)
+		}
 		// The CAS loser: a second flip on the now-queued row finds no
 		// resumable state and refuses — this is the guard that makes two
 		// concurrent ResumeOpenRun calls resolve to exactly one requeue
@@ -688,7 +453,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 
 		// completed + outcome=abort → ok (message-resumable).
-		abortRun := seedAgentRunForTest(t, store, orgID, seed, "running")
+		abortRun := seedAgentRunForTest(t, orgID, seed, "running")
 		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "", "stopped", "abort", "needs a human", ""); err != nil {
 			t.Fatalf("complete+abort: %v", err)
 		}
@@ -696,7 +461,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Errorf("from completed+abort: ok=%v err=%v, want true", ok, err)
 		}
 		// completed + outcome=finish → refused (finish excluded).
-		finishRun := seedAgentRunForTest(t, store, orgID, seed, "running")
+		finishRun := seedAgentRunForTest(t, orgID, seed, "running")
 		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, "", "shipped", "finish", "", ""); err != nil {
 			t.Fatalf("complete+finish: %v", err)
 		}
@@ -710,7 +475,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		ctx := context.Background()
 		// `open` is intentionally failable (a warm open run has no durable
 		// snapshot, so an infra error reaching failRun must terminate it).
-		openRun := seedAgentRunForTest(t, store, orgID, seed, "running")
+		openRun := seedAgentRunForTest(t, orgID, seed, "running")
 		if _, err := store.MarkOpen(ctx, orgID, openRun); err != nil {
 			t.Fatalf("open: %v", err)
 		}
@@ -722,12 +487,12 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Errorf("status = %q, want failed", got.Status)
 		}
 		// pending_approval is protected (it has a durable snapshot) → refused.
-		paRun := seedAgentRunForTest(t, store, orgID, seed, "pending_approval")
+		paRun := seedAgentRunForTest(t, orgID, seed, "pending_approval")
 		if ok, _ := store.MarkFailedIfActive(ctx, orgID, paRun, ""); ok {
 			t.Errorf("MarkFailedIfActive flipped a pending_approval run; want refused")
 		}
 		// Already terminal → refused.
-		doneRun := seedAgentRunForTest(t, store, orgID, seed, "completed")
+		doneRun := seedAgentRunForTest(t, orgID, seed, "completed")
 		if ok, _ := store.MarkFailedIfActive(ctx, orgID, doneRun, ""); ok {
 			t.Errorf("MarkFailedIfActive flipped a completed run; want refused")
 		}
@@ -736,7 +501,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Run("MarkCancelledIfActive_FlipsActive_RefusesTerminal", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		ok, err := store.MarkCancelledIfActive(ctx, orgID, runID, "manual", "user cancelled")
 		if err != nil || !ok {
 			t.Fatalf("cancel active: ok=%v err=%v", ok, err)
@@ -752,27 +517,219 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
-	t.Run("MarkDiscarded_OnlyPendingApproval", func(t *testing.T) {
+	t.Run("SetExecutorSystem_MintsUpdatesReleasesActiveClaim", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runRunning := seedAgentRunForTest(t, store, orgID, seed, "running")
-		runPending := seedAgentRunForTest(t, store, orgID, seed, "pending_approval")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 
-		// Running → refused (Discard targets pending_approval only).
-		ok, _ := store.MarkDiscarded(ctx, orgID, runRunning, "discarded")
-		if ok {
-			t.Errorf("Discarded on running: ok=true, want false")
+		// No claim yet → the go-live confirmation mints one.
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-a", 3); err != nil {
+			t.Fatalf("SetExecutorSystem mint: %v", err)
 		}
-		// pending_approval → ok.
-		ok, err := store.MarkDiscarded(ctx, orgID, runPending, "discarded")
-		if err != nil || !ok {
-			t.Fatalf("Discarded on pending_approval: ok=%v err=%v", ok, err)
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 || claims[0].ExecutorID != "exec-a" || claims[0].BootEpoch != 3 || claims[0].Released {
+			t.Fatalf("after mint: claims = %+v, want one active (exec-a, 3)", claims)
 		}
-		got, _ := store.Get(ctx, orgID, runPending)
-		if got.Status != "cancelled" {
-			t.Errorf("after discard: status=%q, want cancelled", got.Status)
+
+		// A live claim → idempotent identity update, no second row.
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-a", 4); err != nil {
+			t.Fatalf("SetExecutorSystem update: %v", err)
+		}
+		claims = seed.ClaimRows(t, runID)
+		if len(claims) != 1 || claims[0].BootEpoch != 4 || claims[0].Released {
+			t.Fatalf("after update: claims = %+v, want the same single active claim at epoch 4", claims)
+		}
+		if got, _ := store.Get(ctx, orgID, runID); got.ExecutorID != "exec-a" || got.Attempts != 1 {
+			t.Errorf("Get after update: executor=%q attempts=%d, want exec-a/1", got.ExecutorID, got.Attempts)
+		}
+
+		// Empty executorID → the legacy clear: the active claim releases
+		// as requeued and the read-side owner goes empty.
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "", 0); err != nil {
+			t.Fatalf("SetExecutorSystem clear: %v", err)
+		}
+		claims = seed.ClaimRows(t, runID)
+		if len(claims) != 1 || !claims[0].Released || claims[0].Outcome != "requeued" {
+			t.Fatalf("after clear: claims = %+v, want one released claim with outcome requeued", claims)
+		}
+		got, _ := store.Get(ctx, orgID, runID)
+		if got.ExecutorID != "" {
+			t.Errorf("ExecutorID after release = %q, want empty", got.ExecutorID)
+		}
+		if got.Attempts != 1 {
+			t.Errorf("Attempts after release = %d, want 1 (released claims still count)", got.Attempts)
+		}
+		if got.ClaimedAt == nil {
+			t.Errorf("ClaimedAt after release = nil, want the released claim's claimed_at")
+		}
+
+		// A re-mint after release is a NEW claim — attempts becomes the
+		// claim count, and one-active-claim holds (the released row stays).
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-b", 5); err != nil {
+			t.Fatalf("SetExecutorSystem re-mint: %v", err)
+		}
+		claims = seed.ClaimRows(t, runID)
+		if len(claims) != 2 {
+			t.Fatalf("after re-mint: %d claims, want 2", len(claims))
+		}
+		active := 0
+		for _, c := range claims {
+			if !c.Released {
+				active++
+			}
+		}
+		if active != 1 {
+			t.Errorf("active claims = %d, want exactly 1", active)
+		}
+		if got, _ := store.Get(ctx, orgID, runID); got.ExecutorID != "exec-b" || got.Attempts != 2 {
+			t.Errorf("Get after re-mint: executor=%q attempts=%d, want exec-b/2", got.ExecutorID, got.Attempts)
 		}
 	})
+
+	t.Run("TerminalWrites_ReleaseActiveClaimWithOutcome", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		assertReleased := func(t *testing.T, runID, wantOutcome string) {
+			t.Helper()
+			claims := seed.ClaimRows(t, runID)
+			if len(claims) != 1 {
+				t.Fatalf("claims = %+v, want exactly 1", claims)
+			}
+			if !claims[0].Released || claims[0].Outcome != wantOutcome {
+				t.Errorf("claim = %+v, want released with outcome %q", claims[0], wantOutcome)
+			}
+			if got, _ := store.Get(ctx, orgID, runID); got.ExecutorID != "" {
+				t.Errorf("ExecutorID after release = %q, want empty", got.ExecutorID)
+			}
+		}
+		stage := func(t *testing.T) string {
+			t.Helper()
+			runID := seedAgentRunForTest(t, orgID, seed, "running")
+			if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-term", 1); err != nil {
+				t.Fatalf("SetExecutorSystem: %v", err)
+			}
+			return runID
+		}
+
+		t.Run("Complete_completed", func(t *testing.T) {
+			runID := stage(t)
+			if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			assertReleased(t, runID, "completed")
+		})
+		t.Run("Complete_failed", func(t *testing.T) {
+			runID := stage(t)
+			if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, "", "", "", "", ""); err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			assertReleased(t, runID, "failed")
+		})
+		t.Run("MarkCancelledIfActive", func(t *testing.T) {
+			runID := stage(t)
+			if ok, err := store.MarkCancelledIfActive(ctx, orgID, runID, "manual", ""); err != nil || !ok {
+				t.Fatalf("MarkCancelledIfActive: ok=%v err=%v", ok, err)
+			}
+			assertReleased(t, runID, "cancelled")
+		})
+		t.Run("MarkFailedIfActive", func(t *testing.T) {
+			runID := stage(t)
+			if ok, err := store.MarkFailedIfActive(ctx, orgID, runID, ""); err != nil || !ok {
+				t.Fatalf("MarkFailedIfActive: ok=%v err=%v", ok, err)
+			}
+			assertReleased(t, runID, "failed")
+		})
+		t.Run("MarkOpen_parks", func(t *testing.T) {
+			runID := stage(t)
+			if ok, err := store.MarkOpen(ctx, orgID, runID); err != nil || !ok {
+				t.Fatalf("MarkOpen: ok=%v err=%v", ok, err)
+			}
+			assertReleased(t, runID, "parked")
+		})
+		t.Run("MarkQueuedForResume_requeues", func(t *testing.T) {
+			runID := stage(t)
+			if ok, err := store.MarkOpen(ctx, orgID, runID); err != nil || !ok {
+				t.Fatalf("MarkOpen: ok=%v err=%v", ok, err)
+			}
+			// MarkOpen already released as 'parked'; re-mint so the requeue
+			// has an active claim to release.
+			if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-park", 2); err != nil {
+				t.Fatalf("SetExecutorSystem re-mint: %v", err)
+			}
+			if ok, err := store.MarkQueuedForResume(ctx, orgID, runID); err != nil || !ok {
+				t.Fatalf("MarkQueuedForResume: ok=%v err=%v", ok, err)
+			}
+			claims := seed.ClaimRows(t, runID)
+			if len(claims) != 2 {
+				t.Fatalf("claims = %+v, want 2 (parked, then requeued)", claims)
+			}
+			last := claims[len(claims)-1]
+			if !last.Released || last.Outcome != "requeued" {
+				t.Errorf("latest claim = %+v, want released with outcome requeued", last)
+			}
+		})
+		t.Run("RefusedWrite_LeavesClaimActive", func(t *testing.T) {
+			// A guarded no-op must not release: complete the run, re-mint a
+			// claim (simulating a racing engagement), then fail — the guard
+			// refuses and the claim stays live.
+			runID := stage(t)
+			if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-race", 9); err != nil {
+				t.Fatalf("SetExecutorSystem: %v", err)
+			}
+			if ok, _ := store.MarkFailedIfActive(ctx, orgID, runID, ""); ok {
+				t.Fatalf("MarkFailedIfActive on completed run succeeded; want refused")
+			}
+			claims := seed.ClaimRows(t, runID)
+			last := claims[len(claims)-1]
+			if last.Released {
+				t.Errorf("refused terminal write released the claim: %+v", last)
+			}
+		})
+	})
+
+	t.Run("ClaimDerivedFields_TrackLatestClaim", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
+
+		// First engagement.
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-1", 1); err != nil {
+			t.Fatalf("SetExecutorSystem 1: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.ExecutorID != "exec-1" || got.Attempts != 1 || got.ClaimedAt == nil {
+			t.Fatalf("first engagement: executor=%q attempts=%d claimedAt=%v", got.ExecutorID, got.Attempts, got.ClaimedAt)
+		}
+		firstClaimedAt := *got.ClaimedAt
+
+		// Park (releases), then a second engagement — ClaimedAt advances to
+		// the newest claim, Attempts counts both, ExecutorID is the live one.
+		if ok, err := store.MarkOpen(ctx, orgID, runID); err != nil || !ok {
+			t.Fatalf("MarkOpen: ok=%v err=%v", ok, err)
+		}
+		time.Sleep(1100 * time.Millisecond) // SQLite's second-granularity timestamps
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-2", 2); err != nil {
+			t.Fatalf("SetExecutorSystem 2: %v", err)
+		}
+		got, err = store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get 2: err=%v got=%v", err, got)
+		}
+		if got.ExecutorID != "exec-2" || got.Attempts != 2 {
+			t.Errorf("second engagement: executor=%q attempts=%d, want exec-2/2", got.ExecutorID, got.Attempts)
+		}
+		if got.ClaimedAt == nil || !got.ClaimedAt.After(firstClaimedAt) {
+			t.Errorf("ClaimedAt = %v, want later than the first claim's %v", got.ClaimedAt, firstClaimedAt)
+		}
+	})
+
 	t.Run("ListForTask_OrderedByStartedAtDesc", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -784,21 +741,9 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		// for ORDER BY to discriminate. Two runs is enough to pin
 		// "newest first"; three would risk landing in the same
 		// second slot without making the assertion stronger.
-		first := uuid.New().String()
-		if err := store.Create(ctx, orgID, domain.AgentRun{
-			ID: first, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
-			BlueprintRunID: seed.BlueprintRun(t, taskID),
-		}); err != nil {
-			t.Fatalf("Create first: %v", err)
-		}
+		first := seedAgentRunForTaskTest(t, orgID, taskID, "running", seed)
 		time.Sleep(1100 * time.Millisecond)
-		second := uuid.New().String()
-		if err := store.Create(ctx, orgID, domain.AgentRun{
-			ID: second, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
-			BlueprintRunID: seed.BlueprintRun(t, taskID),
-		}); err != nil {
-			t.Fatalf("Create second: %v", err)
-		}
+		second := seedAgentRunForTaskTest(t, orgID, taskID, "running", seed)
 		runs, err := store.ListForTask(ctx, orgID, taskID)
 		if err != nil {
 			t.Fatalf("ListForTask: %v", err)
@@ -813,31 +758,25 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	})
 
 	t.Run("ListForTask_PreservesTriggerType", func(t *testing.T) {
-		// Same projection bug that motivated the Get assertion above
-		// applies to ListForTask (shares pgRunColumns / sqliteRunColumns).
-		// Cover both branches: manual round-trip + event round-trip
-		// across a mixed list.
+		// The projection must round-trip trigger_type — when the column was
+		// missing, every caller saw "" and the resume goroutine treated
+		// event runs as manual on resume. Cover both branches across a
+		// mixed list.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		ent := seed.Entity(t, "list-trigger")
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-		manualID := uuid.New().String()
-		if err := store.Create(ctx, orgID, domain.AgentRun{
-			ID: manualID, TaskID: taskID, PromptID: agentRunTestPrompt(t),
+		manualID := seed.Run(t, domain.AgentRun{
+			TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "manual",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
-		}); err != nil {
-			t.Fatalf("Create manual: %v", err)
-		}
-		eventID := uuid.New().String()
-		if err := store.Create(ctx, orgID, domain.AgentRun{
-			ID: eventID, TaskID: taskID, PromptID: agentRunTestPrompt(t),
+		})
+		eventID := seed.Run(t, domain.AgentRun{
+			TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
-		}); err != nil {
-			t.Fatalf("Create event: %v", err)
-		}
+		})
 		runs, err := store.ListForTask(ctx, orgID, taskID)
 		if err != nil {
 			t.Fatalf("ListForTask: %v", err)
@@ -873,9 +812,9 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		evB := seed.Event(t, entB, domain.EventGitHubPROpened)
 		taskB := seed.Task(t, entB, domain.EventGitHubPROpened, evB)
 
-		runA1 := seedAgentRunForTaskTest(t, store, orgID, taskA, "running", seed)
-		runA2 := seedAgentRunForTaskTest(t, store, orgID, taskA, "completed", seed)
-		runB1 := seedAgentRunForTaskTest(t, store, orgID, taskB, "running", seed)
+		runA1 := seedAgentRunForTaskTest(t, orgID, taskA, "running", seed)
+		runA2 := seedAgentRunForTaskTest(t, orgID, taskA, "completed", seed)
+		runB1 := seedAgentRunForTaskTest(t, orgID, taskB, "running", seed)
 
 		// Mix in a valid-but-absent UUID and a non-UUID literal: both must be
 		// tolerated (no rows, no error). The non-UUID guards the Postgres path,
@@ -907,26 +846,20 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
-	t.Run("HasActiveAndActiveIDs_ForTask", func(t *testing.T) {
+	t.Run("ActiveIDsForTask_FiltersTerminal", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		ent := seed.Entity(t, "ha")
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-		// No runs yet → false / empty.
-		if has, _ := store.HasActiveForTask(ctx, orgID, taskID); has {
-			t.Error("HasActive with no runs: true, want false")
-		}
+		// No runs yet → empty.
 		ids, _ := store.ActiveIDsForTask(ctx, orgID, taskID)
 		if len(ids) != 0 {
 			t.Errorf("ActiveIDs with no runs: %v, want []", ids)
 		}
-		// One running + one terminal → has=true, ids=[running].
-		runRun := seedAgentRunForTaskTest(t, store, orgID, taskID, "running", seed)
-		_ = seedAgentRunForTaskTest(t, store, orgID, taskID, "completed", seed)
-		if has, _ := store.HasActiveForTask(ctx, orgID, taskID); !has {
-			t.Error("HasActive with running: false, want true")
-		}
+		// One running + one terminal → ids=[running].
+		runRun := seedAgentRunForTaskTest(t, orgID, taskID, "running", seed)
+		_ = seedAgentRunForTaskTest(t, orgID, taskID, "completed", seed)
 		ids, _ = store.ActiveIDsForTask(ctx, orgID, taskID)
 		if len(ids) != 1 || ids[0] != runRun {
 			t.Errorf("ActiveIDs = %v, want [%s]", ids, runRun)
@@ -934,11 +867,10 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	})
 
 	t.Run("HasActiveAutoRunForEntity", func(t *testing.T) {
-		// Per-entity sibling of HasActiveForTask: any non-terminal
-		// trigger_type='event' run on any task that belongs to the
-		// entity. Manual delegations are excluded (by design —
-		// manual decoupled from the auto-queue gate); terminal runs
-		// don't count either.
+		// Per-entity gate: any non-terminal trigger_type='event' run on any
+		// task that belongs to the entity. Manual delegations are excluded
+		// (by design — manual decoupled from the auto-queue gate); terminal
+		// runs don't count either.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		ent := seed.Entity(t, "ha-ent")
@@ -951,20 +883,17 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 
 		// Manual run — must NOT trip the gate.
-		_ = seedAgentRunForTaskTest(t, store, orgID, taskID, "running", seed)
+		_ = seedAgentRunForTaskTest(t, orgID, taskID, "running", seed)
 		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); has {
 			t.Error("manual run tripped the auto-run gate; gate must be event-only")
 		}
 
 		// Add an active event-trigger run on the same task — gate flips true.
-		eventRunID := uuid.New().String()
-		if err := store.Create(ctx, orgID, domain.AgentRun{
-			ID: eventRunID, TaskID: taskID, PromptID: agentRunTestPrompt(t),
+		eventRunID := seed.Run(t, domain.AgentRun{
+			TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
-		}); err != nil {
-			t.Fatalf("Create event-triggered: %v", err)
-		}
+		})
 		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); !has {
 			t.Error("active event-trigger run should trip the gate")
 		}
@@ -999,20 +928,17 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 
 		// Manual run only — must NOT resolve.
-		_ = seedAgentRunForTaskTest(t, store, orgID, taskID, "running", seed)
+		_ = seedAgentRunForTaskTest(t, orgID, taskID, "running", seed)
 		if id, tid, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != "" || tid != "" {
 			t.Errorf("manual-only: id=%q taskID=%q err=%v, want empty (event-only)", id, tid, err)
 		}
 
 		// Active event-trigger run → resolves to its run ID and owning task ID.
-		eventRunID := uuid.New().String()
-		if err := store.Create(ctx, orgID, domain.AgentRun{
-			ID: eventRunID, TaskID: taskID, PromptID: agentRunTestPrompt(t),
+		eventRunID := seed.Run(t, domain.AgentRun{
+			TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
-		}); err != nil {
-			t.Fatalf("Create event-triggered: %v", err)
-		}
+		})
 		if id, tid, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != eventRunID || tid != taskID {
 			t.Errorf("ActiveAutoRunIDForEntitySystem = (%q, %q) err=%v, want (%q, %q)", id, tid, err, eventRunID, taskID)
 		}
@@ -1027,45 +953,26 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
-	t.Run("PendingApprovalIDForTask", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		ent := seed.Entity(t, "pa")
-		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
-		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-		// Empty → "".
-		id, _ := store.PendingApprovalIDForTask(ctx, orgID, taskID)
-		if id != "" {
-			t.Errorf("with no pending: id=%q, want empty", id)
-		}
-		// Seed one pending_approval run.
-		runID := seedAgentRunForTaskTest(t, store, orgID, taskID, "pending_approval", seed)
-		id, _ = store.PendingApprovalIDForTask(ctx, orgID, taskID)
-		if id != runID {
-			t.Errorf("PendingApprovalID = %q, want %q", id, runID)
-		}
-	})
-
-	t.Run("ListParkedWorktreePaths_FiltersByStatusAndWorktree", func(t *testing.T) {
+	t.Run("ListParkedWorktreePathsSystem_FiltersByStatusAndWorktree", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 
 		// open WITH a worktree path → included.
-		openRun := seedAgentRunForTest(t, store, orgID, seed, "open")
+		openRun := seedAgentRunForTest(t, orgID, seed, "open")
 		if err := store.SetWorktreePath(ctx, orgID, openRun, "/tmp/triagefactory-runs/open"); err != nil {
 			t.Fatalf("set worktree (open): %v", err)
 		}
 		// completed WITH a worktree → excluded by the status filter. A completed run
 		// that left an unresolved artifact no longer parks, so its
 		// worktree is not preserved as a warm resume cache.
-		completed := seedAgentRunForTest(t, store, orgID, seed, "completed")
+		completed := seedAgentRunForTest(t, orgID, seed, "completed")
 		if err := store.SetWorktreePath(ctx, orgID, completed, "/tmp/triagefactory-runs/completed"); err != nil {
 			t.Fatalf("set worktree (completed): %v", err)
 		}
 		// open WITHOUT a worktree → excluded by the COALESCE filter.
-		_ = seedAgentRunForTest(t, store, orgID, seed, "open")
+		_ = seedAgentRunForTest(t, orgID, seed, "open")
 		// running WITH a worktree → excluded by the status filter.
-		running := seedAgentRunForTest(t, store, orgID, seed, "running")
+		running := seedAgentRunForTest(t, orgID, seed, "running")
 		if err := store.SetWorktreePath(ctx, orgID, running, "/tmp/triagefactory-runs/running"); err != nil {
 			t.Fatalf("set worktree (running): %v", err)
 		}
@@ -1076,22 +983,25 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		orphanTaskID := seed.Task(t, seed.Entity(t, "parked-orphan"), domain.EventGitHubPROpened,
 			seed.Event(t, seed.Entity(t, "parked-orphan-ev"), domain.EventGitHubPROpened))
 		orphanBR := seed.BlueprintRun(t, orphanTaskID)
-		orphan := seedAgentRunUnderBlueprintForTest(t, store, orgID, orphanTaskID, orphanBR, "open")
+		orphan := seed.Run(t, domain.AgentRun{
+			TaskID: orphanTaskID, PromptID: agentRunTestPrompt(t), Status: "open", Model: "m",
+			BlueprintRunID: orphanBR,
+		})
 		if err := store.SetWorktreePath(ctx, orgID, orphan, "/tmp/triagefactory-runs/orphan"); err != nil {
 			t.Fatalf("set worktree (orphan): %v", err)
 		}
 		seed.SetBlueprintRunStatus(t, orphanBR, "cancelled")
 
-		paths, err := store.ListParkedWorktreePaths(ctx, orgID)
+		paths, err := store.ListParkedWorktreePathsSystem(ctx, orgID)
 		if err != nil {
-			t.Fatalf("ListParkedWorktreePaths: %v", err)
+			t.Fatalf("ListParkedWorktreePathsSystem: %v", err)
 		}
 		got := map[string]bool{}
 		for _, p := range paths {
 			got[p] = true
 		}
 		if !got["/tmp/triagefactory-runs/open"] {
-			t.Error("open worktree missing from ListParkedWorktreePaths")
+			t.Error("open worktree missing from ListParkedWorktreePathsSystem")
 		}
 		if got["/tmp/triagefactory-runs/completed"] {
 			t.Error("completed worktree leaked — status filter failed (completed runs no longer park)")
@@ -1104,16 +1014,6 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 		if len(got) != 1 {
 			t.Errorf("got %d parked paths, want 1 (%v)", len(got), paths)
-		}
-
-		// System variant (admin pool; the startup sweep has no JWT-claims
-		// context) returns the same set as the app-pool variant.
-		sysPaths, err := store.ListParkedWorktreePathsSystem(ctx, orgID)
-		if err != nil {
-			t.Fatalf("ListParkedWorktreePathsSystem: %v", err)
-		}
-		if len(sysPaths) != len(paths) {
-			t.Errorf("System returned %d paths, app returned %d", len(sysPaths), len(paths))
 		}
 	})
 
@@ -1146,11 +1046,11 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		taskB := seed.Task(t, entB, domain.EventGitHubPROpened, evB)
 
 		// A has an open run; B has only a running run.
-		runA := seedAgentRunForTaskTest(t, store, orgID, taskA, "running", seed)
+		runA := seedAgentRunForTaskTest(t, orgID, taskA, "running", seed)
 		if _, err := store.MarkOpen(ctx, orgID, runA); err != nil {
 			t.Fatalf("open A: %v", err)
 		}
-		_ = seedAgentRunForTaskTest(t, store, orgID, taskB, "running", seed)
+		_ = seedAgentRunForTaskTest(t, orgID, taskB, "running", seed)
 
 		got, err := store.EntitiesWithOpenRuns(ctx, orgID, []string{entA, entB})
 		if err != nil {
@@ -1167,7 +1067,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Run("InsertMessage_StampsCreatedAtAndReturnsID", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 
 		msg := &domain.AgentMessage{
 			RunID:   runID,
@@ -1190,7 +1090,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Run("InsertMessage_PreservesExplicitCreatedAt", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		explicit := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 		msg := &domain.AgentMessage{
 			RunID: runID, Role: "assistant", Content: "x", Subtype: "text",
@@ -1207,7 +1107,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Run("Messages_RoundTripsToolCallsAndMetadata", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		msg := &domain.AgentMessage{
 			RunID:   runID,
 			Role:    "assistant",
@@ -1237,13 +1137,58 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	t.Run("InsertMessage_RoundTripsUserAndClaimAttribution", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
+
+		// Mint a claim so ClaimID has a real FK target, then attribute a
+		// user message to (user, claim).
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-msg", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 {
+			t.Fatalf("claims = %+v, want 1", claims)
+		}
+		claimID := claims[0].ID
+
+		attributed := &domain.AgentMessage{
+			RunID: runID, Role: "user", Subtype: "text", Content: "steer",
+			UserID: userID, ClaimID: claimID,
+		}
+		if _, err := store.InsertMessage(ctx, orgID, attributed); err != nil {
+			t.Fatalf("InsertMessage attributed: %v", err)
+		}
+		// A system row leaves both empty (NULL on the row).
+		if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{
+			RunID: runID, Role: "assistant", Subtype: "text", Content: "reply",
+		}); err != nil {
+			t.Fatalf("InsertMessage system: %v", err)
+		}
+
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		if len(msgs) != 2 {
+			t.Fatalf("len = %d, want 2", len(msgs))
+		}
+		if msgs[0].UserID != userID || msgs[0].ClaimID != claimID {
+			t.Errorf("attributed row = (user=%q, claim=%q), want (%q, %q)", msgs[0].UserID, msgs[0].ClaimID, userID, claimID)
+		}
+		if msgs[1].UserID != "" || msgs[1].ClaimID != "" {
+			t.Errorf("system row = (user=%q, claim=%q), want empty/empty", msgs[1].UserID, msgs[1].ClaimID)
+		}
+	})
+
 	t.Run("InsertMessage_DefaultsDeliveredTrueAndWindowStateActive", func(t *testing.T) {
 		// Every existing caller in the repo leaves Delivered nil and
 		// WindowState "" — the columnar-canon columns must not change their
 		// observed behavior: delivered=true, window_state='active', seq=NULL.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		msg := &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "hi"}
 		if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
 			t.Fatalf("InsertMessage: %v", err)
@@ -1270,7 +1215,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Run("Messages_RoundTripsReasoningContentBlocksAndExplicitOverrides", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		delivered := false
 		seq := 12.5
 		msg := &domain.AgentMessage{
@@ -1324,7 +1269,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		// identically to "no reasoning on this message".
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		seed.SeedRawMessage(t, runID, "reasoning", `{"wrong":"shape"}`)
 		if _, err := store.Messages(ctx, orgID, runID); err == nil {
 			t.Fatal("Messages: want a decode error for wrong-shaped reasoning JSON, got nil")
@@ -1337,7 +1282,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Run("Messages_SurfacesContentBlocksDecodeError", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		seed.SeedRawMessage(t, runID, "content_blocks", `{"wrong":"shape"}`)
 		if _, err := store.Messages(ctx, orgID, runID); err == nil {
 			t.Fatal("Messages: want a decode error for wrong-shaped content_blocks JSON, got nil")
@@ -1350,7 +1295,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Run("ListForAssembly_OrdersByCoalesceSeqAndIncludesEverythingButInactive", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 
 		idA, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "a"})
 		if err != nil {
@@ -1414,8 +1359,8 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Run("MarkDelivered_FlipsOnlyGivenIDsScopedToRun", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
-		otherRunID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
+		otherRunID := seedAgentRunForTest(t, orgID, seed, "running")
 
 		delivered := false
 		id1, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "user", Subtype: "injection:steer", Content: "1", Delivered: &delivered})
@@ -1464,7 +1409,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Run("SetWindowState_BatchFlipsBeforeThresholdAndReturnsCount", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 
 		var ids []int64
 		for _, c := range []string{"m1", "m2", "m3", "m4"} {
@@ -1523,8 +1468,8 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Fatalf("MessagesForRuns(nil) = (%v, %v), want (nil, nil)", msgs, err)
 		}
 
-		runA := seedAgentRunForTest(t, store, orgID, seed, "running")
-		runB := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runA := seedAgentRunForTest(t, orgID, seed, "running")
+		runB := seedAgentRunForTest(t, orgID, seed, "running")
 		for _, c := range []string{"a-first", "a-second"} {
 			if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{
 				RunID: runA, Role: "assistant", Content: c, Subtype: "text",
@@ -1556,10 +1501,10 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
-	t.Run("TokenTotals_SumsAssistantOnly", func(t *testing.T) {
+	t.Run("TokenTotalsSystem_SumsAssistantOnly", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		// Two assistant messages with tokens, plus a user message that
 		// should NOT contribute to totals.
 		i1, i2 := 100, 50
@@ -1583,9 +1528,9 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 				t.Fatalf("InsertMessage(%s): %v", tup.role, err)
 			}
 		}
-		tot, err := store.TokenTotals(ctx, orgID, runID)
+		tot, err := store.TokenTotalsSystem(ctx, orgID, runID)
 		if err != nil {
-			t.Fatalf("TokenTotals: %v", err)
+			t.Fatalf("TokenTotalsSystem: %v", err)
 		}
 		if tot.InputTokens != i1+i2 {
 			t.Errorf("InputTokens = %d, want %d (user role must not count)", tot.InputTokens, i1+i2)
@@ -1601,7 +1546,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	t.Run("LastAgentActivityAtSystem_NewestNonUserMessage", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		runID := seedAgentRunForTest(t, store, orgID, seed, "open")
+		runID := seedAgentRunForTest(t, orgID, seed, "open")
 
 		// No agent message yet → ok=false, the caller falls back to run start.
 		if _, ok, err := store.LastAgentActivityAtSystem(ctx, orgID, runID); err != nil || ok {
@@ -1657,15 +1602,14 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		// Two runs sharing one blueprint_run — sibling steps. (The seeder
 		// mints a fresh blueprint_run per call, so we reuse brID directly
 		// to stage the multi-step shape the footer aggregates over.)
-		step1, step2 := uuid.New().String(), uuid.New().String()
-		for _, id := range []string{step1, step2} {
-			if err := store.Create(ctx, orgID, domain.AgentRun{
-				ID: id, TaskID: taskID, PromptID: agentRunTestPrompt(t),
-				Status: "running", Model: "m", BlueprintRunID: brID,
-			}); err != nil {
-				t.Fatalf("Create %s: %v", id, err)
-			}
-		}
+		step1 := seed.Run(t, domain.AgentRun{
+			TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			Status: "running", Model: "m", BlueprintRunID: brID,
+		})
+		step2 := seed.Run(t, domain.AgentRun{
+			TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			Status: "running", Model: "m", BlueprintRunID: brID,
+		})
 		if err := store.Complete(ctx, orgID, step1, "completed", 0.01, 1000, 1, "ok", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete step1: %v", err)
 		}
@@ -1700,18 +1644,15 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Errorf("sibling cost for empty blueprint_run = %v, want 0", sib)
 		}
 
-		// An unsettled sibling (created, never completed → NULL
+		// An unsettled sibling (seeded, never completed → NULL
 		// total_cost_usd) contributes 0, not an error: SUM skips the NULL
 		// and COALESCE floors the all-NULL case at 0. Add a third,
 		// never-completed step and re-query for step2 — the settled total
 		// is unchanged (step1's 0.01 only).
-		step3 := uuid.New().String()
-		if err := store.Create(ctx, orgID, domain.AgentRun{
-			ID: step3, TaskID: taskID, PromptID: agentRunTestPrompt(t),
+		_ = seed.Run(t, domain.AgentRun{
+			TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
-		}); err != nil {
-			t.Fatalf("Create step3: %v", err)
-		}
+		})
 		sib, err = store.BlueprintSiblingCostUSDSystem(ctx, orgID, brID, step2)
 		if err != nil {
 			t.Fatalf("BlueprintSiblingCostUSDSystem(step2, unsettled sibling): %v", err)
@@ -1730,15 +1671,14 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		brID := seed.BlueprintRun(t, taskID)
 
 		// Two runs sharing one blueprint_run — sibling steps.
-		step1, step2 := uuid.New().String(), uuid.New().String()
-		for _, id := range []string{step1, step2} {
-			if err := store.Create(ctx, orgID, domain.AgentRun{
-				ID: id, TaskID: taskID, PromptID: agentRunTestPrompt(t),
-				Status: "running", Model: "m", BlueprintRunID: brID,
-			}); err != nil {
-				t.Fatalf("Create %s: %v", id, err)
-			}
-		}
+		step1 := seed.Run(t, domain.AgentRun{
+			TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			Status: "running", Model: "m", BlueprintRunID: brID,
+		})
+		step2 := seed.Run(t, domain.AgentRun{
+			TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			Status: "running", Model: "m", BlueprintRunID: brID,
+		})
 		// Complete's 6th/7th args are durationMs / numTurns.
 		if err := store.Complete(ctx, orgID, step1, "completed", 0.01, 1000, 1, "ok", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete step1: %v", err)
@@ -1771,15 +1711,12 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if ms != 0 {
 			t.Errorf("sibling duration for empty blueprint_run = %d, want 0", ms)
 		}
-		// An unsettled sibling (created, never completed → NULL duration_ms)
+		// An unsettled sibling (seeded, never completed → NULL duration_ms)
 		// contributes 0: SUM skips the NULL, COALESCE floors at 0.
-		step3 := uuid.New().String()
-		if err := store.Create(ctx, orgID, domain.AgentRun{
-			ID: step3, TaskID: taskID, PromptID: agentRunTestPrompt(t),
+		_ = seed.Run(t, domain.AgentRun{
+			TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
-		}); err != nil {
-			t.Fatalf("Create step3: %v", err)
-		}
+		})
 		ms, err = store.BlueprintSiblingDurationMsSystem(ctx, orgID, brID, step2)
 		if err != nil {
 			t.Fatalf("BlueprintSiblingDurationMsSystem(step2, unsettled sibling): %v", err)
@@ -1798,19 +1735,11 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 
 		// One run per memory-content state. memory_missing should be
 		// true for no-row, NULL, "", whitespace; false for populated.
-		runNoRow := uuid.New().String()
-		runNullContent := uuid.New().String()
-		runEmpty := uuid.New().String()
-		runWhitespace := uuid.New().String()
-		runPopulated := uuid.New().String()
-		for _, id := range []string{runNoRow, runNullContent, runEmpty, runWhitespace, runPopulated} {
-			if err := store.Create(ctx, orgID, domain.AgentRun{
-				ID: id, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
-				BlueprintRunID: seed.BlueprintRun(t, taskID),
-			}); err != nil {
-				t.Fatalf("Create %s: %v", id, err)
-			}
-		}
+		runNoRow := seedAgentRunForTaskTest(t, orgID, taskID, "running", seed)
+		runNullContent := seedAgentRunForTaskTest(t, orgID, taskID, "running", seed)
+		runEmpty := seedAgentRunForTaskTest(t, orgID, taskID, "running", seed)
+		runWhitespace := seedAgentRunForTaskTest(t, orgID, taskID, "running", seed)
+		runPopulated := seedAgentRunForTaskTest(t, orgID, taskID, "running", seed)
 		seed.SetRunMemory(t, runNullContent, ent, NullMemorySentinel)
 		seed.SetRunMemory(t, runEmpty, ent, "")
 		seed.SetRunMemory(t, runWhitespace, ent, "  \t\n ")
@@ -1836,49 +1765,29 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 }
 
 // seedAgentRunForTest creates a fresh entity+event+task+run chain and
-// returns the run ID. status is what we want the run row to land in;
-// the seeder calls the store with the status set directly rather
+// returns the run ID. status is what we want the conversation row to land
+// in; the seeder inserts the row with the status set directly rather
 // than driving the lifecycle methods (which is the conformance
 // suite's job to test).
-func seedAgentRunForTest(t *testing.T, store db.AgentRunStore, orgID string, seed AgentRunSeeder, status string) string {
+func seedAgentRunForTest(t *testing.T, orgID string, seed AgentRunSeeder, status string) string {
 	t.Helper()
 	ent := seed.Entity(t, "seed-"+status+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
 	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-	return seedAgentRunForTaskTest(t, store, orgID, taskID, status, seed)
+	return seedAgentRunForTaskTest(t, orgID, taskID, status, seed)
 }
 
 // seedAgentRunForTaskTest creates a run on an existing task, used
 // by tests that need multiple runs on the same parent. Each run gets
-// its own freshly-minted blueprint_run (runs.blueprint_run_id is NOT
-// NULL); independent firings on a shared task is the realistic shape.
-func seedAgentRunForTaskTest(t *testing.T, store db.AgentRunStore, orgID, taskID, status string, seed AgentRunSeeder) string {
+// its own freshly-minted blueprint_run; independent firings on a shared
+// task is the realistic shape.
+func seedAgentRunForTaskTest(t *testing.T, orgID, taskID, status string, seed AgentRunSeeder) string {
 	t.Helper()
-	id := uuid.New().String()
-	ctx := context.Background()
-	if err := store.Create(ctx, orgID, domain.AgentRun{
-		ID: id, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: status, Model: "m",
+	_ = orgID
+	return seed.Run(t, domain.AgentRun{
+		TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: status, Model: "m",
 		BlueprintRunID: seed.BlueprintRun(t, taskID),
-	}); err != nil {
-		t.Fatalf("Create %s: %v", status, err)
-	}
-	return id
-}
-
-// seedAgentRunUnderBlueprintForTest creates a run on an existing task under a
-// caller-supplied blueprint_run id, rather than minting a fresh parent. Used by
-// the worktree-preserve subtest, which needs the run and the blueprint_run it
-// then terminates to be the same pair.
-func seedAgentRunUnderBlueprintForTest(t *testing.T, store db.AgentRunStore, orgID, taskID, blueprintRunID, status string) string {
-	t.Helper()
-	id := uuid.New().String()
-	if err := store.Create(context.Background(), orgID, domain.AgentRun{
-		ID: id, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: status, Model: "m",
-		BlueprintRunID: blueprintRunID,
-	}); err != nil {
-		t.Fatalf("Create %s under blueprint_run: %v", status, err)
-	}
-	return id
+	})
 }
 
 // agentRunTestPromptID is the prompt-row id the backend test files

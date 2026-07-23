@@ -32,7 +32,7 @@ func TestRunWorktreeStore_SQLite(t *testing.T) {
 			},
 			DeleteRun: func(t *testing.T, runID string) {
 				t.Helper()
-				if _, err := conn.Exec(`DELETE FROM runs WHERE id = ?`, runID); err != nil {
+				if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, runID); err != nil {
 					t.Fatalf("delete run: %v", err)
 				}
 			},
@@ -106,7 +106,7 @@ func seedSQLiteRunForWorktree(t *testing.T, conn *sql.DB, suffix string) string 
 	runID := uuid.New().String()
 	blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
 	if _, err := conn.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, status, model, blueprint_run_id) VALUES (?, ?, 'p_run_worktree', 'running', 'm', ?)
+		INSERT INTO conversations (id, task_id, prompt_id, status, model, blueprint_run_id) VALUES (?, ?, 'p_run_worktree', 'running', 'm', ?)
 	`, runID, taskID, blueprintRunID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}

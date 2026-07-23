@@ -624,7 +624,7 @@ const recomputePromptListingStatsPG = `
 			SUM(CASE WHEN r.status = 'completed' THEN 1 ELSE 0 END) AS completed_runs,
 			MAX(r.started_at) AS last_run_at
 		FROM (SELECT DISTINCT listing_id, root_object_id FROM marketplace_installs WHERE org_id = $1 AND root_object_id IS NOT NULL) mi
-		JOIN runs r ON r.prompt_id = mi.root_object_id::text AND r.org_id = $1
+		JOIN conversations r ON r.prompt_id = mi.root_object_id::text AND r.org_id = $1
 		WHERE r.status IN (` + runTerminalStatusesSQL + `)
 		GROUP BY mi.listing_id
 	) runs_agg ON runs_agg.listing_id = l.id

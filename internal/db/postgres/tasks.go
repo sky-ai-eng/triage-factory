@@ -1032,7 +1032,7 @@ func countConsecutiveFailedRuns(ctx context.Context, q queryer, orgID, entityID,
 					PARTITION BY COALESCE(r.blueprint_run_id, r.id)
 					ORDER BY r.started_at ASC
 				) AS step_rank
-			FROM runs r
+			FROM conversations r
 			JOIN tasks t ON r.task_id = t.id AND r.org_id = t.org_id
 			LEFT JOIN blueprint_runs cr ON cr.id = r.blueprint_run_id AND cr.org_id = r.org_id
 			WHERE r.org_id = $1

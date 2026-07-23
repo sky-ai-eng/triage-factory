@@ -119,7 +119,7 @@ func newSQLiteSpendSeeder(conn *sql.DB, teamProjectID, nullTeamProjectID string)
 			t.Helper()
 			id := uuid.New().String()
 			if _, err := conn.Exec(`
-				INSERT INTO runs
+				INSERT INTO conversations
 					(id, org_id, team_id, creator_user_id, trigger_type, origin, actor_agent_id, trigger_id, model, status,
 					 total_cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, started_at)
 				VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -134,29 +134,43 @@ func newSQLiteSpendSeeder(conn *sql.DB, teamProjectID, nullTeamProjectID string)
 		},
 		Curator: func(t *testing.T, f dbtest.CuratorSpendFixture) string {
 			t.Helper()
-			id := uuid.New().String()
-			status := f.Status
-			if status == "" {
-				status = "completed"
-			}
-			// Non-empty TeamID → the team-scoped project (snapshot carries its team);
-			// empty → the null-team project (snapshot is NULL). team_id is captured
-			// via the same (SELECT team_id FROM projects WHERE id = ?) subquery
-			// production uses, so this proves project team → row team → view (TFAC-476).
+			// The view's curator arm is per-CLAIM: one curator conversation
+			// carrying the (team, creator) attribution snapshot, one claim
+			// carrying the turn's accounting. Non-empty TeamID → the
+			// team-scoped project (snapshot carries its team); empty → the
+			// null-team project (snapshot is NULL), captured via the same
+			// (SELECT team_id FROM projects WHERE id = ?) subquery production
+			// used, so this proves project team → row team → view.
 			projID := nullTeamProjectID
 			if f.TeamID != "" {
 				projID = teamProjectID
 			}
+			creator := f.CreatorUserID
+			if creator == "" {
+				creator = runmode.LocalDefaultUserID
+			}
+			convID := uuid.New().String()
 			if _, err := conn.Exec(`
-				INSERT INTO curator_requests
-					(id, org_id, creator_user_id, project_id, team_id, status, user_input, cost_usd,
-					 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-				VALUES (?, ?, ?, ?, (SELECT team_id FROM projects WHERE id = ?), ?, 'spend-test', ?, ?, ?, ?, ?, ?)
+				INSERT INTO conversations
+					(id, org_id, type, creator_user_id, team_id, visibility,
+					 trigger_type, origin, runtime, status, project_id, started_at)
+				VALUES (?, ?, 'curator', ?, (SELECT team_id FROM projects WHERE id = ?),
+				        'private', 'manual', 'curator', 'sdk', NULL, ?, ?)
+			`, convID, runmode.LocalDefaultOrgID, creator, projID, projID, f.CreatedAt); err != nil {
+				t.Fatalf("seed curator conversation: %v", err)
+			}
+			id := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO claims
+					(id, org_id, conversation_id, executor_id, boot_epoch, claimed_at,
+					 released_at, outcome, cost_usd,
+					 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+				VALUES (?, ?, ?, '', 0, ?, ?, 'completed', ?, ?, ?, ?, ?)
 			`,
-				id, runmode.LocalDefaultOrgID, f.CreatorUserID, projID, projID, status, f.Cost,
-				f.Tokens.Input, f.Tokens.Output, f.Tokens.CacheRead, f.Tokens.CacheCreation, f.CreatedAt,
+				id, runmode.LocalDefaultOrgID, convID, f.CreatedAt, f.CreatedAt, f.Cost,
+				f.Tokens.Input, f.Tokens.Output, f.Tokens.CacheRead, f.Tokens.CacheCreation,
 			); err != nil {
-				t.Fatalf("seed curator_request: %v", err)
+				t.Fatalf("seed curator claim: %v", err)
 			}
 			return id
 		},
