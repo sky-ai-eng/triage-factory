@@ -67,6 +67,20 @@ type Store interface {
 	// make_interval), same discipline as ReapDeadExecutors. Returns the
 	// count released.
 	CancelStrandedCuratorTurns(ctx context.Context, staleThreshold time.Duration) (int, error)
+
+	// HealClaimDesyncs runs the two janitor arms for the states the
+	// app-pool terminal writes can strand a delegation conversation in
+	// (their conversation flip and claim release commit independently):
+	// a terminal conversation with a dangling active claim gets the claim
+	// released (outcome mapped from status), and an in-flight delegation
+	// conversation with no active claim under a running blueprint parent
+	// goes back to 'queued' for re-claim. The same arms run at boot inside
+	// RunQueueStore.ReconcileOrphanedRuns; the periodic repeat here bounds
+	// the desync's lifetime to a reaper tick instead of the next restart.
+	// Both arms are idempotent and safe against in-flight healthy writes.
+	// Curator conversations (status NULL) are never touched — their claim
+	// recovery belongs to the curator sweeps above.
+	HealClaimDesyncs(ctx context.Context) (requeued, released int, err error)
 }
 
 // pgStore is the Postgres implementation.
@@ -254,6 +268,52 @@ func (s *pgStore) DeleteStaleInstances(ctx context.Context, staleAfter time.Dura
 	}
 	n, err := res.RowsAffected()
 	return int(n), err
+}
+
+func (s *pgStore) HealClaimDesyncs(ctx context.Context) (int, int, error) {
+	// Duplicates internal/db/postgres's healClaimDesyncs SQL rather than
+	// importing it, keeping this package dialect-independent like the rest
+	// of the file (see pgUUIDArray's rationale). Statement order matters
+	// only for accounting, not correctness — each arm's predicate is
+	// disjoint from the other's write set.
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE claims SET released_at = now(),
+		    outcome = CASE c.status
+		        WHEN 'completed' THEN 'completed'
+		        WHEN 'cancelled' THEN 'cancelled'
+		        ELSE 'failed'
+		    END
+		FROM conversations c
+		WHERE claims.conversation_id = c.id AND claims.released_at IS NULL
+		  AND c.status IN ('completed','failed','cancelled','task_unsolvable')
+	`)
+	if err != nil {
+		return 0, 0, err
+	}
+	rel, err := res.RowsAffected()
+	if err != nil {
+		return 0, 0, err
+	}
+
+	res, err = s.db.ExecContext(ctx, `
+		UPDATE conversations SET status = 'queued', queued_at = now(),
+		    preferred_executor_id = NULL
+		WHERE type = 'delegation'
+		  AND status NOT IN (`+nonProcessingStatusesSQL+`)
+		  AND NOT EXISTS (
+		      SELECT 1 FROM claims cl
+		      WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL
+		  )
+		  AND blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
+	`)
+	if err != nil {
+		return 0, 0, err
+	}
+	req, err := res.RowsAffected()
+	if err != nil {
+		return 0, 0, err
+	}
+	return int(req), int(rel), nil
 }
 
 func (s *pgStore) CancelStrandedCuratorTurns(ctx context.Context, staleThreshold time.Duration) (int, error) {

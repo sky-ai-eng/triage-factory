@@ -226,6 +226,142 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 	})
 
+	t.Run("BeginTurn_StampsDeliveringClaimOnUserRow", func(t *testing.T) {
+		h := mk(t)
+		projectID := h.SeedProject(t, "claim-stamp")
+		convID, msgID := seedTurn(t, h, projectID, "stamp me")
+
+		claimID, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, "exec-1", 1)
+		if err != nil || !ok {
+			t.Fatalf("claim: ok=%v err=%v", ok, err)
+		}
+		withClaims(t, h, func(ts db.TxStores) error {
+			_, err := ts.Curator.BeginTurn(ctx, h.OrgID, projectID, convID, msgID)
+			return err
+		})
+
+		var msgs []domain.AgentMessage
+		withClaims(t, h, func(ts db.TxStores) error {
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			msgs = ms
+			return err
+		})
+		if len(msgs) != 1 || msgs[0].ClaimID != claimID {
+			t.Fatalf("user row claim after BeginTurn = %+v, want stamped with %s", msgs, claimID)
+		}
+		// The delivering claim therefore never reads as a failed pickup, even
+		// when the turn itself ends failed with nothing streamed.
+		if _, err := h.Stores.Curator.ReleaseActiveTurnSystem(ctx, h.OrgID, convID, "failed", "agent blew up", 0, 0, 0); err != nil {
+			t.Fatalf("release: %v", err)
+		}
+		count, lastErr, err := h.Stores.Curator.FailedTurnAttemptsSystem(ctx, h.OrgID, convID, msgID)
+		if err != nil {
+			t.Fatalf("FailedTurnAttemptsSystem: %v", err)
+		}
+		if count != 0 || lastErr != "" {
+			t.Errorf("attempts for a delivered turn = (%d, %q), want (0, \"\") — the stamp attaches the user row to the claim", count, lastErr)
+		}
+	})
+
+	t.Run("DeadLetter_PoisonedTurnRetiresAtCap_TransientFailureStaysClaimable", func(t *testing.T) {
+		h := mk(t)
+		projectID := h.SeedProject(t, "dead-letter")
+		convID, msgID := seedTurn(t, h, projectID, "poisoned")
+
+		// Two failed pickups: claim minted, BeginTurn never delivered (no
+		// stamp), claim released failed. Exactly the loop shape a permanent
+		// BeginTurn failure produces.
+		for i, boom := range []string{"boom one", "boom two"} {
+			if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, "exec-1", int64(i+1)); err != nil || !ok {
+				t.Fatalf("claim %d: ok=%v err=%v", i, ok, err)
+			}
+			if flipped, err := h.Stores.Curator.ReleaseActiveTurnSystem(ctx, h.OrgID, convID, "failed", boom, 0, 0, 0); err != nil || !flipped {
+				t.Fatalf("release %d: flipped=%v err=%v", i, flipped, err)
+			}
+		}
+		count, lastErr, err := h.Stores.Curator.FailedTurnAttemptsSystem(ctx, h.OrgID, convID, msgID)
+		if err != nil {
+			t.Fatalf("FailedTurnAttemptsSystem: %v", err)
+		}
+		if count != 2 || lastErr != "boom two" {
+			t.Fatalf("attempts = (%d, %q), want (2, \"boom two\")", count, lastErr)
+		}
+
+		// Under the cap the message is untouched — still the queued turn a
+		// later scan re-claims (the transient-failure retry path).
+		var inFlight *db.CuratorInFlightTurn
+		withClaims(t, h, func(ts db.TxStores) error {
+			f, err := ts.Curator.InFlightTurn(ctx, h.OrgID, projectID, h.UserID)
+			inFlight = f
+			return err
+		})
+		if inFlight == nil || inFlight.Running || inFlight.MessageID != msgID {
+			t.Fatalf("turn after transient failures = %+v, want still queued message %d", inFlight, msgID)
+		}
+
+		// An active engagement blocks the dead-letter (nothing written).
+		if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, "exec-1", 3); err != nil || !ok {
+			t.Fatalf("blocking claim: ok=%v err=%v", ok, err)
+		}
+		if matched, err := h.Stores.Curator.DeadLetterTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", 3, "nope"); err != nil || matched {
+			t.Fatalf("dead-letter under an active claim: matched=%v err=%v, want miss", matched, err)
+		}
+		if _, err := h.Stores.Curator.ReleaseActiveTurnSystem(ctx, h.OrgID, convID, "failed", "boom three", 0, 0, 0); err != nil {
+			t.Fatalf("release blocker: %v", err)
+		}
+
+		// At the cap: the dead-letter retires the message and mints the
+		// terminal claim in one op.
+		finalErr := "curator turn failed 3 times, giving up: boom three"
+		matched, err := h.Stores.Curator.DeadLetterTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", 3, finalErr)
+		if err != nil || !matched {
+			t.Fatalf("dead-letter: matched=%v err=%v", matched, err)
+		}
+		// Idempotence: the message is delivered now, so a duplicate feed's
+		// dead-letter is a miss.
+		if matched, err := h.Stores.Curator.DeadLetterTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", 3, finalErr); err != nil || matched {
+			t.Fatalf("duplicate dead-letter: matched=%v err=%v, want miss", matched, err)
+		}
+
+		var claims []domain.Claim
+		var msgs []domain.AgentMessage
+		withClaims(t, h, func(ts db.TxStores) error {
+			cs, err := ts.Curator.ListClaims(ctx, h.OrgID, convID)
+			if err != nil {
+				return err
+			}
+			claims = cs
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			msgs = ms
+			return err
+		})
+		if len(claims) != 4 {
+			t.Fatalf("claims = %d, want 4 (three failed pickups + the final dead-letter claim)", len(claims))
+		}
+		final := claims[len(claims)-1]
+		if final.ReleasedAt == nil || final.Outcome != "failed" || final.Error != finalErr {
+			t.Errorf("final claim = %+v, want released failed with the give-up error", final)
+		}
+		// The retired message stays visible history — delivered, inactive,
+		// stamped with the final claim so synthesis renders the turn failed.
+		if len(msgs) != 1 {
+			t.Fatalf("messages = %d, want the retired user row still visible", len(msgs))
+		}
+		m := msgs[0]
+		if m.Delivered == nil || !*m.Delivered || m.WindowState != domain.MessageWindowInactive || m.ClaimID != final.ID {
+			t.Errorf("retired row = (delivered=%v, window=%q, claim=%q), want (true, inactive, %s)", m.Delivered, m.WindowState, m.ClaimID, final.ID)
+		}
+		// Out of the claimable scan and the in-flight lookup for good.
+		withClaims(t, h, func(ts db.TxStores) error {
+			f, err := ts.Curator.InFlightTurn(ctx, h.OrgID, projectID, h.UserID)
+			inFlight = f
+			return err
+		})
+		if inFlight != nil {
+			t.Errorf("InFlightTurn after dead-letter = %+v, want nil", inFlight)
+		}
+	})
+
 	t.Run("QueuedTurn_CancelsByDeletion", func(t *testing.T) {
 		h := mk(t)
 		projectID := h.SeedProject(t, "queued-cancel")

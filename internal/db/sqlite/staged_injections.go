@@ -59,9 +59,12 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, ru
 	}
 	// UPDATE … RETURNING claims the run's pending notes in one statement, so
 	// an injection is delivered exactly once even under a resume race.
+	// window_state='active' keeps withdrawn rows (undelivered + inactive)
+	// out of the flush — withdrawn means "never happened".
 	rows, err := s.q.QueryContext(ctx, `
 		UPDATE messages SET delivered = 1
-		WHERE org_id = ? AND conversation_id = ? AND delivered = 0 AND subtype = ?
+		WHERE org_id = ? AND conversation_id = ? AND delivered = 0
+		  AND window_state = 'active' AND subtype = ?
 		RETURNING id, conversation_id, org_id, metadata, content, created_at
 	`, orgID, runID, stagedInjectionSubtype)
 	if err != nil {
@@ -89,12 +92,14 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 		// names any row — the contract is a silent no-op.
 		return nil
 	}
-	// Retire, don't delete (see the interface doc): delivered + inactive
-	// keeps the withdrawn note out of both the flush and assembly. The
+	// Retire, don't delete (see the interface doc). delivered stays 0 —
+	// withdrawn means the note never happened, and a delivered stamp would
+	// make it read as transcript history; window_state='inactive' is what
+	// keeps it out of the flush, assembly, and the display reads. The
 	// delivered = 0 guard keeps this from retiring an already-flushed row a
 	// racing resume just consumed.
 	_, err = s.q.ExecContext(ctx, `
-		UPDATE messages SET delivered = 1, window_state = 'inactive'
+		UPDATE messages SET window_state = 'inactive'
 		WHERE org_id = ? AND id = ? AND subtype = ? AND delivered = 0
 	`, orgID, rowID, stagedInjectionSubtype)
 	return err

@@ -60,6 +60,18 @@ func claimOutcomeForStatus(status string) string {
 // no live engagement — a terminal write may land on a row whose claim was
 // already released (requeue, boot sweep). q must be admin-backed: tf_app
 // has no UPDATE grant on claims.
+//
+// On the non-System paths this release is deliberately ADJACENT to the
+// app-pool conversation flip rather than atomic with it: tf_app's
+// SELECT-only posture on claims is the structural guarantee that no
+// request-path tx can write claims, and it is worth more than
+// single-statement atomicity here. The two commits can therefore land
+// without each other — a rolled-back outer tx leaves an in-flight
+// conversation with no active claim, a crash between the commits leaves a
+// terminal conversation with a dangling one — and both shapes are healed by
+// the claim-desync janitor arms (RunQueueStore.ReconcileOrphanedRuns at
+// boot in both modes; the leader reaper's HealClaimDesyncs every tick), so
+// neither can strand a row past a sweep.
 func releaseActiveClaim(ctx context.Context, q queryer, orgID, runID, outcome string) error {
 	_, err := q.ExecContext(ctx, `
 		UPDATE claims SET released_at = now(), outcome = $1
@@ -68,6 +80,9 @@ func releaseActiveClaim(ctx context.Context, q queryer, orgID, runID, outcome st
 	return err
 }
 
+// Complete pairs the app-pool status flip with an adjacent admin-pool claim
+// release — non-atomic by design; see releaseActiveClaim for why the split
+// is acceptable (the janitor arms make both crash shapes self-healing).
 func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
 	if err := completeRun(ctx, s.q, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
 		return err
@@ -113,6 +128,10 @@ func completeRun(ctx context.Context, q queryer, orgID, runID, status string, co
 	return err
 }
 
+// MarkOpen's park release is adjacent, not atomic — see releaseActiveClaim.
+// An 'open' row with a dangling claim needs no janitor arm of its own: the
+// resume flip (MarkQueuedForResume) releases any active claim on its way
+// back to the queue.
 func (s *agentRunStore) MarkOpen(ctx context.Context, orgID, runID string) (bool, error) {
 	flipped, err := markOpen(ctx, s.q, orgID, runID)
 	if err != nil || !flipped {
@@ -289,6 +308,9 @@ func setRunWorktreePath(ctx context.Context, q queryer, orgID, runID, path strin
 	return err
 }
 
+// MarkFailedIfActive's release is adjacent, not atomic — see
+// releaseActiveClaim for the crash shapes and the janitor arms that heal
+// them.
 func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID, failureKind string) (bool, error) {
 	flipped, err := markFailedIfActive(ctx, s.q, orgID, runID, failureKind)
 	if err != nil || !flipped {
@@ -339,6 +361,9 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, runID, failureKin
 	return n > 0, err
 }
 
+// MarkCancelledIfActive's release is adjacent, not atomic — see
+// releaseActiveClaim for the crash shapes and the janitor arms that heal
+// them.
 func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
 	flipped, err := markCancelledIfActive(ctx, s.q, orgID, runID, stopReason, summary)
 	if err != nil || !flipped {
@@ -910,10 +935,15 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 }
 
 func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error) {
+	// Withdrawn-pending rows (undelivered + inactive — a staged injection
+	// that was withdrawn before any flush) never happened, so the display
+	// read hides them. delivered + inactive stays visible: that is compacted
+	// history, still part of the rendered transcript.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
 		FROM messages
 		WHERE org_id = $1 AND conversation_id = $2
+		  AND NOT (delivered = false AND window_state = 'inactive')
 		ORDER BY id ASC
 	`, orgID, runID)
 	if err != nil {
@@ -936,10 +966,12 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 	// binds as a uuid[] literal through one $N (pgUUIDArray), mirroring
 	// artifactStore.ListByRuns. ORDER BY (conversation_id, id) so the caller
 	// groups by RunID with each run's messages in insertion order.
+	// Withdrawn-pending rows are hidden, same as Messages.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
 		FROM messages
 		WHERE org_id = $1 AND conversation_id = ANY($2)
+		  AND NOT (delivered = false AND window_state = 'inactive')
 		ORDER BY conversation_id ASC, id ASC
 	`, orgID, pgUUIDArray(runIDs))
 	if err != nil {

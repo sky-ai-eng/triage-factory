@@ -1356,6 +1356,76 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	t.Run("Messages_HideWithdrawnPendingRows", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
+
+		undelivered := false
+		inserts := []*domain.AgentMessage{
+			{RunID: runID, Role: "assistant", Subtype: "text", Content: "plain"},
+			// Withdrawn-pending: staged, then withdrawn before any flush —
+			// "never happened", so the display reads must hide it.
+			{RunID: runID, Role: "user", Subtype: "injection:system-note", Content: "withdrawn",
+				Delivered: &undelivered, WindowState: domain.MessageWindowInactive},
+			// Delivered + inactive is compacted history: retired from
+			// assembly but still part of the rendered transcript.
+			{RunID: runID, Role: "assistant", Subtype: "text", Content: "compacted",
+				WindowState: domain.MessageWindowInactive},
+			// A still-pending active row stays visible (it will happen).
+			{RunID: runID, Role: "user", Subtype: "injection:system-note", Content: "pending",
+				Delivered: &undelivered},
+		}
+		for _, m := range inserts {
+			if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
+				t.Fatalf("InsertMessage %q: %v", m.Content, err)
+			}
+		}
+
+		wantVisible := []string{"plain", "compacted", "pending"}
+		assertContents := func(desc string, msgs []domain.AgentMessage) {
+			t.Helper()
+			var contents []string
+			for _, m := range msgs {
+				contents = append(contents, m.Content)
+			}
+			if len(contents) != len(wantVisible) {
+				t.Fatalf("%s = %v, want %v (withdrawn-pending hidden, compacted visible)", desc, contents, wantVisible)
+			}
+			for i := range wantVisible {
+				if contents[i] != wantVisible[i] {
+					t.Errorf("%s[%d] = %q, want %q", desc, i, contents[i], wantVisible[i])
+				}
+			}
+		}
+
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		assertContents("Messages", msgs)
+
+		batched, err := store.MessagesForRuns(ctx, orgID, []string{runID})
+		if err != nil {
+			t.Fatalf("MessagesForRuns: %v", err)
+		}
+		assertContents("MessagesForRuns", batched)
+
+		// Assembly excludes every inactive row — withdrawn AND compacted.
+		asm, err := store.ListForAssembly(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("ListForAssembly: %v", err)
+		}
+		var asmContents []string
+		for _, m := range asm {
+			asmContents = append(asmContents, m.Content)
+		}
+		wantAsm := []string{"plain", "pending"}
+		if len(asmContents) != len(wantAsm) || asmContents[0] != wantAsm[0] || asmContents[1] != wantAsm[1] {
+			t.Errorf("ListForAssembly = %v, want %v", asmContents, wantAsm)
+		}
+	})
+
 	t.Run("MarkDelivered_FlipsOnlyGivenIDsScopedToRun", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

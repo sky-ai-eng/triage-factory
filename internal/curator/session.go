@@ -106,6 +106,39 @@ func (s *projectSession) dispatch(item queueItem) {
 		return
 	}
 
+	// Dead-letter gate: a turn whose prior pickups keep failing at BeginTurn
+	// is poisoned input — every re-feed would just mint another doomed claim
+	// (and leak it released-failed), so at the cap the turn retires
+	// terminally instead of dispatching. Checked before admission so a
+	// poisoned turn never waits on (or occupies) a capacity slot. A counter
+	// read error fails open into a normal dispatch — worst case one more
+	// ordinary attempt, never a stuck turn.
+	if maxAttempts := s.curator.getTurnMaxAttempts(); maxAttempts > 0 {
+		gateCtx := context.WithoutCancel(s.ctx)
+		prior, lastErr, cntErr := s.curator.stores.Curator.FailedTurnAttemptsSystem(gateCtx, item.orgID, item.conversationID, item.messageID)
+		if cntErr != nil {
+			curatorLog.Warn("count failed turn attempts failed; dispatching anyway", "request", requestID, "error", cntErr)
+		} else if prior >= maxAttempts {
+			errMsg := fmt.Sprintf("curator turn failed %d times, giving up", prior)
+			if lastErr != "" {
+				errMsg += ": " + lastErr
+			}
+			executorID, bootEpoch := s.curator.getExecutorIdentity()
+			matched, dlErr := s.curator.stores.Curator.DeadLetterTurnSystem(gateCtx, item.orgID, item.conversationID, item.messageID, executorID, bootEpoch, errMsg)
+			if dlErr != nil {
+				curatorLog.Warn("dead-letter turn failed", "request", requestID, "error", dlErr)
+				return
+			}
+			if matched {
+				// Only the writer that actually retired the row announces —
+				// a raced cancel already broadcast its own terminal state.
+				curatorLog.Warn("dead-lettered poisoned curator turn", "request", requestID, "attempts", prior)
+				s.curator.broadcastRequestUpdate(item.orgID, s.projectID, requestID, "failed")
+			}
+			return
+		}
+	}
+
 	// Per-message ctx is a child of the session ctx. SIGKILL of the
 	// in-flight subprocess goes through this; cancelInFlight fires
 	// it from outside the goroutine.
@@ -610,7 +643,9 @@ func (s *projectSession) cancelQueued(item queueItem) {
 // failQueued terminal-fails a turn whose infrastructure broke before the
 // normal claim path ran (admission-gate error): mint the claim, deliver the
 // message so the turn can't be re-fed, and release failed — the same
-// visible history a mid-dispatch failure leaves.
+// visible history a mid-dispatch failure leaves. A turn cancelled in the
+// window before the pickup instead settles cancelled, silently — cancelled
+// stands, and the canceller already broadcast.
 func (s *projectSession) failQueued(item queueItem, errMsg string) {
 	ctx := context.WithoutCancel(s.ctx)
 	executorID, bootEpoch := s.curator.getExecutorIdentity()
@@ -622,7 +657,16 @@ func (s *projectSession) failQueued(item queueItem, errMsg string) {
 	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
 		_, err := ts.Curator.BeginTurn(ctx, item.orgID, s.projectID, item.conversationID, item.messageID)
 		return err
-	}); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	}); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// The queued row vanished between the admission error and this
+			// pickup — a cancel won the race. Release the just-minted claim
+			// quietly and DON'T broadcast failed: the canceller already
+			// announced cancelled, and a late failed would overwrite it in
+			// the UI. Same withdrawn handling as the main dispatch path.
+			_, _ = s.curator.stores.Curator.ReleaseActiveTurnSystem(ctx, item.orgID, item.conversationID, "cancelled", "queued turn withdrawn before pickup", 0, 0, 0)
+			return
+		}
 		curatorLog.Warn("fail queued turn: deliver failed", "request", item.requestID, "error", err)
 	}
 	s.releaseFailed(item, errMsg)

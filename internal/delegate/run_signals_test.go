@@ -526,12 +526,38 @@ func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 		t.Fatalf("outcome = %v, want InjectNotDelivered", outcome)
 	}
 
-	var count int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND delivered = 0 AND subtype = 'injection:system-note'`, "r-inj3").Scan(&count); err != nil {
-		t.Fatalf("count staged injection messages: %v", err)
+	// Withdrawn encoding: the row stays undelivered ("never happened") but
+	// leaves the active window, so nothing flushable — or visible — remains.
+	var flushable int
+	if err := database.QueryRow(`
+		SELECT COUNT(*) FROM messages
+		WHERE conversation_id = ? AND delivered = 0 AND window_state = 'active'
+		  AND subtype = 'injection:system-note'
+	`, "r-inj3").Scan(&flushable); err != nil {
+		t.Fatalf("count flushable staged injection messages: %v", err)
 	}
-	if count != 0 {
-		t.Errorf("messages holds %d orphaned staged-injection row(s) for a run InjectNotDelivered decided against, want 0", count)
+	if flushable != 0 {
+		t.Errorf("messages holds %d flushable staged-injection row(s) for a run InjectNotDelivered decided against, want 0", flushable)
+	}
+	var withdrawn int
+	if err := database.QueryRow(`
+		SELECT COUNT(*) FROM messages
+		WHERE conversation_id = ? AND delivered = 0 AND window_state = 'inactive'
+		  AND subtype = 'injection:system-note'
+	`, "r-inj3").Scan(&withdrawn); err != nil {
+		t.Fatalf("count withdrawn staged injection messages: %v", err)
+	}
+	if withdrawn != 1 {
+		t.Errorf("withdrawn staged-injection rows = %d, want 1 (retired in place, not deleted)", withdrawn)
+	}
+	msgs, err := stores.AgentRuns.Messages(context.Background(), runmode.LocalDefaultOrgID, "r-inj3")
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	for _, m := range msgs {
+		if m.Subtype == "injection:system-note" {
+			t.Errorf("withdrawn staged injection renders in the display read: %+v", m)
+		}
 	}
 }
 

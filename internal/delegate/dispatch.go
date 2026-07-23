@@ -132,7 +132,7 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 		return
 	}
 	if c > 0 {
-		dispatchLog.Info("boot reconcile: cancelled child runs orphaned under a terminal blueprint_run", "count", c)
+		dispatchLog.Info("boot reconcile: healed orphaned child runs and run↔claim desyncs", "count", c)
 	}
 }
 

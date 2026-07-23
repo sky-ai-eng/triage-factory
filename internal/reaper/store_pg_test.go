@@ -348,6 +348,84 @@ func TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesRunsExecutorID(t *test
 	}
 }
 
+// TestHealClaimDesyncs_HealsBothStrandedShapes pins the periodic janitor: a
+// terminal conversation with a dangling active claim gets the claim released
+// (outcome mapped from status), an in-flight claimless run under a running
+// parent is requeued, and a healthy claimed running run is untouched. These
+// are the two shapes the non-atomic app-pool terminal writes can strand;
+// the reaper repeating the boot-time arms bounds their lifetime to a tick.
+func TestHealClaimDesyncs_HealsBothStrandedShapes(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	// Crash-after-flip: the conversation committed terminal but its claim
+	// release never landed.
+	terminal := seedReaperFixture(t, h, 1)
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = 'completed' WHERE id = $1`, terminal.runID)
+
+	// Rolled-back flip: the claim release committed but the conversation
+	// stayed in-flight, with a stale placement stamp to clear.
+	stranded := seedReaperFixture(t, h, 1)
+	pgtest.MustExec(t, h.AdminDB, `
+		UPDATE claims SET released_at = now(), outcome = 'failed'
+		WHERE conversation_id = $1 AND released_at IS NULL
+	`, stranded.runID)
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = 'exec-dead' WHERE id = $1`, stranded.runID)
+
+	// Healthy: running with a live claim.
+	healthy := seedReaperFixture(t, h, 1)
+
+	store := reaper.NewPostgresStore(h.AdminDB)
+	requeued, released, err := store.HealClaimDesyncs(ctx)
+	if err != nil {
+		t.Fatalf("HealClaimDesyncs: %v", err)
+	}
+	if requeued != 1 || released != 1 {
+		t.Fatalf("healed = (requeued=%d, released=%d), want (1, 1)", requeued, released)
+	}
+
+	var rel bool
+	var outcome string
+	if err := h.AdminDB.QueryRowContext(ctx, `
+		SELECT released_at IS NOT NULL, COALESCE(outcome, '') FROM claims
+		WHERE conversation_id = $1 ORDER BY claimed_at DESC LIMIT 1
+	`, terminal.runID).Scan(&rel, &outcome); err != nil {
+		t.Fatalf("read terminal row's claim: %v", err)
+	}
+	if !rel || outcome != "completed" {
+		t.Errorf("terminal row's claim = (released=%v, outcome=%q), want (true, completed)", rel, outcome)
+	}
+
+	var status string
+	var pref any
+	if err := h.AdminDB.QueryRowContext(ctx, `
+		SELECT status, preferred_executor_id FROM conversations WHERE id = $1
+	`, stranded.runID).Scan(&status, &pref); err != nil {
+		t.Fatalf("read stranded row: %v", err)
+	}
+	if status != "queued" || pref != nil {
+		t.Errorf("stranded row = (status=%q, preferred=%v), want (queued, cleared)", status, pref)
+	}
+
+	var healthyStatus string
+	var active int
+	if err := h.AdminDB.QueryRowContext(ctx, `
+		SELECT c.status, (SELECT COUNT(*) FROM claims WHERE conversation_id = c.id AND released_at IS NULL)
+		FROM conversations c WHERE c.id = $1
+	`, healthy.runID).Scan(&healthyStatus, &active); err != nil {
+		t.Fatalf("read healthy row: %v", err)
+	}
+	if healthyStatus != "running" || active != 1 {
+		t.Errorf("healthy row = (status=%q, active claims=%d), want (running, 1)", healthyStatus, active)
+	}
+
+	// Idempotent: a second sweep finds nothing.
+	if requeued, released, err := store.HealClaimDesyncs(ctx); err != nil || requeued != 0 || released != 0 {
+		t.Errorf("second sweep = (%d, %d, %v), want (0, 0, nil)", requeued, released, err)
+	}
+}
+
 // TestClaimsExecutorID_HasNoForeignKeyToInstances pins the schema invariant
 // the GC's safety argument depends on: claims.executor_id is a plain text
 // column with no FK constraint into instances, so deleting an instances row

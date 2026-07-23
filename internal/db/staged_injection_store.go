@@ -48,10 +48,11 @@ type StagedInjectionStore interface {
 	// longer) resumable after all — the caller falls through to a normal
 	// deferral instead, and the staged row would otherwise be orphaned (or,
 	// worse, double-deliver if the run is later boot-recovered and
-	// resumed). The impl retires the row (delivered + window_state
-	// 'inactive') rather than deleting it — the executor's tf_system role
-	// holds no DELETE on messages, and a retired row is equally invisible
-	// to both the flush and assembly. A no-op (no error) if the row is
-	// already gone or was flushed.
+	// resumed). The impl retires the row (window_state 'inactive', delivered
+	// KEPT false — withdrawn means "never happened", so it must not read as
+	// delivered transcript history) rather than deleting it — the executor's
+	// tf_system role holds no DELETE on messages, and a retired row is
+	// equally invisible to the flush, assembly, and the display reads. A
+	// no-op (no error) if the row is already gone or was flushed.
 	DeleteSystem(ctx context.Context, orgID, id string) error
 }

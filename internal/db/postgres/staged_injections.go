@@ -55,11 +55,13 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, ru
 	// UPDATE … RETURNING claims the run's pending notes in one statement, so
 	// an injection is delivered exactly once even under a resume race. The
 	// row-id sort restores oldest-first (RETURNING order is unspecified).
+	// window_state='active' keeps withdrawn rows (undelivered + inactive)
+	// out of the flush — withdrawn means "never happened".
 	rows, err := s.admin.QueryContext(ctx, `
 		WITH flushed AS (
 			UPDATE messages SET delivered = true
 			WHERE org_id = $1::uuid AND conversation_id = $2::uuid
-			  AND delivered = false AND subtype = $3
+			  AND delivered = false AND window_state = 'active' AND subtype = $3
 			RETURNING id, conversation_id, org_id, metadata, content, created_at
 		)
 		SELECT id, conversation_id::text, org_id::text, metadata::text, content, created_at
@@ -79,13 +81,15 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 		// names any row — the contract is a silent no-op.
 		return nil
 	}
-	// Retire, don't delete (see the interface doc): delivered + inactive
-	// keeps the withdrawn note out of both the flush and assembly, and the
-	// executor's tf_system role holds no DELETE on messages. The
-	// delivered = false guard keeps this from retiring an already-flushed
-	// row a racing resume just consumed.
+	// Retire, don't delete (see the interface doc): the executor's tf_system
+	// role holds no DELETE on messages. delivered stays false — withdrawn
+	// means the note never happened, and a delivered stamp would make it read
+	// as transcript history; window_state='inactive' is what keeps it out of
+	// the flush, assembly, and the display reads. The delivered = false guard
+	// keeps this from retiring an already-flushed row a racing resume just
+	// consumed.
 	_, err = s.admin.ExecContext(ctx, `
-		UPDATE messages SET delivered = true, window_state = 'inactive'
+		UPDATE messages SET window_state = 'inactive'
 		WHERE org_id = $1::uuid AND id = $2 AND subtype = $3 AND delivered = false
 	`, orgID, rowID, stagedInjectionSubtype)
 	return err

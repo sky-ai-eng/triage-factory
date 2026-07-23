@@ -365,6 +365,8 @@ CREATE INDEX idx_messages_conversation     ON messages(conversation_id);
 CREATE INDEX idx_messages_conversation_seq ON messages(conversation_id, (COALESCE(seq, id)));
 CREATE INDEX idx_messages_undelivered     ON messages(conversation_id) WHERE delivered = 0;
 CREATE INDEX idx_messages_claim           ON messages(claim_id) WHERE claim_id IS NOT NULL;
+-- Per-user message reads; partial because most rows are agent-side (NULL user).
+CREATE INDEX idx_messages_user            ON messages(user_id) WHERE user_id IS NOT NULL;
 
 -- Delegation transcripts copy with their ids preserved (id is the assembly
 -- sort key) and attach to the conversation's single migrated claim when one

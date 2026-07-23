@@ -2512,6 +2512,8 @@ CREATE INDEX idx_messages_conversation_seq ON public.messages (conversation_id, 
 CREATE INDEX idx_messages_undelivered ON public.messages USING btree (conversation_id) WHERE (delivered = false);
 -- Per-engagement token accounting (SUM over one claim's rows).
 CREATE INDEX idx_messages_claim ON public.messages USING btree (claim_id) WHERE (claim_id IS NOT NULL);
+-- Per-user message reads; partial because most rows are agent-side (NULL user).
+CREATE INDEX idx_messages_user ON public.messages USING btree (user_id) WHERE (user_id IS NOT NULL);
 
 
 --

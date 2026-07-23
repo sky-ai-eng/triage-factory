@@ -868,9 +868,16 @@ func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]do
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
+	// Withdrawn-pending rows (undelivered + inactive — a staged injection
+	// that was withdrawn before any flush) never happened, so the display
+	// read hides them. delivered + inactive stays visible: that is compacted
+	// history, still part of the rendered transcript.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+sqliteMessageColumns+`
-		FROM messages WHERE conversation_id = ? ORDER BY id ASC
+		FROM messages
+		WHERE conversation_id = ?
+		  AND NOT (delivered = 0 AND window_state = 'inactive')
+		ORDER BY id ASC
 	`, runID)
 	if err != nil {
 		return nil, err
@@ -900,10 +907,12 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 			placeholders[i] = "?"
 			args[i] = id
 		}
+		// Withdrawn-pending rows are hidden, same as Messages.
 		rows, err := s.q.QueryContext(ctx, `
 			SELECT `+sqliteMessageColumns+`
 			FROM messages
 			WHERE conversation_id IN (`+strings.Join(placeholders, ", ")+`)
+			  AND NOT (delivered = 0 AND window_state = 'inactive')
 			ORDER BY conversation_id ASC, id ASC
 		`, args...)
 		if err != nil {

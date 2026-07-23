@@ -122,10 +122,14 @@ func (s *curatorStore) EnqueueUserMessage(ctx context.Context, orgID, conversati
 // --- History ---
 
 func (s *curatorStore) ListConversationMessages(ctx context.Context, orgID, conversationID string) ([]domain.AgentMessage, error) {
+	// Withdrawn-pending rows (undelivered + inactive) never happened and are
+	// hidden; delivered + inactive stays visible — that is retired history
+	// (compaction, a dead-lettered turn's input) the transcript still shows.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
 		FROM messages
 		WHERE org_id = $1 AND conversation_id = $2
+		  AND NOT (delivered = false AND window_state = 'inactive')
 		ORDER BY COALESCE(seq, id) ASC
 	`, orgID, conversationID)
 	if err != nil {
@@ -265,9 +269,16 @@ func (s *curatorStore) ClaimTurnSystem(ctx context.Context, orgID, conversationI
 func (s *curatorStore) BeginTurn(ctx context.Context, orgID, projectID, conversationID string, messageID int64) (*db.CuratorTurnStart, error) {
 	start := &db.CuratorTurnStart{}
 	err := inTx(ctx, s.q, func(q queryer) error {
+		// The delivering claim stamps the user row (single-active makes the
+		// subquery at most one id). The stamp rides this tx: a failed
+		// BeginTurn leaves no stamp, so a message-less failed claim is
+		// recognizable as a failed pickup, and a delivered turn's terminal
+		// state stays derivable from the message even when nothing streams.
 		var userInput string
 		err := q.QueryRowContext(ctx, `
-			UPDATE messages SET delivered = true
+			UPDATE messages SET delivered = true,
+			       claim_id = (SELECT id FROM claims
+			                   WHERE conversation_id = $2 AND released_at IS NULL)
 			WHERE org_id = $1 AND conversation_id = $2 AND id = $3
 			  AND role = 'user' AND subtype = 'text' AND delivered = false
 			RETURNING content
@@ -322,6 +333,100 @@ func (s *curatorStore) SetSDKSession(ctx context.Context, orgID, conversationID,
 		UPDATE conversations SET sdk_session_id = $1 WHERE org_id = $2 AND id = $3
 	`, sessionID, orgID, conversationID)
 	return err
+}
+
+func (s *curatorStore) FailedTurnAttemptsSystem(ctx context.Context, orgID, conversationID string, messageID int64) (int, string, error) {
+	// A missing message row makes the created_at subquery NULL, which
+	// matches nothing — the right answer, since a withdrawn turn has no
+	// attempts left to cap.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT COALESCE(cl.error, '')
+		FROM claims cl
+		WHERE cl.org_id = $1 AND cl.conversation_id = $2
+		  AND cl.released_at IS NOT NULL AND cl.outcome = 'failed'
+		  AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.claim_id = cl.id)
+		  AND cl.claimed_at >= (SELECT m2.created_at FROM messages m2
+		                        WHERE m2.org_id = $1 AND m2.conversation_id = $2 AND m2.id = $3)
+		ORDER BY cl.claimed_at DESC, cl.id DESC
+	`, orgID, conversationID, messageID)
+	if err != nil {
+		return 0, "", err
+	}
+	defer rows.Close()
+	count := 0
+	lastError := ""
+	for rows.Next() {
+		var e string
+		if err := rows.Scan(&e); err != nil {
+			return 0, "", err
+		}
+		if count == 0 {
+			lastError = e
+		}
+		count++
+	}
+	return count, lastError, rows.Err()
+}
+
+func (s *curatorStore) DeadLetterTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, executorID string, bootEpoch int64, errMsg string) (bool, error) {
+	matched := false
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		// A live engagement owns the conversation — this gate mirrors the
+		// dispatch's own claim-conflict skip, so the poisoned row waits
+		// rather than fighting whatever is running.
+		var active int
+		if err := q.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM claims
+			WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL
+		`, orgID, conversationID).Scan(&active); err != nil {
+			return err
+		}
+		if active > 0 {
+			return nil
+		}
+		// Retire the message before minting anything: a raced cancel that
+		// already deleted (or a duplicate feed that already delivered) the
+		// row must leave zero writes behind. window_state='inactive' keeps
+		// the poisoned input out of assembly and the claimable scan;
+		// delivered=true keeps it visible transcript history.
+		res, err := q.ExecContext(ctx, `
+			UPDATE messages SET delivered = true, window_state = 'inactive'
+			WHERE org_id = $1 AND conversation_id = $2 AND id = $3
+			  AND role = 'user' AND subtype = 'text' AND delivered = false
+		`, orgID, conversationID, messageID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+		// The final claim is born released: it exists to carry the terminal
+		// 'failed' the history synthesizer derives the turn's status from.
+		claimID := uuid.New().String()
+		if _, err := q.ExecContext(ctx, `
+			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
+			                    claimed_at, released_at, outcome, error)
+			VALUES ($1, $2, $3, $4, $5, now(), now(), 'failed', $6)
+		`, claimID, orgID, conversationID, executorID, bootEpoch, nullIfEmpty(errMsg)); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE messages SET claim_id = $1
+			WHERE org_id = $2 AND conversation_id = $3 AND id = $4
+		`, claimID, orgID, conversationID, messageID); err != nil {
+			return err
+		}
+		matched = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return matched, nil
 }
 
 func (s *curatorStore) ReleaseActiveTurnSystem(ctx context.Context, orgID, conversationID, outcome, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error) {

@@ -490,37 +490,121 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 	// 0. Same every-terminal-write invariant as the cancel paths; correlates on
 	// the unique conversation id, so no org scoping is needed on this
 	// cross-tenant sweep.
-	var count int
-	err := s.conn.QueryRowContext(ctx, `
-		WITH cancelled AS (
-			UPDATE conversations
-			SET status = 'cancelled',
-			    completed_at = COALESCE(completed_at, now()),
-			    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
-			    result_summary = COALESCE(NULLIF(result_summary, ''), $1),
-			    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE conversation_id = conversations.id),
-			    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE conversation_id = conversations.id),
-			    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE conversation_id = conversations.id),
-			    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE conversation_id = conversations.id)
-			WHERE status NOT IN (`+runTerminalStatusesSQL+`)
-			  AND blueprint_run_id IN (
-			      SELECT id FROM blueprint_runs
-			      WHERE status IN ('completed','aborted','failed','cancelled')
-			  )
-			RETURNING id
-		),
-		rel AS (
-			UPDATE claims SET released_at = now(), outcome = 'cancelled'
-			FROM cancelled
-			WHERE claims.conversation_id = cancelled.id AND claims.released_at IS NULL
-			RETURNING claims.id
-		)
-		SELECT count(*) FROM cancelled
-	`, "Cancelled: owning blueprint run reached a terminal state").Scan(&count)
+	var total int
+	err := inTx(ctx, s.conn, func(q queryer) error {
+		var cancelled int
+		if err := q.QueryRowContext(ctx, `
+			WITH cancelled AS (
+				UPDATE conversations
+				SET status = 'cancelled',
+				    completed_at = COALESCE(completed_at, now()),
+				    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
+				    result_summary = COALESCE(NULLIF(result_summary, ''), $1),
+				    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE conversation_id = conversations.id),
+				    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE conversation_id = conversations.id),
+				    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE conversation_id = conversations.id),
+				    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE conversation_id = conversations.id)
+				WHERE status NOT IN (`+runTerminalStatusesSQL+`)
+				  AND blueprint_run_id IN (
+				      SELECT id FROM blueprint_runs
+				      WHERE status IN ('completed','aborted','failed','cancelled')
+				  )
+				RETURNING id
+			),
+			rel AS (
+				UPDATE claims SET released_at = now(), outcome = 'cancelled'
+				FROM cancelled
+				WHERE claims.conversation_id = cancelled.id AND claims.released_at IS NULL
+				RETURNING claims.id
+			)
+			SELECT count(*) FROM cancelled
+		`, "Cancelled: owning blueprint run reached a terminal state").Scan(&cancelled); err != nil {
+			return err
+		}
+
+		// Claim-desync janitor arms (after the blueprint-terminal cancel, so
+		// a row it just cancelled reads terminal here and is never requeued).
+		released, requeued, err := healClaimDesyncs(ctx, q)
+		if err != nil {
+			return err
+		}
+		total = cancelled + released + requeued
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}
-	return count, nil
+	return total, nil
+}
+
+// healClaimDesyncs is the two-armed janitor for the states the app-pool
+// (non-System) terminal writes can strand a delegation conversation in —
+// their conversation flip and claim release commit independently (tf_app
+// holds no claims UPDATE grant, so one atomic tx is structurally
+// unavailable), and either commit can land without the other. Shared by the
+// boot-time ReconcileOrphanedRuns and the leader reaper's periodic sweep;
+// both arms are idempotent, and a normal in-between state (row still locked
+// by the in-flight writer) resolves against the committed row under READ
+// COMMITTED re-evaluation, so running this concurrently with healthy
+// terminal writes is safe.
+//
+// Arm one: a terminal conversation with a still-active claim (the flip
+// committed, the release never did) — release it, outcome mapped from the
+// status the same way the terminal writes map it (task_unsolvable → failed).
+//
+// Arm two: an in-flight delegation conversation with no active claim (the
+// release committed, the flip's tx rolled back) — back to 'queued' so the
+// dispatcher re-claims it. Gated on a still-running blueprint parent,
+// mirroring ResetProcessingRuns: a re-queued row is only claimable under a
+// running parent, and rows under a terminal parent belong to the
+// blueprint-terminal cancel arm. Curator conversations are excluded by
+// construction (status NULL, type 'curator') — their claim recovery is the
+// curator boot sweeps' and the curator reaper arm's job.
+func healClaimDesyncs(ctx context.Context, q queryer) (released, requeued int, err error) {
+	res, err := q.ExecContext(ctx, `
+		UPDATE claims SET released_at = now(),
+		    outcome = CASE c.status
+		        WHEN 'completed' THEN 'completed'
+		        WHEN 'cancelled' THEN 'cancelled'
+		        ELSE 'failed'
+		    END
+		FROM conversations c
+		WHERE claims.conversation_id = c.id AND claims.released_at IS NULL
+		  AND c.status IN (`+runTerminalStatusesSQL+`)
+	`)
+	if err != nil {
+		return 0, 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, 0, err
+	}
+	released = int(n)
+
+	res, err = q.ExecContext(ctx, `
+		UPDATE conversations SET status = 'queued', queued_at = now(),
+		    preferred_executor_id = NULL
+		WHERE type = 'delegation'
+		  AND status NOT IN (
+			'queued',
+			`+runTerminalStatusesSQL+`,
+			'open','pending_approval'
+		  )
+		  AND NOT EXISTS (
+		      SELECT 1 FROM claims cl
+		      WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL
+		  )
+		  AND blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
+	`)
+	if err != nil {
+		return 0, 0, err
+	}
+	n, err = res.RowsAffected()
+	if err != nil {
+		return 0, 0, err
+	}
+	requeued = int(n)
+	return released, requeued, nil
 }
 
 // scanOrgQueueShares reads FleetQueueShares rows, mapping a NULL or

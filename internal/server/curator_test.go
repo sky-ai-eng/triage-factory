@@ -186,6 +186,43 @@ func TestHandleCuratorHistory_ReturnsRequestsWithMessages(t *testing.T) {
 	}
 }
 
+// TestHandleCuratorHistory_DeadLetteredTurnRendersFailed pins the synthesis
+// fallback for a turn with no agent-side stream: a dead-lettered turn's user
+// message carries the final claim itself, and history must derive the
+// terminal 'failed' (and its error) from that claim rather than fabricate a
+// 'done'.
+func TestHandleCuratorHistory_DeadLetteredTurnRendersFailed(t *testing.T) {
+	srv, _, projectID := curatorTestSetup(t)
+	convID, msgID := seedCuratorTurn(t, srv, projectID, "poisoned")
+
+	const giveUp = "curator turn failed 3 times, giving up: begin turn: boom"
+	matched, err := srv.curatorStore.DeadLetterTurnSystem(t.Context(), runmode.LocalDefaultOrgID, convID, msgID, "test-exec", 1, giveUp)
+	if err != nil || !matched {
+		t.Fatalf("dead-letter: matched=%v err=%v", matched, err)
+	}
+
+	rr := doJSON(t, srv, http.MethodGet, "/api/projects/"+projectID+"/curator/messages", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var got []curatorRequestJSON
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d turns, want the dead-lettered one (body=%s)", len(got), rr.Body.String())
+	}
+	if got[0].Status != "failed" {
+		t.Errorf("status = %q, want failed (derived from the claim stamped on the user row)", got[0].Status)
+	}
+	if got[0].ErrorMsg != giveUp {
+		t.Errorf("error = %q, want the give-up message", got[0].ErrorMsg)
+	}
+	if len(got[0].Messages) != 0 {
+		t.Errorf("dead-lettered turn has %d stream messages, want 0", len(got[0].Messages))
+	}
+}
+
 func TestHandleCuratorCancel_404OnNoInFlight(t *testing.T) {
 	srv, _, projectID := curatorTestSetup(t)
 	rr := doJSON(t, srv, http.MethodDelete, "/api/projects/"+projectID+"/curator/messages/in-flight", nil)

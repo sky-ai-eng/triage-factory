@@ -118,6 +118,44 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		}
 	})
 
+	t.Run("Withdrawn_note_is_never_flushed", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		runID := seed.Run(t, "withdraw")
+
+		doomed := &domain.StagedInjection{RunID: runID, Producer: "p", Body: "withdrawn"}
+		if err := store.AppendSystem(ctx, orgID, doomed); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		if err := store.DeleteSystem(ctx, orgID, doomed.ID); err != nil {
+			t.Fatalf("withdraw: %v", err)
+		}
+		got, err := store.FlushPendingSystem(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("flush returned %d injections after withdrawal, want 0: %+v", len(got), got)
+		}
+
+		// The withdrawal is per-row: a note staged afterwards flushes normally.
+		if err := store.AppendSystem(ctx, orgID, &domain.StagedInjection{RunID: runID, Producer: "p", Body: "survivor"}); err != nil {
+			t.Fatalf("append survivor: %v", err)
+		}
+		got, err = store.FlushPendingSystem(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("flush survivor: %v", err)
+		}
+		if len(got) != 1 || got[0].Body != "survivor" {
+			t.Errorf("post-withdrawal flush = %+v, want just the survivor", got)
+		}
+
+		// Withdrawing an already-flushed id is a tolerated no-op, and never
+		// resurrects or hides the delivered row's flush-once state.
+		if err := store.DeleteSystem(ctx, orgID, got[0].ID); err != nil {
+			t.Fatalf("withdraw flushed id: %v", err)
+		}
+	})
+
 	t.Run("Run_delete_cascades_pending_notes", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		runID := seed.Run(t, "cascade")

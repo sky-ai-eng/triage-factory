@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -83,6 +84,16 @@ type Curator struct {
 	// avoids importing delegate.
 	bringUpTurnSandbox BringUpTurnSandboxFunc
 
+	// turnMaxAttempts caps how many failed pickups (claim minted, BeginTurn
+	// failed, claim released 'failed' with the message still undelivered) a
+	// queued turn may accumulate before dispatch dead-letters it instead of
+	// feeding it into another doomed cycle — without the cap, a permanent
+	// BeginTurn failure (e.g. a corrupt project row) loops forever, leaking
+	// one zero-message failed claim per scan. Defaults to
+	// DefaultTurnMaxAttempts; SetTurnMaxAttempts overrides from
+	// TF_CURATOR_TURN_MAX_ATTEMPTS at app wiring.
+	turnMaxAttempts int
+
 	// admitTurn gates one turn's execution through the host's shared agent
 	// capacity — in production the delegation spawner's AcquireTurnSlot, so a
 	// curator turn waits out the same memory guardrail and occupies the same
@@ -124,12 +135,50 @@ type Curator struct {
 // admin-pool door, so no raw *sql.DB handle is retained.
 func New(stores db.Stores, wsHub *websocket.Hub, model string) *Curator {
 	return &Curator{
-		stores:   stores,
-		wsHub:    wsHub,
-		model:    model,
-		sessions: make(map[string]*projectSession),
-		runAgent: agentproc.Run,
+		stores:          stores,
+		wsHub:           wsHub,
+		model:           model,
+		sessions:        make(map[string]*projectSession),
+		runAgent:        agentproc.Run,
+		turnMaxAttempts: DefaultTurnMaxAttempts,
 	}
+}
+
+// DefaultTurnMaxAttempts is the failed-pickup budget a queued turn gets
+// before dispatch dead-letters it. Distinct from the delegation side's
+// TF_RUN_MAX_ATTEMPTS: this caps repeated BeginTurn failures on one turn's
+// message, not executor-loss re-claims.
+const DefaultTurnMaxAttempts = 3
+
+// ParseTurnMaxAttempts parses TF_CURATOR_TURN_MAX_ATTEMPTS. Empty maps to
+// DefaultTurnMaxAttempts; anything else must parse as a positive integer.
+// Mirrors reaper.ParseMaxAttempts (TF_RUN_MAX_ATTEMPTS).
+func ParseTurnMaxAttempts(raw string) (int, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return DefaultTurnMaxAttempts, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid TF_CURATOR_TURN_MAX_ATTEMPTS=%q (want a positive integer)", raw)
+	}
+	return n, nil
+}
+
+// SetTurnMaxAttempts overrides the dead-letter cap. Called once at app
+// wiring with the ParseTurnMaxAttempts result.
+func (c *Curator) SetTurnMaxAttempts(n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.turnMaxAttempts = n
+}
+
+// getTurnMaxAttempts returns the cap under the lock, matching getSecrets'
+// race-free accessor shape.
+func (c *Curator) getTurnMaxAttempts() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.turnMaxAttempts
 }
 
 // SetRunCredentialResolvers wires the per-org run-credential seam: the GitHub

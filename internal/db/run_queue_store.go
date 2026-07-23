@@ -194,8 +194,18 @@ type RunQueueStore interface {
 	// forever, keeping the dispatcher on phantom work and pinning its feature
 	// branch in a worktree (any sibling fetch then requeues forever). The atomic
 	// cancel in BlueprintStore.MarkRunStatus prevents the desync going forward;
-	// this heals rows already broken at boot. Cross-org system sweep; returns the
-	// count cancelled.
+	// this heals rows already broken at boot.
+	//
+	// It also runs the two claim-desync janitor arms (Postgres:
+	// healClaimDesyncs; SQLite mirrors them) for the shapes the app-pool
+	// terminal writes can strand — a terminal conversation with a dangling
+	// active claim is released (outcome mapped from status), and an in-flight
+	// delegation conversation with no active claim under a running parent
+	// goes back to 'queued' for re-claim. The leader reaper repeats the same
+	// two arms periodically; here they run at boot in both modes.
+	//
+	// Cross-org system sweep; returns the total count of rows healed across
+	// all arms.
 	ReconcileOrphanedRuns(ctx context.Context) (int, error)
 
 	// CountQueuedSystem returns how many runs are currently in status='queued'

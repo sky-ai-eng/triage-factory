@@ -402,6 +402,14 @@ func (a *App) buildCuratorRuntime() error {
 
 	a.curator = curator.New(a.stores, a.wsHub, "")
 	a.curator.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
+	// Dead-letter cap for poisoned turns, resolved the same way the reaper's
+	// TF_RUN_MAX_ATTEMPTS is: parsed once at wiring, a malformed value fails
+	// boot rather than silently running with a default.
+	turnMaxAttempts, err := curator.ParseTurnMaxAttempts(os.Getenv("TF_CURATOR_TURN_MAX_ATTEMPTS"))
+	if err != nil {
+		return fmt.Errorf("curator turn max attempts: %w", err)
+	}
+	a.curator.SetTurnMaxAttempts(turnMaxAttempts)
 	// Persistent instance-registry identity, stamped onto every claims row a
 	// dispatch mints — the same identity the delegation spawner stamps, so
 	// the ownership-scoped boot sweep finds this pod's own strays.

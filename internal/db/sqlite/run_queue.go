@@ -484,6 +484,64 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 		`, time.Now().UTC())
 		return err
 	})
+	if err != nil {
+		return 0, err
+	}
+
+	// Claim-desync janitor arms — the SQLite mirror of the Postgres twin's
+	// healClaimDesyncs (see internal/db/postgres/run_queue.go for the two
+	// stranded shapes and why they exist). SQLite's single connection makes
+	// the non-System terminal writes atomic, so these arms are conformance
+	// symmetry here rather than a live hazard; runs after the
+	// blueprint-terminal cancel above so a just-cancelled row reads terminal
+	// and is never requeued.
+	err = inTx(ctx, s.conn, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE claims SET released_at = ?,
+			    outcome = CASE (SELECT c.status FROM conversations c WHERE c.id = claims.conversation_id)
+			        WHEN 'completed' THEN 'completed'
+			        WHEN 'cancelled' THEN 'cancelled'
+			        ELSE 'failed'
+			    END
+			WHERE released_at IS NULL
+			  AND conversation_id IN (
+			      SELECT id FROM conversations WHERE status IN (`+runTerminalStatusesSQL+`)
+			  )
+		`, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		count += int(n)
+
+		res, err = q.ExecContext(ctx, `
+			UPDATE conversations SET status = 'queued', queued_at = CURRENT_TIMESTAMP,
+			    preferred_executor_id = NULL
+			WHERE type = 'delegation'
+			  AND status NOT IN (
+				'queued',
+				`+runTerminalStatusesSQL+`,
+				'open','pending_approval'
+			  )
+			  AND NOT EXISTS (
+			      SELECT 1 FROM claims cl
+			      WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL
+			  )
+			  AND blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
+		`)
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		count += int(n)
+		return nil
+	})
 	return count, err
 }
 

@@ -163,9 +163,13 @@ func (ch *curatorHandler) handleCuratorHistory(w http.ResponseWriter, r *http.Re
 // conversation's rows: each plain user message ('text') starts a turn whose
 // status is 'queued' while the row is undelivered and otherwise derives from
 // the claim its following rows carry (active → running; released outcome
-// completed/cancelled/failed → done/cancelled/failed; no claim → done). The
-// rows between a user message and the next one are the turn's agent-side
-// stream; injection rows are internal plumbing and never reach the wire.
+// completed/cancelled/failed → done/cancelled/failed) — falling back to the
+// claim stamped on the user row itself when nothing streamed, so a turn that
+// never produced agent rows (a dead-lettered one especially) still renders
+// its real terminal state instead of a fabricated 'done'. No claim anywhere
+// → done. The rows between a user message and the next one are the turn's
+// agent-side stream; injection rows are internal plumbing and never reach
+// the wire.
 func synthesizeCuratorTurns(projectID string, messages []domain.AgentMessage, claims []domain.Claim) []curatorRequestJSON {
 	claimByID := make(map[string]domain.Claim, len(claims))
 	for _, c := range claims {
@@ -175,16 +179,22 @@ func synthesizeCuratorTurns(projectID string, messages []domain.AgentMessage, cl
 	out := make([]curatorRequestJSON, 0)
 	var cur *curatorRequestJSON
 	var curClaimID string
+	var curUserClaimID string
 	var curQueued bool
 
 	flush := func() {
 		if cur == nil {
 			return
 		}
-		applyCuratorTurnStatus(cur, curQueued, curClaimID, claimByID)
+		claimID := curClaimID
+		if claimID == "" {
+			claimID = curUserClaimID
+		}
+		applyCuratorTurnStatus(cur, curQueued, claimID, claimByID)
 		out = append(out, *cur)
 		cur = nil
 		curClaimID = ""
+		curUserClaimID = ""
 		curQueued = false
 	}
 
@@ -205,6 +215,7 @@ func synthesizeCuratorTurns(projectID string, messages []domain.AgentMessage, cl
 				Messages: []domain.CuratorMessage{},
 			}
 			curQueued = m.Delivered != nil && !*m.Delivered
+			curUserClaimID = m.ClaimID
 			continue
 		}
 		if cur == nil {

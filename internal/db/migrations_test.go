@@ -664,6 +664,8 @@ func TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages(t *testing.T) {
 		`INSERT INTO run_pending_input (run_id, org_id, message, user_id) VALUES ('r1', '00000000-0000-0000-0000-000000000001', 'resume me', 'u1')`,
 		`INSERT INTO staged_agent_injections (id, run_id, producer, body) VALUES ('si1', 'r1', 'new_commits', 'PR gained commits')`,
 		`INSERT INTO curator_requests (id, project_id, status, user_input, creator_user_id) VALUES ('cq1', 'proj1', 'queued', 'hello curator', 'u1')`,
+		`INSERT INTO curator_pending_context (project_id, curator_session_id, change_type, baseline_value, creator_user_id)
+		 VALUES ('proj1', 'sess-legacy', 'pinned_repos', '["a/b"]', 'u1')`,
 	}
 	for _, q := range seed {
 		if _, err := database.Exec(q); err != nil {
@@ -693,4 +695,10 @@ func TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages(t *testing.T) {
 		`SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id=m.conversation_id
 		 WHERE c.type='curator' AND c.project_id='proj1' AND c.creator_user_id='u1'
 		   AND m.role='user' AND m.content='hello curator' AND m.delivered=0`, 1)
+	assertUndelivered("unconsumed pending context",
+		`SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id=m.conversation_id
+		 WHERE c.type='curator' AND c.project_id='proj1' AND c.creator_user_id='u1'
+		   AND m.subtype='injection:context' AND m.delivered=0
+		   AND json_extract(m.metadata,'$.change_type')='pinned_repos'
+		   AND json_extract(m.metadata,'$.baseline_value')='["a/b"]'`, 1)
 }

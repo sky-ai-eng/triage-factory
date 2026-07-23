@@ -263,11 +263,16 @@ type AgentRunStore interface {
 	// what it always wrote (delivered=true, window_state='active').
 	InsertMessage(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
 
-	// Messages returns all messages for a given run, ordered by id.
+	// Messages returns the run's messages for display, ordered by id.
+	// Withdrawn-pending rows (delivered=false AND window_state='inactive' —
+	// a staged injection withdrawn before any flush) are excluded: withdrawn
+	// means "never happened", so it must not render as transcript history.
+	// Delivered inactive rows (compacted history) stay visible.
 	Messages(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error)
 
 	// MessagesForRuns is the batched form of Messages: every message
-	// for any of the given run IDs as one flat slice. Each run's
+	// for any of the given run IDs as one flat slice, with the same
+	// withdrawn-pending exclusion. Each run's
 	// messages are contiguous and in insertion order (id ASC), so the
 	// caller groups by RunID with per-run order preserved; order across
 	// distinct runs is unspecified (the SQLite read chunks its IN-list).

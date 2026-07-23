@@ -32,6 +32,10 @@ func (s *countingStore) CancelStrandedCuratorTurns(context.Context, time.Duratio
 	panic("CancelStrandedCuratorTurns not expected from RunRegistryGC")
 }
 
+func (s *countingStore) HealClaimDesyncs(context.Context) (int, int, error) {
+	panic("HealClaimDesyncs not expected from RunRegistryGC")
+}
+
 func (s *countingStore) calls() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

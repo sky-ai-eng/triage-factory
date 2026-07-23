@@ -197,6 +197,14 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	if _, err := conn.Exec(`UPDATE conversations SET status = 'running' WHERE id = 'rb-child'`); err != nil {
 		t.Fatalf("set child B running: %v", err)
 	}
+	// A genuinely running child holds an active claim (ClaimNextRun mints
+	// it); without one, the claim-desync requeue arm would rightly treat the
+	// row as stranded.
+	if _, err := conn.Exec(`
+		INSERT INTO claims (id, conversation_id, executor_id) VALUES ('rb-claim', 'rb-child', 'exec-b')
+	`); err != nil {
+		t.Fatalf("seed rb-child claim: %v", err)
+	}
 
 	n, err := stores.RunQueue.ReconcileOrphanedRuns(ctx)
 	if err != nil {
@@ -232,5 +240,114 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	// Idempotent: a second sweep finds nothing.
 	if n2, err := stores.RunQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
 		t.Errorf("second ReconcileOrphanedRuns = (%d, %v), want (0, nil)", n2, err)
+	}
+}
+
+// TestReconcileOrphanedRuns_HealsClaimDesyncs pins the janitor arms on the
+// SQLite side: a terminal conversation with a dangling active claim gets the
+// claim released with the status-mapped outcome, and an in-flight delegation
+// conversation with no active claim under a running parent goes back to
+// 'queued' — while the healthy shapes (running with an active claim, queued
+// with none) are untouched.
+func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	task := seedEntityEventTask(t, conn, "desync")
+	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "ds-p0", Name: "p0", Body: "b", Source: "user"})
+	insertBlueprintForTest(t, conn, "ds-bp", "Desync BP")
+	if err := stores.Blueprints.ReplaceSteps(ctx, org, "ds-bp", []string{"ds-p0"}, nil); err != nil {
+		t.Fatalf("ReplaceSteps: %v", err)
+	}
+	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "ds-br", BlueprintID: "ds-bp", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-ds",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	step0 := 0
+	seedChild := func(id, status string) {
+		t.Helper()
+		insertConversationForTest(t, conn, domain.AgentRun{
+			ID: id, TaskID: task.ID, PromptID: "ds-p0", Status: "running",
+			Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step0,
+		})
+		if _, err := conn.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, status, id); err != nil {
+			t.Fatalf("set %s status: %v", id, err)
+		}
+	}
+	activeClaim := func(claimID, convID string) {
+		t.Helper()
+		if _, err := conn.Exec(`
+			INSERT INTO claims (id, conversation_id, executor_id) VALUES (?, ?, 'exec-ds')
+		`, claimID, convID); err != nil {
+			t.Fatalf("seed claim %s: %v", claimID, err)
+		}
+	}
+
+	// Dangling claims on terminal rows (the crash-after-flip shape).
+	seedChild("ds-done", "completed")
+	activeClaim("ds-done-cl", "ds-done")
+	seedChild("ds-unsolvable", "task_unsolvable")
+	activeClaim("ds-unsolvable-cl", "ds-unsolvable")
+	// Claimless running row (the rolled-back-flip shape), with a stale
+	// placement stamp the requeue must clear.
+	seedChild("ds-stranded", "running")
+	if _, err := conn.Exec(`UPDATE conversations SET preferred_executor_id = 'exec-dead' WHERE id = 'ds-stranded'`); err != nil {
+		t.Fatalf("stamp placement: %v", err)
+	}
+	// Healthy shapes: running with a live claim; queued with none.
+	seedChild("ds-healthy", "running")
+	activeClaim("ds-healthy-cl", "ds-healthy")
+	seedChild("ds-queued", "queued")
+
+	n, err := stores.RunQueue.ReconcileOrphanedRuns(ctx)
+	if err != nil {
+		t.Fatalf("ReconcileOrphanedRuns: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("healed count = %d, want 3 (two released claims + one requeue)", n)
+	}
+
+	claimState := func(id string) (released bool, outcome string) {
+		t.Helper()
+		var rel any
+		if err := conn.QueryRow(`SELECT released_at, COALESCE(outcome, '') FROM claims WHERE id = ?`, id).Scan(&rel, &outcome); err != nil {
+			t.Fatalf("read claim %s: %v", id, err)
+		}
+		return rel != nil, outcome
+	}
+	if rel, out := claimState("ds-done-cl"); !rel || out != "completed" {
+		t.Errorf("completed row's claim = (released=%v, outcome=%q), want (true, completed)", rel, out)
+	}
+	if rel, out := claimState("ds-unsolvable-cl"); !rel || out != "failed" {
+		t.Errorf("task_unsolvable row's claim = (released=%v, outcome=%q), want (true, failed)", rel, out)
+	}
+	if got := childRunStatusDB(t, conn, "ds-stranded"); got != "queued" {
+		t.Errorf("stranded row status = %q, want queued", got)
+	}
+	var pref any
+	if err := conn.QueryRow(`SELECT preferred_executor_id FROM conversations WHERE id = 'ds-stranded'`).Scan(&pref); err != nil {
+		t.Fatalf("read preferred_executor_id: %v", err)
+	}
+	if pref != nil {
+		t.Errorf("stranded row preferred_executor_id = %v, want cleared", pref)
+	}
+	if rel, _ := claimState("ds-healthy-cl"); rel {
+		t.Error("healthy running row's live claim was released")
+	}
+	if got := childRunStatusDB(t, conn, "ds-healthy"); got != "running" {
+		t.Errorf("healthy running row status = %q, want running", got)
+	}
+	if got := childRunStatusDB(t, conn, "ds-queued"); got != "queued" {
+		t.Errorf("claimless queued row status = %q, want queued (already claimable, nothing to heal)", got)
+	}
+
+	// Idempotent: a second sweep finds nothing.
+	if n2, err := stores.RunQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
+		t.Errorf("second sweep = (%d, %v), want (0, nil)", n2, err)
 	}
 }

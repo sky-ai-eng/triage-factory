@@ -87,11 +87,14 @@ type CuratorStore interface {
 
 	// --- History (app pool, claims-bound) ---
 
-	// ListConversationMessages returns every messages row of the
-	// conversation in assembly order (COALESCE(seq, id)), with UserID /
-	// ClaimID / Delivered populated so the handler can synthesize the turn
-	// wire shape (a plain user row starts a turn; its status derives from
-	// Delivered and the claim its following rows carry).
+	// ListConversationMessages returns the conversation's messages rows in
+	// assembly order (COALESCE(seq, id)), with UserID / ClaimID / Delivered
+	// populated so the handler can synthesize the turn wire shape (a plain
+	// user row starts a turn; its status derives from Delivered and the
+	// claim its following rows carry, falling back to the claim stamped on
+	// the user row itself when nothing streamed). Withdrawn-pending rows
+	// (delivered=false AND window_state='inactive') are excluded — withdrawn
+	// means "never happened".
 	ListConversationMessages(ctx context.Context, orgID, conversationID string) ([]domain.AgentMessage, error)
 
 	// ListClaims returns the conversation's claims oldest-first. App pool —
@@ -131,11 +134,39 @@ type CuratorStore interface {
 
 	// BeginTurn delivers the turn in one transaction: flips the turn's user
 	// message delivered=true (sql.ErrNoRows when the row is gone or already
-	// delivered — a queued-cancel or duplicate dispatch raced ahead),
-	// consumes every undelivered 'injection:context' row (delivered=true,
-	// ids remembered in Consumed for the revert), and snapshots the project
-	// row + the conversation's sdk_session_id in the same tx.
+	// delivered — a queued-cancel or duplicate dispatch raced ahead) and
+	// stamps it with the conversation's active claim — the explicit
+	// turn↔claim link. The stamp rides the tx, so a failed BeginTurn leaves
+	// no stamp behind and a retried delivery can't accumulate stale ones;
+	// its flip side is that every claim that DID deliver a turn owns at
+	// least the user message row, which is what lets
+	// FailedTurnAttemptsSystem recognize a message-less failed claim as a
+	// failed pickup. Also consumes every undelivered 'injection:context' row
+	// (delivered=true, ids remembered in Consumed for the revert), and
+	// snapshots the project row + the conversation's sdk_session_id in the
+	// same tx.
 	BeginTurn(ctx context.Context, orgID, projectID, conversationID string, messageID int64) (*CuratorTurnStart, error)
+
+	// FailedTurnAttemptsSystem counts the turn's prior failed pickups —
+	// released claims on the conversation with outcome='failed', no messages
+	// attached (a claim that reached BeginTurn successfully always owns at
+	// least the turn's user row), claimed at-or-after the turn message's
+	// creation — and returns the most recent one's error. The dispatch's
+	// dead-letter gate: a turn whose count reaches the cap is poisoned input
+	// (BeginTurn itself keeps failing), and feeding it again just leaks
+	// another zero-message failed claim. Admin pool.
+	FailedTurnAttemptsSystem(ctx context.Context, orgID, conversationID string, messageID int64) (count int, lastError string, err error)
+
+	// DeadLetterTurnSystem terminally retires a poisoned queued turn: in one
+	// transaction it marks the user message delivered=true +
+	// window_state='inactive' (out of every future assembly and out of the
+	// claimable scan, but still visible transcript history) and stamps it
+	// with a freshly minted, already-released claim (outcome='failed',
+	// error=errMsg) so history synthesis renders the turn failed. matched
+	// is false — and nothing is written — when the message is gone/already
+	// delivered (a cancel raced ahead) or another engagement is live on the
+	// conversation. Admin pool.
+	DeadLetterTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, executorID string, bootEpoch int64, errMsg string) (matched bool, err error)
 
 	// SetSDKSession persists the SDK resume handle captured from the agent's
 	// init event onto the conversation.
