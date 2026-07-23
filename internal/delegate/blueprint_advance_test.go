@@ -105,7 +105,7 @@ func TestProcessCompletion_BlueprintStepDraftPRDoesNotPark(t *testing.T) {
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, "bpr-"+runID, task,
-		res(`{"outcome":"continue","summary":"opened a PR"}`), cwd, "", "event", "")
+		res(`{"outcome":"continue","summary":"opened a PR"}`), cwd, "", "event", "", 0)
 
 	run := loadRun(t, s, runID)
 	if run.Outcome != "continue" {
@@ -127,7 +127,7 @@ func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testin
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, "bpr-"+runID, task,
-		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "event", "")
+		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "event", "", 0)
 
 	run := loadRun(t, s, runID)
 	if run.Outcome != "continue" {
@@ -168,7 +168,7 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 	// No session id → the gate can't (and needn't) retry; the staged file plus
 	// a valid continue outcome already satisfy it.
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, "bpr-"+runID, task,
-		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "event", "")
+		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "event", "", 0)
 
 	// Raw column read rather than a store method: this test is about
 	// processCompletion's write side (file ingestion + blueprint_run_id

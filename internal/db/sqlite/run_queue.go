@@ -436,11 +436,6 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 	// forever — the dispatcher treats it as live work and its worktree pins the
 	// feature branch, requeuing any sibling fetch into a forever-failing loop.
 	// Any active claim on a cancelled row releases as 'cancelled' with it.
-	//
-	// Roll up the token cache here too (correlated SUM per row) — a 'running'
-	// child stranded under a terminal blueprint may have streamed messages,
-	// so this terminal write must reflect them rather than leave the columns at
-	// 0. Same every-terminal-write invariant as the cancel paths.
 	var count int
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
@@ -448,11 +443,7 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 			SET status = 'cancelled',
 			    completed_at = COALESCE(completed_at, ?),
 			    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
-			    result_summary = COALESCE(NULLIF(result_summary, ''), ?),
-			    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE conversation_id = conversations.id),
-			    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE conversation_id = conversations.id),
-			    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE conversation_id = conversations.id),
-			    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE conversation_id = conversations.id)
+			    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
 			WHERE status NOT IN (`+runTerminalStatusesSQL+`)
 			  AND blueprint_run_id IN (
 			      SELECT id FROM blueprint_runs
@@ -554,10 +545,12 @@ func (s *runQueueStore) CountQueuedSystem(ctx context.Context) (int, error) {
 	return n, nil
 }
 
-// runTimingClaimCols selects the latest claim's identity for the timing
-// projection. claimed_at loses its declared column type inside the
-// subselect, so it scans as text and parses via parseDBDatetime.
+// runTimingClaimCols selects the claim-derived timing fields: duration_ms
+// is the SUM of the per-engagement telemetry, then the latest claim's
+// identity. claimed_at loses its declared column type inside the subselect,
+// so it scans as text and parses via parseDBDatetime.
 const runTimingClaimCols = `
+	(SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = conversations.id),
 	(SELECT cl.executor_id FROM claims cl WHERE cl.conversation_id = conversations.id ORDER BY cl.claimed_at DESC, cl.rowid DESC LIMIT 1),
 	(SELECT MAX(cl.claimed_at) FROM claims cl WHERE cl.conversation_id = conversations.id)`
 
@@ -567,7 +560,7 @@ func (s *runQueueStore) RecentRunTimingsSystem(ctx context.Context, since time.T
 	}
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT org_id, status, COALESCE(failure_kind, ''),
-		       started_at, completed_at, duration_ms, `+runTimingClaimCols+`
+		       started_at, completed_at, `+runTimingClaimCols+`
 		FROM conversations
 		WHERE type = 'delegation' AND started_at >= ?
 		ORDER BY started_at DESC
@@ -622,7 +615,7 @@ func (s *runQueueStore) RecentRunTimingsForOrgSystem(ctx context.Context, orgID 
 	// conversations table (ClaimNextRun orders/filters started_at raw); both
 	// the stored CURRENT_TIMESTAMP value and the bound serialize sortably.
 	q := `SELECT org_id, status, COALESCE(failure_kind, ''),
-	             started_at, completed_at, duration_ms, ` + runTimingClaimCols + `
+	             started_at, completed_at, ` + runTimingClaimCols + `
 	      FROM conversations WHERE type = 'delegation' AND org_id = ? AND started_at >= ?`
 	args := []any{orgID, since.UTC()}
 	if !until.IsZero() {

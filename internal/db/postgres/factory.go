@@ -151,7 +151,9 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 		SELECT
 			r.id, r.task_id, r.prompt_id,
 			r.status, COALESCE(r.model, ''), r.started_at, r.completed_at,
-			r.total_cost_usd, r.duration_ms, r.num_turns,
+			(SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id AND m.org_id = r.org_id),
+			(SELECT SUM(cl.duration_ms)::bigint FROM claims cl WHERE cl.conversation_id = r.id),
+			(SELECT SUM(cl.num_turns)::bigint FROM claims cl WHERE cl.conversation_id = r.id),
 			COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
 			COALESCE(r.result_summary, ''), COALESCE(r.sdk_session_id, ''),
 			(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing,

@@ -69,13 +69,12 @@ func SeedConversation(tb testing.TB, database *sql.DB, run domain.AgentRun) {
 			prompt_id, trigger_id, trigger_type, origin, runtime, status, model,
 			sdk_session_id, worktree_path, result_summary, outcome,
 			outcome_reason, failure_kind, stop_reason, started_at, completed_at,
-			parked_at, duration_ms, num_turns, total_cost_usd, input_tokens,
-			output_tokens, cache_read_tokens, cache_creation_tokens,
+			parked_at,
 			actor_agent_id, blueprint_run_id, blueprint_step_index,
 			triggering_event_id, queued_at, preferred_executor_id)
 		VALUES (?, ?, 'delegation', ?, ?, 'team', ?, ?, ?, ?, ?, 'sdk', ?, ?,
 		        ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, NULL,
-		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		        ?, ?, ?, ?, ?, ?)
 	`,
 		run.ID, orgID, creator, teamID, nullIfEmpty(run.TaskID),
 		nullIfEmpty(run.PromptID), nullIfEmpty(run.TriggerID), triggerType,
@@ -84,12 +83,48 @@ func SeedConversation(tb testing.TB, database *sql.DB, run domain.AgentRun) {
 		nullIfEmpty(run.ResultSummary), nullIfEmpty(run.Outcome),
 		nullIfEmpty(run.OutcomeReason), nullIfEmpty(string(run.FailureKind)),
 		nullIfEmpty(run.StopReason), startedAt, run.CompletedAt,
-		run.DurationMs, run.NumTurns, run.TotalCostUSD, run.InputTokens,
-		run.OutputTokens, run.CacheReadTokens, run.CacheCreationTokens,
 		nullIfEmpty(run.ActorAgentID), nullIfEmpty(run.BlueprintRunID),
 		stepIdx, nullIfEmpty(run.TriggeringEventID), run.QueuedAt,
 		nullIfEmpty(run.PreferredExecutorID)); err != nil {
 		tb.Fatalf("SeedConversation %s: %v", run.ID, err)
+	}
+
+	// The fixture's accounting fields translate into the rows the read
+	// projections derive them from: cost/tokens become one settled ledger
+	// message, duration/turns a released claim's telemetry. A fixture with
+	// none of them seeds neither row.
+	if run.TotalCostUSD != nil || run.InputTokens != 0 || run.OutputTokens != 0 ||
+		run.CacheReadTokens != 0 || run.CacheCreationTokens != 0 {
+		var cost any
+		if run.TotalCostUSD != nil {
+			cost = *run.TotalCostUSD
+		}
+		if _, err := database.Exec(`
+			INSERT INTO messages (org_id, conversation_id, role, subtype, content, cost_usd,
+			                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+			                      created_at)
+			VALUES (?, ?, 'assistant', 'text', 'seeded work', ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+		`, orgID, run.ID, cost, run.InputTokens, run.OutputTokens,
+			run.CacheReadTokens, run.CacheCreationTokens, startedAt); err != nil {
+			tb.Fatalf("SeedConversation %s ledger row: %v", run.ID, err)
+		}
+	}
+	if run.DurationMs != nil || run.NumTurns != nil {
+		var duration, turns any
+		if run.DurationMs != nil {
+			duration = *run.DurationMs
+		}
+		if run.NumTurns != nil {
+			turns = *run.NumTurns
+		}
+		if _, err := database.Exec(`
+			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
+			                    claimed_at, released_at, outcome, duration_ms, num_turns)
+			VALUES (?, ?, ?, 'seed-exec', 0, COALESCE(?, CURRENT_TIMESTAMP),
+			        COALESCE(?, CURRENT_TIMESTAMP), 'completed', ?, ?)
+		`, uuid.New().String(), orgID, run.ID, startedAt, startedAt, duration, turns); err != nil {
+			tb.Fatalf("SeedConversation %s telemetry claim: %v", run.ID, err)
+		}
 	}
 }
 

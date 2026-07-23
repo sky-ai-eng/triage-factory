@@ -320,19 +320,14 @@ func (s *pgStore) CancelStrandedCuratorTurns(ctx context.Context, staleThreshold
 	// A home is dead when its instances row is missing (GC'd or never
 	// registered) or its heartbeat is older than the threshold — the same
 	// missing-or-stale predicate ReapDeadExecutors uses for a run's executor.
-	// The token columns are rolled up from the curator_messages SUM, same as
-	// every other terminal write (a 'running' turn that streamed before its home
-	// died must still report its spend — TFAC-473); this reaper runs on the
-	// leader's superuser admin pool, so no extra grant applies here.
+	// An outcome/error release only: the messages ledger already holds
+	// whatever the stranded turn streamed, and a turn whose home died never
+	// reported a cost lump to settle.
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE claims
 		SET released_at = now(),
 		    outcome = 'cancelled',
-		    error = COALESCE(error, 'Cancelled: curator home executor lost (reaper) — re-send to re-home'),
-		    input_tokens          = (SELECT COALESCE(SUM(m.input_tokens), 0)          FROM messages m WHERE m.claim_id = claims.id),
-		    output_tokens         = (SELECT COALESCE(SUM(m.output_tokens), 0)         FROM messages m WHERE m.claim_id = claims.id),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(m.cache_read_tokens), 0)     FROM messages m WHERE m.claim_id = claims.id),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(m.cache_creation_tokens), 0) FROM messages m WHERE m.claim_id = claims.id)
+		    error = COALESCE(error, 'Cancelled: curator home executor lost (reaper) — re-send to re-home')
 		WHERE released_at IS NULL
 		  AND EXISTS (
 		      SELECT 1 FROM conversations c

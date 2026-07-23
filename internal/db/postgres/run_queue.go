@@ -483,13 +483,6 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 	// SQLite mirror. Admin pool (BYPASSRLS): a cross-org system sweep with no
 	// per-user identity, the same posture as ResetProcessingRuns. Any active
 	// claim on a cancelled row releases as 'cancelled' in the same statement.
-	//
-	// Roll up the token cache here too (correlated SUM per row) — a 'running'
-	// child stranded under a terminal blueprint may have streamed messages,
-	// so this terminal write must reflect them rather than leave the columns at
-	// 0. Same every-terminal-write invariant as the cancel paths; correlates on
-	// the unique conversation id, so no org scoping is needed on this
-	// cross-tenant sweep.
 	var total int
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		var cancelled int
@@ -499,11 +492,7 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 				SET status = 'cancelled',
 				    completed_at = COALESCE(completed_at, now()),
 				    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
-				    result_summary = COALESCE(NULLIF(result_summary, ''), $1),
-				    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE conversation_id = conversations.id),
-				    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE conversation_id = conversations.id),
-				    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE conversation_id = conversations.id),
-				    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE conversation_id = conversations.id)
+				    result_summary = COALESCE(NULLIF(result_summary, ''), $1)
 				WHERE status NOT IN (`+runTerminalStatusesSQL+`)
 				  AND blueprint_run_id IN (
 				      SELECT id FROM blueprint_runs
@@ -637,16 +626,17 @@ func (s *runQueueStore) CountQueuedSystem(ctx context.Context) (int, error) {
 	return n, nil
 }
 
-// runTimingClaimLateral derives the timing projection's claim identity —
-// the LATEST claim's executor + claimed_at (the engagement that most
-// recently drove the conversation, released or not).
+// runTimingClaimLateral derives the timing projection's claim fields — the
+// LATEST claim's executor + claimed_at (the engagement that most recently
+// drove the conversation, released or not) plus the SUM of the
+// per-engagement duration telemetry.
 const runTimingClaimLateral = `
 	LEFT JOIN LATERAL (
-		SELECT c2.executor_id, c2.claimed_at
+		SELECT MAX(c2.claimed_at) AS claimed_at,
+		       (ARRAY_AGG(c2.executor_id ORDER BY c2.claimed_at DESC))[1] AS executor_id,
+		       SUM(c2.duration_ms)::bigint AS duration_ms
 		FROM claims c2
 		WHERE c2.conversation_id = r.id
-		ORDER BY c2.claimed_at DESC
-		LIMIT 1
 	) cl ON true`
 
 func (s *runQueueStore) RecentRunTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.RunTiming, error) {
@@ -655,7 +645,7 @@ func (s *runQueueStore) RecentRunTimingsSystem(ctx context.Context, since time.T
 	}
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT r.org_id::text, COALESCE(cl.executor_id, ''), r.status, COALESCE(r.failure_kind, ''),
-		       r.started_at, cl.claimed_at, r.completed_at, r.duration_ms
+		       r.started_at, cl.claimed_at, r.completed_at, cl.duration_ms
 		FROM conversations r
 		`+runTimingClaimLateral+`
 		WHERE r.type = 'delegation' AND r.started_at >= $1
@@ -708,7 +698,7 @@ func (s *runQueueStore) RecentRunTimingsForOrgSystem(ctx context.Context, orgID 
 		limit = 5000
 	}
 	q := `SELECT r.org_id::text, COALESCE(cl.executor_id, ''), r.status, COALESCE(r.failure_kind, ''),
-	             r.started_at, cl.claimed_at, r.completed_at, r.duration_ms
+	             r.started_at, cl.claimed_at, r.completed_at, cl.duration_ms
 	      FROM conversations r
 	      ` + runTimingClaimLateral + `
 	      WHERE r.type = 'delegation' AND r.org_id = $1 AND r.started_at >= $2`

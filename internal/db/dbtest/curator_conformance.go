@@ -190,12 +190,8 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		if cl.ReleasedAt == nil || cl.Outcome != "completed" {
 			t.Errorf("claim terminal = (released=%v, outcome=%q), want released completed", cl.ReleasedAt, cl.Outcome)
 		}
-		if cl.CostUSD == nil || *cl.CostUSD < 0.049 || *cl.CostUSD > 0.051 {
-			t.Errorf("claim cost = %v, want ~0.05", cl.CostUSD)
-		}
-		if cl.InputTokens != 11 || cl.OutputTokens != 22 || cl.CacheReadTokens != 33 || cl.CacheCreationTokens != 44 {
-			t.Errorf("claim tokens = (%d,%d,%d,%d), want the per-claim messages SUM (11,22,33,44)",
-				cl.InputTokens, cl.OutputTokens, cl.CacheReadTokens, cl.CacheCreationTokens)
+		if cl.DurationMs == nil || *cl.DurationMs != 1200 || cl.NumTurns == nil || *cl.NumTurns != 3 {
+			t.Errorf("claim telemetry = (%v, %v), want (1200, 3)", cl.DurationMs, cl.NumTurns)
 		}
 
 		withClaims(t, h, func(ts db.TxStores) error {
@@ -223,6 +219,45 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 		if msgs[1].ClaimID != claimID {
 			t.Errorf("assistant row claim = %q, want %q", msgs[1].ClaimID, claimID)
+		}
+		// The release settled the turn's dollars as ONE lump on the claim's
+		// last row — the assistant row here, not the user row.
+		if c := msgs[1].CostUSD; c == nil || *c < 0.049 || *c > 0.051 {
+			t.Errorf("last row cost_usd = %v, want ~0.05 (the release's lump)", msgs[1].CostUSD)
+		}
+		if msgs[0].CostUSD != nil {
+			t.Errorf("user row cost_usd = %v, want nil (the lump lands on the LAST row only)", *msgs[0].CostUSD)
+		}
+	})
+
+	t.Run("Release_NothingStreamed_SettlesOnUserRow", func(t *testing.T) {
+		// A turn that delivered but streamed nothing still settles its lump:
+		// BeginTurn stamped the user row with the claim, so that row is the
+		// claim's last (and only) message.
+		h := mk(t)
+		projectID := h.SeedProject(t, "lump-fallback")
+		convID, msgID := seedTurn(t, h, projectID, "no stream")
+		if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, "exec-1", 1); err != nil || !ok {
+			t.Fatalf("claim: ok=%v err=%v", ok, err)
+		}
+		withClaims(t, h, func(ts db.TxStores) error {
+			_, err := ts.Curator.BeginTurn(ctx, h.OrgID, projectID, convID, msgID)
+			return err
+		})
+		if flipped, err := h.Stores.Curator.ReleaseActiveTurnSystem(ctx, h.OrgID, convID, "completed", "", 0.03, 500, 1); err != nil || !flipped {
+			t.Fatalf("release: flipped=%v err=%v", flipped, err)
+		}
+		var msgs []domain.AgentMessage
+		withClaims(t, h, func(ts db.TxStores) error {
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			msgs = ms
+			return err
+		})
+		if len(msgs) != 1 {
+			t.Fatalf("messages = %d, want 1 (just the user row)", len(msgs))
+		}
+		if c := msgs[0].CostUSD; c == nil || *c < 0.029 || *c > 0.031 {
+			t.Errorf("user row cost_usd = %v, want ~0.03 (fallback settlement)", msgs[0].CostUSD)
 		}
 	})
 
@@ -747,6 +782,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 		released := time.Now().UTC().Truncate(time.Second)
 		cost := 0.02
+		tokens := 5
 		claim := domain.Claim{
 			ID:             uuid.New().String(),
 			ConversationID: conv.ID,
@@ -755,13 +791,12 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			ClaimedAt:      released.Add(-time.Second),
 			ReleasedAt:     &released,
 			Outcome:        "completed",
-			CostUSD:        &cost,
-			InputTokens:    5,
 		}
 		delivered := true
 		msgs := []domain.AgentMessage{
 			{RunID: conv.ID, UserID: h.UserID, Role: "user", Subtype: "text", Content: "imported turn", Delivered: &delivered},
-			{RunID: conv.ID, UserID: h.UserID, ClaimID: claim.ID, Role: "assistant", Subtype: "text", Content: "imported ack"},
+			{RunID: conv.ID, UserID: h.UserID, ClaimID: claim.ID, Role: "assistant", Subtype: "text", Content: "imported ack",
+				InputTokens: &tokens, CostUSD: &cost},
 		}
 		if err := h.Stores.Curator.ImportConversationStateSystem(ctx, h.OrgID, conv, []domain.Claim{claim}, msgs); err != nil {
 			t.Fatalf("import: %v", err)
@@ -793,6 +828,14 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 		if len(gotMsgs) != 2 || gotMsgs[0].Content != "imported turn" || gotMsgs[1].ClaimID != claim.ID {
 			t.Fatalf("imported messages = %+v, want the source transcript with claim attribution", gotMsgs)
+		}
+		// float4 storage: compare with an epsilon, and dereference for the
+		// error message.
+		if c := gotMsgs[1].CostUSD; c == nil || *c < cost-1e-4 || *c > cost+1e-4 {
+			t.Errorf("imported assistant row cost_usd = %v, want ~%v (the ledger travels with the bundle)", c, cost)
+		}
+		if it := gotMsgs[1].InputTokens; it == nil || *it != tokens {
+			t.Errorf("imported assistant row input_tokens = %v, want %d", it, tokens)
 		}
 	})
 }

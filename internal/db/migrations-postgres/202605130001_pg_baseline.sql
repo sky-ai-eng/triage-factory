@@ -1201,6 +1201,14 @@ CREATE TABLE public.messages (
     output_tokens integer,
     cache_read_tokens integer,
     cache_creation_tokens integer,
+    -- cost_usd is dollars settled at this row: NULL = not a settlement
+    -- row, 0 = genuinely free. The runtime stamps an invocation's reported
+    -- total as ONE lump on the invocation's last recorded row at terminal
+    -- time (no proration — proration without a pricing table would be
+    -- confidently wrong), so SUM over any window is the spend in that
+    -- window. messages is the money/token ledger; conversations and claims
+    -- carry no dollar or token caches.
+    cost_usd real,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     -- reasoning is an array of reasoning-detail objects mirroring bifrost's
     -- ChatReasoningDetails shape ({index, type, text?, signature?, data?}) —
@@ -1272,9 +1280,11 @@ CREATE TABLE public.run_worktrees (
 -- the system can rebuild for a model, regardless of surface. A delegated
 -- task run, a curator chat, a future interactive session, and a future
 -- subagent are all conversations. Per-engagement execution state (which
--- executor drove it, when, at what per-engagement cost, under which sealed
--- credentials) lives on claims (see the multi-mode machinery section); the
--- transcript itself is the messages table.
+-- executor drove it, when, under which sealed credentials, at what reported
+-- duration/turn telemetry) lives on claims (see the multi-mode machinery
+-- section); the transcript — and with it the money/token ledger (cost_usd +
+-- per-row tokens, summed at read time) — is the messages table. No
+-- accounting cache lives here.
 CREATE TABLE public.conversations (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -1350,15 +1360,6 @@ CREATE TABLE public.conversations (
     -- without deleting history — the curator's reset/new-chat mechanism.
     -- NULL = live. An archived conversation is never claimed again.
     archived_at timestamp with time zone,
-    duration_ms integer,
-    num_turns integer,
-    total_cost_usd real,
-    -- Token breakdown denormalized at terminal writes: the absolute SUM
-    -- over this conversation's messages (idempotent across resumes).
-    input_tokens integer DEFAULT 0 NOT NULL,
-    output_tokens integer DEFAULT 0 NOT NULL,
-    cache_read_tokens integer DEFAULT 0 NOT NULL,
-    cache_creation_tokens integer DEFAULT 0 NOT NULL,
     actor_agent_id uuid,
     -- project_id anchors a curator conversation to its project (knowledge
     -- base, homing, cascade-delete). NULL for every other type.
@@ -7850,7 +7851,7 @@ REVOKE ALL ON public.run_signals FROM anon, authenticated, service_role;
 -- curator_requests. A conversation is claimed (a row is minted here), driven
 -- for a while, and released; a retry or a resumed park is simply the next
 -- claim. At most one active (released_at IS NULL) claim per conversation,
--- enforced below. Rows are immutable identity + terminal accounting: the
+-- enforced below. Rows are immutable identity + terminal telemetry: the
 -- executor/boot pair never changes after mint.
 --
 -- Both dialects (the local dispatcher claims its own work through the same
@@ -7878,15 +7879,11 @@ CREATE TABLE public.claims (
     -- live.
     outcome text,
     error text,
-    -- Per-engagement accounting (the curator's former per-request numbers;
-    -- a delegation conversation's terminal rollup is the SUM of its claims).
-    cost_usd real,
+    -- Engagement telemetry the runtime reports per invocation and nothing
+    -- can derive from messages. Dollars and tokens deliberately do NOT
+    -- live here — messages is the ledger.
     duration_ms integer,
     num_turns integer,
-    input_tokens integer DEFAULT 0 NOT NULL,
-    output_tokens integer DEFAULT 0 NOT NULL,
-    cache_read_tokens integer DEFAULT 0 NOT NULL,
-    cache_creation_tokens integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -7979,67 +7976,59 @@ GRANT SELECT, DELETE ON TABLE public.claim_credentials TO tf_system;
 -- Name: llm_spend; Type: VIEW; Schema: public; Owner: -
 --
 
--- Unified spend view: one row-per-spend shape UNION-ing delegation
--- conversations, curator claims, and headless system jobs onto a single
--- category axis. Placed here (not with the tables) because it depends on
--- claims, which needs conversations' uniques — the tail is where every
--- dependency already exists.
+-- Unified spend view: one row-per-spend shape UNION-ing the messages
+-- ledger (both agent surfaces) and headless system jobs onto a single
+-- category axis. Placed here (not with the tables) because the historical
+-- tail position survives the table-order shuffle — every dependency
+-- already exists by here.
 --
--- category derivation: delegation conversations split on trigger_type
--- (manual → per-user, anything else → autonomous); curator spend is
--- per-CLAIM (the former per-request row — one claim per turn), attributed
--- through the owning conversation's team/creator snapshot; system jobs are
--- 'system_overhead' with the job carried as subtype.
+-- The agent arm reads messages directly: a row participates when it
+-- carries tokens (an assistant row) or settled dollars (any cost-stamped
+-- row — the runtime's one-lump terminal stamp), attributed through the
+-- owning conversation's team/creator/actor/trigger snapshot (curator
+-- conversations carry NULL actor/trigger by construction). category:
+-- curator conversations → 'curator'; delegation splits on trigger_type
+-- (manual → per-user, anything else → autonomous); system jobs are
+-- 'system_overhead' with the job carried as subtype. source_id is the
+-- message id (system arm: the job row id), cast to text so the UNION's
+-- column type is uniform.
 --
 -- security_invoker = true is LOAD-BEARING and mandatory (PG 15+): the base
--- tables' RLS (conversations' visibility arms, claims-through-conversation,
--- system_llm_runs org) applies under the querying app-pool identity.
+-- tables' RLS (messages-through-conversation, conversations' visibility
+-- arms, system_llm_runs org) applies under the querying app-pool identity.
 CREATE VIEW public.llm_spend WITH (security_invoker='true') AS
- SELECT 'run'::text AS source,
-    conversations.id AS source_id,
-    conversations.org_id,
-    conversations.team_id,
-        CASE conversations.trigger_type
-            WHEN 'manual'::text THEN 'manual'::text
+ SELECT
+        CASE c.type
+            WHEN 'delegation'::text THEN 'run'::text
+            ELSE 'curator'::text
+        END AS source,
+    (m.id)::text AS source_id,
+    m.org_id,
+    c.team_id,
+        CASE
+            WHEN (c.type = 'curator'::text) THEN 'curator'::text
+            WHEN (c.trigger_type = 'manual'::text) THEN 'manual'::text
             ELSE 'autonomous'::text
         END AS category,
     NULL::text AS subtype,
-    conversations.creator_user_id,
-    conversations.actor_agent_id,
-    conversations.trigger_id,
-    conversations.model,
-    COALESCE(conversations.total_cost_usd, (0)::real) AS total_cost_usd,
-    conversations.input_tokens,
-    conversations.output_tokens,
-    conversations.cache_read_tokens,
-    conversations.cache_creation_tokens,
-    conversations.started_at AS occurred_at
-   FROM public.conversations
-  WHERE (conversations.type = 'delegation'::text)
-UNION ALL
- SELECT 'curator'::text AS source,
-    cl.id AS source_id,
-    cl.org_id,
-    c.team_id,
-    'curator'::text AS category,
-    NULL::text AS subtype,
     c.creator_user_id,
-    NULL::uuid AS actor_agent_id,
-    NULL::uuid AS trigger_id,
-    NULL::text AS model,
-    COALESCE(cl.cost_usd, (0)::real) AS total_cost_usd,
-    cl.input_tokens,
-    cl.output_tokens,
-    cl.cache_read_tokens,
-    cl.cache_creation_tokens,
-    cl.claimed_at AS occurred_at
-   FROM (public.claims cl
-     JOIN public.conversations c ON (((c.id = cl.conversation_id) AND (c.org_id = cl.org_id))))
-  WHERE (c.type = 'curator'::text)
+    c.actor_agent_id,
+    c.trigger_id,
+    m.model,
+    COALESCE(m.cost_usd, (0)::real) AS total_cost_usd,
+    COALESCE(m.input_tokens, 0) AS input_tokens,
+    COALESCE(m.output_tokens, 0) AS output_tokens,
+    COALESCE(m.cache_read_tokens, 0) AS cache_read_tokens,
+    COALESCE(m.cache_creation_tokens, 0) AS cache_creation_tokens,
+    m.created_at AS occurred_at
+   FROM (public.messages m
+     JOIN public.conversations c ON (((c.id = m.conversation_id) AND (c.org_id = m.org_id))))
+  WHERE ((c.type = ANY (ARRAY['delegation'::text, 'curator'::text]))
+     AND ((m.role = 'assistant'::text) OR (m.cost_usd IS NOT NULL)))
 UNION ALL
 
  SELECT 'system'::text AS source,
-    system_llm_runs.id AS source_id,
+    (system_llm_runs.id)::text AS source_id,
     system_llm_runs.org_id,
     NULL::uuid AS team_id,
     'system_overhead'::text AS category,

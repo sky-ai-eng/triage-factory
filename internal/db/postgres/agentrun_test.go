@@ -530,53 +530,56 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 		t.Fatalf("SetStatusSystem: %v", err)
 	}
 
-	// Complete twice — the second folds into the first's totals, the
-	// accumulation the resume path relies on (the terminal write is the
-	// largest of processCompletion's routed writes).
-	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		return tx.AgentRuns.Complete(ctx, orgID, runID, "completed", 0.5, 1500, 3, "partial", "", "", "", "")
-	}); err != nil {
-		t.Fatalf("first Complete under synth claims: %v", err)
+	// Complete twice — two invocation cycles, each settling its own cost
+	// lump on its own last message row and stamping its telemetry onto the
+	// claim it releases; the derived totals then ADD across the cycles.
+	settle := func(cost float64, durationMs, numTurns int, stopReason, resultSummary, outcome string) {
+		t.Helper()
+		var msgID int64
+		if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+			id, mErr := tx.AgentRuns.InsertMessage(ctx, orgID, &domain.AgentMessage{
+				RunID: runID, Role: "assistant", Subtype: "text", Content: "work",
+			})
+			msgID = id
+			return mErr
+		}); err != nil {
+			t.Fatalf("InsertMessage under synth claims: %v", err)
+		}
+		if err := stores.AgentRuns.SetExecutorSystem(ctx, orgID, runID, "exec-lc", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+			return tx.AgentRuns.Complete(ctx, orgID, runID, "completed", cost, durationMs, numTurns, msgID, stopReason, resultSummary, outcome, "", "")
+		}); err != nil {
+			t.Fatalf("Complete under synth claims: %v", err)
+		}
 	}
-	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		return tx.AgentRuns.Complete(ctx, orgID, runID, "completed", 0.25, 500, 2, "end_turn", "ok", "finish", "", "")
-	}); err != nil {
-		t.Fatalf("Complete under synth claims: %v", err)
-	}
+	settle(0.5, 1500, 3, "partial", "", "")
+	settle(0.25, 500, 2, "end_turn", "ok", "finish")
 
-	// Verify on admin: row landed in completed, totals reflect the two
-	// Completes' merge, creator stayed the original user.
-	var (
-		status        string
-		totalCostUSD  float64
-		durationMs    int
-		numTurns      int
-		stopReason    string
-		creatorUserID sql.NullString
-	)
-	if err := h.AdminDB.QueryRow(`
-		SELECT status, total_cost_usd, duration_ms, num_turns, stop_reason, creator_user_id::text
-		FROM conversations WHERE id = $1
-	`, runID).Scan(&status, &totalCostUSD, &durationMs, &numTurns, &stopReason, &creatorUserID); err != nil {
-		t.Fatalf("read back: %v", err)
+	// Verify through the derived projection: row landed in completed, the
+	// totals reflect both cycles, creator stayed the original user.
+	got, err := stores.AgentRuns.GetSystem(ctx, orgID, runID)
+	if err != nil || got == nil {
+		t.Fatalf("GetSystem: err=%v got=%v", err, got)
 	}
-	if status != "completed" {
-		t.Errorf("status = %q, want completed", status)
+	if got.Status != "completed" {
+		t.Errorf("status = %q, want completed", got.Status)
 	}
-	if totalCostUSD != 0.75 {
-		t.Errorf("total_cost_usd = %v, want 0.75 (0.5 partial + 0.25 complete)", totalCostUSD)
+	if got.TotalCostUSD == nil || *got.TotalCostUSD != 0.75 {
+		t.Errorf("total_cost_usd = %v, want 0.75 (0.5 lump + 0.25 lump)", got.TotalCostUSD)
 	}
-	if durationMs != 2000 {
-		t.Errorf("duration_ms = %d, want 2000 (1500 partial + 500 complete)", durationMs)
+	if got.DurationMs == nil || *got.DurationMs != 2000 {
+		t.Errorf("duration_ms = %v, want 2000 (1500 + 500 across claims)", got.DurationMs)
 	}
-	if numTurns != 5 {
-		t.Errorf("num_turns = %d, want 5 (3 partial + 2 complete)", numTurns)
+	if got.NumTurns == nil || *got.NumTurns != 5 {
+		t.Errorf("num_turns = %v, want 5 (3 + 2 across claims)", got.NumTurns)
 	}
-	if stopReason != "end_turn" {
-		t.Errorf("stop_reason = %q, want end_turn", stopReason)
+	if got.StopReason != "end_turn" {
+		t.Errorf("stop_reason = %q, want end_turn", got.StopReason)
 	}
-	if !creatorUserID.Valid || creatorUserID.String != userID {
-		t.Errorf("creator_user_id = %v, want %s", creatorUserID, userID)
+	if got.CreatorUserID != userID {
+		t.Errorf("creator_user_id = %v, want %s", got.CreatorUserID, userID)
 	}
 
 	// MarkFailedIfActive on a terminal row is a no-op (guarded

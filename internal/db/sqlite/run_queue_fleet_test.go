@@ -60,20 +60,20 @@ func TestRunQueueStore_SQLite_FleetReads(t *testing.T) {
 		t.Fatalf("QueuedRunAgesForOrgSystem(other org) = %d, want 0", len(q))
 	}
 
-	// Complete one run with a claim + duration stamp so the timing read has a
-	// terminal row with a queue wait and a duration. The claim stamp is a
-	// claims row now (the timing read derives claimed_at from the latest
-	// claim).
+	// Complete one run with a claim so the timing read has a terminal row
+	// with a queue wait and a duration. Both claim identity AND duration
+	// live on the claims row now (the timing read derives claimed_at from
+	// the latest claim, duration from the claims' telemetry SUM).
 	if _, err := conn.Exec(`
 		UPDATE conversations SET status='completed',
-		       completed_at=datetime(started_at, '+7 seconds'), duration_ms=5000
+		       completed_at=datetime(started_at, '+7 seconds')
 		WHERE id='fr-run-0'`); err != nil {
 		t.Fatalf("complete run: %v", err)
 	}
 	if _, err := conn.Exec(`
-		INSERT INTO claims (id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome)
+		INSERT INTO claims (id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome, duration_ms)
 		SELECT 'fr-claim-0', id, 'fr-exec', 1, datetime(started_at, '+2 seconds'),
-		       datetime(started_at, '+7 seconds'), 'completed'
+		       datetime(started_at, '+7 seconds'), 'completed', 5000
 		FROM conversations WHERE id='fr-run-0'`); err != nil {
 		t.Fatalf("stamp claim: %v", err)
 	}

@@ -193,21 +193,35 @@ func TestMigrationStatus_BricksPreV1110(t *testing.T) {
 	}
 }
 
-// TestMigrate_RunCuratorTokenColumnsPresent pins that the token
-// columns land on both conversations (the per-transcript rollup) and claims
-// (the per-engagement accounting) after a full fresh migration. A SELECT of
-// the four columns errors if any is missing, so the
-// LIMIT 0 probe is a column-existence assertion without needing rows.
-func TestMigrate_RunCuratorTokenColumnsPresent(t *testing.T) {
+// TestMigrate_MessagesAreTheOnlyAccountingLedger pins the accounting shape a
+// fresh migration produces: messages carries the token columns AND cost_usd
+// (the money/token ledger); conversations and claims carry NO dollar or token
+// cache (claims keep only the duration/turns telemetry). A SELECT of the
+// columns errors if any is missing, so the LIMIT 0 probe is a
+// column-existence assertion without needing rows.
+func TestMigrate_MessagesAreTheOnlyAccountingLedger(t *testing.T) {
 	database := openMigrationsTestDB(t)
 	if err := Migrate(database, "sqlite3"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	for _, table := range []string{"conversations", "claims"} {
-		if _, err := database.Exec(
-			`SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens FROM ` + table + ` LIMIT 0`,
-		); err != nil {
-			t.Errorf("%s missing a token column after migrate: %v", table, err)
+	if _, err := database.Exec(
+		`SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd FROM messages LIMIT 0`,
+	); err != nil {
+		t.Errorf("messages missing a ledger column after migrate: %v", err)
+	}
+	if _, err := database.Exec(`SELECT duration_ms, num_turns FROM claims LIMIT 0`); err != nil {
+		t.Errorf("claims missing a telemetry column after migrate: %v", err)
+	}
+	for _, probe := range []struct{ table, col string }{
+		{"conversations", "total_cost_usd"},
+		{"conversations", "duration_ms"},
+		{"conversations", "num_turns"},
+		{"conversations", "input_tokens"},
+		{"claims", "cost_usd"},
+		{"claims", "input_tokens"},
+	} {
+		if _, err := database.Exec(`SELECT ` + probe.col + ` FROM ` + probe.table + ` LIMIT 0`); err == nil {
+			t.Errorf("%s.%s survived the migration; the accounting cache must be gone", probe.table, probe.col)
 		}
 	}
 }
@@ -264,17 +278,18 @@ func TestMigrate_BackfillsRunTokensFromRunMessages(t *testing.T) {
 		t.Fatalf("goose Up: %v", err)
 	}
 
-	// The refactor renamed the table under the row; the backfilled totals
-	// ride along.
+	// The refactor made messages the ledger: the per-message tokens survive
+	// the run_messages → messages copy and SUM to the historical totals.
 	var in, out, cr, cc int
 	if err := database.QueryRow(`
-		SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
-		FROM conversations WHERE id = 'r1'
+		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_creation_tokens), 0)
+		FROM messages WHERE conversation_id = 'r1'
 	`).Scan(&in, &out, &cr, &cc); err != nil {
-		t.Fatalf("read backfilled tokens: %v", err)
+		t.Fatalf("read ledger tokens: %v", err)
 	}
 	if in != 150 || out != 25 || cr != 1500 || cc != 10 {
-		t.Errorf("backfilled tokens = (%d,%d,%d,%d), want (150,25,1500,10)", in, out, cr, cc)
+		t.Errorf("ledger tokens = (%d,%d,%d,%d), want (150,25,1500,10)", in, out, cr, cc)
 	}
 }
 
@@ -340,16 +355,18 @@ func TestMigrate_BackfillsCuratorTokensFromMessages(t *testing.T) {
 	}
 
 	// The conversations refactor turns the request into a claim (claim id =
-	// request id) carrying the same per-turn accounting.
+	// request id) whose stream rows keep their per-message tokens — the
+	// ledger the per-turn accounting now derives from.
 	var in, out, cr, cc int
 	if err := database.QueryRow(`
-		SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
-		FROM claims WHERE id = 'cr1'
+		SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_creation_tokens), 0)
+		FROM messages WHERE claim_id = 'cr1'
 	`).Scan(&in, &out, &cr, &cc); err != nil {
-		t.Fatalf("read backfilled tokens: %v", err)
+		t.Fatalf("read ledger tokens: %v", err)
 	}
 	if in != 150 || out != 25 || cr != 1500 || cc != 10 {
-		t.Errorf("backfilled tokens = (%d,%d,%d,%d), want (150,25,1500,10)", in, out, cr, cc)
+		t.Errorf("ledger tokens = (%d,%d,%d,%d), want (150,25,1500,10)", in, out, cr, cc)
 	}
 }
 
@@ -398,11 +415,13 @@ func TestMigrate_CuratorTeamIDBackfillAndView(t *testing.T) {
 	`, teamID); err != nil {
 		t.Fatalf("seed projects: %v", err)
 	}
-	// Two curator requests that predate the migration (no team_id column yet).
+	// Two curator requests that predate the migration (no team_id column
+	// yet). Each carries a settled cost so the refactor's historical stamp
+	// gives them a ledger row the view exposes.
 	if _, err := database.Exec(`
-		INSERT INTO curator_requests (id, project_id, status, user_input) VALUES
-			('ct', 'pteam', 'done', 'hi'),
-			('co', 'porg',  'done', 'hi')
+		INSERT INTO curator_requests (id, project_id, status, user_input, cost_usd) VALUES
+			('ct', 'pteam', 'done', 'hi', 0.5),
+			('co', 'porg',  'done', 'hi', 0.25)
 	`); err != nil {
 		t.Fatalf("seed curator_requests: %v", err)
 	}
@@ -419,11 +438,14 @@ func TestMigrate_CuratorTeamIDBackfillAndView(t *testing.T) {
 	assertCuratorTeamID(t, database,
 		`SELECT c.team_id FROM claims cl JOIN conversations c ON c.id = cl.conversation_id WHERE cl.id = 'co'`, "")
 
-	// View surfaces the same team_id on the curator arm.
+	// View surfaces the same team_id on the curator arm — keyed by the
+	// turn's cost-stamped ledger row now (source_id = the message id).
 	assertCuratorTeamID(t, database,
-		`SELECT team_id FROM llm_spend WHERE source = 'curator' AND source_id = 'ct'`, teamID)
+		`SELECT team_id FROM llm_spend WHERE source = 'curator'
+		   AND source_id = (SELECT id FROM messages WHERE claim_id = 'ct')`, teamID)
 	assertCuratorTeamID(t, database,
-		`SELECT team_id FROM llm_spend WHERE source = 'curator' AND source_id = 'co'`, "")
+		`SELECT team_id FROM llm_spend WHERE source = 'curator'
+		   AND source_id = (SELECT id FROM messages WHERE claim_id = 'co')`, "")
 }
 
 // TestMigrate_LLMSpendTriggerIDView pins the TFAC-478 SQLite migration: applied
@@ -467,10 +489,11 @@ func TestMigrate_LLMSpendTriggerIDView(t *testing.T) {
 	}
 	// curator_requests already has team_id at this version (TFAC-476), so set it
 	// directly: the team project's row carries the team, the org project's NULL.
+	// The costs give each turn a ledger row the refactored view exposes.
 	if _, err := database.Exec(`
-		INSERT INTO curator_requests (id, project_id, team_id, status, user_input) VALUES
-			('ct', 'pteam', ?,    'done', 'hi'),
-			('co', 'porg',  NULL, 'done', 'hi')
+		INSERT INTO curator_requests (id, project_id, team_id, status, user_input, cost_usd) VALUES
+			('ct', 'pteam', ?,    'done', 'hi', 0.5),
+			('co', 'porg',  NULL, 'done', 'hi', 0.25)
 	`, teamID); err != nil {
 		t.Fatalf("seed curator_requests: %v", err)
 	}
@@ -494,14 +517,17 @@ func TestMigrate_LLMSpendTriggerIDView(t *testing.T) {
 	}
 
 	// Curator arm: team_id preserved from TFAC-476; trigger_id NULL (only runs
-	// are trigger-fired).
+	// are trigger-fired). Keyed by the turn's cost-stamped ledger row.
 	assertCuratorTeamID(t, database,
-		`SELECT team_id FROM llm_spend WHERE source = 'curator' AND source_id = 'ct'`, teamID)
+		`SELECT team_id FROM llm_spend WHERE source = 'curator'
+		   AND source_id = (SELECT id FROM messages WHERE claim_id = 'ct')`, teamID)
 	assertCuratorTeamID(t, database,
-		`SELECT team_id FROM llm_spend WHERE source = 'curator' AND source_id = 'co'`, "")
+		`SELECT team_id FROM llm_spend WHERE source = 'curator'
+		   AND source_id = (SELECT id FROM messages WHERE claim_id = 'co')`, "")
 	var triggerID sql.NullString
 	if err := database.QueryRow(
-		`SELECT trigger_id FROM llm_spend WHERE source = 'curator' AND source_id = 'ct'`,
+		`SELECT trigger_id FROM llm_spend WHERE source = 'curator'
+		   AND source_id = (SELECT id FROM messages WHERE claim_id = 'ct')`,
 	).Scan(&triggerID); err != nil {
 		t.Fatalf("scan curator trigger_id: %v", err)
 	}
@@ -566,6 +592,7 @@ func TestMigrate_RunsTriggerIDBackfill(t *testing.T) {
 			VALUES ('run-ev', 't1', 'p1', 'event', NULL, 'completed', 'br-ev', 0, 1.0)`,
 		`INSERT INTO runs (id, task_id, prompt_id, status, blueprint_run_id, blueprint_step_index, total_cost_usd)
 			VALUES ('run-man', 't1', 'p1', 'completed', 'br-man', 0, 2.0)`,
+		`INSERT INTO run_messages (run_id, role, content) VALUES ('run-ev', 'assistant', 'work')`,
 	} {
 		if _, err := database.Exec(stmt); err != nil {
 			t.Fatalf("seed %q: %v", stmt, err)
@@ -579,17 +606,25 @@ func TestMigrate_RunsTriggerIDBackfill(t *testing.T) {
 
 	assertRunTriggerID(t, database, `SELECT trigger_id FROM conversations WHERE id = 'run-ev'`, "trig1")
 	assertRunTriggerID(t, database, `SELECT trigger_id FROM conversations WHERE id = 'run-man'`, "")
-	// And through the spend layer: the autonomous row is now rule-attributed.
+	// And through the spend layer: the autonomous run's ledger row (its one
+	// streamed message, now carrying the historical cost stamp) is
+	// rule-attributed.
 	assertRunTriggerID(t, database,
-		`SELECT trigger_id FROM llm_spend WHERE source = 'run' AND source_id = 'run-ev'`, "trig1")
+		`SELECT trigger_id FROM llm_spend WHERE source = 'run'
+		   AND source_id = (SELECT id FROM messages WHERE conversation_id = 'run-ev')`, "trig1")
 	var cat string
+	var cost float64
 	if err := database.QueryRow(
-		`SELECT category FROM llm_spend WHERE source = 'run' AND source_id = 'run-ev'`,
-	).Scan(&cat); err != nil {
+		`SELECT category, total_cost_usd FROM llm_spend WHERE source = 'run'
+		   AND source_id = (SELECT id FROM messages WHERE conversation_id = 'run-ev')`,
+	).Scan(&cat, &cost); err != nil {
 		t.Fatalf("scan llm_spend category: %v", err)
 	}
 	if cat != "autonomous" {
 		t.Errorf("llm_spend category = %q, want autonomous", cat)
+	}
+	if cost != 1.0 {
+		t.Errorf("llm_spend cost = %v, want 1.0 (the historical stamp on the last message)", cost)
 	}
 }
 
@@ -629,6 +664,105 @@ func assertCuratorTeamID(t *testing.T, database *sql.DB, query, want string) {
 	if !got.Valid || got.String != want {
 		t.Errorf("%q = %v (valid=%t), want %q", query, got.String, got.Valid, want)
 	}
+}
+
+// TestMigrate_StampsHistoricalCostOntoLastMessage pins the refactor's
+// historical dollars re-key: a pre-migration run's total_cost_usd lands as
+// ONE lump on the conversation's last message row (never the earlier rows),
+// and a curator request's cost_usd lands on the turn's last stream row —
+// falling back to the turn's user message row when nothing streamed. A row
+// with dollars but zero messages loses the stamp by design (accepted
+// residue).
+func TestMigrate_StampsHistoricalCostOntoLastMessage(t *testing.T) {
+	database, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { database.Close() })
+
+	goose.SetBaseFS(migrationsSQLiteFS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("set dialect: %v", err)
+	}
+	if err := goose.UpTo(database, "migrations-sqlite", 202607200002); err != nil {
+		t.Fatalf("goose UpTo: %v", err)
+	}
+
+	seed := []string{
+		`INSERT INTO users (id) VALUES ('00000000-0000-0000-0000-000000000100')`,
+		`INSERT INTO projects (id, name, visibility) VALUES ('proj1', 'P', 'private')`,
+		// A settled run with two streamed rows: the lump must land on the
+		// SECOND row only.
+		`INSERT INTO runs (id, task_id, prompt_id, blueprint_run_id, status, total_cost_usd)
+		 VALUES ('r-cost', 't1', 'p1', 'b1', 'completed', 1.5)`,
+		`INSERT INTO run_messages (run_id, role, content) VALUES ('r-cost', 'assistant', 'first')`,
+		`INSERT INTO run_messages (run_id, role, content) VALUES ('r-cost', 'assistant', 'last')`,
+		// A settled run with no rows: the residue is dropped, not misfiled.
+		`INSERT INTO runs (id, task_id, prompt_id, blueprint_run_id, status, total_cost_usd)
+		 VALUES ('r-empty', 't1', 'p1', 'b2', 'completed', 9.9)`,
+		// A curator turn WITH stream rows: the lump lands on its last stream
+		// row, not the user row.
+		`INSERT INTO curator_requests (id, project_id, status, user_input, cost_usd)
+		 VALUES ('cq-stream', 'proj1', 'done', 'streamed turn', 0.5)`,
+		`INSERT INTO curator_messages (request_id, role, content) VALUES ('cq-stream', 'assistant', 'ack one')`,
+		`INSERT INTO curator_messages (request_id, role, content) VALUES ('cq-stream', 'assistant', 'ack two')`,
+		// A curator turn with NO stream rows: the lump falls back to the
+		// user message row.
+		`INSERT INTO curator_requests (id, project_id, status, user_input, cost_usd)
+		 VALUES ('cq-bare', 'proj1', 'done', 'bare turn', 0.25)`,
+	}
+	for _, q := range seed {
+		if _, err := database.Exec(q); err != nil {
+			t.Fatalf("seed %q: %v", q, err)
+		}
+	}
+
+	if err := goose.Up(database, "migrations-sqlite"); err != nil {
+		t.Fatalf("goose Up: %v", err)
+	}
+
+	assertCost := func(desc, query string, want float64) {
+		t.Helper()
+		var got sql.NullFloat64
+		if err := database.QueryRow(query).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", desc, err)
+		}
+		if !got.Valid {
+			t.Errorf("%s = NULL, want %v", desc, want)
+			return
+		}
+		if got.Float64 != want {
+			t.Errorf("%s = %v, want %v", desc, got.Float64, want)
+		}
+	}
+	assertCost("run last-row lump",
+		`SELECT cost_usd FROM messages WHERE conversation_id = 'r-cost' AND content = 'last'`, 1.5)
+	var n int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE conversation_id = 'r-cost' AND cost_usd IS NOT NULL`,
+	).Scan(&n); err != nil {
+		t.Fatalf("count stamped run rows: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("stamped run rows = %d, want 1 (one lump, no proration)", n)
+	}
+	assertCost("run total via SUM",
+		`SELECT SUM(cost_usd) FROM messages WHERE conversation_id = 'r-cost'`, 1.5)
+
+	assertCost("curator stream lump",
+		`SELECT cost_usd FROM messages WHERE claim_id = 'cq-stream' AND content = 'ack two'`, 0.5)
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE claim_id = 'cq-stream' AND cost_usd IS NOT NULL`,
+	).Scan(&n); err != nil {
+		t.Fatalf("count stamped curator rows: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("stamped curator rows = %d, want 1", n)
+	}
+	assertCost("curator user-row fallback",
+		`SELECT cost_usd FROM messages WHERE claim_id = 'cq-bare' AND role = 'user'`, 0.25)
 }
 
 // TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages pins the

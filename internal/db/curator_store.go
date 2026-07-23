@@ -174,10 +174,12 @@ type CuratorStore interface {
 
 	// ReleaseActiveTurnSystem stamps the conversation's active claim
 	// released: released_at, outcome ('completed'|'failed'|'cancelled'),
-	// error, per-engagement accounting, and the four token columns as the
-	// SUM over messages carrying this claim's id. Returns false when no
-	// active claim exists (a racing cancel/shutdown already released it) —
-	// first writer wins, exactly the old terminal-status filter. Admin pool.
+	// error, and the duration/turns engagement telemetry — then settles
+	// costUSD as one lump on the claim's LAST message row (the user row
+	// when nothing streamed; BeginTurn stamped it with this claim). Returns
+	// false when no active claim exists (a racing cancel/shutdown already
+	// released it) — first writer wins, exactly the old terminal-status
+	// filter. Admin pool.
 	ReleaseActiveTurnSystem(ctx context.Context, orgID, conversationID, outcome, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error)
 
 	// RevertTurnContext un-consumes a failed/cancelled turn's injection rows

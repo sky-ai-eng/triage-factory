@@ -80,10 +80,20 @@ func seedPromptRun(t *testing.T, h *Harness, orgID, userID, teamID, taskID, prom
 		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
 		VALUES ($1, $2, $3, $4, $5, 'manual', 'completed', '/tmp/wt', $6, '[]')
 	`, brID, orgID, userID, bpID, taskID, startedAt)
+	convID := uuid.New().String()
 	MustExec(t, h.AdminDB, `
-		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, status, started_at, total_cost_usd, duration_ms, blueprint_run_id)
-		VALUES ($1, $2, $3, $4, 'team', $5, $6, $7, $8, 0.01, 100, $9)
-	`, uuid.New().String(), orgID, userID, teamID, taskID, promptID, status, startedAt, brID)
+		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, status, started_at, blueprint_run_id)
+		VALUES ($1, $2, $3, $4, 'team', $5, $6, $7, $8, $9)
+	`, convID, orgID, userID, teamID, taskID, promptID, status, startedAt, brID)
+	// Accounting rides the ledger + claim telemetry the stats derive from.
+	MustExec(t, h.AdminDB, `
+		INSERT INTO messages (org_id, conversation_id, role, subtype, content, cost_usd, created_at)
+		VALUES ($1, $2, 'assistant', 'text', 'work', 0.01, $3)
+	`, orgID, convID, startedAt)
+	MustExec(t, h.AdminDB, `
+		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome, duration_ms)
+		VALUES ($1, $2, $3, 'exec-mk', 1, $4, $4, 'completed', 100)
+	`, uuid.New().String(), orgID, convID, startedAt)
 }
 
 // seedMarketplaceBlueprintRun records one blueprint_runs row directly

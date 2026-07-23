@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -306,33 +307,48 @@ func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, age
 // blueprint graph; empty CreatorUserID/ActorAgentID and a nil Cost map to SQL
 // NULL (uuid columns reject empty strings; the in-flight run carries NULL cost).
 func newPgSpendSeeder(conn *sql.DB, orgID, teamProjectID, nullTeamProjectID string) dbtest.SpendSeeder {
+	seedLedgerRow := func(t *testing.T, convID, model string, cost any, tok dbtest.SpendTokens, at time.Time) string {
+		t.Helper()
+		var id int64
+		if err := conn.QueryRow(`
+			INSERT INTO messages
+				(org_id, conversation_id, role, subtype, content, model,
+				 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+				 cost_usd, created_at)
+			VALUES ($1, $2, 'assistant', 'text', 'work', NULLIF($3, ''),
+			        $4, $5, $6, $7, $8, $9)
+			RETURNING id
+		`, orgID, convID, model,
+			tok.Input, tok.Output, tok.CacheRead, tok.CacheCreation, cost, at).Scan(&id); err != nil {
+			t.Fatalf("seed ledger row: %v", err)
+		}
+		return strconv.FormatInt(id, 10)
+	}
 	return dbtest.SpendSeeder{
 		Run: func(t *testing.T, f dbtest.RunSpendFixture) string {
 			t.Helper()
 			id := uuid.New().String()
 			if _, err := conn.Exec(`
 				INSERT INTO conversations
-					(id, org_id, team_id, creator_user_id, trigger_type, origin, actor_agent_id, trigger_id, model, status,
-					 total_cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, started_at)
-				VALUES ($1, $2, $3, $4, $5, 'manual', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+					(id, org_id, team_id, creator_user_id, trigger_type, origin, actor_agent_id, trigger_id, model, status, started_at)
+				VALUES ($1, $2, $3, $4, $5, 'manual', $6, $7, $8, $9, $10)
 			`,
 				id, orgID, f.TeamID, pgUUIDArg(f.CreatorUserID), f.TriggerType,
-				pgUUIDArg(f.ActorAgentID), pgUUIDArg(f.TriggerID), f.Model, f.Status,
-				pgCostArg(f.Cost), f.Tokens.Input, f.Tokens.Output, f.Tokens.CacheRead, f.Tokens.CacheCreation, f.StartedAt,
+				pgUUIDArg(f.ActorAgentID), pgUUIDArg(f.TriggerID), f.Model, f.Status, f.StartedAt,
 			); err != nil {
 				t.Fatalf("seed run: %v", err)
 			}
-			return id
+			return seedLedgerRow(t, id, f.Model, pgCostArg(f.Cost), f.Tokens, f.StartedAt)
 		},
 		Curator: func(t *testing.T, f dbtest.CuratorSpendFixture) string {
 			t.Helper()
-			// The view's curator arm is per-CLAIM: one curator conversation
-			// carrying the (team, creator) attribution snapshot, one claim
-			// carrying the turn's accounting. Non-empty TeamID → the
-			// team-scoped project (snapshot carries its team); empty → the
-			// null-team project (snapshot is NULL), captured via the same
-			// (SELECT team_id FROM projects WHERE id = ...) subquery
-			// production used, so this proves project team → row team → view.
+			// One curator conversation carrying the (team, creator)
+			// attribution snapshot, one cost-stamped ledger row. Non-empty
+			// TeamID → the team-scoped project (snapshot carries its team);
+			// empty → the null-team project (snapshot is NULL), captured via
+			// the same (SELECT team_id FROM projects WHERE id = ...) subquery
+			// production uses, so this proves project team → conversation
+			// team → view.
 			projID := nullTeamProjectID
 			if f.TeamID != "" {
 				projID = teamProjectID
@@ -349,20 +365,9 @@ func newPgSpendSeeder(conn *sql.DB, orgID, teamProjectID, nullTeamProjectID stri
 			`, convID, orgID, f.CreatorUserID, projID, f.CreatedAt); err != nil {
 				t.Fatalf("seed curator conversation: %v", err)
 			}
-			id := uuid.New().String()
-			if _, err := conn.Exec(`
-				INSERT INTO claims
-					(id, org_id, conversation_id, executor_id, boot_epoch, claimed_at,
-					 released_at, outcome, cost_usd,
-					 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
-				VALUES ($1, $2, $3, '', 0, $4, $4, 'completed', $5, $6, $7, $8, $9)
-			`,
-				id, orgID, convID, f.CreatedAt, f.Cost,
-				f.Tokens.Input, f.Tokens.Output, f.Tokens.CacheRead, f.Tokens.CacheCreation,
-			); err != nil {
-				t.Fatalf("seed curator claim: %v", err)
-			}
-			return id
+			// The curator arm's model deliberately stays NULL — the wire
+			// contract never exposed a curator model.
+			return seedLedgerRow(t, convID, "", f.Cost, f.Tokens, f.CreatedAt)
 		},
 		System: func(t *testing.T, f dbtest.SystemSpendFixture) string {
 			t.Helper()

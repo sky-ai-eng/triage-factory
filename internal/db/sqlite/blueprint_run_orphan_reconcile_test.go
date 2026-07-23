@@ -219,18 +219,19 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	if got := childRunStatusDB(t, conn, "ra-child-queued"); got != "cancelled" {
 		t.Errorf("queued orphan child status = %q, want cancelled", got)
 	}
-	// The running orphan's token cache rolled up from messages in the same
-	// sweep (TFAC-473). The queued orphan had no messages, so it stays 0.
+	// The running orphan's streamed tokens still read through the ledger —
+	// the sweep is a status flip only, nothing to roll up or lose.
 	{
 		var in, out, cr, cc int
 		if err := conn.QueryRow(`
-			SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
-			FROM conversations WHERE id = 'ra-child'
+			SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+			       COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_creation_tokens), 0)
+			FROM messages WHERE conversation_id = 'ra-child'
 		`).Scan(&in, &out, &cr, &cc); err != nil {
 			t.Fatalf("read ra-child tokens: %v", err)
 		}
 		if in != 150 || out != 25 || cr != 1500 || cc != 10 {
-			t.Errorf("orphan child token cols = (%d,%d,%d,%d), want (150,25,1500,10) — boot sweep did not roll up messages", in, out, cr, cc)
+			t.Errorf("orphan child ledger tokens = (%d,%d,%d,%d), want (150,25,1500,10)", in, out, cr, cc)
 		}
 	}
 	if got := childRunStatusDB(t, conn, "rb-child"); got != "running" {

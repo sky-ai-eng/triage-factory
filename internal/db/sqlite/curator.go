@@ -46,9 +46,9 @@ func (s *curatorStore) GetOrCreateConversation(ctx context.Context, orgID, proje
 		now := time.Now().UTC()
 		// team_id snapshots from the project at mint (point-in-time, like the
 		// delegation side) so curator spend attributes to the project's team;
-		// the llm_spend view reads the claim → conversation join directly.
-		// status is explicit NULL — a curator conversation has no work
-		// lifecycle; its turn state derives from messages + claims.
+		// the llm_spend view attributes the messages ledger through this
+		// snapshot. status is explicit NULL — a curator conversation has no
+		// work lifecycle; its turn state derives from messages + claims.
 		if _, err := q.ExecContext(ctx, `
 			INSERT INTO conversations (
 				id, org_id, type, creator_user_id, team_id, visibility,
@@ -471,26 +471,40 @@ func (s *curatorStore) ReleaseActiveTurnSystem(ctx context.Context, orgID, conve
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	// Token columns are SET from the absolute per-claim messages SUM (the
-	// streaming sink stamped every row with this claim's id before the
-	// terminal write) — the per-engagement roll-up the llm_spend curator arm
-	// reads. Every terminal write refreshes them, cancel included, so a turn
-	// killed mid-stream still reports its spend.
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE claims
-		SET released_at = ?, outcome = ?, error = ?,
-		    cost_usd = ?, duration_ms = ?, num_turns = ?,
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE claim_id = claims.id),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE claim_id = claims.id),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE claim_id = claims.id),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE claim_id = claims.id)
-		WHERE conversation_id = ? AND released_at IS NULL
-	`, time.Now().UTC(), outcome, nullIfEmpty(errMsg), costUSD, durationMs, numTurns, conversationID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
+	// The claim keeps only the engagement telemetry (duration/turns); the
+	// turn's dollars settle as one lump on the claim's LAST message row —
+	// the user row when nothing streamed (BeginTurn stamped it with this
+	// claim). Every terminal write stamps, cancel included, so a turn
+	// killed mid-stream still reports the spend it settled.
+	released := false
+	err := inTx(ctx, s.q, func(q queryer) error {
+		var claimID string
+		err := q.QueryRowContext(ctx, `
+			SELECT id FROM claims WHERE conversation_id = ? AND released_at IS NULL
+		`, conversationID).Scan(&claimID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE claims
+			SET released_at = ?, outcome = ?, error = ?, duration_ms = ?, num_turns = ?
+			WHERE id = ?
+		`, time.Now().UTC(), outcome, nullIfEmpty(errMsg), durationMs, numTurns, claimID); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE messages SET cost_usd = ?
+			WHERE id = (SELECT MAX(id) FROM messages WHERE claim_id = ?)
+		`, costUSD, claimID); err != nil {
+			return err
+		}
+		released = true
+		return nil
+	})
+	return released, err
 }
 
 func (s *curatorStore) RevertTurnContext(ctx context.Context, orgID, conversationID string, consumed []domain.CuratorContextChange, auditMessageID int64) error {
@@ -576,17 +590,13 @@ func (s *curatorStore) ListClaimableTurnsForHomeSystem(ctx context.Context, home
 }
 
 // CancelStrandedTurnsForHomeSystem is inert in SQLite (local uses the global
-// CancelOrphanedTurnsSystem boot sweep), but implemented for symmetry. The
-// token roll-up matches ReleaseActiveTurnSystem: a stranded running turn may
-// have streamed (and paid for) messages before its home died.
+// CancelOrphanedTurnsSystem boot sweep), but implemented for symmetry. An
+// outcome/error release only: the ledger already holds whatever the turn
+// streamed, and a stranded turn has no reported cost lump to settle.
 func (s *curatorStore) CancelStrandedTurnsForHomeSystem(ctx context.Context, homeInstanceID string, bootEpoch int64, errMsg string) (int, error) {
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE claims
-		SET released_at = ?, outcome = 'cancelled', error = COALESCE(error, ?),
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE claim_id = claims.id),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE claim_id = claims.id),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE claim_id = claims.id),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE claim_id = claims.id)
+		SET released_at = ?, outcome = 'cancelled', error = COALESCE(error, ?)
 		WHERE executor_id = ? AND boot_epoch < ? AND released_at IS NULL
 		  AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = claims.conversation_id AND c.type = 'curator')
 	`, time.Now().UTC(), errMsg, homeInstanceID, bootEpoch)
@@ -600,11 +610,7 @@ func (s *curatorStore) CancelStrandedTurnsForHomeSystem(ctx context.Context, hom
 func (s *curatorStore) CancelOrphanedTurnsSystem(ctx context.Context) (int, error) {
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE claims
-		SET released_at = ?, outcome = 'cancelled', error = COALESCE(error, 'process restarted'),
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE claim_id = claims.id),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE claim_id = claims.id),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE claim_id = claims.id),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE claim_id = claims.id)
+		SET released_at = ?, outcome = 'cancelled', error = COALESCE(error, 'process restarted')
 		WHERE released_at IS NULL
 		  AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = claims.conversation_id AND c.type = 'curator')
 	`, time.Now().UTC())
@@ -773,14 +779,12 @@ func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID 
 			}
 			if _, err := q.ExecContext(ctx, `
 				INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
-				                    claimed_at, released_at, outcome, error, cost_usd,
-				                    duration_ms, num_turns, input_tokens, output_tokens,
-				                    cache_read_tokens, cache_creation_tokens)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				                    claimed_at, released_at, outcome, error,
+				                    duration_ms, num_turns)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`, cl.ID, orgID, conv.ID, cl.ExecutorID, cl.BootEpoch,
 				cl.ClaimedAt.UTC(), released, nullIfEmpty(cl.Outcome), nullIfEmpty(cl.Error),
-				sqliteNullFloat(cl.CostUSD), sqliteNullInt(cl.DurationMs), sqliteNullInt(cl.NumTurns),
-				cl.InputTokens, cl.OutputTokens, cl.CacheReadTokens, cl.CacheCreationTokens); err != nil {
+				sqliteNullInt(cl.DurationMs), sqliteNullInt(cl.NumTurns)); err != nil {
 				return fmt.Errorf("import curator claim %s: %w", cl.ID, err)
 			}
 		}
@@ -836,14 +840,14 @@ func importCuratorMessage(ctx context.Context, q queryer, orgID string, msg *dom
 		INSERT INTO messages (org_id, conversation_id, user_id, claim_id, role, content, subtype,
 		                      tool_calls, tool_call_id, is_error, metadata, model,
 		                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-		                      created_at, reasoning, content_blocks, delivered)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      cost_usd, created_at, reasoning, content_blocks, delivered)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, orgID, msg.RunID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID),
 		msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, sqliteNullStr(msg.ToolCallID), msg.IsError, metadataJSON,
 		sqliteNullStr(msg.Model), sqliteNullInt(msg.InputTokens), sqliteNullInt(msg.OutputTokens),
 		sqliteNullInt(msg.CacheReadTokens), sqliteNullInt(msg.CacheCreationTokens),
-		msg.CreatedAt, reasoningJSON, contentBlocksJSON, delivered)
+		sqliteNullFloat(msg.CostUSD), msg.CreatedAt, reasoningJSON, contentBlocksJSON, delivered)
 	if err != nil {
 		return fmt.Errorf("import curator message: %w", err)
 	}
@@ -853,8 +857,7 @@ func importCuratorMessage(ctx context.Context, q queryer, orgID string, msg *dom
 // --- Shared scan helpers ---
 
 const sqliteClaimColumns = `id, org_id, conversation_id, executor_id, boot_epoch, claimed_at,
-	released_at, outcome, error, cost_usd, duration_ms, num_turns,
-	input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at`
+	released_at, outcome, error, duration_ms, num_turns, created_at`
 
 func scanClaimRows(rows *sql.Rows) ([]domain.Claim, error) {
 	var out []domain.Claim
@@ -864,14 +867,12 @@ func scanClaimRows(rows *sql.Rows) ([]domain.Claim, error) {
 			releasedAt sql.NullTime
 			outcome    sql.NullString
 			errMsg     sql.NullString
-			costUSD    sql.NullFloat64
 			durationMs sql.NullInt64
 			numTurns   sql.NullInt64
 		)
 		if err := rows.Scan(
 			&c.ID, &c.OrgID, &c.ConversationID, &c.ExecutorID, &c.BootEpoch, &c.ClaimedAt,
-			&releasedAt, &outcome, &errMsg, &costUSD, &durationMs, &numTurns,
-			&c.InputTokens, &c.OutputTokens, &c.CacheReadTokens, &c.CacheCreationTokens, &c.CreatedAt,
+			&releasedAt, &outcome, &errMsg, &durationMs, &numTurns, &c.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -881,10 +882,6 @@ func scanClaimRows(rows *sql.Rows) ([]domain.Claim, error) {
 		}
 		c.Outcome = outcome.String
 		c.Error = errMsg.String
-		if costUSD.Valid {
-			v := costUSD.Float64
-			c.CostUSD = &v
-		}
 		if durationMs.Valid {
 			v := int(durationMs.Int64)
 			c.DurationMs = &v

@@ -94,21 +94,24 @@ func (r *usageRig) seedSpend(t *testing.T) {
 		projID, r.orgID, r.member, r.teamA)
 
 	// teamA: manual run by member ($1.00), autonomous run via trigger ($0.25),
-	// team curator by member ($0.50 — a curator conversation plus one released
-	// claim carrying the turn's spend).
-	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, model, status, total_cost_usd, started_at) VALUES ($1, $2, $3, $4, 'manual', 'manual', 'claude-opus-4-8', 'completed', 1.00, $5)`,
-		uuid.New().String(), r.orgID, r.teamA, r.member, when)
-	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, trigger_id, model, status, total_cost_usd, started_at) VALUES ($1, $2, $3, NULL, 'event', 'manual', $4, 'claude-haiku-4-5', 'completed', 0.25, $5)`,
-		uuid.New().String(), r.orgID, r.teamA, triggerID, when)
-	curConvID := uuid.New().String()
-	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO conversations (id, org_id, type, creator_user_id, team_id, visibility, trigger_type, origin, status, project_id, started_at) VALUES ($1, $2, 'curator', $3, $4, 'private', 'manual', 'curator', NULL, $5, $6)`,
-		curConvID, r.orgID, r.member, r.teamA, projID, when)
-	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome, cost_usd) VALUES ($1, $2, $3, '', 0, $4, $4, 'completed', 0.50)`,
-		uuid.New().String(), r.orgID, curConvID, when)
+	// team curator by member ($0.50). Spend is the messages ledger, so every
+	// conversation gets one cost-stamped assistant row.
+	seedSpendConv := func(convSQL string, args []any, model string, cost float64) {
+		convID := uuid.New().String()
+		pgtest.MustExec(t, r.h.AdminDB, convSQL, append([]any{convID}, args...)...)
+		pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO messages (org_id, conversation_id, role, subtype, content, model, cost_usd, created_at) VALUES ($1, $2, 'assistant', 'text', 'work', NULLIF($3, ''), $4, $5)`,
+			r.orgID, convID, model, cost, when)
+	}
+	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, model, status, started_at) VALUES ($1, $2, $3, $4, 'manual', 'manual', 'claude-opus-4-8', 'completed', $5)`,
+		[]any{r.orgID, r.teamA, r.member, when}, "claude-opus-4-8", 1.00)
+	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, trigger_id, model, status, started_at) VALUES ($1, $2, $3, NULL, 'event', 'manual', $4, 'claude-haiku-4-5', 'completed', $5)`,
+		[]any{r.orgID, r.teamA, triggerID, when}, "claude-haiku-4-5", 0.25)
+	seedSpendConv(`INSERT INTO conversations (id, org_id, type, creator_user_id, team_id, visibility, trigger_type, origin, status, project_id, started_at) VALUES ($1, $2, 'curator', $3, $4, 'private', 'manual', 'curator', NULL, $5, $6)`,
+		[]any{r.orgID, r.member, r.teamA, projID, when}, "", 0.50)
 
 	// teamB: manual run by orgAdmin ($2.00).
-	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, model, status, total_cost_usd, started_at) VALUES ($1, $2, $3, $4, 'manual', 'manual', 'claude-opus-4-8', 'completed', 2.00, $5)`,
-		uuid.New().String(), r.orgID, r.teamB, r.orgAdmin, when)
+	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, model, status, started_at) VALUES ($1, $2, $3, $4, 'manual', 'manual', 'claude-opus-4-8', 'completed', $5)`,
+		[]any{r.orgID, r.teamB, r.orgAdmin, when}, "claude-opus-4-8", 2.00)
 
 	// System job ($0.05, org-level).
 	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO system_llm_runs (id, org_id, job, model, total_cost_usd, started_at) VALUES ($1, $2, 'scorer', 'claude-haiku-4-5', 0.05, $3)`,

@@ -142,7 +142,7 @@ func TestHandlePRNewCommits_TerminalNonResumableSkips(t *testing.T) {
 	seedRun(t, database, "run-finished", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	// completed + outcome=finish → resumableState=false.
-	if err := s.agentRuns.CompleteSystem(context.Background(), runmode.LocalDefaultOrgID, "run-finished", "completed", 0, 0, 0, "", "", string(domain.RunOutcomeFinish), "", ""); err != nil {
+	if err := s.agentRuns.CompleteSystem(context.Background(), runmode.LocalDefaultOrgID, "run-finished", "completed", 0, 0, 0, 0, "", "", string(domain.RunOutcomeFinish), "", ""); err != nil {
 		t.Fatalf("complete run: %v", err)
 	}
 	seedPendingReview(t, s, "run-finished", "o/r", 7, "oldHead")

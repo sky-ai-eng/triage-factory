@@ -14,13 +14,14 @@ type CuratorRequest struct {
 	Status    string `json:"status"` // queued | running | done | cancelled | failed
 	UserInput string `json:"user_input"`
 	// CreatorUserID is the requesting user — the user message row's user_id.
-	CreatorUserID string  `json:"creator_user_id,omitempty"`
-	ErrorMsg      string  `json:"error_msg,omitempty"`
-	CostUSD       float64 `json:"cost_usd"`
-	DurationMs    int     `json:"duration_ms"`
-	NumTurns      int     `json:"num_turns"`
-	// Token breakdown, from the executing claim's per-engagement accounting
-	// (the SUM over the claim's messages, stamped at release).
+	CreatorUserID string `json:"creator_user_id,omitempty"`
+	ErrorMsg      string `json:"error_msg,omitempty"`
+	// CostUSD is the SUM of the turn's messages-ledger settlement stamps;
+	// DurationMs/NumTurns come from the executing claim's telemetry.
+	CostUSD    float64 `json:"cost_usd"`
+	DurationMs int     `json:"duration_ms"`
+	NumTurns   int     `json:"num_turns"`
+	// Token breakdown: the SUM over the turn's message rows.
 	InputTokens         int        `json:"input_tokens"`
 	OutputTokens        int        `json:"output_tokens"`
 	CacheReadTokens     int        `json:"cache_read_tokens"`

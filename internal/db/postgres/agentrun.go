@@ -80,51 +80,65 @@ func releaseActiveClaim(ctx context.Context, q queryer, orgID, runID, outcome st
 	return err
 }
 
-// Complete pairs the app-pool status flip with an adjacent admin-pool claim
-// release — non-atomic by design; see releaseActiveClaim for why the split
-// is acceptable (the janitor arms make both crash shapes self-healing).
-func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
-	if err := completeRun(ctx, s.q, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+// Complete pairs the app-pool status flip + cost-lump stamp with an
+// adjacent admin-pool claim release — non-atomic by design; see
+// releaseActiveClaim for why the split is acceptable (the janitor arms make
+// both crash shapes self-healing). The cost stamp rides the app pool: the
+// messages ledger is app-writable (tf_app holds UPDATE) and the row is the
+// caller's own conversation.
+func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, lastMessageID int64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+	if err := completeRun(ctx, s.q, orgID, runID, status, costUSD, lastMessageID, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
 		return err
 	}
-	return releaseActiveClaim(ctx, s.admin, orgID, runID, claimOutcomeForStatus(status))
+	return releaseActiveClaimWithTelemetry(ctx, s.admin, orgID, runID, claimOutcomeForStatus(status), durationMs, numTurns)
 }
 
-func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, lastMessageID int64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
 	return inTx(ctx, s.admin, func(q queryer) error {
-		if err := completeRun(ctx, q, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+		if err := completeRun(ctx, q, orgID, runID, status, costUSD, lastMessageID, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
 			return err
 		}
-		return releaseActiveClaim(ctx, q, orgID, runID, claimOutcomeForStatus(status))
+		return releaseActiveClaimWithTelemetry(ctx, q, orgID, runID, claimOutcomeForStatus(status), durationMs, numTurns)
 	})
 }
 
-func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
-	// Token columns are SET to the absolute SUM over messages (the
-	// streaming sink wrote every session's rows before this terminal
-	// write), NOT accumulated like total_cost_usd — the SUM is already the
-	// full total, so re-running Complete on a resume re-sets the same
-	// correct value rather than doubling. The subqueries reuse the org/run
-	// binds ($11/$12); org_id scopes messages for defense-in-depth
-	// (and so the admin-pool BYPASSRLS path stays tenant-correct).
+func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, lastMessageID int64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+	// The conversation carries no accounting cache — cost settles as one
+	// lump on the invocation's last message row (the ledger) below. A
+	// resume's Complete stamps its own invocation's lump on its own last
+	// row, so nothing accumulates or doubles.
 	_, err := q.ExecContext(ctx, `
 		UPDATE conversations
 		SET status = $1,
 		    completed_at = $2,
-		    total_cost_usd = COALESCE(total_cost_usd, 0) + $3,
-		    duration_ms = COALESCE(duration_ms, 0) + $4,
-		    num_turns = COALESCE(num_turns, 0) + $5,
-		    stop_reason = $6,
-		    result_summary = $7,
-		    outcome = NULLIF($8, ''),
-		    outcome_reason = NULLIF($9, ''),
-		    failure_kind = NULLIF($10, ''),
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE org_id = $11 AND conversation_id = $12),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE org_id = $11 AND conversation_id = $12),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE org_id = $11 AND conversation_id = $12),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE org_id = $11 AND conversation_id = $12)
-		WHERE org_id = $11 AND id = $12
-	`, status, time.Now(), costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind, orgID, runID)
+		    stop_reason = $3,
+		    result_summary = $4,
+		    outcome = NULLIF($5, ''),
+		    outcome_reason = NULLIF($6, ''),
+		    failure_kind = NULLIF($7, '')
+		WHERE org_id = $8 AND id = $9
+	`, status, time.Now(), stopReason, resultSummary, outcome, outcomeReason, failureKind, orgID, runID)
+	if err != nil {
+		return err
+	}
+	if lastMessageID == 0 {
+		return nil
+	}
+	_, err = q.ExecContext(ctx, `
+		UPDATE messages SET cost_usd = $1
+		WHERE org_id = $2 AND conversation_id = $3 AND id = $4
+	`, costUSD, orgID, runID, lastMessageID)
+	return err
+}
+
+// releaseActiveClaimWithTelemetry is releaseActiveClaim plus the terminal
+// duration/turns stamp — the engagement telemetry the runtime reports per
+// invocation, which lives on the claim because messages can't derive it.
+func releaseActiveClaimWithTelemetry(ctx context.Context, q queryer, orgID, runID, outcome string, durationMs, numTurns int) error {
+	_, err := q.ExecContext(ctx, `
+		UPDATE claims SET released_at = now(), outcome = $1, duration_ms = $2, num_turns = $3
+		WHERE org_id = $4 AND conversation_id = $5 AND released_at IS NULL
+	`, outcome, durationMs, numTurns, orgID, runID)
 	return err
 }
 
@@ -336,20 +350,9 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, runID, failureKin
 	// 'open' is deliberately failable here (unlike 'pending_approval') — see
 	// AgentRunStore.MarkFailedIfActive: a warm 'open' run has no durable
 	// snapshot yet, so an infra error reaching failRun must terminate it.
-	//
-	// Refresh the denormalized token columns from the messages SUM, same as
-	// completeRun — an infra-failed run still streamed (and paid for) messages,
-	// so the cache must reflect them rather than strand at 0. The subqueries
-	// reuse the org/run binds ($3/$4); org_id scopes messages for
-	// defense-in-depth (and so the admin-pool BYPASSRLS path stays
-	// tenant-correct).
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, $1),
-		    failure_kind = NULLIF($2, ''),
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE org_id = $3 AND conversation_id = $4),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE org_id = $3 AND conversation_id = $4),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE org_id = $3 AND conversation_id = $4),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE org_id = $3 AND conversation_id = $4)
+		    failure_kind = NULLIF($2, '')
 		WHERE org_id = $3 AND id = $4
 		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
 		                     'pending_approval')
@@ -387,19 +390,9 @@ func (s *agentRunStore) MarkCancelledIfActiveSystem(ctx context.Context, orgID, 
 
 func markCancelledIfActive(ctx context.Context, q queryer, orgID, runID, stopReason, summary string) (bool, error) {
 	now := time.Now()
-	// Refresh the denormalized token columns from the messages SUM, same as
-	// completeRun — a run cancelled while running/open still streamed (and paid
-	// for) messages, so the cache must reflect them rather than strand at 0. The
-	// subqueries reuse the org/run binds ($4/$5); org_id scopes messages for
-	// defense-in-depth (and so the admin-pool BYPASSRLS path stays
-	// tenant-correct).
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations
-		SET status = 'cancelled', completed_at = $1, stop_reason = $2, result_summary = $3,
-		    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE org_id = $4 AND conversation_id = $5),
-		    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE org_id = $4 AND conversation_id = $5),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE org_id = $4 AND conversation_id = $5),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE org_id = $4 AND conversation_id = $5)
+		SET status = 'cancelled', completed_at = $1, stop_reason = $2, result_summary = $3
 		WHERE org_id = $4 AND id = $5
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
 		                     'pending_approval')
@@ -420,10 +413,12 @@ func markCancelledIfActive(ctx context.Context, q queryer, orgID, runID, stopRea
 // JOINs. Keeping this here keeps the simple "just the run" projection
 // uncoupled from those. task_id/status/team_id COALESCE to ” because a
 // non-delegation conversation may carry NULLs there; the claim-derived
-// fields come from the `cl` lateral (see runClaimLateral).
+// fields (incl. duration/turns telemetry) come from the `cl` lateral and
+// the ledger-derived accounting (cost + tokens) from the `msum` lateral
+// (see runClaimLateral / runLedgerLateral).
 const pgRunColumns = `
 	r.id, COALESCE(r.task_id::text, ''), COALESCE(r.status, ''), COALESCE(r.model, ''), r.started_at, r.queued_at, cl.claimed_at, r.completed_at,
-	r.total_cost_usd, r.duration_ms, r.num_turns,
+	msum.total_cost_usd, cl.duration_ms, cl.num_turns,
 	COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
 	COALESCE(r.result_summary, ''),
 	COALESCE(r.outcome, ''), COALESCE(r.outcome_reason, ''),
@@ -436,24 +431,44 @@ const pgRunColumns = `
 	COALESCE(cl.executor_id, ''),
 	cl.attempts,
 	r.blueprint_run_id, r.blueprint_step_index,
-	r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_creation_tokens,
+	msum.input_tokens, msum.output_tokens, msum.cache_read_tokens, msum.cache_creation_tokens,
 	(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing,
 	COALESCE(a.display_name, '') AS actor_agent_name
 `
 
 // runClaimLateral derives the claim-facing AgentRun fields from claims:
 // ClaimedAt is the latest claim's claimed_at, Attempts the count of
-// engagements, ExecutorID the active (unreleased) claim's executor. The
+// engagements, ExecutorID the active (unreleased) claim's executor, and
+// duration_ms/num_turns the SUM of the per-engagement telemetry. The
 // aggregate lateral always yields exactly one row, so a never-claimed
-// conversation reads (NULL, 0, NULL).
+// conversation reads (NULL, 0, NULL, NULL, NULL).
 const runClaimLateral = `
 	LEFT JOIN LATERAL (
 		SELECT MAX(c2.claimed_at) AS claimed_at,
 		       COUNT(*)::int      AS attempts,
-		       MAX(c2.executor_id) FILTER (WHERE c2.released_at IS NULL) AS executor_id
+		       MAX(c2.executor_id) FILTER (WHERE c2.released_at IS NULL) AS executor_id,
+		       SUM(c2.duration_ms)::bigint AS duration_ms,
+		       SUM(c2.num_turns)::bigint   AS num_turns
 		FROM claims c2
 		WHERE c2.conversation_id = r.id
 	) cl ON true
+`
+
+// runLedgerLateral derives the money/token accounting from the messages
+// ledger: total_cost_usd is the SUM of the settlement stamps (NULL until
+// anything settles — the frozen wire semantics of the former stored
+// column), the token columns the SUM over every row. Always exactly one
+// row, so a message-less conversation reads (NULL, 0, 0, 0, 0).
+const runLedgerLateral = `
+	LEFT JOIN LATERAL (
+		SELECT SUM(m2.cost_usd)                            AS total_cost_usd,
+		       COALESCE(SUM(m2.input_tokens), 0)::bigint          AS input_tokens,
+		       COALESCE(SUM(m2.output_tokens), 0)::bigint         AS output_tokens,
+		       COALESCE(SUM(m2.cache_read_tokens), 0)::bigint     AS cache_read_tokens,
+		       COALESCE(SUM(m2.cache_creation_tokens), 0)::bigint AS cache_creation_tokens
+		FROM messages m2
+		WHERE m2.conversation_id = r.id AND m2.org_id = r.org_id
+	) msum ON true
 `
 
 func (s *agentRunStore) Get(ctx context.Context, orgID, runID string) (*domain.AgentRun, error) {
@@ -480,6 +495,7 @@ func getRun(ctx context.Context, q queryer, orgID, runID string) (*domain.AgentR
 		LEFT JOIN run_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		`+runClaimLateral+`
+		`+runLedgerLateral+`
 		WHERE r.org_id = $1 AND r.id = $2
 	`, orgID, runID)
 
@@ -500,6 +516,7 @@ func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) (
 		LEFT JOIN run_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		`+runClaimLateral+`
+		`+runLedgerLateral+`
 		WHERE r.org_id = $1 AND r.task_id = $2
 		ORDER BY r.started_at DESC
 	`, orgID, taskID)
@@ -539,6 +556,7 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 		LEFT JOIN run_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		`+runClaimLateral+`
+		`+runLedgerLateral+`
 		WHERE r.org_id = $1 AND r.task_id = ANY($2)
 		ORDER BY r.started_at DESC
 	`, orgID, pgUUIDArray(taskIDs))
@@ -802,10 +820,10 @@ func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.
 		INSERT INTO messages (org_id, conversation_id, user_id, claim_id, role, content, subtype, tool_calls,
 		                      tool_call_id, is_error, metadata, model,
 		                      input_tokens, output_tokens,
-		                      cache_read_tokens, cache_creation_tokens, created_at,
+		                      cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 		                      reasoning, content_blocks, delivered, window_state, seq)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-		        $16, $17, $18, $19, $20, $21, $22)
+		        $16, $17, $18, $19, $20, $21, $22, $23)
 		RETURNING id
 	`,
 		orgID, msg.RunID, nullIfEmpty(msg.UserID), nullIfEmpty(msg.ClaimID),
@@ -814,7 +832,7 @@ func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.
 		nullableJSONB(metadataJSON), nullIfEmpty(msg.Model),
 		nullIntPtr(msg.InputTokens), nullIntPtr(msg.OutputTokens),
 		nullIntPtr(msg.CacheReadTokens), nullIntPtr(msg.CacheCreationTokens),
-		msg.CreatedAt,
+		nullFloatPtr(msg.CostUSD), msg.CreatedAt,
 		nullableJSONB(reasoningJSON), nullableJSONB(contentBlocksJSON), delivered,
 		string(windowState), nullFloatPtr(msg.Seq),
 	).Scan(&id)
@@ -850,7 +868,7 @@ func nullIntPtr(p *int) any {
 
 const pgMessageColumns = `id, conversation_id, COALESCE(user_id::text, ''), COALESCE(claim_id::text, ''),
 	role, content, subtype, tool_calls::text, tool_call_id, is_error, metadata::text,
-	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at,
+	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 	reasoning::text, content_blocks::text, delivered, window_state, seq`
 
 // scanAgentMessageRows drains a messages result set selecting
@@ -862,6 +880,7 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		var m domain.AgentMessage
 		var content, subtype, toolCallsStr, toolCallID, metadataStr, model sql.NullString
 		var inputTok, outputTok, cacheReadTok, cacheCreateTok sql.NullInt64
+		var costUSD sql.NullFloat64
 		var reasoningStr, contentBlocksStr sql.NullString
 		var delivered bool
 		var windowState string
@@ -870,7 +889,7 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		if err := rows.Scan(
 			&m.ID, &m.RunID, &m.UserID, &m.ClaimID, &m.Role, &content, &subtype, &toolCallsStr,
 			&toolCallID, &m.IsError, &metadataStr, &model,
-			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &m.CreatedAt,
+			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
 			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq,
 		); err != nil {
 			return nil, err
@@ -917,6 +936,10 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		if cacheCreateTok.Valid {
 			v := int(cacheCreateTok.Int64)
 			m.CacheCreationTokens = &v
+		}
+		if costUSD.Valid {
+			v := costUSD.Float64
+			m.CostUSD = &v
 		}
 		// Read back the concrete stored value (the column is NOT NULL) —
 		// unlike on insert, nil here would just mean "unknown", which is
@@ -1054,9 +1077,10 @@ func (s *agentRunStore) TokenTotalsSystem(ctx context.Context, orgID, runID stri
 func (s *agentRunStore) BlueprintSiblingCostUSDSystem(ctx context.Context, orgID, blueprintRunID, excludeRunID string) (float64, error) {
 	var cost sql.NullFloat64
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(total_cost_usd), 0)
-		FROM conversations
-		WHERE org_id = $1 AND blueprint_run_id = $2 AND id <> $3
+		SELECT COALESCE(SUM(m.cost_usd), 0)
+		FROM messages m
+		JOIN conversations c ON c.id = m.conversation_id AND c.org_id = m.org_id
+		WHERE c.org_id = $1 AND c.blueprint_run_id = $2 AND c.id <> $3
 	`, orgID, blueprintRunID, excludeRunID).Scan(&cost)
 	if err != nil {
 		return 0, err
@@ -1067,9 +1091,10 @@ func (s *agentRunStore) BlueprintSiblingCostUSDSystem(ctx context.Context, orgID
 func (s *agentRunStore) BlueprintSiblingDurationMsSystem(ctx context.Context, orgID, blueprintRunID, excludeRunID string) (int, error) {
 	var ms sql.NullInt64
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(duration_ms), 0)
-		FROM conversations
-		WHERE org_id = $1 AND blueprint_run_id = $2 AND id <> $3
+		SELECT COALESCE(SUM(cl.duration_ms), 0)
+		FROM claims cl
+		JOIN conversations c ON c.id = cl.conversation_id AND c.org_id = cl.org_id
+		WHERE c.org_id = $1 AND c.blueprint_run_id = $2 AND c.id <> $3
 	`, orgID, blueprintRunID, excludeRunID).Scan(&ms)
 	if err != nil {
 		return 0, err

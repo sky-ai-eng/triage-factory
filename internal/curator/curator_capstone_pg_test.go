@@ -148,10 +148,11 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 		t.Errorf("conversations.sdk_session_id = %q, want sess-capstone (session capture under claims)", sid)
 	}
 
-	// --- per-message tokens rolled up onto the executing claim ---
+	// --- the ledger carries the turn's tokens + the release's cost lump ---
 	// The dispatch's sink persisted the streamed message (with its token
-	// usage + claim id), and the release SET the claim's token columns from
-	// the per-claim messages SUM. Read back under alice's claims (exercises
+	// usage + claim id) and the release settled the reported cost as one
+	// lump on the claim's last row; the claim itself keeps the reported
+	// duration/turns telemetry. Read back under alice's claims (exercises
 	// the app-pool claims read-scan too).
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgA, alice, func(ts db.TxStores) error {
 		conv, err := ts.Curator.GetLiveConversation(ctx, orgA, projectA, alice)
@@ -170,11 +171,40 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 			t.Fatalf("claims = %d, want 1", len(claims))
 		}
 		cl := claims[0]
-		if cl.InputTokens != capstoneInputTokens || cl.OutputTokens != capstoneOutputTokens ||
-			cl.CacheReadTokens != capstoneCacheReadTokens || cl.CacheCreationTokens != capstoneCacheCreationTokens {
-			t.Errorf("claim tokens = (%d,%d,%d,%d), want (%d,%d,%d,%d) — per-claim messages SUM not rolled up",
-				cl.InputTokens, cl.OutputTokens, cl.CacheReadTokens, cl.CacheCreationTokens,
+		if cl.DurationMs == nil || *cl.DurationMs != 5 || cl.NumTurns == nil || *cl.NumTurns != 1 {
+			t.Errorf("claim telemetry = (%v, %v), want (5, 1) — the stub result's reported duration/turns", cl.DurationMs, cl.NumTurns)
+		}
+		msgs, err := ts.Curator.ListConversationMessages(ctx, orgA, conv.ID)
+		if err != nil {
+			return err
+		}
+		var in, out, crd, ccr int
+		var cost float64
+		for _, m := range msgs {
+			if m.InputTokens != nil {
+				in += *m.InputTokens
+			}
+			if m.OutputTokens != nil {
+				out += *m.OutputTokens
+			}
+			if m.CacheReadTokens != nil {
+				crd += *m.CacheReadTokens
+			}
+			if m.CacheCreationTokens != nil {
+				ccr += *m.CacheCreationTokens
+			}
+			if m.CostUSD != nil {
+				cost += *m.CostUSD
+			}
+		}
+		if in != capstoneInputTokens || out != capstoneOutputTokens ||
+			crd != capstoneCacheReadTokens || ccr != capstoneCacheCreationTokens {
+			t.Errorf("ledger tokens = (%d,%d,%d,%d), want (%d,%d,%d,%d)",
+				in, out, crd, ccr,
 				capstoneInputTokens, capstoneOutputTokens, capstoneCacheReadTokens, capstoneCacheCreationTokens)
+		}
+		if cost < 0.0009 || cost > 0.0011 {
+			t.Errorf("ledger cost = %v, want ~0.001 (the release's settlement lump)", cost)
 		}
 		return nil
 	}); err != nil {
@@ -454,7 +484,7 @@ func TestCurator_Postgres_Multimode_SimulatedRestartSweepsOrphans(t *testing.T) 
 // --- stub agent -----------------------------------------------------------
 
 // Token usage the driveSink stub streams on its one assistant message, so
-// tests can assert the curator_messages → curator_requests roll-up (TFAC-473).
+// tests can assert the ledger carries the turn's tokens.
 const (
 	capstoneInputTokens         = 111
 	capstoneOutputTokens        = 22

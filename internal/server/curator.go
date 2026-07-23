@@ -169,7 +169,11 @@ func (ch *curatorHandler) handleCuratorHistory(w http.ResponseWriter, r *http.Re
 // its real terminal state instead of a fabricated 'done'. No claim anywhere
 // → done. The rows between a user message and the next one are the turn's
 // agent-side stream; injection rows are internal plumbing and never reach
-// the wire.
+// the wire (their accounting — none today — would still fold into the turn
+// sums below). Cost and tokens are SUMs over the turn's rows: messages is
+// the money/token ledger, and the terminal lump lands on the turn's last
+// row (the user row itself when nothing streamed). Duration/turns still
+// come from the claim's telemetry.
 func synthesizeCuratorTurns(projectID string, messages []domain.AgentMessage, claims []domain.Claim) []curatorRequestJSON {
 	claimByID := make(map[string]domain.Claim, len(claims))
 	for _, c := range claims {
@@ -197,9 +201,31 @@ func synthesizeCuratorTurns(projectID string, messages []domain.AgentMessage, cl
 		curUserClaimID = ""
 		curQueued = false
 	}
+	accumulate := func(m *domain.AgentMessage) {
+		if cur == nil {
+			return
+		}
+		if m.CostUSD != nil {
+			cur.CostUSD += *m.CostUSD
+		}
+		if m.InputTokens != nil {
+			cur.InputTokens += *m.InputTokens
+		}
+		if m.OutputTokens != nil {
+			cur.OutputTokens += *m.OutputTokens
+		}
+		if m.CacheReadTokens != nil {
+			cur.CacheReadTokens += *m.CacheReadTokens
+		}
+		if m.CacheCreationTokens != nil {
+			cur.CacheCreationTokens += *m.CacheCreationTokens
+		}
+	}
 
-	for _, m := range messages {
+	for i := range messages {
+		m := messages[i]
 		if strings.HasPrefix(m.Subtype, "injection:") {
+			accumulate(&m)
 			continue
 		}
 		if m.Role == "user" && m.Subtype == "text" {
@@ -216,6 +242,7 @@ func synthesizeCuratorTurns(projectID string, messages []domain.AgentMessage, cl
 			}
 			curQueued = m.Delivered != nil && !*m.Delivered
 			curUserClaimID = m.ClaimID
+			accumulate(&m)
 			continue
 		}
 		if cur == nil {
@@ -224,6 +251,7 @@ func synthesizeCuratorTurns(projectID string, messages []domain.AgentMessage, cl
 		if curClaimID == "" && m.ClaimID != "" {
 			curClaimID = m.ClaimID
 		}
+		accumulate(&m)
 		cur.Messages = append(cur.Messages, domain.CuratorMessage{
 			ID:                  m.ID,
 			RequestID:           cur.ID,
@@ -248,8 +276,9 @@ func synthesizeCuratorTurns(projectID string, messages []domain.AgentMessage, cl
 	return out
 }
 
-// applyCuratorTurnStatus stamps one synthesized turn's status + accounting
-// from its executing claim.
+// applyCuratorTurnStatus stamps one synthesized turn's status, times, and
+// the claim's duration/turns telemetry. Cost and tokens are NOT read here —
+// the caller already summed them from the turn's message rows.
 func applyCuratorTurnStatus(turn *curatorRequestJSON, queued bool, claimID string, claimByID map[string]domain.Claim) {
 	if queued {
 		turn.Status = "queued"
@@ -267,19 +296,12 @@ func applyCuratorTurnStatus(turn *curatorRequestJSON, queued bool, claimID strin
 	turn.StartedAt = &started
 	turn.FinishedAt = c.ReleasedAt
 	turn.ErrorMsg = c.Error
-	if c.CostUSD != nil {
-		turn.CostUSD = *c.CostUSD
-	}
 	if c.DurationMs != nil {
 		turn.DurationMs = *c.DurationMs
 	}
 	if c.NumTurns != nil {
 		turn.NumTurns = *c.NumTurns
 	}
-	turn.InputTokens = c.InputTokens
-	turn.OutputTokens = c.OutputTokens
-	turn.CacheReadTokens = c.CacheReadTokens
-	turn.CacheCreationTokens = c.CacheCreationTokens
 	if c.ReleasedAt == nil {
 		turn.Status = "running"
 		return

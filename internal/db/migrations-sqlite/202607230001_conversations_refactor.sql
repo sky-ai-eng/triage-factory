@@ -50,11 +50,22 @@ ALTER TABLE run_worktrees        RENAME COLUMN run_id TO conversation_id;
 PRAGMA foreign_keys = off;
 
 -- Stage the runs-era claim columns before the rebuild discards them; the
--- claims mint below (step 4) reads this snapshot. Dropped at the end.
+-- claims mint below (step 4) reads this snapshot. duration_ms / num_turns
+-- ride along — the flattened engagement telemetry lands on the one migrated
+-- claim. Dropped at the end.
 CREATE TABLE conversations_claim_src AS
-SELECT id, executor_id, boot_epoch, cred_pubkey, claimed_at
+SELECT id, executor_id, boot_epoch, cred_pubkey, claimed_at,
+       duration_ms, num_turns
 FROM conversations
 WHERE executor_id IS NOT NULL;
+
+-- Stage the runs-era settled dollars too: the historical cost stamp
+-- (step 5b) re-keys each conversation's total onto its last message row,
+-- claim or no claim. Dropped at the end.
+CREATE TABLE conversations_cost_src AS
+SELECT id, total_cost_usd
+FROM conversations
+WHERE total_cost_usd IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- 2. The target conversations shape. Differences from the runs era: type /
@@ -63,7 +74,11 @@ WHERE executor_id IS NOT NULL;
 -- projects.curator_session_id); team_id and status drop NOT NULL (a curator
 -- conversation may carry a NULL team snapshot and has no work lifecycle);
 -- the claim machinery (claimed_at / attempts / executor_id / boot_epoch /
--- cred_pubkey) moves to claims.
+-- cred_pubkey) moves to claims. The accounting cache columns
+-- (total_cost_usd / duration_ms / num_turns / the four token rollups) are
+-- gone entirely: messages is the money/token ledger (cost_usd + per-row
+-- tokens, summed at read time), claims carry the per-engagement
+-- duration/turns telemetry.
 CREATE TABLE conversations_new (
     id              TEXT PRIMARY KEY,
     org_id          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
@@ -108,13 +123,6 @@ CREATE TABLE conversations_new (
     -- deleting history (the curator's reset / new-chat mechanism). An
     -- archived conversation is never claimed again.
     archived_at     DATETIME,
-    duration_ms     INTEGER,
-    num_turns       INTEGER,
-    total_cost_usd  REAL,
-    input_tokens    INTEGER NOT NULL DEFAULT 0,
-    output_tokens   INTEGER NOT NULL DEFAULT 0,
-    cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
-    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
     actor_agent_id  TEXT REFERENCES agents(id) ON DELETE SET NULL,
     -- Curator anchor: the owning project (knowledge base, homing,
     -- cascade-delete). NULL for every other type.
@@ -152,8 +160,7 @@ INSERT INTO conversations_new (
     prompt_id, trigger_id, trigger_type, origin, runtime, status, model,
     sdk_session_id, worktree_path, result_summary, outcome, outcome_reason,
     failure_kind, stop_reason, started_at, completed_at, parked_at,
-    duration_ms, num_turns, total_cost_usd, input_tokens, output_tokens,
-    cache_read_tokens, cache_creation_tokens, actor_agent_id,
+    actor_agent_id,
     blueprint_run_id, blueprint_step_index, triggering_event_id, queued_at,
     preferred_executor_id)
 SELECT
@@ -161,8 +168,7 @@ SELECT
     prompt_id, trigger_id, trigger_type, origin, 'sdk', status, model,
     session_id, worktree_path, result_summary, outcome, outcome_reason,
     failure_kind, stop_reason, started_at, completed_at, parked_at,
-    duration_ms, num_turns, total_cost_usd, input_tokens, output_tokens,
-    cache_read_tokens, cache_creation_tokens, actor_agent_id,
+    actor_agent_id,
     blueprint_run_id, blueprint_step_index, triggering_event_id, queued_at,
     preferred_executor_id
 FROM conversations;
@@ -251,13 +257,11 @@ CREATE TABLE claims (
     -- 'parked' | 'reaped'. NULL while live.
     outcome         TEXT,
     error           TEXT,
-    cost_usd        REAL,
+    -- Engagement telemetry the runtime reports per invocation and nothing
+    -- can derive from messages. Dollars and tokens deliberately do NOT
+    -- live here — messages is the ledger.
     duration_ms     INTEGER,
     num_turns       INTEGER,
-    input_tokens    INTEGER NOT NULL DEFAULT 0,
-    output_tokens   INTEGER NOT NULL DEFAULT 0,
-    cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
-    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX claims_id_org_unique   ON claims (id, org_id);
@@ -271,7 +275,8 @@ CREATE INDEX        idx_claims_conversation ON claims(conversation_id, claimed_a
 -- 'open' row releases as 'parked'; anything else was mid-flight at migration
 -- time and stays an active claim for the boot sweep to reconcile.
 INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
-                    cred_pubkey, claimed_at, released_at, outcome)
+                    cred_pubkey, claimed_at, released_at, outcome,
+                    duration_ms, num_turns)
 SELECT
     c.id, c.org_id, c.id, r_executor_id, COALESCE(r_boot_epoch, 0),
     r_cred_pubkey, COALESCE(r_claimed_at, c.started_at),
@@ -287,10 +292,12 @@ SELECT
       WHEN 'cancelled'        THEN 'cancelled'
       WHEN 'task_unsolvable'  THEN 'failed'
       WHEN 'open'             THEN 'parked'
-    END
+    END,
+    r_duration_ms, r_num_turns
 FROM (SELECT id, org_id, status, started_at, completed_at, parked_at FROM conversations WHERE type = 'delegation') c
 JOIN (SELECT id AS rid, executor_id AS r_executor_id, boot_epoch AS r_boot_epoch,
-             cred_pubkey AS r_cred_pubkey, claimed_at AS r_claimed_at
+             cred_pubkey AS r_cred_pubkey, claimed_at AS r_claimed_at,
+             duration_ms AS r_duration_ms, num_turns AS r_num_turns
         FROM conversations_claim_src) src ON src.rid = c.id;
 
 -- Curator turns: one claim per non-queued request (a queued request never
@@ -298,8 +305,7 @@ JOIN (SELECT id AS rid, executor_id AS r_executor_id, boot_epoch AS r_boot_epoch
 -- mode has no homing, so executor_id falls back to the '' sentinel.
 INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
                     cred_pubkey, claimed_at, released_at, outcome, error,
-                    cost_usd, duration_ms, num_turns, input_tokens,
-                    output_tokens, cache_read_tokens, cache_creation_tokens)
+                    duration_ms, num_turns)
 SELECT
     cr.id, cr.org_id, conv.id, COALESCE(cr.home_instance_id, ''), 0,
     NULLIF(cr.cred_pubkey, ''),
@@ -311,9 +317,7 @@ SELECT
       WHEN 'cancelled' THEN 'cancelled'
       WHEN 'failed'    THEN 'failed'
     END,
-    cr.error_msg, cr.cost_usd, cr.duration_ms, cr.num_turns,
-    cr.input_tokens, cr.output_tokens, cr.cache_read_tokens,
-    cr.cache_creation_tokens
+    cr.error_msg, cr.duration_ms, cr.num_turns
 FROM curator_requests cr
 JOIN conversations conv
   ON conv.project_id = cr.project_id
@@ -347,6 +351,13 @@ CREATE TABLE messages (
     output_tokens         INTEGER,
     cache_read_tokens     INTEGER,
     cache_creation_tokens INTEGER,
+    -- Dollars settled at this row: NULL = not a settlement row, 0 =
+    -- genuinely free. The runtime stamps an invocation's reported total
+    -- as ONE lump on the invocation's last recorded row at terminal time
+    -- (no proration — proration without a pricing table would be
+    -- confidently wrong), so SUM over any window is the spend in that
+    -- window.
+    cost_usd              REAL,
     created_at            DATETIME DEFAULT CURRENT_TIMESTAMP,
     -- Replay-only reasoning details ({index, type, text?, signature?,
     -- data?}); the API validates signatures, not ordering.
@@ -387,7 +398,9 @@ ORDER BY rm.id;
 -- curator_requests.user_input — queued requests arrive undelivered)
 -- followed by its streamed rows, appended in (request, arm, row) order so
 -- fresh AUTOINCREMENT ids preserve the transcript order under
--- COALESCE(seq, id).
+-- COALESCE(seq, id). An executed request's user row carries its claim,
+-- exactly as live delivery stamps it — which also makes the turn's rows
+-- one claim-keyed group for the cost stamp below.
 INSERT INTO messages (org_id, conversation_id, user_id, claim_id, role,
                       content, subtype, tool_calls, tool_call_id, is_error,
                       metadata, model, input_tokens, output_tokens,
@@ -399,7 +412,8 @@ SELECT org_id, conversation_id, user_id, claim_id, role, content, subtype,
        created_at
 FROM (
   SELECT cr.org_id AS org_id, conv.id AS conversation_id,
-         cr.creator_user_id AS user_id, NULL AS claim_id,
+         cr.creator_user_id AS user_id,
+         CASE WHEN cr.status <> 'queued' THEN cr.id END AS claim_id,
          'user' AS role, cr.user_input AS content, 'text' AS subtype,
          NULL AS tool_calls, NULL AS tool_call_id, 0 AS is_error,
          NULL AS metadata, NULL AS model, NULL AS input_tokens,
@@ -429,6 +443,32 @@ FROM (
      AND conv.type = 'curator'
 )
 ORDER BY ord1, ord2, ord3, ord4;
+
+-- ---------------------------------------------------------------------------
+-- 5b. Historical dollars re-key onto the ledger: each conversation's / each
+-- curator turn's settled total lands as one lump on its LAST message row —
+-- delegation from the staged runs-era rollup keyed by conversation, curator
+-- from each request's per-turn cost keyed by the claim its rows carry
+-- (MAX(id) is the last stream row, or the user row itself when nothing
+-- streamed). Runs BEFORE step 6 so a pending side-table row can never be
+-- mistaken for a transcript's last message. A conversation/turn with
+-- dollars but zero rows loses the stamp — accepted: a result-reported cost
+-- implies streamed messages, so the residue is negligible.
+UPDATE messages SET cost_usd = (
+    SELECT s.total_cost_usd FROM conversations_cost_src s
+    WHERE s.id = messages.conversation_id)
+WHERE messages.id IN (
+    SELECT MAX(m.id) FROM messages m
+    JOIN conversations_cost_src s ON s.id = m.conversation_id
+    GROUP BY m.conversation_id);
+
+UPDATE messages SET cost_usd = (
+    SELECT cr.cost_usd FROM curator_requests cr WHERE cr.id = messages.claim_id)
+WHERE messages.id IN (
+    SELECT MAX(m.id) FROM messages m
+    JOIN curator_requests cr ON cr.id = m.claim_id
+    WHERE cr.cost_usd IS NOT NULL
+    GROUP BY m.claim_id);
 
 -- ---------------------------------------------------------------------------
 -- 6. The pending side-tables dissolve into undelivered message rows.
@@ -473,52 +513,39 @@ DROP TABLE staged_agent_injections;
 DROP TABLE run_credentials;
 DROP TABLE curator_turn_credentials;
 DROP TABLE conversations_claim_src;
+DROP TABLE conversations_cost_src;
 ALTER TABLE projects DROP COLUMN curator_session_id;
 
 -- ---------------------------------------------------------------------------
--- 8. llm_spend, re-keyed: the delegation arm reads conversation rollups; the
--- curator arm reads per-CLAIM accounting (the former per-request row — one
--- claim per turn) attributed through the owning conversation's team/creator
--- snapshot; the system arm is unchanged.
+-- 8. llm_spend, re-keyed onto the ledger: ONE messages-based arm covers both
+-- agent surfaces — a row participates when it carries tokens (an assistant
+-- row) or settled dollars (any cost-stamped row) — attributed through the
+-- owning conversation's team/creator/actor/trigger snapshot (curator
+-- conversations carry NULL actor/trigger by construction); the system arm is
+-- unchanged.
 CREATE VIEW llm_spend AS
-  SELECT 'run' AS source,
-         id AS source_id,
-         org_id,
-         team_id,
-         CASE trigger_type WHEN 'manual' THEN 'manual' ELSE 'autonomous' END AS category,
-         NULL AS subtype,
-         creator_user_id,
-         actor_agent_id,
-         trigger_id,
-         model,
-         COALESCE(total_cost_usd, 0) AS total_cost_usd,
-         input_tokens,
-         output_tokens,
-         cache_read_tokens,
-         cache_creation_tokens,
-         started_at AS occurred_at
-  FROM conversations
-  WHERE type = 'delegation'
-  UNION ALL
-  SELECT 'curator' AS source,
-         cl.id AS source_id,
-         cl.org_id,
+  SELECT CASE c.type WHEN 'delegation' THEN 'run' ELSE 'curator' END AS source,
+         m.id AS source_id,
+         m.org_id,
          c.team_id,
-         'curator' AS category,
+         CASE WHEN c.type = 'curator' THEN 'curator'
+              WHEN c.trigger_type = 'manual' THEN 'manual'
+              ELSE 'autonomous' END AS category,
          NULL AS subtype,
          c.creator_user_id,
-         NULL AS actor_agent_id,
-         NULL AS trigger_id,
-         NULL AS model,
-         COALESCE(cl.cost_usd, 0) AS total_cost_usd,
-         cl.input_tokens,
-         cl.output_tokens,
-         cl.cache_read_tokens,
-         cl.cache_creation_tokens,
-         cl.claimed_at AS occurred_at
-  FROM claims cl
-  JOIN conversations c ON c.id = cl.conversation_id
-  WHERE c.type = 'curator'
+         c.actor_agent_id,
+         c.trigger_id,
+         m.model,
+         COALESCE(m.cost_usd, 0) AS total_cost_usd,
+         COALESCE(m.input_tokens, 0) AS input_tokens,
+         COALESCE(m.output_tokens, 0) AS output_tokens,
+         COALESCE(m.cache_read_tokens, 0) AS cache_read_tokens,
+         COALESCE(m.cache_creation_tokens, 0) AS cache_creation_tokens,
+         m.created_at AS occurred_at
+  FROM messages m
+  JOIN conversations c ON c.id = m.conversation_id
+  WHERE c.type IN ('delegation', 'curator')
+    AND (m.role = 'assistant' OR m.cost_usd IS NOT NULL)
   UNION ALL
   SELECT 'system' AS source,
          id AS source_id,

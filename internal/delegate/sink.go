@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -42,6 +43,22 @@ type runSink struct {
 	// Because each agentproc.Run call gets a fresh sink, this does
 	// not deduplicate across separate resume invocations.
 	sessionDelivered bool
+
+	// lastMsgID is the id of this invocation's most recently inserted
+	// message row — where the terminal write settles the invocation's
+	// reported cost as one lump. 0 = nothing recorded yet. Guarded
+	// because OnMessage runs on the stream-reader goroutine while the
+	// completion path reads from the driver's.
+	mu        sync.Mutex
+	lastMsgID int64
+}
+
+// lastMessageID returns the id of the invocation's last recorded message
+// row (0 = none) — the completion path's cost-settlement target.
+func (k *runSink) lastMessageID() int64 {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.lastMsgID
 }
 
 func newRunSink(s *Spawner, orgID, runID, triggerType, creatorUserID string) *runSink {
@@ -104,6 +121,9 @@ func (k *runSink) OnMessage(msg *domain.AgentMessage) error {
 		id = i
 	}
 	msg.ID = int(id)
+	k.mu.Lock()
+	k.lastMsgID = id
+	k.mu.Unlock()
 	k.spawner.broadcastMessage(k.orgID, k.runID, msg)
 	return nil
 }

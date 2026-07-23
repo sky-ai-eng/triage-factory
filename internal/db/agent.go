@@ -44,11 +44,20 @@ import (
 type AgentRunStore interface {
 	// --- Lifecycle ---
 
-	// Complete finalizes a conversation with the terminal totals folded
-	// into any partial totals already on the row, and releases the
-	// conversation's active claim (if one exists) with an outcome mapped
-	// from status: 'failed'/'task_unsolvable' release as 'failed',
-	// 'cancelled' as 'cancelled', anything else as 'completed'.
+	// Complete finalizes a conversation (status + terminal narrative
+	// fields only — the conversation carries no accounting cache) and
+	// releases the conversation's active claim (if one exists) with an
+	// outcome mapped from status ('failed'/'task_unsolvable' release as
+	// 'failed', 'cancelled' as 'cancelled', anything else as 'completed'),
+	// stamping the invocation's reported duration/turns telemetry onto the
+	// released claim.
+	//
+	// costUSD is the invocation's reported total, settled as ONE lump on
+	// the messages row lastMessageID (the invocation's last recorded row —
+	// the delegate sink tracks it); lastMessageID 0 means the invocation
+	// recorded no rows and the lump has nowhere to settle (dropped, same
+	// as the pre-refactor park path). No proration across rows — proration
+	// without a pricing table is confidently wrong.
 	//
 	// outcome / outcomeReason persist the parsed terminal-envelope
 	// outcome and (abort-only) reason; pass "" for both on runs that
@@ -57,7 +66,7 @@ type AgentRunStore interface {
 	// failureKind is the machine-readable failure discriminator
 	// (domain.RunFailureKind vocabulary) — non-empty only when status
 	// is 'failed' and the caller classified the cause; "" → NULL.
-	Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
+	Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, lastMessageID int64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
 
 	// MarkOpen flips a running run to `open` — a turn ended without a
 	// conclusion (or the live process idle-closed). Stamps parked_at to the
@@ -143,7 +152,9 @@ type AgentRunStore interface {
 	// conversation type, not just delegation (curator/subagent rows
 	// hydrate the same shape). MemoryMissing is derived from a LEFT JOIN
 	// to run_memory; ClaimedAt/Attempts/ExecutorID derive from claims per
-	// the interface doc.
+	// the interface doc. The accounting fields are derived too:
+	// TotalCostUSD + the four token fields are SUMs over the messages
+	// ledger, DurationMs/NumTurns SUMs over the claims' telemetry.
 	Get(ctx context.Context, orgID, runID string) (*domain.AgentRun, error)
 
 	// ListForTask returns all runs for a given task, ordered
@@ -327,6 +338,7 @@ type AgentRunStore interface {
 	// pool the statement runs on; SQLite has one connection and the
 	// two variants collapse.
 	GetSystem(ctx context.Context, orgID, runID string) (*domain.AgentRun, error)
+	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, lastMessageID int64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
 	// LookupOrgForRunSystem returns the owning orgID for the given
 	// runID, or the empty string with a nil error if no such run
 	// exists. Used by the cmd/exec runident helper to discover the
@@ -335,7 +347,6 @@ type AgentRunStore interface {
 	// has been passed in. Routes through the admin pool because the
 	// agent subprocess has no JWT-claims context yet.
 	LookupOrgForRunSystem(ctx context.Context, runID string) (string, error)
-	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
 	MarkOpenSystem(ctx context.Context, orgID, runID string) (bool, error)
 	SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error
 	// SetStatusSystem writes conversations.status without a guard. Used by
@@ -383,18 +394,18 @@ type AgentRunStore interface {
 	// claims tx just to read one aggregate row.
 	TokenTotalsSystem(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error)
 
-	// BlueprintSiblingCostUSDSystem sums conversations.total_cost_usd across
-	// every run in blueprintRunID EXCEPT excludeRunID, counting only settled
-	// (non-NULL) costs. agentmeta.Build adds this to the authoring run's
+	// BlueprintSiblingCostUSDSystem sums the messages ledger's cost_usd
+	// stamps across every run in blueprintRunID EXCEPT excludeRunID.
+	// agentmeta.Build adds this to the authoring run's
 	// own cost so a multi-step blueprint's published review/PR discloses
 	// the total spend across all steps, not just the step that authored
 	// it. Routes through the admin pool in Postgres — the footer builds
 	// from claims-less contexts (agent subprocess, post-approval submit).
 	BlueprintSiblingCostUSDSystem(ctx context.Context, orgID, blueprintRunID, excludeRunID string) (float64, error)
 
-	// BlueprintSiblingDurationMsSystem sums conversations.duration_ms across
-	// every run in blueprintRunID EXCEPT excludeRunID, counting only settled
-	// (non-NULL) durations. agentmeta.Build adds this to the authoring
+	// BlueprintSiblingDurationMsSystem sums the claims' duration_ms
+	// telemetry across every run in blueprintRunID EXCEPT excludeRunID.
+	// agentmeta.Build adds this to the authoring
 	// run's own duration so a multi-step blueprint's published review/PR
 	// discloses the total time spent across all steps, not just the step
 	// that authored it — the time analog of BlueprintSiblingCostUSDSystem.

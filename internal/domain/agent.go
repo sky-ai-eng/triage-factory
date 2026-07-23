@@ -131,23 +131,22 @@ type Conversation struct {
 	// StartedAt stays the mint stamp and DurationMs stays pure working time
 	// (the SDK-reported per-turn duration, never wall clock across the
 	// queue). Both nil on legacy rows that predate the queue columns.
-	QueuedAt     *time.Time
-	ClaimedAt    *time.Time
-	CompletedAt  *time.Time
+	QueuedAt    *time.Time
+	ClaimedAt   *time.Time
+	CompletedAt *time.Time
+	// TotalCostUSD / DurationMs / NumTurns are derived at read time, not
+	// stored: cost is the SUM of the messages ledger's cost_usd stamps,
+	// duration/turns the SUM of the claims' per-engagement telemetry. nil
+	// when nothing has settled yet. Wire shape unchanged from the
+	// stored-column era.
 	TotalCostUSD *float64
 	DurationMs   *int
 	NumTurns     *int
 
-	// Token breakdown denormalized onto the run at completion — SET to the
-	// full SUM over run_messages by AgentRunStore.Complete (absolute, so
-	// idempotent across resumes; not additive like total_cost_usd). Plain
-	// ints because the columns are INTEGER NOT NULL DEFAULT 0 (0 for a run
-	// that never streamed a usage-bearing message). Mirrors
-	// system_llm_runs' columns so the unified spend view (TFAC-472) reads
-	// tokens natively for delegated runs. snake_case json tags match the
-	// curator_requests token fields and AgentRun's own recent additions
-	// (blueprint_run_id, attempts), so a direct json.Marshal stays
-	// consistent. TFAC-473.
+	// Token breakdown, derived at read time as the SUM over this
+	// conversation's messages (plain ints — 0 for a run that never
+	// streamed a usage-bearing message). Mirrors system_llm_runs' columns;
+	// snake_case json tags keep the frozen wire shape.
 	InputTokens         int `json:"input_tokens"`
 	OutputTokens        int `json:"output_tokens"`
 	CacheReadTokens     int `json:"cache_read_tokens"`
@@ -293,7 +292,12 @@ type Message struct {
 	OutputTokens        *int
 	CacheReadTokens     *int
 	CacheCreationTokens *int
-	CreatedAt           time.Time
+	// CostUSD is dollars settled at this row: nil = not a settlement row,
+	// 0 = genuinely free. The runtime stamps an invocation's reported
+	// total as one lump on the invocation's last recorded row at terminal
+	// time, so a SUM over any window is the spend in that window.
+	CostUSD   *float64
+	CreatedAt time.Time
 
 	// Reasoning is the model's persisted chain-of-thought for this message —
 	// nil when the message carries none. Reference-only (see ReasoningDetail):
@@ -417,8 +421,9 @@ type AgentRun = Conversation
 type AgentMessage = Message
 
 // Claim is one executor engagement with a conversation: who drove it, when,
-// with what sealed credentials, at what per-engagement cost. At most one
-// active (ReleasedAt == nil) claim exists per conversation.
+// with what sealed credentials. At most one active (ReleasedAt == nil) claim
+// exists per conversation. Dollars and tokens live on Message (the ledger),
+// never here.
 type Claim struct {
 	ID             string `json:"id"`
 	OrgID          string `json:"org_id,omitempty"`
@@ -435,13 +440,9 @@ type Claim struct {
 	// "cancelled" | "requeued" | "parked" | "reaped". Empty while live.
 	Outcome string `json:"outcome,omitempty"`
 	Error   string `json:"error,omitempty"`
-	// Per-engagement accounting (the curator's former per-request numbers).
-	CostUSD             *float64  `json:"cost_usd,omitempty"`
-	DurationMs          *int      `json:"duration_ms,omitempty"`
-	NumTurns            *int      `json:"num_turns,omitempty"`
-	InputTokens         int       `json:"input_tokens"`
-	OutputTokens        int       `json:"output_tokens"`
-	CacheReadTokens     int       `json:"cache_read_tokens"`
-	CacheCreationTokens int       `json:"cache_creation_tokens"`
-	CreatedAt           time.Time `json:"created_at"`
+	// Engagement telemetry the runtime reports per invocation — not
+	// derivable from messages.
+	DurationMs *int      `json:"duration_ms,omitempty"`
+	NumTurns   *int      `json:"num_turns,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }

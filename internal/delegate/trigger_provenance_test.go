@@ -58,13 +58,21 @@ func TestDelegate_EventPath_StampsTriggerIDOnStepRun(t *testing.T) {
 		t.Errorf("step-0 run (trigger_type, trigger_id) = (%q, %q), want (\"event\", %q)", gotType, gotTrig, trigID)
 	}
 
-	// End-to-end into the spend layer: the llm_spend row for this run pairs
-	// category='autonomous' with the firing rule — the invariant the usage
-	// page's by-category / by-rule split depends on.
+	// End-to-end into the spend layer: give the run one ledger row (the
+	// view reads messages, so a run with no stream has no spend rows yet)
+	// and check the row pairs category='autonomous' with the firing rule —
+	// the invariant the usage page's by-category / by-rule split depends on.
+	if _, err := database.Exec(`
+		INSERT INTO messages (org_id, conversation_id, role, subtype, content)
+		VALUES (?, ?, 'assistant', 'text', 'work')
+	`, org, runID); err != nil {
+		t.Fatalf("seed ledger row: %v", err)
+	}
 	var cat string
 	var viewTrig sql.NullString
 	if err := database.QueryRow(
-		`SELECT category, trigger_id FROM llm_spend WHERE source = 'run' AND source_id = ?`, runID,
+		`SELECT category, trigger_id FROM llm_spend
+		 WHERE source = 'run' AND source_id = (SELECT id FROM messages WHERE conversation_id = ?)`, runID,
 	).Scan(&cat, &viewTrig); err != nil {
 		t.Fatalf("read llm_spend row: %v", err)
 	}

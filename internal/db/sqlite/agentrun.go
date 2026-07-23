@@ -60,40 +60,45 @@ func releaseActiveClaim(ctx context.Context, q queryer, runID, outcome string) e
 	return err
 }
 
-func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, lastMessageID int64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	// Token columns are SET to the absolute SUM over messages (the
-	// streaming sink wrote every session's messages before this terminal
-	// write), NOT accumulated like total_cost_usd — the SUM is already the
-	// full total, so re-running Complete on a resume re-sets the same
-	// correct value rather than doubling.
+	// The conversation carries no accounting cache: cost settles as one
+	// lump on the invocation's last message row (the ledger), and the
+	// reported duration/turns telemetry rides the claim release. A resume's
+	// Complete stamps its own invocation's lump on its own last row, so
+	// nothing accumulates or doubles.
 	return inTx(ctx, s.q, func(q queryer) error {
 		_, err := q.ExecContext(ctx, `
 			UPDATE conversations
 			SET status = ?,
 			    completed_at = ?,
-			    total_cost_usd = COALESCE(total_cost_usd, 0) + ?,
-			    duration_ms = COALESCE(duration_ms, 0) + ?,
-			    num_turns = COALESCE(num_turns, 0) + ?,
 			    stop_reason = ?,
 			    result_summary = ?,
 			    outcome = ?,
 			    outcome_reason = ?,
-			    failure_kind = ?,
-			    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE conversation_id = ?),
-			    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE conversation_id = ?),
-			    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE conversation_id = ?),
-			    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE conversation_id = ?)
+			    failure_kind = ?
 			WHERE id = ?
-		`, status, time.Now(), costUSD, durationMs, numTurns, stopReason, resultSummary,
+		`, status, time.Now(), stopReason, resultSummary,
 			nullIfEmpty(outcome), nullIfEmpty(outcomeReason), nullIfEmpty(failureKind),
-			runID, runID, runID, runID, runID)
+			runID)
 		if err != nil {
 			return err
 		}
-		return releaseActiveClaim(ctx, q, runID, claimOutcomeForStatus(status))
+		if lastMessageID != 0 {
+			if _, err := q.ExecContext(ctx, `
+				UPDATE messages SET cost_usd = ?
+				WHERE conversation_id = ? AND id = ?
+			`, costUSD, runID, lastMessageID); err != nil {
+				return err
+			}
+		}
+		_, err = q.ExecContext(ctx, `
+			UPDATE claims SET released_at = ?, outcome = ?, duration_ms = ?, num_turns = ?
+			WHERE conversation_id = ? AND released_at IS NULL
+		`, time.Now().UTC(), claimOutcomeForStatus(status), durationMs, numTurns, runID)
+		return err
 	})
 }
 
@@ -227,23 +232,15 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID, fa
 	// 'open' is deliberately failable here (unlike 'pending_approval') — see
 	// AgentRunStore.MarkFailedIfActive: a warm 'open' run has no durable
 	// snapshot yet, so an infra error reaching failRun must terminate it.
-	//
-	// Refresh the denormalized token columns from the messages SUM, same as
-	// Complete — an infra-failed run still streamed (and paid for) messages, so
-	// the cache must reflect them rather than strand at 0.
 	var flipped bool
 	err := inTx(ctx, s.q, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, ?),
-			    failure_kind = ?,
-			    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE conversation_id = ?),
-			    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE conversation_id = ?),
-			    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE conversation_id = ?),
-			    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE conversation_id = ?)
+			    failure_kind = ?
 			WHERE id = ?
 			  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
 			                     'pending_approval')
-		`, time.Now().UTC(), nullIfEmpty(failureKind), runID, runID, runID, runID, runID)
+		`, time.Now().UTC(), nullIfEmpty(failureKind), runID)
 		if err != nil {
 			return err
 		}
@@ -265,22 +262,15 @@ func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID,
 		return false, err
 	}
 	now := time.Now()
-	// Refresh the denormalized token columns from the messages SUM, same as
-	// Complete — a run cancelled while running/open still streamed (and paid
-	// for) messages, so the cache must reflect them rather than strand at 0.
 	var flipped bool
 	err := inTx(ctx, s.q, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations
-			SET status = 'cancelled', completed_at = ?, stop_reason = ?, result_summary = ?,
-			    input_tokens          = (SELECT COALESCE(SUM(input_tokens), 0)          FROM messages WHERE conversation_id = ?),
-			    output_tokens         = (SELECT COALESCE(SUM(output_tokens), 0)         FROM messages WHERE conversation_id = ?),
-			    cache_read_tokens     = (SELECT COALESCE(SUM(cache_read_tokens), 0)     FROM messages WHERE conversation_id = ?),
-			    cache_creation_tokens = (SELECT COALESCE(SUM(cache_creation_tokens), 0) FROM messages WHERE conversation_id = ?)
+			SET status = 'cancelled', completed_at = ?, stop_reason = ?, result_summary = ?
 			WHERE id = ?
 			  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
 			                     'pending_approval')
-		`, now, stopReason, summary, runID, runID, runID, runID, runID)
+		`, now, stopReason, summary, runID)
 		if err != nil {
 			return err
 		}
@@ -304,14 +294,18 @@ func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID,
 // memory_missing derivation uses SQLite's TRIM(...) variant with the
 // explicit whitespace charset (Postgres uses BTRIM with an E'...'
 // escape string). The claim-derived columns (claimed_at / executor_id /
-// attempts) are correlated subselects over claims; claimed_at loses its
-// declared column type inside the subselect, so it scans as text and
-// parses via parseDBDatetime.
+// attempts / duration_ms / num_turns) are correlated subselects over
+// claims and the accounting columns (cost + tokens) subselects over the
+// messages ledger; claimed_at loses its declared column type inside the
+// subselect, so it scans as text and parses via parseDBDatetime.
 const sqliteRunColumns = `
 	r.id, COALESCE(r.task_id, ''), COALESCE(r.status, ''), r.model, r.started_at, r.queued_at,
 	(SELECT MAX(cl.claimed_at) FROM claims cl WHERE cl.conversation_id = r.id) AS claimed_at,
 	r.completed_at,
-	r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
+	(SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id)     AS total_cost_usd,
+	(SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = r.id) AS duration_ms,
+	(SELECT SUM(cl.num_turns) FROM claims cl WHERE cl.conversation_id = r.id)   AS num_turns,
+	r.stop_reason, r.worktree_path,
 	r.result_summary, r.outcome, r.outcome_reason, r.failure_kind, r.sdk_session_id, r.actor_agent_id,
 	COALESCE(r.trigger_type, ''),
 	r.creator_user_id,
@@ -319,7 +313,10 @@ const sqliteRunColumns = `
 	(SELECT cl.executor_id FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL) AS executor_id,
 	(SELECT COUNT(*) FROM claims cl WHERE cl.conversation_id = r.id) AS attempts,
 	r.blueprint_run_id, r.blueprint_step_index,
-	r.input_tokens, r.output_tokens, r.cache_read_tokens, r.cache_creation_tokens,
+	(SELECT COALESCE(SUM(m.input_tokens), 0)          FROM messages m WHERE m.conversation_id = r.id) AS input_tokens,
+	(SELECT COALESCE(SUM(m.output_tokens), 0)         FROM messages m WHERE m.conversation_id = r.id) AS output_tokens,
+	(SELECT COALESCE(SUM(m.cache_read_tokens), 0)     FROM messages m WHERE m.conversation_id = r.id) AS cache_read_tokens,
+	(SELECT COALESCE(SUM(m.cache_creation_tokens), 0) FROM messages m WHERE m.conversation_id = r.id) AS cache_creation_tokens,
 	(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
 	COALESCE(a.display_name, '') AS actor_agent_name
 `
@@ -540,8 +537,8 @@ func (s *agentRunStore) LookupOrgForRunSystem(ctx context.Context, runID string)
 	return orgID, err
 }
 
-func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
-	return s.Complete(ctx, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind)
+func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, lastMessageID int64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+	return s.Complete(ctx, orgID, runID, status, costUSD, durationMs, numTurns, lastMessageID, stopReason, resultSummary, outcome, outcomeReason, failureKind)
 }
 
 func (s *agentRunStore) MarkOpenSystem(ctx context.Context, orgID, runID string) (bool, error) {
@@ -758,16 +755,16 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 	result, err := s.q.ExecContext(ctx, `
 		INSERT INTO messages (conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id,
 		                      is_error, metadata, model,
-		                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at,
+		                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 		                      reasoning, content_blocks, delivered, window_state, seq)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		msg.RunID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID),
 		msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, sqliteNullStr(msg.ToolCallID), msg.IsError, metadataJSON,
 		sqliteNullStr(msg.Model), sqliteNullInt(msg.InputTokens), sqliteNullInt(msg.OutputTokens),
 		sqliteNullInt(msg.CacheReadTokens), sqliteNullInt(msg.CacheCreationTokens),
-		msg.CreatedAt,
+		sqliteNullFloat(msg.CostUSD), msg.CreatedAt,
 		reasoningJSON, contentBlocksJSON, delivered, string(windowState), sqliteNullFloat(msg.Seq),
 	)
 	if err != nil {
@@ -777,7 +774,7 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 }
 
 const sqliteMessageColumns = `id, conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
-	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at,
+	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 	reasoning, content_blocks, delivered, window_state, seq`
 
 // scanAgentMessageRows drains a messages result set selecting
@@ -790,6 +787,7 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		var userID, claimID sql.NullString
 		var content, subtype, toolCallsStr, toolCallID, metadataStr, model sql.NullString
 		var inputTok, outputTok, cacheReadTok, cacheCreateTok sql.NullInt64
+		var costUSD sql.NullFloat64
 		var reasoningStr, contentBlocksStr sql.NullString
 		var delivered bool
 		var windowState string
@@ -798,7 +796,7 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		if err := rows.Scan(
 			&m.ID, &m.RunID, &userID, &claimID, &m.Role, &content, &subtype, &toolCallsStr,
 			&toolCallID, &m.IsError, &metadataStr, &model,
-			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &m.CreatedAt,
+			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
 			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq,
 		); err != nil {
 			return nil, err
@@ -847,6 +845,10 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		if cacheCreateTok.Valid {
 			v := int(cacheCreateTok.Int64)
 			m.CacheCreationTokens = &v
+		}
+		if costUSD.Valid {
+			v := costUSD.Float64
+			m.CostUSD = &v
 		}
 		// Read back the concrete stored value (the column is NOT NULL) —
 		// unlike on insert, nil here would just mean "unknown", which is
@@ -1031,9 +1033,10 @@ func (s *agentRunStore) BlueprintSiblingCostUSDSystem(ctx context.Context, orgID
 	}
 	var cost sql.NullFloat64
 	err := s.q.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(total_cost_usd), 0)
-		FROM conversations
-		WHERE blueprint_run_id = ? AND id <> ?
+		SELECT COALESCE(SUM(m.cost_usd), 0)
+		FROM messages m
+		JOIN conversations c ON c.id = m.conversation_id
+		WHERE c.blueprint_run_id = ? AND c.id <> ?
 	`, blueprintRunID, excludeRunID).Scan(&cost)
 	if err != nil {
 		return 0, err
@@ -1047,9 +1050,10 @@ func (s *agentRunStore) BlueprintSiblingDurationMsSystem(ctx context.Context, or
 	}
 	var ms sql.NullInt64
 	err := s.q.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(duration_ms), 0)
-		FROM conversations
-		WHERE blueprint_run_id = ? AND id <> ?
+		SELECT COALESCE(SUM(cl.duration_ms), 0)
+		FROM claims cl
+		JOIN conversations c ON c.id = cl.conversation_id
+		WHERE c.blueprint_run_id = ? AND c.id <> ?
 	`, blueprintRunID, excludeRunID).Scan(&ms)
 	if err != nil {
 		return 0, err

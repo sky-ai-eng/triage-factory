@@ -1110,7 +1110,10 @@ func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID stri
 	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, task_id, prompt_id, status, model, started_at, completed_at,
-		       total_cost_usd, duration_ms, num_turns, stop_reason, worktree_path,
+		       (SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = conversations.id AND m.org_id = conversations.org_id),
+		       (SELECT SUM(cl.duration_ms)::bigint FROM claims cl WHERE cl.conversation_id = conversations.id),
+		       (SELECT SUM(cl.num_turns)::bigint FROM claims cl WHERE cl.conversation_id = conversations.id),
+		       stop_reason, worktree_path,
 		       result_summary, sdk_session_id, outcome, outcome_reason,
 		       blueprint_run_id, blueprint_step_index
 		FROM conversations

@@ -500,8 +500,8 @@ func TestCancelStrandedCuratorTurns_CancelsDeadHomeOnly(t *testing.T) {
 	_, survivorClaim := insertTurn(liveExec)
 
 	// The stranded turn already streamed a token-bearing message before its
-	// home died — the sweep must roll those up onto the released claim, not
-	// strand llm_spend at 0.
+	// home died — the ledger keeps it; the sweep is an outcome/error release
+	// only and must not disturb the row.
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO messages (org_id, conversation_id, user_id, claim_id, role, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
 		VALUES ($1, $2, $3, $4, 'assistant', 7, 13, 5, 9)
@@ -515,21 +515,28 @@ func TestCancelStrandedCuratorTurns_CancelsDeadHomeOnly(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("cancelled %d turns, want 1 (only the dead-home claim)", n)
 	}
-	// The stranded claim is released cancelled with the token roll-up.
+	// The stranded claim is released cancelled; the streamed tokens still
+	// read through the ledger.
 	var released bool
 	var outcome string
-	var in, out, cr, cc int
 	if err := h.AdminDB.QueryRowContext(ctx,
-		`SELECT released_at IS NOT NULL, COALESCE(outcome, ''), input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
-		   FROM claims WHERE id = $1`, strandedClaim,
-	).Scan(&released, &outcome, &in, &out, &cr, &cc); err != nil {
+		`SELECT released_at IS NOT NULL, COALESCE(outcome, '') FROM claims WHERE id = $1`, strandedClaim,
+	).Scan(&released, &outcome); err != nil {
 		t.Fatalf("read back stranded claim: %v", err)
 	}
 	if !released || outcome != "cancelled" {
 		t.Errorf("stranded claim = (released=%v outcome=%q), want (true, cancelled)", released, outcome)
 	}
+	var in, out, cr, cc int
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+		        COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_creation_tokens), 0)
+		   FROM messages WHERE claim_id = $1`, strandedClaim,
+	).Scan(&in, &out, &cr, &cc); err != nil {
+		t.Fatalf("read back stranded ledger: %v", err)
+	}
 	if in != 7 || out != 13 || cr != 5 || cc != 9 {
-		t.Errorf("stranded-claim token roll-up = (%d,%d,%d,%d), want (7,13,5,9)", in, out, cr, cc)
+		t.Errorf("stranded-turn ledger tokens = (%d,%d,%d,%d), want (7,13,5,9)", in, out, cr, cc)
 	}
 
 	// The live-home claim is untouched (still active, no outcome).

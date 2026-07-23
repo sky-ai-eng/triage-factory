@@ -535,8 +535,11 @@ func TestTryAutoDelegate_SameTask_StageToNonResumableRun_NoOrphanedRow(t *testin
 		t.Fatalf("expected the firing to fall through to the normal deferral, got %d pending_firings rows", len(rows))
 	}
 
+	// Withdrawn-pending rows retire as window_state='inactive' (delivered
+	// stays 0 — withdrawn means the note never happened), so "orphaned"
+	// means an undelivered row still in the flushable set.
 	var staged int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND delivered = 0 AND subtype = 'injection:system-note'`, activeRunID).Scan(&staged); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND delivered = 0 AND window_state <> 'inactive' AND subtype = 'injection:system-note'`, activeRunID).Scan(&staged); err != nil {
 		t.Fatalf("count staged injection messages: %v", err)
 	}
 	if staged != 0 {

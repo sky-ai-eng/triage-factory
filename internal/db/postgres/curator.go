@@ -55,10 +55,10 @@ func (s *curatorStore) GetOrCreateConversation(ctx context.Context, orgID, proje
 		id := uuid.New().String()
 		// team_id snapshots from the project at mint (point-in-time, like the
 		// delegation side) so curator spend attributes to the project's team;
-		// the llm_spend curator arm reads the claim → conversation join.
-		// status is explicit NULL — a curator conversation has no work
-		// lifecycle; its turn state derives from messages + claims. The RLS
-		// INSERT policy pins creator_user_id to the caller's claims.
+		// the llm_spend view attributes the messages ledger through this
+		// snapshot. status is explicit NULL — a curator conversation has no
+		// work lifecycle; its turn state derives from messages + claims. The
+		// RLS INSERT policy pins creator_user_id to the caller's claims.
 		if _, err := q.ExecContext(ctx, `
 			INSERT INTO conversations (
 				id, org_id, type, creator_user_id, team_id, visibility,
@@ -430,25 +430,36 @@ func (s *curatorStore) DeadLetterTurnSystem(ctx context.Context, orgID, conversa
 }
 
 func (s *curatorStore) ReleaseActiveTurnSystem(ctx context.Context, orgID, conversationID, outcome, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error) {
-	// The token columns SET to the absolute per-claim messages SUM on every
-	// terminal write, cancel included, so a turn killed mid-stream still
-	// reports the spend it streamed — the per-engagement roll-up the
-	// llm_spend curator arm reads.
-	res, err := s.admin.ExecContext(ctx, `
-		UPDATE claims
-		SET released_at = now(), outcome = $1, error = $2,
-		    cost_usd = $3, duration_ms = $4, num_turns = $5,
-		    input_tokens          = (SELECT COALESCE(SUM(m.input_tokens), 0)          FROM messages m WHERE m.claim_id = claims.id),
-		    output_tokens         = (SELECT COALESCE(SUM(m.output_tokens), 0)         FROM messages m WHERE m.claim_id = claims.id),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(m.cache_read_tokens), 0)     FROM messages m WHERE m.claim_id = claims.id),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(m.cache_creation_tokens), 0) FROM messages m WHERE m.claim_id = claims.id)
-		WHERE org_id = $6 AND conversation_id = $7 AND released_at IS NULL
-	`, outcome, nullIfEmpty(errMsg), costUSD, durationMs, numTurns, orgID, conversationID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
+	// The claim keeps only the engagement telemetry (duration/turns); the
+	// turn's dollars settle as one lump on the claim's LAST message row —
+	// the user row when nothing streamed (BeginTurn stamped it with this
+	// claim). Every terminal write stamps, cancel included, so a turn
+	// killed mid-stream still reports the spend it settled.
+	released := false
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		var claimID string
+		err := q.QueryRowContext(ctx, `
+			UPDATE claims
+			SET released_at = now(), outcome = $1, error = $2, duration_ms = $3, num_turns = $4
+			WHERE org_id = $5 AND conversation_id = $6 AND released_at IS NULL
+			RETURNING id
+		`, outcome, nullIfEmpty(errMsg), durationMs, numTurns, orgID, conversationID).Scan(&claimID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE messages SET cost_usd = $1
+			WHERE id = (SELECT MAX(m.id) FROM messages m WHERE m.claim_id = $2)
+		`, costUSD, claimID); err != nil {
+			return err
+		}
+		released = true
+		return nil
+	})
+	return released, err
 }
 
 func (s *curatorStore) RevertTurnContext(ctx context.Context, orgID, conversationID string, consumed []domain.CuratorContextChange, auditMessageID int64) error {
@@ -531,18 +542,13 @@ func (s *curatorStore) ListClaimableTurnsForHomeSystem(ctx context.Context, home
 	return out, rows.Err()
 }
 
-// CancelStrandedTurnsForHomeSystem rolls the token cache up from the
-// per-claim messages SUM, same as every other terminal write: a running turn
-// stranded on this pod's dead prior boot may have streamed (and paid for)
-// messages before it died.
+// CancelStrandedTurnsForHomeSystem is an outcome/error release only: the
+// ledger already holds whatever the stranded turn streamed, and a turn whose
+// home died has no reported cost lump to settle.
 func (s *curatorStore) CancelStrandedTurnsForHomeSystem(ctx context.Context, homeInstanceID string, bootEpoch int64, errMsg string) (int, error) {
 	res, err := s.admin.ExecContext(ctx, `
 		UPDATE claims
-		SET released_at = now(), outcome = 'cancelled', error = COALESCE(error, $1),
-		    input_tokens          = (SELECT COALESCE(SUM(m.input_tokens), 0)          FROM messages m WHERE m.claim_id = claims.id),
-		    output_tokens         = (SELECT COALESCE(SUM(m.output_tokens), 0)         FROM messages m WHERE m.claim_id = claims.id),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(m.cache_read_tokens), 0)     FROM messages m WHERE m.claim_id = claims.id),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(m.cache_creation_tokens), 0) FROM messages m WHERE m.claim_id = claims.id)
+		SET released_at = now(), outcome = 'cancelled', error = COALESCE(error, $1)
 		WHERE executor_id = $2 AND boot_epoch < $3 AND released_at IS NULL
 		  AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = claims.conversation_id AND c.type = 'curator')
 	`, errMsg, homeInstanceID, bootEpoch)
@@ -556,11 +562,7 @@ func (s *curatorStore) CancelStrandedTurnsForHomeSystem(ctx context.Context, hom
 func (s *curatorStore) CancelOrphanedTurnsSystem(ctx context.Context) (int, error) {
 	res, err := s.admin.ExecContext(ctx, `
 		UPDATE claims
-		SET released_at = now(), outcome = 'cancelled', error = COALESCE(error, 'process restarted'),
-		    input_tokens          = (SELECT COALESCE(SUM(m.input_tokens), 0)          FROM messages m WHERE m.claim_id = claims.id),
-		    output_tokens         = (SELECT COALESCE(SUM(m.output_tokens), 0)         FROM messages m WHERE m.claim_id = claims.id),
-		    cache_read_tokens     = (SELECT COALESCE(SUM(m.cache_read_tokens), 0)     FROM messages m WHERE m.claim_id = claims.id),
-		    cache_creation_tokens = (SELECT COALESCE(SUM(m.cache_creation_tokens), 0) FROM messages m WHERE m.claim_id = claims.id)
+		SET released_at = now(), outcome = 'cancelled', error = COALESCE(error, 'process restarted')
 		WHERE released_at IS NULL
 		  AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = claims.conversation_id AND c.type = 'curator')
 	`)
@@ -741,14 +743,12 @@ func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID 
 			}
 			if _, err := q.ExecContext(ctx, `
 				INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
-				                    claimed_at, released_at, outcome, error, cost_usd,
-				                    duration_ms, num_turns, input_tokens, output_tokens,
-				                    cache_read_tokens, cache_creation_tokens)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+				                    claimed_at, released_at, outcome, error,
+				                    duration_ms, num_turns)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			`, cl.ID, orgID, conv.ID, cl.ExecutorID, cl.BootEpoch,
 				cl.ClaimedAt.UTC(), released, nullIfEmpty(cl.Outcome), nullIfEmpty(cl.Error),
-				nullFloat64Ptr(cl.CostUSD), nullIntPtr(cl.DurationMs), nullIntPtr(cl.NumTurns),
-				cl.InputTokens, cl.OutputTokens, cl.CacheReadTokens, cl.CacheCreationTokens); err != nil {
+				nullIntPtr(cl.DurationMs), nullIntPtr(cl.NumTurns)); err != nil {
 				return fmt.Errorf("import curator claim %s: %w", cl.ID, err)
 			}
 		}
@@ -764,8 +764,7 @@ func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID 
 // --- Shared scan helpers ---
 
 const pgClaimColumns = `id, org_id, conversation_id, executor_id, boot_epoch, claimed_at,
-	released_at, outcome, error, cost_usd, duration_ms, num_turns,
-	input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at`
+	released_at, outcome, error, duration_ms, num_turns, created_at`
 
 func scanPgClaimRows(rows *sql.Rows) ([]domain.Claim, error) {
 	var out []domain.Claim
@@ -775,14 +774,12 @@ func scanPgClaimRows(rows *sql.Rows) ([]domain.Claim, error) {
 			releasedAt sql.NullTime
 			outcome    sql.NullString
 			errMsg     sql.NullString
-			costUSD    sql.NullFloat64
 			durationMs sql.NullInt64
 			numTurns   sql.NullInt64
 		)
 		if err := rows.Scan(
 			&c.ID, &c.OrgID, &c.ConversationID, &c.ExecutorID, &c.BootEpoch, &c.ClaimedAt,
-			&releasedAt, &outcome, &errMsg, &costUSD, &durationMs, &numTurns,
-			&c.InputTokens, &c.OutputTokens, &c.CacheReadTokens, &c.CacheCreationTokens, &c.CreatedAt,
+			&releasedAt, &outcome, &errMsg, &durationMs, &numTurns, &c.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -792,10 +789,6 @@ func scanPgClaimRows(rows *sql.Rows) ([]domain.Claim, error) {
 		}
 		c.Outcome = outcome.String
 		c.Error = errMsg.String
-		if costUSD.Valid {
-			v := costUSD.Float64
-			c.CostUSD = &v
-		}
 		if durationMs.Valid {
 			v := int(durationMs.Int64)
 			c.DurationMs = &v

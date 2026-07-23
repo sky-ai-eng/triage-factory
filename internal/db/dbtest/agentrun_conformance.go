@@ -167,21 +167,53 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
-	t.Run("Complete_FoldsTotalsAndStampsCompletedAt", func(t *testing.T) {
+	t.Run("Complete_SettlesCostLumpAndClaimTelemetry", func(t *testing.T) {
+		// Two invocation cycles (initial + resume). Each Complete settles its
+		// invocation's reported cost as ONE lump on that invocation's last
+		// message row and stamps its duration/turns onto the claim it
+		// releases; the read projection then derives cost as the ledger SUM
+		// and duration/turns as the claims SUM — so two cycles ADD without
+		// any stored accumulator.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		runID := seedAgentRunForTest(t, orgID, seed, "running")
 
-		// Two Completes exercise the COALESCE+add accumulation the resume
-		// path relies on (the first stands in for a prior invocation's
-		// partial totals).
-		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 4000, 3, "partial", "", "", "", ""); err != nil {
+		msg1, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "turn 1"})
+		if err != nil {
+			t.Fatalf("InsertMessage 1: %v", err)
+		}
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-cost", 1); err != nil {
+			t.Fatalf("SetExecutorSystem 1: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 4000, 3, msg1, "partial", "", "", "", ""); err != nil {
 			t.Fatalf("first Complete: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 2000, 5, "ok", "all done", "abort", "needs human", ""); err != nil {
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get after first: err=%v, got=%v", err, got)
+		}
+		if got.TotalCostUSD == nil || *got.TotalCostUSD != 1.25 {
+			t.Errorf("total_cost_usd after first = %v, want 1.25", got.TotalCostUSD)
+		}
+		if got.DurationMs == nil || *got.DurationMs != 4000 {
+			t.Errorf("duration_ms after first = %v, want 4000", got.DurationMs)
+		}
+		if got.NumTurns == nil || *got.NumTurns != 3 {
+			t.Errorf("num_turns after first = %v, want 3", got.NumTurns)
+		}
+
+		// The resume invocation records its own row + claim, then settles.
+		msg2, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "turn 2"})
+		if err != nil {
+			t.Fatalf("InsertMessage 2: %v", err)
+		}
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-cost", 2); err != nil {
+			t.Fatalf("SetExecutorSystem 2: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 2000, 5, msg2, "ok", "all done", "abort", "needs human", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
-		got, err := store.Get(ctx, orgID, runID)
+		got, err = store.Get(ctx, orgID, runID)
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v, got=%v", err, got)
 		}
@@ -192,13 +224,13 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Errorf("completed_at not stamped")
 		}
 		if got.TotalCostUSD == nil || *got.TotalCostUSD != 2.0 {
-			t.Errorf("total_cost_usd = %v, want 2.0 (prior 1.25 + terminal 0.75)", got.TotalCostUSD)
+			t.Errorf("total_cost_usd = %v, want 2.0 (lump 1.25 + lump 0.75 over the ledger)", got.TotalCostUSD)
 		}
 		if got.DurationMs == nil || *got.DurationMs != 6000 {
-			t.Errorf("duration_ms = %v, want 6000", got.DurationMs)
+			t.Errorf("duration_ms = %v, want 6000 (claims telemetry SUM)", got.DurationMs)
 		}
 		if got.NumTurns == nil || *got.NumTurns != 8 {
-			t.Errorf("num_turns = %v, want 8", got.NumTurns)
+			t.Errorf("num_turns = %v, want 8 (claims telemetry SUM)", got.NumTurns)
 		}
 		if got.StopReason != "ok" {
 			t.Errorf("stop_reason = %q, want ok", got.StopReason)
@@ -209,16 +241,56 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if got.OutcomeReason != "needs human" {
 			t.Errorf("outcome_reason = %q, want \"needs human\"", got.OutcomeReason)
 		}
+
+		// The stamps land exactly where reported: one lump per invocation's
+		// last row, no proration.
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		costByID := map[int]*float64{}
+		for i := range msgs {
+			costByID[msgs[i].ID] = msgs[i].CostUSD
+		}
+		if c := costByID[int(msg1)]; c == nil || *c != 1.25 {
+			t.Errorf("msg1 cost_usd = %v, want 1.25", c)
+		}
+		if c := costByID[int(msg2)]; c == nil || *c != 0.75 {
+			t.Errorf("msg2 cost_usd = %v, want 0.75", c)
+		}
 	})
 
-	t.Run("Complete_DenormalizesMessageTokens_AbsoluteAcrossResumes", func(t *testing.T) {
+	t.Run("Complete_ZeroLastMessageID_SettlesNothing", func(t *testing.T) {
+		// lastMessageID 0 = the invocation recorded no rows: the lump has no
+		// settlement target and is dropped, and no existing row may be
+		// touched.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
+		if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "prior"}); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, runID, "completed", 9.99, 0, 0, 0, "", "", "finish", "", ""); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.TotalCostUSD != nil {
+			t.Errorf("total_cost_usd = %v, want nil (nothing settled)", *got.TotalCostUSD)
+		}
+	})
+
+	t.Run("TokensDeriveFromMessagesLedger", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		runID := seedAgentRunForTest(t, orgID, seed, "running")
 
-		// messages is the source of truth (written by the streaming
-		// sink as messages arrive). Complete sums the four token columns
-		// onto the run. Two assistant rows so the SUM is non-trivial.
+		// messages is the source of truth (written by the streaming sink as
+		// messages arrive); the read projection SUMs it live — no terminal
+		// write is needed for the totals to appear, and re-Completing can't
+		// double them. Two assistant rows so the SUM is non-trivial.
 		ptr := func(n int) *int { return &n }
 		for _, m := range []*domain.AgentMessage{
 			{RunID: runID, Role: "assistant", Subtype: "text", Content: "a",
@@ -231,9 +303,6 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			}
 		}
 
-		if err := store.Complete(ctx, orgID, runID, "completed", 0.1, 1000, 2, "ok", "done", "finish", "", ""); err != nil {
-			t.Fatalf("Complete: %v", err)
-		}
 		got, err := store.Get(ctx, orgID, runID)
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v got=%v", err, got)
@@ -243,27 +312,23 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 				got.InputTokens, got.OutputTokens, got.CacheReadTokens, got.CacheCreationTokens)
 		}
 
-		// Re-Complete simulates a resume re-running completion. Tokens are
-		// SET to the absolute messages SUM (not added like cost), so a
-		// second Complete with no new messages re-sets the same value — they
-		// must stay (150,25,1500,10), NOT double.
-		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "ok", "done", "finish", "", ""); err != nil {
-			t.Fatalf("re-Complete: %v", err)
+		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, 0, "ok", "done", "finish", "", ""); err != nil {
+			t.Fatalf("Complete: %v", err)
 		}
 		got2, err := store.Get(ctx, orgID, runID)
 		if err != nil || got2 == nil {
-			t.Fatalf("Get after re-Complete: err=%v got=%v", err, got2)
+			t.Fatalf("Get after Complete: err=%v got=%v", err, got2)
 		}
 		if got2.InputTokens != 150 || got2.OutputTokens != 25 || got2.CacheReadTokens != 1500 || got2.CacheCreationTokens != 10 {
-			t.Errorf("after re-Complete token cols = (%d,%d,%d,%d), want unchanged (150,25,1500,10) — SET must be absolute, not additive",
+			t.Errorf("after Complete token cols = (%d,%d,%d,%d), want unchanged (150,25,1500,10) — the ledger is the only source",
 				got2.InputTokens, got2.OutputTokens, got2.CacheReadTokens, got2.CacheCreationTokens)
 		}
 	})
 
-	// Every terminal write — not just Complete — refreshes the token cache from
-	// the messages SUM, so a run that ends by cancel or infra-failure still
-	// reflects the tokens it streamed rather than stranding the columns at 0.
-	t.Run("CancelAndFail_DenormalizeMessageTokens", func(t *testing.T) {
+	// Tokens derive from the messages ledger at read time, so a run that
+	// ends by cancel or infra-failure still reflects the tokens it streamed
+	// with no terminal roll-up at all.
+	t.Run("CancelAndFail_TokensStillDeriveFromLedger", func(t *testing.T) {
 		ptr := func(n int) *int { return &n }
 		seedRunningWithTokens := func(t *testing.T, store db.AgentRunStore, orgID string, seed AgentRunSeeder) string {
 			t.Helper()
@@ -288,7 +353,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 				t.Fatalf("Get: err=%v got=%v", err, got)
 			}
 			if got.InputTokens != 150 || got.OutputTokens != 25 || got.CacheReadTokens != 1500 || got.CacheCreationTokens != 10 {
-				t.Errorf("token cols = (%d,%d,%d,%d), want (150,25,1500,10) — terminal write did not roll up the messages SUM",
+				t.Errorf("token cols = (%d,%d,%d,%d), want (150,25,1500,10) — ledger SUM must survive the terminal write",
 					got.InputTokens, got.OutputTokens, got.CacheReadTokens, got.CacheCreationTokens)
 			}
 		}
@@ -352,7 +417,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		ctx := context.Background()
 
 		runID := seedAgentRunForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, "", "", "", "", string(domain.RunFailureAgentError)); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, 0, "", "", "", "", string(domain.RunFailureAgentError)); err != nil {
 			t.Fatalf("Complete with kind: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, runID)
@@ -368,7 +433,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 
 		// Empty kind on a failed Complete → NULL → unclassified zero value.
 		plainID := seedAgentRunForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, plainID, "failed", 0, 0, 0, "", "", "", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, plainID, "failed", 0, 0, 0, 0, "", "", "", "", ""); err != nil {
 			t.Fatalf("Complete without kind: %v", err)
 		}
 		if got, _ := store.Get(ctx, orgID, plainID); got == nil || got.FailureKind != domain.RunFailureUnclassified {
@@ -454,7 +519,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 
 		// completed + outcome=abort → ok (message-resumable).
 		abortRun := seedAgentRunForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "", "stopped", "abort", "needs a human", ""); err != nil {
+		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, 0, "", "stopped", "abort", "needs a human", ""); err != nil {
 			t.Fatalf("complete+abort: %v", err)
 		}
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, abortRun); err != nil || !ok {
@@ -462,7 +527,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 		// completed + outcome=finish → refused (finish excluded).
 		finishRun := seedAgentRunForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, "", "shipped", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, 0, "", "shipped", "finish", "", ""); err != nil {
 			t.Fatalf("complete+finish: %v", err)
 		}
 		if ok, _ := store.MarkQueuedForResume(ctx, orgID, finishRun); ok {
@@ -614,14 +679,14 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 
 		t.Run("Complete_completed", func(t *testing.T) {
 			runID := stage(t)
-			if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+			if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, 0, "", "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
 			assertReleased(t, runID, "completed")
 		})
 		t.Run("Complete_failed", func(t *testing.T) {
 			runID := stage(t)
-			if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, "", "", "", "", ""); err != nil {
+			if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, 0, "", "", "", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
 			assertReleased(t, runID, "failed")
@@ -674,7 +739,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			// claim (simulating a racing engagement), then fail — the guard
 			// refuses and the claim stays live.
 			runID := stage(t)
-			if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+			if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, 0, "", "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
 			if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-race", 9); err != nil {
@@ -901,7 +966,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		// Terminate the event run; only terminal event-trigger rows
 		// remain plus the still-running manual — gate flips back to
 		// false.
-		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, 0, "", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); has {
@@ -945,7 +1010,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 
 		// Terminate it — terminal-only, plus the still-active manual run,
 		// resolves back to ("", "").
-		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, 0, "", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		if id, tid, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != "" || tid != "" {
@@ -1680,12 +1745,20 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
-		if err := store.Complete(ctx, orgID, step1, "completed", 0.01, 1000, 1, "ok", "", "finish", "", ""); err != nil {
-			t.Fatalf("Complete step1: %v", err)
+		// Each step streams a row and settles its cost lump on it — the
+		// sibling sum reads the ledger, not any run-level column.
+		settle := func(stepID string, cost float64) {
+			t.Helper()
+			msgID, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: stepID, Role: "assistant", Subtype: "text", Content: "work"})
+			if err != nil {
+				t.Fatalf("InsertMessage %s: %v", stepID, err)
+			}
+			if err := store.Complete(ctx, orgID, stepID, "completed", cost, 1000, 1, msgID, "ok", "", "finish", "", ""); err != nil {
+				t.Fatalf("Complete %s: %v", stepID, err)
+			}
 		}
-		if err := store.Complete(ctx, orgID, step2, "completed", 0.02, 1000, 1, "ok", "", "finish", "", ""); err != nil {
-			t.Fatalf("Complete step2: %v", err)
-		}
+		settle(step1, 0.01)
+		settle(step2, 0.02)
 
 		near := func(got, want float64) bool { return got-want < 1e-9 && want-got < 1e-9 }
 
@@ -1714,9 +1787,8 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Errorf("sibling cost for empty blueprint_run = %v, want 0", sib)
 		}
 
-		// An unsettled sibling (seeded, never completed → NULL
-		// total_cost_usd) contributes 0, not an error: SUM skips the NULL
-		// and COALESCE floors the all-NULL case at 0. Add a third,
+		// An unsettled sibling (seeded, never completed → no settlement
+		// stamps on its rows) contributes 0, not an error. Add a third,
 		// never-completed step and re-query for step2 — the settled total
 		// is unchanged (step1's 0.01 only).
 		_ = seed.Run(t, domain.AgentRun{
@@ -1740,7 +1812,9 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 		brID := seed.BlueprintRun(t, taskID)
 
-		// Two runs sharing one blueprint_run — sibling steps.
+		// Two runs sharing one blueprint_run — sibling steps. Duration lives
+		// on the claim Complete releases, so each step goes live (minting a
+		// claim) before it completes.
 		step1 := seed.Run(t, domain.AgentRun{
 			TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
@@ -1749,13 +1823,17 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
-		// Complete's 6th/7th args are durationMs / numTurns.
-		if err := store.Complete(ctx, orgID, step1, "completed", 0.01, 1000, 1, "ok", "", "finish", "", ""); err != nil {
-			t.Fatalf("Complete step1: %v", err)
+		settle := func(stepID string, durationMs int) {
+			t.Helper()
+			if err := store.SetExecutorSystem(ctx, orgID, stepID, "exec-dur", 1); err != nil {
+				t.Fatalf("SetExecutorSystem %s: %v", stepID, err)
+			}
+			if err := store.Complete(ctx, orgID, stepID, "completed", 0, durationMs, 1, 0, "ok", "", "finish", "", ""); err != nil {
+				t.Fatalf("Complete %s: %v", stepID, err)
+			}
 		}
-		if err := store.Complete(ctx, orgID, step2, "completed", 0.02, 2000, 1, "ok", "", "finish", "", ""); err != nil {
-			t.Fatalf("Complete step2: %v", err)
-		}
+		settle(step1, 1000)
+		settle(step2, 2000)
 
 		// Querying for step2 returns step1's settled duration only (self excluded).
 		ms, err := store.BlueprintSiblingDurationMsSystem(ctx, orgID, brID, step2)
@@ -1781,8 +1859,8 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if ms != 0 {
 			t.Errorf("sibling duration for empty blueprint_run = %d, want 0", ms)
 		}
-		// An unsettled sibling (seeded, never completed → NULL duration_ms)
-		// contributes 0: SUM skips the NULL, COALESCE floors at 0.
+		// An unsettled sibling (seeded, never claimed nor completed → no
+		// claim telemetry) contributes 0: SUM skips it, COALESCE floors at 0.
 		_ = seed.Run(t, domain.AgentRun{
 			TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", BlueprintRunID: brID,

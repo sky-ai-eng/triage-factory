@@ -182,9 +182,10 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.AgentRuns.MarkOpenSystem(ctx, orgID, runID); err != nil {
 			t.Errorf("AgentRuns.MarkOpenSystem: %v", err)
 		}
-		if _, err := stores.AgentRuns.InsertMessageSystem(ctx, orgID, &domain.AgentMessage{
+		msgID, err := stores.AgentRuns.InsertMessageSystem(ctx, orgID, &domain.AgentMessage{
 			RunID: runID, Role: "assistant", Content: "hello", Subtype: "text",
-		}); err != nil {
+		})
+		if err != nil {
 			t.Errorf("AgentRuns.InsertMessageSystem: %v", err)
 		}
 		if _, err := stores.AgentRuns.GetSystem(ctx, orgID, runID); err != nil {
@@ -193,7 +194,9 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if err := stores.AgentRuns.SetWorktreePathSystem(ctx, orgID, runID, "/tmp/conformance-wt"); err != nil {
 			t.Errorf("AgentRuns.SetWorktreePathSystem: %v", err)
 		}
-		if err := stores.AgentRuns.CompleteSystem(ctx, orgID, runID, "completed", 0.01, 1000, 3,
+		// lastMessageID exercises the terminal cost stamp's messages UPDATE
+		// under the executor role's grant set.
+		if err := stores.AgentRuns.CompleteSystem(ctx, orgID, runID, "completed", 0.01, 1000, 3, msgID,
 			"", "did the thing", "completed", "", ""); err != nil {
 			t.Errorf("AgentRuns.CompleteSystem: %v", err)
 		}
