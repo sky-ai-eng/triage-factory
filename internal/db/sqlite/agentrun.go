@@ -13,6 +13,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
 // agentRunStore is the SQLite impl of db.AgentRunStore over the
@@ -26,6 +27,8 @@ import (
 // SQLite side never grew the second arg. The
 // `...System` admin-pool variants are thin wrappers around their
 // non-System counterparts on the SQLite side.
+var agentRunLog = logging.Component("db/agentrun")
+
 type agentRunStore struct{ q queryer }
 
 func newAgentRunStore(q queryer) db.AgentRunStore { return &agentRunStore{q: q} }
@@ -87,11 +90,44 @@ func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status strin
 			return err
 		}
 		if lastMessageID != 0 {
+			// Overwrite, not add: lastMessageID is this invocation's own
+			// fresh last row, and the lump is that invocation's whole total.
 			if _, err := q.ExecContext(ctx, `
 				UPDATE messages SET cost_usd = ?
 				WHERE conversation_id = ? AND id = ?
 			`, costUSD, runID, lastMessageID); err != nil {
 				return err
+			}
+		} else if costUSD != 0 {
+			// An invocation can bill real tokens while streaming zero
+			// parsable messages (system-prompt/cache overhead on an errored
+			// run), and the messages ledger is the only spend record — so the
+			// lump settles on the conversation's newest existing row rather
+			// than being dropped. ADDITIVE, unlike the overwrite above: that
+			// row may already carry an earlier invocation's lump. The caveat:
+			// a rowless resume's spend lands on an older invocation's row —
+			// totals stay exact, per-row time attribution smears; accepted
+			// for this narrow corner. Keyed by conversation, not claim (the
+			// curator turn release's shape), because delegation message rows
+			// carry no claim stamp at insert time for a claim to locate.
+			res, err := q.ExecContext(ctx, `
+				UPDATE messages SET cost_usd = COALESCE(cost_usd, 0) + ?
+				WHERE conversation_id = ?
+				  AND id = (SELECT MAX(id) FROM messages WHERE conversation_id = ?)
+			`, costUSD, runID, runID)
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				// No message rows at all: the spend has no ledger row to
+				// live on. Loud, so the dropped dollars are at least
+				// observable.
+				agentRunLog.Warn("run cost has no message row to settle on; spend unrecorded",
+					"conversation_id", runID, "cost_usd", costUSD)
 			}
 		}
 		_, err = q.ExecContext(ctx, `

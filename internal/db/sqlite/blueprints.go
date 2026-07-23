@@ -894,12 +894,26 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 }
 
 // cancelOrphanedChildRuns marks every non-terminal child run of blueprintRunID
-// 'cancelled' (stamping completed_at). Called by MarkRunStatus's atomic flip;
+// 'cancelled' (stamping completed_at) and releases those children's active
+// claims. Called by MarkRunStatus's atomic flip;
 // RunQueueStore.ReconcileOrphanedRuns applies the same terminal-status filter in
 // its own boot sweep (it can't share this body — different store, different
 // scope). The filter is the canonical run terminal set used across the agentrun
 // store.
 func cancelOrphanedChildRuns(ctx context.Context, q queryer, blueprintRunID string) error {
+	// Claims first: the subquery's non-terminal predicate matches exactly the
+	// rows the cancel below is about to retire, and both statements share the
+	// caller's transaction, so the pair lands atomically either way.
+	if _, err := q.ExecContext(ctx, `
+		UPDATE claims SET released_at = ?, outcome = 'cancelled'
+		WHERE released_at IS NULL
+		  AND conversation_id IN (
+		      SELECT id FROM conversations
+		      WHERE blueprint_run_id = ?
+		        AND status NOT IN (`+runTerminalStatusesSQL+`))
+	`, time.Now().UTC(), blueprintRunID); err != nil {
+		return err
+	}
 	_, err := q.ExecContext(ctx, `
 		UPDATE conversations
 		SET status = 'cancelled',

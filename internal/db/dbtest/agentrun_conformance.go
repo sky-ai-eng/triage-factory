@@ -260,16 +260,61 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
-	t.Run("Complete_ZeroLastMessageID_SettlesNothing", func(t *testing.T) {
-		// lastMessageID 0 = the invocation recorded no rows: the lump has no
-		// settlement target and is dropped, and no existing row may be
-		// touched.
+	t.Run("Complete_ZeroLastMessageID_SettlesOnNewestRow", func(t *testing.T) {
+		// lastMessageID 0 = the invocation recorded no rows, but its lump
+		// can still be real spend (an invocation bills for system-prompt /
+		// cache overhead even when nothing parsed) — it settles ADDITIVELY
+		// onto the conversation's newest existing message row, on top of any
+		// lump an earlier invocation already stamped there.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		runID := seedAgentRunForTest(t, orgID, seed, "running")
-		if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "prior"}); err != nil {
-			t.Fatalf("InsertMessage: %v", err)
+		msg1, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "older"})
+		if err != nil {
+			t.Fatalf("InsertMessage 1: %v", err)
 		}
+		msg2, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "newest"})
+		if err != nil {
+			t.Fatalf("InsertMessage 2: %v", err)
+		}
+		// First invocation settles its lump normally on its own last row.
+		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 0, 0, msg2, "", "", "finish", "", ""); err != nil {
+			t.Fatalf("first Complete: %v", err)
+		}
+		// The rowless resume's lump lands on the same (newest) row, added.
+		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 0, 0, 0, "", "", "finish", "", ""); err != nil {
+			t.Fatalf("zero-lastMessageID Complete: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.TotalCostUSD == nil || *got.TotalCostUSD != 2.0 {
+			t.Errorf("total_cost_usd = %v, want 2.0 (1.25 settled + 0.75 fallback-added)", got.TotalCostUSD)
+		}
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		costByID := map[int]*float64{}
+		for i := range msgs {
+			costByID[msgs[i].ID] = msgs[i].CostUSD
+		}
+		if c := costByID[int(msg1)]; c != nil {
+			t.Errorf("older row cost_usd = %v, want nil (fallback must target only the newest row)", *c)
+		}
+		if c := costByID[int(msg2)]; c == nil || *c != 2.0 {
+			t.Errorf("newest row cost_usd = %v, want 2.0 (additive settle)", c)
+		}
+	})
+
+	t.Run("Complete_ZeroLastMessageID_NoRows_DropsLumpWithoutError", func(t *testing.T) {
+		// A conversation with no message rows at all is the one truly
+		// unattributable case: Complete succeeds, writes nothing to the
+		// ledger, and must not invent a row.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
 		if err := store.Complete(ctx, orgID, runID, "completed", 9.99, 0, 0, 0, "", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
@@ -277,8 +322,18 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v got=%v", err, got)
 		}
+		if got.Status != "completed" {
+			t.Errorf("status = %q, want completed", got.Status)
+		}
 		if got.TotalCostUSD != nil {
-			t.Errorf("total_cost_usd = %v, want nil (nothing settled)", *got.TotalCostUSD)
+			t.Errorf("total_cost_usd = %v, want nil (no ledger row to settle on)", *got.TotalCostUSD)
+		}
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		if len(msgs) != 0 {
+			t.Errorf("messages = %d rows, want 0 (fallback must not mint rows)", len(msgs))
 		}
 	})
 

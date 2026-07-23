@@ -54,10 +54,15 @@ type AgentRunStore interface {
 	//
 	// costUSD is the invocation's reported total, settled as ONE lump on
 	// the messages row lastMessageID (the invocation's last recorded row —
-	// the delegate sink tracks it); lastMessageID 0 means the invocation
-	// recorded no rows and the lump has nowhere to settle (dropped, same
-	// as the pre-refactor park path). No proration across rows — proration
-	// without a pricing table is confidently wrong.
+	// the delegate sink tracks it). lastMessageID 0 means the invocation
+	// recorded no rows; a nonzero lump still settles, additively, onto the
+	// conversation's newest existing message row (which may already carry
+	// an earlier invocation's lump) — the ledger is the only spend record
+	// and an invocation can bill with nothing parsed. Totals stay exact;
+	// per-row time attribution smears in that corner. With no message rows
+	// at all the lump is unattributable: logged, not stored. No proration
+	// across rows — proration without a pricing table is confidently
+	// wrong.
 	//
 	// outcome / outcomeReason persist the parsed terminal-envelope
 	// outcome and (abort-only) reason; pass "" for both on runs that

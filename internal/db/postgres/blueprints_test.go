@@ -222,6 +222,33 @@ func TestBlueprintStore_Postgres_MarkRunStatus_CancelsOrphanedChild(t *testing.T
 	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = 'running' WHERE id = $1`, childID); err != nil {
 		t.Fatalf("set child running: %v", err)
 	}
+	// The racing dispatcher already claimed the child; the cancel must
+	// release the engagement along with the status flip, not leave it for
+	// the janitor.
+	seedChildClaim := func(convID, executor string) {
+		t.Helper()
+		if _, err := h.AdminDB.Exec(`
+			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch)
+			VALUES ($1, $2, $3, 1)
+		`, orgID, convID, executor); err != nil {
+			t.Fatalf("seed claim for %s: %v", convID, err)
+		}
+	}
+	assertClaimReleased := func(convID string) {
+		t.Helper()
+		var released bool
+		var outcome string
+		if err := h.AdminDB.QueryRow(`
+			SELECT released_at IS NOT NULL, COALESCE(outcome, '')
+			FROM claims WHERE conversation_id = $1
+		`, convID).Scan(&released, &outcome); err != nil {
+			t.Fatalf("read claim for %s: %v", convID, err)
+		}
+		if !released || outcome != "cancelled" {
+			t.Errorf("cancelled child's claim = (released=%v, outcome=%q), want (true, cancelled)", released, outcome)
+		}
+	}
+	seedChildClaim(childID, "exec-oc")
 
 	changed, err := stores.Blueprints.MarkRunStatusSystem(ctx, orgID, brID, domain.BlueprintRunStatusCancelled, "user_cancelled", nil)
 	if err != nil {
@@ -233,6 +260,35 @@ func TestBlueprintStore_Postgres_MarkRunStatus_CancelsOrphanedChild(t *testing.T
 	if st, completed := pgRunStatus(t, h, childID); st != "cancelled" || !completed {
 		t.Errorf("child = (%q, completed=%v), want (cancelled, true) — a terminal parent must not strand a live child", st, completed)
 	}
+	assertClaimReleased(childID)
+
+	// Same guarantee on the app-pool path, where the claim release lands
+	// adjacently on the admin pool instead of inside the cancel statement.
+	brID2, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+		BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
+		WorktreePath: "/tmp/wt-oc2",
+		StepPlan:     []domain.BlueprintPlanStep{{StepIndex: 0, PromptID: stepPromptID, PromptName: "S", PromptBody: "b", Source: "user"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun 2: %v", err)
+	}
+	childID2 := seedPgRun(t, h, orgID, userID, taskID, stepPromptID, brID2, 0)
+	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = 'running' WHERE id = $1`, childID2); err != nil {
+		t.Fatalf("set child 2 running: %v", err)
+	}
+	seedChildClaim(childID2, "exec-oc2")
+
+	changed, err = stores.Blueprints.MarkRunStatus(ctx, orgID, brID2, domain.BlueprintRunStatusCancelled, "user_cancelled", nil)
+	if err != nil {
+		t.Fatalf("MarkRunStatus: %v", err)
+	}
+	if !changed {
+		t.Fatal("MarkRunStatus reported no change")
+	}
+	if st, completed := pgRunStatus(t, h, childID2); st != "cancelled" || !completed {
+		t.Errorf("child 2 = (%q, completed=%v), want (cancelled, true)", st, completed)
+	}
+	assertClaimReleased(childID2)
 }
 
 // MarkRunStatus → GetRunForRun on a real Postgres tx. Covers the UUID/TEXT

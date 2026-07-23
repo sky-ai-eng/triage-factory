@@ -906,10 +906,16 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			Outcome:        "completed",
 		}
 		delivered := true
+		seq := 1.5
 		msgs := []domain.AgentMessage{
 			{RunID: conv.ID, UserID: h.UserID, Role: "user", Subtype: "text", Content: "imported turn", Delivered: &delivered},
 			{RunID: conv.ID, UserID: h.UserID, ClaimID: claim.ID, Role: "assistant", Subtype: "text", Content: "imported ack",
 				InputTokens: &tokens, CostUSD: &cost},
+			// A compacted row: retired from the active window with a
+			// fractional assembly override. Both fields must survive the
+			// round-trip or the row reappears active after an import.
+			{RunID: conv.ID, UserID: h.UserID, Role: "assistant", Subtype: "text", Content: "imported compaction",
+				Delivered: &delivered, WindowState: domain.MessageWindowInactive, Seq: &seq},
 		}
 		if err := h.Stores.Curator.ImportConversationStateSystem(ctx, h.OrgID, conv, []domain.Claim{claim}, msgs); err != nil {
 			t.Fatalf("import: %v", err)
@@ -939,16 +945,38 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		if len(claims) != 1 || claims[0].Outcome != "completed" || claims[0].ExecutorID != "src-exec" {
 			t.Fatalf("imported claims = %+v, want the source claim", claims)
 		}
-		if len(gotMsgs) != 2 || gotMsgs[0].Content != "imported turn" || gotMsgs[1].ClaimID != claim.ID {
-			t.Fatalf("imported messages = %+v, want the source transcript with claim attribution", gotMsgs)
+		// The seq override changes assembly order relative to the backend's
+		// auto-assigned ids, so rows are located by content, not position.
+		byContent := map[string]domain.AgentMessage{}
+		for _, m := range gotMsgs {
+			byContent[m.Content] = m
+		}
+		if len(gotMsgs) != 3 {
+			t.Fatalf("imported messages = %+v, want the 3-row source transcript", gotMsgs)
+		}
+		if _, ok := byContent["imported turn"]; !ok {
+			t.Fatalf("imported messages = %+v, want the source user turn", gotMsgs)
+		}
+		ack := byContent["imported ack"]
+		if ack.ClaimID != claim.ID {
+			t.Fatalf("imported assistant row claim_id = %q, want claim attribution %q", ack.ClaimID, claim.ID)
 		}
 		// float4 storage: compare with an epsilon, and dereference for the
 		// error message.
-		if c := gotMsgs[1].CostUSD; c == nil || *c < cost-1e-4 || *c > cost+1e-4 {
+		if c := ack.CostUSD; c == nil || *c < cost-1e-4 || *c > cost+1e-4 {
 			t.Errorf("imported assistant row cost_usd = %v, want ~%v (the ledger travels with the bundle)", c, cost)
 		}
-		if it := gotMsgs[1].InputTokens; it == nil || *it != tokens {
+		if it := ack.InputTokens; it == nil || *it != tokens {
 			t.Errorf("imported assistant row input_tokens = %v, want %d", it, tokens)
+		}
+		compacted := byContent["imported compaction"]
+		if compacted.WindowState != domain.MessageWindowInactive {
+			t.Errorf("imported compaction row window_state = %q, want %q (must not reappear active)",
+				compacted.WindowState, domain.MessageWindowInactive)
+		}
+		if compacted.Seq == nil || *compacted.Seq != seq {
+			t.Errorf("imported compaction row seq = %v, want %v (assembly override travels with the bundle)",
+				compacted.Seq, seq)
 		}
 	})
 }

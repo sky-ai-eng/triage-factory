@@ -827,7 +827,9 @@ func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID 
 }
 
 // importCuratorMessage mirrors agentRunStore.InsertMessage's column
-// handling for a bundle row (delivered preserved rather than defaulted).
+// handling for a bundle row (delivered/window_state/seq preserved rather
+// than defaulted — a compacted or seq-overridden message must not reappear
+// active in assembly after a round-trip).
 func importCuratorMessage(ctx context.Context, q queryer, orgID string, msg *domain.AgentMessage) error {
 	var toolCallsJSON, metadataJSON, reasoningJSON, contentBlocksJSON sql.NullString
 	if len(msg.ToolCalls) > 0 {
@@ -865,18 +867,24 @@ func importCuratorMessage(ctx context.Context, q queryer, orgID string, msg *dom
 	if msg.Delivered != nil {
 		delivered = *msg.Delivered
 	}
+	windowState := msg.WindowState
+	if windowState == "" {
+		windowState = domain.MessageWindowActive
+	}
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO messages (org_id, conversation_id, user_id, claim_id, role, content, subtype,
 		                      tool_calls, tool_call_id, is_error, metadata, model,
 		                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-		                      cost_usd, created_at, reasoning, content_blocks, delivered)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      cost_usd, created_at, reasoning, content_blocks, delivered,
+		                      window_state, seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, orgID, msg.RunID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID),
 		msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, sqliteNullStr(msg.ToolCallID), msg.IsError, metadataJSON,
 		sqliteNullStr(msg.Model), sqliteNullInt(msg.InputTokens), sqliteNullInt(msg.OutputTokens),
 		sqliteNullInt(msg.CacheReadTokens), sqliteNullInt(msg.CacheCreationTokens),
-		sqliteNullFloat(msg.CostUSD), msg.CreatedAt, reasoningJSON, contentBlocksJSON, delivered)
+		sqliteNullFloat(msg.CostUSD), msg.CreatedAt, reasoningJSON, contentBlocksJSON, delivered,
+		string(windowState), sqliteNullFloat(msg.Seq))
 	if err != nil {
 		return fmt.Errorf("import curator message: %w", err)
 	}

@@ -53,6 +53,14 @@ func TestMarkRunStatus_CancelsOrphanedChild_OnTerminal(t *testing.T) {
 	if _, err := conn.Exec(`UPDATE conversations SET status = 'running' WHERE id = 'oa-child'`); err != nil {
 		t.Fatalf("set child running: %v", err)
 	}
+	// The racing dispatcher already claimed the child; the cancel must
+	// release the engagement along with the status flip, not leave it for
+	// the janitor.
+	if _, err := conn.Exec(`
+		INSERT INTO claims (id, conversation_id, executor_id) VALUES ('oa-claim', 'oa-child', 'exec-oa')
+	`); err != nil {
+		t.Fatalf("seed oa-child claim: %v", err)
+	}
 
 	changed, err := stores.Blueprints.MarkRunStatus(ctx, org, brID, domain.BlueprintRunStatusCancelled, "user_cancelled", nil)
 	if err != nil {
@@ -71,6 +79,14 @@ func TestMarkRunStatus_CancelsOrphanedChild_OnTerminal(t *testing.T) {
 	}
 	if completedAt == nil {
 		t.Error("cancelled child run has NULL completed_at; want a stamp")
+	}
+	var releasedAt any
+	var outcome string
+	if err := conn.QueryRow(`SELECT released_at, COALESCE(outcome, '') FROM claims WHERE id = 'oa-claim'`).Scan(&releasedAt, &outcome); err != nil {
+		t.Fatalf("read oa-claim: %v", err)
+	}
+	if releasedAt == nil || outcome != "cancelled" {
+		t.Errorf("cancelled child's claim = (released=%v, outcome=%q), want (released, cancelled)", releasedAt != nil, outcome)
 	}
 }
 

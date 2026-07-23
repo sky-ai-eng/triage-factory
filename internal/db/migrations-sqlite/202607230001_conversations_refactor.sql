@@ -519,12 +519,12 @@ ORDER BY cpc.created_at, cpc.id;
 -- 7. Drop everything the model dissolved.
 DROP TABLE run_messages;
 DROP TABLE curator_messages;
-DROP TABLE curator_requests;
 DROP TABLE curator_pending_context;
+DROP TABLE curator_turn_credentials;
+DROP TABLE curator_requests;
 DROP TABLE run_pending_input;
 DROP TABLE staged_agent_injections;
 DROP TABLE run_credentials;
-DROP TABLE curator_turn_credentials;
 DROP TABLE conversations_claim_src;
 DROP TABLE conversations_cost_src;
 ALTER TABLE projects DROP COLUMN curator_session_id;
