@@ -33,7 +33,7 @@ var memBase = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 // human_content NULL (agent-only composition).
 func seedAuthoringMemory(t *testing.T, conn *sql.DB, orgID, entityID, runID, agent, human string, createdAt time.Time, role string) {
 	t.Helper()
-	if _, err := conn.Exec(`INSERT INTO runs (id, origin, status) VALUES (?, 'interactive', 'running')`, runID); err != nil {
+	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, runID); err != nil {
 		t.Fatalf("seed authoring run: %v", err)
 	}
 	var humanVal any
@@ -41,13 +41,13 @@ func seedAuthoringMemory(t *testing.T, conn *sql.DB, orgID, entityID, runID, age
 		humanVal = human
 	}
 	if _, err := conn.Exec(
-		`INSERT INTO run_memory (id, run_id, entity_id, agent_content, human_content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO run_memory (id, conversation_id, entity_id, agent_content, human_content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		uuid.New().String(), runID, entityID, agent, humanVal, createdAt,
 	); err != nil {
 		t.Fatalf("seed run_memory: %v", err)
 	}
 	if _, err := conn.Exec(
-		`INSERT INTO run_memory_entities (org_id, run_id, entity_id, role, created_at) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO run_memory_entities (org_id, conversation_id, entity_id, role, created_at) VALUES (?, ?, ?, ?, ?)`,
 		orgID, runID, entityID, role, createdAt,
 	); err != nil {
 		t.Fatalf("seed run_memory_entities: %v", err)
@@ -156,7 +156,7 @@ func TestLocalClient_MemoryLoad_Miss_NoEntityNoTouch(t *testing.T) {
 	}
 	// No touch row for the reading run at all.
 	var n int
-	if err := conn.QueryRow(`SELECT count(*) FROM run_memory_entities WHERE run_id = ?`, info.RunID).Scan(&n); err != nil {
+	if err := conn.QueryRow(`SELECT count(*) FROM run_memory_entities WHERE conversation_id = ?`, info.RunID).Scan(&n); err != nil {
 		t.Fatalf("count touch rows: %v", err)
 	}
 	if n != 0 {
@@ -220,7 +220,7 @@ func TestServer_MemoryLoad_RoundTrip(t *testing.T) {
 
 	// A reading run for the touch FK, and an entity with one prior memory.
 	readerRun := uuid.New().String()
-	if _, err := conn.Exec(`INSERT INTO runs (id, origin, status) VALUES (?, 'interactive', 'running')`, readerRun); err != nil {
+	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, readerRun); err != nil {
 		t.Fatalf("seed reader run: %v", err)
 	}
 	entityID := seedEntity(t, stores, orgID, "jira", "SKY-123", "A ticket")

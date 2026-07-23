@@ -32,7 +32,7 @@ func seedSteerRun(t *testing.T, database *sql.DB, suffix, status string) string 
 	execSQL(t, database, `INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES (?, 'P', 'b', ?, ?)`, p, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
 	execSQL(t, database, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id) VALUES (?, ?, ?, ?)`, tk, e, eventType, ev)
 	brID := seedBlueprintRunSQLite(t, database, tk)
-	execSQL(t, database, `INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, blueprint_run_id) VALUES (?, ?, ?, ?, 'manual', ?)`, rn, tk, p, status, brID)
+	execSQL(t, database, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id) VALUES (?, ?, ?, ?, 'manual', ?)`, rn, tk, p, status, brID)
 	return rn
 }
 
@@ -51,7 +51,7 @@ func TestHandleAgentMessage_RecordsThenConflictsOnTerminal(t *testing.T) {
 	}
 
 	var role, subtype, content string
-	if err := s.db.QueryRow(`SELECT role, subtype, content FROM run_messages WHERE run_id=?`, runID).Scan(&role, &subtype, &content); err != nil {
+	if err := s.db.QueryRow(`SELECT role, subtype, content FROM messages WHERE conversation_id=?`, runID).Scan(&role, &subtype, &content); err != nil {
 		t.Fatalf("read recorded message: %v", err)
 	}
 	if role != "user" || subtype != "text" || content != "pick this back up" {

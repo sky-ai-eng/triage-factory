@@ -10,7 +10,7 @@ import (
 )
 
 // TestCrossSidecarSealedBundleIsolation is the executable form of the first
-// cross-sidecar negative: sidecar A cannot read sidecar B's run_credentials
+// cross-sidecar negative: sidecar A cannot read sidecar B's sealed credential
 // row. Each run's sidecar mints its OWN X25519 keypair (newCredRuntime, one per
 // run) and the brain seals that run's bundle to that run's public key; the
 // private half is born in the sidecar and never leaves it. So the boundary is

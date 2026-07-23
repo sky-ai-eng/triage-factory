@@ -60,7 +60,7 @@ func setDailyCostCap(t *testing.T, database *sql.DB, cap float64) {
 func seedSpendAt(t *testing.T, database *sql.DB, cost float64, occurredAt time.Time) {
 	t.Helper()
 	if _, err := database.Exec(`
-		INSERT INTO runs
+		INSERT INTO conversations
 			(id, org_id, team_id, creator_user_id, trigger_type, origin, model, status,
 			 total_cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, started_at)
 		VALUES (?, ?, ?, ?, 'manual', 'manual', 'm', 'completed', ?, 0, 0, 0, 0, ?)

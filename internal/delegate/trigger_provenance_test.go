@@ -50,7 +50,7 @@ func TestDelegate_EventPath_StampsTriggerIDOnStepRun(t *testing.T) {
 	// The queued step-0 run carries the event shape AND the firing trigger.
 	var runID, gotType, gotTrig string
 	if err := database.QueryRow(
-		`SELECT id, trigger_type, COALESCE(trigger_id, '') FROM runs WHERE blueprint_run_id = ?`, brID,
+		`SELECT id, trigger_type, COALESCE(trigger_id, '') FROM conversations WHERE blueprint_run_id = ?`, brID,
 	).Scan(&runID, &gotType, &gotTrig); err != nil {
 		t.Fatalf("read step-0 run: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestDelegate_ManualPath_LeavesTriggerIDNull(t *testing.T) {
 	}
 
 	var trig sql.NullString
-	if err := database.QueryRow(`SELECT trigger_id FROM runs WHERE blueprint_run_id = ?`, brID).Scan(&trig); err != nil {
+	if err := database.QueryRow(`SELECT trigger_id FROM conversations WHERE blueprint_run_id = ?`, brID).Scan(&trig); err != nil {
 		t.Fatalf("read step-0 run: %v", err)
 	}
 	if trig.Valid {

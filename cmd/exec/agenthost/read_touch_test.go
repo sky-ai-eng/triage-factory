@@ -24,7 +24,7 @@ func touchRole(t *testing.T, conn *sql.DB, runID, entityID string) string {
 	t.Helper()
 	var role string
 	switch err := conn.QueryRow(
-		`SELECT role FROM run_memory_entities WHERE run_id = ? AND entity_id = ?`, runID, entityID,
+		`SELECT role FROM run_memory_entities WHERE conversation_id = ? AND entity_id = ?`, runID, entityID,
 	).Scan(&role); err {
 	case nil:
 		return role

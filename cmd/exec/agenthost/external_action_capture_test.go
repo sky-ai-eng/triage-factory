@@ -50,7 +50,7 @@ func newCaptureStoresConn(t *testing.T, eventTriggered bool) (*sql.DB, db.Stores
 		t.Fatalf("bootstrap schema: %v", err)
 	}
 	const runID = "11111111-1111-1111-1111-111111111111"
-	if _, err := conn.Exec(`INSERT INTO runs (id, origin, status) VALUES (?, 'interactive', 'running')`, runID); err != nil {
+	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, runID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	userID := ""

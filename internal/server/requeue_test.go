@@ -66,7 +66,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	}
 	blueprintRunID := seedBlueprintRunSQLite(t, database, "t_pa")
 	if _, err := database.Exec(
-		`INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, blueprint_run_id)
+		`INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id)
 		 VALUES ('r_pa', 't_pa', 'p_pa', 'completed', 'manual', ?)`,
 		blueprintRunID,
 	); err != nil {
@@ -144,7 +144,7 @@ func assertPendingApprovalCleanedUp(
 	// The run is untouched by the resolve — it stays terminal (completed). A
 	// resolve must never flip runs.status.
 	var runStatus string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id = ?`, runID).Scan(&runStatus); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&runStatus); err != nil {
 		t.Fatalf("scan run: %v", err)
 	}
 	if runStatus != "completed" {
@@ -166,7 +166,7 @@ func assertPendingApprovalCleanedUp(
 
 	var agentContent, humanContent sql.NullString
 	if err := database.QueryRow(
-		`SELECT agent_content, human_content FROM run_memory WHERE run_id = ?`, runID,
+		`SELECT agent_content, human_content FROM run_memory WHERE conversation_id = ?`, runID,
 	).Scan(&agentContent, &humanContent); err != nil {
 		t.Fatalf("scan run_memory: %v", err)
 	}
@@ -1238,7 +1238,7 @@ func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 
 	var humanContentBefore sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT human_content FROM run_memory WHERE run_id = ?`, runID,
+		`SELECT human_content FROM run_memory WHERE conversation_id = ?`, runID,
 	).Scan(&humanContentBefore); err != nil {
 		t.Fatalf("scan after first call: %v", err)
 	}
@@ -1254,8 +1254,8 @@ func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 	var runStatusAfter string
 	if err := s.db.QueryRow(
 		`SELECT rm.human_content, r.status
-		 FROM run_memory rm JOIN runs r ON r.id = rm.run_id
-		 WHERE rm.run_id = ?`, runID,
+		 FROM run_memory rm JOIN conversations r ON r.id = rm.conversation_id
+		 WHERE rm.conversation_id = ?`, runID,
 	).Scan(&humanContentAfter, &runStatusAfter); err != nil {
 		t.Fatalf("scan after second call: %v", err)
 	}
@@ -1291,14 +1291,14 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 	// Run is untouched (it was never flipped — teardown doesn't touch run status),
 	// and human_content was rolled back with the rest of the batch.
 	var runStatus string
-	if err := s.db.QueryRow(`SELECT status FROM runs WHERE id = ?`, runID).Scan(&runStatus); err != nil {
+	if err := s.db.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&runStatus); err != nil {
 		t.Fatalf("scan run after sabotaged teardown: %v", err)
 	}
 	if runStatus != "completed" {
 		t.Fatalf("run.status = %q after failure; want %q (run untouched)", runStatus, "completed")
 	}
 	var humanContent sql.NullString
-	if err := s.db.QueryRow(`SELECT human_content FROM run_memory WHERE run_id = ?`, runID).Scan(&humanContent); err != nil {
+	if err := s.db.QueryRow(`SELECT human_content FROM run_memory WHERE conversation_id = ?`, runID).Scan(&humanContent); err != nil {
 		t.Fatalf("scan run_memory after failure: %v", err)
 	}
 	if humanContent.Valid {
@@ -1335,7 +1335,7 @@ func TestTeardownTaskArtifacts_AgentContentNullSurvives(t *testing.T) {
 	// (UpsertAgentMemory("") would have done this in
 	// production; we set it directly to skip the dependency).
 	if _, err := s.db.Exec(
-		`UPDATE run_memory SET agent_content = NULL WHERE run_id = ?`, runID,
+		`UPDATE run_memory SET agent_content = NULL WHERE conversation_id = ?`, runID,
 	); err != nil {
 		t.Fatalf("force null agent_content: %v", err)
 	}
@@ -1344,7 +1344,7 @@ func TestTeardownTaskArtifacts_AgentContentNullSurvives(t *testing.T) {
 
 	var agentContent, humanContent sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT agent_content, human_content FROM run_memory WHERE run_id = ?`, runID,
+		`SELECT agent_content, human_content FROM run_memory WHERE conversation_id = ?`, runID,
 	).Scan(&agentContent, &humanContent); err != nil {
 		t.Fatalf("scan run_memory: %v", err)
 	}

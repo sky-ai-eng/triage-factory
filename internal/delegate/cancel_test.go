@@ -52,7 +52,7 @@ func (f *fakeDrainer) callsCopy() []drainCall {
 func TestCancel_OpenAutoRun_DrainsQueue(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r1", "sess-1", "/tmp/wt-r1")
-	if _, err := database.Exec(`UPDATE runs SET status = 'open', trigger_type = 'event', creator_user_id = NULL WHERE id = 'r1'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', trigger_type = 'event', creator_user_id = NULL WHERE id = 'r1'`); err != nil {
 		t.Fatalf("park run: %v", err)
 	}
 
@@ -92,7 +92,7 @@ func TestCancel_OpenManualRun_NoDrain(t *testing.T) {
 	seedRun(t, database, "r-manual", "sess-2", "/tmp/wt-rm")
 	// Manual is the seedRun default but we set it explicitly for
 	// clarity and pin to `open`.
-	if _, err := database.Exec(`UPDATE runs SET status = 'open', trigger_type = 'manual' WHERE id = 'r-manual'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', trigger_type = 'manual' WHERE id = 'r-manual'`); err != nil {
 		t.Fatalf("park run: %v", err)
 	}
 
@@ -125,7 +125,7 @@ func TestCancel_AlreadyTerminal_NoDrain(t *testing.T) {
 	// Trigger_type='event' requires creator_user_id IS NULL per the
 	// CHECK invariant. seedRun defaults to manual +
 	// sentinel creator; the UPDATE has to clear creator alongside.
-	if _, err := database.Exec(`UPDATE runs SET status = 'completed', trigger_type = 'event', creator_user_id = NULL WHERE id = 'r-done'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'completed', trigger_type = 'event', creator_user_id = NULL WHERE id = 'r-done'`); err != nil {
 		t.Fatalf("complete run: %v", err)
 	}
 
@@ -153,7 +153,7 @@ func TestCancel_AlreadyTerminal_NoDrain(t *testing.T) {
 func TestCancel_OpenStep_FinalizesBlueprintRun(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-step", "sess-step", "/tmp/wt-rs")
-	if _, err := database.Exec(`UPDATE runs SET status = 'open' WHERE id = 'r-step'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open' WHERE id = 'r-step'`); err != nil {
 		t.Fatalf("park run: %v", err)
 	}
 
@@ -165,7 +165,7 @@ func TestCancel_OpenStep_FinalizesBlueprintRun(t *testing.T) {
 	}
 
 	var runStatus, bpStatus string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id = 'r-step'`).Scan(&runStatus); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = 'r-step'`).Scan(&runStatus); err != nil {
 		t.Fatalf("read run status: %v", err)
 	}
 	if runStatus != "cancelled" {

@@ -76,7 +76,7 @@ func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered boo
 
 	const runID = "22222222-2222-2222-2222-222222222222"
 	if _, err := conn.Exec(
-		`INSERT INTO runs (id, origin, status) VALUES (?, 'interactive', 'running')`, runID,
+		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, runID,
 	); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}

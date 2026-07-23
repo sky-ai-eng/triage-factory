@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -92,16 +93,13 @@ func seedAgentRun(t *testing.T, stores db.Stores, conn *sql.DB, runID, creator, 
 	if err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
-	run := domain.AgentRun{
+	dbtest.SeedConversation(t, conn, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "claude-test",
 		TriggerType:    trigger,
 		CreatorUserID:  creator,
 		BlueprintRunID: seedBlueprintRun(t, conn, task.ID),
-	}
-	if err := stores.AgentRuns.Create(ctx, orgID, run); err != nil {
-		t.Fatalf("seed run: %v", err)
-	}
+	})
 }
 
 func TestProtocol_FrameRoundTrip(t *testing.T) {

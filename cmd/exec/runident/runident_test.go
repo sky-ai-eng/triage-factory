@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -81,14 +82,12 @@ func seedRun(t *testing.T, stores db.Stores, conn *sql.DB, runID, triggerType st
 	if err := stores.Prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	if err := stores.AgentRuns.Create(ctx, runmode.LocalDefaultOrgID, domain.AgentRun{
+	dbtest.SeedConversation(t, conn, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
 		TriggerType:    triggerType,
 		BlueprintRunID: seedBlueprintRun(t, conn, task.ID),
-	}); err != nil {
-		t.Fatalf("run: %v", err)
-	}
+	})
 }
 
 func TestResolveRunIdentity_EmptyRunID(t *testing.T) {
@@ -163,7 +162,7 @@ func TestResolveRunIdentity_TeamIDFromRow(t *testing.T) {
 	seedRun(t, stores, conn, "t1", "manual")
 
 	const customTeam = "00000000-0000-0000-0000-0000000009f9"
-	if _, err := conn.Exec(`UPDATE runs SET team_id = ? WHERE id = 't1'`, customTeam); err != nil {
+	if _, err := conn.Exec(`UPDATE conversations SET team_id = ? WHERE id = 't1'`, customTeam); err != nil {
 		t.Fatalf("override team_id: %v", err)
 	}
 

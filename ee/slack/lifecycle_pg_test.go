@@ -263,7 +263,7 @@ func seedSlackMessageRun(t *testing.T, h *pgtest.Harness, orgID, creatorID, team
 
 	runID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO runs (id, org_id, team_id, task_id, trigger_type, origin, status, visibility)
+		INSERT INTO conversations (id, org_id, team_id, task_id, trigger_type, origin, status, visibility)
 		VALUES ($1, $2, $3, $4, 'event', 'interactive', 'running', 'team')
 	`, runID, orgID, teamID, taskID); err != nil {
 		t.Fatalf("seed run: %v", err)
@@ -300,7 +300,7 @@ func seedGitHubTaskAndRun(t *testing.T, h *pgtest.Harness, orgID, creatorID, tea
 	}
 	runID = uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO runs (id, org_id, team_id, task_id, trigger_type, origin, status, visibility)
+		INSERT INTO conversations (id, org_id, team_id, task_id, trigger_type, origin, status, visibility)
 		VALUES ($1, $2, $3, $4, 'event', 'interactive', 'running', 'team')
 	`, runID, orgID, teamID, taskID); err != nil {
 		t.Fatalf("seed run: %v", err)

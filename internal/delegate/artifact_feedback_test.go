@@ -138,8 +138,8 @@ func TestArtifactLedgerForResume_FallsBackToStartedAt(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	// Pin started_at into the past so the artifact seeded "now" is unambiguously
-	// after it; insert NO run_messages, so the watermark must fall back to it.
-	if _, err := database.Exec(`UPDATE runs SET started_at = ? WHERE id = 'r-nomsg'`,
+	// after it; insert NO messages, so the watermark must fall back to it.
+	if _, err := database.Exec(`UPDATE conversations SET started_at = ? WHERE id = 'r-nomsg'`,
 		time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatalf("set started_at: %v", err)
 	}

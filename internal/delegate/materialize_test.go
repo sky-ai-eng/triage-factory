@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -101,11 +102,9 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 	); err != nil {
 		t.Fatalf("blueprint_run: %v", err)
 	}
-	if err := stores.AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.AgentRun{
 		ID: "prior-run", TaskID: task.ID, PromptID: "p1", Status: "completed", Model: "m", BlueprintRunID: priorBlueprintRunID,
-	}); err != nil {
-		t.Fatalf("run: %v", err)
-	}
+	})
 	if err := stores.TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "prior-run", entity.ID, priorBlueprintRunID, "what i did last time"); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
@@ -173,11 +172,9 @@ func TestMaterializePriorMemories_BlueprintSiblingsShareFolder(t *testing.T) {
 	}
 
 	// Step 1 runs and writes its memory under the shared blueprint namespace.
-	if err := stores.AgentRuns.Create(ctx, runmode.LocalDefaultOrgID, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.AgentRun{
 		ID: "step1-run", TaskID: task.ID, PromptID: "p1", Status: "completed", Model: "m", BlueprintRunID: blueprintRunID,
-	}); err != nil {
-		t.Fatalf("step1 run: %v", err)
-	}
+	})
 	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, "step1-run", entity.ID, blueprintRunID, "step 1 findings"); err != nil {
 		t.Fatalf("step1 memory: %v", err)
 	}

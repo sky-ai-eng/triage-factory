@@ -462,7 +462,7 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, runID, content
 		if _, err := conn.Exec(`INSERT INTO entities (id, source, source_id, kind) VALUES (?, 'github', ?, 'pull_request')`, entityID, entityID); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
-		if _, err := conn.Exec(`INSERT INTO runs (id, origin, status) VALUES (?, 'interactive', 'completed')`, runID); err != nil {
+		if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'completed')`, runID); err != nil {
 			t.Fatalf("seed run: %v", err)
 		}
 		if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, runID, entityID, "", content); err != nil {

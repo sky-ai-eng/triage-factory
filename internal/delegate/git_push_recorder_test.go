@@ -15,9 +15,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// newRecorderStores opens an in-memory SQLite, migrates it, and seeds one runs
-// row the artifacts FK (run_id) can point at — mirroring the pre-push hook's
-// own test fixture so the two writers are exercised against the same store.
+// newRecorderStores opens an in-memory SQLite, migrates it, and seeds one
+// conversations row the artifacts FK (conversation_id) can point at —
+// mirroring the pre-push hook's own test fixture so the two writers are
+// exercised against the same store.
 func newRecorderStores(t *testing.T) (db.Stores, string) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
@@ -28,7 +29,7 @@ func newRecorderStores(t *testing.T) (db.Stores, string) {
 	if err := db.Migrate(conn, "sqlite3"); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if _, err := conn.Exec(`INSERT INTO runs (id, trigger_type, creator_user_id, origin) VALUES ('run-1', 'event', NULL, 'interactive')`); err != nil {
+	if _, err := conn.Exec(`INSERT INTO conversations (id, trigger_type, creator_user_id, origin) VALUES ('run-1', 'event', NULL, 'interactive')`); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	return sqlitestore.New(conn), "run-1"

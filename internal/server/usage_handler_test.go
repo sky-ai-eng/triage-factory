@@ -430,7 +430,7 @@ func seedUsageLocal(t *testing.T, s *Server) (triggerID, blueprintName string) {
 		 VALUES (?, ?, ?, ?, 'trigger', 'github:pr:ci_check_failed', ?, 3, 0.5)`,
 		triggerID, org, team, user, bpID)
 
-	// Projects back the curator turns (curator_requests.project_id FK).
+	// Projects back the curator conversations (conversations.project_id FK).
 	exec(`INSERT INTO projects (id, name, team_id, org_id, creator_user_id, visibility) VALUES ('p-team', 'team-proj', ?, ?, ?, 'team')`, team, org, user)
 	exec(`INSERT INTO projects (id, name, team_id, org_id, creator_user_id, visibility) VALUES ('p-org', 'org-proj', NULL, ?, ?, 'org')`, org, user)
 
@@ -440,29 +440,39 @@ func seedUsageLocal(t *testing.T, s *Server) (triggerID, blueprintName string) {
 	const t2 = "2026-06-16 10:00:00"
 
 	// Manual run by the user (team-scoped).
-	exec(`INSERT INTO runs
+	exec(`INSERT INTO conversations
 			(id, org_id, team_id, creator_user_id, trigger_type, origin, model, status,
 			 total_cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, started_at)
 		 VALUES ('r-manual', ?, ?, ?, 'manual', 'manual', 'claude-opus-4-8', 'completed', 1.00, 100, 10, 5, 1, ?)`,
 		org, team, user, t1)
 	// Autonomous run fired by the trigger (NULL creator, team-scoped).
-	exec(`INSERT INTO runs
+	exec(`INSERT INTO conversations
 			(id, org_id, team_id, creator_user_id, trigger_type, origin, trigger_id, model, status,
 			 total_cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, started_at)
 		 VALUES ('r-auto', ?, ?, NULL, 'event', 'manual', ?, 'claude-haiku-4-5', 'completed', 0.25, 20, 2, 0, 0, ?)`,
 		org, team, triggerID, t2)
+	// Curator turns are per-claim spend now: each former request row becomes a
+	// curator conversation plus one released claim carrying the turn's cost.
 	// Team-attributed curator turn by the user.
-	exec(`INSERT INTO curator_requests
-			(id, org_id, creator_user_id, project_id, team_id, status, user_input, cost_usd,
-			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-		 VALUES ('cur-team', ?, ?, 'p-team', ?, 'completed', 'hi', 0.50, 11, 1, 0, 0, ?)`,
+	exec(`INSERT INTO conversations
+			(id, org_id, type, creator_user_id, team_id, visibility, trigger_type, origin, status, project_id, started_at)
+		 VALUES ('conv-cur-team', ?, 'curator', ?, ?, 'private', 'manual', 'curator', NULL, 'p-team', ?)`,
 		org, user, team, t1)
+	exec(`INSERT INTO claims
+			(id, org_id, conversation_id, executor_id, claimed_at, released_at, outcome, cost_usd,
+			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+		 VALUES ('cur-team', ?, 'conv-cur-team', '', ?, ?, 'completed', 0.50, 11, 1, 0, 0)`,
+		org, t1, t1)
 	// NULL-team curator turn by the user (org-visibility project).
-	exec(`INSERT INTO curator_requests
-			(id, org_id, creator_user_id, project_id, team_id, status, user_input, cost_usd,
-			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-		 VALUES ('cur-org', ?, ?, 'p-org', NULL, 'completed', 'hi', 0.10, 1, 1, 0, 0, ?)`,
+	exec(`INSERT INTO conversations
+			(id, org_id, type, creator_user_id, team_id, visibility, trigger_type, origin, status, project_id, started_at)
+		 VALUES ('conv-cur-org', ?, 'curator', ?, NULL, 'private', 'manual', 'curator', NULL, 'p-org', ?)`,
 		org, user, t2)
+	exec(`INSERT INTO claims
+			(id, org_id, conversation_id, executor_id, claimed_at, released_at, outcome, cost_usd,
+			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+		 VALUES ('cur-org', ?, 'conv-cur-org', '', ?, ?, 'completed', 0.10, 1, 1, 0, 0)`,
+		org, t2, t2)
 	// System job (org-level, NULL team).
 	exec(`INSERT INTO system_llm_runs
 			(id, org_id, job, model, total_cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, started_at)

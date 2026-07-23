@@ -21,7 +21,7 @@ func seedPgRunWithMemory(t *testing.T, h *pgtest.Harness, stores db.Stores, orgI
 	t.Helper()
 	runID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO runs (id, org_id, team_id, creator_user_id, visibility, trigger_type, origin, status)
+		INSERT INTO conversations (id, org_id, team_id, creator_user_id, visibility, trigger_type, origin, status)
 		VALUES ($1, $2, $3, $4, $5, 'manual', 'interactive', 'completed')
 	`, runID, orgID, teamID, creatorID, visibility); err != nil {
 		t.Fatalf("seed run: %v", err)
@@ -78,7 +78,7 @@ func TestLocalClient_MemoryLoad_Postgres_TeamScoped(t *testing.T) {
 	// A team-1 reading run for the touch FK.
 	readerRun := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO runs (id, org_id, team_id, creator_user_id, visibility, trigger_type, origin, status)
+		INSERT INTO conversations (id, org_id, team_id, creator_user_id, visibility, trigger_type, origin, status)
 		VALUES ($1, $2, $3, $4, 'team', 'manual', 'interactive', 'running')
 	`, readerRun, orgID, team1, owner); err != nil {
 		t.Fatalf("seed reader run: %v", err)
@@ -126,7 +126,7 @@ func TestLocalClient_MemoryLoad_Postgres_TeamScoped(t *testing.T) {
 	// Loading recorded the touch for the reading run.
 	var role string
 	if err := h.AdminDB.QueryRow(
-		`SELECT role FROM run_memory_entities WHERE run_id = $1 AND entity_id = $2`, readerRun, entityID,
+		`SELECT role FROM run_memory_entities WHERE conversation_id = $1 AND entity_id = $2`, readerRun, entityID,
 	).Scan(&role); err != nil {
 		t.Fatalf("read reader touch row: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestLocalClient_MemoryLoad_Postgres_Miss(t *testing.T) {
 	orgID, owner, team1 := pgtest.SeedOrgWithUser(t, h, "mem-load-miss")
 	readerRun := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO runs (id, org_id, team_id, creator_user_id, visibility, trigger_type, origin, status)
+		INSERT INTO conversations (id, org_id, team_id, creator_user_id, visibility, trigger_type, origin, status)
 		VALUES ($1, $2, $3, $4, 'team', 'manual', 'interactive', 'running')
 	`, readerRun, orgID, team1, owner); err != nil {
 		t.Fatalf("seed reader run: %v", err)
@@ -182,7 +182,7 @@ func TestLocalClient_MemoryLoad_Postgres_Miss(t *testing.T) {
 	}
 	// No touch row for the reading run.
 	var n int
-	if err := h.AdminDB.QueryRow(`SELECT count(*) FROM run_memory_entities WHERE run_id = $1`, readerRun).Scan(&n); err != nil {
+	if err := h.AdminDB.QueryRow(`SELECT count(*) FROM run_memory_entities WHERE conversation_id = $1`, readerRun).Scan(&n); err != nil {
 		t.Fatalf("count touch rows: %v", err)
 	}
 	if n != 0 {

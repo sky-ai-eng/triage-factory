@@ -16,8 +16,8 @@ import (
 // identity until SetExecutorID wires the persistent registry id (an empty
 // default is what makes a missed wiring observable — a random uuid default
 // would stamp plausible-looking but unregistered ids onto runs), and that
-// stampExecutor picks up the override — runs.executor_id on claim must
-// equal the registry id.
+// stampExecutor picks up the override — the conversation's active claim
+// must carry the registry id.
 func TestSetExecutorID_OverridesConstructorDefault(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
@@ -40,11 +40,11 @@ func TestSetExecutorID_OverridesConstructorDefault(t *testing.T) {
 	s.stampExecutor(runmode.LocalDefaultOrgID, "run-stamp")
 
 	var stored string
-	if err := database.QueryRow(`SELECT executor_id FROM runs WHERE id = ?`, "run-stamp").Scan(&stored); err != nil {
+	if err := database.QueryRow(`SELECT executor_id FROM claims WHERE conversation_id = ? AND released_at IS NULL`, "run-stamp").Scan(&stored); err != nil {
 		t.Fatalf("read back executor_id: %v", err)
 	}
 	if stored != "persistent-instance-id" {
-		t.Errorf("runs.executor_id = %q, want the persistent id %q", stored, "persistent-instance-id")
+		t.Errorf("active claim executor_id = %q, want the persistent id %q", stored, "persistent-instance-id")
 	}
 }
 

@@ -518,7 +518,7 @@ func setupJiraMirrorFixture(t *testing.T, suffix string, status, assignee string
 	runID := "r-jira-" + suffix
 	seedJiraRun(t, database, runID, "sess-"+suffix, "/tmp/wt-jira-"+suffix)
 	var taskID string
-	if err := database.QueryRow(`SELECT task_id FROM runs WHERE id = ?`, runID).Scan(&taskID); err != nil {
+	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id = ?`, runID).Scan(&taskID); err != nil {
 		t.Fatalf("lookup task_id: %v", err)
 	}
 

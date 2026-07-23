@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -138,7 +139,7 @@ func (f *fakeInstanceStore) SetDraining(context.Context, string, bool) (bool, er
 func taskIDForRun(t *testing.T, database *sql.DB, runID string) string {
 	t.Helper()
 	var taskID string
-	if err := database.QueryRow(`SELECT task_id FROM runs WHERE id = ?`, runID).Scan(&taskID); err != nil {
+	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id = ?`, runID).Scan(&taskID); err != nil {
 		t.Fatalf("resolve task id for run %s: %v", runID, err)
 	}
 	return taskID
@@ -149,7 +150,7 @@ func entityIDForRun(t *testing.T, database *sql.DB, runID string) string {
 	t.Helper()
 	var entityID string
 	if err := database.QueryRow(
-		`SELECT entity_id FROM tasks WHERE id = (SELECT task_id FROM runs WHERE id = ?)`, runID,
+		`SELECT entity_id FROM tasks WHERE id = (SELECT task_id FROM conversations WHERE id = ?)`, runID,
 	).Scan(&entityID); err != nil {
 		t.Fatalf("resolve entity id for run %s: %v", runID, err)
 	}
@@ -199,9 +200,7 @@ func seedFakeTrigger(t *testing.T, database *sql.DB, runID string) string {
 func TestCrossPodController_Interrupt_RoutesRemoteAndAwaitsAck(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-remote", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET executor_id = 'executor-2' WHERE id = 'r-remote'`); err != nil {
-		t.Fatalf("stamp executor: %v", err)
-	}
+	dbtest.SeedActiveClaim(t, database, "r-remote", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fakeSignals := newFakeRunSignalStore()
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
@@ -228,9 +227,7 @@ func TestCrossPodController_Interrupt_RoutesRemoteAndAwaitsAck(t *testing.T) {
 func TestCrossPodController_Steer_CarriesTextInPayload(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-remote2", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET executor_id = 'executor-2' WHERE id = 'r-remote2'`); err != nil {
-		t.Fatalf("stamp executor: %v", err)
-	}
+	dbtest.SeedActiveClaim(t, database, "r-remote2", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fakeSignals := newFakeRunSignalStore()
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
@@ -261,9 +258,7 @@ func TestCrossPodController_Steer_CarriesTextInPayload(t *testing.T) {
 func TestCrossPodController_Steer_StaleAckSurfacesAsNoLiveProcess(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-remote-stale", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET executor_id = 'executor-2' WHERE id = 'r-remote-stale'`); err != nil {
-		t.Fatalf("stamp executor: %v", err)
-	}
+	dbtest.SeedActiveClaim(t, database, "r-remote-stale", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fakeSignals := newFakeRunSignalStore()
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
@@ -288,9 +283,7 @@ func TestCrossPodController_Steer_StaleAckSurfacesAsNoLiveProcess(t *testing.T) 
 func TestCrossPodController_Interrupt_TimesOutWhenOwnerNeverAcks(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-timeout", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET executor_id = 'executor-2' WHERE id = 'r-timeout'`); err != nil {
-		t.Fatalf("stamp executor: %v", err)
-	}
+	dbtest.SeedActiveClaim(t, database, "r-timeout", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
@@ -310,9 +303,7 @@ func TestCrossPodController_Interrupt_TimesOutWhenOwnerNeverAcks(t *testing.T) {
 func TestCrossPodController_Interrupt_NoLiveOwnerFallsBackToNotLive(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-stale", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET executor_id = 'executor-dead' WHERE id = 'r-stale'`); err != nil {
-		t.Fatalf("stamp executor: %v", err)
-	}
+	dbtest.SeedActiveClaim(t, database, "r-stale", "executor-dead", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-dead": {ID: "executor-dead", LastHeartbeatAt: time.Now().Add(-time.Hour)},
@@ -359,9 +350,7 @@ func TestCrossPodController_LocalHitNeverGoesRemote(t *testing.T) {
 func TestCancel_SignalsRemoteOwnerBestEffort(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-cancel", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET executor_id = 'executor-2' WHERE id = 'r-cancel'`); err != nil {
-		t.Fatalf("stamp executor: %v", err)
-	}
+	dbtest.SeedActiveClaim(t, database, "r-cancel", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fakeSignals := newFakeRunSignalStore()
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
@@ -373,7 +362,7 @@ func TestCancel_SignalsRemoteOwnerBestEffort(t *testing.T) {
 		t.Fatalf("Cancel: %v", err)
 	}
 	var status string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id = 'r-cancel'`).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = 'r-cancel'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status != "cancelled" {
@@ -393,9 +382,7 @@ func TestCancel_SignalsRemoteOwnerBestEffort(t *testing.T) {
 func TestCancel_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-cancel-noinst", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET executor_id = 'executor-2' WHERE id = 'r-cancel-noinst'`); err != nil {
-		t.Fatalf("stamp executor: %v", err)
-	}
+	dbtest.SeedActiveClaim(t, database, "r-cancel-noinst", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fakeSignals := newFakeRunSignalStore()
 	s.instances = nil
@@ -405,7 +392,7 @@ func TestCancel_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic(t *testing
 		t.Fatalf("Cancel: %v", err)
 	}
 	var status string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id = 'r-cancel-noinst'`).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = 'r-cancel-noinst'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status != "cancelled" {
@@ -426,9 +413,7 @@ func TestCancel_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic(t *testing
 func TestResolvePermission_RoutesRemoteWhenNoLocalProcess(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-perm", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET executor_id = 'executor-2' WHERE id = 'r-perm'`); err != nil {
-		t.Fatalf("stamp executor: %v", err)
-	}
+	dbtest.SeedActiveClaim(t, database, "r-perm", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fakeSignals := newFakeRunSignalStore()
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
@@ -476,9 +461,7 @@ func TestResolvePermission_LocalProcOwnedButRequestStaleNeverGoesRemote(t *testi
 func TestStageOrDeliverAdditiveEvent_RemoteLiveSignals(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-inj", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET executor_id = 'executor-2' WHERE id = 'r-inj'`); err != nil {
-		t.Fatalf("stamp executor: %v", err)
-	}
+	dbtest.SeedActiveClaim(t, database, "r-inj", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	fakeSignals := newFakeRunSignalStore()
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
@@ -504,7 +487,7 @@ func TestStageOrDeliverAdditiveEvent_RemoteLiveSignals(t *testing.T) {
 func TestStageOrDeliverAdditiveEvent_NoLiveOwnerFallsBackToStaged(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-inj2", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET status = 'open' WHERE id = 'r-inj2'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open' WHERE id = 'r-inj2'`); err != nil {
 		t.Fatalf("park run: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
@@ -531,7 +514,7 @@ func TestStageOrDeliverAdditiveEvent_NoLiveOwnerFallsBackToStaged(t *testing.T) 
 func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-inj3", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET status = 'completed', outcome = 'finish' WHERE id = 'r-inj3'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'completed', outcome = 'finish' WHERE id = 'r-inj3'`); err != nil {
 		t.Fatalf("terminate run: %v", err)
 	}
 	stores := testSpawnerStores(database)
@@ -544,11 +527,11 @@ func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 	}
 
 	var count int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM staged_agent_injections WHERE run_id = ?`, "r-inj3").Scan(&count); err != nil {
-		t.Fatalf("count staged_agent_injections: %v", err)
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND delivered = 0 AND subtype = 'injection:system-note'`, "r-inj3").Scan(&count); err != nil {
+		t.Fatalf("count staged injection messages: %v", err)
 	}
 	if count != 0 {
-		t.Errorf("staged_agent_injections has %d orphaned row(s) for a run InjectNotDelivered decided against, want 0", count)
+		t.Errorf("messages holds %d orphaned staged-injection row(s) for a run InjectNotDelivered decided against, want 0", count)
 	}
 }
 

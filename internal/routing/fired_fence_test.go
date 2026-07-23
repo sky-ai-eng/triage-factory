@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -111,7 +112,7 @@ func fenceRunCount(t *testing.T, database *sql.DB, entityID string) int {
 	t.Helper()
 	var n int
 	if err := database.QueryRow(`
-		SELECT COUNT(*) FROM runs r JOIN tasks t ON t.id = r.task_id WHERE t.entity_id = ?
+		SELECT COUNT(*) FROM conversations r JOIN tasks t ON t.id = r.task_id WHERE t.entity_id = ?
 	`, entityID).Scan(&n); err != nil {
 		t.Fatalf("count runs: %v", err)
 	}
@@ -124,7 +125,7 @@ func fenceRunCount(t *testing.T, database *sql.DB, entityID string) int {
 func fenceCompleteRuns(t *testing.T, database *sql.DB, entityID string) {
 	t.Helper()
 	if _, err := database.Exec(`
-		UPDATE runs SET status = 'completed', completed_at = ?
+		UPDATE conversations SET status = 'completed', completed_at = ?
 		WHERE task_id IN (SELECT id FROM tasks WHERE entity_id = ?)
 	`, time.Now(), entityID); err != nil {
 		t.Fatalf("complete runs: %v", err)
@@ -227,7 +228,7 @@ func TestDrainEntity_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 		t.Fatalf("seed prior blueprint_run: inserted=%v err=%v", inserted, err)
 	}
 	stepIdx := 0
-	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.AgentRun{
 		ID:                 uuid.New().String(),
 		TaskID:             taskID,
 		PromptID:           "p-drain",
@@ -236,9 +237,7 @@ func TestDrainEntity_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 		TriggerID:          triggerID,
 		BlueprintRunID:     priorBlueprintRunID,
 		BlueprintStepIndex: &stepIdx,
-	}); err != nil {
-		t.Fatalf("seed prior run: %v", err)
-	}
+	})
 
 	// Queue a firing carrying the same triggering event.
 	if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID); err != nil {

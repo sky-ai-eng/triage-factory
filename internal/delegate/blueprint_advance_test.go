@@ -178,7 +178,7 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 	var agentContent sql.NullString
 	var gotBlueprintRunID sql.NullString
 	if err := database.QueryRow(
-		`SELECT agent_content, blueprint_run_id FROM run_memory WHERE run_id = ?`, runID,
+		`SELECT agent_content, blueprint_run_id FROM run_memory WHERE conversation_id = ?`, runID,
 	).Scan(&agentContent, &gotBlueprintRunID); err != nil {
 		t.Fatalf("scan run_memory: %v", err)
 	}
@@ -250,7 +250,7 @@ func makeRunBlueprintStep(t *testing.T, database *sql.DB, runID, taskID string) 
 	); err != nil {
 		t.Fatalf("seed blueprint_runs: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE runs SET blueprint_run_id = ? WHERE id = ?`, "bpr-"+runID, runID); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET blueprint_run_id = ? WHERE id = ?`, "bpr-"+runID, runID); err != nil {
 		t.Fatalf("set blueprint_run_id: %v", err)
 	}
 }

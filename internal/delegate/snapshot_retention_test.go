@@ -117,14 +117,14 @@ func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
 	wireBlobStore(t, s)
 
 	oldBpr := blueprintRunIDForRun(t, database, oldRun)
-	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='abort', completed_at=datetime('now','-20 days') WHERE id=?`, oldRun); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-20 days') WHERE id=?`, oldRun); err != nil {
 		t.Fatalf("age old run: %v", err)
 	}
 	putTestSnapshot(t, s, oldBpr)
 
 	seedRun(t, database, "r-fresh", "sess-fresh", "/tmp/wt-fresh")
 	freshBpr := blueprintRunIDForRun(t, database, "r-fresh")
-	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='abort', completed_at=datetime('now') WHERE id='r-fresh'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now') WHERE id='r-fresh'`); err != nil {
 		t.Fatalf("complete fresh run: %v", err)
 	}
 	putTestSnapshot(t, s, freshBpr)
@@ -141,16 +141,16 @@ func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
 func TestListReapableSnapshotKeys_ExcludesFinishAndInTTL(t *testing.T) {
 	s, database, abortRun, _ := setupAdvanceFixture(t, "reap-rules")
 	abortBpr := blueprintRunIDForRun(t, database, abortRun)
-	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, abortRun); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, abortRun); err != nil {
 		t.Fatalf("age abort run: %v", err)
 	}
 
 	seedRun(t, database, "r-fin2", "s", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='finish', completed_at=datetime('now','-30 days') WHERE id='r-fin2'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish', completed_at=datetime('now','-30 days') WHERE id='r-fin2'`); err != nil {
 		t.Fatalf("finish run: %v", err)
 	}
 	seedRun(t, database, "r-open2", "s", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE runs SET status='open', completed_at=NULL, started_at=datetime('now') WHERE id='r-open2'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='open', completed_at=NULL, started_at=datetime('now') WHERE id='r-open2'`); err != nil {
 		t.Fatalf("open run: %v", err)
 	}
 
@@ -174,12 +174,12 @@ func TestListReapableSnapshotKeys_ExcludesFinishAndInTTL(t *testing.T) {
 func TestListReapableSnapshotKeys_SharedBlueprintNeedsAllPastTTL(t *testing.T) {
 	s, database, run1, taskID := setupAdvanceFixture(t, "reap-shared")
 	bpr := blueprintRunIDForRun(t, database, run1)
-	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, run1); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, run1); err != nil {
 		t.Fatalf("age step 1: %v", err)
 	}
 	// A second step on the SAME blueprint_run, also completed+abort but fresh.
 	addStepRun(t, database, bpr, taskID, "run2-shared", 1, "running")
-	if _, err := database.Exec(`UPDATE runs SET status='completed', outcome='abort', completed_at=datetime('now') WHERE id='run2-shared'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now') WHERE id='run2-shared'`); err != nil {
 		t.Fatalf("complete step 2: %v", err)
 	}
 
@@ -197,7 +197,7 @@ func TestListReapableSnapshotKeys_SharedBlueprintNeedsAllPastTTL(t *testing.T) {
 
 // TestMarkOpenResuming_StampsAndClearsParkedAt pins the park-timestamp
 // lifecycle: MarkOpen stamps parked_at (so retention keys off the last park),
-// MarkResuming clears it (the run is no longer parked).
+// the resume-by-enqueue flip clears it (the run is no longer parked).
 func TestMarkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
 	s, database, run, _ := setupAdvanceFixture(t, "parked-stamp")
 	ctx := context.Background()
@@ -209,11 +209,11 @@ func TestMarkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
 		t.Error("MarkOpen did not stamp parked_at")
 	}
 
-	if _, err := s.agentRuns.MarkResuming(ctx, runmode.LocalDefaultOrgID, run, "test-instance", 1); err != nil {
-		t.Fatalf("MarkResuming: %v", err)
+	if _, err := s.agentRuns.MarkQueuedForResume(ctx, runmode.LocalDefaultOrgID, run); err != nil {
+		t.Fatalf("MarkQueuedForResume: %v", err)
 	}
 	if parkedAtSet(t, database, run) {
-		t.Error("MarkResuming did not clear parked_at")
+		t.Error("MarkQueuedForResume did not clear parked_at")
 	}
 }
 
@@ -228,7 +228,7 @@ func TestListReapableSnapshotKeys_OpenRunKeysOffParkedAt(t *testing.T) {
 	cutoff := time.Now().Add(-14 * 24 * time.Hour)
 
 	// Started 30 days ago, last re-parked just now → must survive.
-	if _, err := database.Exec(`UPDATE runs SET status='open', started_at=datetime('now','-30 days'), parked_at=datetime('now') WHERE id=?`, run); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='open', started_at=datetime('now','-30 days'), parked_at=datetime('now') WHERE id=?`, run); err != nil {
 		t.Fatalf("seed recently-parked open run: %v", err)
 	}
 	if keysContain(reapKeys(t, s, cutoff), bpr) {
@@ -236,7 +236,7 @@ func TestListReapableSnapshotKeys_OpenRunKeysOffParkedAt(t *testing.T) {
 	}
 
 	// Age the park past the TTL → now reapable.
-	if _, err := database.Exec(`UPDATE runs SET parked_at=datetime('now','-30 days') WHERE id=?`, run); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET parked_at=datetime('now','-30 days') WHERE id=?`, run); err != nil {
 		t.Fatalf("age park: %v", err)
 	}
 	if !keysContain(reapKeys(t, s, cutoff), bpr) {
@@ -249,7 +249,7 @@ func TestListReapableSnapshotKeys_OpenRunKeysOffParkedAt(t *testing.T) {
 func parkedAtSet(t *testing.T, database *sql.DB, runID string) bool {
 	t.Helper()
 	var pa sql.NullString
-	if err := database.QueryRow(`SELECT parked_at FROM runs WHERE id=?`, runID).Scan(&pa); err != nil {
+	if err := database.QueryRow(`SELECT parked_at FROM conversations WHERE id=?`, runID).Scan(&pa); err != nil {
 		t.Fatalf("read parked_at: %v", err)
 	}
 	return pa.Valid

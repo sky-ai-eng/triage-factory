@@ -207,7 +207,7 @@ func setupAdvanceFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, string
 	runID := "r-adv-" + suffix
 	seedRun(t, database, runID, "sess-"+suffix, "/tmp/wt-adv-"+suffix)
 	var taskID string
-	if err := database.QueryRow(`SELECT task_id FROM runs WHERE id = ?`, runID).Scan(&taskID); err != nil {
+	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id = ?`, runID).Scan(&taskID); err != nil {
 		t.Fatalf("lookup task_id: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -245,7 +245,7 @@ func readTaskStatus(t *testing.T, database *sql.DB, taskID string) string {
 
 func setRunStatus(t *testing.T, database *sql.DB, runID, status string) {
 	t.Helper()
-	if _, err := database.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, status, runID); err != nil {
 		t.Fatalf("set run status: %v", err)
 	}
 }
@@ -253,7 +253,7 @@ func setRunStatus(t *testing.T, database *sql.DB, runID, status string) {
 func blueprintRunIDForRun(t *testing.T, database *sql.DB, runID string) string {
 	t.Helper()
 	var brID string
-	if err := database.QueryRow(`SELECT blueprint_run_id FROM runs WHERE id = ?`, runID).Scan(&brID); err != nil {
+	if err := database.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, runID).Scan(&brID); err != nil {
 		t.Fatalf("read blueprint_run_id: %v", err)
 	}
 	return brID
@@ -264,7 +264,7 @@ func blueprintRunIDForRun(t *testing.T, database *sql.DB, runID string) string {
 func addStepRun(t *testing.T, database *sql.DB, blueprintRunID, taskID, runID string, stepIndex int, status string) {
 	t.Helper()
 	if _, err := database.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, status, trigger_type, team_id, visibility,
+		INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, team_id, visibility,
 		                  creator_user_id, worktree_path, blueprint_run_id, blueprint_step_index)
 		VALUES (?, ?, 'test-prompt', ?, 'manual', ?, 'team', ?, '/tmp/wt-step', ?, ?)
 	`, runID, taskID, status, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, blueprintRunID, stepIndex); err != nil {

@@ -164,7 +164,7 @@ func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task 
 	// injection seam targets (staged_agent_injections.run_id FKs to
 	// runs(id)) — resolve the real run row it minted (one run per
 	// blueprint_run in the stub, step_index 0).
-	if err := database.QueryRow(`SELECT id FROM runs WHERE blueprint_run_id = ?`, blueprintRunID).Scan(&activeRunID); err != nil {
+	if err := database.QueryRow(`SELECT id FROM conversations WHERE blueprint_run_id = ?`, blueprintRunID).Scan(&activeRunID); err != nil {
 		t.Fatalf("resolve seeded run id: %v", err)
 	}
 	return
@@ -491,7 +491,7 @@ func TestTryAutoDelegate_SameTask_NotDeliveredFallsThroughToDeferral(t *testing.
 // routing-level regression test for staging onto a non-resumable run.
 // Unlike the sibling tests above, this one wires a REAL *delegate.Spawner as the Delegator
 // (not injectingStubDelegator) so StageOrDeliverAdditiveEvent's actual DB
-// side effects — the staged_agent_injections append AND its cleanup — are
+// side effects — the staged-injection message append AND its cleanup — are
 // observable. setupAbsorbScenario's active run is status="running" with
 // no live process registered against this fresh spawner instance, so
 // getProc returns nil (no local delivery) and there's no run_signals wired
@@ -536,11 +536,11 @@ func TestTryAutoDelegate_SameTask_StageToNonResumableRun_NoOrphanedRow(t *testin
 	}
 
 	var staged int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM staged_agent_injections WHERE run_id = ?`, activeRunID).Scan(&staged); err != nil {
-		t.Fatalf("count staged_agent_injections: %v", err)
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND delivered = 0 AND subtype = 'injection:system-note'`, activeRunID).Scan(&staged); err != nil {
+		t.Fatalf("count staged injection messages: %v", err)
 	}
 	if staged != 0 {
-		t.Errorf("staged_agent_injections has %d orphaned row(s) for run %q, want 0 (deferral landed but the staged row was never cleaned up)", staged, activeRunID)
+		t.Errorf("messages holds %d orphaned staged-injection row(s) for run %q, want 0 (deferral landed but the staged row was never cleaned up)", staged, activeRunID)
 	}
 }
 

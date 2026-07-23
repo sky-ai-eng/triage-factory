@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -71,16 +72,11 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 
 	step0 := 0
 	run0 := "rrun0-" + suffix
-	if err := stores.AgentRuns.Create(ctx, org, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.AgentRun{
 		ID: run0, TaskID: task.ID, PromptID: promptIDs[0], Status: step0Status,
-		Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step0,
-	}); err != nil {
-		t.Fatalf("create step0 run: %v", err)
-	}
-	if _, err := database.Exec(`UPDATE runs SET status = ?, outcome = ? WHERE id = ?`,
-		step0Status, sql.NullString{String: step0Outcome, Valid: step0Outcome != ""}, run0); err != nil {
-		t.Fatalf("set step0 outcome: %v", err)
-	}
+		Outcome: step0Outcome,
+		Model:   "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step0,
+	})
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	return s, database, brID, task.ID, run0
@@ -88,7 +84,7 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 
 func queuedStepRuns(t *testing.T, database *sql.DB, brID string) []int {
 	t.Helper()
-	rows, err := database.Query(`SELECT blueprint_step_index FROM runs WHERE blueprint_run_id = ? AND status = 'queued' ORDER BY blueprint_step_index`, brID)
+	rows, err := database.Query(`SELECT blueprint_step_index FROM conversations WHERE blueprint_run_id = ? AND status = 'queued' ORDER BY blueprint_step_index`, brID)
 	if err != nil {
 		t.Fatalf("query queued runs: %v", err)
 	}
@@ -112,7 +108,7 @@ func TestDrainRunQueue_DrainingSkipsClaim(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
 	seedRun(t, database, "run-drain-skip", "sess-1", "/tmp/wt-run-drain-skip")
-	if _, err := database.Exec(`UPDATE runs SET status = 'queued', claimed_at = NULL, executor_id = NULL, boot_epoch = NULL WHERE id = ?`, "run-drain-skip"); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'queued' WHERE id = ?`, "run-drain-skip"); err != nil {
 		t.Fatalf("force queued: %v", err)
 	}
 
@@ -120,7 +116,7 @@ func TestDrainRunQueue_DrainingSkipsClaim(t *testing.T) {
 	s.drainRunQueue(context.Background())
 
 	var status string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id = ?`, "run-drain-skip").Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, "run-drain-skip").Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status != "queued" {
@@ -129,7 +125,7 @@ func TestDrainRunQueue_DrainingSkipsClaim(t *testing.T) {
 
 	s.SetDraining(false)
 	s.drainRunQueue(context.Background())
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id = ?`, "run-drain-skip").Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, "run-drain-skip").Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	// ClaimNextRun flips queued->running synchronously; drainRunQueue then
@@ -152,7 +148,7 @@ func TestDrainRunQueue_PartitionFencedSkipsClaim(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
 	seedRun(t, database, "run-pfence-skip", "sess-1", "/tmp/wt-run-pfence-skip")
-	if _, err := database.Exec(`UPDATE runs SET status = 'queued', claimed_at = NULL, executor_id = NULL, boot_epoch = NULL WHERE id = ?`, "run-pfence-skip"); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'queued' WHERE id = ?`, "run-pfence-skip"); err != nil {
 		t.Fatalf("force queued: %v", err)
 	}
 
@@ -160,7 +156,7 @@ func TestDrainRunQueue_PartitionFencedSkipsClaim(t *testing.T) {
 	s.drainRunQueue(context.Background())
 
 	var status string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id = ?`, "run-pfence-skip").Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, "run-pfence-skip").Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
 	if status != "queued" {
@@ -185,7 +181,7 @@ func TestReconcileRunQueue_CancelsOrphanUnderTerminalBlueprint(t *testing.T) {
 	s.reconcileRunQueue(context.Background())
 
 	var status string
-	if err := database.QueryRow(`SELECT status FROM runs WHERE id = ?`, run0).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, run0).Scan(&status); err != nil {
 		t.Fatalf("read child status: %v", err)
 	}
 	if status != "cancelled" {
@@ -252,7 +248,7 @@ func TestReactor_AdvanceInheritsActorAgent(t *testing.T) {
 	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
 
 	var actor string
-	if err := database.QueryRow(`SELECT COALESCE(actor_agent_id, '') FROM runs WHERE blueprint_run_id = ? AND blueprint_step_index = 1`, brID).Scan(&actor); err != nil {
+	if err := database.QueryRow(`SELECT COALESCE(actor_agent_id, '') FROM conversations WHERE blueprint_run_id = ? AND blueprint_step_index = 1`, brID).Scan(&actor); err != nil {
 		t.Fatalf("read step-1 actor: %v", err)
 	}
 	if actor != agentID {
@@ -293,7 +289,7 @@ func TestReactor_AdvanceInheritsTriggerID(t *testing.T) {
 	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
 
 	var gotTrig string
-	if err := database.QueryRow(`SELECT COALESCE(trigger_id, '') FROM runs WHERE blueprint_run_id = ? AND blueprint_step_index = 1`, brID).Scan(&gotTrig); err != nil {
+	if err := database.QueryRow(`SELECT COALESCE(trigger_id, '') FROM conversations WHERE blueprint_run_id = ? AND blueprint_step_index = 1`, brID).Scan(&gotTrig); err != nil {
 		t.Fatalf("read step-1 trigger_id: %v", err)
 	}
 	if gotTrig != trigID {

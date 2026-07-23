@@ -85,7 +85,7 @@ func newJiraRecordingStoresConn(t *testing.T, jiraURL string, eventTriggered boo
 
 	const runID = "11111111-1111-1111-1111-111111111111"
 	if _, err := conn.Exec(
-		`INSERT INTO runs (id, origin, status) VALUES (?, 'interactive', 'running')`, runID,
+		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, runID,
 	); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}

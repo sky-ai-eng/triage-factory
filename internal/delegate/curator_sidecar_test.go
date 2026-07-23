@@ -2,8 +2,10 @@ package delegate
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -106,38 +108,82 @@ func TestCuratorGitAuthorizeDecision(t *testing.T) {
 	})
 }
 
+// seedCuratorTurn mints a curator conversation on a fresh project plus one
+// ACTIVE claim homed to executorID — the shape a homed turn has when the
+// executor brings its sidecar up. Raw SQL because curator conversations are
+// minted by the curator engine, not any delegate-side store.
+func seedCuratorTurn(t *testing.T, database *sql.DB, stores db.Stores, executorID string, bootEpoch int64) (conversationID string) {
+	t.Helper()
+	projectID, err := stores.Projects.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "homed"})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	conversationID = "conv-curator-turn"
+	if _, err := database.Exec(`
+		INSERT INTO conversations (id, org_id, type, creator_user_id, team_id, visibility, trigger_type, origin, status, project_id)
+		VALUES (?, ?, 'curator', ?, ?, 'private', 'manual', 'curator', NULL, ?)
+	`, conversationID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID, projectID); err != nil {
+		t.Fatalf("seed curator conversation: %v", err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch)
+		VALUES ('claim-curator-turn', ?, ?, ?, ?)
+	`, runmode.LocalDefaultOrgID, conversationID, executorID, bootEpoch); err != nil {
+		t.Fatalf("seed active claim: %v", err)
+	}
+	return conversationID
+}
+
+// fakeRunCredentials is an in-memory db.RunCredentialsStore standing in for
+// the Postgres-only claim_credentials channel (the SQLite impl refuses every
+// call), so the provision loop's poll half is exercisable here.
+type fakeRunCredentials struct {
+	mu        sync.Mutex
+	sealed    []byte
+	bootEpoch int64
+	ok        bool
+}
+
+func (f *fakeRunCredentials) Put(_ context.Context, _, _, _ string, bootEpoch int64, sealed []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sealed, f.bootEpoch, f.ok = sealed, bootEpoch, true
+	return nil
+}
+
+func (f *fakeRunCredentials) Get(context.Context, string, string) (string, int64, []byte, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return "", f.bootEpoch, f.sealed, f.ok, nil
+}
+
 // TestCuratorSidecarProvisionFor pins the curator provision fn's handshake:
-// it publishes the sidecar's pubkey onto the turn, then polls the
-// curator_turn_credentials channel and returns the OPAQUE sealed bytes the brain
-// wrote (sealed to this executor's boot epoch) — the exact "pubkey publish →
-// poll → opaque relay" loop the run path's sidecarProvisionFor runs.
+// it publishes the sidecar's pubkey onto the conversation's active claim,
+// then polls the sealed-bundle channel and returns the OPAQUE sealed bytes
+// the brain wrote (sealed to this executor's boot epoch) — the exact "pubkey
+// publish → poll → opaque relay" loop the run path's sidecarProvisionFor runs.
 func TestCuratorSidecarProvisionFor(t *testing.T) {
 	database := newDelegateTestDB(t)
 	stores := sqlitestore.New(database)
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 
-	projectID, err := stores.Projects.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Project{Name: "homed"})
-	if err != nil {
-		t.Fatalf("create project: %v", err)
-	}
-	requestID, err := stores.Curator.CreateRequest(ctx, org, projectID, runmode.LocalDefaultUserID, "home-exec", "hi")
-	if err != nil {
-		t.Fatalf("CreateRequest: %v", err)
-	}
+	conversationID := seedCuratorTurn(t, database, stores, "home-exec", 5)
 
 	s := NewSpawner(database, stores, nil, nil, "")
 	s.SetExecutorID("home-exec", 5)
 	s.SetAwaitingCredentialsTimeout(3*time.Second, 5*time.Millisecond)
+	creds := &fakeRunCredentials{}
+	s.runCredentials = creds
 
-	fn := s.curatorSidecarProvisionFor(org, requestID)
+	fn := s.curatorSidecarProvisionFor(org, conversationID)
 
 	sealed := []byte("sealed-curator-bundle")
 	// The brain seals + writes the bundle shortly after the executor publishes
 	// its key. Race it with the provision poll.
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		_ = stores.CuratorTurnCredentials.Put(ctx, org, requestID, "home-exec", 5, sealed)
+		_ = creds.Put(ctx, org, conversationID, "home-exec", 5, sealed)
 	}()
 
 	gotSealed, gotEpoch, err := fn(ctx, "sidecar-pubkey-b64")
@@ -148,8 +194,9 @@ func TestCuratorSidecarProvisionFor(t *testing.T) {
 		t.Errorf("provision fn = (%q, %d), want (%q, 5)", gotSealed, gotEpoch, sealed)
 	}
 
-	// The pubkey was published onto the turn so the brain could seal to it.
-	info, ok, err := stores.Curator.GetTurnProvisionInfoSystem(ctx, org, requestID)
+	// The pubkey was published onto the active claim so the brain could seal
+	// to it.
+	info, ok, err := stores.Curator.GetTurnProvisionInfoSystem(ctx, org, conversationID)
 	if err != nil || !ok {
 		t.Fatalf("GetTurnProvisionInfoSystem: ok=%v err=%v", ok, err)
 	}
@@ -167,20 +214,14 @@ func TestCuratorSidecarProvisionFor_TimesOut(t *testing.T) {
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 
-	projectID, err := stores.Projects.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Project{Name: "homed"})
-	if err != nil {
-		t.Fatalf("create project: %v", err)
-	}
-	requestID, err := stores.Curator.CreateRequest(ctx, org, projectID, runmode.LocalDefaultUserID, "home-exec", "hi")
-	if err != nil {
-		t.Fatalf("CreateRequest: %v", err)
-	}
+	conversationID := seedCuratorTurn(t, database, stores, "home-exec", 5)
 
 	s := NewSpawner(database, stores, nil, nil, "")
 	s.SetExecutorID("home-exec", 5)
 	s.SetAwaitingCredentialsTimeout(80*time.Millisecond, 5*time.Millisecond)
+	s.runCredentials = &fakeRunCredentials{}
 
-	fn := s.curatorSidecarProvisionFor(org, requestID)
+	fn := s.curatorSidecarProvisionFor(org, conversationID)
 	if _, _, err := fn(ctx, "sidecar-pubkey-b64"); err == nil {
 		t.Fatal("provision fn returned nil error, want a timeout (brain never provisioned)")
 	}

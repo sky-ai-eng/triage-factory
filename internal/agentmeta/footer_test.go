@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -60,10 +61,10 @@ func seedBlueprintRun(t *testing.T, database *sql.DB, taskID string) string {
 }
 
 // seedFooterRun installs the entity → event → task → prompt → run
-// chain required for db.GetAgentRun to find a row, then patches the
-// runs columns the footer actually reads (model, started_at,
-// completed_at, duration_ms, total_cost_usd) via a direct UPDATE.
-// Returns nothing — the test asserts via db.GetAgentRun and Build.
+// chain required for the footer's run read to find a row, carrying the
+// columns the footer actually reads (model, started_at, completed_at,
+// duration_ms, total_cost_usd). Returns nothing — the test asserts via
+// Build.
 func seedFooterRun(t *testing.T, database *sql.DB, fix runFooterFixture) {
 	t.Helper()
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#"+fix.ID, "pr", "T", "https://x/"+fix.ID)
@@ -93,27 +94,13 @@ func seedFooterRun(t *testing.T, database *sql.DB, fix runFooterFixture) {
 	if brID == "" {
 		brID = seedBlueprintRun(t, database, task.ID)
 	}
-	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrgID, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.AgentRun{
 		ID: fix.ID, TaskID: task.ID, PromptID: "footer-test-prompt",
 		Status: "running", Model: fix.Model, StartedAt: fix.StartedAt,
+		CompletedAt: fix.CompletedAt, DurationMs: fix.DurationMs,
+		TotalCostUSD:   fix.TotalCostUSD,
 		BlueprintRunID: brID,
-	}); err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	// Patch the columns the footer reads. CreateAgentRun doesn't
-	// expose total_cost_usd / duration_ms / completed_at, so we go
-	// direct.
-	if _, err := database.Exec(
-		`UPDATE runs
-		    SET completed_at = ?,
-		        duration_ms = ?,
-		        total_cost_usd = ?,
-		        started_at = ?
-		  WHERE id = ?`,
-		fix.CompletedAt, fix.DurationMs, fix.TotalCostUSD, fix.StartedAt, fix.ID,
-	); err != nil {
-		t.Fatalf("patch run columns: %v", err)
-	}
+	})
 }
 
 type runFooterFixture struct {
@@ -237,7 +224,7 @@ func TestBuild_SumsCostAcrossBlueprintSteps(t *testing.T) {
 		TotalCostUSD: &step1Cost,
 	})
 	var brID string
-	if err := database.QueryRow(`SELECT blueprint_run_id FROM runs WHERE id = ?`, "bp-step-1").Scan(&brID); err != nil {
+	if err := database.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, "bp-step-1").Scan(&brID); err != nil {
 		t.Fatalf("read blueprint_run_id: %v", err)
 	}
 
@@ -285,7 +272,7 @@ func TestBuild_SumsTimeAcrossBlueprintSteps(t *testing.T) {
 		DurationMs: &step1Dur,
 	})
 	var brID string
-	if err := database.QueryRow(`SELECT blueprint_run_id FROM runs WHERE id = ?`, "bpt-step-1").Scan(&brID); err != nil {
+	if err := database.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, "bpt-step-1").Scan(&brID); err != nil {
 		t.Fatalf("read blueprint_run_id: %v", err)
 	}
 
