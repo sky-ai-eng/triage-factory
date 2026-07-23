@@ -25,6 +25,12 @@ type RunPendingInputStore interface {
 	// an idempotent replace keyed by the conversation (a retried "requeue
 	// failed" request just overwrites its own prior write with an equal
 	// one).
+	//
+	// The at-most-one-undelivered-row-per-conversation contract is enforced
+	// here (delete-then-insert) and by the single-flighted resume path, not
+	// by a DB constraint: a partial unique index on undelivered user rows
+	// cannot exist on the shared messages table, because curator
+	// conversations legitimately queue several undelivered user turns.
 	Store(ctx context.Context, orgID, runID, userID, message string) error
 
 	// Peek reads the pending input for a run WITHOUT flipping it, or

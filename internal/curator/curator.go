@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -84,6 +85,14 @@ type Curator struct {
 	// avoids importing delegate.
 	bringUpTurnSandbox BringUpTurnSandboxFunc
 
+	// turnRetryDelay paces the session's own re-feed after a BeginTurn
+	// failure — the one failure class that leaves the turn queued with
+	// nothing else driving it (the executor claim loop's handed-off dedup
+	// only clears once a pickup mints a claim, and local mode has no loop
+	// at all). Small enough to feel responsive, large enough that a hard
+	// DB outage doesn't spin the mint/fail cycle.
+	turnRetryDelay time.Duration
+
 	// turnMaxAttempts caps how many failed pickups (claim minted, BeginTurn
 	// failed, claim released 'failed' with the message still undelivered) a
 	// queued turn may accumulate before dispatch dead-letters it instead of
@@ -141,6 +150,7 @@ func New(stores db.Stores, wsHub *websocket.Hub, model string) *Curator {
 		sessions:        make(map[string]*projectSession),
 		runAgent:        agentproc.Run,
 		turnMaxAttempts: DefaultTurnMaxAttempts,
+		turnRetryDelay:  DefaultTurnRetryDelay,
 	}
 }
 
@@ -149,6 +159,9 @@ func New(stores db.Stores, wsHub *websocket.Hub, model string) *Curator {
 // TF_RUN_MAX_ATTEMPTS: this caps repeated BeginTurn failures on one turn's
 // message, not executor-loss re-claims.
 const DefaultTurnMaxAttempts = 3
+
+// DefaultTurnRetryDelay paces the self-retry after a failed BeginTurn.
+const DefaultTurnRetryDelay = 5 * time.Second
 
 // ParseTurnMaxAttempts parses TF_CURATOR_TURN_MAX_ATTEMPTS. Empty maps to
 // DefaultTurnMaxAttempts; anything else must parse as a positive integer.
@@ -179,6 +192,20 @@ func (c *Curator) getTurnMaxAttempts() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.turnMaxAttempts
+}
+
+// SetTurnRetryDelay overrides the BeginTurn-failure re-feed pacing (tests
+// shrink it to keep the retry cycle fast).
+func (c *Curator) SetTurnRetryDelay(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.turnRetryDelay = d
+}
+
+func (c *Curator) getTurnRetryDelay() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.turnRetryDelay
 }
 
 // SetRunCredentialResolvers wires the per-org run-credential seam: the GitHub

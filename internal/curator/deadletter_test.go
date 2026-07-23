@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -66,6 +65,7 @@ func TestDispatch_BeginTurnFailureCapDeadLetters(t *testing.T) {
 	stores := sqlitestore.New(database)
 	c := New(stores, nil, "claude-sonnet-4-6")
 	c.SetTurnMaxAttempts(2)
+	c.SetTurnRetryDelay(time.Millisecond)
 	t.Cleanup(c.Shutdown)
 
 	var agentRan atomic.Bool
@@ -83,32 +83,11 @@ func TestDispatch_BeginTurnFailureCapDeadLetters(t *testing.T) {
 	if err != nil || conv == nil {
 		t.Fatalf("get conversation: %v (%v)", conv, err)
 	}
-	// The wire request id IS the message id.
-	msgID, err := strconv.ParseInt(reqID, 10, 64)
-	if err != nil {
-		t.Fatalf("parse request id: %v", err)
-	}
 
-	// Attempt 1 (the in-process send) fails at BeginTurn and leaves the
-	// message queued for a later scan.
-	claims := waitForClaims(t, stores, conv.ID, 1)
-	if claims[0].Outcome != "failed" || !strings.Contains(claims[0].Error, "begin turn") {
-		t.Fatalf("attempt 1 claim = %+v, want failed at begin turn", claims[0])
-	}
-	if status, _ := turnState(t, stores, projectID, reqID); status != "queued" {
-		t.Fatalf("status after attempt 1 = %q, want queued (still claimable)", status)
-	}
-
-	// Attempt 2 (a re-feed, as the claim loop would) fails the same way.
-	if !c.EnqueueClaimed(org, projectID, conv.ID, msgID, user) {
-		t.Fatal("re-feed 2 rejected")
-	}
-	waitForClaims(t, stores, conv.ID, 2)
-
-	// Feed 3 hits the cap: dead-letter, no third pickup.
-	if !c.EnqueueClaimed(org, projectID, conv.ID, msgID, user) {
-		t.Fatal("re-feed 3 rejected")
-	}
+	// The ONLY feed is the in-process send: every subsequent pickup must be
+	// the session's own retry — the claim loop's handed-off dedup skips a
+	// still-claimable turn, and local mode has no loop at all, so anything
+	// beyond one claim here proves the self-retry engine is the driver.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		status, errMsg := turnState(t, stores, projectID, reqID)
@@ -123,7 +102,7 @@ func TestDispatch_BeginTurnFailureCapDeadLetters(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	claims = waitForClaims(t, stores, conv.ID, 3)
+	claims := waitForClaims(t, stores, conv.ID, 3)
 	final := claims[2]
 	if final.Outcome != "failed" || !strings.Contains(final.Error, "giving up") {
 		t.Errorf("final claim = %+v, want the dead-letter release", final)
@@ -146,6 +125,7 @@ func TestDispatch_TransientBeginTurnFailureRetries(t *testing.T) {
 	corruptProject(t, database, projectID)
 	stores := sqlitestore.New(database)
 	c := New(stores, nil, "claude-sonnet-4-6")
+	c.SetTurnRetryDelay(10 * time.Millisecond)
 	t.Cleanup(c.Shutdown)
 
 	var agentRan atomic.Bool
@@ -163,19 +143,11 @@ func TestDispatch_TransientBeginTurnFailureRetries(t *testing.T) {
 	if err != nil || conv == nil {
 		t.Fatalf("get conversation: %v (%v)", conv, err)
 	}
-	// The wire request id IS the message id.
-	msgID, err := strconv.ParseInt(reqID, 10, 64)
-	if err != nil {
-		t.Fatalf("parse request id: %v", err)
-	}
 	waitForClaims(t, stores, conv.ID, 1)
 
-	// The fault clears; the re-feed must dispatch normally (reach the agent)
-	// rather than dead-letter.
+	// The fault clears; the session's own retry must dispatch normally
+	// (reach the agent) rather than dead-letter — no manual re-feed.
 	healProject(t, database, projectID)
-	if !c.EnqueueClaimed(org, projectID, conv.ID, msgID, user) {
-		t.Fatal("re-feed rejected")
-	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		status, errMsg := turnState(t, stores, projectID, reqID)

@@ -77,7 +77,11 @@ type Store interface {
 	// goes back to 'queued' for re-claim. The same arms run at boot inside
 	// RunQueueStore.ReconcileOrphanedRuns; the periodic repeat here bounds
 	// the desync's lifetime to a reaper tick instead of the next restart.
-	// Both arms are idempotent and safe against in-flight healthy writes.
+	// Both arms are idempotent and safe against in-flight healthy writes:
+	// the terminal writes stage their status UPDATE before releasing the
+	// claim, so the requeue arm blocks on that row lock and re-evaluates
+	// its WHERE post-commit — it can only match a genuinely rolled-back
+	// flip, never a completion mid-write.
 	// Curator conversations (status NULL) are never touched — their claim
 	// recovery belongs to the curator sweeps above.
 	HealClaimDesyncs(ctx context.Context) (requeued, released int, err error)

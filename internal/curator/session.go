@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -221,6 +222,15 @@ func (s *projectSession) dispatch(item queueItem) {
 		}
 		curatorLog.Warn("begin turn failed", "request", requestID, "error", wrapErr)
 		s.releaseFailed(item, fmt.Sprintf("begin turn: %v", wrapErr))
+		// A BeginTurn failure rolls its tx back, so the message is still
+		// undelivered and claim-less — queued, with nothing else driving a
+		// retry: the executor claim loop's handed-off dedup only clears
+		// once a pickup mints a claim, and local mode has no loop at all.
+		// The session re-feeds itself until the dead-letter gate above
+		// retires the turn at the cap. Every later failure class leaves
+		// the message delivered (terminal to the user), so this is the
+		// only site that self-retries.
+		s.scheduleTurnRetry(item)
 		return
 	}
 	if start.Project == nil {
@@ -685,6 +695,19 @@ func (s *projectSession) releaseCancelled(item queueItem, reason string) {
 	if flipped {
 		s.curator.broadcastRequestUpdate(item.orgID, s.projectID, item.requestID, "cancelled")
 	}
+}
+
+// scheduleTurnRetry re-feeds a BeginTurn-failed turn after a pacing delay.
+// EnqueueClaimed absorbs the shutdown and queue-full cases (the turn stays
+// durably queued for a boot/scan backstop), so a timer outliving the
+// session is harmless.
+func (s *projectSession) scheduleTurnRetry(item queueItem) {
+	delay := s.curator.getTurnRetryDelay()
+	time.AfterFunc(delay, func() {
+		if !s.curator.EnqueueClaimed(item.orgID, s.projectID, item.conversationID, item.messageID, item.creatorUserID) {
+			curatorLog.Warn("turn retry re-feed skipped", "request", item.requestID)
+		}
+	})
 }
 
 // releaseFailed releases the conversation's active claim as failed. A

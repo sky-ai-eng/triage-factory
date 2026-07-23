@@ -41,6 +41,11 @@ type RunCredentialsStore interface {
 	// sweep, but the guard means it never happens at all. <=, not <, so a
 	// same-epoch refresh (re-minted tokens for the SAME still-live claim)
 	// still applies normally.
+	//
+	// A nil error does NOT mean the bundle landed: with no active claim on
+	// the conversation (released between the caller's read and this write),
+	// Put inserts zero rows and returns nil. Callers must treat delivery as
+	// confirmed only by the executor's own Get poll, never by Put's return.
 	Put(ctx context.Context, orgID, runID, executorID string, bootEpoch int64, sealed []byte) error
 
 	// Get returns the sealed bundle for runID's active claim, or ok=false

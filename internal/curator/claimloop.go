@@ -135,6 +135,14 @@ func (l *HomeClaimLoop) scan(ctx context.Context) {
 	// delivered; drop it so tracked stays bounded to in-flight-queued work. A
 	// pruned id that reappears (the rare duplicate-feed race) is fenced by
 	// the dispatch's BeginTurn delivered check.
+	//
+	// The prune is what keeps a FAILED pickup retryable from here: it only
+	// fires once a pickup mints a claim (the turn leaves the claimable set),
+	// so this loop alone would skip a BeginTurn-failed turn forever — the
+	// session's own scheduleTurnRetry is the driver that guarantees every
+	// handoff eventually mints a claim or dead-letters, which in turn lets
+	// this prune cycle. Duplicate feeds from the two drivers racing are
+	// fenced by the single-active-claim index + the delivered check.
 	for id := range l.tracked {
 		if _, still := queued[id]; !still {
 			delete(l.tracked, id)

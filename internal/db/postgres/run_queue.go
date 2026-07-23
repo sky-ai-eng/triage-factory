@@ -543,7 +543,14 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 //
 // Arm two: an in-flight delegation conversation with no active claim (the
 // release committed, the flip's tx rolled back) — back to 'queued' so the
-// dispatcher re-claims it. Gated on a still-running blueprint parent,
+// dispatcher re-claims it.
+//
+// Arm two cannot false-positive against a HEALTHY terminal write racing it:
+// the app-pool tx stages its status UPDATE before the adjacent claim
+// release, so this arm's UPDATE blocks on that row lock and Postgres
+// re-evaluates the WHERE after the commit — a conversation that just went
+// terminal no longer matches. Only a genuinely rolled-back flip (the crash
+// window this arm exists for) still presents the claimless in-flight shape. Gated on a still-running blueprint parent,
 // mirroring ResetProcessingRuns: a re-queued row is only claimable under a
 // running parent, and rows under a terminal parent belong to the
 // blueprint-terminal cancel arm. Curator conversations are excluded by

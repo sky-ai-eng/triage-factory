@@ -487,6 +487,11 @@ ORDER BY created_at, id;
 -- Only unconsumed context notices are still pending; the change payload
 -- rides metadata (rendering happens at delivery against live project
 -- state, exactly as before).
+-- The creator_user_id join leg is vestigial precision: every pre-refactor
+-- write left the column at its sentinel default, so it always matches the
+-- (equally sentinel-defaulted) request-derived conversation. Kept for shape
+-- symmetry with the transcript join above; an unmatched row would drop, not
+-- error.
 INSERT INTO messages (org_id, conversation_id, user_id, role, content,
                       subtype, metadata, delivered, created_at)
 SELECT cpc.org_id, conv.id, cpc.creator_user_id, 'user', '',
