@@ -53,16 +53,18 @@ type AgentRunStore interface {
 	// released claim.
 	//
 	// costUSD is the invocation's reported total, settled as ONE lump on
-	// the messages row lastMessageID (the invocation's last recorded row —
-	// the delegate sink tracks it). lastMessageID 0 means the invocation
-	// recorded no rows; a nonzero lump still settles, additively, onto the
+	// the engagement's own newest message row — the newest row attributed
+	// to the claim this call releases (rows insert claim-stamped while the
+	// engagement is live, so the claim locates them; the curator turn
+	// release settles the same way). An engagement can bill while
+	// recording no rows of its own (system-prompt/cache overhead on an
+	// errored run); a nonzero lump then settles, additively, onto the
 	// conversation's newest existing message row (which may already carry
-	// an earlier invocation's lump) — the ledger is the only spend record
-	// and an invocation can bill with nothing parsed. Totals stay exact;
-	// per-row time attribution smears in that corner. With no message rows
-	// at all the lump is unattributable: logged, not stored. No proration
-	// across rows — proration without a pricing table is confidently
-	// wrong.
+	// an earlier invocation's lump) — the ledger is the only spend record.
+	// Totals stay exact; per-row time attribution smears in that corner.
+	// With no message rows at all the lump is unattributable: logged, not
+	// stored. No proration across rows — proration without a pricing table
+	// is confidently wrong.
 	//
 	// outcome / outcomeReason persist the parsed terminal-envelope
 	// outcome and (abort-only) reason; pass "" for both on runs that
@@ -71,7 +73,7 @@ type AgentRunStore interface {
 	// failureKind is the machine-readable failure discriminator
 	// (domain.RunFailureKind vocabulary) — non-empty only when status
 	// is 'failed' and the caller classified the cause; "" → NULL.
-	Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, lastMessageID int64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
+	Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
 
 	// MarkOpen flips a running run to `open` — a turn ended without a
 	// conclusion (or the live process idle-closed). Stamps parked_at to the
@@ -266,9 +268,14 @@ type AgentRunStore interface {
 	// subsequent WS broadcast can carry the same value without a
 	// re-read.
 	//
-	// msg.UserID / msg.ClaimID are written when non-empty ("" → NULL): the
-	// requesting user's turn attribution and the executor engagement that
-	// produced the row.
+	// msg.UserID is written when non-empty ("" → NULL): the requesting
+	// user's turn attribution. msg.ClaimID names the executor engagement
+	// that produced the row; an explicit non-empty value always wins,
+	// and an empty one resolves server-side to the conversation's active
+	// claim — rows written during an engagement belong to it, rows
+	// written outside one (pending inputs, queued turns, injections)
+	// correctly resolve NULL. A message racing its claim's release lands
+	// NULL, harmless.
 	//
 	// msg.Delivered nil writes the schema default (true — delivered
 	// immediately, today's only behavior); a non-nil value writes it
@@ -343,7 +350,7 @@ type AgentRunStore interface {
 	// pool the statement runs on; SQLite has one connection and the
 	// two variants collapse.
 	GetSystem(ctx context.Context, orgID, runID string) (*domain.AgentRun, error)
-	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, lastMessageID int64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
+	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
 	// LookupOrgForRunSystem returns the owning orgID for the given
 	// runID, or the empty string with a nil error if no such run
 	// exists. Used by the cmd/exec runident helper to discover the

@@ -89,23 +89,23 @@ func releaseActiveClaim(ctx context.Context, q queryer, orgID, runID, outcome st
 // both crash shapes self-healing). The cost stamp rides the app pool: the
 // messages ledger is app-writable (tf_app holds UPDATE) and the row is the
 // caller's own conversation.
-func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, lastMessageID int64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
-	if err := completeRun(ctx, s.q, orgID, runID, status, costUSD, lastMessageID, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+	if err := completeRun(ctx, s.q, orgID, runID, status, costUSD, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
 		return err
 	}
 	return releaseActiveClaimWithTelemetry(ctx, s.admin, orgID, runID, claimOutcomeForStatus(status), durationMs, numTurns)
 }
 
-func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, lastMessageID int64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
 	return inTx(ctx, s.admin, func(q queryer) error {
-		if err := completeRun(ctx, q, orgID, runID, status, costUSD, lastMessageID, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+		if err := completeRun(ctx, q, orgID, runID, status, costUSD, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
 			return err
 		}
 		return releaseActiveClaimWithTelemetry(ctx, q, orgID, runID, claimOutcomeForStatus(status), durationMs, numTurns)
 	})
 }
 
-func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, lastMessageID int64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
 	// The conversation carries no accounting cache — cost settles as one
 	// lump on the invocation's last message row (the ledger) below. A
 	// resume's Complete stamps its own invocation's lump on its own last
@@ -124,28 +124,49 @@ func completeRun(ctx context.Context, q queryer, orgID, runID, status string, co
 	if err != nil {
 		return err
 	}
-	if lastMessageID != 0 {
-		// Overwrite, not add: lastMessageID is this invocation's own fresh
-		// last row, and the lump is that invocation's whole total.
-		_, err = q.ExecContext(ctx, `
-			UPDATE messages SET cost_usd = $1
-			WHERE org_id = $2 AND conversation_id = $3 AND id = $4
-		`, costUSD, orgID, runID, lastMessageID)
+	// The active claim this terminal write releases identifies the
+	// engagement's own message rows (they insert claim-stamped), so the
+	// lump settles claim-keyed — the curator turn release's shape. Read
+	// before the release below: a released claim is no longer findable.
+	var claimID string
+	err = q.QueryRowContext(ctx, `
+		SELECT id FROM claims
+		WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL
+	`, orgID, runID).Scan(&claimID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
+	}
+	if claimID != "" {
+		// Overwrite, not add: the engagement's newest claim-attributed row
+		// is its own fresh row, and the lump is that invocation's whole
+		// total.
+		res, err := q.ExecContext(ctx, `
+			UPDATE messages SET cost_usd = $1
+			WHERE org_id = $2 AND conversation_id = $3
+			  AND id = (SELECT MAX(id) FROM messages WHERE claim_id = $4)
+		`, costUSD, orgID, runID, claimID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			return nil
+		}
 	}
 	if costUSD == 0 {
 		return nil
 	}
-	// An invocation can bill real tokens while streaming zero parsable
-	// messages (system-prompt/cache overhead on an errored run), and the
+	// An invocation can bill real tokens while streaming zero rows of its
+	// own (system-prompt/cache overhead on an errored run), and the
 	// messages ledger is the only spend record — so the lump settles on the
 	// conversation's newest existing row rather than being dropped. ADDITIVE,
 	// unlike the overwrite above: that row may already carry an earlier
 	// invocation's lump. The caveat: a rowless resume's spend lands on an
 	// older invocation's row — totals stay exact, per-row time attribution
-	// smears; accepted for this narrow corner. Keyed by conversation, not
-	// claim (the curator turn release's shape), because delegation message
-	// rows carry no claim stamp at insert time for a claim to locate.
+	// smears; accepted for this narrow corner.
 	res, err := q.ExecContext(ctx, `
 		UPDATE messages SET cost_usd = COALESCE(cost_usd, 0) + $1
 		WHERE org_id = $2 AND conversation_id = $3
@@ -798,6 +819,14 @@ func (s *agentRunStore) LastAgentActivityAtSystem(ctx context.Context, orgID, ru
 	return at, true, nil
 }
 
+// insertRunMessage attributes the row to an engagement: an explicit
+// non-empty msg.ClaimID always wins (the curator sink names its own
+// claim), otherwise claim_id resolves server-side to the conversation's
+// active claim. Rows written during an engagement belong to it; rows
+// written outside one (pending inputs, queued turns, injections)
+// correctly resolve NULL. A message racing its claim's release lands
+// NULL — harmless, the terminal settle's newest-row fallback still
+// reaches it.
 func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.AgentMessage) (int64, error) {
 	var toolCallsJSON, metadataJSON, reasoningJSON, contentBlocksJSON []byte
 
@@ -858,7 +887,10 @@ func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.
 		                      input_tokens, output_tokens,
 		                      cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 		                      reasoning, content_blocks, delivered, window_state, seq)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+		VALUES ($1, $2, $3,
+		        COALESCE($4, (SELECT id FROM claims
+		                      WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL)),
+		        $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
 		        $16, $17, $18, $19, $20, $21, $22, $23)
 		RETURNING id
 	`,

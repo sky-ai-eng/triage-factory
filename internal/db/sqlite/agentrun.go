@@ -63,14 +63,14 @@ func releaseActiveClaim(ctx context.Context, q queryer, runID, outcome string) e
 	return err
 }
 
-func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, lastMessageID int64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
 	// The conversation carries no accounting cache: cost settles as one
-	// lump on the invocation's last message row (the ledger), and the
-	// reported duration/turns telemetry rides the claim release. A resume's
-	// Complete stamps its own invocation's lump on its own last row, so
+	// lump on the invocation's own newest ledger row, and the reported
+	// duration/turns telemetry rides the claim release. A resume's
+	// Complete stamps its own invocation's lump on its own row, so
 	// nothing accumulates or doubles.
 	return inTx(ctx, s.q, func(q queryer) error {
 		_, err := q.ExecContext(ctx, `
@@ -89,27 +89,47 @@ func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status strin
 		if err != nil {
 			return err
 		}
-		if lastMessageID != 0 {
-			// Overwrite, not add: lastMessageID is this invocation's own
-			// fresh last row, and the lump is that invocation's whole total.
-			if _, err := q.ExecContext(ctx, `
+		// The active claim this terminal write releases identifies the
+		// engagement's own message rows (they insert claim-stamped), so
+		// the lump settles claim-keyed — the curator turn release's shape.
+		// Read before the release below: a released claim is no longer
+		// findable.
+		var claimID string
+		err = q.QueryRowContext(ctx, `
+			SELECT id FROM claims WHERE conversation_id = ? AND released_at IS NULL
+		`, runID).Scan(&claimID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		settled := false
+		if claimID != "" {
+			// Overwrite, not add: the engagement's newest claim-attributed
+			// row is its own fresh row, and the lump is that invocation's
+			// whole total.
+			res, err := q.ExecContext(ctx, `
 				UPDATE messages SET cost_usd = ?
-				WHERE conversation_id = ? AND id = ?
-			`, costUSD, runID, lastMessageID); err != nil {
+				WHERE conversation_id = ?
+				  AND id = (SELECT MAX(id) FROM messages WHERE claim_id = ?)
+			`, costUSD, runID, claimID)
+			if err != nil {
 				return err
 			}
-		} else if costUSD != 0 {
-			// An invocation can bill real tokens while streaming zero
-			// parsable messages (system-prompt/cache overhead on an errored
-			// run), and the messages ledger is the only spend record — so the
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			settled = n > 0
+		}
+		if !settled && costUSD != 0 {
+			// An invocation can bill real tokens while streaming zero rows
+			// of its own (system-prompt/cache overhead on an errored run),
+			// and the messages ledger is the only spend record — so the
 			// lump settles on the conversation's newest existing row rather
 			// than being dropped. ADDITIVE, unlike the overwrite above: that
 			// row may already carry an earlier invocation's lump. The caveat:
 			// a rowless resume's spend lands on an older invocation's row —
 			// totals stay exact, per-row time attribution smears; accepted
-			// for this narrow corner. Keyed by conversation, not claim (the
-			// curator turn release's shape), because delegation message rows
-			// carry no claim stamp at insert time for a claim to locate.
+			// for this narrow corner.
 			res, err := q.ExecContext(ctx, `
 				UPDATE messages SET cost_usd = COALESCE(cost_usd, 0) + ?
 				WHERE conversation_id = ?
@@ -573,8 +593,8 @@ func (s *agentRunStore) LookupOrgForRunSystem(ctx context.Context, runID string)
 	return orgID, err
 }
 
-func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, lastMessageID int64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
-	return s.Complete(ctx, orgID, runID, status, costUSD, durationMs, numTurns, lastMessageID, stopReason, resultSummary, outcome, outcomeReason, failureKind)
+func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+	return s.Complete(ctx, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind)
 }
 
 func (s *agentRunStore) MarkOpenSystem(ctx context.Context, orgID, runID string) (bool, error) {
@@ -732,6 +752,14 @@ func (s *agentRunStore) EntitiesWithOpenRuns(ctx context.Context, orgID string, 
 
 // --- Transcript / messages ---
 
+// InsertMessage attributes the row to an engagement: an explicit
+// non-empty msg.ClaimID always wins (the curator sink names its own
+// claim), otherwise claim_id resolves server-side to the conversation's
+// active claim. Rows written during an engagement belong to it; rows
+// written outside one (pending inputs, queued turns, injections)
+// correctly resolve NULL. A message racing its claim's release lands
+// NULL — harmless, the terminal settle's newest-row fallback still
+// reaches it.
 func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
@@ -793,9 +821,12 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 		                      is_error, metadata, model,
 		                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 		                      reasoning, content_blocks, delivered, window_state, seq)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?,
+		        COALESCE(?, (SELECT id FROM claims
+		                     WHERE conversation_id = ? AND released_at IS NULL)),
+		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		msg.RunID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID),
+		msg.RunID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID), msg.RunID,
 		msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, sqliteNullStr(msg.ToolCallID), msg.IsError, metadataJSON,
 		sqliteNullStr(msg.Model), sqliteNullInt(msg.InputTokens), sqliteNullInt(msg.OutputTokens),

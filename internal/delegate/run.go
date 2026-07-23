@@ -475,7 +475,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 
 	if out.result != nil {
-		parked = s.processCompletion(ctx, orgID, runID, cfg.blueprintRunID, task, out.result, claudeCwd, out.sessionID, triggerType, creatorUserID, sink.lastMessageID())
+		parked = s.processCompletion(ctx, orgID, runID, cfg.blueprintRunID, task, out.result, claudeCwd, out.sessionID, triggerType, creatorUserID)
 		return
 	}
 
@@ -529,7 +529,6 @@ func (s *Spawner) processCompletion(
 	task domain.Task,
 	completion *agentproc.Result,
 	claudeCwd, sessionID, triggerType, creatorUserID string,
-	lastMessageID int64,
 ) (parked bool) {
 	// The memory namespace is the folder grouping this run's memory file with
 	// its blueprint siblings (so step N+1 reads step N's as its handoff).
@@ -635,11 +634,11 @@ func (s *Spawner) processCompletion(
 
 	if triggerType == "manual" {
 		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.AgentRuns.Complete(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, lastMessageID, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind))
+			return ts.AgentRuns.Complete(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind))
 		}); err != nil {
 			delegateLog.Warn("record completion for run failed", "run", runID, "error", err)
 		}
-	} else if err := s.agentRuns.CompleteSystem(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, lastMessageID, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind)); err != nil {
+	} else if err := s.agentRuns.CompleteSystem(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind)); err != nil {
 		delegateLog.Warn("record completion for run failed", "run", runID, "error", err)
 	}
 

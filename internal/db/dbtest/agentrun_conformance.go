@@ -168,24 +168,25 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 	})
 
 	t.Run("Complete_SettlesCostLumpAndClaimTelemetry", func(t *testing.T) {
-		// Two invocation cycles (initial + resume). Each Complete settles its
-		// invocation's reported cost as ONE lump on that invocation's last
-		// message row and stamps its duration/turns onto the claim it
-		// releases; the read projection then derives cost as the ledger SUM
-		// and duration/turns as the claims SUM — so two cycles ADD without
-		// any stored accumulator.
+		// Two invocation cycles (initial + resume). Each cycle's rows insert
+		// while its claim is active, so they carry its id; each Complete then
+		// settles its invocation's reported cost as ONE lump on its own
+		// engagement's newest row and stamps its duration/turns onto the
+		// claim it releases; the read projection then derives cost as the
+		// ledger SUM and duration/turns as the claims SUM — so two cycles
+		// ADD without any stored accumulator.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		runID := seedAgentRunForTest(t, orgID, seed, "running")
 
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-cost", 1); err != nil {
+			t.Fatalf("SetExecutorSystem 1: %v", err)
+		}
 		msg1, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "turn 1"})
 		if err != nil {
 			t.Fatalf("InsertMessage 1: %v", err)
 		}
-		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-cost", 1); err != nil {
-			t.Fatalf("SetExecutorSystem 1: %v", err)
-		}
-		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 4000, 3, msg1, "partial", "", "", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 4000, 3, "partial", "", "", "", ""); err != nil {
 			t.Fatalf("first Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, runID)
@@ -202,15 +203,16 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			t.Errorf("num_turns after first = %v, want 3", got.NumTurns)
 		}
 
-		// The resume invocation records its own row + claim, then settles.
+		// The resume invocation mints its own claim, records its own row,
+		// then settles.
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-cost", 2); err != nil {
+			t.Fatalf("SetExecutorSystem 2: %v", err)
+		}
 		msg2, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "turn 2"})
 		if err != nil {
 			t.Fatalf("InsertMessage 2: %v", err)
 		}
-		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-cost", 2); err != nil {
-			t.Fatalf("SetExecutorSystem 2: %v", err)
-		}
-		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 2000, 5, msg2, "ok", "all done", "abort", "needs human", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 2000, 5, "ok", "all done", "abort", "needs human", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got, err = store.Get(ctx, orgID, runID)
@@ -260,12 +262,80 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
-	t.Run("Complete_ZeroLastMessageID_SettlesOnNewestRow", func(t *testing.T) {
-		// lastMessageID 0 = the invocation recorded no rows, but its lump
-		// can still be real spend (an invocation bills for system-prompt /
-		// cache overhead even when nothing parsed) — it settles ADDITIVELY
-		// onto the conversation's newest existing message row, on top of any
-		// lump an earlier invocation already stamped there.
+	t.Run("Complete_SettlesOnEngagementRow_SkipsForeignNewerRow", func(t *testing.T) {
+		// The lump must land on the settling engagement's own newest row —
+		// NOT on the conversation's newest row when that row belongs to a
+		// different (already-released) claim.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
+
+		// Engagement 1 records a row and settles.
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-a", 1); err != nil {
+			t.Fatalf("SetExecutorSystem 1: %v", err)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 {
+			t.Fatalf("claims = %+v, want 1", claims)
+		}
+		claim1 := claims[0].ID
+		msgA, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "a"})
+		if err != nil {
+			t.Fatalf("InsertMessage a: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 0, 0, "", "", "abort", "wait", ""); err != nil {
+			t.Fatalf("first Complete: %v", err)
+		}
+
+		// Engagement 2 goes live and records its row; then a NEWER row
+		// attributed (explicitly) to the released first claim lands.
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-b", 2); err != nil {
+			t.Fatalf("SetExecutorSystem 2: %v", err)
+		}
+		msgB, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "b"})
+		if err != nil {
+			t.Fatalf("InsertMessage b: %v", err)
+		}
+		msgC, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "c", ClaimID: claim1})
+		if err != nil {
+			t.Fatalf("InsertMessage c: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 0, 0, "", "", "finish", "", ""); err != nil {
+			t.Fatalf("second Complete: %v", err)
+		}
+
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.TotalCostUSD == nil || *got.TotalCostUSD != 2.0 {
+			t.Errorf("total_cost_usd = %v, want 2.0 (one lump per engagement)", got.TotalCostUSD)
+		}
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		costByID := map[int]*float64{}
+		for i := range msgs {
+			costByID[msgs[i].ID] = msgs[i].CostUSD
+		}
+		if c := costByID[int(msgA)]; c == nil || *c != 1.25 {
+			t.Errorf("engagement-1 row cost_usd = %v, want 1.25", c)
+		}
+		if c := costByID[int(msgB)]; c == nil || *c != 0.75 {
+			t.Errorf("engagement-2 row cost_usd = %v, want 0.75 (the engagement's own MAX row)", c)
+		}
+		if c := costByID[int(msgC)]; c != nil {
+			t.Errorf("foreign newer row cost_usd = %v, want nil (never the settle target of another engagement)", *c)
+		}
+	})
+
+	t.Run("Complete_NoClaimAttributedRows_SettlesAdditivelyOnNewestRow", func(t *testing.T) {
+		// An engagement can bill while recording no rows of its own (an
+		// invocation bills for system-prompt / cache overhead even when
+		// nothing parsed) — its lump settles ADDITIVELY onto the
+		// conversation's newest existing message row, on top of any lump
+		// already there.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		runID := seedAgentRunForTest(t, orgID, seed, "running")
@@ -277,20 +347,24 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if err != nil {
 			t.Fatalf("InsertMessage 2: %v", err)
 		}
-		// First invocation settles its lump normally on its own last row.
-		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 0, 0, msg2, "", "", "finish", "", ""); err != nil {
+		// No active claim at all: the fallback owns the settle.
+		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 0, 0, "", "", "finish", "", ""); err != nil {
 			t.Fatalf("first Complete: %v", err)
 		}
-		// The rowless resume's lump lands on the same (newest) row, added.
-		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 0, 0, 0, "", "", "finish", "", ""); err != nil {
-			t.Fatalf("zero-lastMessageID Complete: %v", err)
+		// A live claim whose engagement recorded nothing (both rows predate
+		// it) falls back the same way, added.
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-rowless", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 0, 0, "", "", "finish", "", ""); err != nil {
+			t.Fatalf("rowless-engagement Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, runID)
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v got=%v", err, got)
 		}
 		if got.TotalCostUSD == nil || *got.TotalCostUSD != 2.0 {
-			t.Errorf("total_cost_usd = %v, want 2.0 (1.25 settled + 0.75 fallback-added)", got.TotalCostUSD)
+			t.Errorf("total_cost_usd = %v, want 2.0 (1.25 fallback-added + 0.75 fallback-added)", got.TotalCostUSD)
 		}
 		msgs, err := store.Messages(ctx, orgID, runID)
 		if err != nil {
@@ -308,14 +382,18 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
-	t.Run("Complete_ZeroLastMessageID_NoRows_DropsLumpWithoutError", func(t *testing.T) {
+	t.Run("Complete_NoRows_DropsLumpWithoutError", func(t *testing.T) {
 		// A conversation with no message rows at all is the one truly
-		// unattributable case: Complete succeeds, writes nothing to the
-		// ledger, and must not invent a row.
+		// unattributable case: Complete succeeds (even with a live claim —
+		// both settle paths find nothing), writes nothing to the ledger,
+		// and must not invent a row.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		runID := seedAgentRunForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, runID, "completed", 9.99, 0, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-norows", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, runID, "completed", 9.99, 0, 0, "", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, runID)
@@ -367,7 +445,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 				got.InputTokens, got.OutputTokens, got.CacheReadTokens, got.CacheCreationTokens)
 		}
 
-		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, 0, "ok", "done", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "ok", "done", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got2, err := store.Get(ctx, orgID, runID)
@@ -472,7 +550,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		ctx := context.Background()
 
 		runID := seedAgentRunForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, 0, "", "", "", "", string(domain.RunFailureAgentError)); err != nil {
+		if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, "", "", "", "", string(domain.RunFailureAgentError)); err != nil {
 			t.Fatalf("Complete with kind: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, runID)
@@ -488,7 +566,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 
 		// Empty kind on a failed Complete → NULL → unclassified zero value.
 		plainID := seedAgentRunForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, plainID, "failed", 0, 0, 0, 0, "", "", "", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, plainID, "failed", 0, 0, 0, "", "", "", "", ""); err != nil {
 			t.Fatalf("Complete without kind: %v", err)
 		}
 		if got, _ := store.Get(ctx, orgID, plainID); got == nil || got.FailureKind != domain.RunFailureUnclassified {
@@ -574,7 +652,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 
 		// completed + outcome=abort → ok (message-resumable).
 		abortRun := seedAgentRunForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, 0, "", "stopped", "abort", "needs a human", ""); err != nil {
+		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "", "stopped", "abort", "needs a human", ""); err != nil {
 			t.Fatalf("complete+abort: %v", err)
 		}
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, abortRun); err != nil || !ok {
@@ -582,7 +660,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 		// completed + outcome=finish → refused (finish excluded).
 		finishRun := seedAgentRunForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, 0, "", "shipped", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, "", "shipped", "finish", "", ""); err != nil {
 			t.Fatalf("complete+finish: %v", err)
 		}
 		if ok, _ := store.MarkQueuedForResume(ctx, orgID, finishRun); ok {
@@ -734,14 +812,14 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 
 		t.Run("Complete_completed", func(t *testing.T) {
 			runID := stage(t)
-			if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, 0, "", "", "finish", "", ""); err != nil {
+			if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
 			assertReleased(t, runID, "completed")
 		})
 		t.Run("Complete_failed", func(t *testing.T) {
 			runID := stage(t)
-			if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, 0, "", "", "", "", ""); err != nil {
+			if err := store.Complete(ctx, orgID, runID, "failed", 0, 0, 0, "", "", "", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
 			assertReleased(t, runID, "failed")
@@ -794,7 +872,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			// claim (simulating a racing engagement), then fail — the guard
 			// refuses and the claim stays live.
 			runID := stage(t)
-			if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, 0, "", "", "finish", "", ""); err != nil {
+			if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
 			if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-race", 9); err != nil {
@@ -1021,7 +1099,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		// Terminate the event run; only terminal event-trigger rows
 		// remain plus the still-running manual — gate flips back to
 		// false.
-		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); has {
@@ -1065,7 +1143,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 
 		// Terminate it — terminal-only, plus the still-active manual run,
 		// resolves back to ("", "").
-		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, 0, "", "", "finish", "", ""); err != nil {
+		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		if id, tid, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != "" || tid != "" {
@@ -1280,7 +1358,11 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if _, err := store.InsertMessage(ctx, orgID, attributed); err != nil {
 			t.Fatalf("InsertMessage attributed: %v", err)
 		}
-		// A system row leaves both empty (NULL on the row).
+		// A system row written outside the engagement (claim released)
+		// leaves both empty (NULL on the row).
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "", 0); err != nil {
+			t.Fatalf("SetExecutorSystem release: %v", err)
+		}
 		if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{
 			RunID: runID, Role: "assistant", Subtype: "text", Content: "reply",
 		}); err != nil {
@@ -1299,6 +1381,72 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 		if msgs[1].UserID != "" || msgs[1].ClaimID != "" {
 			t.Errorf("system row = (user=%q, claim=%q), want empty/empty", msgs[1].UserID, msgs[1].ClaimID)
+		}
+	})
+
+	t.Run("InsertMessage_StampsActiveClaimServerSide", func(t *testing.T) {
+		// The live-write attribution contract: rows written during an
+		// engagement belong to it (the active claim's id is stamped
+		// server-side), rows written outside one resolve NULL, and an
+		// explicit ClaimID always wins over the active claim.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, orgID, seed, "running")
+
+		// Before any engagement: no active claim to attribute to.
+		if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "pre"}); err != nil {
+			t.Fatalf("InsertMessage pre-claim: %v", err)
+		}
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-stamp", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 {
+			t.Fatalf("claims = %+v, want 1", claims)
+		}
+		claim1 := claims[0].ID
+
+		if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "during"}); err != nil {
+			t.Fatalf("InsertMessage during claim: %v", err)
+		}
+
+		// Released engagement: later rows must NOT inherit the dead claim.
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "", 0); err != nil {
+			t.Fatalf("SetExecutorSystem release: %v", err)
+		}
+		if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "post"}); err != nil {
+			t.Fatalf("InsertMessage post-release: %v", err)
+		}
+
+		// A second engagement goes live; an explicit ClaimID naming the
+		// released first claim (the bundle-import shape) beats the active
+		// one.
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-stamp", 2); err != nil {
+			t.Fatalf("SetExecutorSystem 2: %v", err)
+		}
+		if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: runID, Role: "assistant", Subtype: "text", Content: "explicit", ClaimID: claim1}); err != nil {
+			t.Fatalf("InsertMessage explicit: %v", err)
+		}
+
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		if len(msgs) != 4 {
+			t.Fatalf("len = %d, want 4", len(msgs))
+		}
+		if msgs[0].ClaimID != "" {
+			t.Errorf("pre-claim row claim = %q, want empty (no engagement to attribute to)", msgs[0].ClaimID)
+		}
+		if msgs[1].ClaimID != claim1 {
+			t.Errorf("live row claim = %q, want the active claim %q", msgs[1].ClaimID, claim1)
+		}
+		if msgs[2].ClaimID != "" {
+			t.Errorf("post-release row claim = %q, want empty (the engagement is over)", msgs[2].ClaimID)
+		}
+		if msgs[3].ClaimID != claim1 {
+			t.Errorf("explicit row claim = %q, want the explicit %q (explicit wins over the active claim)", msgs[3].ClaimID, claim1)
 		}
 	})
 
@@ -1804,11 +1952,10 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		// sibling sum reads the ledger, not any run-level column.
 		settle := func(stepID string, cost float64) {
 			t.Helper()
-			msgID, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: stepID, Role: "assistant", Subtype: "text", Content: "work"})
-			if err != nil {
+			if _, err := store.InsertMessage(ctx, orgID, &domain.AgentMessage{RunID: stepID, Role: "assistant", Subtype: "text", Content: "work"}); err != nil {
 				t.Fatalf("InsertMessage %s: %v", stepID, err)
 			}
-			if err := store.Complete(ctx, orgID, stepID, "completed", cost, 1000, 1, msgID, "ok", "", "finish", "", ""); err != nil {
+			if err := store.Complete(ctx, orgID, stepID, "completed", cost, 1000, 1, "ok", "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete %s: %v", stepID, err)
 			}
 		}
@@ -1883,7 +2030,7 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 			if err := store.SetExecutorSystem(ctx, orgID, stepID, "exec-dur", 1); err != nil {
 				t.Fatalf("SetExecutorSystem %s: %v", stepID, err)
 			}
-			if err := store.Complete(ctx, orgID, stepID, "completed", 0, durationMs, 1, 0, "ok", "", "finish", "", ""); err != nil {
+			if err := store.Complete(ctx, orgID, stepID, "completed", 0, durationMs, 1, "ok", "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete %s: %v", stepID, err)
 			}
 		}

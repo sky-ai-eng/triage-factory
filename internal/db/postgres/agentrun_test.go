@@ -530,26 +530,26 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 		t.Fatalf("SetStatusSystem: %v", err)
 	}
 
-	// Complete twice — two invocation cycles, each settling its own cost
-	// lump on its own last message row and stamping its telemetry onto the
-	// claim it releases; the derived totals then ADD across the cycles.
+	// Complete twice — two invocation cycles, each going live first (the
+	// claim mint) so its streamed row is claim-stamped under RLS, then
+	// settling its own cost lump on that row and stamping its telemetry
+	// onto the claim it releases; the derived totals then ADD across the
+	// cycles.
 	settle := func(cost float64, durationMs, numTurns int, stopReason, resultSummary, outcome string) {
 		t.Helper()
-		var msgID int64
-		if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-			id, mErr := tx.AgentRuns.InsertMessage(ctx, orgID, &domain.AgentMessage{
-				RunID: runID, Role: "assistant", Subtype: "text", Content: "work",
-			})
-			msgID = id
-			return mErr
-		}); err != nil {
-			t.Fatalf("InsertMessage under synth claims: %v", err)
-		}
 		if err := stores.AgentRuns.SetExecutorSystem(ctx, orgID, runID, "exec-lc", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-			return tx.AgentRuns.Complete(ctx, orgID, runID, "completed", cost, durationMs, numTurns, msgID, stopReason, resultSummary, outcome, "", "")
+			_, mErr := tx.AgentRuns.InsertMessage(ctx, orgID, &domain.AgentMessage{
+				RunID: runID, Role: "assistant", Subtype: "text", Content: "work",
+			})
+			return mErr
+		}); err != nil {
+			t.Fatalf("InsertMessage under synth claims: %v", err)
+		}
+		if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+			return tx.AgentRuns.Complete(ctx, orgID, runID, "completed", cost, durationMs, numTurns, stopReason, resultSummary, outcome, "", "")
 		}); err != nil {
 			t.Fatalf("Complete under synth claims: %v", err)
 		}

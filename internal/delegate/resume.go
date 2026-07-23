@@ -289,19 +289,16 @@ type ResumeOptions struct {
 // ResumeOutcome bundles what ResumeWithMessage returns: the raw
 // completion event from the resumed stream (nil if none was observed),
 // the parsed agent result JSON (nil if the completion text didn't
-// contain a parseable envelope), captured stderr for diagnostics, and the
-// resumed invocation's last recorded message id (0 = none) — the row the
-// completion path settles the invocation's reported cost on.
+// contain a parseable envelope), and captured stderr for diagnostics.
 //
 // ResumeWithMessage always returns a non-nil *ResumeOutcome (the same struct on
 // every path, error or not), so callers guard on Completion == nil, not on a
 // nil outcome. Callers decide how to interpret a nil Completion — ResumeOpenRun
 // treats it as a session-level failure and surfaces an error.
 type ResumeOutcome struct {
-	Completion    *agentproc.Result
-	Result        *agentResult
-	StderrText    string
-	LastMessageID int64
+	Completion *agentproc.Result
+	Result     *agentResult
+	StderrText string
 }
 
 // ResumeWithMessage resumes a prior headless claude session with a new
@@ -458,7 +455,6 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	outcome := &ResumeOutcome{}
 	outcome.Completion = out.result
 	outcome.StderrText = out.stderr
-	outcome.LastMessageID = sink.lastMessageID()
 	if out.result != nil {
 		outcome.Result = parseAgentResult(out.result.Result)
 	}

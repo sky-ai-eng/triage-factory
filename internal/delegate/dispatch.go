@@ -607,7 +607,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.AgentRun,
 		return
 	}
 
-	parked := s.processCompletion(stepCtx, orgID, run.ID, blueprintRunID, *task, outcome.Completion, resumeCwd, run.SessionID, "manual", userID, outcome.LastMessageID)
+	parked := s.processCompletion(stepCtx, orgID, run.ID, blueprintRunID, *task, outcome.Completion, resumeCwd, run.SessionID, "manual", userID)
 	// The resumed step reached a terminal state (it didn't go open again)
 	// → hand back to the blueprint orchestrator to finalize.
 	if !parked {
