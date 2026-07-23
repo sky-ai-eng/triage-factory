@@ -630,3 +630,67 @@ func assertCuratorTeamID(t *testing.T, database *sql.DB, query, want string) {
 		t.Errorf("%q = %v (valid=%t), want %q", query, got.String, got.Valid, want)
 	}
 }
+
+// TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages pins the
+// refactor's pending unification: rows that were waiting in
+// run_pending_input / staged_agent_injections / a queued curator request
+// when the upgrade ran must surface as delivered=0 message rows — the
+// exactly-once delivery contract transfers to the messages table, nothing
+// silently drops.
+func TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages(t *testing.T) {
+	database, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { database.Close() })
+
+	goose.SetBaseFS(migrationsSQLiteFS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("set dialect: %v", err)
+	}
+
+	// Everything before the conversations refactor: the pending side-tables
+	// still exist and carry waiting rows.
+	if err := goose.UpTo(database, "migrations-sqlite", 202607200002); err != nil {
+		t.Fatalf("goose UpTo: %v", err)
+	}
+
+	seed := []string{
+		`INSERT INTO users (id) VALUES ('u1')`,
+		`INSERT INTO projects (id, name, visibility) VALUES ('proj1', 'P', 'private')`,
+		`INSERT INTO runs (id, task_id, prompt_id, blueprint_run_id, status) VALUES ('r1', 't1', 'p1', 'b1', 'open')`,
+		`INSERT INTO run_pending_input (run_id, org_id, message, user_id) VALUES ('r1', '00000000-0000-0000-0000-000000000001', 'resume me', 'u1')`,
+		`INSERT INTO staged_agent_injections (id, run_id, producer, body) VALUES ('si1', 'r1', 'new_commits', 'PR gained commits')`,
+		`INSERT INTO curator_requests (id, project_id, status, user_input, creator_user_id) VALUES ('cq1', 'proj1', 'queued', 'hello curator', 'u1')`,
+	}
+	for _, q := range seed {
+		if _, err := database.Exec(q); err != nil {
+			t.Fatalf("seed %q: %v", q, err)
+		}
+	}
+
+	if err := goose.Up(database, "migrations-sqlite"); err != nil {
+		t.Fatalf("goose Up: %v", err)
+	}
+
+	assertUndelivered := func(desc, query string, want int) {
+		t.Helper()
+		var n int
+		if err := database.QueryRow(query).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", desc, err)
+		}
+		if n != want {
+			t.Errorf("%s = %d, want %d", desc, n, want)
+		}
+	}
+	assertUndelivered("pending follow-up",
+		`SELECT COUNT(*) FROM messages WHERE conversation_id='r1' AND role='user' AND content='resume me' AND user_id='u1' AND delivered=0 AND subtype='text'`, 1)
+	assertUndelivered("staged injection",
+		`SELECT COUNT(*) FROM messages WHERE conversation_id='r1' AND subtype='injection:system-note' AND content='PR gained commits' AND delivered=0 AND json_extract(metadata,'$.producer')='new_commits'`, 1)
+	assertUndelivered("queued curator turn",
+		`SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id=m.conversation_id
+		 WHERE c.type='curator' AND c.project_id='proj1' AND c.creator_user_id='u1'
+		   AND m.role='user' AND m.content='hello curator' AND m.delivered=0`, 1)
+}
