@@ -60,7 +60,7 @@ func seedCuratorTurn(t *testing.T, srv *Server, projectID, input string) (convID
 func completeCuratorTurn(t *testing.T, srv *Server, projectID, convID string, msgID int64, reply string, cost float64) {
 	t.Helper()
 	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
-	claimID, ok, err := srv.curatorStore.ClaimTurnSystem(t.Context(), org, convID, "test-exec", 1)
+	claimID, ok, err := srv.curatorStore.ClaimTurnSystem(t.Context(), org, convID, msgID, "test-exec", 1)
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
@@ -295,7 +295,7 @@ func TestHandleCuratorReset_409OnRunningTurn(t *testing.T) {
 	srv, _, projectID := curatorTestSetup(t)
 	convID, msgID := seedCuratorTurn(t, srv, projectID, "in flight")
 	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
-	if _, ok, err := srv.curatorStore.ClaimTurnSystem(t.Context(), org, convID, "test-exec", 1); err != nil || !ok {
+	if _, ok, err := srv.curatorStore.ClaimTurnSystem(t.Context(), org, convID, msgID, "test-exec", 1); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	if err := srv.tx.SyntheticClaimsWithTx(t.Context(), org, user, func(ts db.TxStores) error {

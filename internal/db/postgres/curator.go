@@ -246,13 +246,19 @@ func (s *curatorStore) ArchiveLiveConversation(ctx context.Context, orgID, proje
 
 // --- Dispatch ---
 
-func (s *curatorStore) ClaimTurnSystem(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64) (string, bool, error) {
+func (s *curatorStore) ClaimTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, executorID string, bootEpoch int64) (string, bool, error) {
 	id := uuid.New().String()
+	// The mint is guarded on the queued row still being undelivered: a raced
+	// cancel deletes it (minting then would trip the message FK), and a
+	// duplicate feed finds it delivered — both are skips, not engagements.
 	res, err := s.admin.ExecContext(ctx, `
-		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
-		VALUES ($1, $2, $3, $4, $5, now())
+		INSERT INTO claims (id, org_id, conversation_id, message_id, executor_id, boot_epoch, claimed_at)
+		SELECT $1, $2, $3, m.id, $5, $6, now()
+		FROM messages m
+		WHERE m.org_id = $2 AND m.conversation_id = $3 AND m.id = $4
+		  AND m.role = 'user' AND m.subtype = 'text' AND m.delivered = false
 		ON CONFLICT (conversation_id) WHERE released_at IS NULL DO NOTHING
-	`, id, orgID, conversationID, executorID, bootEpoch)
+	`, id, orgID, conversationID, messageID, executorID, bootEpoch)
 	if err != nil {
 		return "", false, err
 	}
@@ -336,17 +342,20 @@ func (s *curatorStore) SetSDKSession(ctx context.Context, orgID, conversationID,
 }
 
 func (s *curatorStore) FailedTurnAttemptsSystem(ctx context.Context, orgID, conversationID string, messageID int64) (int, string, error) {
-	// A missing message row makes the created_at subquery NULL, which
-	// matches nothing — the right answer, since a withdrawn turn has no
-	// attempts left to cap.
+	// Exact attribution via the mint-time message_id stamp — no time window,
+	// so two queued turns on one conversation never count each other's
+	// failures, and a withdrawn turn (message deleted → message_id NULLed)
+	// matches nothing. The zero-message NOT EXISTS stays load-bearing: a
+	// claim that delivered the turn also carries its message_id, and
+	// counting a post-delivery run crash would cap the turn for a failure
+	// that is not the input's fault.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT COALESCE(cl.error, '')
 		FROM claims cl
 		WHERE cl.org_id = $1 AND cl.conversation_id = $2
 		  AND cl.released_at IS NOT NULL AND cl.outcome = 'failed'
 		  AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.claim_id = cl.id)
-		  AND cl.claimed_at >= (SELECT m2.created_at FROM messages m2
-		                        WHERE m2.org_id = $1 AND m2.conversation_id = $2 AND m2.id = $3)
+		  AND cl.message_id = $3
 		ORDER BY cl.claimed_at DESC, cl.id DESC
 	`, orgID, conversationID, messageID)
 	if err != nil {
@@ -408,10 +417,10 @@ func (s *curatorStore) DeadLetterTurnSystem(ctx context.Context, orgID, conversa
 		// 'failed' the history synthesizer derives the turn's status from.
 		claimID := uuid.New().String()
 		if _, err := q.ExecContext(ctx, `
-			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
+			INSERT INTO claims (id, org_id, conversation_id, message_id, executor_id, boot_epoch,
 			                    claimed_at, released_at, outcome, error)
-			VALUES ($1, $2, $3, $4, $5, now(), now(), 'failed', $6)
-		`, claimID, orgID, conversationID, executorID, bootEpoch, nullIfEmpty(errMsg)); err != nil {
+			VALUES ($1, $2, $3, $4, $5, $6, now(), now(), 'failed', $7)
+		`, claimID, orgID, conversationID, messageID, executorID, bootEpoch, nullIfEmpty(errMsg)); err != nil {
 			return err
 		}
 		if _, err := q.ExecContext(ctx, `
@@ -566,6 +575,23 @@ func (s *curatorStore) CancelOrphanedTurnsSystem(ctx context.Context) (int, erro
 		WHERE released_at IS NULL
 		  AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = claims.conversation_id AND c.type = 'curator')
 	`)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
+func (s *curatorStore) DeleteQueuedTurnsForProjectSystem(ctx context.Context, orgID, projectID string) (int, error) {
+	// Only plain queued turns go — pending injections aren't claimable work,
+	// and delivered rows are transcript history the project cascade (or the
+	// surviving archived project) keeps.
+	res, err := s.admin.ExecContext(ctx, `
+		DELETE FROM messages
+		WHERE delivered = false AND role = 'user' AND subtype = 'text'
+		  AND conversation_id IN (SELECT id FROM conversations
+		                          WHERE org_id = $1 AND project_id = $2 AND type = 'curator')
+	`, orgID, projectID)
 	if err != nil {
 		return 0, err
 	}

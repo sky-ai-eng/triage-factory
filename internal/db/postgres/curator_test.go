@@ -69,7 +69,7 @@ func TestCuratorStore_Postgres_PrivateVisibility_SelfOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("alice seed: %v", err)
 	}
-	claimID, ok, err := stores.Curator.ClaimTurnSystem(ctx, orgID, convID, "exec-1", 1)
+	claimID, ok, err := stores.Curator.ClaimTurnSystem(ctx, orgID, convID, msgID, "exec-1", 1)
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}

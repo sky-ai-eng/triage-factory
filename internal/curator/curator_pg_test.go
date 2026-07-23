@@ -98,7 +98,7 @@ func seedTurn(t *testing.T, ctx context.Context, stores db.Stores, orgID, userID
 // two steps — leaving the conversation with a live engagement.
 func beginSeededTurn(t *testing.T, ctx context.Context, stores db.Stores, orgID, userID, projectID, conversationID string, messageID int64) string {
 	t.Helper()
-	claimID, ok, err := stores.Curator.ClaimTurnSystem(ctx, orgID, conversationID, "test-executor", 1)
+	claimID, ok, err := stores.Curator.ClaimTurnSystem(ctx, orgID, conversationID, messageID, "test-executor", 1)
 	if err != nil || !ok {
 		t.Fatalf("claim turn: ok=%v err=%v", ok, err)
 	}

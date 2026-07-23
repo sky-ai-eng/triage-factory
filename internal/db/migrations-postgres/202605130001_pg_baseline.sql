@@ -7861,6 +7861,11 @@ CREATE TABLE public.claims (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     conversation_id uuid NOT NULL,
+    -- message_id is the queued turn this engagement was minted to drive —
+    -- curator pickups stamp it so failed (zero-message) claims stay
+    -- attributable to their exact turn; NULL for delegation claims and
+    -- pre-refactor history.
+    message_id bigint,
     executor_id text NOT NULL,
     -- boot_epoch pairs with executor_id (an instance's persistent id
     -- survives restarts); the boot self-sweep only releases claims where
@@ -7895,6 +7900,8 @@ ALTER TABLE ONLY public.claims
     ADD CONSTRAINT claims_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.claims
     ADD CONSTRAINT claims_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.claims
+    ADD CONSTRAINT claims_message_id_fkey FOREIGN KEY (message_id) REFERENCES public.messages(id) ON DELETE SET NULL;
 
 -- The single-active-claim invariant: a conversation has at most one live
 -- executor engagement at any moment.

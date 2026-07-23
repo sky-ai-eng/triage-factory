@@ -105,7 +105,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed curator turn: %v", err)
 	}
-	claimID, ok, err := stores.Curator.ClaimTurnSystem(ctx, srcOrg, convID, "src-exec", 1)
+	claimID, ok, err := stores.Curator.ClaimTurnSystem(ctx, srcOrg, convID, msgID, "src-exec", 1)
 	if err != nil || !ok {
 		t.Fatalf("claim turn: ok=%v err=%v", ok, err)
 	}

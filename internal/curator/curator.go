@@ -638,8 +638,8 @@ func (c *Curator) deleteQueuedTurn(ctx context.Context, item queueItem) {
 // loop leaves the turn queued and retries on its next scan.
 //
 // Idempotency: feeding the same turn twice is safe — the second dispatch's
-// BeginTurn finds the message already delivered (sql.ErrNoRows), releases
-// its just-minted claim, and returns without re-running the agent — so a
+// claim mint skips (the first engagement is still live, or already
+// delivered the message) and returns without re-running the agent — so a
 // duplicated doorbell or a scan race never double-executes a turn.
 func (c *Curator) EnqueueClaimed(orgID, projectID, conversationID string, messageID int64, creatorUserID string) bool {
 	session := c.getOrStartSession(orgID, projectID)
@@ -732,10 +732,12 @@ func (c *Curator) InFlightProjectCount(projectIDs []string) int {
 // trail distinguishes the two.
 //
 // Called BEFORE the projects DELETE (delete path) so the FK cascade doesn't
-// race a still-running goroutine. Row removal is the cascade's job once the
-// project row drops (projects → conversations → messages/claims); queued
-// turns are undelivered messages that never entered context, so their
-// cascade deletion IS the queued-cancel semantic — no pre-drain needed.
+// race a still-running goroutine. Delivered history removal is the cascade's
+// job once the project row drops (projects → conversations →
+// messages/claims), but queued turns are drained HERE rather than left to
+// it: the team-archive force-stop keeps the project row, and an undrained
+// queued turn stays claimable — the executor claim loop or a pending retry
+// timer would resurrect work for a project that was just force-stopped.
 //
 // orgID is the project's owning tenant, threaded through to
 // broadcast events so the cancellation toast/update only reaches
@@ -750,6 +752,16 @@ func (c *Curator) CancelProject(orgID, projectID, reason string) {
 
 	if ok {
 		session.shutdown(reason)
+	}
+
+	// The force-stop drain, after the session teardown so the dispatch can't
+	// re-enqueue behind it. Background ctx: teardown fires outside any
+	// request/JWT context, and the drain spans every creator's conversation,
+	// which only the admin-pool System door reaches.
+	if n, err := c.stores.Curator.DeleteQueuedTurnsForProjectSystem(context.Background(), orgID, projectID); err != nil {
+		curatorLog.Warn("drain queued curator turns on project teardown failed", "org", orgID, "project", projectID, "error", err)
+	} else if n > 0 {
+		curatorLog.Info("drained queued curator turns on project teardown", "org", orgID, "project", projectID, "count", n)
 	}
 
 	// Curator homing (spec §6.3): when the live session lives on a remote

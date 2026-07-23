@@ -169,8 +169,8 @@ func TestDispatch_TransientBeginTurnFailureRetries(t *testing.T) {
 
 // TestFailQueued_RacedCancelSettlesCancelled pins the raced-cancel gate: a
 // turn cancelled (its queued row deleted) between an admission error and
-// failQueued's pickup must settle cancelled — the canceller's terminal state
-// stands, and no 'failed' release lands on top of it.
+// failQueued's pickup must stay cancelled — the mint skips the withdrawn
+// row, so no claim exists for a 'failed' release to land on.
 func TestFailQueued_RacedCancelSettlesCancelled(t *testing.T) {
 	database := newTestDB(t)
 	projectID := seedProject(t, database, "raced-cancel")
@@ -217,11 +217,85 @@ func TestFailQueued_RacedCancelSettlesCancelled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list claims: %v", err)
 	}
-	if len(claims) != 1 {
-		t.Fatalf("claims = %d, want exactly the withdrawn pickup's release", len(claims))
+	if len(claims) != 0 {
+		t.Errorf("claims = %+v, want none — a withdrawn turn's pickup must leave zero writes, and failed must not overwrite a raced cancel", claims)
 	}
-	got := claims[0]
-	if got.ReleasedAt == nil || got.Outcome != "cancelled" || got.Error != "queued turn withdrawn before pickup" {
-		t.Errorf("claim = (released=%v, outcome=%q, error=%q), want the quiet cancelled release — failed must not overwrite a raced cancel", got.ReleasedAt != nil, got.Outcome, got.Error)
+}
+
+// TestCancelProject_DrainsQueuedTurnAndStopsRetry pins the force-stop
+// contract: a project cancelled while a BeginTurn-failure retry is pending
+// must not be resurrectable — the queued row is drained, the pending timer
+// observes the torn-down session and never re-feeds, and no fresh session or
+// second pickup appears afterwards.
+func TestCancelProject_DrainsQueuedTurnAndStopsRetry(t *testing.T) {
+	database := newTestDB(t)
+	projectID := seedProject(t, database, "force-stopped")
+	corruptProject(t, database, projectID)
+	stores := sqlitestore.New(database)
+	c := New(stores, nil, "claude-sonnet-4-6")
+	c.SetTurnRetryDelay(20 * time.Millisecond)
+	t.Cleanup(c.Shutdown)
+
+	var agentRan atomic.Bool
+	c.runAgent = func(context.Context, agentproc.RunOptions, agentproc.Sink) (*agentproc.Outcome, error) {
+		agentRan.Store(true)
+		return nil, errors.New("must never run for a force-stopped project")
+	}
+
+	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+	if _, err := c.SendMessage(t.Context(), projectID, org, user, "doomed"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	conv, err := stores.Curator.GetLiveConversation(t.Context(), org, projectID, user)
+	if err != nil || conv == nil {
+		t.Fatalf("get conversation: %v (%v)", conv, err)
+	}
+
+	// Catch the first failed pickup with a tight poll: CancelProject must
+	// land inside the retry-pacing window so exactly one pickup ever runs.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		claims, err := stores.Curator.ListClaims(context.Background(), org, conv.ID)
+		if err != nil {
+			t.Fatalf("list claims: %v", err)
+		}
+		if len(claims) == 1 && claims[0].ReleasedAt != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("claims = %d, want the first pickup released", len(claims))
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	c.CancelProject(org, projectID, "team archived")
+
+	// Long enough for the pending timer (and several would-be retry cycles)
+	// to have fired.
+	time.Sleep(150 * time.Millisecond)
+
+	claims, err := stores.Curator.ListClaims(context.Background(), org, conv.ID)
+	if err != nil {
+		t.Fatalf("list claims: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Errorf("claims = %d, want 1 — no pickup may follow the force-stop", len(claims))
+	}
+	msgs, err := stores.Curator.ListConversationMessages(context.Background(), org, conv.ID)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	for _, m := range msgs {
+		if m.Delivered != nil && !*m.Delivered {
+			t.Errorf("undelivered row %d survived the drain — the turn is still claimable", m.ID)
+		}
+	}
+	if inFlight, err := stores.Curator.InFlightTurn(context.Background(), org, projectID, user); err != nil || inFlight != nil {
+		t.Errorf("InFlightTurn after force-stop = %+v (err=%v), want nil", inFlight, err)
+	}
+	if c.HasLiveSession(projectID) {
+		t.Error("a session goroutine exists after CancelProject — the retry re-fed a torn-down project")
+	}
+	if agentRan.Load() {
+		t.Error("agent ran for a force-stopped project")
 	}
 }

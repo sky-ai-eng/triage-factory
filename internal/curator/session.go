@@ -182,18 +182,20 @@ func (s *projectSession) dispatch(item queueItem) {
 	}
 
 	// Mint the turn's claim (admin pool — the one door that writes claims).
-	// A conflict means another engagement is live on this conversation
-	// (a stale claim the reaper hasn't released yet, or a duplicate feed);
-	// leave the turn queued for a later scan rather than fighting it.
+	// A skip means another engagement is live on this conversation (a stale
+	// claim the reaper hasn't released yet, or a duplicate feed) — leave the
+	// turn queued for a later scan rather than fighting it — or the queued
+	// row itself is gone: a raced cancel withdrew the turn, and cancelled
+	// stands with no claim minted on top of it.
 	executorID, bootEpoch := s.curator.getExecutorIdentity()
 	claimCtx := context.WithoutCancel(msgCtx)
-	claimID, ok, err := s.curator.stores.Curator.ClaimTurnSystem(claimCtx, item.orgID, item.conversationID, executorID, bootEpoch)
+	claimID, ok, err := s.curator.stores.Curator.ClaimTurnSystem(claimCtx, item.orgID, item.conversationID, item.messageID, executorID, bootEpoch)
 	if err != nil {
 		curatorLog.Warn("mint turn claim failed", "request", requestID, "error", err)
 		return
 	}
 	if !ok {
-		curatorLog.Warn("turn claim conflicted with a live engagement; leaving queued", "request", requestID, "conversation", item.conversationID)
+		curatorLog.Warn("turn not claimable (live engagement or withdrawn row); skipping", "request", requestID, "conversation", item.conversationID)
 		return
 	}
 
@@ -654,14 +656,17 @@ func (s *projectSession) cancelQueued(item queueItem) {
 // normal claim path ran (admission-gate error): mint the claim, deliver the
 // message so the turn can't be re-fed, and release failed — the same
 // visible history a mid-dispatch failure leaves. A turn cancelled in the
-// window before the pickup instead settles cancelled, silently — cancelled
-// stands, and the canceller already broadcast.
+// window before the pickup is a zero-write no-op — the mint skips a
+// withdrawn row, cancelled stands, and the canceller already broadcast.
 func (s *projectSession) failQueued(item queueItem, errMsg string) {
 	ctx := context.WithoutCancel(s.ctx)
 	executorID, bootEpoch := s.curator.getExecutorIdentity()
-	_, ok, err := s.curator.stores.Curator.ClaimTurnSystem(ctx, item.orgID, item.conversationID, executorID, bootEpoch)
-	if err != nil || !ok {
+	_, ok, err := s.curator.stores.Curator.ClaimTurnSystem(ctx, item.orgID, item.conversationID, item.messageID, executorID, bootEpoch)
+	if err != nil {
 		curatorLog.Warn("fail queued turn: claim mint failed", "request", item.requestID, "error", err)
+		return
+	}
+	if !ok {
 		return
 	}
 	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
@@ -698,12 +703,19 @@ func (s *projectSession) releaseCancelled(item queueItem, reason string) {
 }
 
 // scheduleTurnRetry re-feeds a BeginTurn-failed turn after a pacing delay.
-// EnqueueClaimed absorbs the shutdown and queue-full cases (the turn stays
-// durably queued for a boot/scan backstop), so a timer outliving the
-// session is harmless.
+// The callback checks the session ctx first: a torn-down session (curator
+// shutdown OR CancelProject) must not re-feed — EnqueueClaimed's
+// getOrStartSession checks only whole-curator shutdown, so a post-teardown
+// re-feed would mint a fresh session and resurrect work for a project that
+// was just force-stopped. EnqueueClaimed still absorbs the shutdown and
+// queue-full cases that race past the check (the turn stays durably queued
+// for a boot/scan backstop).
 func (s *projectSession) scheduleTurnRetry(item queueItem) {
 	delay := s.curator.getTurnRetryDelay()
 	time.AfterFunc(delay, func() {
+		if s.ctx.Err() != nil {
+			return
+		}
 		if !s.curator.EnqueueClaimed(item.orgID, s.projectID, item.conversationID, item.messageID, item.creatorUserID) {
 			curatorLog.Warn("turn retry re-feed skipped", "request", item.requestID)
 		}

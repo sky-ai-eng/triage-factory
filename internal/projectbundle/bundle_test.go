@@ -123,7 +123,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	if err != nil {
 		t.Fatalf("enqueue turn: %v", err)
 	}
-	claimID, ok, err := stores.Curator.ClaimTurnSystem(ctx, org, conv.ID, "fixture-exec", 1)
+	claimID, ok, err := stores.Curator.ClaimTurnSystem(ctx, org, conv.ID, msgID, "fixture-exec", 1)
 	if err != nil || !ok {
 		t.Fatalf("claim turn: ok=%v err=%v", ok, err)
 	}

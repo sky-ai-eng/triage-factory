@@ -127,10 +127,16 @@ type CuratorStore interface {
 	// --- Dispatch (session goroutine) ---
 
 	// ClaimTurnSystem mints the turn's claims row (admin pool — tf_app
-	// cannot write claims). Single-active is enforced by the schema's
-	// partial unique index; ok=false means another engagement is live on the
-	// conversation and the caller skips (the queued row stays claimable).
-	ClaimTurnSystem(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64) (claimID string, ok bool, err error)
+	// cannot write claims), stamping messageID — the queued turn this
+	// engagement is minted to drive — so a pickup that fails before
+	// attaching any message stays attributable to its exact turn.
+	// Single-active is enforced by the schema's partial unique index, and
+	// the mint is guarded on the queued row still being undelivered.
+	// ok=false means the turn is not claimable — another engagement is live
+	// on the conversation (the queued row stays claimable for a later
+	// scan), or the row is gone/delivered (a raced cancel or duplicate
+	// feed) — and nothing was written.
+	ClaimTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, executorID string, bootEpoch int64) (claimID string, ok bool, err error)
 
 	// BeginTurn delivers the turn in one transaction: flips the turn's user
 	// message delivered=true (sql.ErrNoRows when the row is gone or already
@@ -148,10 +154,12 @@ type CuratorStore interface {
 	BeginTurn(ctx context.Context, orgID, projectID, conversationID string, messageID int64) (*CuratorTurnStart, error)
 
 	// FailedTurnAttemptsSystem counts the turn's prior failed pickups —
-	// released claims on the conversation with outcome='failed', no messages
-	// attached (a claim that reached BeginTurn successfully always owns at
-	// least the turn's user row), claimed at-or-after the turn message's
-	// creation — and returns the most recent one's error. The dispatch's
+	// released claims minted for exactly this message (claims.message_id —
+	// no time window, so two queued turns on one conversation never count
+	// each other's failures), outcome='failed', with no messages attached
+	// (a claim that reached BeginTurn successfully always owns at least the
+	// turn's user row, which keeps post-delivery run crashes out of the
+	// cap) — and returns the most recent one's error. The dispatch's
 	// dead-letter gate: a turn whose count reaches the cap is poisoned input
 	// (BeginTurn itself keeps failing), and feeding it again just leaks
 	// another zero-message failed claim. Admin pool.
@@ -215,6 +223,16 @@ type CuratorStore interface {
 	// survive a restart. Queued turns are untouched, same as the
 	// ownership-scoped sweep. Returns the count released.
 	CancelOrphanedTurnsSystem(ctx context.Context) (int, error)
+
+	// DeleteQueuedTurnsForProjectSystem is the force-stop drain: deletes
+	// every queued (undelivered plain user) turn across the project's
+	// curator conversations. A cancelled project's queued turns must not
+	// linger claimable — the executor claim loop or a pending retry timer
+	// would resurrect work for a project that was just force-stopped (team
+	// archive). Returns the number of rows deleted. Admin pool — the drain
+	// spans every creator's conversation, which the app pool's
+	// private-visibility arm cannot reach.
+	DeleteQueuedTurnsForProjectSystem(ctx context.Context, orgID, projectID string) (int, error)
 
 	// --- Pending-context producer (admin pool) ---
 

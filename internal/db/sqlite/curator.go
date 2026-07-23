@@ -257,16 +257,22 @@ func (s *curatorStore) ArchiveLiveConversation(ctx context.Context, orgID, proje
 
 // --- Dispatch ---
 
-func (s *curatorStore) ClaimTurnSystem(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64) (string, bool, error) {
+func (s *curatorStore) ClaimTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, executorID string, bootEpoch int64) (string, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", false, err
 	}
 	id := uuid.New().String()
+	// The mint is guarded on the queued row still being undelivered: a raced
+	// cancel deletes it (minting then would trip the message FK), and a
+	// duplicate feed finds it delivered — both are skips, not engagements.
 	res, err := s.q.ExecContext(ctx, `
-		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO claims (id, org_id, conversation_id, message_id, executor_id, boot_epoch, claimed_at)
+		SELECT ?, ?, ?, m.id, ?, ?, ?
+		FROM messages m
+		WHERE m.conversation_id = ? AND m.id = ?
+		  AND m.role = 'user' AND m.subtype = 'text' AND m.delivered = 0
 		ON CONFLICT (conversation_id) WHERE released_at IS NULL DO NOTHING
-	`, id, orgID, conversationID, executorID, bootEpoch, time.Now().UTC())
+	`, id, orgID, conversationID, executorID, bootEpoch, time.Now().UTC(), conversationID, messageID)
 	if err != nil {
 		return "", false, err
 	}
@@ -372,19 +378,22 @@ func (s *curatorStore) FailedTurnAttemptsSystem(ctx context.Context, orgID, conv
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, "", err
 	}
-	// A missing message row makes the created_at subquery NULL, which
-	// matches nothing — the right answer, since a withdrawn turn has no
-	// attempts left to cap.
+	// Exact attribution via the mint-time message_id stamp — no time window,
+	// so two queued turns on one conversation never count each other's
+	// failures, and a withdrawn turn (message deleted → message_id NULLed)
+	// matches nothing. The zero-message NOT EXISTS stays load-bearing: a
+	// claim that delivered the turn also carries its message_id, and
+	// counting a post-delivery run crash would cap the turn for a failure
+	// that is not the input's fault.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT COALESCE(cl.error, '')
 		FROM claims cl
 		WHERE cl.conversation_id = ?
 		  AND cl.released_at IS NOT NULL AND cl.outcome = 'failed'
 		  AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.claim_id = cl.id)
-		  AND cl.claimed_at >= (SELECT m2.created_at FROM messages m2
-		                        WHERE m2.conversation_id = ? AND m2.id = ?)
+		  AND cl.message_id = ?
 		ORDER BY cl.claimed_at DESC, cl.id DESC
-	`, conversationID, conversationID, messageID)
+	`, conversationID, messageID)
 	if err != nil {
 		return 0, "", err
 	}
@@ -447,10 +456,10 @@ func (s *curatorStore) DeadLetterTurnSystem(ctx context.Context, orgID, conversa
 		claimID := uuid.New().String()
 		now := time.Now().UTC()
 		if _, err := q.ExecContext(ctx, `
-			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
+			INSERT INTO claims (id, org_id, conversation_id, message_id, executor_id, boot_epoch,
 			                    claimed_at, released_at, outcome, error)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 'failed', ?)
-		`, claimID, orgID, conversationID, executorID, bootEpoch, now, now, nullIfEmpty(errMsg)); err != nil {
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?)
+		`, claimID, orgID, conversationID, messageID, executorID, bootEpoch, now, now, nullIfEmpty(errMsg)); err != nil {
 			return err
 		}
 		if _, err := q.ExecContext(ctx, `
@@ -614,6 +623,26 @@ func (s *curatorStore) CancelOrphanedTurnsSystem(ctx context.Context) (int, erro
 		WHERE released_at IS NULL
 		  AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = claims.conversation_id AND c.type = 'curator')
 	`, time.Now().UTC())
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
+func (s *curatorStore) DeleteQueuedTurnsForProjectSystem(ctx context.Context, orgID, projectID string) (int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	// Only plain queued turns go — pending injections aren't claimable work,
+	// and delivered rows are transcript history the project cascade (or the
+	// surviving archived project) keeps.
+	res, err := s.q.ExecContext(ctx, `
+		DELETE FROM messages
+		WHERE delivered = 0 AND role = 'user' AND subtype = 'text'
+		  AND conversation_id IN (SELECT id FROM conversations
+		                          WHERE org_id = ? AND project_id = ? AND type = 'curator')
+	`, orgID, projectID)
 	if err != nil {
 		return 0, err
 	}

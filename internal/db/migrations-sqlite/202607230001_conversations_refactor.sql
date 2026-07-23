@@ -244,6 +244,10 @@ CREATE TABLE claims (
     id              TEXT PRIMARY KEY,
     org_id          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    -- The queued turn this engagement was minted to drive — curator pickups
+    -- stamp it so failed (zero-message) claims stay attributable to their
+    -- exact turn; NULL for delegation claims and pre-refactor history.
+    message_id      INTEGER REFERENCES messages(id) ON DELETE SET NULL,
     executor_id     TEXT NOT NULL,
     boot_epoch      INTEGER NOT NULL DEFAULT 0,
     -- The per-engagement credential sidecar's X25519 pubkey (multi-mode
@@ -268,66 +272,12 @@ CREATE UNIQUE INDEX claims_id_org_unique   ON claims (id, org_id);
 CREATE UNIQUE INDEX idx_claims_one_active  ON claims(conversation_id) WHERE released_at IS NULL;
 CREATE INDEX        idx_claims_conversation ON claims(conversation_id, claimed_at);
 
--- The runs era flattened every engagement into columns + an attempts
--- counter, so per-retry history is unrecoverable; mint ONE claim per
--- conversation that was ever claimed (executor_id survives requeues only on
--- the final owner). Terminal rows release with a mapped outcome; a parked
--- 'open' row releases as 'parked'; anything else was mid-flight at migration
--- time and stays an active claim for the boot sweep to reconcile.
-INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
-                    cred_pubkey, claimed_at, released_at, outcome,
-                    duration_ms, num_turns)
-SELECT
-    c.id, c.org_id, c.id, r_executor_id, COALESCE(r_boot_epoch, 0),
-    r_cred_pubkey, COALESCE(r_claimed_at, c.started_at),
-    CASE
-      WHEN c.status IN ('completed','failed','cancelled','task_unsolvable')
-        THEN COALESCE(c.completed_at, c.started_at)
-      WHEN c.status = 'open'
-        THEN COALESCE(c.parked_at, c.completed_at, c.started_at)
-    END,
-    CASE c.status
-      WHEN 'completed'        THEN 'completed'
-      WHEN 'failed'           THEN 'failed'
-      WHEN 'cancelled'        THEN 'cancelled'
-      WHEN 'task_unsolvable'  THEN 'failed'
-      WHEN 'open'             THEN 'parked'
-    END,
-    r_duration_ms, r_num_turns
-FROM (SELECT id, org_id, status, started_at, completed_at, parked_at FROM conversations WHERE type = 'delegation') c
-JOIN (SELECT id AS rid, executor_id AS r_executor_id, boot_epoch AS r_boot_epoch,
-             cred_pubkey AS r_cred_pubkey, claimed_at AS r_claimed_at,
-             duration_ms AS r_duration_ms, num_turns AS r_num_turns
-        FROM conversations_claim_src) src ON src.rid = c.id;
-
--- Curator turns: one claim per non-queued request (a queued request never
--- had an engagement — it becomes an undelivered user message below). Local
--- mode has no homing, so executor_id falls back to the '' sentinel.
-INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
-                    cred_pubkey, claimed_at, released_at, outcome, error,
-                    duration_ms, num_turns)
-SELECT
-    cr.id, cr.org_id, conv.id, COALESCE(cr.home_instance_id, ''), 0,
-    NULLIF(cr.cred_pubkey, ''),
-    COALESCE(cr.started_at, cr.created_at),
-    CASE WHEN cr.status IN ('done','cancelled','failed')
-         THEN COALESCE(cr.finished_at, cr.created_at) END,
-    CASE cr.status
-      WHEN 'done'      THEN 'completed'
-      WHEN 'cancelled' THEN 'cancelled'
-      WHEN 'failed'    THEN 'failed'
-    END,
-    cr.error_msg, cr.duration_ms, cr.num_turns
-FROM curator_requests cr
-JOIN conversations conv
-  ON conv.project_id = cr.project_id
- AND conv.creator_user_id = cr.creator_user_id
- AND conv.type = 'curator'
-WHERE cr.status <> 'queued';
-
 -- ---------------------------------------------------------------------------
--- 5. messages: the unified transcript canon (the columnar-canon columns from
--- the deleted 202607220001/202607220002 land here directly).
+-- 4b. messages: the unified transcript canon (the columnar-canon columns from
+-- the deleted 202607220001/202607220002 land here directly). The DDL sits
+-- BEFORE the claim mints below: claims.message_id references this table, and
+-- with foreign_keys back on SQLite refuses DML against a child whose FK
+-- parent table is missing — even rows that would stamp NULL.
 CREATE TABLE messages (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     org_id                TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
@@ -379,6 +329,67 @@ CREATE INDEX idx_messages_claim           ON messages(claim_id) WHERE claim_id I
 -- Per-user message reads; partial because most rows are agent-side (NULL user).
 CREATE INDEX idx_messages_user            ON messages(user_id) WHERE user_id IS NOT NULL;
 
+-- The runs era flattened every engagement into columns + an attempts
+-- counter, so per-retry history is unrecoverable; mint ONE claim per
+-- conversation that was ever claimed (executor_id survives requeues only on
+-- the final owner). Terminal rows release with a mapped outcome; a parked
+-- 'open' row releases as 'parked'; anything else was mid-flight at migration
+-- time and stays an active claim for the boot sweep to reconcile.
+INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
+                    cred_pubkey, claimed_at, released_at, outcome,
+                    duration_ms, num_turns)
+SELECT
+    c.id, c.org_id, c.id, r_executor_id, COALESCE(r_boot_epoch, 0),
+    r_cred_pubkey, COALESCE(r_claimed_at, c.started_at),
+    CASE
+      WHEN c.status IN ('completed','failed','cancelled','task_unsolvable')
+        THEN COALESCE(c.completed_at, c.started_at)
+      WHEN c.status = 'open'
+        THEN COALESCE(c.parked_at, c.completed_at, c.started_at)
+    END,
+    CASE c.status
+      WHEN 'completed'        THEN 'completed'
+      WHEN 'failed'           THEN 'failed'
+      WHEN 'cancelled'        THEN 'cancelled'
+      WHEN 'task_unsolvable'  THEN 'failed'
+      WHEN 'open'             THEN 'parked'
+    END,
+    r_duration_ms, r_num_turns
+FROM (SELECT id, org_id, status, started_at, completed_at, parked_at FROM conversations WHERE type = 'delegation') c
+JOIN (SELECT id AS rid, executor_id AS r_executor_id, boot_epoch AS r_boot_epoch,
+             cred_pubkey AS r_cred_pubkey, claimed_at AS r_claimed_at,
+             duration_ms AS r_duration_ms, num_turns AS r_num_turns
+        FROM conversations_claim_src) src ON src.rid = c.id;
+
+-- Curator turns: one claim per non-queued request (a queued request never
+-- had an engagement — it becomes an undelivered user message below). Local
+-- mode has no homing, so executor_id falls back to the '' sentinel.
+-- message_id stays NULL on migrated claims — exact failed-pickup attribution
+-- applies only to pickups minted under the new model.
+INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
+                    cred_pubkey, claimed_at, released_at, outcome, error,
+                    duration_ms, num_turns)
+SELECT
+    cr.id, cr.org_id, conv.id, COALESCE(cr.home_instance_id, ''), 0,
+    NULLIF(cr.cred_pubkey, ''),
+    COALESCE(cr.started_at, cr.created_at),
+    CASE WHEN cr.status IN ('done','cancelled','failed')
+         THEN COALESCE(cr.finished_at, cr.created_at) END,
+    CASE cr.status
+      WHEN 'done'      THEN 'completed'
+      WHEN 'cancelled' THEN 'cancelled'
+      WHEN 'failed'    THEN 'failed'
+    END,
+    cr.error_msg, cr.duration_ms, cr.num_turns
+FROM curator_requests cr
+JOIN conversations conv
+  ON conv.project_id = cr.project_id
+ AND conv.creator_user_id = cr.creator_user_id
+ AND conv.type = 'curator'
+WHERE cr.status <> 'queued';
+
+-- ---------------------------------------------------------------------------
+-- 5. The transcripts land in messages (DDL above, with the claims DDL).
 -- Delegation transcripts copy with their ids preserved (id is the assembly
 -- sort key) and attach to the conversation's single migrated claim when one
 -- exists.
