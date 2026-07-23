@@ -46,25 +46,108 @@ func TestParseLine_CaptureSessionAndAccumulate(t *testing.T) {
 	}
 }
 
-// TestParseLine_ThinkingEmitsOwnMessage pins that a thinking block becomes
-// its own subtype:"thinking" message, emitted immediately — ahead of the
-// text sibling that accumulates on the shared assistant message and only
-// flushes on stop_reason.
-func TestParseLine_ThinkingEmitsOwnMessage(t *testing.T) {
+// TestParseLine_ThinkingRidesAssistantMessage pins the fidelity fix: a
+// thinking block no longer flushes as its own subtype:"thinking" row.
+// Instead it accumulates as a Reasoning entry (capturing the signature) on
+// the same assistant message its text/tool_use siblings share, and the
+// whole thing flushes together on stop_reason.
+func TestParseLine_ThinkingRidesAssistantMessage(t *testing.T) {
 	s := NewStreamState()
-	msgs, _ := s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","model":"sonnet","content":[{"type":"thinking","thinking":"let me reason"}]}}`), "t")
-	if len(msgs) != 1 {
-		t.Fatalf("expected immediate thinking message; got %d msgs", len(msgs))
-	}
-	th := msgs[0]
-	if th.Role != "assistant" || th.Subtype != "thinking" || th.Content != "let me reason" || th.Model != "sonnet" {
-		t.Errorf("thinking message wrong shape: %+v", th)
+
+	msgs, _ := s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","model":"sonnet","content":[{"type":"thinking","thinking":"let me reason","signature":"sig-1"}]}}`), "t")
+	if len(msgs) != 0 {
+		t.Fatalf("thinking block must not emit its own row; got %d msgs: %+v", len(msgs), msgs)
 	}
 
-	s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"answer"}]}}`), "t")
+	msgs, _ = s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"answer"}]}}`), "t")
+	if len(msgs) != 0 {
+		t.Fatalf("text sibling should not flush before stop_reason; got %+v", msgs)
+	}
+
 	flushed, _ := s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","stop_reason":"end_turn","content":[]}}`), "t")
-	if len(flushed) != 1 || flushed[0].Subtype != "text" || flushed[0].Content != "answer" {
-		t.Fatalf("text sibling should flush separately after thinking; got %+v", flushed)
+	if len(flushed) != 1 {
+		t.Fatalf("expected exactly one flushed message carrying both thinking and text; got %d: %+v", len(flushed), flushed)
+	}
+	msg := flushed[0]
+	if msg.Role != "assistant" || msg.Content != "answer" {
+		t.Errorf("flushed message wrong shape: %+v", msg)
+	}
+	if len(msg.Reasoning) != 1 {
+		t.Fatalf("expected 1 reasoning entry, got %d: %+v", len(msg.Reasoning), msg.Reasoning)
+	}
+	r := msg.Reasoning[0]
+	if r.Index != 0 || r.Type != "text" || r.Text != "let me reason" || r.Signature != "sig-1" {
+		t.Errorf("reasoning entry wrong shape: %+v", r)
+	}
+	if msg.ContentBlocks != nil {
+		t.Errorf("single text block should not promote ContentBlocks; got %+v", msg.ContentBlocks)
+	}
+}
+
+// TestParseLine_ReasoningOrderingPreserved pins that multiple thinking
+// blocks across separate stream lines accumulate onto Reasoning in the
+// order they were produced, each carrying its own signature and a
+// zero-based Index matching that order.
+func TestParseLine_ReasoningOrderingPreserved(t *testing.T) {
+	s := NewStreamState()
+	s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","content":[{"type":"thinking","thinking":"step one","signature":"sig-a"}]}}`), "t")
+	s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","content":[{"type":"thinking","thinking":"step two","signature":"sig-b"}]}}`), "t")
+	flushed, _ := s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","stop_reason":"end_turn","content":[]}}`), "t")
+	if len(flushed) != 1 {
+		t.Fatalf("expected 1 flushed message, got %d", len(flushed))
+	}
+	got := flushed[0].Reasoning
+	if len(got) != 2 {
+		t.Fatalf("expected 2 reasoning entries, got %d: %+v", len(got), got)
+	}
+	if got[0].Index != 0 || got[0].Text != "step one" || got[0].Signature != "sig-a" {
+		t.Errorf("reasoning[0] wrong: %+v", got[0])
+	}
+	if got[1].Index != 1 || got[1].Text != "step two" || got[1].Signature != "sig-b" {
+		t.Errorf("reasoning[1] wrong: %+v", got[1])
+	}
+}
+
+// TestParseLine_MultiTextBlockConcatenation pins the fix for the
+// last-block-wins bug: multiple text blocks on one assistant message
+// concatenate into Content instead of the last one overwriting the rest,
+// and the full block list is preserved on ContentBlocks so nothing is lost.
+func TestParseLine_MultiTextBlockConcatenation(t *testing.T) {
+	s := NewStreamState()
+	s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"first"}]}}`), "t")
+	flushed, _ := s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","stop_reason":"end_turn","content":[{"type":"text","text":"second"}]}}`), "t")
+	if len(flushed) != 1 {
+		t.Fatalf("expected 1 flushed message, got %d", len(flushed))
+	}
+	msg := flushed[0]
+	if msg.Content != "first\nsecond" {
+		t.Errorf("Content = %q, want concatenated text blocks", msg.Content)
+	}
+	if len(msg.ContentBlocks) != 2 || msg.ContentBlocks[0].Text != "first" || msg.ContentBlocks[1].Text != "second" {
+		t.Errorf("ContentBlocks wrong: %+v", msg.ContentBlocks)
+	}
+}
+
+// TestParseLine_NoThinkingRowEmitted is a broader regression guard: across a
+// full turn mixing thinking, text, and tool_use, no emitted message ever
+// carries subtype "thinking" — new writes stop producing that row shape
+// entirely (historical rows are a frontend-only rendering concern).
+func TestParseLine_NoThinkingRowEmitted(t *testing.T) {
+	s := NewStreamState()
+	lines := []string{
+		`{"type":"system","subtype":"init","session_id":"s"}`,
+		`{"type":"assistant","message":{"id":"m1","model":"sonnet","content":[{"type":"thinking","thinking":"reasoning...","signature":"sig-1"}]}}`,
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"ok"}]}}`,
+		`{"type":"assistant","message":{"id":"m1","stop_reason":"tool_use","content":[{"type":"tool_use","id":"c1","name":"Read","input":{}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"done"}]}}`,
+	}
+	for _, line := range lines {
+		msgs, _ := s.ParseLine([]byte(line), "t")
+		for _, m := range msgs {
+			if m.Subtype == "thinking" {
+				t.Fatalf("no message should carry subtype=thinking; got %+v", m)
+			}
+		}
 	}
 }
 
@@ -166,6 +249,50 @@ func TestParseLine_ToolResultBlockArrayContent(t *testing.T) {
 	}
 	if out[0].ToolCallID != "c1" {
 		t.Errorf("tool_call_id = %q, want c1", out[0].ToolCallID)
+	}
+}
+
+// TestParseLine_ToolResultImageBlockCapture pins the other half of the tool-
+// result fidelity fix: an image content block (screenshot, Read on an
+// image) must not vanish. Text still flattens onto Content; the image lands
+// on ContentBlocks as a data: URI built from the base64 source.
+func TestParseLine_ToolResultImageBlockCapture(t *testing.T) {
+	s := NewStreamState()
+	out, _ := s.ParseLine([]byte(`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":[{"type":"text","text":"screenshot"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"QUJD"}}]}]}}`), "t")
+	if len(out) != 1 {
+		t.Fatalf("expected 1 tool message, got %d", len(out))
+	}
+	msg := out[0]
+	if msg.Content != "screenshot" {
+		t.Errorf("Content = %q, want the flattened text block", msg.Content)
+	}
+	if len(msg.ContentBlocks) != 1 {
+		t.Fatalf("expected 1 content block, got %d: %+v", len(msg.ContentBlocks), msg.ContentBlocks)
+	}
+	img := msg.ContentBlocks[0]
+	if img.Type != domain.ContentBlockImage || img.ImageURL == nil || img.ImageURL.URL != "data:image/png;base64,QUJD" {
+		t.Errorf("image block wrong shape: %+v", img)
+	}
+}
+
+// TestParseLine_ParallelToolResultsAllSurface pins that a single "user" line
+// carrying multiple tool_result blocks — parallel tool calls from one
+// assistant turn resolving together — yields one message per block instead
+// of dropping every result but the first.
+func TestParseLine_ParallelToolResultsAllSurface(t *testing.T) {
+	s := NewStreamState()
+	out, _ := s.ParseLine([]byte(`{"type":"user","message":{"content":[
+		{"type":"tool_result","tool_use_id":"c1","content":"result one"},
+		{"type":"tool_result","tool_use_id":"c2","content":"result two","is_error":true}
+	]}}`), "t")
+	if len(out) != 2 {
+		t.Fatalf("expected 2 tool messages, got %d: %+v", len(out), out)
+	}
+	if out[0].ToolCallID != "c1" || out[0].Content != "result one" || out[0].IsError {
+		t.Errorf("first tool result wrong: %+v", out[0])
+	}
+	if out[1].ToolCallID != "c2" || out[1].Content != "result two" || !out[1].IsError {
+		t.Errorf("second tool result wrong: %+v", out[1])
 	}
 }
 

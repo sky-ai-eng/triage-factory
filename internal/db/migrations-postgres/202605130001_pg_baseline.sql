@@ -531,7 +531,18 @@ CREATE TABLE public.curator_messages (
     output_tokens integer,
     cache_read_tokens integer,
     cache_creation_tokens integer,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- reasoning / content_blocks mirror run_messages' columns of the same
+    -- name: reasoning is the model's replay-only chain-of-thought
+    -- ({index, type, text?, signature?, data?} entries); content_blocks
+    -- carries non-text content (e.g. an image tool result) the flat
+    -- `content` column can't. Curator turns run through the same SDK stream
+    -- parser as delegated runs, so they need the same two columns for
+    -- display parity — the delivered/window_state/seq columns stay
+    -- run_messages-only, since those are native-loop assembly mechanics the
+    -- interactive curator (staying on agentproc) never uses.
+    reasoning jsonb,
+    content_blocks jsonb
 );
 
 

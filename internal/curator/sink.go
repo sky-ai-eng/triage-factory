@@ -109,6 +109,8 @@ func (s *requestSink) OnMessage(msg *domain.AgentMessage) error {
 		CacheReadTokens:     msg.CacheReadTokens,
 		CacheCreationTokens: msg.CacheCreationTokens,
 		CreatedAt:           msg.CreatedAt,
+		Reasoning:           msg.Reasoning,
+		ContentBlocks:       msg.ContentBlocks,
 	}
 	// Per-message synthetic-claims wrap — each row attributes to the
 	// requesting user. Short-lived tx (one INSERT) so the long-running

@@ -236,12 +236,54 @@ export interface AgentMessage {
   CacheReadTokens?: number
   CacheCreationTokens?: number
   CreatedAt: string
+  // Reasoning/ContentBlocks mirror domain.AgentMessage's fields of the same
+  // name — nil/absent on messages that carry neither. Reasoning
+  // rides the assistant message it belongs to rather than arriving as a
+  // separate subtype:"thinking" row; ContentBlocks holds non-text content
+  // (e.g. an image tool result) the flat Content string can't carry.
+  Reasoning?: ReasoningDetail[]
+  ContentBlocks?: ContentBlock[]
 }
 
 export interface ToolCall {
   id: string
   name: string
   input: Record<string, unknown>
+}
+
+// ReasoningDetail/ContentBlock* mirror the Go domain types of the same name
+// (internal/domain/agent.go) — those Go structs DO carry json tags, so the
+// wire shape is lowercase/snake_case even though they nest inside the
+// PascalCase AgentMessage container field.
+export interface ReasoningDetail {
+  index: number
+  type: string
+  text?: string
+  signature?: string
+  data?: string
+}
+
+export type ContentBlockType = 'text' | 'image_url' | 'file'
+
+export interface ContentBlock {
+  type: ContentBlockType
+  text?: string
+  image_url?: ContentImageURL
+  file?: ContentFile
+}
+
+export interface ContentImageURL {
+  url?: string
+  file_id?: string
+  detail?: string
+}
+
+export interface ContentFile {
+  file_data?: string
+  file_url?: string
+  file_id?: string
+  filename?: string
+  file_type?: string
 }
 
 // CuratorMessage / CuratorRequest mirror the Go domain types in
@@ -264,6 +306,8 @@ export interface CuratorMessage {
   cache_read_tokens?: number
   cache_creation_tokens?: number
   created_at: string
+  reasoning?: ReasoningDetail[]
+  content_blocks?: ContentBlock[]
 }
 
 export type CuratorRequestStatus = 'queued' | 'running' | 'done' | 'cancelled' | 'failed'

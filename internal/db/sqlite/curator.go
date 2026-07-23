@@ -318,7 +318,7 @@ func (s *curatorStore) InsertMessage(ctx context.Context, orgID string, msg *dom
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}
-	var toolCallsJSON, metadataJSON sql.NullString
+	var toolCallsJSON, metadataJSON, reasoningJSON, contentBlocksJSON sql.NullString
 	if len(msg.ToolCalls) > 0 {
 		b, err := json.Marshal(msg.ToolCalls)
 		if err != nil {
@@ -333,18 +333,32 @@ func (s *curatorStore) InsertMessage(ctx context.Context, orgID string, msg *dom
 		}
 		metadataJSON = sql.NullString{String: string(b), Valid: true}
 	}
+	if len(msg.Reasoning) > 0 {
+		b, err := json.Marshal(msg.Reasoning)
+		if err != nil {
+			return 0, fmt.Errorf("marshal reasoning: %w", err)
+		}
+		reasoningJSON = sql.NullString{String: string(b), Valid: true}
+	}
+	if len(msg.ContentBlocks) > 0 {
+		b, err := json.Marshal(msg.ContentBlocks)
+		if err != nil {
+			return 0, fmt.Errorf("marshal content_blocks: %w", err)
+		}
+		contentBlocksJSON = sql.NullString{String: string(b), Valid: true}
+	}
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now().UTC()
 	}
 	result, err := s.q.ExecContext(ctx, `
-		INSERT INTO curator_messages (request_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO curator_messages (request_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at, reasoning, content_blocks)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		msg.RequestID, msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, nullStrSqlite(msg.ToolCallID), msg.IsError, metadataJSON,
 		nullStrSqlite(msg.Model), nullIntSqlite(msg.InputTokens), nullIntSqlite(msg.OutputTokens),
 		nullIntSqlite(msg.CacheReadTokens), nullIntSqlite(msg.CacheCreationTokens),
-		msg.CreatedAt,
+		msg.CreatedAt, reasoningJSON, contentBlocksJSON,
 	)
 	if err != nil {
 		return 0, err
@@ -749,26 +763,29 @@ func (s *curatorStore) ImportPendingContext(ctx context.Context, orgID string, r
 // exported interfaces.
 const sqliteCuratorMessageColumns = `
 	id, request_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
-	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at
+	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at,
+	reasoning, content_blocks
 `
 
 func scanCuratorMessageRowSqlite(rows *sql.Rows) (domain.CuratorMessage, error) {
 	var (
-		m             domain.CuratorMessage
-		toolCallsJSON sql.NullString
-		metadataJSON  sql.NullString
-		toolCallID    sql.NullString
-		model         sql.NullString
-		inputTokens   sql.NullInt64
-		outputTokens  sql.NullInt64
-		cacheRead     sql.NullInt64
-		cacheCreation sql.NullInt64
+		m                 domain.CuratorMessage
+		toolCallsJSON     sql.NullString
+		metadataJSON      sql.NullString
+		toolCallID        sql.NullString
+		model             sql.NullString
+		inputTokens       sql.NullInt64
+		outputTokens      sql.NullInt64
+		cacheRead         sql.NullInt64
+		cacheCreation     sql.NullInt64
+		reasoningJSON     sql.NullString
+		contentBlocksJSON sql.NullString
 	)
 	if err := rows.Scan(
 		&m.ID, &m.RequestID, &m.Role, &m.Content, &m.Subtype,
 		&toolCallsJSON, &toolCallID, &m.IsError, &metadataJSON,
 		&model, &inputTokens, &outputTokens, &cacheRead, &cacheCreation,
-		&m.CreatedAt,
+		&m.CreatedAt, &reasoningJSON, &contentBlocksJSON,
 	); err != nil {
 		return domain.CuratorMessage{}, err
 	}
@@ -780,6 +797,20 @@ func scanCuratorMessageRowSqlite(rows *sql.Rows) (domain.CuratorMessage, error) 
 	if metadataJSON.Valid {
 		if err := json.Unmarshal([]byte(metadataJSON.String), &m.Metadata); err != nil {
 			return domain.CuratorMessage{}, fmt.Errorf("unmarshal metadata: %w", err)
+		}
+	}
+	// Unlike tool_calls/metadata above, reasoning/content_blocks are
+	// display-fidelity data (not observability metadata) — a decode
+	// failure must surface, not silently yield an empty slice that looks
+	// identical to "no reasoning on this message" when the row has some.
+	if reasoningJSON.Valid {
+		if err := json.Unmarshal([]byte(reasoningJSON.String), &m.Reasoning); err != nil {
+			return domain.CuratorMessage{}, fmt.Errorf("unmarshal reasoning (message %d): %w", m.ID, err)
+		}
+	}
+	if contentBlocksJSON.Valid {
+		if err := json.Unmarshal([]byte(contentBlocksJSON.String), &m.ContentBlocks); err != nil {
+			return domain.CuratorMessage{}, fmt.Errorf("unmarshal content_blocks (message %d): %w", m.ID, err)
 		}
 	}
 	m.ToolCallID = toolCallID.String

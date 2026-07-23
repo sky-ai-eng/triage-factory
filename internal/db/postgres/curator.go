@@ -337,7 +337,7 @@ func (s *curatorStore) QueuedRequestsForProjectSystem(ctx context.Context, orgID
 }
 
 func (s *curatorStore) InsertMessage(ctx context.Context, orgID string, msg *domain.CuratorMessage) (int64, error) {
-	var toolCallsJSON, metadataJSON any
+	var toolCallsJSON, metadataJSON, reasoningJSON, contentBlocksJSON any
 	if len(msg.ToolCalls) > 0 {
 		b, err := json.Marshal(msg.ToolCalls)
 		if err != nil {
@@ -351,6 +351,20 @@ func (s *curatorStore) InsertMessage(ctx context.Context, orgID string, msg *dom
 			return 0, fmt.Errorf("marshal metadata: %w", err)
 		}
 		metadataJSON = string(b)
+	}
+	if len(msg.Reasoning) > 0 {
+		b, err := json.Marshal(msg.Reasoning)
+		if err != nil {
+			return 0, fmt.Errorf("marshal reasoning: %w", err)
+		}
+		reasoningJSON = string(b)
+	}
+	if len(msg.ContentBlocks) > 0 {
+		b, err := json.Marshal(msg.ContentBlocks)
+		if err != nil {
+			return 0, fmt.Errorf("marshal content_blocks: %w", err)
+		}
+		contentBlocksJSON = string(b)
 	}
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now().UTC()
@@ -371,16 +385,16 @@ func (s *curatorStore) InsertMessage(ctx context.Context, orgID string, msg *dom
 		INSERT INTO curator_messages
 			(org_id, creator_user_id, request_id, role, content, subtype, tool_calls, tool_call_id,
 			 is_error, metadata, model, input_tokens, output_tokens,
-			 cache_read_tokens, cache_creation_tokens, created_at)
+			 cache_read_tokens, cache_creation_tokens, created_at, reasoning, content_blocks)
 		VALUES ($1, tf.current_user_id(), $2, $3, $4, $5, $6::jsonb, NULLIF($7, ''), $8,
-		        $9::jsonb, NULLIF($10, ''), $11, $12, $13, $14, $15)
+		        $9::jsonb, NULLIF($10, ''), $11, $12, $13, $14, $15, $16::jsonb, $17::jsonb)
 		RETURNING id
 	`,
 		orgID, msg.RequestID, msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, msg.ToolCallID, msg.IsError, metadataJSON,
 		msg.Model, intPtrAny(msg.InputTokens), intPtrAny(msg.OutputTokens),
 		intPtrAny(msg.CacheReadTokens), intPtrAny(msg.CacheCreationTokens),
-		msg.CreatedAt,
+		msg.CreatedAt, reasoningJSON, contentBlocksJSON,
 	).Scan(&id)
 	if err != nil {
 		return 0, err
@@ -626,7 +640,8 @@ func (s *curatorStore) ListMessagesByRequestIDs(ctx context.Context, orgID strin
 	// One query, no chunking: the whole list is a single array bind.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id, request_id::text, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
-		       model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at
+		       model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at,
+		       reasoning, content_blocks
 		FROM curator_messages
 		WHERE org_id = $1 AND request_id = ANY($2)
 		ORDER BY created_at ASC, id ASC
@@ -757,21 +772,23 @@ func (s *curatorStore) ImportPendingContext(ctx context.Context, orgID string, r
 // column ordering (see ListMessagesByRequestIDs' SELECT list).
 func scanPgCuratorMessage(rows *sql.Rows) (domain.CuratorMessage, error) {
 	var (
-		m             domain.CuratorMessage
-		toolCallsJSON sql.NullString
-		metadataJSON  sql.NullString
-		toolCallID    sql.NullString
-		model         sql.NullString
-		inputTokens   sql.NullInt64
-		outputTokens  sql.NullInt64
-		cacheRead     sql.NullInt64
-		cacheCreation sql.NullInt64
+		m                 domain.CuratorMessage
+		toolCallsJSON     sql.NullString
+		metadataJSON      sql.NullString
+		toolCallID        sql.NullString
+		model             sql.NullString
+		inputTokens       sql.NullInt64
+		outputTokens      sql.NullInt64
+		cacheRead         sql.NullInt64
+		cacheCreation     sql.NullInt64
+		reasoningJSON     sql.NullString
+		contentBlocksJSON sql.NullString
 	)
 	if err := rows.Scan(
 		&m.ID, &m.RequestID, &m.Role, &m.Content, &m.Subtype,
 		&toolCallsJSON, &toolCallID, &m.IsError, &metadataJSON,
 		&model, &inputTokens, &outputTokens, &cacheRead, &cacheCreation,
-		&m.CreatedAt,
+		&m.CreatedAt, &reasoningJSON, &contentBlocksJSON,
 	); err != nil {
 		return domain.CuratorMessage{}, err
 	}
@@ -783,6 +800,20 @@ func scanPgCuratorMessage(rows *sql.Rows) (domain.CuratorMessage, error) {
 	if metadataJSON.Valid {
 		if err := json.Unmarshal([]byte(metadataJSON.String), &m.Metadata); err != nil {
 			return domain.CuratorMessage{}, fmt.Errorf("unmarshal metadata: %w", err)
+		}
+	}
+	// Unlike tool_calls/metadata above, reasoning/content_blocks are
+	// display-fidelity data (not observability metadata) — a decode
+	// failure must surface, not silently yield an empty slice that looks
+	// identical to "no reasoning on this message" when the row has some.
+	if reasoningJSON.Valid {
+		if err := json.Unmarshal([]byte(reasoningJSON.String), &m.Reasoning); err != nil {
+			return domain.CuratorMessage{}, fmt.Errorf("unmarshal reasoning (message %d): %w", m.ID, err)
+		}
+	}
+	if contentBlocksJSON.Valid {
+		if err := json.Unmarshal([]byte(contentBlocksJSON.String), &m.ContentBlocks); err != nil {
+			return domain.CuratorMessage{}, fmt.Errorf("unmarshal content_blocks (message %d): %w", m.ID, err)
 		}
 	}
 	m.ToolCallID = toolCallID.String
