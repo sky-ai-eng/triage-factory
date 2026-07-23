@@ -257,6 +257,6 @@ func checkLabel(ok bool) string {
 // CLAUDE.md's multi-mode read-scoping rule, not a cross-team leak.
 func (s *Server) countActiveRuns(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE status IN ('queued', 'running')`).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversations WHERE status IN ('queued', 'running')`).Scan(&n)
 	return n, err
 }

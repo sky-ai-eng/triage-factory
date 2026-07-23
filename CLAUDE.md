@@ -47,7 +47,7 @@ Triage Factory is a **single Go binary** (HTTP server + pollers + delegated-agen
 `main.go` dispatches on `os.Args[1]`:
 
 - **Server mode** (default) — HTTP API + websocket hub + pollers + scorer + event router + delegation spawner.
-- **CLI mode** (`exec`, `status`) — invoked _by delegated Claude Code agents_ inside a worktree. `cmd/exec/` provides scoped GitHub/Jira subcommands the agent uses instead of calling those APIs directly, so credentials stay in the keychain and activity is auditable via `runs` / `run_artifacts`.
+- **CLI mode** (`exec`, `status`) — invoked _by delegated Claude Code agents_ inside a worktree. `cmd/exec/` provides scoped GitHub/Jira subcommands the agent uses instead of calling those APIs directly, so credentials stay in the keychain and activity is auditable via `conversations` / `artifacts`.
 
 ### Core data model
 
@@ -60,12 +60,30 @@ Events                              ← append-only; every poller detection + sy
   ↓  (0 or 1 — only if a task_rule or prompt_trigger predicate matches)
 Task                                ← "this entity needs attention, because of this event type"
   ↓
-Runs                                ← one prompt execution against one task
+Conversations                       ← durable agent context: one row per transcript, any surface
+  ↓
+Claims                              ← one row per executor engagement with a conversation
 ```
+
+**Conversations · messages · claims** is the unified agent data model (it replaced
+the former `runs` + `curator_requests` fusion tables): a *conversation* is the
+durable context — type (`delegation` | `curator` | `interactive` reserved |
+namespaced `subagent:<kind>` reserved), task/trigger/project linkage, user-facing
+status, cost rollups, `runtime` ratchet (`sdk`|`native`), `sdk_session_id`,
+KV-warmth + archive timestamps. A *claim* is one executor engagement (executor id
++ boot epoch, per-engagement accounting, sealed-credential pubkey, at most one
+active per conversation — the schema enforces it). The transcript itself is the
+`messages` table: one row per neutral API message, `delivered=false` rows are the
+universal pending-input queue (follow-ups, staged injections, curator context
+notices — the former three side-tables), `window_state`/`seq` are the native
+loop's assembly columns, and `user_id`/`claim_id` attribute each row to the
+requesting user and producing engagement. Queue-is-truth generalizes: "needs
+driving" = a queued conversation or one with undelivered input and no active
+claim.
 
 Key invariants:
 
-- **Entities are durable, events are immutable, tasks are ephemeral, runs are the work.** Memory is written per-run but materialized per-entity via `entity_links`.
+- **Entities are durable, events are immutable, tasks are ephemeral, conversations are the work.** Memory is written per-conversation but materialized per-entity via `entity_links`.
 - **Dedup:** at most one active task per `(entity_id, event_type, dedup_key)` — enforced by a partial unique index in `tasks`. `dedup_key` is usually empty; open-set discriminators (label name, status name) use it to get separate tasks per value.
 - **No retroactive task creation.** A new task_rule or trigger applies to events _going forward_. Historical events in the log are not re-evaluated.
 - **Tracking changes are forward-only — the mirror of the rule above.** Adding a repo/project to a team's tracked set doesn't retroactively mint tasks for its history; removing one doesn't retroactively prune or close existing tasks. The team↔repo gate (`internal/routing` `handlerScopeMatchesEvent` + `TracksRepoSystem`) filters _future_ matches only; it deliberately does **not** reconcile `task_teams` visibility for tasks already created while the repo was tracked. A task is durable work (may have an in-flight run, an open PR, agent memory), so untracking never silently destroys it. This is symmetric in multi-team (team A untracks a shared repo → A keeps tasks it already had, gets no new ones; B is unaffected) and correct in solo N=1 (one team, so pruning visibility would orphan the task to nobody). Tradeoff acknowledged: an untracked repo stops polling, so its open PRs never emit the close event that would retire stale tasks — the answer is an explicit user-initiated "dismiss" affordance (its own ticket), never an automatic purge wired into a config save.
@@ -91,7 +109,7 @@ Pollers publish events to the bus rather than invoking callbacks directly. This 
 
 ### Delegation (the "Agent" column)
 
-`internal/delegate/spawner.go` + `internal/worktree` — delegation spins up a **headless Claude Code instance inside an isolated git worktree**. Credentials are hot-swapped into the spawner on config change (see `SetOnGitHubChanged` in `main.go`); the spawner instance itself is created once at startup. Agents stream stdout into `run_messages`; structured outputs (PRs opened, reviews posted) land in `run_artifacts` with a unique `is_primary` per run. Orphaned worktrees from crashed runs are cleaned on startup via `worktree.Cleanup()`.
+`internal/delegate/spawner.go` + `internal/worktree` — delegation spins up a **headless Claude Code instance inside an isolated git worktree**. Credentials are hot-swapped into the spawner on config change (see `SetOnGitHubChanged` in `main.go`); the spawner instance itself is created once at startup. Agents stream stdout into `messages`; structured outputs (PRs opened, reviews posted) land in `artifacts` with a unique `is_primary` per conversation. Orphaned worktrees from crashed runs are cleaned on startup via `worktree.Cleanup()`.
 
 ### Sandbox, isolation, and executor credentials (multi-mode)
 
@@ -103,15 +121,15 @@ The executor is split three ways so that no process holds both a dangerous power
 - **orchestrator** — the main process, capabilities **dropped at exec** via `setpriv` (Go can't drop reliably in-process). Runs the dispatcher, holds credentials, and binds the per-run **llm/git/egress proxies** (`internal/agentproc/proxies.go`) + the **agenthost** unix socket (`cmd/exec/agenthost`) that parse hostile agent traffic — with zero capabilities.
 - **sandbox** — the gVisor jail. **Property B**: no real credential ever enters its env; the agent gets a per-run proxy URL + a throwaway token, and the real key is injected host-side on the upstream hop. Per-run fail-closed egress allowlist.
 
-**Executor credentials never come from the secret store.** On `TF_ROLE=executor` the secret store is disabled (`pgstore.NewWithoutSecrets`; `TF_SECRET_ENCRYPTION_KEY` is never loaded). Credentials arrive as **sealed per-run bundles** — the control plane resolves and seals them (`internal/credprovision` → `internal/credseal`) to the claiming instance's key, writes a `run_credentials` row, and the executor unseals once at claim and threads the plaintext on ctx (`credbundle.FromContext`). So executor-side code (proxies, agenthost, git) reads credentials from the **bundle**, never `stores.Secrets` — resolving from the disabled store is a recurring bug class. Local mode uses the live secret store directly (no bundle); there is no fused multi role that does — `TF_ROLE=all` refuses to boot in multi (TFAC-637), sandboxed runs REQUIRE a prebuilt per-run network + credential sidecar (`agentproc.Run` errors without one), and the former in-process proxy / clone-token / agenthost-over-stores paths are deleted. Full posture: `docs/security/security-overview.md` + `docs/security/privilege-separation.md`.
+**Executor credentials never come from the secret store.** On `TF_ROLE=executor` the secret store is disabled (`pgstore.NewWithoutSecrets`; `TF_SECRET_ENCRYPTION_KEY` is never loaded). Credentials arrive as **sealed per-claim bundles** — the control plane resolves and seals them (`internal/credprovision` → `internal/credseal`) to the active claim's published sidecar key, writes a `claim_credentials` row, and the executor unseals once at claim and threads the plaintext on ctx (`credbundle.FromContext`). One channel for both surfaces: delegated engagements and curator turns are claims alike. So executor-side code (proxies, agenthost, git) reads credentials from the **bundle**, never `stores.Secrets` — resolving from the disabled store is a recurring bug class. Local mode uses the live secret store directly (no bundle); there is no fused multi role that does — `TF_ROLE=all` refuses to boot in multi (TFAC-637), sandboxed runs REQUIRE a prebuilt per-run network + credential sidecar (`agentproc.Run` errors without one), and the former in-process proxy / clone-token / agenthost-over-stores paths are deleted. Full posture: `docs/security/security-overview.md` + `docs/security/privilege-separation.md`.
 
 ### Curator
 
-`internal/curator` — an interactive, per-project agent the user chats with, distinct from the task→run delegation flow. Turns are serialized per session and execute through `agentproc.Run` (sandboxed like a delegated run in multi-mode), with tool access to a per-project **knowledge base** and pinned repo worktrees (shared read-only per `(org, repo)`, seeded on demand). State lives in `curator_requests` + the knowledge-base files under `TF_STATE_ROOT`.
+`internal/curator` — an interactive, per-project agent the user chats with, distinct from the task→run delegation flow. Turns are serialized per session and execute through `agentproc.Run` (sandboxed like a delegated run in multi-mode), with tool access to a per-project **knowledge base** and pinned repo worktrees (shared read-only per `(org, repo)`, seeded on demand). State lives in the shared conversation model — one `conversations` row per (project, creator), `visibility='private'` (creator-scoped through the standard RLS arms), turns = an undelivered user `messages` row claimed and driven by an executor `claims` row — plus the knowledge-base files under `TF_STATE_ROOT`. Reset archives the conversation (`archived_at`); the next message mints a fresh one.
 
 ### Instance registry (fleet membership)
 
-`internal/instance` + the `instances` table (`db.InstanceStore`) — every TF process's persistent identity and heartbeat, the substrate the horizontal-scaling epic's later phases (reaper, placement, fleet dashboard) read. The id is a file: `internal/instance.EnsureIdentity` mints (or re-reads) `<TF_STATE_ROOT>/instance-id` under an exclusive flock held for the process lifetime, so a restart keeps the same id and two processes pointed at one state root fail fast instead of silently sharing an identity. `app.New` resolves it first thing at boot, registers it (`Instances.Register` — an atomic upsert that bumps `boot_epoch` on every restart), and hands the (id, boot_epoch) pair to the spawner via `Spawner.SetExecutorID`, replacing the old per-boot random uuid that stamped `runs.executor_id`. `Spawner.RunInstanceHeartbeat` renews the row every ~4s with the live capacity/admission snapshot (host memory headroom, the dispatch memory gate, semaphore occupancy) — moving state that used to live only on the process onto a row other instances (and eventually the fleet dashboard) can read. Every process registers, not just executors (deployment-wide visibility — build versions, health, the eventual lease holder); the row's `role` column carries this process's resolved `TF_ROLE` (`all`/`control`/`executor` — TFAC-582), stamped by `app.registerInstance` from `runmode.Role()`.
+`internal/instance` + the `instances` table (`db.InstanceStore`) — every TF process's persistent identity and heartbeat, the substrate the horizontal-scaling epic's later phases (reaper, placement, fleet dashboard) read. The id is a file: `internal/instance.EnsureIdentity` mints (or re-reads) `<TF_STATE_ROOT>/instance-id` under an exclusive flock held for the process lifetime, so a restart keeps the same id and two processes pointed at one state root fail fast instead of silently sharing an identity. `app.New` resolves it first thing at boot, registers it (`Instances.Register` — an atomic upsert that bumps `boot_epoch` on every restart), and hands the (id, boot_epoch) pair to the spawner via `Spawner.SetExecutorID`, replacing the old per-boot random uuid that stamped the claim's executor identity. `Spawner.RunInstanceHeartbeat` renews the row every ~4s with the live capacity/admission snapshot (host memory headroom, the dispatch memory gate, semaphore occupancy) — moving state that used to live only on the process onto a row other instances (and eventually the fleet dashboard) can read. Every process registers, not just executors (deployment-wide visibility — build versions, health, the eventual lease holder); the row's `role` column carries this process's resolved `TF_ROLE` (`all`/`control`/`executor` — TFAC-582), stamped by `app.registerInstance` from `runmode.Role()`.
 
 ### Background-brain leader lease
 
