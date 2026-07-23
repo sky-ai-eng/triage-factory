@@ -18,7 +18,10 @@ import (
 
 // BringUpCuratorSandbox stands up the run network + credential sidecar for a
 // homed curator turn — the curator-turn analog of
-// bringUpExecutorSandbox. Curator wires it through the SetTurnSandbox seam,
+// bringUpExecutorSandbox, keyed by the CONVERSATION id: the sealed-bundle
+// channel (claim_credentials) resolves the conversation's active claim, and
+// one active claim per conversation makes the id unique per concurrent
+// sandbox/network/socket. Curator wires it through the SetTurnSandbox seam,
 // gated on the executor runtime, so local (where this returns nil) keeps the
 // in-process agenthost.Start path byte-identical.
 //
@@ -34,20 +37,20 @@ import (
 // sidecar's git proxy (pinned ∩ tracked) and, carried on RunInfo/AgentHostInfo,
 // authorizes the agent's exec-gh verbs against the same set. userID is the
 // requesting user; teamID the curated project's owning team.
-func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, requestID, userID, teamID string, pinnedRepos []string) (*executorSandbox, error) {
+func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, conversationID, userID, teamID string, pinnedRepos []string) (*executorSandbox, error) {
 	if runmode.Current() != runmode.ModeMulti {
 		return nil, nil
 	}
 	// Not wired (a test fixture) — degrade like every other nil-store seam here.
-	if s.curatorTurnCredentials == nil || s.curatorStore == nil {
+	if s.runCredentials == nil || s.curatorStore == nil {
 		return nil, nil
 	}
 
-	net, err := sandbox.SetupRunNetwork(ctx, requestID)
+	net, err := sandbox.SetupRunNetwork(ctx, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("set up curator turn network: %w", err)
 	}
-	sc, err := sandbox.LaunchSidecar(ctx, sandbox.SidecarConfig{RunID: requestID, SubnetIdx: net.Idx})
+	sc, err := sandbox.LaunchSidecar(ctx, sandbox.SidecarConfig{RunID: conversationID, SubnetIdx: net.Idx})
 	if err != nil {
 		_ = net.Close()
 		return nil, fmt.Errorf("launch curator credential sidecar: %w", err)
@@ -57,7 +60,7 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, requestID, u
 	info := agenthost.RunInfo{
 		OrgID:            orgID,
 		UserID:           userID,
-		RunID:            requestID,
+		RunID:            conversationID,
 		TeamID:           teamID,
 		IsEventTriggered: false,
 		PinnedRepos:      pinnedRepos,
@@ -104,7 +107,7 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, requestID, u
 		},
 	}
 
-	res, conn, err := agentproc.BringUpRunSidecar(ctx, sc, s.curatorSidecarProvisionFor(orgID, requestID), params)
+	res, conn, err := agentproc.BringUpRunSidecar(ctx, sc, s.curatorSidecarProvisionFor(orgID, conversationID), params)
 	if err != nil {
 		_ = sc.Close()
 		_ = net.Close()
@@ -113,28 +116,30 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, requestID, u
 
 	es := &executorSandbox{net: net, sidecar: sc, conn: conn, res: res, stopRelay: make(chan struct{})}
 	// Same mid-flight refresh relay as a delegated run: the brain re-mints and
-	// re-seals the turn's short-lived credentials into curator_turn_credentials,
-	// and this goroutine relays each new sealed blob down so a long turn keeps
-	// signing with live credentials.
+	// re-seals the turn's short-lived credentials into claim_credentials
+	// (keyed by the conversation's active claim), and this goroutine relays
+	// each new sealed blob down so a long turn keeps signing with live
+	// credentials.
 	_, myBootEpoch := s.executorIdentity()
-	go s.relayCredentialRefreshes(requestID, func(ctx context.Context) (int64, []byte, bool, error) {
-		_, be, sealed, ok, err := s.curatorTurnCredentials.Get(ctx, orgID, requestID)
+	go s.relayCredentialRefreshes(conversationID, func(ctx context.Context) (int64, []byte, bool, error) {
+		_, be, sealed, ok, err := s.runCredentials.Get(ctx, orgID, conversationID)
 		return be, sealed, ok, err
 	}, myBootEpoch, conn, es.stopRelay)
 	return es, nil
 }
 
 // curatorSidecarProvisionFor is the curator analog of sidecarProvisionFor: it
-// publishes the sidecar's per-turn pubkey onto curator_requests.cred_pubkey (and
-// — Postgres — fires the curator_cred_request doorbell, both inside
-// PublishTurnCredPubKey) so the brain seals THIS turn's bundle to it, then polls
-// curator_turn_credentials for the OPAQUE sealed bytes. The orchestrator never
-// opens the bundle; only the sidecar holds the matching private key.
-func (s *Spawner) curatorSidecarProvisionFor(orgID, requestID string) agentproc.SidecarProvisionFunc {
+// publishes the sidecar's per-turn pubkey onto the conversation's ACTIVE
+// claim (and — Postgres — fires the curator_cred_request doorbell, both
+// inside PublishTurnCredPubKeySystem) so the brain seals THIS turn's bundle
+// to it, then polls the shared claim_credentials channel for the OPAQUE
+// sealed bytes. The orchestrator never opens the bundle; only the sidecar
+// holds the matching private key.
+func (s *Spawner) curatorSidecarProvisionFor(orgID, conversationID string) agentproc.SidecarProvisionFunc {
 	_, myBootEpoch := s.executorIdentity()
 	return func(provCtx context.Context, sidecarPubKeyB64 string) ([]byte, int64, error) {
-		if _, err := s.curatorStore.PublishTurnCredPubKey(provCtx, orgID, requestID, sidecarPubKeyB64); err != nil {
-			return nil, 0, fmt.Errorf("publish curator turn %s sidecar pubkey: %w", requestID, err)
+		if _, err := s.curatorStore.PublishTurnCredPubKeySystem(provCtx, orgID, conversationID, sidecarPubKeyB64); err != nil {
+			return nil, 0, fmt.Errorf("publish curator turn %s sidecar pubkey: %w", conversationID, err)
 		}
 
 		timeout, pollInterval := s.awaitingCredentialsKnobs()
@@ -142,9 +147,9 @@ func (s *Spawner) curatorSidecarProvisionFor(orgID, requestID string) agentproc.
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		for {
-			_, bootEpoch, sealed, ok, err := s.curatorTurnCredentials.Get(provCtx, orgID, requestID)
+			_, bootEpoch, sealed, ok, err := s.runCredentials.Get(provCtx, orgID, conversationID)
 			if err != nil {
-				dispatchLog.Warn("read curator turn credential bundle failed; retrying", "request", requestID, "error", err)
+				dispatchLog.Warn("read curator turn credential bundle failed; retrying", "conversation", conversationID, "error", err)
 			} else if ok && bootEpoch == myBootEpoch {
 				return sealed, bootEpoch, nil
 			}
@@ -153,7 +158,7 @@ func (s *Spawner) curatorSidecarProvisionFor(orgID, requestID string) agentproc.
 				return nil, 0, provCtx.Err()
 			case <-ticker.C:
 				if time.Now().After(deadline) {
-					return nil, 0, fmt.Errorf("timed out waiting for curator turn %s credential bundle (brain not provisioning)", requestID)
+					return nil, 0, fmt.Errorf("timed out waiting for curator turn %s credential bundle (brain not provisioning)", conversationID)
 				}
 			}
 		}

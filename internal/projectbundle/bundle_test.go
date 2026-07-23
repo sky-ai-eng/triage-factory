@@ -85,11 +85,10 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 
 	sessionID := "11111111-2222-3333-4444-555555555555"
 	projectID, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
-		Name:             projectName,
-		Description:      "Fixture project",
-		CuratorSessionID: sessionID,
-		PinnedRepos:      []string{slug},
-		JiraProjectKey:   "SKY",
+		Name:           projectName,
+		Description:    "Fixture project",
+		PinnedRepos:    []string{slug},
+		JiraProjectKey: "SKY",
 	})
 	if err != nil {
 		t.Fatalf("seed project: %v", err)
@@ -110,28 +109,41 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 		t.Fatalf("write diagram.png: %v", err)
 	}
 
-	reqID, err := db.CreateCuratorRequest(database, projectID, "hello")
+	// One completed turn (conversation + delivered user message + claimed
+	// engagement + streamed reply) plus a pending injection — the write set
+	// SendMessage → dispatch produces.
+	stores := sqlitestore.New(database)
+	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
+	ctx := context.Background()
+	conv, err := stores.Curator.GetOrCreateConversation(ctx, org, projectID, user)
 	if err != nil {
-		t.Fatalf("seed curator request: %v", err)
+		t.Fatalf("mint conversation: %v", err)
 	}
-	if err := db.MarkCuratorRequestRunning(database, reqID); err != nil {
-		t.Fatalf("mark request running: %v", err)
-	}
-	if _, err := db.CompleteCuratorRequest(database, reqID, "done", "", 0.12, 2400, 4); err != nil {
-		t.Fatalf("complete request: %v", err)
-	}
-	_, err = db.InsertCuratorMessage(database, &domain.CuratorMessage{
-		RequestID: reqID,
-		Role:      "assistant",
-		Subtype:   "text",
-		Content:   "done",
-		CreatedAt: time.Now().UTC(),
-	})
+	msgID, err := stores.Curator.EnqueueUserMessage(ctx, org, conv.ID, user, "hello")
 	if err != nil {
+		t.Fatalf("enqueue turn: %v", err)
+	}
+	claimID, ok, err := stores.Curator.ClaimTurnSystem(ctx, org, conv.ID, "fixture-exec", 1)
+	if err != nil || !ok {
+		t.Fatalf("claim turn: ok=%v err=%v", ok, err)
+	}
+	if _, err := stores.Curator.BeginTurn(ctx, org, projectID, conv.ID, msgID); err != nil {
+		t.Fatalf("begin turn: %v", err)
+	}
+	if err := stores.Curator.SetSDKSession(ctx, org, conv.ID, sessionID); err != nil {
+		t.Fatalf("set sdk session: %v", err)
+	}
+	if _, err := stores.AgentRuns.InsertMessage(ctx, org, &domain.AgentMessage{
+		RunID: conv.ID, UserID: user, ClaimID: claimID,
+		Role: "assistant", Subtype: "text", Content: "done", CreatedAt: time.Now().UTC(),
+	}); err != nil {
 		t.Fatalf("insert curator message: %v", err)
 	}
-	if err := sqlitestore.New(database).Curator.InsertPendingContext(t.Context(), runmode.LocalDefaultOrgID, projectID, sessionID, domain.ChangeTypePinnedRepos, `["sky-ai-eng/triage-factory"]`); err != nil {
-		t.Fatalf("insert pending context: %v", err)
+	if _, err := stores.Curator.ReleaseActiveTurnSystem(ctx, org, conv.ID, "completed", "", 0.12, 2400, 4); err != nil {
+		t.Fatalf("release turn: %v", err)
+	}
+	if err := stores.Curator.QueueContextChangeSystem(ctx, org, projectID, domain.ChangeTypePinnedRepos, `["sky-ai-eng/triage-factory"]`); err != nil {
+		t.Fatalf("queue pending context: %v", err)
 	}
 
 	resolvedRoot := worktree.ResolveClaudeProjectCwd(root)
@@ -232,6 +244,7 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	imported, warnings, err := Import(
 		context.Background(),
 		sqlitestore.New(targetDB).Tx,
+		sqlitestore.New(targetDB).Curator,
 		nil,
 		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID,
 		bytes.NewReader(bundleBytes),
@@ -247,8 +260,17 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	if imported.ID == f.projectID {
 		t.Fatal("import should allocate a new project id")
 	}
-	if imported.CuratorSessionID == "" || imported.CuratorSessionID == f.sessionID {
-		t.Fatalf("expected fresh curator session id, got %q", imported.CuratorSessionID)
+	targetStores := sqlitestore.New(targetDB)
+	importedConv, err := targetStores.Curator.GetLiveConversation(t.Context(), runmode.LocalDefaultOrgID, imported.ID, runmode.LocalDefaultUserID)
+	if err != nil {
+		t.Fatalf("read imported conversation: %v", err)
+	}
+	if importedConv == nil {
+		t.Fatal("import did not restore the curator conversation")
+	}
+	newSessionID := importedConv.SessionID
+	if newSessionID == "" || newSessionID == f.sessionID {
+		t.Fatalf("expected fresh curator session id, got %q", newSessionID)
 	}
 
 	newRoot, err := curator.KnowledgeDir(runmode.LocalDefaultOrgID, imported.ID)
@@ -265,7 +287,7 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 
 	newResolved := worktree.ResolveClaudeProjectCwd(newRoot)
 	newEncoded := worktree.EncodeClaudeProjectDir(newResolved)
-	newTranscript := filepath.Join(home, ".claude", "projects", newEncoded, imported.CuratorSessionID+".jsonl")
+	newTranscript := filepath.Join(home, ".claude", "projects", newEncoded, newSessionID+".jsonl")
 	transcriptBody, err := os.ReadFile(newTranscript)
 	if err != nil {
 		t.Fatalf("read imported transcript: %v", err)
@@ -277,8 +299,8 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	if strings.Contains(body, f.sessionID) {
 		t.Fatalf("imported transcript still contains old session id %s", f.sessionID)
 	}
-	if !strings.Contains(body, imported.CuratorSessionID) {
-		t.Fatalf("imported transcript missing new session id %s", imported.CuratorSessionID)
+	if !strings.Contains(body, newSessionID) {
+		t.Fatalf("imported transcript missing new session id %s", newSessionID)
 	}
 	if strings.Contains(body, f.resolvedRoot) {
 		t.Fatalf("imported transcript still contains old cwd %s", f.resolvedRoot)
@@ -287,14 +309,14 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 		t.Fatalf("imported transcript missing rewritten cwd %s", newResolved)
 	}
 
-	subagentBody, err := os.ReadFile(filepath.Join(home, ".claude", "projects", newEncoded, imported.CuratorSessionID, "subagents", "agent-one.jsonl"))
+	subagentBody, err := os.ReadFile(filepath.Join(home, ".claude", "projects", newEncoded, newSessionID, "subagents", "agent-one.jsonl"))
 	if err != nil {
 		t.Fatalf("read imported subagent jsonl: %v", err)
 	}
 	if strings.Contains(string(subagentBody), f.sessionID) || strings.Contains(string(subagentBody), f.resolvedRoot) {
 		t.Fatalf("subagent jsonl did not rewrite old session/cwd: %s", string(subagentBody))
 	}
-	toolBody, err := os.ReadFile(filepath.Join(home, ".claude", "projects", newEncoded, imported.CuratorSessionID, "tool-results", "toolu_123.txt"))
+	toolBody, err := os.ReadFile(filepath.Join(home, ".claude", "projects", newEncoded, newSessionID, "tool-results", "toolu_123.txt"))
 	if err != nil {
 		t.Fatalf("read imported tool result: %v", err)
 	}
@@ -302,29 +324,39 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 		t.Fatalf("tool result did not rewrite old session/cwd: %s", string(toolBody))
 	}
 
-	reqs, err := sqlitestore.New(targetDB).Curator.ListRequestsByProject(t.Context(), runmode.LocalDefaultOrgID, imported.ID)
+	// Conversation state round-tripped: one claim with its accounting, the
+	// delivered user turn, the claim-attributed reply, and the pending
+	// injection (still undelivered — a queued delta survives the trip).
+	claims, err := targetStores.Curator.ListClaims(t.Context(), runmode.LocalDefaultOrgID, importedConv.ID)
 	if err != nil {
-		t.Fatalf("list imported requests: %v", err)
+		t.Fatalf("list imported claims: %v", err)
 	}
-	if len(reqs) != 1 {
-		t.Fatalf("expected 1 imported request, got %d", len(reqs))
+	if len(claims) != 1 || claims[0].Outcome != "completed" {
+		t.Fatalf("imported claims = %+v, want one completed engagement", claims)
 	}
-	msgs, err := db.ListCuratorMessagesByRequest(targetDB, reqs[0].ID)
+	msgs, err := targetStores.Curator.ListConversationMessages(t.Context(), runmode.LocalDefaultOrgID, importedConv.ID)
 	if err != nil {
 		t.Fatalf("list imported messages: %v", err)
 	}
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 imported message, got %d", len(msgs))
+	var userTurns, replies, pendingInjections int
+	for _, m := range msgs {
+		switch {
+		case m.Role == "user" && m.Subtype == "text":
+			userTurns++
+		case m.Role == "assistant":
+			replies++
+			if m.ClaimID != claims[0].ID {
+				t.Errorf("imported reply claim = %q, want remapped %q", m.ClaimID, claims[0].ID)
+			}
+		case m.Subtype == "injection:context":
+			pendingInjections++
+			if m.Delivered == nil || *m.Delivered {
+				t.Errorf("imported injection row delivered = %v, want undelivered", m.Delivered)
+			}
+		}
 	}
-	pending, err := sqlitestore.New(targetDB).Curator.ListPendingContext(t.Context(), runmode.LocalDefaultOrgID, imported.ID)
-	if err != nil {
-		t.Fatalf("list pending context: %v", err)
-	}
-	if len(pending) != 1 {
-		t.Fatalf("expected 1 pending context row, got %d", len(pending))
-	}
-	if pending[0].CuratorSessionID != imported.CuratorSessionID {
-		t.Fatalf("pending context session id = %q, want %q", pending[0].CuratorSessionID, imported.CuratorSessionID)
+	if userTurns != 1 || replies != 1 || pendingInjections != 1 {
+		t.Fatalf("imported transcript shape = (turns=%d, replies=%d, injections=%d), want (1,1,1): %+v", userTurns, replies, pendingInjections, msgs)
 	}
 
 	// The imported pin must be tracked for the importing team, not just
@@ -357,6 +389,7 @@ func TestImport_MissingReposAbortsWithoutWrites(t *testing.T) {
 	_, _, err := Import(
 		context.Background(),
 		sqlitestore.New(targetDB).Tx,
+		sqlitestore.New(targetDB).Curator,
 		nil,
 		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID,
 		bytes.NewReader(bundleBytes),
@@ -394,6 +427,7 @@ func TestImport_DuplicateNameAborts(t *testing.T) {
 	_, _, err := Import(
 		context.Background(),
 		sqlitestore.New(targetDB).Tx,
+		sqlitestore.New(targetDB).Curator,
 		nil,
 		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID,
 		bytes.NewReader(bundleBytes),
@@ -415,9 +449,9 @@ func TestImport_DuplicateNameAborts(t *testing.T) {
 
 func TestDecodeZipJSONLines_EnforcesRowLimit(t *testing.T) {
 	entries := buildZipEntries(t, map[string][]byte{
-		curatorRequestsPath: []byte(`{"id":"r1"}` + "\n" + `{"id":"r2"}` + "\n"),
+		curatorClaimsPath: []byte(`{"id":"r1"}` + "\n" + `{"id":"r2"}` + "\n"),
 	})
-	zf := entries[curatorRequestsPath]
+	zf := entries[curatorClaimsPath]
 	if zf == nil {
 		t.Fatal("missing curator requests entry")
 	}

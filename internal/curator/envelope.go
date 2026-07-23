@@ -120,15 +120,15 @@ func renderToolsReference() string {
 }
 
 // pendingChangesNote renders the hidden [system note] block that gets
-// prepended to the user's next message when there are unconsumed
-// context-change rows. Returns "" when there is nothing to inject so
+// prepended to the user's next message when the turn consumed pending
+// 'injection:context' rows. Returns "" when there is nothing to inject so
 // the caller can short-circuit without prepending an empty fence.
 //
-// Each pending row carries a baseline (snapshot before the first
-// unconsumed PATCH) and the renderer diffs that against the project
-// row's *current* state, so an A→B→A round-trip naturally collapses
-// to "no actual change" and is omitted.
-func pendingChangesNote(rows []domain.CuratorPendingContext, current envelopeInputs) string {
+// Each consumed row carries a baseline (snapshot remembered when the change
+// was queued) and the renderer diffs that against the project row's
+// *current* state, so an A→B→A round-trip naturally collapses to "no actual
+// change" and is omitted.
+func pendingChangesNote(rows []domain.CuratorContextChange, current envelopeInputs) string {
 	var lines []string
 	for _, row := range rows {
 		line := renderPendingRow(row, current)
@@ -153,7 +153,7 @@ func pendingChangesNote(rows []domain.CuratorPendingContext, current envelopeInp
 // into a human-readable diff line. Returns "" when the baseline
 // matches the current value (round-trip no-op) so the caller can drop
 // it cleanly.
-func renderPendingRow(row domain.CuratorPendingContext, current envelopeInputs) string {
+func renderPendingRow(row domain.CuratorContextChange, current envelopeInputs) string {
 	switch row.ChangeType {
 	case domain.ChangeTypePinnedRepos:
 		return renderPinnedReposDiff(row.BaselineValue, current.PinnedRepos)

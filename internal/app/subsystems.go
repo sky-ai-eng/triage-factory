@@ -402,6 +402,10 @@ func (a *App) buildCuratorRuntime() error {
 
 	a.curator = curator.New(a.stores, a.wsHub, "")
 	a.curator.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
+	// Persistent instance-registry identity, stamped onto every claims row a
+	// dispatch mints — the same identity the delegation spawner stamps, so
+	// the ownership-scoped boot sweep finds this pod's own strays.
+	a.curator.SetExecutorIdentity(a.identity.ID, a.bootEpoch)
 	// KB blob seam: in multi mode the executor materializes the
 	// project KB from the store at turn start and reconciles disk→store at
 	// turn end, so the curator holds the same *kbstore.Store the handlers use.
@@ -430,8 +434,8 @@ func (a *App) buildCuratorRuntime() error {
 		// curator.TurnSandbox interface, mapping a nil return to a nil interface
 		// (avoiding a non-nil interface wrapping a nil pointer). Wired only here,
 		// so control/all/local keep the in-process path.
-		a.curator.SetTurnSandbox(func(ctx context.Context, orgID, requestID, userID, teamID string, pinnedRepos []string) (curator.TurnSandbox, error) {
-			sb, err := a.spawner.BringUpCuratorSandbox(ctx, orgID, requestID, userID, teamID, pinnedRepos)
+		a.curator.SetTurnSandbox(func(ctx context.Context, orgID, conversationID, userID, teamID string, pinnedRepos []string) (curator.TurnSandbox, error) {
+			sb, err := a.spawner.BringUpCuratorSandbox(ctx, orgID, conversationID, userID, teamID, pinnedRepos)
 			if err != nil {
 				return nil, err
 			}
@@ -444,20 +448,23 @@ func (a *App) buildCuratorRuntime() error {
 	return nil
 }
 
-// sweepStrandedCuratorTurns runs the boot recovery sweep: ownership-scoped in
-// multi mode (always a split role — control/executor), global in local, where
-// the single process owned every row. See buildCuratorRuntime for the
-// rationale.
+// sweepStrandedCuratorTurns runs the boot recovery sweep over active curator
+// CLAIMS: ownership-scoped in multi mode (always a split role —
+// control/executor — so this pod releases only its own prior boots'
+// engagements), global in local, where the single process owned every
+// engagement. Queued turns are untouched either way: they are unowned
+// undelivered messages now and survive to be re-claimed. See
+// buildCuratorRuntime for the rationale.
 func (a *App) sweepStrandedCuratorTurns(multi bool) {
 	if multi {
-		if n, err := a.stores.Curator.CancelStrandedRequestsForHomeSystem(context.Background(), a.identity.ID, "process restarted"); err != nil {
+		if n, err := a.stores.Curator.CancelStrandedTurnsForHomeSystem(context.Background(), a.identity.ID, a.bootEpoch, "process restarted"); err != nil {
 			curatorLog.Error("sweep stranded homed turns failed", "error", err)
 		} else if n > 0 {
 			curatorLog.Info("cancelled stranded turns homed to this pod's prior boot", "count", n)
 		}
 		return
 	}
-	if n, err := a.stores.Curator.CancelOrphanedNonTerminalRequests(context.Background()); err != nil {
+	if n, err := a.stores.Curator.CancelOrphanedTurnsSystem(context.Background()); err != nil {
 		curatorLog.Error("sweep stranded turns failed", "error", err)
 	} else if n > 0 {
 		curatorLog.Info("cancelled stranded turns from prior process", "count", n)

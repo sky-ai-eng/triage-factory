@@ -208,14 +208,11 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// see sibling teams' rows past RLS) route outside the tx, the
 		// same autonomous-commit shape Events / TaskMemory use.
 		TeamGitHubRepos: newTeamGitHubReposStore(tx, s.admin),
-		// Curator: app-side write routes through the tx; admin half
-		// stays pinned to the real admin pool so
-		// CancelOrphanedNonTerminalRequests inside WithTx routes
-		// outside the tx (cross-tenant sweep that bypasses RLS).
-		// Per-turn writes all run under the outer
-		// SyntheticClaimsWithTx claims via curator_requests_modify /
-		// curator_messages_modify / curator_pending_context_modify
-		// on (org_id, creator_user_id).
+		// Curator: app-side message/conversation writes route through the
+		// tx so they run under the outer claims (the conversations
+		// private-visibility RLS arm); admin half stays pinned to the real
+		// admin pool so a `...System` claim write or sweep invoked inside
+		// WithTx routes outside the tx (system-side, bypasses RLS).
 		Curator: newCuratorStore(tx, s.admin),
 		// app half is the claims-set tx (GetForOrg / CreateForOrg);
 		// admin half stays the real admin pool so installation writes +

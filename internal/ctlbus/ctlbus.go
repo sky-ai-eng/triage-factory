@@ -44,7 +44,8 @@ const Channel = "tf_ctl"
 // credential provisioner — see internal/credprovision and
 // internal/app/ctl.go's dispatch case); "curator_cred_request" uses OrgID/RunID
 // too (a home executor standing a curator turn's credential sidecar up nudging
-// the same provisioner — RunID carries the curator_requests id);
+// the same provisioner — RunID carries the curator conversation id, the
+// claim-credentials channel's key);
 // "curator_new" / "curator_cancel" use
 // OrgID/ProjectID (curator homing, spec §6.3): a control pod nudging the home
 // executor's claim loop for a fresh turn, or routing a cross-pod cancel to

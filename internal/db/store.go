@@ -232,13 +232,14 @@ type Stores struct {
 	// org-wide UNION of every team's rows, a derived cache).
 	TeamGitHubRepos TeamGitHubReposStore
 
-	// Curator owns the curator-runtime tables (curator_requests,
-	// curator_messages, curator_pending_context). App pool in
-	// Postgres — the per-project goroutine wraps each turn's
-	// writes in Tx.SyntheticClaimsWithTx with the requesting
-	// user's identity (creator_user_id read from the request row
-	// at dequeue). RLS policies gate every row on the
-	// (org_id, creator_user_id) pair.
+	// Curator owns the curator's view of the shared conversations /
+	// messages / claims tables — one private conversation per (project,
+	// creator), queued turns as undelivered user messages, one claim per
+	// executed turn. Holds both pools in Postgres: app for the claims-bound
+	// send/history/dispatch message writes (the per-project goroutine wraps
+	// each turn in Tx.SyntheticClaimsWithTx under the requesting user's
+	// identity), admin for the `...System` claim writes, claim-loop scan,
+	// boot sweeps, pending-context producer, and provisioning reads.
 	Curator CuratorStore
 
 	// GitHubApps owns the org_github_apps table — per-org GitHub
@@ -398,13 +399,6 @@ type Stores struct {
 	// RunPendingInput its payload is credential-bearing ciphertext, so
 	// there is no app-pool grant at all.
 	RunCredentials RunCredentialsStore
-
-	// CuratorTurnCredentials owns the curator_turn_credentials table — the
-	// sealed per-turn credential bundle channel, the curator-turn
-	// analog of RunCredentials keyed on the curator_requests id. Admin-pool-
-	// only, same posture as RunCredentials: credential-bearing ciphertext,
-	// never a request-handler surface, no app-pool grant.
-	CuratorTurnCredentials CuratorTurnCredentialsStore
 
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
 	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —

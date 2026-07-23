@@ -97,8 +97,8 @@ func sweepCuratorAwaiting(ctx context.Context, mgr *Manager) {
 		return
 	}
 	for _, turn := range turns {
-		if err := mgr.ProvisionForCuratorTurn(ctx, turn.OrgID, turn.ID); err != nil {
-			log.Warn("backstop-sweep curator provision failed", "request", turn.ID, "error", err)
+		if err := mgr.ProvisionForCuratorTurn(ctx, turn.OrgID, turn.ConversationID); err != nil {
+			log.Warn("backstop-sweep curator provision failed", "conversation", turn.ConversationID, "error", err)
 		}
 	}
 }

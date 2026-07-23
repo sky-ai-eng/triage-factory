@@ -46,17 +46,17 @@ type exportState struct {
 
 // collectExportState gathers everything Export/Preview serialize. DB
 // reads run inside one claims-bound WithTx so Postgres RLS scopes them
-// to the requesting user (the curator select policies are deliberately
-// self-only — a multi-mode export carries the exporting user's own chat
-// turns, the local single user's export carries everything). Filesystem
-// collection happens after the tx ends so disk walks never hold a
-// claims-bound connection.
+// to the requesting user (the conversation private-visibility arm is
+// deliberately self-only — a multi-mode export carries the exporting user's
+// own live curator conversation, the local single user's export carries
+// theirs). Filesystem collection happens after the tx ends so disk walks
+// never hold a claims-bound connection.
 func collectExportState(ctx context.Context, txr db.TxRunner, kb *kbstore.Store, orgID, userID, projectID string) (*exportState, error) {
 	var (
-		project  *domain.Project
-		requests []domain.CuratorRequest
-		msgByReq map[string][]domain.CuratorMessage
-		pending  []domain.CuratorPendingContext
+		project      *domain.Project
+		conversation *domain.Conversation
+		claims       []domain.Claim
+		messages     []domain.AgentMessage
 	)
 	if err := txr.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -64,21 +64,20 @@ func collectExportState(ctx context.Context, txr db.TxRunner, kb *kbstore.Store,
 		if e != nil || project == nil {
 			return e
 		}
-		requests, e = tx.Curator.ListRequestsByProject(ctx, orgID, projectID)
+		conversation, e = tx.Curator.GetLiveConversation(ctx, orgID, projectID, userID)
 		if e != nil {
-			return fmt.Errorf("list curator requests: %w", e)
+			return fmt.Errorf("read curator conversation: %w", e)
 		}
-		requestIDs := make([]string, 0, len(requests))
-		for _, req := range requests {
-			requestIDs = append(requestIDs, req.ID)
+		if conversation == nil {
+			return nil
 		}
-		msgByReq, e = tx.Curator.ListMessagesByRequestIDs(ctx, orgID, requestIDs)
+		claims, e = tx.Curator.ListClaims(ctx, orgID, conversation.ID)
+		if e != nil {
+			return fmt.Errorf("list curator claims: %w", e)
+		}
+		messages, e = tx.Curator.ListConversationMessages(ctx, orgID, conversation.ID)
 		if e != nil {
 			return fmt.Errorf("list curator messages: %w", e)
-		}
-		pending, e = tx.Curator.ListPendingContext(ctx, orgID, projectID)
-		if e != nil {
-			return fmt.Errorf("list curator pending context: %w", e)
 		}
 		return nil
 	}); err != nil {
@@ -122,7 +121,14 @@ func collectExportState(ctx context.Context, txr db.TxRunner, kb *kbstore.Store,
 		return nil, fmt.Errorf("collect knowledge files: %w", err)
 	}
 
-	sessionIncluded, sessionWarning, err := appendSessionArtifacts(resolvedRoot, project.CuratorSessionID, &state.artifacts)
+	// The SDK resume handle lives on the exporting user's live conversation
+	// now, so the session tree ships only when that conversation exists and
+	// has one.
+	sdkSessionID := ""
+	if conversation != nil {
+		sdkSessionID = conversation.SessionID
+	}
+	sessionIncluded, sessionWarning, err := appendSessionArtifacts(resolvedRoot, sdkSessionID, &state.artifacts)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +138,7 @@ func collectExportState(ctx context.Context, txr db.TxRunner, kb *kbstore.Store,
 	state.sessionInZip = sessionIncluded
 	if sessionIncluded {
 		state.manifest.Session = &ManifestSession{
-			CuratorSessionID: project.CuratorSessionID,
+			CuratorSessionID: sdkSessionID,
 			// ResolvedCwd is the cwd AS THE AGENT SAW IT — the value
 			// embedded in the transcript JSONL that import's
 			// search-replace rewrite must match. For a sandboxed
@@ -142,7 +148,7 @@ func collectExportState(ctx context.Context, txr db.TxRunner, kb *kbstore.Store,
 		}
 	}
 
-	if err := appendCuratorArtifacts(requests, msgByReq, pending, &state.artifacts); err != nil {
+	if err := appendCuratorArtifacts(conversation, claims, messages, &state.artifacts); err != nil {
 		return nil, err
 	}
 
@@ -293,35 +299,35 @@ func appendSessionArtifacts(resolvedProjectRoot, curatorSessionID string, out *[
 	return true, "", nil
 }
 
-// appendCuratorArtifacts serializes the already-collected curator rows.
-// Pure serialization — every DB read happened inside
-// collectExportState's WithTx.
+// appendCuratorArtifacts serializes the already-collected curator
+// conversation state. Pure serialization — every DB read happened inside
+// collectExportState's WithTx. A project with no live conversation for the
+// exporting user ships no curator artifacts at all.
 func appendCuratorArtifacts(
-	requests []domain.CuratorRequest,
-	msgByReq map[string][]domain.CuratorMessage,
-	pending []domain.CuratorPendingContext,
+	conversation *domain.Conversation,
+	claims []domain.Claim,
+	messages []domain.AgentMessage,
 	out *[]bundleArtifact,
 ) error {
-	requestBytes, err := marshalJSONLines(requests)
+	if conversation == nil {
+		return nil
+	}
+	convBytes, err := json.Marshal(conversation)
 	if err != nil {
-		return fmt.Errorf("encode curator requests: %w", err)
+		return fmt.Errorf("encode curator conversation: %w", err)
 	}
-	flatMessages := make([]domain.CuratorMessage, 0)
-	for _, req := range requests {
-		flatMessages = append(flatMessages, msgByReq[req.ID]...)
+	claimBytes, err := marshalJSONLines(claims)
+	if err != nil {
+		return fmt.Errorf("encode curator claims: %w", err)
 	}
-	messageBytes, err := marshalJSONLines(flatMessages)
+	messageBytes, err := marshalJSONLines(messages)
 	if err != nil {
 		return fmt.Errorf("encode curator messages: %w", err)
 	}
-	pendingBytes, err := marshalJSONLines(pending)
-	if err != nil {
-		return fmt.Errorf("encode curator pending context: %w", err)
-	}
 	*out = append(*out,
-		bundleArtifact{bundlePath: curatorRequestsPath, size: int64(len(requestBytes)), content: requestBytes},
+		bundleArtifact{bundlePath: curatorConversationPath, size: int64(len(convBytes)), content: convBytes},
+		bundleArtifact{bundlePath: curatorClaimsPath, size: int64(len(claimBytes)), content: claimBytes},
 		bundleArtifact{bundlePath: curatorMessagesPath, size: int64(len(messageBytes)), content: messageBytes},
-		bundleArtifact{bundlePath: curatorPendingContextPath, size: int64(len(pendingBytes)), content: pendingBytes},
 	)
 	return nil
 }

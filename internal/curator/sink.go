@@ -11,25 +11,28 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// requestSink translates agentproc stream events into curator_messages
-// rows + websocket pushes for one in-flight request. One sink per
-// agentproc.Run call (constructed on each message dispatch in the
-// per-project goroutine). The projectID and requestID are captured at
-// construction so the broadcasts are keyed correctly when many
-// projects' Curators are streaming simultaneously.
+// turnSink translates agentproc stream events into messages rows +
+// websocket pushes for one in-flight turn. One sink per agentproc.Run call
+// (constructed on each dispatch in the per-project goroutine). Every row is
+// stamped with the requesting user (turn attribution) and the turn's claim
+// (per-engagement accounting — the release's token SUM keys on it); the
+// broadcast carries the wire CuratorMessage shape with request_id = the
+// turn id, so the frontend's rendering is unchanged.
 //
-// Session id capture: only the very first message in a project's
+// Session id capture: only the very first turn in a conversation's
 // lifetime sees a fresh init event with a new session_id. Subsequent
-// requests resume against the captured id so the init they emit
+// turns resume against the persisted id so the init they emit
 // re-broadcasts the same id. The sync.Once guard keeps us from
-// writing the same value twice per request even though
-// SetCuratorSessionID is idempotent at the DB layer.
-type requestSink struct {
-	curator       *Curator
-	projectID     string
-	requestID     string
-	orgID         string
-	creatorUserID string
+// writing the same value twice per turn even though SetSDKSession is
+// idempotent at the DB layer.
+type turnSink struct {
+	curator        *Curator
+	projectID      string
+	conversationID string
+	requestID      string
+	claimID        string
+	orgID          string
+	creatorUserID  string
 
 	// sessionOnce guards the OnSession write so a future concurrent
 	// ParseLine wouldn't double-persist if the underlying stream
@@ -44,21 +47,23 @@ type requestSink struct {
 	sessionErrMu sync.Mutex
 }
 
-func newRequestSink(c *Curator, projectID, requestID, orgID, creatorUserID string) *requestSink {
-	return &requestSink{
-		curator:       c,
-		projectID:     projectID,
-		requestID:     requestID,
-		orgID:         orgID,
-		creatorUserID: creatorUserID,
+func newTurnSink(c *Curator, projectID, conversationID, requestID, claimID, orgID, creatorUserID string) *turnSink {
+	return &turnSink{
+		curator:        c,
+		projectID:      projectID,
+		conversationID: conversationID,
+		requestID:      requestID,
+		claimID:        claimID,
+		orgID:          orgID,
+		creatorUserID:  creatorUserID,
 	}
 }
 
-// OnSession persists the captured session_id on the project row the
-// first time it's observed in the request's lifetime. Subsequent
-// resumes within the same project re-emit the same id and the
-// persisted-flag short-circuits the redundant write.
-func (s *requestSink) OnSession(sessionID string) error {
+// OnSession persists the captured session_id on the conversation the
+// first time it's observed in the turn's lifetime. Subsequent resumes
+// within the same conversation re-emit the same id and the sync.Once
+// short-circuits the redundant write.
+func (s *turnSink) OnSession(sessionID string) error {
 	// The session-id update is part of this user's turn — wrap in
 	// synthetic claims so multi-mode RLS attributes the bookkeeping
 	// write to the same identity as the message writes. Background
@@ -66,9 +71,6 @@ func (s *requestSink) OnSession(sessionID string) error {
 	// a cancellable msgCtx, and the write should land even if the
 	// dispatch is being torn down.
 	//
-	// sync.Once ensures the write happens at most once across
-	// concurrent callers — agentproc is single-threaded today but
-	// this protection is what the comment on sessionOnce promises.
 	// Errors from the first attempt are captured under sessionErrMu
 	// and returned to every subsequent caller so a transient failure
 	// on the first OnSession invocation isn't swallowed by a later
@@ -76,7 +78,7 @@ func (s *requestSink) OnSession(sessionID string) error {
 	s.sessionOnce.Do(func() {
 		ctx := context.Background()
 		err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, s.orgID, s.creatorUserID, func(ts db.TxStores) error {
-			return ts.Projects.SetCuratorSessionID(ctx, s.orgID, s.projectID, sessionID)
+			return ts.Curator.SetSDKSession(ctx, s.orgID, s.conversationID, sessionID)
 		})
 		if err != nil {
 			s.sessionErrMu.Lock()
@@ -89,13 +91,15 @@ func (s *requestSink) OnSession(sessionID string) error {
 	return s.sessionErr
 }
 
-// OnMessage inserts the parsed assistant or tool message into
-// curator_messages and broadcasts it to the websocket so the open
-// project page paints it as it arrives. Per-row failures are
-// returned to agentproc which logs and continues.
-func (s *requestSink) OnMessage(msg *domain.AgentMessage) error {
-	curatorMsg := &domain.CuratorMessage{
-		RequestID:           s.requestID,
+// OnMessage inserts the parsed assistant or tool message into the
+// conversation's transcript and broadcasts it to the websocket so the open
+// project page paints it as it arrives. Per-row failures are returned to
+// agentproc which logs and continues.
+func (s *turnSink) OnMessage(msg *domain.AgentMessage) error {
+	row := &domain.AgentMessage{
+		RunID:               s.conversationID,
+		UserID:              s.creatorUserID,
+		ClaimID:             s.claimID,
 		Role:                msg.Role,
 		Subtype:             msg.Subtype,
 		Content:             msg.Content,
@@ -118,7 +122,7 @@ func (s *requestSink) OnMessage(msg *domain.AgentMessage) error {
 	ctx := context.Background()
 	var id int64
 	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, s.orgID, s.creatorUserID, func(ts db.TxStores) error {
-		got, err := ts.Curator.InsertMessage(ctx, s.orgID, curatorMsg)
+		got, err := ts.AgentRuns.InsertMessage(ctx, s.orgID, row)
 		if err != nil {
 			return err
 		}
@@ -127,14 +131,31 @@ func (s *requestSink) OnMessage(msg *domain.AgentMessage) error {
 	}); err != nil {
 		return fmt.Errorf("insert curator message: %w", err)
 	}
-	curatorMsg.ID = int(id)
-	s.curator.broadcastMessage(s.orgID, s.projectID, curatorMsg)
+	wire := &domain.CuratorMessage{
+		ID:                  int(id),
+		RequestID:           s.requestID,
+		Role:                row.Role,
+		Subtype:             row.Subtype,
+		Content:             row.Content,
+		ToolCalls:           row.ToolCalls,
+		ToolCallID:          row.ToolCallID,
+		IsError:             row.IsError,
+		Metadata:            row.Metadata,
+		Model:               row.Model,
+		InputTokens:         row.InputTokens,
+		OutputTokens:        row.OutputTokens,
+		CacheReadTokens:     row.CacheReadTokens,
+		CacheCreationTokens: row.CacheCreationTokens,
+		CreatedAt:           row.CreatedAt,
+		Reasoning:           row.Reasoning,
+		ContentBlocks:       row.ContentBlocks,
+	}
+	s.curator.broadcastMessage(s.orgID, s.projectID, wire)
 	return nil
 }
 
-// Compile-time check that requestSink satisfies the agentproc.Sink
-// contract.
-var _ agentproc.Sink = (*requestSink)(nil)
+// Compile-time check that turnSink satisfies the agentproc.Sink contract.
+var _ agentproc.Sink = (*turnSink)(nil)
 
 // broadcastMessage pushes a CuratorMessage onto the websocket. Empty
 // hub is tolerated (test harnesses construct curators without a hub).
@@ -154,9 +175,9 @@ func (c *Curator) broadcastMessage(orgID, projectID string, msg *domain.CuratorM
 	})
 }
 
-// broadcastRequestUpdate pushes a status transition for a request.
+// broadcastRequestUpdate pushes a status transition for a turn.
 // Frontend uses this to flip the UI from "queued" → "running" →
-// terminal without re-fetching the request row.
+// terminal without re-fetching history.
 func (c *Curator) broadcastRequestUpdate(orgID, projectID, requestID, status string) {
 	if c.wsHub == nil {
 		return
