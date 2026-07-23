@@ -17,6 +17,16 @@ import (
 //
 // taskID may be empty for tests that don't have a real task FK; blueprint_runs
 // has no FK requiring task_id to resolve in the SQLite baseline.
+
+// nullIfEmpty maps an empty string to a SQL NULL bind — test-local now that
+// the last production raw-SQL file retired its shared copy.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 func mintBlueprintRunForTest(t *testing.T, database *sql.DB, taskID string) string {
 	t.Helper()
 	bpID := uuid.New().String()
