@@ -70,7 +70,7 @@ the former `runs` + `curator_requests` fusion tables): a *conversation* is the
 durable context — type (`delegation` | `curator` | `interactive` reserved |
 namespaced `subagent:<kind>` reserved), task/trigger/project linkage, user-facing
 status, cost rollups, `runtime` ratchet (`sdk`|`native`), `sdk_session_id`,
-KV-warmth + archive timestamps. A *claim* is one executor engagement (executor id
+archive timestamp (KV-cache warmth is derived from the newest assistant message row, never stored). A *claim* is one executor engagement (executor id
 + boot epoch, per-engagement accounting, sealed-credential pubkey, at most one
 active per conversation — the schema enforces it). The transcript itself is the
 `messages` table: one row per neutral API message, `delivered=false` rows are the

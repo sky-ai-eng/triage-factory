@@ -113,11 +113,12 @@ type Conversation struct {
 	// ParentConversationID links a subagent conversation to its spawner;
 	// empty otherwise.
 	ParentConversationID string `json:"parent_conversation_id,omitempty"`
-	// LastRequestAt is the KV-cache warmth watermark (time of the most
-	// recent provider request). ArchivedAt retires the conversation from
-	// its surface's current view (the curator reset mechanism).
-	LastRequestAt *time.Time `json:"last_request_at,omitempty"`
-	ArchivedAt    *time.Time `json:"archived_at,omitempty"`
+	// ArchivedAt retires the conversation from its surface's current view
+	// (the curator reset mechanism). KV-cache warmth is deliberately NOT a
+	// conversation field: it derives from the newest assistant message row
+	// (warmth drives elision, elision changes assembly, and assembly must
+	// be a pure function of rows).
+	ArchivedAt *time.Time `json:"archived_at,omitempty"`
 
 	ID        string
 	TaskID    string

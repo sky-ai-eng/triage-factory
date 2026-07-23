@@ -69,7 +69,7 @@ WHERE total_cost_usd IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- 2. The target conversations shape. Differences from the runs era: type /
--- project_id / parent_conversation_id / last_request_at / archived_at /
+-- project_id / parent_conversation_id / archived_at /
 -- runtime are new; session_id is renamed sdk_session_id (it now also absorbs
 -- projects.curator_session_id); team_id and status drop NOT NULL (a curator
 -- conversation may carry a NULL team snapshot and has no work lifecycle);
@@ -116,9 +116,6 @@ CREATE TABLE conversations_new (
     started_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at    DATETIME,
     parked_at       DATETIME,
-    -- KV-cache warmth watermark: time of the most recent provider request
-    -- for this conversation. Written by the runtime, never by handlers.
-    last_request_at DATETIME,
     -- Retires a conversation from its surface's "current" view without
     -- deleting history (the curator's reset / new-chat mechanism). An
     -- archived conversation is never claimed again.

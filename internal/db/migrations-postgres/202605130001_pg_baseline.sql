@@ -1351,11 +1351,6 @@ CREATE TABLE public.conversations (
     -- parked state and cleared on resume, so the snapshot-retention sweep
     -- keys an open conversation off its last park.
     parked_at timestamp with time zone,
-    -- last_request_at is the KV-cache warmth watermark: the time of the
-    -- most recent provider request made for this conversation, compared
-    -- against the provider cache TTL to pick warm-path vs cold-path
-    -- context management. Written by the runtime, never by handlers.
-    last_request_at timestamp with time zone,
     -- archived_at retires a conversation from its surface's "current" view
     -- without deleting history — the curator's reset/new-chat mechanism.
     -- NULL = live. An archived conversation is never claimed again.
