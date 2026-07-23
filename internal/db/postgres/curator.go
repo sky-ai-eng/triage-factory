@@ -832,13 +832,6 @@ func scanPgContextChangeRows(rows *sql.Rows) ([]domain.CuratorContextChange, err
 	return out, rows.Err()
 }
 
-func nullFloat64Ptr(p *float64) any {
-	if p == nil {
-		return nil
-	}
-	return *p
-}
-
 // scanPgCuratorProject reads a project row used by BeginTurn. Duplicates the
 // project-store scan inline so the curator impl stays decoupled from
 // projects.go's column lifetime.
