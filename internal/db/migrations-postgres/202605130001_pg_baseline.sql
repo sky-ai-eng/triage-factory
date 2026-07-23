@@ -510,157 +510,6 @@ CREATE TABLE public.agents (
 );
 
 
---
--- Name: curator_messages; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.curator_messages (
-    id bigint NOT NULL,
-    org_id uuid NOT NULL,
-    creator_user_id uuid NOT NULL,
-    request_id uuid NOT NULL,
-    role text NOT NULL,
-    subtype text DEFAULT 'text'::text NOT NULL,
-    content text DEFAULT ''::text NOT NULL,
-    tool_calls jsonb,
-    tool_call_id text,
-    is_error boolean DEFAULT false NOT NULL,
-    metadata jsonb,
-    model text,
-    input_tokens integer,
-    output_tokens integer,
-    cache_read_tokens integer,
-    cache_creation_tokens integer,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    -- reasoning / content_blocks mirror run_messages' columns of the same
-    -- name: reasoning is the model's replay-only chain-of-thought
-    -- ({index, type, text?, signature?, data?} entries); content_blocks
-    -- carries non-text content (e.g. an image tool result) the flat
-    -- `content` column can't. Curator turns run through the same SDK stream
-    -- parser as delegated runs, so they need the same two columns for
-    -- display parity — the delivered/window_state/seq columns stay
-    -- run_messages-only, since those are native-loop assembly mechanics the
-    -- interactive curator (staying on agentproc) never uses.
-    reasoning jsonb,
-    content_blocks jsonb
-);
-
-
---
--- Name: curator_messages_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.curator_messages_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: curator_messages_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.curator_messages_id_seq OWNED BY public.curator_messages.id;
-
-
---
--- Name: curator_pending_context; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.curator_pending_context (
-    id bigint NOT NULL,
-    org_id uuid NOT NULL,
-    creator_user_id uuid NOT NULL,
-    project_id uuid NOT NULL,
-    curator_session_id text NOT NULL,
-    change_type text NOT NULL,
-    baseline_value text NOT NULL,
-    consumed_at timestamp with time zone,
-    consumed_by_request_id uuid,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: curator_pending_context_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.curator_pending_context_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: curator_pending_context_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.curator_pending_context_id_seq OWNED BY public.curator_pending_context.id;
-
-
---
--- Name: curator_requests; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.curator_requests (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    org_id uuid NOT NULL,
-    creator_user_id uuid NOT NULL,
-    project_id uuid NOT NULL,
-    -- team_id snapshotted from the project at creation (point-in-time, nullable;
-    -- mirrors runs.team_id). A Curator session is tied to a project and projects
-    -- are team-scoped, so curator spend attributes to the project's team: team
-    -- project -> team-attributed; private/org project -> NULL (still creator- and
-    -- org-visible, just absent from team dashboards). Denormalized (no FK): a
-    -- project later moving teams leaves past spend with the team that incurred it,
-    -- and the security_invoker llm_spend view stays JOIN-free so it doesn't re-gate
-    -- curator rows through projects' RLS. Every curator INSERT must populate this
-    -- via (SELECT team_id FROM projects WHERE id = <project_id>). See TFAC-476.
-    team_id uuid,
-    status text DEFAULT 'queued'::text NOT NULL,
-    user_input text NOT NULL,
-    error_msg text,
-    cost_usd real DEFAULT 0 NOT NULL,
-    duration_ms integer DEFAULT 0 NOT NULL,
-    num_turns integer DEFAULT 0 NOT NULL,
-    -- Token breakdown denormalized onto the request at completion (TFAC-473):
-    -- CompleteRequest SETs each to the absolute SUM over curator_messages
-    -- (idempotent), the same roll-up runs uses over run_messages. Mirrors
-    -- system_llm_runs' columns so the unified spend view (TFAC-472) reads
-    -- tokens natively for curator turns.
-    input_tokens integer DEFAULT 0 NOT NULL,
-    output_tokens integer DEFAULT 0 NOT NULL,
-    cache_read_tokens integer DEFAULT 0 NOT NULL,
-    cache_creation_tokens integer DEFAULT 0 NOT NULL,
-    started_at timestamp with time zone,
-    finished_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    -- home_instance_id (curator homing, spec §6.3): the executor instance that
-    -- runs this turn. Stamped at creation from the resolved home — a remote
-    -- executor when the serving control pod forwards, or the serving pod itself
-    -- in the local / no-executor-available fallback. NULL only on the untouched
-    -- local / role=all path (which never forwards and sweeps globally). The
-    -- executor claim loop selects on it (home_instance_id = me AND
-    -- status = 'queued'); the ownership-scoped boot sweep and the leader reaper
-    -- read it to retire turns stranded on a pod that died. Plain text, matching
-    -- instances.id / runs.executor_id (not FK-validated — a home id that has
-    -- since retired self-heals via the next turn's re-home, exactly like the
-    -- placement stamp).
-    home_instance_id text,
-    -- cred_pubkey: the per-turn credential sidecar's X25519 public
-    -- key (base64), the curator-turn analog of runs.cred_pubkey. The home
-    -- executor publishes it when it stands the turn's sidecar up, and the brain
-    -- reads it at seal time so the sealed bundle opens only inside that turn's
-    -- sidecar process — the orchestrator never holds the private half. NOT NULL
-    -- DEFAULT '' (empty = no sidecar published yet, the untouched local /
-    -- role=all path); recorded only while the turn is non-terminal, so a
-    -- finished turn never carries a key the brain could seal a fresh bundle to.
-    cred_pubkey text DEFAULT ''::text NOT NULL
-);
 
 
 --
@@ -671,7 +520,7 @@ CREATE TABLE public.curator_requests (
 -- repo-profiler, and project-classifier each run a Haiku call every poll
 -- cycle). Captures the cost + token breakdown the subprocess already
 -- computed so org spend reconciles with the Anthropic bill and a "system
--- overhead" line exists alongside runs.total_cost_usd / curator_requests.cost_usd.
+-- overhead" line exists alongside conversation / claim spend rows.
 -- Org-level, no team_id by design: scorer batches mix teams, and
 -- repo_profiles/entities carry no team. System-written (admin pool); the
 -- app pool only reads, gated by the org-scoped RLS policy below. See TFAC-451.
@@ -752,7 +601,7 @@ CREATE TABLE public.access_change_log (
 -- can't diverge from the action. action is a free-text discriminator (no CHECK —
 -- extensible, like access_change_log); credential names the org credential used
 -- (github_app | jira_org); from_state/to_state carry a transition's endpoints;
--- run_id is the producing run (the agent's, or the drafter's for an approval, FK
+-- conversation_id is the producing run (the agent's, or the drafter's for an approval, FK
 -- ON DELETE SET NULL so it outlives a run purge); actor_user_id is the human
 -- authorizer/initiator (NULL for an autonomous system write). dedup_key is the
 -- natural per-action key — a branch push (the one true double-capture case: the
@@ -771,7 +620,7 @@ CREATE TABLE public.external_actions (
     url text,
     from_state text,
     to_state text,
-    run_id uuid,
+    conversation_id uuid,
     actor_user_id uuid,
     credential text NOT NULL,
     dedup_key text NOT NULL,
@@ -1257,12 +1106,12 @@ CREATE TABLE public.repo_profiles (
 -- the shape. All capture writers UPSERT on (org_id, dedup_key) so the same
 -- logical object is one row. Replaces the never-written run_artifacts
 -- placeholder. team_id is denormalized from the run so reads scope by team
--- exactly like runs; run_id is nullable (ON DELETE SET NULL) so a row
+-- exactly like runs; conversation_id is nullable (ON DELETE SET NULL) so a row
 -- survives a run purge for audit. state is per-kind lifecycle (domain
 -- consts, no CHECK — extensible).
 CREATE TABLE public.artifacts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    run_id uuid,
+    conversation_id uuid,
     org_id uuid NOT NULL,
     team_id uuid NOT NULL,
     provider text NOT NULL,
@@ -1285,7 +1134,7 @@ CREATE TABLE public.artifacts (
 CREATE TABLE public.run_memory (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
-    run_id uuid NOT NULL,
+    conversation_id uuid NOT NULL,
     entity_id uuid NOT NULL,
     blueprint_run_id uuid,
     agent_content text,
@@ -1300,14 +1149,14 @@ CREATE TABLE public.run_memory (
 
 -- TFAC-622: lets one run_memory row reach every entity the run actually
 -- touched (a Jira ticket + the PR it opens), not just the denormalized
--- primary entity_id above. Keyed on run_id rather than the run_memory row
+-- primary entity_id above. Keyed on conversation_id rather than the run_memory row
 -- id — touches are recorded mid-run, before the run_memory row exists (it's
--- written at termination); run_memory's UNIQUE(run_id) makes the join
--- through run_id sound once that row lands. role is free text (house
+-- written at termination); run_memory's UNIQUE(conversation_id) makes the join
+-- through conversation_id sound once that row lands. role is free text (house
 -- style: external_actions.action; see domain.MemoryRole*), no CHECK.
 CREATE TABLE public.run_memory_entities (
     org_id uuid NOT NULL,
-    run_id uuid NOT NULL,
+    conversation_id uuid NOT NULL,
     entity_id uuid NOT NULL,
     role text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
@@ -1315,19 +1164,31 @@ CREATE TABLE public.run_memory_entities (
 
 
 --
--- Name: run_messages; Type: TABLE; Schema: public; Owner: -
+-- Name: messages; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.run_messages (
+-- messages is the transcript canon: one row per neutral (OpenAI-shaped)
+-- API message, owned by exactly one conversation. The columns ARE the
+-- storage format; assembly is a pure function of these rows and nothing
+-- else.
+CREATE TABLE public.messages (
     id bigint NOT NULL,
     org_id uuid NOT NULL,
-    run_id uuid NOT NULL,
-    -- role is app-validated, not CHECK-constrained (no CHECK exists today):
-    -- 'assistant' | 'tool' | 'user' (the native loop's injected-input rows).
-    -- Reserved subtypes for the 'user' role, minted by later phases, not this
-    -- one: 'injection:compaction-request', 'injection:steer'; a
-    -- 'injection:compaction-result' row is minted with role='user' too. See
-    -- db.AgentRunStore's doc comment for the authoritative allowed-value list.
+    conversation_id uuid NOT NULL,
+    -- user_id stamps the whole turn: the requesting user owns their user
+    -- row AND the assistant/tool rows produced in response. NULL =
+    -- system-triggered (an event-fired delegation's rows, injections
+    -- minted by the system).
+    user_id uuid,
+    -- claim_id attributes a row to the executor engagement that produced
+    -- it — per-engagement token accounting and turn reconstruction both
+    -- hang off it. NULL for rows produced outside any claim (a queued
+    -- user message, a pending injection). Never read by assembly.
+    claim_id uuid,
+    -- role is app-validated, not CHECK-constrained: 'assistant' | 'tool' |
+    -- 'user'. Reserved 'user' subtypes minted by later phases:
+    -- 'injection:compaction-request', 'injection:compaction-result',
+    -- 'injection:steer', 'injection:system-note', 'injection:context'.
     role text NOT NULL,
     content text,
     subtype text DEFAULT 'text'::text,
@@ -1344,45 +1205,37 @@ CREATE TABLE public.run_messages (
     -- reasoning is an array of reasoning-detail objects mirroring bifrost's
     -- ChatReasoningDetails shape ({index, type, text?, signature?, data?}) —
     -- the provider's replay reference for a prior turn's chain-of-thought.
-    -- NULL means no reasoning on this message. Reference-only: the API
-    -- validates each block's signature, not their ordering, so this is never
-    -- reconstructed or reordered, only replayed verbatim.
+    -- Reference-only: the API validates each block's signature, not their
+    -- ordering, so this is never reconstructed or reordered, only replayed
+    -- verbatim. NULL = no reasoning on this message.
     reasoning jsonb,
-    -- content_blocks is an array of neutral content-block objects (bifrost's
-    -- ChatContentBlock shape: text / image / file). NULL means the message's
-    -- content is fully represented by the flat `content` column above.
-    -- Applies to every role, not just assistant — a tool row uses this for an
-    -- image result the flat text column can't carry.
+    -- content_blocks is an array of neutral content-block objects (text /
+    -- image / file). NULL means the flat `content` column is the whole
+    -- story. Applies to every role — a tool row uses this for an image
+    -- result the flat text column can't carry.
     content_blocks jsonb,
-    -- delivered=false marks a durable pending input (a steer / follow-up
-    -- message) not yet folded into any context assembly. The native loop
-    -- flips it at its injection points (before each provider call, and the
-    -- late recheck at completion); ordering among pending rows is plain
-    -- insertion order (id ASC). Every row inserted by today's SDK runtime is
-    -- delivered immediately, hence the true default.
+    -- delivered=false marks a durable pending input (a steer, follow-up,
+    -- staged injection, or curator context notice) not yet folded into any
+    -- context assembly. Consumers flip it exactly-once via
+    -- UPDATE … RETURNING; ordering among pending rows is insertion order.
     delivered boolean DEFAULT true NOT NULL,
-    -- window_state is app-validated (no CHECK — same house pattern as
-    -- runs.origin): 'active' (default; assembled normally) | 'elided'
-    -- (renders as a deterministic stub, content + is_error retained on the
-    -- row) | 'inactive' (superseded by compaction, never assembled). Flips
-    -- are policy-gated — elided only in a batched cold-moment pass, inactive
-    -- only via compaction — and sticky by construction (row state, no
-    -- watermark). Nothing flips this column in production yet.
+    -- window_state is app-validated: 'active' (default) | 'elided'
+    -- (renders as a deterministic stub, content + is_error retained) |
+    -- 'inactive' (superseded by compaction, never assembled). Flips are
+    -- policy-gated and sticky by construction — row state, no watermark.
     window_state text DEFAULT 'active'::text NOT NULL,
     -- seq is the assembly-order override: the effective sort key is
-    -- COALESCE(seq, id). NULL for every normally-appended row — no backfill,
-    -- no insert-time dance. Only a synthetic insertion (a compaction result)
-    -- sets a fractional value to land between two existing rows without
-    -- renumbering either of them.
+    -- COALESCE(seq, id). NULL for every normally-appended row; only a
+    -- synthetic insertion (a compaction result) sets a fractional value.
     seq double precision
 );
 
 
 --
--- Name: run_messages_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+-- Name: messages_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
-CREATE SEQUENCE public.run_messages_id_seq
+CREATE SEQUENCE public.messages_id_seq
     START WITH 1
     INCREMENT BY 1
     NO MINVALUE
@@ -1391,10 +1244,10 @@ CREATE SEQUENCE public.run_messages_id_seq
 
 
 --
--- Name: run_messages_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: messages_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
 --
 
-ALTER SEQUENCE public.run_messages_id_seq OWNED BY public.run_messages.id;
+ALTER SEQUENCE public.messages_id_seq OWNED BY public.messages.id;
 
 
 --
@@ -1402,7 +1255,7 @@ ALTER SEQUENCE public.run_messages_id_seq OWNED BY public.run_messages.id;
 --
 
 CREATE TABLE public.run_worktrees (
-    run_id uuid NOT NULL,
+    conversation_id uuid NOT NULL,
     org_id uuid NOT NULL,
     repo_id text NOT NULL,
     path text NOT NULL,
@@ -1412,252 +1265,134 @@ CREATE TABLE public.run_worktrees (
 
 
 --
--- Name: runs; Type: TABLE; Schema: public; Owner: -
+-- Name: conversations; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.runs (
+-- conversations is the durable agent-context table: one row per transcript
+-- the system can rebuild for a model, regardless of surface. A delegated
+-- task run, a curator chat, a future interactive session, and a future
+-- subagent are all conversations. Per-engagement execution state (which
+-- executor drove it, when, at what per-engagement cost, under which sealed
+-- credentials) lives on claims (see the multi-mode machinery section); the
+-- transcript itself is the messages table.
+CREATE TABLE public.conversations (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
+    -- type names the owning surface: 'delegation' (task runs — every
+    -- blueprint step today), 'curator' (per-(project, creator) chat),
+    -- 'interactive' (reserved: the taskless "pick repos and type" surface),
+    -- or a namespaced 'subagent:<kind>' ('subagent:clone',
+    -- 'subagent:explore', … — never the bare word). App-validated, no value
+    -- CHECK (house pattern, mirrors origin/source).
+    type text DEFAULT 'delegation'::text NOT NULL,
     creator_user_id uuid,
-    team_id uuid NOT NULL,
+    -- team_id is nullable: delegation conversations always carry their
+    -- team (pinned via the visibility CHECK below); a curator conversation
+    -- snapshots its project's team at creation, which is NULL for a
+    -- private/org project (spend attribution, not access control).
+    team_id uuid,
     visibility text DEFAULT 'team'::text NOT NULL,
-    -- task_id / prompt_id are NULLABLE (relaxed from NOT NULL in this
-    -- baseline) so a run need not descend from a task or a saved prompt — headroom
-    -- for a future user-initiated interactive run (no event, no task, no saved
-    -- prompt). runs_origin_requires_parents pins them for origin 'blueprint'
-    -- (every run today). The interactive parent (agent_sessions + a
-    -- runs.agent_session_id FK) is deferred — additive in a later migration.
+    -- task_id / prompt_id are NULLABLE so a conversation need not descend
+    -- from a task or a saved prompt (curator/interactive/subagent rows).
+    -- conversations_origin_requires_parents pins them for origin
+    -- 'blueprint' (every delegation conversation today).
     task_id uuid,
     prompt_id text,
     trigger_id uuid,
     trigger_type text DEFAULT 'manual'::text NOT NULL,
-    -- origin discriminates blueprint-step runs from a future interactive kind;
-    -- app-validated (no value CHECK, mirrors source). See the SQLite twin.
+    -- origin discriminates blueprint-step delegation from other creation
+    -- modes ('curator', future 'interactive'); app-validated (no value
+    -- CHECK). See the SQLite twin.
     origin text DEFAULT 'blueprint'::text NOT NULL,
     -- runtime picks the executing engine: 'sdk' (the Claude Code SDK
-    -- subprocess — every run today) or 'native' (the executor-side agent
-    -- loop hydrating straight from run_messages). App-validated, no value
-    -- CHECK (mirrors origin/source). A native run's assembly-affecting
-    -- run_messages columns (reasoning / content_blocks / delivered /
-    -- window_state / seq) are populated per that table's contract; an sdk
-    -- run may carry values in reasoning/content_blocks too (the stream
-    -- parser captures them for display and future migration) but they are
-    -- never read back for replay — the SDK's own session file is truth for
-    -- an sdk run's resume.
+    -- subprocess — everything today) or 'native' (the executor-side agent
+    -- loop hydrating straight from messages). App-validated. A one-way
+    -- ratchet per conversation: once any engagement runs native, the SDK
+    -- can never continue this transcript (it cannot ingest message rows;
+    -- only the native loop assembles from them). An sdk conversation may
+    -- carry reasoning/content_blocks on its messages for display, but they
+    -- are never read back for replay — sdk_session_id is truth for resume.
     runtime text DEFAULT 'sdk'::text NOT NULL,
-    status text DEFAULT 'cloning'::text NOT NULL,
+    -- status is the work lifecycle for delegation (queued / cloning /
+    -- running / awaiting_credentials / open / completed / failed /
+    -- cancelled — vocabulary unchanged from the runs era) and for future
+    -- interactive/subagent kinds. NULL for curator conversations, whose
+    -- turn state is derived from messages + claims; the delegation CHECK
+    -- below pins it NOT NULL where it is load-bearing.
+    status text DEFAULT 'cloning'::text,
     model text,
-    session_id text,
+    -- sdk_session_id is the SDK-runtime resume handle — the union of the
+    -- former runs.session_id and projects.curator_session_id. Meaningless
+    -- (and left NULL) under runtime='native', where the message rows are
+    -- the resume state.
+    sdk_session_id text,
     worktree_path text,
     result_summary text,
     outcome text,
     outcome_reason text,
-    -- failure_kind is the machine-readable discriminator for WHY a run
-    -- reached status='failed' (domain.RunFailureKind: memory_limit / crash /
-    -- no_result / agent_error), written by markFailedIfActive / completeRun
-    -- alongside the status flip. App-validated (no CHECK, same as
-    -- repo_profiles.clone_error_kind); NULL === no specific classification
-    -- (non-failed runs, legacy failed rows). See the SQLite twin.
+    -- failure_kind is the machine-readable discriminator for WHY status
+    -- reached 'failed' (domain.RunFailureKind: memory_limit / crash /
+    -- no_result / agent_error). App-validated; NULL = no classification.
     failure_kind text,
     stop_reason text,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
-    -- parked_at is stamped when the run enters the `open` parked state and
-    -- cleared on resume, so the snapshot-retention sweep can key an open run off
-    -- its last park rather than started_at (which never resets across resumes).
-    -- NULL whenever the run is not parked open; the pending_approval and
-    -- completed+abort terminals use completed_at for the same purpose.
+    -- parked_at is stamped when a delegation conversation enters the `open`
+    -- parked state and cleared on resume, so the snapshot-retention sweep
+    -- keys an open conversation off its last park.
     parked_at timestamp with time zone,
+    -- last_request_at is the KV-cache warmth watermark: the time of the
+    -- most recent provider request made for this conversation, compared
+    -- against the provider cache TTL to pick warm-path vs cold-path
+    -- context management. Written by the runtime, never by handlers.
+    last_request_at timestamp with time zone,
+    -- archived_at retires a conversation from its surface's "current" view
+    -- without deleting history — the curator's reset/new-chat mechanism.
+    -- NULL = live. An archived conversation is never claimed again.
+    archived_at timestamp with time zone,
     duration_ms integer,
     num_turns integer,
     total_cost_usd real,
-    -- Token breakdown denormalized onto the run at completion (TFAC-473):
-    -- AgentRunStore.Complete SETs each to the absolute SUM over run_messages
-    -- (idempotent across resumes). Mirrors system_llm_runs' columns so the
-    -- unified spend view (TFAC-472) reads tokens natively for delegated runs.
+    -- Token breakdown denormalized at terminal writes: the absolute SUM
+    -- over this conversation's messages (idempotent across resumes).
     input_tokens integer DEFAULT 0 NOT NULL,
     output_tokens integer DEFAULT 0 NOT NULL,
     cache_read_tokens integer DEFAULT 0 NOT NULL,
     cache_creation_tokens integer DEFAULT 0 NOT NULL,
     actor_agent_id uuid,
-    -- blueprint_run_id is NULLABLE (relaxed from NOT NULL at this baseline);
-    -- pinned for origin 'blueprint' by runs_origin_requires_parents, so every
-    -- run today still has it. See the SQLite twin + task_id above.
+    -- project_id anchors a curator conversation to its project (knowledge
+    -- base, homing, cascade-delete). NULL for every other type.
+    project_id uuid,
+    -- parent_conversation_id links a subagent conversation to the
+    -- conversation that spawned it. Scoping anchors (task_id, or
+    -- project_id + creator_user_id) are denormalized from the parent at
+    -- mint so RLS never recurses.
+    parent_conversation_id uuid,
     blueprint_run_id uuid,
     blueprint_step_index integer,
     triggering_event_id uuid,
-    -- Run-queue claim columns (mirror event_queue). A blueprint step is
-    -- enqueued as a run row in status='queued'; the dispatcher claims it
-    -- (queued -> running) via FOR UPDATE SKIP LOCKED, stamping claimed_at and
-    -- bumping attempts. Both stay NULL/0 for the legacy never-queued shape.
-    claimed_at timestamp with time zone,
-    -- queued_at is when the run last entered the queue. started_at is the
-    -- mint stamp and never resets, so after any re-queue (transient-setup
-    -- retry, crash reconcile, resume-by-enqueue, reaper spill) it stops
-    -- describing the current wait. Re-stamped on every flip to
-    -- status='queued': claimed_at − queued_at is the latest queue episode's
-    -- dwell, now() − queued_at the live wait a QUEUED card shows — keeping
-    -- queue time out of the working-time readouts.
+    -- queued_at is when the conversation last entered the claim queue;
+    -- re-stamped on every flip to status='queued' (claimed_at lives on the
+    -- claim row; claim.claimed_at − queued_at is the latest queue dwell).
     queued_at timestamp with time zone,
-    attempts integer DEFAULT 0 NOT NULL,
-    -- executor_id records which executor instance owns a run's live
-    -- process while it is running. Stamped atomically at claim (queued ->
-    -- running) alongside boot_epoch below, so a running row's ownership is
-    -- never unknown between claim and the process actually going live; NULL
-    -- whenever the row is not claimed (never claimed, or returned to the
-    -- queue by a requeue/reset, which clear the stamp — a queued row has no
-    -- owner). Resumes re-stamp in MarkResuming. At N=1 it's a single per-process
-    -- instance id; at N>1 it's the fence ResetProcessingRuns (TFAC-578)
-    -- reads to self-sweep only its own orphans, never a live sibling's
-    -- claimed work.
-    executor_id text,
-    -- boot_epoch pairs with executor_id: an instance's persistent id
-    -- survives restarts, so executor_id alone can't distinguish "still live
-    -- under an earlier boot of me" from "orphaned by a crash". Stamped at
-    -- claim time from instances.boot_epoch (TFAC-577); ResetProcessingRuns
-    -- only resets rows where executor_id = self AND boot_epoch < the
-    -- current boot's epoch.
-    boot_epoch bigint,
-    -- cred_pubkey is the per-run credential sidecar's X25519 public key
-    -- (base64), written by the executor when it parks the run in
-    -- status='awaiting_credentials' and read by the brain at seal time —
-    -- the bundle must be sealed to the sidecar that will actually open it,
-    -- not to the claiming instance's per-boot key. Claim-scoped ownership
-    -- metadata: it rides with executor_id/boot_epoch above and is cleared
-    -- wherever they are (a queued row has no owner and no key), so a
-    -- requeued/reset run never carries a stale key the brain could
-    -- mistakenly seal to.
-    cred_pubkey text,
-    -- preferred_executor_id is the placement affinity stamp (TFAC-587, spec
-    -- §6): the capacity-weighted rendezvous winner for this run's (org, repo)
-    -- key, computed by the control plane over live registry members at
-    -- enqueue and re-stamped on every blueprint-step advance so it never
-    -- outlives one queue dwell. The two-tier claim reads it — tier 1 is an
-    -- indexed equality (preferred_executor_id = the claiming executor), tier
-    -- 2 spills anything aged past the placement window or whose preferred
-    -- owner is dead/gated/draining. Purely advisory: NULL means "unowned,
-    -- claimable by anyone now" (never stamped, placement disabled, or cleared
-    -- on requeue), so the whole layer can be dropped without breaking a
-    -- claim. Distinct from executor_id in lifetime — this is SET while the
-    -- row is queued (its entire purpose) and cleared alongside executor_id on
-    -- every requeue/reset path (a queued row carries no owner and no stale
-    -- preference toward a possibly-dead instance). Deliberately NO FK to
-    -- instances, same as executor_id: a stamp toward a since-retired instance
-    -- is legal and self-heals via the aging tier.
+    -- preferred_executor_id is the placement affinity stamp: the
+    -- capacity-weighted rendezvous winner for this conversation's
+    -- (org, repo) key, computed at enqueue, cleared on requeue. Purely
+    -- advisory queue-time state, so it lives here, not on a claim (which
+    -- doesn't exist yet while queued). Deliberately NO FK to instances.
     preferred_executor_id text,
-    CONSTRAINT runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
-    CONSTRAINT runs_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
-    CONSTRAINT runs_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
-    -- A 'blueprint'-origin run carries its full parentage (blueprint_run + task
-    -- + prompt), preserving the previous NOT-NULL invariant for every run
-    -- today; origin <> 'blueprint' (a future interactive/ad-hoc run) is left
-    -- unconstrained here. See the SQLite twin.
-    CONSTRAINT runs_origin_requires_parents CHECK (((origin = 'blueprint'::text AND blueprint_run_id IS NOT NULL AND task_id IS NOT NULL AND prompt_id IS NOT NULL) OR (origin <> 'blueprint'::text)))
+    CONSTRAINT conversations_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
+    CONSTRAINT conversations_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
+    CONSTRAINT conversations_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
+    -- A 'blueprint'-origin conversation carries its full parentage
+    -- (blueprint_run + task + prompt), preserving the runs-era invariant.
+    CONSTRAINT conversations_origin_requires_parents CHECK (((origin = 'blueprint'::text AND blueprint_run_id IS NOT NULL AND task_id IS NOT NULL AND prompt_id IS NOT NULL) OR (origin <> 'blueprint'::text))),
+    -- status is nullable only because curator conversations have no work
+    -- lifecycle; a delegation conversation always has one.
+    CONSTRAINT conversations_delegation_has_status CHECK (((type <> 'delegation'::text) OR (status IS NOT NULL)))
 );
 
 
---
--- Name: llm_spend; Type: VIEW; Schema: public; Owner: -
---
-
--- Unified spend view (TFAC-472): one row-per-spend shape UNION-ing the three
--- source tables — delegated runs, curator turns, and headless system jobs —
--- onto a single category axis so the team dashboard + safety cap read from one
--- place and org totals reconcile with the Anthropic bill. Read-side only: no
--- normalized table, no write-path change, no backfill — the view IS the
--- abstraction boundary (materialize later only if it's ever measured too slow).
--- Placed here because it depends on all three source tables, of which runs is
--- the last created.
---
--- category derivation: runs split on trigger_type (manual → per-user, anything
--- else → autonomous; the runs_creator_matches_trigger_type CHECK guarantees
--- 'manual'/'event'); curator is 'curator'; system jobs are 'system_overhead'
--- with the job (scorer/repo_profiler/classifier) carried as subtype.
---
--- team_id: runs are team-scoped; curator is team-attributed via a point-in-time
--- snapshot of its project's team (curator_requests.team_id, TFAC-476) — a team
--- project → that team, a private/org project → NULL; system-overhead has no team
--- (org-level). So the dashboard sees runs + team-project curator by team, and
--- system + null-team curator at org scope. actor_agent_id is the org agent that
--- executed the run (audit passthrough) — only runs are agent-executed, so NULL
--- for curator (user-driven) + system (background). trigger_id is the
--- event_handler that fired an autonomous run (TFAC-478) — it backs the team
--- dashboard's by-rule breakdown; NULL for manual runs, curator, and system.
---
--- Tokens are read NATIVELY from all three tables — every token column is
--- INTEGER NOT NULL DEFAULT 0 (runs + curator via TFAC-473, system via
--- TFAC-451) — so the view does NO COALESCE on tokens; only runs.total_cost_usd
--- (nullable until a terminal write) is wrapped in COALESCE(…,0). The view
--- reflects *settled* spend: in-flight rows show 0 cost + 0 tokens until a
--- terminal write, consistently across cost and tokens. Every terminal write
--- (completion, cancel, infra-failure, and the boot-time orphan sweeps) rolls
--- the breakdown up from the per-message tables, so a cancelled/failed run or
--- curator turn still carries its real token spend.
---
--- security_invoker = true is LOAD-BEARING and mandatory (PG 15+): without it a
--- view evaluates base-table RLS as the view *owner*, bypassing the invoker's
--- row scoping → a cross-team / cross-org spend leak. With it, the base tables'
--- existing RLS (runs/curator_requests org+team, system_llm_runs org) applies
--- under the querying app-pool identity, exactly as if selecting the tables
--- directly. Deliberately NO separate RLS policy on the view, and NOT
--- security_definer.
-CREATE VIEW public.llm_spend WITH (security_invoker='true') AS
- SELECT 'run'::text AS source,
-    runs.id AS source_id,
-    runs.org_id,
-    runs.team_id,
-        CASE runs.trigger_type
-            WHEN 'manual'::text THEN 'manual'::text
-            ELSE 'autonomous'::text
-        END AS category,
-    NULL::text AS subtype,
-    runs.creator_user_id,
-    runs.actor_agent_id,
-    runs.trigger_id,
-    runs.model,
-    COALESCE(runs.total_cost_usd, (0)::real) AS total_cost_usd,
-    runs.input_tokens,
-    runs.output_tokens,
-    runs.cache_read_tokens,
-    runs.cache_creation_tokens,
-    runs.started_at AS occurred_at
-   FROM public.runs
-UNION ALL
- SELECT 'curator'::text AS source,
-    curator_requests.id AS source_id,
-    curator_requests.org_id,
-    curator_requests.team_id,
-    'curator'::text AS category,
-    NULL::text AS subtype,
-    curator_requests.creator_user_id,
-    NULL::uuid AS actor_agent_id,
-    NULL::uuid AS trigger_id,
-    NULL::text AS model,
-    curator_requests.cost_usd AS total_cost_usd,
-    curator_requests.input_tokens,
-    curator_requests.output_tokens,
-    curator_requests.cache_read_tokens,
-    curator_requests.cache_creation_tokens,
-    curator_requests.created_at AS occurred_at
-   FROM public.curator_requests
-UNION ALL
- SELECT 'system'::text AS source,
-    system_llm_runs.id AS source_id,
-    system_llm_runs.org_id,
-    NULL::uuid AS team_id,
-    'system_overhead'::text AS category,
-    system_llm_runs.job AS subtype,
-    NULL::uuid AS creator_user_id,
-    NULL::uuid AS actor_agent_id,
-    NULL::uuid AS trigger_id,
-    system_llm_runs.model,
-    system_llm_runs.total_cost_usd,
-    system_llm_runs.input_tokens,
-    system_llm_runs.output_tokens,
-    system_llm_runs.cache_read_tokens,
-    system_llm_runs.cache_creation_tokens,
-    system_llm_runs.started_at AS occurred_at
-   FROM public.system_llm_runs;
 
 
 --
@@ -1969,18 +1704,8 @@ CREATE TABLE public.user_jira_identities (
 );
 
 
---
--- Name: curator_messages id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_messages ALTER COLUMN id SET DEFAULT nextval('public.curator_messages_id_seq'::regclass);
 
 
---
--- Name: curator_pending_context id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_pending_context ALTER COLUMN id SET DEFAULT nextval('public.curator_pending_context_id_seq'::regclass);
 
 
 --
@@ -1991,10 +1716,10 @@ ALTER TABLE ONLY public.pending_firings ALTER COLUMN id SET DEFAULT nextval('pub
 
 
 --
--- Name: run_messages id; Type: DEFAULT; Schema: public; Owner: -
+-- Name: messages id; Type: DEFAULT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_messages ALTER COLUMN id SET DEFAULT nextval('public.run_messages_id_seq'::regclass);
+ALTER TABLE ONLY public.messages ALTER COLUMN id SET DEFAULT nextval('public.messages_id_seq'::regclass);
 
 
 --
@@ -2028,36 +1753,12 @@ ALTER TABLE ONLY public.agents
     ADD CONSTRAINT agents_pkey PRIMARY KEY (id);
 
 
---
--- Name: curator_messages curator_messages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_messages
-    ADD CONSTRAINT curator_messages_pkey PRIMARY KEY (id);
 
 
---
--- Name: curator_pending_context curator_pending_context_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_pending_context
-    ADD CONSTRAINT curator_pending_context_pkey PRIMARY KEY (id);
 
 
---
--- Name: curator_requests curator_requests_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_requests
-    ADD CONSTRAINT curator_requests_id_org_id_key UNIQUE (id, org_id);
 
 
---
--- Name: curator_requests curator_requests_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_requests
-    ADD CONSTRAINT curator_requests_pkey PRIMARY KEY (id);
 
 
 --
@@ -2353,7 +2054,7 @@ ALTER TABLE ONLY public.run_memory
 --
 
 ALTER TABLE ONLY public.run_memory
-    ADD CONSTRAINT run_memory_run_id_key UNIQUE (run_id);
+    ADD CONSTRAINT run_memory_run_id_key UNIQUE (conversation_id);
 
 
 --
@@ -2361,15 +2062,15 @@ ALTER TABLE ONLY public.run_memory
 --
 
 ALTER TABLE ONLY public.run_memory_entities
-    ADD CONSTRAINT run_memory_entities_pkey PRIMARY KEY (run_id, entity_id);
+    ADD CONSTRAINT run_memory_entities_pkey PRIMARY KEY (conversation_id, entity_id);
 
 
 --
--- Name: run_messages run_messages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: messages messages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_messages
-    ADD CONSTRAINT run_messages_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_pkey PRIMARY KEY (id);
 
 
 --
@@ -2377,23 +2078,23 @@ ALTER TABLE ONLY public.run_messages
 --
 
 ALTER TABLE ONLY public.run_worktrees
-    ADD CONSTRAINT run_worktrees_pkey PRIMARY KEY (run_id, repo_id, ref);
+    ADD CONSTRAINT run_worktrees_pkey PRIMARY KEY (conversation_id, repo_id, ref);
 
 
 --
--- Name: runs runs_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: conversations conversations_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.runs
-    ADD CONSTRAINT runs_id_org_id_key UNIQUE (id, org_id);
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_id_org_id_key UNIQUE (id, org_id);
 
 
 --
--- Name: runs runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: conversations conversations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.runs
-    ADD CONSTRAINT runs_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_pkey PRIMARY KEY (id);
 
 
 --
@@ -2515,49 +2216,16 @@ ALTER TABLE ONLY public.users
 CREATE INDEX agents_org_idx ON public.agents USING btree (org_id);
 
 
---
--- Name: idx_curator_messages_request_created; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_curator_messages_request_created ON public.curator_messages USING btree (request_id, created_at, id);
 
 
---
--- Name: idx_curator_pending_context_consumer; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_curator_pending_context_consumer ON public.curator_pending_context USING btree (consumed_by_request_id) WHERE (consumed_by_request_id IS NOT NULL);
 
 
---
--- Name: idx_curator_pending_context_one_pending_per_type; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX idx_curator_pending_context_one_pending_per_type ON public.curator_pending_context USING btree (project_id, curator_session_id, change_type) WHERE (consumed_at IS NULL);
 
 
---
--- Name: idx_curator_requests_in_flight; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_curator_requests_in_flight ON public.curator_requests USING btree (project_id) WHERE (status = ANY (ARRAY['queued'::text, 'running'::text]));
 
 
---
--- Name: idx_curator_requests_homed_queued; Type: INDEX; Schema: public; Owner: -
---
-
--- The executor claim loop's hot path: pull my queued homed turns. Mirrors
--- idx_runs_queued_preferred (the run queue's tier-1 claim). Curator homing,
--- spec §6.3.
-CREATE INDEX idx_curator_requests_homed_queued ON public.curator_requests USING btree (home_instance_id, created_at, id) WHERE (status = 'queued'::text);
 
 
---
--- Name: idx_curator_requests_project_created; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_curator_requests_project_created ON public.curator_requests USING btree (project_id, created_at);
 
 
 --
@@ -2760,7 +2428,7 @@ CREATE INDEX idx_external_actions_team_occurred ON public.external_actions USING
 -- Name: idx_external_actions_run; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_external_actions_run ON public.external_actions USING btree (run_id);
+CREATE INDEX idx_external_actions_run ON public.external_actions USING btree (conversation_id);
 
 
 --
@@ -2791,7 +2459,7 @@ CREATE INDEX idx_artifacts_org_created ON public.artifacts USING btree (org_id, 
 -- Name: idx_artifacts_run; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_artifacts_run ON public.artifacts USING btree (run_id);
+CREATE INDEX idx_artifacts_run ON public.artifacts USING btree (conversation_id);
 
 
 --
@@ -2812,7 +2480,7 @@ CREATE INDEX idx_run_memory_entity_blueprint ON public.run_memory USING btree (e
 -- Name: idx_run_memory_run; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_run_memory_run ON public.run_memory USING btree (run_id);
+CREATE INDEX idx_run_memory_run ON public.run_memory USING btree (conversation_id);
 
 
 --
@@ -2823,56 +2491,62 @@ CREATE INDEX idx_run_memory_entities_entity ON public.run_memory_entities USING 
 
 
 --
--- Name: idx_run_messages_run; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_messages_conversation; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_run_messages_run ON public.run_messages USING btree (run_id);
+CREATE INDEX idx_messages_conversation ON public.messages USING btree (conversation_id);
 
 
 --
--- Name: idx_run_messages_run_seq; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_messages_conversation_seq; Type: INDEX; Schema: public; Owner: -
 --
 
 -- Assembly order: the effective sort key is COALESCE(seq, id), so this
 -- expression index is what a native loop's ListForAssembly actually walks —
--- idx_run_messages_run above stays for the plain id-order transcript reads
+-- idx_messages_conversation above stays for the plain id-order transcript reads
 -- (UI, spend sums) that never touch seq.
-CREATE INDEX idx_run_messages_run_seq ON public.run_messages (run_id, (COALESCE(seq, (id)::double precision)));
+CREATE INDEX idx_messages_conversation_seq ON public.messages (conversation_id, (COALESCE(seq, (id)::double precision)));
+
+-- The claim-trigger scan ("conversations with undelivered input") + the
+-- pending-flush read.
+CREATE INDEX idx_messages_undelivered ON public.messages USING btree (conversation_id) WHERE (delivered = false);
+-- Per-engagement token accounting (SUM over one claim's rows).
+CREATE INDEX idx_messages_claim ON public.messages USING btree (claim_id) WHERE (claim_id IS NOT NULL);
 
 
 --
 -- Name: idx_run_worktrees_run; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_run_worktrees_run ON public.run_worktrees USING btree (run_id);
+CREATE INDEX idx_run_worktrees_run ON public.run_worktrees USING btree (conversation_id);
 
 
 --
--- Name: idx_runs_org_status; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_conversations_org_status; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_runs_org_status ON public.runs USING btree (org_id, status);
-
-
---
--- Name: idx_runs_prompt_started; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_runs_prompt_started ON public.runs USING btree (prompt_id, started_at DESC);
+CREATE INDEX idx_conversations_org_status ON public.conversations USING btree (org_id, status);
 
 
 --
--- Name: idx_runs_task; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_conversations_prompt_started; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_runs_task ON public.runs USING btree (task_id);
+CREATE INDEX idx_conversations_prompt_started ON public.conversations USING btree (prompt_id, started_at DESC);
 
 
 --
--- Name: idx_runs_trigger; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_conversations_task; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_runs_trigger ON public.runs USING btree (trigger_id);
+CREATE INDEX idx_conversations_task ON public.conversations USING btree (task_id);
+
+
+--
+-- Name: idx_conversations_trigger; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_conversations_trigger ON public.conversations USING btree (trigger_id);
 
 
 --
@@ -2950,21 +2624,26 @@ CREATE INDEX project_knowledge_org_idx ON public.project_knowledge USING btree (
 
 
 --
--- Name: runs_actor_agent_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: conversations_actor_agent_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX runs_actor_agent_idx ON public.runs USING btree (actor_agent_id) WHERE (actor_agent_id IS NOT NULL);
+CREATE INDEX conversations_actor_agent_idx ON public.conversations USING btree (actor_agent_id) WHERE (actor_agent_id IS NOT NULL);
+
+-- The curator's conversation lookup: one live conversation per
+-- (project, creator); archived rows excluded by the app-side predicate.
+CREATE INDEX idx_conversations_project ON public.conversations USING btree (project_id, creator_user_id) WHERE (project_id IS NOT NULL);
+CREATE INDEX idx_conversations_parent ON public.conversations USING btree (parent_conversation_id) WHERE (parent_conversation_id IS NOT NULL);
 
 
 --
--- Name: runs_event_trigger_fence; Type: INDEX; Schema: public; Owner: -
+-- Name: conversations_event_trigger_fence; Type: INDEX; Schema: public; Owner: -
 --
 -- Fired-fence: one event firing one trigger materializes at most
 -- one run. Partial WHERE triggering_event_id IS NOT NULL so manual and
 -- blueprint-step runs (NULL) never participate — multiple manual runs of one
 -- task stay allowed, and two distinct event instances still fire independently.
 
-CREATE UNIQUE INDEX runs_event_trigger_fence ON public.runs USING btree (triggering_event_id, trigger_id) WHERE (triggering_event_id IS NOT NULL);
+CREATE UNIQUE INDEX conversations_event_trigger_fence ON public.conversations USING btree (triggering_event_id, trigger_id) WHERE (triggering_event_id IS NOT NULL);
 
 
 --
@@ -3154,84 +2833,24 @@ ALTER TABLE ONLY public.agents
     ADD CONSTRAINT agents_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: curator_messages curator_messages_creator_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_messages
-    ADD CONSTRAINT curator_messages_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
---
--- Name: curator_messages curator_messages_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_messages
-    ADD CONSTRAINT curator_messages_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: curator_messages curator_messages_request_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_messages
-    ADD CONSTRAINT curator_messages_request_id_org_id_fkey FOREIGN KEY (request_id, org_id) REFERENCES public.curator_requests(id, org_id) ON DELETE CASCADE;
 
 
---
--- Name: curator_pending_context curator_pending_context_consumed_by_request_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_pending_context
-    ADD CONSTRAINT curator_pending_context_consumed_by_request_id_org_id_fkey FOREIGN KEY (consumed_by_request_id, org_id) REFERENCES public.curator_requests(id, org_id) ON DELETE SET NULL;
 
 
---
--- Name: curator_pending_context curator_pending_context_creator_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_pending_context
-    ADD CONSTRAINT curator_pending_context_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
---
--- Name: curator_pending_context curator_pending_context_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_pending_context
-    ADD CONSTRAINT curator_pending_context_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: curator_pending_context curator_pending_context_project_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_pending_context
-    ADD CONSTRAINT curator_pending_context_project_id_org_id_fkey FOREIGN KEY (project_id, org_id) REFERENCES public.projects(id, org_id) ON DELETE CASCADE;
 
 
---
--- Name: curator_requests curator_requests_creator_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_requests
-    ADD CONSTRAINT curator_requests_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
---
--- Name: curator_requests curator_requests_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_requests
-    ADD CONSTRAINT curator_requests_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
---
--- Name: curator_requests curator_requests_project_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.curator_requests
-    ADD CONSTRAINT curator_requests_project_id_org_id_fkey FOREIGN KEY (project_id, org_id) REFERENCES public.projects(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -3485,7 +3104,7 @@ ALTER TABLE ONLY public.project_knowledge
 --
 
 ALTER TABLE ONLY public.project_knowledge
-    ADD CONSTRAINT project_knowledge_last_updated_by_run_fkey FOREIGN KEY (last_updated_by_run, org_id) REFERENCES public.runs(id, org_id) ON DELETE SET NULL;
+    ADD CONSTRAINT project_knowledge_last_updated_by_run_fkey FOREIGN KEY (last_updated_by_run, org_id) REFERENCES public.conversations(id, org_id) ON DELETE SET NULL;
 
 
 --
@@ -3590,7 +3209,7 @@ ALTER TABLE ONLY public.access_change_log
 -- Name: external_actions external_actions_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
--- org_id CASCADE (drop an org's log with the org); run_id SET NULL (the action
+-- org_id CASCADE (drop an org's log with the org); conversation_id SET NULL (the action
 -- outlives a purged run for the audit trail, like artifacts). team_id and
 -- actor_user_id are deliberately FK-free so the audit row outlives the team/user
 -- it references — an audit log must outlive its subjects (same rule as
@@ -3604,7 +3223,7 @@ ALTER TABLE ONLY public.external_actions
 --
 
 ALTER TABLE ONLY public.external_actions
-    ADD CONSTRAINT external_actions_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.runs(id) ON DELETE SET NULL;
+    ADD CONSTRAINT external_actions_run_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
 
 
 --
@@ -3620,11 +3239,11 @@ ALTER TABLE ONLY public.artifacts
 --
 
 -- Single-column ref to runs(id) with ON DELETE SET NULL: the artifact
--- outlives a purged run for the audit ledger. A composite (run_id, org_id)
+-- outlives a purged run for the audit ledger. A composite (conversation_id, org_id)
 -- ref like the other run children can't SET NULL here because org_id is
 -- NOT NULL — and the artifact's own org_id_fkey already pins the org.
 ALTER TABLE ONLY public.artifacts
-    ADD CONSTRAINT artifacts_run_id_fkey FOREIGN KEY (run_id) REFERENCES public.runs(id) ON DELETE SET NULL;
+    ADD CONSTRAINT artifacts_run_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
 
 
 --
@@ -3656,7 +3275,7 @@ ALTER TABLE ONLY public.run_memory
 --
 
 ALTER TABLE ONLY public.run_memory
-    ADD CONSTRAINT run_memory_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE CASCADE;
+    ADD CONSTRAINT run_memory_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -3680,23 +3299,26 @@ ALTER TABLE ONLY public.run_memory_entities
 --
 
 ALTER TABLE ONLY public.run_memory_entities
-    ADD CONSTRAINT run_memory_entities_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE CASCADE;
+    ADD CONSTRAINT run_memory_entities_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
 --
--- Name: run_messages run_messages_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: messages messages_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_messages
-    ADD CONSTRAINT run_messages_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
 
 
 --
--- Name: run_messages run_messages_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: messages messages_conversation_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_messages
-    ADD CONSTRAINT run_messages_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -3712,74 +3334,79 @@ ALTER TABLE ONLY public.run_worktrees
 --
 
 ALTER TABLE ONLY public.run_worktrees
-    ADD CONSTRAINT run_worktrees_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE CASCADE;
+    ADD CONSTRAINT run_worktrees_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
 --
--- Name: runs runs_actor_agent_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversations conversations_actor_agent_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.runs
-    ADD CONSTRAINT runs_actor_agent_fkey FOREIGN KEY (actor_agent_id, org_id) REFERENCES public.agents(id, org_id) ON DELETE SET NULL;
-
-
---
--- Name: runs runs_creator_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.runs
-    ADD CONSTRAINT runs_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_actor_agent_fkey FOREIGN KEY (actor_agent_id, org_id) REFERENCES public.agents(id, org_id) ON DELETE SET NULL;
 
 
 --
--- Name: runs runs_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversations conversations_creator_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.runs
-    ADD CONSTRAINT runs_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-
-
---
--- Name: runs runs_prompt_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.runs
-    ADD CONSTRAINT runs_prompt_id_org_id_fkey FOREIGN KEY (prompt_id, org_id) REFERENCES public.prompts(id, org_id);
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
--- Name: runs runs_task_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversations conversations_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.runs
-    ADD CONSTRAINT runs_task_id_org_id_fkey FOREIGN KEY (task_id, org_id) REFERENCES public.tasks(id, org_id);
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
-
---
--- Name: runs runs_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.runs
-    ADD CONSTRAINT runs_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_project_id_org_id_fkey FOREIGN KEY (project_id, org_id) REFERENCES public.projects(id, org_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_parent_id_org_id_fkey FOREIGN KEY (parent_conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
 --
--- Name: runs runs_trigger_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversations conversations_prompt_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.runs
-    ADD CONSTRAINT runs_trigger_id_org_id_fkey FOREIGN KEY (trigger_id, org_id) REFERENCES public.event_handlers(id, org_id);
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_prompt_id_org_id_fkey FOREIGN KEY (prompt_id, org_id) REFERENCES public.prompts(id, org_id);
 
 
 --
--- Name: runs runs_triggering_event_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversations conversations_task_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_task_id_org_id_fkey FOREIGN KEY (task_id, org_id) REFERENCES public.tasks(id, org_id);
+
+
+--
+-- Name: conversations conversations_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
+
+
+--
+-- Name: conversations conversations_trigger_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_trigger_id_org_id_fkey FOREIGN KEY (trigger_id, org_id) REFERENCES public.event_handlers(id, org_id);
+
+
+--
+-- Name: conversations conversations_triggering_event_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 -- Composite FK mirrors pending_firings.triggering_event_id. NULL
 -- triggering_event_id (manual / blueprint-step runs) skips the check under
 -- MATCH SIMPLE, so only event-fired runs are tied to a real event row.
 
-ALTER TABLE ONLY public.runs
-    ADD CONSTRAINT runs_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
 
 
 --
@@ -4060,64 +3687,19 @@ CREATE POLICY agents_update ON public.agents FOR UPDATE USING (((org_id = tf.cur
   WHERE ((org_memberships.user_id = agents.github_pat_user_id) AND (org_memberships.org_id = agents.org_id)))))));
 
 
---
--- Name: curator_messages; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.curator_messages ENABLE ROW LEVEL SECURITY;
-
---
--- Name: curator_messages curator_messages_modify; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY curator_messages_modify ON public.curator_messages USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()))) WITH CHECK (((org_id = tf.current_org_id()) AND (creator_user_id = tf.current_user_id()) AND tf.user_has_org_access(org_id)));
 
 
---
--- Name: curator_messages curator_messages_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY curator_messages_select ON public.curator_messages FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id())));
 
 
---
--- Name: curator_pending_context; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.curator_pending_context ENABLE ROW LEVEL SECURITY;
-
---
--- Name: curator_pending_context curator_pending_context_modify; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY curator_pending_context_modify ON public.curator_pending_context USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()))) WITH CHECK (((org_id = tf.current_org_id()) AND (creator_user_id = tf.current_user_id()) AND tf.user_has_org_access(org_id)));
 
 
---
--- Name: curator_pending_context curator_pending_context_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY curator_pending_context_select ON public.curator_pending_context FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id())));
 
 
---
--- Name: curator_requests; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.curator_requests ENABLE ROW LEVEL SECURITY;
-
---
--- Name: curator_requests curator_requests_modify; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY curator_requests_modify ON public.curator_requests USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()))) WITH CHECK (((org_id = tf.current_org_id()) AND (creator_user_id = tf.current_user_id()) AND tf.user_has_org_access(org_id)));
 
 
---
--- Name: curator_requests curator_requests_select; Type: POLICY; Schema: public; Owner: -
---
 
-CREATE POLICY curator_requests_select ON public.curator_requests FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id())));
+
+
 
 
 --
@@ -4668,10 +4250,10 @@ ALTER TABLE public.run_memory ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY run_memory_all ON public.run_memory USING ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = run_memory.run_id)))) WITH CHECK ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = run_memory.run_id))));
+   FROM public.conversations r
+  WHERE (r.id = run_memory.conversation_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM public.conversations r
+  WHERE (r.id = run_memory.conversation_id))));
 
 
 --
@@ -4685,27 +4267,27 @@ ALTER TABLE public.run_memory_entities ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY run_memory_entities_all ON public.run_memory_entities USING ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = run_memory_entities.run_id)))) WITH CHECK ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = run_memory_entities.run_id))));
+   FROM public.conversations r
+  WHERE (r.id = run_memory_entities.conversation_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM public.conversations r
+  WHERE (r.id = run_memory_entities.conversation_id))));
 
 
 --
--- Name: run_messages; Type: ROW SECURITY; Schema: public; Owner: -
+-- Name: messages; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
-ALTER TABLE public.run_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: run_messages run_messages_all; Type: POLICY; Schema: public; Owner: -
+-- Name: messages messages_all; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY run_messages_all ON public.run_messages USING ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = run_messages.run_id)))) WITH CHECK ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = run_messages.run_id))));
+CREATE POLICY messages_all ON public.messages USING ((EXISTS ( SELECT 1
+   FROM public.conversations r
+  WHERE (r.id = messages.conversation_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM public.conversations r
+  WHERE (r.id = messages.conversation_id))));
 
 
 --
@@ -4719,44 +4301,44 @@ ALTER TABLE public.run_worktrees ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY run_worktrees_all ON public.run_worktrees USING ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = run_worktrees.run_id)))) WITH CHECK ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = run_worktrees.run_id))));
+   FROM public.conversations r
+  WHERE (r.id = run_worktrees.conversation_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM public.conversations r
+  WHERE (r.id = run_worktrees.conversation_id))));
 
 
 --
--- Name: runs; Type: ROW SECURITY; Schema: public; Owner: -
+-- Name: conversations; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
-ALTER TABLE public.runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.conversations ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: runs runs_delete; Type: POLICY; Schema: public; Owner: -
+-- Name: conversations conversations_delete; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY runs_delete ON public.runs FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_can_write_team(team_id)))));
-
-
---
--- Name: runs runs_insert; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY runs_insert ON public.runs FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR tf.user_can_write_team(team_id)) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
+CREATE POLICY conversations_delete ON public.conversations FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_can_write_team(team_id)))));
 
 
 --
--- Name: runs runs_select; Type: POLICY; Schema: public; Owner: -
+-- Name: conversations conversations_insert; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY runs_select ON public.runs FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_in_team(team_id)) OR (visibility = 'org'::text))));
+CREATE POLICY conversations_insert ON public.conversations FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR tf.user_can_write_team(team_id)) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
 
 
 --
--- Name: runs runs_update; Type: POLICY; Schema: public; Owner: -
+-- Name: conversations conversations_select; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY runs_update ON public.runs FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_can_write_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_can_write_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
+CREATE POLICY conversations_select ON public.conversations FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_in_team(team_id)) OR (visibility = 'org'::text))));
+
+
+--
+-- Name: conversations conversations_update; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY conversations_update ON public.conversations FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_can_write_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND tf.user_can_write_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
 
 
 --
@@ -5193,59 +4775,14 @@ GRANT ALL ON TABLE public.agents TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.agents TO tf_app;
 
 
---
--- Name: TABLE curator_messages; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON TABLE public.curator_messages TO postgres;
-GRANT ALL ON TABLE public.curator_messages TO anon;
-GRANT ALL ON TABLE public.curator_messages TO authenticated;
-GRANT ALL ON TABLE public.curator_messages TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.curator_messages TO tf_app;
 
 
---
--- Name: SEQUENCE curator_messages_id_seq; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON SEQUENCE public.curator_messages_id_seq TO postgres;
-GRANT ALL ON SEQUENCE public.curator_messages_id_seq TO anon;
-GRANT ALL ON SEQUENCE public.curator_messages_id_seq TO authenticated;
-GRANT ALL ON SEQUENCE public.curator_messages_id_seq TO service_role;
-GRANT SELECT,USAGE ON SEQUENCE public.curator_messages_id_seq TO tf_app;
 
 
---
--- Name: TABLE curator_pending_context; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON TABLE public.curator_pending_context TO postgres;
-GRANT ALL ON TABLE public.curator_pending_context TO anon;
-GRANT ALL ON TABLE public.curator_pending_context TO authenticated;
-GRANT ALL ON TABLE public.curator_pending_context TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.curator_pending_context TO tf_app;
 
 
---
--- Name: SEQUENCE curator_pending_context_id_seq; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON SEQUENCE public.curator_pending_context_id_seq TO postgres;
-GRANT ALL ON SEQUENCE public.curator_pending_context_id_seq TO anon;
-GRANT ALL ON SEQUENCE public.curator_pending_context_id_seq TO authenticated;
-GRANT ALL ON SEQUENCE public.curator_pending_context_id_seq TO service_role;
-GRANT SELECT,USAGE ON SEQUENCE public.curator_pending_context_id_seq TO tf_app;
 
 
---
--- Name: TABLE curator_requests; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON TABLE public.curator_requests TO postgres;
-GRANT ALL ON TABLE public.curator_requests TO anon;
-GRANT ALL ON TABLE public.curator_requests TO authenticated;
-GRANT ALL ON TABLE public.curator_requests TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.curator_requests TO tf_app;
 
 
 --
@@ -5534,25 +5071,25 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.run_memory_entities TO tf_app;
 
 
 --
--- Name: TABLE run_messages; Type: ACL; Schema: public; Owner: -
+-- Name: TABLE messages; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT ALL ON TABLE public.run_messages TO postgres;
-GRANT ALL ON TABLE public.run_messages TO anon;
-GRANT ALL ON TABLE public.run_messages TO authenticated;
-GRANT ALL ON TABLE public.run_messages TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.run_messages TO tf_app;
+GRANT ALL ON TABLE public.messages TO postgres;
+GRANT ALL ON TABLE public.messages TO anon;
+GRANT ALL ON TABLE public.messages TO authenticated;
+GRANT ALL ON TABLE public.messages TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.messages TO tf_app;
 
 
 --
--- Name: SEQUENCE run_messages_id_seq; Type: ACL; Schema: public; Owner: -
+-- Name: SEQUENCE messages_id_seq; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT ALL ON SEQUENCE public.run_messages_id_seq TO postgres;
-GRANT ALL ON SEQUENCE public.run_messages_id_seq TO anon;
-GRANT ALL ON SEQUENCE public.run_messages_id_seq TO authenticated;
-GRANT ALL ON SEQUENCE public.run_messages_id_seq TO service_role;
-GRANT SELECT,USAGE ON SEQUENCE public.run_messages_id_seq TO tf_app;
+GRANT ALL ON SEQUENCE public.messages_id_seq TO postgres;
+GRANT ALL ON SEQUENCE public.messages_id_seq TO anon;
+GRANT ALL ON SEQUENCE public.messages_id_seq TO authenticated;
+GRANT ALL ON SEQUENCE public.messages_id_seq TO service_role;
+GRANT SELECT,USAGE ON SEQUENCE public.messages_id_seq TO tf_app;
 
 
 --
@@ -5567,28 +5104,20 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.run_worktrees TO tf_app;
 
 
 --
--- Name: TABLE runs; Type: ACL; Schema: public; Owner: -
+-- Name: TABLE conversations; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT ALL ON TABLE public.runs TO postgres;
-GRANT ALL ON TABLE public.runs TO anon;
-GRANT ALL ON TABLE public.runs TO authenticated;
-GRANT ALL ON TABLE public.runs TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.runs TO tf_app;
+GRANT ALL ON TABLE public.conversations TO postgres;
+GRANT ALL ON TABLE public.conversations TO anon;
+GRANT ALL ON TABLE public.conversations TO authenticated;
+GRANT ALL ON TABLE public.conversations TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.conversations TO tf_app;
 
 
 --
 -- Name: TABLE llm_spend; Type: ACL; Schema: public; Owner: -
 --
 
--- Read-only view (TFAC-472): tf_app gets SELECT only. security_invoker='true'
--- means the base tables' RLS still applies under tf_app, so no view-level policy
--- is needed (and would be wrong — see the CREATE VIEW comment).
-GRANT ALL ON TABLE public.llm_spend TO postgres;
-GRANT ALL ON TABLE public.llm_spend TO anon;
-GRANT ALL ON TABLE public.llm_spend TO authenticated;
-GRANT ALL ON TABLE public.llm_spend TO service_role;
-GRANT SELECT ON TABLE public.llm_spend TO tf_app;
 
 
 --
@@ -5997,20 +5526,20 @@ CREATE INDEX idx_blueprint_steps_step_prompt ON public.blueprint_steps (step_pro
 CREATE INDEX idx_blueprint_runs_task   ON public.blueprint_runs (task_id, org_id);
 CREATE INDEX idx_blueprint_runs_status ON public.blueprint_runs (status) WHERE (status = 'running'::text);
 CREATE INDEX idx_blueprint_runs_actor_agent ON public.blueprint_runs (actor_agent_id) WHERE (actor_agent_id IS NOT NULL);
-CREATE INDEX idx_runs_blueprint        ON public.runs (blueprint_run_id, blueprint_step_index);
+CREATE INDEX idx_conversations_blueprint        ON public.conversations (blueprint_run_id, blueprint_step_index);
 -- Claim index for the run queue: the dispatcher claims the globally-oldest
 -- 'queued' run (FIFO by started_at, id) under FOR UPDATE SKIP LOCKED. Partial so
 -- it only spans unclaimed work, mirroring idx_event_queue_pending.
-CREATE INDEX idx_runs_queued ON public.runs (started_at, id) WHERE (status = 'queued'::text);
+CREATE INDEX idx_conversations_queued ON public.conversations (started_at, id) WHERE (status = 'queued'::text);
 -- Placement tier-1 claim index: the two-tier claim's hot path is an executor
 -- pulling its OWN preferred queued runs (preferred_executor_id = me), ordered
 -- by started_at, id. This partial index makes that an indexed equality — the
 -- point of stamping the rendezvous winner at enqueue instead of re-evaluating
 -- the hash per claim — and lets the ORDER BY (preferred = me) DESC, started_at,
 -- id resolve a tier-1 row without scanning the whole queued set. Same partial
--- WHERE status='queued' as idx_runs_queued, so it too spans only unclaimed
--- work. Global-oldest (placement disabled) still uses idx_runs_queued.
-CREATE INDEX idx_runs_queued_preferred ON public.runs (preferred_executor_id, started_at, id) WHERE (status = 'queued'::text);
+-- WHERE status='queued' as idx_conversations_queued, so it too spans only unclaimed
+-- work. Global-oldest (placement disabled) still uses idx_conversations_queued.
+CREATE INDEX idx_conversations_queued_preferred ON public.conversations (preferred_executor_id, started_at, id) WHERE (status = 'queued'::text);
 -- Per-org fairness/cap claim index: the claim computes each org's active-run
 -- count (status running/awaiting_credentials) once per statement to both filter
 -- orgs at their max_concurrent_runs cap and order claimable rows fewest-active
@@ -6021,7 +5550,7 @@ CREATE INDEX idx_runs_queued_preferred ON public.runs (preferred_executor_id, st
 -- this predicate (predicate implication, not textual identity — an equivalent
 -- status IN-list matches regardless of spelling); keep the claim's active-run
 -- status set in sync with the one here so that implication holds.
-CREATE INDEX idx_runs_active_by_org ON public.runs (org_id) WHERE (status = ANY (ARRAY['running'::text, 'awaiting_credentials'::text]));
+CREATE INDEX idx_conversations_active_by_org ON public.conversations (org_id) WHERE (status = ANY (ARRAY['running'::text, 'awaiting_credentials'::text]));
 -- Replay fence (relocated from runs): one event firing one trigger materializes
 -- at most one blueprint_run. Partial WHERE triggering_event_id IS NOT NULL so
 -- manual blueprint runs (NULL) never participate.
@@ -6067,7 +5596,7 @@ ALTER TABLE ONLY public.blueprint_runs
 -- event reference is impossible.
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
--- Composite (id, org_id) FK like runs_actor_agent_fkey: the actor must belong to
+-- Composite (id, org_id) FK like conversations_actor_agent_fkey: the actor must belong to
 -- the run's own org. ON DELETE SET NULL keeps the audit row when the agent is
 -- deleted (the run still happened; the actor pointer just goes blank).
 ALTER TABLE ONLY public.blueprint_runs
@@ -6080,8 +5609,8 @@ ALTER TABLE ONLY public.blueprint_runs
 ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_fired_run_id_org_id_fkey FOREIGN KEY (fired_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);
 
-ALTER TABLE ONLY public.runs
-    ADD CONSTRAINT runs_blueprint_run_fkey FOREIGN KEY (blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_blueprint_run_fkey FOREIGN KEY (blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);
 
 -- run_memory.blueprint_run_id is denormalized from the run and grouped per
 -- blueprint run. Composite (blueprint_run_id, org_id) FK, matching the
@@ -6832,7 +6361,7 @@ CREATE UNIQUE INDEX sso_domains_verified_global_uniq
 -- without a seq scan (the org_domain index leads with org_id, so it can't
 -- serve a connection_id lookup). Also serves a future "domains for this
 -- connection" read. Matches the baseline's index-the-FK-column pattern
--- (idx_tasks_entity, idx_runs_task, ...).
+-- (idx_tasks_entity, idx_conversations_task, ...).
 CREATE INDEX sso_domains_connection_idx ON public.sso_domains (connection_id);
 
 -- BEFORE-UPDATE triggers keep updated_at fresh, matching every other table.
@@ -7144,61 +6673,6 @@ REVOKE ALL ON public.seat_claims FROM PUBLIC;
 REVOKE ALL ON public.seat_claims FROM anon, authenticated, service_role;
 
 
--- staged_agent_injections (TFAC-501): the durable, producer-agnostic "stage for next
--- resume" agent-injection queue — the generic terminal/parked half of the staged-injection
--- delivery seam TFAC-493 shipped live-only. Rolled into the baseline (not a
--- forward migration) because multi-mode / Postgres is net-new and unshipped; the
--- SQLite tree, which HAS shipped, carries the equivalent forward migration
--- 202606290001_staged_agent_injections.sql.
---
--- Run-scoped, modeled on run_messages: team-scoped RLS inherited via the runs FK,
--- (run_id, org_id) FK ON DELETE CASCADE so a purged run takes its undelivered
--- injections with it (the agent will never resume to read them), org_id bound as
--- defense in depth. The store reads/writes on the admin pool (claims-less
--- producer + consumer), but the policy + tf_app grants keep the run_messages
--- shape so a future request-scoped read needs no migration. body is the bare,
--- already-rendered injection line (the flush wraps + bundles); producer is a free-text
--- origin tag (domain.StagedInjectionProducer*, no CHECK).
-CREATE TABLE public.staged_agent_injections (
-    id         uuid DEFAULT gen_random_uuid() NOT NULL,
-    run_id     uuid NOT NULL,
-    org_id     uuid NOT NULL,
-    producer   text NOT NULL,
-    body       text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-ALTER TABLE ONLY public.staged_agent_injections
-    ADD CONSTRAINT staged_agent_injections_pkey PRIMARY KEY (id);
-
--- The index covers the per-run claim's run_id lookup + the created_at sort,
--- mirroring idx_run_messages_run (run_id-leading, no org_id). org_id is applied
--- as a residual filter, NOT indexed: run_id is already selective and functionally
--- determines org_id, so leading with org_id buys nothing.
-CREATE INDEX idx_staged_agent_injections_run ON public.staged_agent_injections USING btree (run_id, created_at);
-
-ALTER TABLE ONLY public.staged_agent_injections
-    ADD CONSTRAINT staged_agent_injections_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY public.staged_agent_injections
-    ADD CONSTRAINT staged_agent_injections_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE CASCADE;
-
--- Team-scoped exactly like run_messages: visible iff the run is (the runs_select
--- RLS gates the EXISTS). The admin pool bypasses this; it's defense in depth for
--- any future app-pool read.
-ALTER TABLE public.staged_agent_injections ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY staged_agent_injections_all ON public.staged_agent_injections USING ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = staged_agent_injections.run_id)))) WITH CHECK ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = staged_agent_injections.run_id))));
-
-GRANT ALL ON TABLE public.staged_agent_injections TO postgres;
-GRANT ALL ON TABLE public.staged_agent_injections TO anon;
-GRANT ALL ON TABLE public.staged_agent_injections TO authenticated;
-GRANT ALL ON TABLE public.staged_agent_injections TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.staged_agent_injections TO tf_app;
 
 
 -- Slack workspace connect: org_slack_workspaces — the (Slack workspace,
@@ -8318,7 +7792,7 @@ REVOKE ALL ON public.ws_presence FROM anon, authenticated, service_role;
 -- (getProc(runID)) is a process-local map hit the router (brain) can't
 -- reach for a run executing on a remote executor. Under run_signals, the
 -- owner delivers into its live process; the staged-injection fallback
--- (staged_agent_injections) remains for genuinely parked runs.
+-- (an undelivered messages row) remains for genuinely parked conversations.
 --
 -- `payload` carries steer text / the permission decision / the injection
 -- body — riding the outbox row, not the NOTIFY payload, so there is no
@@ -8334,7 +7808,7 @@ REVOKE ALL ON public.ws_presence FROM anon, authenticated, service_role;
 CREATE TABLE public.run_signals (
     id         bigint GENERATED BY DEFAULT AS IDENTITY,
     org_id     uuid NOT NULL,
-    run_id     uuid NOT NULL,
+    conversation_id     uuid NOT NULL,
     kind       text NOT NULL,
     payload    jsonb,
     target     text NOT NULL,
@@ -8350,7 +7824,7 @@ ALTER TABLE ONLY public.run_signals
 ALTER TABLE ONLY public.run_signals
     ADD CONSTRAINT run_signals_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.run_signals
-    ADD CONSTRAINT run_signals_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE CASCADE;
+    ADD CONSTRAINT run_signals_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 -- The owner's apply-loop scan: unacked rows targeting me, oldest id first
 -- (§5.2's "apply signals per run in id order" — ascending id across the
@@ -8366,85 +7840,112 @@ REVOKE ALL ON public.run_signals FROM PUBLIC;
 REVOKE ALL ON public.run_signals FROM anon, authenticated, service_role;
 
 
--- run_pending_input (TFAC-585): the durable half of resume-by-enqueue — the
--- message (+ acting user) recorded before a parked run's continuation is
--- re-queued as ordinary claimable work, so a crash between "message
--- recorded" and "process spawned" is recoverable by the standard boot
--- sweep instead of an ad-hoc path. See
--- docs/for-agents/specs/horizontal-scaling/README.md §5.2.
+
+
+-- claims: one row per executor engagement with a conversation — the claim
+-- machinery that used to live as columns on runs (claimed_at / attempts /
+-- executor_id / boot_epoch / cred_pubkey) and as whole rows in
+-- curator_requests. A conversation is claimed (a row is minted here), driven
+-- for a while, and released; a retry or a resumed park is simply the next
+-- claim. At most one active (released_at IS NULL) claim per conversation,
+-- enforced below. Rows are immutable identity + terminal accounting: the
+-- executor/boot pair never changes after mint.
 --
--- Both dialects (NOT Postgres-only, unlike run_signals above): local mode's
--- dispatcher claims its own resumed runs through the identical queue path
--- — resume-by-enqueue applies in every mode, TF_ROLE=all included (decision
--- log #7). See the SQLite twin,
--- internal/db/migrations-sqlite/202607100001_run_pending_input.sql.
---
--- One row per run (PK run_id): a second message recorded before the first
--- is claimed REPLACES it — an idempotent upsert keyed by run_id, matching
--- the documented crash-window contract ("input recorded, requeue failed ->
--- API 500s, user retries" — the retry's upsert is a no-op-equivalent
--- overwrite, never a duplicate row). Consumed destructively (DELETE …
--- RETURNING) by the claiming executor's resume path, exactly like
--- staged_agent_injections' flush — delivered exactly once.
-CREATE TABLE public.run_pending_input (
-    run_id     uuid NOT NULL,
-    org_id     uuid NOT NULL,
-    message    text NOT NULL,
-    user_id    uuid NOT NULL,
+-- Both dialects (the local dispatcher claims its own work through the same
+-- path); the credential columns are multi-mode-only in practice and simply
+-- stay NULL locally.
+CREATE TABLE public.claims (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id uuid NOT NULL,
+    conversation_id uuid NOT NULL,
+    executor_id text NOT NULL,
+    -- boot_epoch pairs with executor_id (an instance's persistent id
+    -- survives restarts); the boot self-sweep only releases claims where
+    -- executor_id = self AND boot_epoch < the current boot's epoch.
+    boot_epoch bigint NOT NULL,
+    -- cred_pubkey is the per-engagement credential sidecar's X25519 public
+    -- key (base64), published when the executor parks the conversation in
+    -- awaiting_credentials and read by the brain at seal time.
+    cred_pubkey text,
+    claimed_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- released_at NULL = this claim is live (its executor owns the
+    -- conversation's process). Stamped exactly once, on release.
+    released_at timestamp with time zone,
+    -- outcome is app-validated: how the engagement ended — 'completed' |
+    -- 'failed' | 'cancelled' | 'requeued' | 'parked' | 'reaped'. NULL while
+    -- live.
+    outcome text,
+    error text,
+    -- Per-engagement accounting (the curator's former per-request numbers;
+    -- a delegation conversation's terminal rollup is the SUM of its claims).
+    cost_usd real,
+    duration_ms integer,
+    num_turns integer,
+    input_tokens integer DEFAULT 0 NOT NULL,
+    output_tokens integer DEFAULT 0 NOT NULL,
+    cache_read_tokens integer DEFAULT 0 NOT NULL,
+    cache_creation_tokens integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-ALTER TABLE ONLY public.run_pending_input
-    ADD CONSTRAINT run_pending_input_pkey PRIMARY KEY (run_id);
+ALTER TABLE ONLY public.claims
+    ADD CONSTRAINT claims_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.claims
+    ADD CONSTRAINT claims_id_org_unique UNIQUE (id, org_id);
+ALTER TABLE ONLY public.claims
+    ADD CONSTRAINT claims_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.claims
+    ADD CONSTRAINT claims_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
-ALTER TABLE ONLY public.run_pending_input
-    ADD CONSTRAINT run_pending_input_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.run_pending_input
-    ADD CONSTRAINT run_pending_input_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.run_pending_input
-    ADD CONSTRAINT run_pending_input_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+-- The single-active-claim invariant: a conversation has at most one live
+-- executor engagement at any moment.
+CREATE UNIQUE INDEX idx_claims_one_active ON public.claims USING btree (conversation_id) WHERE (released_at IS NULL);
+CREATE INDEX idx_claims_conversation ON public.claims USING btree (conversation_id, claimed_at);
 
--- Team-scoped exactly like staged_agent_injections: visible iff the run is
--- (the runs FK's implied visibility gates the EXISTS). The admin pool
--- bypasses this; it's defense in depth for any future app-pool read.
-ALTER TABLE public.run_pending_input ENABLE ROW LEVEL SECURITY;
+-- App-pool visibility composes through the conversation (the runstation
+-- shows which executor drove an engagement); every write is system-side.
+ALTER TABLE public.claims ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY run_pending_input_all ON public.run_pending_input USING ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = run_pending_input.run_id)))) WITH CHECK ((EXISTS ( SELECT 1
-   FROM public.runs r
-  WHERE (r.id = run_pending_input.run_id))));
+CREATE POLICY claims_select ON public.claims FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM public.conversations c
+  WHERE (c.id = claims.conversation_id))));
 
-GRANT ALL ON TABLE public.run_pending_input TO postgres;
-GRANT ALL ON TABLE public.run_pending_input TO anon;
-GRANT ALL ON TABLE public.run_pending_input TO authenticated;
-GRANT ALL ON TABLE public.run_pending_input TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.run_pending_input TO tf_app;
+GRANT ALL ON TABLE public.claims TO postgres;
+GRANT ALL ON TABLE public.claims TO anon;
+GRANT ALL ON TABLE public.claims TO authenticated;
+GRANT ALL ON TABLE public.claims TO service_role;
+GRANT SELECT ON TABLE public.claims TO tf_app;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.claims TO tf_system;
+
+-- messages.claim_id attaches here (declared late: claims_id_org_unique must
+-- exist first). ON DELETE SET NULL so a conversation cascade (conversation →
+-- claims and conversation → messages independently) never orders wrong.
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_claim_id_fkey FOREIGN KEY (claim_id) REFERENCES public.claims(id) ON DELETE SET NULL;
 
 
--- run_credentials (TFAC-614): the sealed per-run credential bundle channel.
--- An executor claims a run and parks it in status='awaiting_credentials';
--- the brain resolves the run's LLM/GitHub/Jira credentials, seals them
--- (credseal, an X25519 sealed box) to the claimant's instances.pubkey, and
--- writes exactly one row here. One row per run (PK run_id), replaced
--- wholesale on every write — never merged — so a refresh (re-minted git
--- tokens for a long-running run) or a re-claim after a crash simply
--- overwrites the prior bundle.
+-- claim_credentials: the sealed per-claim credential bundle channel — the
+-- unification of the former run_credentials and curator_turn_credentials,
+-- which were column-for-column identical because the system always sealed
+-- per engagement. An executor claims a conversation and parks it in
+-- status='awaiting_credentials'; the brain resolves the engagement's
+-- LLM/GitHub/Jira credentials, seals them (credseal, an X25519 sealed box)
+-- to the claim's published cred_pubkey, and writes exactly one row here.
+-- One row per claim (PK claim_id), replaced wholesale on every write —
+-- never merged — so a refresh (re-minted git tokens for a long engagement)
+-- simply overwrites the prior bundle, and a re-claim after a crash is a NEW
+-- claim with its own fresh seal.
 --
--- boot_epoch is the CLAIMING EXECUTOR's boot epoch at seal time, carried in
--- cleartext alongside the sealed blob specifically so the executor can
--- compare it against its own current epoch BEFORE attempting to unseal — a
--- restart mints a fresh ephemeral keypair, and a bundle sealed for an
--- earlier boot must never be handed to credseal.Open (it would just fail
--- the box auth tag, but the contract is stronger than "fails safe": never
--- attempt it at all, so a resume path can't even try).
+-- boot_epoch is the claiming executor's boot epoch at seal time, carried in
+-- cleartext alongside the sealed blob so the executor can compare it
+-- against its own current epoch BEFORE attempting to unseal — never even
+-- attempt a bundle sealed for an earlier boot.
 --
--- Admin-pool only, no RLS policy (deny-by-default) — same posture as
--- instances/leases/run_signals: this table never serves a request handler,
--- and unlike run_pending_input its payload is credential-bearing sealed
--- ciphertext, so there is deliberately no app-pool grant at all.
-CREATE TABLE public.run_credentials (
-    run_id      uuid NOT NULL,
+-- Admin-pool only, no RLS policy (deny-by-default), no app-pool grant at
+-- all: credential-bearing sealed ciphertext, never a request-handler
+-- surface. Rows cascade with their claim.
+CREATE TABLE public.claim_credentials (
+    claim_id    uuid NOT NULL,
     org_id      uuid NOT NULL,
     executor_id text NOT NULL,
     boot_epoch  bigint NOT NULL,
@@ -8452,57 +7953,114 @@ CREATE TABLE public.run_credentials (
     created_at  timestamp with time zone DEFAULT now() NOT NULL
 );
 
-ALTER TABLE ONLY public.run_credentials
-    ADD CONSTRAINT run_credentials_pkey PRIMARY KEY (run_id);
+ALTER TABLE ONLY public.claim_credentials
+    ADD CONSTRAINT claim_credentials_pkey PRIMARY KEY (claim_id);
 
-ALTER TABLE ONLY public.run_credentials
-    ADD CONSTRAINT run_credentials_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.run_credentials
-    ADD CONSTRAINT run_credentials_run_id_org_id_fkey FOREIGN KEY (run_id, org_id) REFERENCES public.runs(id, org_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.claim_credentials
+    ADD CONSTRAINT claim_credentials_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.claim_credentials
+    ADD CONSTRAINT claim_credentials_claim_id_org_id_fkey FOREIGN KEY (claim_id, org_id) REFERENCES public.claims(id, org_id) ON DELETE CASCADE;
 
-ALTER TABLE public.run_credentials ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.claim_credentials ENABLE ROW LEVEL SECURITY;
 
-REVOKE ALL ON public.run_credentials FROM PUBLIC;
-REVOKE ALL ON public.run_credentials FROM anon, authenticated, service_role;
+REVOKE ALL ON public.claim_credentials FROM PUBLIC;
+REVOKE ALL ON public.claim_credentials FROM anon, authenticated, service_role;
+
+-- The executor's awaiting-credentials wait polls for the bundle the brain
+-- sealed to its published pubkey (SELECT), and best-effort deletes the row
+-- on engagement teardown so sealed material doesn't linger (DELETE). No
+-- INSERT — only the brain provisions, on its own superuser admin pool.
+GRANT SELECT, DELETE ON TABLE public.claim_credentials TO tf_system;
 
 
--- curator_turn_credentials: the curator-turn analog of
--- run_credentials — the sealed per-turn credential bundle channel. A homed
--- curator turn is a curator_requests row (not a runs row), so the run-keyed
--- handshake can't carry it; this is the column-for-column mirror keyed on the
--- request id instead. The home executor publishes its per-turn sidecar pubkey
--- onto curator_requests.cred_pubkey and rings the brain; the brain resolves the
--- turn's LLM/GitHub/Jira credentials, seals them to that key, and writes exactly
--- one row here. One row per turn (PK request_id), replaced wholesale on every
--- write (Put upserts, boot_epoch-guarded so a slow provision can't clobber a
--- fresher one). The executor polls it, hands the OPAQUE sealed bytes to the
--- sidecar, and never unseals — only the sidecar holds the private half.
 --
--- Admin-pool only, no RLS policy (deny-by-default) — same posture as
--- run_credentials: credential-bearing sealed ciphertext, never a request-handler
--- surface, so there is deliberately no app-pool grant at all. Rows also cascade
--- with the request (the turn finishing / project delete retires them).
-CREATE TABLE public.curator_turn_credentials (
-    request_id  uuid NOT NULL,
-    org_id      uuid NOT NULL,
-    executor_id text NOT NULL,
-    boot_epoch  bigint NOT NULL,
-    sealed      bytea NOT NULL,
-    created_at  timestamp with time zone DEFAULT now() NOT NULL
-);
+-- Name: llm_spend; Type: VIEW; Schema: public; Owner: -
+--
 
-ALTER TABLE ONLY public.curator_turn_credentials
-    ADD CONSTRAINT curator_turn_credentials_pkey PRIMARY KEY (request_id);
+-- Unified spend view: one row-per-spend shape UNION-ing delegation
+-- conversations, curator claims, and headless system jobs onto a single
+-- category axis. Placed here (not with the tables) because it depends on
+-- claims, which needs conversations' uniques — the tail is where every
+-- dependency already exists.
+--
+-- category derivation: delegation conversations split on trigger_type
+-- (manual → per-user, anything else → autonomous); curator spend is
+-- per-CLAIM (the former per-request row — one claim per turn), attributed
+-- through the owning conversation's team/creator snapshot; system jobs are
+-- 'system_overhead' with the job carried as subtype.
+--
+-- security_invoker = true is LOAD-BEARING and mandatory (PG 15+): the base
+-- tables' RLS (conversations' visibility arms, claims-through-conversation,
+-- system_llm_runs org) applies under the querying app-pool identity.
+CREATE VIEW public.llm_spend WITH (security_invoker='true') AS
+ SELECT 'run'::text AS source,
+    conversations.id AS source_id,
+    conversations.org_id,
+    conversations.team_id,
+        CASE conversations.trigger_type
+            WHEN 'manual'::text THEN 'manual'::text
+            ELSE 'autonomous'::text
+        END AS category,
+    NULL::text AS subtype,
+    conversations.creator_user_id,
+    conversations.actor_agent_id,
+    conversations.trigger_id,
+    conversations.model,
+    COALESCE(conversations.total_cost_usd, (0)::real) AS total_cost_usd,
+    conversations.input_tokens,
+    conversations.output_tokens,
+    conversations.cache_read_tokens,
+    conversations.cache_creation_tokens,
+    conversations.started_at AS occurred_at
+   FROM public.conversations
+  WHERE (conversations.type = 'delegation'::text)
+UNION ALL
+ SELECT 'curator'::text AS source,
+    cl.id AS source_id,
+    cl.org_id,
+    c.team_id,
+    'curator'::text AS category,
+    NULL::text AS subtype,
+    c.creator_user_id,
+    NULL::uuid AS actor_agent_id,
+    NULL::uuid AS trigger_id,
+    NULL::text AS model,
+    COALESCE(cl.cost_usd, (0)::real) AS total_cost_usd,
+    cl.input_tokens,
+    cl.output_tokens,
+    cl.cache_read_tokens,
+    cl.cache_creation_tokens,
+    cl.claimed_at AS occurred_at
+   FROM (public.claims cl
+     JOIN public.conversations c ON (((c.id = cl.conversation_id) AND (c.org_id = cl.org_id))))
+  WHERE (c.type = 'curator'::text)
+UNION ALL
 
-ALTER TABLE ONLY public.curator_turn_credentials
-    ADD CONSTRAINT curator_turn_credentials_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.curator_turn_credentials
-    ADD CONSTRAINT curator_turn_credentials_request_id_org_id_fkey FOREIGN KEY (request_id, org_id) REFERENCES public.curator_requests(id, org_id) ON DELETE CASCADE;
+ SELECT 'system'::text AS source,
+    system_llm_runs.id AS source_id,
+    system_llm_runs.org_id,
+    NULL::uuid AS team_id,
+    'system_overhead'::text AS category,
+    system_llm_runs.job AS subtype,
+    NULL::uuid AS creator_user_id,
+    NULL::uuid AS actor_agent_id,
+    NULL::uuid AS trigger_id,
+    system_llm_runs.model,
+    system_llm_runs.total_cost_usd,
+    system_llm_runs.input_tokens,
+    system_llm_runs.output_tokens,
+    system_llm_runs.cache_read_tokens,
+    system_llm_runs.cache_creation_tokens,
+    system_llm_runs.started_at AS occurred_at
+   FROM public.system_llm_runs;
 
-ALTER TABLE public.curator_turn_credentials ENABLE ROW LEVEL SECURITY;
+GRANT ALL ON TABLE public.llm_spend TO postgres;
+GRANT ALL ON TABLE public.llm_spend TO anon;
+GRANT ALL ON TABLE public.llm_spend TO authenticated;
+GRANT ALL ON TABLE public.llm_spend TO service_role;
+GRANT SELECT ON TABLE public.llm_spend TO tf_app;
 
-REVOKE ALL ON public.curator_turn_credentials FROM PUBLIC;
-REVOKE ALL ON public.curator_turn_credentials FROM anon, authenticated, service_role;
+
 
 
 -- tf_system: least-privilege executor role. Login mechanics mirror
@@ -8522,9 +8080,9 @@ GRANT USAGE ON SCHEMA public, tf TO tf_system;
 -- (SELECT, UPDATE) and the dispatcher's own queue inserts — both the
 -- initial blueprint-step enqueue and every subsequent step (SELECT,
 -- INSERT). No DELETE — runs are never removed, only status-terminated.
-GRANT SELECT, INSERT, UPDATE ON TABLE public.runs TO tf_system;
-GRANT SELECT, INSERT ON TABLE public.run_messages TO tf_system;
-GRANT USAGE, SELECT ON SEQUENCE public.run_messages_id_seq TO tf_system;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.conversations TO tf_system;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.messages TO tf_system;
+GRANT USAGE, SELECT ON SEQUENCE public.messages_id_seq TO tf_system;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.artifacts TO tf_system;
 GRANT SELECT, INSERT, DELETE ON TABLE public.run_worktrees TO tf_system;
 -- Agent memory (TaskMemory.UpsertAgentMemorySystem / GetMemoriesForEntitySystem).
@@ -8542,9 +8100,6 @@ GRANT SELECT ON TABLE public.entity_links TO tf_system;
 -- flips (SetStatusSystem, CloseSystem on run completion).
 GRANT SELECT, INSERT ON TABLE public.task_events TO tf_system;
 GRANT SELECT, UPDATE ON TABLE public.tasks TO tf_system;
--- Cross-run injection staging: AppendSystem (producer) + FlushPendingSystem
--- (the resume path consuming it) both run executor-side.
-GRANT SELECT, INSERT, DELETE ON TABLE public.staged_agent_injections TO tf_system;
 -- The inject signal's gone-compensation enqueues a pending_firing from the
 -- executor's cross-pod apply loop. Claim/drain/requeue is router-side.
 GRANT SELECT, INSERT ON TABLE public.pending_firings TO tf_system;
@@ -8553,11 +8108,6 @@ GRANT USAGE, SELECT ON SEQUENCE public.pending_firings_id_seq TO tf_system;
 -- UPDATE for ack. Insert (cross-pod dispatch) and the purge reaper are
 -- brain-gated — control-side only.
 GRANT SELECT, UPDATE ON TABLE public.run_signals TO tf_system;
--- run_pending_input (TFAC-585): the claim path Peeks then Consumes
--- (destructively) right before delivery, both on the admin pool. The
--- upsert-write rides the resume flip's app-pool claims tx and needs no
--- grant here.
-GRANT SELECT, DELETE ON TABLE public.run_pending_input TO tf_system;
 -- ws_outbox (TFAC-584): INSERT to publish a websocket event over the
 -- backplane, plus SELECT + DELETE for the TTL reaper, which deliberately
 -- runs on every backplane-wired pod, executors included.
@@ -8618,40 +8168,13 @@ GRANT SELECT ON TABLE public.org_github_app_installations TO tf_system;
 GRANT SELECT ON TABLE public.events TO tf_system;
 GRANT SELECT ON TABLE public.jira_project_status_rules TO tf_system;
 -- llm_spend is security_invoker: reading it needs SELECT on its own base
--- tables too (curator_requests, system_llm_runs), not just the view.
+-- tables too (conversations, claims, system_llm_runs), not just the view.
 GRANT SELECT ON TABLE public.llm_spend TO tf_system;
--- curator_requests: SELECT feeds llm_spend and the executor claim loop's
--- homed-turn scan; UPDATE is the ownership-scoped boot sweep + the leader
--- reaper cancelling turns stranded on a dead home (curator homing, spec §6.3),
--- and the home executor's PublishTurnCredPubKey stamp of cred_pubkey when it
--- stands a turn's credential sidecar up. The per-turn
--- running/terminal writes ride the app pool under the requesting user's
--- synthetic claims, not tf_system.
-GRANT SELECT, UPDATE ON TABLE public.curator_requests TO tf_system;
--- curator_messages: SELECT so the ownership-scoped boot sweep's token roll-up
--- (the correlated SUM every terminal write performs, TFAC-473) can read the
--- turn's streamed messages on the executor's tf_system pool. Read-only — the
--- per-message inserts ride the app pool under synthetic claims.
-GRANT SELECT ON TABLE public.curator_messages TO tf_system;
 -- curator_homes: the control pod upserts the (org, project) -> home mapping at
 -- turn dispatch and the executor claim loop reads it; the reaper/reset clears
 -- it. All I/O is admin-pool with org_id bound by argument (curator homing).
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.curator_homes TO tf_system;
 GRANT SELECT ON TABLE public.system_llm_runs TO tf_system;
--- Sealed per-run credential bundles (TFAC-614): the executor's
--- awaiting-credentials wait polls this for the bundle the brain sealed to
--- its published pubkey, then unseals it in-process — org_secrets itself
--- is never read on the executor (TF_SECRET_ENCRYPTION_KEY never reaches
--- this role at all; see internal/db/postgres/secrets_disabled.go). No
--- INSERT/DELETE: only the brain provisions (Put) and only a future
--- terminal-disposition cleanup would delete, neither of which runs here.
-GRANT SELECT ON TABLE public.run_credentials TO tf_system;
--- Sealed per-turn credential bundles: the curator-turn analog of
--- run_credentials. The home executor's sidecar bring-up polls this for the
--- bundle the brain sealed to its published pubkey (SELECT), and best-effort
--- deletes the row on turn teardown so sealed material doesn't linger (DELETE).
--- No INSERT — only the brain provisions (Put), on its own superuser admin pool.
-GRANT SELECT, DELETE ON TABLE public.curator_turn_credentials TO tf_system;
 -- Slack provider policy ops (ee/slack/exec_provider_ops.go): the orchestrator
 -- serves the sidecar's relayed `exec slack` calls against these, resolving an
 -- authorization decision or a workspace IDENTITY, never a bot token (that rides
@@ -8672,9 +8195,9 @@ GRANT SELECT ON TABLE public.goose_db_version TO tf_system;
 -- arms, both dead — grep finds zero writers — replaced by membership
 -- through this join) is result-identical for every row that exists as of
 -- this migration.
-INSERT INTO run_memory_entities (org_id, run_id, entity_id, role, created_at)
-SELECT org_id, run_id, entity_id, 'primary', created_at FROM run_memory
-ON CONFLICT (run_id, entity_id) DO NOTHING;
+INSERT INTO run_memory_entities (org_id, conversation_id, entity_id, role, created_at)
+SELECT org_id, conversation_id, entity_id, 'primary', created_at FROM run_memory
+ON CONFLICT (conversation_id, entity_id) DO NOTHING;
 
 -- +goose Down
 SELECT 'down not supported';
