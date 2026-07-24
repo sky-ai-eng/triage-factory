@@ -81,7 +81,7 @@ func (a *App) startBrain(term int64) {
 	// listener holds with the lease, stopping via brainCtx on demotion —
 	// deliberately unlike tf_ctl's always-listen + dispatch-gate shape:
 	// sentinel volume tracks agent activity, and a standby consuming that
-	// stream only to hand it to a bus with zero system:run: subscribers
+	// stream only to hand it to a bus with zero system:conversation: subscribers
 	// (the sole consumer, the EE lifecycle adapter, subscribes inside the
 	// brain-gated OnReady worker below) would be exactly the waste §5.3
 	// splits the channel to avoid. nil check: role=all never builds a

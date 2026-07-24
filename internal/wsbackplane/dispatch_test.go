@@ -210,7 +210,7 @@ func TestHandleCtlKick_ClosesNonSelfOriginMatch(t *testing.T) {
 // is, so a self-origin envelope must never re-publish locally.
 func TestHandleBusNotification_SkipsSelfOrigin(t *testing.T) {
 	b := &Backplane{originID: "pod-a"}
-	env := busEnvelope{OriginInstanceID: "pod-a", Event: domain.Event{EventType: "system:run:status", OrgID: "org-1"}}
+	env := busEnvelope{OriginInstanceID: "pod-a", Event: domain.Event{EventType: "system:conversation:status", OrgID: "org-1"}}
 	payload, _ := json.Marshal(env)
 
 	called := false
@@ -225,7 +225,7 @@ func TestHandleBusNotification_SkipsSelfOrigin(t *testing.T) {
 // half: an executor's sentinel must land on the brain's local bus.
 func TestHandleBusNotification_RepublishesNonSelfOrigin(t *testing.T) {
 	b := &Backplane{originID: "brain-pod"}
-	want := domain.Event{EventType: "system:run:activity", OrgID: "org-1", MetadataJSON: `{"tool":"bash"}`}
+	want := domain.Event{EventType: "system:conversation:activity", OrgID: "org-1", MetadataJSON: `{"tool":"bash"}`}
 	env := busEnvelope{OriginInstanceID: "executor-pod", Event: want}
 	payload, _ := json.Marshal(env)
 

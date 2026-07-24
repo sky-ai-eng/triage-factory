@@ -447,7 +447,7 @@ func testSentinelBrainRelay(t *testing.T, adminDB *sql.DB, dsn string) {
 	t.Cleanup(cancel)
 	go brain.RunBusListener(ctx, func(evt domain.Event) { received <- evt })
 
-	want := domain.Event{EventType: "system:run:activity", OrgID: "org-sentinel", MetadataJSON: `{"tool":"bash"}`}
+	want := domain.Event{EventType: "system:conversation:activity", OrgID: "org-sentinel", MetadataJSON: `{"tool":"bash"}`}
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		executor.PublishSentinel(want)

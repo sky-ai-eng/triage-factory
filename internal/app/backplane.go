@@ -41,7 +41,7 @@ func (a *App) buildWSBackplane() {
 }
 
 // registerSentinelRelay subscribes TFAC-592 run sentinels
-// (system:run:status / system:run:activity) for cross-pod relay to the
+// (system:conversation:status / system:conversation:activity) for cross-pod relay to the
 // brain via tf_bus — executor-only: a brain process already has these on
 // its own local bus (see broadcastEvent's identical exclusion in
 // subscribers.go), so relaying a brain's own sentinels back to itself
@@ -52,7 +52,7 @@ func (a *App) registerSentinelRelay() {
 	}
 	a.bus.Subscribe(eventbus.Subscriber{
 		Name:   "tf-bus-relay",
-		Filter: []string{"system:run:"},
+		Filter: []string{"system:conversation:"},
 		Handle: a.wsBackplane.PublishSentinel,
 	})
 }

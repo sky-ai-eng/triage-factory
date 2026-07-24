@@ -3,7 +3,7 @@
 // api.OnReady (the socket manager's precedent — api.Bus() is nil during
 // install(), see install.go's package doc), subscribes to the run-lifecycle
 // and routing-disposition sentinels the blocking core tickets publish
-// (system:run:status, system:run:activity, system:routing:disposition) and
+// (system:conversation:status, system:conversation:activity, system:routing:disposition) and
 // drives four surfaces purely off them:
 //
 //   - a 👀 reaction acknowledging an explicit @-mention (the ONLY reaction —
@@ -72,7 +72,7 @@ var (
 	// never fires while a run is genuinely still going.
 	slackLifecycleStatusRefreshInterval = 45 * time.Second
 	// slackLifecycleActivityDebounce bounds setStatus calls driven by
-	// system:run:activity to at most one per this interval per run — activity
+	// system:conversation:activity to at most one per this interval per run — activity
 	// can arrive far faster than it should render.
 	slackLifecycleActivityDebounce = 3 * time.Second
 	// slackLifecycleIdleTimeout reaps a worker whose run's terminal sentinel
@@ -137,7 +137,7 @@ func (a *lifecycleAdapter) run(ctx context.Context) {
 	ch := make(chan domain.Event, slackLifecycleEventBuffer)
 	unsubscribe := bus.Subscribe(eventbus.Subscriber{
 		Name:   "slack-lifecycle",
-		Filter: []string{"system:run:", "system:routing:"},
+		Filter: []string{"system:conversation:", "system:routing:"},
 		Handle: func(evt domain.Event) {
 			select {
 			case ch <- evt:
@@ -189,15 +189,15 @@ func drainLifecycleWorkers(runs map[string]*runEntry) {
 }
 
 // dispatch routes one bus sentinel to its handler by type. Anything else
-// matching the "system:run:"/"system:routing:" filter that isn't one of
+// matching the "system:conversation:"/"system:routing:" filter that isn't one of
 // these three exact types (there is none today) is silently ignored.
 func (a *lifecycleAdapter) dispatch(ctx context.Context, evt domain.Event, runs map[string]*runEntry) {
 	switch evt.EventType {
 	case domain.EventSystemRoutingDisposition:
 		a.handleDisposition(ctx, evt)
-	case domain.EventSystemRunStatus:
+	case domain.EventSystemConversationStatus:
 		a.handleRunStatus(ctx, evt, runs)
-	case domain.EventSystemRunActivity:
+	case domain.EventSystemConversationActivity:
 		a.handleRunActivity(ctx, evt, runs)
 	}
 }
@@ -404,16 +404,16 @@ func isTerminalRunStatus(status string) bool {
 // orgs), and stalling it on a slow/429'd teardown call would head-of-line
 // block every other org's sentinels behind one run's cleanup.
 func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event, runs map[string]*runEntry) {
-	var meta events.SystemRunStatusMetadata
+	var meta events.SystemConversationStatusMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 		slackLog.Warn("slack lifecycle: decode run status failed", "error", err)
 		return
 	}
 
-	entry, ok := runs[meta.RunID]
+	entry, ok := runs[meta.ConversationID]
 	if !ok {
-		entry = a.resolveRunEntry(ctx, evt.OrgID, meta.RunID)
-		runs[meta.RunID] = entry
+		entry = a.resolveRunEntry(ctx, evt.OrgID, meta.ConversationID)
+		runs[meta.ConversationID] = entry
 		pruneRunCache(runs)
 	} else {
 		// LRU touch (before the isSlack early-return — non-Slack entries are
@@ -445,7 +445,7 @@ func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event
 	case meta.Status == "running":
 		switch {
 		case entry.worker == nil:
-			entry.worker = newRunStatusWorker(ctx, a.client, a.publicURL, evt.OrgID, meta.RunID, entry.channel, entry.threadTS, entry.botToken, initialIndicatorText, entry.prevDone)
+			entry.worker = newRunStatusWorker(ctx, a.client, a.publicURL, evt.OrgID, meta.ConversationID, entry.channel, entry.threadTS, entry.botToken, initialIndicatorText, entry.prevDone)
 		case !entry.agentLive:
 			// Started by a setup-phase status — that phase is over; show the
 			// generic working pair until tool activity refines it.
@@ -464,12 +464,12 @@ func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event
 			// The run failed before any status-bearing sentinel started a
 			// worker — still owe the failure note; nothing to clear since no
 			// worker ever set a status.
-			postSlackFailureReply(ctx, a.client, a.publicURL, evt.OrgID, meta.RunID, entry.channel, entry.threadTS, entry.botToken)
+			postSlackFailureReply(ctx, a.client, a.publicURL, evt.OrgID, meta.ConversationID, entry.channel, entry.threadTS, entry.botToken)
 		}
 	default:
 		if text, ok := preRunIndicatorText(meta.Status); ok {
 			if entry.worker == nil {
-				entry.worker = newRunStatusWorker(ctx, a.client, a.publicURL, evt.OrgID, meta.RunID, entry.channel, entry.threadTS, entry.botToken, text, entry.prevDone)
+				entry.worker = newRunStatusWorker(ctx, a.client, a.publicURL, evt.OrgID, meta.ConversationID, entry.channel, entry.threadTS, entry.botToken, text, entry.prevDone)
 				entry.agentLive = false
 			} else {
 				entry.worker.sendActivity(text)
@@ -480,17 +480,17 @@ func (a *lifecycleAdapter) handleRunStatus(ctx context.Context, evt domain.Event
 
 // handleRunActivity forwards a tool-activity sentinel to its run's live
 // worker, if any. A run with no cached entry yet (activity arrived before
-// this adapter ever saw a system:run:status for it) or no active worker
+// this adapter ever saw a system:conversation:status for it) or no active worker
 // (not "running", or not a Slack run at all) is silently ignored — the
-// verdict-priming event is always system:run:status, per the cache contract
+// verdict-priming event is always system:conversation:status, per the cache contract
 // above.
 func (a *lifecycleAdapter) handleRunActivity(ctx context.Context, evt domain.Event, runs map[string]*runEntry) {
-	var meta events.SystemRunActivityMetadata
+	var meta events.SystemConversationActivityMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 		slackLog.Warn("slack lifecycle: decode run activity failed", "error", err)
 		return
 	}
-	entry, ok := runs[meta.RunID]
+	entry, ok := runs[meta.ConversationID]
 	if !ok || !entry.isSlack || entry.worker == nil {
 		return
 	}
@@ -654,10 +654,10 @@ func preRunIndicatorText(status string) (indicatorText, bool) {
 }
 
 // activityIndicatorText derives both indicator texts from a
-// system:run:activity sentinel's tool list: prefer each tool's Description
+// system:conversation:activity sentinel's tool list: prefer each tool's Description
 // when non-empty, else a humanized form of its Name, joined for the
 // (usually single-element, occasionally parallel-tool-call) case.
-func activityIndicatorText(tools []events.RunActivityTool) indicatorText {
+func activityIndicatorText(tools []events.ConversationActivityTool) indicatorText {
 	parts := make([]string, 0, len(tools))
 	for _, t := range tools {
 		label := t.Description

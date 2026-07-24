@@ -892,7 +892,7 @@ control pods, the delegation spawner's classifier wait on executors,
 the re-profile button. At `all`, loopback.
 
 The same brain-bound motion carries the run sentinels
-(`system:run:status` / `system:run:activity`, TFAC-592): they are
+(`system:conversation:status` / `system:conversation:activity`, TFAC-592): they are
 published on the bus of the process *running the run* — an executor,
 after the split — while their consumers (EE bus subscribers such as
 the Slack liveness adapter) are brain components (§3). They ride a

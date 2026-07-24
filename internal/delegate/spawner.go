@@ -1259,9 +1259,9 @@ func (s *Spawner) broadcastRunUpdate(orgID, runID, status string) {
 			Data:           map[string]string{"status": status},
 		})
 	}
-	s.publishEvent(orgID, domain.EventSystemRunStatus, events.SystemRunStatusMetadata{
-		RunID:  runID,
-		Status: status,
+	s.publishEvent(orgID, domain.EventSystemConversationStatus, events.SystemConversationStatusMetadata{
+		ConversationID: runID,
+		Status:         status,
 	})
 }
 
@@ -1284,11 +1284,11 @@ func (s *Spawner) broadcastRunFailed(orgID, runID string, kind domain.RunFailure
 			Data:           data,
 		})
 	}
-	meta := events.SystemRunStatusMetadata{RunID: runID, Status: "failed"}
+	meta := events.SystemConversationStatusMetadata{ConversationID: runID, Status: "failed"}
 	if kind != domain.RunFailureUnclassified {
 		meta.FailureKind = string(kind)
 	}
-	s.publishEvent(orgID, domain.EventSystemRunStatus, meta)
+	s.publishEvent(orgID, domain.EventSystemConversationStatus, meta)
 }
 
 func (s *Spawner) broadcastMessage(orgID, runID string, msg *domain.Message) {
@@ -1305,16 +1305,16 @@ func (s *Spawner) broadcastMessage(orgID, runID string, msg *domain.Message) {
 	if msg.Subtype != "tool_use" {
 		return
 	}
-	tools := make([]events.RunActivityTool, 0, len(msg.ToolCalls))
+	tools := make([]events.ConversationActivityTool, 0, len(msg.ToolCalls))
 	for _, tc := range msg.ToolCalls {
-		tool := events.RunActivityTool{Name: tc.Name}
+		tool := events.ConversationActivityTool{Name: tc.Name}
 		if desc, ok := tc.Input["description"].(string); ok {
 			tool.Description = desc
 		}
 		tools = append(tools, tool)
 	}
-	s.publishEvent(orgID, domain.EventSystemRunActivity, events.SystemRunActivityMetadata{
-		RunID: runID,
-		Tools: tools,
+	s.publishEvent(orgID, domain.EventSystemConversationActivity, events.SystemConversationActivityMetadata{
+		ConversationID: runID,
+		Tools:          tools,
 	})
 }

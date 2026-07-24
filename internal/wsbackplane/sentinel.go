@@ -7,9 +7,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// PublishSentinel relays a TFAC-592 run sentinel (system:run:status /
-// system:run:activity) onto tf_bus for the brain to pick up. Executor
-// processes wire this as an eventbus subscriber for the "system:run:"
+// PublishSentinel relays a TFAC-592 run sentinel (system:conversation:status /
+// system:conversation:activity) onto tf_bus for the brain to pick up. Executor
+// processes wire this as an eventbus subscriber for the "system:conversation:"
 // prefix (internal/app's registerSentinelRelay) — a brain process never
 // needs it, since its sentinels are already on its own local bus (see
 // that wiring's doc comment).
