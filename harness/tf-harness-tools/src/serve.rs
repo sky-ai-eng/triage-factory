@@ -42,6 +42,13 @@
 //!   never arrives and the client's own frame read fails on EOF. No partial
 //!   frame is ever emitted — a frame is serialized in full and written from a
 //!   single buffer, or the process dies before sending.
+//! * **Error responses and the connection** — a protocol error does *not* imply
+//!   the engagement is over. Most kinds are survivable (answer, then read the
+//!   next frame); one, `request_too_large`, is fatal by construction because the
+//!   stream cannot be resynchronized past a body the server refused to read, so
+//!   the server closes right after sending it. [`ErrorKind::is_fatal`] is the
+//!   authoritative classification — a client branches on it rather than
+//!   assuming, and a kind added later is classified in that one place.
 //! * **Bash children** — `bash` runs each command in its own session
 //!   (`setsid`, via [`crate::shell`]) and [`crate::bash::execute`] waits for and
 //!   reaps it before returning. Because dispatch is synchronous and serial, no
@@ -178,18 +185,40 @@ impl Response {
 
 /// Stable `kind` discriminators for protocol-level (non-tool) failures. The
 /// string values are part of the wire contract; add variants, never rename.
+///
+/// Each variant documents whether the connection **survives** it — the fact a
+/// client's error handling turns on. Survivable kinds mean "read the next
+/// frame"; fatal kinds mean the server has already closed and no further frame
+/// will arrive, so the engagement is over. A client may also rely on the
+/// converse: [`ErrorKind::is_fatal`] is the single source of truth, so a kind
+/// added later is classified there rather than by string-matching at call
+/// sites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     /// The `tool` field named a tool the host does not implement. The
     /// extensibility hook: a new verb becomes a new known name, and everything
     /// else keeps returning this.
+    ///
+    /// Connection **survives** — the request was well-framed and fully read.
     UnknownTool,
     /// The request frame's bytes were not a JSON object with a string `tool`
     /// field. The frame boundary was intact (a full length-delimited body was
-    /// read), so the connection survives and the next frame is still read.
+    /// read), so the next frame is still read.
+    ///
+    /// Connection **survives**.
     MalformedRequest,
+    /// A request's length prefix exceeded [`MAX_FRAME_BYTES`], so the body was
+    /// never read and the stream can no longer be resynchronized — the server
+    /// cannot know where the oversized body ends.
+    ///
+    /// Connection is **closed** immediately after this frame: it is the last
+    /// frame the client will receive on this engagement.
+    RequestTooLarge,
     /// A response body exceeded [`MAX_FRAME_BYTES`]. Defensive; truncation keeps
     /// real tool output far below the cap.
+    ///
+    /// Connection **survives** — the oversized body is replaced by this error
+    /// and the read loop continues.
     ResponseTooLarge,
 }
 
@@ -199,7 +228,21 @@ impl ErrorKind {
         match self {
             ErrorKind::UnknownTool => "unknown_tool",
             ErrorKind::MalformedRequest => "malformed_request",
+            ErrorKind::RequestTooLarge => "request_too_large",
             ErrorKind::ResponseTooLarge => "response_too_large",
+        }
+    }
+
+    /// Whether the server closes the connection immediately after sending this
+    /// kind. `true` means the frame is the engagement's last; `false` means the
+    /// client should go on reading. The one place this classification lives, so
+    /// a future variant is decided here and not at each call site.
+    pub fn is_fatal(self) -> bool {
+        match self {
+            ErrorKind::RequestTooLarge => true,
+            ErrorKind::UnknownTool | ErrorKind::MalformedRequest | ErrorKind::ResponseTooLarge => {
+                false
+            }
         }
     }
 }
@@ -359,10 +402,11 @@ fn serve_connection(stream: UnixStream, cwd: &str) -> io::Result<()> {
             ReadOutcome::Closed => return Ok(()),
             ReadOutcome::TooLarge(len) => {
                 // Best-effort: tell the peer why, then close — the stream can't
-                // be resynchronized past an oversized body.
+                // be resynchronized past an oversized body. The kind is the
+                // fatal one precisely because this branch always closes.
                 let response = Response::protocol_error(
                     Value::Null,
-                    ErrorKind::MalformedRequest,
+                    ErrorKind::RequestTooLarge,
                     format!("frame length {len} exceeds cap {MAX_FRAME_BYTES}; closing connection"),
                 );
                 let _ = write_frame(&mut writer, &response);
@@ -456,6 +500,46 @@ mod tests {
         let v = serde_json::to_value(&resp).unwrap();
         assert_eq!(v["id"], json!(1));
         assert_eq!(v["error"]["kind"], json!("unknown_tool"));
+    }
+
+    #[test]
+    fn wire_strings_and_fatality_are_pinned() {
+        // The kind strings are the wire contract; changing one silently would
+        // break a client that branches on it.
+        for (kind, wire, fatal) in [
+            (ErrorKind::UnknownTool, "unknown_tool", false),
+            (ErrorKind::MalformedRequest, "malformed_request", false),
+            (ErrorKind::RequestTooLarge, "request_too_large", true),
+            (ErrorKind::ResponseTooLarge, "response_too_large", false),
+        ] {
+            assert_eq!(kind.as_str(), wire, "wire string for {kind:?}");
+            assert_eq!(kind.is_fatal(), fatal, "fatality for {kind:?}");
+        }
+    }
+
+    #[test]
+    fn every_kind_handle_request_can_emit_is_survivable() {
+        // handle_request runs per-frame inside the read loop, which always goes
+        // on to the next frame — so nothing it produces may be marked fatal.
+        // The fatal kind is emitted by the read loop itself, not from here.
+        for body in [
+            &br#"not json"#[..],
+            &br#"[1,2,3]"#[..],
+            &br#"{"id":1,"tool":"frobnicate"}"#[..],
+        ] {
+            let resp = handle_request(body, ".");
+            let v = serde_json::to_value(&resp).unwrap();
+            let kind = v["error"]["kind"].as_str().expect("a kinded error");
+            assert!(
+                kind == ErrorKind::MalformedRequest.as_str()
+                    || kind == ErrorKind::UnknownTool.as_str(),
+                "handle_request emitted an unexpected kind: {kind}"
+            );
+            assert!(
+                !matches!(kind, k if k == ErrorKind::RequestTooLarge.as_str()),
+                "handle_request must never emit the connection-fatal kind"
+            );
+        }
     }
 
     #[test]

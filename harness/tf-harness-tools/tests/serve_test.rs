@@ -347,7 +347,9 @@ fn oversized_length_prefix_is_refused_and_closes() {
 
     let body = read_frame(&mut stream).expect("expected a protocol-error frame");
     let resp: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(resp["error"]["kind"], json!("malformed_request"));
+    // Its own kind, distinct from the survivable malformed_request: this is the
+    // one protocol error after which the server always closes.
+    assert_eq!(resp["error"]["kind"], json!("request_too_large"));
 
     // The server closed after answering: the next read hits EOF.
     let mut header = [0u8; 4];

@@ -77,8 +77,12 @@ the spec. In brief: a 4-byte big-endian length prefix then that many JSON bytes;
 request `{id, tool, args}`; response `{id, ok, result}` or `{id, ok:false,
 error}`, where `error` is the tool's message string for a tool failure or a
 `{kind, message}` object for a protocol failure (`unknown_tool`,
-`malformed_request`, `response_too_large`). A clean socket EOF ends the
-engagement. Keeping tool
+`malformed_request`, `request_too_large`, `response_too_large`). A protocol
+error doesn't imply the engagement is over: all kinds are survivable — read the
+next frame — except `request_too_large`, after which the server always closes
+because the stream can't be resynchronized past a body it refused to read
+(`ErrorKind::is_fatal` is the authoritative classification). A clean socket EOF
+ends the engagement. Keeping tool
 execution in-jail (rather than on the host side of a bind mount) keeps
 symlink/path-traversal resolution over hostile worktree content inside the
 Sentry; the resident-behind-a-socket shape keeps the capability-holding
