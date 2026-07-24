@@ -163,10 +163,19 @@ func noteLine(sk Skeleton, lvl tier, total, rows int) string {
 		fmt.Fprintf(&b, "  %s, folded and windowed to %d lines — elided spans are marked below.",
 			plural(total, "event", "events"), rows)
 	}
-	if sk.Truncated {
-		b.WriteString(" The oldest history is missing: the timeline fetch hit its page cap.")
+	// Name the cause, not just the fact. An agent weighing whether to trust
+	// the block is served differently by "this PR is longer than the block
+	// ever shows" than by "the read broke" — and both mean the newest
+	// activity is what's absent, which is the part that changes decisions.
+	switch sk.Truncation {
+	case TruncationPageCap:
+		b.WriteString(" This PR's history is longer than the fetch reads: only the earliest events are shown and the most recent activity is missing.")
+	case TruncationFetchFailed:
+		b.WriteString(" The history could not be read to the end (a timeline page failed to fetch), so the most recent activity is missing.")
+	case TruncationParseFailed:
+		b.WriteString(" The history could not be read to the end (a timeline page could not be parsed), so the most recent activity is missing.")
 	}
-	if lvl != tierFull || sk.Truncated {
+	if lvl != tierFull || sk.Truncation != TruncationNone {
 		b.WriteString(" For detail: `git log` in the worktree, or `exec gh pr view -v` for review and comment bodies.")
 	}
 	return b.String()
@@ -225,14 +234,10 @@ func mergeRun(run []Entry) Entry {
 			details = append(details, e.Detail)
 		}
 	}
-	// A review fold shares one state by construction (it's in the fold key),
-	// so the state carries onto the merged row. Label folds list the names
-	// they touched — short by construction and the only case where the
-	// individual values still matter at a glance. Everything else (commits,
-	// comments) drops its details entirely.
+	// Label folds list the names they touched — short by construction and the
+	// only case where the individual values still matter at a glance.
+	// Everything else (commits, comments) drops its details entirely.
 	switch merged.Kind {
-	case KindReview:
-		merged.Detail = run[0].Detail
 	case KindLabeled, KindUnlabeled:
 		merged.Detail = joinCapped(details, maxFoldLabels)
 	}
@@ -370,7 +375,13 @@ func writeRows(b *strings.Builder, rows []Entry, opts Options) {
 			when += " " + age
 			prevAge = age
 		}
-		c := cell{when: when, what: whatCell(e), who: whoCell(e, opts)}
+		// Sanitize here rather than trusting the entries: Render is this
+		// package's public surface and a Skeleton can be built by hand, so
+		// the "one entry per line" structure must be guaranteed by the code
+		// that emits the lines, not by whoever populated Actors and Detail.
+		// One choke point covers every kind branch, including ones added
+		// later. The `when` cell is machine-generated and needs no pass.
+		c := cell{when: when, what: sanitize(whatCell(e)), who: sanitize(whoCell(e, opts))}
 		whenW = max(whenW, len(c.when))
 		whatW = max(whatW, len(c.what))
 		cells = append(cells, c)
@@ -397,11 +408,17 @@ func whatCell(e Entry) string {
 	case KindForcePush:
 		return "force-push"
 	case KindReview:
-		if n > 1 {
-			return fmt.Sprintf("%d reviews: %s", n, e.Detail)
+		// Never folded (a landmark), so the state is always one review's, and
+		// Inline is that review's own comment count — joined at fetch time so
+		// the verdict and the weight of the feedback read as one fact.
+		if e.Inline > 0 {
+			return fmt.Sprintf("review %s (%d inline)", e.Detail, e.Inline)
 		}
-		return "review: " + e.Detail
+		return "review " + e.Detail
 	case KindReviewComments:
+		// Only reached when a batch couldn't be joined to its review. Count
+		// comes from the batch size, not from folding: one row is one
+		// review's inline comments, and separate reviews stay separate rows.
 		return counted(n, "review comment", "review comments")
 	case KindComment:
 		return counted(n, "comment", "comments")

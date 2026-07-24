@@ -78,12 +78,14 @@ type Entry struct {
 	Actors []string
 	// Detail is the kind-specific discriminator: a review state, a label
 	// name, a requested reviewer, a commit subject, a rename's new title.
-	//
-	// A review's inline-comment count is deliberately NOT here: the source
-	// timeline reports inline comments as their own event rather than as a
-	// property of the review, so they arrive as a neighbouring
-	// KindReviewComments row carrying its own count.
 	Detail string
+	// Inline is how many inline comments a review left, folded onto the
+	// review row. The source reports inline comments as their own event, but
+	// each one names its parent review, so the two are joined at fetch time:
+	// "review CHANGES_REQUESTED (6 inline)" beats a review row followed by a
+	// disconnected count, and a batch whose parent can't be resolved stays a
+	// KindReviewComments row of its own.
+	Inline int
 	// Ref is the abbreviated commit sha on a commit entry.
 	Ref string
 	// Count is the number of source entries this row stands for: 1 for a
@@ -101,34 +103,41 @@ type KindCount struct {
 }
 
 // landmark reports whether an entry must survive every collapse tier.
-// Landmarks are the transitions that change what the PR *is* — it went
-// draft, it got approved, someone force-pushed out from under a review,
-// the base branch moved. A tier-3 window drops thirty commits before it
-// drops one of these, because "approved, then force-pushed, then
-// re-requested" is the story; the last thirty commit subjects are not.
+// Landmarks are the events that change what the PR *is* — it went draft, it
+// got reviewed, someone force-pushed out from under a review, the base
+// branch moved. A tier-3 window drops thirty commits before it drops one of
+// these, because "reviewed, then force-pushed, then re-requested" is the
+// story; the last thirty commit subjects are not.
+//
+// Every review is a landmark, including a COMMENTED one. A review is a human
+// engaging with the change, and which way they came down on it is the single
+// most load-bearing fact about a PR's current state — it ranks with a
+// force-push or a close, not with a commit.
 func (e Entry) landmark() bool {
 	switch e.Kind {
-	case KindOpened, KindForcePush, KindDraft, KindReadyForReview,
+	case KindOpened, KindReview, KindForcePush, KindDraft, KindReadyForReview,
 		KindRenamed, KindBaseChanged, KindMerged, KindClosed, KindReopened:
 		return true
-	case KindReview:
-		return e.Detail != ReviewCommented
 	default:
 		return false
 	}
 }
 
 // foldKey returns the grouping key for tier-2 run folding, and whether the
-// entry may fold at all. Landmarks never fold. Reviews key on their state
-// so a COMMENTED run can't absorb a neighbouring approval.
+// entry may fold at all. Landmarks never fold.
+//
+// KindReviewComments is deliberately excluded even though it is no landmark:
+// each entry is already one review's batch of inline comments, and merging
+// three batches of six into "18 review comments" describes nothing a reader
+// can act on — it hides that three separate people each left six. Top-level
+// comments (KindComment) do fold, because there "18 comments on the PR" is
+// exactly the useful summary.
 func (e Entry) foldKey() (string, bool) {
 	if e.landmark() {
 		return "", false
 	}
 	switch e.Kind {
-	case KindReview:
-		return string(e.Kind) + ":" + e.Detail, true
-	case KindCommit, KindComment, KindReviewComments, KindLabeled, KindUnlabeled,
+	case KindCommit, KindComment, KindLabeled, KindUnlabeled,
 		KindReviewRequested, KindReviewRequestRemoved:
 		return string(e.Kind), true
 	default:
@@ -169,12 +178,35 @@ type Header struct {
 type Skeleton struct {
 	Header  Header
 	Entries []Entry
-	// Truncated is set when the timeline fetch hit its page cap, meaning
-	// the OLDEST history is missing. Rendered as an explicit note — a
-	// silently-short timeline reads as a short PR history, which is
-	// exactly the wrong conclusion.
-	Truncated bool
+	// Truncation says why the timeline is incomplete, TruncationNone when
+	// it isn't. Rendered as an explicit note — a silently-short timeline
+	// reads as a short PR history, which is exactly the wrong conclusion.
+	Truncation Truncation
 }
+
+// Truncation is why a skeleton's timeline stops short.
+//
+// Whatever the cause, the SAME end is missing. The source feed is ordered
+// oldest-first and is read forward, so every way a read can stop early drops
+// the tail — the most recent activity, which is the part an agent most needs.
+// The distinction the reasons carry is diagnostic, not structural: a reader
+// deciding whether to trust the block wants to know whether it hit a designed
+// bound or a transport failure.
+type Truncation string
+
+const (
+	TruncationNone Truncation = ""
+	// TruncationPageCap — the fetch hit its own page ceiling. Expected on a
+	// pathologically long PR; the block is as complete as this package ever
+	// promises to be.
+	TruncationPageCap Truncation = "page_cap"
+	// TruncationFetchFailed — a page request errored. Unexpected: the gap is
+	// wherever the transport gave out, not a designed bound.
+	TruncationFetchFailed Truncation = "fetch_failed"
+	// TruncationParseFailed — a page decoded to something this package can't
+	// read, which means a source-shape change worth noticing.
+	TruncationParseFailed Truncation = "parse_failed"
+)
 
 // sortEntries orders the timeline chronologically. The sort is stable so
 // entries sharing a timestamp — a push landing five commits with one

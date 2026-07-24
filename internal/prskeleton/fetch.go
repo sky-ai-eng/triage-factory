@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -30,8 +31,16 @@ const (
 	// maxTimelinePages bounds one PR's timeline fetch. A five-year-old
 	// epic PR must not turn run setup into an unbounded paging loop; 500
 	// events is far past what any collapse tier renders, and hitting the
-	// cap sets Skeleton.Truncated so the block says so rather than reading
+	// cap sets Skeleton.Truncation so the block says so rather than reading
 	// as a short history.
+	//
+	// The feed is oldest-first and there is no way to page it in reverse
+	// (the endpoint takes no direction, and the Link header that would
+	// address the last page directly isn't visible through the Getter's
+	// body-only surface), so a capped read keeps the oldest events and
+	// loses the newest. That's the wrong end to lose, which is the reason
+	// the ceiling sits far above any realistic PR rather than at a tighter
+	// bound: it should essentially never be reached.
 	maxTimelinePages = 5
 )
 
@@ -49,8 +58,13 @@ func FetchPR(ctx context.Context, g Getter, owner, repo string, number int) (*Sk
 	}
 
 	sk := &Skeleton{Header: pr.header(owner+"/"+repo, number)}
+
+	// Rows are collected with their correlation keys and resolved once at the
+	// end: an inline-comment batch can arrive on a different page from the
+	// review it belongs to, so the join can't happen while paging.
+	var rows []parsed
 	if opened := pr.openedEntry(); opened != nil {
-		sk.Entries = append(sk.Entries, *opened)
+		rows = append(rows, parsed{entry: *opened})
 	}
 
 	for page := 1; page <= maxTimelinePages; page++ {
@@ -59,28 +73,31 @@ func FetchPR(ctx context.Context, g Getter, owner, repo string, number int) (*Sk
 		data, err := g.Get(ctx, path)
 		if err != nil {
 			// A partial timeline is still worth rendering: the header and
-			// whatever pages landed beat no history at all. Mark it short
-			// and stop rather than failing the whole fetch.
-			sk.Truncated = true
+			// whatever pages landed beat no history at all. Record why it
+			// stopped and return what we have, rather than failing the whole
+			// fetch — but never let the shortfall pass as a complete history.
+			sk.Truncation = TruncationFetchFailed
 			break
 		}
 		var items []timelineItem
 		if err := json.Unmarshal(data, &items); err != nil {
-			sk.Truncated = true
+			sk.Truncation = TruncationParseFailed
 			break
 		}
 		for _, it := range items {
-			if e, ok := it.entry(); ok {
-				sk.Entries = append(sk.Entries, e)
-			}
+			rows = append(rows, it.parse()...)
 		}
+		// A short page is the end of the feed — the only path that reads the
+		// history to completion.
 		if len(items) < timelinePageSize {
-			return sk, nil
+			break
 		}
 		if page == maxTimelinePages {
-			sk.Truncated = true
+			sk.Truncation = TruncationPageCap
 		}
 	}
+
+	sk.Entries = attachInlineComments(rows)
 	return sk, nil
 }
 
@@ -174,7 +191,9 @@ type timelineItem struct {
 	Actor *login `json:"actor"`
 	User  *login `json:"user"`
 
-	// Review fields.
+	// Review fields. On a reviewed event the item IS the review, so ID is
+	// the review's id — the key an inline-comment batch names to find it.
+	ID          int64  `json:"id"`
 	State       string `json:"state"`
 	SubmittedAt string `json:"submitted_at"`
 
@@ -201,10 +220,12 @@ type timelineItem struct {
 	} `json:"rename"`
 
 	// Comments is populated on a line-commented event: a batch of inline
-	// comments not carried by a review submission.
+	// comments. Each names the review it was submitted under, which is what
+	// lets the batch fold onto its review row.
 	Comments []struct {
-		CreatedAt string `json:"created_at"`
-		User      *login `json:"user"`
+		CreatedAt           string `json:"created_at"`
+		User                *login `json:"user"`
+		PullRequestReviewID int64  `json:"pull_request_review_id"`
 	} `json:"comments"`
 }
 
@@ -219,13 +240,71 @@ func (l *login) name() string {
 	return l.Login
 }
 
-// entry maps one timeline item onto the neutral model. ok=false drops the
-// item: an event this package doesn't model (subscribed, mentioned,
-// cross-referenced, milestoned — feed noise that says nothing about the
-// PR's progress) or one with no usable timestamp.
-func (t timelineItem) entry() (Entry, bool) {
+// parsed is one mapped row plus the key that joins an inline-comment batch
+// to the review it was submitted under. reviewID is the review's own id on a
+// review row, the parent review's id on a batch, and empty everywhere else
+// (and on either side when the source didn't report one).
+type parsed struct {
+	entry    Entry
+	reviewID string
+}
+
+// parse maps one timeline item onto zero or more rows. Most items yield one;
+// a line-commented item yields one per review its comments belong to, so a
+// batch spanning two reviews can't collapse two reviewers into one row.
+func (t timelineItem) parse() []parsed {
+	if t.Event == "line-commented" {
+		return t.inlineBatches()
+	}
+	e, key, ok := t.single()
+	if !ok {
+		return nil
+	}
+	return []parsed{{entry: e, reviewID: key}}
+}
+
+// inlineBatches splits one line-commented item into a row per parent review.
+func (t timelineItem) inlineBatches() []parsed {
+	var order []int64
+	byReview := map[int64]*Entry{}
+	for _, c := range t.Comments {
+		at := parseTime(c.CreatedAt)
+		if at.IsZero() {
+			continue
+		}
+		e, seen := byReview[c.PullRequestReviewID]
+		if !seen {
+			e = &Entry{Kind: KindReviewComments}
+			byReview[c.PullRequestReviewID] = e
+			order = append(order, c.PullRequestReviewID)
+		}
+		e.Count++
+		if at.After(e.At) {
+			e.At = at
+		}
+		e.Actors = addActor(e.Actors, sanitize(c.User.name()))
+	}
+
+	out := make([]parsed, 0, len(order))
+	for _, id := range order {
+		e := byReview[id]
+		key := ""
+		if id != 0 {
+			key = strconv.FormatInt(id, 10)
+		}
+		out = append(out, parsed{entry: *e, reviewID: key})
+	}
+	return out
+}
+
+// single maps a non-batch timeline item. ok=false drops the item: an event
+// this package doesn't model (subscribed, mentioned, cross-referenced,
+// milestoned — feed noise that says nothing about the PR's progress) or one
+// with no usable timestamp.
+func (t timelineItem) single() (Entry, string, bool) {
 	e := Entry{Count: 1, At: parseTime(t.CreatedAt)}
 	actor := sanitize(t.Actor.name())
+	reviewID := ""
 
 	switch t.Event {
 	case "committed":
@@ -241,19 +320,9 @@ func (t timelineItem) entry() (Entry, bool) {
 		e.Detail = upper(t.State)
 		e.At = parseTime(t.SubmittedAt)
 		actor = sanitize(t.User.name())
-	case "line-commented":
-		e.Kind = KindReviewComments
-		e.Count = len(t.Comments)
-		if e.Count == 0 {
-			return Entry{}, false
+		if t.ID != 0 {
+			reviewID = strconv.FormatInt(t.ID, 10)
 		}
-		for _, c := range t.Comments {
-			if at := parseTime(c.CreatedAt); at.After(e.At) {
-				e.At = at
-			}
-			e.Actors = addActor(e.Actors, sanitize(c.User.name()))
-		}
-		return e, !e.At.IsZero()
 	case "commented":
 		e.Kind = KindComment
 		actor = sanitize(t.Actor.name())
@@ -299,14 +368,54 @@ func (t timelineItem) entry() (Entry, bool) {
 	case "reopened":
 		e.Kind = KindReopened
 	default:
-		return Entry{}, false
+		return Entry{}, "", false
 	}
 
 	if e.At.IsZero() {
-		return Entry{}, false
+		return Entry{}, "", false
 	}
 	e.Actors = addActor(e.Actors, actor)
-	return e, true
+	return e, reviewID, true
+}
+
+// attachInlineComments folds each inline-comment batch onto the review it was
+// submitted under, so a review renders as one row carrying its verdict and
+// its comment count instead of two rows a reader has to associate by
+// adjacency.
+//
+// A batch survives as its own row when its parent can't be resolved — the
+// source didn't report the linkage, or the parent review fell outside the
+// pages that were read. That fallback is the reason the join is best-effort
+// rather than assumed: worst case the block reads as it did before.
+func attachInlineComments(rows []parsed) []Entry {
+	reviewAt := make(map[string]int, len(rows))
+	for i, p := range rows {
+		if p.entry.Kind != KindReview || p.reviewID == "" {
+			continue
+		}
+		if _, dup := reviewAt[p.reviewID]; !dup {
+			reviewAt[p.reviewID] = i
+		}
+	}
+
+	folded := make([]bool, len(rows))
+	for i, p := range rows {
+		if p.entry.Kind != KindReviewComments || p.reviewID == "" {
+			continue
+		}
+		if idx, ok := reviewAt[p.reviewID]; ok {
+			rows[idx].entry.Inline += p.entry.Count
+			folded[i] = true
+		}
+	}
+
+	out := make([]Entry, 0, len(rows))
+	for i := range rows {
+		if !folded[i] {
+			out = append(out, rows[i].entry)
+		}
+	}
+	return out
 }
 
 // parseTime decodes GitHub's RFC3339 timestamps, yielding the zero time on

@@ -55,7 +55,7 @@ func TestRenderPRSkeleton(t *testing.T) {
 
 	for _, want := range []string{
 		"Pull request octo/repo#18",
-		"review: CHANGES_REQUESTED",
+		"review CHANGES_REQUESTED",
 		"force-push",
 	} {
 		if !strings.Contains(got, want) {
@@ -91,8 +91,13 @@ func TestRenderPRSkeletonPartialTimelineStillRenders(t *testing.T) {
 	if !strings.Contains(got, "Pull request octo/repo#18") {
 		t.Errorf("header should survive a timeline failure;\n%s", got)
 	}
-	if !strings.Contains(got, "oldest history is missing") {
-		t.Errorf("a short fetch must be stated, not implied;\n%s", got)
+	// The note must name the cause — a broken read, not the designed page
+	// cap — and say which end of the history is absent.
+	if !strings.Contains(got, "failed to fetch") {
+		t.Errorf("a short fetch must be stated with its cause, not implied;\n%s", got)
+	}
+	if !strings.Contains(got, "most recent activity is missing") {
+		t.Errorf("the note must say which end is missing;\n%s", got)
 	}
 }
 
