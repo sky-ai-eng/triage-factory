@@ -1,0 +1,136 @@
+name: refresh-pricing
+
+# Keeps the native-loop inference package's vendored model-pricing snapshot
+# fresh (internal/inference/pricing_datasheet.json + pricing_provenance.json).
+# Prices move on the upstream's cadence, not ours, so a weekly bump would let
+# them drift for days; this runs daily.
+#
+# It is a DATA-only pipeline: scripts/refresh-pricing.sh rewrites the two JSON
+# files and never touches Go source. The cost FORMULA (computeTextCost) is
+# vendored and only a human edits it — a refresh can change what a model costs,
+# never how cost is computed.
+#
+# Two safety nets sit between fast-moving upstream data and the frozen formula:
+#   - the in-package verification gate (go test -run TestPricing) runs HERE,
+#     before any PR: a moved anchor price, a broken cache multiplier, or
+#     malformed JSON fails it, and we open a tracking issue instead of a PR.
+#   - the script's schema-drift check flags a NEW upstream cost field the
+#     formula doesn't read; when present it opens its own tracking issue so the
+#     unmodeled dimension becomes a reviewed formula change, not silent
+#     underpricing.
+#
+# The PR is opened with the default GITHUB_TOKEN, which deliberately does NOT
+# trigger downstream workflows (same reason release-please.yml uses a PAT). That
+# is fine here: the gate already ran in THIS job, and a human reviews the price
+# diff before merge.
+
+on:
+  schedule:
+    # 06:23 UTC daily. Off-the-hour to dodge GitHub's cron congestion at :00.
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Refresh pricing snapshot
+        run: ./scripts/refresh-pricing.sh 2>&1 | tee /tmp/refresh.log
+
+      - name: Verify (pricing gate)
+        id: gate
+        run: |
+          if go test ./internal/inference/ -run 'TestPricing|TestCostForUsage' > /tmp/gate.log 2>&1; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=0" >> "$GITHUB_OUTPUT"
+          fi
+          cat /tmp/gate.log
+
+      - name: Open/update tracking issue on gate failure
+        if: steps.gate.outputs.ok != '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TITLE="pricing refresh: verification gate failing"
+          BODY_FILE=$(mktemp)
+          {
+            echo "The daily pricing refresh produced a snapshot that fails the in-package verification gate."
+            echo "This usually means an anchor price moved, a prompt-cache multiplier changed, or the upstream shape changed — it needs a human to review and, if legitimate, update the expected table in pricing_test.go."
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo '```'
+            cat /tmp/gate.log
+            echo '```'
+          } > "$BODY_FILE"
+          existing=$(gh issue list --search "$TITLE in:title" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "$BODY_FILE"
+          else
+            gh issue create --title "$TITLE" --body-file "$BODY_FILE"
+          fi
+
+      - name: Fail the job on gate failure
+        if: steps.gate.outputs.ok != '1'
+        run: |
+          echo "::error::pricing verification gate failed — a tracking issue was opened; no PR created."
+          exit 1
+
+      - name: Flag pricing schema drift
+        if: steps.gate.outputs.ok == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          DRIFT="$(grep '^PRICING_SCHEMA_DRIFT:' /tmp/refresh.log | sed 's/^PRICING_SCHEMA_DRIFT: //' || true)"
+          if [ -z "$DRIFT" ]; then
+            echo "no schema drift"
+            exit 0
+          fi
+          TITLE="pricing schema drift: unmodeled cost field(s)"
+          BODY_FILE=$(mktemp)
+          # Single-quoted printf format so backticks/$ stay literal; %s injects values.
+          printf 'The daily pricing refresh saw upstream per-token/cache cost field(s) that `computeTextCost` does not read: `%s`.\n\nModels using them may be underpriced. Review whether the formula must model the new dimension, then acknowledge the field(s) in `scripts/refresh-pricing.sh` (ACKNOWLEDGED_COST_FIELDS).\n\nRun: %s/%s/actions/runs/%s\n' \
+            "$DRIFT" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$BODY_FILE"
+          existing=$(gh issue list --search "$TITLE in:title" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file "$BODY_FILE"
+          else
+            gh issue create --title "$TITLE" --body-file "$BODY_FILE"
+          fi
+
+      - name: Open/update pricing PR
+        if: steps.gate.outputs.ok == '1'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: bot/pricing-refresh
+          delete-branch: true
+          commit-message: 'chore(inference): refresh model pricing snapshot'
+          title: 'chore(inference): refresh model pricing snapshot'
+          add-paths: |
+            internal/inference/pricing_datasheet.json
+            internal/inference/pricing_provenance.json
+          body: |
+            Automated daily refresh of the vendored model-pricing snapshot by the `refresh-pricing` workflow — **data only** (`pricing_datasheet.json` + `pricing_provenance.json`); no Go source changes, so this changes what models cost, never how cost is computed.
+
+            The in-package verification gate (`go test ./internal/inference -run TestPricing`) passed on this snapshot in the workflow run before this PR was opened. Review the price diff below.
+
+            If an open **"pricing schema drift"** issue exists, upstream added a cost field the formula doesn't read yet — address that before relying on the affected models' cost.
+
+            _Opened with the default `GITHUB_TOKEN`, so downstream CI is not triggered on this PR; the gate already ran in the refresh job._
