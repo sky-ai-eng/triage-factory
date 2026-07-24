@@ -25,7 +25,6 @@ kamadak-exif = "0.6"
 tempfile = "3"
 base64 = "0.22"
 serde_json = { version = "1", features = ["preserve_order"] }
-libc = "0.2"
 
 [[bin]]
 name = "tf-harness-tools"

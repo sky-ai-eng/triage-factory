@@ -1,6 +1,6 @@
 //! Resident tool-host `serve` mode: a long-lived process that executes the
-//! seven ported tools (plus `bash`) on behalf of an out-of-process agent loop,
-//! over a unix stream socket.
+//! seven ported tools (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`)
+//! on behalf of an out-of-process agent loop, over a unix stream socket.
 //!
 //! # Why resident
 //!
