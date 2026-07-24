@@ -11,7 +11,7 @@ import (
 
 // runSink adapts an agentproc invocation to the delegate's storage:
 // session ids land on runs.session_id, parsed messages land in
-// run_messages, and both fan out to the websocket so the UI can
+// messages, and both fan out to the websocket so the UI can
 // react in real time.
 //
 // One sink per agentproc.Run call (initial invocation + each resume
@@ -79,7 +79,7 @@ func (k *runSink) OnSession(sessionID string) error {
 }
 
 // OnMessage inserts the parsed assistant/tool message into
-// run_messages and pushes it onto the websocket. Per-row failures
+// messages and pushes it onto the websocket. Per-row failures
 // are returned to agentproc, which logs and continues — losing one
 // row is preferable to abandoning the run.
 func (k *runSink) OnMessage(msg *domain.Message) error {

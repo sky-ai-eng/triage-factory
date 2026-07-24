@@ -42,7 +42,7 @@ func (o RunOutcome) Valid() bool {
 // specific failures specifically (a memory-limit kill points at the
 // knob to turn) without anything in the chain matching on message
 // text: the backend classifies with errors.Is, the enum rides the
-// wire, and free text stays where it always was (run_messages /
+// wire, and free text stays where it always was (messages /
 // result_summary).
 //
 // Persisted to runs.failure_kind (NULL === RunFailureUnclassified).
@@ -457,7 +457,7 @@ type ContentFile struct {
 	FileType string `json:"file_type,omitempty"`
 }
 
-// MessageWindowState is run_messages.window_state's app-validated vocabulary
+// MessageWindowState is messages.window_state's app-validated vocabulary
 // (see ConversationStore's doc comment for the full assembly contract each value
 // implies).
 type MessageWindowState string

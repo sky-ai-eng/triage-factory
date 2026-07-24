@@ -1582,7 +1582,7 @@ func TestFK_CrossOrgRejected(t *testing.T) {
 }
 
 // TestRLS_ChildTablesInheritParentVisibility — denormalized child
-// rows (task_events, run_messages, conversation_memory, conversation_memory_entities,
+// rows (task_events, messages, conversation_memory, conversation_memory_entities,
 // conversation_worktrees, pending_firings) must NOT be visible to org members
 // who can't see the parent task/run. Earlier policies gated only on
 // org_id, leaking metadata across users in the same org. EXISTS-on-parent

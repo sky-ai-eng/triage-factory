@@ -81,7 +81,7 @@ func (s *Spawner) deliverInjectionLive(orgID, runID, wrapped string) {
 }
 
 // recordInjectedNote persists a live-injected <system-note> as a user-role
-// run_messages row and broadcasts it, so the run transcript and any watching UI
+// messages row and broadcasts it, so the run transcript and any watching UI
 // show the human action inline. Admin pool (no JWT claims on this path) +
 // best-effort: a failure is logged, never fatal — the steer above is what the
 // agent actually consumes. Recorded as role='user' (not agent activity), so it

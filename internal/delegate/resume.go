@@ -311,7 +311,7 @@ type ResumeOutcome struct {
 // invocation), the cwd the original run used so the resumed
 // subprocess sees the same worktree, and the user message to append
 // to the conversation. The runID is reused so resumed messages append
-// to the existing run_messages stream — the UI sees one coherent
+// to the existing messages stream — the UI sees one coherent
 // conversation.
 //
 // This helper does NOT update runs status. The caller manages

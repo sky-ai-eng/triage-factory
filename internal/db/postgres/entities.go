@@ -549,7 +549,7 @@ func pgUUIDArray(ids []string) string {
 }
 
 // pgIntArray formats a Go int slice as a Postgres array literal (bigint[],
-// per run_messages.id) for binding through a single $N parameter, the same
+// per messages.id) for binding through a single $N parameter, the same
 // textual-literal technique as pgUUIDArray. No escaping needed — ints have
 // no characters the {…} envelope needs quoted.
 func pgIntArray(ids []int) string {

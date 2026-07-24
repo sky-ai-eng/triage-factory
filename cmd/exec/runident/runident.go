@@ -42,7 +42,7 @@ const RunIdentityEnvVar = "TRIAGE_FACTORY_CONVERSATION_ID"
 var ErrRunIdentityMissing = errors.New("TRIAGE_FACTORY_CONVERSATION_ID not set; this command must be invoked by the delegated agent spawner")
 
 // ErrRunIdentityNotFound is returned by ResolveRunIdentity when the
-// supplied runID doesn't match a row in the agent_runs table. Surfaces
+// supplied runID doesn't match a row in the conversations table. Surfaces
 // as a clear "stale env var / spawner bug" message in subcommand
 // stderr. Subcommands errors.Is against this sentinel when they want
 // to remap to their own package-level "not found" sentinels.
@@ -53,7 +53,7 @@ var ErrRunIdentityNotFound = errors.New("TRIAGE_FACTORY_CONVERSATION_ID points a
 // every subcommand's entry point so the body can branch on
 // IsEventTriggered to pick its store-routing strategy.
 type RunIdentity struct {
-	// OrgID is the run's owning org, read from the agent_runs row
+	// OrgID is the run's owning org, read from the conversations row
 	// keyed by TRIAGE_FACTORY_CONVERSATION_ID. In local mode this collapses
 	// to runmode.LocalDefaultOrgID (the single seeded tenant); in
 	// multi mode it carries the real tenant UUID so every
