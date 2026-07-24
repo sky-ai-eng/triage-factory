@@ -1,0 +1,229 @@
+package inference
+
+import (
+	_ "embed"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
+
+	"github.com/maximhq/bifrost/core/schemas"
+)
+
+// The pricing datasheet is a pinned snapshot of upstream model prices. bifrost
+// resolves cost from the datasheet published at https://getbifrost.ai/datasheet
+// (its framework/modelcatalog DefaultURL), which upstream-syncs LiteLLM's
+// model_prices_and_context_window.json. This snapshot is taken from that
+// authoritative LiteLLM source, filtered to the providers TF drives (Anthropic
+// direct + Bedrock-Claude). It is never a TF-authored price table — refreshing
+// it is a mechanical re-fetch-and-filter of the constants below.
+//
+// Provenance (record on every refresh so the source is auditable):
+//   - Source:  https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+//   - Commit:  f2479cc704f6e63d5510929d30ce8e11ffe43467
+//   - Fetched: 2026-07-24
+//   - Filter:  litellm_provider == "anthropic" OR (litellm_provider in
+//     {"bedrock","bedrock_converse"} AND key contains claude/anthropic)
+//   - Cost logic (below) mirrors bifrost framework/modelcatalog computeTextCost
+//     as of fork commit 0f07e6f726be1bd46e81c0982ff0618435560be9.
+const (
+	pricingSource  = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+	pricingCommit  = "f2479cc704f6e63d5510929d30ce8e11ffe43467"
+	pricingFetched = "2026-07-24"
+)
+
+// PricingProvenance reports where the embedded datasheet snapshot came from so
+// the source is auditable at runtime and a refresh is a mechanical re-vendor.
+func PricingProvenance() (source, commit, fetched string) {
+	return pricingSource, pricingCommit, pricingFetched
+}
+
+//go:embed pricing_datasheet.json
+var pricingDatasheetJSON []byte
+
+// tokenTierAbove200K is the long-context boundary: above it Anthropic bills the
+// per-token/-cache rates at their *_above_200k tier. Mirrors bifrost's
+// TokenTierAbove200K. TF's native loop uses the standard on-demand tier only
+// (no fast/flex/priority), so those premium tiers are intentionally not modeled
+// here — the vendored calc reproduces the standard-tier text path exactly.
+const tokenTierAbove200K = 200000
+
+// modelPrice is the subset of the datasheet's per-model pricing that the
+// standard-tier text-cost path reads. Field names/json tags mirror the upstream
+// datasheet (LiteLLM / bifrost TableModelPricing) so the snapshot unmarshals
+// directly; unread fields (audio, image, video, search, supports_* flags, the
+// fast/flex/priority tiers) are ignored on decode.
+type modelPrice struct {
+	InputCostPerToken  *float64 `json:"input_cost_per_token"`
+	OutputCostPerToken *float64 `json:"output_cost_per_token"`
+
+	InputCostPerTokenAbove200k  *float64 `json:"input_cost_per_token_above_200k_tokens"`
+	OutputCostPerTokenAbove200k *float64 `json:"output_cost_per_token_above_200k_tokens"`
+
+	CacheReadInputTokenCost         *float64 `json:"cache_read_input_token_cost"`
+	CacheReadInputTokenCostAbove200 *float64 `json:"cache_read_input_token_cost_above_200k_tokens"`
+
+	CacheCreationInputTokenCost         *float64 `json:"cache_creation_input_token_cost"`
+	CacheCreationInputTokenCostAbove200 *float64 `json:"cache_creation_input_token_cost_above_200k_tokens"`
+
+	CacheCreationInputTokenCostAbove1hr         *float64 `json:"cache_creation_input_token_cost_above_1hr"`
+	CacheCreationInputTokenCostAbove1hrAbove200 *float64 `json:"cache_creation_input_token_cost_above_1hr_above_200k_tokens"`
+}
+
+var (
+	pricingOnce  sync.Once
+	pricingTable map[string]modelPrice
+	pricingErr   error
+)
+
+// loadPricing parses the embedded datasheet once. A parse failure is fatal to
+// pricing (returned as ok=false with the error surfaced via PricingLoadError)
+// rather than silently misbilling.
+func loadPricing() (map[string]modelPrice, error) {
+	pricingOnce.Do(func() {
+		var table map[string]modelPrice
+		if err := json.Unmarshal(pricingDatasheetJSON, &table); err != nil {
+			pricingErr = fmt.Errorf("inference: parse pricing datasheet: %w", err)
+			return
+		}
+		pricingTable = table
+	})
+	return pricingTable, pricingErr
+}
+
+// PricingLoadError reports whether the embedded datasheet failed to parse. It
+// exists so a caller (or a startup check) can fail loudly on a corrupt
+// snapshot instead of discovering it as a stream of ok=false stamps.
+func PricingLoadError() error {
+	_, err := loadPricing()
+	return err
+}
+
+// Usage is the neutral token accounting CostForUsage prices from — the same
+// four columns messages stores plus the 1-hour cache-write split Anthropic
+// bills at a higher rate. Built from a bifrost stream via usageFromBifrost.
+type Usage struct {
+	InputTokens         int
+	OutputTokens        int
+	CacheReadTokens     int
+	CacheCreationTokens int
+	// CacheCreationTokens1h is the subset of CacheCreationTokens written at the
+	// 1-hour TTL (billed at 2× vs the 5-minute 1.25×). Zero when unknown or all
+	// writes are 5-minute.
+	CacheCreationTokens1h int
+}
+
+// CostForUsage prices one message's usage in USD from the pinned datasheet.
+// ok is false for a model the snapshot doesn't carry — callers stamp NULL,
+// never 0 (0 means genuinely free in the ledger). Lookup is exact on the model
+// id, with a Bedrock region-prefix (us./eu./apac./global.) strip as a fallback.
+func CostForUsage(model string, usage Usage) (float64, bool) {
+	table, err := loadPricing()
+	if err != nil || table == nil {
+		return 0, false
+	}
+	price, ok := lookupPrice(table, model)
+	if !ok {
+		return 0, false
+	}
+	return computeTextCost(price, usage), true
+}
+
+// lookupPrice resolves a model id to its price entry: exact match first, then a
+// single Bedrock region-prefix strip so an inference-profile id like
+// "us.anthropic.claude-..." finds the "anthropic.claude-..." row.
+func lookupPrice(table map[string]modelPrice, model string) (modelPrice, bool) {
+	if p, ok := table[model]; ok {
+		return p, true
+	}
+	for _, pfx := range []string{"us.", "eu.", "apac.", "global."} {
+		if strings.HasPrefix(model, pfx) {
+			if p, ok := table[strings.TrimPrefix(model, pfx)]; ok {
+				return p, true
+			}
+		}
+	}
+	return modelPrice{}, false
+}
+
+// computeTextCost reproduces bifrost's standard-tier text billing: non-cached
+// prompt tokens at the input rate, cache reads at the cache-read rate, cache
+// writes split into 1-hour (2×) and 5-minute (1.25×) buckets, and completion
+// tokens at the output rate — each rate selected by the >200k long-context
+// tier. The clamp order (reads ≤ prompt, writes ≤ prompt−reads, 1h ≤ writes)
+// matches upstream so a malformed usage payload can't bill negative.
+func computeTextCost(p modelPrice, u Usage) float64 {
+	prompt := u.InputTokens
+	completion := u.OutputTokens
+	cachedRead := u.CacheReadTokens
+	cachedWrite := u.CacheCreationTokens
+	cachedWrite1h := u.CacheCreationTokens1h
+
+	if cachedRead > prompt {
+		cachedRead = prompt
+	}
+	if cachedWrite > prompt-cachedRead {
+		cachedWrite = prompt - cachedRead
+	}
+	if cachedWrite1h > cachedWrite {
+		cachedWrite1h = cachedWrite
+	}
+
+	above := prompt > tokenTierAbove200K
+	inputRate := tieredRate(p.InputCostPerToken, p.InputCostPerTokenAbove200k, above)
+	outputRate := tieredRate(p.OutputCostPerToken, p.OutputCostPerTokenAbove200k, above)
+	cacheReadRate := tieredRate(p.CacheReadInputTokenCost, p.CacheReadInputTokenCostAbove200, above)
+	cacheWriteRate := tieredRate(p.CacheCreationInputTokenCost, p.CacheCreationInputTokenCostAbove200, above)
+	cacheWrite1hRate := tieredRate(p.CacheCreationInputTokenCostAbove1hr, p.CacheCreationInputTokenCostAbove1hrAbove200, above)
+
+	nonCached := prompt - cachedRead - cachedWrite
+
+	cost := float64(nonCached) * inputRate
+	cost += float64(cachedRead) * cacheReadRate
+	if cachedWrite1h > 0 {
+		cost += float64(cachedWrite1h) * cacheWrite1hRate
+		cost += float64(cachedWrite-cachedWrite1h) * cacheWriteRate
+	} else {
+		cost += float64(cachedWrite) * cacheWriteRate
+	}
+	cost += float64(completion) * outputRate
+	return cost
+}
+
+// tieredRate returns the >200k rate when the request is over the long-context
+// boundary and that rate is set, else the base rate; a nil base falls back to 0
+// (an unpriced token category, matching bifrost's nil-pointer semantics).
+func tieredRate(base, above200k *float64, above bool) float64 {
+	if above && above200k != nil {
+		return *above200k
+	}
+	if base != nil {
+		return *base
+	}
+	// A cache rate with no explicit entry falls back to the input rate upstream;
+	// for the categories TF prices (which always carry explicit cache rates on
+	// Anthropic models) this fallback is never hit, so 0 is the safe "unpriced"
+	// value rather than a silent misattribution.
+	return 0
+}
+
+// usageFromBifrost projects a bifrost usage struct onto the neutral Usage,
+// pulling cache read/write counts (and the 1-hour write split) out of the
+// prompt-token details. A nil usage yields the zero Usage.
+func usageFromBifrost(u *schemas.BifrostLLMUsage) Usage {
+	if u == nil {
+		return Usage{}
+	}
+	out := Usage{
+		InputTokens:  u.PromptTokens,
+		OutputTokens: u.CompletionTokens,
+	}
+	if d := u.PromptTokensDetails; d != nil {
+		out.CacheReadTokens = d.CachedReadTokens
+		out.CacheCreationTokens = d.CachedWriteTokens
+		if d.CachedWriteTokenDetails != nil {
+			out.CacheCreationTokens1h = d.CachedWriteTokenDetails.CachedWriteTokens1h
+		}
+	}
+	return out
+}
