@@ -79,7 +79,7 @@ func (s *externalActionStore) record(ctx context.Context, q queryer, orgID strin
 		ON CONFLICT (org_id, dedup_key) DO NOTHING
 	`,
 		e.ID, orgID, e.TeamID, e.Provider, e.Action, e.Target, e.ExternalID, e.URL,
-		e.FromState, e.ToState, e.RunID, e.ActorUserID, e.Credential, e.DedupKey, e.DetailJSON,
+		e.FromState, e.ToState, e.ConversationID, e.ActorUserID, e.Credential, e.DedupKey, e.DetailJSON,
 	)
 	return err
 }
@@ -160,7 +160,7 @@ func scanExternalActionRows(rows *sql.Rows) ([]domain.ExternalAction, error) {
 func scanExternalAction(sc rowScanner, e *domain.ExternalAction) error {
 	return sc.Scan(
 		&e.ID, &e.OrgID, &e.TeamID, &e.Provider, &e.Action, &e.Target,
-		&e.ExternalID, &e.URL, &e.FromState, &e.ToState, &e.RunID,
+		&e.ExternalID, &e.URL, &e.FromState, &e.ToState, &e.ConversationID,
 		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.OccurredAt,
 	)
 }

@@ -16,14 +16,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
-// agentRunStore is the SQLite impl of db.AgentRunStore over the
+// agentRunStore is the SQLite impl of db.ConversationStore over the
 // conversations + messages + claims tables. SQLite is single-tenant; the
 // orgID assertion at each method entry catches a confused caller passing
 // anything but the local sentinel.
 //
 // The constructor takes a single queryer (SQLite has one connection)
 // rather than the (app, admin) pair the Postgres impl uses — the
-// AgentRunStore was the first store to ship multi-pool, and the
+// ConversationStore was the first store to ship multi-pool, and the
 // SQLite side never grew the second arg. The
 // `...System` admin-pool variants are thin wrappers around their
 // non-System counterparts on the SQLite side.
@@ -31,9 +31,9 @@ var agentRunLog = logging.Component("db/agentrun")
 
 type agentRunStore struct{ q queryer }
 
-func newAgentRunStore(q queryer) db.AgentRunStore { return &agentRunStore{q: q} }
+func newConversationStore(q queryer) db.ConversationStore { return &agentRunStore{q: q} }
 
-var _ db.AgentRunStore = (*agentRunStore)(nil)
+var _ db.ConversationStore = (*agentRunStore)(nil)
 
 // --- Lifecycle ---
 
@@ -292,7 +292,7 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID, fa
 		return false, err
 	}
 	// 'open' is deliberately failable here (unlike 'pending_approval') — see
-	// AgentRunStore.MarkFailedIfActive: a warm 'open' run has no durable
+	// ConversationStore.MarkFailedIfActive: a warm 'open' run has no durable
 	// snapshot yet, so an infra error reaching failRun must terminate it.
 	var flipped bool
 	err := inTx(ctx, s.q, func(q queryer) error {
@@ -351,8 +351,8 @@ func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID,
 
 // --- Queries ---
 
-// sqliteRunColumns is the SELECT list scanned into a domain.AgentRun
-// via scanAgentRun. Same shape as Postgres' pgRunColumns; the
+// sqliteRunColumns is the SELECT list scanned into a domain.Conversation
+// via scanConversation. Same shape as Postgres' pgRunColumns; the
 // memory_missing derivation uses SQLite's TRIM(...) variant with the
 // explicit whitespace charset (Postgres uses BTRIM with an E'...'
 // escape string). The claim-derived columns (claimed_at / executor_id /
@@ -389,20 +389,20 @@ const sqliteRunColumns = `
 	COALESCE(a.display_name, '') AS actor_agent_name
 `
 
-func (s *agentRunStore) Get(ctx context.Context, orgID, runID string) (*domain.AgentRun, error) {
+func (s *agentRunStore) Get(ctx context.Context, orgID, runID string) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	row := s.q.QueryRowContext(ctx, `
 		SELECT `+sqliteRunColumns+`
 		FROM conversations r
-		LEFT JOIN run_memory rm ON rm.conversation_id = r.id
+		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id
 		WHERE r.id = ?
 	`, runID)
 
-	var r domain.AgentRun
-	if err := scanAgentRun(row, &r); err != nil {
+	var r domain.Conversation
+	if err := scanConversation(row, &r); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -411,14 +411,14 @@ func (s *agentRunStore) Get(ctx context.Context, orgID, runID string) (*domain.A
 	return &r, nil
 }
 
-func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) ([]domain.AgentRun, error) {
+func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+sqliteRunColumns+`
 		FROM conversations r
-		LEFT JOIN run_memory rm ON rm.conversation_id = r.id
+		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id
 		WHERE r.task_id = ?
 		ORDER BY r.started_at DESC
@@ -428,10 +428,10 @@ func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) (
 	}
 	defer rows.Close()
 
-	var runs []domain.AgentRun
+	var runs []domain.Conversation
 	for rows.Next() {
-		var r domain.AgentRun
-		if err := scanAgentRunRows(rows, &r); err != nil {
+		var r domain.Conversation
+		if err := scanConversationRows(rows, &r); err != nil {
 			return nil, err
 		}
 		runs = append(runs, r)
@@ -439,7 +439,7 @@ func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) (
 	return runs, rows.Err()
 }
 
-func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.AgentRun, error) {
+func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -452,7 +452,7 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 	// runs are returned contiguously and newest-first among themselves
 	// (order ACROSS tasks is chunk order, not started_at) — which is all the
 	// caller, grouping by run.TaskID, relies on. Same projection as ListForTask.
-	var runs []domain.AgentRun
+	var runs []domain.Conversation
 	for _, chunk := range chunkIDs(taskIDs) {
 		placeholders := make([]string, len(chunk))
 		args := make([]any, len(chunk))
@@ -463,7 +463,7 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 		rows, err := s.q.QueryContext(ctx, `
 			SELECT `+sqliteRunColumns+`
 			FROM conversations r
-			LEFT JOIN run_memory rm ON rm.conversation_id = r.id
+			LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id
 			LEFT JOIN agents a ON a.id = r.actor_agent_id
 			WHERE r.task_id IN (`+strings.Join(placeholders, ", ")+`)
 			ORDER BY r.started_at DESC
@@ -472,8 +472,8 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 			return nil, err
 		}
 		for rows.Next() {
-			var r domain.AgentRun
-			if err := scanAgentRunRows(rows, &r); err != nil {
+			var r domain.Conversation
+			if err := scanConversationRows(rows, &r); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -592,7 +592,7 @@ func (s *agentRunStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, teamI
 	return ids, rows.Err()
 }
 
-func (s *agentRunStore) GetSystem(ctx context.Context, orgID, runID string) (*domain.AgentRun, error) {
+func (s *agentRunStore) GetSystem(ctx context.Context, orgID, runID string) (*domain.Conversation, error) {
 	return s.Get(ctx, orgID, runID)
 }
 
@@ -662,7 +662,7 @@ func (s *agentRunStore) MarkCancelledIfActiveSystem(ctx context.Context, orgID, 
 	return s.MarkCancelledIfActive(ctx, orgID, runID, stopReason, summary)
 }
 
-func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error) {
+func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, msg *domain.Message) (int64, error) {
 	return s.InsertMessage(ctx, orgID, msg)
 }
 
@@ -772,7 +772,7 @@ func (s *agentRunStore) EntitiesWithOpenRuns(ctx context.Context, orgID string, 
 // correctly resolve NULL. A message racing its claim's release lands
 // NULL — harmless, the terminal settle's newest-row fallback still
 // reaches it.
-func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error) {
+func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *domain.Message) (int64, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}
@@ -838,7 +838,7 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 		                     WHERE conversation_id = ? AND released_at IS NULL)),
 		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		msg.RunID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID), msg.RunID,
+		msg.ConversationID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID), msg.ConversationID,
 		msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, sqliteNullStr(msg.ToolCallID), msg.IsError, metadataJSON,
 		sqliteNullStr(msg.Model), sqliteNullInt(msg.InputTokens), sqliteNullInt(msg.OutputTokens),
@@ -856,13 +856,13 @@ const sqliteMessageColumns = `id, conversation_id, user_id, claim_id, role, cont
 	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 	reasoning, content_blocks, delivered, window_state, seq`
 
-// scanAgentMessageRows drains a messages result set selecting
-// sqliteMessageColumns into domain.AgentMessage values. Shared by the
+// scanMessageRows drains a messages result set selecting
+// sqliteMessageColumns into domain.Message values. Shared by the
 // single-run Messages and the batched MessagesForRuns.
-func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
-	var messages []domain.AgentMessage
+func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
+	var messages []domain.Message
 	for rows.Next() {
-		var m domain.AgentMessage
+		var m domain.Message
 		var userID, claimID sql.NullString
 		var content, subtype, toolCallsStr, toolCallID, metadataStr, model sql.NullString
 		var inputTok, outputTok, cacheReadTok, cacheCreateTok sql.NullInt64
@@ -873,7 +873,7 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		var seq sql.NullFloat64
 
 		if err := rows.Scan(
-			&m.ID, &m.RunID, &userID, &claimID, &m.Role, &content, &subtype, &toolCallsStr,
+			&m.ID, &m.ConversationID, &userID, &claimID, &m.Role, &content, &subtype, &toolCallsStr,
 			&toolCallID, &m.IsError, &metadataStr, &model,
 			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
 			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq,
@@ -945,7 +945,7 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 	return messages, rows.Err()
 }
 
-func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error) {
+func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -964,10 +964,10 @@ func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]do
 		return nil, err
 	}
 	defer rows.Close()
-	return scanAgentMessageRows(rows)
+	return scanMessageRows(rows)
 }
 
-func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.AgentMessage, error) {
+func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -980,7 +980,7 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 	// ORDER BY (conversation_id, id) keeps each run's messages contiguous
 	// and in insertion order within the merged slice; the caller groups by
 	// RunID.
-	var messages []domain.AgentMessage
+	var messages []domain.Message
 	for _, chunk := range chunkIDs(runIDs) {
 		placeholders := make([]string, len(chunk))
 		args := make([]any, len(chunk))
@@ -999,7 +999,7 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 		if err != nil {
 			return nil, err
 		}
-		batch, err := scanAgentMessageRows(rows)
+		batch, err := scanMessageRows(rows)
 		rows.Close()
 		if err != nil {
 			return nil, err
@@ -1015,7 +1015,7 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 // 'elided' and undelivered rows are included — see the interface doc for the
 // full contract. Pure read over messages; no other table or in-process
 // state feeds in.
-func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error) {
+func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -1029,7 +1029,7 @@ func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string
 		return nil, err
 	}
 	defer rows.Close()
-	return scanAgentMessageRows(rows)
+	return scanMessageRows(rows)
 }
 
 // MarkDelivered flips delivered=true on the given message ids, scoped to
@@ -1142,7 +1142,7 @@ func (s *agentRunStore) BlueprintSiblingDurationMsSystem(ctx context.Context, or
 
 // --- Helpers ---
 
-func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
+func scanConversation(row *sql.Row, r *domain.Conversation) error {
 	var queuedAt, completedAt sql.NullTime
 	var claimedAt sql.NullString
 	var costUSD sql.NullFloat64
@@ -1158,11 +1158,11 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	); err != nil {
 		return err
 	}
-	return finalizeAgentRun(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
+	return finalizeConversation(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
 		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
 }
 
-func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
+func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
 	var queuedAt, completedAt sql.NullTime
 	var claimedAt sql.NullString
 	var costUSD sql.NullFloat64
@@ -1178,11 +1178,11 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	); err != nil {
 		return err
 	}
-	return finalizeAgentRun(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
+	return finalizeConversation(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep,
 		model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)
 }
 
-func finalizeAgentRun(r *domain.AgentRun, queuedAt sql.NullTime, claimedAt sql.NullString, completedAt sql.NullTime, costUSD sql.NullFloat64,
+func finalizeConversation(r *domain.Conversation, queuedAt sql.NullTime, claimedAt sql.NullString, completedAt sql.NullTime, costUSD sql.NullFloat64,
 	durationMs, numTurns, blueprintStep sql.NullInt64,
 	model, stopReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID sql.NullString) error {
 	r.Model = model.String

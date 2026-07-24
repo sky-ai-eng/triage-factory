@@ -425,7 +425,7 @@ func prPushRemoteName(runID string, prNumber int) string {
 	return fmt.Sprintf("tfpush-%s-%d", runID, prNumber)
 }
 
-// PRRefSlug is the run_worktrees ref and worktree-subdir name for a PR-head
+// PRRefSlug is the conversation_worktrees ref and worktree-subdir name for a PR-head
 // checkout: "pr-<N>". Exported so the workspace CLI reserves the row and
 // computes the worktree path with the same slug the InRoot create uses.
 func PRRefSlug(prNumber int) string {

@@ -94,7 +94,7 @@ func TestSendMessage_OpenRoutesToResume(t *testing.T) {
 // TestSendMessage_RunningRemoteRoutesToController pins the multi-mode fix: a
 // running run with NO process in THIS pod's registry — the shape a control pod
 // always sees, since a running run's process lives on an executor — must route
-// through the controller (which delivers over run_signals to the owner), NOT be
+// through the controller (which delivers over conversation_signals to the owner), NOT be
 // misread as unsteerable because the LOCAL registry missed. Before the fix this
 // fell through to the resumable check (running isn't resumable) and 409'd.
 func TestSendMessage_RunningRemoteRoutesToController(t *testing.T) {

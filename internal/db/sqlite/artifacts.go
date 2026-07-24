@@ -102,7 +102,7 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 			details_json = excluded.details_json,
 			updated_at   = CURRENT_TIMESTAMP
 		RETURNING `+artifactColumns,
-		id, nullIfEmpty(a.RunID), orgID, a.TeamID, a.Provider, a.Kind, a.Target,
+		id, nullIfEmpty(a.ConversationID), orgID, a.TeamID, a.Provider, a.Kind, a.Target,
 		nullIfEmpty(a.ExternalID), nullIfEmpty(a.URL), a.State, a.DedupKey, nullIfEmpty(a.DetailsJSON),
 	)
 	var out domain.Artifact
@@ -445,7 +445,7 @@ func scanArtifact(sc rowScanner, a *domain.Artifact) error {
 	); err != nil {
 		return err
 	}
-	a.RunID = runID.String
+	a.ConversationID = runID.String
 	a.ExternalID = externalID.String
 	a.URL = url.String
 	a.DetailsJSON = detailsJSON.String

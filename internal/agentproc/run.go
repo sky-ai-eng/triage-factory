@@ -94,7 +94,7 @@ type RunOptions struct {
 	PermissionPrompts bool
 
 	// ExtraEnv is appended to os.Environ() for the subprocess. Use
-	// this for run-scoped variables like TRIAGE_FACTORY_RUN_ID and
+	// this for run-scoped variables like TRIAGE_FACTORY_CONVERSATION_ID and
 	// TRIAGE_FACTORY_REPO that the delegated CLI subcommands read.
 	ExtraEnv []string
 
@@ -242,8 +242,8 @@ type ReadOnlyRepoMount struct {
 // message is negligible for the few-second calls these sites make.
 type NoopSink struct{}
 
-func (NoopSink) OnSession(string) error               { return nil }
-func (NoopSink) OnMessage(*domain.AgentMessage) error { return nil }
+func (NoopSink) OnSession(string) error          { return nil }
+func (NoopSink) OnMessage(*domain.Message) error { return nil }
 
 // UsageSink accumulates aggregate token usage across one Run. It's the
 // drop-in replacement for NoopSink at the one-shot system-job call sites
@@ -254,7 +254,7 @@ func (NoopSink) OnMessage(*domain.AgentMessage) error { return nil }
 // carries CostUSD/duration/turns; this sink fills the token gap so
 // system_llm_runs can record cache-rate breakdowns. See TFAC-451.
 //
-// Summing across messages assumes each AgentMessage carries its own turn's
+// Summing across messages assumes each Message carries its own turn's
 // token counts, NOT a cumulative running total — true for the Claude Agent
 // SDK stream, where every assistant message reports the usage of the API
 // call that produced it. A provider that instead emitted running totals on
@@ -269,7 +269,7 @@ type UsageSink struct {
 
 func (s *UsageSink) OnSession(string) error { return nil }
 
-func (s *UsageSink) OnMessage(m *domain.AgentMessage) error {
+func (s *UsageSink) OnMessage(m *domain.Message) error {
 	if m == nil {
 		return nil
 	}
@@ -306,7 +306,7 @@ type Sink interface {
 	// Implementations insert + broadcast. Returning an error is
 	// logged and skipped; the run does not abort because a single
 	// row failed to insert.
-	OnMessage(msg *domain.AgentMessage) error
+	OnMessage(msg *domain.Message) error
 }
 
 // Outcome bundles what Run observed: the terminal Result (nil if no
@@ -560,7 +560,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		return nil, cleanup, fmt.Errorf("sandbox: chown worktree: %w", err)
 	}
 
-	// Translate any host-path env values (e.g. TRIAGE_FACTORY_RUN_ROOT) to
+	// Translate any host-path env values (e.g. TRIAGE_FACTORY_CONVERSATION_ROOT) to
 	// /work-relative paths before the sandbox sees them.
 	sbExtraEnv := translateEnvForSandbox(opts.ExtraEnv, workCwd)
 	// The pre-push hook (A·3, TFAC-460) invokes the binary via this env

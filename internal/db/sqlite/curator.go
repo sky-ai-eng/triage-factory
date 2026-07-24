@@ -118,7 +118,7 @@ func (s *curatorStore) EnqueueUserMessage(ctx context.Context, orgID, conversati
 
 // --- History ---
 
-func (s *curatorStore) ListConversationMessages(ctx context.Context, orgID, conversationID string) ([]domain.AgentMessage, error) {
+func (s *curatorStore) ListConversationMessages(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func (s *curatorStore) ListConversationMessages(ctx context.Context, orgID, conv
 		return nil, err
 	}
 	defer rows.Close()
-	return scanAgentMessageRows(rows)
+	return scanMessageRows(rows)
 }
 
 func (s *curatorStore) ListClaims(ctx context.Context, orgID, conversationID string) ([]domain.Claim, error) {
@@ -220,11 +220,12 @@ func (s *curatorStore) DeleteQueuedTurn(ctx context.Context, orgID, conversation
 	return n > 0, err
 }
 
-func (s *curatorStore) ArchiveLiveConversation(ctx context.Context, orgID, projectID, creatorUserID string) error {
+func (s *curatorStore) ArchiveLiveConversation(ctx context.Context, orgID, projectID, creatorUserID string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return "", err
 	}
-	return inTx(ctx, s.q, func(q queryer) error {
+	var archivedID string
+	err := inTx(ctx, s.q, func(q queryer) error {
 		conv, err := getLiveCuratorConversation(ctx, q, projectID, creatorUserID)
 		if err != nil {
 			return err
@@ -251,8 +252,13 @@ func (s *curatorStore) ArchiveLiveConversation(ctx context.Context, orgID, proje
 		`, time.Now().UTC(), conv.ID); err != nil {
 			return fmt.Errorf("archive conversation: %w", err)
 		}
+		archivedID = conv.ID
 		return nil
 	})
+	if err != nil {
+		return "", err
+	}
+	return archivedID, nil
 }
 
 // --- Dispatch ---
@@ -780,7 +786,7 @@ func (s *curatorStore) ListAwaitingCredentialTurnsSystem(ctx context.Context) ([
 
 // --- Project bundle import ---
 
-func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID string, conv domain.Conversation, claims []domain.Claim, msgs []domain.AgentMessage) error {
+func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID string, conv domain.Conversation, claims []domain.Claim, msgs []domain.Message) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
@@ -830,7 +836,7 @@ func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID 
 // handling for a bundle row (delivered/window_state/seq preserved rather
 // than defaulted — a compacted or seq-overridden message must not reappear
 // active in assembly after a round-trip).
-func importCuratorMessage(ctx context.Context, q queryer, orgID string, msg *domain.AgentMessage) error {
+func importCuratorMessage(ctx context.Context, q queryer, orgID string, msg *domain.Message) error {
 	var toolCallsJSON, metadataJSON, reasoningJSON, contentBlocksJSON sql.NullString
 	if len(msg.ToolCalls) > 0 {
 		b, err := json.Marshal(msg.ToolCalls)
@@ -878,7 +884,7 @@ func importCuratorMessage(ctx context.Context, q queryer, orgID string, msg *dom
 		                      cost_usd, created_at, reasoning, content_blocks, delivered,
 		                      window_state, seq)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, orgID, msg.RunID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID),
+	`, orgID, msg.ConversationID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID),
 		msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, sqliteNullStr(msg.ToolCallID), msg.IsError, metadataJSON,
 		sqliteNullStr(msg.Model), sqliteNullInt(msg.InputTokens), sqliteNullInt(msg.OutputTokens),

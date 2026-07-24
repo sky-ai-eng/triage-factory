@@ -14,7 +14,7 @@ func intp(i int) *int { return &i }
 func TestUsageSink_SumsAcrossMessages(t *testing.T) {
 	s := &UsageSink{}
 
-	if err := s.OnMessage(&domain.AgentMessage{
+	if err := s.OnMessage(&domain.Message{
 		InputTokens:         intp(10),
 		OutputTokens:        intp(2),
 		CacheReadTokens:     intp(100),
@@ -22,7 +22,7 @@ func TestUsageSink_SumsAcrossMessages(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("OnMessage: %v", err)
 	}
-	if err := s.OnMessage(&domain.AgentMessage{
+	if err := s.OnMessage(&domain.Message{
 		InputTokens:         intp(7),
 		OutputTokens:        intp(3),
 		CacheReadTokens:     intp(50),
@@ -52,11 +52,11 @@ func TestUsageSink_HandlesNilPointers(t *testing.T) {
 	s := &UsageSink{}
 
 	// A message with only some fields populated.
-	if err := s.OnMessage(&domain.AgentMessage{InputTokens: intp(4)}); err != nil {
+	if err := s.OnMessage(&domain.Message{InputTokens: intp(4)}); err != nil {
 		t.Fatalf("OnMessage: %v", err)
 	}
 	// A message with all-nil usage (the tool-result shape).
-	if err := s.OnMessage(&domain.AgentMessage{}); err != nil {
+	if err := s.OnMessage(&domain.Message{}); err != nil {
 		t.Fatalf("OnMessage all-nil: %v", err)
 	}
 	// A nil message must be ignored entirely.

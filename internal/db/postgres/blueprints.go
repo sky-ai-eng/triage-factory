@@ -29,7 +29,7 @@ import (
 //     clause as defense in depth.
 //
 // CreateRun routes internally on BlueprintRun.TriggerType, mirroring the
-// AgentRunStore.Create pattern: event-triggered runs land on the admin pool
+// ConversationStore.Create pattern: event-triggered runs land on the admin pool
 // with NULL creator_user_id, manual runs on the app pool with COALESCE
 // fallback. There is no separate CreateRunSystem.
 type blueprintStore struct {
@@ -1127,11 +1127,11 @@ func (s *blueprintStore) RequestRunCancelSystem(ctx context.Context, orgID, id s
 	return n > 0, nil
 }
 
-func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintRunID string) ([]domain.AgentRun, error) {
+func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
 	return runsForBlueprint(ctx, s.app, orgID, blueprintRunID)
 }
 
-func (s *blueprintStore) RunsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.AgentRun, error) {
+func (s *blueprintStore) RunsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
 	return runsForBlueprint(ctx, s.admin, orgID, blueprintRunID)
 }
 
@@ -1168,12 +1168,12 @@ func blueprintActiveStepRunIDs(ctx context.Context, q queryer, orgID, blueprintR
 	return out, rows.Err()
 }
 
-func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]domain.AgentRun, error) {
+func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]domain.Conversation, error) {
 	if !isValidUUID(blueprintRunID) {
 		return nil, nil
 	}
 	// Status coalesces the active claim's phase over the stored status —
-	// the same display contract as the AgentRunStore projections.
+	// the same display contract as the ConversationStore projections.
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, task_id, prompt_id,
 		       COALESCE((SELECT cl.phase FROM claims cl
@@ -1195,10 +1195,10 @@ func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID stri
 	}
 	defer rows.Close()
 
-	var out []domain.AgentRun
+	var out []domain.Conversation
 	for rows.Next() {
 		var (
-			r             domain.AgentRun
+			r             domain.Conversation
 			completedAt   sql.NullTime
 			costUSD       sql.NullFloat64
 			durationMs    sql.NullInt64

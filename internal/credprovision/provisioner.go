@@ -229,7 +229,7 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) erro
 // runs do no git). Otherwise mints a repo-scoped installation token (an
 // active App) — or the org PAT, unscoped (a PAT can't be narrowed) — for
 // every repo in the run's authorized set (the same team-tracked ∩
-// run_worktrees intersection the git proxy's live authorize gate uses, see
+// conversation_worktrees intersection the git proxy's live authorize gate uses, see
 // gitAuthorizeDecision in internal/delegate/spawner.go).
 func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runID string) (*credbundle.GitHubCreds, error) {
 	scoped, ok := m.ghResolver.(ghclient.ScopedResolver)
@@ -286,14 +286,14 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runI
 }
 
 // authorizedRepos returns the run's authorized repo set as "owner/repo"
-// strings: every distinct repo in the run's run_worktrees ledger, PLUS the
+// strings: every distinct repo in the run's conversation_worktrees ledger, PLUS the
 // task's own primary repo — both filtered to what the team tracks. The
-// run_worktrees half is the credential-minting mirror of
+// conversation_worktrees half is the credential-minting mirror of
 // gitAuthorizeDecision (internal/delegate/spawner.go), which enforces the
 // same intersection live at the git proxy; minting outside that set would
 // be pointless (the proxy would 403 it anyway). The task-repo half exists
 // because provisioning happens BEFORE the run's very first clone —
-// run_worktrees has no rows yet for a fresh claim, only for a resumed run
+// conversation_worktrees has no rows yet for a fresh claim, only for a resumed run
 // or one that already cloned before a refresh — so without it, a fresh
 // run's initial host-side clone (setupGitHub's resolveCloneToken, before
 // any worktree exists) would get no token at all.
@@ -305,7 +305,7 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runI
 // falls back to the team's whole tracked set so it can reach the repos its
 // team operates on. This widens READ/API reach, not push authority: the
 // tokens stay per-repo scoped (resolveGitHub), and pushes remain gated by the
-// run_worktrees ledger a `workspace add` creates. The boundary is the team's
+// conversation_worktrees ledger a `workspace add` creates. The boundary is the team's
 // own tracked repos — never another team's, never another org's.
 func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, runID string) ([]string, error) {
 	if m.stores.TeamGitHubRepos == nil {

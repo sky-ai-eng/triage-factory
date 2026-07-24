@@ -71,8 +71,8 @@ func completeCuratorTurn(t *testing.T, srv *Server, projectID, convID string, ms
 		if reply == "" {
 			return nil
 		}
-		_, err := ts.AgentRuns.InsertMessage(t.Context(), org, &domain.AgentMessage{
-			RunID: convID, UserID: user, ClaimID: claimID,
+		_, err := ts.Conversations.InsertMessage(t.Context(), org, &domain.Message{
+			ConversationID: convID, UserID: user, ClaimID: claimID,
 			Role: "assistant", Subtype: "text", Content: reply,
 		})
 		return err
@@ -178,8 +178,8 @@ func TestHandleCuratorHistory_ReturnsRequestsWithMessages(t *testing.T) {
 	if len(got[0].Messages) != 1 || got[0].Messages[0].Content != "first reply" {
 		t.Errorf("first request messages: %+v", got[0].Messages)
 	}
-	if got[0].Messages[0].RequestID != got[0].ID {
-		t.Errorf("message request_id = %q, want the owning turn id %q", got[0].Messages[0].RequestID, got[0].ID)
+	if got[0].Messages[0].ConversationID == "" {
+		t.Errorf("message conversation_id is empty, want the owning curator conversation id")
 	}
 	if len(got[1].Messages) != 0 {
 		t.Errorf("second request should have no messages, got %d", len(got[1].Messages))
@@ -251,7 +251,7 @@ func TestHandleCuratorCancel_DeletesQueuedTurn(t *testing.T) {
 		t.Fatalf("status = %d, want 204; body=%s", rr.Code, rr.Body.String())
 	}
 
-	var msgs []domain.AgentMessage
+	var msgs []domain.Message
 	if err := srv.tx.SyntheticClaimsWithTx(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
 		ms, err := ts.Curator.ListConversationMessages(t.Context(), runmode.LocalDefaultOrgID, convID)
 		msgs = ms

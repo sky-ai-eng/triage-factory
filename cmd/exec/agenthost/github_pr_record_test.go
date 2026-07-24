@@ -66,8 +66,8 @@ func TestLocalClient_GithubCreatePR_RecordsArtifact(t *testing.T) {
 				a.State != domain.ArtifactStatePRDraft || a.DedupKey != "github:pull_request:octo/repo#42" {
 				t.Errorf("PR artifact mismatch: %+v", a)
 			}
-			if a.RunID != info.RunID || a.TeamID != runmode.LocalDefaultTeamID {
-				t.Errorf("attribution mismatch: run=%q team=%q", a.RunID, a.TeamID)
+			if a.ConversationID != info.RunID || a.TeamID != runmode.LocalDefaultTeamID {
+				t.Errorf("attribution mismatch: run=%q team=%q", a.ConversationID, a.TeamID)
 			}
 
 			d, derr := domain.ParsePRArtifactDetails(a.DetailsJSON)

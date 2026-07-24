@@ -1,4 +1,4 @@
-import type { AgentRun, Artifact } from '../types'
+import type { Conversation, Artifact } from '../types'
 
 // Derived-approval helpers (TFAC-382/TFAC-492). A run no longer parks in a
 // `pending_approval` status; the "needs approval" state is a *view* over the
@@ -19,7 +19,7 @@ export interface ApprovalCounts {
 // fields (the server's transient-failure guard, or a run with no artifacts) read
 // as 0 — a card only surfaces approval affordances when has_unresolved_artifacts
 // is true, where the counts are guaranteed present.
-export function approvalCounts(run: AgentRun): ApprovalCounts {
+export function approvalCounts(run: Conversation): ApprovalCounts {
   const pr = run.unresolved_pr_count ?? 0
   const review = run.unresolved_review_count ?? 0
   return { pr, review, total: pr + review }
@@ -32,7 +32,7 @@ export function approvalCounts(run: AgentRun): ApprovalCounts {
 // guard. So honor the authoritative boolean directly when present — a definitive
 // `false` means "none", full stop — and fall back to the id set / counts only
 // when it's undefined (older projections / the transient window).
-export function hasUnresolvedArtifacts(run: AgentRun | null | undefined): boolean {
+export function hasUnresolvedArtifacts(run: Conversation | null | undefined): boolean {
   if (!run) return false
   if (run.has_unresolved_artifacts === false) return false
   if (run.has_unresolved_artifacts === true) return true

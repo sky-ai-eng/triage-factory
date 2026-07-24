@@ -200,7 +200,7 @@ func bumpTaskViaRealUpsert(t *testing.T, router *Router, task *domain.Task, trig
 
 // newAbsorbTestRouter builds a Router wired for the absorption gate tests,
 // sharing the same store construction every test below needs.
-func newAbsorbTestRouter(database *sql.DB, agentRuns db.AgentRunStore, stub *injectingStubDelegator) *Router {
+func newAbsorbTestRouter(database *sql.DB, agentRuns db.ConversationStore, stub *injectingStubDelegator) *Router {
 	st := sqlitestore.New(database)
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
 		testTaskStore(database), agentRuns, st.Entities, st.PendingFirings,
@@ -229,7 +229,7 @@ func TestTryAutoDelegate_SameTask_InjectsIntoActiveRun(t *testing.T) {
 	}
 
 	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
-	router := newAbsorbTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
+	router := newAbsorbTestRouter(database, sqlitestore.New(database).Conversations, stub)
 	// Reproduce the real collision: production's own upsertTaskForEvent
 	// already wrote a "bumped" task_events row for (task.ID, secondEventID)
 	// before tryAutoDelegate/tryAdditiveInjection ever runs.
@@ -292,7 +292,7 @@ func TestTryAutoDelegate_SameTask_StagedResumableRunHandled(t *testing.T) {
 	}
 
 	stub := &injectingStubDelegator{outcome: delegate.InjectStagedResumable}
-	router := newAbsorbTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
+	router := newAbsorbTestRouter(database, sqlitestore.New(database).Conversations, stub)
 	// Reproduce the real collision: see the comment on the sibling
 	// InjectDeliveredLocal test above.
 	bumpTaskViaRealUpsert(t, router, task, trigger, entityID, secondEventID)
@@ -346,7 +346,7 @@ func TestTryAutoDelegate_SameTask_DeliveredRemoteHandledWithoutRecording(t *test
 	}
 
 	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredRemote}
-	router := newAbsorbTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
+	router := newAbsorbTestRouter(database, sqlitestore.New(database).Conversations, stub)
 
 	// tryAutoDelegate's `fired` return is a bare `return` (the named
 	// return's zero value) on every injection branch — a pre-existing quirk
@@ -429,7 +429,7 @@ func TestTryAutoDelegate_CrossTask_Defers(t *testing.T) {
 	}
 
 	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
-	router := newAbsorbTestRouter(database, st.AgentRuns, stub)
+	router := newAbsorbTestRouter(database, st.Conversations, stub)
 
 	router.tryAutoDelegate(runmode.LocalDefaultOrgID, taskB, trigB, entityID, otherEventID, "")
 
@@ -469,7 +469,7 @@ func TestTryAutoDelegate_SameTask_NotDeliveredFallsThroughToDeferral(t *testing.
 	}
 
 	stub := &injectingStubDelegator{outcome: delegate.InjectNotDelivered}
-	router := newAbsorbTestRouter(database, sqlitestore.New(database).AgentRuns, stub)
+	router := newAbsorbTestRouter(database, sqlitestore.New(database).Conversations, stub)
 
 	fired := router.tryAutoDelegate(runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
 	if !fired {
@@ -494,7 +494,7 @@ func TestTryAutoDelegate_SameTask_NotDeliveredFallsThroughToDeferral(t *testing.
 // side effects — the staged-injection message append AND its cleanup — are
 // observable. setupAbsorbScenario's active run is status="running" with
 // no live process registered against this fresh spawner instance, so
-// getProc returns nil (no local delivery) and there's no run_signals wired
+// getProc returns nil (no local delivery) and there's no conversation_signals wired
 // (no remote path either) — StageOrDeliverAdditiveEvent falls to staging,
 // appends the durable row, then its post-stage recheck reads the run back
 // as status="running" (not "open", not completed+abort — resumableState
@@ -518,7 +518,7 @@ func TestTryAutoDelegate_SameTask_StageToNonResumableRun_NoOrphanedRow(t *testin
 
 	spawner := delegate.NewSpawner(database, sqlitestore.New(database), nil, nil, "m")
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
+		testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
 		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil,
 		spawner, noopScorer{}, websocket.NewHub())
 
@@ -584,7 +584,7 @@ func TestTryAutoDelegate_SameTask_StampsAgentClaimOnInjectedTask(t *testing.T) {
 	// resolves to something non-empty; teamAgents left nil so the
 	// bot-disabled-team gate degrades to "proceed" and doesn't interfere.
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), st.Agents, nil, nil,
-		testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings,
+		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings,
 		st.Events, st.Orgs, st.Teams, nil, nil, nil,
 		stub, noopScorer{}, websocket.NewHub())
 

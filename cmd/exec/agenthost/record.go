@@ -37,7 +37,7 @@ func withWriteInfo(
 func stampActionIdentityInfo(act *domain.ExternalAction, info RunInfo) {
 	act.OrgID = info.OrgID
 	act.TeamID = info.TeamID
-	act.RunID = info.RunID
+	act.ConversationID = info.RunID
 	act.ActorUserID = info.UserID // empty for event-triggered → SQL NULL
 }
 
@@ -85,7 +85,7 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info RunInfo, a 
 		if stores.Artifacts == nil {
 			return
 		}
-		a.RunID = info.RunID
+		a.ConversationID = info.RunID
 		a.OrgID = info.OrgID
 		a.TeamID = info.TeamID
 	} else if act == nil || stores.ExternalActions == nil {

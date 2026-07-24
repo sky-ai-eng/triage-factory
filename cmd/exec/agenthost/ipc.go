@@ -39,7 +39,7 @@ const downloadCallTimeout = 15 * time.Minute
 // git host-side — a first-touch bare clone of a large repo legitimately takes
 // a couple of minutes. Deliberately held UNDER the workspace CLI's 5-minute
 // stale-reservation window (cmd/exec/workspace staleReservationAge): a create
-// that times out here is dead before its run_worktrees reservation becomes
+// that times out here is dead before its conversation_worktrees reservation becomes
 // reclaimable, so a reclaimed slot never races a still-running create.
 const checkoutCallTimeout = 4 * time.Minute
 
@@ -194,9 +194,9 @@ func (c *IPCClient) DeleteStagedReviewComment(ctx context.Context, commentID str
 	return c.call(ctx, methodDeleteStagedReviewComment, deleteStagedReviewCommentArgs{CommentID: commentID}, nil)
 }
 
-func (c *IPCClient) GetAgentRun(ctx context.Context) (*domain.AgentRun, error) {
+func (c *IPCClient) GetConversation(ctx context.Context) (*domain.Conversation, error) {
 	var res agentRunResult
-	if err := c.call(ctx, methodGetAgentRun, emptyArgs{}, &res); err != nil {
+	if err := c.call(ctx, methodGetConversation, emptyArgs{}, &res); err != nil {
 		return nil, err
 	}
 	return res.Run, nil
@@ -264,7 +264,7 @@ func (c *IPCClient) DeleteRunWorktreeByRepoRef(ctx context.Context, repoID, ref 
 
 // WorkspaceRoots asks the daemon for the run root's two views. This transport
 // IS the sandbox boundary, so the agent view comes back as the /work mount
-// (the daemon substitutes it) while the host view is what run_worktrees rows
+// (the daemon substitutes it) while the host view is what conversation_worktrees rows
 // must record. See Client.WorkspaceRoots.
 func (c *IPCClient) WorkspaceRoots(ctx context.Context) (string, string, error) {
 	var res workspaceRootsResult
@@ -287,9 +287,9 @@ func (c *IPCClient) CreateWorkspaceCheckout(ctx context.Context, owner, repo, re
 	return res.Path, nil
 }
 
-func (c *IPCClient) BuildAgentRunFooter(ctx context.Context, kind string) (string, error) {
-	var res buildAgentRunFooterResult
-	if err := c.call(ctx, methodBuildAgentRunFooter, buildAgentRunFooterArgs{Kind: kind}, &res); err != nil {
+func (c *IPCClient) BuildAgentFooter(ctx context.Context, kind string) (string, error) {
+	var res buildAgentFooterResult
+	if err := c.call(ctx, methodBuildAgentFooter, buildAgentFooterArgs{Kind: kind}, &res); err != nil {
 		return "", err
 	}
 	return res.Footer, nil

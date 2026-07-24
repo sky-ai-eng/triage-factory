@@ -87,12 +87,12 @@ type Stores struct {
 	// TxStores instead.
 	Factory FactoryReadStore
 
-	// AgentRuns owns conversations + messages — agent conversation
+	// Conversations owns conversations + messages — agent conversation
 	// lifecycle and transcript (per-engagement execution state lives on
 	// claims). App pool in Postgres; every consumer is
 	// request-equivalent or runs in a delegate goroutine launched from
 	// a request handler.
-	AgentRuns AgentRunStore
+	Conversations ConversationStore
 
 	// Artifacts owns the artifacts table — the durable, run-attributed,
 	// polymorphic record of everything a run produces externally (branch,
@@ -157,7 +157,7 @@ type Stores struct {
 	// a background worker with no per-user identity.
 	RunQueue RunQueueStore
 
-	// TaskMemory owns the run_memory table — per-run agent narrative
+	// TaskMemory owns the conversation_memory table — per-run agent narrative
 	// + human verdict, read back by the delegate spawner to
 	// materialize prior context into fresh worktrees. Holds both
 	// pools: app for request-handler equivalents (review/PR submit,
@@ -166,7 +166,7 @@ type Stores struct {
 	// start materializer, both without a JWT-claims context).
 	TaskMemory TaskMemoryStore
 
-	// RunWorktrees owns the run_worktrees table — one row per
+	// RunWorktrees owns the conversation_worktrees table — one row per
 	// (conversation_id, repo_id) lazy worktree reservation a Jira-style run
 	// accumulates as the agent materializes repos via `workspace
 	// add`. Holds both pools: app for the cmd/exec workspace CLI
@@ -359,7 +359,7 @@ type Stores struct {
 	// deployment config, not tenant data.
 	Operators OperatorStore
 
-	// RunSignals owns the run_signals table — the cross-pod run-control
+	// RunSignals owns the conversation_signals table — the cross-pod run-control
 	// outbox (TFAC-585). Postgres only: the SQLite impl is a stub
 	// returning ErrNotApplicableInLocal from every method, mirroring
 	// MarketplaceStore/InvitesStore — local mode is always its own run's
@@ -438,7 +438,7 @@ type TxStores struct {
 	Users            UsersStore
 	Tasks            TaskStore
 	Factory          FactoryReadStore
-	AgentRuns        AgentRunStore
+	Conversations    ConversationStore
 	Artifacts        ArtifactStore
 	Entities         EntityStore
 	Repos            RepoStore

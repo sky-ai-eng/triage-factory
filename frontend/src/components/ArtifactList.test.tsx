@@ -56,7 +56,7 @@ describe('ArtifactList', () => {
     expect(screen.getByText('draft')).toBeInTheDocument()
 
     // The run-scoped read API was hit.
-    expect(fetchMock).toHaveBeenCalledWith('/api/agent/runs/r1/artifacts')
+    expect(fetchMock).toHaveBeenCalledWith('/api/agent/conversations/r1/artifacts')
 
     // The branch row links out to its url; the PR row carries an external link too.
     const links = screen.getAllByRole('link')

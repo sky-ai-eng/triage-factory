@@ -31,10 +31,10 @@ import (
 // the memory namespace folder. Both feed the run-root / entity-memory paths the
 // agent is told to write to. We register them under both the canonical
 // {{RUN_ROOT}} / {{BLUEPRINT_RUN_ID}} placeholders and the shell-style
-// $TRIAGE_FACTORY_RUN_ROOT / $TRIAGE_FACTORY_BLUEPRINT_RUN_ID names: the env
+// $TRIAGE_FACTORY_CONVERSATION_ROOT / $TRIAGE_FACTORY_BLUEPRINT_RUN_ID names: the env
 // vars are exported for Bash, but the agent's file tools do no shell expansion,
 // so any prompt that references the bare env var would otherwise write to a
-// literal "$TRIAGE_FACTORY_RUN_ROOT/..." path the completion gate never finds.
+// literal "$TRIAGE_FACTORY_CONVERSATION_ROOT/..." path the completion gate never finds.
 // Pre-expanding both forms makes the path resolve regardless of which tool the
 // agent reaches for or which form a (possibly user-authored) prompt used.
 //
@@ -48,7 +48,7 @@ func BuildPromptReplacer(task domain.Task, metadataJSON, runID, binaryPath, runR
 		"{{BINARY_PATH}}", binaryPath,
 		"{{RUN_ROOT}}", runRoot,
 		"{{BLUEPRINT_RUN_ID}}", blueprintRunID,
-		"$TRIAGE_FACTORY_RUN_ROOT", runRoot,
+		"$TRIAGE_FACTORY_CONVERSATION_ROOT", runRoot,
 		"$TRIAGE_FACTORY_BLUEPRINT_RUN_ID", blueprintRunID,
 		"{{TASK_TITLE}}", task.Title,
 		"{{EVENT_TYPE}}", task.EventType,

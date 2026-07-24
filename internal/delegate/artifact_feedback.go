@@ -81,7 +81,7 @@ func (s *Spawner) deliverInjectionLive(orgID, runID, wrapped string) {
 }
 
 // recordInjectedNote persists a live-injected <system-note> as a user-role
-// run_messages row and broadcasts it, so the run transcript and any watching UI
+// messages row and broadcasts it, so the run transcript and any watching UI
 // show the human action inline. Admin pool (no JWT claims on this path) +
 // best-effort: a failure is logged, never fatal — the steer above is what the
 // agent actually consumes. Recorded as role='user' (not agent activity), so it
@@ -96,7 +96,7 @@ func (s *Spawner) recordInjectedNote(orgID, runID, content string) {
 	if s.agentRuns == nil {
 		return
 	}
-	msg := &domain.AgentMessage{RunID: runID, Role: "user", Subtype: "system_note", Content: content}
+	msg := &domain.Message{ConversationID: runID, Role: "user", Subtype: "system_note", Content: content}
 	id, err := s.agentRuns.InsertMessageSystem(context.Background(), orgID, msg)
 	if err != nil {
 		delegateLog.Warn("record injected artifact note failed", "run", runID, "error", err)
@@ -136,7 +136,7 @@ func (s *Spawner) recordInjectedNote(orgID, runID, content string) {
 // place a note can be dropped, and it's accepted there.
 //
 // Any read error degrades to "" — feedback never blocks a resume.
-func (s *Spawner) artifactLedgerForResume(ctx context.Context, orgID string, run *domain.AgentRun) string {
+func (s *Spawner) artifactLedgerForResume(ctx context.Context, orgID string, run *domain.Conversation) string {
 	if s.artifacts == nil || s.agentRuns == nil || run == nil {
 		return ""
 	}

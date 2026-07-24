@@ -8,7 +8,7 @@ import (
 
 //go:generate go run github.com/vektra/mockery/v2 --name=RunWorktreeStore --output=./mocks --case=underscore --with-expecter
 
-// RunWorktreeStore owns the run_worktrees table — one row per
+// RunWorktreeStore owns the conversation_worktrees table — one row per
 // (run_id, repo_id, ref) reservation tracking the lazy worktree
 // materializations a run accumulates as the agent calls
 // `triagefactory exec workspace add` against each repo it needs. The
@@ -17,7 +17,7 @@ import (
 // "pr-<N>", or a slugified branch name.
 //
 // Lifted out of the pre-D2 package-level functions in
-// internal/db/run_worktrees.go so multi-mode Postgres callers route
+// internal/db/conversation_worktrees.go so multi-mode Postgres callers route
 // through $N placeholders + explicit org_id + the dual-pool
 // admin/app split.
 //

@@ -2,10 +2,10 @@ package domain
 
 // Run-status classification shared by every surface that aggregates runs by
 // lifecycle (the fleet console, the org-ops usage subset). These classify
-// DISPLAYED statuses — the value AgentRun.Status carries after the read
+// DISPLAYED statuses — the value Conversation.Status carries after the read
 // projections coalesce the active claim's phase over the stored column — so
 // alongside the stored vocabulary (queued | running | open | the terminals,
-// documented on AgentRun.Status in agent.go) the phase names (fetching |
+// documented on Conversation.Status in agent.go) the phase names (fetching |
 // cloning | agent_starting | awaiting_credentials) and legacy transients
 // still classify here:
 //

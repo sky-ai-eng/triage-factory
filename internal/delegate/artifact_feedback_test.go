@@ -12,13 +12,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedAgentMessageAt inserts a non-user run message stamped at the given time, so
+// seedMessageAt inserts a non-user run message stamped at the given time, so
 // a test can place the artifact-change ledger watermark (the run's last agent
 // activity) before/after the artifacts it seeds.
-func seedAgentMessageAt(t *testing.T, s *Spawner, runID string, at time.Time) {
+func seedMessageAt(t *testing.T, s *Spawner, runID string, at time.Time) {
 	t.Helper()
-	if _, err := s.agentRuns.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.AgentMessage{
-		RunID: runID, Role: "assistant", Subtype: "text", Content: "agent turn", CreatedAt: at,
+	if _, err := s.agentRuns.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+		ConversationID: runID, Role: "assistant", Subtype: "text", Content: "agent turn", CreatedAt: at,
 	}); err != nil {
 		t.Fatalf("seed agent message: %v", err)
 	}
@@ -29,7 +29,7 @@ func seedAgentMessageAt(t *testing.T, s *Spawner, runID string, at time.Time) {
 // resolution after a past watermark.
 func seedResolvedArtifact(t *testing.T, s *Spawner, runID string, a domain.Artifact) {
 	t.Helper()
-	a.RunID = runID
+	a.ConversationID = runID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
@@ -47,7 +47,7 @@ func TestArtifactLedgerForResume_DerivesResolvedSinceWatermark(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	// Watermark in the past, so the artifacts seeded "now" all land after it.
-	seedAgentMessageAt(t, s, "r-led", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	seedMessageAt(t, s, "r-led", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	// Resolved: PR approved (open) and a review dismissed → both reported.
 	approvedPR := domain.NewPullRequestArtifact("o/r", 1, "node1", "h", "main",
@@ -95,7 +95,7 @@ func TestArtifactLedgerForResume_ExcludesPreWatermark(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	// Watermark in the FAR future, so the artifact seeded "now" is before it.
-	seedAgentMessageAt(t, s, "r-pre", time.Date(2999, 1, 1, 0, 0, 0, 0, time.UTC))
+	seedMessageAt(t, s, "r-pre", time.Date(2999, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	approvedPR := domain.NewPullRequestArtifact("o/r", 1, "node1", "h", "main",
 		"https://github.com/o/r/pull/1", "PR one", "", false)

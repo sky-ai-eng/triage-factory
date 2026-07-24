@@ -40,7 +40,7 @@ var _ db.RunQueueStore = (*runQueueStore)(nil)
 // (open/pending_approval) to this set keep their own list.
 const runTerminalStatusesSQL = `'completed','failed','cancelled','task_unsolvable'`
 
-func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain.AgentRun) error {
+func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain.Conversation) error {
 	triggerType := run.TriggerType
 	if triggerType == "" {
 		triggerType = "manual"
@@ -135,7 +135,7 @@ const runQueueClaimReturning = `claimed.id::text, claimed.org_id::text, claimed.
 	minted.claimed_at,
 	(SELECT COUNT(*) + 1 FROM claims c2 WHERE c2.conversation_id = claimed.id)::int AS attempts`
 
-func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement) (*domain.AgentRun, error) {
+func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement) (*domain.Conversation, error) {
 	// FOR UPDATE SKIP LOCKED on the inner select so a multi-worker fleet never
 	// claims the same queued run. Claimable = the owning blueprint_run is still
 	// 'running' and not cancel-requested. An empty queue matches no row and the
@@ -737,12 +737,12 @@ func scanRunTimings(rows *sql.Rows) ([]domain.RunTiming, error) {
 }
 
 // scanPgClaimedRun scans ClaimNextRun's outer projection into
-// *domain.AgentRun, including the freshly minted claim's claimed_at and the
+// *domain.Conversation, including the freshly minted claim's claimed_at and the
 // attempts count. (nil, nil) on sql.ErrNoRows so callers treat "nothing
 // claimable" as a non-error empty result.
-func scanPgClaimedRun(row *sql.Row) (*domain.AgentRun, error) {
+func scanPgClaimedRun(row *sql.Row) (*domain.Conversation, error) {
 	var (
-		r         domain.AgentRun
+		r         domain.Conversation
 		stepIdx   sql.NullInt64
 		claimedAt time.Time
 	)

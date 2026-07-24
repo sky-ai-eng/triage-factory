@@ -340,7 +340,7 @@ func TestCrossPodController_LocalHitNeverGoesRemote(t *testing.T) {
 
 	sigs, _ := fakeSignals.ListUnackedForTarget(context.Background(), "")
 	if len(sigs) != 0 {
-		t.Errorf("a local hit must never insert a run_signals row, got %d", len(sigs))
+		t.Errorf("a local hit must never insert a conversation_signals row, got %d", len(sigs))
 	}
 }
 
@@ -550,7 +550,7 @@ func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 	if withdrawn != 1 {
 		t.Errorf("withdrawn staged-injection rows = %d, want 1 (retired in place, not deleted)", withdrawn)
 	}
-	msgs, err := stores.AgentRuns.Messages(context.Background(), runmode.LocalDefaultOrgID, "r-inj3")
+	msgs, err := stores.Conversations.Messages(context.Background(), runmode.LocalDefaultOrgID, "r-inj3")
 	if err != nil {
 		t.Fatalf("Messages: %v", err)
 	}

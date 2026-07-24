@@ -42,7 +42,7 @@ func (o RunOutcome) Valid() bool {
 // specific failures specifically (a memory-limit kill points at the
 // knob to turn) without anything in the chain matching on message
 // text: the backend classifies with errors.Is, the enum rides the
-// wire, and free text stays where it always was (run_messages /
+// wire, and free text stays where it always was (messages /
 // result_summary).
 //
 // Persisted to runs.failure_kind (NULL === RunFailureUnclassified).
@@ -91,9 +91,8 @@ const (
 // Conversation is the durable agent-context row: one row per transcript,
 // regardless of surface (a delegated task run, a curator chat, a future
 // interactive session or subagent). Per-engagement execution state lives on
-// Claim. Field names are the legacy wire shape (direct json.Marshal,
-// PascalCase) — the conversation-vocabulary wire rename is a separate,
-// later change, so several fields keep run-era names on purpose.
+// Claim. The status/summary projection is served through a handler-side map;
+// the transcript rows cross the wire as the snake_case MessageDTO.
 type Conversation struct {
 	// Type names the owning surface: "delegation" | "curator" |
 	// "interactive" (reserved) | namespaced "subagent:<kind>" (reserved).
@@ -184,7 +183,7 @@ type Conversation struct {
 	// event-triggered auto-delegation exactly-once under the at-least-once
 	// router queue: a replayed event whose first run already committed
 	// conflicts on the fence and is skipped. Forward-only provenance —
-	// written via AgentRunStore.CreateIfNotFiredSystem, not hydrated by Get.
+	// written via ConversationStore.CreateIfNotFiredSystem, not hydrated by Get.
 	TriggeringEventID string
 
 	// ActorAgentID is the agents.id the spawner stamped at run start.
@@ -266,13 +265,12 @@ type SnapshotReapKey struct {
 }
 
 // Message is one transcript row: a neutral (OpenAI-shaped) API message
-// owned by exactly one conversation. Field names are the frozen legacy
-// wire shape — RunID carries the conversation id until the wire rename.
+// owned by exactly one conversation. It is the in-memory row shape; the
+// snake_case MessageDTO is what crosses the HTTP/WS wire.
 type Message struct {
 	ID int
-	// RunID is the owning conversation id (legacy field name — frozen
-	// wire shape until the conversation-vocabulary wire rename).
-	RunID string
+	// ConversationID is the owning conversation id.
+	ConversationID string
 	// UserID stamps the whole turn: the requesting user owns their user
 	// row and the assistant/tool rows produced in response. Empty =
 	// system-triggered.
@@ -281,7 +279,7 @@ type Message struct {
 	// it; empty for rows produced outside any claim (a queued user
 	// message, a pending injection). Never read by assembly.
 	ClaimID             string
-	Role                string // "assistant" | "tool" | "user" — see AgentRunStore's doc comment for the full allowed set incl. reserved subtypes
+	Role                string // "assistant" | "tool" | "user" — see ConversationStore's doc comment for the full allowed set incl. reserved subtypes
 	Content             string
 	Subtype             string // "text" | "thinking" | "tool_use" | "tool"
 	ToolCalls           []ToolCall
@@ -321,7 +319,7 @@ type Message struct {
 
 	// WindowState is "" for "apply the schema default" (MessageWindowActive)
 	// and otherwise one of the MessageWindowState vocabulary. The
-	// empty-means-default convention mirrors AgentRun.TriggerType / origin
+	// empty-means-default convention mirrors Conversation.TriggerType / origin
 	// elsewhere in this package.
 	WindowState MessageWindowState
 
@@ -331,6 +329,64 @@ type Message struct {
 	// sets a value, to land between two existing rows without renumbering
 	// either of them.
 	Seq *float64
+}
+
+// MessageDTO is the single snake_case wire shape for one transcript row,
+// shared by every surface: the delegated-run message read/stream and the
+// curator chat both marshal this. It is the display projection of a Message
+// row — the assembly-only columns (delivered / window_state / seq) never
+// cross the wire. ConversationID links the row to its owning conversation;
+// curator groups these into turns client-side over the same field.
+type MessageDTO struct {
+	ID                  int               `json:"id"`
+	ConversationID      string            `json:"conversation_id"`
+	Role                string            `json:"role"`
+	Subtype             string            `json:"subtype"`
+	Content             string            `json:"content"`
+	ToolCalls           []ToolCall        `json:"tool_calls,omitempty"`
+	ToolCallID          string            `json:"tool_call_id,omitempty"`
+	IsError             bool              `json:"is_error,omitempty"`
+	Metadata            map[string]any    `json:"metadata,omitempty"`
+	Model               string            `json:"model,omitempty"`
+	InputTokens         *int              `json:"input_tokens,omitempty"`
+	OutputTokens        *int              `json:"output_tokens,omitempty"`
+	CacheReadTokens     *int              `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens *int              `json:"cache_creation_tokens,omitempty"`
+	CreatedAt           time.Time         `json:"created_at"`
+	Reasoning           []ReasoningDetail `json:"reasoning,omitempty"`
+	ContentBlocks       []ContentBlock    `json:"content_blocks,omitempty"`
+}
+
+// ToDTO projects a transcript row onto the shared snake_case wire shape.
+func (m Message) ToDTO() MessageDTO {
+	return MessageDTO{
+		ID:                  m.ID,
+		ConversationID:      m.ConversationID,
+		Role:                m.Role,
+		Subtype:             m.Subtype,
+		Content:             m.Content,
+		ToolCalls:           m.ToolCalls,
+		ToolCallID:          m.ToolCallID,
+		IsError:             m.IsError,
+		Metadata:            m.Metadata,
+		Model:               m.Model,
+		InputTokens:         m.InputTokens,
+		OutputTokens:        m.OutputTokens,
+		CacheReadTokens:     m.CacheReadTokens,
+		CacheCreationTokens: m.CacheCreationTokens,
+		CreatedAt:           m.CreatedAt,
+		Reasoning:           m.Reasoning,
+		ContentBlocks:       m.ContentBlocks,
+	}
+}
+
+// MessageDTOs projects a slice of rows onto the wire shape, preserving order.
+func MessageDTOs(msgs []Message) []MessageDTO {
+	out := make([]MessageDTO, len(msgs))
+	for i, m := range msgs {
+		out[i] = m.ToDTO()
+	}
+	return out
 }
 
 // ToolCall represents a single tool invocation within a message.
@@ -344,7 +400,7 @@ type ToolCall struct {
 // bifrost's BifrostReasoningDetailsType wire values.
 type ReasoningDetailType string
 
-// ReasoningDetail is one entry in AgentMessage.Reasoning: a reference-only
+// ReasoningDetail is one entry in Message.Reasoning: a reference-only
 // replay unit for a slice of the model's persisted chain-of-thought,
 // mirroring bifrost's ChatReasoningDetails shape (the subset a replay needs:
 // index/type/text/signature/data). The provider keeps the canonical
@@ -371,7 +427,7 @@ const (
 	ContentBlockFile  ContentBlockType = "file"
 )
 
-// ContentBlock is one entry in AgentMessage.ContentBlocks: non-text content
+// ContentBlock is one entry in Message.ContentBlocks: non-text content
 // (an image or a file), neutral-shaped after bifrost's ChatContentBlock.
 // Applies to any role — a tool row uses this for an image result the flat
 // Content string can't carry. Defined in domain, not imported from bifrost,
@@ -401,8 +457,8 @@ type ContentFile struct {
 	FileType string `json:"file_type,omitempty"`
 }
 
-// MessageWindowState is run_messages.window_state's app-validated vocabulary
-// (see AgentRunStore's doc comment for the full assembly contract each value
+// MessageWindowState is messages.window_state's app-validated vocabulary
+// (see ConversationStore's doc comment for the full assembly contract each value
 // implies).
 type MessageWindowState string
 
@@ -411,15 +467,6 @@ const (
 	MessageWindowElided   MessageWindowState = "elided"
 	MessageWindowInactive MessageWindowState = "inactive"
 )
-
-// AgentRun is the legacy name for Conversation, kept as an alias so the
-// run-vocabulary consumer code (and the frozen wire shape it marshals)
-// compiles unchanged until the wire rename retires it.
-type AgentRun = Conversation
-
-// AgentMessage is the legacy name for Message — same alias contract as
-// AgentRun.
-type AgentMessage = Message
 
 // Claim is one executor engagement with a conversation: who drove it, when,
 // with what sealed credentials. At most one active (ReleasedAt == nil) claim

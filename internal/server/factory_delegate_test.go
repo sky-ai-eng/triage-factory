@@ -184,10 +184,10 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 		t.Fatalf("status = %d, want 200 (partial-success convention: claim stamped, run didn't fire)", rec.Code)
 	}
 	var resp struct {
-		TaskID        string `json:"task_id"`
-		RunID         string `json:"run_id"`
-		DelegateError string `json:"delegate_error"`
-		ClaimStamped  bool   `json:"claim_stamped"`
+		TaskID         string `json:"task_id"`
+		ConversationID string `json:"conversation_id"`
+		DelegateError  string `json:"delegate_error"`
+		ClaimStamped   bool   `json:"claim_stamped"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode body: %v", err)
@@ -195,8 +195,8 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 	if resp.DelegateError == "" {
 		t.Errorf("delegate_error empty; expected spawner failure message")
 	}
-	if resp.RunID != "" {
-		t.Errorf("run_id = %q; want empty (spawn failed)", resp.RunID)
+	if resp.ConversationID != "" {
+		t.Errorf("conversation_id = %q; want empty (spawn failed)", resp.ConversationID)
 	}
 	if !resp.ClaimStamped {
 		t.Errorf("claim_stamped = false; want true (claim committed before spawn attempt)")

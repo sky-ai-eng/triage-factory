@@ -318,13 +318,13 @@ func dispositionEvent(orgID, eventID, eventType, disposition string) domain.Even
 }
 
 func runStatusEvent(orgID, runID, status string) domain.Event {
-	meta, _ := json.Marshal(events.SystemRunStatusMetadata{RunID: runID, Status: status})
-	return domain.Event{OrgID: orgID, EventType: domain.EventSystemRunStatus, MetadataJSON: string(meta)}
+	meta, _ := json.Marshal(events.SystemConversationStatusMetadata{ConversationID: runID, Status: status})
+	return domain.Event{OrgID: orgID, EventType: domain.EventSystemConversationStatus, MetadataJSON: string(meta)}
 }
 
-func runActivityEvent(orgID, runID string, tools []events.RunActivityTool) domain.Event {
-	meta, _ := json.Marshal(events.SystemRunActivityMetadata{RunID: runID, Tools: tools})
-	return domain.Event{OrgID: orgID, EventType: domain.EventSystemRunActivity, MetadataJSON: string(meta)}
+func runActivityEvent(orgID, runID string, tools []events.ConversationActivityTool) domain.Event {
+	meta, _ := json.Marshal(events.SystemConversationActivityMetadata{ConversationID: runID, Tools: tools})
+	return domain.Event{OrgID: orgID, EventType: domain.EventSystemConversationActivity, MetadataJSON: string(meta)}
 }
 
 // ---------- test helpers ----------
@@ -603,7 +603,7 @@ func TestLifecycleAdapter_RunStatus_RunningThenActivity_SetsDescriptionDerivedTe
 		t.Errorf("initial loading_messages = %q, want [%q] (the bubble must show ours, not Slack's default rotation)", first.Loading, slackLifecycleInitialLoadingText)
 	}
 
-	adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.RunActivityTool{{Name: "Bash", Description: "Running go test ./..."}}), runs)
+	adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.ConversationActivityTool{{Name: "Bash", Description: "Running go test ./..."}}), runs)
 	waitForCondition(t, 2*time.Second, func() bool {
 		calls := fake.statusCalls()
 		if len(calls) == 0 {
@@ -686,7 +686,7 @@ func TestLifecycleAdapter_RunStatus_ActivityBurst_DebounceCollapsesToOneCall(t *
 	before := len(fake.statusCalls())
 
 	for i := 0; i < 5; i++ {
-		adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.RunActivityTool{{Name: fmt.Sprintf("tool_%d", i)}}), runs)
+		adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.ConversationActivityTool{{Name: fmt.Sprintf("tool_%d", i)}}), runs)
 	}
 
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) > before })
@@ -867,7 +867,7 @@ func TestLifecycleAdapter_RunStatus_SuccessorGatesOnRetiringWorker(t *testing.T)
 	// identical ("is working on it…"), so ordering the retiring clear
 	// against "a successor call" needs a text only the successor can emit.
 	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
-	adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.RunActivityTool{{Name: "resumed_probe"}}), runs)
+	adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.ConversationActivityTool{{Name: "resumed_probe"}}), runs)
 
 	const probe = "is running: resumed probe"
 	waitForCondition(t, 2*time.Second, func() bool {
@@ -943,7 +943,7 @@ func TestLifecycleAdapter_RunStatus_GatedStopChainSurvivesChurn(t *testing.T) {
 	// traces W2 -> W1. A distinguishable activity probe marks W3's status
 	// unambiguously (its plain lifecycle text is identical to W1's/W2's).
 	adapter.dispatch(ctx, runStatusEvent(orgID, fx.RunID, "running"), runs)
-	adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.RunActivityTool{{Name: "w3_probe"}}), runs)
+	adapter.dispatch(ctx, runActivityEvent(orgID, fx.RunID, []events.ConversationActivityTool{{Name: "w3_probe"}}), runs)
 
 	const probe = "is running: w3 probe"
 	waitForCondition(t, 3*time.Second, func() bool {
@@ -995,7 +995,7 @@ func TestLifecycleAdapter_RunStatus_GatedStopChainSurvivesChurn(t *testing.T) {
 // ---------- run-status consumer: non-Slack cache ----------
 
 // TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup pins the
-// per-runID cache: after the first system:run:status resolves a run as
+// per-runID cache: after the first system:conversation:status resolves a run as
 // non-Slack, the underlying data is mutated to look Slack-shaped (entity
 // source flipped to 'slack', task's event_type flipped to slack:message) —
 // if resolution were re-run on a later sentinel for the SAME runID, it would
@@ -1012,7 +1012,7 @@ func TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup(t *testin
 	adapter.dispatch(ctx, runStatusEvent(orgID, runID, "running"), runs)
 	entry, ok := runs[runID]
 	if !ok {
-		t.Fatal("expected a cache entry after the first system:run:status")
+		t.Fatal("expected a cache entry after the first system:conversation:status")
 	}
 	if entry.isSlack {
 		t.Fatal("expected isSlack=false for a GitHub-sourced task")
@@ -1034,7 +1034,7 @@ func TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup(t *testin
 	}
 
 	adapter.dispatch(ctx, runStatusEvent(orgID, runID, "running"), runs)
-	adapter.dispatch(ctx, runActivityEvent(orgID, runID, []events.RunActivityTool{{Name: "Bash"}}), runs)
+	adapter.dispatch(ctx, runActivityEvent(orgID, runID, []events.ConversationActivityTool{{Name: "Bash"}}), runs)
 
 	time.Sleep(50 * time.Millisecond)
 	if len(fake.statusCalls()) != 0 {
@@ -1048,7 +1048,7 @@ func TestLifecycleAdapter_RunStatus_NonSlackRun_CachedAfterFirstLookup(t *testin
 // ---------- run-activity consumer: unknown run ----------
 
 // TestLifecycleAdapter_RunActivity_UnknownRun_Ignored covers activity
-// arriving for a runID this adapter has never seen a system:run:status for
+// arriving for a runID this adapter has never seen a system:conversation:status for
 // (the verdict-priming event) — it must be dropped, not trigger its own
 // resolution.
 func TestLifecycleAdapter_RunActivity_UnknownRun_Ignored(t *testing.T) {
@@ -1056,7 +1056,7 @@ func TestLifecycleAdapter_RunActivity_UnknownRun_Ignored(t *testing.T) {
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
 	runs := map[string]*runEntry{}
 
-	adapter.dispatch(context.Background(), runActivityEvent(orgID, "unseen-run-id", []events.RunActivityTool{{Name: "Bash"}}), runs)
+	adapter.dispatch(context.Background(), runActivityEvent(orgID, "unseen-run-id", []events.ConversationActivityTool{{Name: "Bash"}}), runs)
 
 	if _, ok := runs["unseen-run-id"]; ok {
 		t.Error("run-activity must not prime the cache — only run-status does")

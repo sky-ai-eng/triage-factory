@@ -27,7 +27,7 @@ import (
 //     methods — the tracker (writes entities for every polled repo
 //     regardless of which user configured the repo) and the project
 //     classifier (reads every org's unclassified entities to triage
-//     them). Mirrors the AgentRunStore precedent: explicit `...System`
+//     them). Mirrors the ConversationStore precedent: explicit `...System`
 //     method names keep call-site intent grep-able; the impl routes
 //     per-method internally.
 //
@@ -549,7 +549,7 @@ func pgUUIDArray(ids []string) string {
 }
 
 // pgIntArray formats a Go int slice as a Postgres array literal (bigint[],
-// per run_messages.id) for binding through a single $N parameter, the same
+// per messages.id) for binding through a single $N parameter, the same
 // textual-literal technique as pgUUIDArray. No escaping needed — ints have
 // no characters the {…} envelope needs quoted.
 func pgIntArray(ids []int) string {

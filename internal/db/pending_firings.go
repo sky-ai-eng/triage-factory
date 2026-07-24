@@ -24,7 +24,7 @@ import (
 // by design).
 //
 // The per-entity firing gate is composed at the call site (router)
-// from HasPendingForEntity here + AgentRunStore.HasActiveAutoRunForEntity
+// from HasPendingForEntity here + ConversationStore.HasActiveAutoRunForEntity
 // — strict ownership rather than threading a runs-shaped predicate
 // through this store.
 type PendingFiringsStore interface {
@@ -111,7 +111,7 @@ type PendingFiringsStore interface {
 
 	// HasPendingForEntity returns true iff the entity has any
 	// pending_firings row in 'pending' OR 'draining' status. The router
-	// composes this with AgentRunStore.HasActiveAutoRunForEntity to
+	// composes this with ConversationStore.HasActiveAutoRunForEntity to
 	// enforce FIFO drainage — a new firing must queue behind older
 	// queued rows OR an active auto run on the same entity. 'draining'
 	// counts as queued intent: a drain mid-flight (popped but not yet

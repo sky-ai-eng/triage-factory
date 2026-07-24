@@ -69,7 +69,7 @@ func newJiraRecordingStores(t *testing.T, jiraURL string, eventTriggered bool) (
 }
 
 // newJiraRecordingStoresConn is newJiraRecordingStores plus the raw *sql.DB, for
-// touch tests that read run_memory_entities directly.
+// touch tests that read conversation_memory_entities directly.
 func newJiraRecordingStoresConn(t *testing.T, jiraURL string, eventTriggered bool) (*sql.DB, db.Stores, RunInfo) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
@@ -141,8 +141,8 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 					a.DedupKey != "jira:issue:SKY-1" {
 					t.Errorf("create artifact mismatch: %+v", a)
 				}
-				if a.RunID != info.RunID || a.TeamID != runmode.LocalDefaultTeamID {
-					t.Errorf("attribution mismatch: run=%q team=%q", a.RunID, a.TeamID)
+				if a.ConversationID != info.RunID || a.TeamID != runmode.LocalDefaultTeamID {
+					t.Errorf("attribution mismatch: run=%q team=%q", a.ConversationID, a.TeamID)
 				}
 			})
 

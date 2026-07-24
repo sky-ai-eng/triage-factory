@@ -8,8 +8,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// runSignalStore is the SQLite stub for db.RunSignalStore. run_signals is
-// Postgres-only (see internal/db/postgres/run_signals.go's doc comment):
+// runSignalStore is the SQLite stub for db.RunSignalStore. conversation_signals is
+// Postgres-only (see internal/db/postgres/conversation_signals.go's doc comment):
 // local mode is always its own run's owner (TF_ROLE=all is one process),
 // so no code path may ever reach this store — internal/delegate only
 // constructs the cross-pod RunController in multi mode. Every method

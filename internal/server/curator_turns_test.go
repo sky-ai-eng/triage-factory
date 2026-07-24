@@ -30,19 +30,19 @@ func TestSynthesizeCuratorTurns_DerivesCostAndTokensFromMessages(t *testing.T) {
 		Outcome: "failed", Error: "boom", DurationMs: ip(400), NumTurns: ip(1),
 	}
 
-	messages := []domain.AgentMessage{
+	messages := []domain.Message{
 		// Turn 1: user row + two assistant rows, the lump on the last one.
-		{ID: 1, RunID: "conv", Role: "user", Subtype: "text", Content: "first turn",
+		{ID: 1, ConversationID: "conv", Role: "user", Subtype: "text", Content: "first turn",
 			UserID: "u1", ClaimID: "cl-1", Delivered: bp(true)},
-		{ID: 2, RunID: "conv", Role: "assistant", Subtype: "text", Content: "a",
+		{ID: 2, ConversationID: "conv", Role: "assistant", Subtype: "text", Content: "a",
 			ClaimID: "cl-1", InputTokens: ip(100), OutputTokens: ip(20),
 			CacheReadTokens: ip(1000), CacheCreationTokens: ip(7), Delivered: bp(true)},
-		{ID: 3, RunID: "conv", Role: "assistant", Subtype: "text", Content: "b",
+		{ID: 3, ConversationID: "conv", Role: "assistant", Subtype: "text", Content: "b",
 			ClaimID: "cl-1", InputTokens: ip(50), OutputTokens: ip(5),
 			CacheReadTokens: ip(500), CacheCreationTokens: ip(3),
 			CostUSD: fp(0.05), Delivered: bp(true)},
 		// Turn 2: nothing streamed — the lump settled on the user row itself.
-		{ID: 4, RunID: "conv", Role: "user", Subtype: "text", Content: "second turn",
+		{ID: 4, ConversationID: "conv", Role: "user", Subtype: "text", Content: "second turn",
 			UserID: "u1", ClaimID: "cl-2", CostUSD: fp(0.01), Delivered: bp(true)},
 	}
 

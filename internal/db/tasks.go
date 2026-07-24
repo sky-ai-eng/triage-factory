@@ -326,7 +326,7 @@ type TaskStore interface {
 	// full event-to-task path (record event, dedup-create task, bump
 	// on re-arrival, inline-close stale siblings, fire auto-delegate
 	// triggers, drain pending firings). Same pattern as EntityStore +
-	// AgentRunStore.
+	// ConversationStore.
 	//
 	// Behavior contract is identical to the non-System variants: org_id
 	// stays in every WHERE clause as defense in depth, return shapes

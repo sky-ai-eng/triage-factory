@@ -28,7 +28,7 @@ func stubLiveBranch(t *testing.T, m map[string]string) {
 }
 
 // TestGitAuthorizeDecision is the proxy gate's brain: a run may touch a repo
-// only if its team tracks it AND it appears in the run's run_worktrees ledger,
+// only if its team tracks it AND it appears in the run's conversation_worktrees ledger,
 // and the allowed push ref is the worktree's live checkout's PUSH TARGET —
 // the current branch mapped through its configured push refspec (TFAC-498,
 // refspec-aware; identity when no refspec, as stubbed here). It fails closed
@@ -37,7 +37,7 @@ func TestGitAuthorizeDecision(t *testing.T) {
 	database := newDelegateTestDB(t)
 	stores := sqlitestore.New(database)
 	ctx := context.Background()
-	// run_worktrees FKs the run, so seed it first (LocalDefaultTeamID via the task).
+	// conversation_worktrees FKs the run, so seed it first (LocalDefaultTeamID via the task).
 	seedRun(t, database, "run-1", "sess", "/tmp/wt")
 	info := agenthost.RunInfo{
 		OrgID:  runmode.LocalDefaultOrgID,
@@ -118,7 +118,7 @@ func TestGitAuthorizeDecision(t *testing.T) {
 // TestGitAuthorizeDecision_TaskOwnRepoReadableBeforeLedger is the regression
 // test for the first-ever multi-mode GitHub-PR run stalling in `cloning`: the
 // eager-PR setup clone routes through this same per-run proxy, but its
-// run_worktrees ledger row is written only AFTER the clone succeeds — so the
+// conversation_worktrees ledger row is written only AFTER the clone succeeds — so the
 // bootstrap fetch was denied against its own not-yet-written row. The run's OWN
 // task repo must read as authorized pre-ledger (Allowed=true, no pushable refs),
 // while an unrelated tracked repo with no ledger row still denies — scoping the
@@ -147,7 +147,7 @@ func TestGitAuthorizeDecision_TaskOwnRepoReadableBeforeLedger(t *testing.T) {
 		t.Fatalf("seed profile: %v", err)
 	}
 
-	// No run_worktrees row exists yet (the clone that writes it hasn't run). The
+	// No conversation_worktrees row exists yet (the clone that writes it hasn't run). The
 	// run's own task repo must be readable; AllowedRefs stays empty so a premature
 	// push is still refused by the receive-pack gate.
 	if d, err := gitAuthorizeDecision(ctx, stores, info, "owner", "repo"); err != nil || !d.Allowed || len(d.AllowedRefs) != 0 {

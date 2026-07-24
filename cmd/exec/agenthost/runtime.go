@@ -34,7 +34,7 @@ type Runtime interface {
 
 	// Reads.
 	ListRunArtifacts(ctx context.Context) ([]domain.Artifact, error)
-	GetAgentRun(ctx context.Context) (*domain.AgentRun, error)
+	GetConversation(ctx context.Context) (*domain.Conversation, error)
 	GetTask(ctx context.Context, taskID string) (*domain.Task, error)
 	ListRepos(ctx context.Context) ([]domain.RepoProfile, error)
 	GetRepo(ctx context.Context, repoID string) (*domain.RepoProfile, error)
@@ -42,7 +42,7 @@ type Runtime interface {
 	GetRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.RunWorktree, error)
 	ListRunWorktrees(ctx context.Context) ([]domain.RunWorktree, error)
 	OrgJiraBaseURL(ctx context.Context) (string, error)
-	AgentRunFooter(ctx context.Context, kind string) (string, error)
+	AgentFooter(ctx context.Context, kind string) (string, error)
 
 	// Writes.
 	InsertRunWorktree(ctx context.Context, row domain.RunWorktree) (inserted bool, winningPath string, err error)
@@ -122,18 +122,18 @@ type ExtensionRuntime interface {
 // relayRuntime (producer) and the orchestrator's RelayServer (consumer) live
 // in this package, so these are package-local.
 const (
-	opGetAgentRun             = "get_agent_run"
+	opGetConversation         = "get_conversation"
 	opGetTask                 = "get_task"
 	opListRepos               = "list_repos"
 	opGetRepo                 = "get_repo"
 	opTeamTracksRepo          = "team_tracks_repo"
 	opGetRunWorktreeByRepoRef = "get_run_worktree_by_repo_ref"
-	opListRunWorktrees        = "list_run_worktrees"
+	opListRunWorktrees        = "list_conversation_worktrees"
 	opInsertRunWorktree       = "insert_run_worktree"
 	opDeleteRunWorktree       = "delete_run_worktree"
 	opListRunArtifacts        = "list_run_artifacts"
 	opOrgJiraBase             = "org_jira_base"
-	opBuildAgentRunFooter     = "build_agent_run_footer"
+	opBuildAgentFooter        = "build_agent_run_footer"
 	opUpsertArtifact          = "upsert_artifact"
 	opUpdateReviewDetails     = "update_review_details_if_pending"
 	opRecordExternalWrite     = "record_external_write"
@@ -225,8 +225,8 @@ func (r *directRuntime) ListRunArtifacts(ctx context.Context) ([]domain.Artifact
 	return out, err
 }
 
-func (r *directRuntime) GetAgentRun(ctx context.Context) (*domain.AgentRun, error) {
-	return r.stores.AgentRuns.GetSystem(ctx, r.info.OrgID, r.info.RunID)
+func (r *directRuntime) GetConversation(ctx context.Context) (*domain.Conversation, error) {
+	return r.stores.Conversations.GetSystem(ctx, r.info.OrgID, r.info.RunID)
 }
 
 func (r *directRuntime) GetTask(ctx context.Context, taskID string) (*domain.Task, error) {
@@ -268,8 +268,8 @@ func (r *directRuntime) OrgJiraBaseURL(ctx context.Context) (string, error) {
 	return strings.TrimRight(set.JiraBaseURL, "/"), nil
 }
 
-func (r *directRuntime) AgentRunFooter(ctx context.Context, kind string) (string, error) {
-	return agentmeta.Build(r.stores.AgentRuns, r.info.OrgID, r.info.RunID, kind), nil
+func (r *directRuntime) AgentFooter(ctx context.Context, kind string) (string, error) {
+	return agentmeta.Build(r.stores.Conversations, r.info.OrgID, r.info.RunID, kind), nil
 }
 
 func (r *directRuntime) InsertRunWorktree(ctx context.Context, row domain.RunWorktree) (bool, string, error) {
@@ -307,7 +307,7 @@ func (r *directRuntime) DeleteRunWorktree(ctx context.Context, repoID, ref strin
 func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID
-	a.RunID = r.info.RunID
+	a.ConversationID = r.info.RunID
 	act := branchPushActionInfo(a, r.info)
 	if r.info.IsEventTriggered {
 		stored, err := r.stores.Artifacts.UpsertSystem(ctx, r.info.OrgID, a)
@@ -441,9 +441,9 @@ func (r *relayRuntime) ListRunArtifacts(ctx context.Context) ([]domain.Artifact,
 	return res.Artifacts, nil
 }
 
-func (r *relayRuntime) GetAgentRun(ctx context.Context) (*domain.AgentRun, error) {
+func (r *relayRuntime) GetConversation(ctx context.Context) (*domain.Conversation, error) {
 	var res agentRunResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opGetAgentRun, emptyArgs{}, &res); err != nil {
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opGetConversation, emptyArgs{}, &res); err != nil {
 		return nil, err
 	}
 	return res.Run, nil
@@ -505,9 +505,9 @@ func (r *relayRuntime) OrgJiraBaseURL(ctx context.Context) (string, error) {
 	return res.URL, nil
 }
 
-func (r *relayRuntime) AgentRunFooter(ctx context.Context, kind string) (string, error) {
-	var res buildAgentRunFooterResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opBuildAgentRunFooter, buildAgentRunFooterArgs{Kind: kind}, &res); err != nil {
+func (r *relayRuntime) AgentFooter(ctx context.Context, kind string) (string, error) {
+	var res buildAgentFooterResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opBuildAgentFooter, buildAgentFooterArgs{Kind: kind}, &res); err != nil {
 		return "", err
 	}
 	return res.Footer, nil

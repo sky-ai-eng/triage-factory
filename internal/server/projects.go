@@ -41,7 +41,6 @@ type createProjectRequest struct {
 	PinnedRepos      []string `json:"pinned_repos"`
 	JiraProjectKey   string   `json:"jira_project_key"`
 	LinearProjectKey string   `json:"linear_project_key"`
-	CuratorSessionID string   `json:"curator_session_id"` // optional; usually set by the runtime, not the user
 	// TeamID is the acting team the write picker supplied — the team the
 	// new project (and its pinned-repo / tracker-key validation) is
 	// scoped to. Required in the UI when the caller belongs to ≥2 teams;
@@ -65,7 +64,6 @@ type patchProjectRequest struct {
 	PinnedRepos               *[]string `json:"pinned_repos"`
 	JiraProjectKey            *string   `json:"jira_project_key"`
 	LinearProjectKey          *string   `json:"linear_project_key"`
-	CuratorSessionID          *string   `json:"curator_session_id"`
 	SpecAuthorshipBlueprintID *string   `json:"spec_authorship_blueprint_id"`
 	// Visibility changes an existing project's private/team/org gate.
 	// There's no TeamID field alongside it — v1 doesn't support
@@ -199,7 +197,6 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 			PinnedRepos:               pinned,
 			JiraProjectKey:            jiraKey,
 			LinearProjectKey:          linearKey,
-			CuratorSessionID:          req.CuratorSessionID,
 			SpecAuthorshipBlueprintID: specBlueprintID,
 			Visibility:                visibility,
 		})
@@ -641,9 +638,6 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		updated.LinearProjectKey = linearKey
-	}
-	if req.CuratorSessionID != nil {
-		updated.CuratorSessionID = *req.CuratorSessionID
 	}
 	if req.SpecAuthorshipBlueprintID != nil {
 		// Empty string clears the override (project falls back to the seeded

@@ -27,7 +27,7 @@ import (
 type artifactsHandler struct {
 	tx         db.TxRunner
 	ws         *websocket.Hub
-	agentRuns  db.AgentRunStore
+	agentRuns  db.ConversationStore
 	ghResolver ghclient.Resolver
 	// spawner is a lazy delegation-spawner accessor (wired by Server.routes via a
 	// closure over s.spawner) used to feed the drafting agent a <system-note> when
@@ -44,31 +44,31 @@ type artifactsHandler struct {
 // gates the blueprint (TFAC-379 #2). The artifact passed must carry its
 // post-resolution State so the right kind-specific copy is rendered.
 func (ah *artifactsHandler) injectArtifactNote(orgID string, a domain.Artifact) {
-	if a.RunID == "" || ah.spawner == nil {
+	if a.ConversationID == "" || ah.spawner == nil {
 		return
 	}
 	sp := ah.spawner()
 	if sp == nil {
 		return
 	}
-	sp.InjectArtifactNote(orgID, a.RunID, a)
+	sp.InjectArtifactNote(orgID, a.ConversationID, a)
 }
 
 // prArtifactJSON is the wire shape the PR overlay consumes. Title/Body are the
 // live values pulled from GitHub (GetPRBasic) so the editor renders the current
 // PR, not a stale snapshot; the rest are the artifact's stable coordinates.
 type prArtifactJSON struct {
-	ID         string `json:"id"`
-	RunID      string `json:"run_id,omitempty"`
-	Owner      string `json:"owner"`
-	Repo       string `json:"repo"`
-	Number     int    `json:"number"`
-	HeadBranch string `json:"head_branch"`
-	BaseBranch string `json:"base_branch"`
-	Title      string `json:"title"`
-	Body       string `json:"body"`
-	URL        string `json:"url"`
-	State      string `json:"state"`
+	ID             string `json:"id"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	Owner          string `json:"owner"`
+	Repo           string `json:"repo"`
+	Number         int    `json:"number"`
+	HeadBranch     string `json:"head_branch"`
+	BaseBranch     string `json:"base_branch"`
+	Title          string `json:"title"`
+	Body           string `json:"body"`
+	URL            string `json:"url"`
+	State          string `json:"state"`
 }
 
 // loadArtifact fetches an artifact by id and 404s if missing. It is the shared
@@ -162,17 +162,17 @@ func (ah *artifactsHandler) handleArtifactGet(w http.ResponseWriter, r *http.Req
 	}
 
 	writeJSON(w, http.StatusOK, prArtifactJSON{
-		ID:         art.ID,
-		RunID:      art.RunID,
-		Owner:      owner,
-		Repo:       repo,
-		Number:     number,
-		HeadBranch: details.HeadBranch,
-		BaseBranch: details.Base,
-		Title:      title,
-		Body:       body,
-		URL:        art.URL,
-		State:      art.State,
+		ID:             art.ID,
+		ConversationID: art.ConversationID,
+		Owner:          owner,
+		Repo:           repo,
+		Number:         number,
+		HeadBranch:     details.HeadBranch,
+		BaseBranch:     details.Base,
+		Title:          title,
+		Body:           body,
+		URL:            art.URL,
+		State:          art.State,
 	})
 }
 
@@ -402,7 +402,7 @@ func diffTruncationNote(fileCount int) string {
 // handleArtifactApprove promotes the draft PR to ready-for-review: it appends the
 // agentmeta footer to the body (UpdatePR), marks the PR ready (MarkPRReady),
 // flips the artifact to state=open, and captures the human verdict into
-// run_memory. Approval is a decoupled sidecar — it does NOT flip run status or
+// conversation_memory. Approval is a decoupled sidecar — it does NOT flip run status or
 // resume/terminate a blueprint; the only lifecycle effect is the shared
 // terminal-on-last task-closure check (closeTaskIfTerminalAndResolved), which
 // closes the task iff this was the last unresolved artifact on a cleanly-completed
@@ -476,7 +476,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 
 	// Append the footer idempotently: strip any footer a prior (partially failed)
 	// approve already added before re-appending, so a retry can't stack footers.
-	footeredBody := agentmeta.StripFooter(finalBody) + agentmeta.Build(ah.agentRuns, orgID, art.RunID, "PR")
+	footeredBody := agentmeta.StripFooter(finalBody) + agentmeta.Build(ah.agentRuns, orgID, art.ConversationID, "PR")
 	if err := gh.UpdatePR(r.Context(), owner, repo, number, finalTitle, footeredBody); err != nil {
 		artifactsLog.Warn("approve UpdatePR (footer) failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
@@ -521,12 +521,12 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	// Step 2: human verdict capture — only when we recovered the agent's proposed
 	// draft (details parsed); without it there's no honest baseline to diff the
 	// human's final against, so we skip rather than fabricate a "was empty" diff.
-	if art.RunID != "" && derr == nil {
+	if art.ConversationID != "" && derr == nil {
 		humanContent := formatPRHumanFeedback(details.Proposed.Title, details.Proposed.Body, finalTitle, finalBody)
 		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, art.RunID, humanContent)
+			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, art.ConversationID, humanContent)
 		}); err != nil {
-			artifactsLog.Warn("failed to record human verdict", "run", art.RunID, "error", err)
+			artifactsLog.Warn("failed to record human verdict", "run", art.ConversationID, "error", err)
 		}
 	}
 
@@ -534,7 +534,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	// never flips run status or resumes/terminates a blueprint. The only lifecycle
 	// effect is closing the task when this was the LAST unresolved artifact on an
 	// already-terminal blueprint (§3); otherwise a no-op.
-	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.RunID)
+	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 
 	// Step 4: tell the drafting agent its PR was approved — live if the run is
 	// warm, else via its ledger on resume. Decoupled from the resolution above.
@@ -614,7 +614,7 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 	// Close the draft PR on GitHub (best-effort). The artifact is already closed; a
 	// GitHub hiccup leaves the PR for reconciliation to retire later. Branch kept.
 	closeDraftPRBestEffort(cleanupCtx, ah.ghResolver, orgID, art)
-	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.RunID)
+	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 	// Tell the drafting agent its draft PR was dismissed (live or via the ledger).
 	ah.injectArtifactNote(orgID, closed)
 
@@ -701,7 +701,7 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		// failed on a network blip) must block closure rather than be silently
 		// skipped, so we never close the task with an unresolved draft PR / pending
 		// review sitting on GitHub.
-		runs, e := tx.AgentRuns.ListForTask(ctx, orgID, taskID)
+		runs, e := tx.Conversations.ListForTask(ctx, orgID, taskID)
 		if e != nil {
 			return fmt.Errorf("list runs for task: %w", e)
 		}
@@ -742,7 +742,7 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 // reading each run's artifacts under the caller's tx. One query per run, bounded
 // by a blueprint's step count. Shared by the terminal-on-last check so the
 // "blueprint still has unresolved work" definition lives next to its single use.
-func runsHaveUnresolvedArtifacts(ctx context.Context, tx db.TxStores, orgID string, runs []domain.AgentRun) (bool, error) {
+func runsHaveUnresolvedArtifacts(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) (bool, error) {
 	for i := range runs {
 		arts, err := tx.Artifacts.ListByRun(ctx, orgID, runs[i].ID)
 		if err != nil {
@@ -768,7 +768,7 @@ func (ah *artifactsHandler) upsertPRDetails(ctx context.Context, orgID, userID s
 }
 
 // formatPRHumanFeedback builds the markdown block written to
-// run_memory.human_content when a draft PR is approved. Port of the deleted
+// conversation_memory.human_content when a draft PR is approved. Port of the deleted
 // FormatHumanFeedbackPR (pending_pr_diff.go) onto the artifact's snapshot model:
 // the agent's first draft is the proposed snapshot (always present in
 // details_json, so no nil-vs-empty pointer dance), and the final values are the

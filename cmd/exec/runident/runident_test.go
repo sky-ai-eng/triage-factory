@@ -82,7 +82,7 @@ func seedRun(t *testing.T, stores db.Stores, conn *sql.DB, runID, triggerType st
 	if err := stores.Prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	dbtest.SeedConversation(t, conn, domain.AgentRun{
+	dbtest.SeedConversation(t, conn, domain.Conversation{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
 		TriggerType:    triggerType,

@@ -11,7 +11,7 @@ import (
 )
 
 // runSignalStore is the Postgres impl of db.RunSignalStore — the cross-pod
-// run-control outbox (TFAC-585). Admin-pool only: run_signals carries no
+// run-control outbox (TFAC-585). Admin-pool only: conversation_signals carries no
 // app-pool policy (RLS enabled, REVOKE ALL from the app roles — see the
 // migration), so every statement here runs against the admin/BYPASSRLS
 // pool, mirroring InstanceStore's shape.
@@ -28,7 +28,7 @@ func (s *runSignalStore) Insert(ctx context.Context, orgID, runID string, kind d
 	}
 	var id int64
 	err := s.admin.QueryRowContext(ctx, `
-		INSERT INTO run_signals (org_id, conversation_id, kind, payload, target, created_at)
+		INSERT INTO conversation_signals (org_id, conversation_id, kind, payload, target, created_at)
 		VALUES ($1::uuid, $2::uuid, $3, $4, $5, now())
 		RETURNING id
 	`, orgID, runID, string(kind), payloadArg, target).Scan(&id)
@@ -38,7 +38,7 @@ func (s *runSignalStore) Insert(ctx context.Context, orgID, runID string, kind d
 func (s *runSignalStore) ListUnackedForTarget(ctx context.Context, target string) ([]domain.RunSignal, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT id, org_id::text, conversation_id::text, kind, COALESCE(payload::text, ''), target, created_at
-		FROM run_signals
+		FROM conversation_signals
 		WHERE target = $1 AND acked_at IS NULL
 		ORDER BY id
 	`, target)
@@ -61,7 +61,7 @@ func (s *runSignalStore) ListUnackedForTarget(ctx context.Context, target string
 
 func (s *runSignalStore) Ack(ctx context.Context, id int64, result string) error {
 	_, err := s.admin.ExecContext(ctx, `
-		UPDATE run_signals SET acked_at = now(), ack_result = $2
+		UPDATE conversation_signals SET acked_at = now(), ack_result = $2
 		WHERE id = $1 AND acked_at IS NULL
 	`, id, result)
 	return err
@@ -70,7 +70,7 @@ func (s *runSignalStore) Ack(ctx context.Context, id int64, result string) error
 func (s *runSignalStore) AckStatus(ctx context.Context, id int64) (bool, string, error) {
 	var ackedAt sql.NullTime
 	var result sql.NullString
-	err := s.admin.QueryRowContext(ctx, `SELECT acked_at, ack_result FROM run_signals WHERE id = $1`, id).Scan(&ackedAt, &result)
+	err := s.admin.QueryRowContext(ctx, `SELECT acked_at, ack_result FROM conversation_signals WHERE id = $1`, id).Scan(&ackedAt, &result)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, "", nil
 	}
@@ -82,7 +82,7 @@ func (s *runSignalStore) AckStatus(ctx context.Context, id int64) (bool, string,
 
 func (s *runSignalStore) PurgeAcked(ctx context.Context, olderThan time.Duration) (int, error) {
 	res, err := s.admin.ExecContext(ctx, `
-		DELETE FROM run_signals WHERE acked_at IS NOT NULL AND acked_at < $1
+		DELETE FROM conversation_signals WHERE acked_at IS NOT NULL AND acked_at < $1
 	`, time.Now().Add(-olderThan))
 	if err != nil {
 		return 0, err

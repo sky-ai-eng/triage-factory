@@ -24,7 +24,7 @@ import (
 // parents), 'interactive' otherwise; status falls back to 'running' so the
 // delegation-has-status CHECK holds (setup sub-states are claim phase, not
 // status — see SeedActiveClaim).
-func SeedConversation(tb testing.TB, database *sql.DB, run domain.AgentRun) {
+func SeedConversation(tb testing.TB, database *sql.DB, run domain.Conversation) {
 	tb.Helper()
 
 	orgID := run.OrgID

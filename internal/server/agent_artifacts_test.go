@@ -17,7 +17,7 @@ import (
 // the exec choke point records artifacts in production.
 func seedRunArtifact(t *testing.T, s *Server, runID string, a domain.Artifact) domain.Artifact {
 	t.Helper()
-	a.RunID = runID
+	a.ConversationID = runID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
@@ -45,7 +45,7 @@ func TestHandleAgentArtifacts(t *testing.T) {
 		DedupKey: domain.ArtifactDedupKey("github", "comment", "555", ""),
 	})
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/runs/"+runID+"/artifacts", nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/artifacts", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET artifacts = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -105,7 +105,7 @@ func TestHandleAgentArtifacts_CorruptDetails(t *testing.T) {
 		t.Fatalf("corrupt details: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/runs/"+runID+"/artifacts", nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/artifacts", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET = %d, want 200 (corrupt details must not 500); body=%s", rec.Code, rec.Body.String())
 	}
@@ -127,7 +127,7 @@ func TestHandleAgentArtifacts_CorruptDetails(t *testing.T) {
 func TestHandleAgentArtifacts_Empty(t *testing.T) {
 	s := newTestServer(t)
 	runID := seedSteerRun(t, s.db, "noarts", "completed")
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/runs/"+runID+"/artifacts", nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/artifacts", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -141,14 +141,14 @@ func TestHandleAgentArtifacts_Empty(t *testing.T) {
 // is indistinguishable from a cross-team one.
 func TestHandleAgentArtifacts_RunNotFound(t *testing.T) {
 	s := newTestServer(t)
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/runs/r_ghost/artifacts", nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/r_ghost/artifacts", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("GET missing run = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
 // TestRunResponse_ArtifactCount pins artifact_count on the single-run response
-// (GET /api/agent/runs/{id}).
+// (GET /api/agent/conversations/{id}).
 func TestRunResponse_ArtifactCount(t *testing.T) {
 	s := newTestServer(t)
 	runID := seedSteerRun(t, s.db, "cnt", "completed")
@@ -161,7 +161,7 @@ func TestRunResponse_ArtifactCount(t *testing.T) {
 		State: domain.ArtifactStateCommentPosted, DedupKey: "c2",
 	})
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/runs/"+runID, nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET run = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -189,7 +189,7 @@ func TestRunResponse_ArtifactCount_Unresolved(t *testing.T) {
 		State: domain.ArtifactStateCommentPosted, DedupKey: "pk1",
 	})
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/runs/"+runID, nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET run = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -219,7 +219,7 @@ func TestRunResponse_HasUnresolved_List(t *testing.T) {
 		"octo/repo", 9, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/9", "T", "B", true))
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/runs?task_id=t_pklist", nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_id=t_pklist", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET runs = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -239,7 +239,7 @@ func TestRunResponse_HasUnresolved_List(t *testing.T) {
 }
 
 // TestRunResponse_ArtifactCount_List pins that the batched count flows through
-// the run-list path (GET /api/agent/runs?task_id=...): two runs on one task get
+// the run-list path (GET /api/agent/conversations?task_id=...): two runs on one task get
 // their own correct counts from the single CountByRun batch.
 func TestRunResponse_ArtifactCount_List(t *testing.T) {
 	s := newTestServer(t)
@@ -261,7 +261,7 @@ func TestRunResponse_ArtifactCount_List(t *testing.T) {
 	seedRunArtifact(t, s, run1, mkComment("l2"))
 	seedRunArtifact(t, s, run2, mkComment("l3"))
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/runs?task_id="+taskID, nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_id="+taskID, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET runs = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}

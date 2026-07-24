@@ -26,7 +26,7 @@ func enqueuePgRunPreferred(t *testing.T, h *pgtest.Harness, stores db.Stores, or
 	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
 	runID := uuid.New().String()
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(context.Background(), orgID, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(context.Background(), orgID, domain.Conversation{
 		ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 		PreferredExecutorID: preferred,

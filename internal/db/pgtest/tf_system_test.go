@@ -156,7 +156,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 
 	t.Run("run_queue_enqueue_and_claim", func(t *testing.T) {
 		runID := newUUID(t, h)
-		if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+		if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 			ID:             runID,
 			TaskID:         taskID,
 			PromptID:       promptID,
@@ -176,29 +176,29 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 			t.Fatalf("ClaimNextRun = %+v, want the just-enqueued run", claimed)
 		}
 
-		if err := stores.AgentRuns.SetExecutorSystem(ctx, orgID, runID, executorID, 1); err != nil {
-			t.Errorf("AgentRuns.SetExecutorSystem: %v", err)
+		if err := stores.Conversations.SetExecutorSystem(ctx, orgID, runID, executorID, 1); err != nil {
+			t.Errorf("Conversations.SetExecutorSystem: %v", err)
 		}
-		if _, err := stores.AgentRuns.MarkOpenSystem(ctx, orgID, runID); err != nil {
-			t.Errorf("AgentRuns.MarkOpenSystem: %v", err)
+		if _, err := stores.Conversations.MarkOpenSystem(ctx, orgID, runID); err != nil {
+			t.Errorf("Conversations.MarkOpenSystem: %v", err)
 		}
-		if _, err := stores.AgentRuns.InsertMessageSystem(ctx, orgID, &domain.AgentMessage{
-			RunID: runID, Role: "assistant", Content: "hello", Subtype: "text",
+		if _, err := stores.Conversations.InsertMessageSystem(ctx, orgID, &domain.Message{
+			ConversationID: runID, Role: "assistant", Content: "hello", Subtype: "text",
 		}); err != nil {
-			t.Errorf("AgentRuns.InsertMessageSystem: %v", err)
+			t.Errorf("Conversations.InsertMessageSystem: %v", err)
 		}
-		if _, err := stores.AgentRuns.GetSystem(ctx, orgID, runID); err != nil {
-			t.Errorf("AgentRuns.GetSystem: %v", err)
+		if _, err := stores.Conversations.GetSystem(ctx, orgID, runID); err != nil {
+			t.Errorf("Conversations.GetSystem: %v", err)
 		}
-		if err := stores.AgentRuns.SetWorktreePathSystem(ctx, orgID, runID, "/tmp/conformance-wt"); err != nil {
-			t.Errorf("AgentRuns.SetWorktreePathSystem: %v", err)
+		if err := stores.Conversations.SetWorktreePathSystem(ctx, orgID, runID, "/tmp/conformance-wt"); err != nil {
+			t.Errorf("Conversations.SetWorktreePathSystem: %v", err)
 		}
 		// The nonzero cost exercises the terminal settle's messages UPDATE
 		// (claims SELECT + newest-row fallback) under the executor role's
 		// grant set.
-		if err := stores.AgentRuns.CompleteSystem(ctx, orgID, runID, "completed", 0.01, 1000, 3,
+		if err := stores.Conversations.CompleteSystem(ctx, orgID, runID, "completed", 0.01, 1000, 3,
 			"", "did the thing", "completed", "", ""); err != nil {
-			t.Errorf("AgentRuns.CompleteSystem: %v", err)
+			t.Errorf("Conversations.CompleteSystem: %v", err)
 		}
 
 		if _, err := stores.RunQueue.ResetProcessingRuns(ctx, executorID, 1); err != nil {
@@ -206,7 +206,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 	})
 
-	t.Run("run_worktrees", func(t *testing.T) {
+	t.Run("conversation_worktrees", func(t *testing.T) {
 		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		if inserted, _, err := stores.RunWorktrees.InsertSystem(ctx, orgID, domain.RunWorktree{
 			RunID: runID, RepoID: "octo/repo", Path: "/tmp/conformance-wt", Ref: "main",
@@ -224,7 +224,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	t.Run("artifacts", func(t *testing.T) {
 		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		art, err := stores.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
-			RunID: runID, TeamID: teamID, Provider: "github", Kind: "pull_request",
+			ConversationID: runID, TeamID: teamID, Provider: "github", Kind: "pull_request",
 			Target: "octo/repo#1", State: "open", DedupKey: "conformance-" + runID,
 		})
 		if err != nil {
@@ -236,7 +236,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		_ = art
 	})
 
-	t.Run("run_memory", func(t *testing.T) {
+	t.Run("conversation_memory", func(t *testing.T) {
 		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, runID, entityID, blueprintRunID, "agent narrative"); err != nil {
 			t.Errorf("TaskMemory.UpsertAgentMemorySystem: %v", err)
@@ -256,7 +256,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		if err := stores.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 			TeamID: teamID, Provider: "jira", Action: "status_transition", Target: "SKY-1",
-			RunID: runID, Credential: "org", ToState: "In Progress",
+			ConversationID: runID, Credential: "org", ToState: "In Progress",
 		}); err != nil {
 			t.Errorf("ExternalActions.RecordSystem: %v", err)
 		}
@@ -311,13 +311,13 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 	})
 
-	t.Run("run_signals", func(t *testing.T) {
+	t.Run("conversation_signals", func(t *testing.T) {
 		runID := seedQueuedRun(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
 		var sigID int64
 		if err := h.AdminDB.QueryRowContext(ctx, `
-			INSERT INTO run_signals (org_id, conversation_id, kind, target) VALUES ($1, $2, 'interrupt', $3) RETURNING id
+			INSERT INTO conversation_signals (org_id, conversation_id, kind, target) VALUES ($1, $2, 'interrupt', $3) RETURNING id
 		`, orgID, runID, executorID).Scan(&sigID); err != nil {
-			t.Fatalf("seed run_signals: %v", err)
+			t.Fatalf("seed conversation_signals: %v", err)
 		}
 		sigs, err := stores.RunSignals.ListUnackedForTarget(ctx, executorID)
 		if err != nil {
@@ -540,7 +540,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 func seedQueuedRun(t *testing.T, h *Harness, stores db.Stores, ctx context.Context, orgID, taskID, promptID, blueprintRunID string) string {
 	t.Helper()
 	runID := newUUID(t, h)
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID: runID, TaskID: taskID, PromptID: promptID, Model: "test-model",
 		TriggerType: "manual", CreatorUserID: "", BlueprintRunID: blueprintRunID,
 	}); err != nil {

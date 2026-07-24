@@ -19,7 +19,7 @@ func seedDraftPRArtifact(t *testing.T, s *Spawner, runID string) {
 	t.Helper()
 	a := domain.NewPullRequestArtifact("o/r", 1, "node", "h", "main",
 		"https://github.com/o/r/pull/1", "queued PR", "", true)
-	a.RunID = runID
+	a.ConversationID = runID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
@@ -146,7 +146,7 @@ func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testin
 // TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow pins the write
 // side of the namespacing: processCompletion ingests the agent's memory file
 // from _scratch/entity-memory/<blueprint_run_id>/<run_id>.md (not the old
-// top-level path) and stamps the run's blueprint_run_id onto the run_memory
+// top-level path) and stamps the run's blueprint_run_id onto the conversation_memory
 // row, so the next step's materializer folders it correctly.
 func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "bp-memrow")
@@ -174,19 +174,19 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 	// processCompletion's write side (file ingestion + blueprint_run_id
 	// stamping), not the entity-scoped read path, and production's write
 	// side (UpsertAgentMemorySystem) does not itself join an entity in
-	// run_memory_entities — that lands with the run-end attach ticket.
+	// conversation_memory_entities — that lands with the run-end attach ticket.
 	var agentContent sql.NullString
 	var gotBlueprintRunID sql.NullString
 	if err := database.QueryRow(
-		`SELECT agent_content, blueprint_run_id FROM run_memory WHERE conversation_id = ?`, runID,
+		`SELECT agent_content, blueprint_run_id FROM conversation_memory WHERE conversation_id = ?`, runID,
 	).Scan(&agentContent, &gotBlueprintRunID); err != nil {
-		t.Fatalf("scan run_memory: %v", err)
+		t.Fatalf("scan conversation_memory: %v", err)
 	}
 	if agentContent.String != "step did X; next step needs Y" {
 		t.Errorf("agent_content = %q; processCompletion should ingest the file from the namespaced path", agentContent.String)
 	}
 	if gotBlueprintRunID.String != blueprintRunID {
-		t.Errorf("run_memory.blueprint_run_id = %q, want %q", gotBlueprintRunID.String, blueprintRunID)
+		t.Errorf("conversation_memory.blueprint_run_id = %q, want %q", gotBlueprintRunID.String, blueprintRunID)
 	}
 }
 

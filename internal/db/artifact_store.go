@@ -48,7 +48,7 @@ type ArtifactStore interface {
 	// event-triggered run (TFAC-459), whose insert is unreachable through
 	// tf_app because the artifacts_insert RLS policy demands a team-writing
 	// user and the run has none. Mirrors the `...System` admin halves on
-	// AgentRuns / RunWorktrees / Reviews. org_id stays bound as defense in
+	// Conversations / RunWorktrees / Reviews. org_id stays bound as defense in
 	// depth; team_id on the row is authoritative (it comes from the run).
 	// Identical to Upsert in SQLite (single-tenant, no RLS).
 	UpsertSystem(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error)

@@ -41,12 +41,12 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 	// the read by orgID but go through the admin pool because there
 	// is no user identity to project.
 	var (
-		run          *domain.AgentRun
+		run          *domain.Conversation
 		preflightErr error
 	)
 	if userID != "" {
 		preflightErr = s.tx.SyntheticClaimsWithTx(context.Background(), orgID, userID, func(ts db.TxStores) error {
-			r, e := ts.AgentRuns.Get(context.Background(), orgID, runID)
+			r, e := ts.Conversations.Get(context.Background(), orgID, runID)
 			run = r
 			return e
 		})
@@ -113,7 +113,7 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 	bgCtx := context.Background()
 	if userID != "" {
 		err = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, userID, func(ts db.TxStores) error {
-			f, mErr := ts.AgentRuns.MarkCancelledIfActive(bgCtx, orgID, runID, "user_cancelled", "Run cancelled by user")
+			f, mErr := ts.Conversations.MarkCancelledIfActive(bgCtx, orgID, runID, "user_cancelled", "Run cancelled by user")
 			flipped = f
 			return mErr
 		})
@@ -153,7 +153,7 @@ func (s *Spawner) handleCancelled(orgID, runID string, startTime time.Time, wtPa
 	var completeErr error
 	if triggerType == "manual" {
 		completeErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.AgentRuns.Complete(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "", "")
+			return ts.Conversations.Complete(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "", "")
 		})
 	} else {
 		completeErr = s.agentRuns.CompleteSystem(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "", "")
@@ -190,7 +190,7 @@ func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errM
 	var markErr error
 	if triggerType == "manual" {
 		markErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			_, mErr := ts.AgentRuns.MarkFailedIfActive(bgCtx, orgID, runID, string(kind))
+			_, mErr := ts.Conversations.MarkFailedIfActive(bgCtx, orgID, runID, string(kind))
 			return mErr
 		})
 	} else {
@@ -200,17 +200,17 @@ func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errM
 		delegateLog.Warn("failed to mark run as failed", "run_id", runID, "error", markErr)
 	}
 
-	failMsg := &domain.AgentMessage{
-		RunID:   runID,
-		Role:    "assistant",
-		Subtype: "text",
-		Content: "Error: " + errMsg,
-		IsError: true,
+	failMsg := &domain.Message{
+		ConversationID: runID,
+		Role:           "assistant",
+		Subtype:        "text",
+		Content:        "Error: " + errMsg,
+		IsError:        true,
 	}
 	var insertErr error
 	if triggerType == "manual" {
 		insertErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			_, ierr := ts.AgentRuns.InsertMessage(bgCtx, orgID, failMsg)
+			_, ierr := ts.Conversations.InsertMessage(bgCtx, orgID, failMsg)
 			return ierr
 		})
 	} else {

@@ -70,33 +70,8 @@ type CuratorContextChange struct {
 	BaselineValue string `json:"baseline_value"`
 }
 
-// CuratorMessage is a WIRE DTO only: the frozen JSON shape of one
-// agent-side chat row as the frontend consumes it (GET history, the
-// curator_message WS push). Behind it is a plain messages row on the
-// curator conversation; RequestID carries the owning turn's id (the user
-// message id as a decimal string), which the server/sink stamps at
-// synthesis time.
-type CuratorMessage struct {
-	ID                  int            `json:"id"`
-	RequestID           string         `json:"request_id"`
-	Role                string         `json:"role"`
-	Subtype             string         `json:"subtype"`
-	Content             string         `json:"content"`
-	ToolCalls           []ToolCall     `json:"tool_calls,omitempty"`
-	ToolCallID          string         `json:"tool_call_id,omitempty"`
-	IsError             bool           `json:"is_error,omitempty"`
-	Metadata            map[string]any `json:"metadata,omitempty"`
-	Model               string         `json:"model,omitempty"`
-	InputTokens         *int           `json:"input_tokens,omitempty"`
-	OutputTokens        *int           `json:"output_tokens,omitempty"`
-	CacheReadTokens     *int           `json:"cache_read_tokens,omitempty"`
-	CacheCreationTokens *int           `json:"cache_creation_tokens,omitempty"`
-	CreatedAt           time.Time      `json:"created_at"`
-
-	// Reasoning and ContentBlocks mirror domain.Message's fields of the
-	// same name — see that type's doc comment. Curator turns run through the
-	// same SDK stream parser as delegated runs, so they carry the same
-	// fidelity data; nil when the message has none.
-	Reasoning     []ReasoningDetail `json:"reasoning,omitempty"`
-	ContentBlocks []ContentBlock    `json:"content_blocks,omitempty"`
-}
+// Curator chat rows cross the wire as the shared MessageDTO (see
+// internal/domain/agent.go): one snake_case message shape for every surface.
+// A curator turn's rows all carry the curator conversation's id and are
+// grouped into turns client-side; the CuratorRequest wrapper above supplies
+// the per-turn status/accounting.

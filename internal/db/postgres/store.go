@@ -136,7 +136,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		EventHandlers: eventHandlers,
 		// Blueprints wires both pools. CreateRun routes internally on
 		// trigger_type (event → admin with NULL creator, manual → app
-		// with COALESCE fallback), mirroring AgentRunStore.Create. The
+		// with COALESCE fallback), mirroring ConversationStore.Create. The
 		// `...System` variants on the read/write methods (ListSteps,
 		// MarkRunStatus, RunsForBlueprint) give the blueprint orchestrator
 		// goroutine an admin-pool route for its detached-context work.
@@ -167,17 +167,17 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// (no per-user identity, must see every in-flight run
 		// regardless of creator).
 		Factory: newFactoryReadStore(admin),
-		// AgentRuns wires app — every consumer is request-
+		// Conversations wires app — every consumer is request-
 		// equivalent (server agent handler, delegate spawner
 		// goroutine spawned from a handler, chains). System-service
 		// reads of run state are routed through the admin-pooled
 		// FactoryReadStore instead.
-		// AgentRuns holds both pools. Manual-trigger Create + every
+		// Conversations holds both pools. Manual-trigger Create + every
 		// other method run on app (RLS-active). Event-triggered
 		// Create routes to admin because the CHECK + RLS policy
 		// pair makes that insert unreachable through tf_app — see
 		// the impl's Create comment.
-		AgentRuns: newAgentRunStore(app, admin),
+		Conversations: newConversationStore(app, admin),
 		// Artifacts wires both pools: app for request-equivalent
 		// writers (manual-run exec choke point under synthetic claims)
 		// and readers (run-detail, C2), admin for UpsertSystem — the
@@ -240,7 +240,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// spawner's runAgent goroutine — the post-completion gate
 		// teardown's UpsertAgentMemorySystem and the run-start
 		// GetMemoriesForEntitySystem both fire without a JWT-claims
-		// context. run_memory_all RLS gates the app side via an
+		// context. conversation_memory_all RLS gates the app side via an
 		// EXISTS subquery against runs; admin bypasses RLS, and
 		// org_id stays in every WHERE clause as defense in depth.
 		TaskMemory: newTaskMemoryStore(app, admin),
@@ -444,11 +444,11 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		Factory:       newFactoryReadStore(tx),
 		// NewForTx is a test door — both pools collapse to the
 		// supplied tx. Tests that exercise the admin-only branch
-		// (event-triggered AgentRunStore.Create, or any of the
+		// (event-triggered ConversationStore.Create, or any of the
 		// `...System` methods that bypass RLS in
 		// production) need the production WithTx wiring instead,
 		// which gets the real admin pool via Store.admin.
-		AgentRuns:        newAgentRunStore(tx, tx),
+		Conversations:    newConversationStore(tx, tx),
 		Artifacts:        newArtifactStore(tx, tx),
 		Entities:         newEntityStore(tx, tx),
 		Repos:            newRepoStore(tx, tx),

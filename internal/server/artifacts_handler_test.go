@@ -93,7 +93,7 @@ func TestArtifactUpdate_GitHubFailure_Pessimistic(t *testing.T) {
 
 // TestArtifactApprove pins the promote-on-approval flow: the body gets the
 // agentmeta footer (UpdatePR), the draft is marked ready (MarkPRReady via
-// GraphQL), the artifact flips to open, and the human verdict lands in run_memory.
+// GraphQL), the artifact flips to open, and the human verdict lands in conversation_memory.
 // Approval is a decoupled sidecar: it must NOT touch run status. The fixture
 // pre-seeds the run as 'completed', and we assert it STAYS 'completed' (approve
 // didn't flip it). Task closure here is a no-op because the fixture blueprint_run
@@ -145,8 +145,8 @@ func TestArtifactApprove(t *testing.T) {
 		t.Errorf("run status = %q, want completed", runStatus)
 	}
 	var human string
-	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM run_memory WHERE conversation_id=?`, runID).Scan(&human); err != nil {
-		t.Fatalf("read run_memory: %v", err)
+	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, runID).Scan(&human); err != nil {
+		t.Fatalf("read conversation_memory: %v", err)
 	}
 	if !strings.Contains(human, "as drafted") {
 		t.Errorf("human_content = %q, want the 'as drafted' verdict (proposed==final)", human)
@@ -217,7 +217,7 @@ func TestArtifactTeardown_ResolvesAllArtifacts(t *testing.T) {
 	// artifacts of different kinds.
 	taskID, runID, prArtID := seedClaimedPRApprovalFixture(t, srv, "acme", "api", 7)
 	rv := domain.NewReviewArtifact("acme/api", 7, "headsha7", runID)
-	rv.RunID = runID
+	rv.ConversationID = runID
 	rv.OrgID = runmode.LocalDefaultOrgID
 	rv.TeamID = runmode.LocalDefaultTeamID
 	rd, _ := domain.ParseReviewArtifactDetails(rv.DetailsJSON)
@@ -402,7 +402,7 @@ func TestArtifactDismiss_TaskLessRunClosesNoTask(t *testing.T) {
 	// only for origin <> 'blueprint').
 	execSQL(t, srv.db, `INSERT INTO conversations (id, status, trigger_type, origin, outcome, team_id, visibility) VALUES ('r_int', 'completed', 'manual', 'interactive', 'abort', ?, 'team')`, runmode.LocalDefaultTeamID)
 	a := domain.NewPullRequestArtifact("acme/api", 42, "PR_node", "feature/x", "main", "https://example.test/acme/api/pull/42", "Proposed title", "Proposed body", true)
-	a.RunID = "r_int"
+	a.ConversationID = "r_int"
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	stored, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
@@ -630,14 +630,14 @@ func seedDraftPRArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo str
 	t.Helper()
 	runID = seedSteerRun(t, s.db, suffix, "completed")
 	taskID = "t_" + suffix
-	// run_memory row so the human-verdict UPDATE has a target (the termination
+	// conversation_memory row so the human-verdict UPDATE has a target (the termination
 	// upsert guarantees this in production).
 	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, runID, "e_"+suffix, "", "agent self-report"); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
 	a := domain.NewPullRequestArtifact(owner+"/"+repo, number, "PR_node", "feature/x", "main",
 		fmt.Sprintf("https://example.test/%s/%s/pull/%d", owner, repo, number), "Proposed title", "Proposed body", true)
-	a.RunID = runID
+	a.ConversationID = runID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
@@ -663,7 +663,7 @@ func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, n
 	}
 	a := domain.NewPullRequestArtifact(owner+"/"+repo, number, "PR_node", "feature/x", "main",
 		fmt.Sprintf("https://example.test/%s/%s/pull/%d", owner, repo, number), "Proposed title", "Proposed body", true)
-	a.RunID = "r_ab"
+	a.ConversationID = "r_ab"
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)

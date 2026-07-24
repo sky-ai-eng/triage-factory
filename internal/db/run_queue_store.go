@@ -65,7 +65,7 @@ type RunQueueStore interface {
 	// with no JWT-claims context; the row's creator_user_id is still stamped
 	// for audit and later RLS-scoped reads. The schema CHECK pairing
 	// trigger_type with creator_user_id nullability is the caller's contract.
-	EnqueueRun(ctx context.Context, orgID string, run domain.AgentRun) error
+	EnqueueRun(ctx context.Context, orgID string, run domain.Conversation) error
 
 	// ClaimNextRun claims a queued run whose owning blueprint_run is still
 	// 'running' and not cancel-requested, flips it queued -> running, stamps
@@ -98,7 +98,7 @@ type RunQueueStore interface {
 	// queued step of a cancel-requested or already-terminal blueprint is
 	// deliberately never claimed — the sequence-level cancel is honored here
 	// (decision: a queued-not-started step cancels with zero work).
-	ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement ClaimPlacement) (*domain.AgentRun, error)
+	ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement ClaimPlacement) (*domain.Conversation, error)
 
 	// RequeueRun returns a claimed run to status='queued' after a transient
 	// dispatcher failure (e.g. workspace setup hiccup), recording lastErr for

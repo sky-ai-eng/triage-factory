@@ -57,9 +57,9 @@ func (p SystemScoringCompletedPredicate) Matches(m SystemScoringCompletedMetadat
 // -----------------------------------------------------------------------------
 
 type SystemDelegationCompletedMetadata struct {
-	RunID    string `json:"run_id"`
-	TaskID   string `json:"task_id"`
-	PromptID string `json:"prompt_id"`
+	ConversationID string `json:"conversation_id"`
+	TaskID         string `json:"task_id"`
+	PromptID       string `json:"prompt_id"`
 }
 
 type SystemDelegationCompletedPredicate struct {
@@ -71,10 +71,10 @@ func (p SystemDelegationCompletedPredicate) Matches(m SystemDelegationCompletedM
 }
 
 type SystemDelegationFailedMetadata struct {
-	RunID    string `json:"run_id"`
-	TaskID   string `json:"task_id"`
-	PromptID string `json:"prompt_id"`
-	Reason   string `json:"reason"`
+	ConversationID string `json:"conversation_id"`
+	TaskID         string `json:"task_id"`
+	PromptID       string `json:"prompt_id"`
+	Reason         string `json:"reason"`
 }
 
 type SystemDelegationFailedPredicate struct {
@@ -123,7 +123,7 @@ func (p SystemTaskDelegationBlockedSubtasksPredicate) Matches(m SystemTaskDelega
 }
 
 // -----------------------------------------------------------------------------
-// system:run:status / system:run:activity — EE-observable run lifecycle
+// system:conversation:status / system:conversation:activity — EE-observable run lifecycle
 // sentinels (TFAC-592), mirroring the two websocket choke points in
 // internal/delegate/spawner.go onto the bus. Deliberately minimal: no
 // TaskID/EntitySource, so consumers resolve run→task→entity context
@@ -131,33 +131,33 @@ func (p SystemTaskDelegationBlockedSubtasksPredicate) Matches(m SystemTaskDelega
 // broadcast path.
 // -----------------------------------------------------------------------------
 
-type SystemRunStatusMetadata struct {
-	RunID       string `json:"run_id"`
-	Status      string `json:"status"`                 // the broadcast status string
-	FailureKind string `json:"failure_kind,omitempty"` // set on the failed arm only
+type SystemConversationStatusMetadata struct {
+	ConversationID string `json:"conversation_id"`
+	Status         string `json:"status"`                 // the broadcast status string
+	FailureKind    string `json:"failure_kind,omitempty"` // set on the failed arm only
 }
 
 // No predicate fields — fires once per instance, users can only enable / disable.
-type SystemRunStatusPredicate struct{}
+type SystemConversationStatusPredicate struct{}
 
-func (p SystemRunStatusPredicate) Matches(m SystemRunStatusMetadata) bool {
+func (p SystemConversationStatusPredicate) Matches(m SystemConversationStatusMetadata) bool {
 	return true
 }
 
-type RunActivityTool struct {
+type ConversationActivityTool struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"` // Input["description"] when a string; else ""
 }
 
-type SystemRunActivityMetadata struct {
-	RunID string            `json:"run_id"`
-	Tools []RunActivityTool `json:"tools"`
+type SystemConversationActivityMetadata struct {
+	ConversationID string                     `json:"conversation_id"`
+	Tools          []ConversationActivityTool `json:"tools"`
 }
 
 // No predicate fields — fires once per instance, users can only enable / disable.
-type SystemRunActivityPredicate struct{}
+type SystemConversationActivityPredicate struct{}
 
-func (p SystemRunActivityPredicate) Matches(m SystemRunActivityMetadata) bool {
+func (p SystemConversationActivityPredicate) Matches(m SystemConversationActivityMetadata) bool {
 	return true
 }
 
@@ -220,7 +220,7 @@ func init() {
 	Register(NewSchema[SystemDelegationFailedMetadata, SystemDelegationFailedPredicate](domain.EventSystemDelegationFailed, OwnershipUnrouted))
 	Register(NewSchema[SystemPromptAutoSuspendedMetadata, SystemPromptAutoSuspendedPredicate](domain.EventSystemPromptAutoSuspended, OwnershipUnrouted))
 	Register(NewSchema[SystemTaskDelegationBlockedSubtasksMetadata, SystemTaskDelegationBlockedSubtasksPredicate](domain.EventSystemTaskDelegationBlockedSubtasks, OwnershipUnrouted))
-	Register(NewSchema[SystemRunStatusMetadata, SystemRunStatusPredicate](domain.EventSystemRunStatus, OwnershipUnrouted))
-	Register(NewSchema[SystemRunActivityMetadata, SystemRunActivityPredicate](domain.EventSystemRunActivity, OwnershipUnrouted))
+	Register(NewSchema[SystemConversationStatusMetadata, SystemConversationStatusPredicate](domain.EventSystemConversationStatus, OwnershipUnrouted))
+	Register(NewSchema[SystemConversationActivityMetadata, SystemConversationActivityPredicate](domain.EventSystemConversationActivity, OwnershipUnrouted))
 	Register(NewSchema[SystemRoutingDispositionMetadata, SystemRoutingDispositionPredicate](domain.EventSystemRoutingDisposition, OwnershipUnrouted))
 }

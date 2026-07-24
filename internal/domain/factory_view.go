@@ -6,11 +6,11 @@ import "time"
 // Factory overlay: the run row joined with its task + a couple of
 // pre-extracted entity fields the renderer needs for keyed lookups.
 //
-// The embedded AgentRun + Task carry the full state; EntityAuthor
+// The embedded Conversation + Task carry the full state; EntityAuthor
 // and EntityEventTyp are pre-copied so the renderer doesn't have to
 // re-derive them per row.
 type FactoryActiveRun struct {
-	Run            AgentRun
+	Run            Conversation
 	Task           Task
 	EntityAuthor   string // PR author login (github) or assignee (jira); "" if unknown
 	EntityEventTyp string // task.event_type; pre-copied for keyed lookup

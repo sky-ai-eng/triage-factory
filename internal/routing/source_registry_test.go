@@ -92,7 +92,7 @@ func fakeEvent(entityID string) domain.Event {
 func fakeSourceRouter(database *sql.DB) *Router {
 	st := sqlitestore.New(database)
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events,
+		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events,
 		st.Orgs, st.Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 }
 

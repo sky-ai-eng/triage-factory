@@ -264,7 +264,7 @@ func testWSFanoutOutboxRef(t *testing.T, adminDB *sql.DB, dsn string) {
 	// the ws_outbox path.
 	big := strings.Repeat("x", 8*1024)
 	retryPublish(t, 10*time.Second, func() {
-		hubA.Broadcast(websocket.Event{Type: "agent_message", OrgID: "org-outbox", Data: map[string]any{"text": big}})
+		hubA.Broadcast(websocket.Event{Type: "message", OrgID: "org-outbox", Data: map[string]any{"text": big}})
 	}, func() bool {
 		_, ok := readerB.next(150 * time.Millisecond)
 		return ok
@@ -447,7 +447,7 @@ func testSentinelBrainRelay(t *testing.T, adminDB *sql.DB, dsn string) {
 	t.Cleanup(cancel)
 	go brain.RunBusListener(ctx, func(evt domain.Event) { received <- evt })
 
-	want := domain.Event{EventType: "system:run:activity", OrgID: "org-sentinel", MetadataJSON: `{"tool":"bash"}`}
+	want := domain.Event{EventType: "system:conversation:activity", OrgID: "org-sentinel", MetadataJSON: `{"tool":"bash"}`}
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		executor.PublishSentinel(want)

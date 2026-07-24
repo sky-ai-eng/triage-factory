@@ -11,18 +11,18 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestAgentRunStore_Postgres_LookupOrgForRunSystem_ReturnsRealOrgID
+// TestConversationStore_Postgres_LookupOrgForRunSystem_ReturnsRealOrgID
 // pins the cold-start identity probe that cmd/exec runident depends
-// on: a delegated agent subprocess only has TRIAGE_FACTORY_RUN_ID in
+// on: a delegated agent subprocess only has TRIAGE_FACTORY_CONVERSATION_ID in
 // its env, so the lookup has to discover the run's owning org by
 // runID alone. Returns the real Postgres org UUID, NOT the local-mode
 // sentinel — the exact regression this ticket exists to fix.
-func TestAgentRunStore_Postgres_LookupOrgForRunSystem_ReturnsRealOrgID(t *testing.T) {
+func TestConversationStore_Postgres_LookupOrgForRunSystem_ReturnsRealOrgID(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
-	orgID, userID, _ := seedPgAgentRunOrg(t, h)
-	promptID := seedPgAgentRunPrompt(t, h, orgID, userID)
+	orgID, userID, _ := seedPgConversationOrg(t, h)
+	promptID := seedPgConversationPrompt(t, h, orgID, userID)
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
@@ -54,12 +54,12 @@ func TestAgentRunStore_Postgres_LookupOrgForRunSystem_ReturnsRealOrgID(t *testin
 		t.Fatalf("seed task: %v", err)
 	}
 	brID := seedPgBlueprintRun(t, h, orgID, userID, taskID)
-	seedPgConversation(t, h.AdminDB, orgID, domain.AgentRun{
+	seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
 		ID: runID, TaskID: taskID, PromptID: promptID, Status: "running", Model: "m",
 		CreatorUserID: userID, BlueprintRunID: brID,
 	})
 
-	got, err := stores.AgentRuns.LookupOrgForRunSystem(ctx, runID)
+	got, err := stores.Conversations.LookupOrgForRunSystem(ctx, runID)
 	if err != nil {
 		t.Fatalf("LookupOrgForRunSystem: %v", err)
 	}
@@ -68,17 +68,17 @@ func TestAgentRunStore_Postgres_LookupOrgForRunSystem_ReturnsRealOrgID(t *testin
 	}
 }
 
-// TestAgentRunStore_Postgres_LookupOrgForRunSystem_UnknownReturnsEmpty
+// TestConversationStore_Postgres_LookupOrgForRunSystem_UnknownReturnsEmpty
 // — an unknown runID returns ("", nil). The runident helper maps this
 // to ErrRunIdentityNotFound so the agent subprocess surfaces a clear
 // "stale env var / spawner bug" message in stderr rather than reading
 // nil-dereference-style panics.
-func TestAgentRunStore_Postgres_LookupOrgForRunSystem_UnknownReturnsEmpty(t *testing.T) {
+func TestConversationStore_Postgres_LookupOrgForRunSystem_UnknownReturnsEmpty(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	got, err := stores.AgentRuns.LookupOrgForRunSystem(context.Background(), uuid.New().String())
+	got, err := stores.Conversations.LookupOrgForRunSystem(context.Background(), uuid.New().String())
 	if err != nil {
 		t.Fatalf("LookupOrgForRunSystem on unknown run: %v", err)
 	}

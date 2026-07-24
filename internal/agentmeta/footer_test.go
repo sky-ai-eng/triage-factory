@@ -94,7 +94,7 @@ func seedFooterRun(t *testing.T, database *sql.DB, fix runFooterFixture) {
 	if brID == "" {
 		brID = seedBlueprintRun(t, database, task.ID)
 	}
-	dbtest.SeedConversation(t, database, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.Conversation{
 		ID: fix.ID, TaskID: task.ID, PromptID: "footer-test-prompt",
 		Status: "running", Model: fix.Model, StartedAt: fix.StartedAt,
 		CompletedAt: fix.CompletedAt, DurationMs: fix.DurationMs,
@@ -142,7 +142,7 @@ func TestBuild_KindNounRendersInDisclaimer(t *testing.T) {
 			Model:     "claude-haiku-4-5",
 			StartedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
 		})
-		got := Build(sqlitestore.New(database).AgentRuns, runmode.LocalDefaultOrgID, runID, kind)
+		got := Build(sqlitestore.New(database).Conversations, runmode.LocalDefaultOrgID, runID, kind)
 		want := "This " + kind + " was partially generated"
 		if !strings.Contains(got, want) {
 			t.Errorf("kind=%q: missing %q in %q", kind, want, got)
@@ -152,7 +152,7 @@ func TestBuild_KindNounRendersInDisclaimer(t *testing.T) {
 
 // TestBuild_HappyPath_UsesStoredCostAndDuration covers the canonical
 // post-run case: TotalCostUSD and DurationMs were populated by
-// CompleteAgentRun. The footer reads them directly with no "~" prefix.
+// CompleteConversation. The footer reads them directly with no "~" prefix.
 func TestBuild_HappyPath_UsesStoredCostAndDuration(t *testing.T) {
 	database := newTestDB(t)
 	completedAt := time.Date(2026, 1, 1, 12, 1, 30, 0, time.UTC)
@@ -167,7 +167,7 @@ func TestBuild_HappyPath_UsesStoredCostAndDuration(t *testing.T) {
 		TotalCostUSD: &cost,
 	})
 
-	got := Build(sqlitestore.New(database).AgentRuns, runmode.LocalDefaultOrgID, "r1", "review")
+	got := Build(sqlitestore.New(database).Conversations, runmode.LocalDefaultOrgID, "r1", "review")
 	if !strings.Contains(got, "Time: 1m 30s") {
 		t.Errorf("missing/wrong Time: %q", got)
 	}
@@ -197,7 +197,7 @@ func TestBuild_LegacyFallback_FlagsApproximateCost(t *testing.T) {
 		// TotalCostUSD nil → forces the legacy path
 	})
 
-	got := Build(sqlitestore.New(database).AgentRuns, runmode.LocalDefaultOrgID, "r2", "review")
+	got := Build(sqlitestore.New(database).Conversations, runmode.LocalDefaultOrgID, "r2", "review")
 	if !strings.Contains(got, "Cost: ~$") {
 		t.Errorf("legacy fallback should prefix Cost with '~': %q", got)
 	}
@@ -241,7 +241,7 @@ func TestBuild_SumsCostAcrossBlueprintSteps(t *testing.T) {
 		BlueprintRunID: brID,
 	})
 
-	got := Build(sqlitestore.New(database).AgentRuns, runmode.LocalDefaultOrgID, "bp-step-2", "review")
+	got := Build(sqlitestore.New(database).Conversations, runmode.LocalDefaultOrgID, "bp-step-2", "review")
 	// 0.01 (step 1) + 0.02 (authoring step 2) = 0.030.
 	if !strings.Contains(got, "Cost: $0.030") {
 		t.Errorf("expected summed cost across blueprint steps (Cost: $0.030): %q", got)
@@ -285,7 +285,7 @@ func TestBuild_SumsTimeAcrossBlueprintSteps(t *testing.T) {
 		BlueprintRunID: brID,
 	})
 
-	got := Build(sqlitestore.New(database).AgentRuns, runmode.LocalDefaultOrgID, "bpt-step-2", "review")
+	got := Build(sqlitestore.New(database).Conversations, runmode.LocalDefaultOrgID, "bpt-step-2", "review")
 	// 30s (step 1) + 1m 30s (authoring step 2) = 2m 0s.
 	if !strings.Contains(got, "Time: 2m 0s") {
 		t.Errorf("expected summed time across blueprint steps (Time: 2m 0s): %q", got)

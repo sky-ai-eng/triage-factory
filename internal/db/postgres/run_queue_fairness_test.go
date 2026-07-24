@@ -37,7 +37,7 @@ func (f *fairnessFixture) enqueue(t *testing.T, stores db.Stores, preferred stri
 	runID := uuid.New().String()
 	idx := f.nextStep
 	f.nextStep++
-	if err := stores.RunQueue.EnqueueRun(context.Background(), f.orgID, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(context.Background(), f.orgID, domain.Conversation{
 		ID: runID, TaskID: f.taskID, PromptID: f.promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: f.userID, BlueprintRunID: f.brID, BlueprintStepIndex: &idx,
 		PreferredExecutorID: preferred,
@@ -82,7 +82,7 @@ func TestClaimFairness_BurstDoesNotStarveOtherOrg(t *testing.T) {
 	// the queue.
 	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET started_at = now() - interval '1 hour' WHERE org_id = $1`, a.orgID)
 
-	claim := func() *domain.AgentRun {
+	claim := func() *domain.Conversation {
 		got, err := stores.RunQueue.ClaimNextRun(ctx, "exec-1", 1, db.ClaimPlacement{})
 		if err != nil {
 			t.Fatalf("ClaimNextRun: %v", err)
@@ -118,7 +118,7 @@ func TestClaimCap_BlocksAtCapAndReconfiguresLive(t *testing.T) {
 		a.enqueue(t, stores, "")
 	}
 	setCap := func(n int) { c := n; setPgOrgCap(t, h, a.orgID, &c) }
-	claim := func() *domain.AgentRun {
+	claim := func() *domain.Conversation {
 		got, err := stores.RunQueue.ClaimNextRun(ctx, "exec-1", 1, db.ClaimPlacement{})
 		if err != nil {
 			t.Fatalf("ClaimNextRun: %v", err)

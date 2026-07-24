@@ -45,7 +45,7 @@ const runQueueClaimCols = `id, org_id, task_id, COALESCE(prompt_id, ''), status,
 	COALESCE(worktree_path, ''), COALESCE(sdk_session_id, ''), trigger_type, COALESCE(trigger_id, ''),
 	COALESCE(creator_user_id, ''), team_id, COALESCE(blueprint_run_id, ''), blueprint_step_index`
 
-func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain.AgentRun) error {
+func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain.Conversation) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
@@ -77,7 +77,7 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 	return err
 }
 
-func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, _ db.ClaimPlacement) (*domain.AgentRun, error) {
+func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, _ db.ClaimPlacement) (*domain.Conversation, error) {
 	// Flip the oldest claimable queued run to 'running' and mint the claims
 	// row that records this engagement's ownership, inside one short
 	// transaction. Claimable = its owning blueprint_run is still 'running'
@@ -98,7 +98,7 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 	//
 	// An empty executorID (the un-wired test-spawner path) stores the ''
 	// sentinel on the claim — claims.executor_id is NOT NULL by schema.
-	var run *domain.AgentRun
+	var run *domain.Conversation
 	claimedAt := time.Now().UTC()
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		row := q.QueryRowContext(ctx, `
@@ -655,11 +655,11 @@ func scanSqliteRunTimings(rows *sql.Rows) ([]domain.RunTiming, error) {
 }
 
 // scanSqliteClaimedRun scans a claimed conversations row into
-// *domain.AgentRun. (nil, nil) on sql.ErrNoRows so callers treat "nothing
+// *domain.Conversation. (nil, nil) on sql.ErrNoRows so callers treat "nothing
 // claimable" as a non-error empty result.
-func scanSqliteClaimedRun(row *sql.Row) (*domain.AgentRun, error) {
+func scanSqliteClaimedRun(row *sql.Row) (*domain.Conversation, error) {
 	var (
-		r       domain.AgentRun
+		r       domain.Conversation
 		stepIdx sql.NullInt64
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.TaskID, &r.PromptID, &r.Status, &r.Model,

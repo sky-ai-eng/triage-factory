@@ -124,7 +124,7 @@ func readOnlyRepoMounts(mounts []ReadOnlyRepoMount) []sandbox.Mount {
 // Callers interpolate this into the prompts and tool-result messages they
 // hand the agent so a concrete absolute memory/scratch path lands where the
 // agent's file tools can actually write it. Those tools do no shell env
-// expansion, so a bare "$TRIAGE_FACTORY_RUN_ROOT/..." reference would be
+// expansion, so a bare "$TRIAGE_FACTORY_CONVERSATION_ROOT/..." reference would be
 // written verbatim; pre-expanding to this value is what makes the path
 // resolve identically whether the run is sandboxed or not.
 func AgentVisibleRoot(hostRoot string) string {
@@ -201,7 +201,7 @@ func buildSandboxEnv(extraEnv []string) []string {
 	out := make([]string, 0, len(base)+len(extraEnv))
 	out = append(out, base...)
 	// ExtraEnv carries non-credential run-scoped metadata
-	// (TRIAGE_FACTORY_RUN_ID etc). Callers that pass credential
+	// (TRIAGE_FACTORY_CONVERSATION_ID etc). Callers that pass credential
 	// env vars in ExtraEnv would violate Property B — that's a
 	// caller bug, but the package's existing contract for ExtraEnv
 	// is "run-scoped non-credential variables" so we trust it.
@@ -259,9 +259,9 @@ func ChownWorkspaceCheckoutForSandbox(ctx context.Context, runRoot, wtDir string
 // matches translateAddDirsForSandbox: same workCwd, same drop-on-
 // outside-cwd policy, same pass-through for empty/non-path values.
 //
-// Why: delegate/resume callers set TRIAGE_FACTORY_RUN_ROOT to a host
+// Why: delegate/resume callers set TRIAGE_FACTORY_CONVERSATION_ROOT to a host
 // path (e.g. /data/worktrees/<run>) so the agent's memory-gate retry
-// message can reference an absolute "$TRIAGE_FACTORY_RUN_ROOT/_scratch/
+// message can reference an absolute "$TRIAGE_FACTORY_CONVERSATION_ROOT/_scratch/
 // entity-memory/<id>.md" path. Inside the sandbox that host path
 // doesn't exist — the run root is bind-mounted at /work — so the agent
 // would write to a path that resolves to nothing. Translate before

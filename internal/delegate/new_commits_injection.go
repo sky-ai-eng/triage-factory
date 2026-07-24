@@ -59,7 +59,7 @@ func (s *Spawner) HandlePRNewCommits(evt domain.Event) {
 
 	for i := range reviews {
 		a := reviews[i]
-		if a.RunID == "" {
+		if a.ConversationID == "" {
 			continue // detached artifact (run purged) — no agent to tell
 		}
 		// Freshness gate: the agent isn't behind if its review already recorded
@@ -72,11 +72,11 @@ func (s *Spawner) HandlePRNewCommits(evt domain.Event) {
 		// resumable run (staged for its next resume). A truly terminal, non-
 		// resumable run (completed+finish, failed, cancelled) can never read a
 		// staged injection — staging it would leak a row that never flushes — so skip.
-		live := s.getProc(a.RunID) != nil
+		live := s.getProc(a.ConversationID) != nil
 		if !live {
-			run, err := s.agentRuns.GetSystem(ctx, evt.OrgID, a.RunID)
+			run, err := s.agentRuns.GetSystem(ctx, evt.OrgID, a.ConversationID)
 			if err != nil {
-				delegateLog.Warn("new-commits injection: load run failed", "run", a.RunID, "error", err)
+				delegateLog.Warn("new-commits injection: load run failed", "run", a.ConversationID, "error", err)
 				continue
 			}
 			if run == nil || !resumableState(run.Status, run.Outcome) {
@@ -84,6 +84,6 @@ func (s *Spawner) HandlePRNewCommits(evt domain.Event) {
 			}
 		}
 		body := domain.PRNewCommitsInjection(meta.Repo, meta.PRNumber, meta.PrevHeadSHA, meta.HeadSHA)
-		s.StageOrDeliverInjection(evt.OrgID, a.RunID, domain.StagedInjectionProducerPRNewCommits, body)
+		s.StageOrDeliverInjection(evt.OrgID, a.ConversationID, domain.StagedInjectionProducerPRNewCommits, body)
 	}
 }

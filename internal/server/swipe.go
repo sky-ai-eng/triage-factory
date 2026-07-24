@@ -566,7 +566,7 @@ func (s *Server) swipeLifecycle(w http.ResponseWriter, r *http.Request, orgID, u
 // unresolved artifact the task holds (teardownTaskArtifacts — closes all draft
 // PRs, dismisses all pending reviews, a no-op when none exist) and cancels
 // in-flight runs. The discard memory note differs per action so the next agent
-// reading run_memory can tell apart "human walked away" (dismiss) from "human
+// reading conversation_memory can tell apart "human walked away" (dismiss) from "human
 // resolved it" (complete) from "human took over" (claim) from "re-delegate".
 // Best-effort.
 func (s *Server) swipeTeardownRuns(r *http.Request, orgID, userID, id, action string) {
@@ -590,7 +590,7 @@ func (s *Server) swipeTeardownRuns(r *http.Request, orgID, userID, id, action st
 	var ids []string
 	if err := s.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		ids, e = tx.AgentRuns.ActiveIDsForTask(cleanupCtx, orgID, id)
+		ids, e = tx.Conversations.ActiveIDsForTask(cleanupCtx, orgID, id)
 		return e
 	}); err != nil {
 		swipeLog.Error("active-run lookup failed", "task", id, "error", err)
@@ -684,6 +684,6 @@ func (s *Server) swipeTriggerDelegation(r *http.Request, orgID, userID, id strin
 	if err != nil {
 		response["delegate_error"] = err.Error()
 	} else {
-		response["run_id"] = runID
+		response["conversation_id"] = runID
 	}
 }

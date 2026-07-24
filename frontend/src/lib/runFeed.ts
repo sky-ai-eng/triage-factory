@@ -1,4 +1,4 @@
-import type { AgentMessage } from '../types'
+import type { Message } from '../types'
 
 // runFeed — the bounded per-run projection the board's AgentCards render from.
 //
@@ -6,7 +6,7 @@ import type { AgentMessage } from '../types'
 // hand it to each card, which then derived a token/comment tally and the last
 // five ticker lines on every render. That meant unbounded memory growth per
 // live run AND a whole-board re-render doing O(all messages) work for every
-// streamed agent_message. The card only ever displays aggregates + the tail,
+// streamed `message` event. The card only ever displays aggregates + the tail,
 // so this module keeps exactly that: running stats plus the last few feed
 // lines, updated incrementally as messages arrive.
 //
@@ -37,7 +37,7 @@ export const EMPTY_FEED: RunCardFeed = { comments: 0, tokens: 0, lines: [] }
 const FEED_LINE_CAP = 8
 
 /** Build a feed from a full message array (the aggregated board fetch). */
-export function feedFromMessages(messages: AgentMessage[]): RunCardFeed {
+export function feedFromMessages(messages: Message[]): RunCardFeed {
   let feed = EMPTY_FEED
   for (const msg of messages) feed = appendToFeed(feed, msg)
   return feed
@@ -50,11 +50,11 @@ export function feedFromMessages(messages: AgentMessage[]): RunCardFeed {
  * a live transcript). Callers rely on that identity to skip the state write
  * entirely, so a display-no-op message doesn't re-render the board.
  */
-export function appendToFeed(prev: RunCardFeed | undefined, msg: AgentMessage): RunCardFeed {
+export function appendToFeed(prev: RunCardFeed | undefined, msg: Message): RunCardFeed {
   const base = prev ?? EMPTY_FEED
   const lines = linesForMessage(msg)
   const comments = commentsForMessage(msg)
-  const tokens = (msg.OutputTokens ?? 0) + (msg.InputTokens ?? 0)
+  const tokens = (msg.output_tokens ?? 0) + (msg.input_tokens ?? 0)
   if (lines.length === 0 && comments === 0 && tokens === 0) return base
   return {
     comments: base.comments + comments,
@@ -63,9 +63,9 @@ export function appendToFeed(prev: RunCardFeed | undefined, msg: AgentMessage): 
   }
 }
 
-function commentsForMessage(msg: AgentMessage): number {
-  if (msg.Role === 'assistant' && msg.Subtype === 'tool_use' && msg.ToolCalls?.length) {
-    const cmd = String(msg.ToolCalls[0].input?.command || '')
+function commentsForMessage(msg: Message): number {
+  if (msg.role === 'assistant' && msg.subtype === 'tool_use' && msg.tool_calls?.length) {
+    const cmd = String(msg.tool_calls[0].input?.command || '')
     if (cmd.includes('add-review-comment') || cmd.includes('add-comment')) return 1
   }
   return 0
@@ -74,9 +74,9 @@ function commentsForMessage(msg: AgentMessage): number {
 // linesForMessage flattens one message into compact one-liners — the agent's
 // actions (tool calls) and its prose turns — for the card's live ticker. The
 // full, nested transcript lives in the expanded run view.
-function linesForMessage(msg: AgentMessage): FeedLine[] {
+function linesForMessage(msg: Message): FeedLine[] {
   const out: FeedLine[] = []
-  const time = new Date(msg.CreatedAt).toLocaleTimeString([], {
+  const time = new Date(msg.created_at).toLocaleTimeString([], {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
@@ -84,19 +84,19 @@ function linesForMessage(msg: AgentMessage): FeedLine[] {
   })
   // Operator steers show on the ticker too — the card should reflect that
   // someone redirected the run.
-  if (msg.Role === 'user' && msg.Content) {
-    out.push({ id: `u-${msg.ID}`, time, text: `you: ${clip(msg.Content, 64)}` })
+  if (msg.role === 'user' && msg.content) {
+    out.push({ id: `u-${msg.id}`, time, text: `you: ${clip(msg.content, 64)}` })
     return out
   }
-  if (msg.Role !== 'assistant') return out
+  if (msg.role !== 'assistant') return out
   // Skip the raw JSON completion message (the agent's structured output).
-  if (msg.Content && msg.Content.trimStart().startsWith('{"status":')) return out
+  if (msg.content && msg.content.trimStart().startsWith('{"status":')) return out
   // Reasoning stays off the ticker — it's a verbose stream; the expanded
   // run view renders it under its own THINKING rows.
-  if (msg.Subtype === 'thinking') return out
-  if (msg.Content) out.push({ id: `txt-${msg.ID}`, time, text: clip(msg.Content, 70) })
-  if (msg.ToolCalls?.length) {
-    for (const tc of msg.ToolCalls) {
+  if (msg.subtype === 'thinking') return out
+  if (msg.content) out.push({ id: `txt-${msg.id}`, time, text: clip(msg.content, 70) })
+  if (msg.tool_calls?.length) {
+    for (const tc of msg.tool_calls) {
       out.push({ id: `tc-${tc.id}`, time, text: formatToolCall(tc.name, tc.input) })
     }
   }

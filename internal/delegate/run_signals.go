@@ -2,7 +2,7 @@
 // implementation. When the local process registry misses a control
 // request (interrupt/steer/cancel/permission), crossPodController resolves
 // the run's executor via runs.executor_id + instance-registry liveness,
-// inserts a row on the run_signals outbox, NOTIFYs tf_ctl, and waits (with
+// inserts a row on the conversation_signals outbox, NOTIFYs tf_ctl, and waits (with
 // a bounded timeout) for the owning executor's apply loop to apply it
 // through its own local RunController and ack. See
 // docs/for-agents/specs/horizontal-scaling/README.md §5.2.
@@ -14,7 +14,7 @@
 // remote executor.
 //
 // Every mechanism here is dormant unless SetRunSignals wires it — always
-// nil in local mode (run_signals is Postgres-only) and in every test that
+// nil in local mode (conversation_signals is Postgres-only) and in every test that
 // doesn't opt in, which is what keeps s.controller as the plain
 // inProcessController and every cross-pod branch below unreached.
 
@@ -117,7 +117,7 @@ func (s *Spawner) signalTimeout() time.Duration {
 // runSignals swaps s.controller for crossPodController, the RunController
 // seam's second implementation; leaving it unset (the default) keeps the
 // plain inProcessController, which is what makes local mode's "no
-// run_signals writes" invariant structural rather than a runtime check.
+// conversation_signals writes" invariant structural rather than a runtime check.
 // notifyDB is the admin pool NOTIFY rides — see pgnotify.Notify's doc
 // comment on why it needs no session affinity, unlike the dedicated LISTEN
 // connection (internal/pgnotify.Listener, wired separately against
@@ -167,12 +167,12 @@ func (c crossPodController) Steer(ctx context.Context, runID, text string) error
 	return c.s.routeControlSignal(ctx, runID, domain.RunSignalSteer, text)
 }
 
-// steerPayload is the run_signals.payload shape for kind=steer.
+// steerPayload is the conversation_signals.payload shape for kind=steer.
 type steerPayload struct {
 	Text string `json:"text"`
 }
 
-// permissionPayload is the run_signals.payload shape for kind=permission.
+// permissionPayload is the conversation_signals.payload shape for kind=permission.
 type permissionPayload struct {
 	RequestID    string         `json:"request_id"`
 	Behavior     string         `json:"behavior"`
@@ -180,7 +180,7 @@ type permissionPayload struct {
 	UpdatedInput map[string]any `json:"updated_input"`
 }
 
-// injectPayload is the run_signals.payload shape for kind=inject. The
+// injectPayload is the conversation_signals.payload shape for kind=inject. The
 // firing-ref fields ride along so the owner can compensate with a
 // pending_firing enqueue if the run turns out dead by apply time (the
 // "gone" ack path) — the intent must never be dropped.
@@ -289,7 +289,7 @@ func (s *Spawner) resolveLiveOwner(ctx context.Context, orgID, runID string) (ex
 }
 
 // sendSignalAndAwaitAck resolves a live remote owner for runID, inserts a
-// run_signals row, NOTIFYs tf_ctl, and waits for an ack until ctx is done.
+// conversation_signals row, NOTIFYs tf_ctl, and waits for an ack until ctx is done.
 // live=false means no live remote owner was found at all (the run has no
 // stamped executor, or its heartbeat is stale) — the caller falls back to
 // its own no-live-process handling; live=true with a non-nil err means the
@@ -424,7 +424,7 @@ const (
 	// process's own live handle for the run — the caller should record
 	// the task_event 'injected' itself, exactly as before TFAC-585.
 	InjectDeliveredLocal
-	// InjectDeliveredRemote means a run_signals row was handed to a live
+	// InjectDeliveredRemote means a conversation_signals row was handed to a live
 	// remote executor — the OWNER records 'injected' (or compensates with
 	// a pending_firing on "gone") once delivery is confirmed, so the
 	// caller must NOT record it here.
@@ -455,7 +455,7 @@ type AdditiveFiringRef struct {
 // live remote executor" outcome its callers must NOT re-record locally).
 //
 // Decision order: local live process (byte-identical to the pre-TFAC-585
-// path) → a live remote owner (insert an `inject` run_signals row,
+// path) → a live remote owner (insert an `inject` conversation_signals row,
 // fire-and-forget — never waited on, per the reply-leg contract) → the
 // existing staged/resumable fallback.
 func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID, producer, body string, firing AdditiveFiringRef) InjectOutcome {
@@ -523,7 +523,7 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID,
 const DefaultSignalApplyScanInterval = 5 * time.Second
 
 // RunSignalApplyLoop is the owner's half of the cross-pod control seam: it
-// scans run_signals for unacked rows targeting this executor and applies
+// scans conversation_signals for unacked rows targeting this executor and applies
 // each through the local (never cross-pod — see applySignal) RunController,
 // acking with a result. One goroutine, deliberately serial (§5.2: "do not
 // parallelize" — signal volume is human-action-scale). No-op when
@@ -568,7 +568,7 @@ func (s *Spawner) drainSignals(ctx context.Context) {
 	}
 	sigs, err := s.runSignals.ListUnackedForTarget(ctx, executorID)
 	if err != nil {
-		delegateLog.Warn("scan unacked run_signals failed; retrying on the next tick", "error", err)
+		delegateLog.Warn("scan unacked conversation_signals failed; retrying on the next tick", "error", err)
 		return
 	}
 	for _, sig := range sigs {
@@ -749,7 +749,7 @@ func ParseRunSignalPurgeAge(raw string) (time.Duration, error) {
 	return d, nil
 }
 
-// RunSignalPurgeReaper periodically deletes acked run_signals rows older
+// RunSignalPurgeReaper periodically deletes acked conversation_signals rows older
 // than age — the 24h audit-convenience window. No-op when runSignals
 // isn't wired.
 func (s *Spawner) RunSignalPurgeReaper(ctx context.Context, interval, age time.Duration) {
@@ -765,11 +765,11 @@ func (s *Spawner) RunSignalPurgeReaper(ctx context.Context, interval, age time.D
 		case <-tick.C:
 			n, err := s.runSignals.PurgeAcked(ctx, age)
 			if err != nil {
-				delegateLog.Warn("purge acked run_signals failed", "error", err)
+				delegateLog.Warn("purge acked conversation_signals failed", "error", err)
 				continue
 			}
 			if n > 0 {
-				delegateLog.Info("purged acked run_signals", "count", n)
+				delegateLog.Info("purged acked conversation_signals", "count", n)
 			}
 		}
 	}

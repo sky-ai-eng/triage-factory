@@ -9,17 +9,14 @@ import "time"
 // `~/.triagefactory/projects/<id>/knowledge-base/*.md`; the per-project
 // classifier reads it inline at vote time.
 //
-// CuratorSessionID was originally named DesignerSessionID; it was
-// renamed to match the runtime that actually populates it. The
-// rename happened via the 20260503_001_curator.sql migration on
-// existing installs, with the new name carried through Go code in
-// the same release.
+// The curator's SDK resume handle no longer lives on the project row — the
+// curator conversation's sdk_session_id absorbs it — so there is no
+// session-id field here.
 type Project struct {
-	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	Description      string   `json:"description"`
-	CuratorSessionID string   `json:"curator_session_id,omitempty"`
-	PinnedRepos      []string `json:"pinned_repos"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	PinnedRepos []string `json:"pinned_repos"`
 	// CreatorUserID is the user who created the project — the identity the
 	// projects_{insert,update,delete} RLS policies' "private" branch pins
 	// visibility="private" writes to (WITH CHECK creator_user_id =

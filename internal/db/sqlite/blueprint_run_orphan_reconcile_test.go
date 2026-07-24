@@ -46,7 +46,7 @@ func TestMarkRunStatus_CancelsOrphanedChild_OnTerminal(t *testing.T) {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	step0 := 0
-	insertConversationForTest(t, conn, domain.AgentRun{
+	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "oa-child", TaskID: task.ID, PromptID: "oa-p0", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	})
@@ -114,7 +114,7 @@ func TestMarkRunStatus_LeavesTerminalChild(t *testing.T) {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	step0 := 0
-	insertConversationForTest(t, conn, domain.AgentRun{
+	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "of-child", TaskID: task.ID, PromptID: "of-p0", Status: "completed",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	})
@@ -162,7 +162,7 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 		t.Fatalf("CreateRun A: %v", err)
 	}
 	step0 := 0
-	insertConversationForTest(t, conn, domain.AgentRun{
+	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "ra-child", TaskID: taskA.ID, PromptID: "ra-p0", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brA, BlueprintStepIndex: &step0,
 	})
@@ -187,7 +187,7 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	// A second orphan that never started: queued child under the same terminal
 	// parent (the parent went terminal before the step was claimed). Must also be
 	// cancelled — a queued step under a non-running parent is never claimable.
-	insertConversationForTest(t, conn, domain.AgentRun{
+	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "ra-child-queued", TaskID: taskA.ID, PromptID: "ra-p0", Status: "queued",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brA, BlueprintStepIndex: &step0,
 	})
@@ -206,7 +206,7 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun B: %v", err)
 	}
-	insertConversationForTest(t, conn, domain.AgentRun{
+	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "rb-child", TaskID: taskB.ID, PromptID: "rb-p0", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brB, BlueprintStepIndex: &step0,
 	})
@@ -288,7 +288,7 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	step0 := 0
 	seedChild := func(id, status string) {
 		t.Helper()
-		insertConversationForTest(t, conn, domain.AgentRun{
+		insertConversationForTest(t, conn, domain.Conversation{
 			ID: id, TaskID: task.ID, PromptID: "ds-p0", Status: "running",
 			Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 		})

@@ -26,8 +26,8 @@ import (
 // in workflow scripts but fine in a test.
 var memBase = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// seedAuthoringMemory inserts one prior run + its run_memory row + the
-// run_memory_entities join row on entityID, with explicit content and
+// seedAuthoringMemory inserts one prior run + its conversation_memory row + the
+// conversation_memory_entities join row on entityID, with explicit content and
 // created_at so the read's composition and ordering are pinned. role is the
 // join row's classification (primary/produced/touched). human "" leaves
 // human_content NULL (agent-only composition).
@@ -41,16 +41,16 @@ func seedAuthoringMemory(t *testing.T, conn *sql.DB, orgID, entityID, runID, age
 		humanVal = human
 	}
 	if _, err := conn.Exec(
-		`INSERT INTO run_memory (id, conversation_id, entity_id, agent_content, human_content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content, human_content, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		uuid.New().String(), runID, entityID, agent, humanVal, createdAt,
 	); err != nil {
-		t.Fatalf("seed run_memory: %v", err)
+		t.Fatalf("seed conversation_memory: %v", err)
 	}
 	if _, err := conn.Exec(
-		`INSERT INTO run_memory_entities (org_id, conversation_id, entity_id, role, created_at) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO conversation_memory_entities (org_id, conversation_id, entity_id, role, created_at) VALUES (?, ?, ?, ?, ?)`,
 		orgID, runID, entityID, role, createdAt,
 	); err != nil {
-		t.Fatalf("seed run_memory_entities: %v", err)
+		t.Fatalf("seed conversation_memory_entities: %v", err)
 	}
 }
 
@@ -156,7 +156,7 @@ func TestLocalClient_MemoryLoad_Miss_NoEntityNoTouch(t *testing.T) {
 	}
 	// No touch row for the reading run at all.
 	var n int
-	if err := conn.QueryRow(`SELECT count(*) FROM run_memory_entities WHERE conversation_id = ?`, info.RunID).Scan(&n); err != nil {
+	if err := conn.QueryRow(`SELECT count(*) FROM conversation_memory_entities WHERE conversation_id = ?`, info.RunID).Scan(&n); err != nil {
 		t.Fatalf("count touch rows: %v", err)
 	}
 	if n != 0 {

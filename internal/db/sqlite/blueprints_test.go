@@ -173,7 +173,7 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip(t *testing.T) {
 
 	step0 := 0
 	step1 := 1
-	for _, run := range []domain.AgentRun{
+	for _, run := range []domain.Conversation{
 		{ID: "blueprint-step-run-0", TaskID: task.ID, PromptID: "step-prompt-1", Status: "running", Model: "claude-sonnet-4-6", BlueprintRunID: "blueprint-run-rt", BlueprintStepIndex: &step0},
 		{ID: "blueprint-step-run-1", TaskID: task.ID, PromptID: "step-prompt-2", Status: "running", Model: "claude-sonnet-4-6", BlueprintRunID: "blueprint-run-rt", BlueprintStepIndex: &step1},
 	} {
@@ -362,12 +362,12 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome(t *testing.T) {
 	}
 
 	step0 := 0
-	insertConversationForTest(t, conn, domain.AgentRun{
+	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "op-run", TaskID: task.ID, PromptID: "op-step", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: "op-blueprint-run", BlueprintStepIndex: &step0,
 	})
 	// Persist a terminal outcome the way processCompletion does.
-	if err := stores.AgentRuns.CompleteSystem(ctx, org, "op-run", "completed", 0, 0, 0, "", "did the thing", "continue", "", ""); err != nil {
+	if err := stores.Conversations.CompleteSystem(ctx, org, "op-run", "completed", 0, 0, 0, "", "did the thing", "continue", "", ""); err != nil {
 		t.Fatalf("complete step run: %v", err)
 	}
 

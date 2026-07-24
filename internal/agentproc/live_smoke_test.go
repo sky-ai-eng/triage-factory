@@ -315,17 +315,17 @@ func waitSession(t *testing.T, lr *LiveRun, d time.Duration) {
 // over a channel so a test can wait for it.
 type liveSink struct {
 	mu       sync.Mutex
-	messages []*domain.AgentMessage
-	asst     chan *domain.AgentMessage
+	messages []*domain.Message
+	asst     chan *domain.Message
 }
 
 func newLiveSink() *liveSink {
-	return &liveSink{asst: make(chan *domain.AgentMessage, 64)}
+	return &liveSink{asst: make(chan *domain.Message, 64)}
 }
 
 func (s *liveSink) OnSession(string) error { return nil }
 
-func (s *liveSink) OnMessage(m *domain.AgentMessage) error {
+func (s *liveSink) OnMessage(m *domain.Message) error {
 	s.mu.Lock()
 	s.messages = append(s.messages, m)
 	s.mu.Unlock()
@@ -338,7 +338,7 @@ func (s *liveSink) OnMessage(m *domain.AgentMessage) error {
 	return nil
 }
 
-func (s *liveSink) waitAssistant(t *testing.T, d time.Duration) *domain.AgentMessage {
+func (s *liveSink) waitAssistant(t *testing.T, d time.Duration) *domain.Message {
 	t.Helper()
 	select {
 	case m := <-s.asst:
@@ -356,7 +356,7 @@ func outcomeStderr(o *Outcome) string {
 	return o.Stderr
 }
 
-func findFirstAssistant(msgs []*domain.AgentMessage) *domain.AgentMessage {
+func findFirstAssistant(msgs []*domain.Message) *domain.Message {
 	for _, m := range msgs {
 		if m.Role == "assistant" {
 			return m

@@ -421,17 +421,17 @@ func (s *projectSession) dispatch(item queueItem) {
 		// history must not show a "context noted" entry for a turn that
 		// never delivered the deltas. Best-effort — failing to write the
 		// audit row should not abort the dispatch.
-		auditMsg := &domain.AgentMessage{
-			RunID:   item.conversationID,
-			UserID:  item.creatorUserID,
-			ClaimID: claimID,
-			Role:    "system",
-			Subtype: "context_change",
-			Content: contextNote,
+		auditMsg := &domain.Message{
+			ConversationID: item.conversationID,
+			UserID:         item.creatorUserID,
+			ClaimID:        claimID,
+			Role:           "system",
+			Subtype:        "context_change",
+			Content:        contextNote,
 		}
 		auditCtx := context.WithoutCancel(msgCtx)
 		if auditErr := s.curator.stores.Tx.SyntheticClaimsWithTx(auditCtx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
-			id, err := ts.AgentRuns.InsertMessage(auditCtx, item.orgID, auditMsg)
+			id, err := ts.Conversations.InsertMessage(auditCtx, item.orgID, auditMsg)
 			if err != nil {
 				return err
 			}
@@ -496,7 +496,7 @@ func (s *projectSession) dispatch(item queueItem) {
 		// all/local: the orchestrator IS the credential holder, so it hosts the
 		// socket server in-process over its live stores. PinnedRepos authorizes
 		// the agent's exec-gh verbs against the project's pinned set — a curator
-		// turn creates no run_worktrees rows the run path's gate would key on.
+		// turn creates no conversation_worktrees rows the run path's gate would key on.
 		hd, mount, err := agenthost.Start(s.curator.stores, agenthost.RunInfo{
 			OrgID:            item.orgID,
 			UserID:           item.creatorUserID,

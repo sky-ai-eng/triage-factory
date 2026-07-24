@@ -139,7 +139,7 @@ func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, si
 
 func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]domain.FactoryActiveRun, error) {
 	// memory_missing derivation: the agent has not produced
-	// its memory file iff no run_memory row exists, OR the row's
+	// its memory file iff no conversation_memory row exists, OR the row's
 	// agent_content is NULL/whitespace. BTRIM with the whitespace set
 	// collapses tabs, newlines, and carriage returns onto the same
 	// NULL signal so legacy empty/whitespace rows match the canonical
@@ -163,7 +163,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			COALESCE(r.failure_kind, ''),
 			` + pgTaskColumnsWithEntity + `
 		FROM conversations r
-		LEFT JOIN run_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
+		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		JOIN tasks t ON r.task_id = t.id AND t.org_id = r.org_id
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
@@ -179,7 +179,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 
 	var out []domain.FactoryActiveRun
 	for rows.Next() {
-		var r domain.AgentRun
+		var r domain.Conversation
 		var t domain.Task
 		var completedAt sql.NullTime
 		var costUSD sql.NullFloat64

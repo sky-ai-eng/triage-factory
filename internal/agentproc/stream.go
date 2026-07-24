@@ -3,7 +3,7 @@
 // It is the storage-neutral half of the runtime: it knows how to talk
 // to Claude Code and parse what comes back, but not where to put the
 // results. Callers wire it up with a Sink that decides persistence
-// (delegate writes to runs / run_messages; the curator runtime
+// (delegate writes to runs / messages; the curator runtime
 // writes to its own tables).
 package agentproc
 
@@ -20,7 +20,7 @@ import (
 // rather than flushing as its own row.
 type StreamState struct {
 	currentMsgID string
-	current      *domain.AgentMessage
+	current      *domain.Message
 	sessionID    string // captured from the system/init event at stream start
 
 	// currentBlocks accumulates the pending message's text/image content
@@ -44,7 +44,7 @@ func NewStreamState() *StreamState {
 func (s *StreamState) SessionID() string { return s.sessionID }
 
 // flush returns the accumulated assistant message (if any) and resets state.
-func (s *StreamState) flush() *domain.AgentMessage {
+func (s *StreamState) flush() *domain.Message {
 	msg := s.current
 	if msg != nil && len(s.currentBlocks) > 0 {
 		nonText := len(s.currentBlocks) > 1 || s.currentBlocks[0].Type != domain.ContentBlockText
@@ -65,7 +65,7 @@ func (s *StreamState) flush() *domain.AgentMessage {
 // caller's choice of identifier (delegate runs use the agent run ID;
 // the curator wires its own message-group ID through). Storage
 // decisions live in the Sink, not here.
-func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.AgentMessage, *Result) {
+func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.Message, *Result) {
 	var raw map[string]any
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return nil, nil
@@ -93,7 +93,7 @@ func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.AgentMes
 		// single "user" line can carry multiple tool_result blocks (parallel
 		// tool calls from one assistant turn all resolve together), so this
 		// walks the whole content array rather than just its first entry.
-		var out []*domain.AgentMessage
+		var out []*domain.Message
 		if flushed := s.flush(); flushed != nil {
 			out = append(out, flushed)
 		}
@@ -101,7 +101,7 @@ func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.AgentMes
 		return out, nil
 
 	case "result":
-		var out []*domain.AgentMessage
+		var out []*domain.Message
 		if flushed := s.flush(); flushed != nil {
 			out = append(out, flushed)
 		}
@@ -111,7 +111,7 @@ func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.AgentMes
 	return nil, nil
 }
 
-func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*domain.AgentMessage {
+func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*domain.Message {
 	msgObj, ok := raw["message"].(map[string]any)
 	if !ok {
 		return nil
@@ -122,7 +122,7 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 		return nil
 	}
 
-	var flushed []*domain.AgentMessage
+	var flushed []*domain.Message
 	if msgID != s.currentMsgID && s.current != nil {
 		flushed = append(flushed, s.flush())
 	}
@@ -130,11 +130,11 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 	if s.current == nil {
 		model, _ := msgObj["model"].(string)
 		s.currentMsgID = msgID
-		s.current = &domain.AgentMessage{
-			RunID:   traceID,
-			Role:    "assistant",
-			Subtype: "text",
-			Model:   model,
+		s.current = &domain.Message{
+			ConversationID: traceID,
+			Role:           "assistant",
+			Subtype:        "text",
+			Model:          model,
 		}
 	}
 
@@ -209,7 +209,7 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 // block. Each block's own content is walked in turn: text sub-blocks flatten
 // into the display Content string, non-text sub-blocks (images) land in
 // ContentBlocks so they aren't silently dropped.
-func parseToolResult(raw map[string]any, traceID string) []*domain.AgentMessage {
+func parseToolResult(raw map[string]any, traceID string) []*domain.Message {
 	msgObj, ok := raw["message"].(map[string]any)
 	if !ok {
 		return nil
@@ -225,7 +225,7 @@ func parseToolResult(raw map[string]any, traceID string) []*domain.AgentMessage 
 		toolResults = append(toolResults, b)
 	}
 
-	var out []*domain.AgentMessage
+	var out []*domain.Message
 	for _, b := range toolResults {
 		toolUseID, _ := b["tool_use_id"].(string)
 		isError, _ := b["is_error"].(bool)
@@ -240,14 +240,14 @@ func parseToolResult(raw map[string]any, traceID string) []*domain.AgentMessage 
 			}
 		}
 
-		out = append(out, &domain.AgentMessage{
-			RunID:         traceID,
-			Role:          "tool",
-			Subtype:       "tool",
-			Content:       content,
-			ToolCallID:    toolUseID,
-			IsError:       isError,
-			ContentBlocks: blocks,
+		out = append(out, &domain.Message{
+			ConversationID: traceID,
+			Role:           "tool",
+			Subtype:        "tool",
+			Content:        content,
+			ToolCallID:     toolUseID,
+			IsError:        isError,
+			ContentBlocks:  blocks,
 		})
 	}
 	return out

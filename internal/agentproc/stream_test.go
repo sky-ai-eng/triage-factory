@@ -32,7 +32,7 @@ func TestParseLine_CaptureSessionAndAccumulate(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 flushed msg on stop_reason; got %d", len(msgs))
 	}
-	if msgs[0].Role != "assistant" || msgs[0].Content != "hello" || msgs[0].RunID != "trace-1" {
+	if msgs[0].Role != "assistant" || msgs[0].Content != "hello" || msgs[0].ConversationID != "trace-1" {
 		t.Errorf("flushed message wrong shape: %+v", msgs[0])
 	}
 
@@ -166,7 +166,7 @@ func TestParseLine_ToolUseAndToolResult(t *testing.T) {
 
 	// Tool result emitted as a "user" line.
 	out, _ := s.ParseLine([]byte(`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","content":"contents"}]}}`), "t")
-	var toolMsg *domain.AgentMessage
+	var toolMsg *domain.Message
 	for _, m := range out {
 		if m.Role == "tool" {
 			toolMsg = m

@@ -134,7 +134,7 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 	// run's original trigger).
 	var flipped bool
 	err = s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
-		f, fErr := ts.AgentRuns.MarkQueuedForResume(ctx, orgID, runID)
+		f, fErr := ts.Conversations.MarkQueuedForResume(ctx, orgID, runID)
 		if fErr != nil {
 			return fErr
 		}
@@ -184,7 +184,7 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 // cold-rehydrate from. A check we can't complete (no storage wired, a blob
 // hiccup) counts as recoverable — a transient inability to verify must never
 // strand a resumable run as expired, and the claim path re-checks for real.
-func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *domain.AgentRun) bool {
+func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *domain.Conversation) bool {
 	if run.WorktreePath != "" {
 		if _, err := os.Stat(run.WorktreePath); err == nil {
 			return true
@@ -219,7 +219,7 @@ func (s *Spawner) markCancelledAfterResume(orgID, runID, userID string) {
 	cancelCtx := context.Background()
 	var ok bool
 	_ = s.tx.SyntheticClaimsWithTx(cancelCtx, orgID, userID, func(ts db.TxStores) error {
-		f, mErr := ts.AgentRuns.MarkCancelledIfActive(cancelCtx, orgID, runID, "user_cancelled", "Run cancelled by user")
+		f, mErr := ts.Conversations.MarkCancelledIfActive(cancelCtx, orgID, runID, "user_cancelled", "Run cancelled by user")
 		ok = f
 		return mErr
 	})
@@ -311,14 +311,14 @@ type ResumeOutcome struct {
 // invocation), the cwd the original run used so the resumed
 // subprocess sees the same worktree, and the user message to append
 // to the conversation. The runID is reused so resumed messages append
-// to the existing run_messages stream — the UI sees one coherent
+// to the existing messages stream — the UI sees one coherent
 // conversation.
 //
 // This helper does NOT update runs status. The caller manages
 // lifecycle: the memory-gate retry loop keeps the run in its current
 // state during retries and only finalizes once the gate passes or
 // gives up. Mirroring the initial invocation's status updates here
-// would produce double CompleteAgentRun writes with stale
+// would produce double CompleteConversation writes with stale
 // cost/duration fields overwriting the real totals.
 func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID, cwd, message string, opts ResumeOptions, triggerType, creatorUserID string) (*ResumeOutcome, error) {
 	if sessionID == "" {
@@ -344,20 +344,20 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	}
 
 	extraEnv := []string{
-		"TRIAGE_FACTORY_RUN_ID=" + runID,
-		// Mirror runAgent's TRIAGE_FACTORY_RUN_ROOT setting. The resume
+		"TRIAGE_FACTORY_CONVERSATION_ID=" + runID,
+		// Mirror runAgent's TRIAGE_FACTORY_CONVERSATION_ROOT setting. The resume
 		// cwd IS the original run-root (runAgent passed runRoot as the
 		// agentproc Cwd; for GitHub PR runs the worktree IS the run-root,
 		// for Jira lazy runs the run-root is the throwaway parent of
 		// per-repo worktrees). Without this, the memory-gate retry
 		// message — which now references
-		// $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/ for
+		// $TRIAGE_FACTORY_CONVERSATION_ROOT/_scratch/entity-memory/ for
 		// absolute-path resilience across `cd`s — would resolve to
 		// an empty string in the resumed shell and the agent couldn't
 		// follow the retry instructions. Same env shape as the initial
 		// invocation so the agent sees a consistent environment across
 		// every prompt of the conversation.
-		"TRIAGE_FACTORY_RUN_ROOT=" + cwd,
+		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cwd,
 	}
 	// Mirror runAgent's memory-namespace export so the resumed agent writes
 	// into the same _scratch/entity-memory/<namespace>/ folder it used on the

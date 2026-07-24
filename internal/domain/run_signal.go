@@ -50,7 +50,7 @@ const (
 	RunSignalAckStale = "stale"
 )
 
-// RunSignal is one row of the run_signals cross-pod control outbox
+// RunSignal is one row of the conversation_signals cross-pod control outbox
 // (Postgres only — see internal/db.RunSignalStore). A control pod inserts
 // one when a control request (cancel/interrupt/steer/permission/inject)
 // can't be served by its own local process registry; the executor named by

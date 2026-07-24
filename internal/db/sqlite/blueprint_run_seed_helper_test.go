@@ -17,7 +17,7 @@ import (
 // the blueprint_run id to drop into the run insert's blueprint_run_id column.
 //
 // Shared across the package-sqlite CRUD test files (factory,
-// prompts, run_worktrees, task_memory) whose `runs` fixtures are not the
+// prompts, conversation_worktrees, task_memory) whose `runs` fixtures are not the
 // system under test — they just need a valid FK target.
 func seedBlueprintRunForRun(t *testing.T, conn *sql.DB, taskID string) string {
 	t.Helper()
@@ -53,7 +53,7 @@ func seedBlueprintRunForRun(t *testing.T, conn *sql.DB, taskID string) string {
 // 'manual' with the sentinel user and 'event' with NULL. Fields honored:
 // ID, TaskID, PromptID, Status, Model, TriggerType, TriggerID,
 // BlueprintRunID, BlueprintStepIndex.
-func insertConversationForTest(t *testing.T, conn *sql.DB, run domain.AgentRun) {
+func insertConversationForTest(t *testing.T, conn *sql.DB, run domain.Conversation) {
 	t.Helper()
 	trigger := run.TriggerType
 	if trigger == "" {

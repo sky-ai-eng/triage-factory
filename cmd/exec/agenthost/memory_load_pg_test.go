@@ -13,7 +13,7 @@ import (
 )
 
 // seedPgRunWithMemory inserts a completed run (visibility as given) plus one
-// authored run_memory row and its primary run_memory_entities join on entityID.
+// authored conversation_memory row and its primary conversation_memory_entities join on entityID.
 // origin='interactive' sidesteps runs_origin_requires_parents so no task /
 // prompt / blueprint parentage is needed — MemoryLoad reads only runs.visibility
 // + runs.team_id off the run, never its lineage.
@@ -126,7 +126,7 @@ func TestLocalClient_MemoryLoad_Postgres_TeamScoped(t *testing.T) {
 	// Loading recorded the touch for the reading run.
 	var role string
 	if err := h.AdminDB.QueryRow(
-		`SELECT role FROM run_memory_entities WHERE conversation_id = $1 AND entity_id = $2`, readerRun, entityID,
+		`SELECT role FROM conversation_memory_entities WHERE conversation_id = $1 AND entity_id = $2`, readerRun, entityID,
 	).Scan(&role); err != nil {
 		t.Fatalf("read reader touch row: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestLocalClient_MemoryLoad_Postgres_Miss(t *testing.T) {
 	}
 	// No touch row for the reading run.
 	var n int
-	if err := h.AdminDB.QueryRow(`SELECT count(*) FROM run_memory_entities WHERE conversation_id = $1`, readerRun).Scan(&n); err != nil {
+	if err := h.AdminDB.QueryRow(`SELECT count(*) FROM conversation_memory_entities WHERE conversation_id = $1`, readerRun).Scan(&n); err != nil {
 		t.Fatalf("count touch rows: %v", err)
 	}
 	if n != 0 {

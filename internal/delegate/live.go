@@ -342,7 +342,7 @@ func (s *Spawner) markRunOpen(park liveParkContext) {
 	var err error
 	if park.triggerType == "manual" {
 		err = s.tx.SyntheticClaimsWithTx(bgCtx, park.orgID, park.creatorUserID, func(ts db.TxStores) error {
-			f, e := ts.AgentRuns.MarkOpen(bgCtx, park.orgID, park.runID)
+			f, e := ts.Conversations.MarkOpen(bgCtx, park.orgID, park.runID)
 			flipped = f
 			return e
 		})
@@ -440,7 +440,7 @@ func (a activitySink) OnSession(id string) error {
 	return a.inner.OnSession(id)
 }
 
-func (a activitySink) OnMessage(m *domain.AgentMessage) error {
+func (a activitySink) OnMessage(m *domain.Message) error {
 	a.bump()
 	return a.inner.OnMessage(m)
 }

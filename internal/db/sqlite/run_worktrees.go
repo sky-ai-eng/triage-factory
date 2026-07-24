@@ -27,7 +27,7 @@ func (s *runWorktreeStore) Insert(ctx context.Context, orgID string, w domain.Ru
 		return false, "", err
 	}
 	res, err := s.q.ExecContext(ctx, `
-		INSERT OR IGNORE INTO run_worktrees (conversation_id, repo_id, path, ref)
+		INSERT OR IGNORE INTO conversation_worktrees (conversation_id, repo_id, path, ref)
 		VALUES (?, ?, ?, ?)
 	`, w.RunID, w.RepoID, w.Path, w.Ref)
 	if err != nil {
@@ -56,7 +56,7 @@ func (s *runWorktreeStore) GetByRepoRef(ctx context.Context, orgID, runID, repoI
 	}
 	row := s.q.QueryRowContext(ctx, `
 		SELECT conversation_id, repo_id, path, ref, created_at
-		FROM run_worktrees
+		FROM conversation_worktrees
 		WHERE conversation_id = ? AND repo_id = ? AND ref = ?
 	`, runID, repoID, ref)
 	var w domain.RunWorktree
@@ -75,7 +75,7 @@ func (s *runWorktreeStore) List(ctx context.Context, orgID, runID string) ([]dom
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT conversation_id, repo_id, path, ref, created_at
-		FROM run_worktrees
+		FROM conversation_worktrees
 		WHERE conversation_id = ?
 		ORDER BY created_at ASC, repo_id ASC, ref ASC
 	`, runID)
@@ -103,7 +103,7 @@ func (s *runWorktreeStore) DeleteByRepoRef(ctx context.Context, orgID, runID, re
 		return err
 	}
 	_, err := s.q.ExecContext(ctx, `
-		DELETE FROM run_worktrees WHERE conversation_id = ? AND repo_id = ? AND ref = ?
+		DELETE FROM conversation_worktrees WHERE conversation_id = ? AND repo_id = ? AND ref = ?
 	`, runID, repoID, ref)
 	return err
 }
@@ -113,7 +113,7 @@ func (s *runWorktreeStore) DeleteByPathSystem(ctx context.Context, orgID, runID,
 		return err
 	}
 	_, err := s.q.ExecContext(ctx, `
-		DELETE FROM run_worktrees WHERE conversation_id = ? AND path = ?
+		DELETE FROM conversation_worktrees WHERE conversation_id = ? AND path = ?
 	`, runID, path)
 	return err
 }

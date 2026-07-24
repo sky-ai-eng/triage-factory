@@ -44,7 +44,7 @@ Usage notes:
   - Prior memory for THIS task's OWN entity is already materialized under
     _scratch/entity-memory/ — use this only for a different entity you pull
     in mid-run.
-  - Run id is read from $TRIAGE_FACTORY_RUN_ID (set by the delegation spawner).`
+  - Conversation id is read from $TRIAGE_FACTORY_CONVERSATION_ID (set by the delegation spawner).`
 
 // defaultLimit is how many of an entity's most recent memories `memory load`
 // returns when --limit is omitted. Enough to orient without flooding the tool

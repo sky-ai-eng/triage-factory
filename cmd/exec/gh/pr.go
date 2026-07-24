@@ -23,7 +23,7 @@ import (
 // exitErr/os.Exit shape the rest of the file uses so the agent sees a
 // clear message and the subcommand exits non-zero.
 //
-// In local mode this resolves identity from TRIAGE_FACTORY_RUN_ID at
+// In local mode this resolves identity from TRIAGE_FACTORY_CONVERSATION_ID at
 // AutoDetect time; in sandbox mode the daemon's per-socket map
 // determines identity and LookupRun just round-trips. Either way the
 // subcommand body reads the routing-relevant fields from a single
@@ -38,8 +38,8 @@ func lookupRun(host agenthost.Client) agenthost.RunInfo {
 
 // agentMemoryFile returns the absolute path the delegated agent must write its
 // run-memory file to, composed from the run-scoped env vars the spawner exports
-// into the agent's environment (TRIAGE_FACTORY_RUN_ROOT,
-// TRIAGE_FACTORY_BLUEPRINT_RUN_ID, and TRIAGE_FACTORY_RUN_ID — see
+// into the agent's environment (TRIAGE_FACTORY_CONVERSATION_ROOT,
+// TRIAGE_FACTORY_BLUEPRINT_RUN_ID, and TRIAGE_FACTORY_CONVERSATION_ID — see
 // internal/delegate/run.go). This mirrors the path the completion gate reads
 // (cwd/_scratch/entity-memory/<blueprint_run_id>/<run_id>.md), so the "do not
 // retry, finish by writing ..." messages below can point the agent at the file
@@ -47,17 +47,17 @@ func lookupRun(host agenthost.Client) agenthost.RunInfo {
 //
 // The bare env-var reference these messages used to carry would be written
 // verbatim by the agent's Write tool — which does no shell expansion — so the
-// file landed at a literal "$TRIAGE_FACTORY_RUN_ROOT/..." path the gate never
-// found. Inside the sandbox TRIAGE_FACTORY_RUN_ROOT is already translated to
+// file landed at a literal "$TRIAGE_FACTORY_CONVERSATION_ROOT/..." path the gate never
+// found. Inside the sandbox TRIAGE_FACTORY_CONVERSATION_ROOT is already translated to
 // /work, so reading it here yields a path the agent can actually reach. Falls
 // back to the env-var-reference form if any piece is unset (subcommand invoked
 // outside a delegated run) so the message still reads coherently.
 func agentMemoryFile() string {
-	root := os.Getenv("TRIAGE_FACTORY_RUN_ROOT")
+	root := os.Getenv("TRIAGE_FACTORY_CONVERSATION_ROOT")
 	ns := os.Getenv("TRIAGE_FACTORY_BLUEPRINT_RUN_ID")
-	runID := os.Getenv("TRIAGE_FACTORY_RUN_ID")
+	runID := os.Getenv("TRIAGE_FACTORY_CONVERSATION_ID")
 	if root == "" || ns == "" || runID == "" {
-		return "$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/$TRIAGE_FACTORY_BLUEPRINT_RUN_ID/$TRIAGE_FACTORY_RUN_ID.md"
+		return "$TRIAGE_FACTORY_CONVERSATION_ROOT/_scratch/entity-memory/$TRIAGE_FACTORY_BLUEPRINT_RUN_ID/$TRIAGE_FACTORY_CONVERSATION_ID.md"
 	}
 	return filepath.Join(root, "_scratch", "entity-memory", ns, runID+".md")
 }
@@ -734,7 +734,7 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 
 // reviewedPRWorktreePath returns the absolute worktree path of the PR being
 // reviewed in owner/repo, resolved from the run's (run, repo, ref) worktree
-// registry: the unique run_worktrees row whose repo matches and whose ref is a
+// registry: the unique conversation_worktrees row whose repo matches and whose ref is a
 // PR ref ("pr-<N>"). This is what lets add-review-comment anchor to the RIGHT
 // PR's worktree HEAD in a multi-PR run instead of trusting cwd (TFAC-502).
 //

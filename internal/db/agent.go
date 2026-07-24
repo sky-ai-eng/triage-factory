@@ -7,19 +7,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-//go:generate go run github.com/vektra/mockery/v2 --name=AgentRunStore --output=./mocks --case=underscore --with-expecter
+//go:generate go run github.com/vektra/mockery/v2 --name=ConversationStore --output=./mocks --case=underscore --with-expecter
 
-// AgentRunStore owns the conversations / messages tables — agent
+// ConversationStore owns the conversations / messages tables — agent
 // conversation lifecycle, transcript messages, and the derived queries the
 // delegate spawner + agent handler + chains depend on. All methods take
 // orgID; local mode passes runmode.LocalDefaultOrgID.
 //
 // Per-engagement execution state (who is driving the conversation, when it
 // was claimed, how many times) lives on the claims table. The read
-// projections derive AgentRun.ClaimedAt (latest claim's claimed_at),
+// projections derive Conversation.ClaimedAt (latest claim's claimed_at),
 // Attempts (count of claims), and ExecutorID (the active claim's executor,
 // "" when none) from claims rather than columns on the conversation, and
-// return AgentRun.Status as the active claim's phase coalesced over the
+// return Conversation.Status as the active claim's phase coalesced over the
 // stored status — so a live engagement's setup sub-state surfaces through
 // the same field the wire has always carried; the
 // terminal lifecycle writes release the conversation's active claim in the
@@ -37,14 +37,14 @@ import (
 // statements rather than one transaction.
 //
 // The MemoryMissing field returned by Get and ListForTask is
-// derived from a LEFT JOIN to run_memory rather than read
+// derived from a LEFT JOIN to conversation_memory rather than read
 // off a column on conversations. The JOIN keeps the projection honest by
 // construction — a denormalized column drifted from ground truth
 // whenever a memory row was written outside the spawner's gate.
 //
 // The transcript layer (Messages, InsertMessage, TokenTotalsSystem) sits on
 // the messages table.
-type AgentRunStore interface {
+type ConversationStore interface {
 	// --- Lifecycle ---
 
 	// Complete finalizes a conversation (status + terminal narrative
@@ -161,15 +161,15 @@ type AgentRunStore interface {
 	// Get returns a single agent run by ID, or nil if absent — any
 	// conversation type, not just delegation (curator/subagent rows
 	// hydrate the same shape). MemoryMissing is derived from a LEFT JOIN
-	// to run_memory; ClaimedAt/Attempts/ExecutorID derive from claims per
+	// to conversation_memory; ClaimedAt/Attempts/ExecutorID derive from claims per
 	// the interface doc. The accounting fields are derived too:
 	// TotalCostUSD + the four token fields are SUMs over the messages
 	// ledger, DurationMs/NumTurns SUMs over the claims' telemetry.
-	Get(ctx context.Context, orgID, runID string) (*domain.AgentRun, error)
+	Get(ctx context.Context, orgID, runID string) (*domain.Conversation, error)
 
 	// ListForTask returns all runs for a given task, ordered
 	// started_at DESC. MemoryMissing + claim fields derived per Get.
-	ListForTask(ctx context.Context, orgID, taskID string) ([]domain.AgentRun, error)
+	ListForTask(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error)
 
 	// ListForTasks is the batched form of ListForTask: every run for
 	// any of the given task IDs, each task's runs newest-first
@@ -179,7 +179,7 @@ type AgentRunStore interface {
 	// across distinct tasks is unspecified (the SQLite read chunks its
 	// IN-list to stay under the variable limit). Empty taskIDs returns
 	// nil. MemoryMissing + claim fields derived per Get.
-	ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.AgentRun, error)
+	ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.Conversation, error)
 
 	// HasActiveAutoRunForEntity returns true if any task on the
 	// entity has a non-terminal run with trigger_type='event'.
@@ -287,14 +287,14 @@ type AgentRunStore interface {
 	// a non-empty value writes it explicitly. Neither existing caller in this
 	// repo sets either field, so every current insert keeps writing exactly
 	// what it always wrote (delivered=true, window_state='active').
-	InsertMessage(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
+	InsertMessage(ctx context.Context, orgID string, msg *domain.Message) (int64, error)
 
 	// Messages returns the run's messages for display, ordered by id.
 	// Withdrawn-pending rows (delivered=false AND window_state='inactive' —
 	// a staged injection withdrawn before any flush) are excluded: withdrawn
 	// means "never happened", so it must not render as transcript history.
 	// Delivered inactive rows (compacted history) stay visible.
-	Messages(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error)
+	Messages(ctx context.Context, orgID, runID string) ([]domain.Message, error)
 
 	// MessagesForRuns is the batched form of Messages: every message
 	// for any of the given run IDs as one flat slice, with the same
@@ -304,7 +304,7 @@ type AgentRunStore interface {
 	// distinct runs is unspecified (the SQLite read chunks its IN-list).
 	// Backs the Board's aggregated include=messages read. Empty runIDs
 	// returns nil.
-	MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.AgentMessage, error)
+	MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Message, error)
 
 	// ListForAssembly returns every row a native loop needs to rebuild this
 	// run's exact LLM context, ordered by the effective assembly key
@@ -312,7 +312,7 @@ type AgentRunStore interface {
 	// (superseded by compaction, permanently out of the window);
 	// 'elided' rows ARE included (the loop renders their deterministic stub
 	// from the retained content/is_error) and so are undelivered
-	// (delivered=false) rows, flagged as such via AgentMessage.Delivered —
+	// (delivered=false) rows, flagged as such via Message.Delivered —
 	// the loop, not this method, decides whether a pending row is due for
 	// consumption at this call site.
 	//
@@ -321,7 +321,7 @@ type AgentRunStore interface {
 	// process-level state — if a future rule needs to change what gets
 	// assembled, it must become a column on this table, per the epic's
 	// standing rule.
-	ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error)
+	ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.Message, error)
 
 	// MarkDelivered flips delivered=true on the given message ids — the
 	// batch primitive a native loop calls once it has folded a run of
@@ -352,13 +352,13 @@ type AgentRunStore interface {
 	// shapes are identical. The only difference is which Postgres
 	// pool the statement runs on; SQLite has one connection and the
 	// two variants collapse.
-	GetSystem(ctx context.Context, orgID, runID string) (*domain.AgentRun, error)
+	GetSystem(ctx context.Context, orgID, runID string) (*domain.Conversation, error)
 	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
 	// LookupOrgForRunSystem returns the owning orgID for the given
 	// runID, or the empty string with a nil error if no such run
 	// exists. Used by the cmd/exec runident helper to discover the
 	// run's tenant before any other read — at agent-subprocess cold
-	// start the orgID isn't yet known, only TRIAGE_FACTORY_RUN_ID
+	// start the orgID isn't yet known, only TRIAGE_FACTORY_CONVERSATION_ID
 	// has been passed in. Routes through the admin pool because the
 	// agent subprocess has no JWT-claims context yet.
 	LookupOrgForRunSystem(ctx context.Context, runID string) (string, error)
@@ -377,7 +377,7 @@ type AgentRunStore interface {
 	SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error
 	MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
 	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID, failureKind string) (bool, error)
-	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
+	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.Message) (int64, error)
 
 	// LastAgentActivityAtSystem returns the created_at of the run's most
 	// recent non-user messages row (role <> 'user') — the "agent last

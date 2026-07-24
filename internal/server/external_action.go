@@ -44,17 +44,17 @@ func githubApprovalAction(art *domain.Artifact, userID, action, from, to string)
 		}
 	}
 	return domain.ExternalAction{
-		TeamID:      art.TeamID,
-		Provider:    domain.ArtifactProviderGitHub,
-		Action:      action,
-		Target:      art.Target,
-		ExternalID:  art.ExternalID,
-		URL:         url,
-		FromState:   from,
-		ToState:     to,
-		RunID:       art.RunID,
-		ActorUserID: userID,
-		Credential:  domain.CredentialGitHubApp,
+		TeamID:         art.TeamID,
+		Provider:       domain.ArtifactProviderGitHub,
+		Action:         action,
+		Target:         art.Target,
+		ExternalID:     art.ExternalID,
+		URL:            url,
+		FromState:      from,
+		ToState:        to,
+		ConversationID: art.ConversationID,
+		ActorUserID:    userID,
+		Credential:     domain.CredentialGitHubApp,
 	}
 }
 

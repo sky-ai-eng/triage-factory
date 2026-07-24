@@ -129,15 +129,15 @@ const (
 	EventSystemPromptAutoSuspended           = "system:prompt:auto_suspended" // per-(entity, prompt) breaker trip
 	EventSystemTaskDelegationBlockedSubtasks = "system:task:delegation_blocked_by_subtasks"
 
-	// EventSystemRunStatus / EventSystemRunActivity are EE-observable run
-	// lifecycle sentinels (TFAC-592): mirrors of the two websocket choke
-	// points in internal/delegate/spawner.go (broadcastRunUpdate/
-	// broadcastRunFailed and broadcastMessage) onto the bus, so an EE
-	// subscriber (ExtensionAPI.Bus()) can observe run activity without a
-	// websocket connection. See internal/domain/events/system.go for the
-	// metadata shapes.
-	EventSystemRunStatus   = "system:run:status"
-	EventSystemRunActivity = "system:run:activity"
+	// EventSystemConversationStatus / EventSystemConversationActivity are
+	// EE-observable conversation lifecycle sentinels: bus mirrors of the two
+	// websocket choke points in internal/delegate/spawner.go (broadcastRunUpdate/
+	// broadcastRunFailed → the conversation_update WS event, broadcastMessage →
+	// the message WS event), so an EE subscriber (ExtensionAPI.Bus()) can
+	// observe conversation activity without a websocket connection. See
+	// internal/domain/events/system.go for the metadata shapes.
+	EventSystemConversationStatus   = "system:conversation:status"
+	EventSystemConversationActivity = "system:conversation:activity"
 
 	// EventSystemRoutingDisposition is the per-event sentinel
 	// Router.HandleEvent publishes after it finishes handling one event
@@ -204,8 +204,8 @@ func AllEventTypes() []EventType {
 		{ID: EventSystemDelegationFailed, Source: "system", Category: "delegation", Label: "Delegation Failed", Description: "Agent delegation run failed"},
 		{ID: EventSystemPromptAutoSuspended, Source: "system", Category: "delegation", Label: "Prompt Auto-suspended", Description: "Per-(entity, prompt) breaker tripped after repeated failures"},
 		{ID: EventSystemTaskDelegationBlockedSubtasks, Source: "system", Category: "delegation", Label: "Delegation Blocked: Subtasks", Description: "Auto-delegation skipped because parent has open subtasks"},
-		{ID: EventSystemRunStatus, Source: "system", Category: "delegation", Label: "Run Status", Description: "A delegated run's status changed"},
-		{ID: EventSystemRunActivity, Source: "system", Category: "delegation", Label: "Run Activity", Description: "A delegated run invoked a tool"},
+		{ID: EventSystemConversationStatus, Source: "system", Category: "delegation", Label: "Conversation Status", Description: "A delegated conversation's status changed"},
+		{ID: EventSystemConversationActivity, Source: "system", Category: "delegation", Label: "Conversation Activity", Description: "A delegated conversation invoked a tool"},
 		{ID: EventSystemRoutingDisposition, Source: "system", Category: "routing", Label: "Routing Disposition", Description: "The router finished handling an event (frozen, taskless, task created/bumped, or error)"},
 	}
 }

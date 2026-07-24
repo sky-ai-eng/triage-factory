@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AgentMessage, AgentRun, Artifact, Task, WSEvent } from '../types'
+import type { Message, Conversation, Artifact, Task, WSEvent } from '../types'
 import { readError } from '../lib/api'
 import { isPermissionTerminalStatus } from '../lib/runStatus'
 import { useWebSocket } from './useWebSocket'
@@ -12,11 +12,11 @@ import type { PendingPermission, PermissionDecisionInput } from '../lib/permissi
 export type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 
 export interface RunDetailState {
-  run: AgentRun | null
+  run: Conversation | null
   task: Task | null
-  messages: AgentMessage[]
+  messages: Message[]
   /** Every artifact this run produced (branch / PR / review / issue / comment),
-   *  newest first — the same set GET /api/agent/runs/{id}/artifacts returns.
+   *  newest first — the same set GET /api/agent/conversations/{id}/artifacts returns.
    *  Kept live alongside `run` so the approval list + resolve-all confirmation
    *  repaint when an approve/dismiss in another tab changes the set (TFAC-384 §6).
    *  Cross-reference run.pending_artifact_ids to get the *unresolved* subset
@@ -43,12 +43,12 @@ export interface RunDetailState {
 // useRunDetail loads a single agent run, its messages, and the parent
 // task, then subscribes to live websocket updates so the page stays
 // fresh while the agent works. We fetch the task separately because
-// AgentRun only carries TaskID, and the detail page wants the title +
+// Conversation only carries TaskID, and the detail page wants the title +
 // source badge in its header.
 export function useRunDetail(runID: string | undefined): RunDetailState {
-  const [run, setRun] = useState<AgentRun | null>(null)
+  const [run, setRun] = useState<Conversation | null>(null)
   const [task, setTask] = useState<Task | null>(null)
-  const [messages, setMessages] = useState<AgentMessage[]>([])
+  const [messages, setMessages] = useState<Message[]>([])
   const [artifacts, setArtifacts] = useState<Artifact[]>([])
   const [loading, setLoading] = useState(true)
   const [notFound, setNotFound] = useState(false)
@@ -71,7 +71,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   // on lastRunIDRef so a slow fetch for a since-navigated-away run is discarded
   // rather than clobbering the current run's artifacts.
   const refetchArtifacts = useCallback((id: string) => {
-    fetch(`/api/agent/runs/${id}/artifacts`)
+    fetch(`/api/agent/conversations/${id}/artifacts`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data: Artifact[] | null) => {
         if (data && id === lastRunIDRef.current) setArtifacts(data)
@@ -86,9 +86,9 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   const softRefresh = useCallback(() => {
     if (!runID) return
     const id = runID
-    fetch(`/api/agent/runs/${id}`)
+    fetch(`/api/agent/conversations/${id}`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((data: AgentRun | null) => {
+      .then((data: Conversation | null) => {
         if (data && id === lastRunIDRef.current) setRun(data)
       })
       .catch(() => {})
@@ -134,7 +134,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
     setError(null)
     ;(async () => {
       try {
-        const runRes = await fetch(`/api/agent/runs/${runID}`)
+        const runRes = await fetch(`/api/agent/conversations/${runID}`)
         if (runRes.status === 404) {
           if (!cancelled) {
             setNotFound(true)
@@ -146,7 +146,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           if (!cancelled) setError(await readError(runRes, 'Failed to load run'))
           return
         }
-        const runData = (await runRes.json()) as AgentRun
+        const runData = (await runRes.json()) as Conversation
         if (cancelled) return
         setRun(runData)
         // The artifact set drives the approval list; pull it in the same load so
@@ -155,24 +155,24 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
 
         // Parallel: messages + task.
         const [msgsRes, taskRes] = await Promise.all([
-          fetch(`/api/agent/runs/${runID}/messages`),
+          fetch(`/api/agent/conversations/${runID}/messages`),
           runData.TaskID ? fetch(`/api/tasks/${runData.TaskID}`) : Promise.resolve(null),
         ])
         if (cancelled) return
 
         if (msgsRes.ok) {
-          const msgs = (await msgsRes.json()) as AgentMessage[]
+          const msgs = (await msgsRes.json()) as Message[]
           if (!cancelled) {
-            // Merge by ID rather than replacing. If a websocket
-            // agent_message arrived between the run fetch starting and
+            // Merge by id rather than replacing. If a websocket
+            // `message` event arrived between the run fetch starting and
             // the messages fetch resolving, a wholesale replace would
             // erase that newer row until the next refetch.
             setMessages((prev) => {
               if (prev.length === 0) return msgs
-              const byID = new Map<number, AgentMessage>()
-              for (const m of msgs) byID.set(m.ID, m)
-              for (const m of prev) byID.set(m.ID, m)
-              return Array.from(byID.values()).sort((a, b) => a.ID - b.ID)
+              const byID = new Map<number, Message>()
+              for (const m of msgs) byID.set(m.id, m)
+              for (const m of prev) byID.set(m.id, m)
+              return Array.from(byID.values()).sort((a, b) => a.id - b.id)
             })
           }
         } else if (!cancelled) {
@@ -208,16 +208,16 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
     if (!runID) return
     let cancelled = false
     const poll = () => {
-      fetch(`/api/agent/runs/${runID}/artifacts/refresh`, { method: 'POST' })
+      fetch(`/api/agent/conversations/${runID}/artifacts/refresh`, { method: 'POST' })
         .then((r) => (r.ok ? r.json() : null))
         .then((data: { updated?: number } | null) => {
           if (cancelled || !data?.updated) return
           // A transition landed — pull the run row + its artifact set fresh in
           // case the websocket broadcast was missed (the WS handler does the same
           // on its event), so the derived approval surface can't go stale.
-          fetch(`/api/agent/runs/${runID}`)
+          fetch(`/api/agent/conversations/${runID}`)
             .then((r) => (r.ok ? r.json() : null))
-            .then((run: AgentRun | null) => {
+            .then((run: Conversation | null) => {
               if (!cancelled && run) setRun(run)
             })
             .catch(() => {})
@@ -232,33 +232,33 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
     }
   }, [runID, refetchArtifacts])
 
-  // Live updates. agent_message appends; agent_run_update refetches the
-  // run row so status/duration/cost flip without a full reload. Permission
-  // prompts route into the shared queue (ingest on request, forget on a
-  // resolved-elsewhere / timeout broadcast).
+  // Live updates. A `message` event appends; `conversation_update` refetches
+  // the conversation row so status/duration/cost flip without a full reload.
+  // Permission prompts route into the shared queue (ingest on request, forget
+  // on a resolved-elsewhere / timeout broadcast).
   useWebSocket(
     useCallback(
       (event: WSEvent) => {
         if (!runID) return
-        if (event.type === 'agent_message' && event.run_id === runID) {
+        if (event.type === 'message' && event.conversation_id === runID) {
           setMessages((prev) => {
             // Dedup: a refetch + ws race can replay the same row. Match
-            // on ID, which is set server-side by the time the row hits
+            // on id, which is set server-side by the time the row hits
             // the wire.
-            if (prev.some((m) => m.ID === event.data.ID)) return prev
+            if (prev.some((m) => m.id === event.data.id)) return prev
             return [...prev, event.data]
           })
         }
-        if (event.type === 'agent_run_update' && event.run_id === runID) {
+        if (event.type === 'conversation_update' && event.conversation_id === runID) {
           // A run that left the running state can't act on a parked prompt —
           // drop the queue so the dock doesn't keep a stale Allow/Deny up until
           // the client TTL fires (mirrors the board's terminal drop).
-          if (isPermissionTerminalStatus(event.data.status)) {
+          if (isPermissionTerminalStatus(event.data.status ?? '')) {
             dropRun(runID)
           }
-          fetch(`/api/agent/runs/${runID}`)
+          fetch(`/api/agent/conversations/${runID}`)
             .then((r) => (r.ok ? r.json() : null))
-            .then((data: AgentRun | null) => {
+            .then((data: Conversation | null) => {
               // Guard the async write against a navigation that landed while the
               // fetch was in flight (same guard refetchArtifacts uses), so an
               // old run's row can't clobber the new run's state.
@@ -269,24 +269,24 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           // surface a freshly-staged one — pull the set so the list repaints.
           refetchArtifacts(runID)
         }
-        if (event.type === 'artifact_updated' && event.run_id === runID) {
+        if (event.type === 'artifact_updated' && event.conversation_id === runID) {
           // Reconciler (TFAC-464): an artifact this run produced changed state
           // on GitHub (or another tab approved/dismissed it). Refetch the run so
           // its derived approval signal (has_unresolved_artifacts + counts)
           // updates, and the artifact set so the approval list repaints. The
           // run's own status is unchanged, so no permission-queue drop here.
-          fetch(`/api/agent/runs/${runID}`)
+          fetch(`/api/agent/conversations/${runID}`)
             .then((r) => (r.ok ? r.json() : null))
-            .then((data: AgentRun | null) => {
+            .then((data: Conversation | null) => {
               if (data && runID === lastRunIDRef.current) setRun(data)
             })
             .catch(() => {})
           refetchArtifacts(runID)
         }
-        if (event.type === 'permission_request' && event.run_id === runID) {
+        if (event.type === 'permission_request' && event.conversation_id === runID) {
           ingest(event)
         }
-        if (event.type === 'permission_resolved' && event.run_id === runID) {
+        if (event.type === 'permission_resolved' && event.conversation_id === runID) {
           forget(event)
         }
       },

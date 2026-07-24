@@ -119,7 +119,7 @@ func (e *executorSandbox) GitCloneAuth(cloneURL string) worktree.CloneAuth {
 //
 // On any error the partial state (network, sidecar) is already torn down; the
 // caller does not Close a nil return.
-func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run *domain.AgentRun, task domain.Task) (*executorSandbox, error) {
+func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run *domain.Conversation, task domain.Task) (*executorSandbox, error) {
 	if runmode.Current() != runmode.ModeMulti {
 		return nil, nil
 	}
@@ -311,7 +311,7 @@ func (s *Spawner) githubAPIUpstreamFor(ctx context.Context, orgID string) string
 
 // executorGitGate builds the orchestrator-side git gate the sidecar's git proxy
 // relays to: the non-secret org base as the insteadOf upstream, plus the
-// DB-backed Authorize (team-tracks + run_worktrees ledger + ref allowlist), the
+// DB-backed Authorize (team-tracks + conversation_worktrees ledger + ref allowlist), the
 // RecordDenial audit, and the RecordPush capture. No TokenSource /
 // ProbeCredentials — the sidecar resolves and probes the real token from its
 // own unsealed bundle. Returns nil when the resolver is unwired.

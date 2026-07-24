@@ -18,7 +18,7 @@ import (
 func TestBuildSandboxEnv_NoGitConfig(t *testing.T) {
 	for _, extra := range [][]string{
 		nil,
-		{"TRIAGE_FACTORY_RUN_ID=r1", "TRIAGE_FACTORY_BLUEPRINT_RUN_ID=r1"},
+		{"TRIAGE_FACTORY_CONVERSATION_ID=r1", "TRIAGE_FACTORY_BLUEPRINT_RUN_ID=r1"},
 	} {
 		for _, kv := range buildSandboxEnv(extra) {
 			if strings.HasPrefix(kv, "GIT_CONFIG_") {
@@ -150,26 +150,26 @@ func TestTranslateEnvForSandbox(t *testing.T) {
 		{
 			name: "non_path_values_passthrough",
 			env: []string{
-				"TRIAGE_FACTORY_RUN_ID=abc-123",
+				"TRIAGE_FACTORY_CONVERSATION_ID=abc-123",
 				"TRIAGE_FACTORY_REPO=owner/repo",
 			},
 			cwd: "/data/worktrees/abc",
 			want: []string{
-				"TRIAGE_FACTORY_RUN_ID=abc-123",
+				"TRIAGE_FACTORY_CONVERSATION_ID=abc-123",
 				"TRIAGE_FACTORY_REPO=owner/repo",
 			},
 		},
 		{
 			name: "abs_path_under_cwd_translates",
-			env:  []string{"TRIAGE_FACTORY_RUN_ROOT=/data/worktrees/abc"},
+			env:  []string{"TRIAGE_FACTORY_CONVERSATION_ROOT=/data/worktrees/abc"},
 			cwd:  "/data/worktrees/abc",
-			want: []string{"TRIAGE_FACTORY_RUN_ROOT=/work"},
+			want: []string{"TRIAGE_FACTORY_CONVERSATION_ROOT=/work"},
 		},
 		{
 			name: "abs_subpath_under_cwd_translates",
-			env:  []string{"TRIAGE_FACTORY_RUN_ROOT=/data/worktrees/abc/_scratch"},
+			env:  []string{"TRIAGE_FACTORY_CONVERSATION_ROOT=/data/worktrees/abc/_scratch"},
 			cwd:  "/data/worktrees/abc",
-			want: []string{"TRIAGE_FACTORY_RUN_ROOT=/work/_scratch"},
+			want: []string{"TRIAGE_FACTORY_CONVERSATION_ROOT=/work/_scratch"},
 		},
 		{
 			name: "abs_path_outside_cwd_dropped",
@@ -180,25 +180,25 @@ func TestTranslateEnvForSandbox(t *testing.T) {
 		{
 			name: "mixed_keep_translate_drop",
 			env: []string{
-				"TRIAGE_FACTORY_RUN_ID=abc-123",
-				"TRIAGE_FACTORY_RUN_ROOT=/data/worktrees/abc",
+				"TRIAGE_FACTORY_CONVERSATION_ID=abc-123",
+				"TRIAGE_FACTORY_CONVERSATION_ROOT=/data/worktrees/abc",
 				"JAVA_HOME=/usr/lib/jvm/openjdk",
 			},
 			cwd: "/data/worktrees/abc",
 			want: []string{
-				"TRIAGE_FACTORY_RUN_ID=abc-123",
-				"TRIAGE_FACTORY_RUN_ROOT=/work",
+				"TRIAGE_FACTORY_CONVERSATION_ID=abc-123",
+				"TRIAGE_FACTORY_CONVERSATION_ROOT=/work",
 			},
 		},
 		{
 			name: "empty_cwd_drops_abs_paths_keeps_others",
 			env: []string{
-				"TRIAGE_FACTORY_RUN_ID=abc-123",
-				"TRIAGE_FACTORY_RUN_ROOT=/data/worktrees/abc",
+				"TRIAGE_FACTORY_CONVERSATION_ID=abc-123",
+				"TRIAGE_FACTORY_CONVERSATION_ROOT=/data/worktrees/abc",
 			},
 			cwd: "",
 			want: []string{
-				"TRIAGE_FACTORY_RUN_ID=abc-123",
+				"TRIAGE_FACTORY_CONVERSATION_ID=abc-123",
 			},
 		},
 		{
@@ -209,9 +209,9 @@ func TestTranslateEnvForSandbox(t *testing.T) {
 		},
 		{
 			name: "empty_value_passthrough",
-			env:  []string{"TRIAGE_FACTORY_RUN_ROOT="},
+			env:  []string{"TRIAGE_FACTORY_CONVERSATION_ROOT="},
 			cwd:  "/data/worktrees/abc",
-			want: []string{"TRIAGE_FACTORY_RUN_ROOT="},
+			want: []string{"TRIAGE_FACTORY_CONVERSATION_ROOT="},
 		},
 	}
 	for _, c := range cases {

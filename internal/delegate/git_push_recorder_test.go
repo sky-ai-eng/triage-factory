@@ -77,8 +77,8 @@ func TestGitPushRecorder_RecordsBranch(t *testing.T) {
 	if want := "git:branch:octo/repo:refs/heads/feature/x"; a.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q", a.DedupKey, want)
 	}
-	if a.RunID != runID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {
-		t.Errorf("identity not stamped: run=%q org=%q team=%q", a.RunID, a.OrgID, a.TeamID)
+	if a.ConversationID != runID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {
+		t.Errorf("identity not stamped: run=%q org=%q team=%q", a.ConversationID, a.OrgID, a.TeamID)
 	}
 	var d struct {
 		SHA string `json:"sha"`
@@ -139,8 +139,8 @@ func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 		t.Fatalf("got %d branch_push_failed actions, want 1", len(acts))
 	}
 	a := acts[0]
-	if a.Target != "octo/repo" || a.ExternalID != "refs/heads/feature/x" || a.RunID != runID {
-		t.Errorf("failure row = target %q external_id %q run %q; want octo/repo, refs/heads/feature/x, %s", a.Target, a.ExternalID, a.RunID, runID)
+	if a.Target != "octo/repo" || a.ExternalID != "refs/heads/feature/x" || a.ConversationID != runID {
+		t.Errorf("failure row = target %q external_id %q run %q; want octo/repo, refs/heads/feature/x, %s", a.Target, a.ExternalID, a.ConversationID, runID)
 	}
 	var d struct {
 		SHA        string `json:"sha"`

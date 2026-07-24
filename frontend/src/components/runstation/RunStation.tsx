@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { motion, useReducedMotion } from 'motion/react'
 import { ArrowLeft, ExternalLink, Pause, Send, Square } from 'lucide-react'
-import type { AgentMessage, AgentRun, Task } from '../../types'
+import type { Message, Conversation, Task } from '../../types'
 import type { PendingPermission, PermissionDecisionInput } from '../../lib/permissions'
 import {
   isActiveStatus,
@@ -50,11 +50,11 @@ interface ChainStep {
 }
 
 interface Props {
-  run: AgentRun
+  run: Conversation
   task: Task | null
-  messages: AgentMessage[]
+  messages: Message[]
   now: number
-  chainSteps?: AgentRun[] | null
+  chainSteps?: Conversation[] | null
   actions: StationActions
   /** Unanswered tool-permission prompts, head-first. The dock renders the head
    *  with priority and surfaces an "N more" affordance for the rest. */
@@ -83,7 +83,7 @@ export default function RunStation({
   const lastMessageAt = useMemo(() => {
     if (messages.length === 0) return null
     const last = messages[messages.length - 1]
-    return new Date(last.CreatedAt).getTime()
+    return new Date(last.created_at).getTime()
   }, [messages])
   const heat = st.live ? liveHeat(st.heat, lastMessageAt, now) : st.heat
 
@@ -431,7 +431,7 @@ function IntakeDock({
   actions,
   pending,
 }: {
-  run: AgentRun
+  run: Conversation
   state: ReturnType<typeof stationState>
   active: boolean
   actions: StationActions
@@ -561,7 +561,7 @@ function IntakeDock({
 
 // DockComposer — the steering input. An auto-resizing textarea (Enter sends,
 // Shift+Enter inserts a newline), with a send key lit in the run's state tone.
-// State is local; the sent text round-trips back as an agent_message, so there's
+// State is local; the sent text round-trips back as an `message` event, so there's
 // no optimistic insert here. `hidden` collapses it out of view and disables
 // interaction (e.g. while a permission prompt is up) without unmounting it —
 // unmounting would drop whatever the user had drafted.
@@ -710,7 +710,7 @@ function DockButton({
 // stepStateOf maps one chain step to its progress-track state (the same mapping
 // AgentCard uses, so the station's chain bar matches the board card's).
 function stepStateOf(
-  s: AgentRun,
+  s: Conversation,
   i: number,
   currentRunID: string,
   currentStepIndex?: number,

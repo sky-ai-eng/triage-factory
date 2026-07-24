@@ -81,7 +81,7 @@ func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath stri
 	ensureTestPrompt(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
 	brID := seedRunBlueprint(t, database, runID, task.ID)
 	stepIdx := 0
-	dbtest.SeedConversation(t, database, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.Conversation{
 		ID:                 runID,
 		TaskID:             task.ID,
 		PromptID:           "test-prompt",
@@ -118,7 +118,7 @@ func seedJiraRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath 
 	ensureTestPrompt(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
 	brID := seedRunBlueprint(t, database, runID, task.ID)
 	stepIdx := 0
-	dbtest.SeedConversation(t, database, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.Conversation{
 		ID: runID, TaskID: task.ID, PromptID: "test-prompt",
 		Status: "running", Model: "claude-sonnet-4-6", SessionID: sessionID,
 		WorktreePath:   worktreePath,

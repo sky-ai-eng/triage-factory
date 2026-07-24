@@ -85,7 +85,7 @@ func seedDraftPRArtifact(t *testing.T, s *Server, owner, repo string) string {
 	runID := seedSteerRun(t, s.db, "ppr-"+uuid.New().String()[:8], "completed")
 	a := domain.NewPullRequestArtifact(owner+"/"+repo, 42, "PR_node", "feature/x", "main",
 		"https://example.test/"+owner+"/"+repo+"/pull/42", "Add thing", "Body.", true)
-	a.RunID = runID
+	a.ConversationID = runID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)

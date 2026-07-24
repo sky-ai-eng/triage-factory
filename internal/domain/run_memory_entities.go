@@ -1,6 +1,6 @@
 package domain
 
-// MemoryRole discriminators for run_memory_entities — free text, no CHECK
+// MemoryRole discriminators for conversation_memory_entities — free text, no CHECK
 // constraint (house style: external_actions.action). "referenced" is
 // reserved for a future eager trigger-referenced read set and is
 // deliberately unused in v1.

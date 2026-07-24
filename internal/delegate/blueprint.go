@@ -168,7 +168,7 @@ func (s *Spawner) terminateBlueprint(
 	}
 	// Aborted / failed / cancelled blueprints intentionally do NOT mark
 	// the task done — leave it in the queue so a human can inspect the
-	// steps' run memory (durable in run_memory) and decide what to do next.
+	// steps' run memory (durable in conversation_memory) and decide what to do next.
 
 	if !skipCleanup {
 		s.runBlueprintWorktreeCleanup(blueprintRunID, cfg)
@@ -215,8 +215,8 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 		}
 	} else if cfg.runRoot != "" {
 		// Jira blueprints materialize worktrees lazily via `workspace add`, which
-		// keys run_worktrees rows AND the on-disk run-root (runDir) by each
-		// *step's* run_id (the agent's TRIAGE_FACTORY_RUN_ID), not the
+		// keys conversation_worktrees rows AND the on-disk run-root (runDir) by each
+		// *step's* run_id (the agent's TRIAGE_FACTORY_CONVERSATION_ID), not the
 		// blueprint_run_id. Iterate every step run so we find + remove their
 		// worktrees and their run-root dirs.
 		stepRuns, err := s.blueprints.RunsForBlueprintSystem(context.Background(), cfg.orgID, blueprintRunID)
@@ -228,7 +228,7 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 		for _, sr := range stepRuns {
 			rows, err := s.runWorktrees.ListSystem(context.Background(), cfg.orgID, sr.ID)
 			if err != nil {
-				blueprintLog.Warn("list run_worktrees for step failed", "blueprint_run", blueprintRunID, "step_run", sr.ID, "error", err)
+				blueprintLog.Warn("list conversation_worktrees for step failed", "blueprint_run", blueprintRunID, "step_run", sr.ID, "error", err)
 				// Log but continue to attempt DB row deletion below.
 				rows = nil
 			}
@@ -243,7 +243,7 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 					reclaimWorkspaceAddPRConfig(w)
 				}
 				if err := s.runWorktrees.DeleteByPathSystem(cleanupCtx, cfg.orgID, sr.ID, w.Path); err != nil {
-					blueprintLog.Warn("delete run_worktrees row failed", "blueprint_run", blueprintRunID, "path", w.Path, "error", err)
+					blueprintLog.Warn("delete conversation_worktrees row failed", "blueprint_run", blueprintRunID, "path", w.Path, "error", err)
 				}
 			}
 		}
@@ -255,7 +255,7 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 		// The run-root is keyed by the blueprint run id (setup and the cold
 		// rehydrate both build it there), and every `workspace add` checkout
 		// nests under it, so one removal reclaims the whole tree — the per-step
-		// run_worktrees rows and their PR config were already reclaimed above.
+		// conversation_worktrees rows and their PR config were already reclaimed above.
 		worktree.RemoveRunRoot(blueprintRunID)
 		return
 	}
@@ -264,7 +264,7 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 
 // reclaimWorkspaceAddPRConfig reclaims the per-run PR branch + push remote a
 // `workspace add --pr N` worktree left in the shared bare, keyed off the
-// run_worktrees row's ref (pr-<N>) and run_id (the run that created it, so the
+// conversation_worktrees row's ref (pr-<N>) and run_id (the run that created it, so the
 // per-run branch namespace matches). A no-op for non-PR refs (@default, branch
 // slugs) — those leave detached checkouts with no per-PR config. Folds the
 // eager path's inline cleanup into the lazy teardown so the bootstrap sweep
@@ -282,7 +282,7 @@ func reclaimWorkspaceAddPRConfig(w domain.RunWorktree) {
 	worktree.CleanupPRConfig(owner, repo, prNum, w.RunID)
 }
 
-// prNumberFromRef extracts N from a "pr-<N>" run_worktrees ref. ok=false for any
+// prNumberFromRef extracts N from a "pr-<N>" conversation_worktrees ref. ok=false for any
 // non-PR ref ("@default", a branch slug), which carries no per-PR config.
 func prNumberFromRef(ref string) (int, bool) {
 	rest, ok := strings.CutPrefix(ref, "pr-")
@@ -480,7 +480,7 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 // This path only runs with no live goroutine, so the blueprint is sequentially
 // paused (no other step is executing) and finalizing the whole blueprint_run on
 // the single cancelled step is correct.
-func (s *Spawner) finalizeParkedBlueprintOnCancel(ctx context.Context, orgID string, run *domain.AgentRun, userID string) {
+func (s *Spawner) finalizeParkedBlueprintOnCancel(ctx context.Context, orgID string, run *domain.Conversation, userID string) {
 	if s.blueprints == nil || run.BlueprintRunID == "" {
 		return
 	}
@@ -587,7 +587,7 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
 // disposition for the resume path: a clean completion routes through
 // decideBlueprintStep (finish/advance/abort), and the non-terminal-completed
 // statuses map to the matching blueprint terminal.
-func blueprintTerminalForResumedStep(stepRun *domain.AgentRun, isFinal bool) (domain.BlueprintRunStatus, string) {
+func blueprintTerminalForResumedStep(stepRun *domain.Conversation, isFinal bool) (domain.BlueprintRunStatus, string) {
 	switch stepRun.Status {
 	case "completed":
 		decision, abortReason := decideBlueprintStep(stepRun.Outcome, isFinal)
@@ -650,7 +650,7 @@ func (s *Spawner) blueprintHasUnresolvedArtifacts(ctx context.Context, orgID, bl
 // a per-run read error returns true rather than risk under-reporting. The read is
 // one query per run; the run set is a single blueprint_run's steps, so it is
 // bounded by step count, not blueprint history.
-func (s *Spawner) runsHaveUnresolvedArtifacts(ctx context.Context, orgID string, runs []domain.AgentRun) bool {
+func (s *Spawner) runsHaveUnresolvedArtifacts(ctx context.Context, orgID string, runs []domain.Conversation) bool {
 	if s.artifacts == nil {
 		return false
 	}

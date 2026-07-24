@@ -71,7 +71,7 @@ const staleReservationAge = 5 * time.Minute
 // validation errors returned by materializeWorkspace. Callers translate
 // these into stderr messages + non-zero exit; tests assert on identity.
 var (
-	errMissingRunID        = errors.New("workspace add: TRIAGE_FACTORY_RUN_ID not set; this command must be invoked by the delegated agent")
+	errMissingRunID        = errors.New("workspace add: TRIAGE_FACTORY_CONVERSATION_ID not set; this command must be invoked by the delegated agent")
 	errInvalidOwnerRepo    = errors.New("workspace add: invalid owner/repo")
 	errRunNotFound         = errors.New("workspace add: run not found")
 	errRepoNotConfigured   = errors.New("workspace add: repo is not configured in Triage Factory; add it on the Settings page first")
@@ -161,14 +161,14 @@ func parseAddArgs(args []string) (ownerRepo string, spec checkoutSpec, err error
 // Two path namespaces (TFAC-546): the git materialization runs HOST-SIDE via
 // host.CreateWorkspaceCheckout — in the sandbox that's the agenthost daemon
 // building into the real host run root, which this process sees bind-mounted
-// at /work. Every durable path (the run_worktrees reservation, the row the
+// at /work. Every durable path (the conversation_worktrees reservation, the row the
 // push gate and snapshot read) is therefore recorded in HOST view, while every
 // path this process touches (the liveness stat) or returns (the `cd` target on
 // stdout) is the AGENT view. host.WorkspaceRoots supplies both roots; in local
 // mode they're the same string and the translation is the identity.
 //
 // Concurrency: the cross-process serialization point is the
-// run_worktrees PK insert (`InsertRunWorktree`'s INSERT OR IGNORE),
+// conversation_worktrees PK insert (`InsertRunWorktree`'s INSERT OR IGNORE),
 // hidden behind host.InsertRunWorktree. Two concurrent invocations
 // both passing the idempotency precheck race at insert time; the
 // loser sees inserted=false and returns the winner's path without
@@ -184,7 +184,7 @@ func parseAddArgs(args []string) (ownerRepo string, spec checkoutSpec, err error
 //     missing/not-a-dir (e.g. wiped by startup orphan sweep), drop
 //     the stale row so the reservation step below can re-reserve.
 //  3. Repo profile lookup (clone URL required) + team-tracking gate.
-//  4. Reserve the run_worktrees row with the deterministic path
+//  4. Reserve the conversation_worktrees row with the deterministic path
 //     {runRoot}/{owner}/{repo}. PK conflict picks the winner.
 //  5. Loser path: return winner's path immediately.
 //  6. Winner path: materialize the checkout on disk. On failure, release
@@ -220,7 +220,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	// The run must exist (the reservation FKs it; a clear error beats an
 	// opaque FK failure later). No task is loaded — `workspace add` is now
 	// run-agnostic and serves taskless runs too.
-	run, err := host.GetAgentRun(ctx)
+	run, err := host.GetConversation(ctx)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: load run: %w", err)
 	}
@@ -255,7 +255,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	if err != nil {
 		return "", fmt.Errorf("workspace add: lookup existing worktree: %w", err)
 	}
-	// Roots for the dual-view translation below. run_worktrees rows carry the
+	// Roots for the dual-view translation below. conversation_worktrees rows carry the
 	// HOST view; everything this process stats or returns is the AGENT view.
 	hostRoot, agentRoot, err := host.WorkspaceRoots(ctx)
 	if err != nil {
@@ -394,7 +394,7 @@ func agentViewPath(hostRoot, agentRoot, p string) string {
 	return filepath.Join(agentRoot, rel)
 }
 
-// refForSpec computes the run_worktrees ref for a checkout spec — the
+// refForSpec computes the conversation_worktrees ref for a checkout spec — the
 // (run, repo, ref) PK discriminator AND the worktree path-slug subdirectory.
 // "pr-<N>" for a PR, the slugified branch for --ref, or "@default" for a
 // detached default-branch checkout. It uses the same slug helpers the InRoot

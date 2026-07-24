@@ -81,7 +81,7 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, conversati
 	}
 
 	// GitHub authorized set is the project's pinned repos ∩ the team's tracked
-	// set — a curator turn has no run_worktrees ledger and no task repo, it reads
+	// set — a curator turn has no conversation_worktrees ledger and no task repo, it reads
 	// only the pinned repos the project surfaces. The project read is admin-pool
 	// (the brain has no JWT claims here); the team is the conversation's
 	// snapshot, carried on the provisioning projection.

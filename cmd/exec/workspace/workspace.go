@@ -40,7 +40,7 @@ Discovery:
       absolute paths and the checkout each landed on
 
 Usage notes:
-  - Run id is read from $TRIAGE_FACTORY_RUN_ID (set by the delegation spawner).
+  - Conversation id is read from $TRIAGE_FACTORY_CONVERSATION_ID (set by the delegation spawner).
   - The checkout is DETACHED — no branch is prescribed. Create your own
     working branch with 'git checkout -b <name>' before committing; the push
     gate authorizes whatever branch your checkout is on (base/protected refs

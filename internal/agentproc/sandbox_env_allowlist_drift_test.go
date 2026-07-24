@@ -66,8 +66,8 @@ func TestSandboxEnvAllowlistCoversEveryProducer(t *testing.T) {
 	// (delegate imports agentproc), so the literals are mirrored here; a
 	// rename there without updating the allowlist trips this test.
 	add([]string{
-		"TRIAGE_FACTORY_RUN_ID=x",
-		"TRIAGE_FACTORY_RUN_ROOT=/work",
+		"TRIAGE_FACTORY_CONVERSATION_ID=x",
+		"TRIAGE_FACTORY_CONVERSATION_ROOT=/work",
 		"TRIAGE_FACTORY_BLUEPRINT_RUN_ID=x",
 		"TRIAGE_FACTORY_REPO=o/r",
 		"TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER=Co-authored-by: X <x@y>",

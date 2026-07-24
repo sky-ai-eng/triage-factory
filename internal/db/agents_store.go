@@ -14,8 +14,8 @@ import (
 // AgentStore owns the agents table — the org's workload identity.
 // One row per org (UNIQUE(org_id) in Postgres; idempotent INSERT on a
 // deterministic id in SQLite where org_id has no column). Distinct
-// from the AgentRun domain in internal/domain/agent.go: an Agent is
-// "who acts," an AgentRun is one execution by that actor.
+// from the Conversation domain in internal/domain/agent.go: an Agent is
+// "who acts," a Conversation is one execution by that actor.
 //
 // Audiences:
 //

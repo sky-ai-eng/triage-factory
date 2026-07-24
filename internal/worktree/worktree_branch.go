@@ -57,7 +57,7 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir, CloneAuth{})
 }
 
-// CheckoutRefSlug is the run_worktrees ref (PK discriminator) AND the
+// CheckoutRefSlug is the conversation_worktrees ref (PK discriminator) AND the
 // worktree-subdir name for a default/--ref checkout. It MUST be a single
 // filesystem-safe path segment that is injective over valid refs (distinct refs
 // → distinct slugs) and disjoint from the reserved "pr-<N>" and "@default"
@@ -82,7 +82,7 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 //
 // The slug is never handed to git (the fetch uses the raw ref); it is only the
 // PK + on-disk subdir + `workspace list` display. Exported so the workspace CLI
-// reserves the run_worktrees row and computes the worktree path with the same
+// reserves the conversation_worktrees row and computes the worktree path with the same
 // slug CreateForCheckoutInRoot lands the worktree at.
 func CheckoutRefSlug(ref string) string {
 	if ref == "" {
@@ -320,7 +320,7 @@ func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, runI
 // symbolically points at), or "" when HEAD is detached, the path isn't a git
 // worktree, or HEAD can't be read. The push gate (internal/delegate) uses this
 // to authorize "whatever branch the checkout is currently on" rather than a
-// prescribed run_worktrees.FeatureBranch: a detached HEAD — the state a fresh
+// prescribed conversation_worktrees.FeatureBranch: a detached HEAD — the state a fresh
 // default / --ref `workspace add` lands in — yields "" so no push is authorized
 // until the agent creates its own branch.
 //

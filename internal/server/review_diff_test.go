@@ -317,7 +317,7 @@ func TestFormatHumanFeedback_EmptyOriginalBodyIsRealSnapshot(t *testing.T) {
 // deliver review bodies with "\r\n" line endings, and a naive split
 // on "\n" leaves a stray "\r" at the end of every quoted line. The
 // stored human_content must be byte-stable across platforms so
-// downstream parsers (and humans diffing run_memory rows) see clean
+// downstream parsers (and humans diffing conversation_memory rows) see clean
 // LF-terminated blockquote lines regardless of where the human typed
 // the review.
 func TestFormatHumanFeedback_BodyCRLFNormalized(t *testing.T) {

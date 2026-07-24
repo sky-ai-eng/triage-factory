@@ -121,7 +121,7 @@ func (s *curatorStore) EnqueueUserMessage(ctx context.Context, orgID, conversati
 
 // --- History ---
 
-func (s *curatorStore) ListConversationMessages(ctx context.Context, orgID, conversationID string) ([]domain.AgentMessage, error) {
+func (s *curatorStore) ListConversationMessages(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
 	// Withdrawn-pending rows (undelivered + inactive) never happened and are
 	// hidden; delivered + inactive stays visible — that is retired history
 	// (compaction, a dead-lettered turn's input) the transcript still shows.
@@ -136,7 +136,7 @@ func (s *curatorStore) ListConversationMessages(ctx context.Context, orgID, conv
 		return nil, err
 	}
 	defer rows.Close()
-	return scanAgentMessageRows(rows)
+	return scanMessageRows(rows)
 }
 
 func (s *curatorStore) ListClaims(ctx context.Context, orgID, conversationID string) ([]domain.Claim, error) {
@@ -212,8 +212,9 @@ func (s *curatorStore) DeleteQueuedTurn(ctx context.Context, orgID, conversation
 	return n > 0, err
 }
 
-func (s *curatorStore) ArchiveLiveConversation(ctx context.Context, orgID, projectID, creatorUserID string) error {
-	return inTx(ctx, s.q, func(q queryer) error {
+func (s *curatorStore) ArchiveLiveConversation(ctx context.Context, orgID, projectID, creatorUserID string) (string, error) {
+	var archivedID string
+	err := inTx(ctx, s.q, func(q queryer) error {
 		conv, err := getLiveCuratorConversation(ctx, q, orgID, projectID, creatorUserID)
 		if err != nil {
 			return err
@@ -240,8 +241,13 @@ func (s *curatorStore) ArchiveLiveConversation(ctx context.Context, orgID, proje
 		`, conv.ID); err != nil {
 			return fmt.Errorf("archive conversation: %w", err)
 		}
+		archivedID = conv.ID
 		return nil
 	})
+	if err != nil {
+		return "", err
+	}
+	return archivedID, nil
 }
 
 // --- Dispatch ---
@@ -744,7 +750,7 @@ func (s *curatorStore) ListAwaitingCredentialTurnsSystem(ctx context.Context) ([
 
 // --- Project bundle import ---
 
-func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID string, conv domain.Conversation, claims []domain.Claim, msgs []domain.AgentMessage) error {
+func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID string, conv domain.Conversation, claims []domain.Claim, msgs []domain.Message) error {
 	return inTx(ctx, s.admin, func(q queryer) error {
 		startedAt := conv.StartedAt
 		if startedAt.IsZero() {

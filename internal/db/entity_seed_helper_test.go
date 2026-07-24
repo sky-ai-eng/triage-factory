@@ -11,7 +11,7 @@ import (
 )
 
 // createEntityForTest inserts an entity row directly via raw SQL so
-// package-db CRUD tests (pending_firings, run_worktrees, projects, ...)
+// package-db CRUD tests (pending_firings, conversation_worktrees, projects, ...)
 // have an entity to FK-point to without reaching for the EntityStore
 // impl (which lives in internal/db/sqlite and would form a circular
 // import if pulled into package db). Mirrors createRunForTest in

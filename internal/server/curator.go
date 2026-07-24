@@ -59,7 +59,7 @@ type curatorSendResponse struct {
 // and the next user message are its agent-side stream.
 type curatorRequestJSON struct {
 	domain.CuratorRequest
-	Messages []domain.CuratorMessage `json:"messages"`
+	Messages []domain.MessageDTO `json:"messages"`
 }
 
 func (ch *curatorHandler) handleCuratorSend(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +126,7 @@ func (ch *curatorHandler) handleCuratorHistory(w http.ResponseWriter, r *http.Re
 	projectID := r.PathValue("id")
 	var (
 		project  *domain.Project
-		messages []domain.AgentMessage
+		messages []domain.Message
 		claims   []domain.Claim
 	)
 	if err := ch.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -174,7 +174,7 @@ func (ch *curatorHandler) handleCuratorHistory(w http.ResponseWriter, r *http.Re
 // the money/token ledger, and the terminal lump lands on the turn's last
 // row (the user row itself when nothing streamed). Duration/turns still
 // come from the claim's telemetry.
-func synthesizeCuratorTurns(projectID string, messages []domain.AgentMessage, claims []domain.Claim) []curatorRequestJSON {
+func synthesizeCuratorTurns(projectID string, messages []domain.Message, claims []domain.Claim) []curatorRequestJSON {
 	claimByID := make(map[string]domain.Claim, len(claims))
 	for _, c := range claims {
 		claimByID[c.ID] = c
@@ -201,7 +201,7 @@ func synthesizeCuratorTurns(projectID string, messages []domain.AgentMessage, cl
 		curUserClaimID = ""
 		curQueued = false
 	}
-	accumulate := func(m *domain.AgentMessage) {
+	accumulate := func(m *domain.Message) {
 		if cur == nil {
 			return
 		}
@@ -238,7 +238,7 @@ func synthesizeCuratorTurns(projectID string, messages []domain.AgentMessage, cl
 					CreatorUserID: m.UserID,
 					CreatedAt:     m.CreatedAt,
 				},
-				Messages: []domain.CuratorMessage{},
+				Messages: []domain.MessageDTO{},
 			}
 			curQueued = m.Delivered != nil && !*m.Delivered
 			curUserClaimID = m.ClaimID
@@ -252,25 +252,7 @@ func synthesizeCuratorTurns(projectID string, messages []domain.AgentMessage, cl
 			curClaimID = m.ClaimID
 		}
 		accumulate(&m)
-		cur.Messages = append(cur.Messages, domain.CuratorMessage{
-			ID:                  m.ID,
-			RequestID:           cur.ID,
-			Role:                m.Role,
-			Subtype:             m.Subtype,
-			Content:             m.Content,
-			ToolCalls:           m.ToolCalls,
-			ToolCallID:          m.ToolCallID,
-			IsError:             m.IsError,
-			Metadata:            m.Metadata,
-			Model:               m.Model,
-			InputTokens:         m.InputTokens,
-			OutputTokens:        m.OutputTokens,
-			CacheReadTokens:     m.CacheReadTokens,
-			CacheCreationTokens: m.CacheCreationTokens,
-			CreatedAt:           m.CreatedAt,
-			Reasoning:           m.Reasoning,
-			ContentBlocks:       m.ContentBlocks,
-		})
+		cur.Messages = append(cur.Messages, m.ToDTO())
 	}
 	flush()
 	return out
@@ -407,7 +389,7 @@ func (ch *curatorHandler) broadcastRequestUpdate(orgID, projectID, requestID, st
 		return
 	}
 	ch.ws.Broadcast(websocket.Event{
-		Type:      "curator_request_update",
+		Type:      "conversation_update",
 		OrgID:     orgID,
 		ProjectID: projectID,
 		Data: map[string]string{
@@ -429,6 +411,13 @@ func (ch *curatorHandler) broadcastRequestUpdate(orgID, projectID, requestID, st
 // 409 with a clear hint if the user's turn is in flight — caller should
 // cancel first. The DB op + the WS broadcast are decoupled because a
 // failed broadcast (e.g. hub panicked) shouldn't roll back the archive.
+//
+// The broadcast is fired only when a conversation was actually archived
+// (ArchiveLiveConversation returns the archived id, empty when there was
+// nothing live to reset), it is scoped to the requesting user (curator
+// conversations are per-creator, so a teammate's live chat must not clear),
+// and it carries the archived conversation id so a client that has already
+// begun a fresh conversation ignores the stale reset instead of wiping it.
 func (ch *curatorHandler) handleCuratorReset(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -450,8 +439,11 @@ func (ch *curatorHandler) handleCuratorReset(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	var archivedID string
 	if err := ch.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Curator.ArchiveLiveConversation(r.Context(), orgID, projectID, userID)
+		var e error
+		archivedID, e = tx.Curator.ArchiveLiveConversation(r.Context(), orgID, projectID, userID)
+		return e
 	}); err != nil {
 		if errors.Is(err, db.ErrCuratorInFlight) {
 			writeJSON(w, http.StatusConflict, map[string]string{
@@ -463,11 +455,14 @@ func (ch *curatorHandler) handleCuratorReset(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if ch.ws != nil {
+	if ch.ws != nil && archivedID != "" {
 		ch.ws.Broadcast(websocket.Event{
-			Type:      "curator_reset",
-			OrgID:     orgID,
-			ProjectID: projectID,
+			Type:           "conversation_reset",
+			OrgID:          orgID,
+			UserID:         userID,
+			ProjectID:      projectID,
+			ConversationID: archivedID,
+			Data:           map[string]string{"conversation_id": archivedID},
 		})
 	}
 	w.WriteHeader(http.StatusNoContent)

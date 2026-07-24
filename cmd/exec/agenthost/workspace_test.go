@@ -108,7 +108,7 @@ func stubWorkspaceCreates(t *testing.T, rec *createRecorder) {
 // in-process client (no sandbox boundary on this transport).
 func TestLocalClient_WorkspaceRoots(t *testing.T) {
 	stores, conn := newTestDB(t)
-	seedAgentRun(t, stores, conn, "run-roots", runmode.LocalDefaultUserID, "manual")
+	seedConversation(t, stores, conn, "run-roots", runmode.LocalDefaultUserID, "manual")
 	client := NewLocal(stores, workspaceInfo("run-roots"))
 
 	host, agent, err := client.WorkspaceRoots(context.Background())
@@ -122,7 +122,7 @@ func TestLocalClient_WorkspaceRoots(t *testing.T) {
 		t.Errorf("LocalClient views differ: host %q, agent %q — no sandbox boundary on this transport", host, agent)
 	}
 
-	if err := stores.AgentRuns.SetWorktreePathSystem(context.Background(), runmode.LocalDefaultOrgID, "run-roots", "/data/runs/rehydrated-root"); err != nil {
+	if err := stores.Conversations.SetWorktreePathSystem(context.Background(), runmode.LocalDefaultOrgID, "run-roots", "/data/runs/rehydrated-root"); err != nil {
 		t.Fatalf("SetWorktreePathSystem: %v", err)
 	}
 	host, agent, err = client.WorkspaceRoots(context.Background())
@@ -142,8 +142,8 @@ func TestLocalClient_WorkspaceRoots(t *testing.T) {
 // cd-able path (TFAC-546).
 func TestServer_WorkspaceRoots_AgentViewIsWorkMount(t *testing.T) {
 	stores, conn := newTestDB(t)
-	seedAgentRun(t, stores, conn, "run-ipc-roots", runmode.LocalDefaultUserID, "manual")
-	if err := stores.AgentRuns.SetWorktreePathSystem(context.Background(), runmode.LocalDefaultOrgID, "run-ipc-roots", "/tmp/triagefactory-runs/run-ipc-roots"); err != nil {
+	seedConversation(t, stores, conn, "run-ipc-roots", runmode.LocalDefaultUserID, "manual")
+	if err := stores.Conversations.SetWorktreePathSystem(context.Background(), runmode.LocalDefaultOrgID, "run-ipc-roots", "/tmp/triagefactory-runs/run-ipc-roots"); err != nil {
 		t.Fatalf("SetWorktreePathSystem: %v", err)
 	}
 
@@ -181,7 +181,7 @@ func TestServer_WorkspaceRoots_AgentViewIsWorkMount(t *testing.T) {
 // ref+pr conflict — all before any git runs.
 func TestLocalClient_CreateWorkspaceCheckout_Gates(t *testing.T) {
 	stores, conn := newTestDB(t)
-	seedAgentRun(t, stores, conn, "run-gates", runmode.LocalDefaultUserID, "manual")
+	seedConversation(t, stores, conn, "run-gates", runmode.LocalDefaultUserID, "manual")
 	rec := &createRecorder{}
 	stubWorkspaceCreates(t, rec)
 	client := NewLocal(stores, workspaceInfo("run-gates"))
@@ -226,7 +226,7 @@ func TestLocalClient_CreateWorkspaceCheckout_Gates(t *testing.T) {
 // the operator's own git path).
 func TestLocalClient_CreateWorkspaceCheckout_DefaultPath(t *testing.T) {
 	stores, conn := newTestDB(t)
-	seedAgentRun(t, stores, conn, "run-co", runmode.LocalDefaultUserID, "manual")
+	seedConversation(t, stores, conn, "run-co", runmode.LocalDefaultUserID, "manual")
 	seedWorkspaceRepo(t, stores, "sky", "core", "https://github.com/sky/core.git")
 	rec := &createRecorder{path: "/wt/path"}
 	stubWorkspaceCreates(t, rec)
@@ -281,15 +281,15 @@ func TestLocalClient_CreateWorkspaceCheckout_PRPath(t *testing.T) {
 	defer gh.Close()
 
 	stores, conn := newTestDB(t)
-	seedAgentRun(t, stores, conn, "run-pr", runmode.LocalDefaultUserID, "manual")
+	seedConversation(t, stores, conn, "run-pr", runmode.LocalDefaultUserID, "manual")
 	seedWorkspaceRepo(t, stores, "sky", "core", "https://github.com/sky/core.git")
-	// The workspace CLI reserves the run_worktrees row BEFORE the create — and
+	// The workspace CLI reserves the conversation_worktrees row BEFORE the create — and
 	// the host-side PR fetch rides the exec-gh channel, whose least-privilege
 	// gate requires that row. Mirror the production ordering.
 	if _, _, err := stores.RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
 		RunID: "run-pr", RepoID: "sky/core", Path: "/wt/pr-path", Ref: "pr-42",
 	}); err != nil {
-		t.Fatalf("reserve run_worktrees row: %v", err)
+		t.Fatalf("reserve conversation_worktrees row: %v", err)
 	}
 	rec := &createRecorder{path: "/wt/pr-path"}
 	stubWorkspaceCreates(t, rec)
@@ -357,7 +357,7 @@ func TestStrictlyWithin(t *testing.T) {
 // create failure surfaces to the caller (which releases its reservation).
 func TestLocalClient_CreateWorkspaceCheckout_CreateErrorPropagates(t *testing.T) {
 	stores, conn := newTestDB(t)
-	seedAgentRun(t, stores, conn, "run-fail", runmode.LocalDefaultUserID, "manual")
+	seedConversation(t, stores, conn, "run-fail", runmode.LocalDefaultUserID, "manual")
 	seedWorkspaceRepo(t, stores, "sky", "core", "https://github.com/sky/core.git")
 	rec := &createRecorder{err: errors.New("simulated git failure")}
 	stubWorkspaceCreates(t, rec)

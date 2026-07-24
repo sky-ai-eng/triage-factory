@@ -96,8 +96,8 @@ func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
 	if want := "git:branch:octo/repo:refs/heads/feature/x"; a.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q", a.DedupKey, want)
 	}
-	if a.RunID != runID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {
-		t.Errorf("identity not stamped: run=%q org=%q team=%q", a.RunID, a.OrgID, a.TeamID)
+	if a.ConversationID != runID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {
+		t.Errorf("identity not stamped: run=%q org=%q team=%q", a.ConversationID, a.OrgID, a.TeamID)
 	}
 	var d pushDetails
 	if err := json.Unmarshal([]byte(a.DetailsJSON), &d); err != nil {

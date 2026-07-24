@@ -56,7 +56,7 @@ type factoryRunJSON struct {
 }
 
 // factoryRunSummaryJSON mirrors the AgentCard-expected shape the frontend
-// already consumes (see frontend/src/types.ts AgentRun). Field names are
+// already consumes (see frontend/src/types.ts Conversation). Field names are
 // capitalized to match the struct-tag-free JSON the existing /api/agent/
 // runs handler emits for Status/StartedAt/etc.
 type factoryRunSummaryJSON struct {
@@ -81,7 +81,7 @@ type factoryRunSummaryJSON struct {
 	FailureKind    string     `json:"FailureKind"`
 }
 
-func toFactoryRunSummary(r domain.AgentRun) factoryRunSummaryJSON {
+func toFactoryRunSummary(r domain.Conversation) factoryRunSummaryJSON {
 	return factoryRunSummaryJSON{
 		ID:             r.ID,
 		TaskID:         r.TaskID,
@@ -287,7 +287,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 			return e
 		}
 
-		openRunsByEntity, e = tx.AgentRuns.EntitiesWithOpenRuns(r.Context(), orgID, entityIDs)
+		openRunsByEntity, e = tx.Conversations.EntitiesWithOpenRuns(r.Context(), orgID, entityIDs)
 		return e
 	}); err != nil {
 		internalError(w, "factory", err)

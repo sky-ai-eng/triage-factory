@@ -72,7 +72,7 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 
 	step0 := 0
 	run0 := "rrun0-" + suffix
-	dbtest.SeedConversation(t, database, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.Conversation{
 		ID: run0, TaskID: task.ID, PromptID: promptIDs[0], Status: step0Status,
 		Outcome: step0Outcome,
 		Model:   "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step0,

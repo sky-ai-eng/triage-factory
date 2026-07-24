@@ -262,7 +262,7 @@ func (r *slackExecRig) trackChannel(orgID, userID, teamID, channelID string) {
 
 // seedNonSlackTask seeds a minimal entity + event + task chain with a
 // GitHub (not slack:message) event type, and returns the task id. Every run
-// this rig seeds carries one: AgentRunStore.GetSystem's column list
+// this rig seeds carries one: ConversationStore.GetSystem's column list
 // (pgRunColumns) selects task_id with no COALESCE, so scanning a run whose
 // task_id is genuinely NULL errors — harmless in production (every run
 // today is blueprint-origin, which requires a non-NULL task_id) but hit
@@ -346,37 +346,37 @@ func (r *slackExecRig) actionsForRun(orgID, runID string) []domain.ExternalActio
 	}
 	var out []domain.ExternalAction
 	for _, a := range all {
-		if a.RunID == runID {
+		if a.ConversationID == runID {
 			out = append(out, a)
 		}
 	}
 	return out
 }
 
-// touchRole reads run_memory_entities.role for (runID, entityID) directly — the
+// touchRole reads conversation_memory_entities.role for (runID, entityID) directly — the
 // store interface exposes no role-returning read. "" when no row exists.
 func (r *slackExecRig) touchRole(runID, entityID string) string {
 	r.t.Helper()
 	var role string
 	err := r.h.AdminDB.QueryRow(
-		`SELECT role FROM run_memory_entities WHERE conversation_id = $1 AND entity_id = $2`, runID, entityID,
+		`SELECT role FROM conversation_memory_entities WHERE conversation_id = $1 AND entity_id = $2`, runID, entityID,
 	).Scan(&role)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ""
 	}
 	if err != nil {
-		r.t.Fatalf("read run_memory_entities role: %v", err)
+		r.t.Fatalf("read conversation_memory_entities role: %v", err)
 	}
 	return role
 }
 
-// touchRowCount counts every run_memory_entities row for a run — a set-returning
+// touchRowCount counts every conversation_memory_entities row for a run — a set-returning
 // read must leave this at 0.
 func (r *slackExecRig) touchRowCount(runID string) int {
 	r.t.Helper()
 	var n int
-	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM run_memory_entities WHERE conversation_id = $1`, runID).Scan(&n); err != nil {
-		r.t.Fatalf("count run_memory_entities: %v", err)
+	if err := r.h.AdminDB.QueryRow(`SELECT count(*) FROM conversation_memory_entities WHERE conversation_id = $1`, runID).Scan(&n); err != nil {
+		r.t.Fatalf("count conversation_memory_entities: %v", err)
 	}
 	return n
 }
@@ -420,8 +420,8 @@ func TestSlackExecHandler_Send_RecordsArtifactAndAction(t *testing.T) {
 				a.DedupKey != domain.ArtifactDedupKey(domain.ArtifactProviderSlack, domain.ArtifactKindMessage, "C1/"+out.TS, "") {
 				t.Errorf("artifact mismatch: %+v (want target=%q)", a, wantTarget)
 			}
-			if a.RunID != runID || a.TeamID != teamID {
-				t.Errorf("attribution mismatch: run=%q team=%q", a.RunID, a.TeamID)
+			if a.ConversationID != runID || a.TeamID != teamID {
+				t.Errorf("attribution mismatch: run=%q team=%q", a.ConversationID, a.TeamID)
 			}
 
 			acts := r.actionsForRun(orgID, runID)
@@ -616,8 +616,8 @@ func TestSlackExecHandler_Edit_UpsertsSameArtifactRow(t *testing.T) {
 	if arts[0].State != domain.ArtifactStateMessagePosted {
 		t.Errorf("state = %q, want %q", arts[0].State, domain.ArtifactStateMessagePosted)
 	}
-	if arts[0].RunID != runID {
-		t.Errorf("edit must not reassign run_id away from the creating run: got %q, want %q", arts[0].RunID, runID)
+	if arts[0].ConversationID != runID {
+		t.Errorf("edit must not reassign run_id away from the creating run: got %q, want %q", arts[0].ConversationID, runID)
 	}
 
 	acts := r.actionsForRun(orgID, runID)
@@ -675,8 +675,8 @@ func TestSlackExecHandler_Edit_PreservesCreatingRunAndTeam_AcrossDifferentTeams(
 	if len(artsA) != 1 {
 		t.Fatalf("want 1 artifact still attributed to the creating run A, got %d: %+v", len(artsA), artsA)
 	}
-	if artsA[0].RunID != runA || artsA[0].TeamID != teamA {
-		t.Errorf("artifact attribution drifted: run=%q team=%q, want run=%q team=%q", artsA[0].RunID, artsA[0].TeamID, runA, teamA)
+	if artsA[0].ConversationID != runA || artsA[0].TeamID != teamA {
+		t.Errorf("artifact attribution drifted: run=%q team=%q, want run=%q team=%q", artsA[0].ConversationID, artsA[0].TeamID, runA, teamA)
 	}
 	if artsB := r.artifactsForRun(orgID, runB); len(artsB) != 0 {
 		t.Errorf("editing run B must not have reassigned the artifact to itself, got %+v", artsB)

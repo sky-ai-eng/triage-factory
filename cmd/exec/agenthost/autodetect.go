@@ -20,7 +20,7 @@ import (
 //     late mystery error inside a subcommand.
 //
 //   - Otherwise the binary is the local-mode CLI. Resolve the run
-//     identity from TRIAGE_FACTORY_RUN_ID, construct a LocalClient
+//     identity from TRIAGE_FACTORY_CONVERSATION_ID, construct a LocalClient
 //     against the supplied stores, and return it.
 //
 // Stores is consulted only on the local branch; the IPC branch

@@ -32,20 +32,20 @@ func (f *fakeEventPublisher) eventsCopy() []domain.Event {
 	return out
 }
 
-func decodeRunStatus(t *testing.T, raw string) events.SystemRunStatusMetadata {
+func decodeRunStatus(t *testing.T, raw string) events.SystemConversationStatusMetadata {
 	t.Helper()
-	var meta events.SystemRunStatusMetadata
+	var meta events.SystemConversationStatusMetadata
 	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
-		t.Fatalf("decode SystemRunStatusMetadata: %v", err)
+		t.Fatalf("decode SystemConversationStatusMetadata: %v", err)
 	}
 	return meta
 }
 
-func decodeRunActivity(t *testing.T, raw string) events.SystemRunActivityMetadata {
+func decodeRunActivity(t *testing.T, raw string) events.SystemConversationActivityMetadata {
 	t.Helper()
-	var meta events.SystemRunActivityMetadata
+	var meta events.SystemConversationActivityMetadata
 	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
-		t.Fatalf("decode SystemRunActivityMetadata: %v", err)
+		t.Fatalf("decode SystemConversationActivityMetadata: %v", err)
 	}
 	return meta
 }
@@ -66,14 +66,14 @@ func TestBroadcastRunUpdate_PublishesRunStatus(t *testing.T) {
 		t.Fatalf("published %d events, want 1", len(got))
 	}
 	evt := got[0]
-	if evt.EventType != domain.EventSystemRunStatus {
-		t.Errorf("event_type = %q, want %q", evt.EventType, domain.EventSystemRunStatus)
+	if evt.EventType != domain.EventSystemConversationStatus {
+		t.Errorf("event_type = %q, want %q", evt.EventType, domain.EventSystemConversationStatus)
 	}
 	if evt.OrgID != "org-a" {
 		t.Errorf("org_id = %q, want org-a", evt.OrgID)
 	}
 	meta := decodeRunStatus(t, evt.MetadataJSON)
-	if meta.RunID != "run-1" || meta.Status != "running" {
+	if meta.ConversationID != "run-1" || meta.Status != "running" {
 		t.Errorf("metadata = %+v, want RunID=run-1 Status=running", meta)
 	}
 	if meta.FailureKind != "" {
@@ -121,14 +121,14 @@ func TestBroadcastRunFailed_UnclassifiedOmitsFailureKind(t *testing.T) {
 }
 
 // TestBroadcastMessage_ToolUsePublishesActivity pins the volume-bounding
-// rule: only Subtype=="tool_use" publishes system:run:activity, and the
+// rule: only Subtype=="tool_use" publishes system:conversation:activity, and the
 // tool's Description resolves from Input["description"] when present.
 func TestBroadcastMessage_ToolUsePublishesActivity(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	pub := &fakeEventPublisher{}
 	s.SetEventPublisher(pub)
 
-	s.broadcastMessage("org-a", "run-1", &domain.AgentMessage{
+	s.broadcastMessage("org-a", "run-1", &domain.Message{
 		Subtype: "tool_use",
 		ToolCalls: []domain.ToolCall{
 			{ID: "1", Name: "Bash", Input: map[string]any{"description": "run tests", "command": "go test ./..."}},
@@ -141,12 +141,12 @@ func TestBroadcastMessage_ToolUsePublishesActivity(t *testing.T) {
 		t.Fatalf("published %d events, want 1", len(got))
 	}
 	evt := got[0]
-	if evt.EventType != domain.EventSystemRunActivity {
-		t.Errorf("event_type = %q, want %q", evt.EventType, domain.EventSystemRunActivity)
+	if evt.EventType != domain.EventSystemConversationActivity {
+		t.Errorf("event_type = %q, want %q", evt.EventType, domain.EventSystemConversationActivity)
 	}
 	meta := decodeRunActivity(t, evt.MetadataJSON)
-	if meta.RunID != "run-1" {
-		t.Errorf("RunID = %q, want run-1", meta.RunID)
+	if meta.ConversationID != "run-1" {
+		t.Errorf("RunID = %q, want run-1", meta.ConversationID)
 	}
 	if len(meta.Tools) != 2 {
 		t.Fatalf("Tools = %+v, want 2 entries", meta.Tools)
@@ -168,7 +168,7 @@ func TestBroadcastMessage_NonToolUseSubtypesPublishNothing(t *testing.T) {
 			pub := &fakeEventPublisher{}
 			s.SetEventPublisher(pub)
 
-			s.broadcastMessage("org-a", "run-1", &domain.AgentMessage{Subtype: subtype})
+			s.broadcastMessage("org-a", "run-1", &domain.Message{Subtype: subtype})
 
 			if got := pub.eventsCopy(); len(got) != 0 {
 				t.Fatalf("subtype %q published %d events, want 0", subtype, len(got))
@@ -185,7 +185,7 @@ func TestBroadcast_NilPublisher_NoPanic(t *testing.T) {
 
 	s.broadcastRunUpdate("org-a", "run-1", "running")
 	s.broadcastRunFailed("org-a", "run-1", domain.RunFailureMemoryLimit)
-	s.broadcastMessage("org-a", "run-1", &domain.AgentMessage{
+	s.broadcastMessage("org-a", "run-1", &domain.Message{
 		Subtype:   "tool_use",
 		ToolCalls: []domain.ToolCall{{ID: "1", Name: "Bash"}},
 	})

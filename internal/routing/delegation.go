@@ -142,7 +142,7 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 	// Per-entity gate. Closed if any auto run is active on the entity OR
 	// any pending_firings rows are already queued (FIFO fairness).
 	// Compose the per-entity firing gate from its two halves:
-	// AgentRunStore owns the runs-shaped predicate, PendingFiringsStore
+	// ConversationStore owns the runs-shaped predicate, PendingFiringsStore
 	// owns the queue-shaped one. canFire = neither side blocks.
 	//
 	// The active-run read resolves the run's ID and owning task in one
@@ -320,7 +320,7 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runI
 	case delegate.InjectNotDelivered:
 		return false
 	case delegate.InjectDeliveredRemote:
-		routerLog.Info("handed additive event to a live remote executor via run_signals",
+		routerLog.Info("handed additive event to a live remote executor via conversation_signals",
 			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)
 		return true
 	default: // InjectDeliveredLocal, InjectStagedResumable

@@ -13,11 +13,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestHandleAgentRuns_Batched pins the aggregated run-list path the Board uses
+// TestHandleConversations_Batched pins the aggregated run-list path the Board uses
 // to collapse its per-refresh fan-out (TFAC-98): one
-// GET /api/agent/runs?task_ids=a,b&include=messages returns runs grouped per
+// GET /api/agent/conversations?task_ids=a,b&include=messages returns runs grouped per
 // task (newest-first) plus each task's PRIMARY-run transcript keyed by run id.
-func TestHandleAgentRuns_Batched(t *testing.T) {
+func TestHandleConversations_Batched(t *testing.T) {
 	s := newTestServer(t)
 
 	// Task A: a primary (newest) run plus an older run on the same task.
@@ -33,8 +33,8 @@ func TestHandleAgentRuns_Batched(t *testing.T) {
 
 	store := sqlitestore.New(s.db)
 	seedMsg := func(runID, content string) {
-		if _, err := store.AgentRuns.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.AgentMessage{
-			RunID: runID, Role: "assistant", Content: content, Subtype: "text",
+		if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+			ConversationID: runID, Role: "assistant", Content: content, Subtype: "text",
 		}); err != nil {
 			t.Fatalf("InsertMessage(%s): %v", runID, err)
 		}
@@ -43,7 +43,7 @@ func TestHandleAgentRuns_Batched(t *testing.T) {
 	seedMsg(olderA, "older-a") // must NOT appear — only the primary run's transcript is returned
 	seedMsg(primaryB, "primary-b")
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/runs?task_ids="+taskA+","+taskB+"&include=messages", nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+taskA+","+taskB+"&include=messages", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET batched = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -74,7 +74,7 @@ func TestHandleAgentRuns_Batched(t *testing.T) {
 	}
 	assertMsg := func(runID, want string) {
 		ms := resp.Messages[runID]
-		if len(ms) != 1 || ms[0]["Content"] != want {
+		if len(ms) != 1 || ms[0]["content"] != want {
 			t.Errorf("messages[%s] = %v, want one %q", runID, ms, want)
 		}
 	}
@@ -82,7 +82,7 @@ func TestHandleAgentRuns_Batched(t *testing.T) {
 	assertMsg(primaryB, "primary-b")
 
 	// Without include=messages, the messages key is omitted entirely.
-	rec2 := doJSON(t, s, http.MethodGet, "/api/agent/runs?task_ids="+taskA, nil)
+	rec2 := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+taskA, nil)
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("GET batched (no include) = %d, want 200", rec2.Code)
 	}
@@ -98,24 +98,24 @@ func TestHandleAgentRuns_Batched(t *testing.T) {
 	}
 }
 
-// TestHandleAgentRuns_MissingParams pins that the run-list endpoint still
+// TestHandleConversations_MissingParams pins that the run-list endpoint still
 // requires a task selector — neither task_id nor task_ids is a 400, and an
 // all-empty task_ids (commas/whitespace only) is rejected too.
-func TestHandleAgentRuns_MissingParams(t *testing.T) {
+func TestHandleConversations_MissingParams(t *testing.T) {
 	s := newTestServer(t)
 
-	if rec := doJSON(t, s, http.MethodGet, "/api/agent/runs", nil); rec.Code != http.StatusBadRequest {
+	if rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations", nil); rec.Code != http.StatusBadRequest {
 		t.Errorf("GET runs (no params) = %d, want 400", rec.Code)
 	}
-	if rec := doJSON(t, s, http.MethodGet, "/api/agent/runs?task_ids=%20,%20", nil); rec.Code != http.StatusBadRequest {
+	if rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids=%20,%20", nil); rec.Code != http.StatusBadRequest {
 		t.Errorf("GET runs (empty task_ids) = %d, want 400", rec.Code)
 	}
 }
 
-// TestHandleAgentRuns_BatchedCap pins the task_ids cap: a request beyond
+// TestHandleConversations_BatchedCap pins the task_ids cap: a request beyond
 // maxBatchTaskIDs is truncated to the first N (not rejected), so a real task at
 // the head still resolves while one placed past the cap is dropped.
-func TestHandleAgentRuns_BatchedCap(t *testing.T) {
+func TestHandleConversations_BatchedCap(t *testing.T) {
 	s := newTestServer(t)
 	_ = seedSteerRun(t, s.db, "cap", "running") // run on task t_cap
 	const taskID = "t_cap"
@@ -128,7 +128,7 @@ func TestHandleAgentRuns_BatchedCap(t *testing.T) {
 		return ids
 	}
 	runsFor := func(ids []string) map[string][]map[string]any {
-		rec := doJSON(t, s, http.MethodGet, "/api/agent/runs?task_ids="+strings.Join(ids, ","), nil)
+		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids="+strings.Join(ids, ","), nil)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET batched (cap) = %d, want 200; body=%s", rec.Code, rec.Body.String())
 		}

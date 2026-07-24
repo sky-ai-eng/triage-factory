@@ -177,7 +177,7 @@ type finalizeReviewDraftArgs struct {
 }
 
 type agentRunResult struct {
-	Run *domain.AgentRun `json:"run,omitempty"`
+	Run *domain.Conversation `json:"run,omitempty"`
 }
 
 type getTaskArgs struct {
@@ -238,7 +238,7 @@ type deleteRunWorktreeByRepoRefArgs struct {
 
 // workspaceRootsResult carries the run root's two path-namespace views. The
 // daemon substitutes the sandbox mount point (/work) as Agent; Host is what
-// the host filesystem — and every host-side reader of run_worktrees paths —
+// the host filesystem — and every host-side reader of conversation_worktrees paths —
 // knows the same directory as. See Client.WorkspaceRoots.
 type workspaceRootsResult struct {
 	Host  string `json:"host"`
@@ -261,11 +261,11 @@ type createWorkspaceCheckoutResult struct {
 	Path string `json:"path"`
 }
 
-type buildAgentRunFooterArgs struct {
+type buildAgentFooterArgs struct {
 	Kind string `json:"kind"`
 }
 
-type buildAgentRunFooterResult struct {
+type buildAgentFooterResult struct {
 	Footer string `json:"footer"`
 }
 
@@ -597,7 +597,7 @@ type callExtensionResult struct {
 }
 
 // emptyArgs is the args type for methods that take no parameters
-// (LookupRun, GetAgentRun, ListRunWorktrees, ListRepos). Using an empty
+// (LookupRun, GetConversation, ListRunWorktrees, ListRepos). Using an empty
 // struct rather than json.RawMessage(nil)
 // lets the daemon-side dispatch use the same json.Unmarshal call shape
 // for every method without a nil-check.
@@ -627,7 +627,7 @@ const (
 	methodResetReviewDraft           = "ResetReviewDraft"
 	methodUpdateStagedReviewComment  = "UpdateStagedReviewComment"
 	methodDeleteStagedReviewComment  = "DeleteStagedReviewComment"
-	methodGetAgentRun                = "GetAgentRun"
+	methodGetConversation            = "GetConversation"
 	methodGetTask                    = "GetTask"
 	methodListRepos                  = "ListRepos"
 	methodGetRepo                    = "GetRepo"
@@ -638,7 +638,7 @@ const (
 	methodDeleteRunWorktreeByRepoRef = "DeleteRunWorktreeByRepoRef"
 	methodWorkspaceRoots             = "WorkspaceRoots"
 	methodCreateWorkspaceCheckout    = "CreateWorkspaceCheckout"
-	methodBuildAgentRunFooter        = "BuildAgentRunFooter"
+	methodBuildAgentFooter           = "BuildAgentFooter"
 
 	methodUpsertArtifact = "UpsertArtifact"
 

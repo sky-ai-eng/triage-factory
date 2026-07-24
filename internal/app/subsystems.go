@@ -300,9 +300,9 @@ func (a *App) buildExecution() error {
 		a.classifier.SetKBStore(a.kbStore)
 	}
 
-	// Cross-pod run control (TFAC-585): the run_signals outbox is Postgres-
+	// Cross-pod run control (TFAC-585): the conversation_signals outbox is Postgres-
 	// only, so this is the ONE gate that keeps local mode structurally free
-	// of run_signals writes — s.controller stays the plain
+	// of conversation_signals writes — s.controller stays the plain
 	// inProcessController unless SetRunSignals is called, and it is only
 	// ever called here, behind this mode check. Wired for every role in
 	// multi mode (not just dispatcher-capable ones): a control pod's HTTP
@@ -574,7 +574,7 @@ func (a *App) buildRouting() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. It drains the durable
 	// event_queue (not the bus); the ingestor enqueues there at emit time.
-	a.router = routing.NewRouter(a.stores.Prompts, a.stores.Blueprints, a.stores.EventHandlers, a.stores.Agents, a.stores.TeamAgents, a.stores.Users, a.stores.Tasks, a.stores.AgentRuns, a.stores.Entities, a.stores.PendingFirings, a.stores.Events, a.stores.Orgs, a.stores.Teams, a.stores.TeamGitHubRepos, a.stores.JiraStatusRules, a.stores.TeamGitHubGroups, a.spawner, a.scorer, a.wsHub)
+	a.router = routing.NewRouter(a.stores.Prompts, a.stores.Blueprints, a.stores.EventHandlers, a.stores.Agents, a.stores.TeamAgents, a.stores.Users, a.stores.Tasks, a.stores.Conversations, a.stores.Entities, a.stores.PendingFirings, a.stores.Events, a.stores.Orgs, a.stores.Teams, a.stores.TeamGitHubRepos, a.stores.JiraStatusRules, a.stores.TeamGitHubGroups, a.spawner, a.scorer, a.wsHub)
 	a.router.SetEventQueue(a.stores.EventQueue)
 	// Mirror the per-event routing disposition sentinel onto the bus
 	// (TFAC-593) so an async event source (e.g. Slack) can learn

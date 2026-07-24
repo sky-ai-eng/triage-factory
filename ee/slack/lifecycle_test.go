@@ -14,7 +14,7 @@ import (
 // TestLifecycleAdapter_Run_SubscribesFilteredAndUnsubscribesOnShutdown
 // exercises run() itself (the pgtest suite in lifecycle_pg_test.go calls
 // dispatch directly and never goes through the real bus): it subscribes with
-// the "system:run:"/"system:routing:" prefix filter, and returns promptly
+// the "system:conversation:"/"system:routing:" prefix filter, and returns promptly
 // once ctx is cancelled. Publishes a matching-but-undispatched event type
 // (proves the subscription + prefix filter work) and a non-matching one
 // (must never reach dispatch — stores is nil here, so a mis-routed event
@@ -31,7 +31,7 @@ func TestLifecycleAdapter_Run_SubscribesFilteredAndUnsubscribesOnShutdown(t *tes
 	}()
 	time.Sleep(20 * time.Millisecond) // let run() reach bus.Subscribe before publishing
 
-	bus.Publish(domain.Event{OrgID: "org-1", EventType: "system:run:unused-for-test"})
+	bus.Publish(domain.Event{OrgID: "org-1", EventType: "system:conversation:unused-for-test"})
 	bus.Publish(domain.Event{OrgID: "org-1", EventType: "system:poll:completed"})
 	time.Sleep(20 * time.Millisecond)
 

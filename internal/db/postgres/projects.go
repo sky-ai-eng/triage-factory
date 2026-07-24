@@ -43,7 +43,7 @@ func translateVisibilityErr(err error) error {
 //     routes through admin so the classifier can pair each org's
 //     unclassified entities against that org's projects without
 //     impersonating any one user. Same pattern EntityStore /
-//     RepoStore / AgentRunStore use.
+//     RepoStore / ConversationStore use.
 //
 // pinned_repos is jsonb in Postgres vs text-JSON in SQLite. The
 // jsonb cast happens at the placeholder level ($N::jsonb) — callers
@@ -263,13 +263,6 @@ func (s *projectStore) Delete(ctx context.Context, orgID, id string) error {
 	if n == 0 {
 		return sql.ErrNoRows
 	}
-	return nil
-}
-
-// SetCuratorSessionID is a transitional no-op: the SDK resume handle moved
-// off the project row (the curator conversation's sdk_session_id absorbs
-// it), so there is no column left to write here.
-func (s *projectStore) SetCuratorSessionID(ctx context.Context, orgID, projectID, sessionID string) error {
 	return nil
 }
 

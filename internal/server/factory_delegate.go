@@ -28,17 +28,17 @@ type factoryDelegateRequest struct {
 
 // factoryDelegateResponse mirrors the /api/tasks/{id}/swipe delegate
 // response: on partial success (claim stamped, run didn't fire),
-// DelegateError carries the spawner error and RunID stays empty. The
+// DelegateError carries the spawner error and ConversationID stays empty. The
 // FE renders the "delegate failed — retry" affordance on the bot-
 // claimed card regardless of whether the failure was a 400-class
 // (ErrPromptNotFound) or 500-class (DB / spawner internal) error.
 // ClaimStamped is always true on a 200 response — the user's gesture
 // committed at the claim axis even when the run didn't materialize.
 type factoryDelegateResponse struct {
-	TaskID        string `json:"task_id"`
-	RunID         string `json:"run_id"`
-	DelegateError string `json:"delegate_error,omitempty"`
-	ClaimStamped  bool   `json:"claim_stamped"`
+	TaskID         string `json:"task_id"`
+	ConversationID string `json:"conversation_id"`
+	DelegateError  string `json:"delegate_error,omitempty"`
+	ClaimStamped   bool   `json:"claim_stamped"`
 }
 
 // handleFactoryDelegate is the drag-to-delegate endpoint behind the
@@ -366,17 +366,17 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		// or 500-class (DB, spawner internal) is irrelevant to the
 		// caller — the response shape is the same.
 		writeJSON(w, http.StatusOK, factoryDelegateResponse{
-			TaskID:        task.ID,
-			RunID:         "",
-			DelegateError: err.Error(),
-			ClaimStamped:  true,
+			TaskID:         task.ID,
+			ConversationID: "",
+			DelegateError:  err.Error(),
+			ClaimStamped:   true,
 		})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, factoryDelegateResponse{
-		TaskID:       task.ID,
-		RunID:        runID,
-		ClaimStamped: true,
+		TaskID:         task.ID,
+		ConversationID: runID,
+		ClaimStamped:   true,
 	})
 }

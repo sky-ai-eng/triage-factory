@@ -18,20 +18,20 @@ import (
 // LocalClient is the one seam the multi daemon dispatches through, so proving
 // it here covers both the sandbox and local-mode paths.
 
-// touchRole reads run_memory_entities.role for (runID, entityID) directly — the
+// touchRole reads conversation_memory_entities.role for (runID, entityID) directly — the
 // store interface exposes no role-returning read. "" when no row exists.
 func touchRole(t *testing.T, conn *sql.DB, runID, entityID string) string {
 	t.Helper()
 	var role string
 	switch err := conn.QueryRow(
-		`SELECT role FROM run_memory_entities WHERE conversation_id = ? AND entity_id = ?`, runID, entityID,
+		`SELECT role FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ?`, runID, entityID,
 	).Scan(&role); err {
 	case nil:
 		return role
 	case sql.ErrNoRows:
 		return ""
 	default:
-		t.Fatalf("read run_memory_entities role: %v", err)
+		t.Fatalf("read conversation_memory_entities role: %v", err)
 		return ""
 	}
 }
@@ -89,12 +89,12 @@ func TestFunnel_GithubWrite_RecordsEntityTouch(t *testing.T) {
 }
 
 // TestFunnel_TouchRecordingFailure_DoesNotFailWrite proves the touch is
-// best-effort: with run_memory_entities dropped, the record fails but the
+// best-effort: with conversation_memory_entities dropped, the record fails but the
 // already-applied comment write still succeeds.
 func TestFunnel_TouchRecordingFailure_DoesNotFailWrite(t *testing.T) {
 	gh := startFakeGitHubComments(t)
 	conn, _, _, client := newGithubRecordingClientConn(t, gh.URL, true)
-	if _, err := conn.Exec(`DROP TABLE run_memory_entities`); err != nil {
+	if _, err := conn.Exec(`DROP TABLE conversation_memory_entities`); err != nil {
 		t.Fatalf("drop table: %v", err)
 	}
 

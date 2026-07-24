@@ -12,7 +12,7 @@ import { useFocusTrap } from '../hooks/useFocusTrap'
 // now, edited 1:1.
 interface PRArtifact {
   id: string
-  run_id?: string
+  conversation_id?: string
   owner: string
   repo: string
   number: number

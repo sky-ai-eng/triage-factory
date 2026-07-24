@@ -32,7 +32,7 @@ func seedReviewArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo stri
 	}
 	line := 3
 	a := domain.NewReviewArtifact(owner+"/"+repo, number, "headsha"+suffix, runID)
-	a.RunID = runID
+	a.ConversationID = runID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
@@ -95,7 +95,7 @@ func TestReviewArtifactGet_SeverityRoundTrip(t *testing.T) {
 // TestReviewArtifactApprove pins the atomic submit-on-approval flow: SubmitReview
 // POSTs the staged body+event+footer+comments to GitHub, the artifact flips
 // pending → submitted and gains the submitted review's id + URL, the run
-// completes, and the human verdict lands in run_memory.
+// completes, and the human verdict lands in conversation_memory.
 func TestReviewArtifactApprove(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -157,8 +157,8 @@ func TestReviewArtifactApprove(t *testing.T) {
 		t.Errorf("run status = %q, want completed", runStatus)
 	}
 	var human string
-	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM run_memory WHERE conversation_id=?`, runID).Scan(&human); err != nil {
-		t.Fatalf("read run_memory: %v", err)
+	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, runID).Scan(&human); err != nil {
+		t.Fatalf("read conversation_memory: %v", err)
 	}
 	if !strings.Contains(human, "as drafted") {
 		t.Errorf("human_content = %q, want the 'as drafted' verdict (proposed==final)", human)

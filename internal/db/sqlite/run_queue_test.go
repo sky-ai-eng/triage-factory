@@ -46,7 +46,7 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	}
 
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
 		ID: "rq-run-0", TaskID: task.ID, PromptID: "rq-p0", Model: "claude-sonnet-4-6",
 		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -113,7 +113,7 @@ func TestRunQueueStore_SQLite_CancelRequestedNotClaimed(t *testing.T) {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
 		ID: "rqc-run-0", TaskID: task.ID, PromptID: "rqc-p0", Model: "m",
 		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -160,7 +160,7 @@ func TestRunQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
 		ID: "rqr-run-0", TaskID: task.ID, PromptID: "rqr-p0", Model: "m",
 		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -231,7 +231,7 @@ func TestRunQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
 				t.Fatalf("CreateRun: %v", err)
 			}
 			step0 := 0
-			if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+			if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
 				ID: "rqs-run-0", TaskID: task.ID, PromptID: "rqs-p0", Model: "m",
 				TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 			}); err != nil {
@@ -243,14 +243,14 @@ func TestRunQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
 			// Advance the claim into the setup phase the dispatcher would
 			// have recorded before the workspace-setup failure fired the
 			// requeue.
-			if err := stores.AgentRuns.SetActiveClaimPhaseSystem(ctx, org, "rqs-run-0", phase); err != nil {
+			if err := stores.Conversations.SetActiveClaimPhaseSystem(ctx, org, "rqs-run-0", phase); err != nil {
 				t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", phase, err)
 			}
 
 			if err := stores.RunQueue.RequeueRun(ctx, org, "rqs-run-0", "workspace setup: boom"); err != nil {
 				t.Fatalf("RequeueRun: %v", err)
 			}
-			after, err := stores.AgentRuns.GetSystem(ctx, org, "rqs-run-0")
+			after, err := stores.Conversations.GetSystem(ctx, org, "rqs-run-0")
 			if err != nil || after == nil {
 				t.Fatalf("GetSystem after requeue: (%v, %v)", after, err)
 			}
@@ -292,7 +292,7 @@ func TestRunQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 	// protects the row — which is exactly the invariant being pinned
 	// (parked rows stay parked through a self-sweep of prior-boot orphans).
 	step0 := 0
-	insertConversationForTest(t, conn, domain.AgentRun{
+	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "rqd-run-0", TaskID: task.ID, PromptID: "rqd-p0", Status: "open",
 		Model: "m", TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	})
@@ -337,7 +337,7 @@ func TestRunQueueStore_SQLite_ResetProcessingRuns_ScopedToOwner(t *testing.T) {
 		t.Fatalf("CreateRun: %v", err)
 	}
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
 		ID: "rqso-run-0", TaskID: task.ID, PromptID: "rqso-p0", Model: "m",
 		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -399,7 +399,7 @@ func TestRunQueueStore_SQLite_SetCurrentStep(t *testing.T) {
 
 // TestRunQueueStore_SQLite_EnqueueStampsActorAgent pins the audit gap fix:
 // EnqueueRun (the live run-creation path) persists runs.actor_agent_id, and the
-// AgentRunStore.Get read projection JOINs agents to surface the bot's display
+// ConversationStore.Get read projection JOINs agents to surface the bot's display
 // name as ActorAgentName for the "Ran as: {name}" UI. A run enqueued with no
 // actor reads back with both fields empty (the column's nullable contract).
 func TestRunQueueStore_SQLite_EnqueueStampsActorAgent(t *testing.T) {
@@ -431,7 +431,7 @@ func TestRunQueueStore_SQLite_EnqueueStampsActorAgent(t *testing.T) {
 	}
 
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
 		ID: "rqa-run-0", TaskID: task.ID, PromptID: "rqa-p0", Model: "m",
 		TriggerType: "manual", ActorAgentID: agentID,
 		BlueprintRunID: brID, BlueprintStepIndex: &step0,
@@ -439,9 +439,9 @@ func TestRunQueueStore_SQLite_EnqueueStampsActorAgent(t *testing.T) {
 		t.Fatalf("EnqueueRun: %v", err)
 	}
 
-	got, err := stores.AgentRuns.Get(ctx, org, "rqa-run-0")
+	got, err := stores.Conversations.Get(ctx, org, "rqa-run-0")
 	if err != nil || got == nil {
-		t.Fatalf("AgentRuns.Get: (%v, %v)", got, err)
+		t.Fatalf("Conversations.Get: (%v, %v)", got, err)
 	}
 	if got.ActorAgentID != agentID {
 		t.Errorf("ActorAgentID = %q, want %q (EnqueueRun must persist the actor)", got.ActorAgentID, agentID)
@@ -453,15 +453,15 @@ func TestRunQueueStore_SQLite_EnqueueStampsActorAgent(t *testing.T) {
 	// A run with no actor reads back with both fields empty — the nullable
 	// column + LEFT JOIN degrade to "" rather than erroring.
 	step1 := 1
-	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
 		ID: "rqa-run-1", TaskID: task.ID, PromptID: "rqa-p0", Model: "m",
 		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step1,
 	}); err != nil {
 		t.Fatalf("EnqueueRun (no actor): %v", err)
 	}
-	noActor, err := stores.AgentRuns.Get(ctx, org, "rqa-run-1")
+	noActor, err := stores.Conversations.Get(ctx, org, "rqa-run-1")
 	if err != nil || noActor == nil {
-		t.Fatalf("AgentRuns.Get (no actor): (%v, %v)", noActor, err)
+		t.Fatalf("Conversations.Get (no actor): (%v, %v)", noActor, err)
 	}
 	if noActor.ActorAgentID != "" || noActor.ActorAgentName != "" {
 		t.Errorf("no-actor run = (id %q, name %q), want both empty", noActor.ActorAgentID, noActor.ActorAgentName)
@@ -501,7 +501,7 @@ func TestRunQueueStore_SQLite_Credentials(t *testing.T) {
 				idx := nextStep
 				nextStep++
 				runID := uuid.New().String()
-				if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+				if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
 					ID: runID, TaskID: task.ID, PromptID: "rqcr-p0", Model: "m",
 					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &idx,
 				}); err != nil {
@@ -563,7 +563,7 @@ func TestRunQueueStore_SQLite_FleetQueueShares(t *testing.T) {
 				idx := nextStep
 				nextStep++
 				runID := uuid.New().String()
-				if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+				if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
 					ID: runID, TaskID: task.ID, PromptID: "rqfqs-p0", Model: "m",
 					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &idx,
 				}); err != nil {
@@ -597,7 +597,7 @@ func TestRunQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 	const bogusOrg = "11111111-1111-1111-1111-111111111111"
 
-	if err := stores.RunQueue.EnqueueRun(ctx, bogusOrg, domain.AgentRun{}); err == nil {
+	if err := stores.RunQueue.EnqueueRun(ctx, bogusOrg, domain.Conversation{}); err == nil {
 		t.Errorf("EnqueueRun with non-local orgID should error")
 	}
 	if err := stores.RunQueue.RequeueRun(ctx, bogusOrg, "r", "x"); err == nil {
@@ -631,14 +631,14 @@ func TestRunQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
 	}
 
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
 		ID: "rq-dwell-run", TaskID: task.ID, PromptID: "rq-dwell-p0", Model: "claude-sonnet-4-6",
 		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
 		t.Fatalf("EnqueueRun: %v", err)
 	}
 
-	queued, err := stores.AgentRuns.Get(ctx, org, "rq-dwell-run")
+	queued, err := stores.Conversations.Get(ctx, org, "rq-dwell-run")
 	if err != nil || queued == nil {
 		t.Fatalf("Get after enqueue: (%v, %v)", queued, err)
 	}
@@ -653,7 +653,7 @@ func TestRunQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
 	if got, err := stores.RunQueue.ClaimNextRun(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
 		t.Fatalf("ClaimNextRun: (%v, %v)", got, err)
 	}
-	claimed, err := stores.AgentRuns.Get(ctx, org, "rq-dwell-run")
+	claimed, err := stores.Conversations.Get(ctx, org, "rq-dwell-run")
 	if err != nil || claimed == nil {
 		t.Fatalf("Get after claim: (%v, %v)", claimed, err)
 	}
@@ -667,7 +667,7 @@ func TestRunQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
 	if err := stores.RunQueue.RequeueRun(ctx, org, "rq-dwell-run", "transient setup error"); err != nil {
 		t.Fatalf("RequeueRun: %v", err)
 	}
-	requeued, err := stores.AgentRuns.Get(ctx, org, "rq-dwell-run")
+	requeued, err := stores.Conversations.Get(ctx, org, "rq-dwell-run")
 	if err != nil || requeued == nil {
 		t.Fatalf("Get after requeue: (%v, %v)", requeued, err)
 	}

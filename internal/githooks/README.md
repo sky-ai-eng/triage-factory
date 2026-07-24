@@ -22,7 +22,7 @@ Hooks are **generic** — they carry no per-run state. They read the run
 context from the environment TF guarantees is present in the agent
 process in both modes:
 
-- `TRIAGE_FACTORY_RUN_ID` — the run the git op belongs to. A hook records
+- `TRIAGE_FACTORY_CONVERSATION_ID` — the run the git op belongs to. A hook records
   through the `triagefactory hook ...` callback (an internal namespace,
   kept off `exec` so the agent can't invoke it), which resolves this into
   the `(org, user, run)` identity (local mode) or hands it to the agenthost
@@ -35,7 +35,7 @@ process in both modes:
 - The **agenthost socket** — present at `/run/tf.sock` inside the sandbox
   (multi). In local mode there is no socket; `triagefactory exec`
   auto-detects its absence and routes writes through a `LocalClient`
-  keyed by `TRIAGE_FACTORY_RUN_ID` instead. Either way a hook just runs
+  keyed by `TRIAGE_FACTORY_CONVERSATION_ID` instead. Either way a hook just runs
   `triagefactory exec ...` and the choke point does the right thing.
 
 ## Contract for hooks added here

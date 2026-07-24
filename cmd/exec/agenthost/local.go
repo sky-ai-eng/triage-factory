@@ -65,7 +65,7 @@ type LocalClient struct {
 	proxyCreds *ProxyCredentials
 
 	// gateWired reports whether the exec-gh repo authorization gate can run —
-	// true whenever the runtime can serve the team-tracks + run_worktrees reads
+	// true whenever the runtime can serve the team-tracks + conversation_worktrees reads
 	// (always, on the sidecar's relay runtime and a fully-wired all/local
 	// LocalClient). A partial test wiring (nil stores) leaves it false so the
 	// gate no-ops rather than dereferencing an absent store. This replaces the
@@ -449,8 +449,8 @@ func (c *LocalClient) saveReviewDraftDetails(ctx context.Context, artifactID str
 
 // --- workspace ---
 
-func (c *LocalClient) GetAgentRun(ctx context.Context) (*domain.AgentRun, error) {
-	return c.rt.GetAgentRun(ctx)
+func (c *LocalClient) GetConversation(ctx context.Context) (*domain.Conversation, error) {
+	return c.rt.GetConversation(ctx)
 }
 
 func (c *LocalClient) GetTask(ctx context.Context, taskID string) (*domain.Task, error) {
@@ -487,8 +487,8 @@ func (c *LocalClient) DeleteRunWorktreeByRepoRef(ctx context.Context, repoID, re
 
 // --- agent run footer ---
 
-func (c *LocalClient) BuildAgentRunFooter(ctx context.Context, kind string) (string, error) {
-	return c.rt.AgentRunFooter(ctx, kind)
+func (c *LocalClient) BuildAgentFooter(ctx context.Context, kind string) (string, error) {
+	return c.rt.AgentFooter(ctx, kind)
 }
 
 // --- artifacts ---
@@ -955,7 +955,7 @@ func (c *LocalClient) githubClientForRepo(ctx context.Context, owner, repo strin
 // resolveRepoClient is the single funnel every exec-gh GitHub call goes
 // through. In MULTI mode it enforces the per-run repo gate (the run may only
 // touch a repo its team tracks AND that it has materialized — its eagerly-
-// cloned task repo, recorded in run_worktrees, or a workspace-add'd one) and
+// cloned task repo, recorded in conversation_worktrees, or a workspace-add'd one) and
 // resolves a per-repo DOWN-SCOPED client (the injected token is narrowed to
 // owner/repo), memoized per repo so several calls in one subcommand mint once.
 // In LOCAL mode (N=1, unscoped — mirroring the git proxy being nil locally) it
@@ -1029,11 +1029,11 @@ func (c *LocalClient) legacyRepoClient(ctx context.Context, owner, repo string) 
 }
 
 // authorizeRepo is the exec-gh repo gate (multi mode): the run may only act on
-// a repo its team tracks AND that it has EITHER materialized in run_worktrees
+// a repo its team tracks AND that it has EITHER materialized in conversation_worktrees
 // (a delegated run's task repo — recorded at setup — or a workspace-add'd repo)
 // OR that appears in the turn's pinned set (a curator turn, which creates no
-// run_worktrees rows). Same team-tracks predicate as the git proxy's
-// Authorize; the second arm is the run_worktrees ledger or the pinned set. A
+// conversation_worktrees rows). Same team-tracks predicate as the git proxy's
+// Authorize; the second arm is the conversation_worktrees ledger or the pinned set. A
 // partial test wiring (nil stores) skips the gate. Both a hard deny and a
 // fail-closed backend error record a git_denied audit row before returning, so
 // a transient DB blip during a denied gh op still leaves an audit trail —
@@ -1069,7 +1069,7 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "repo-not-tracked")
 		return fmt.Errorf("repo %s is not tracked by this team; a team admin must add it as a tracked repo in Settings before it can be used", repoID)
 	}
-	// Curator turns carry their authorized set explicitly (no run_worktrees
+	// Curator turns carry their authorized set explicitly (no conversation_worktrees
 	// ledger); a delegated run passes an empty PinnedRepos so this arm is
 	// inert and the ledger check below is the sole gate, unchanged.
 	for _, p := range c.info.PinnedRepos {

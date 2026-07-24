@@ -173,7 +173,7 @@ func TestBuildPromptReplacer_RunRootAndBlueprintRunID(t *testing.T) {
 	// the shell-style $TRIAGE_FACTORY_* env-var references must be pre-expanded
 	// to the concrete agent-visible values. The agent's file tools do no shell
 	// expansion, so a bare env-var reference left verbatim would write the
-	// memory file to a literal "$TRIAGE_FACTORY_RUN_ROOT/..." path the
+	// memory file to a literal "$TRIAGE_FACTORY_CONVERSATION_ROOT/..." path the
 	// completion gate never finds.
 	task := domain.Task{EntitySource: "github", EntitySourceID: "owner/repo#1"}
 	r := BuildPromptReplacer(task, "", "run-xyz", "/bin/tf", "/work", "bp-run-1", "tfac/<ticket-id>", "")
@@ -184,7 +184,7 @@ func TestBuildPromptReplacer_RunRootAndBlueprintRunID(t *testing.T) {
 		t.Errorf("placeholder form: got %q want %q", got, want)
 	}
 
-	gotEnv := interpolate(r, "env=$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/$TRIAGE_FACTORY_BLUEPRINT_RUN_ID/{{RUN_ID}}.md")
+	gotEnv := interpolate(r, "env=$TRIAGE_FACTORY_CONVERSATION_ROOT/_scratch/entity-memory/$TRIAGE_FACTORY_BLUEPRINT_RUN_ID/{{RUN_ID}}.md")
 	wantEnv := "env=/work/_scratch/entity-memory/bp-run-1/run-xyz.md"
 	if gotEnv != wantEnv {
 		t.Errorf("env-var form: got %q want %q", gotEnv, wantEnv)

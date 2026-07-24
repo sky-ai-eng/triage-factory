@@ -23,20 +23,20 @@ func TestExternalActionStore_SQLite_RoundTrip(t *testing.T) {
 	runID := seedArtifactRun(t, conn)
 
 	in := domain.ExternalAction{
-		OrgID:       runmode.LocalDefaultOrgID,
-		TeamID:      runmode.LocalDefaultTeamID,
-		Provider:    domain.ArtifactProviderGitHub,
-		Action:      domain.ActionPRMarkedReady,
-		Target:      "octo/repo#123",
-		ExternalID:  "123",
-		URL:         "https://github.com/octo/repo/pull/123",
-		FromState:   domain.ArtifactStatePRDraft,
-		ToState:     domain.ArtifactStatePROpen,
-		RunID:       runID,
-		ActorUserID: runmode.LocalDefaultUserID,
-		Credential:  domain.CredentialGitHubApp,
-		DedupKey:    "pr_marked_ready:octo/repo#123:once",
-		DetailJSON:  `{"k":"v"}`,
+		OrgID:          runmode.LocalDefaultOrgID,
+		TeamID:         runmode.LocalDefaultTeamID,
+		Provider:       domain.ArtifactProviderGitHub,
+		Action:         domain.ActionPRMarkedReady,
+		Target:         "octo/repo#123",
+		ExternalID:     "123",
+		URL:            "https://github.com/octo/repo/pull/123",
+		FromState:      domain.ArtifactStatePRDraft,
+		ToState:        domain.ArtifactStatePROpen,
+		ConversationID: runID,
+		ActorUserID:    runmode.LocalDefaultUserID,
+		Credential:     domain.CredentialGitHubApp,
+		DedupKey:       "pr_marked_ready:octo/repo#123:once",
+		DetailJSON:     `{"k":"v"}`,
 	}
 	if err := stores.ExternalActions.Record(ctx, runmode.LocalDefaultOrgID, in); err != nil {
 		t.Fatalf("Record: %v", err)
@@ -55,7 +55,7 @@ func TestExternalActionStore_SQLite_RoundTrip(t *testing.T) {
 	}
 	if a.Provider != "github" || a.Action != domain.ActionPRMarkedReady || a.Target != "octo/repo#123" ||
 		a.ExternalID != "123" || a.URL != in.URL || a.FromState != "draft" || a.ToState != "open" ||
-		a.RunID != runID || a.ActorUserID != runmode.LocalDefaultUserID || a.Credential != "github_app" ||
+		a.ConversationID != runID || a.ActorUserID != runmode.LocalDefaultUserID || a.Credential != "github_app" ||
 		a.DedupKey != in.DedupKey || a.DetailJSON != `{"k":"v"}` {
 		t.Errorf("round-trip mismatch: %+v", a)
 	}
@@ -99,7 +99,7 @@ func TestExternalActionStore_SQLite_BranchTwinDedup(t *testing.T) {
 		return domain.ExternalAction{
 			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: domain.ArtifactProviderGitHub, Action: domain.ActionBranchPushed,
-			Target: "octo/repo", ExternalID: "refs/heads/feat", URL: url, RunID: runID,
+			Target: "octo/repo", ExternalID: "refs/heads/feat", URL: url, ConversationID: runID,
 			ToState: domain.ArtifactStateBranchPushed, Credential: domain.CredentialGitHubApp, DedupKey: key,
 		}
 	}
@@ -211,7 +211,7 @@ func TestExternalActionStore_SQLite_ListFiltersAndPaging(t *testing.T) {
 	for i, s := range seeds {
 		e := domain.ExternalAction{
 			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-			Provider: s.provider, Action: s.action, Target: "t", ActorUserID: s.actor, RunID: runID,
+			Provider: s.provider, Action: s.action, Target: "t", ActorUserID: s.actor, ConversationID: runID,
 			Credential: domain.CredentialGitHubApp, DedupKey: "k" + string(rune('a'+i)),
 		}
 		if err := stores.ExternalActions.Record(ctx, runmode.LocalDefaultOrgID, e); err != nil {

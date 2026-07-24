@@ -122,7 +122,7 @@ func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
 	ctx := context.Background()
 
 	// Artifact ledger: a watermark in the past so the resolved PR lands in it.
-	seedAgentMessageAt(t, s, "r-compose", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	seedMessageAt(t, s, "r-compose", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
 	approvedPR := domain.NewPullRequestArtifact("o/r", 1, "node1", "h", "main",
 		"https://github.com/o/r/pull/1", "PR one", "", false) // draft=false → open (approved)
 	seedResolvedArtifact(t, s, "r-compose", approvedPR)

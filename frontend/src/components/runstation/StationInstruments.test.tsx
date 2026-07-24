@@ -3,12 +3,12 @@ import { render, screen } from '@testing-library/react'
 import { TelemetryRail } from './StationInstruments'
 import { stationState } from './stationStyle'
 import { QUEUE_DWELL_VISIBLE_MS } from '../../lib/runStatus'
-import type { AgentRun } from '../../types'
+import type { Conversation } from '../../types'
 
 const T0 = new Date('2026-06-25T00:00:00Z').getTime()
 const iso = (offsetMs: number) => new Date(T0 + offsetMs).toISOString()
 
-const run = (over: Partial<AgentRun>): AgentRun =>
+const run = (over: Partial<Conversation>): Conversation =>
   ({
     ID: 'r1',
     TaskID: 't1',
@@ -17,9 +17,9 @@ const run = (over: Partial<AgentRun>): AgentRun =>
     StartedAt: iso(0),
     ResultSummary: '',
     ...over,
-  }) as AgentRun
+  }) as Conversation
 
-function renderRail(over: Partial<AgentRun>, now: number = T0 + 60_000) {
+function renderRail(over: Partial<Conversation>, now: number = T0 + 60_000) {
   const r = run(over)
   render(<TelemetryRail run={r} messages={[]} state={stationState(r)} now={now} />)
 }

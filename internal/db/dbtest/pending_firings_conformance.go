@@ -46,7 +46,7 @@ type PendingFiringsSeeder struct {
 	// runs(id). Status / trigger_type aren't load-bearing here —
 	// the conformance suite only needs a real run row to point at;
 	// the per-entity firing gate's runs-shaped half is owned by
-	// AgentRunStore and tested there.
+	// ConversationStore and tested there.
 	RunForTask func(t *testing.T, taskID string) string
 }
 
@@ -74,7 +74,7 @@ type PendingFiringsSeeder struct {
 //   - ListForEntity orders by queued_at ASC then id ASC.
 //
 // The runs-shaped half of the per-entity firing gate
-// (HasActiveAutoRunForEntity) is owned by AgentRunStore — its
+// (HasActiveAutoRunForEntity) is owned by ConversationStore — its
 // behavior is covered by that store's own tests, not here.
 func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFactory) {
 	t.Helper()

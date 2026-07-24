@@ -11,7 +11,7 @@ import (
 )
 
 // TestRunSignalStore_SQLite_EveryMethodReturnsErrNotApplicableInLocal pins
-// the Postgres-only stub (TFAC-585): run_signals lives in the Postgres
+// the Postgres-only stub (TFAC-585): conversation_signals lives in the Postgres
 // baseline only — local mode is always its own run's owner, so no code
 // path may ever reach this store. Every method must fail loudly rather
 // than silently no-op against a table that doesn't exist locally.

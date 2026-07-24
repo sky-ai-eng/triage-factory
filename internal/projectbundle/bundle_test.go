@@ -133,8 +133,8 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	if err := stores.Curator.SetSDKSession(ctx, org, conv.ID, sessionID); err != nil {
 		t.Fatalf("set sdk session: %v", err)
 	}
-	if _, err := stores.AgentRuns.InsertMessage(ctx, org, &domain.AgentMessage{
-		RunID: conv.ID, UserID: user, ClaimID: claimID,
+	if _, err := stores.Conversations.InsertMessage(ctx, org, &domain.Message{
+		ConversationID: conv.ID, UserID: user, ClaimID: claimID,
 		Role: "assistant", Subtype: "text", Content: "done", CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("insert curator message: %v", err)

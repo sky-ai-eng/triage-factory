@@ -24,19 +24,19 @@ func TestExternalActionStore_Postgres_RoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	in := domain.ExternalAction{
-		OrgID:       orgID,
-		TeamID:      teamID,
-		Provider:    domain.ArtifactProviderGitHub,
-		Action:      domain.ActionPRMarkedReady,
-		Target:      "octo/repo#123",
-		ExternalID:  "123",
-		URL:         "https://github.com/octo/repo/pull/123",
-		FromState:   domain.ArtifactStatePRDraft,
-		ToState:     domain.ArtifactStatePROpen,
-		RunID:       runID,
-		ActorUserID: userID,
-		Credential:  domain.CredentialGitHubApp,
-		DetailJSON:  `{"k":"v"}`,
+		OrgID:          orgID,
+		TeamID:         teamID,
+		Provider:       domain.ArtifactProviderGitHub,
+		Action:         domain.ActionPRMarkedReady,
+		Target:         "octo/repo#123",
+		ExternalID:     "123",
+		URL:            "https://github.com/octo/repo/pull/123",
+		FromState:      domain.ArtifactStatePRDraft,
+		ToState:        domain.ArtifactStatePROpen,
+		ConversationID: runID,
+		ActorUserID:    userID,
+		Credential:     domain.CredentialGitHubApp,
+		DetailJSON:     `{"k":"v"}`,
 		// DedupKey empty → server fills a uuid.
 	}
 	if err := stores.ExternalActions.Record(ctx, orgID, in); err != nil {
@@ -55,7 +55,7 @@ func TestExternalActionStore_Postgres_RoundTrip(t *testing.T) {
 	}
 	if a.Provider != "github" || a.Action != domain.ActionPRMarkedReady || a.Target != "octo/repo#123" ||
 		a.ExternalID != "123" || a.URL != in.URL || a.FromState != "draft" || a.ToState != "open" ||
-		a.RunID != runID || a.ActorUserID != userID || a.Credential != "github_app" || a.DetailJSON != `{"k":"v"}` {
+		a.ConversationID != runID || a.ActorUserID != userID || a.Credential != "github_app" || a.DetailJSON != `{"k":"v"}` {
 		t.Errorf("round-trip mismatch: %+v", a)
 	}
 }
