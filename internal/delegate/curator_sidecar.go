@@ -90,6 +90,10 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, conversation
 		// the git + GitHub-REST proxies are always on.
 		GitHubAPIEnabled:  true,
 		GitHubAPIUpstream: s.githubAPIUpstreamFor(ctx, orgID),
+		// The real-gh channel injector, same as a delegated run — the curator's
+		// authorized set is the pinned ∩ tracked repos its CLIToken is scoped to.
+		GHChannelEnabled:  true,
+		GHChannelUpstream: s.githubAPIUpstreamFor(ctx, orgID),
 		// Jira REST only when the org has Jira configured. A curator turn has no
 		// task to read EntitySource off (the run path's signal), so the non-secret
 		// org signal stands in — the bundle carries Jira creds on the same

@@ -21,10 +21,11 @@ type fakeTurnSandbox struct {
 	closed atomic.Bool
 }
 
-func (f *fakeTurnSandbox) Network() *sandbox.RunNetwork           { return f.net }
-func (f *fakeTurnSandbox) ProxyEnv() []string                     { return f.env }
-func (f *fakeTurnSandbox) GitCloneAuth(string) worktree.CloneAuth { return worktree.CloneAuth{} }
-func (f *fakeTurnSandbox) Close()                                 { f.closed.Store(true) }
+func (f *fakeTurnSandbox) Network() *sandbox.RunNetwork                { return f.net }
+func (f *fakeTurnSandbox) ProxyEnv() []string                          { return f.env }
+func (f *fakeTurnSandbox) GHChannel(string) *agentproc.GHChannelParams { return nil }
+func (f *fakeTurnSandbox) GitCloneAuth(string) worktree.CloneAuth      { return worktree.CloneAuth{} }
+func (f *fakeTurnSandbox) Close()                                      { f.closed.Store(true) }
 
 // TestDispatch_ExecutorPath_ConsumesTurnSandbox pins the executor wiring:
 // when the SetTurnSandbox seam is present, dispatch stands the turn

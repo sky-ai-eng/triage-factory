@@ -282,7 +282,78 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runI
 		}
 		gh.RepoTokens[repoID] = credbundle.RepoToken{Token: tok.Value, ExpiresAt: tok.ExpiresAt}
 	}
+
+	// The real-gh channel's single team-set-scoped token: ONE installation
+	// token over the run's authorized repos under the primary owner (App orgs),
+	// or the org PAT (PAT orgs). The injector proxy injects this on every
+	// request, so its own repo scope IS the policy — no per-request path
+	// parsing. Minting is per-installation, so a run whose authorized set spans
+	// multiple owners gets gh-channel coverage for the primary owner only;
+	// repos under other owners surface GitHub's standard 404 on this channel
+	// (the per-repo RepoTokens above still cover them for the exec/git channels
+	// until P4).
+	//
+	// EVERY failure here is non-fatal, deliberately unlike the per-repo loop
+	// above: this token is additive: a bundle without it still serves the
+	// exec-verb channel and the git proxy from RepoTokens, so the run works with
+	// only the gh channel degraded. Hard-failing would turn "gh unavailable"
+	// into "run cannot start" — and the failure is reachable in normal
+	// operation, not just on a blip: a "selected repositories" App install 422s
+	// a mint naming a repo outside its grant, which would otherwise abort every
+	// run for that org. The next refresh sweep re-mints.
+	if owner, names := cliChannelScope(m.taskPrimaryRepo(ctx, orgID, taskID), repoIDs); owner != "" {
+		cliTok, err := scoped.TokenForReposScoped(ctx, orgID, owner, names, nil)
+		switch {
+		case err != nil:
+			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+				log.Warn("gh-channel token mint failed; run continues without the gh channel",
+					"org", orgID, "owner", owner, "repos", len(names), "error", err)
+			}
+		case cliTok.Value != "":
+			gh.CLIToken = &credbundle.RepoToken{Token: cliTok.Value, ExpiresAt: cliTok.ExpiresAt}
+		}
+	}
 	return gh, nil
+}
+
+// cliChannelScope picks the single owner the real-gh channel's team-set token
+// is minted for, and the bare repo names under it. Preference: the owner of
+// the run's primary repo (the repo a delegated run actually works on), else —
+// for an unanchored run whose authorized set is the team's whole tracked set —
+// the owner with the most authorized repos (alphabetically-first owner breaks a
+// tie, for a deterministic seal). repoIDs are "owner/repo"; primaryRepo is
+// "owner/repo" or "". Returns ("", nil) when repoIDs is empty.
+func cliChannelScope(primaryRepo string, repoIDs []string) (owner string, repoNames []string) {
+	byOwner := map[string][]string{}
+	for _, id := range repoIDs {
+		o, r, ok := strings.Cut(id, "/")
+		if !ok || o == "" || r == "" {
+			continue
+		}
+		byOwner[o] = append(byOwner[o], r)
+	}
+	if len(byOwner) == 0 {
+		return "", nil
+	}
+
+	if po, _, ok := strings.Cut(primaryRepo, "/"); ok && po != "" {
+		if names, present := byOwner[po]; present {
+			return po, names
+		}
+	}
+
+	best := ""
+	for o, names := range byOwner {
+		switch {
+		case best == "":
+			best = o
+		case len(names) > len(byOwner[best]):
+			best = o
+		case len(names) == len(byOwner[best]) && o < best:
+			best = o
+		}
+	}
+	return best, byOwner[best]
 }
 
 // authorizedRepos returns the run's authorized repo set as "owner/repo"

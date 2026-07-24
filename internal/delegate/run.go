@@ -407,6 +407,10 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		PrebuiltNetwork:  cfg.execSandbox.runNetwork(),
 		PrebuiltProxyEnv: cfg.execSandbox.proxyEnv(),
 		StartAgentHost:   startAgentHost,
+		// Real-gh channel: the pinned gh binary + per-run injector cert mounts and
+		// the GH_* env, when the sidecar bound the injector. nil-safe on a nil
+		// execSandbox (local/non-sandbox keeps the SDK exec-verb gh).
+		GHChannel: cfg.execSandbox.ghChannel(runID),
 		// Org commit identity (TFAC-452): empty when none resolved → ambient git
 		// config inherited (today's behavior).
 		GitUserName:  commitIdentity.Name,

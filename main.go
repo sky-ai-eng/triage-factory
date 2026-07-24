@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/sky-ai-eng/triage-factory/ee"
@@ -89,7 +90,17 @@ func run(ctx context.Context, args []string) error {
 	// CLI subcommands short-circuit before any server wiring: exec/status
 	// are used by delegated Claude Code agents; install/uninstall/
 	// migrate/jwk-init are user-facing.
-	if handled, err := dispatchCLI(args[1:]); handled {
+	//
+	// argv0 applet dispatch (TFAC-669): when this same binary is invoked under
+	// the additive `tfac` name (a second bind mount at /opt/tf/bin/tfac), a bare
+	// `tfac <verb>` means `triagefactory exec <verb>` — the short applet name for
+	// the TF-domain verbs. Additive: the canonical `triagefactory exec` path is
+	// untouched, so envelopes can adopt the short name incrementally.
+	cliArgs := args[1:]
+	if filepath.Base(args[0]) == "tfac" {
+		cliArgs = append([]string{"exec"}, cliArgs...)
+	}
+	if handled, err := dispatchCLI(cliArgs); handled {
 		return err
 	}
 

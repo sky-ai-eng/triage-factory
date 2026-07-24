@@ -248,6 +248,50 @@ func SocketMountFor(runID string) sandbox.Mount {
 	return sandbox.Mount{Source: SocketPathFor(runID), Destination: DefaultSocketPath}
 }
 
+// CertPathFor returns the host-side path of runID's gh-injector TLS
+// certificate, alongside the run's socket under hostSocketRoot. Deterministic
+// so the sidecar (which writes + serves the injector) and the orchestrator
+// (which bind-mounts the cert into the jail) agree without a round trip — the
+// same contract as SocketPathFor. The cap-broker independently re-derives this
+// as TrustedGHInjectorCertPath and validates a launch's mount source against it;
+// a drift test cross-checks the two derivations agree.
+func CertPathFor(runID string) string {
+	return filepath.Join(hostSocketRoot, sanitizeSocketName(runID)+"-gh-injector.crt")
+}
+
+// WriteInjectorCert writes runID's per-run gh-injector certificate (PEM, the
+// PUBLIC half only — the private key never leaves the sidecar) to
+// CertPathFor(runID) and grants the sandbox group read access, mirroring the
+// socket's owner-legal group grant. Called by the sidecar during bring-up when
+// the gh channel is enabled, before the sandbox launches (the OCI spec
+// references the source path, which must exist).
+func WriteInjectorCert(runID string, certPEM []byte) error {
+	if err := os.MkdirAll(hostSocketRoot, 0o700); err != nil {
+		return fmt.Errorf("agenthost: mkdir %s: %w", hostSocketRoot, err)
+	}
+	path := CertPathFor(runID)
+	if err := os.WriteFile(path, certPEM, 0o640); err != nil {
+		return fmt.Errorf("agenthost: write injector cert %s: %w", path, err)
+	}
+	return grantReadOnlyToSandbox(path)
+}
+
+// grantReadOnlyToSandbox grants the sandbox uid/gid read access to a per-run
+// file the agent only reads (the injector cert). Same owner-legal chgrp the
+// socket grant uses; 0640 (owner rw, group r) since the agent never writes it.
+func grantReadOnlyToSandbox(path string) error {
+	if os.Getuid() == 0 {
+		if err := os.Chown(path, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {
+			return fmt.Errorf("agenthost: chown %s to uid=%d: %w", path, sandbox.WorktreeUID, err)
+		}
+		return os.Chmod(path, 0o640)
+	}
+	if err := os.Chown(path, -1, sandbox.WorktreeGID); err != nil {
+		return fmt.Errorf("agenthost: chgrp %s to gid=%d: %w (an unprivileged sidecar must be a member of the sandbox group for this owner-legal group grant)", path, sandbox.WorktreeGID, err)
+	}
+	return os.Chmod(path, 0o640)
+}
+
 // sanitizeSocketName trims a run id to a fs-safe form. RunIDs are
 // already UUIDs in production callers so this is a defense-in-depth
 // guard against future callers using a less-constrained shape (the

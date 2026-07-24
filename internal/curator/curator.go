@@ -325,6 +325,10 @@ type TurnSandbox interface {
 	Network() *sandbox.RunNetwork
 	// ProxyEnv is the non-secret sandbox proxy env (RunOptions.PrebuiltProxyEnv).
 	ProxyEnv() []string
+	// GHChannel is the real-gh channel params (RunOptions.GHChannel) when the
+	// turn's sidecar bound the injector; nil otherwise. runID is the
+	// conversation id (the cert path key).
+	GHChannel(runID string) *agentproc.GHChannelParams
 	// GitCloneAuth routes a host-side fetch of cloneURL through the turn's git
 	// proxy so the orchestrator holds no token (empty when the sandbox has no
 	// git proxy).

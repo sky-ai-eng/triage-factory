@@ -518,9 +518,11 @@ func (s *projectSession) dispatch(item queueItem) {
 	// all/local, where agentproc allocates the network and resolves in-process.
 	var prebuiltNet *sandbox.RunNetwork
 	var prebuiltProxyEnv []string
+	var ghChannel *agentproc.GHChannelParams
 	if turnSandbox != nil {
 		prebuiltNet = turnSandbox.Network()
 		prebuiltProxyEnv = turnSandbox.ProxyEnv()
+		ghChannel = turnSandbox.GHChannel(item.conversationID)
 	}
 
 	outcome, runErr := s.curator.runAgent(msgCtx, agentproc.RunOptions{
@@ -546,6 +548,7 @@ func (s *projectSession) dispatch(item queueItem) {
 		// diff stays minimal — no branch on the RunOptions themselves.
 		PrebuiltNetwork:    prebuiltNet,
 		PrebuiltProxyEnv:   prebuiltProxyEnv,
+		GHChannel:          ghChannel,
 		StartAgentHost:     startAgentHost,
 		ReadOnlyRepoMounts: roRepoMounts,
 	}, newTurnSink(s.curator, s.projectID, item.conversationID, requestID, claimID, item.orgID, item.creatorUserID))

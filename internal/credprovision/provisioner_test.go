@@ -3,6 +3,7 @@ package credprovision
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,14 @@ type scopedCall struct {
 	perms       map[string]string
 }
 
+// reposScopedCall records one TokenForReposScoped mint — the gh-channel's
+// single team-set-scoped token over a list of repos under one owner.
+type reposScopedCall struct {
+	owner string
+	repos []string
+	perms map[string]string
+}
+
 // fakeScopedResolver stands in for the production ghclient.Resolver +
 // ScopedResolver: it returns a canned token from every scoped mint and
 // records the calls, so a test can prove the brain-side provisioner mints
@@ -32,13 +41,14 @@ type scopedCall struct {
 // material.
 type fakeScopedResolver struct {
 	ghclient.Resolver
-	base    string
-	name    string
-	email   string
-	hasCred bool
-	token   githubapp.Token
-	errFor  map[string]error // keyed by "owner/repo"; returned by the scoped mint instead of token
-	calls   []scopedCall
+	base       string
+	name       string
+	email      string
+	hasCred    bool
+	token      githubapp.Token
+	errFor     map[string]error // keyed by "owner/repo" (single) or "owner" (repos-scoped); returned instead of token
+	calls      []scopedCall
+	reposCalls []reposScopedCall
 }
 
 func (f *fakeScopedResolver) BaseURLFor(context.Context, string) (string, error) {
@@ -56,6 +66,14 @@ func (f *fakeScopedResolver) HasAnyCredential(context.Context, string) (bool, er
 func (f *fakeScopedResolver) TokenForRepoScoped(_ context.Context, _, owner, repo string, perms map[string]string) (githubapp.Token, error) {
 	f.calls = append(f.calls, scopedCall{owner: owner, repo: repo, perms: perms})
 	if err := f.errFor[owner+"/"+repo]; err != nil {
+		return githubapp.Token{}, err
+	}
+	return f.token, nil
+}
+
+func (f *fakeScopedResolver) TokenForReposScoped(_ context.Context, _, owner string, repos []string, perms map[string]string) (githubapp.Token, error) {
+	f.reposCalls = append(f.reposCalls, reposScopedCall{owner: owner, repos: repos, perms: perms})
+	if err := f.errFor[owner]; err != nil {
 		return githubapp.Token{}, err
 	}
 	return f.token, nil
@@ -150,6 +168,55 @@ func TestManager_resolveGitHub_MintsScopedTokensForAuthorizedRepos(t *testing.T)
 	}
 	if c := res.calls[0]; c.owner != "acme" || c.repo != "widgets" {
 		t.Errorf("minted for %s/%s, want acme/widgets", c.owner, c.repo)
+	}
+
+	// The gh-channel single team-set token is minted for the primary owner
+	// (acme, from the task repo) over its authorized repo names.
+	if gh.CLIToken == nil {
+		t.Fatal("CLIToken is nil, want the gh-channel team-set token")
+	}
+	if gh.CLIToken.Token != "ghs_scoped" || !gh.CLIToken.ExpiresAt.Equal(exp) {
+		t.Errorf("CLIToken = (%q, %v), want (ghs_scoped, %v)", gh.CLIToken.Token, gh.CLIToken.ExpiresAt, exp)
+	}
+	if len(res.reposCalls) != 1 {
+		t.Fatalf("TokenForReposScoped called %d times, want exactly 1", len(res.reposCalls))
+	}
+	if c := res.reposCalls[0]; c.owner != "acme" || len(c.repos) != 1 || c.repos[0] != "widgets" {
+		t.Errorf("gh-channel mint = owner %q repos %v, want acme [widgets]", c.owner, c.repos)
+	}
+}
+
+// TestCLIChannelScope pins the primary-owner selection for the gh-channel's
+// single team-set token: the task's primary owner wins when present, else the
+// owner with the most authorized repos (alphabetically-first breaks a tie).
+func TestCLIChannelScope(t *testing.T) {
+	cases := []struct {
+		name      string
+		primary   string
+		repos     []string
+		wantOwner string
+		wantRepos []string
+	}{
+		{"primary owner wins", "acme/widgets", []string{"acme/widgets", "acme/gadgets", "other/thing"}, "acme", []string{"widgets", "gadgets"}},
+		{"no primary, sole owner", "", []string{"acme/a", "acme/b"}, "acme", []string{"a", "b"}},
+		{"no primary, most repos wins", "", []string{"beta/x", "acme/a", "acme/b"}, "acme", []string{"a", "b"}},
+		{"no primary, tie broken alphabetically", "", []string{"beta/x", "acme/a"}, "acme", []string{"a"}},
+		{"primary owner not in set falls back", "ghost/repo", []string{"acme/a", "acme/b"}, "acme", []string{"a", "b"}},
+		{"empty set", "acme/widgets", nil, "", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			owner, repos := cliChannelScope(tc.primary, tc.repos)
+			if owner != tc.wantOwner {
+				t.Errorf("owner = %q, want %q", owner, tc.wantOwner)
+			}
+			sort.Strings(repos)
+			want := append([]string(nil), tc.wantRepos...)
+			sort.Strings(want)
+			if strings.Join(repos, ",") != strings.Join(want, ",") {
+				t.Errorf("repos = %v, want %v", repos, tc.wantRepos)
+			}
+		})
 	}
 }
 
@@ -285,5 +352,58 @@ func TestManager_resolveGitHub_NoCredentialIsNotAnError(t *testing.T) {
 	}
 	if len(res.calls) != 0 {
 		t.Errorf("TokenForRepoScoped called %d times, want 0 (nothing to mint without a credential)", len(res.calls))
+	}
+}
+
+// TestManager_resolveGitHub_GHChannelMintFailureIsNonFatal pins the deliberate
+// asymmetry against the per-repo loop: the gh-channel token is ADDITIVE, so a
+// mint failure must degrade the gh channel, never abort provisioning. The run
+// still gets its per-repo RepoTokens, which is what the exec-verb channel and
+// the git proxy actually consume. Hard-failing here would turn "gh unavailable"
+// into "run cannot start" — and this failure is reachable in normal operation,
+// not just on a blip: a "selected repositories" App install 422s a mint naming a
+// repo outside its grant.
+func TestManager_resolveGitHub_GHChannelMintFailureIsNonFatal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"transient backend error", errors.New("github: 503 while minting")},
+		{"422 repo outside the installation grant", errors.New("github: mint installation token: status 422")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := &fakeScopedResolver{
+				base:    "https://github.com",
+				hasCred: true,
+				token:   githubapp.Token{Value: "ghs_scoped", ExpiresAt: time.Now().Add(time.Hour)},
+				// Keyed by OWNER — only the gh-channel (repos-scoped) mint fails;
+				// the per-repo mints, keyed "owner/repo", still succeed.
+				errFor: map[string]error{"acme": tc.err},
+			}
+			m := &Manager{
+				stores: db.Stores{
+					TeamGitHubRepos: &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
+					Tasks:           &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
+					RunWorktrees:    &fakeRunWorktrees{},
+				},
+				ghResolver: res,
+			}
+
+			gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "run-1")
+			if err != nil {
+				t.Fatalf("resolveGitHub failed on a gh-channel mint error: %v (it must be non-fatal)", err)
+			}
+			if gh == nil {
+				t.Fatal("resolveGitHub returned nil; the run must still get its per-repo credentials")
+			}
+			if gh.CLIToken != nil {
+				t.Errorf("CLIToken = %+v, want nil when the gh-channel mint failed", gh.CLIToken)
+			}
+			// The load-bearing part: the channels that don't depend on the gh
+			// token are untouched, so the run is fully operable.
+			if _, ok := gh.RepoTokens["acme/widgets"]; !ok {
+				t.Errorf("RepoTokens lost the authorized repo; got %v", gh.RepoTokens)
+			}
+		})
 	}
 }

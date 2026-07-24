@@ -112,6 +112,61 @@ func TestArtifactStore_Postgres_UpsertDedup(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_Postgres_InsertIfAbsent mirrors the SQLite conformance for
+// the reconciler-backstop write: first insert lands, a second on the same
+// dedup_key is a no-op that preserves the existing row's advanced state.
+func TestArtifactStore_Postgres_InsertIfAbsent(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
+	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo#7", "")
+	base := domain.Artifact{
+		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		Provider: "github", Kind: "pull_request", Target: "octo/repo#7", ExternalID: "7",
+		DedupKey: key,
+	}
+
+	first := base
+	first.State = domain.ArtifactStatePROpen
+	inserted, err := stores.Artifacts.InsertArtifactIfAbsentSystem(ctx, orgID, first)
+	if err != nil {
+		t.Fatalf("first InsertArtifactIfAbsentSystem: %v", err)
+	}
+	if !inserted {
+		t.Fatal("first insert reported not-inserted; want true")
+	}
+
+	if _, err := h.AdminDB.Exec(`UPDATE artifacts SET state = $1 WHERE dedup_key = $2`, domain.ArtifactStatePRMerged, key); err != nil {
+		t.Fatalf("advance state: %v", err)
+	}
+
+	second := base
+	second.State = domain.ArtifactStatePROpen
+	inserted, err = stores.Artifacts.InsertArtifactIfAbsentSystem(ctx, orgID, second)
+	if err != nil {
+		t.Fatalf("second InsertArtifactIfAbsentSystem: %v", err)
+	}
+	if inserted {
+		t.Error("second insert reported inserted; want false")
+	}
+
+	var count int
+	var state string
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*), MAX(state) FROM artifacts WHERE dedup_key = $1`, key).Scan(&count, &state); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("want exactly 1 row, got %d", count)
+	}
+	if state != domain.ArtifactStatePRMerged {
+		t.Errorf("insert-if-absent clobbered state to %q; want merged preserved", state)
+	}
+}
+
 // TestArtifactStore_Postgres_PendingToReal pins the pending→real PR
 // transition: keyed on the branch ref, the real PR upserts onto the same
 // row (pending→open, url/external_id filled).

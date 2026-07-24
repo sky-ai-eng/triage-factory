@@ -53,7 +53,8 @@ func NewReconciler(resolver clientResolver, artifacts db.ArtifactStore, memory d
 }
 
 // ReconcileOrg lists the org's reconcilable non-terminal artifacts (admin pool,
-// org-wide) and reconciles them. The Tier-1 Runner's per-cycle body.
+// org-wide) and reconciles them, then runs the gh-channel PR-artifact backstop.
+// The Tier-1 Runner's per-cycle body.
 func (rc *Reconciler) ReconcileOrg(ctx context.Context, orgID string) error {
 	arts, err := rc.artifacts.ListNonTerminalBySystem(ctx, orgID)
 	if err != nil {
@@ -61,6 +62,101 @@ func (rc *Reconciler) ReconcileOrg(ctx context.Context, orgID string) error {
 	}
 	if _, err := rc.Reconcile(ctx, orgID, arts); err != nil {
 		return err
+	}
+	// gh-channel backstop: record PRs a run created via the real gh whose
+	// injector observation was lost (channel severed, or the create raced a
+	// crash). Best-effort — a failure here never aborts the reconcile cycle.
+	if err := rc.BackfillPRArtifactsForBranches(ctx, orgID, arts); err != nil {
+		reconcileLog.Warn("gh-channel PR backstop failed", "org", orgID, "error", err)
+	}
+	return nil
+}
+
+// BackfillPRArtifactsForBranches is the gh-channel PR-artifact backstop
+// (TFAC-669). Exec-verb self-reporting doesn't exist on the real-gh channel, so
+// a PR created there is normally recorded by the injector's observation relay;
+// this covers the two cases that path can't — the observation channel severed,
+// or the create raced an executor crash. For each conversation that pushed a
+// branch (its git:branch artifact carries the full ref), it discovers the open
+// PR on that branch and records the pull_request artifact via the insert-if-
+// absent write. Idempotent by construction: a PR the observation path (or a
+// prior pass) already recorded is left untouched, so re-running changes nothing.
+//
+// arts is the org's already-listed non-terminal set (branch artifacts included),
+// passed in by ReconcileOrg to avoid a second list; a nil arts makes this
+// self-list (the boot pass). Best-effort per repo — a per-owner credential or
+// GitHub failure skips that repo this pass.
+func (rc *Reconciler) BackfillPRArtifactsForBranches(ctx context.Context, orgID string, arts []domain.Artifact) error {
+	if arts == nil {
+		var err error
+		arts, err = rc.artifacts.ListNonTerminalBySystem(ctx, orgID)
+		if err != nil {
+			return fmt.Errorf("list non-terminal artifacts: %w", err)
+		}
+	}
+
+	// (owner/repo) → (branch → the conversation that pushed it). Only pushed
+	// branch artifacts anchored to a live conversation are candidates.
+	type convRef struct{ conversationID, teamID string }
+	byRepo := map[string]map[string]convRef{}
+	for _, a := range arts {
+		if a.Kind != domain.ArtifactKindBranch || a.State != domain.ArtifactStateBranchPushed {
+			continue
+		}
+		if a.ConversationID == "" || a.Target == "" {
+			continue // detached from its run, or malformed — can't attribute a PR
+		}
+		branch, ok := strings.CutPrefix(a.ExternalID, "refs/heads/")
+		if !ok {
+			continue
+		}
+		if byRepo[a.Target] == nil {
+			byRepo[a.Target] = map[string]convRef{}
+		}
+		byRepo[a.Target][branch] = convRef{conversationID: a.ConversationID, teamID: a.TeamID}
+	}
+	if len(byRepo) == 0 {
+		return nil
+	}
+
+	for repoPath, byBranch := range byRepo {
+		owner, repo, ok := strings.Cut(repoPath, "/")
+		if !ok || owner == "" || repo == "" {
+			continue
+		}
+		client, err := rc.resolver.ClientFor(ctx, orgID, owner)
+		if err != nil {
+			reconcileLog.Warn("backstop: resolve github client failed; skipping repo this pass",
+				"org", orgID, "repo", repoPath, "error", err)
+			continue
+		}
+		prs, _, _, err := client.ListOpenPRs(ctx, owner, repo, "")
+		if err != nil {
+			reconcileLog.Warn("backstop: list open PRs failed; skipping repo this pass",
+				"org", orgID, "repo", repoPath, "error", err)
+			continue
+		}
+		for _, pr := range prs {
+			ref, matched := byBranch[pr.Snapshot.HeadRef]
+			if !matched {
+				continue // no conversation of this org pushed this PR's head branch
+			}
+			art := domain.NewPullRequestArtifact(repoPath, pr.Snapshot.Number, pr.NodeID,
+				pr.Snapshot.HeadRef, pr.Snapshot.BaseRef, pr.Snapshot.URL, pr.Snapshot.Title, "", pr.Snapshot.IsDraft)
+			art.ConversationID = ref.conversationID
+			art.OrgID = orgID
+			art.TeamID = ref.teamID
+			inserted, err := rc.artifacts.InsertArtifactIfAbsentSystem(ctx, orgID, art)
+			if err != nil {
+				reconcileLog.Warn("backstop: record PR artifact failed",
+					"org", orgID, "repo", repoPath, "pr", pr.Snapshot.Number, "error", err)
+				continue
+			}
+			if inserted {
+				reconcileLog.Info("backstop: recorded PR artifact from branch match",
+					"org", orgID, "repo", repoPath, "pr", pr.Snapshot.Number, "conversation", ref.conversationID)
+			}
+		}
 	}
 	return nil
 }

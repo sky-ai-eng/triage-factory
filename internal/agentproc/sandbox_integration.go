@@ -178,7 +178,11 @@ func buildSandboxEnv(extraEnv []string) []string {
 	// pairs into that block, don't add them here. TestBuildSandboxEnv_NoGitConfig
 	// enforces this.
 	base := []string{
-		"PATH=/usr/local/bin:/usr/bin:/bin",
+		// /opt/tf/bin leads so the TF-pinned gh (bind-mounted there when the
+		// real-gh channel is on) wins the PATH race against any gh a custom
+		// profile image ships at /usr/local/bin or /usr/bin (TFAC-408). Harmless
+		// when nothing is mounted there — an empty dir on PATH is a no-op.
+		"PATH=/opt/tf/bin:/usr/local/bin:/usr/bin:/bin",
 		"HOME=/work",
 		"TERM=xterm",
 		// The sandbox's egress is a fail-closed allowlist of package registries
@@ -207,6 +211,29 @@ func buildSandboxEnv(extraEnv []string) []string {
 	// is "run-scoped non-credential variables" so we trust it.
 	out = append(out, extraEnv...)
 	return out
+}
+
+// ghChannelEnv builds the sandbox env entries that point the real gh binary at
+// the per-run injector: GH_HOST (the injector's host:port — gh forces https and
+// verifies against the mounted cert), GH_ENTERPRISE_TOKEN (the per-run
+// placeholder gh sends; the injector strips it and injects the real token),
+// SSL_CERT_FILE (the mounted trust file — the system roots plus this run's
+// injector leaf, so no rootfs edit and no narrowing of other in-jail TLS
+// clients), and the prompt/update-notifier suppressors so gh runs
+// non-interactively and never phones home for release checks. Property B-safe:
+// the only credential-shaped value is the placeholder, never a real token.
+// Empty when the channel is off.
+func ghChannelEnv(gc *GHChannelParams) []string {
+	if gc == nil || gc.Host == "" {
+		return nil
+	}
+	return []string{
+		"GH_HOST=" + gc.Host,
+		"GH_ENTERPRISE_TOKEN=" + gc.Token,
+		"SSL_CERT_FILE=" + sandboxGHInjectorCert,
+		"GH_PROMPT_DISABLED=1",
+		"GH_NO_UPDATE_NOTIFIER=1",
+	}
 }
 
 // chownWorktreeForSandbox hands the worktree's ownership to the uid/gid

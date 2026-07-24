@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/apiproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
+	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
@@ -38,14 +39,15 @@ type credRuntime struct {
 	// conn is constructed (the conn needs this runtime as its Handler first).
 	conn *sidecarproto.Conn
 
-	mu        sync.Mutex
-	bundle    *credbundle.Bundle // newest unsealed bundle; nil until first seal
-	proxies   *agentproc.RunProxyHandle
-	githubAPI *apiproxy.Server      // GitHub REST credential proxy; nil unless requested
-	jiraAPI   *apiproxy.Server      // Jira REST credential proxy; nil unless requested
-	agentHost *agenthost.HostDaemon // the relocated exec-verb socket server; nil unless requested
-	proxied   bool                  // guards against a duplicate StartProxies
-	bootEpoch int64
+	mu         sync.Mutex
+	bundle     *credbundle.Bundle // newest unsealed bundle; nil until first seal
+	proxies    *agentproc.RunProxyHandle
+	githubAPI  *apiproxy.Server      // GitHub REST credential proxy; nil unless requested
+	jiraAPI    *apiproxy.Server      // Jira REST credential proxy; nil unless requested
+	ghInjector *ghinjector.Server    // real-gh credential-injector proxy; nil unless requested
+	agentHost  *agenthost.HostDaemon // the relocated exec-verb socket server; nil unless requested
+	proxied    bool                  // guards against a duplicate StartProxies
+	bootEpoch  int64
 }
 
 // newCredRuntime mints the per-run keypair. The public half is published to
@@ -181,6 +183,26 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		result.JiraAPIURL, result.JiraAPIToken = url, token
 	}
 
+	// The real-gh credential-injector proxy: the TLS listener the sandboxed gh
+	// reaches via GH_HOST, injecting the team-set-scoped token upstream while the
+	// jail holds only a placeholder. Needs the run's identity for the per-run
+	// cert path (the orchestrator mounts the same path), so it rides AgentHost's
+	// RunID — a gh channel without a run identity is skipped rather than guessed.
+	if req.GHChannelEnabled && req.AgentHost != nil && req.AgentHost.RunID != "" {
+		host, token, gerr := r.startGHInjector(req.HostVethIP, req.GHChannelUpstream, req.AgentHost.RunID)
+		if gerr != nil {
+			_ = handle.Shutdown(ctx)
+			if r.githubAPI != nil {
+				_ = r.githubAPI.Shutdown(ctx)
+			}
+			if r.jiraAPI != nil {
+				_ = r.jiraAPI.Shutdown(ctx)
+			}
+			return nil, gerr
+		}
+		result.GHChannelHost, result.GHChannelToken = host, token
+	}
+
 	// Host the exec-verb socket server in THIS capless process rather than the
 	// orchestrator (the relocation): the hostile-input parser now runs in the
 	// per-run jail, holding no db.Stores and no secret store. Its LocalClient's
@@ -195,6 +217,9 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 			}
 			if r.jiraAPI != nil {
 				_ = r.jiraAPI.Shutdown(ctx)
+			}
+			if r.ghInjector != nil {
+				_ = r.ghInjector.Shutdown(ctx)
 			}
 			return nil, aerr
 		}
@@ -251,6 +276,78 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 	}
 	r.agentHost = hd
 	return nil
+}
+
+// startGHInjector binds the real-gh credential-injector proxy on the veth IP:
+// generates the per-run self-signed TLS cert (private key stays here), writes
+// the public cert to the per-run path the orchestrator bind-mounts into the jail
+// (agenthost.WriteInjectorCert), and serves TLS. The injector's TokenSource
+// reads the held bundle's single team-set-scoped CLIToken live, so a mid-run
+// re-seal is picked up; the observation callback relays the two artifact-bearing
+// mutations to the orchestrator (which writes the artifact row). Returns the
+// bound host:port (GH_HOST) and the per-run placeholder (GH_ENTERPRISE_TOKEN).
+func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string) (string, string, error) {
+	if upstream == "" {
+		upstream = "https://api.github.com"
+	}
+	cert, certPEM, err := ghinjector.GenerateCert(hostVethIP)
+	if err != nil {
+		return "", "", fmt.Errorf("runsidecar: generate gh-injector cert: %w", err)
+	}
+	// The trust file must exist at the per-run path before the sandbox launches
+	// (the OCI spec references the mount source); the sidecar bring-up runs
+	// before that launch, so writing here is early enough. It carries the host's
+	// system roots plus this run's leaf, because SSL_CERT_FILE is process-global
+	// in the jail — see ghinjector.TrustBundlePEM for why that widens nothing.
+	if err := agenthost.WriteInjectorCert(runID, ghinjector.TrustBundlePEM(certPEM)); err != nil {
+		return "", "", fmt.Errorf("runsidecar: write gh-injector cert: %w", err)
+	}
+	token, err := randomToken()
+	if err != nil {
+		return "", "", err
+	}
+	srv, err := ghinjector.New(ghinjector.Config{
+		Upstream:         upstream,
+		IncomingToken:    token,
+		Cert:             cert,
+		AllowNonLoopback: true,
+		TokenSource: func(context.Context) (string, error) {
+			bundle := r.currentBundle()
+			if bundle == nil || bundle.GitHub == nil || bundle.GitHub.CLIToken == nil || bundle.GitHub.CLIToken.Token == "" {
+				return "", fmt.Errorf("runsidecar: no gh-channel token in current bundle")
+			}
+			return bundle.GitHub.CLIToken.Token, nil
+		},
+		Observe: func(_ context.Context, m ghinjector.ObservedMutation) {
+			// Fire-and-forget: the mutation already landed on GitHub; the
+			// orchestrator (which holds the DB) builds and upserts the artifact.
+			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordObservation,
+				agentproc.RecordObservationArgs{
+					Kind:        m.Kind,
+					Owner:       m.Owner,
+					Repo:        m.Repo,
+					Number:      m.Number,
+					NodeID:      m.NodeID,
+					Head:        m.Head,
+					Base:        m.Base,
+					URL:         m.URL,
+					Title:       m.Title,
+					Body:        m.Body,
+					Draft:       m.Draft,
+					ReviewID:    m.ReviewID,
+					ReviewState: m.ReviewState,
+				})
+		},
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("runsidecar: construct gh injector: %w", err)
+	}
+	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
+	if err != nil {
+		return "", "", fmt.Errorf("runsidecar: start gh injector: %w", err)
+	}
+	r.ghInjector = srv
+	return addr, token, nil
 }
 
 // startGitHubAPIProxy binds a GitHub-REST credential proxy on the veth IP.
@@ -435,8 +532,9 @@ func (r *credRuntime) shutdown(ctx context.Context) {
 	handle := r.proxies
 	githubAPI := r.githubAPI
 	jiraAPI := r.jiraAPI
+	ghInjector := r.ghInjector
 	agentHost := r.agentHost
-	r.proxies, r.githubAPI, r.jiraAPI, r.agentHost = nil, nil, nil, nil
+	r.proxies, r.githubAPI, r.jiraAPI, r.ghInjector, r.agentHost = nil, nil, nil, nil, nil
 	r.mu.Unlock()
 	// Drain the socket server first (unblocks its accept loop + removes the
 	// socket file) so a graceful teardown leaves no stale /run/tf socket; a
@@ -453,5 +551,8 @@ func (r *credRuntime) shutdown(ctx context.Context) {
 	}
 	if jiraAPI != nil {
 		_ = jiraAPI.Shutdown(ctx)
+	}
+	if ghInjector != nil {
+		_ = ghInjector.Shutdown(ctx)
 	}
 }

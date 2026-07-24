@@ -70,6 +70,14 @@ type ScopedResolver interface {
 	// only narrows — a PAT is returned unchanged (it cannot be scoped). See
 	// the impl for the tier order and the 422-fall-through to PAT.
 	TokenForRepoScoped(ctx context.Context, orgID, owner, repo string, permissions map[string]string) (githubapp.Token, error)
+	// TokenForReposScoped mints ONE credential narrowed to the given set of
+	// repos under a single owner (bare repo names, all under owner's
+	// installation) — the real-gh channel's single team-set-scoped token. App
+	// tier mints one installation token over the whole list; a PAT is returned
+	// unscoped (it cannot be narrowed). repos beyond the installation's grant
+	// 422 exactly like the single-repo path. Same App-XOR-PAT tiering as
+	// TokenForRepoScoped.
+	TokenForReposScoped(ctx context.Context, orgID, owner string, repos []string, permissions map[string]string) (githubapp.Token, error)
 	// HasAnyCredential reports whether the org has ANY usable GitHub
 	// credential (an App installation or a PAT) WITHOUT minting a repo-scoped
 	// token — the run-start probe that decides whether a run gets a git proxy
@@ -495,6 +503,53 @@ func (r *resolver) TokenForRepoScoped(ctx context.Context, orgID, owner, repo st
 		return githubapp.Token{Value: pat}, nil
 	}
 	return githubapp.Token{}, fmt.Errorf("%w: org=%s repo=%s/%s", ErrNoGitHubCredentials, orgID, owner, repo)
+}
+
+// TokenForReposScoped mints ONE credential narrowed to a set of repos under a
+// single owner (see the ScopedResolver interface doc) — the real-gh channel's
+// single team-set-scoped token. App XOR PAT (see activeApp): an active App
+// mints one installation token over the whole repo list or fails — NO PAT
+// fallback (a transient mint blip surfaces as an error rather than silently
+// degrading to an unscoped PAT); only a no-active-App org uses the PAT,
+// returned unscoped (a PAT can't be narrowed). All-miss: ErrNoGitHubCredentials.
+func (r *resolver) TokenForReposScoped(ctx context.Context, orgID, owner string, repos []string, permissions map[string]string) (githubapp.Token, error) {
+	base, err := r.githubBaseFor(ctx, orgID)
+	if err != nil {
+		return githubapp.Token{}, err
+	}
+	if app := r.activeApp(ctx, orgID); app != nil {
+		return r.appReposScopedToken(ctx, orgID, app, owner, repos, base, permissions)
+	}
+	pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT)
+	if err != nil {
+		return githubapp.Token{}, fmt.Errorf("resolve github pat for org %s: %w", orgID, err)
+	}
+	if pat != "" {
+		return githubapp.Token{Value: pat}, nil
+	}
+	return githubapp.Token{}, fmt.Errorf("%w: org=%s owner=%s", ErrNoGitHubCredentials, orgID, owner)
+}
+
+// appReposScopedToken mints one installation access token scoped to the given
+// repo names under owner's installation. Mirror of appScopedToken but with a
+// repo LIST (MintScopedInstallationToken already accepts one) — the real-gh
+// channel's single token. Same no-cache rationale: a scoped mint bypasses the
+// installation TokenCache (keyed by installation only) so a scoped token is
+// never served to an unscoped caller.
+func (r *resolver) appReposScopedToken(ctx context.Context, orgID string, app *domain.OrgGitHubApp, owner string, repos []string, base string, permissions map[string]string) (githubapp.Token, error) {
+	inst, ok := r.installationFor(ctx, orgID, owner)
+	if !ok {
+		return githubapp.Token{}, fmt.Errorf("%w: org=%s: app has no installation for %q", ErrNoGitHubCredentials, orgID, owner)
+	}
+	minter, err := r.minterFor(ctx, orgID, app, base)
+	if err != nil {
+		return githubapp.Token{}, err
+	}
+	installID, err := strconv.ParseInt(inst.InstallationID, 10, 64)
+	if err != nil {
+		return githubapp.Token{}, fmt.Errorf("parse installation id %q: %w", inst.InstallationID, err)
+	}
+	return minter.MintScopedInstallationToken(ctx, installID, repos, permissions)
 }
 
 // ClientForRepoScoped resolves a *Client backed by the per-repo scoped

@@ -207,6 +207,16 @@ type RunOptions struct {
 	// flows.
 	StartAgentHost func() (mount sandbox.Mount, closer io.Closer, err error)
 
+	// GHChannel, when non-nil, wires the real-gh credential channel into the
+	// sandbox: the pinned gh binary (bind-mounted RO from the host image), the
+	// per-run injector cert (bind-mounted RO from the sidecar-written source
+	// path), and the gh env (GH_HOST → the injector, GH_ENTERPRISE_TOKEN → the
+	// per-run placeholder, SSL_CERT_FILE → the mounted cert, plus the prompt/
+	// update-notifier suppressors). nil on runs that don't touch GitHub, and on
+	// local/non-sandbox paths (which keep the SDK exec-verb gh). See
+	// GHChannelParams.
+	GHChannel *GHChannelParams
+
 	// ReadOnlyRepoMounts are extra host directories bind-mounted READ-ONLY
 	// into the sandbox under Cwd. The Curator populates this with its shared
 	// per-(org, repo) pinned-repo worktrees so the agent reads them without a
@@ -233,6 +243,26 @@ type ReadOnlyRepoMount struct {
 	Source string
 	// RelPath is the mount location relative to Cwd, e.g. "repos/owner/repo".
 	RelPath string
+}
+
+// GHChannelParams carries the per-run coordinates the sandbox branch needs to
+// wire the real-gh credential channel: the injector's bound host:port (GH_HOST),
+// the per-run placeholder token (GH_ENTERPRISE_TOKEN), and the host path of the
+// injector cert the sidecar wrote (bind-mounted RO so SSL_CERT_FILE can point at
+// it in-jail). The real GitHub credential is NEVER here — it lives only in the
+// sidecar and is injected upstream; the placeholder is all the jail ever holds.
+type GHChannelParams struct {
+	// Host is the injector's bound "host:port" (no scheme) — GH_HOST. gh forces
+	// https to it and verifies against the injector's per-run cert.
+	Host string
+	// Token is the per-run placeholder the agent's gh presents
+	// (GH_ENTERPRISE_TOKEN). The injector strips it and injects the real token.
+	Token string
+	// CertSourcePath is the host path of the injector cert the sidecar wrote
+	// (agenthost.CertPathFor(runID)). agentproc bind-mounts it RO at
+	// sandboxGHInjectorCert; the broker validates the source against its own
+	// derivation.
+	CertSourcePath string
 }
 
 // NoopSink discards all stream events. Suitable for one-shot agent
@@ -604,6 +634,14 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 			Destination: sandboxTFBinary,
 			Options:     []string{"ro"},
 		})
+		// The same binary a second time under the additive `tfac` applet name on
+		// a PATH-leading dir, so `tfac <verb>` (argv0 dispatch) resolves to this
+		// binary and runs `exec <verb>`. Additive to the canonical mount above.
+		extraMounts = append(extraMounts, sandbox.Mount{
+			Source:      hostSelfBin,
+			Destination: sandboxTFACBinary,
+			Options:     []string{"ro"},
+		})
 	}
 
 	// The TF-controlled git hooks dir (F2, TFAC-456), bind-mounted RO at a
@@ -646,6 +684,29 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	// another reads.
 	extraMounts = append(extraMounts, readOnlyRepoMounts(opts.ReadOnlyRepoMounts)...)
 
+	// Real-gh channel mounts: the per-run injector cert (RO, from the
+	// sidecar-written source) and the TF-pinned gh binary (RO, from the host
+	// image). The cert source must exist before Wrap reads the spec — the
+	// sidecar wrote it during bring-up, which ran before this. The gh binary is
+	// os.Stat-guarded so a dev/host without a baked gh simply mounts no gh (the
+	// channel is a no-op there), exactly like the git-hooks dir.
+	if opts.GHChannel != nil {
+		if opts.GHChannel.CertSourcePath != "" {
+			extraMounts = append(extraMounts, sandbox.Mount{
+				Source:      opts.GHChannel.CertSourcePath,
+				Destination: sandboxGHInjectorCert,
+				Options:     []string{"ro"},
+			})
+		}
+		if _, statErr := os.Stat(hostGHBinaryPath); statErr == nil {
+			extraMounts = append(extraMounts, sandbox.Mount{
+				Source:      hostGHBinaryPath,
+				Destination: sandboxGHBinary,
+				Options:     []string{"ro"},
+			})
+		}
+	}
+
 	// The sandbox's argv targets /usr/bin/node (the apk-installed nodejs in
 	// the cached alpine rootfs) + /sdk/wrapper.mjs (the SDK bind-mount
 	// destination), not host paths. Build the sandbox-side argv from scratch.
@@ -660,6 +721,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	// sandbox env and give Wrap the prebuilt network so it skips its own
 	// allocation — this process holds no run credential and runs no proxy.
 	sbEnv = append(sbEnv, opts.PrebuiltProxyEnv...)
+	sbEnv = append(sbEnv, ghChannelEnv(opts.GHChannel)...)
 
 	sandboxRun, sboxObj, err := sandbox.Wrap(runCtx, sandbox.Config{
 		RunID:           opts.TraceID,

@@ -78,6 +78,28 @@ func (e *executorSandbox) runNetwork() *sandbox.RunNetwork {
 	return e.net
 }
 
+// ghChannel is the real-gh channel params threaded into agentproc.RunOptions.
+// GHChannel when the sidecar bound the injector: its host:port + per-run
+// placeholder, plus the per-run cert source path the orchestrator bind-mounts
+// (the sidecar wrote it to the same deterministic path). nil when no injector
+// was bound (the run then keeps no gh binary/env). runID resolves the cert path.
+func (e *executorSandbox) ghChannel(runID string) *agentproc.GHChannelParams {
+	if e == nil || e.res == nil || e.res.GHChannelHost == "" {
+		return nil
+	}
+	return &agentproc.GHChannelParams{
+		Host:           e.res.GHChannelHost,
+		Token:          e.res.GHChannelToken,
+		CertSourcePath: agenthost.CertPathFor(runID),
+	}
+}
+
+// GHChannel is the exported accessor the curator seam consumes (parallel to
+// Network / ProxyEnv), so a homed curator turn wires the same gh channel.
+func (e *executorSandbox) GHChannel(runID string) *agentproc.GHChannelParams {
+	return e.ghChannel(runID)
+}
+
 // Network / ProxyEnv / GitCloneAuth are the exported accessors the curator seam
 // (internal/curator's TurnSandbox) consumes — a homed curator turn runs under
 // this same executor sandbox but curator can't import the unexported delegate
@@ -179,6 +201,12 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 		// agenthost gh verbs), so the git + GitHub-REST proxies are always on.
 		GitHubAPIEnabled:  true,
 		GitHubAPIUpstream: s.githubAPIUpstreamFor(ctx, orgID),
+		// The real-gh channel's injector: the sandboxed gh binary reaches it via
+		// GH_HOST. On for every delegated run (same rationale as the REST proxy);
+		// the injector needs GitHub creds, which resolveGitHub already provisions.
+		// Same REST-base upstream as the GitHub-REST proxy.
+		GHChannelEnabled:  true,
+		GHChannelUpstream: s.githubAPIUpstreamFor(ctx, orgID),
 		// Jira REST only for Jira runs (their bundle carries a Jira credential;
 		// a non-Jira org's bundle carries none and the proxy would fail to bind).
 		// Upstream left empty — the sidecar derives it from the bundle's Jira URL.
