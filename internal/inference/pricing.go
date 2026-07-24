@@ -14,16 +14,19 @@ import (
 // resolves cost from the datasheet published at https://getbifrost.ai/datasheet
 // (its framework/modelcatalog DefaultURL), which upstream-syncs LiteLLM's
 // model_prices_and_context_window.json. This snapshot is taken from that
-// authoritative LiteLLM source, filtered to the providers TF drives (Anthropic
-// direct + Bedrock-Claude). It is never a TF-authored price table — refreshing
-// it is a mechanical re-fetch-and-filter of the constants below.
+// authoritative LiteLLM source, filtered to text-generation models (mode in
+// chat/responses/completion) across every provider — not just the ones TF
+// drives today — so the package prices any chat model out of the gate. Non-text
+// modalities (image/audio/embedding/rerank/…) are dropped: the text-cost path
+// below can't price them, and CostForUsage returns ok=false for a mode it
+// doesn't price. It is never a TF-authored price table — refreshing it is a
+// mechanical re-fetch-and-filter of the constants below.
 //
 // Provenance (record on every refresh so the source is auditable):
 //   - Source:  https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
 //   - Commit:  f2479cc704f6e63d5510929d30ce8e11ffe43467
 //   - Fetched: 2026-07-24
-//   - Filter:  litellm_provider == "anthropic" OR (litellm_provider in
-//     {"bedrock","bedrock_converse"} AND key contains claude/anthropic)
+//   - Filter:  mode in {"chat","responses","completion"}
 //   - Cost logic (below) mirrors bifrost framework/modelcatalog computeTextCost
 //     as of fork commit 0f07e6f726be1bd46e81c0982ff0618435560be9.
 const (
@@ -41,19 +44,26 @@ func PricingProvenance() (source, commit, fetched string) {
 //go:embed pricing_datasheet.json
 var pricingDatasheetJSON []byte
 
-// tokenTierAbove200K is the long-context boundary: above it Anthropic bills the
-// per-token/-cache rates at their *_above_200k tier. Mirrors bifrost's
-// TokenTierAbove200K. TF's native loop uses the standard on-demand tier only
-// (no fast/flex/priority), so those premium tiers are intentionally not modeled
-// here — the vendored calc reproduces the standard-tier text path exactly.
+// tokenTierAbove200K is the long-context boundary: above it a model bills the
+// per-token/-cache rates at their *_above_200k tier (Anthropic's 1M-context
+// tier; a model with no such rate falls back to its base rate). Mirrors
+// bifrost's TokenTierAbove200K. The vendored calc reproduces the standard
+// on-demand text path; premium tiers (fast/flex/priority) are intentionally not
+// modeled — the native loop never requests them.
 const tokenTierAbove200K = 200000
 
-// modelPrice is the subset of the datasheet's per-model pricing that the
-// standard-tier text-cost path reads. Field names/json tags mirror the upstream
-// datasheet (LiteLLM / bifrost TableModelPricing) so the snapshot unmarshals
-// directly; unread fields (audio, image, video, search, supports_* flags, the
-// fast/flex/priority tiers) are ignored on decode.
+// modelPrice is the subset of the datasheet's per-model pricing the text-cost
+// path reads. Field names/json tags mirror the upstream datasheet (LiteLLM /
+// bifrost TableModelPricing) so the snapshot unmarshals directly; unread fields
+// (audio, image, video, search, supports_* flags, the fast/flex/priority tiers)
+// are ignored on decode.
 type modelPrice struct {
+	// Mode is the model's modality ("chat" | "responses" | "completion" for the
+	// text models this snapshot carries). CostForUsage prices only these — a
+	// non-text mode returns ok=false rather than a wrong number from the text
+	// formula.
+	Mode string `json:"mode"`
+
 	InputCostPerToken  *float64 `json:"input_cost_per_token"`
 	OutputCostPerToken *float64 `json:"output_cost_per_token"`
 
@@ -114,19 +124,35 @@ type Usage struct {
 }
 
 // CostForUsage prices one message's usage in USD from the pinned datasheet.
-// ok is false for a model the snapshot doesn't carry — callers stamp NULL,
-// never 0 (0 means genuinely free in the ledger). Lookup is exact on the model
-// id, with a Bedrock region-prefix (us./eu./apac./global.) strip as a fallback.
+// It prices any text model (any provider) the snapshot carries; ok is false for
+// a model the snapshot doesn't carry or one whose mode the text formula can't
+// price — callers stamp NULL, never 0 (0 means genuinely free in the ledger).
+// Lookup is exact on the model id, with a Bedrock region-prefix
+// (us./eu./apac./global.) strip as a fallback.
 func CostForUsage(model string, usage Usage) (float64, bool) {
 	table, err := loadPricing()
 	if err != nil || table == nil {
 		return 0, false
 	}
 	price, ok := lookupPrice(table, model)
-	if !ok {
+	if !ok || !isPriceableMode(price.Mode) {
 		return 0, false
 	}
 	return computeTextCost(price, usage), true
+}
+
+// isPriceableMode reports whether a model's modality is one the text-cost path
+// prices. The snapshot is pre-filtered to these, so this is defense in depth: a
+// future re-vendor that widened the filter can't silently mis-price an
+// image/audio/embedding model through the token formula. An empty mode (a rare
+// untagged datasheet entry) is treated as priceable.
+func isPriceableMode(mode string) bool {
+	switch mode {
+	case "", "chat", "responses", "completion":
+		return true
+	default:
+		return false
+	}
 }
 
 // lookupPrice resolves a model id to its price entry: exact match first, then a

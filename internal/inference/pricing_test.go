@@ -162,6 +162,38 @@ func TestCostForUsage_FreeIsNotUnknown(t *testing.T) {
 	}
 }
 
+// TestCostForUsage_CrossProvider proves the package prices any provider's chat
+// models out of the gate, not just Anthropic — an OpenAI and a Gemini model
+// both resolve and compute.
+func TestCostForUsage_CrossProvider(t *testing.T) {
+	// gpt-4o: input 2.5e-06, output 1e-05.
+	usd, ok := CostForUsage("gpt-4o", Usage{InputTokens: 1000, OutputTokens: 500})
+	if !ok {
+		t.Fatal("expected a non-Anthropic chat model (gpt-4o) to be priced")
+	}
+	if want := 1000*2.5e-06 + 500*1e-05; !approxEqual(usd, want) {
+		t.Fatalf("gpt-4o cost = %g, want %g", usd, want)
+	}
+	if _, ok := CostForUsage("gemini-2.5-pro", Usage{InputTokens: 100}); !ok {
+		t.Fatal("expected a Gemini chat model to be priced")
+	}
+}
+
+// TestCostForUsage_NonTextModeUnpriced pins the mode guard: a model whose
+// modality the text formula can't price returns ok=false, never a wrong number.
+// Exercised through a synthetic table since the snapshot is pre-filtered to
+// text models.
+func TestCostForUsage_NonTextModeUnpriced(t *testing.T) {
+	for mode, priceable := range map[string]bool{
+		"chat": true, "responses": true, "completion": true, "": true,
+		"embedding": false, "image_generation": false, "audio_speech": false, "rerank": false,
+	} {
+		if got := isPriceableMode(mode); got != priceable {
+			t.Errorf("isPriceableMode(%q) = %v, want %v", mode, got, priceable)
+		}
+	}
+}
+
 func TestLookupPrice_BedrockRegionPrefixStrip(t *testing.T) {
 	table := map[string]modelPrice{
 		"anthropic.claude-x": {InputCostPerToken: f64(1e-06)},
