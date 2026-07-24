@@ -11,8 +11,7 @@
 //     into one neutral assistant message per API message — reasoning details
 //     with signatures intact, tool calls, and usage including cache tokens.
 //   - Usage→dollars pricing (CostForUsage) computed from a pinned, vendored
-//     snapshot of bifrost's model-pricing datasheet — never a TF-authored
-//     price table.
+//     snapshot of bifrost's model-pricing datasheet
 //
 // It deliberately holds no loop, no dispatcher wiring, and no
 // credential-sealing integration: callers pass resolved credentials as plain
