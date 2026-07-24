@@ -63,6 +63,15 @@ type StartProxiesBody struct {
 	JiraAPIEnabled  bool   `json:"jira_api_enabled,omitempty"`
 	JiraAPIUpstream string `json:"jira_api_upstream,omitempty"`
 
+	// GHChannelEnabled requests the real-gh credential-injector proxy — the
+	// TLS listener the sandboxed `gh` binary reaches via GH_HOST, holding only a
+	// per-run placeholder while the sidecar injects the team-set-scoped token
+	// upstream. GHChannelUpstream is the org's REST API base (api.github.com or a
+	// GHES /api/v3 base); empty defaults to api.github.com sidecar-side. HostVethIP
+	// is reused as the injector's TLS SAN so gh's forced-https verification passes.
+	GHChannelEnabled  bool   `json:"gh_channel_enabled,omitempty"`
+	GHChannelUpstream string `json:"gh_channel_upstream,omitempty"`
+
 	// AgentHost, when non-nil, asks the sidecar to ALSO host the agenthost
 	// socket server for this run — moving the hostile-input exec verb parser
 	// off the orchestrator (where it sits beside the all-orgs db.Stores) and
@@ -119,6 +128,15 @@ type StartProxiesResult struct {
 	// JiraAPIURL / JiraAPIToken are the same for the Jira-REST proxy.
 	JiraAPIURL   string `json:"jira_api_url,omitempty"`
 	JiraAPIToken string `json:"jira_api_token,omitempty"`
+
+	// GHChannelHost is the injector's bound "host:port" (no scheme) — the value
+	// the orchestrator stamps into the sandbox as GH_HOST. GHChannelToken is the
+	// per-run placeholder the agent's gh presents (GH_ENTERPRISE_TOKEN). Both
+	// empty when GHChannelEnabled was false. The injector's per-run cert is
+	// written by the sidecar to a deterministic path and mounted by the
+	// orchestrator, so it does not travel on this result.
+	GHChannelHost  string `json:"gh_channel_host,omitempty"`
+	GHChannelToken string `json:"gh_channel_token,omitempty"`
 }
 
 // RelayCallBody is the payload of both KindRelayCall and KindRelayNotify: the

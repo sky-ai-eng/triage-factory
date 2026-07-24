@@ -134,6 +134,14 @@ type SidecarBringUpParams struct {
 	JiraAPIEnabled  bool
 	JiraAPIUpstream string
 
+	// GHChannelEnabled requests the real-gh credential-injector proxy (the TLS
+	// listener the sandboxed gh reaches via GH_HOST). GHChannelUpstream is the
+	// org's REST base (same value as GitHubAPIUpstream); the injector derives the
+	// GraphQL endpoint from it. The injector's host:port + placeholder come back
+	// in the result (GHChannelHost/GHChannelToken).
+	GHChannelEnabled  bool
+	GHChannelUpstream string
+
 	// AgentHost, when non-nil, asks the sidecar to also host the exec-verb
 	// socket server for this run (the relocation) — carrying the run's
 	// non-secret identity. nil leaves the socket server in the orchestrator
@@ -199,6 +207,8 @@ func BringUpRunSidecar(ctx context.Context, sc sandbox.LaunchedSidecar, provisio
 		GitHubAPIUpstream:   params.GitHubAPIUpstream,
 		JiraAPIEnabled:      params.JiraAPIEnabled,
 		JiraAPIUpstream:     params.JiraAPIUpstream,
+		GHChannelEnabled:    params.GHChannelEnabled,
+		GHChannelUpstream:   params.GHChannelUpstream,
 		AgentHost:           params.AgentHost,
 	}
 	if params.Git != nil {

@@ -899,3 +899,121 @@ func assertState(t *testing.T, stores db.Stores, orgID, dedupKey, want string) {
 	}
 	t.Errorf("artifact %s not found", dedupKey)
 }
+
+// --- gh-channel PR-artifact backstop (TFAC-669) ---
+
+// openPRsStub serves the REST open-PR listing ListOpenPRs issues, returning the
+// canned PRs for GET /repos/{o}/{r}/pulls?state=open. Any other path 404s.
+func openPRsStub(t *testing.T, prsJSON string) *github.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pulls") && r.URL.Query().Get("state") == "open" {
+			_, _ = w.Write([]byte(prsJSON))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return github.NewClient(srv.URL, "test-token")
+}
+
+// prArtifactFor returns the pull_request artifact for repoPath#number, or nil.
+func prArtifactFor(t *testing.T, stores db.Stores, repoPath string, number int) *domain.Artifact {
+	t.Helper()
+	arts, err := stores.Artifacts.ListNonTerminalBySystem(context.Background(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("list artifacts: %v", err)
+	}
+	want := domain.PullRequestDedupKey(repoPath, number)
+	for i := range arts {
+		if arts[i].DedupKey == want {
+			return &arts[i]
+		}
+	}
+	return nil
+}
+
+// TestBackstop_RecordsPRFromBranchMatch is the severed-observation recovery: a
+// conversation pushed a branch (its git:branch artifact), an open PR exists on
+// that branch, but no pull_request artifact was recorded (the injector
+// observation never fired). The backstop discovers the PR and records it, linked
+// to the pushing conversation.
+func TestBackstop_RecordsPRFromBranchMatch(t *testing.T) {
+	stores, seedRun, seedArt := reconcileTestStores(t)
+	seedRun("octo/repo#5", "conv-1", "memory")
+
+	br, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feature-x", "sha1", true)
+	if !ok {
+		t.Fatal("branch artifact builder rejected a valid ref")
+	}
+	br.ConversationID = "conv-1"
+	seedArt(br)
+
+	// Sanity: no PR artifact before the backstop.
+	if prArtifactFor(t, stores, "octo/repo", 5) != nil {
+		t.Fatal("a PR artifact already existed before the backstop")
+	}
+
+	prsJSON := `[{"number":5,"node_id":"PR_5","title":"My PR","html_url":"https://github.com/octo/repo/pull/5",` +
+		`"state":"open","draft":false,"head":{"ref":"feature-x","sha":"sha1"},"base":{"ref":"main"}}]`
+	rc := NewReconciler(&fakeResolver{client: openPRsStub(t, prsJSON)}, stores.Artifacts, stores.TaskMemory, nil)
+
+	if err := rc.BackfillPRArtifactsForBranches(context.Background(), runmode.LocalDefaultOrgID, nil); err != nil {
+		t.Fatalf("backstop: %v", err)
+	}
+
+	got := prArtifactFor(t, stores, "octo/repo", 5)
+	if got == nil {
+		t.Fatal("backstop did not record the PR artifact")
+	}
+	if got.ConversationID != "conv-1" {
+		t.Errorf("PR artifact conversation = %q, want conv-1 (the pushing conversation)", got.ConversationID)
+	}
+	if got.State != domain.ArtifactStatePROpen || got.ExternalID != "5" {
+		t.Errorf("PR artifact = state %q external_id %q, want open / 5", got.State, got.ExternalID)
+	}
+}
+
+// TestBackstop_Idempotent asserts re-running the backstop on an already-recorded
+// PR changes nothing (negative space) — and never regresses a state a prior
+// writer advanced.
+func TestBackstop_Idempotent(t *testing.T) {
+	stores, seedRun, seedArt := reconcileTestStores(t)
+	seedRun("octo/repo#5", "conv-1", "memory")
+
+	br, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feature-x", "sha1", true)
+	if !ok {
+		t.Fatal("branch artifact builder rejected a valid ref")
+	}
+	br.ConversationID = "conv-1"
+	seedArt(br)
+
+	// The observation path already recorded this PR, and it later merged.
+	merged := domain.NewPullRequestArtifact("octo/repo", 5, "PR_5", "feature-x", "main",
+		"https://github.com/octo/repo/pull/5", "My PR", "body", false)
+	merged.ConversationID = "conv-1"
+	merged.State = domain.ArtifactStatePRMerged
+	seedArt(merged)
+
+	prsJSON := `[{"number":5,"node_id":"PR_5","title":"My PR","html_url":"https://github.com/octo/repo/pull/5",` +
+		`"state":"open","draft":false,"head":{"ref":"feature-x","sha":"sha1"},"base":{"ref":"main"}}]`
+	rc := NewReconciler(&fakeResolver{client: openPRsStub(t, prsJSON)}, stores.Artifacts, stores.TaskMemory, nil)
+
+	// A merged PR drops out of the non-terminal set, so run twice to prove the
+	// insert-if-absent write neither duplicates nor resurrects it.
+	for i := 0; i < 2; i++ {
+		if err := rc.BackfillPRArtifactsForBranches(context.Background(), runmode.LocalDefaultOrgID, nil); err != nil {
+			t.Fatalf("backstop pass %d: %v", i, err)
+		}
+	}
+
+	// Merged is terminal → absent from the non-terminal list; assert exactly one
+	// PR row total via a fresh reconcile-store query would need conn access, so
+	// assert through the store: no NEW open PR row was minted (the merged row is
+	// untouched, not resurrected to open).
+	if got := prArtifactFor(t, stores, "octo/repo", 5); got != nil {
+		t.Errorf("backstop resurrected the merged PR into the non-terminal set: %+v", got)
+	}
+}

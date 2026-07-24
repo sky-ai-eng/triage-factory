@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -148,6 +149,31 @@ func NewReviewArtifact(repoPath string, number int, headSHA, runID string) Artif
 		Kind:        ArtifactKindReview,
 		Target:      ReviewTarget(repoPath, number),
 		State:       ArtifactStateReviewPending,
+		DedupKey:    ReviewDedupKey(repoPath, number, runID),
+		DetailsJSON: string(details),
+	}
+}
+
+// NewSubmittedReviewArtifact builds a review artifact for a review posted
+// directly to GitHub via the real-gh channel — a single POST .../reviews with
+// no TF-side draft phase, so the review is already live: it carries the GitHub
+// review id (ExternalID), its web URL, and state=submitted. It shares
+// NewReviewArtifact's run-scoped dedup key, so if the same run had also staged a
+// TF-side draft for this PR the gh submit upserts onto that one row
+// (draft → submitted) instead of minting a second. runID scopes the key;
+// reviewID / state / htmlURL come from the POST response, number from its path.
+func NewSubmittedReviewArtifact(repoPath string, number, reviewID int, state, htmlURL, runID string) Artifact {
+	details, err := json.Marshal(ReviewArtifactDetails{Number: number, ReviewEvent: state})
+	if err != nil {
+		details = nil
+	}
+	return Artifact{
+		Provider:    ArtifactProviderGitHub,
+		Kind:        ArtifactKindReview,
+		Target:      ReviewTarget(repoPath, number),
+		ExternalID:  strconv.Itoa(reviewID),
+		URL:         htmlURL,
+		State:       ArtifactStateReviewSubmitted,
 		DedupKey:    ReviewDedupKey(repoPath, number, runID),
 		DetailsJSON: string(details),
 	}

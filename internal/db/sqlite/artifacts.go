@@ -121,6 +121,38 @@ func (s *artifactStore) UpsertSystem(ctx context.Context, orgID string, a domain
 	return s.Upsert(ctx, orgID, a)
 }
 
+// InsertArtifactIfAbsentSystem inserts a only when no (org_id, dedup_key) row
+// exists — ON CONFLICT DO NOTHING — returning whether a row was inserted. See
+// the interface doc: it never overwrites an existing row, so the reconciler
+// backstop can't regress a PR's state. Identical single-connection path in
+// SQLite (no admin/app split).
+func (s *artifactStore) InsertArtifactIfAbsentSystem(ctx context.Context, orgID string, a domain.Artifact) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	id := a.ID
+	if id == "" {
+		id = uuid.New().String()
+	}
+	res, err := s.q.ExecContext(ctx, `
+		INSERT INTO artifacts
+			(id, conversation_id, org_id, team_id, provider, kind, target,
+			 external_id, url, state, dedup_key, details_json, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(org_id, dedup_key) DO NOTHING`,
+		id, nullIfEmpty(a.ConversationID), orgID, a.TeamID, a.Provider, a.Kind, a.Target,
+		nullIfEmpty(a.ExternalID), nullIfEmpty(a.URL), a.State, a.DedupKey, nullIfEmpty(a.DetailsJSON),
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 // TransitionReviewState is the review CAS: one UPDATE guarded on the current
 // state, so of two racing approves exactly one sees a row flip (RowsAffected=1)
 // and the loser gets false without touching anything. external_id / url /

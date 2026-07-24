@@ -161,6 +161,7 @@ func (m *Manager) resolveGitHubForCuratorTurn(ctx context.Context, orgID, teamID
 	}
 
 	seen := map[string]bool{}
+	var authorized []string
 	for _, repoID := range pinnedRepos {
 		key := strings.ToLower(repoID)
 		if seen[key] {
@@ -194,6 +195,22 @@ func (m *Manager) resolveGitHubForCuratorTurn(ctx context.Context, orgID, teamID
 			gh.PAT = tok.Value
 		}
 		gh.RepoTokens[repoID] = credbundle.RepoToken{Token: tok.Value, ExpiresAt: tok.ExpiresAt}
+		authorized = append(authorized, repoID)
+	}
+
+	// The real-gh channel's single team-set-scoped token, same as the delegated
+	// run path (see resolveGitHub's CLIToken block). A curator turn has no
+	// single "primary repo", so the primary owner is chosen from the pinned set
+	// alone.
+	if owner, names := cliChannelScope("", authorized); owner != "" {
+		cliTok, err := scoped.TokenForReposScoped(ctx, orgID, owner, names, nil)
+		if err != nil {
+			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+				return nil, fmt.Errorf("mint gh-channel token for owner %s: %w", owner, err)
+			}
+		} else if cliTok.Value != "" {
+			gh.CLIToken = &credbundle.RepoToken{Token: cliTok.Value, ExpiresAt: cliTok.ExpiresAt}
+		}
 	}
 	return gh, nil
 }

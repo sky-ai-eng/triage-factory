@@ -89,6 +89,17 @@ type GitHubCreds struct {
 	BaseURL       string `json:"base_url,omitempty"`
 
 	RepoTokens map[string]RepoToken `json:"repo_tokens,omitempty"`
+
+	// CLIToken is the single credential the real-gh channel's injector proxy
+	// injects upstream on every request. For an App org it is one installation
+	// token scoped to the run's authorized repos under the primary owner (minted
+	// with nil permissions = the App's full grant on those repos); for a PAT org
+	// it is the org PAT. The injector injects it unconditionally — the token's
+	// own repo scope IS the policy, so the injector needs no path allowlist and
+	// GraphQL opacity is irrelevant. Distinct from RepoTokens, which the
+	// per-repo exec-verb/SDK channel and git proxy consume until their P4
+	// retirement. Nil when the org has no GitHub credential.
+	CLIToken *RepoToken `json:"cli_token,omitempty"`
 }
 
 // RepoToken is one repo-scoped installation token minted for the bundle.

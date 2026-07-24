@@ -38,3 +38,11 @@ func SocketPathFor(_ string) string { return "" }
 
 // SocketMountFor returns a zero mount on non-Linux.
 func SocketMountFor(_ string) sandbox.Mount { return sandbox.Mount{} }
+
+// CertPathFor returns "" on non-Linux (the gh channel is sandbox-only).
+func CertPathFor(_ string) string { return "" }
+
+// WriteInjectorCert is unsupported off Linux.
+func WriteInjectorCert(_ string, _ []byte) error {
+	return errors.New("agenthost: gh-injector cert not supported on this platform")
+}

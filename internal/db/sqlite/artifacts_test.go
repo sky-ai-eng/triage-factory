@@ -124,6 +124,62 @@ func TestArtifactStore_SQLite_UpsertDedup(t *testing.T) {
 	}
 }
 
+// TestArtifactStore_SQLite_InsertIfAbsent pins the reconciler-backstop write:
+// the first insert lands (inserted=true); a second on the same dedup_key is a
+// no-op (inserted=false) that NEVER overwrites the existing row's state — so a
+// backstop pass can't regress a PR the observation path already recorded as, say,
+// merged, back to open.
+func TestArtifactStore_SQLite_InsertIfAbsent(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	runID := seedArtifactRun(t, conn)
+
+	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo#7", "")
+	base := domain.Artifact{
+		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		Provider: "github", Kind: "pull_request", Target: "octo/repo#7", ExternalID: "7",
+		DedupKey: key,
+	}
+
+	first := base
+	first.State = domain.ArtifactStatePROpen
+	inserted, err := stores.Artifacts.InsertArtifactIfAbsentSystem(ctx, runmode.LocalDefaultOrgID, first)
+	if err != nil {
+		t.Fatalf("first InsertArtifactIfAbsentSystem: %v", err)
+	}
+	if !inserted {
+		t.Fatal("first insert reported not-inserted; want true")
+	}
+
+	// Advance the row out-of-band the way the observation path would.
+	if _, err := conn.Exec(`UPDATE artifacts SET state = ? WHERE dedup_key = ?`, domain.ArtifactStatePRMerged, key); err != nil {
+		t.Fatalf("advance state: %v", err)
+	}
+
+	second := base
+	second.State = domain.ArtifactStatePROpen // a stale backstop view
+	inserted, err = stores.Artifacts.InsertArtifactIfAbsentSystem(ctx, runmode.LocalDefaultOrgID, second)
+	if err != nil {
+		t.Fatalf("second InsertArtifactIfAbsentSystem: %v", err)
+	}
+	if inserted {
+		t.Error("second insert reported inserted; want false (row already present)")
+	}
+
+	var count int
+	var state string
+	if err := conn.QueryRow(`SELECT COUNT(*), MAX(state) FROM artifacts WHERE dedup_key = ?`, key).Scan(&count, &state); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("want exactly 1 row, got %d", count)
+	}
+	if state != domain.ArtifactStatePRMerged {
+		t.Errorf("insert-if-absent clobbered state to %q; want merged preserved", state)
+	}
+}
+
 // TestArtifactStore_SQLite_PendingToReal pins the pending→real PR
 // transition: a pending PR keyed on the branch ref, then the real PR keyed
 // on the same ref, collapse to one row that flips pending→open with

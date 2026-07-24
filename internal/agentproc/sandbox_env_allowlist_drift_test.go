@@ -61,6 +61,11 @@ func TestSandboxEnvAllowlistCoversEveryProducer(t *testing.T) {
 	}))
 	add([]string{githooks.PushCaptureEnvVar + "=" + githooks.PushCaptureProxy})
 
+	// Real-gh channel env (GH_HOST / GH_ENTERPRISE_TOKEN / SSL_CERT_FILE + the
+	// two suppressors). A new key here without an allowlist entry would break
+	// every gh-channel run at launch validation.
+	add(ghChannelEnv(&GHChannelParams{Host: "10.42.1.1:8443", Token: "run-token"}))
+
 	// Run-scoped metadata set by delegate/run.go + delegate/resume.go as
 	// ExtraEnv. Those live in a package agentproc's tests can't import
 	// (delegate imports agentproc), so the literals are mirrored here; a

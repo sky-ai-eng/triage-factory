@@ -215,6 +215,34 @@ RUN set -eux; \
     echo "${EXPECTED_SHA}  /usr/local/bin/runsc" | sha512sum -c -; \
     chmod 0755 /usr/local/bin/runsc
 
+# TF-pinned real `gh` release binary (TFAC-669), bind-mounted read-only into the
+# sandbox at /opt/tf/bin/gh (a PATH-leading dir) so the agent's gh talks to the
+# per-run credential-injector proxy. Pinned + checksum-verified here, exactly
+# like runsc above: a user profile image with its own gh loses the PATH race and
+# would have no credentials anyway. GitHub's official linux tarballs are static,
+# so this musl-alpine-jail-safe binary execs fine in the rootfs.
+#
+# Bumping: pick a newer tag from https://github.com/cli/cli/releases and refresh
+# both SHA256s from that release's gh_<VER>_checksums.txt. Keep the version in
+# step with the spike-validated surface (the injector's two path prefixes).
+ARG GH_VERSION=2.96.0
+ARG GH_SHA256_AMD64=83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60
+ARG GH_SHA256_ARM64=06f86ec7103d41993b76cd78072f43595c34aaa56506d971d9860e67140bf909
+RUN set -eux; \
+    case "$TARGETARCH" in \
+        amd64) GH_ARCH=amd64; GH_SHA=$GH_SHA256_AMD64 ;; \
+        arm64) GH_ARCH=arm64; GH_SHA=$GH_SHA256_ARM64 ;; \
+        *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    tarball="gh_${GH_VERSION}_linux_${GH_ARCH}.tar.gz"; \
+    curl -fsSL -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${tarball}"; \
+    echo "${GH_SHA}  /tmp/gh.tgz" | sha256sum -c -; \
+    mkdir -p /opt/tf/bin; \
+    tar -xzf /tmp/gh.tgz -C /tmp; \
+    install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${GH_ARCH}/bin/gh" /opt/tf/bin/gh; \
+    rm -rf /tmp/gh.tgz "/tmp/gh_${GH_VERSION}_linux_${GH_ARCH}"; \
+    /opt/tf/bin/gh --version
+
 # Pre-installed Agent SDK. EnsureSDK resolves it via paths.SDKDir() =
 # <ToolchainRoot>/sdk, and ToolchainRoot honors TF_TOOLCHAIN_ROOT (set
 # below), so the binary finds this baked copy at /opt/triagefactory/sdk

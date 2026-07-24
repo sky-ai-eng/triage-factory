@@ -29,6 +29,13 @@ const (
 	OpAuthorizeRepo = "authorize_repo"
 	OpRecordDenial  = "record_denial"
 	OpRecordPush    = "record_push"
+	// OpRecordObservation is the gh-channel injector's fire-and-forget report of
+	// an artifact-bearing mutation the real gh performed (a PR created, a review
+	// posted). The exec-verb channel self-reports its writes; the gh channel has
+	// no verb layer, so the injector observes the two mutation shapes and relays
+	// the coordinates. The orchestrator (which holds the DB and domain types)
+	// builds and upserts the artifact row — the capless sidecar never does.
+	OpRecordObservation = "record_observation"
 )
 
 // AuthorizeRepoArgs / AuthorizeRepoReply are the authorize_repo op's payloads
@@ -76,6 +83,30 @@ type RecordPushArgs struct {
 	NewSHA  string `json:"new_sha"`
 	Created bool   `json:"created"`
 	Status  int    `json:"status"`
+}
+
+// RecordObservationArgs is record_observation's payload: the coordinates of an
+// artifact-bearing mutation the gh-channel injector saw complete. Kind is
+// "pull_request" or "review". For a PR create, Number/NodeID/Head/Base/URL/
+// Title/Body/Draft come from the 201 response; for a review post, Number comes
+// from the request path and ReviewID/ReviewState/URL from the response. The
+// orchestrator binds ConversationID/OrgID/TeamID from its own RunInfo (the
+// sidecar never names them), so a sidecar cannot attribute an artifact to
+// another run.
+type RecordObservationArgs struct {
+	Kind        string `json:"kind"`
+	Owner       string `json:"owner"`
+	Repo        string `json:"repo"`
+	Number      int    `json:"number"`
+	NodeID      string `json:"node_id,omitempty"`
+	Head        string `json:"head,omitempty"`
+	Base        string `json:"base,omitempty"`
+	URL         string `json:"url,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Body        string `json:"body,omitempty"`
+	Draft       bool   `json:"draft,omitempty"`
+	ReviewID    int    `json:"review_id,omitempty"`
+	ReviewState string `json:"review_state,omitempty"`
 }
 
 // RelayDispatcher serves the sidecar's org-bound relay ops. The concrete impl

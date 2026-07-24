@@ -54,6 +54,46 @@ func TrustedTFBinaryPath() (string, error) {
 	return os.Executable()
 }
 
+// TrustedTFACBinaryDestination mirrors agentproc's private sandboxTFACBinary —
+// the second in-sandbox path the TF binary is bind-mounted at, under the
+// additive `tfac` applet name. Same trusted source as the canonical TF-binary
+// mount (the broker's own re-exec target), just a different destination.
+const TrustedTFACBinaryDestination = "/opt/tf/bin/tfac"
+
+// TrustedGHBinaryDestination mirrors agentproc's private sandboxGHBinary — the
+// fixed in-sandbox path the TF-pinned real gh binary is bind-mounted at.
+// Duplicated as a literal for the same cycle reason as TrustedTFBinaryDestination;
+// agentproc's drift test cross-checks the two literals stay equal.
+const TrustedGHBinaryDestination = "/opt/tf/bin/gh"
+
+// trustedGHBinaryPath is the executor-host path the pinned gh binary is baked at
+// (docker/Dockerfile). A var (not const) so this package's own tests can point
+// it at a stub the non-root `go test` user can create; production never
+// reassigns it, and the source it validates is the same fixed image path
+// agentproc mounts from.
+var trustedGHBinaryPath = "/opt/tf/bin/gh"
+
+// TrustedGHBinaryPath returns the broker-trusted source path for the pinned gh
+// binary mount. Unlike the TF binary (the broker's own re-exec target), gh is a
+// fixed image path, so the broker validates a launch's gh mount source against
+// this literal.
+func TrustedGHBinaryPath() string { return trustedGHBinaryPath }
+
+// TrustedGHInjectorCertDestination mirrors agentproc's private
+// sandboxGHInjectorCert — the fixed in-sandbox path the per-run gh-injector cert
+// is bind-mounted at (SSL_CERT_FILE points here).
+const TrustedGHInjectorCertDestination = "/run/tf-gh-injector.crt"
+
+// TrustedGHInjectorCertPath is the broker's own derivation of "this run's own
+// gh-injector cert" host-side path. Like the agenthost socket, the broker did
+// not create this file — the sidecar writes it during bring-up (agenthost.
+// WriteInjectorCert → CertPathFor) before the launch RPC — so the broker
+// VALIDATES a launch's mount source against this derivation. A drift test
+// cross-checks it agrees with agenthost.CertPathFor.
+func TrustedGHInjectorCertPath(runID string) string {
+	return filepath.Join(trustedAgentHostSocketRoot, sanitizeRunIDForSocket(runID)+"-gh-injector.crt")
+}
+
 // TrustedAgentHostSocketDestination mirrors cmd/exec/agenthost's exported
 // DefaultSocketPath — the fixed in-sandbox path the per-run agenthost
 // socket is bind-mounted at. Duplicated as a literal for the same cycle
@@ -243,6 +283,16 @@ var allowedSandboxEnvKeys = map[string]struct{}{
 	// by prefix below.
 	"GIT_CONFIG_COUNT":    {},
 	"TF_GIT_PUSH_CAPTURE": {},
+
+	// Real-gh channel (agentproc.ghChannelEnv). GH_HOST redirects gh at the
+	// per-run injector; GH_ENTERPRISE_TOKEN is the per-run PLACEHOLDER (never
+	// the real token — Property B); SSL_CERT_FILE points at the mounted per-run
+	// injector cert; the two GH_* suppressors keep gh non-interactive and quiet.
+	"GH_HOST":               {},
+	"GH_ENTERPRISE_TOKEN":   {},
+	"SSL_CERT_FILE":         {},
+	"GH_PROMPT_DISABLED":    {},
+	"GH_NO_UPDATE_NOTIFIER": {},
 }
 
 // allowedSandboxEnvPrefixes covers the dynamically-numbered env families
@@ -742,6 +792,20 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 			if realSource != realTrusted {
 				return fmt.Errorf("sandbox: mount %q source %q is not the broker-resolved TF binary path %q", m.Destination, m.Source, trusted)
 			}
+		case TrustedTFACBinaryDestination:
+			// The additive `tfac` applet mount: same trusted source as the
+			// canonical TF-binary mount (the broker's own re-exec target).
+			trusted, tfErr := TrustedTFBinaryPath()
+			if tfErr != nil {
+				return fmt.Errorf("sandbox: resolve trusted TF binary path: %w", tfErr)
+			}
+			realTrusted, rErr := realPath(trusted)
+			if rErr != nil {
+				return fmt.Errorf("sandbox: resolve trusted TF binary path: %w", rErr)
+			}
+			if realSource != realTrusted {
+				return fmt.Errorf("sandbox: mount %q source %q is not the broker-resolved TF binary path %q", m.Destination, m.Source, trusted)
+			}
 		case githooks.SandboxDir:
 			trusted := TrustedGitHooksDir()
 			realTrusted, rErr := realPath(trusted)
@@ -759,6 +823,23 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 			}
 			if realSource != realTrusted {
 				return fmt.Errorf("sandbox: mount %q source %q is not this run's own agenthost socket (want %q)", m.Destination, m.Source, trusted)
+			}
+		case TrustedGHBinaryDestination:
+			realTrusted, rErr := realPath(TrustedGHBinaryPath())
+			if rErr != nil {
+				return fmt.Errorf("sandbox: resolve trusted gh binary path: %w", rErr)
+			}
+			if realSource != realTrusted {
+				return fmt.Errorf("sandbox: mount %q source %q is not the broker-resolved gh binary path %q", m.Destination, m.Source, TrustedGHBinaryPath())
+			}
+		case TrustedGHInjectorCertDestination:
+			trusted := TrustedGHInjectorCertPath(runID)
+			realTrusted, rErr := realPath(trusted)
+			if rErr != nil {
+				return fmt.Errorf("sandbox: resolve this run's gh-injector cert: %w", rErr)
+			}
+			if realSource != realTrusted {
+				return fmt.Errorf("sandbox: mount %q source %q is not this run's own gh-injector cert (want %q)", m.Destination, m.Source, trusted)
 			}
 		default:
 			if !hasScope {

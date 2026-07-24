@@ -72,6 +72,34 @@ func (s *artifactStore) UpsertSystem(ctx context.Context, orgID string, a domain
 	return s.upsert(ctx, s.admin, orgID, a)
 }
 
+// InsertArtifactIfAbsentSystem inserts a only when no (org_id, dedup_key) row
+// exists — ON CONFLICT DO NOTHING — on the admin pool (BYPASSRLS; the reconciler
+// backstop has no JWT-claims context). Returns whether a row was inserted:
+// RowsAffected is 1 on insert, 0 when a row already existed. See the interface
+// doc for why this never-overwrite path (not UpsertSystem) is what the backstop
+// needs. org_id stays bound as defense in depth.
+func (s *artifactStore) InsertArtifactIfAbsentSystem(ctx context.Context, orgID string, a domain.Artifact) (bool, error) {
+	res, err := s.admin.ExecContext(ctx, `
+		INSERT INTO artifacts
+			(id, conversation_id, org_id, team_id, provider, kind, target,
+			 external_id, url, state, dedup_key, details_json, updated_at)
+		VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()),
+		        NULLIF($2, '')::uuid, $3, $4, $5, $6, $7,
+		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now())
+		ON CONFLICT (org_id, dedup_key) DO NOTHING`,
+		a.ID, a.ConversationID, orgID, a.TeamID, a.Provider, a.Kind, a.Target,
+		a.ExternalID, a.URL, a.State, a.DedupKey, a.DetailsJSON,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a domain.Artifact) (domain.Artifact, error) {
 	// ON CONFLICT(org_id, dedup_key) updates the documented mutable fields
 	// from the proposed row (EXCLUDED.*) and bumps updated_at; id/created_at

@@ -407,6 +407,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		PrebuiltNetwork:  opts.execSandbox.runNetwork(),
 		PrebuiltProxyEnv: opts.execSandbox.proxyEnv(),
 		StartAgentHost:   startAgentHost,
+		GHChannel:        opts.execSandbox.ghChannel(runID),
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
 
