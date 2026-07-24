@@ -53,10 +53,50 @@ cd harness && cargo test
 # defaults to a sibling ../pi checkout, override with PI_ROOT or --pi)
 cargo build && bun parity/parity.ts [--pi /path/to/pi] [case-filter]
 
+# same corpus, driven through the resident tool-host socket, asserted
+# byte-identical to direct invocation (no pi checkout needed)
+cargo build && bun parity/parity.ts --mode socket [case-filter]
+
 # poke a tool by hand
 ./target/release/tf-harness-tools grep --cwd ~/code/repo '{"pattern":"func ","glob":"*.go"}'
 ./target/release/tf-harness-tools --definitions
 ```
+
+## Resident tool-host (`serve`)
+
+The native multi-mode agent loop runs *outside* the gVisor jail and dispatches
+each tool call *in*. `tf-harness-tools serve --socket <path> [--cwd <dir>]` is
+the in-jail counterpart: a long-lived process that listens on a unix stream
+socket and answers length-prefixed JSON tool-call frames, one at a time, using
+the exact same `run_tool` entry point as the one-shot CLI — so a call over the
+socket returns byte-identical bytes to a direct invocation.
+
+The wire protocol is specified by the rustdoc on the frame types in
+`src/serve.rs` (`Request` / `Response` / `ErrorKind`) — the schema comment *is*
+the spec. In brief: a 4-byte big-endian length prefix then that many JSON bytes;
+request `{id, tool, args}`; response `{id, ok, result}` or `{id, ok:false,
+error}`, where `error` is the tool's message string for a tool failure or a
+`{kind, message}` object for a protocol failure (`unknown_tool`,
+`malformed_request`). A clean socket EOF ends the engagement. Keeping tool
+execution in-jail (rather than on the host side of a bind mount) keeps
+symlink/path-traversal resolution over hostile worktree content inside the
+Sentry; the resident-behind-a-socket shape keeps the capability-holding
+cap-broker out of the per-call hot path.
+
+Launching `serve` as the sandbox's main process (the OCI-spec/mount wiring) and
+the Go client that drives it belong to the native-loop ticket; this crate ships
+`serve` standalone and fully tested:
+
+- `tests/serve_test.rs` — soak/robustness: rapid sequential calls, oversized
+  (truncated) output parity, a client killed mid-request, a server killed
+  mid-request, unknown tool, and malformed/oversized frames (the server answers
+  a protocol error or closes — it never panics on hostile bytes).
+- `parity/parity.ts --mode socket` — the full corpus over the socket, asserted
+  byte-identical to direct invocation.
+- `tests/injail_smoke.rs` — an env-gated smoke that runs `serve` under real
+  `runsc` and drives it from the host; skips cleanly where runsc is absent (set
+  `TF_HARNESS_INJAIL_SMOKE=1` and `TF_HARNESS_INJAIL_ROOTFS=<dir>` on the runsc
+  host to run it).
 
 ## Measured syscall reduction
 

@@ -24,6 +24,7 @@ pub mod output_accumulator;
 pub mod paths;
 pub mod read;
 pub mod result;
+pub mod serve;
 pub mod shell;
 pub mod truncate;
 pub mod validate;
