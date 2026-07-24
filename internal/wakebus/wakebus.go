@@ -1,4 +1,4 @@
-// Package wakebus is the tf_wake NOTIFY doorbell (TFAC-586, spec §5's
+// Package wakebus is the tf_wake NOTIFY doorbell (the spec's
 // coordination-fabric table): control (any enqueue) → executors. A
 // {kind: run|event, org} publish nudges idle executors to claim within
 // milliseconds instead of the dispatcher's scan-interval backstop, which
@@ -23,7 +23,7 @@ const Channel = "tf_wake"
 // Kind values discriminate WHY a row became claimable — not which table it
 // lives in (both kinds nudge the same run-queue claim loop): "run" is a
 // fresh RunQueueStore.EnqueueRun (a new blueprint step); "event" is
-// ConversationStore.MarkQueuedForResume (resume-by-enqueue, TFAC-585 — a
+// ConversationStore.MarkQueuedForResume (resume-by-enqueue — a
 // parked/terminal-resumable run woken by an external message).
 const (
 	KindRun   = "run"

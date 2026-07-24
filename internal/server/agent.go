@@ -230,7 +230,7 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, out)
 }
 
-// runResponse projects an Conversation into the wire shape the frontend consumes,
+// runResponse projects a Conversation into the wire shape the frontend consumes,
 // augmented with `artifact_count` (so the Board card can show how many artifacts
 // a run produced without a per-card fetch) and the derived approval signal:
 // `has_unresolved_artifacts` (bool), `unresolved_pr_count` /

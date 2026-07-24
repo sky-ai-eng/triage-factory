@@ -15,12 +15,12 @@ import (
 // the same per-connection scope filter Broadcast would have applied
 // locally.
 type wireEvent struct {
-	Type      string          `json:"type"`
-	RunID     string          `json:"run_id,omitempty"`
-	ProjectID string          `json:"project_id,omitempty"`
-	OrgID     string          `json:"org_id,omitempty"`
-	UserID    string          `json:"user_id,omitempty"`
-	Data      json.RawMessage `json:"data"`
+	Type           string          `json:"type"`
+	ConversationID string          `json:"conversation_id,omitempty"`
+	ProjectID      string          `json:"project_id,omitempty"`
+	OrgID          string          `json:"org_id,omitempty"`
+	UserID         string          `json:"user_id,omitempty"`
+	Data           json.RawMessage `json:"data"`
 }
 
 func newWireEvent(evt websocket.Event) (wireEvent, error) {
@@ -29,24 +29,24 @@ func newWireEvent(evt websocket.Event) (wireEvent, error) {
 		return wireEvent{}, fmt.Errorf("marshal event data: %w", err)
 	}
 	return wireEvent{
-		Type:      evt.Type,
-		RunID:     evt.ConversationID,
-		ProjectID: evt.ProjectID,
-		OrgID:     evt.OrgID,
-		UserID:    evt.UserID,
-		Data:      data,
+		Type:           evt.Type,
+		ConversationID: evt.ConversationID,
+		ProjectID:      evt.ProjectID,
+		OrgID:          evt.OrgID,
+		UserID:         evt.UserID,
+		Data:           data,
 	}, nil
 }
 
 func (w wireEvent) toEvent() websocket.Event {
 	var data any
 	// A malformed Data payload degrades to nil rather than dropping the
-	// whole event — Type/OrgID/RunID still route and render correctly,
-	// only the event-specific payload is empty.
+	// whole event — Type/OrgID/ConversationID still route and render
+	// correctly, only the event-specific payload is empty.
 	_ = json.Unmarshal(w.Data, &data)
 	return websocket.Event{
 		Type:           w.Type,
-		ConversationID: w.RunID,
+		ConversationID: w.ConversationID,
 		ProjectID:      w.ProjectID,
 		OrgID:          w.OrgID,
 		UserID:         w.UserID,

@@ -15,7 +15,7 @@ import (
 // One row per org (UNIQUE(org_id) in Postgres; idempotent INSERT on a
 // deterministic id in SQLite where org_id has no column). Distinct
 // from the Conversation domain in internal/domain/agent.go: an Agent is
-// "who acts," an Conversation is one execution by that actor.
+// "who acts," a Conversation is one execution by that actor.
 //
 // Audiences:
 //
