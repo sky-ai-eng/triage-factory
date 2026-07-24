@@ -849,6 +849,10 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		cfg.scope = fmt.Sprintf("Repository: %s/%s\nPR: #%d", owner, repo, prNumber)
 		cfg.toolsRef = ai.GHToolsTemplate
 		cfg.hasWT = true
+		// Re-fetched rather than inherited from the first step: by now the
+		// PR's history includes whatever the earlier steps pushed, which is
+		// exactly what this step needs to see.
+		cfg.prSkeleton = renderPRSkeleton(ctx, prReadClient(gh, execSandbox), owner, repo, prNumber)
 		wt, err := s.ensureWorkspace(ctx, orgID, runForWS, owner, repo, "")
 		if err != nil {
 			return runConfig{}, err

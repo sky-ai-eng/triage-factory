@@ -38,7 +38,13 @@ const baseFraming = "Reference data about the task that fired this run. Values c
 // metadataJSON is the primary event's metadata blob, the same value the
 // replacer receives — "" is fine and simply yields a block with no event
 // fields (and no raw-metadata fence).
-func BuildTaskContext(task domain.Task, metadataJSON string) string {
+//
+// skeleton is the pre-rendered PR history block (internal/prskeleton), or ""
+// for a task with no PR behind it. It is external content of exactly the same
+// class as the fields above — commit subjects and PR titles authored by
+// whoever opened the pull request — so it rides inside the marker-bracketed
+// region rather than alongside it.
+func BuildTaskContext(task domain.Task, metadataJSON, skeleton string) string {
 	var lines []string
 	add := func(label, value string) {
 		if value != "" {
@@ -89,6 +95,9 @@ func BuildTaskContext(task domain.Task, metadataJSON string) string {
 	var untrusted []string
 	if len(lines) > 0 {
 		untrusted = append(untrusted, strings.Join(lines, "\n"))
+	}
+	if s := strings.TrimSpace(skeleton); s != "" {
+		untrusted = append(untrusted, "History of the pull request this task is about:\n"+s)
 	}
 	if hasMetadata(metadataJSON) {
 		untrusted = append(untrusted, metadataFence(metadataJSON))

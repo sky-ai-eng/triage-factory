@@ -23,7 +23,7 @@ func TestBuildPrompt_InterpolatesInjectedSections(t *testing.T) {
 	}
 	toolsRef := ai.GHToolsTemplate + "\n\n" + ai.JiraToolsTemplate
 
-	out := buildPrompt(task, "", "mission body", "Repository: owner/repo", toolsRef,
+	out := buildPrompt(task, "", "", "mission body", "Repository: owner/repo", toolsRef,
 		"/usr/local/bin/triagefactory", "run-1", "/work", "bp-run-1", "tfac/SKY-9", "")
 
 	if strings.Contains(out, "{{BINARY_PATH}}") {
@@ -102,7 +102,7 @@ func TestBuildPrompt_BeginsWithTaskContext(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := buildPrompt(tc.task, tc.metadata, "mission body", "Repository: owner/repo",
+			out := buildPrompt(tc.task, tc.metadata, "", "mission body", "Repository: owner/repo",
 				"", "/bin/tf", "run-1", "/work", "bp-run-1", "tfac/<ticket-id>", "")
 			if !strings.HasPrefix(out, "<task_context>\n") {
 				t.Errorf("composed prompt must begin with the task-context block;\n%s", out)
@@ -126,7 +126,7 @@ func TestBuildPrompt_PrependOnly(t *testing.T) {
 	scope := "Repository: owner/repo"
 	toolsRef := ai.GHToolsTemplate
 
-	out := buildPrompt(task, metadata, mission, scope, toolsRef,
+	out := buildPrompt(task, metadata, "", mission, scope, toolsRef,
 		"/bin/tf", "run-1", "/work", "bp-run-1", "tfac/SKY-9", "")
 
 	// Reconstruct the pre-injection return value: the same shim + section
@@ -136,7 +136,7 @@ func TestBuildPrompt_PrependOnly(t *testing.T) {
 	full = strings.NewReplacer("{{TOOLS_REFERENCE}}", toolsRef, "{{SCOPE}}", scope).Replace(full)
 	prev := BuildPromptReplacer(task, metadata, "run-1", "/bin/tf", "/work", "bp-run-1", "tfac/SKY-9", "").Replace(full)
 
-	want := BuildTaskContext(task, metadata) + "\n\n" + prev
+	want := BuildTaskContext(task, metadata, "") + "\n\n" + prev
 	if out != want {
 		t.Errorf("composed output must be exactly the block + separator + prior output;\n--- got ---\n%s\n--- want ---\n%s", out, want)
 	}
@@ -154,7 +154,7 @@ func TestBuildPrompt_ExternalTextNotInterpolated(t *testing.T) {
 		EntitySourceID: "owner/repo#5",
 	}
 
-	out := buildPrompt(task, "", "mission for run {{RUN_ID}}", "", "",
+	out := buildPrompt(task, "", "", "mission for run {{RUN_ID}}", "", "",
 		"/bin/tf", "the-real-run-id", "/work", "bp-run-1", "tfac/<ticket-id>", "")
 
 	if !strings.Contains(out, "handle {{RUN_ID}} in the retry path") {

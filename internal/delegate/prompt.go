@@ -154,8 +154,9 @@ func (s *Spawner) resolvePrompt(orgID string, task domain.Task, explicitPromptID
 // the mission or envelope gets resolved here, with unknown names falling
 // through as literal braces so they're obvious to prompt authors on first
 // run. metadataJSON is the primary event's metadata blob ("" is fine —
-// event-derived placeholders just render empty).
-func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binaryPath, runID, runRoot, blueprintRunID, branchTemplate, runURL string) string {
+// event-derived placeholders just render empty). skeleton is the rendered PR
+// history block, empty for a task with no pull request behind it.
+func buildPrompt(task domain.Task, metadataJSON, skeleton, mission, scope, toolsRef, binaryPath, runID, runRoot, blueprintRunID, branchTemplate, runURL string) string {
 	// Compatibility shim: some early prompts were written with the literal
 	// "triagefactory exec" prefix on CLI invocations, assuming the binary
 	// was on PATH. The binary lives at an absolute path in the worktree
@@ -183,7 +184,7 @@ func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binar
 	// interpolation path over attacker-influenced text. Composing after keeps
 	// the block's own contents inert while every existing prompt interpolates
 	// exactly as before.
-	return BuildTaskContext(task, metadataJSON) + "\n\n" +
+	return BuildTaskContext(task, metadataJSON, skeleton) + "\n\n" +
 		BuildPromptReplacer(task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID, branchTemplate, runURL).Replace(full)
 }
 

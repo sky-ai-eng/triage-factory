@@ -312,7 +312,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// authorizes whatever branch the worktree lands on.
 	branchTemplate := s.resolveBranchTemplate(context.Background(), task)
 	runURL := s.runURLFor(orgID, runID)
-	prompt := buildPrompt(task, metadataJSON, mission, cfg.scope, cfg.toolsRef, agentBin, runID, agentRunRoot, namespace, branchTemplate, runURL)
+	prompt := buildPrompt(task, metadataJSON, cfg.prSkeleton, mission, cfg.scope, cfg.toolsRef, agentBin, runID, agentRunRoot, namespace, branchTemplate, runURL)
 
 	s.updatePhase(orgID, runID, "agent_starting")
 	if ctx.Err() != nil {
