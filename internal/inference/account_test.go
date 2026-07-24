@@ -2,6 +2,7 @@ package inference
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -21,6 +22,19 @@ func TestNewAccount_Validation(t *testing.T) {
 				t.Fatalf("expected an error for %q", name)
 			}
 		})
+	}
+}
+
+func TestNewAccount_DuplicateProviderRejected(t *testing.T) {
+	_, err := NewAccount(
+		ProviderCredentials{Provider: ProviderAnthropic, APIKey: "k1", Models: []string{"claude-sonnet-5"}},
+		ProviderCredentials{Provider: ProviderAnthropic, APIKey: "k2", Models: []string{"claude-opus-4-1"}},
+	)
+	if err == nil {
+		t.Fatal("a duplicate provider must be rejected, not silently overwritten")
+	}
+	if !strings.Contains(err.Error(), "duplicate provider") {
+		t.Fatalf("error should name the duplicate provider, got: %v", err)
 	}
 }
 

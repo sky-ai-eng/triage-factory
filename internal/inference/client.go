@@ -2,8 +2,10 @@ package inference
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
@@ -17,8 +19,13 @@ import (
 // usage with cache tokens). Construct one per account and reuse it; Close
 // shuts the embedded bifrost workers down.
 type Client struct {
-	bf *bifrost.Bifrost
+	bf     *bifrost.Bifrost
+	closed atomic.Bool
 }
+
+// ErrClientClosed is returned by Stream on a nil, uninitialized, or already-
+// closed client, so a misuse surfaces as an error instead of a panic.
+var ErrClientClosed = errors.New("inference: client is closed or not initialized")
 
 // New initializes an embedded bifrost client over the given account. The
 // account carries the resolved per-provider credentials and model whitelist.
@@ -36,9 +43,13 @@ func New(account schemas.Account) (*Client, error) {
 	return &Client{bf: bf}, nil
 }
 
-// Close shuts down the embedded bifrost workers.
+// Close shuts down the embedded bifrost workers. Safe to call more than once
+// and on a nil client; only the first call shuts bifrost down.
 func (c *Client) Close() {
-	if c.bf != nil {
+	if c == nil || c.bf == nil {
+		return
+	}
+	if c.closed.CompareAndSwap(false, true) {
 		c.bf.Shutdown()
 	}
 }
@@ -85,8 +96,12 @@ type Completion struct {
 }
 
 // Stream runs one streaming chat completion and reassembles it. It respects
-// ctx cancellation (the underlying stream is bound to it).
+// ctx cancellation (the underlying stream is bound to it). A nil, uninitialized,
+// or closed client returns ErrClientClosed rather than panicking.
 func (c *Client) Stream(ctx context.Context, req Request) (*Completion, error) {
+	if c == nil || c.bf == nil || c.closed.Load() {
+		return nil, ErrClientClosed
+	}
 	breq, err := buildChatRequest(req)
 	if err != nil {
 		return nil, err

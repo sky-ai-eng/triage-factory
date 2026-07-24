@@ -104,6 +104,14 @@ func NewAccount(creds ...ProviderCredentials) (schemas.Account, error) {
 		if len(c.Models) == 0 {
 			return nil, fmt.Errorf("inference: credentials[%d] (%s) has an empty model whitelist — bifrost reads empty as no models; list the model or use \"*\"", i, c.Provider)
 		}
+		// One entry per provider: a duplicate would otherwise silently clobber
+		// the earlier key + config in the map. Reject it loudly so an accidental
+		// dup is a build-time error, not a mystery at request time. (Weighted
+		// multi-key per provider is a deliberate future API shape, not something
+		// to infer from a repeated provider here.)
+		if _, dup := entries[c.Provider]; dup {
+			return nil, fmt.Errorf("inference: credentials[%d]: duplicate provider %s — supply exactly one entry per provider", i, c.Provider)
+		}
 		key, err := buildKey(c)
 		if err != nil {
 			return nil, fmt.Errorf("inference: credentials[%d] (%s): %w", i, c.Provider, err)
