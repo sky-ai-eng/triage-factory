@@ -1,13 +1,23 @@
 #!/usr/bin/env bun
 /**
- * Differential parity harness: runs pi's actual TypeScript tools (imported
- * from the local pi checkout) and the Rust `tf-harness-tools` CLI against identical
- * fixture workspaces, then deep-compares the result envelopes.
+ * Differential parity harness. Two modes, same 81-case corpus and fixtures:
+ *
+ *   pi mode (default): runs pi's actual TypeScript tools (imported from the
+ *   local pi checkout) and the Rust `tf-harness-tools` CLI against identical
+ *   fixture workspaces, then deep-compares the result envelopes. This is the
+ *   port's anchor to upstream.
+ *
+ *   socket mode (--mode socket): runs the Rust CLI directly and the Rust
+ *   `serve` tool-host over its unix socket, and asserts the two produce
+ *   byte-identical envelopes. No pi checkout needed — it pins that dispatching
+ *   a tool call over the socket returns exactly what invoking it directly does.
  *
  * Usage:
  *   bun harness/parity/parity.ts [--pi /path/to/pi] [--cli /path/to/tf-harness-tools] [case-name-filter]
+ *   bun harness/parity/parity.ts --mode socket [--cli /path/to/tf-harness-tools] [case-name-filter]
  *
- * Requires: `npm ci` in the pi checkout, `cargo build` in harness/.
+ * Requires: `cargo build` in harness/ (both modes); `npm ci` in the pi checkout
+ * (pi mode only).
  *
  * Normalizations before comparison (each one is a place where byte equality
  * is impossible or meaningless, not a semantic difference):
@@ -19,18 +29,26 @@
 
 import { mkdirSync, readFileSync, rmSync, writeFileSync, symlinkSync, chmodSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
+import net from "node:net";
 
 const argv = process.argv.slice(2);
 let piRoot = process.env.PI_ROOT ?? resolve(import.meta.dir, "../../../pi");
 let cliPath = resolve(import.meta.dir, "../target/debug/tf-harness-tools");
 let filter: string | undefined;
+let mode: "pi" | "socket" = "pi";
 for (let i = 0; i < argv.length; i++) {
   if (argv[i] === "--pi") piRoot = argv[++i];
   else if (argv[i] === "--cli") cliPath = argv[++i];
+  else if (argv[i] === "--mode") mode = argv[++i] as "pi" | "socket";
   else filter = argv[i];
 }
 
-const toolsModule = await import(join(piRoot, "packages/coding-agent/src/core/tools/index.ts"));
+// pi's tools are only needed as the reference in pi mode; socket mode compares
+// the Rust binary against itself and must run with no pi checkout present.
+const toolsModule =
+  mode === "pi"
+    ? await import(join(piRoot, "packages/coding-agent/src/core/tools/index.ts"))
+    : null;
 
 type Envelope = {
   ok: boolean;
@@ -122,7 +140,8 @@ function collectPostFiles(env: Envelope, dir: string, postFiles?: string[]): voi
 }
 
 async function runPi(c: Case, dir: string): Promise<Envelope> {
-  const tool = toolsModule.createTool(c.tool, dir);
+  // Only reached in pi mode, where toolsModule is loaded.
+  const tool = toolsModule!.createTool(c.tool, dir);
   let env: Envelope;
   try {
     // The agent runtime applies prepareArguments before execute; mirror it.
@@ -155,6 +174,94 @@ async function runRust(c: Case, dir: string): Promise<Envelope> {
   return normalizeEnvelope(env, dir);
 }
 
+// --------------------------------------------------------- socket transport
+
+/** Connect to the tool-host socket, retrying until it's bound (serve binds
+ *  asynchronously after spawn). */
+async function connectWithRetry(sockPath: string): Promise<net.Socket> {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    try {
+      return await new Promise<net.Socket>((res, rej) => {
+        const conn = net.createConnection({ path: sockPath });
+        conn.once("connect", () => res(conn));
+        conn.once("error", rej);
+      });
+    } catch (e) {
+      if (Date.now() > deadline) throw e;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
+}
+
+/** One length-prefixed request frame in, one response frame out. Mirrors the
+ *  server framing: a 4-byte big-endian length then that many JSON bytes. */
+async function socketCall(sockPath: string, req: unknown): Promise<any> {
+  const conn = await connectWithRetry(sockPath);
+  return await new Promise((res, rej) => {
+    let buf = Buffer.alloc(0);
+    let expected: number | null = null;
+    conn.setTimeout(20000, () => {
+      conn.destroy();
+      rej(new Error("socket call timed out"));
+    });
+    conn.on("data", (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+      if (expected === null && buf.length >= 4) {
+        expected = buf.readUInt32BE(0);
+        buf = buf.subarray(4);
+      }
+      if (expected !== null && buf.length >= expected) {
+        const body = buf.subarray(0, expected).toString("utf-8");
+        conn.end();
+        try {
+          res(JSON.parse(body));
+        } catch (e) {
+          rej(e);
+        }
+      }
+    });
+    conn.on("error", rej);
+    const body = Buffer.from(JSON.stringify(req), "utf-8");
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(body.length, 0);
+    conn.write(Buffer.concat([header, body]));
+  });
+}
+
+async function runRustSocket(c: Case, dir: string): Promise<Envelope> {
+  const sockDir = join(workRoot, `${c.name}-sock`);
+  mkdirSync(sockDir, { recursive: true });
+  const sockPath = join(sockDir, "toolhost.sock");
+  const proc = Bun.spawn([cliPath, "serve", "--socket", sockPath, "--cwd", dir], {
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  let env: Envelope;
+  try {
+    const resp = await socketCall(sockPath, { id: 1, tool: c.tool, args: c.args(dir) });
+    // A tool that ran carries `ok` + string `error` or `result`, exactly the
+    // shape the direct CLI prints; a protocol error would carry an object
+    // `error`, which the valid-tool corpus never triggers.
+    env = resp.ok ? { ok: true, result: resp.result } : { ok: false, error: resp.error };
+  } catch (err) {
+    const stderr = await new Response(proc.stderr).text().catch(() => "");
+    env = { ok: false, error: `<socket call failed: ${err}${stderr ? ` | serve stderr: ${stderr.slice(0, 200)}` : ""}>` };
+  } finally {
+    // The connection half-close ends the engagement and serve exits; kill as a
+    // backstop if it somehow lingers, then reap.
+    proc.kill();
+    await proc.exited;
+  }
+  collectPostFiles(env, dir, c.postFiles);
+  return normalizeEnvelope(env, dir);
+}
+
+// Labels for the two compared sides, so failure diagnostics name the right
+// runner in each mode.
+const sideA = mode === "socket" ? "direct" : "pi";
+const sideB = mode === "socket" ? "socket" : "rust";
+
 function deepDiff(a: unknown, b: unknown, path = "$"): string[] {
   if (typeof a !== typeof b) return [`${path}: type ${typeof a} vs ${typeof b}`];
   if (a === null || b === null || typeof a !== "object") {
@@ -170,8 +277,8 @@ function deepDiff(a: unknown, b: unknown, path = "$"): string[] {
   const keys = new Set([...Object.keys(ao), ...Object.keys(bo)]);
   const diffs: string[] = [];
   for (const key of keys) {
-    if (!(key in ao)) diffs.push(`${path}.${key}: missing on pi side`);
-    else if (!(key in bo)) diffs.push(`${path}.${key}: missing on rust side`);
+    if (!(key in ao)) diffs.push(`${path}.${key}: missing on ${sideA} side`);
+    else if (!(key in bo)) diffs.push(`${path}.${key}: missing on ${sideB} side`);
     else diffs.push(...deepDiff(ao[key], bo[key], `${path}.${key}`));
   }
   return diffs;
@@ -835,6 +942,12 @@ const workRoot = join(process.env.TMPDIR ?? "/tmp", `pi-parity-${process.pid}`);
 rmSync(workRoot, { recursive: true, force: true });
 mkdirSync(workRoot, { recursive: true });
 
+console.log(
+  mode === "socket"
+    ? "mode: socket (rust CLI direct vs rust serve over the tool-host socket)"
+    : "mode: pi (pi TypeScript tools vs rust CLI)",
+);
+
 let pass = 0;
 let fail = 0;
 const failures: string[] = [];
@@ -846,24 +959,37 @@ for (const c of cases) {
     continue;
   }
 
-  const dirPi = join(workRoot, `${c.name}-pi`);
-  const dirRs = join(workRoot, `${c.name}-rs`);
-  mkdirSync(dirPi, { recursive: true });
-  mkdirSync(dirRs, { recursive: true });
-  c.setup?.(dirPi);
-  c.setup?.(dirRs);
+  // Two independent fixture dirs, one per side, so a mutating tool (write/edit)
+  // can't leak state between the two runners. After path normalization each
+  // dir collapses to "$DIR", making the envelopes directly comparable.
+  const dirA = join(workRoot, `${c.name}-${sideA}`);
+  const dirB = join(workRoot, `${c.name}-${sideB}`);
+  mkdirSync(dirA, { recursive: true });
+  mkdirSync(dirB, { recursive: true });
+  c.setup?.(dirA);
+  c.setup?.(dirB);
 
-  // pi spawns rg/fd from the process cwd; align both sides on the case dir.
-  process.chdir(dirPi);
-  const piEnv = await runPi(c, dirPi);
-  process.chdir(workRoot);
-  const rsEnv = await runRust(c, dirRs);
+  let envA: Envelope;
+  let envB: Envelope;
+  if (mode === "socket") {
+    // Neither Rust runner depends on the process cwd (both take an explicit
+    // --cwd), so no chdir dance is needed.
+    process.chdir(workRoot);
+    envA = await runRust(c, dirA);
+    envB = await runRustSocket(c, dirB);
+  } else {
+    // pi spawns rg/fd from the process cwd; align its side on the case dir.
+    process.chdir(dirA);
+    envA = await runPi(c, dirA);
+    process.chdir(workRoot);
+    envB = await runRust(c, dirB);
+  }
 
   if (c.sortLines) {
-    sortBodyLines(piEnv);
-    sortBodyLines(rsEnv);
+    sortBodyLines(envA);
+    sortBodyLines(envB);
   }
-  const diffs = deepDiff(piEnv, rsEnv);
+  const diffs = deepDiff(envA, envB);
   if (diffs.length === 0) {
     pass++;
     console.log(`PASS ${c.name}`);
