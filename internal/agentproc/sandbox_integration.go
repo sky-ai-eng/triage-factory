@@ -217,11 +217,12 @@ func buildSandboxEnv(extraEnv []string) []string {
 // the per-run injector: GH_HOST (the injector's host:port — gh forces https and
 // verifies against the mounted cert), GH_ENTERPRISE_TOKEN (the per-run
 // placeholder gh sends; the injector strips it and injects the real token),
-// SSL_CERT_FILE (the mounted injector cert — gh's sole trust root, so no rootfs
-// edit), and the prompt/update-notifier suppressors so gh runs non-interactively
-// and never phones home for release checks. Property B-safe: the only
-// credential-shaped value is the placeholder, never a real token. Empty when
-// the channel is off.
+// SSL_CERT_FILE (the mounted trust file — the system roots plus this run's
+// injector leaf, so no rootfs edit and no narrowing of other in-jail TLS
+// clients), and the prompt/update-notifier suppressors so gh runs
+// non-interactively and never phones home for release checks. Property B-safe:
+// the only credential-shaped value is the placeholder, never a real token.
+// Empty when the channel is off.
 func ghChannelEnv(gc *GHChannelParams) []string {
 	if gc == nil || gc.Host == "" {
 		return nil

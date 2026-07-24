@@ -294,10 +294,12 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string) (strin
 	if err != nil {
 		return "", "", fmt.Errorf("runsidecar: generate gh-injector cert: %w", err)
 	}
-	// The public cert must exist at the per-run path before the sandbox launches
+	// The trust file must exist at the per-run path before the sandbox launches
 	// (the OCI spec references the mount source); the sidecar bring-up runs
-	// before that launch, so writing here is early enough.
-	if err := agenthost.WriteInjectorCert(runID, certPEM); err != nil {
+	// before that launch, so writing here is early enough. It carries the host's
+	// system roots plus this run's leaf, because SSL_CERT_FILE is process-global
+	// in the jail — see ghinjector.TrustBundlePEM for why that widens nothing.
+	if err := agenthost.WriteInjectorCert(runID, ghinjector.TrustBundlePEM(certPEM)); err != nil {
 		return "", "", fmt.Errorf("runsidecar: write gh-injector cert: %w", err)
 	}
 	token, err := randomToken()

@@ -98,7 +98,7 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
 		t.Fatalf("mkdir cert root: %v", err)
 	}
-	if err := os.WriteFile(certPath, certPEM, 0o640); err != nil {
+	if err := os.WriteFile(certPath, ghinjector.TrustBundlePEM(certPEM), 0o640); err != nil {
 		t.Fatalf("write cert: %v", err)
 	}
 	if err := os.Chown(certPath, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {

@@ -34,10 +34,13 @@ const sandboxTFACBinary = "/opt/tf/bin/tfac"
 // sandbox.TrustedGHBinaryDestination; a drift test cross-checks the two.
 const sandboxGHBinary = "/opt/tf/bin/gh"
 
-// sandboxGHInjectorCert is the in-sandbox path the per-run gh-injector TLS
-// certificate is bind-mounted at (read-only). SSL_CERT_FILE points gh here so
-// it trusts the injector's per-run self-signed leaf — the sole root gh sees, no
-// rootfs trust-store edit. Mirrored broker-side as
+// sandboxGHInjectorCert is the in-sandbox path the per-run gh-injector trust
+// file is bind-mounted at (read-only). SSL_CERT_FILE points gh here so it
+// trusts the injector's per-run self-signed leaf without any rootfs
+// trust-store edit. The file carries the host's system roots alongside that
+// leaf — SSL_CERT_FILE is process-global, so a leaf-only file would narrow
+// every other in-jail TLS client's file-sourced trust; see
+// ghinjector.TrustBundlePEM. Mirrored broker-side as
 // sandbox.TrustedGHInjectorCertDestination.
 const sandboxGHInjectorCert = "/run/tf-gh-injector.crt"
 

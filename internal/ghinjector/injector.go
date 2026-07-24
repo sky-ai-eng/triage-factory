@@ -20,10 +20,12 @@
 // # TLS, but no interception
 //
 // gh forces https to any GH_HOST and rejects scheme prefixes, so the injector
-// serves TLS with a per-run self-signed certificate (GenerateCert); the cert is
-// bind-mounted into the jail and SSL_CERT_FILE points gh at it. There is no TLS
-// interception of GitHub anywhere — the injector terminates gh's connection with
-// its own per-run cert and opens its own TLS connection to the real upstream.
+// serves TLS with a per-run self-signed certificate (GenerateCert), published to
+// the jail through a bind-mounted trust file SSL_CERT_FILE points at
+// (TrustBundlePEM — the system roots plus this run's leaf, since that env var is
+// process-global). There is no TLS interception of GitHub anywhere — the
+// injector terminates gh's connection with its own per-run cert and opens its
+// own TLS connection to the real upstream.
 //
 // # Path surface
 //
