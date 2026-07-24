@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/prskeleton"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -47,6 +49,12 @@ type runConfig struct {
 	repo      string  // resolved GitHub repo (empty for Jira lazy runs)
 	prNumber  int     // PR number (0 for non-PR runs); set so the runAgent defer can call worktree.CleanupPRConfig and reclaim the per-run branch + push remote the bare repo would otherwise accumulate
 	projectID *string // entity's project assignment (nil for un-assigned); used to copy the project's knowledge-base into ./_scratch/project-knowledge/
+
+	// prSkeleton is the rendered PR history block folded into the run's
+	// static task context. Empty for a non-PR run, and empty (never fatal)
+	// when the fetch fails — the run proceeds with the point-in-time event
+	// context it has always had.
+	prSkeleton string
 
 	extraAllowedTools string // comma-separated extra tools from prompt.AllowedTools + agent scans; merged into --allowedTools at spawn time
 
@@ -426,9 +434,7 @@ func cloneHostBase(cloneURL string) string {
 // orchestrator holds no GitHub credential for either. Elsewhere (all/local)
 // ghClient is the resolver-built client and the clone injects a real token.
 func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, rootKey string, task domain.Task, ghClient *ghclient.Client, execSandbox *executorSandbox) (runConfig, error) {
-	if execSandbox != nil {
-		ghClient = ghclient.NewProxyClient(execSandbox.res.GitHubAPIURL, execSandbox.res.GitHubAPIToken)
-	}
+	ghClient = prReadClient(ghClient, execSandbox)
 	if ghClient == nil {
 		return runConfig{}, fmt.Errorf("GitHub credentials not configured")
 	}
@@ -559,17 +565,55 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, rootKey string,
 	s.awaitClassification(ctx, orgID, task.EntityID)
 
 	return runConfig{
-		orgID:     orgID,
-		scope:     fmt.Sprintf("Repository: %s/%s\nPR: #%d\nBranch: %s", owner, repo, prNumber, pr.HeadRef),
-		toolsRef:  ai.GHToolsTemplate,
-		wtPath:    wtPath,
-		hasWT:     true,
-		runRoot:   wtPath, // GitHub PR runs: worktree IS the run-root, so $TRIAGE_FACTORY_CONVERSATION_ROOT resolves to the worktree
-		owner:     owner,
-		repo:      repo,
-		prNumber:  prNumber,
-		projectID: lookupEntityProjectID(s.entities, orgID, task.EntityID),
+		orgID:      orgID,
+		scope:      fmt.Sprintf("Repository: %s/%s\nPR: #%d\nBranch: %s", owner, repo, prNumber, pr.HeadRef),
+		toolsRef:   ai.GHToolsTemplate,
+		wtPath:     wtPath,
+		hasWT:      true,
+		runRoot:    wtPath, // GitHub PR runs: worktree IS the run-root, so $TRIAGE_FACTORY_CONVERSATION_ROOT resolves to the worktree
+		owner:      owner,
+		repo:       repo,
+		prNumber:   prNumber,
+		projectID:  lookupEntityProjectID(s.entities, orgID, task.EntityID),
+		prSkeleton: renderPRSkeleton(ctx, ghClient, owner, repo, prNumber),
 	}, nil
+}
+
+// prReadClient resolves the client a PR-scoped read should use. On the
+// executor path every GitHub read routes through the run's credential
+// sidecar (the REST proxy), so the orchestrator holds no token; elsewhere
+// the resolver-built client is already the right one.
+func prReadClient(ghClient *ghclient.Client, execSandbox *executorSandbox) *ghclient.Client {
+	if execSandbox != nil {
+		return ghclient.NewProxyClient(execSandbox.res.GitHubAPIURL, execSandbox.res.GitHubAPIToken)
+	}
+	return ghClient
+}
+
+// renderPRSkeleton fetches and renders the PR's history for the run's static
+// context. Two GETs through whichever client the caller resolved, so it
+// inherits the run's credential path (the sidecar's REST proxy on an
+// executor, the org's App-or-PAT client elsewhere) with nothing new to
+// provision.
+//
+// Re-fetched per step rather than carried on the blueprint run: a later
+// step's history should include what its predecessors just pushed, which a
+// value frozen at the first step's setup could not show.
+//
+// Best-effort by construction: a failure returns "" and the run proceeds
+// with the context it has always had. History is an enrichment, and a
+// GitHub hiccup fetching it must never be the reason a delegation dies.
+func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, repo string, prNumber int) string {
+	if ghClient == nil || owner == "" || repo == "" || prNumber == 0 {
+		return ""
+	}
+	sk, err := prskeleton.FetchPR(ctx, ghClient, owner, repo, prNumber)
+	if err != nil {
+		delegateLog.Warn("fetch PR history skeleton failed; run continues without it",
+			"repo", owner+"/"+repo, "pr", prNumber, "error", err)
+		return ""
+	}
+	return prskeleton.Render(*sk, prskeleton.Options{Now: time.Now()})
 }
 
 // setupJira prepares the run-root for a Jira delegation. No repo is
