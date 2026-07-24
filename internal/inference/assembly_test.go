@@ -173,6 +173,48 @@ func TestBijection_IsErrorSurvives(t *testing.T) {
 	}
 }
 
+// TestContentBlocks_UnsupportedProviderTypeDropped pins the deliberate
+// asymmetry: a provider block type the domain can't model (here input_audio) is
+// dropped on ingest, the representable blocks survive, and — critically — the
+// resulting row still re-assembles without error, so one exotic block never
+// bricks a conversation's continuation.
+func TestContentBlocks_UnsupportedProviderTypeDropped(t *testing.T) {
+	msg := schemas.ChatMessage{
+		Role:            schemas.ChatMessageRoleTool,
+		ChatToolMessage: &schemas.ChatToolMessage{ToolCallID: strPtr("t1")},
+		Content: &schemas.ChatMessageContent{ContentBlocks: []schemas.ChatContentBlock{
+			{Type: schemas.ChatContentBlockTypeText, Text: strPtr("see attached")},
+			{Type: schemas.ChatContentBlockTypeInputAudio, InputAudio: &schemas.ChatInputAudio{Data: "AAAA"}},
+			{Type: schemas.ChatContentBlockTypeImage, ImageURLStruct: &schemas.ChatInputImage{URL: "data:image/png;base64,AA"}},
+		}},
+	}
+	row, err := MessageToRow(msg)
+	if err != nil {
+		t.Fatalf("MessageToRow: %v", err)
+	}
+	if row.Content != "see attached" {
+		t.Fatalf("text content must survive, got %q", row.Content)
+	}
+	if len(row.ContentBlocks) != 1 || row.ContentBlocks[0].Type != domain.ContentBlockImage {
+		t.Fatalf("audio must be dropped and image kept, got %+v", row.ContentBlocks)
+	}
+	// The row that carried an unsupported block must still re-assemble — the
+	// bug this guards against is a kept stub that the send path then rejects.
+	if _, err := rowToMessage(row); err != nil {
+		t.Fatalf("re-assembly must not error after an unsupported block was dropped: %v", err)
+	}
+}
+
+// TestContentBlocksToSchema_RejectsOutOfVocabDomainType pins the strict half:
+// the send path treats an out-of-vocabulary domain block type as an invariant
+// violation and fails loud (it can only occur on a genuine bug now that ingest
+// never produces one).
+func TestContentBlocksToSchema_RejectsOutOfVocabDomainType(t *testing.T) {
+	if _, err := contentBlocksToSchema([]domain.ContentBlock{{Type: "input_audio"}}); err == nil {
+		t.Fatal("an out-of-vocabulary domain block type must error on the send path")
+	}
+}
+
 func TestRowsToMessages_SeqOrdering(t *testing.T) {
 	// Ids arrive out of order; seq overrides. A compaction result at seq 1.5
 	// lands between id 1 and id 2.

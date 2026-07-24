@@ -424,6 +424,14 @@ func contentBlocksToSchema(blocks []domain.ContentBlock) ([]schemas.ChatContentB
 				}
 			}
 		default:
+			// The domain content-block vocabulary is OURS and closed
+			// (text/image/file). A value outside it is a real invariant
+			// violation — a new domain type left unmapped, or a corrupt row —
+			// so fail loud rather than emit a payload-less block to the
+			// provider. This is the strict half of a deliberate asymmetry with
+			// contentBlocksToDomain, which is liberal toward the provider's open
+			// vocabulary; it never produces an out-of-vocabulary domain block,
+			// so this default only fires on a genuine bug.
 			return nil, fmt.Errorf("unsupported content block type %q", b.Type)
 		}
 		out[i] = cb
@@ -457,8 +465,15 @@ func contentBlocksToDomain(blocks []schemas.ChatContentBlock) []domain.ContentBl
 				}
 			}
 		default:
-			// A block type the domain model doesn't carry (audio, refusal):
-			// preserve the discriminator so it isn't silently dropped.
+			// The provider's block vocabulary is open (audio, refusal, whatever
+			// they add next); the domain models only text/image/file. Drop what
+			// we can't represent rather than keep a stub carrying an
+			// unrepresentable Type — a kept stub would be an out-of-vocabulary
+			// domain block that contentBlocksToSchema then rejects, bricking any
+			// follow-up request assembled from this row. The payload is
+			// unrepresentable regardless (the domain type has no field for it),
+			// so dropping it loses nothing a stub would have preserved.
+			continue
 		}
 		out = append(out, db)
 	}
