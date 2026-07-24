@@ -29,6 +29,13 @@ var anthropicPublicPrices = map[string]expectedPrice{
 	"claude-haiku-4-5":  {input: 1e-06, output: 5e-06, cacheRead: 1e-07, cache5m: 1.25e-06, cache1h: 2e-06},
 }
 
+func TestPricingProvenance(t *testing.T) {
+	source, commit, fetched := PricingProvenance()
+	if source == "" || commit == "" || fetched == "" {
+		t.Fatalf("provenance must be populated from pricing_provenance.json: source=%q commit=%q fetched=%q", source, commit, fetched)
+	}
+}
+
 func TestPricing_DatasheetLoads(t *testing.T) {
 	if err := PricingLoadError(); err != nil {
 		t.Fatalf("embedded datasheet must parse: %v", err)

@@ -10,39 +10,40 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
-// The pricing datasheet is a pinned snapshot of upstream model prices. bifrost
-// resolves cost from the datasheet published at https://getbifrost.ai/datasheet
-// (its framework/modelcatalog DefaultURL), which upstream-syncs LiteLLM's
-// model_prices_and_context_window.json. This snapshot is taken from that
-// authoritative LiteLLM source, filtered to text-generation models (mode in
-// chat/responses/completion) across every provider — not just the ones TF
-// drives today — so the package prices any chat model out of the gate. Non-text
-// modalities (image/audio/embedding/rerank/…) are dropped: the text-cost path
-// below can't price them, and CostForUsage returns ok=false for a mode it
-// doesn't price. It is never a TF-authored price table — refreshing it is a
-// mechanical re-fetch-and-filter of the constants below.
+// pricing_datasheet.json is a snapshot of upstream model PRICES — the per-model
+// rate numbers only. It, and pricing_provenance.json beside it, are the sole
+// outputs of scripts/refresh-pricing.sh (run daily by the refresh-pricing
+// workflow): a pure data operation that rewrites these two JSON files and never
+// touches Go source. A refresh can change what a model costs — never how cost is
+// computed (that is the formula in computeTextCost, which only a human edits).
 //
-// Provenance (record on every refresh so the source is auditable):
-//   - Source:  https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
-//   - Commit:  f2479cc704f6e63d5510929d30ce8e11ffe43467
-//   - Fetched: 2026-07-24
-//   - Filter:  mode in {"chat","responses","completion"}
-//   - Cost logic (below) mirrors bifrost framework/modelcatalog computeTextCost
-//     as of fork commit 0f07e6f726be1bd46e81c0982ff0618435560be9.
-const (
-	pricingSource  = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
-	pricingCommit  = "f2479cc704f6e63d5510929d30ce8e11ffe43467"
-	pricingFetched = "2026-07-24"
-)
-
-// PricingProvenance reports where the embedded datasheet snapshot came from so
-// the source is auditable at runtime and a refresh is a mechanical re-vendor.
-func PricingProvenance() (source, commit, fetched string) {
-	return pricingSource, pricingCommit, pricingFetched
-}
+// Source: LiteLLM's model_prices_and_context_window.json (the table
+// getbifrost.ai/datasheet syncs), filtered to the text-generation models the
+// formula prices (mode chat/responses/completion) across every provider — not
+// just the ones TF drives today, so the package prices any chat model out of the
+// gate. Non-text modalities (image/audio/embedding/rerank/…) are dropped;
+// CostForUsage returns ok=false for a mode it doesn't price. Never a TF-authored
+// price table. pricing_provenance.json records the exact upstream commit + date,
+// kept auditable at runtime via PricingProvenance.
 
 //go:embed pricing_datasheet.json
 var pricingDatasheetJSON []byte
+
+//go:embed pricing_provenance.json
+var pricingProvenanceJSON []byte
+
+// PricingProvenance reports where the embedded datasheet snapshot came from so
+// the source is auditable at runtime. Values live in pricing_provenance.json so
+// a refresh touches only data, never this file.
+func PricingProvenance() (source, commit, fetched string) {
+	var p struct {
+		Source  string `json:"source"`
+		Commit  string `json:"commit"`
+		Fetched string `json:"fetched"`
+	}
+	_ = json.Unmarshal(pricingProvenanceJSON, &p)
+	return p.Source, p.Commit, p.Fetched
+}
 
 // tokenTierAbove200K is the long-context boundary: above it a model bills the
 // per-token/-cache rates at their *_above_200k tier (Anthropic's 1M-context
@@ -172,12 +173,23 @@ func lookupPrice(table map[string]modelPrice, model string) (modelPrice, bool) {
 	return modelPrice{}, false
 }
 
-// computeTextCost reproduces bifrost's standard-tier text billing: non-cached
+// computeTextCost is the pricing FORMULA — the one part of this package the
+// daily data refresh never touches. It is vendored from bifrost
+// framework/modelcatalog computeTextCost (fork commit
+// 0f07e6f726be1bd46e81c0982ff0618435560be9) and changes only by a deliberate
+// human edit. It reproduces bifrost's standard-tier text billing: non-cached
 // prompt tokens at the input rate, cache reads at the cache-read rate, cache
 // writes split into 1-hour (2×) and 5-minute (1.25×) buckets, and completion
 // tokens at the output rate — each rate selected by the >200k long-context
 // tier. The clamp order (reads ≤ prompt, writes ≤ prompt−reads, 1h ≤ writes)
 // matches upstream so a malformed usage payload can't bill negative.
+//
+// The risk this comment guards against: the datasheet's SHAPE can outrun a
+// frozen formula. A new upstream cost dimension this doesn't read (a finer
+// context tier, a new cache-TTL bucket) would silently underprice the models
+// that use it. That is why scripts/refresh-pricing.sh flags any per-token/cache
+// cost field it doesn't recognize — so a new dimension surfaces as a reviewed
+// change to this formula, not silent drift in the data.
 func computeTextCost(p modelPrice, u Usage) float64 {
 	prompt := u.InputTokens
 	completion := u.OutputTokens
