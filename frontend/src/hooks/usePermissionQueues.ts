@@ -103,7 +103,7 @@ export function usePermissionQueues(): PermissionQueues {
 
   const ingest = useCallback(
     (event: PermissionRequestEvent) => {
-      const runID = event.run_id
+      const runID = event.conversation_id
       const req = event.data
       setQueues((prev) => {
         const q = prev[runID] ?? []
@@ -127,7 +127,7 @@ export function usePermissionQueues(): PermissionQueues {
 
   const forget = useCallback(
     (event: PermissionResolvedEvent) => {
-      dropPermission(event.run_id, event.data.request_id)
+      dropPermission(event.conversation_id, event.data.request_id)
     },
     [dropPermission],
   )

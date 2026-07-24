@@ -35,7 +35,7 @@ func newCaptureStores(t *testing.T, eventTriggered bool) (db.Stores, RunInfo) {
 }
 
 // newCaptureStoresConn is newCaptureStores plus the raw *sql.DB, for touch tests
-// that read run_memory_entities directly (the store interface has no
+// that read conversation_memory_entities directly (the store interface has no
 // role-returning read).
 func newCaptureStoresConn(t *testing.T, eventTriggered bool) (*sql.DB, db.Stores, RunInfo) {
 	t.Helper()
@@ -100,7 +100,7 @@ func TestCapture_JiraActions_RecordExternalActions(t *testing.T) {
 				}
 				a := acts[0]
 				if a.Action != domain.ActionIssueCreated || a.Provider != domain.ArtifactProviderJira ||
-					a.Credential != domain.CredentialJiraOrg || a.Target != "SKY-1" || a.RunID != info.RunID ||
+					a.Credential != domain.CredentialJiraOrg || a.Target != "SKY-1" || a.ConversationID != info.RunID ||
 					a.TeamID != runmode.LocalDefaultTeamID {
 					t.Errorf("create action mismatch: %+v", a)
 				}
@@ -253,7 +253,7 @@ func TestCapture_GithubReply_RecordsArtifactlessAction(t *testing.T) {
 			a := acts[0]
 			if a.Action != domain.ActionCommentPosted || a.Provider != domain.ArtifactProviderGitHub ||
 				a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo#1" ||
-				a.ExternalID != "777" || a.RunID != info.RunID {
+				a.ExternalID != "777" || a.ConversationID != info.RunID {
 				t.Errorf("reply action mismatch: %+v", a)
 			}
 			// The audit row deep-links to the reply on the PR.
@@ -329,7 +329,7 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsArtifactlessAction(t *test
 				a := acts[0]
 				if a.Action != domain.ActionReviewCommentEdited || a.Provider != domain.ArtifactProviderGitHub ||
 					a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo" ||
-					a.ExternalID != "999" || a.URL != "" || a.RunID != info.RunID {
+					a.ExternalID != "999" || a.URL != "" || a.ConversationID != info.RunID {
 					t.Errorf("review-comment edit action mismatch: %+v", a)
 				}
 				assertActor(t, a, eventTriggered)
@@ -357,7 +357,7 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsArtifactlessAction(t *test
 				a := acts[0]
 				if a.Action != domain.ActionReviewCommentDeleted || a.Provider != domain.ArtifactProviderGitHub ||
 					a.Credential != domain.CredentialGitHubApp || a.Target != "octo/repo" ||
-					a.ExternalID != "999" || a.URL != "" || a.RunID != info.RunID {
+					a.ExternalID != "999" || a.URL != "" || a.ConversationID != info.RunID {
 					t.Errorf("review-comment delete action mismatch: %+v", a)
 				}
 				assertActor(t, a, eventTriggered)

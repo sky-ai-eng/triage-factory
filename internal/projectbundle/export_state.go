@@ -56,7 +56,7 @@ func collectExportState(ctx context.Context, txr db.TxRunner, kb *kbstore.Store,
 		project      *domain.Project
 		conversation *domain.Conversation
 		claims       []domain.Claim
-		messages     []domain.AgentMessage
+		messages     []domain.Message
 	)
 	if err := txr.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -306,7 +306,7 @@ func appendSessionArtifacts(resolvedProjectRoot, curatorSessionID string, out *[
 func appendCuratorArtifacts(
 	conversation *domain.Conversation,
 	claims []domain.Claim,
-	messages []domain.AgentMessage,
+	messages []domain.Message,
 	out *[]bundleArtifact,
 ) error {
 	if conversation == nil {

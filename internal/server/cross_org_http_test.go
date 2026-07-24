@@ -81,16 +81,16 @@ func TestCrossOrgHTTP_ProjectGet(t *testing.T) {
 	}
 }
 
-func TestCrossOrgHTTP_AgentRunGet(t *testing.T) {
+func TestCrossOrgHTTP_ConversationGet(t *testing.T) {
 	r := newAuthRig(t)
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
 	runA := seedRunInOrg(t, r, orgA, alice, "run-get")
 
-	if got := r.requestWithSid("GET", "/api/agent/runs/"+runA, sidA).StatusCode; got != http.StatusOK {
-		t.Errorf("alice GET /api/agent/runs/%s = %d, want 200", runA, got)
+	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA, sidA).StatusCode; got != http.StatusOK {
+		t.Errorf("alice GET /api/agent/conversations/%s = %d, want 200", runA, got)
 	}
-	if got := r.requestWithSid("GET", "/api/agent/runs/"+runA, sidB).StatusCode; got != http.StatusNotFound {
-		t.Errorf("bob GET /api/agent/runs/%s = %d, want 404 (cross-org leak)", runA, got)
+	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA, sidB).StatusCode; got != http.StatusNotFound {
+		t.Errorf("bob GET /api/agent/conversations/%s = %d, want 404 (cross-org leak)", runA, got)
 	}
 }
 
@@ -103,11 +103,11 @@ func TestCrossOrgHTTP_AgentArtifacts(t *testing.T) {
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
 	runA := seedRunInOrg(t, r, orgA, alice, "run-arts")
 
-	if got := r.requestWithSid("GET", "/api/agent/runs/"+runA+"/artifacts", sidA).StatusCode; got != http.StatusOK {
-		t.Errorf("alice GET /api/agent/runs/%s/artifacts = %d, want 200", runA, got)
+	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA+"/artifacts", sidA).StatusCode; got != http.StatusOK {
+		t.Errorf("alice GET /api/agent/conversations/%s/artifacts = %d, want 200", runA, got)
 	}
-	if got := r.requestWithSid("GET", "/api/agent/runs/"+runA+"/artifacts", sidB).StatusCode; got != http.StatusNotFound {
-		t.Errorf("bob GET /api/agent/runs/%s/artifacts = %d, want 404 (cross-org leak)", runA, got)
+	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA+"/artifacts", sidB).StatusCode; got != http.StatusNotFound {
+		t.Errorf("bob GET /api/agent/conversations/%s/artifacts = %d, want 404 (cross-org leak)", runA, got)
 	}
 }
 

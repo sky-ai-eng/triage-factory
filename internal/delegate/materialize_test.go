@@ -89,7 +89,7 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 	ensureTestPrompt(t, database, domain.Prompt{ID: "p1", Name: "T", Body: "x", Source: "user"})
 	// Every run belongs to a blueprint_run now, so the prior memory is
 	// namespaced by its blueprint_run_id. Seed that row (runs.blueprint_run_id is
-	// NOT NULL and the run_memory FK needs it).
+	// NOT NULL and the conversation_memory FK needs it).
 	const priorBlueprintRunID = "bpr-prior"
 	if err := stores.Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: "bp-prior", Name: "BP", Source: "user", TeamID: runmode.LocalDefaultTeamID,
@@ -102,7 +102,7 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 	); err != nil {
 		t.Fatalf("blueprint_run: %v", err)
 	}
-	dbtest.SeedConversation(t, database, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.Conversation{
 		ID: "prior-run", TaskID: task.ID, PromptID: "p1", Status: "completed", Model: "m", BlueprintRunID: priorBlueprintRunID,
 	})
 	if err := stores.TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "prior-run", entity.ID, priorBlueprintRunID, "what i did last time"); err != nil {
@@ -157,7 +157,7 @@ func TestMaterializePriorMemories_BlueprintSiblingsShareFolder(t *testing.T) {
 	ensureTestPrompt(t, database, domain.Prompt{ID: "p1", Name: "T", Body: "x", Source: "user"})
 
 	// Seed the blueprint + blueprint_run the two step runs share. The
-	// run_memory.blueprint_run_id FK (ON DELETE SET NULL) needs this row.
+	// conversation_memory.blueprint_run_id FK (ON DELETE SET NULL) needs this row.
 	const blueprintRunID = "bpr-shared"
 	if err := stores.Blueprints.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: "bp1", Name: "BP", Source: "user", TeamID: runmode.LocalDefaultTeamID,
@@ -172,7 +172,7 @@ func TestMaterializePriorMemories_BlueprintSiblingsShareFolder(t *testing.T) {
 	}
 
 	// Step 1 runs and writes its memory under the shared blueprint namespace.
-	dbtest.SeedConversation(t, database, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.Conversation{
 		ID: "step1-run", TaskID: task.ID, PromptID: "p1", Status: "completed", Model: "m", BlueprintRunID: blueprintRunID,
 	})
 	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, "step1-run", entity.ID, blueprintRunID, "step 1 findings"); err != nil {

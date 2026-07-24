@@ -21,9 +21,9 @@ import (
 // loosened).
 //
 // The per-entity firing gate's runs-shaped half lives on
-// AgentRunStore (HasActiveAutoRunForEntity) — strict ownership. The
+// ConversationStore (HasActiveAutoRunForEntity) — strict ownership. The
 // router composes the gate from this store's HasPendingForEntity +
-// AgentRunStore's HasActiveAutoRunForEntity.
+// ConversationStore's HasActiveAutoRunForEntity.
 type pendingFiringsStore struct{ q queryer }
 
 func newPendingFiringsStore(q queryer) db.PendingFiringsStore {
@@ -34,7 +34,7 @@ var _ db.PendingFiringsStore = (*pendingFiringsStore)(nil)
 
 func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entityID, taskID, triggerID, triggeringEventID string) (bool, error) {
 	// creator_user_id is NOT NULL in the Postgres schema. Resolution
-	// mirrors AgentRunStore.createManual: prefer the caller-supplied
+	// mirrors ConversationStore.createManual: prefer the caller-supplied
 	// userID, fall back to the org owner. tf.current_user_id() is
 	// intentionally skipped — admin-pool inserts run without JWT
 	// claims, so the helper would return NULL and the COALESCE would
@@ -47,7 +47,7 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 	// pending_firings_creator_user_id_fkey on every busy-entity
 	// enqueue. Normalize to empty here so NULLIF collapses to NULL
 	// and COALESCE walks to the org-owner fallback. Same shape as
-	// AgentRunStore.createManual.
+	// ConversationStore.createManual.
 	//
 	// queued_at uses the schema default (now()) so the insert and
 	// the index agree on the timestamp source — no clock skew between

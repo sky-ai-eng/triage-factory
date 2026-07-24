@@ -1,4 +1,4 @@
-import type { AgentRun } from '../../types'
+import type { Conversation } from '../../types'
 import { isActiveRun } from '../../lib/runStatus'
 
 // cardStyle — the design tokens + status→tone logic for the board's lit-plane
@@ -48,7 +48,7 @@ export interface Glow {
 // colored glow on a settled/cancelled/waiting card just reads as a tinted
 // drop-shadow under the card (and those states already announce themselves via
 // the attention row / result verdict).
-export function runGlow(run: AgentRun): Glow | null {
+export function runGlow(run: Conversation): Glow | null {
   if (isActiveRun(run)) return { tone: 'active', breathing: true }
   return null
 }

@@ -158,8 +158,8 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		// The sink's write set: one assistant row stamped with the claim.
 		ip := func(n int) *int { return &n }
 		withClaims(t, h, func(ts db.TxStores) error {
-			_, err := ts.AgentRuns.InsertMessage(ctx, h.OrgID, &domain.AgentMessage{
-				RunID: convID, UserID: h.UserID, ClaimID: claimID,
+			_, err := ts.Conversations.InsertMessage(ctx, h.OrgID, &domain.Message{
+				ConversationID: convID, UserID: h.UserID, ClaimID: claimID,
 				Role: "assistant", Subtype: "text", Content: "ack",
 				InputTokens: ip(11), OutputTokens: ip(22), CacheReadTokens: ip(33), CacheCreationTokens: ip(44),
 			})
@@ -205,7 +205,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 
 		// Transcript read: user turn + assistant row, Delivered/ClaimID
 		// surfaced for the history synthesizer.
-		var msgs []domain.AgentMessage
+		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
 			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
 			msgs = ms
@@ -247,7 +247,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		if flipped, err := h.Stores.Curator.ReleaseActiveTurnSystem(ctx, h.OrgID, convID, "completed", "", 0.03, 500, 1); err != nil || !flipped {
 			t.Fatalf("release: flipped=%v err=%v", flipped, err)
 		}
-		var msgs []domain.AgentMessage
+		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
 			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
 			msgs = ms
@@ -275,7 +275,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			return err
 		})
 
-		var msgs []domain.AgentMessage
+		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
 			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
 			msgs = ms
@@ -359,7 +359,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 
 		var claims []domain.Claim
-		var msgs []domain.AgentMessage
+		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
 			cs, err := ts.Curator.ListClaims(ctx, h.OrgID, convID)
 			if err != nil {
@@ -478,7 +478,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		if inFlight != nil {
 			t.Errorf("InFlightTurn after drain = %+v, want nil", inFlight)
 		}
-		var msgs []domain.AgentMessage
+		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
 			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
 			msgs = ms
@@ -591,8 +591,8 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		// The audit row the dispatch writes after rendering.
 		var auditID int64
 		withClaims(t, h, func(ts db.TxStores) error {
-			id, err := ts.AgentRuns.InsertMessage(ctx, h.OrgID, &domain.AgentMessage{
-				RunID: convID, UserID: h.UserID,
+			id, err := ts.Conversations.InsertMessage(ctx, h.OrgID, &domain.Message{
+				ConversationID: convID, UserID: h.UserID,
 				Role: "system", Subtype: "context_change", Content: "[system note] ...",
 			})
 			auditID = id
@@ -638,7 +638,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 
 		// The audit row was deleted by the revert.
-		var msgs []domain.AgentMessage
+		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
 			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
 			msgs = ms
@@ -661,7 +661,8 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			t.Fatalf("claim: ok=%v err=%v", ok, err)
 		}
 		err := h.Stores.Tx.SyntheticClaimsWithTx(ctx, h.OrgID, h.UserID, func(ts db.TxStores) error {
-			return ts.Curator.ArchiveLiveConversation(ctx, h.OrgID, projectID, h.UserID)
+			_, e := ts.Curator.ArchiveLiveConversation(ctx, h.OrgID, projectID, h.UserID)
+			return e
 		})
 		if !errors.Is(err, db.ErrCuratorInFlight) {
 			t.Fatalf("archive with live claim err = %v, want ErrCuratorInFlight", err)
@@ -670,9 +671,15 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		if _, err := h.Stores.Curator.ReleaseActiveTurnSystem(ctx, h.OrgID, convID, "cancelled", "user cancelled", 0, 0, 0); err != nil {
 			t.Fatalf("release: %v", err)
 		}
+		var archivedID string
 		withClaims(t, h, func(ts db.TxStores) error {
-			return ts.Curator.ArchiveLiveConversation(ctx, h.OrgID, projectID, h.UserID)
+			id, e := ts.Curator.ArchiveLiveConversation(ctx, h.OrgID, projectID, h.UserID)
+			archivedID = id
+			return e
 		})
+		if archivedID != convID {
+			t.Fatalf("archive returned id %q, want the archived conversation %q", archivedID, convID)
+		}
 
 		var live *domain.Conversation
 		withClaims(t, h, func(ts db.TxStores) error {
@@ -685,7 +692,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 		// The queued row was deleted with the archive; the archived
 		// transcript keeps only delivered history.
-		var msgs []domain.AgentMessage
+		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
 			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
 			msgs = ms
@@ -709,10 +716,17 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		// Archiving with no live conversation is a tolerated no-op... after
 		// archiving the fresh one too.
 		withClaims(t, h, func(ts db.TxStores) error {
-			if err := ts.Curator.ArchiveLiveConversation(ctx, h.OrgID, projectID, h.UserID); err != nil {
+			if _, err := ts.Curator.ArchiveLiveConversation(ctx, h.OrgID, projectID, h.UserID); err != nil {
 				return err
 			}
-			return ts.Curator.ArchiveLiveConversation(ctx, h.OrgID, projectID, h.UserID)
+			id, err := ts.Curator.ArchiveLiveConversation(ctx, h.OrgID, projectID, h.UserID)
+			if err != nil {
+				return err
+			}
+			if id != "" {
+				t.Errorf("archive with no live conversation returned id %q, want empty", id)
+			}
+			return nil
 		})
 	})
 
@@ -907,14 +921,14 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 		delivered := true
 		seq := 1.5
-		msgs := []domain.AgentMessage{
-			{RunID: conv.ID, UserID: h.UserID, Role: "user", Subtype: "text", Content: "imported turn", Delivered: &delivered},
-			{RunID: conv.ID, UserID: h.UserID, ClaimID: claim.ID, Role: "assistant", Subtype: "text", Content: "imported ack",
+		msgs := []domain.Message{
+			{ConversationID: conv.ID, UserID: h.UserID, Role: "user", Subtype: "text", Content: "imported turn", Delivered: &delivered},
+			{ConversationID: conv.ID, UserID: h.UserID, ClaimID: claim.ID, Role: "assistant", Subtype: "text", Content: "imported ack",
 				InputTokens: &tokens, CostUSD: &cost},
 			// A compacted row: retired from the active window with a
 			// fractional assembly override. Both fields must survive the
 			// round-trip or the row reappears active after an import.
-			{RunID: conv.ID, UserID: h.UserID, Role: "assistant", Subtype: "text", Content: "imported compaction",
+			{ConversationID: conv.ID, UserID: h.UserID, Role: "assistant", Subtype: "text", Content: "imported compaction",
 				Delivered: &delivered, WindowState: domain.MessageWindowInactive, Seq: &seq},
 		}
 		if err := h.Stores.Curator.ImportConversationStateSystem(ctx, h.OrgID, conv, []domain.Claim{claim}, msgs); err != nil {
@@ -931,7 +945,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			t.Fatalf("imported conversation = %+v, want %s with sess-imported", live, conv.ID)
 		}
 		var claims []domain.Claim
-		var gotMsgs []domain.AgentMessage
+		var gotMsgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
 			cs, err := ts.Curator.ListClaims(ctx, h.OrgID, conv.ID)
 			if err != nil {
@@ -947,7 +961,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 		// The seq override changes assembly order relative to the backend's
 		// auto-assigned ids, so rows are located by content, not position.
-		byContent := map[string]domain.AgentMessage{}
+		byContent := map[string]domain.Message{}
 		for _, m := range gotMsgs {
 			byContent[m.Content] = m
 		}

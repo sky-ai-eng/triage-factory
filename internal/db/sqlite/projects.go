@@ -202,13 +202,6 @@ func (s *projectStore) Delete(ctx context.Context, orgID, id string) error {
 	return nil
 }
 
-// SetCuratorSessionID is a transitional no-op: the SDK resume handle moved
-// off the project row (the curator conversation's sdk_session_id absorbs
-// it), so there is no column left to write here.
-func (s *projectStore) SetCuratorSessionID(ctx context.Context, orgID, projectID, sessionID string) error {
-	return assertLocalOrg(orgID)
-}
-
 func (s *projectStore) BumpUpdatedAt(ctx context.Context, orgID, id string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err

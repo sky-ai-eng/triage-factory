@@ -58,7 +58,7 @@ func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain
 	`,
 		id, orgID, nullIfEmpty(e.TeamID), e.Provider, e.Action, e.Target,
 		nullIfEmpty(e.ExternalID), nullIfEmpty(e.URL), nullIfEmpty(e.FromState),
-		nullIfEmpty(e.ToState), nullIfEmpty(e.RunID), nullIfEmpty(e.ActorUserID),
+		nullIfEmpty(e.ToState), nullIfEmpty(e.ConversationID), nullIfEmpty(e.ActorUserID),
 		e.Credential, dedupKey, nullIfEmpty(e.DetailJSON),
 	)
 	return err
@@ -159,7 +159,7 @@ func scanExternalActionRows(rows *sql.Rows) ([]domain.ExternalAction, error) {
 func scanExternalAction(sc rowScanner, e *domain.ExternalAction) error {
 	return sc.Scan(
 		&e.ID, &e.OrgID, &e.TeamID, &e.Provider, &e.Action, &e.Target,
-		&e.ExternalID, &e.URL, &e.FromState, &e.ToState, &e.RunID,
+		&e.ExternalID, &e.URL, &e.FromState, &e.ToState, &e.ConversationID,
 		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.OccurredAt,
 	)
 }

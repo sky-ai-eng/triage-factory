@@ -1,50 +1,50 @@
 import { describe, it, expect } from 'vitest'
-import type { AgentMessage } from '../types'
+import type { Message } from '../types'
 import { appendToFeed, feedFromMessages, EMPTY_FEED } from './runFeed'
 
 let nextID = 1
-function msg(over: Partial<AgentMessage>): AgentMessage {
+function msg(over: Partial<Message>): Message {
   return {
-    ID: nextID++,
-    RunID: 'r1',
-    Role: 'assistant',
-    Content: '',
-    Subtype: 'text',
-    ToolCallID: '',
-    IsError: false,
-    Model: '',
-    CreatedAt: '2026-07-07T12:00:00Z',
+    id: nextID++,
+    conversation_id: 'r1',
+    role: 'assistant',
+    content: '',
+    subtype: 'text',
+    tool_call_id: '',
+    is_error: false,
+    model: '',
+    created_at: '2026-07-07T12:00:00Z',
     ...over,
   }
 }
 
 describe('appendToFeed', () => {
   it('returns the SAME reference for a display-no-op message (the WS handler skips the state write on identity)', () => {
-    const feed = appendToFeed(undefined, msg({ Content: 'hello', OutputTokens: 5 }))
+    const feed = appendToFeed(undefined, msg({ content: 'hello', output_tokens: 5 }))
     // A tool-result row: no ticker line, no tokens, no comment delta.
-    const after = appendToFeed(feed, msg({ Role: 'tool', ToolCallID: 'tc-1', Content: 'ok' }))
+    const after = appendToFeed(feed, msg({ role: 'tool', tool_call_id: 'tc-1', content: 'ok' }))
     expect(after).toBe(feed)
     // Same contract from an empty start: base EMPTY_FEED comes back untouched.
-    expect(appendToFeed(undefined, msg({ Role: 'tool', ToolCallID: 'tc-2' }))).toBe(EMPTY_FEED)
+    expect(appendToFeed(undefined, msg({ role: 'tool', tool_call_id: 'tc-2' }))).toBe(EMPTY_FEED)
   })
 
   it('accumulates tokens, comments, and ticker lines', () => {
     let feed = appendToFeed(
       undefined,
-      msg({ Content: 'planning', InputTokens: 100, OutputTokens: 10 }),
+      msg({ content: 'planning', input_tokens: 100, output_tokens: 10 }),
     )
     feed = appendToFeed(
       feed,
       msg({
-        Subtype: 'tool_use',
-        ToolCalls: [
+        subtype: 'tool_use',
+        tool_calls: [
           {
             id: 'tc-1',
             name: 'Bash',
             input: { command: 'triagefactory exec gh pr add-comment', description: '' },
           },
         ],
-        InputTokens: 50,
+        input_tokens: 50,
       }),
     )
     expect(feed.tokens).toBe(160)
@@ -55,9 +55,9 @@ describe('appendToFeed', () => {
   it('skips thinking and the JSON completion blob on the ticker but still counts their tokens', () => {
     let feed = appendToFeed(
       undefined,
-      msg({ Content: 'inner voice', Subtype: 'thinking', OutputTokens: 40 }),
+      msg({ content: 'inner voice', subtype: 'thinking', output_tokens: 40 }),
     )
-    feed = appendToFeed(feed, msg({ Content: '{"status":"done"}', OutputTokens: 8 }))
+    feed = appendToFeed(feed, msg({ content: '{"status":"done"}', output_tokens: 8 }))
     expect(feed.lines).toEqual([])
     expect(feed.tokens).toBe(48)
   })
@@ -65,7 +65,7 @@ describe('appendToFeed', () => {
   it('caps the ticker buffer without changing what the card shows (last 5 of at least 8 kept)', () => {
     let feed = EMPTY_FEED
     for (let i = 0; i < 20; i++) {
-      feed = appendToFeed(feed, msg({ Content: `line ${i}` }))
+      feed = appendToFeed(feed, msg({ content: `line ${i}` }))
     }
     expect(feed.lines.length).toBe(8)
     expect(feed.lines[feed.lines.length - 1].text).toBe('line 19')
@@ -75,9 +75,9 @@ describe('appendToFeed', () => {
 describe('feedFromMessages', () => {
   it('matches the fold of appendToFeed over the same messages', () => {
     const messages = [
-      msg({ Content: 'a', InputTokens: 1, OutputTokens: 2 }),
-      msg({ Role: 'tool', ToolCallID: 'tc-1', Content: 'result' }),
-      msg({ Role: 'user', Content: 'steer it' }),
+      msg({ content: 'a', input_tokens: 1, output_tokens: 2 }),
+      msg({ role: 'tool', tool_call_id: 'tc-1', content: 'result' }),
+      msg({ role: 'user', content: 'steer it' }),
     ]
     const folded = messages.reduce(
       (f, m) => appendToFeed(f, m),

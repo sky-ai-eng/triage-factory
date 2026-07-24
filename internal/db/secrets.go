@@ -77,7 +77,7 @@ type SecretStore interface {
 
 	// Delete removes a secret. Returns ok=false when no row
 	// matched, matching the pattern of other "did the write land"
-	// helpers on Stores (RequeueTask, MarkAgentRunCancelledIfActive).
+	// helpers on Stores (RequeueTask, MarkConversationCancelledIfActive).
 	Delete(ctx context.Context, orgID, key string) (ok bool, err error)
 
 	// PutUser writes (or rotates) a per-user secret — a credential

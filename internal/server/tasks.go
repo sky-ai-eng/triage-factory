@@ -497,7 +497,7 @@ func (s *Server) handleTaskAdvance(w http.ResponseWriter, r *http.Request) {
 // discardOutcome describes how the task ended up after the user
 // rejected the agent's prepared review. The DB cleanup path is the
 // same across all four values, but the human_content note baked
-// into run_memory differs — the next agent reading prior memory
+// into conversation_memory differs — the next agent reading prior memory
 // needs to know whether the human:
 //
 //   - re-queued the task (still on the docket; verdict was wrong),
@@ -547,7 +547,7 @@ const (
 //
 //   - artifact teardown: resolve every unresolved artifact the task's
 //     runs hold (close all draft PRs, dismiss all pending reviews) and
-//     write the discard verdict to run_memory.human_content, so a
+//     write the discard verdict to conversation_memory.human_content, so a
 //     returned-to-queue task leaves no stranded GitHub draft / pending
 //     review. Decoupled from run lifecycle — it never flips runs.status.
 //
@@ -612,7 +612,7 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 // Keyed on the task's runs (ListForTask spans the blueprint's step runs and any
 // standalone run) rather than the retired pending_approval lookup.
 //
-// outcome shapes the discard note baked into run_memory.human_content so the next
+// outcome shapes the discard note baked into conversation_memory.human_content so the next
 // agent reading memory can distinguish "still on the docket, the human just
 // didn't like this verdict" (requeued) from "walked away from the entity"
 // (dismissed) from "resolved it themselves" (completed) from "took over"
@@ -633,7 +633,7 @@ func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskI
 	// to dismissed is the whole resolution — there is no GitHub object to retire.
 	var prArtifacts []domain.Artifact
 	err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		runs, err := tx.AgentRuns.ListForTask(ctx, orgID, taskID)
+		runs, err := tx.Conversations.ListForTask(ctx, orgID, taskID)
 		if err != nil {
 			return fmt.Errorf("list runs for task: %w", err)
 		}

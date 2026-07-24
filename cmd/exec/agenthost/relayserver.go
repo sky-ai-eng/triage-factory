@@ -113,8 +113,8 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 			DenyMessage: dec.DenyMessage,
 		})
 
-	case opGetAgentRun:
-		run, err := s.rt.GetAgentRun(ctx)
+	case opGetConversation:
+		run, err := s.rt.GetConversation(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -213,16 +213,16 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(orgJiraBaseResult{URL: url})
 
-	case opBuildAgentRunFooter:
-		var a buildAgentRunFooterArgs
+	case opBuildAgentFooter:
+		var a buildAgentFooterArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
-		footer, err := s.rt.AgentRunFooter(ctx, a.Kind)
+		footer, err := s.rt.AgentFooter(ctx, a.Kind)
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(buildAgentRunFooterResult{Footer: footer})
+		return json.Marshal(buildAgentFooterResult{Footer: footer})
 
 	case opUpsertArtifact:
 		var a upsertArtifactArgs

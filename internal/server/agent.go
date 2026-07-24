@@ -33,12 +33,12 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	runID := r.PathValue("runID")
-	var run *domain.AgentRun
+	conversationID := r.PathValue("conversationID")
+	var run *domain.Conversation
 	var resp map[string]any
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		run, e = tx.AgentRuns.Get(r.Context(), orgID, runID)
+		run, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
 		}
@@ -81,7 +81,7 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 // background per-org cycle. It runs the SAME reconcile path as Tier 1, bounded
 // to this one run's artifacts, and pushes any transition over the WS hub.
 //
-// Authorization rides the request-claims read: AgentRuns.Get + Artifacts.ListByRun
+// Authorization rides the request-claims read: Conversations.Get + Artifacts.ListByRun
 // are RLS-scoped, so a user can only refresh a run their team can see. The GitHub
 // calls and the artifact/memory writes happen OUTSIDE that read tx (no network
 // I/O under a held transaction) — the reconciler writes via its admin-pool path.
@@ -91,7 +91,7 @@ func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Req
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	runID := r.PathValue("runID")
+	conversationID := r.PathValue("conversationID")
 
 	rc := ag.reconciler()
 	if rc == nil {
@@ -102,15 +102,15 @@ func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Req
 	// Read the run + its reconcilable non-terminal artifacts under request
 	// claims (authorization + RLS scoping). Filter to the same working set the
 	// org-wide Tier-1 query selects so the two tiers reconcile identically.
-	var run *domain.AgentRun
+	var run *domain.Conversation
 	var arts []domain.Artifact
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		run, e = tx.AgentRuns.Get(r.Context(), orgID, runID)
+		run, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil || run == nil {
 			return e
 		}
-		all, e := tx.Artifacts.ListByRun(r.Context(), orgID, runID)
+		all, e := tx.Artifacts.ListByRun(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
 		}
@@ -138,7 +138,7 @@ func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Req
 }
 
 // artifactJSON is the wire shape of one run artifact for
-// GET /api/agent/runs/{runID}/artifacts — the run's artifacts as the board /
+// GET /api/agent/conversations/{conversationID}/artifacts — the run's artifacts as the board /
 // run-detail UI (TFAC-470) consumes them, across every kind (branch /
 // pull_request / review / issue / comment). details is the PARSED details_json
 // (the kind-specific payload as a JSON object, or null when absent/unparseable)
@@ -199,20 +199,20 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	runID := r.PathValue("runID")
+	conversationID := r.PathValue("conversationID")
 
-	var run *domain.AgentRun
+	var run *domain.Conversation
 	var arts []domain.Artifact
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		run, e = tx.AgentRuns.Get(r.Context(), orgID, runID)
+		run, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
 		}
 		if run == nil {
 			return nil
 		}
-		arts, e = tx.Artifacts.ListByRun(r.Context(), orgID, runID)
+		arts, e = tx.Artifacts.ListByRun(r.Context(), orgID, conversationID)
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -230,7 +230,7 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, out)
 }
 
-// runResponse projects an AgentRun into the wire shape the frontend consumes,
+// runResponse projects an Conversation into the wire shape the frontend consumes,
 // augmented with `artifact_count` (so the Board card can show how many artifacts
 // a run produced without a per-card fetch) and the derived approval signal:
 // `has_unresolved_artifacts` (bool), `unresolved_pr_count` /
@@ -254,7 +254,7 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 // OMITTED rather than reported as a misleading false, so a transient DB/RLS hiccup
 // can't hide approval-required work; the client treats their absence as "unknown"
 // and re-derives on the next refresh.
-func runResponse(run *domain.AgentRun, artifactCount int, arts []domain.Artifact) map[string]any {
+func runResponse(run *domain.Conversation, artifactCount int, arts []domain.Artifact) map[string]any {
 	out := map[string]any{
 		"ID":                   run.ID,
 		"TaskID":               run.TaskID,
@@ -296,26 +296,23 @@ func runResponse(run *domain.AgentRun, artifactCount int, arts []domain.Artifact
 	return out
 }
 
-func (ag *agentHandler) handleAgentMessages(w http.ResponseWriter, r *http.Request) {
+func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	runID := r.PathValue("runID")
-	var messages []domain.AgentMessage
+	conversationID := r.PathValue("conversationID")
+	var messages []domain.Message
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		messages, e = tx.AgentRuns.Messages(r.Context(), orgID, runID)
+		messages, e = tx.Conversations.Messages(r.Context(), orgID, conversationID)
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
 		return
 	}
-	if messages == nil {
-		messages = []domain.AgentMessage{}
-	}
-	writeJSON(w, http.StatusOK, messages)
+	writeJSON(w, http.StatusOK, domain.MessageDTOs(messages))
 }
 
 func (ag *agentHandler) handleAgentCancel(w http.ResponseWriter, r *http.Request) {
@@ -324,28 +321,28 @@ func (ag *agentHandler) handleAgentCancel(w http.ResponseWriter, r *http.Request
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	runID := r.PathValue("runID")
+	conversationID := r.PathValue("conversationID")
 	spawner := ag.spawner()
 	if spawner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
 		return
 	}
-	if err := spawner.Cancel(orgID, runID, userID); err != nil {
+	if err := spawner.Cancel(orgID, conversationID, userID); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 
-// runVisible reports whether runID exists and is visible to the caller's org
+// runVisible reports whether conversationID exists and is visible to the caller's org
 // (and team, under RLS). The steering control ops resolve a run by id against
 // in-memory state (the process registry, the permission broker), so this is the
 // authorization gate that stops a known run id from one tenant being acted on by
 // another: a non-existent or not-visible run reads as false → the caller 404s.
-func (ag *agentHandler) runVisible(ctx context.Context, orgID, userID, runID string) (bool, error) {
+func (ag *agentHandler) runVisible(ctx context.Context, orgID, userID, conversationID string) (bool, error) {
 	var exists bool
 	err := ag.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		run, e := tx.AgentRuns.Get(ctx, orgID, runID)
+		run, e := tx.Conversations.Get(ctx, orgID, conversationID)
 		if e != nil {
 			return e
 		}
@@ -355,20 +352,20 @@ func (ag *agentHandler) runVisible(ctx context.Context, orgID, userID, runID str
 	return exists, err
 }
 
-// handleAgentMessage records a free-form user message on a run, broadcasts it
+// handleMessage records a free-form user message on a run, broadcasts it
 // to watchers, then routes it: a live run is steered in place, an `open` run is
 // woken via resume. The run is read in the same tx that records the message, so
 // a run not visible to the caller's org reads as 404 (the authz gate before any
 // control op) and an existing run's message is recorded before routing — the
 // transcript stays optimistic (the user's words show immediately). A run that
 // can take no message (terminal / no live process) is 409.
-func (ag *agentHandler) handleAgentMessage(w http.ResponseWriter, r *http.Request) {
+func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	runID := r.PathValue("runID")
+	conversationID := r.PathValue("conversationID")
 
 	var body struct {
 		Text string `json:"text"`
@@ -391,10 +388,10 @@ func (ag *agentHandler) handleAgentMessage(w http.ResponseWriter, r *http.Reques
 	// caller's org (RLS), so a missing / cross-org run is a 404 before SendMessage
 	// reaches the registry; an existing run gets the user message persisted (with
 	// the row id carried back onto msg.ID for the broadcast's client dedup).
-	msg := &domain.AgentMessage{RunID: runID, Role: "user", Subtype: "text", Content: body.Text}
+	msg := &domain.Message{ConversationID: conversationID, Role: "user", Subtype: "text", Content: body.Text}
 	var runExists bool
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		run, e := tx.AgentRuns.Get(r.Context(), orgID, runID)
+		run, e := tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
 		}
@@ -402,7 +399,7 @@ func (ag *agentHandler) handleAgentMessage(w http.ResponseWriter, r *http.Reques
 			return nil
 		}
 		runExists = true
-		id, e := tx.AgentRuns.InsertMessage(r.Context(), orgID, msg)
+		id, e := tx.Conversations.InsertMessage(r.Context(), orgID, msg)
 		if e != nil {
 			return e
 		}
@@ -417,13 +414,13 @@ func (ag *agentHandler) handleAgentMessage(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	ag.ws.Broadcast(websocket.Event{
-		Type:  "agent_message",
-		OrgID: orgID,
-		RunID: runID,
-		Data:  msg,
+		Type:           "message",
+		OrgID:          orgID,
+		ConversationID: conversationID,
+		Data:           msg.ToDTO(),
 	})
 
-	if err := spawner.SendMessage(r.Context(), orgID, runID, userID, body.Text); err != nil {
+	if err := spawner.SendMessage(r.Context(), orgID, conversationID, userID, body.Text); err != nil {
 		writeJSON(w, steerErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
@@ -441,13 +438,13 @@ func (ag *agentHandler) handleAgentInterrupt(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	runID := r.PathValue("runID")
+	conversationID := r.PathValue("conversationID")
 	spawner := ag.spawner()
 	if spawner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
 		return
 	}
-	exists, err := ag.runVisible(r.Context(), orgID, userID, runID)
+	exists, err := ag.runVisible(r.Context(), orgID, userID, conversationID)
 	if err != nil {
 		internalError(w, "agent", err)
 		return
@@ -456,7 +453,7 @@ func (ag *agentHandler) handleAgentInterrupt(w http.ResponseWriter, r *http.Requ
 		notFound(w, "run")
 		return
 	}
-	if err := spawner.Interrupt(r.Context(), runID); err != nil {
+	if err := spawner.Interrupt(r.Context(), conversationID); err != nil {
 		writeJSON(w, steerErrorStatus(err), map[string]string{"error": err.Error()})
 		return
 	}
@@ -501,7 +498,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	runID := r.PathValue("runID")
+	conversationID := r.PathValue("conversationID")
 	requestID := r.PathValue("requestID")
 
 	var body struct {
@@ -525,7 +522,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 
 	// Authorize the run under the caller's org before touching the broker — the
 	// broker's own org check is a backstop, not a team-level RLS gate.
-	exists, err := ag.runVisible(r.Context(), orgID, userID, runID)
+	exists, err := ag.runVisible(r.Context(), orgID, userID, conversationID)
 	if err != nil {
 		internalError(w, "agent", err)
 		return
@@ -535,7 +532,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	err = spawner.ResolvePermission(orgID, runID, requestID, agentproc.PermissionDecision{
+	err = spawner.ResolvePermission(orgID, conversationID, requestID, agentproc.PermissionDecision{
 		Behavior:     body.Behavior,
 		Message:      body.Message,
 		UpdatedInput: body.UpdatedInput,
@@ -558,7 +555,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 // has. Board's useWebSocket re-fetches on every status transition, so a per-run
 // read would scale with the task's run history.
 //
-//   - artifact_count for every run: one CountByRun (runID→count; a run with no
+//   - artifact_count for every run: one CountByRun (conversationID→count; a run with no
 //     artifacts is absent → 0).
 //   - has_unresolved_artifacts for the runs that have artifacts: one ListByRuns
 //     over just those run ids (count>0), grouped per run. The derivation needs
@@ -568,7 +565,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 // Best-effort: a ListByRuns failure drops the derived flags (logged) but leaves
 // counts and the rest intact. Shared by the single-task and batched (task_ids)
 // run-list paths.
-func enrichRuns(ctx context.Context, tx db.TxStores, orgID string, runs []domain.AgentRun) ([]map[string]any, error) {
+func enrichRuns(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) ([]map[string]any, error) {
 	runIDs := make([]string, len(runs))
 	for i := range runs {
 		runIDs[i] = runs[i].ID
@@ -589,7 +586,7 @@ func enrichRuns(ctx context.Context, tx db.TxStores, orgID string, runs []domain
 			serverLog.Warn("artifact batch lookup failed; omitting has_unresolved_artifacts (artifact_count unaffected)", "error", lerr)
 		} else {
 			for _, a := range arts {
-				artsByRun[a.RunID] = append(artsByRun[a.RunID], a)
+				artsByRun[a.ConversationID] = append(artsByRun[a.ConversationID], a)
 			}
 		}
 	}
@@ -616,7 +613,7 @@ func splitCommaList(raw string) []string {
 	return out
 }
 
-func (ag *agentHandler) handleAgentRuns(w http.ResponseWriter, r *http.Request) {
+func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -629,7 +626,7 @@ func (ag *agentHandler) handleAgentRuns(w http.ResponseWriter, r *http.Request) 
 	// O(tasks) serial round-trips to one. The single ?task_id path below is
 	// unchanged for back-compat.
 	if raw := r.URL.Query().Get("task_ids"); raw != "" {
-		ag.handleAgentRunsBatched(w, r, orgID, userID, raw)
+		ag.handleConversationsBatched(w, r, orgID, userID, raw)
 		return
 	}
 
@@ -640,12 +637,12 @@ func (ag *agentHandler) handleAgentRuns(w http.ResponseWriter, r *http.Request) 
 	}
 	var out []map[string]any
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		runs, e := tx.AgentRuns.ListForTask(r.Context(), orgID, taskID)
+		runs, e := tx.Conversations.ListForTask(r.Context(), orgID, taskID)
 		if e != nil {
 			return e
 		}
 		if runs == nil {
-			runs = []domain.AgentRun{}
+			runs = []domain.Conversation{}
 		}
 		out, e = enrichRuns(r.Context(), tx, orgID, runs)
 		return e
@@ -663,8 +660,8 @@ func (ag *agentHandler) handleAgentRuns(w http.ResponseWriter, r *http.Request) 
 // logged rather than allowed to fan out unbounded.
 const maxBatchTaskIDs = 500
 
-// handleAgentRunsBatched serves GET /api/agent/runs?task_ids=a,b,c. The
-// response is { "runs": { <taskID>: []run }, "messages": { <runID>: []message } }:
+// handleConversationsBatched serves GET /api/agent/conversations?task_ids=a,b,c. The
+// response is { "runs": { <taskID>: []run }, "messages": { <conversationID>: []message } }:
 // runs grouped per task (newest-first, same per-run projection as the single
 // path), and — when include=messages — the transcript of each task's PRIMARY
 // (newest-started) run, keyed by that run's id. The primary run is runs[0] per
@@ -676,7 +673,7 @@ const maxBatchTaskIDs = 500
 // consistent: the old per-task serial loop read each task at a different
 // transaction boundary, so a status change mid-refresh could return some tasks
 // in the old state and some in the new. One tx removes that flicker class.
-func (ag *agentHandler) handleAgentRunsBatched(w http.ResponseWriter, r *http.Request, orgID, userID, raw string) {
+func (ag *agentHandler) handleConversationsBatched(w http.ResponseWriter, r *http.Request, orgID, userID, raw string) {
 	taskIDs := splitCommaList(raw)
 	if len(taskIDs) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "task_ids must contain at least one id"})
@@ -702,9 +699,9 @@ func (ag *agentHandler) handleAgentRunsBatched(w http.ResponseWriter, r *http.Re
 	}
 
 	runsByTask := map[string][]map[string]any{}
-	messagesByRun := map[string][]domain.AgentMessage{}
+	messagesByRun := map[string][]domain.MessageDTO{}
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		runs, e := tx.AgentRuns.ListForTasks(r.Context(), orgID, taskIDs)
+		runs, e := tx.Conversations.ListForTasks(r.Context(), orgID, taskIDs)
 		if e != nil {
 			return e
 		}
@@ -728,12 +725,12 @@ func (ag *agentHandler) handleAgentRunsBatched(w http.ResponseWriter, r *http.Re
 			}
 		}
 		if includeMessages && len(primaryRunIDs) > 0 {
-			msgs, e := tx.AgentRuns.MessagesForRuns(r.Context(), orgID, primaryRunIDs)
+			msgs, e := tx.Conversations.MessagesForRuns(r.Context(), orgID, primaryRunIDs)
 			if e != nil {
 				return e
 			}
 			for _, m := range msgs {
-				messagesByRun[m.RunID] = append(messagesByRun[m.RunID], m)
+				messagesByRun[m.ConversationID] = append(messagesByRun[m.ConversationID], m.ToDTO())
 			}
 		}
 		return nil

@@ -443,10 +443,10 @@ var orgScopedTables = []string{
 	"org_secrets",
 	// TF data:
 	"swipe_events",
-	"run_worktrees",
+	"conversation_worktrees",
 	"pending_firings",
 	"artifacts",
-	"run_memory", "run_memory_entities",
+	"conversation_memory", "conversation_memory_entities",
 	"claim_credentials", "messages", "claims", "conversations",
 	"task_events", "tasks",
 	"event_handlers",

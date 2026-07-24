@@ -487,7 +487,7 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, runID, content
 
 // getRunMemory finds the memory row belonging to runID via
 // GetMemoriesForEntity — the replacement for the removed GetRunMemory now
-// that reads are join-based (run_memory_entities) rather than a direct
+// that reads are join-based (conversation_memory_entities) rather than a direct
 // run_id lookup.
 func getRunMemory(t *testing.T, stores db.Stores, ctx context.Context, orgID, entityID, runID string) *domain.TaskMemory {
 	t.Helper()
@@ -517,16 +517,16 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 	seedRun("ent-1", runID, "agent narrative")
 
 	prArt := domain.NewPullRequestArtifact("octo/repo", 1, "PR_1", "feat", "main", "https://github.com/octo/repo/pull/1", "t", "b", true)
-	prArt.RunID = runID
+	prArt.ConversationID = runID
 	reviewArt := domain.NewReviewArtifact("octo/repo", 2, "headsha2", runID)
-	reviewArt.RunID = runID
+	reviewArt.ConversationID = runID
 	branchArt, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/feature", "sha", true)
-	branchArt.RunID = runID
+	branchArt.ConversationID = runID
 	// A terminal PR already merged — it must NOT be in the non-terminal set and
 	// must never be fetched.
 	mergedArt := domain.NewPullRequestArtifact("octo/repo", 9, "PR_9", "old", "main", "https://github.com/octo/repo/pull/9", "t", "b", false)
 	mergedArt.State = domain.ArtifactStatePRMerged
-	mergedArt.RunID = runID
+	mergedArt.ConversationID = runID
 	seedArt(prArt)
 	seedArt(reviewArt)
 	seedArt(branchArt)
@@ -593,9 +593,9 @@ func TestReconcile_PRClosed(t *testing.T) {
 	seedRun("ent-2", runID, "narrative")
 
 	prArt := domain.NewPullRequestArtifact("octo/repo", 3, "PR_3", "x", "main", "u", "t", "b", false)
-	prArt.RunID = runID
+	prArt.ConversationID = runID
 	reviewArt := domain.NewReviewArtifact("octo/repo", 4, "headsha4", runID)
-	reviewArt.RunID = runID
+	reviewArt.ConversationID = runID
 	seedArt(prArt)
 	seedArt(reviewArt)
 
@@ -627,11 +627,11 @@ func TestReconcile_NoOpWhenUnchanged(t *testing.T) {
 	seedRun("ent-3", runID, "narrative")
 
 	prArt := domain.NewPullRequestArtifact("octo/repo", 5, "PR_5", "x", "main", "u", "t", "b", false) // open
-	prArt.RunID = runID
+	prArt.ConversationID = runID
 	reviewArt := domain.NewReviewArtifact("octo/repo", 6, "headsha6", runID) // pending draft
-	reviewArt.RunID = runID
+	reviewArt.ConversationID = runID
 	branchArt, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/keep", "sha", true)
-	branchArt.RunID = runID
+	branchArt.ConversationID = runID
 	seedArt(prArt)
 	seedArt(reviewArt)
 	seedArt(branchArt)
@@ -667,7 +667,7 @@ func TestReconcile_UnknownBranchNotDeleted(t *testing.T) {
 	const runID = "44444444-4444-4444-4444-444444444444"
 	seedRun("ent-4", runID, "narrative")
 	branchArt, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/maybe", "sha", true)
-	branchArt.RunID = runID
+	branchArt.ConversationID = runID
 	seedArt(branchArt)
 
 	stub := &stubGH{branches: map[string]bool{}} // empty → repository alias null → unknown
@@ -692,9 +692,9 @@ func TestReconcile_SingleRunScope(t *testing.T) {
 	seedRun("ent-b", runB, "b")
 
 	prA := domain.NewPullRequestArtifact("octo/repo", 7, "PR_7", "x", "main", "u", "t", "b", false)
-	prA.RunID = runA
+	prA.ConversationID = runA
 	prB := domain.NewPullRequestArtifact("octo/repo", 8, "PR_8", "y", "main", "u", "t", "b", false)
-	prB.RunID = runB
+	prB.ConversationID = runB
 	seedArt(prA)
 	seedArt(prB)
 
@@ -740,7 +740,7 @@ func TestReconcile_OutcomeSupersedesVerdict(t *testing.T) {
 	}
 
 	prArt := domain.NewPullRequestArtifact("octo/repo", 10, "PR_10", "x", "main", "u", "draft title", "draft body", false)
-	prArt.RunID = runID
+	prArt.ConversationID = runID
 	seedArt(prArt)
 
 	stub := &stubGH{
@@ -829,7 +829,7 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 	const runID = "99999999-9999-9999-9999-999999999991"
 	seedRun("ent-9", runID, "narrative")
 	prArt := domain.NewPullRequestArtifact("octo/repo", 12, "PR_12", "x", "main", "u", "t", "b", false)
-	prArt.RunID = runID
+	prArt.ConversationID = runID
 	seedArt(prArt)
 
 	stub := &stubGH{

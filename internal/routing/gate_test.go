@@ -82,7 +82,7 @@ func gateRouter(database *sql.DB) *Router {
 	// ladder) runs — the gate operates on the visibility set either way, but
 	// wiring it lets the CI tests assert a real owner instead of a NULL one.
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
-		testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events,
+		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events,
 		st.Orgs, st.Teams, st.TeamGitHubRepos, st.JiraStatusRules, nil, nil, noopScorer{}, websocket.NewHub())
 }
 
@@ -211,7 +211,7 @@ func TestGate_EscapeHatches(t *testing.T) {
 
 	// (2) teamRepos + jiraRules unwired (nil) → pre-ticket behavior, never
 	// drops, for either source.
-	rNil := NewRouter(nil, nil, nil, nil, nil, nil, nil, st.AgentRuns, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, noopScorer{}, nil)
+	rNil := NewRouter(nil, nil, nil, nil, nil, nil, nil, st.Conversations, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, noopScorer{}, nil)
 	if !rNil.handlerScopeMatchesEvent(githubEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
 		t.Error("nil teamRepos store should skip the GitHub gate")
 	}

@@ -370,7 +370,7 @@ type runEntry struct {
 }
 
 // isTerminalRunStatus reports whether status is one of the run-lifecycle
-// terminals (domain.AgentRun's documented vocabulary) or the parked/
+// terminals (domain.Conversation's documented vocabulary) or the parked/
 // awaiting-input "open" state — both stop the worker and clear the
 // indicator; only "failed" additionally posts the failure reply.
 func isTerminalRunStatus(status string) bool {
@@ -497,7 +497,7 @@ func (a *lifecycleAdapter) handleRunActivity(ctx context.Context, evt domain.Eve
 	entry.worker.sendActivity(activityIndicatorText(meta.Tools))
 }
 
-// resolveRunEntry runs the documented chain — AgentRuns.GetSystem -> Task ->
+// resolveRunEntry runs the documented chain — Conversations.GetSystem -> Task ->
 // Events.GetMetadataSystem — to decide whether runID belongs to a Slack
 // task and, if so, resolve the thread context + bot token a worker needs.
 // Every "this isn't a Slack run" outcome (no task, wrong entity source,
@@ -509,7 +509,7 @@ func (a *lifecycleAdapter) handleRunActivity(ctx context.Context, evt domain.Eve
 func (a *lifecycleAdapter) resolveRunEntry(ctx context.Context, orgID, runID string) *runEntry {
 	entry := &runEntry{cachedAt: slackLifecycleNow()}
 
-	run, err := a.stores.AgentRuns.GetSystem(ctx, orgID, runID)
+	run, err := a.stores.Conversations.GetSystem(ctx, orgID, runID)
 	if err != nil {
 		slackLog.Warn("slack lifecycle: load run failed", "run", runID, "error", err)
 		return entry

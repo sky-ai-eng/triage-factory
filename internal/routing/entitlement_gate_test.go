@@ -115,7 +115,7 @@ func TestReDeriveTask_GatedSource_FiresNothing(t *testing.T) {
 
 	stub := &stubDelegator{db: database}
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
+		testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
 		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
 	router.ReDeriveAfterScoring(runmode.LocalDefaultOrgID, []string{taskID})
 

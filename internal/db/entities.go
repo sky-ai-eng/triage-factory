@@ -206,7 +206,7 @@ type EntityStore interface {
 	// — the tracker (which writes entities for every polled repo
 	// regardless of which user configured it) and the project
 	// classifier (which reads every org's unclassified entities to
-	// triage them). Same admin/app split pattern as AgentRunStore's.
+	// triage them). Same admin/app split pattern as ConversationStore's.
 	//
 	// Behavior contract is identical to the non-System variants:
 	// org_id is still filtered in every WHERE clause as defense in

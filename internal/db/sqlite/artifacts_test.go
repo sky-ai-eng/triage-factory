@@ -24,17 +24,17 @@ func TestArtifactStore_SQLite_RoundTrip(t *testing.T) {
 	runID := seedArtifactRun(t, conn)
 
 	in := domain.Artifact{
-		RunID:       runID,
-		OrgID:       runmode.LocalDefaultOrgID,
-		TeamID:      runmode.LocalDefaultTeamID,
-		Provider:    domain.ArtifactProviderGitHub,
-		Kind:        domain.ArtifactKindPullRequest,
-		Target:      "octo/repo#123",
-		ExternalID:  "123",
-		URL:         "https://github.com/octo/repo/pull/123",
-		State:       domain.ArtifactStatePROpen,
-		DedupKey:    domain.ArtifactDedupKey("github", "pull_request", "octo/repo", "refs/heads/feat"),
-		DetailsJSON: `{"draft":false}`,
+		ConversationID: runID,
+		OrgID:          runmode.LocalDefaultOrgID,
+		TeamID:         runmode.LocalDefaultTeamID,
+		Provider:       domain.ArtifactProviderGitHub,
+		Kind:           domain.ArtifactKindPullRequest,
+		Target:         "octo/repo#123",
+		ExternalID:     "123",
+		URL:            "https://github.com/octo/repo/pull/123",
+		State:          domain.ArtifactStatePROpen,
+		DedupKey:       domain.ArtifactDedupKey("github", "pull_request", "octo/repo", "refs/heads/feat"),
+		DetailsJSON:    `{"draft":false}`,
 	}
 	out, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, in)
 	if err != nil {
@@ -46,7 +46,7 @@ func TestArtifactStore_SQLite_RoundTrip(t *testing.T) {
 	if out.CreatedAt.IsZero() || out.UpdatedAt.IsZero() {
 		t.Error("expected created_at/updated_at populated")
 	}
-	if out.RunID != runID || out.Provider != "github" || out.Kind != "pull_request" ||
+	if out.ConversationID != runID || out.Provider != "github" || out.Kind != "pull_request" ||
 		out.Target != "octo/repo#123" || out.ExternalID != "123" ||
 		out.URL != in.URL || out.State != "open" || out.DedupKey != in.DedupKey ||
 		out.DetailsJSON != `{"draft":false}` {
@@ -88,7 +88,7 @@ func TestArtifactStore_SQLite_UpsertDedup(t *testing.T) {
 
 	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo", "refs/heads/feat")
 	first, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "pull_request", Target: "octo/repo",
 		State: domain.ArtifactStatePRDraft, DedupKey: key,
 	})
@@ -97,7 +97,7 @@ func TestArtifactStore_SQLite_UpsertDedup(t *testing.T) {
 	}
 
 	second, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "pull_request", Target: "octo/repo#7",
 		ExternalID: "7", URL: "https://github.com/octo/repo/pull/7",
 		State: domain.ArtifactStatePROpen, DedupKey: key,
@@ -138,7 +138,7 @@ func TestArtifactStore_SQLite_PendingToReal(t *testing.T) {
 	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo", "refs/heads/feat")
 
 	pending, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "pull_request", Target: "octo/repo",
 		State: domain.ArtifactStatePRPending, DedupKey: key,
 		// No external_id / url yet — the PR doesn't exist.
@@ -151,7 +151,7 @@ func TestArtifactStore_SQLite_PendingToReal(t *testing.T) {
 	}
 
 	real, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "pull_request", Target: "octo/repo#42",
 		ExternalID: "42", URL: "https://github.com/octo/repo/pull/42",
 		State: domain.ArtifactStatePROpen, DedupKey: key,
@@ -188,7 +188,7 @@ func TestArtifactStore_SQLite_UpsertPreservesExternalIDAndURL(t *testing.T) {
 
 	key := domain.ArtifactDedupKey("jira", "issue", "SKY-1", "")
 	if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "jira", Kind: "issue", Target: "SKY-1",
 		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1",
 		State: domain.ArtifactStateIssueCreated, DedupKey: key,
@@ -198,7 +198,7 @@ func TestArtifactStore_SQLite_UpsertPreservesExternalIDAndURL(t *testing.T) {
 
 	// A later mutation that can't supply external_id/url (both empty).
 	out, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "jira", Kind: "issue", Target: "SKY-1",
 		State: domain.ArtifactStateIssueUpdated, DedupKey: key,
 	})
@@ -214,7 +214,7 @@ func TestArtifactStore_SQLite_UpsertPreservesExternalIDAndURL(t *testing.T) {
 
 	// A non-empty value still overwrites (intentional change path).
 	out, err = stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "jira", Kind: "issue", Target: "SKY-1",
 		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1?focusedId=9",
 		State: domain.ArtifactStateIssueUpdated, DedupKey: key,
@@ -240,7 +240,7 @@ func TestArtifactStore_SQLite_UpsertPreservesTargetOnEmpty(t *testing.T) {
 
 	key := domain.ArtifactDedupKey("github", "comment", "555", "")
 	if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "comment", Target: "octo/repo#7",
 		ExternalID: "555", URL: "https://github.com/octo/repo/pull/7#issuecomment-555",
 		State: domain.ArtifactStateCommentPosted, DedupKey: key,
@@ -250,7 +250,7 @@ func TestArtifactStore_SQLite_UpsertPreservesTargetOnEmpty(t *testing.T) {
 
 	// A comment-delete that only carries the id (empty target/url).
 	out, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "comment", ExternalID: "555",
 		State: domain.ArtifactStateCommentDeleted, DedupKey: key,
 	})
@@ -266,7 +266,7 @@ func TestArtifactStore_SQLite_UpsertPreservesTargetOnEmpty(t *testing.T) {
 
 	// A non-empty target still overwrites (migration path).
 	out, err = stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "comment", Target: "octo/repo#8",
 		State: domain.ArtifactStateCommentPosted, DedupKey: key,
 	})
@@ -288,7 +288,7 @@ func TestArtifactStore_SQLite_ListByRunAndTeam(t *testing.T) {
 
 	for i, k := range []string{"a", "b", "c"} {
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-			RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: "github", Kind: "comment", Target: "octo/repo",
 			State: domain.ArtifactStateCommentPosted, DedupKey: "k" + k,
 		}); err != nil {
@@ -335,7 +335,7 @@ func TestArtifactStore_SQLite_CountByRun(t *testing.T) {
 
 	seed := func(runID, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-			RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: "github", Kind: "comment", Target: "octo/repo",
 			State: domain.ArtifactStateCommentPosted, DedupKey: key,
 		}); err != nil {
@@ -388,7 +388,7 @@ func TestArtifactStore_SQLite_ListByRuns(t *testing.T) {
 
 	seed := func(runID, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-			RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: "github", Kind: "comment", Target: "octo/repo",
 			State: domain.ArtifactStateCommentPosted, DedupKey: key,
 		}); err != nil {
@@ -405,10 +405,10 @@ func TestArtifactStore_SQLite_ListByRuns(t *testing.T) {
 	}
 	byRun := map[string]int{}
 	for _, a := range arts {
-		if a.RunID == "" {
+		if a.ConversationID == "" {
 			t.Errorf("artifact %s came back without its RunID (can't group)", a.ID)
 		}
-		byRun[a.RunID]++
+		byRun[a.ConversationID]++
 	}
 	if byRun[runA] != 2 || byRun[runB] != 1 {
 		t.Errorf("grouped counts = %v, want runA=2 runB=1", byRun)
@@ -437,7 +437,7 @@ func TestArtifactStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
 	runID := seedArtifactRun(t, conn)
 
 	art, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "git", Kind: "branch", Target: "octo/repo",
 		State: domain.ArtifactStateBranchPushed, DedupKey: "git:branch:octo/repo:refs/heads/x",
 	})
@@ -465,8 +465,8 @@ func TestArtifactStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
 	if len(rows) != 1 || rows[0].ID != art.ID {
 		t.Errorf("ListByTeam dropped the detached artifact: %+v", rows)
 	}
-	if rows[0].RunID != "" {
-		t.Errorf("detached row RunID = %q, want empty", rows[0].RunID)
+	if rows[0].ConversationID != "" {
+		t.Errorf("detached row RunID = %q, want empty", rows[0].ConversationID)
 	}
 }
 
@@ -524,7 +524,7 @@ func TestArtifactStore_SQLite_ListNonTerminal(t *testing.T) {
 	for i, s := range seeds {
 		key := "k" + string(rune('a'+i)) // unique dedup_key per seed
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-			RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: "github", Kind: s.kind, Target: "octo/repo", State: s.state, DedupKey: key,
 		}); err != nil {
 			t.Fatalf("seed %s/%s: %v", s.kind, s.state, err)
@@ -582,7 +582,7 @@ func TestArtifactStore_SQLite_ListByOrgSystem(t *testing.T) {
 	}
 	for i, s := range seeds {
 		out, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-			RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: s.provider, Kind: s.kind, Target: "octo/repo", State: s.state, DedupKey: "k" + string(rune('a'+i)),
 		})
 		if err != nil {
@@ -689,7 +689,7 @@ func TestArtifactStore_SQLite_ListByTeam_Filters(t *testing.T) {
 
 	seed := func(provider, kind, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-			RunID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: provider, Kind: kind, Target: "octo/repo",
 			State: domain.ArtifactStateCommentPosted, DedupKey: key,
 		}); err != nil {
@@ -750,7 +750,7 @@ func TestArtifactStore_SQLite_ListPendingReviewsByTarget(t *testing.T) {
 
 	mk := func(kind, state, target, dedup string) {
 		if _, err := stores.Artifacts.Upsert(ctx, org, domain.Artifact{
-			RunID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
+			ConversationID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
 			Provider: domain.ArtifactProviderGitHub, Kind: kind, State: state,
 			Target: target, DedupKey: dedup,
 		}); err != nil {
@@ -792,7 +792,7 @@ func TestArtifactStore_SQLite_TransitionReviewState(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
 	rev, err := stores.Artifacts.Upsert(ctx, org, domain.Artifact{
-		RunID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
 		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindReview,
 		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7",
 		DedupKey: "rev-cas", DetailsJSON: `{"number":7}`,
@@ -801,7 +801,7 @@ func TestArtifactStore_SQLite_TransitionReviewState(t *testing.T) {
 		t.Fatalf("seed review: %v", err)
 	}
 	pr, err := stores.Artifacts.Upsert(ctx, org, domain.Artifact{
-		RunID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
 		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
 		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7", DedupKey: "pr-cas",
 	})
@@ -866,7 +866,7 @@ func TestArtifactStore_SQLite_UpdateReviewDetailsIfPending(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
 	rev, err := stores.Artifacts.Upsert(ctx, org, domain.Artifact{
-		RunID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
 		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindReview,
 		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7",
 		DedupKey: "rev-details", DetailsJSON: `{"v":1}`,

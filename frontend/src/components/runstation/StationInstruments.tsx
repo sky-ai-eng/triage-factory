@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import type { AgentMessage, AgentRun } from '../../types'
+import type { Message, Conversation } from '../../types'
 import {
   formatDurationMs,
   formatElapsed,
@@ -11,8 +11,8 @@ import { compactNum, tokenTotals, tint, type StationState } from './stationStyle
 import ArtifactList from '../ArtifactList'
 
 interface Props {
-  run: AgentRun
-  messages: AgentMessage[]
+  run: Conversation
+  messages: Message[]
   state: StationState
   now: number
   /** Open an artifact's approval overlay (PR / review) — wired up the page to
@@ -236,10 +236,10 @@ function Readout({
 // creation) of the most recent message carrying token usage — the size the
 // model last processed. Trailing usage-less rows (tool results, the user's own
 // message) are skipped; null when no message has usage yet (render nothing).
-function latestContextSize(messages: AgentMessage[]): number | null {
+function latestContextSize(messages: Message[]): number | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
-    const size = (m.InputTokens ?? 0) + (m.CacheReadTokens ?? 0) + (m.CacheCreationTokens ?? 0)
+    const size = (m.input_tokens ?? 0) + (m.cache_read_tokens ?? 0) + (m.cache_creation_tokens ?? 0)
     if (size > 0) return size
   }
   return null

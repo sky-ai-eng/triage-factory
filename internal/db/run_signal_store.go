@@ -10,12 +10,12 @@ import (
 // RunSignalStore is the cross-pod run-control outbox (TFAC-585, Postgres
 // only — see docs/for-agents/specs/horizontal-scaling/README.md §5.2, "RunController
 // gets its intended second implementation"). Every method is admin-pool,
-// no claims-scoped variant and no "...System" suffix: run_signals is pure
+// no claims-scoped variant and no "...System" suffix: conversation_signals is pure
 // system-to-system coordination, never read under a user's RLS context —
 // same unsuffixed shape as RunQueueStore/EventQueueStore.
 //
 // The SQLite implementation returns ErrNotApplicableInLocal from every
-// method (see internal/db/sqlite/run_signals.go): local mode is always its
+// method (see internal/db/sqlite/conversation_signals.go): local mode is always its
 // own run's owner (TF_ROLE=all is one process), so no code path may ever
 // reach this store there — internal/delegate only constructs the cross-pod
 // RunController when runmode.Current() == ModeMulti, so the SQLite stub is

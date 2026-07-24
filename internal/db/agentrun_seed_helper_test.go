@@ -47,8 +47,8 @@ func mintBlueprintRunForTest(t *testing.T, database *sql.DB, taskID string) stri
 }
 
 // createRunForTest inserts a conversations row directly via raw SQL so
-// package-db CRUD tests (pending_firings, run_worktrees, ...) have
-// a run to FK-point to without reaching for the AgentRunStore impl
+// package-db CRUD tests (pending_firings, conversation_worktrees, ...) have
+// a run to FK-point to without reaching for the ConversationStore impl
 // (which lives in internal/db/sqlite and would form a circular
 // import if pulled into package db).
 //
@@ -58,10 +58,10 @@ func mintBlueprintRunForTest(t *testing.T, database *sql.DB, taskID string) stri
 // test — so this minimal insert is enough.
 //
 // promptID may be empty; the raw SQL inserts NULL, which the
-// pre-D2 CreateAgentRun also tolerated via nullIfEmpty. Tests
+// pre-D2 CreateConversation also tolerated via nullIfEmpty. Tests
 // that need a real prompt FK should seed one first and pass the
 // id explicitly.
-func createRunForTest(t *testing.T, database *sql.DB, run domain.AgentRun) error {
+func createRunForTest(t *testing.T, database *sql.DB, run domain.Conversation) error {
 	t.Helper()
 	triggerType := run.TriggerType
 	if triggerType == "" {

@@ -15,13 +15,7 @@ import { useOrgHref } from '../hooks/useOrgHref'
 import { linkifyMarkdown, type LinkifyContext } from '../lib/linkify'
 import { toast } from './Toast/toastStore'
 import PromptPicker from './PromptPicker'
-import type {
-  CuratorMessage,
-  CuratorRequestWithMessages,
-  Project,
-  Prompt,
-  ToolCall,
-} from '../types'
+import type { Message, CuratorRequestWithMessages, Project, Prompt, ToolCall } from '../types'
 
 const SYSTEM_TICKET_SPEC_PROMPT_ID = 'system-ticket-spec'
 
@@ -440,7 +434,7 @@ function RequestBlock({
   // pairing so the visual relationship is the same — call up top,
   // result nested underneath.
   const toolResults = useMemo(() => {
-    const map = new Map<string, CuratorMessage>()
+    const map = new Map<string, Message>()
     for (const m of visibleMessages) {
       if (m.role === 'tool' && m.tool_call_id) {
         map.set(m.tool_call_id, m)
@@ -553,8 +547,8 @@ function AssistantTurn({
   onToggle,
   linkifyCtx,
 }: {
-  message: CuratorMessage
-  toolResults: Map<string, CuratorMessage>
+  message: Message
+  toolResults: Map<string, Message>
   isExpanded: (id: string) => boolean
   onToggle: (id: string, currentlyExpanded: boolean) => void
   linkifyCtx: LinkifyContext
@@ -616,7 +610,7 @@ function ToolCallCard({
   onToggle,
 }: {
   toolCall: ToolCall
-  result?: CuratorMessage
+  result?: Message
   expanded: boolean
   onToggle: () => void
 }) {
@@ -835,7 +829,7 @@ function formatToolCall(name: string, input: Record<string, unknown>): string {
   return name
 }
 
-function formatToolResult(_tc: ToolCall, result: CuratorMessage): string {
+function formatToolResult(_tc: ToolCall, result: Message): string {
   const text = result.content || ''
   if (!text) return result.is_error ? 'error' : '✓'
   const oneLine = text.split('\n')[0]

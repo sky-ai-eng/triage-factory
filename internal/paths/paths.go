@@ -268,7 +268,7 @@ func SDKDir() string {
 // every git operation a delegated agent performs — in both run modes and
 // any cwd, including repos the agent clones into subdirs itself (F2,
 // TFAC-456). The hooks are generic and read run context from env
-// (TRIAGE_FACTORY_RUN_ID + the agenthost socket), so this is a single
+// (TRIAGE_FACTORY_CONVERSATION_ID + the agenthost socket), so this is a single
 // fixed location, NOT regenerated per run — hence host-global and NOT
 // org-scoped (it hangs off StateRoot, never OrgRoot). In multi mode the
 // host process owns and writes this dir, then bind-mounts it read-only

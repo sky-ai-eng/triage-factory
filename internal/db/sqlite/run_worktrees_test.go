@@ -18,7 +18,7 @@ import (
 
 // TestRunWorktreeStore_SQLite runs the shared conformance suite
 // against the SQLite RunWorktreeStore impl. Each subtest opens a
-// fresh in-memory DB so run_worktrees state doesn't leak between
+// fresh in-memory DB so conversation_worktrees state doesn't leak between
 // assertions.
 func TestRunWorktreeStore_SQLite(t *testing.T) {
 	dbtest.RunRunWorktreeStoreConformance(t, func(t *testing.T) (db.RunWorktreeStore, string, dbtest.RunWorktreeSeeder) {
@@ -69,7 +69,7 @@ func TestRunWorktreeStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 }
 
 // seedSQLiteRunForWorktree seeds the entity + event + prompt + task
-// + run FK chain run_worktrees needs. Mirrors the seedSQLiteRunFor
+// + run FK chain conversation_worktrees needs. Mirrors the seedSQLiteRunFor
 // TaskMemory shape so both stores' tests stay reading like siblings.
 func seedSQLiteRunForWorktree(t *testing.T, conn *sql.DB, suffix string) string {
 	t.Helper()

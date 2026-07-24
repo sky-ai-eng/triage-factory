@@ -24,7 +24,7 @@ func seedPendingReview(t *testing.T, s *Spawner, runID, repo string, pr int, hea
 		}
 		a.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
 	}
-	a.RunID = runID
+	a.ConversationID = runID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {

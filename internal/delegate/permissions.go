@@ -187,9 +187,9 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID string, absent AbsentAut
 		// permission_resolved to drop the card the moment it fires.
 		full := s.permTimeout()
 		s.wsHub.Broadcast(websocket.Event{
-			Type:  "permission_request",
-			OrgID: orgID,
-			RunID: runID,
+			Type:           "permission_request",
+			OrgID:          orgID,
+			ConversationID: runID,
 			Data: map[string]any{
 				"request_id": req.RequestID,
 				"tool_name":  req.ToolName,
@@ -367,9 +367,9 @@ func (s *Spawner) SetPresencePollInterval(d time.Duration) {
 // backstop for a dropped/missed event. Hub.Broadcast is nil-receiver-safe.
 func (s *Spawner) broadcastPermissionResolved(orgID, runID, requestID string) {
 	s.wsHub.Broadcast(websocket.Event{
-		Type:  "permission_resolved",
-		OrgID: orgID,
-		RunID: runID,
+		Type:           "permission_resolved",
+		OrgID:          orgID,
+		ConversationID: runID,
 		Data: map[string]any{
 			"request_id": requestID,
 		},
@@ -463,7 +463,7 @@ func (s *Spawner) resolvePermissionLocal(orgID, runID, requestID string, d agent
 }
 
 // routePermission is ResolvePermission's cross-pod path: marshal the
-// decision onto a run_signals row targeting the run's live remote owner
+// decision onto a conversation_signals row targeting the run's live remote owner
 // and wait for the ack, up to DefaultPermissionAckTimeout (longer than
 // interrupt/steer's TF_SIGNAL_ACK_TIMEOUT — the browser is synchronously
 // blocked on this response). A "gone" or "stale" ack both map to

@@ -14,7 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/wakebus"
 )
 
-// agentRunStore is the Postgres impl of db.AgentRunStore over the
+// agentRunStore is the Postgres impl of db.ConversationStore over the
 // conversations + messages + claims tables. Holds two pools (see
 // postgres.New): `q` is the app pool (or a *sql.Tx composed from it via
 // WithTx) — every request-equivalent path runs here, RLS-active under
@@ -36,11 +36,11 @@ type agentRunStore struct {
 	admin queryer
 }
 
-func newAgentRunStore(q, admin queryer) db.AgentRunStore {
+func newConversationStore(q, admin queryer) db.ConversationStore {
 	return &agentRunStore{q: q, admin: admin}
 }
 
-var _ db.AgentRunStore = (*agentRunStore)(nil)
+var _ db.ConversationStore = (*agentRunStore)(nil)
 
 // --- Lifecycle ---
 
@@ -409,7 +409,7 @@ func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, run
 
 func markFailedIfActive(ctx context.Context, q queryer, orgID, runID, failureKind string) (bool, error) {
 	// 'open' is deliberately failable here (unlike 'pending_approval') — see
-	// AgentRunStore.MarkFailedIfActive: a warm 'open' run has no durable
+	// ConversationStore.MarkFailedIfActive: a warm 'open' run has no durable
 	// snapshot yet, so an infra error reaching failRun must terminate it.
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, $1),
@@ -467,8 +467,8 @@ func markCancelledIfActive(ctx context.Context, q queryer, orgID, runID, stopRea
 
 // --- Queries ---
 
-// pgRunColumns is the SELECT list scanned into a domain.AgentRun
-// via scanAgentRun. Owned here on AgentRunStore; sibling Postgres
+// pgRunColumns is the SELECT list scanned into a domain.Conversation
+// via scanConversation. Owned here on ConversationStore; sibling Postgres
 // stores that need to project a run (e.g. factoryReadStore.ActiveRuns)
 // already use their own copy because they also project task+entity
 // JOINs. Keeping this here keeps the simple "just the run" projection
@@ -501,7 +501,7 @@ const pgRunColumns = `
 	COALESCE(a.display_name, '') AS actor_agent_name
 `
 
-// runClaimLateral derives the claim-facing AgentRun fields from claims:
+// runClaimLateral derives the claim-facing Conversation fields from claims:
 // ClaimedAt is the latest claim's claimed_at, Attempts the count of
 // engagements, ExecutorID and phase the active (unreleased) claim's, and
 // duration_ms/num_turns the SUM of the per-engagement telemetry. The
@@ -537,11 +537,11 @@ const runLedgerLateral = `
 	) msum ON true
 `
 
-func (s *agentRunStore) Get(ctx context.Context, orgID, runID string) (*domain.AgentRun, error) {
+func (s *agentRunStore) Get(ctx context.Context, orgID, runID string) (*domain.Conversation, error) {
 	return getRun(ctx, s.q, orgID, runID)
 }
 
-func (s *agentRunStore) GetSystem(ctx context.Context, orgID, runID string) (*domain.AgentRun, error) {
+func (s *agentRunStore) GetSystem(ctx context.Context, orgID, runID string) (*domain.Conversation, error) {
 	return getRun(ctx, s.admin, orgID, runID)
 }
 
@@ -554,19 +554,19 @@ func (s *agentRunStore) LookupOrgForRunSystem(ctx context.Context, runID string)
 	return orgID, err
 }
 
-func getRun(ctx context.Context, q queryer, orgID, runID string) (*domain.AgentRun, error) {
+func getRun(ctx context.Context, q queryer, orgID, runID string) (*domain.Conversation, error) {
 	row := q.QueryRowContext(ctx, `
 		SELECT `+pgRunColumns+`
 		FROM conversations r
-		LEFT JOIN run_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
+		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		`+runClaimLateral+`
 		`+runLedgerLateral+`
 		WHERE r.org_id = $1 AND r.id = $2
 	`, orgID, runID)
 
-	var r domain.AgentRun
-	if err := scanAgentRun(row, &r); err != nil {
+	var r domain.Conversation
+	if err := scanConversation(row, &r); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -575,11 +575,11 @@ func getRun(ctx context.Context, q queryer, orgID, runID string) (*domain.AgentR
 	return &r, nil
 }
 
-func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) ([]domain.AgentRun, error) {
+func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgRunColumns+`
 		FROM conversations r
-		LEFT JOIN run_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
+		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		`+runClaimLateral+`
 		`+runLedgerLateral+`
@@ -591,10 +591,10 @@ func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) (
 	}
 	defer rows.Close()
 
-	var runs []domain.AgentRun
+	var runs []domain.Conversation
 	for rows.Next() {
-		var r domain.AgentRun
-		if err := scanAgentRunRows(rows, &r); err != nil {
+		var r domain.Conversation
+		if err := scanConversationRows(rows, &r); err != nil {
 			return nil, err
 		}
 		runs = append(runs, r)
@@ -602,7 +602,7 @@ func (s *agentRunStore) ListForTask(ctx context.Context, orgID, taskID string) (
 	return runs, rows.Err()
 }
 
-func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.AgentRun, error) {
+func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.Conversation, error) {
 	// task_id is a uuid column: a non-UUID id (these are client-supplied on the
 	// batched run-list path) would fail Postgres parsing with 22P02 → 500
 	// before the row filter runs, so drop invalid ids up front and treat them
@@ -619,7 +619,7 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgRunColumns+`
 		FROM conversations r
-		LEFT JOIN run_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
+		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		`+runClaimLateral+`
 		`+runLedgerLateral+`
@@ -631,10 +631,10 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 	}
 	defer rows.Close()
 
-	var runs []domain.AgentRun
+	var runs []domain.Conversation
 	for rows.Next() {
-		var r domain.AgentRun
-		if err := scanAgentRunRows(rows, &r); err != nil {
+		var r domain.Conversation
+		if err := scanConversationRows(rows, &r); err != nil {
 			return nil, err
 		}
 		runs = append(runs, r)
@@ -799,11 +799,11 @@ func (s *agentRunStore) EntitiesWithOpenRuns(ctx context.Context, orgID string, 
 
 // --- Transcript / messages ---
 
-func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error) {
+func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *domain.Message) (int64, error) {
 	return insertRunMessage(ctx, s.q, orgID, msg)
 }
 
-func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error) {
+func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, msg *domain.Message) (int64, error) {
 	return insertRunMessage(ctx, s.admin, orgID, msg)
 }
 
@@ -836,7 +836,7 @@ func (s *agentRunStore) LastAgentActivityAtSystem(ctx context.Context, orgID, ru
 // correctly resolve NULL. A message racing its claim's release lands
 // NULL — harmless, the terminal settle's newest-row fallback still
 // reaches it.
-func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.AgentMessage) (int64, error) {
+func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.Message) (int64, error) {
 	var toolCallsJSON, metadataJSON, reasoningJSON, contentBlocksJSON []byte
 
 	if len(msg.ToolCalls) > 0 {
@@ -903,7 +903,7 @@ func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.
 		        $16, $17, $18, $19, $20, $21, $22, $23)
 		RETURNING id
 	`,
-		orgID, msg.RunID, nullIfEmpty(msg.UserID), nullIfEmpty(msg.ClaimID),
+		orgID, msg.ConversationID, nullIfEmpty(msg.UserID), nullIfEmpty(msg.ClaimID),
 		msg.Role, msg.Content, msg.Subtype,
 		nullableJSONB(toolCallsJSON), nullIfEmpty(msg.ToolCallID), msg.IsError,
 		nullableJSONB(metadataJSON), nullIfEmpty(msg.Model),
@@ -948,13 +948,13 @@ const pgMessageColumns = `id, conversation_id, COALESCE(user_id::text, ''), COAL
 	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
 	reasoning::text, content_blocks::text, delivered, window_state, seq`
 
-// scanAgentMessageRows drains a messages result set selecting
-// pgMessageColumns into domain.AgentMessage values. Shared by the
+// scanMessageRows drains a messages result set selecting
+// pgMessageColumns into domain.Message values. Shared by the
 // single-run Messages and the batched MessagesForRuns.
-func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
-	var messages []domain.AgentMessage
+func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
+	var messages []domain.Message
 	for rows.Next() {
-		var m domain.AgentMessage
+		var m domain.Message
 		var content, subtype, toolCallsStr, toolCallID, metadataStr, model sql.NullString
 		var inputTok, outputTok, cacheReadTok, cacheCreateTok sql.NullInt64
 		var costUSD sql.NullFloat64
@@ -964,7 +964,7 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 		var seq sql.NullFloat64
 
 		if err := rows.Scan(
-			&m.ID, &m.RunID, &m.UserID, &m.ClaimID, &m.Role, &content, &subtype, &toolCallsStr,
+			&m.ID, &m.ConversationID, &m.UserID, &m.ClaimID, &m.Role, &content, &subtype, &toolCallsStr,
 			&toolCallID, &m.IsError, &metadataStr, &model,
 			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
 			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq,
@@ -1034,7 +1034,7 @@ func scanAgentMessageRows(rows *sql.Rows) ([]domain.AgentMessage, error) {
 	return messages, rows.Err()
 }
 
-func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error) {
+func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
 	// Withdrawn-pending rows (undelivered + inactive — a staged injection
 	// that was withdrawn before any flush) never happened, so the display
 	// read hides them. delivered + inactive stays visible: that is compacted
@@ -1050,10 +1050,10 @@ func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]do
 		return nil, err
 	}
 	defer rows.Close()
-	return scanAgentMessageRows(rows)
+	return scanMessageRows(rows)
 }
 
-func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.AgentMessage, error) {
+func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Message, error) {
 	// conversation_id is a uuid column; drop any non-UUID id (22P02 → 500
 	// guard, same read convention as ListForTasks). These ids are
 	// server-derived today, so this is defense in depth against a future
@@ -1078,7 +1078,7 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 		return nil, err
 	}
 	defer rows.Close()
-	return scanAgentMessageRows(rows)
+	return scanMessageRows(rows)
 }
 
 // ListForAssembly returns every row a native loop needs to rebuild this run's
@@ -1087,7 +1087,7 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 // compaction); 'elided' and undelivered rows are included — see the
 // interface doc for the full contract. Pure read over messages; no
 // other table or in-process state feeds in.
-func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error) {
+func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
 		FROM messages
@@ -1098,7 +1098,7 @@ func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string
 		return nil, err
 	}
 	defer rows.Close()
-	return scanAgentMessageRows(rows)
+	return scanMessageRows(rows)
 }
 
 // MarkDelivered flips delivered=true on the given message ids, scoped to
@@ -1181,10 +1181,10 @@ func (s *agentRunStore) BlueprintSiblingDurationMsSystem(ctx context.Context, or
 
 // --- Helpers ---
 
-// scanAgentRun fills r from a single-row QueryRow result. Sibling
-// scanAgentRunRows handles the rows.Scan case. Both unpack the
+// scanConversation fills r from a single-row QueryRow result. Sibling
+// scanConversationRows handles the rows.Scan case. Both unpack the
 // nullable columns through the same set of intermediates.
-func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
+func scanConversation(row *sql.Row, r *domain.Conversation) error {
 	var queuedAt, claimedAt, completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
@@ -1201,11 +1201,11 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 		return err
 	}
 	r.FailureKind = domain.RunFailureKind(failureKind)
-	finalizeAgentRun(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
+	finalizeConversation(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
 	return nil
 }
 
-func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
+func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
 	var queuedAt, claimedAt, completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
@@ -1222,11 +1222,11 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 		return err
 	}
 	r.FailureKind = domain.RunFailureKind(failureKind)
-	finalizeAgentRun(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
+	finalizeConversation(r, queuedAt, claimedAt, completedAt, costUSD, durationMs, numTurns, blueprintStep, blueprintRunID)
 	return nil
 }
 
-func finalizeAgentRun(r *domain.AgentRun, queuedAt, claimedAt, completedAt sql.NullTime, costUSD sql.NullFloat64, durationMs, numTurns, blueprintStep sql.NullInt64, blueprintRunID sql.NullString) {
+func finalizeConversation(r *domain.Conversation, queuedAt, claimedAt, completedAt sql.NullTime, costUSD sql.NullFloat64, durationMs, numTurns, blueprintStep sql.NullInt64, blueprintRunID sql.NullString) {
 	if blueprintRunID.Valid {
 		r.BlueprintRunID = blueprintRunID.String
 	}

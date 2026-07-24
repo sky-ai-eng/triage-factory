@@ -130,9 +130,9 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 		args = append(args, sqliteFactoryActiveRunStatuses[i])
 	}
 
-	// memory_missing is derived from a LEFT JOIN to run_memory rather
+	// memory_missing is derived from a LEFT JOIN to conversation_memory rather
 	// than read off a column on runs: "the agent has not
-	// produced its memory file" === "no run_memory row exists, OR the
+	// produced its memory file" === "no conversation_memory row exists, OR the
 	// row's agent_content is NULL/whitespace." NULLIF(TRIM(...), '')
 	// collapses both empty strings (legacy carry-over from before
 	// this was normalized) and whitespace-only writes onto the
@@ -162,7 +162,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			COALESCE(r.failure_kind, ''),
 			` + sqliteTaskColumnsWithEntity + `
 		FROM conversations r
-		LEFT JOIN run_memory rm ON rm.conversation_id = r.id
+		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id
 		LEFT JOIN agents a ON a.id = r.actor_agent_id
 		JOIN tasks t ON r.task_id = t.id
 		JOIN entities e ON t.entity_id = e.id
@@ -178,7 +178,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 
 	var out []domain.FactoryActiveRun
 	for rows.Next() {
-		var r domain.AgentRun
+		var r domain.Conversation
 		var t domain.Task
 		var completedAt sql.NullTime
 		var costUSD sql.NullFloat64

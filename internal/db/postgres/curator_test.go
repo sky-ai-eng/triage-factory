@@ -77,8 +77,8 @@ func TestCuratorStore_Postgres_PrivateVisibility_SelfOnly(t *testing.T) {
 		if _, err := ts.Curator.BeginTurn(ctx, orgID, projectID, convID, msgID); err != nil {
 			return err
 		}
-		_, err := ts.AgentRuns.InsertMessage(ctx, orgID, &domain.AgentMessage{
-			RunID: convID, UserID: alice, ClaimID: claimID,
+		_, err := ts.Conversations.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: convID, UserID: alice, ClaimID: claimID,
 			Role: "assistant", Subtype: "text", Content: "private ack",
 		})
 		return err
@@ -131,7 +131,8 @@ func TestCuratorStore_Postgres_PrivateVisibility_SelfOnly(t *testing.T) {
 		if deleted {
 			t.Error("bob deleted alice's queued turn — private-visibility RLS leak")
 		}
-		return ts.Curator.ArchiveLiveConversation(ctx, orgID, projectID, alice)
+		_, e := ts.Curator.ArchiveLiveConversation(ctx, orgID, projectID, alice)
+		return e
 	}); err != nil {
 		t.Fatalf("bob writes: %v", err)
 	}

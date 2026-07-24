@@ -973,12 +973,12 @@ func (s *blueprintStore) RequestRunCancelSystem(ctx context.Context, orgID, id s
 	return n > 0, nil
 }
 
-func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintRunID string) ([]domain.AgentRun, error) {
+func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	// Status coalesces the active claim's phase over the stored status —
-	// the same display contract as the AgentRunStore projections.
+	// the same display contract as the ConversationStore projections.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id, task_id, prompt_id,
 		       COALESCE((SELECT cl.phase FROM claims cl
@@ -1000,10 +1000,10 @@ func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintR
 	}
 	defer rows.Close()
 
-	var out []domain.AgentRun
+	var out []domain.Conversation
 	for rows.Next() {
 		var (
-			r             domain.AgentRun
+			r             domain.Conversation
 			completedAt   sql.NullTime
 			costUSD       sql.NullFloat64
 			durationMs    sql.NullInt64
@@ -1101,6 +1101,6 @@ func (s *blueprintStore) ActiveStepRunIDsSystem(ctx context.Context, orgID, blue
 	return s.ActiveStepRunIDs(ctx, orgID, blueprintRunID)
 }
 
-func (s *blueprintStore) RunsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.AgentRun, error) {
+func (s *blueprintStore) RunsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
 	return s.RunsForBlueprint(ctx, orgID, blueprintRunID)
 }

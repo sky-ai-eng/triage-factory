@@ -40,7 +40,7 @@ func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 
 	runID := uuid.New().String()
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -98,7 +98,7 @@ func TestRunQueueStore_Postgres_ResetProcessingRuns_ScopedToOwner(t *testing.T) 
 	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
 	step0 := 0
 	runID := uuid.New().String()
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -152,7 +152,7 @@ func TestRunQueueStore_Postgres_ResetProcessingRuns_NeverResetsCurrentEpoch(t *t
 	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
 	step0 := 0
 	runID := uuid.New().String()
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -186,7 +186,7 @@ func TestRunQueueStore_Postgres_CancelRequestedNotClaimed(t *testing.T) {
 	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
 
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID: uuid.New().String(), TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -217,7 +217,7 @@ func TestRunQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 	for i := 0; i < n; i++ {
 		runID := uuid.New().String()
 		idx := i
-		if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+		if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 			ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
 			TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
 		}); err != nil {
@@ -282,7 +282,7 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	brA, taskA, promptA := seedPgRunQueueFixture(t, h, orgID, userID)
 	orphanID := uuid.New().String()
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID: orphanID, TaskID: taskA, PromptID: promptA, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brA, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -294,7 +294,7 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	// A queued orphan under the same terminal parent (never claimed) must also
 	// be cancelled — a queued step under a non-running parent is never claimable.
 	queuedOrphanID := uuid.New().String()
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID: queuedOrphanID, TaskID: taskA, PromptID: promptA, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brA, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -307,7 +307,7 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	// Healthy: running parent, child running — must be left alone.
 	brB, taskB, promptB := seedPgRunQueueFixture(t, h, orgID, userID)
 	healthyID := uuid.New().String()
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID: healthyID, TaskID: taskB, PromptID: promptB, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brB, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -366,7 +366,7 @@ func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 	seedChild := func(status string) string {
 		t.Helper()
 		id := uuid.New().String()
-		if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+		if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 			ID: id, TaskID: taskID, PromptID: promptID, Model: "m",
 			TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 		}); err != nil {
@@ -452,7 +452,7 @@ func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 
 // TestRunQueueStore_Postgres_EnqueueStampsActorAgent is the Postgres parity of
 // the SQLite actor-stamp test: EnqueueRun (both the manual and event branches)
-// persists runs.actor_agent_id, and AgentRunStore.GetSystem JOINs agents to
+// persists runs.actor_agent_id, and ConversationStore.GetSystem JOINs agents to
 // surface the display name as ActorAgentName. A run with no actor reads back
 // with both fields empty.
 func TestRunQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
@@ -477,14 +477,14 @@ func TestRunQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	// Manual branch stamps the actor.
 	manualID := uuid.New().String()
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID: manualID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, ActorAgentID: agentID,
 		BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
 		t.Fatalf("EnqueueRun (manual): %v", err)
 	}
-	got, err := stores.AgentRuns.GetSystem(ctx, orgID, manualID)
+	got, err := stores.Conversations.GetSystem(ctx, orgID, manualID)
 	if err != nil || got == nil {
 		t.Fatalf("GetSystem (manual): (%v, %v)", got, err)
 	}
@@ -498,14 +498,14 @@ func TestRunQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	// Event branch (creator_user_id NULL per the schema CHECK) also stamps it.
 	eventID := uuid.New().String()
 	step1 := 1
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID: eventID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "event", ActorAgentID: agentID,
 		BlueprintRunID: brID, BlueprintStepIndex: &step1,
 	}); err != nil {
 		t.Fatalf("EnqueueRun (event): %v", err)
 	}
-	ev, err := stores.AgentRuns.GetSystem(ctx, orgID, eventID)
+	ev, err := stores.Conversations.GetSystem(ctx, orgID, eventID)
 	if err != nil || ev == nil {
 		t.Fatalf("GetSystem (event): (%v, %v)", ev, err)
 	}
@@ -516,14 +516,14 @@ func TestRunQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	// No actor → both fields empty (nullable column + LEFT JOIN).
 	bareID := uuid.New().String()
 	step2 := 2
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID: bareID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID,
 		BlueprintRunID: brID, BlueprintStepIndex: &step2,
 	}); err != nil {
 		t.Fatalf("EnqueueRun (no actor): %v", err)
 	}
-	bare, err := stores.AgentRuns.GetSystem(ctx, orgID, bareID)
+	bare, err := stores.Conversations.GetSystem(ctx, orgID, bareID)
 	if err != nil || bare == nil {
 		t.Fatalf("GetSystem (no actor): (%v, %v)", bare, err)
 	}
@@ -554,7 +554,7 @@ func TestRunQueueStore_Postgres_Credentials(t *testing.T) {
 				idx := nextStep
 				nextStep++
 				runID := uuid.New().String()
-				if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+				if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 					ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
 					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
 				}); err != nil {
@@ -605,7 +605,7 @@ func TestRunQueueStore_Postgres_FleetQueueShares(t *testing.T) {
 				idx := nextStep
 				nextStep++
 				runID := uuid.New().String()
-				if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+				if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 					ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
 					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
 				}); err != nil {
@@ -665,7 +665,7 @@ func seedPgRunQueueFixture(t *testing.T, h *pgtest.Harness, orgID, userID string
 
 // TestRunQueueStore_Postgres_QueuedAtStamps mirrors the SQLite twin: enqueue
 // stamps queued_at, a claim stamps claimed_at (both surfaced through
-// AgentRuns.GetSystem), and a requeue re-stamps queued_at and clears
+// Conversations.GetSystem), and a requeue re-stamps queued_at and clears
 // claimed_at so the next dwell measures from the re-entry, not the mint.
 func TestRunQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -678,14 +678,14 @@ func TestRunQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 
 	runID := uuid.New().String()
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
 		t.Fatalf("EnqueueRun: %v", err)
 	}
 
-	queued, err := stores.AgentRuns.GetSystem(ctx, orgID, runID)
+	queued, err := stores.Conversations.GetSystem(ctx, orgID, runID)
 	if err != nil || queued == nil {
 		t.Fatalf("GetSystem after enqueue: (%v, %v)", queued, err)
 	}
@@ -700,7 +700,7 @@ func TestRunQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 	if got, err := stores.RunQueue.ClaimNextRun(ctx, pgRunQueueExecutorID, pgRunQueueBootEpoch, db.ClaimPlacement{}); err != nil || got == nil {
 		t.Fatalf("ClaimNextRun: (%v, %v)", got, err)
 	}
-	claimed, err := stores.AgentRuns.GetSystem(ctx, orgID, runID)
+	claimed, err := stores.Conversations.GetSystem(ctx, orgID, runID)
 	if err != nil || claimed == nil {
 		t.Fatalf("GetSystem after claim: (%v, %v)", claimed, err)
 	}
@@ -714,7 +714,7 @@ func TestRunQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 	if err := stores.RunQueue.RequeueRun(ctx, orgID, runID, "transient setup error"); err != nil {
 		t.Fatalf("RequeueRun: %v", err)
 	}
-	requeued, err := stores.AgentRuns.GetSystem(ctx, orgID, runID)
+	requeued, err := stores.Conversations.GetSystem(ctx, orgID, runID)
 	if err != nil || requeued == nil {
 		t.Fatalf("GetSystem after requeue: (%v, %v)", requeued, err)
 	}
@@ -749,7 +749,7 @@ func TestRunQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 
 			runID := uuid.New().String()
 			step0 := 0
-			if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+			if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 				ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
 				TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 			}); err != nil {
@@ -761,14 +761,14 @@ func TestRunQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 			// Advance the claim into the setup phase the dispatcher would
 			// have recorded before the workspace-setup failure fired the
 			// requeue.
-			if err := stores.AgentRuns.SetActiveClaimPhaseSystem(ctx, orgID, runID, phase); err != nil {
+			if err := stores.Conversations.SetActiveClaimPhaseSystem(ctx, orgID, runID, phase); err != nil {
 				t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", phase, err)
 			}
 
 			if err := stores.RunQueue.RequeueRun(ctx, orgID, runID, "workspace setup: boom"); err != nil {
 				t.Fatalf("RequeueRun: %v", err)
 			}
-			after, err := stores.AgentRuns.GetSystem(ctx, orgID, runID)
+			after, err := stores.Conversations.GetSystem(ctx, orgID, runID)
 			if err != nil || after == nil {
 				t.Fatalf("GetSystem after requeue: (%v, %v)", after, err)
 			}

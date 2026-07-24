@@ -3,7 +3,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import AgentCard from './AgentCard'
 import { QUEUE_DWELL_VISIBLE_MS } from '../lib/runStatus'
-import type { AgentRun, Task } from '../types'
+import type { Conversation, Task } from '../types'
 
 // useOrgHref pulls in deployment-config + org-context fetches we don't need
 // here; the identity resolver keeps the card's Links/hrefs simple.
@@ -19,7 +19,7 @@ const task: Task = {
   event_type: 'ci_check_failed',
 } as unknown as Task
 
-const run = (over: Partial<AgentRun>): AgentRun =>
+const run = (over: Partial<Conversation>): Conversation =>
   ({
     ID: 'r1',
     TaskID: 't1',
@@ -28,9 +28,9 @@ const run = (over: Partial<AgentRun>): AgentRun =>
     StartedAt: '2026-06-25T00:00:00Z',
     ResultSummary: 'Done.',
     ...over,
-  }) as AgentRun
+  }) as Conversation
 
-function renderCard(over: Partial<AgentRun>, onOpenArtifact = vi.fn()) {
+function renderCard(over: Partial<Conversation>, onOpenArtifact = vi.fn()) {
   render(
     <MemoryRouter>
       <AgentCard task={task} run={run(over)} onOpenArtifact={onOpenArtifact} />
@@ -79,7 +79,7 @@ describe('AgentCard artifacts affordance', () => {
 
     // Popover lazy-fetches and renders the list.
     expect(await screen.findByText('org/repo#18')).toBeInTheDocument()
-    expect(globalThis.fetch).toHaveBeenCalledWith('/api/agent/runs/r1/artifacts')
+    expect(globalThis.fetch).toHaveBeenCalledWith('/api/agent/conversations/r1/artifacts')
   })
 
   it('forwards a PR row to onOpenArtifact and closes the popover', async () => {

@@ -1128,10 +1128,10 @@ CREATE TABLE public.artifacts (
 
 
 --
--- Name: run_memory; Type: TABLE; Schema: public; Owner: -
+-- Name: conversation_memory; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.run_memory (
+CREATE TABLE public.conversation_memory (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     conversation_id uuid NOT NULL,
@@ -1144,17 +1144,17 @@ CREATE TABLE public.run_memory (
 
 
 --
--- Name: run_memory_entities; Type: TABLE; Schema: public; Owner: -
+-- Name: conversation_memory_entities; Type: TABLE; Schema: public; Owner: -
 --
 
--- TFAC-622: lets one run_memory row reach every entity the run actually
+-- TFAC-622: lets one conversation_memory row reach every entity the run actually
 -- touched (a Jira ticket + the PR it opens), not just the denormalized
--- primary entity_id above. Keyed on conversation_id rather than the run_memory row
--- id — touches are recorded mid-run, before the run_memory row exists (it's
--- written at termination); run_memory's UNIQUE(conversation_id) makes the join
+-- primary entity_id above. Keyed on conversation_id rather than the conversation_memory row
+-- id — touches are recorded mid-run, before the conversation_memory row exists (it's
+-- written at termination); conversation_memory's UNIQUE(conversation_id) makes the join
 -- through conversation_id sound once that row lands. role is free text (house
 -- style: external_actions.action; see domain.MemoryRole*), no CHECK.
-CREATE TABLE public.run_memory_entities (
+CREATE TABLE public.conversation_memory_entities (
     org_id uuid NOT NULL,
     conversation_id uuid NOT NULL,
     entity_id uuid NOT NULL,
@@ -1259,10 +1259,10 @@ ALTER SEQUENCE public.messages_id_seq OWNED BY public.messages.id;
 
 
 --
--- Name: run_worktrees; Type: TABLE; Schema: public; Owner: -
+-- Name: conversation_worktrees; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.run_worktrees (
+CREATE TABLE public.conversation_worktrees (
     conversation_id uuid NOT NULL,
     org_id uuid NOT NULL,
     repo_id text NOT NULL,
@@ -2041,27 +2041,27 @@ ALTER TABLE ONLY public.artifacts
 
 
 --
--- Name: run_memory run_memory_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_memory conversation_memory_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_memory
-    ADD CONSTRAINT run_memory_pkey PRIMARY KEY (id);
-
-
---
--- Name: run_memory run_memory_run_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.run_memory
-    ADD CONSTRAINT run_memory_run_id_key UNIQUE (conversation_id);
+ALTER TABLE ONLY public.conversation_memory
+    ADD CONSTRAINT conversation_memory_pkey PRIMARY KEY (id);
 
 
 --
--- Name: run_memory_entities run_memory_entities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_memory conversation_memory_run_id_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_memory_entities
-    ADD CONSTRAINT run_memory_entities_pkey PRIMARY KEY (conversation_id, entity_id);
+ALTER TABLE ONLY public.conversation_memory
+    ADD CONSTRAINT conversation_memory_run_id_key UNIQUE (conversation_id);
+
+
+--
+-- Name: conversation_memory_entities conversation_memory_entities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.conversation_memory_entities
+    ADD CONSTRAINT conversation_memory_entities_pkey PRIMARY KEY (conversation_id, entity_id);
 
 
 --
@@ -2073,11 +2073,11 @@ ALTER TABLE ONLY public.messages
 
 
 --
--- Name: run_worktrees run_worktrees_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_worktrees conversation_worktrees_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_worktrees
-    ADD CONSTRAINT run_worktrees_pkey PRIMARY KEY (conversation_id, repo_id, ref);
+ALTER TABLE ONLY public.conversation_worktrees
+    ADD CONSTRAINT conversation_worktrees_pkey PRIMARY KEY (conversation_id, repo_id, ref);
 
 
 --
@@ -2462,31 +2462,31 @@ CREATE INDEX idx_artifacts_run ON public.artifacts USING btree (conversation_id)
 
 
 --
--- Name: idx_run_memory_entity_created; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_conversation_memory_entity_created; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_run_memory_entity_created ON public.run_memory USING btree (entity_id, created_at);
-
-
---
--- Name: idx_run_memory_entity_blueprint; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_run_memory_entity_blueprint ON public.run_memory USING btree (entity_id, blueprint_run_id);
+CREATE INDEX idx_conversation_memory_entity_created ON public.conversation_memory USING btree (entity_id, created_at);
 
 
 --
--- Name: idx_run_memory_run; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_conversation_memory_entity_blueprint; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_run_memory_run ON public.run_memory USING btree (conversation_id);
+CREATE INDEX idx_conversation_memory_entity_blueprint ON public.conversation_memory USING btree (entity_id, blueprint_run_id);
 
 
 --
--- Name: idx_run_memory_entities_entity; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_conversation_memory_run; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_run_memory_entities_entity ON public.run_memory_entities USING btree (org_id, entity_id);
+CREATE INDEX idx_conversation_memory_run ON public.conversation_memory USING btree (conversation_id);
+
+
+--
+-- Name: idx_conversation_memory_entities_entity; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_conversation_memory_entities_entity ON public.conversation_memory_entities USING btree (org_id, entity_id);
 
 
 --
@@ -2516,10 +2516,10 @@ CREATE INDEX idx_messages_user ON public.messages USING btree (user_id) WHERE (u
 
 
 --
--- Name: idx_run_worktrees_run; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_conversation_worktrees_run; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_run_worktrees_run ON public.run_worktrees USING btree (conversation_id);
+CREATE INDEX idx_conversation_worktrees_run ON public.conversation_worktrees USING btree (conversation_id);
 
 
 --
@@ -3256,51 +3256,51 @@ ALTER TABLE ONLY public.artifacts
 
 
 --
--- Name: run_memory run_memory_entity_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_memory conversation_memory_entity_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_memory
-    ADD CONSTRAINT run_memory_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id);
-
-
---
--- Name: run_memory run_memory_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.run_memory
-    ADD CONSTRAINT run_memory_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.conversation_memory
+    ADD CONSTRAINT conversation_memory_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id);
 
 
 --
--- Name: run_memory run_memory_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_memory conversation_memory_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_memory
-    ADD CONSTRAINT run_memory_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
-
-
---
--- Name: run_memory_entities run_memory_entities_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.run_memory_entities
-    ADD CONSTRAINT run_memory_entities_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.conversation_memory
+    ADD CONSTRAINT conversation_memory_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
 --
--- Name: run_memory_entities run_memory_entities_entity_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_memory conversation_memory_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_memory_entities
-    ADD CONSTRAINT run_memory_entities_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.conversation_memory
+    ADD CONSTRAINT conversation_memory_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
 --
--- Name: run_memory_entities run_memory_entities_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_memory_entities conversation_memory_entities_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_memory_entities
-    ADD CONSTRAINT run_memory_entities_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.conversation_memory_entities
+    ADD CONSTRAINT conversation_memory_entities_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+
+--
+-- Name: conversation_memory_entities conversation_memory_entities_entity_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.conversation_memory_entities
+    ADD CONSTRAINT conversation_memory_entities_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
+
+
+--
+-- Name: conversation_memory_entities conversation_memory_entities_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.conversation_memory_entities
+    ADD CONSTRAINT conversation_memory_entities_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -3323,19 +3323,19 @@ ALTER TABLE ONLY public.messages
 
 
 --
--- Name: run_worktrees run_worktrees_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_worktrees conversation_worktrees_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_worktrees
-    ADD CONSTRAINT run_worktrees_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.conversation_worktrees
+    ADD CONSTRAINT conversation_worktrees_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
 --
--- Name: run_worktrees run_worktrees_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_worktrees conversation_worktrees_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.run_worktrees
-    ADD CONSTRAINT run_worktrees_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.conversation_worktrees
+    ADD CONSTRAINT conversation_worktrees_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -4241,37 +4241,37 @@ CREATE POLICY artifacts_update ON public.artifacts FOR UPDATE USING (((org_id = 
 
 
 --
--- Name: run_memory; Type: ROW SECURITY; Schema: public; Owner: -
+-- Name: conversation_memory; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
-ALTER TABLE public.run_memory ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.conversation_memory ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: run_memory run_memory_all; Type: POLICY; Schema: public; Owner: -
+-- Name: conversation_memory conversation_memory_all; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY run_memory_all ON public.run_memory USING ((EXISTS ( SELECT 1
+CREATE POLICY conversation_memory_all ON public.conversation_memory USING ((EXISTS ( SELECT 1
    FROM public.conversations r
-  WHERE (r.id = run_memory.conversation_id)))) WITH CHECK ((EXISTS ( SELECT 1
+  WHERE (r.id = conversation_memory.conversation_id)))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public.conversations r
-  WHERE (r.id = run_memory.conversation_id))));
+  WHERE (r.id = conversation_memory.conversation_id))));
 
 
 --
--- Name: run_memory_entities; Type: ROW SECURITY; Schema: public; Owner: -
+-- Name: conversation_memory_entities; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
-ALTER TABLE public.run_memory_entities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.conversation_memory_entities ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: run_memory_entities run_memory_entities_all; Type: POLICY; Schema: public; Owner: -
+-- Name: conversation_memory_entities conversation_memory_entities_all; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY run_memory_entities_all ON public.run_memory_entities USING ((EXISTS ( SELECT 1
+CREATE POLICY conversation_memory_entities_all ON public.conversation_memory_entities USING ((EXISTS ( SELECT 1
    FROM public.conversations r
-  WHERE (r.id = run_memory_entities.conversation_id)))) WITH CHECK ((EXISTS ( SELECT 1
+  WHERE (r.id = conversation_memory_entities.conversation_id)))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public.conversations r
-  WHERE (r.id = run_memory_entities.conversation_id))));
+  WHERE (r.id = conversation_memory_entities.conversation_id))));
 
 
 --
@@ -4292,20 +4292,20 @@ CREATE POLICY messages_all ON public.messages USING ((EXISTS ( SELECT 1
 
 
 --
--- Name: run_worktrees; Type: ROW SECURITY; Schema: public; Owner: -
+-- Name: conversation_worktrees; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
-ALTER TABLE public.run_worktrees ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.conversation_worktrees ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: run_worktrees run_worktrees_all; Type: POLICY; Schema: public; Owner: -
+-- Name: conversation_worktrees conversation_worktrees_all; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY run_worktrees_all ON public.run_worktrees USING ((EXISTS ( SELECT 1
+CREATE POLICY conversation_worktrees_all ON public.conversation_worktrees USING ((EXISTS ( SELECT 1
    FROM public.conversations r
-  WHERE (r.id = run_worktrees.conversation_id)))) WITH CHECK ((EXISTS ( SELECT 1
+  WHERE (r.id = conversation_worktrees.conversation_id)))) WITH CHECK ((EXISTS ( SELECT 1
    FROM public.conversations r
-  WHERE (r.id = run_worktrees.conversation_id))));
+  WHERE (r.id = conversation_worktrees.conversation_id))));
 
 
 --
@@ -5050,25 +5050,25 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.artifacts TO tf_app;
 
 
 --
--- Name: TABLE run_memory; Type: ACL; Schema: public; Owner: -
+-- Name: TABLE conversation_memory; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT ALL ON TABLE public.run_memory TO postgres;
-GRANT ALL ON TABLE public.run_memory TO anon;
-GRANT ALL ON TABLE public.run_memory TO authenticated;
-GRANT ALL ON TABLE public.run_memory TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.run_memory TO tf_app;
+GRANT ALL ON TABLE public.conversation_memory TO postgres;
+GRANT ALL ON TABLE public.conversation_memory TO anon;
+GRANT ALL ON TABLE public.conversation_memory TO authenticated;
+GRANT ALL ON TABLE public.conversation_memory TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.conversation_memory TO tf_app;
 
 
 --
--- Name: TABLE run_memory_entities; Type: ACL; Schema: public; Owner: -
+-- Name: TABLE conversation_memory_entities; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT ALL ON TABLE public.run_memory_entities TO postgres;
-GRANT ALL ON TABLE public.run_memory_entities TO anon;
-GRANT ALL ON TABLE public.run_memory_entities TO authenticated;
-GRANT ALL ON TABLE public.run_memory_entities TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.run_memory_entities TO tf_app;
+GRANT ALL ON TABLE public.conversation_memory_entities TO postgres;
+GRANT ALL ON TABLE public.conversation_memory_entities TO anon;
+GRANT ALL ON TABLE public.conversation_memory_entities TO authenticated;
+GRANT ALL ON TABLE public.conversation_memory_entities TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.conversation_memory_entities TO tf_app;
 
 
 --
@@ -5094,14 +5094,14 @@ GRANT SELECT,USAGE ON SEQUENCE public.messages_id_seq TO tf_app;
 
 
 --
--- Name: TABLE run_worktrees; Type: ACL; Schema: public; Owner: -
+-- Name: TABLE conversation_worktrees; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT ALL ON TABLE public.run_worktrees TO postgres;
-GRANT ALL ON TABLE public.run_worktrees TO anon;
-GRANT ALL ON TABLE public.run_worktrees TO authenticated;
-GRANT ALL ON TABLE public.run_worktrees TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.run_worktrees TO tf_app;
+GRANT ALL ON TABLE public.conversation_worktrees TO postgres;
+GRANT ALL ON TABLE public.conversation_worktrees TO anon;
+GRANT ALL ON TABLE public.conversation_worktrees TO authenticated;
+GRANT ALL ON TABLE public.conversation_worktrees TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.conversation_worktrees TO tf_app;
 
 
 --
@@ -5613,18 +5613,18 @@ ALTER TABLE ONLY public.pending_firings
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_blueprint_run_fkey FOREIGN KEY (blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);
 
--- run_memory.blueprint_run_id is denormalized from the run and grouped per
+-- conversation_memory.blueprint_run_id is denormalized from the run and grouped per
 -- blueprint run. Composite (blueprint_run_id, org_id) FK, matching the
 -- tenant-isolation pattern every other cross-table reference here uses: a
 -- cross-org blueprint_run reference is structurally impossible at the DB level
 -- — defense in depth beyond RLS, whose WITH CHECK only validates org_id, not
--- which blueprint_run the row points at. Lives in this block (not the run_memory
+-- which blueprint_run the row points at. Lives in this block (not the conversation_memory
 -- FK section above) because blueprint_runs is created here. ON DELETE SET NULL
 -- is scoped to blueprint_run_id alone (the PG 15 column-list form) so deleting a
 -- blueprint run keeps the durable memory row with its org_id intact; a bare SET
 -- NULL would try to null org_id too (NOT NULL) and fail the delete.
-ALTER TABLE ONLY public.run_memory
-    ADD CONSTRAINT run_memory_blueprint_run_id_org_id_fkey FOREIGN KEY (blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id) ON DELETE SET NULL (blueprint_run_id);
+ALTER TABLE ONLY public.conversation_memory
+    ADD CONSTRAINT conversation_memory_blueprint_run_id_org_id_fkey FOREIGN KEY (blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id) ON DELETE SET NULL (blueprint_run_id);
 
 ALTER TABLE public.blueprint_steps ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.blueprint_runs  ENABLE ROW LEVEL SECURITY;
@@ -7771,7 +7771,7 @@ REVOKE ALL ON public.ws_presence FROM PUBLIC;
 REVOKE ALL ON public.ws_presence FROM anon, authenticated, service_role;
 
 
--- run_signals (TFAC-585): the cross-pod run-control outbox — a control pod's
+-- conversation_signals (TFAC-585): the cross-pod run-control outbox — a control pod's
 -- delivery of cancel/interrupt/steer/permission/inject to the executor that
 -- owns a run's live process (runs.executor_id), for the case where the
 -- local process registry (Spawner.procs) misses. See
@@ -7780,18 +7780,18 @@ REVOKE ALL ON public.ws_presence FROM anon, authenticated, service_role;
 --
 -- Postgres-only, deliberately no SQLite twin: local mode is always its own
 -- run's owner (TF_ROLE=all is one process), so no code path may ever write
--- a signal there — internal/db/sqlite/run_signals.go is a stub returning
+-- a signal there — internal/db/sqlite/conversation_signals.go is a stub returning
 -- ErrNotApplicableInLocal, mirroring MarketplaceStore/InvitesStore.
 --
 -- Admin-pool-only / system table, same posture as instances / auth_events:
--- run_signals is pure system-to-system coordination, never read under a
+-- conversation_signals is pure system-to-system coordination, never read under a
 -- user's RLS context, so RLS is enabled with NO policy (deny-by-default) +
 -- REVOKE ALL from the app roles — the superuser/admin pool does all I/O.
 --
 -- `kind` carries the fifth value 'inject' because TFAC-594's additive-event
 -- injection is a routed operation wearing a queued API: its live path
 -- (getProc(runID)) is a process-local map hit the router (brain) can't
--- reach for a run executing on a remote executor. Under run_signals, the
+-- reach for a run executing on a remote executor. Under conversation_signals, the
 -- owner delivers into its live process; the staged-injection fallback
 -- (an undelivered messages row) remains for genuinely parked conversations.
 --
@@ -7806,7 +7806,7 @@ REVOKE ALL ON public.ws_presence FROM anon, authenticated, service_role;
 -- convenience window); unacked rows simply expire harmlessly if the owner
 -- never returns — the fleet reaper (TFAC-586) owns a dead executor's runs,
 -- not this table.
-CREATE TABLE public.run_signals (
+CREATE TABLE public.conversation_signals (
     id         bigint GENERATED BY DEFAULT AS IDENTITY,
     org_id     uuid NOT NULL,
     conversation_id     uuid NOT NULL,
@@ -7816,29 +7816,29 @@ CREATE TABLE public.run_signals (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     acked_at   timestamp with time zone,
     ack_result text,
-    CONSTRAINT run_signals_kind_check CHECK ((kind = ANY (ARRAY['cancel'::text, 'interrupt'::text, 'steer'::text, 'permission'::text, 'inject'::text])))
+    CONSTRAINT conversation_signals_kind_check CHECK ((kind = ANY (ARRAY['cancel'::text, 'interrupt'::text, 'steer'::text, 'permission'::text, 'inject'::text])))
 );
 
-ALTER TABLE ONLY public.run_signals
-    ADD CONSTRAINT run_signals_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.conversation_signals
+    ADD CONSTRAINT conversation_signals_pkey PRIMARY KEY (id);
 
-ALTER TABLE ONLY public.run_signals
-    ADD CONSTRAINT run_signals_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.run_signals
-    ADD CONSTRAINT run_signals_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.conversation_signals
+    ADD CONSTRAINT conversation_signals_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.conversation_signals
+    ADD CONSTRAINT conversation_signals_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 -- The owner's apply-loop scan: unacked rows targeting me, oldest id first
 -- (§5.2's "apply signals per run in id order" — ascending id across the
 -- whole target is a superset ordering that trivially preserves per-run
 -- order too).
-CREATE INDEX idx_run_signals_target_unacked ON public.run_signals USING btree (target, id) WHERE (acked_at IS NULL);
+CREATE INDEX idx_conversation_signals_target_unacked ON public.conversation_signals USING btree (target, id) WHERE (acked_at IS NULL);
 -- The 24h purge sweep.
-CREATE INDEX idx_run_signals_acked ON public.run_signals USING btree (acked_at) WHERE (acked_at IS NOT NULL);
+CREATE INDEX idx_conversation_signals_acked ON public.conversation_signals USING btree (acked_at) WHERE (acked_at IS NOT NULL);
 
-ALTER TABLE public.run_signals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.conversation_signals ENABLE ROW LEVEL SECURITY;
 
-REVOKE ALL ON public.run_signals FROM PUBLIC;
-REVOKE ALL ON public.run_signals FROM anon, authenticated, service_role;
+REVOKE ALL ON public.conversation_signals FROM PUBLIC;
+REVOKE ALL ON public.conversation_signals FROM anon, authenticated, service_role;
 
 
 
@@ -8090,13 +8090,13 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.conversations TO tf_system;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.messages TO tf_system;
 GRANT USAGE, SELECT ON SEQUENCE public.messages_id_seq TO tf_system;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.artifacts TO tf_system;
-GRANT SELECT, INSERT, DELETE ON TABLE public.run_worktrees TO tf_system;
+GRANT SELECT, INSERT, DELETE ON TABLE public.conversation_worktrees TO tf_system;
 -- Agent memory (TaskMemory.UpsertAgentMemorySystem / GetMemoriesForEntitySystem).
-GRANT SELECT, INSERT, UPDATE ON TABLE public.run_memory TO tf_system;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.conversation_memory TO tf_system;
 -- Multi-entity memory join (TaskMemory.RecordEntityTouchSystem / the
 -- GetMemoriesForEntitySystem read-path join). UPDATE backs the
 -- role-precedence upgrade (touched -> produced -> primary).
-GRANT SELECT, INSERT, UPDATE ON TABLE public.run_memory_entities TO tf_system;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.conversation_memory_entities TO tf_system;
 -- External-credential write audit log (RecordExternalWrite / the Jira mirror).
 GRANT SELECT, INSERT ON TABLE public.external_actions TO tf_system;
 -- Touched-entity resolution.
@@ -8110,10 +8110,10 @@ GRANT SELECT, UPDATE ON TABLE public.tasks TO tf_system;
 -- executor's cross-pod apply loop. Claim/drain/requeue is router-side.
 GRANT SELECT, INSERT ON TABLE public.pending_firings TO tf_system;
 GRANT USAGE, SELECT ON SEQUENCE public.pending_firings_id_seq TO tf_system;
--- run_signals (TFAC-585): SELECT for the owning executor's apply-loop scan,
+-- conversation_signals (TFAC-585): SELECT for the owning executor's apply-loop scan,
 -- UPDATE for ack. Insert (cross-pod dispatch) and the purge reaper are
 -- brain-gated — control-side only.
-GRANT SELECT, UPDATE ON TABLE public.run_signals TO tf_system;
+GRANT SELECT, UPDATE ON TABLE public.conversation_signals TO tf_system;
 -- ws_outbox (TFAC-584): INSERT to publish a websocket event over the
 -- backplane, plus SELECT + DELETE for the TTL reaper, which deliberately
 -- runs on every backplane-wired pod, executors included.
@@ -8196,13 +8196,13 @@ GRANT SELECT ON TABLE public.org_slack_workspaces TO tf_system;
 -- reads this and nothing else; no DDL, ever.
 GRANT SELECT ON TABLE public.goose_db_version TO tf_system;
 
--- TFAC-622: backfill one 'primary' run_memory_entities row per pre-existing
--- run_memory row, so the entity-scoped read switch (entity_links UNION
+-- TFAC-622: backfill one 'primary' conversation_memory_entities row per pre-existing
+-- conversation_memory row, so the entity-scoped read switch (entity_links UNION
 -- arms, both dead — grep finds zero writers — replaced by membership
 -- through this join) is result-identical for every row that exists as of
 -- this migration.
-INSERT INTO run_memory_entities (org_id, conversation_id, entity_id, role, created_at)
-SELECT org_id, conversation_id, entity_id, 'primary', created_at FROM run_memory
+INSERT INTO conversation_memory_entities (org_id, conversation_id, entity_id, role, created_at)
+SELECT org_id, conversation_id, entity_id, 'primary', created_at FROM conversation_memory
 ON CONFLICT (conversation_id, entity_id) DO NOTHING;
 
 -- +goose Down

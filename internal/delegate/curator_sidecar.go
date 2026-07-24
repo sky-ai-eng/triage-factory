@@ -67,7 +67,7 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, conversation
 	}
 
 	// Git gate for the sidecar's git proxy: authorize a fetch of a repo that is
-	// pinned ∩ team-tracked (a curator turn has no run_worktrees ledger). The
+	// pinned ∩ team-tracked (a curator turn has no conversation_worktrees ledger). The
 	// sidecar resolves the real token from its own unsealed bundle; no
 	// TokenSource here.
 	var git *agentproc.GitProxyConfig

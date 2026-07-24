@@ -49,7 +49,7 @@ const ConfigKey = "core.hooksPath"
 // wherever the operator ran it from (not necessarily on PATH), so the
 // spawner exports this in the agent process env in both run modes; the
 // hooks read it with a PATH fallback. Part of the F2 run-context
-// convention, alongside TRIAGE_FACTORY_RUN_ID and the agenthost socket.
+// convention, alongside TRIAGE_FACTORY_CONVERSATION_ID and the agenthost socket.
 const BinEnvVar = "TRIAGE_FACTORY_BIN"
 
 // PushCaptureEnvVar names the env entry that tells the pre-push hook who owns

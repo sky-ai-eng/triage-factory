@@ -48,10 +48,10 @@ type ExternalAction struct {
 	// draft→open). Empty for a non-transition action → SQL NULL.
 	FromState string `json:"from_state,omitempty"`
 	ToState   string `json:"to_state,omitempty"`
-	// RunID is the producing run — the agent's for a bot/system action, the
+	// ConversationID is the producing run — the agent's for a bot/system action, the
 	// drafter's for an approval. Empty (→ SQL NULL) for an action with no run (a
 	// dashboard board-drag) or after the run is purged (FK ON DELETE SET NULL).
-	RunID string `json:"run_id,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
 	// ActorUserID is the human authorizer/initiator (the approver, the dragger,
 	// the kicking-off user of a manual run). Empty (→ SQL NULL) for an autonomous
 	// system action (an event-triggered bot run, the Jira board mirror).

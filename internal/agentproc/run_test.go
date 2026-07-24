@@ -13,7 +13,7 @@ import (
 // assert the regression-case message survived the stream reader.
 type captureSink struct {
 	sessionID string
-	messages  []*domain.AgentMessage
+	messages  []*domain.Message
 }
 
 func (c *captureSink) OnSession(sid string) error {
@@ -21,7 +21,7 @@ func (c *captureSink) OnSession(sid string) error {
 	return nil
 }
 
-func (c *captureSink) OnMessage(m *domain.AgentMessage) error {
+func (c *captureSink) OnMessage(m *domain.Message) error {
 	c.messages = append(c.messages, m)
 	return nil
 }
@@ -58,7 +58,7 @@ func TestConsumeStream_HandlesOversizedToolResult(t *testing.T) {
 		t.Errorf("session id = %q, want sess-big", sink.sessionID)
 	}
 
-	var toolMsg *domain.AgentMessage
+	var toolMsg *domain.Message
 	for _, m := range sink.messages {
 		if m.Role == "tool" {
 			toolMsg = m

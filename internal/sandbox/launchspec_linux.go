@@ -209,8 +209,8 @@ var allowedSandboxEnvKeys = map[string]struct{}{
 	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": {},
 
 	// Run-scoped metadata (delegate/resume ExtraEnv + the git-hooks bin).
-	"TRIAGE_FACTORY_RUN_ID":               {},
-	"TRIAGE_FACTORY_RUN_ROOT":             {},
+	"TRIAGE_FACTORY_CONVERSATION_ID":      {},
+	"TRIAGE_FACTORY_CONVERSATION_ROOT":    {},
 	"TRIAGE_FACTORY_BLUEPRINT_RUN_ID":     {},
 	"TRIAGE_FACTORY_REPO":                 {},
 	"TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER": {},

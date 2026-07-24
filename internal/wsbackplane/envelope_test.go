@@ -15,12 +15,12 @@ import (
 // locally.
 func TestWireEvent_RoundTripPreservesOrgAndUser(t *testing.T) {
 	orig := websocket.Event{
-		Type:      "agent_message",
-		RunID:     "run-1",
-		ProjectID: "",
-		OrgID:     "org-1",
-		UserID:    "user-1",
-		Data:      map[string]any{"text": "hello"},
+		Type:           "message",
+		ConversationID: "run-1",
+		ProjectID:      "",
+		OrgID:          "org-1",
+		UserID:         "user-1",
+		Data:           map[string]any{"text": "hello"},
 	}
 	we, err := newWireEvent(orig)
 	if err != nil {
@@ -35,7 +35,7 @@ func TestWireEvent_RoundTripPreservesOrgAndUser(t *testing.T) {
 		t.Fatalf("unmarshal wireEvent: %v", err)
 	}
 	got := decoded.toEvent()
-	if got.Type != orig.Type || got.RunID != orig.RunID || got.OrgID != orig.OrgID || got.UserID != orig.UserID {
+	if got.Type != orig.Type || got.ConversationID != orig.ConversationID || got.OrgID != orig.OrgID || got.UserID != orig.UserID {
 		t.Fatalf("round trip mismatch: got %+v, want %+v", got, orig)
 	}
 	data, ok := got.Data.(map[string]any)

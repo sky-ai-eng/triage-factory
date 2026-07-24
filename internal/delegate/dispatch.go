@@ -240,7 +240,7 @@ func (s *Spawner) drainRunQueue(ctx context.Context) {
 // or finalized to avoid stranding it, so those must not be abortable by a
 // shutdown mid-finalize (the same detached-terminal-write convention the rest of
 // the spawner follows).
-func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) {
+func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversation) {
 	orgID := run.OrgID
 	startTime := time.Now()
 
@@ -464,7 +464,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.AgentRun) 
 // did. Any executor may run this — ensureWorkspace warm-reuses the
 // worktree if this IS the executor that parked it, else cold-rehydrates
 // from the durable S3 snapshot.
-func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.AgentRun, task *domain.Task, agentMessage, userID string) {
+func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversation, task *domain.Task, agentMessage, userID string) {
 	orgID := run.OrgID
 	blueprintRunID := run.BlueprintRunID
 
@@ -625,7 +625,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.AgentRun,
 // open→leave parked — now driven by the DB rather than a
 // goroutine stack. It calls recomputeTaskBoardColumn on every transition so the
 // board stays live under the queue model.
-func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, stepRun domain.AgentRun, cfg runConfig, startTime time.Time) {
+func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, stepRun domain.Conversation, cfg runConfig, startTime time.Time) {
 	triggerType := stepRun.TriggerType
 	creatorUserID := stepRun.CreatorUserID
 	stepIdx := 0
@@ -785,7 +785,7 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 	// and never outlives one queue dwell. Empty = no affinity (placement off,
 	// non-repo task, or a failed read) → the claim treats it as unowned.
 	preferred := s.preferredExecutorFor(ctx, orgID, task, runID)
-	return s.runQueue.EnqueueRun(ctx, orgID, domain.AgentRun{
+	return s.runQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID:                  runID,
 		TaskID:              task.ID,
 		PromptID:            step.StepPromptID,
@@ -807,7 +807,7 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 // every later claim it reconstructs the lightweight config from the task and
 // guarantees the shared worktree is on disk (warm reuse, or cold rehydrate from
 // the durable snapshot via ensureWorkspace).
-func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, run domain.AgentRun, gh *ghclient.Client, execSandbox *executorSandbox) (runConfig, error) {
+func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, run domain.Conversation, gh *ghclient.Client, execSandbox *executorSandbox) (runConfig, error) {
 	if br.WorktreePath == "" {
 		var (
 			cfg runConfig
@@ -815,7 +815,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		)
 		// The run-root is blueprint-scoped (shared across steps, rebuilt under the
 		// same key on rehydrate), so setup keys it by br.ID; run.ID stays the
-		// per-run identity for the worktree_path / run_worktrees records.
+		// per-run identity for the worktree_path / conversation_worktrees records.
 		switch task.EntitySource {
 		case "github":
 			cfg, err = s.setupGitHub(ctx, orgID, run.ID, br.ID, task, gh, execSandbox)
@@ -840,7 +840,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	// Later step (or crash re-claim): reconstruct config + ensure the shared
 	// worktree exists. ensureWorkspace warm-returns the on-disk path or cold-
 	// rebuilds it from the snapshot keyed by the blueprint_run id.
-	runForWS := &domain.AgentRun{ID: run.ID, WorktreePath: br.WorktreePath, BlueprintRunID: br.ID}
+	runForWS := &domain.Conversation{ID: run.ID, WorktreePath: br.WorktreePath, BlueprintRunID: br.ID}
 	cfg := runConfig{orgID: orgID, projectID: lookupEntityProjectID(s.entities, orgID, task.EntityID)}
 	switch task.EntitySource {
 	case "github":
@@ -898,7 +898,7 @@ func parseGitHubTask(task domain.Task) (owner, repo string, prNumber int) {
 // handleStepSetupError requeues a claimed run whose workspace setup hit a
 // transient error, or fails the blueprint out once the run exhausts its retry
 // budget (poison pill). The shared worktree, if partially built, stays on disk.
-func (s *Spawner) handleStepSetupError(orgID string, br *domain.BlueprintRun, run domain.AgentRun, setupErr error) {
+func (s *Spawner) handleStepSetupError(orgID string, br *domain.BlueprintRun, run domain.Conversation, setupErr error) {
 	if run.Attempts >= maxRunAttempts {
 		dispatchLog.Error("workspace setup failed after attempts; failing blueprint", "run", run.ID, "attempts", run.Attempts, "error", setupErr)
 		s.terminateBlueprint(orgID, br.ID, run.TaskID, run.TriggerType, run.CreatorUserID, time.Now(),
@@ -914,7 +914,7 @@ func (s *Spawner) handleStepSetupError(orgID string, br *domain.BlueprintRun, ru
 
 // failClaimedRun marks an orphaned claimed run failed (its blueprint_run
 // vanished, so there is nothing to drive). Best-effort.
-func (s *Spawner) failClaimedRun(orgID string, run *domain.AgentRun, reason string) {
+func (s *Spawner) failClaimedRun(orgID string, run *domain.Conversation, reason string) {
 	dispatchLog.Error("marking run failed", "run", run.ID, "reason", reason)
 	if _, err := s.agentRuns.MarkFailedIfActiveSystem(context.Background(), orgID, run.ID, ""); err != nil {
 		dispatchLog.Warn("mark orphaned run failed", "run", run.ID, "error", err)

@@ -338,7 +338,7 @@ func TestMergeEnv_StripsParentCredsWhenResolved(t *testing.T) {
 		"ANTHROPIC_BEDROCK_BASE_URL=https://op", // endpoint hijack
 		"NPM_CONFIG_CACHE=/cache",
 	}
-	extra := []string{"TRIAGE_FACTORY_RUN_ID=run-123"}
+	extra := []string{"TRIAGE_FACTORY_CONVERSATION_ID=run-123"}
 	creds := map[string]string{"ANTHROPIC_API_KEY": "sk-ant-org-resolved"}
 
 	merged := mergeEnv(parent, extra, creds)
@@ -365,7 +365,7 @@ func TestMergeEnv_StripsParentCredsWhenResolved(t *testing.T) {
 		}
 	}
 	// ExtraEnv must pass through.
-	if !containsKey(merged, "TRIAGE_FACTORY_RUN_ID=run-123") {
+	if !containsKey(merged, "TRIAGE_FACTORY_CONVERSATION_ID=run-123") {
 		t.Errorf("ExtraEnv var missing from merged env: %v", merged)
 	}
 }

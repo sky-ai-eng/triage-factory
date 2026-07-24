@@ -95,7 +95,7 @@ type CuratorStore interface {
 	// the user row itself when nothing streamed). Withdrawn-pending rows
 	// (delivered=false AND window_state='inactive') are excluded — withdrawn
 	// means "never happened".
-	ListConversationMessages(ctx context.Context, orgID, conversationID string) ([]domain.AgentMessage, error)
+	ListConversationMessages(ctx context.Context, orgID, conversationID string) ([]domain.Message, error)
 
 	// ListClaims returns the conversation's claims oldest-first. App pool —
 	// tf_app has SELECT on claims and the RLS policy composes through the
@@ -117,12 +117,15 @@ type CuratorStore interface {
 
 	// ArchiveLiveConversation is the reset: stamps archived_at on the
 	// creator's live conversation and deletes its undelivered rows (queued
-	// turns and pending injections never entered context). Returns
-	// ErrCuratorInFlight when an active claim exists — a live subprocess
-	// must be cancelled before its transcript is retired. A missing live
-	// conversation is a no-op (nil). The next send mints a fresh
-	// conversation, which is what makes reset start a fresh SDK session.
-	ArchiveLiveConversation(ctx context.Context, orgID, projectID, creatorUserID string) error
+	// turns and pending injections never entered context). Returns the
+	// archived conversation's id, or "" when there was no live conversation
+	// to reset (a no-op) — the handler broadcasts the reset only on a real
+	// archive and carries the id so a client that already began a fresh
+	// conversation ignores the stale event. Returns ErrCuratorInFlight when
+	// an active claim exists — a live subprocess must be cancelled before its
+	// transcript is retired. The next send mints a fresh conversation, which
+	// is what makes reset start a fresh SDK session.
+	ArchiveLiveConversation(ctx context.Context, orgID, projectID, creatorUserID string) (string, error)
 
 	// --- Dispatch (session goroutine) ---
 
@@ -284,5 +287,5 @@ type CuratorStore interface {
 	// already remapped by the caller. Admin pool because claims have no
 	// app-pool write door; runs after the import's main tx committed the
 	// project row.
-	ImportConversationStateSystem(ctx context.Context, orgID string, conv domain.Conversation, claims []domain.Claim, msgs []domain.AgentMessage) error
+	ImportConversationStateSystem(ctx context.Context, orgID string, conv domain.Conversation, claims []domain.Claim, msgs []domain.Message) error
 }

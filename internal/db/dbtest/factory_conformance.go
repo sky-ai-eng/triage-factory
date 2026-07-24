@@ -61,7 +61,7 @@ type FactorySeeder struct {
 	// backdate closures into / out of the grace window.
 	CloseEntity func(t *testing.T, entityID string, closedAt time.Time)
 
-	// SetRunMemory upserts a run_memory row with the given
+	// SetRunMemory upserts a conversation_memory row with the given
 	// agent_content. content="" inserts a literal empty string;
 	// content with whitespace exercises the BTRIM/TRIM derivation
 	// for memory_missing. To insert a row with NULL agent_content,
@@ -84,7 +84,7 @@ const nullSentinel = "<NULL>"
 //   - LifetimeDistinctByEventType collapses re-entries from one
 //     entity to one count and ignores system events.
 //   - ActiveRuns filters by status, JOINs through tasks+entities,
-//     and derives memory_missing from run_memory across all four
+//     and derives memory_missing from conversation_memory across all four
 //     forms of noncompliance (no row, NULL content, empty string,
 //     whitespace-only) plus the populated-content baseline.
 //   - RecentEventsByEntity returns at most perEntity events per

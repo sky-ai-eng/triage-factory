@@ -5,7 +5,7 @@ import { ArtifactRow } from './ArtifactRow'
 
 // ArtifactList — the shared surface for everything a run produced (TFAC-470).
 // One row per artifact: a kind icon + the target + a state badge + an external
-// link. Fetched run-scoped from GET /api/agent/runs/{id}/artifacts (TFAC-465);
+// link. Fetched run-scoped from GET /api/agent/conversations/{id}/artifacts (TFAC-465);
 // the component owns its own fetch so both consumers stay one-liners — the
 // run-detail rail (mounts with the page → "always visible") and the board
 // card's popover (mounts on open → lazy-fetch).
@@ -33,7 +33,7 @@ export default function ArtifactList({ runId, onOpenApproval }: Props) {
     setError(null)
     ;(async () => {
       try {
-        const res = await fetch(`/api/agent/runs/${runId}/artifacts`)
+        const res = await fetch(`/api/agent/conversations/${runId}/artifacts`)
         if (!res.ok) {
           // readError keeps the context ("Couldn't load artifacts: …") and
           // degrades through the server's JSON `error`, a non-JSON text body,

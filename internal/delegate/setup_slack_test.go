@@ -105,7 +105,7 @@ func TestSetupSlack_PersistsWorktreePath(t *testing.T) {
 	runID := "slack-run-persist"
 	rootKey := brID // the run-root keys by the blueprint run id
 	t.Cleanup(func() { worktree.RemoveRunRoot(rootKey) })
-	dbtest.SeedConversation(t, database, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.Conversation{
 		ID: runID, TaskID: task.ID, PromptID: "persist-prompt", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
 	})
@@ -172,7 +172,7 @@ func TestSetupSlack_ToolsRef_ComposesRegisteredReference(t *testing.T) {
 // slackBlueprintFixture seeds a full 1-step blueprint + running blueprint_run
 // on a slack-sourced task, for exercising buildStepConfig's switch dispatch
 // end to end (both the first-claim and later-step branches).
-func slackBlueprintFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, string, domain.Task, domain.AgentRun) {
+func slackBlueprintFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, string, domain.Task, domain.Conversation) {
 	t.Helper()
 	s, database, task := slackTaskFixture(t, suffix)
 	ctx := context.Background()
@@ -202,7 +202,7 @@ func slackBlueprintFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, stri
 		t.Fatalf("CreateRun: %v", err)
 	}
 
-	run := domain.AgentRun{ID: "srun-" + suffix, TaskID: task.ID, BlueprintRunID: brID}
+	run := domain.Conversation{ID: "srun-" + suffix, TaskID: task.ID, BlueprintRunID: brID}
 	return s, database, brID, task, run
 }
 

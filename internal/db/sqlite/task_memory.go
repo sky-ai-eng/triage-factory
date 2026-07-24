@@ -50,7 +50,7 @@ func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, runID, e
 		blueprintRun = blueprintRunID
 	}
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO run_memory (id, conversation_id, entity_id, blueprint_run_id, agent_content, created_at)
+		INSERT INTO conversation_memory (id, conversation_id, entity_id, blueprint_run_id, agent_content, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(conversation_id) DO UPDATE SET agent_content = excluded.agent_content, blueprint_run_id = excluded.blueprint_run_id
 	`, uuid.New().String(), runID, entityID, blueprintRun, agentContent, time.Now().UTC())
@@ -70,7 +70,7 @@ func (s *taskMemoryStore) UpdateRunMemoryHumanContent(ctx context.Context, orgID
 		humanContent = content
 	}
 	res, err := s.q.ExecContext(ctx,
-		`UPDATE run_memory SET human_content = ? WHERE conversation_id = ?`,
+		`UPDATE conversation_memory SET human_content = ? WHERE conversation_id = ?`,
 		humanContent, runID,
 	)
 	if err != nil {
@@ -83,20 +83,20 @@ func (s *taskMemoryStore) UpdateRunMemoryHumanContent(ctx context.Context, orgID
 		// before claiming the row is missing.
 		var exists int
 		err := s.q.QueryRowContext(ctx,
-			`SELECT 1 FROM run_memory WHERE conversation_id = ? LIMIT 1`,
+			`SELECT 1 FROM conversation_memory WHERE conversation_id = ? LIMIT 1`,
 			runID,
 		).Scan(&exists)
 		switch err {
 		case nil:
 			// Matching row exists; the UPDATE was a no-op.
 		case sql.ErrNoRows:
-			// Logged-and-returned-nil: if the run_memory row genuinely
+			// Logged-and-returned-nil: if the conversation_memory row genuinely
 			// doesn't exist (cleanup race, taken-over run, etc.), the
 			// human's submit shouldn't fail. The agent-side upsert path
 			// will surface its own warning if it failed earlier.
-			memoryLog.Warn("no run_memory row; human_content not recorded", "conversation_id", runID)
+			memoryLog.Warn("no conversation_memory row; human_content not recorded", "conversation_id", runID)
 		default:
-			memoryLog.Warn("verify run_memory row after no-op human_content update failed", "conversation_id", runID, "error", err)
+			memoryLog.Warn("verify conversation_memory row after no-op human_content update failed", "conversation_id", runID, "error", err)
 		}
 	}
 	return nil
@@ -143,8 +143,8 @@ func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, 
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
-		FROM run_memory rm
-		WHERE rm.conversation_id IN (SELECT conversation_id FROM run_memory_entities WHERE entity_id = ?)
+		FROM conversation_memory rm
+		WHERE rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE entity_id = ?)
 		ORDER BY rm.created_at DESC
 		LIMIT ?
 	`, entityID, limit)
@@ -163,8 +163,8 @@ func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, 
 func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]domain.TaskMemory, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
-		FROM run_memory rm
-		WHERE rm.conversation_id IN (SELECT conversation_id FROM run_memory_entities WHERE entity_id = ?)
+		FROM conversation_memory rm
+		WHERE rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE entity_id = ?)
 		ORDER BY rm.created_at ASC
 	`, entityID)
 	if err != nil {
@@ -174,7 +174,7 @@ func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]do
 	return scanTaskMemories(rows)
 }
 
-// scanTaskMemories drains a run_memory result set (the shared column list) into
+// scanTaskMemories drains a conversation_memory result set (the shared column list) into
 // materialized TaskMemory rows.
 func scanTaskMemories(rows *sql.Rows) ([]domain.TaskMemory, error) {
 	var out []domain.TaskMemory
@@ -214,10 +214,10 @@ func (s *taskMemoryStore) RecordEntityTouchSystem(ctx context.Context, orgID, ru
 		return err
 	}
 	query := `
-		INSERT INTO run_memory_entities (org_id, conversation_id, entity_id, role, created_at)
+		INSERT INTO conversation_memory_entities (org_id, conversation_id, entity_id, role, created_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(conversation_id, entity_id) DO UPDATE SET role = excluded.role
-		WHERE ` + fmt.Sprintf(memoryRoleRankCASE, "excluded.role") + ` > ` + fmt.Sprintf(memoryRoleRankCASE, "run_memory_entities.role")
+		WHERE ` + fmt.Sprintf(memoryRoleRankCASE, "excluded.role") + ` > ` + fmt.Sprintf(memoryRoleRankCASE, "conversation_memory_entities.role")
 	_, err := s.q.ExecContext(ctx, query, orgID, runID, entityID, role, time.Now().UTC())
 	return err
 }
@@ -229,8 +229,8 @@ func (s *taskMemoryStore) CountMemoriesForEntitySystem(ctx context.Context, orgI
 	}
 	var n int
 	err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM run_memory rm
-		WHERE rm.conversation_id IN (SELECT conversation_id FROM run_memory_entities WHERE entity_id = ?)
+		SELECT COUNT(*) FROM conversation_memory rm
+		WHERE rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE entity_id = ?)
 	`, entityID).Scan(&n)
 	return n, err
 }

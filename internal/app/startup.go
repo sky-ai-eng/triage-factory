@@ -207,7 +207,7 @@ func (a *App) cleanupWorktrees(ctx context.Context) {
 	}
 
 	preserveWorktrees := map[string]bool{}
-	if parkedPaths, perr := a.stores.AgentRuns.ListParkedWorktreePathsSystem(ctx, runmode.LocalDefaultOrgID); perr != nil {
+	if parkedPaths, perr := a.stores.Conversations.ListParkedWorktreePathsSystem(ctx, runmode.LocalDefaultOrgID); perr != nil {
 		serverLog.Warn("load parked worktree paths failed; parked workspaces will rehydrate from snapshot rather than reuse the warm cache", "error", perr)
 	} else {
 		for _, p := range parkedPaths {

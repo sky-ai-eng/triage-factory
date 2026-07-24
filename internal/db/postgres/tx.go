@@ -108,7 +108,7 @@ func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn f
 // *sql.Tx. Shared between the WithTx and SyntheticClaimsWithTx code
 // paths so wiring drift is impossible: both entrypoints get the
 // exact same set of tx-bound stores, with the same admin-pool
-// retention for AgentRuns (event-triggered Create routes around RLS
+// retention for Conversations (event-triggered Create routes around RLS
 // even from inside a claims-set tx — see the Create comment).
 func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 	return db.TxStores{
@@ -127,51 +127,51 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// admin pool so event-triggered CreateRun + the `...System`
 		// reads route around RLS. The admin writes commit
 		// autonomously from the outer tx — same pool-routing
-		// semantics as AgentRunStore.Create.
+		// semantics as ConversationStore.Create.
 		Blueprints: newBlueprintStore(tx, s.admin),
 		Agents:     newTxAgentStore(tx),
 		TeamAgents: newTxTeamAgentStore(tx),
 		Users:      newUsersStore(tx, tx),
 		Tasks:      newTaskStore(tx, s.admin),
 		Factory:    newFactoryReadStore(tx),
-		// AgentRuns: composed half is tx; admin half stays the
+		// Conversations: composed half is tx; admin half stays the
 		// real admin pool so event-triggered Create can route
 		// around RLS. The admin write commits autonomously from
 		// the outer tx — see Create's pool-routing comment for
 		// why that's the intended semantics.
-		AgentRuns: newAgentRunStore(tx, s.admin),
+		Conversations: newConversationStore(tx, s.admin),
 		// Artifacts: app-side write routes through the tx so writes
 		// compose with the surrounding claims tx (artifacts_* RLS scopes
 		// by team_id like runs); admin half stays pinned to s.admin so
 		// UpsertSystem inside WithTx routes outside the tx and commits
-		// autonomously, the same shape AgentRuns / RunWorktrees use.
+		// autonomously, the same shape Conversations / RunWorktrees use.
 		Artifacts:      newArtifactStore(tx, s.admin),
 		Entities:       newEntityStore(tx, tx),
 		Repos:          newRepoStore(tx, tx),
 		PendingFirings: newPendingFiringsStore(tx),
 		// Projects: ListSystem routes around RLS the same way
-		// AgentRuns' event-triggered Create does. Keeping the admin
+		// Conversations' event-triggered Create does. Keeping the admin
 		// half pinned to s.admin lets the classifier read each org's
 		// project set even when composed inside a claims-set tx.
 		Projects: newProjectStore(tx, s.admin),
 		// Events: app-side write routes through the tx; admin half
 		// stays pinned to the real admin pool so RecordSystem /
 		// GetMetadataSystem inside WithTx routes outside the tx —
-		// those writes commit autonomously, same shape AgentRuns /
+		// those writes commit autonomously, same shape Conversations /
 		// TaskMemory use for their admin-pool halves.
 		Events: newEventStore(tx, s.admin),
 		// TaskMemory: app-side write routes through the tx; admin
 		// half stays pinned to the real admin pool so
 		// UpsertAgentMemorySystem / GetMemoriesForEntitySystem inside
 		// WithTx routes outside the tx — those writes commit
-		// autonomously, same shape Events / AgentRuns use for their
+		// autonomously, same shape Events / Conversations use for their
 		// admin-pool halves.
 		TaskMemory: newTaskMemoryStore(tx, s.admin),
 		// RunWorktrees: app-side write routes through the tx; admin
 		// half stays pinned to s.admin so DeleteByPathSystem +
 		// ListSystem inside WithTx route outside the tx — those
 		// writes commit autonomously, same shape Events /
-		// AgentRuns / TaskMemory use for their admin-pool halves.
+		// Conversations / TaskMemory use for their admin-pool halves.
 		RunWorktrees: newRunWorktreeStore(tx, s.admin),
 		// Orgs: app-side writes route through the tx so settings
 		// upserts compose with the surrounding claims tx; admin half
@@ -189,7 +189,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// settings upserts compose with the surrounding claims tx;
 		// admin half stays pinned to s.admin so GetDefaultForOrgSystem
 		// + GetSettingsSystem inside WithTx route outside the tx — same
-		// shape Orgs/Events/AgentRuns use for their admin-pool halves.
+		// shape Orgs/Events/Conversations use for their admin-pool halves.
 		Teams: newTeamsStore(tx, s.admin),
 		// JiraStatusRules: app-side write routes through the tx so
 		// ReplaceForTeam composes with the surrounding claims tx;

@@ -13,7 +13,7 @@ import (
 //   - the wired RunWorktreeStore impl,
 //   - the orgID to pass to every call,
 //   - a RunWorktreeSeeder the harness uses to stage the run FK
-//     chain (run_worktrees FKs to runs; backends seed those rows
+//     chain (conversation_worktrees FKs to runs; backends seed those rows
 //     differently and the conformance harness shouldn't bake one
 //     shape's schema into the assertions).
 type RunWorktreeStoreFactory func(t *testing.T) (store db.RunWorktreeStore, orgID string, seed RunWorktreeSeeder)
@@ -22,7 +22,7 @@ type RunWorktreeStoreFactory func(t *testing.T) (store db.RunWorktreeStore, orgI
 // to stage fixture rows the RunWorktreeStore doesn't own.
 type RunWorktreeSeeder struct {
 	// Run inserts the entity + event + prompt + task + run FK chain
-	// needed to attach a run_worktrees row, and returns the runID.
+	// needed to attach a conversation_worktrees row, and returns the runID.
 	// suffix discriminates per-subtest seeds so the unique indexes on
 	// entities/runs don't collide.
 	Run func(t *testing.T, suffix string) (runID string)

@@ -18,12 +18,12 @@ import "time"
 // survives a run purge for audit — the FK is ON DELETE SET NULL.
 type Artifact struct {
 	ID string `json:"id"`
-	// RunID is the run that produced this artifact. Empty after the run
+	// ConversationID is the run that produced this artifact. Empty after the run
 	// is purged (FK ON DELETE SET NULL) — the artifact outlives it for
 	// the audit ledger.
-	RunID  string `json:"run_id,omitempty"`
-	OrgID  string `json:"org_id"`
-	TeamID string `json:"team_id"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	OrgID          string `json:"org_id"`
+	TeamID         string `json:"team_id"`
 
 	// Provider + Kind are the polymorphic discriminators. Use the
 	// ArtifactProvider* / ArtifactKind* consts.

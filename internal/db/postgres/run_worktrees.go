@@ -13,7 +13,7 @@ import (
 // runWorktreeStore is the Postgres impl of db.RunWorktreeStore. SQL
 // is written fresh against D3's schema: $N placeholders, explicit
 // org_id bind (column NOT NULL with no default), and org_id in every
-// WHERE clause as defense in depth alongside the run_worktrees_all
+// WHERE clause as defense in depth alongside the conversation_worktrees_all
 // RLS policy (which gates rows on the parent run's visibility via
 // EXISTS).
 //
@@ -22,7 +22,7 @@ import (
 //   - q: app pool (tf_app, RLS-active). The workspace CLI subcommand
 //     (cmd/exec/workspace) routes here. A separate cmd/exec auth pass
 //     owns wrapping the CLI's store calls in synthetic-claims so the
-//     EXISTS subquery in run_worktrees_all can resolve the parent
+//     EXISTS subquery in conversation_worktrees_all can resolve the parent
 //     run row.
 //
 //   - admin: admin pool (supabase_admin, BYPASSRLS). The delegate
@@ -65,7 +65,7 @@ func insertRunWorktree(
 	// inserted=false and returns the winner's path without
 	// touching git.
 	res, err := q.ExecContext(ctx, `
-		INSERT INTO run_worktrees (conversation_id, org_id, repo_id, path, ref)
+		INSERT INTO conversation_worktrees (conversation_id, org_id, repo_id, path, ref)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (conversation_id, repo_id, ref) DO NOTHING
 	`, w.RunID, orgID, w.RepoID, w.Path, w.Ref)
@@ -100,7 +100,7 @@ func (s *runWorktreeStore) GetByRepoRefSystem(ctx context.Context, orgID, runID,
 func getRunWorktreeByRepoRef(ctx context.Context, q queryer, orgID, runID, repoID, ref string) (*domain.RunWorktree, error) {
 	row := q.QueryRowContext(ctx, `
 		SELECT conversation_id, repo_id, path, ref, created_at
-		FROM run_worktrees
+		FROM conversation_worktrees
 		WHERE org_id = $1 AND conversation_id = $2 AND repo_id = $3 AND ref = $4
 	`, orgID, runID, repoID, ref)
 	var w domain.RunWorktree
@@ -124,7 +124,7 @@ func (s *runWorktreeStore) ListSystem(ctx context.Context, orgID, runID string) 
 func listRunWorktrees(ctx context.Context, q queryer, orgID, runID string) ([]domain.RunWorktree, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT conversation_id, repo_id, path, ref, created_at
-		FROM run_worktrees
+		FROM conversation_worktrees
 		WHERE org_id = $1 AND conversation_id = $2
 		ORDER BY created_at ASC, repo_id ASC, ref ASC
 	`, orgID, runID)
@@ -153,7 +153,7 @@ func (s *runWorktreeStore) DeleteByRepoRefSystem(ctx context.Context, orgID, run
 
 func deleteRunWorktreeByRepoRef(ctx context.Context, q queryer, orgID, runID, repoID, ref string) error {
 	_, err := q.ExecContext(ctx, `
-		DELETE FROM run_worktrees
+		DELETE FROM conversation_worktrees
 		WHERE org_id = $1 AND conversation_id = $2 AND repo_id = $3 AND ref = $4
 	`, orgID, runID, repoID, ref)
 	return err
@@ -161,7 +161,7 @@ func deleteRunWorktreeByRepoRef(ctx context.Context, q queryer, orgID, runID, re
 
 func (s *runWorktreeStore) DeleteByPathSystem(ctx context.Context, orgID, runID, path string) error {
 	_, err := s.admin.ExecContext(ctx, `
-		DELETE FROM run_worktrees
+		DELETE FROM conversation_worktrees
 		WHERE org_id = $1 AND conversation_id = $2 AND path = $3
 	`, orgID, runID, path)
 	return err

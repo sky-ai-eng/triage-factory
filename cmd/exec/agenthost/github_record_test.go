@@ -58,7 +58,7 @@ func newGithubRecordingClient(t *testing.T, ghURL string, eventTriggered bool) (
 }
 
 // newGithubRecordingClientConn is newGithubRecordingClient plus the raw *sql.DB,
-// for touch tests that read run_memory_entities directly (the store interface
+// for touch tests that read conversation_memory_entities directly (the store interface
 // has no role-returning read) or that drop a table to exercise the best-effort
 // recording path.
 func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered bool) (*sql.DB, db.Stores, RunInfo, *LocalClient) {
@@ -125,8 +125,8 @@ func TestLocalClient_GithubAddComment_RecordsArtifact(t *testing.T) {
 				a.State != domain.ArtifactStateCommentPosted || a.DedupKey != "github:comment:777" {
 				t.Errorf("comment artifact mismatch: %+v", a)
 			}
-			if a.RunID != info.RunID || a.TeamID != runmode.LocalDefaultTeamID {
-				t.Errorf("attribution mismatch: run=%q team=%q", a.RunID, a.TeamID)
+			if a.ConversationID != info.RunID || a.TeamID != runmode.LocalDefaultTeamID {
+				t.Errorf("attribution mismatch: run=%q team=%q", a.ConversationID, a.TeamID)
 			}
 		})
 	}

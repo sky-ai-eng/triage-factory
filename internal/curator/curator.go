@@ -138,7 +138,7 @@ type Curator struct {
 //
 // stores carries the Tx runner (for SyntheticClaimsWithTx wraps), the
 // CuratorStore (per-turn message writes plus the admin-pool …System claim
-// doors), the AgentRunStore (transcript inserts), the PromptStore (skill
+// doors), the ConversationStore (transcript inserts), the PromptStore (skill
 // materialization), and the RepoStore (pinned-repo materialization). Every
 // row read/write the curator issues goes through a claims-bound tx or an
 // admin-pool door, so no raw *sql.DB handle is retained.

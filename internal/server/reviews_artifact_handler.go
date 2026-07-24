@@ -19,15 +19,15 @@ import (
 // submit at approval. Each comment's severity is parsed back out of its body for
 // the chip. ReviewID is empty until approval stamps the submitted review's id.
 type reviewArtifactJSON struct {
-	ID          string `json:"id"`
-	RunID       string `json:"run_id,omitempty"`
-	Owner       string `json:"owner"`
-	Repo        string `json:"repo"`
-	PRNumber    int    `json:"pr_number"`
-	ReviewID    string `json:"review_id"`
-	ReviewBody  string `json:"review_body"`
-	ReviewEvent string `json:"review_event"`
-	State       string `json:"state"`
+	ID             string `json:"id"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	Owner          string `json:"owner"`
+	Repo           string `json:"repo"`
+	PRNumber       int    `json:"pr_number"`
+	ReviewID       string `json:"review_id"`
+	ReviewBody     string `json:"review_body"`
+	ReviewEvent    string `json:"review_event"`
+	State          string `json:"state"`
 	// URL is the posted review's GitHub deep link (#pullrequestreview-<id>),
 	// stamped at approval — empty while the draft is pending (nothing exists on
 	// GitHub yet). The read-only overlay renders it as "View on GitHub".
@@ -79,17 +79,17 @@ func (ah *artifactsHandler) reviewGet(w http.ResponseWriter, r *http.Request, or
 	}
 
 	out := reviewArtifactJSON{
-		ID:          art.ID,
-		RunID:       art.RunID,
-		Owner:       owner,
-		Repo:        repo,
-		PRNumber:    number,
-		ReviewID:    art.ExternalID,
-		ReviewBody:  details.ReviewBody,
-		ReviewEvent: details.ReviewEvent,
-		State:       art.State,
-		URL:         art.URL,
-		Comments:    []reviewArtifactCommentJSON{},
+		ID:             art.ID,
+		ConversationID: art.ConversationID,
+		Owner:          owner,
+		Repo:           repo,
+		PRNumber:       number,
+		ReviewID:       art.ExternalID,
+		ReviewBody:     details.ReviewBody,
+		ReviewEvent:    details.ReviewEvent,
+		State:          art.State,
+		URL:            art.URL,
+		Comments:       []reviewArtifactCommentJSON{},
 	}
 	for _, c := range details.StagedComments {
 		sev, clean := domain.ParseSeverityBadge(c.Body)
@@ -193,7 +193,7 @@ func (ah *artifactsHandler) updateReviewDetailsPending(w http.ResponseWriter, r 
 // reviewApprove creates and submits the staged review to GitHub atomically
 // (SubmitReview — one POST carrying commit_id + event + body + footer + the staged
 // comments[]), stamps the submitted review's id + URL onto the artifact, records
-// the human verdict into run_memory, and runs the shared run/task/blueprint
+// the human verdict into conversation_memory, and runs the shared run/task/blueprint
 // bookkeeping. Nothing touched GitHub before this point (the review was staged
 // entirely TF-side), so concurrent runs on one PR each submit their own review
 // here — GitHub allows unlimited submitted reviews per identity.
@@ -328,7 +328,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// authoritative event back from GitHub's response) — capture it so the
 	// persisted artifact, the verdict diff, and the response all reflect the
 	// same value that was requested.
-	body := details.ReviewBody + agentmeta.Build(ah.agentRuns, orgID, fresh.RunID, "review")
+	body := details.ReviewBody + agentmeta.Build(ah.agentRuns, orgID, fresh.ConversationID, "review")
 	reviewID, submittedEvent, err := gh.SubmitReview(r.Context(), owner, repo, number, commitID, details.ReviewEvent, body, submitComments)
 	if err != nil {
 		artifactsLog.Warn("SubmitReview failed",
@@ -409,13 +409,13 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// Step 2: human verdict capture — diff the agent's proposed draft against the
 	// human-edited final (body, event, the staged comments — all from the
 	// post-claim re-read, so a last-moment edit shows up in the diff) into
-	// run_memory.human_content.
-	if fresh.RunID != "" {
+	// conversation_memory.human_content.
+	if fresh.ConversationID != "" {
 		humanContent := FormatHumanFeedback(buildReviewHumanFeedbackInput(details, details.StagedComments))
 		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, fresh.RunID, humanContent)
+			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, fresh.ConversationID, humanContent)
 		}); err != nil {
-			artifactsLog.Warn("failed to record human verdict", "run", fresh.RunID, "error", err)
+			artifactsLog.Warn("failed to record human verdict", "run", fresh.ConversationID, "error", err)
 		}
 	}
 
@@ -423,7 +423,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// never flips run status or resumes/terminates a blueprint. The only lifecycle
 	// effect is closing the task when this was the LAST unresolved artifact on an
 	// already-terminal blueprint; otherwise a no-op.
-	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, fresh.RunID)
+	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, fresh.ConversationID)
 
 	// Tell the drafting agent its review was submitted (live or via the ledger).
 	// submitted keeps art.ID — the review handle the agent spoke to start-review —
@@ -480,7 +480,7 @@ func (ah *artifactsHandler) reviewDismiss(w http.ResponseWriter, r *http.Request
 	// terminal-on-last task-closure check detached so a client disconnect can't
 	// strand it now that the artifact is resolved.
 	cleanupCtx := context.WithoutCancel(r.Context())
-	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.RunID)
+	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 	// Tell the drafting agent its review was dismissed (live or via the ledger).
 	ah.injectArtifactNote(orgID, dismissed)
 
@@ -724,7 +724,7 @@ func (ah *artifactsHandler) handleArtifactCommentDelete(w http.ResponseWriter, r
 // buildReviewHumanFeedbackInput diffs the agent's proposed review draft (snapshot
 // in details_json) against the human-edited final (staged body/event + the staged
 // comments at approval), producing the input FormatHumanFeedback renders into
-// run_memory.human_content. Comments are joined by their stable TF-local id;
+// conversation_memory.human_content. Comments are joined by their stable TF-local id;
 // severity badges are stripped from both sides so the diff shows clean prose.
 func buildReviewHumanFeedbackInput(details domain.ReviewArtifactDetails, finalComments []domain.ReviewArtifactComment) HumanFeedbackInput {
 	type cmt struct {

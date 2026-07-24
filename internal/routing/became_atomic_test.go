@@ -71,7 +71,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	atomicJSON, _ := json.Marshal(atomicMeta)
 
 	ws := websocket.NewHub()
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,
@@ -128,7 +128,7 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 
 	ws := websocket.NewHub()
 	st := sqlitestore.New(database)
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users, testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, noopScorer{}, ws)
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, noopScorer{}, ws)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,

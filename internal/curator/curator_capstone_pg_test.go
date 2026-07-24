@@ -520,7 +520,7 @@ func (s *stubAgent) run(ctx context.Context, opts agentproc.RunOptions, sink age
 		// token usage block the sink persists claim-stamped; the release
 		// then rolls the per-claim SUM onto the claim's token columns.
 		_ = sink.OnSession("sess-capstone")
-		_ = sink.OnMessage(&domain.AgentMessage{
+		_ = sink.OnMessage(&domain.Message{
 			Role: "assistant", Subtype: "text", Content: "capstone ack",
 			InputTokens:         intPtr(capstoneInputTokens),
 			OutputTokens:        intPtr(capstoneOutputTokens),

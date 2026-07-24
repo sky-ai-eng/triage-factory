@@ -1,20 +1,20 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import { Check, Copy } from 'lucide-react'
-import type { AgentMessage, AgentRun, ToolCall } from '../../types'
+import type { Message, Conversation, ToolCall } from '../../types'
 import { isActiveRun } from '../../lib/runStatus'
 import { stripWorktree } from '../../lib/worktree'
 import { toast } from '../Toast/toastStore'
 import { stationState } from './stationStyle'
 
 interface Props {
-  messages: AgentMessage[]
-  run: AgentRun
+  messages: Message[]
+  run: Conversation
 }
 
 // react-markdown parses its source on every render. Memoizing it means an
 // unchanged row's markdown is parsed exactly once — without this, every
-// streamed agent_message re-parsed the ENTIRE transcript (O(N²) over a run's
+// streamed `message` event re-parsed the ENTIRE transcript (O(N²) over a run's
 // life), which is what made long live runs peg a core.
 const MemoMarkdown = memo(Markdown)
 
@@ -186,10 +186,10 @@ function ScreenTranscript({ messages, run }: Props) {
 
 // buildRows flattens the transcript into screen rows: assistant prose and tool
 // calls (each paired with its result), the JSON completion blob skipped.
-function buildRows(messages: AgentMessage[], worktree: string | undefined): React.ReactNode[] {
-  const toolResults = new Map<string, AgentMessage>()
+function buildRows(messages: Message[], worktree: string | undefined): React.ReactNode[] {
+  const toolResults = new Map<string, Message>()
   for (const m of messages) {
-    if (m.Role === 'tool' && m.ToolCallID) toolResults.set(m.ToolCallID, m)
+    if (m.role === 'tool' && m.tool_call_id) toolResults.set(m.tool_call_id, m)
   }
 
   const rows: React.ReactNode[] = []
@@ -197,19 +197,19 @@ function buildRows(messages: AgentMessage[], worktree: string | undefined): Reac
     // Steering input: the message endpoint records the user's words as a
     // Role:"user" row before routing them to the process — render them as
     // operator lines so a steer is visible in the feed it steered.
-    if (msg.Role === 'user') {
-      if (msg.Content) {
+    if (msg.role === 'user') {
+      if (msg.content) {
         rows.push(
-          <ScreenRow key={`u-${msg.ID}`} time={clockTime(msg.CreatedAt)}>
-            <UserLine text={msg.Content} />
+          <ScreenRow key={`u-${msg.id}`} time={clockTime(msg.created_at)}>
+            <UserLine text={msg.content} />
           </ScreenRow>,
         )
       }
       continue
     }
-    if (msg.Role !== 'assistant') continue
-    if (msg.Content && msg.Content.trimStart().startsWith('{"status":')) continue
-    const time = clockTime(msg.CreatedAt)
+    if (msg.role !== 'assistant') continue
+    if (msg.content && msg.content.trimStart().startsWith('{"status":')) continue
+    const time = clockTime(msg.created_at)
 
     // Reasoning gets its own quiet row — dim italic under a THINKING tag —
     // so it reads as the agent's interior voice, distinct from prose output.
@@ -217,45 +217,46 @@ function buildRows(messages: AgentMessage[], worktree: string | undefined): Reac
     // current writes ride it on the owning assistant message's Reasoning
     // field instead — both render with the same ThinkingLine treatment,
     // and the legacy row still renders for historical runs.
-    if (msg.Subtype === 'thinking') {
-      if (msg.Content) {
+    if (msg.subtype === 'thinking') {
+      if (msg.content) {
         rows.push(
-          <ScreenRow key={`th-${msg.ID}`} time={time}>
-            <ThinkingLine text={msg.Content} />
+          <ScreenRow key={`th-${msg.id}`} time={time}>
+            <ThinkingLine text={msg.content} />
           </ScreenRow>,
         )
       }
       continue
     }
 
-    if (msg.Reasoning?.length) {
-      const reasoningText = msg.Reasoning.map((r) => r.text)
+    if (msg.reasoning?.length) {
+      const reasoningText = msg.reasoning
+        .map((r) => r.text)
         .filter(Boolean)
         .join('\n\n')
       if (reasoningText) {
         rows.push(
-          <ScreenRow key={`r-${msg.ID}`} time={time}>
+          <ScreenRow key={`r-${msg.id}`} time={time}>
             <ThinkingLine text={reasoningText} />
           </ScreenRow>,
         )
       }
     }
 
-    if (msg.Content) {
+    if (msg.content) {
       rows.push(
-        <ScreenRow key={`t-${msg.ID}`} time={time}>
+        <ScreenRow key={`t-${msg.id}`} time={time}>
           <div
             className="max-w-none text-[13px] leading-relaxed [&_a]:text-[color:var(--hmi-cyan-bright)] [&_a]:underline [&_code]:rounded-[3px] [&_code]:bg-[color:var(--hmi-code-bg)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[11.5px] [&_h1]:mb-1 [&_h1]:mt-2 [&_h1]:text-[15px] [&_h1]:font-semibold [&_h2]:mb-1 [&_h2]:mt-2 [&_h2]:text-[14px] [&_h2]:font-semibold [&_li]:my-0.5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-1.5 [&_pre]:my-2 [&_pre]:overflow-auto [&_pre]:rounded-[4px] [&_pre]:bg-[color:var(--hmi-code-bg)] [&_pre]:p-3 [&_pre]:text-[11.5px] [&_strong]:font-semibold [&_strong]:text-[color:var(--hmi-strong)] [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5"
             style={{ color: 'var(--hmi-ink)' }}
           >
-            <MemoMarkdown>{msg.Content}</MemoMarkdown>
+            <MemoMarkdown>{msg.content}</MemoMarkdown>
           </div>
         </ScreenRow>,
       )
     }
 
-    if (msg.ToolCalls?.length) {
-      for (const tc of msg.ToolCalls) {
+    if (msg.tool_calls?.length) {
+      for (const tc of msg.tool_calls) {
         rows.push(
           <ScreenRow key={`c-${tc.id}`} time={time}>
             <ToolLine call={tc} result={toolResults.get(tc.id)} worktree={worktree} />
@@ -355,7 +356,7 @@ const ToolLine = memo(function ToolLine({
   worktree,
 }: {
   call: ToolCall
-  result?: AgentMessage
+  result?: Message
   worktree?: string
 }) {
   const [open, setOpen] = useState(false)
@@ -366,11 +367,11 @@ const ToolLine = memo(function ToolLine({
     () => stripWorktree(safeJsonStringify(call.input), worktree),
     [call.input, worktree],
   )
-  const resultText = stripWorktree(result?.Content ?? '', worktree)
-  const isError = !!result?.IsError
+  const resultText = stripWorktree(result?.content ?? '', worktree)
+  const isError = !!result?.is_error
   const long = resultText.length > 400
   const images =
-    result?.ContentBlocks?.filter((b) => b.type === 'image_url' && b.image_url?.url) ?? []
+    result?.content_blocks?.filter((b) => b.type === 'image_url' && b.image_url?.url) ?? []
 
   return (
     <div>
@@ -415,8 +416,8 @@ const ToolLine = memo(function ToolLine({
 })
 
 // ToolResultImages — non-text tool-result content (a screenshot, a Read on
-// an image) that ContentBlocks carries and the flat Content string can't.
-function ToolResultImages({ images }: { images: NonNullable<AgentMessage['ContentBlocks']> }) {
+// an image) that content_blocks carries and the flat content string can't.
+function ToolResultImages({ images }: { images: NonNullable<Message['content_blocks']> }) {
   return (
     <div className="flex flex-wrap gap-2">
       {images.map((b, i) => (
@@ -514,7 +515,7 @@ function Pane({
 }
 
 // Verdict — the settled run's outcome, stamped on the screen in the state tone.
-function Verdict({ run }: { run: AgentRun }) {
+function Verdict({ run }: { run: Conversation }) {
   const st = stationState(run)
   return (
     <div className="mb-2 mt-5">

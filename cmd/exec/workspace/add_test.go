@@ -120,7 +120,7 @@ func TestParseAddArgs(t *testing.T) {
 
 // newTestDB spins up an in-memory SQLite with the full schema so the
 // orchestration tests run against the real DB layer (FK cascades,
-// INSERT OR IGNORE on the run_worktrees PK, the actual queries).
+// INSERT OR IGNORE on the conversation_worktrees PK, the actual queries).
 func newTestDB(t *testing.T) (db.Stores, *db.DB) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
@@ -179,7 +179,7 @@ func seedJiraRun(t *testing.T, database *db.DB, runID, issueKey string) {
 	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	dbtest.SeedConversation(t, database.Conn, domain.AgentRun{
+	dbtest.SeedConversation(t, database.Conn, domain.Conversation{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
 		BlueprintRunID: seedBlueprintRun(t, database.Conn, task.ID),
@@ -207,7 +207,7 @@ func seedGitHubRun(t *testing.T, database *db.DB, runID string) {
 	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	dbtest.SeedConversation(t, database.Conn, domain.AgentRun{
+	dbtest.SeedConversation(t, database.Conn, domain.Conversation{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
 		BlueprintRunID: seedBlueprintRun(t, database.Conn, task.ID),
@@ -524,7 +524,7 @@ func TestMaterializeWorkspace_RefCheckout(t *testing.T) {
 	if stub.createCalls != 1 {
 		t.Fatalf("createCalls = %d, want 1", stub.createCalls)
 	}
-	// The create receives the RAW branch (feature-x); the stored run_worktrees
+	// The create receives the RAW branch (feature-x); the stored conversation_worktrees
 	// ref is the namespaced slug (ref-feature-x).
 	if got := stub.createArgs[0].spec.ref; got != "feature-x" {
 		t.Errorf("spec.ref = %q, want feature-x", got)
@@ -829,7 +829,7 @@ func TestMaterializeWorkspace_CreateFailureReleasesReservation(t *testing.T) {
 		t.Fatalf("GetByRepoRef: %v", err)
 	}
 	if row != nil {
-		t.Errorf("expected run_worktrees row to be released after create failure, found %+v", row)
+		t.Errorf("expected conversation_worktrees row to be released after create failure, found %+v", row)
 	}
 }
 
@@ -885,7 +885,7 @@ func (d dualViewHost) WorkspaceRoots(context.Context) (string, string, error) {
 }
 
 // TestMaterializeWorkspace_DualView is the TFAC-546 namespace-split test: with
-// sandbox-shaped roots (host ≠ agent), the run_worktrees row must record the
+// sandbox-shaped roots (host ≠ agent), the conversation_worktrees row must record the
 // HOST path (what the push gate and workspace snapshot read host-side) while
 // the returned `cd` target — and the liveness stat on a re-add — use the
 // AGENT (/work) view. Recording the agent-invisible jail path was exactly the
@@ -1009,7 +1009,7 @@ func seedEventTriggeredJiraRun(t *testing.T, database *db.DB, runID, issueKey st
 	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	dbtest.SeedConversation(t, database.Conn, domain.AgentRun{
+	dbtest.SeedConversation(t, database.Conn, domain.Conversation{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
 		TriggerType:    "event",
@@ -1037,7 +1037,7 @@ func TestMaterializeWorkspace_EventTriggeredRunRouting(t *testing.T) {
 	}
 	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "e1", "sky/core", "@default")
 	if err != nil || row == nil {
-		t.Fatalf("expected run_worktrees row from event-triggered insert; got row=%v err=%v", row, err)
+		t.Fatalf("expected conversation_worktrees row from event-triggered insert; got row=%v err=%v", row, err)
 	}
 }
 

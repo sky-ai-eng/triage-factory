@@ -1,10 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type {
-  CuratorMessage,
-  CuratorRequestStatus,
-  CuratorRequestWithMessages,
-  WSEvent,
-} from '../types'
+import type { Message, CuratorRequestStatus, CuratorRequestWithMessages, WSEvent } from '../types'
 import { readError } from '../lib/api'
 import { useWebSocket } from './useWebSocket'
 
@@ -138,26 +133,32 @@ export function useCuratorChat(projectId: string | undefined): UseCuratorChatRes
     return () => document.removeEventListener('visibilitychange', onVisible)
   }, [refetch])
 
-  // WS handler. Filters to the current project; updates request rows
-  // and appends messages. New request_ids that arrive over WS without
-  // a matching local row get a stub so the message lands somewhere
-  // sensible until the next refetch fills in user_input.
+  // WS handler. Filters to the current project. The converged wire uses one
+  // vocabulary across surfaces: a `message` event (project_id set for curator)
+  // carries the shared Message DTO and is appended to the active in-flight
+  // turn — the transcript row no longer carries a turn id, and curator
+  // serializes turns so there is exactly one in-flight turn to attach to; a
+  // `conversation_update` carries { request_id, status } for a curator turn; a
+  // `conversation_reset` clears the transcript.
   const handleWS = useCallback(
     (event: WSEvent) => {
       if (!projectId) return
-      if (event.type === 'curator_message') {
+      if (event.type === 'message') {
         if (event.project_id !== projectId) return
         const msg = event.data
         setRequests((prev) => mergeMessage(prev, msg))
         return
       }
-      if (event.type === 'curator_request_update') {
+      if (event.type === 'conversation_update') {
+        // A delegated-run conversation_update carries conversation_id (no
+        // project_id) — filter it out; only the curator turn variant applies.
         if (event.project_id !== projectId) return
         const { request_id, status } = event.data
-        setRequests((prev) => mergeStatus(prev, request_id, status))
+        if (!request_id || !status) return
+        setRequests((prev) => mergeStatus(prev, request_id, status as CuratorRequestStatus))
         return
       }
-      if (event.type === 'curator_reset') {
+      if (event.type === 'conversation_reset') {
         // Mirrors the backend wipe: drop the local transcript so a
         // second tab viewing this project clears at the same instant
         // the tab that issued the reset does. The next REST refetch
@@ -254,7 +255,7 @@ export function useCuratorChat(projectId: string | undefined): UseCuratorChatRes
   const totalCostUSD = requests.reduce((sum, r) => sum + (r.cost_usd || 0), 0)
 
   // reset POSTs to the curator/reset endpoint. The backend broadcasts
-  // `curator_reset` on success, which our WS handler picks up and
+  // `conversation_reset` on success, which our WS handler picks up and
   // clears local state — so this function only owns the network call,
   // not the UI mutation. Returns a structured result so the caller can
   // distinguish "in-flight conflict" (409) from a real failure and
@@ -296,29 +297,28 @@ export function useCuratorChat(projectId: string | undefined): UseCuratorChatRes
   }
 }
 
-// mergeMessage appends a CuratorMessage to its parent request, deduping
+// mergeMessage appends a Message to its parent request, deduping
 // by message id. If the request_id is unknown locally, creates a stub
 // so the message lands somewhere — the next REST refetch fills in
 // user_input + accounting fields.
+// mergeMessage appends a streamed agent row to its turn, deduping by message
+// id. The shared Message DTO no longer carries a turn id, so it attaches to
+// the active in-flight turn — curator serializes turns per conversation, so
+// there is at most one (the last non-terminal request). When none is present
+// locally (a second tab that never saw the user's optimistic turn), the row is
+// dropped from the live view and the next REST refetch reconstructs the turn.
 function mergeMessage(
   requests: CuratorRequestWithMessages[],
-  msg: CuratorMessage,
+  msg: Message,
 ): CuratorRequestWithMessages[] {
-  const idx = requests.findIndex((r) => r.id === msg.request_id)
-  if (idx === -1) {
-    const stub: CuratorRequestWithMessages = {
-      id: msg.request_id,
-      project_id: '',
-      status: 'running',
-      user_input: '',
-      cost_usd: 0,
-      duration_ms: 0,
-      num_turns: 0,
-      created_at: msg.created_at,
-      messages: [msg],
+  let idx = -1
+  for (let i = requests.length - 1; i >= 0; i--) {
+    if (!isTerminal(requests[i].status)) {
+      idx = i
+      break
     }
-    return [...requests, stub]
   }
+  if (idx === -1) return requests
   const existing = requests[idx]
   if (existing.messages.some((m) => m.id === msg.id)) {
     return requests

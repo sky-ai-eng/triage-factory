@@ -36,7 +36,7 @@ type runSink struct {
 
 	// sessionDelivered suppresses repeated OnSession handling within
 	// this runSink instance. Some streams can emit system/init more
-	// than once for the same session_id; while SetAgentRunSession is
+	// than once for the same session_id; while SetConversationSession is
 	// idempotent at the DB layer, skipping duplicate handling also
 	// avoids an extra running-status broadcast from the same stream.
 	// Because each agentproc.Run call gets a fresh sink, this does
@@ -67,7 +67,7 @@ func (k *runSink) OnSession(sessionID string) error {
 	bgCtx := context.Background()
 	if k.triggerType == "manual" {
 		if err := k.spawner.tx.SyntheticClaimsWithTx(bgCtx, k.orgID, k.creatorUserID, func(ts db.TxStores) error {
-			return ts.AgentRuns.SetSession(bgCtx, k.orgID, k.runID, sessionID)
+			return ts.Conversations.SetSession(bgCtx, k.orgID, k.runID, sessionID)
 		}); err != nil {
 			return fmt.Errorf("persist session_id: %w", err)
 		}
@@ -82,12 +82,12 @@ func (k *runSink) OnSession(sessionID string) error {
 // run_messages and pushes it onto the websocket. Per-row failures
 // are returned to agentproc, which logs and continues — losing one
 // row is preferable to abandoning the run.
-func (k *runSink) OnMessage(msg *domain.AgentMessage) error {
+func (k *runSink) OnMessage(msg *domain.Message) error {
 	bgCtx := context.Background()
 	var id int64
 	if k.triggerType == "manual" {
 		if err := k.spawner.tx.SyntheticClaimsWithTx(bgCtx, k.orgID, k.creatorUserID, func(ts db.TxStores) error {
-			i, ierr := ts.AgentRuns.InsertMessage(bgCtx, k.orgID, msg)
+			i, ierr := ts.Conversations.InsertMessage(bgCtx, k.orgID, msg)
 			if ierr != nil {
 				return ierr
 			}

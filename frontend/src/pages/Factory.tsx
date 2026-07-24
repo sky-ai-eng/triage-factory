@@ -25,7 +25,7 @@ import {
   noteWrittenTeam,
   teamFilterQuery,
 } from '../hooks/useTeams'
-import type { AgentRun, FactoryEntity, FactorySnapshot, Task } from '../types'
+import type { Conversation, FactoryEntity, FactorySnapshot, Task } from '../types'
 
 // Production factory page — Babylon scene driven by /api/factory/snapshot.
 // The page itself does almost nothing visual: it fetches the snapshot,
@@ -187,7 +187,7 @@ export default function Factory() {
     if (
       evt.type === 'event' ||
       evt.type === 'tasks_updated' ||
-      evt.type === 'agent_run_update' ||
+      evt.type === 'conversation_update' ||
       evt.type === 'artifact_updated'
     ) {
       const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
@@ -807,7 +807,7 @@ function EntityTooltip({ entity }: { entity: FactoryEntity }) {
   )
 }
 
-function RunRow({ run, task }: { run: AgentRun; task: Task }) {
+function RunRow({ run, task }: { run: Conversation; task: Task }) {
   const ref = task.source_id || task.entity_id
   const isOpen = run.Status === 'open'
   return (
@@ -879,7 +879,7 @@ function runStatusLabel(status: string): string {
   }
 }
 
-function formatRunMeta(run: AgentRun): string {
+function formatRunMeta(run: Conversation): string {
   const parts: string[] = []
   if (run.DurationMs && run.DurationMs > 0) {
     const sec = Math.round(run.DurationMs / 1000)

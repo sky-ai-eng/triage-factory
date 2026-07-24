@@ -387,7 +387,7 @@ func preflightPinnedRepos(ctx context.Context, pinned []string, probe GitHubProb
 // session, and message claim references remapped (an unknown reference
 // drops to unattributed rather than tripping the FK). Returns a nil
 // conversation when the bundle carries no curator payload.
-func decodeCuratorState(entries map[string]*zip.File, projectID, newSessionID, userID string) (*domain.Conversation, []domain.Claim, []domain.AgentMessage, error) {
+func decodeCuratorState(entries map[string]*zip.File, projectID, newSessionID, userID string) (*domain.Conversation, []domain.Claim, []domain.Message, error) {
 	convFile, ok := entries[curatorConversationPath]
 	if !ok {
 		return nil, nil, nil, nil
@@ -430,14 +430,14 @@ func decodeCuratorState(entries map[string]*zip.File, projectID, newSessionID, u
 		return nil, nil, nil, fmt.Errorf("decode %s: %w", curatorClaimsPath, err)
 	}
 
-	var msgs []domain.AgentMessage
+	var msgs []domain.Message
 	if err := decodeZipJSONLines(
 		entries[curatorMessagesPath],
 		maxImportJSONLEntryBytes,
 		maxImportJSONLRows,
-		func(row domain.AgentMessage) error {
+		func(row domain.Message) error {
 			row.ID = 0 // let the destination DB assign the message id
-			row.RunID = conv.ID
+			row.ConversationID = conv.ID
 			if row.UserID != "" {
 				row.UserID = userID
 			}

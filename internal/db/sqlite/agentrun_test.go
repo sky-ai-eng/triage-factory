@@ -17,23 +17,23 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestAgentRunStore_SQLite runs the shared conformance suite against
-// the SQLite AgentRunStore impl. Each subtest gets a fresh in-memory
+// TestConversationStore_SQLite runs the shared conformance suite against
+// the SQLite ConversationStore impl. Each subtest gets a fresh in-memory
 // DB so the run lifecycle assertions don't bleed across.
-func TestAgentRunStore_SQLite(t *testing.T) {
-	dbtest.RunAgentRunStoreConformance(t, func(t *testing.T) (db.AgentRunStore, string, string, dbtest.AgentRunSeeder) {
+func TestConversationStore_SQLite(t *testing.T) {
+	dbtest.RunConversationStoreConformance(t, func(t *testing.T) (db.ConversationStore, string, string, dbtest.ConversationSeeder) {
 		t.Helper()
-		conn := newSQLiteForAgentRunTest(t)
-		seed := newSQLiteAgentRunSeeder(conn)
+		conn := newSQLiteForConversationTest(t)
+		seed := newSQLiteConversationSeeder(conn)
 		stores := sqlitestore.New(conn)
-		return stores.AgentRuns, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, seed
+		return stores.Conversations, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, seed
 	})
 }
 
-// newSQLiteForAgentRunTest opens an in-memory DB, bootstraps the
+// newSQLiteForConversationTest opens an in-memory DB, bootstraps the
 // schema, and seeds the local default agent + the conformance
 // prompt. Returned connection is t.Cleanup-closed.
-func newSQLiteForAgentRunTest(t *testing.T) *sql.DB {
+func newSQLiteForConversationTest(t *testing.T) *sql.DB {
 	t.Helper()
 	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 	if err != nil {
@@ -69,7 +69,7 @@ func newSQLiteForAgentRunTest(t *testing.T) *sql.DB {
 // independent of the store under test; the trigger_type↔creator CHECK is
 // satisfied by pairing 'manual' with the sentinel user and 'event' with
 // NULL.
-func seedSQLiteConversation(t *testing.T, conn *sql.DB, run domain.AgentRun) string {
+func seedSQLiteConversation(t *testing.T, conn *sql.DB, run domain.Conversation) string {
 	t.Helper()
 	id := run.ID
 	if id == "" {
@@ -99,11 +99,11 @@ func seedSQLiteConversation(t *testing.T, conn *sql.DB, run domain.AgentRun) str
 	return id
 }
 
-// newSQLiteAgentRunSeeder returns the FactorySeeder-style bag of
+// newSQLiteConversationSeeder returns the FactorySeeder-style bag of
 // callbacks the conformance suite drives. Raw SQL keeps the seeder
 // independent of the store under test.
-func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
-	return dbtest.AgentRunSeeder{
+func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
+	return dbtest.ConversationSeeder{
 		Entity: func(t *testing.T, suffix string) string {
 			t.Helper()
 			id := uuid.New().String()
@@ -140,7 +140,7 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 			}
 			return id
 		},
-		Run: func(t *testing.T, run domain.AgentRun) string {
+		Run: func(t *testing.T, run domain.Conversation) string {
 			return seedSQLiteConversation(t, conn, run)
 		},
 		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {
@@ -211,14 +211,14 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
-					INSERT INTO run_memory (id, conversation_id, entity_id, agent_content) VALUES (?, ?, ?, NULL)
+					INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content) VALUES (?, ?, ?, NULL)
 				`, memID, runID, entityID); err != nil {
 					t.Fatalf("seed null memory: %v", err)
 				}
 				return
 			}
 			if _, err := conn.Exec(`
-				INSERT INTO run_memory (id, conversation_id, entity_id, agent_content) VALUES (?, ?, ?, ?)
+				INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content) VALUES (?, ?, ?, ?)
 			`, memID, runID, entityID, content); err != nil {
 				t.Fatalf("seed memory: %v", err)
 			}
@@ -247,32 +247,32 @@ func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
 	}
 }
 
-// TestAgentRunStore_SQLite_AssertLocalOrg pins the local-only invariant:
+// TestConversationStore_SQLite_AssertLocalOrg pins the local-only invariant:
 // the orgID guard at every method entry refuses non-LocalDefaultOrgID.
 // The conformance suite exercises the happy path; this test pins the
 // SQLite-specific rejection.
-func TestAgentRunStore_SQLite_AssertLocalOrg(t *testing.T) {
-	conn := newSQLiteForAgentRunTest(t)
-	store := sqlitestore.New(conn).AgentRuns
+func TestConversationStore_SQLite_AssertLocalOrg(t *testing.T) {
+	conn := newSQLiteForConversationTest(t)
+	store := sqlitestore.New(conn).Conversations
 	if _, err := store.ActiveIDsForTask(t.Context(), "some-other-org", uuid.New().String()); err == nil {
 		t.Error("ActiveIDsForTask accepted non-LocalDefaultOrgID without error")
 	}
 }
 
-// TestAgentRunStore_SQLite_RuntimeDefaultsToSDK pins the
+// TestConversationStore_SQLite_RuntimeDefaultsToSDK pins the
 // conversations.runtime schema fact the columnar-canon epic depends on: a
 // freshly seeded delegation row lands as 'sdk', not the native loop's
-// 'native'. domain.AgentRun has no write path for Runtime (nothing writes
+// 'native'. domain.Conversation has no write path for Runtime (nothing writes
 // 'native' until the executor-side loop lands), so this reads the column
 // directly.
-func TestAgentRunStore_SQLite_RuntimeDefaultsToSDK(t *testing.T) {
-	conn := newSQLiteForAgentRunTest(t)
-	seed := newSQLiteAgentRunSeeder(conn)
+func TestConversationStore_SQLite_RuntimeDefaultsToSDK(t *testing.T) {
+	conn := newSQLiteForConversationTest(t)
+	seed := newSQLiteConversationSeeder(conn)
 
 	ent := seed.Entity(t, "runtime")
 	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-	runID := seedSQLiteConversation(t, conn, domain.AgentRun{
+	runID := seedSQLiteConversation(t, conn, domain.Conversation{
 		TaskID: taskID, PromptID: "p_agentrun_test", Status: "running", Model: "m",
 		BlueprintRunID: seed.BlueprintRun(t, taskID),
 	})
@@ -286,16 +286,16 @@ func TestAgentRunStore_SQLite_RuntimeDefaultsToSDK(t *testing.T) {
 	}
 }
 
-// TestAgentRunStore_SQLite_ActiveIDsForTeamSystem pins the team-archive
+// TestConversationStore_SQLite_ActiveIDsForTeamSystem pins the team-archive
 // force-stop enumeration: runs on the team in the active set
 // (NOT completed/failed/cancelled/task_unsolvable/pending_approval) are
 // returned; terminal and pending_approval runs are excluded. SQLite hardcodes
 // conversations.team_id to the local sentinel, so the cross-team negative case
 // lives in the Postgres tests; here we pin the status predicate + team scoping.
-func TestAgentRunStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
-	conn := newSQLiteForAgentRunTest(t)
-	seed := newSQLiteAgentRunSeeder(conn)
-	store := sqlitestore.New(conn).AgentRuns
+func TestConversationStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
+	conn := newSQLiteForConversationTest(t)
+	seed := newSQLiteConversationSeeder(conn)
+	store := sqlitestore.New(conn).Conversations
 	ctx := context.Background()
 
 	ent := seed.Entity(t, "team-active")
@@ -303,7 +303,7 @@ func TestAgentRunStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
 	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
 	mk := func(status string) string {
-		return seedSQLiteConversation(t, conn, domain.AgentRun{
+		return seedSQLiteConversation(t, conn, domain.Conversation{
 			TaskID: taskID, PromptID: "p_agentrun_test", Status: status, Model: "m",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		})

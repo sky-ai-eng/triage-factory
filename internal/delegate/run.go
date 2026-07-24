@@ -169,7 +169,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			if rmErr != nil {
 				delegateLog.Warn("worktree remove failed; skipping per-PR config cleanup", "run", runID, "error", rmErr)
 			}
-			// Drop the eager worktree's run_worktrees row (recorded at setup with
+			// Drop the eager worktree's conversation_worktrees row (recorded at setup with
 			// ref=pr-<N> so the least-privilege gates could authorize the task
 			// repo) — regardless of the RemoveAt outcome, since the row is
 			// run-scoped metadata, not the worktree, and a lingering dir doesn't
@@ -179,7 +179,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			// (run-scoped, never collides a future run).
 			if s.runWorktrees != nil && cfg.owner != "" && cfg.repo != "" && cfg.prNumber > 0 {
 				if delErr := s.runWorktrees.DeleteByRepoRefSystem(context.Background(), orgID, runID, cfg.owner+"/"+cfg.repo, worktree.PRRefSlug(cfg.prNumber)); delErr != nil {
-					delegateLog.Warn("delete eager worktree run_worktrees row failed", "run", runID, "repo", cfg.owner+"/"+cfg.repo, "error", delErr)
+					delegateLog.Warn("delete eager worktree conversation_worktrees row failed", "run", runID, "repo", cfg.owner+"/"+cfg.repo, "error", delErr)
 				}
 			}
 			// Per-PR config cleanup only when the worktree is actually gone (see
@@ -197,7 +197,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		}()
 	} else if cfg.runRoot != "" {
 		// Jira lazy cleanup: the agent materialized zero or more worktrees
-		// under cfg.runRoot via `workspace add`. Iterate run_worktrees,
+		// under cfg.runRoot via `workspace add`. Iterate conversation_worktrees,
 		// nuke each, then remove the run-root parent.
 		defer func() {
 			if cfg.isBlueprintStep {
@@ -208,7 +208,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			}
 			rows, err := s.runWorktrees.ListSystem(context.Background(), orgID, runID)
 			if err != nil {
-				delegateLog.Warn("list run_worktrees for cleanup failed", "run", runID, "error", err)
+				delegateLog.Warn("list conversation_worktrees for cleanup failed", "run", runID, "error", err)
 			} else {
 				// Use a detached context so cleanup is not skipped if the
 				// agent ctx has already been canceled.
@@ -232,7 +232,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 						reclaimWorkspaceAddPRConfig(w)
 					}
 					if delErr := s.runWorktrees.DeleteByPathSystem(cleanupCtx, orgID, runID, w.Path); delErr != nil {
-						delegateLog.Warn("delete run_worktrees row failed", "run", runID, "path", w.Path, "error", delErr)
+						delegateLog.Warn("delete conversation_worktrees row failed", "run", runID, "path", w.Path, "error", delErr)
 					}
 				}
 			}
@@ -321,8 +321,8 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 
 	extraEnv := []string{
-		"TRIAGE_FACTORY_RUN_ID=" + runID,
-		"TRIAGE_FACTORY_RUN_ROOT=" + cfg.runRoot, // Set for both sources so the completion-gate retry message can reference an absolute _scratch/entity-memory path that resolves regardless of which worktree the agent has cd'd into.
+		"TRIAGE_FACTORY_CONVERSATION_ID=" + runID,
+		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot, // Set for both sources so the completion-gate retry message can reference an absolute _scratch/entity-memory path that resolves regardless of which worktree the agent has cd'd into.
 		// The memory namespace folder: blueprint_run_id for a blueprint step
 		// (its siblings' handoff), else the run's own id. Non-absolute, so it
 		// passes through translateEnvForSandbox unchanged. The <entity_memory>
@@ -555,7 +555,7 @@ func (s *Spawner) processCompletion(
 		return true
 	}
 
-	// Unconditional upsert of the run_memory row at termination: row presence
+	// Unconditional upsert of the conversation_memory row at termination: row presence
 	// === "the run terminated", agent_content NULL === "the agent didn't write a
 	// usable memory file" (UpsertAgentMemory normalizes empty/whitespace input
 	// to NULL on the way in). blueprint_run_id is denormalized onto the row so
@@ -576,7 +576,7 @@ func (s *Spawner) processCompletion(
 	// Attach the run's memory to every entity it materially engaged — the
 	// primary (task) entity plus everything it produced — so the narrative is
 	// reachable from all of them, not just the denormalized primary on
-	// run_memory.entity_id. context.Background() (not ctx) for the same reason
+	// conversation_memory.entity_id. context.Background() (not ctx) for the same reason
 	// the upsert above uses it: a cancelled turn still owns its terminal
 	// bookkeeping.
 	s.attachRunMemoryEntities(context.Background(), orgID, runID, task.EntityID)
@@ -634,7 +634,7 @@ func (s *Spawner) processCompletion(
 
 	if triggerType == "manual" {
 		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.AgentRuns.Complete(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind))
+			return ts.Conversations.Complete(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind))
 		}); err != nil {
 			delegateLog.Warn("record completion for run failed", "run", runID, "error", err)
 		}

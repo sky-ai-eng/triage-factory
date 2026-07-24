@@ -819,7 +819,7 @@ func TestAuthorCentric_TwoTeams_WatcherDoesNotStealOwnership(t *testing.T) {
 func firingRouter(database *sql.DB, stub *stubDelegator) *Router {
 	st := sqlitestore.New(database)
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		st.Agents, st.TeamAgents, st.Users, testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events,
+		st.Agents, st.TeamAgents, st.Users, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events,
 		st.Orgs, st.Teams, nil, nil, st.TeamGitHubGroups, stub, noopScorer{}, websocket.NewHub())
 }
 

@@ -2,7 +2,7 @@ package domain
 
 import "time"
 
-// RunWorktree is one row in the run_worktrees table — a worktree
+// RunWorktree is one row in the conversation_worktrees table — a worktree
 // reservation associated with one delegated agent run. Lifecycle is
 // managed by db.RunWorktreeStore; the value type lives in domain
 // because it's passed across packages (cmd/exec/workspace,

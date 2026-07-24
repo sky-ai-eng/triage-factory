@@ -104,7 +104,7 @@ func fenceRouter(database *sql.DB, spawner Delegator) *Router {
 	// Users wired so the author-centric ladder resolves the owner (whose
 	// automation fires); teamRepos/jiraRules nil → scope gate fails open.
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
-		nil, nil, st.Users, testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events,
+		nil, nil, st.Users, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events,
 		st.Orgs, st.Teams, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
 }
 
@@ -228,7 +228,7 @@ func TestDrainEntity_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 		t.Fatalf("seed prior blueprint_run: inserted=%v err=%v", inserted, err)
 	}
 	stepIdx := 0
-	dbtest.SeedConversation(t, database, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.Conversation{
 		ID:                 uuid.New().String(),
 		TaskID:             taskID,
 		PromptID:           "p-drain",

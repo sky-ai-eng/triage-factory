@@ -269,7 +269,7 @@ func TestHandleEvent_HandlerQueryError_PublishesError(t *testing.T) {
 	st := sqlitestore.New(database)
 	router := NewRouter(
 		testPromptStore(database), testBlueprintStore(database), erroringHandlerStore{st.EventHandlers}, nil, nil, st.Users,
-		testTaskStore(database), st.AgentRuns, st.Entities, st.PendingFirings, st.Events,
+		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events,
 		st.Orgs, st.Teams, nil, nil, st.TeamGitHubGroups, nil, noopScorer{}, websocket.NewHub(),
 	)
 	pub := &fakeDispositionPublisher{}
@@ -310,7 +310,7 @@ func TestHandleEvent_TaskUpsertError_PublishesError(t *testing.T) {
 	st := sqlitestore.New(database)
 	router := NewRouter(
 		testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
-		erroringTaskStore{st.Tasks}, st.AgentRuns, st.Entities, st.PendingFirings, st.Events,
+		erroringTaskStore{st.Tasks}, st.Conversations, st.Entities, st.PendingFirings, st.Events,
 		st.Orgs, st.Teams, nil, nil, st.TeamGitHubGroups, nil, noopScorer{}, websocket.NewHub(),
 	)
 	pub := &fakeDispositionPublisher{}
@@ -359,7 +359,7 @@ func TestHandleEvent_BecameAtomicSuppression_PublishesTasklessNotError(t *testin
 
 	router := NewRouter(
 		testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
-		testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events,
+		testTaskStore(database), stores.Conversations, stores.Entities, stores.PendingFirings, stores.Events,
 		stores.Orgs, stores.Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub(),
 	)
 	pub := &fakeDispositionPublisher{}
@@ -445,7 +445,7 @@ func TestHandleEvent_MultipleTeams_TriggersFiredCountsOnlyCommitted(t *testing.T
 	metaJSON, _ := json.Marshal(meta)
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.Conversations, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
 	pub := &fakeDispositionPublisher{}
 	router.SetEventPublisher(pub)
 

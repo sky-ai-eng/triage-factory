@@ -67,10 +67,10 @@ func seedBlueprintRun(t *testing.T, conn *sql.DB, taskID string) string {
 	return brID
 }
 
-// seedAgentRun inserts an entity → event → task → run chain through
+// seedConversation inserts an entity → event → task → run chain through
 // the real store APIs so the FK constraints are honored. trigger is
 // "manual" (creator set) or "event" (creator empty).
-func seedAgentRun(t *testing.T, stores db.Stores, conn *sql.DB, runID, creator, trigger string) {
+func seedConversation(t *testing.T, stores db.Stores, conn *sql.DB, runID, creator, trigger string) {
 	t.Helper()
 	ctx := context.Background()
 	orgID := runmode.LocalDefaultOrgID
@@ -93,7 +93,7 @@ func seedAgentRun(t *testing.T, stores db.Stores, conn *sql.DB, runID, creator, 
 	if err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
-	dbtest.SeedConversation(t, conn, domain.AgentRun{
+	dbtest.SeedConversation(t, conn, domain.Conversation{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "claude-test",
 		TriggerType:    trigger,
@@ -355,7 +355,7 @@ func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {
 // under test is what runs against Postgres.
 func TestLocalClient_RoutingByTriggerType_Manual(t *testing.T) {
 	stores, conn := newTestDB(t)
-	seedAgentRun(t, stores, conn, "run-1", runmode.LocalDefaultUserID, "manual")
+	seedConversation(t, stores, conn, "run-1", runmode.LocalDefaultUserID, "manual")
 
 	info := RunInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
@@ -385,7 +385,7 @@ func TestLocalClient_RoutingByTriggerType_Manual(t *testing.T) {
 func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 	stores, conn := newTestDB(t)
 	// Event-triggered: no creator_user_id.
-	seedAgentRun(t, stores, conn, "run-2", "", "event")
+	seedConversation(t, stores, conn, "run-2", "", "event")
 
 	info := RunInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
@@ -415,16 +415,16 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 
 // TestAutoDetect_NoSocket_ReturnsLocalClient pins the local-mode
 // path: when /run/tf.sock is absent, AutoDetect resolves identity
-// from TRIAGE_FACTORY_RUN_ID and returns a LocalClient. The probe
+// from TRIAGE_FACTORY_CONVERSATION_ID and returns a LocalClient. The probe
 // here uses a non-default socket-path constant via env override so
 // the test doesn't depend on /run/tf.sock's actual absence.
 func TestAutoDetect_NoSocket_LocalClient(t *testing.T) {
 	stores, conn := newTestDB(t)
-	seedAgentRun(t, stores, conn, "run-3", runmode.LocalDefaultUserID, "manual")
+	seedConversation(t, stores, conn, "run-3", runmode.LocalDefaultUserID, "manual")
 
-	// AutoDetect reads TRIAGE_FACTORY_RUN_ID at lookup time; set it
+	// AutoDetect reads TRIAGE_FACTORY_CONVERSATION_ID at lookup time; set it
 	// to our seeded run.
-	t.Setenv("TRIAGE_FACTORY_RUN_ID", "run-3")
+	t.Setenv("TRIAGE_FACTORY_CONVERSATION_ID", "run-3")
 
 	c, err := AutoDetect(context.Background(), stores)
 	if err != nil {

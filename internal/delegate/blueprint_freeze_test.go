@@ -89,7 +89,7 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 	// Step 0 finished with continue → ready to advance to step 1.
 	step0 := 0
 	run0 := "freeze-run0"
-	dbtest.SeedConversation(t, database, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.Conversation{
 		ID: run0, TaskID: task.ID, PromptID: "freeze-p0", Status: "completed",
 		Model: "claude-sonnet-4-6", Outcome: "continue",
 		BlueprintRunID: brID, BlueprintStepIndex: &step0,

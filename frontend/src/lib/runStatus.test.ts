@@ -1,15 +1,15 @@
 import { describe, it, expect } from 'vitest'
-import type { AgentRun } from '../types'
+import type { Conversation } from '../types'
 import { queueDwellMs, workStartedAt } from './runStatus'
 
-const base = (over: Partial<AgentRun>): AgentRun =>
+const base = (over: Partial<Conversation>): Conversation =>
   ({
     ID: 'r1',
     TaskID: 't1',
     Status: 'running',
     StartedAt: '2026-07-16T10:00:00Z',
     ...over,
-  }) as AgentRun
+  }) as Conversation
 
 const T = (iso: string) => new Date(iso).getTime()
 

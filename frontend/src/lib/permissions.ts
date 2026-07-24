@@ -70,7 +70,7 @@ export async function resolvePermission(
   decision: PermissionDecisionInput,
 ): Promise<PermissionResolveResult> {
   try {
-    const res = await fetch(`/api/agent/runs/${runID}/permissions/${requestID}`, {
+    const res = await fetch(`/api/agent/conversations/${runID}/permissions/${requestID}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(decision),

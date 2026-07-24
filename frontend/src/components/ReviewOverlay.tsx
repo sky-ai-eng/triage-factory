@@ -16,7 +16,7 @@ import { useFocusTrap } from '../hooks/useFocusTrap'
 // the agent wrote the review.
 interface ReviewArtifact {
   id: string
-  run_id?: string
+  conversation_id?: string
   owner: string
   repo: string
   pr_number: number

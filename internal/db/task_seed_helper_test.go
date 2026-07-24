@@ -45,7 +45,7 @@ func seedTaskForTest(t *testing.T, database *sql.DB, entityID, eventType, dedupK
 }
 
 // taskMutationsForTest exposes the in-package raw UPDATEs the
-// AgentRun tests need to position their fixtures. Same justification
+// Conversation tests need to position their fixtures. Same justification
 // as seedTaskForTest — circular imports prevent calling through the
 // store interface, and these mutations are 1:1 with what the SQLite
 // TaskStore methods do internally.

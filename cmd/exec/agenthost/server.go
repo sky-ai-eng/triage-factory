@@ -375,8 +375,8 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return emptyResult{}, client.DeleteStagedReviewComment(ctx, a.CommentID)
 
-	case methodGetAgentRun:
-		run, err := client.GetAgentRun(ctx)
+	case methodGetConversation:
+		run, err := client.GetConversation(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -495,16 +495,16 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return createWorkspaceCheckoutResult{Path: path}, nil
 
-	case methodBuildAgentRunFooter:
-		var a buildAgentRunFooterArgs
+	case methodBuildAgentFooter:
+		var a buildAgentFooterArgs
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		footer, err := client.BuildAgentRunFooter(ctx, a.Kind)
+		footer, err := client.BuildAgentFooter(ctx, a.Kind)
 		if err != nil {
 			return nil, err
 		}
-		return buildAgentRunFooterResult{Footer: footer}, nil
+		return buildAgentFooterResult{Footer: footer}, nil
 
 	case methodUpsertArtifact:
 		var a upsertArtifactArgs

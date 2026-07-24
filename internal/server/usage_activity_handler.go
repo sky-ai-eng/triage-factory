@@ -332,19 +332,19 @@ func parseArtifactListOpts(q url.Values) (db.ArtifactListOpts, string) {
 // org-wide feed (so an org-admin row shows which team's bot acted and who
 // authorized it) and are omitted (omitempty) on the team-scoped feed.
 type actionJSON struct {
-	ID          string          `json:"id"`
-	Provider    string          `json:"provider"`
-	Action      string          `json:"action"`
-	Target      string          `json:"target"`
-	ExternalID  string          `json:"external_id,omitempty"`
-	URL         string          `json:"url,omitempty"`
-	FromState   string          `json:"from_state,omitempty"`
-	ToState     string          `json:"to_state,omitempty"`
-	RunID       string          `json:"run_id,omitempty"`
-	ActorUserID string          `json:"actor_user_id,omitempty"`
-	Credential  string          `json:"credential"`
-	Details     json.RawMessage `json:"details,omitempty"`
-	OccurredAt  time.Time       `json:"occurred_at"`
+	ID             string          `json:"id"`
+	Provider       string          `json:"provider"`
+	Action         string          `json:"action"`
+	Target         string          `json:"target"`
+	ExternalID     string          `json:"external_id,omitempty"`
+	URL            string          `json:"url,omitempty"`
+	FromState      string          `json:"from_state,omitempty"`
+	ToState        string          `json:"to_state,omitempty"`
+	ConversationID string          `json:"conversation_id,omitempty"`
+	ActorUserID    string          `json:"actor_user_id,omitempty"`
+	Credential     string          `json:"credential"`
+	Details        json.RawMessage `json:"details,omitempty"`
+	OccurredAt     time.Time       `json:"occurred_at"`
 	// org feed only:
 	TeamID    string `json:"team_id,omitempty"`
 	TeamName  string `json:"team_name,omitempty"`
@@ -360,19 +360,19 @@ func toActionJSON(a domain.ExternalAction) actionJSON {
 		details = json.RawMessage(a.DetailJSON)
 	}
 	return actionJSON{
-		ID:          a.ID,
-		Provider:    a.Provider,
-		Action:      a.Action,
-		Target:      a.Target,
-		ExternalID:  a.ExternalID,
-		URL:         a.URL,
-		FromState:   a.FromState,
-		ToState:     a.ToState,
-		RunID:       a.RunID,
-		ActorUserID: a.ActorUserID,
-		Credential:  a.Credential,
-		Details:     details,
-		OccurredAt:  a.OccurredAt,
+		ID:             a.ID,
+		Provider:       a.Provider,
+		Action:         a.Action,
+		Target:         a.Target,
+		ExternalID:     a.ExternalID,
+		URL:            a.URL,
+		FromState:      a.FromState,
+		ToState:        a.ToState,
+		ConversationID: a.ConversationID,
+		ActorUserID:    a.ActorUserID,
+		Credential:     a.Credential,
+		Details:        details,
+		OccurredAt:     a.OccurredAt,
 	}
 }
 

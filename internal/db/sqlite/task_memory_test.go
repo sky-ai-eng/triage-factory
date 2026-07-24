@@ -18,7 +18,7 @@ import (
 
 // TestTaskMemoryStore_SQLite runs the shared conformance suite
 // against the SQLite TaskMemoryStore impl. Each subtest opens a
-// fresh in-memory DB so run_memory state doesn't leak between
+// fresh in-memory DB so conversation_memory state doesn't leak between
 // assertions.
 func TestTaskMemoryStore_SQLite(t *testing.T) {
 	dbtest.RunTaskMemoryStoreConformance(t, func(t *testing.T) (db.TaskMemoryStore, string, dbtest.TaskMemorySeeder) {
@@ -43,19 +43,19 @@ func TestTaskMemoryStore_SQLite(t *testing.T) {
 	})
 }
 
-// roleForSQLiteJoinRow reads back run_memory_entities.role directly — the
+// roleForSQLiteJoinRow reads back conversation_memory_entities.role directly — the
 // store interface has no role-returning read, so the
 // RecordEntityTouchSystem precedence conformance subtest needs a raw
 // escape hatch. Returns "" if no row exists.
 func roleForSQLiteJoinRow(t *testing.T, conn *sql.DB, runID, entityID string) string {
 	t.Helper()
 	var role string
-	err := conn.QueryRow(`SELECT role FROM run_memory_entities WHERE conversation_id = ? AND entity_id = ?`, runID, entityID).Scan(&role)
+	err := conn.QueryRow(`SELECT role FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ?`, runID, entityID).Scan(&role)
 	if err == sql.ErrNoRows {
 		return ""
 	}
 	if err != nil {
-		t.Fatalf("read run_memory_entities role: %v", err)
+		t.Fatalf("read conversation_memory_entities role: %v", err)
 	}
 	return role
 }
@@ -141,8 +141,8 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 }
 
 // TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows pins the
-// migration's backfill statement directly: a run_memory row inserted
-// with NO corresponding run_memory_entities row (simulating a
+// migration's backfill statement directly: a conversation_memory row inserted
+// with NO corresponding conversation_memory_entities row (simulating a
 // pre-migration row) gets exactly one 'primary' join row once the
 // backfill INSERT runs, and the entity-scoped read then returns it —
 // the read-path switch's result-identical claim for pre-existing data.
@@ -154,10 +154,10 @@ func TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows(t *testing.T) {
 	runID, entityID := seedSQLiteRunForTaskMemory(t, conn, "backfill")
 	now := time.Now().UTC()
 	if _, err := conn.Exec(
-		`INSERT INTO run_memory (id, conversation_id, entity_id, agent_content, created_at) VALUES (?, ?, ?, 'pre-migration note', ?)`,
+		`INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content, created_at) VALUES (?, ?, ?, 'pre-migration note', ?)`,
 		uuid.New().String(), runID, entityID, now,
 	); err != nil {
-		t.Fatalf("seed pre-migration run_memory row: %v", err)
+		t.Fatalf("seed pre-migration conversation_memory row: %v", err)
 	}
 
 	// No join row exists yet — the read path finds nothing.
@@ -169,8 +169,8 @@ func TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows(t *testing.T) {
 
 	// The exact backfill statement from the migration.
 	if _, err := conn.Exec(`
-		INSERT OR IGNORE INTO run_memory_entities (org_id, conversation_id, entity_id, role, created_at)
-		SELECT org_id, conversation_id, entity_id, 'primary', created_at FROM run_memory
+		INSERT OR IGNORE INTO conversation_memory_entities (org_id, conversation_id, entity_id, role, created_at)
+		SELECT org_id, conversation_id, entity_id, 'primary', created_at FROM conversation_memory
 	`); err != nil {
 		t.Fatalf("run backfill: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows(t *testing.T) {
 }
 
 // seedSQLiteRunForTaskMemory seeds the entity + event + prompt +
-// task + run FK chain run_memory needs. Direct INSERTs keep the
+// task + run FK chain conversation_memory needs. Direct INSERTs keep the
 // fixture path schema-coupled and short — matches the SwipeStore
 // / EventStore conformance seed pattern.
 func seedSQLiteRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (runID, entityID string) {
@@ -239,7 +239,7 @@ func seedSQLiteRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (runI
 }
 
 // seedSQLiteBlueprintRunForTaskMemory seeds the entity + event + task +
-// blueprint + blueprint_run FK chain a run_memory.blueprint_run_id can point
+// blueprint + blueprint_run FK chain a conversation_memory.blueprint_run_id can point
 // at (the column FKs blueprint_runs(id) ON DELETE SET NULL). Returns the
 // blueprint_run id. Independent of seedSQLiteRunForTaskMemory's run — the
 // round-trip test only needs a valid FK target.

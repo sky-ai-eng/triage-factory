@@ -1,4 +1,4 @@
-import type { AgentMessage, AgentRun } from '../../types'
+import type { Message, Conversation } from '../../types'
 import { isActiveRun } from '../../lib/runStatus'
 import { hasUnresolvedArtifacts } from '../../lib/approval'
 
@@ -47,7 +47,7 @@ export const HMI_CYAN = 'var(--hmi-cyan)'
 // stationState collapses the run lifecycle into the machine's lit state. Active
 // sub-statuses (initializing…running) all read as one thing: a turn is
 // executing, so the machine is hot and scanning.
-export function stationState(run: AgentRun): StationState {
+export function stationState(run: Conversation): StationState {
   if (isActiveRun(run)) {
     return {
       key: 'working',
@@ -165,16 +165,16 @@ export interface TokenTotals {
   total: number
 }
 
-export function tokenTotals(messages: AgentMessage[]): TokenTotals {
+export function tokenTotals(messages: Message[]): TokenTotals {
   let input = 0
   let output = 0
   let cacheRead = 0
   let cacheWrite = 0
   for (const m of messages) {
-    input += m.InputTokens ?? 0
-    output += m.OutputTokens ?? 0
-    cacheRead += m.CacheReadTokens ?? 0
-    cacheWrite += m.CacheCreationTokens ?? 0
+    input += m.input_tokens ?? 0
+    output += m.output_tokens ?? 0
+    cacheRead += m.cache_read_tokens ?? 0
+    cacheWrite += m.cache_creation_tokens ?? 0
   }
   return { input, output, cacheRead, cacheWrite, total: input + output }
 }

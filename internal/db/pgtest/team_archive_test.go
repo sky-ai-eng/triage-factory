@@ -25,11 +25,11 @@ func seedRunOnTeam(t *testing.T, h *Harness, orgID, creatorID, teamID, status st
 	return id
 }
 
-// TestAgentRunStore_Postgres_ActiveIDsForTeamSystem pins the team-archive
+// TestConversationStore_Postgres_ActiveIDsForTeamSystem pins the team-archive
 // force-stop enumeration on Postgres (TFAC-448): only active runs owned by the
 // queried team are returned — terminal + pending_approval runs are excluded, and
 // a sibling team's active run is not picked up (the team_id WHERE clause).
-func TestAgentRunStore_Postgres_ActiveIDsForTeamSystem(t *testing.T) {
+func TestConversationStore_Postgres_ActiveIDsForTeamSystem(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
@@ -43,7 +43,7 @@ func TestAgentRunStore_Postgres_ActiveIDsForTeamSystem(t *testing.T) {
 	seedRunOnTeam(t, h, orgA, alice, teamB, "running") // sibling team — excluded
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, SecretKey)
-	ids, err := stores.AgentRuns.ActiveIDsForTeamSystem(context.Background(), orgA, teamA)
+	ids, err := stores.Conversations.ActiveIDsForTeamSystem(context.Background(), orgA, teamA)
 	if err != nil {
 		t.Fatalf("ActiveIDsForTeamSystem: %v", err)
 	}

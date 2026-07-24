@@ -13,28 +13,28 @@ import (
 
 // Event is a message sent to connected clients over the websocket.
 //
-// RunID and ProjectID are optional discriminators frontend listeners
-// filter on. RunID identifies events from a single delegated run
-// (agent_message / agent_run_update); ProjectID identifies events
-// from a project's Curator session (curator_message /
-// curator_request_update). Events that broadcast to the whole UI
-// (tasks_updated, scoring_*) leave both empty.
+// ConversationID and ProjectID are optional discriminators frontend
+// listeners filter on. ConversationID identifies events from a single
+// conversation (message / conversation_update); ProjectID identifies
+// events from a project's Curator session (message /
+// conversation_update / conversation_reset). Events that broadcast to
+// the whole UI (tasks_updated, scoring_*) leave both empty.
 //
 // OrgID and UserID are server-side routing fields used by the hub's
 // per-connection scoping. They are intentionally NOT serialised on the
-// wire (json:"-"): the frontend filters by RunID/ProjectID, and
+// wire (json:"-"): the frontend filters by ConversationID/ProjectID, and
 // coupling it to server-side identity would leak who-owns-what to
 // other tabs/extensions parsing the WS stream. Empty OrgID means
 // "system event, deliver to every connection"; empty UserID means
 // "not user-specific". The hub's filter only kicks in when both
 // event-side and client-side values are set — see Broadcast.
 type Event struct {
-	Type      string `json:"type"`
-	RunID     string `json:"run_id,omitempty"`
-	ProjectID string `json:"project_id,omitempty"`
-	OrgID     string `json:"-"`
-	UserID    string `json:"-"`
-	Data      any    `json:"data"`
+	Type           string `json:"type"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	ProjectID      string `json:"project_id,omitempty"`
+	OrgID          string `json:"-"`
+	UserID         string `json:"-"`
+	Data           any    `json:"data"`
 }
 
 // Close codes the hub sends when it actively kicks a connection

@@ -354,7 +354,7 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID string) dbtest.P
 	// runForTask inserts a blueprint + blueprint_run row so MarkFired's
 	// fired_run_id FK to blueprint_runs(id) is satisfied — the firing unit is
 	// the blueprint_run now. The conformance suite doesn't probe gate semantics
-	// here — those live in AgentRunStore's own tests.
+	// here — those live in ConversationStore's own tests.
 	runForTask := func(t *testing.T, taskID string) string {
 		t.Helper()
 		bpID := uuid.New().String()

@@ -165,7 +165,7 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 	// curator in-flight count is a point-in-time read taken before CancelProject
 	// clears the in-flight marker; the run ids are stable (cancellation only moves
 	// them to terminal).
-	runIDs, err := th.allStores.AgentRuns.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
+	runIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
 	if err != nil {
 		internalError(w, "teams", err)
 		return
@@ -309,7 +309,7 @@ func (th *teamsHandler) handleTeamArchivedList(w http.ResponseWriter, r *http.Re
 // (ActiveIDsForTeamSystem); curator sessions are the in-flight count over the
 // team's projects.
 func (th *teamsHandler) teamActiveWork(r *http.Request, orgID, teamID string) (runs, curatorSessions int, err error) {
-	runIDs, err := th.allStores.AgentRuns.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
+	runIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
 	if err != nil {
 		return 0, 0, err
 	}

@@ -44,7 +44,7 @@ const (
 
 // scratchExcludes are the top-level _scratch subdirectories that already
 // re-materialize on the next run and so never ride in the snapshot:
-// entity-memory rebuilds from run_memory, project-knowledge is re-copied from
+// entity-memory rebuilds from conversation_memory, project-knowledge is re-copied from
 // the project KB. Everything else under _scratch (ci-logs, skill scratch,
 // ad-hoc agent files) is non-recoverable and IS captured.
 var scratchExcludes = map[string]bool{"entity-memory": true, "project-knowledge": true}
@@ -204,7 +204,7 @@ func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID s
 // startup sweep) → rebuild it from the durable snapshot and return the rebuilt
 // path. owner/repo/cloneURL locate (and, on a fresh host only, seed) the bare
 // the git delta replays onto; they're empty/unused for a non-git run-root.
-func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain.AgentRun, owner, repo, cloneURL string) (string, error) {
+func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain.Conversation, owner, repo, cloneURL string) (string, error) {
 	if run.WorktreePath != "" {
 		if _, err := os.Stat(run.WorktreePath); err == nil {
 			return run.WorktreePath, nil // warm: worktree still on disk

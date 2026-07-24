@@ -61,7 +61,7 @@ const (
 )
 
 // FormatHumanFeedback produces the markdown block written to
-// run_memory.human_content when a delegated review is submitted. The
+// conversation_memory.human_content when a delegated review is submitted. The
 // shape is fixed — the agent briefing teaches future agents to scan
 // for "## Human feedback (post-run)" headings in materialized memory
 // and consume the structure below as authoritative. Don't reorder or

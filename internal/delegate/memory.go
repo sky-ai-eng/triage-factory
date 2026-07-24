@@ -84,7 +84,7 @@ func readAgentMemoryFile(cwd, namespace, runID string) (string, memoryFileState)
 	return content, memoryFilePresent
 }
 
-// materializePriorMemories writes any existing run_memory rows for the
+// materializePriorMemories writes any existing conversation_memory rows for the
 // entity into <cwd>/_scratch/entity-memory/<namespace>/<prior_run_id>.md as
 // individual markdown files, so a fresh agent invocation sees what previous
 // iterations on the same task have already tried — and so the sibling steps of
@@ -98,7 +98,7 @@ func readAgentMemoryFile(cwd, namespace, runID string) (string, memoryFileState)
 // reasons: the prompt instructs the agent to `ls` its namespace folder early
 // (fails noisily without the dir), and the completion-gate retry message tells
 // the agent to write to
-// `$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<namespace>/<run>.md` (which
+// `$TRIAGE_FACTORY_CONVERSATION_ROOT/_scratch/entity-memory/<namespace>/<run>.md` (which
 // fails on a missing parent dir unless the agent guesses to mkdir first).
 //
 // Pattern: DB is the source of truth, we materialize into the worktree
@@ -178,7 +178,7 @@ func lookupEntityProjectID(entities db.EntityStore, orgID, entityID string) *str
 // touched row upgrades to produced here, and the primary entity ends primary
 // even if it was also touched or produced.
 //
-// Best-effort and non-fatal throughout: it runs after the run_memory upsert
+// Best-effort and non-fatal throughout: it runs after the conversation_memory upsert
 // has already landed, so a join-row failure is logged and skipped, never
 // aborts completion.
 //

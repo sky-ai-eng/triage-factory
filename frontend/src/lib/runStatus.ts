@@ -1,4 +1,4 @@
-import type { AgentRun } from '../types'
+import type { Conversation } from '../types'
 
 export const ACTIVE_STATUSES = [
   'initializing',
@@ -28,7 +28,7 @@ export function isPermissionTerminalStatus(status: string): boolean {
   return (PERMISSION_TERMINAL_STATUSES as readonly string[]).includes(status)
 }
 
-export function isActiveRun(run: AgentRun): boolean {
+export function isActiveRun(run: Conversation): boolean {
   return (ACTIVE_STATUSES as readonly string[]).includes(run.Status)
 }
 
@@ -46,7 +46,7 @@ export function isFailedStatus(status: string): boolean {
 // independent of approval), or aborted (completed + outcome='abort'). A finish
 // run (completed + outcome='finish') is excluded. The composer keys off this so
 // the same 409-refresh path covers every resumable state.
-export function isResumableRun(run: AgentRun): boolean {
+export function isResumableRun(run: Conversation): boolean {
   return (
     run.Status === 'open' ||
     run.Status === 'pending_approval' ||
@@ -58,7 +58,7 @@ export function isResumableRun(run: AgentRun): boolean {
 // claim stamp, falling back to the mint stamp for legacy rows that predate the
 // queue columns. Live elapsed readouts tick from here so queue dwell never
 // inflates working time.
-export function workStartedAt(run: AgentRun): string {
+export function workStartedAt(run: Conversation): string {
   return run.ClaimedAt ?? run.StartedAt
 }
 
@@ -72,7 +72,7 @@ export const QUEUE_DWELL_VISIBLE_MS = 5000
 // while it is still queued, else the latest episode's settled dwell
 // (ClaimedAt − QueuedAt). null when the row predates the queue columns and the
 // dwell is unknowable.
-export function queueDwellMs(run: AgentRun, now: number = Date.now()): number | null {
+export function queueDwellMs(run: Conversation, now: number = Date.now()): number | null {
   const queuedAt = run.QueuedAt ?? (run.Status === 'queued' ? run.StartedAt : null)
   if (!queuedAt) return null
   if (run.Status === 'queued') return Math.max(0, now - new Date(queuedAt).getTime())

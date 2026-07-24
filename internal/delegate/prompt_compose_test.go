@@ -39,8 +39,8 @@ func TestBuildPrompt_InterpolatesInjectedSections(t *testing.T) {
 	}
 	// The env-var-style run-root reference in the tools docs must be expanded
 	// to the concrete agent-visible path, not left for (absent) shell expansion.
-	if strings.Contains(out, "$TRIAGE_FACTORY_RUN_ROOT") {
-		t.Error("literal $TRIAGE_FACTORY_RUN_ROOT survived in the composed prompt")
+	if strings.Contains(out, "$TRIAGE_FACTORY_CONVERSATION_ROOT") {
+		t.Error("literal $TRIAGE_FACTORY_CONVERSATION_ROOT survived in the composed prompt")
 	}
 	if strings.Contains(out, "$TRIAGE_FACTORY_BLUEPRINT_RUN_ID") {
 		t.Error("literal $TRIAGE_FACTORY_BLUEPRINT_RUN_ID survived in the composed prompt")

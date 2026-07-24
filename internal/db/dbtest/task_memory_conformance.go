@@ -15,7 +15,7 @@ import (
 //   - the wired TaskMemoryStore impl,
 //   - the orgID to pass to every call,
 //   - a TaskMemorySeeder the harness uses to drop the entity + run FK
-//     chain (run_memory FKs to runs which FKs to tasks which FKs to
+//     chain (conversation_memory FKs to runs which FKs to tasks which FKs to
 //     events which FKs to entities — the backends seed those rows
 //     differently and the conformance harness shouldn't bake one
 //     shape's schema into the assertions).
@@ -26,18 +26,18 @@ type TaskMemoryStoreFactory func(t *testing.T) (store db.TaskMemoryStore, orgID 
 // implements them against its own SQL.
 type TaskMemorySeeder struct {
 	// Run inserts the entity + event + prompt + task + run FK chain
-	// needed to attach a run_memory row, and returns (runID, entityID).
+	// needed to attach a conversation_memory row, and returns (runID, entityID).
 	// suffix discriminates per-subtest seeds so the unique indexes on
 	// entities/runs don't collide.
 	Run func(t *testing.T, suffix string) (runID, entityID string)
 
-	// BlueprintRun seeds a blueprint + blueprint_run row so a run_memory
-	// row can carry a valid blueprint_run_id (run_memory FKs it with ON
+	// BlueprintRun seeds a blueprint + blueprint_run row so a conversation_memory
+	// row can carry a valid blueprint_run_id (conversation_memory FKs it with ON
 	// DELETE SET NULL), and returns the blueprint_run id. Only the
 	// round-trip subtest needs it.
 	BlueprintRun func(t *testing.T, suffix string) (blueprintRunID string)
 
-	// Role reads back the role column of a run_memory_entities row
+	// Role reads back the role column of a conversation_memory_entities row
 	// directly (bypassing the store interface, which has no
 	// role-returning read) — used only by the RecordEntityTouchSystem
 	// precedence subtest. Returns "" if no row exists for (runID, entityID).
@@ -47,7 +47,7 @@ type TaskMemorySeeder struct {
 // memoryForRun finds the memory row belonging to runID in the slice
 // GetMemoriesForEntity(entityID) returns — the replacement for the
 // removed GetRunMemory now that reads are join-based
-// (run_memory_entities) rather than a direct run_id lookup. Returns nil
+// (conversation_memory_entities) rather than a direct run_id lookup. Returns nil
 // if no row matches.
 func memoryForRun(t *testing.T, ctx context.Context, s db.TaskMemoryStore, orgID, entityID, runID string) *domain.TaskMemory {
 	t.Helper()
@@ -81,7 +81,7 @@ func memoryForRun(t *testing.T, ctx context.Context, s db.TaskMemoryStore, orgID
 //     canonicalizes empty / whitespace to NULL, and is logged-not-
 //     fatal on missing rows.
 //   - GetMemoriesForEntity returns rows reachable through
-//     run_memory_entities ordered by created_at ASC and materializes
+//     conversation_memory_entities ordered by created_at ASC and materializes
 //     Content via the agent + separator + human format when both
 //     halves are populated — including a row whose denormalized
 //     rm.entity_id points elsewhere, as long as a join row ties the
@@ -280,7 +280,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 
 	t.Run("UpdateRunMemoryHumanContentSystem_missing_row_logged_not_fatal", func(t *testing.T) {
 		// The external transition already landed on GitHub; a missing
-		// run_memory row (purged / detached run) must not error the cycle.
+		// conversation_memory row (purged / detached run) must not error the cycle.
 		s, orgID, _ := mk(t)
 		if err := s.UpdateRunMemoryHumanContentSystem(ctx, orgID, "00000000-0000-0000-0000-0000000000fe", "**Post-run outcome** — anything"); err != nil {
 			t.Errorf("expected nil error on missing row (logged warning); got %v", err)
@@ -385,7 +385,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 	})
 
 	t.Run("GetMemoriesForEntity_finds_row_via_touched_join_on_different_entity", func(t *testing.T) {
-		// The read path walks run_memory_entities membership, not the
+		// The read path walks conversation_memory_entities membership, not the
 		// denormalized rm.entity_id column — a run whose primary entity
 		// is A must still surface for entity B once a join row ties
 		// (run, B) at any role, even 'touched'.

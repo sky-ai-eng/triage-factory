@@ -82,7 +82,11 @@ export interface TeamBot {
   display_name: string
 }
 
-export interface AgentRun {
+// Conversation is the durable agent-context row's display projection —
+// served through a handler-side map, so its fields are PascalCase (mirroring
+// internal/domain/agent.go's Conversation). One conversation is one delegated
+// run today; curator conversations are surfaced through the curator turn DTOs.
+export interface Conversation {
   ID: string
   TaskID: string
   Status: string
@@ -167,7 +171,7 @@ export interface AgentRun {
 // contract.
 export type ArtifactKind = 'branch' | 'pull_request' | 'review' | 'issue' | 'comment' | 'message'
 
-// Artifact mirrors the GET /api/agent/runs/{id}/artifacts wire shape
+// Artifact mirrors the GET /api/agent/conversations/{id}/artifacts wire shape
 // (internal/server/agent.go artifactJSON, TFAC-465). One row per real external
 // object a run produced. `state` is meaningful only read with `kind` (see
 // internal/domain/artifact.go — 'pending' aliases across kinds). `details` is
@@ -211,7 +215,7 @@ export interface ActivityAction {
   url?: string
   from_state?: string
   to_state?: string
-  run_id?: string
+  conversation_id?: string
   actor_user_id?: string
   credential: string
   details?: unknown
@@ -221,28 +225,33 @@ export interface ActivityAction {
   actor_name?: string
 }
 
-export interface AgentMessage {
-  ID: number
-  RunID: string
-  Role: string
-  Content: string
-  Subtype: string
-  ToolCalls?: ToolCall[]
-  ToolCallID: string
-  IsError: boolean
-  Model: string
-  InputTokens?: number
-  OutputTokens?: number
-  CacheReadTokens?: number
-  CacheCreationTokens?: number
-  CreatedAt: string
-  // Reasoning/ContentBlocks mirror domain.AgentMessage's fields of the same
-  // name — nil/absent on messages that carry neither. Reasoning
-  // rides the assistant message it belongs to rather than arriving as a
-  // separate subtype:"thinking" row; ContentBlocks holds non-text content
-  // (e.g. an image tool result) the flat Content string can't carry.
-  Reasoning?: ReasoningDetail[]
-  ContentBlocks?: ContentBlock[]
+// Message is the single snake_case transcript-row DTO shared by every
+// surface (delegated runs and curator chat), mirroring domain.MessageDTO
+// (internal/domain/agent.go). conversation_id links the row to its owning
+// conversation; curator groups these into turns client-side.
+export interface Message {
+  id: number
+  conversation_id: string
+  role: string
+  content: string
+  subtype: string
+  tool_calls?: ToolCall[]
+  tool_call_id?: string
+  is_error?: boolean
+  metadata?: Record<string, unknown>
+  model?: string
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_tokens?: number
+  cache_creation_tokens?: number
+  created_at: string
+  // reasoning/content_blocks mirror domain.MessageDTO's fields of the same
+  // name — absent on messages that carry neither. reasoning rides the
+  // assistant message it belongs to rather than arriving as a separate
+  // subtype:"thinking" row; content_blocks holds non-text content (e.g. an
+  // image tool result) the flat content string can't carry.
+  reasoning?: ReasoningDetail[]
+  content_blocks?: ContentBlock[]
 }
 
 export interface ToolCall {
@@ -252,9 +261,7 @@ export interface ToolCall {
 }
 
 // ReasoningDetail/ContentBlock* mirror the Go domain types of the same name
-// (internal/domain/agent.go) — those Go structs DO carry json tags, so the
-// wire shape is lowercase/snake_case even though they nest inside the
-// PascalCase AgentMessage container field.
+// (internal/domain/agent.go). Every wire message DTO is snake_case.
 export interface ReasoningDetail {
   index: number
   type: string
@@ -286,30 +293,9 @@ export interface ContentFile {
   file_type?: string
 }
 
-// CuratorMessage / CuratorRequest mirror the Go domain types in
-// internal/domain/curator.go. The Go structs carry json tags so the
-// wire shape is snake_case — diverging from AgentMessage, which is
-// PascalCase because its Go struct has no tags. Don't try to unify.
-export interface CuratorMessage {
-  id: number
-  request_id: string
-  role: string // "assistant" | "user" | "tool" | "system"
-  subtype: string // "" | "context_change" | ...
-  content: string
-  tool_calls?: ToolCall[]
-  tool_call_id?: string
-  is_error?: boolean
-  metadata?: Record<string, unknown>
-  model?: string
-  input_tokens?: number
-  output_tokens?: number
-  cache_read_tokens?: number
-  cache_creation_tokens?: number
-  created_at: string
-  reasoning?: ReasoningDetail[]
-  content_blocks?: ContentBlock[]
-}
-
+// CuratorRequest mirrors the Go domain type in internal/domain/curator.go —
+// one curator chat turn (a user message plus the claim that executed it). Its
+// agent-side rows are the shared snake_case Message DTO.
 export type CuratorRequestStatus = 'queued' | 'running' | 'done' | 'cancelled' | 'failed'
 
 export interface CuratorRequest {
@@ -329,7 +315,7 @@ export interface CuratorRequest {
 // History endpoint envelope: each request carries its message stream
 // inline. Frontend dedupes incoming WS messages against this.
 export interface CuratorRequestWithMessages extends CuratorRequest {
-  messages: CuratorMessage[]
+  messages: Message[]
 }
 
 export interface TriageEvent {
@@ -401,7 +387,7 @@ export interface BlueprintStep {
 
 export interface BlueprintRunStepView {
   step: BlueprintStep
-  run?: AgentRun
+  run?: Conversation
 }
 
 export interface BlueprintRunResponse {
@@ -847,7 +833,6 @@ export interface Project {
    *  compares this against the viewer's own id to gray that option out
    *  for anyone else. */
   creator_user_id: string
-  curator_session_id?: string
   pinned_repos: string[]
   jira_project_key: string
   linear_project_key: string
@@ -991,7 +976,7 @@ export interface FactoryStation {
    *  stations, depending on the backend snapshot data. */
   items_lifetime: number
   runs: Array<{
-    run: AgentRun
+    run: Conversation
     task: Task
     mine: boolean
   }>
@@ -1003,26 +988,48 @@ export interface FactorySnapshot {
 }
 
 export type WSEvent =
-  // failure_kind rides along only when status === 'failed' AND the backend
-  // classified the cause (domain.RunFailureKind: 'memory_limit' | 'crash' |
-  // 'no_result' | 'agent_error'). Absent === generic failure — render as
-  // before, so old events and unclassified failures degrade cleanly.
-  | { type: 'agent_run_update'; run_id: string; data: { status: string; failure_kind?: string } }
-  // Artifact reconciliation (TFAC-464): an artifact a run produced changed
-  // state on GitHub (PR merged/closed, branch deleted, review submitted). The
-  // run's own status is unchanged — consumers refetch the run to pick up its
-  // artifact-derived surface (pending kind / approval card). Distinct from
-  // agent_run_update precisely so it never feeds the Board's optimistic
-  // run.Status write.
-  | { type: 'artifact_updated'; run_id: string; data: { artifact_id: string; state: string } }
-  | { type: 'agent_message'; run_id: string; data: AgentMessage }
+  // One transcript row for a conversation — delegated run or curator turn
+  // alike (the two former agent_message / curator_message events converged).
+  // conversation_id is set for delegated runs; project_id is set for curator
+  // turns (the curator surface filters by project and appends to its active
+  // turn). data is the shared snake_case Message DTO.
+  | { type: 'message'; conversation_id?: string; project_id?: string; data: Message }
+  // Conversation lifecycle/status change (the former agent_run_update +
+  // curator_request_update). A delegated run carries conversation_id and a
+  // coalesced display status (fetching/cloning/agent_starting/
+  // awaiting_credentials/running/terminal) plus failure_kind on a failure; a
+  // curator turn carries project_id and { request_id, status }. failure_kind
+  // rides along only when status === 'failed' AND the backend classified the
+  // cause (domain.RunFailureKind); absent === generic failure.
   | {
-      // P3 steering: a run surfaced a tool-permission prompt (canUseTool),
-      // answered via POST /api/agent/runs/{runID}/permissions/{requestID}.
+      type: 'conversation_update'
+      conversation_id?: string
+      project_id?: string
+      data: {
+        status?: string
+        failure_kind?: string
+        request_id?: string
+      }
+    }
+  // Artifact reconciliation (TFAC-464): an artifact a conversation produced
+  // changed state on GitHub (PR merged/closed, branch deleted, review
+  // submitted). The conversation's own status is unchanged — consumers refetch
+  // to pick up its artifact-derived surface (pending kind / approval card).
+  // Distinct from conversation_update precisely so it never feeds the Board's
+  // optimistic status write.
+  | {
+      type: 'artifact_updated'
+      conversation_id: string
+      data: { artifact_id: string; state: string }
+    }
+  | {
+      // P3 steering: a conversation surfaced a tool-permission prompt
+      // (canUseTool), answered via
+      // POST /api/agent/conversations/{conversationID}/permissions/{requestID}.
       // timeout_ms is the prompt's server-side deadline (relative); the dock
       // derives its dismiss TTL from it.
       type: 'permission_request'
-      run_id: string
+      conversation_id: string
       data: {
         request_id: string
         tool_name: string
@@ -1036,14 +1043,8 @@ export type WSEvent =
       // run-detail, or two board tabs) drops it promptly instead of waiting for
       // its own client TTL. The client TTL stays as a backstop.
       type: 'permission_resolved'
-      run_id: string
+      conversation_id: string
       data: { request_id: string }
-    }
-  | { type: 'curator_message'; project_id: string; data: CuratorMessage }
-  | {
-      type: 'curator_request_update'
-      project_id: string
-      data: { request_id: string; status: CuratorRequestStatus }
     }
   | {
       // The executor syncer (multi mode) always carries a `pending` field: the
@@ -1061,7 +1062,16 @@ export type WSEvent =
       project_id: string
       data: { entity_ids: string[] }
     }
-  | { type: 'curator_reset'; project_id: string; data: null }
+  | {
+      // The requesting user's live curator conversation was archived (reset).
+      // Scoped to the resetting user server-side; carries the archived
+      // conversation id so a client that already began a fresh conversation
+      // ignores the stale reset instead of wiping it.
+      type: 'conversation_reset'
+      project_id: string
+      conversation_id?: string
+      data: { conversation_id: string }
+    }
   | { type: 'event'; data: DomainEvent }
   | { type: 'tasks_updated'; data: Record<string, never> }
   | {

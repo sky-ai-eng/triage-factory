@@ -30,7 +30,7 @@ type Delegator interface {
 	Cancel(orgID, runID, userID string) error
 	// StageOrDeliverAdditiveEvent routes one agent-facing additive-event
 	// injection for a run by its live state — local process, live remote
-	// executor (TFAC-585's `inject` run_signals kind), or the durable
+	// executor (TFAC-585's `inject` conversation_signals kind), or the durable
 	// staged-injection fallback — returning a 4-way outcome. Signature
 	// matches *delegate.Spawner's method exactly. Used by tryAutoDelegate's
 	// additive-event branch to fold a follow-up event into an entity's
@@ -75,7 +75,7 @@ type Router struct {
 	teamAgents   dbpkg.TeamAgentStore        // read team_agents.enabled before auto-firing triggers
 	users        dbpkg.UsersStore            // read local user's host-scoped Jira identity for inline close gates
 	tasks        dbpkg.TaskStore             // task lifecycle, dedup, claims, breaker
-	agentRuns    dbpkg.AgentRunStore         // lookup active runs for the task-close cancel cascade
+	agentRuns    dbpkg.ConversationStore     // lookup active runs for the task-close cancel cascade
 	entities     dbpkg.EntityStore           // closed-entity guard + entity-terminating close cascade
 	firings      dbpkg.PendingFiringsStore   // per-entity firing queue + active-run gate
 	events       dbpkg.EventStore            // admin-pool RecordSystem + GetMetadataSystem for the background subscriber
@@ -142,7 +142,7 @@ type Router struct {
 // visibility routing degrades to handler-team visibility (the
 // pre-ticket behavior) when missing or when an event carries no requested
 // identity.
-func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, githubGroups dbpkg.TeamGitHubGroupsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.ConversationStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, githubGroups dbpkg.TeamGitHubGroupsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		prompts:      prompts,
 		blueprints:   blueprints,

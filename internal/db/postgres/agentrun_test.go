@@ -16,11 +16,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestAgentRunStore_Postgres runs the shared conformance suite
-// against the Postgres AgentRunStore impl. Each subtest gets a
+// TestConversationStore_Postgres runs the shared conformance suite
+// against the Postgres ConversationStore impl. Each subtest gets a
 // fresh org + team + user + prompt + agent seed; the suite drives
 // every method through its happy and edge paths.
-func TestAgentRunStore_Postgres(t *testing.T) {
+func TestConversationStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	// Wire both pools against AdminDB so the run lifecycle
 	// statements run without a JWT-claims tx. Production wiring
@@ -29,20 +29,20 @@ func TestAgentRunStore_Postgres(t *testing.T) {
 	// exercises the org_id defense-in-depth filter directly.
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
-	dbtest.RunAgentRunStoreConformance(t, func(t *testing.T) (db.AgentRunStore, string, string, dbtest.AgentRunSeeder) {
+	dbtest.RunConversationStoreConformance(t, func(t *testing.T) (db.ConversationStore, string, string, dbtest.ConversationSeeder) {
 		t.Helper()
 		h.Reset(t)
-		orgID, userID, agentID := seedPgAgentRunOrg(t, h)
-		promptID := seedPgAgentRunPrompt(t, h, orgID, userID)
-		seeder := newPgAgentRunSeeder(h.AdminDB, orgID, userID, agentID, promptID)
-		return stores.AgentRuns, orgID, userID, seeder
+		orgID, userID, agentID := seedPgConversationOrg(t, h)
+		promptID := seedPgConversationPrompt(t, h, orgID, userID)
+		seeder := newPgConversationSeeder(h.AdminDB, orgID, userID, agentID, promptID)
+		return stores.Conversations, orgID, userID, seeder
 	})
 }
 
-// seedPgAgentRunOrg builds the auth.user + public.user + org +
-// org_membership + default team + agent graph the AgentRunStore
+// seedPgConversationOrg builds the auth.user + public.user + org +
+// org_membership + default team + agent graph the ConversationStore
 // needs. Mirrors seedPgOrgUserAgent from tasks_test.go.
-func seedPgAgentRunOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, agentID string) {
+func seedPgConversationOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, agentID string) {
 	t.Helper()
 	orgID = uuid.New().String()
 	userID = uuid.New().String()
@@ -52,13 +52,13 @@ func seedPgAgentRunOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, agentID 
 	h.SeedAuthUser(t, userID, email)
 	if _, err := h.AdminDB.Exec(
 		`INSERT INTO users (id, display_name) VALUES ($1, $2)`,
-		userID, "AgentRun Conformance User",
+		userID, "Conversation Conformance User",
 	); err != nil {
 		t.Fatalf("seed public.users: %v", err)
 	}
 	if _, err := h.AdminDB.Exec(
 		`INSERT INTO orgs (id, name, slug, owner_user_id) VALUES ($1, $2, $3, $4)`,
-		orgID, "AgentRun Org "+orgID[:8], "ar-"+orgID[:8], userID,
+		orgID, "Conversation Org "+orgID[:8], "ar-"+orgID[:8], userID,
 	); err != nil {
 		t.Fatalf("seed org: %v", err)
 	}
@@ -78,28 +78,28 @@ func seedPgAgentRunOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, agentID 
 	return orgID, userID, agentID
 }
 
-// seedPgAgentRunPrompt inserts a user-source prompt the conformance
+// seedPgConversationPrompt inserts a user-source prompt the conformance
 // suite's runs FK into. Stable id `p_agentrun_test` matches the
 // constant the shared harness expects.
-func seedPgAgentRunPrompt(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
+func seedPgConversationPrompt(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
 	t.Helper()
 	teamID := firstTeamForOrg(t, h, orgID)
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, created_at, updated_at)
-		VALUES ('p_agentrun_test', $1, $2, $3, 'AgentRun Test', 'body', 'user', '', now(), now())
+		VALUES ('p_agentrun_test', $1, $2, $3, 'Conversation Test', 'body', 'user', '', now(), now())
 	`, orgID, userID, teamID); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
 	return "p_agentrun_test"
 }
 
-// newPgAgentRunSeeder builds the FactorySeeder-style callbacks the
+// newPgConversationSeeder builds the FactorySeeder-style callbacks the
 // conformance harness uses to stage non-run fixture rows. INSERTs
 // carry org_id explicitly so the cross-org leakage test below can
 // reuse the same seeder for two orgs in parallel.
-func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) dbtest.AgentRunSeeder {
+func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) dbtest.ConversationSeeder {
 	_ = promptID // referenced via the conformance suite's constant
-	return dbtest.AgentRunSeeder{
+	return dbtest.ConversationSeeder{
 		Entity: func(t *testing.T, suffix string) string {
 			t.Helper()
 			id := uuid.New().String()
@@ -137,7 +137,7 @@ func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) 
 			}
 			return id
 		},
-		Run: func(t *testing.T, run domain.AgentRun) string {
+		Run: func(t *testing.T, run domain.Conversation) string {
 			t.Helper()
 			if run.CreatorUserID == "" && run.TriggerType != "event" {
 				run.CreatorUserID = userID
@@ -216,14 +216,14 @@ func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) 
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
-					INSERT INTO run_memory (id, org_id, conversation_id, entity_id, agent_content) VALUES ($1, $2, $3, $4, NULL)
+					INSERT INTO conversation_memory (id, org_id, conversation_id, entity_id, agent_content) VALUES ($1, $2, $3, $4, NULL)
 				`, memID, orgID, runID, entityID); err != nil {
 					t.Fatalf("seed null memory: %v", err)
 				}
 				return
 			}
 			if _, err := conn.Exec(`
-				INSERT INTO run_memory (id, org_id, conversation_id, entity_id, agent_content) VALUES ($1, $2, $3, $4, $5)
+				INSERT INTO conversation_memory (id, org_id, conversation_id, entity_id, agent_content) VALUES ($1, $2, $3, $4, $5)
 			`, memID, orgID, runID, entityID, content); err != nil {
 				t.Fatalf("seed memory: %v", err)
 			}
@@ -252,22 +252,22 @@ func newPgAgentRunSeeder(conn *sql.DB, orgID, userID, agentID, promptID string) 
 	}
 }
 
-// TestAgentRunStore_Postgres_CrossOrgLeakage pins the defense-in-
+// TestConversationStore_Postgres_CrossOrgLeakage pins the defense-in-
 // depth guarantee: even with the org_id filter as the only line of
 // defense (AdminDB bypasses RLS), org A's queries can't see org B's
 // runs. In production the RLS policies add a second layer; this test
 // validates the WHERE-clause filter on its own so a regression there
 // can't silently rely on RLS to compensate.
-func TestAgentRunStore_Postgres_CrossOrgLeakage(t *testing.T) {
+func TestConversationStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
-	orgA, userA, agentA := seedPgAgentRunOrg(t, h)
-	orgB, userB, agentB := seedPgAgentRunOrg(t, h)
+	orgA, userA, agentA := seedPgConversationOrg(t, h)
+	orgB, userB, agentB := seedPgConversationOrg(t, h)
 	_ = agentA
 	_ = agentB
-	seedPgAgentRunPromptIn(t, h, "p_xleak_A", orgA, userA)
-	seedPgAgentRunPromptIn(t, h, "p_xleak_B", orgB, userB)
+	seedPgConversationPromptIn(t, h, "p_xleak_A", orgA, userA)
+	seedPgConversationPromptIn(t, h, "p_xleak_B", orgB, userB)
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
@@ -299,7 +299,7 @@ func TestAgentRunStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		`, taskID, orgID, userID, entityID, eventID); err != nil {
 			t.Fatalf("task: %v", err)
 		}
-		seedPgConversation(t, h.AdminDB, orgID, domain.AgentRun{
+		seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
 			ID: runID, TaskID: taskID, PromptID: promptID, Status: "running", Model: "m",
 			CreatorUserID:  userID,
 			BlueprintRunID: seedPgBlueprintRun(t, h, orgID, userID, taskID),
@@ -312,12 +312,12 @@ func TestAgentRunStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	_ = mkChain(t, orgB, userB, "p_xleak_B", runB)
 
 	// Org A's view must NOT see B's run.
-	if got, err := stores.AgentRuns.Get(ctx, orgA, runB); err != nil {
+	if got, err := stores.Conversations.Get(ctx, orgA, runB); err != nil {
 		t.Fatalf("Get cross-org: %v", err)
 	} else if got != nil {
 		t.Errorf("orgA Get returned orgB run %s; defense-in-depth filter leaked", runB)
 	}
-	if got, err := stores.AgentRuns.Get(ctx, orgB, runA); err != nil {
+	if got, err := stores.Conversations.Get(ctx, orgB, runA); err != nil {
 		t.Fatalf("Get cross-org reverse: %v", err)
 	} else if got != nil {
 		t.Errorf("orgB Get returned orgA run %s", runA)
@@ -325,29 +325,29 @@ func TestAgentRunStore_Postgres_CrossOrgLeakage(t *testing.T) {
 
 	// ListForTask scoped to orgB looking at orgA's task must
 	// return nothing.
-	if runs, err := stores.AgentRuns.ListForTask(ctx, orgB, taskA); err != nil {
+	if runs, err := stores.Conversations.ListForTask(ctx, orgB, taskA); err != nil {
 		t.Fatalf("ListForTask cross-org: %v", err)
 	} else if len(runs) != 0 {
 		t.Errorf("orgB ListForTask(orgA task) returned %d runs; want 0", len(runs))
 	}
 }
 
-// TestAgentRunStore_Postgres_CrossOrgRLSDenied pins the production
-// RLS layer for runs. Where TestAgentRunStore_Postgres_CrossOrgLeakage
+// TestConversationStore_Postgres_CrossOrgRLSDenied pins the production
+// RLS layer for runs. Where TestConversationStore_Postgres_CrossOrgLeakage
 // above wires both pools against AdminDB to prove the defense-in-depth
 // WHERE-clause filter is intact, this test runs the store through the
 // app pool under tf_app with real JWT claims so the actual
 // runs_select / runs_insert policies are exercised. Same-org reads
 // succeed; cross-org reads are silently filtered (USING); cross-org
 // Create raises 42501 from runs_insert WITH CHECK.
-func TestAgentRunStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
+func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
-	orgA, alice, _ := seedPgAgentRunOrg(t, h)
-	orgB, bob, _ := seedPgAgentRunOrg(t, h)
-	seedPgAgentRunPromptIn(t, h, "p_rls_A", orgA, alice)
-	seedPgAgentRunPromptIn(t, h, "p_rls_B", orgB, bob)
+	orgA, alice, _ := seedPgConversationOrg(t, h)
+	orgB, bob, _ := seedPgConversationOrg(t, h)
+	seedPgConversationPromptIn(t, h, "p_rls_A", orgA, alice)
+	seedPgConversationPromptIn(t, h, "p_rls_B", orgB, bob)
 
 	// Seed entity + event + task + run in orgA via admin so the row
 	// exists. Whether bob (claims orgB) can see/mutate it is the
@@ -389,7 +389,7 @@ func TestAgentRunStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			run, err := pgstore.NewForTx(tx, pgtest.SecretKey).AgentRuns.Get(ctx, orgA, runA)
+			run, err := pgstore.NewForTx(tx, pgtest.SecretKey).Conversations.Get(ctx, orgA, runA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -405,7 +405,7 @@ func TestAgentRunStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			run, err := pgstore.NewForTx(tx, pgtest.SecretKey).AgentRuns.Get(ctx, orgA, runA)
+			run, err := pgstore.NewForTx(tx, pgtest.SecretKey).Conversations.Get(ctx, orgA, runA)
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -425,7 +425,7 @@ func TestAgentRunStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// an UPDATE: bob's lifecycle write against orgA's run must be
 		// silently filtered by the USING clause — no rows touched.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx, pgtest.SecretKey).AgentRuns.SetWorktreePath(ctx, orgA, runA, "/tmp/bob-was-here")
+			return pgstore.NewForTx(tx, pgtest.SecretKey).Conversations.SetWorktreePath(ctx, orgA, runA, "/tmp/bob-was-here")
 		})
 		if err != nil {
 			t.Fatalf("cross-org SetWorktreePath: %v", err)
@@ -440,7 +440,7 @@ func TestAgentRunStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	})
 }
 
-// TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims
+// TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims
 // pins the routing the delegate spawner uses for manual-run
 // bookkeeping: lifecycle writes (Complete, MarkCancelledIfActive,
 // MarkResuming) wrapped in SyntheticClaimsWithTx must pass RLS under
@@ -459,14 +459,14 @@ func TestAgentRunStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 // can succeed in multi-mode without the tx wrap is if the
 // row's creator_user_id matches tf.current_user_id() under the
 // claims set by WithTx.
-func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.T) {
+func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, userID, _ := seedPgAgentRunOrg(t, h)
-	seedPgAgentRunPromptIn(t, h, "p_lc_test", orgID, userID)
+	orgID, userID, _ := seedPgConversationOrg(t, h)
+	seedPgConversationPromptIn(t, h, "p_lc_test", orgID, userID)
 
 	// FK chain on admin (same pattern as
-	// TestAgentRunStore_Postgres_Create_UnderAppPoolRLS).
+	// TestConversationStore_Postgres_Create_UnderAppPoolRLS).
 	entityID := uuid.New().String()
 	eventID := uuid.New().String()
 	taskID := uuid.New().String()
@@ -497,7 +497,7 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	// Seed a manual run row owned by userID — the queue's EnqueueRun does
 	// this in production before any lifecycle write runs.
 	lcBlueprintRun := seedPgBlueprintRun(t, h, orgID, userID, taskID)
-	runID := seedPgConversation(t, h.AdminDB, orgID, domain.AgentRun{
+	runID := seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
 		TaskID: taskID, PromptID: "p_lc_test", Status: "running", Model: "m",
 		TriggerType: "manual", CreatorUserID: userID,
 		BlueprintRunID: lcBlueprintRun,
@@ -510,12 +510,12 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	// open→queued CAS the resume path drives under the user's claims.
 	var parked, requeued bool
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		p, mErr := tx.AgentRuns.MarkOpen(ctx, orgID, runID)
+		p, mErr := tx.Conversations.MarkOpen(ctx, orgID, runID)
 		parked = p
 		if mErr != nil {
 			return mErr
 		}
-		r, mErr := tx.AgentRuns.MarkQueuedForResume(ctx, orgID, runID)
+		r, mErr := tx.Conversations.MarkQueuedForResume(ctx, orgID, runID)
 		requeued = r
 		return mErr
 	}); err != nil {
@@ -537,19 +537,19 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	// cycles.
 	settle := func(cost float64, durationMs, numTurns int, stopReason, resultSummary, outcome string) {
 		t.Helper()
-		if err := stores.AgentRuns.SetExecutorSystem(ctx, orgID, runID, "exec-lc", 1); err != nil {
+		if err := stores.Conversations.SetExecutorSystem(ctx, orgID, runID, "exec-lc", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-			_, mErr := tx.AgentRuns.InsertMessage(ctx, orgID, &domain.AgentMessage{
-				RunID: runID, Role: "assistant", Subtype: "text", Content: "work",
+			_, mErr := tx.Conversations.InsertMessage(ctx, orgID, &domain.Message{
+				ConversationID: runID, Role: "assistant", Subtype: "text", Content: "work",
 			})
 			return mErr
 		}); err != nil {
 			t.Fatalf("InsertMessage under synth claims: %v", err)
 		}
 		if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-			return tx.AgentRuns.Complete(ctx, orgID, runID, "completed", cost, durationMs, numTurns, stopReason, resultSummary, outcome, "", "")
+			return tx.Conversations.Complete(ctx, orgID, runID, "completed", cost, durationMs, numTurns, stopReason, resultSummary, outcome, "", "")
 		}); err != nil {
 			t.Fatalf("Complete under synth claims: %v", err)
 		}
@@ -559,7 +559,7 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 
 	// Verify through the derived projection: row landed in completed, the
 	// totals reflect both cycles, creator stayed the original user.
-	got, err := stores.AgentRuns.GetSystem(ctx, orgID, runID)
+	got, err := stores.Conversations.GetSystem(ctx, orgID, runID)
 	if err != nil || got == nil {
 		t.Fatalf("GetSystem: err=%v got=%v", err, got)
 	}
@@ -586,7 +586,7 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 	// transition). Verifies the System variant's guard fires even
 	// though we never wrapped in claims for this call (spawner uses
 	// it goroutine-internally with no user identity).
-	failed, err := stores.AgentRuns.MarkFailedIfActiveSystem(ctx, orgID, runID, "")
+	failed, err := stores.Conversations.MarkFailedIfActiveSystem(ctx, orgID, runID, "")
 	if err != nil {
 		t.Fatalf("MarkFailedIfActiveSystem: %v", err)
 	}
@@ -599,7 +599,7 @@ func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.
 // fixture stand-in for the queue's EnqueueRun mint, staging rows in
 // arbitrary status. The trigger_type↔creator CHECK is satisfied by the
 // caller: manual rows carry CreatorUserID, event rows leave it empty.
-func seedPgConversation(t *testing.T, conn *sql.DB, orgID string, run domain.AgentRun) string {
+func seedPgConversation(t *testing.T, conn *sql.DB, orgID string, run domain.Conversation) string {
 	t.Helper()
 	id := run.ID
 	if id == "" {
@@ -660,17 +660,17 @@ func seedPgBlueprintRun(t *testing.T, h *pgtest.Harness, orgID, userID, taskID s
 	return brID
 }
 
-// TestAgentRunStore_Postgres_RuntimeDefaultsToSDK pins the
+// TestConversationStore_Postgres_RuntimeDefaultsToSDK pins the
 // conversations.runtime schema fact the columnar-canon epic depends on: a
 // freshly seeded delegation row lands as 'sdk', not the native loop's
-// 'native'. domain.AgentRun has no write path for Runtime (nothing writes
+// 'native'. domain.Conversation has no write path for Runtime (nothing writes
 // 'native' until the executor-side loop lands), so this reads the column
 // directly.
-func TestAgentRunStore_Postgres_RuntimeDefaultsToSDK(t *testing.T) {
+func TestConversationStore_Postgres_RuntimeDefaultsToSDK(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, userID, _ := seedPgAgentRunOrg(t, h)
-	seedPgAgentRunPromptIn(t, h, "p_runtime_test", orgID, userID)
+	orgID, userID, _ := seedPgConversationOrg(t, h)
+	seedPgConversationPromptIn(t, h, "p_runtime_test", orgID, userID)
 
 	entityID := uuid.New().String()
 	eventID := uuid.New().String()
@@ -696,7 +696,7 @@ func TestAgentRunStore_Postgres_RuntimeDefaultsToSDK(t *testing.T) {
 		t.Fatalf("task: %v", err)
 	}
 
-	runID := seedPgConversation(t, h.AdminDB, orgID, domain.AgentRun{
+	runID := seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
 		TaskID: taskID, PromptID: "p_runtime_test", Status: "running", Model: "m",
 		CreatorUserID:  userID,
 		BlueprintRunID: seedPgBlueprintRun(t, h, orgID, userID, taskID),
@@ -711,10 +711,10 @@ func TestAgentRunStore_Postgres_RuntimeDefaultsToSDK(t *testing.T) {
 	}
 }
 
-// seedPgAgentRunPromptIn is a small variant that inserts a prompt
+// seedPgConversationPromptIn is a small variant that inserts a prompt
 // with an explicit id. Used by cross-org leakage which needs two
 // prompts in two orgs with distinct ids.
-func seedPgAgentRunPromptIn(t *testing.T, h *pgtest.Harness, id, orgID, userID string) {
+func seedPgConversationPromptIn(t *testing.T, h *pgtest.Harness, id, orgID, userID string) {
 	t.Helper()
 	teamID := firstTeamForOrg(t, h, orgID)
 	if _, err := h.AdminDB.Exec(`

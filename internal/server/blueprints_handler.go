@@ -1093,8 +1093,8 @@ type blueprintRunResponse struct {
 }
 
 type blueprintRunStepView struct {
-	Step blueprintStepView `json:"step"`
-	Run  *domain.AgentRun  `json:"run,omitempty"`
+	Step blueprintStepView    `json:"step"`
+	Run  *domain.Conversation `json:"run,omitempty"`
 }
 
 // blueprintStepView is the step shape in a blueprint-run projection. It mirrors
@@ -1146,7 +1146,7 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 
 	var br *domain.BlueprintRun
 	var fallbackSteps []domain.BlueprintStep
-	var stepRuns []domain.AgentRun
+	var stepRuns []domain.Conversation
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		br, e = tx.Blueprints.GetRun(r.Context(), orgID, id)
@@ -1184,7 +1184,7 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 		}
 	}
 
-	runByStep := map[int]*domain.AgentRun{}
+	runByStep := map[int]*domain.Conversation{}
 	for i := range stepRuns {
 		if stepRuns[i].BlueprintStepIndex != nil {
 			runByStep[*stepRuns[i].BlueprintStepIndex] = &stepRuns[i]

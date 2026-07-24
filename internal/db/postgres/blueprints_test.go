@@ -346,7 +346,7 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	// does, and confirm RunsForBlueprint surfaces it — the channel the
 	// orchestrator advances on (the successor to the old per-step verdict).
 	stepRunID := seedPgRun(t, h, orgID, userID, taskID, stepPromptID, blueprintRunID, 0)
-	if err := stores.AgentRuns.CompleteSystem(ctx, orgID, stepRunID, "completed", 0, 0, 0, "", "did the thing", "finish", "", ""); err != nil {
+	if err := stores.Conversations.CompleteSystem(ctx, orgID, stepRunID, "completed", 0, 0, 0, "", "did the thing", "finish", "", ""); err != nil {
 		t.Fatalf("complete step run: %v", err)
 	}
 	stepRuns, err := blueprints.RunsForBlueprint(ctx, orgID, blueprintRunID)
@@ -418,7 +418,7 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 //     the manual blueprint run reads back with the JWT-claimed user as
 //     creator_user_id.
 //
-// Mirrors TestAgentRunStore_Postgres_Create_UnderAppPoolRLS — same
+// Mirrors TestConversationStore_Postgres_Create_UnderAppPoolRLS — same
 // fix-against-actual-RLS shape.
 func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -524,7 +524,7 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 // TestBlueprintStore_Postgres_CrossOrgLeakage pins the defense-in-depth
 // org_id filter on every admin-pool variant: even with RLS bypassed,
 // a System read for org A must never return rows that live in org B.
-// Mirrors the AgentRunStore cross-org leakage suite.
+// Mirrors the ConversationStore cross-org leakage suite.
 func TestBlueprintStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)

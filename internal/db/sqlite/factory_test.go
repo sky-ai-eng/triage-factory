@@ -138,18 +138,18 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
-					INSERT INTO run_memory (id, conversation_id, entity_id, agent_content)
+					INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content)
 					VALUES (?, ?, ?, NULL)
 				`, memID, runID, entityID); err != nil {
-					t.Fatalf("seed null run_memory: %v", err)
+					t.Fatalf("seed null conversation_memory: %v", err)
 				}
 				return
 			}
 			if _, err := conn.Exec(`
-				INSERT INTO run_memory (id, conversation_id, entity_id, agent_content)
+				INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content)
 				VALUES (?, ?, ?, ?)
 			`, memID, runID, entityID, content); err != nil {
-				t.Fatalf("seed run_memory: %v", err)
+				t.Fatalf("seed conversation_memory: %v", err)
 			}
 		},
 	}

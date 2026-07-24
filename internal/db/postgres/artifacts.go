@@ -14,7 +14,7 @@ import (
 // in every WHERE/INSERT clause as defense in depth. Mirrors the runs store
 // (agentrun.go) for $N placeholders + scan conventions. See TFAC-455.
 //
-// Holds two pools, the same split AgentRuns / RunWorktrees use:
+// Holds two pools, the same split Conversations / RunWorktrees use:
 //
 //   - q: app pool (tf_app, RLS-active). Manual-run exec writes (under
 //     synthetic claims) and run-detail / C2 reads route here.
@@ -122,7 +122,7 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 			details_json = EXCLUDED.details_json,
 			updated_at   = now()
 		RETURNING `+pgArtifactColumns,
-		a.ID, a.RunID, orgID, a.TeamID, a.Provider, a.Kind, a.Target,
+		a.ID, a.ConversationID, orgID, a.TeamID, a.Provider, a.Kind, a.Target,
 		a.ExternalID, a.URL, a.State, a.DedupKey, a.DetailsJSON,
 	)
 	var out domain.Artifact
@@ -419,7 +419,7 @@ type rowScanner interface {
 
 func scanArtifact(sc rowScanner, a *domain.Artifact) error {
 	return sc.Scan(
-		&a.ID, &a.RunID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Target,
+		&a.ID, &a.ConversationID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Target,
 		&a.ExternalID, &a.URL, &a.State, &a.DedupKey, &a.DetailsJSON, &a.CreatedAt, &a.UpdatedAt,
 	)
 }

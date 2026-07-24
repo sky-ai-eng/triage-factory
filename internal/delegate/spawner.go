@@ -105,10 +105,10 @@ type Spawner struct {
 	// awaitingCredentialsPollInterval overrides the package default poll
 	// cadence when > 0, same override shape.
 	awaitingCredentialsPollIntervalOverride time.Duration
-	tasks                                   db.TaskStore     // re-read tasks for run lifecycle handlers
-	agentRuns                               db.AgentRunStore // run lifecycle + transcript
-	entities                                db.EntityStore   // entity reads for project lookup + resume context
-	artifacts                               db.ArtifactStore // review + draft-PR artifact lookup on processCompletion park check
+	tasks                                   db.TaskStore         // re-read tasks for run lifecycle handlers
+	agentRuns                               db.ConversationStore // run lifecycle + transcript
+	entities                                db.EntityStore       // entity reads for project lookup + resume context
+	artifacts                               db.ArtifactStore     // review + draft-PR artifact lookup on processCompletion park check
 	// stagedInjections is the durable, producer-agnostic "stage for next resume"
 	// agent-injection queue (TFAC-501). The generic staged-injection API (StageOrDeliverInjection
 	// / stagedInjectionsForResume) appends here when a target run has no warm process
@@ -191,7 +191,7 @@ type Spawner struct {
 	// exactly when runSignals is nil.
 	signalNotifyDB *sql.DB
 	// ackWaiters holds one wake channel per in-flight signal a control
-	// request on this pod is waiting to see acked, keyed by run_signals.id.
+	// request on this pod is waiting to see acked, keyed by conversation_signals.id.
 	// The shared tf_ctl Listener's onNotify dispatch sends on the matching
 	// channel (non-blocking, 1-buffered) when it observes {"kind":"ack"};
 	// the waiter treats it as "check now", not as the data itself (the
@@ -482,7 +482,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		runCredentials:   stores.RunCredentials,
 		curatorStore:     stores.Curator,
 		tasks:            stores.Tasks,
-		agentRuns:        stores.AgentRuns,
+		agentRuns:        stores.Conversations,
 		entities:         stores.Entities,
 		artifacts:        stores.Artifacts,
 		stagedInjections: stores.StagedInjections,
@@ -833,12 +833,12 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string
 
 // gitAuthorizeDecision is the git proxy's live per-repo gate (Layer 2 + the
 // Layer-3 ref allowlist): the run may touch a repo only if its team tracks it
-// AND it appears in the run's run_worktrees ledger (the eagerly-cloned task
+// AND it appears in the run's conversation_worktrees ledger (the eagerly-cloned task
 // repo — recorded at setup — or a workspace-add'd one). The allowed push ref is
 // the worktree's LIVE current branch mapped through its configured push
 // refspec — "you may push where a bare `git push` from your checkout lands"
 // (TFAC-498, refspec-aware) — read fresh from disk per call rather than a
-// prescribed run_worktrees.FeatureBranch. The refspec mapping matters for PR
+// prescribed conversation_worktrees.FeatureBranch. The refspec mapping matters for PR
 // worktrees: the checkout is the run-namespaced triagefactory/<runID>/pr-<n>
 // while push tracking maps it to the PR's real head branch, and the
 // receive-pack command block the ref gate inspects carries that REMOTE ref —
@@ -892,7 +892,7 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 		found = true
 		// A HEAD file read plus a few `git config --file` subprocesses per
 		// matching row (the current branch comes from a plain .git/HEAD read,
-		// no subprocess). run_worktrees is keyed (run_id, repo_id, ref), so
+		// no subprocess). conversation_worktrees is keyed (run_id, repo_id, ref), so
 		// several rows can match; git ops per run are few enough that per-row
 		// spawning stays fine.
 		branch := worktreePushTargetBranch(w.Path)
@@ -903,7 +903,7 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	}
 	if !found {
 		// No ledger row for this repo yet. The run's OWN task PR repo is the
-		// bootstrap exception: its run_worktrees row is written only AFTER the
+		// bootstrap exception: its conversation_worktrees row is written only AFTER the
 		// eager-PR setup clone materializes the worktree, yet that clone routes
 		// through this same per-run proxy — so the very first fetch would be
 		// denied against its own not-yet-written row. Authorize the task's own
@@ -956,15 +956,15 @@ func gitDenyNotAttached(repoID string) gitproxy.Decision {
 
 // isTaskOwnRepo reports whether (owner, repo) is the GitHub repo of the run's
 // own task — the repo the run was created to work on. It authorizes the initial
-// setup clone for read before that repo's run_worktrees ledger row exists (the
+// setup clone for read before that repo's conversation_worktrees ledger row exists (the
 // row is written post-clone). RunInfo carries no task id, so the run is resolved
 // to its task here. Non-GitHub tasks and any resolution failure report false,
 // falling back to the ledger gate (fail closed).
 func isTaskOwnRepo(ctx context.Context, stores db.Stores, info agenthost.RunInfo, owner, repo string) bool {
-	if stores.AgentRuns == nil || stores.Tasks == nil || info.RunID == "" {
+	if stores.Conversations == nil || stores.Tasks == nil || info.RunID == "" {
 		return false
 	}
-	run, err := stores.AgentRuns.GetSystem(ctx, info.OrgID, info.RunID)
+	run, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.RunID)
 	if err != nil || run == nil || run.TaskID == "" {
 		return false
 	}
@@ -1253,10 +1253,10 @@ func (s *Spawner) updateBreakerCounter(taskID, triggerType, status string) {
 func (s *Spawner) broadcastRunUpdate(orgID, runID, status string) {
 	if s.wsHub != nil {
 		s.wsHub.Broadcast(websocket.Event{
-			Type:  "agent_run_update",
-			OrgID: orgID,
-			RunID: runID,
-			Data:  map[string]string{"status": status},
+			Type:           "conversation_update",
+			OrgID:          orgID,
+			ConversationID: runID,
+			Data:           map[string]string{"status": status},
 		})
 	}
 	s.publishEvent(orgID, domain.EventSystemRunStatus, events.SystemRunStatusMetadata{
@@ -1278,10 +1278,10 @@ func (s *Spawner) broadcastRunFailed(orgID, runID string, kind domain.RunFailure
 	}
 	if s.wsHub != nil {
 		s.wsHub.Broadcast(websocket.Event{
-			Type:  "agent_run_update",
-			OrgID: orgID,
-			RunID: runID,
-			Data:  data,
+			Type:           "conversation_update",
+			OrgID:          orgID,
+			ConversationID: runID,
+			Data:           data,
 		})
 	}
 	meta := events.SystemRunStatusMetadata{RunID: runID, Status: "failed"}
@@ -1291,13 +1291,13 @@ func (s *Spawner) broadcastRunFailed(orgID, runID string, kind domain.RunFailure
 	s.publishEvent(orgID, domain.EventSystemRunStatus, meta)
 }
 
-func (s *Spawner) broadcastMessage(orgID, runID string, msg *domain.AgentMessage) {
+func (s *Spawner) broadcastMessage(orgID, runID string, msg *domain.Message) {
 	if s.wsHub != nil {
 		s.wsHub.Broadcast(websocket.Event{
-			Type:  "agent_message",
-			OrgID: orgID,
-			RunID: runID,
-			Data:  msg,
+			Type:           "message",
+			OrgID:          orgID,
+			ConversationID: runID,
+			Data:           msg.ToDTO(),
 		})
 	}
 	// Only tool_use is published — text/thinking are noise for bus

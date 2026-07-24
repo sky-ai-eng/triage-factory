@@ -1,8 +1,8 @@
 import { memo, useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react'
 import type {
   Task,
-  AgentRun,
-  AgentMessage,
+  Conversation,
+  Message,
   WSEvent,
   TeamMembersResponse,
   TeamMember,
@@ -166,13 +166,13 @@ export default function Board() {
   // Agent run state — runs render on cards regardless of which column
   // the card is in (a user-claimed in_progress task can also have a
   // run; a bot-claimed in_review task definitely has one).
-  const [agentRuns, setAgentRuns] = useState<Record<string, AgentRun>>({})
+  const [agentRuns, setAgentRuns] = useState<Record<string, Conversation>>({})
   // Per-run card feed (running stats + last few ticker lines), keyed by run
   // ID. Bounded by construction — the board used to accumulate every run's
   // full message array here, growing without limit for the lifetime of the
   // page while each card re-derived its stats from scratch per render.
   const [runFeeds, setRunFeeds] = useState<Record<string, RunCardFeed>>({})
-  const [chainStepRuns, setChainStepRuns] = useState<Record<string, AgentRun[]>>({})
+  const [chainStepRuns, setChainStepRuns] = useState<Record<string, Conversation[]>>({})
   const chainStepRunsRef = useRef(chainStepRuns)
   useEffect(() => {
     chainStepRunsRef.current = chainStepRuns
@@ -314,31 +314,34 @@ export default function Board() {
   // a run yet — the shape the chain rail renders. Pure: returns the array
   // (null on error / empty) and writes no state, so fetchTasks can resolve
   // many chains in parallel and apply them in one batched setChainStepRuns.
-  const fetchChainStepRuns = useCallback(async (chainRunID: string): Promise<AgentRun[] | null> => {
-    try {
-      const res = await fetch(`/api/blueprint-runs/${chainRunID}`)
-      if (!res.ok) return null
-      const data: {
-        steps?: Array<{ step: { step_index: number }; run?: AgentRun | null }>
-      } = await res.json()
-      const total = data.steps?.length ?? 0
-      if (total === 0) return null
-      return Array.from({ length: total }, (_, i) => {
-        const existing = data.steps?.[i]?.run
-        if (existing) return existing
-        return {
-          ID: `__pending-${chainRunID}-${i}`,
-          Status: 'pending',
-          blueprint_run_id: chainRunID,
-          blueprint_step_index: i,
-        } as unknown as AgentRun
-      })
-    } catch {
-      // Network error — leave chain indicator empty for now; the
-      // next fetchTasks pass will retry.
-      return null
-    }
-  }, [])
+  const fetchChainStepRuns = useCallback(
+    async (chainRunID: string): Promise<Conversation[] | null> => {
+      try {
+        const res = await fetch(`/api/blueprint-runs/${chainRunID}`)
+        if (!res.ok) return null
+        const data: {
+          steps?: Array<{ step: { step_index: number }; run?: Conversation | null }>
+        } = await res.json()
+        const total = data.steps?.length ?? 0
+        if (total === 0) return null
+        return Array.from({ length: total }, (_, i) => {
+          const existing = data.steps?.[i]?.run
+          if (existing) return existing
+          return {
+            ID: `__pending-${chainRunID}-${i}`,
+            Status: 'pending',
+            blueprint_run_id: chainRunID,
+            blueprint_step_index: i,
+          } as unknown as Conversation
+        })
+      } catch {
+        // Network error — leave chain indicator empty for now; the
+        // next fetchTasks pass will retry.
+        return null
+      }
+    },
+    [],
+  )
 
   // Seeds chainStepRuns for one task from its blueprint run. Thin wrapper
   // over fetchChainStepRuns for the WS handlers (which seed one task at a
@@ -429,11 +432,11 @@ export default function Board() {
       const aggParams = new URLSearchParams()
       aggParams.set('task_ids', withRuns.map((t) => t.id).join(','))
       aggParams.set('include', 'messages')
-      const aggRes = await fetch(`/api/agent/runs?${aggParams.toString()}`)
+      const aggRes = await fetch(`/api/agent/conversations?${aggParams.toString()}`)
       if (!aggRes.ok) return
       const agg = (await aggRes.json()) as {
-        runs?: Record<string, AgentRun[]>
-        messages?: Record<string, AgentMessage[]>
+        runs?: Record<string, Conversation[]>
+        messages?: Record<string, Message[]>
       }
       const runsByTask = agg.runs ?? {}
       const messagesByRun = agg.messages ?? {}
@@ -442,9 +445,9 @@ export default function Board() {
       // (the old loop fired up to three setState calls per task — a render per
       // iteration). Chains need a second per-chain fetch for their blueprint
       // step structure; resolve those concurrently rather than serially.
-      const nextRuns: Record<string, AgentRun> = {}
+      const nextRuns: Record<string, Conversation> = {}
       const nextFeeds: Record<string, RunCardFeed> = {}
-      const chainSeeds: Array<Promise<{ taskID: string; steps: AgentRun[] } | null>> = []
+      const chainSeeds: Array<Promise<{ taskID: string; steps: Conversation[] } | null>> = []
 
       for (const task of withRuns) {
         const runs = runsByTask[task.id]
@@ -470,7 +473,7 @@ export default function Board() {
           // messagesByRun is keyed by each task's PRIMARY (newest-started) run.
           // For a sequential chain the most recently started step IS the active
           // step, so activeStep.ID === runs[0].ID and this lookup hits. If they
-          // ever differ, the WS agent_message handler seeds the active step
+          // ever differ, the WS `message` handler seeds the active step
           // shortly — keep this keyed by activeStep.ID so it stays aligned.
           const msgs = messagesByRun[activeStep.ID]
           if (msgs) nextFeeds[activeStep.ID] = feedFromMessages(msgs)
@@ -497,7 +500,7 @@ export default function Board() {
       // one per task.
       if (chainSeeds.length > 0) {
         const seeded = (await Promise.all(chainSeeds)).filter(
-          (s): s is { taskID: string; steps: AgentRun[] } => s !== null,
+          (s): s is { taskID: string; steps: Conversation[] } => s !== null,
         )
         if (seeded.length > 0) {
           setChainStepRuns((prev) => {
@@ -565,26 +568,31 @@ export default function Board() {
     fetchTasks()
   }, [teamFilter, fetchTasks])
 
-  // WS listener — covers agent_run_update (the existing path) and the
+  // WS listener — covers conversation_update (the existing path) and the
   // new task_updated / task_claimed events that fire from
   // every claim/status mutation. task_updated is the catch-all for
   // "this card may have moved columns; refetch."
   useWebSocket(
     useCallback(
       (event: WSEvent) => {
-        if (event.type === 'agent_run_update') {
+        // conversation_update carries a conversation_id for a delegated run and
+        // a project_id (no conversation_id) for a curator turn — the board only
+        // tracks delegated runs, so it ignores the curator variant.
+        if (event.type === 'conversation_update' && event.conversation_id) {
+          const conversationID = event.conversation_id
+          const status = event.data.status ?? ''
           let matched = false
           setAgentRuns((prev) => {
             const updated = { ...prev }
             for (const [taskId, run] of Object.entries(updated)) {
-              if (run.ID === event.run_id) {
+              if (run.ID === conversationID) {
                 matched = true
                 // failure_kind rides the failed-status event so the card's
                 // kind-specific copy lands with the flip, not only after the
                 // full-run refetch below settles.
                 updated[taskId] = {
                   ...run,
-                  Status: event.data.status,
+                  Status: status,
                   ...(event.data.failure_kind ? { FailureKind: event.data.failure_kind } : {}),
                 }
                 break
@@ -592,9 +600,9 @@ export default function Board() {
             }
             return updated
           })
-          fetch(`/api/agent/runs/${event.run_id}`)
+          fetch(`/api/agent/conversations/${conversationID}`)
             .then((r) => (r.ok ? r.json() : null))
-            .then((fullRun: AgentRun | null) => {
+            .then((fullRun: Conversation | null) => {
               if (!fullRun) return
               setAgentRuns((p) => {
                 const existing = p[fullRun.TaskID]
@@ -614,16 +622,16 @@ export default function Board() {
             .catch(() => {})
 
           // A few server paths still mutate task state but
-          // only emit agent_run_update (review/PR approval flips
+          // only emit conversation_update (review/PR approval flips
           // task='done', then broadcasts the run completion). Without
           // a refetch here the card stays in its old column until a
           // manual refresh. Cheap to re-pull all five buckets — the
           // queries are indexed and short.
-          if (isPermissionTerminalStatus(event.data.status)) {
+          if (isPermissionTerminalStatus(status)) {
             // The run is no longer running a turn, so any prompt parked on it is
             // stale — drop its queue so a finished card doesn't keep an
             // unanswerable Allow/Deny control.
-            dropPermissionRun(event.run_id)
+            dropPermissionRun(conversationID)
             scheduleFetchTasks()
           }
 
@@ -634,7 +642,7 @@ export default function Board() {
             // haven't tracked yet render immediately.
             let isChainStep = false
             for (const steps of Object.values(chainStepRunsRef.current)) {
-              if (steps.some((r) => r.blueprint_run_id && r.ID === event.run_id)) {
+              if (steps.some((r) => r.blueprint_run_id && r.ID === conversationID)) {
                 isChainStep = true
                 break
               }
@@ -647,14 +655,14 @@ export default function Board() {
                   'cancelled',
                   'task_unsolvable',
                   'pending_approval',
-                ].includes(event.data.status)
+                ].includes(status)
               ) {
                 scheduleFetchTasks()
               }
             } else {
-              fetch(`/api/agent/runs/${event.run_id}`)
+              fetch(`/api/agent/conversations/${conversationID}`)
                 .then((r) => (r.ok ? r.json() : null))
-                .then((fullRun: AgentRun | null) => {
+                .then((fullRun: Conversation | null) => {
                   if (!fullRun) return
                   setAgentRuns((p) => ({ ...p, [fullRun.TaskID]: fullRun }))
                   if (fullRun.blueprint_run_id) {
@@ -668,10 +676,10 @@ export default function Board() {
           // Reconciler (TFAC-464): an artifact this run produced changed state
           // on GitHub. The run's own status is unchanged — only its
           // artifact-derived surface (pending kind / approval card) — so refetch
-          // the run, with NO optimistic Status write (unlike agent_run_update).
-          fetch(`/api/agent/runs/${event.run_id}`)
+          // the run, with NO optimistic Status write (unlike conversation_update).
+          fetch(`/api/agent/conversations/${event.conversation_id}`)
             .then((r) => (r.ok ? r.json() : null))
-            .then((fullRun: AgentRun | null) => {
+            .then((fullRun: Conversation | null) => {
               if (!fullRun) return
               setAgentRuns((p) => {
                 const existing = p[fullRun.TaskID]
@@ -686,19 +694,21 @@ export default function Board() {
               })
             })
             .catch(() => {})
-        } else if (event.type === 'agent_message') {
+        } else if (event.type === 'message' && event.conversation_id) {
           // Live run-log tick. AgentCard renders from the bounded per-run feed
           // keyed by run.ID; without this, new agent output only surfaces
           // after a status-change fetchTasks pass. Folding into the feed
           // (rather than appending to a full message array) keeps board state
           // bounded and the per-event work O(1). appendToFeed returns the same
           // reference for a display-no-op message (tool results, mostly) —
-          // return prev in that case so React skips the board re-render.
+          // return prev in that case so React skips the board re-render. A
+          // curator `message` (project_id, no conversation_id) is ignored here.
+          const conversationID = event.conversation_id
           setRunFeeds((prev) => {
-            const cur = prev[event.run_id]
-            const next = appendToFeed(cur, event.data as AgentMessage)
+            const cur = prev[conversationID]
+            const next = appendToFeed(cur, event.data)
             if (next === (cur ?? EMPTY_FEED)) return prev
-            return { ...prev, [event.run_id]: next }
+            return { ...prev, [conversationID]: next }
           })
         } else if (event.type === 'task_updated' || event.type === 'task_claimed') {
           // Any column-affecting change re-pulls the whole
@@ -738,7 +748,7 @@ export default function Board() {
   // Drop a run's queue when the run leaves the board (its agentRuns entry was
   // replaced — e.g. a chain advanced to a new step, or a task got re-delegated).
   // Keyed on agentRuns only (not the queue map) so a freshly-ingested prompt
-  // isn't dropped in the window before its run's agent_run_update seeds
+  // isn't dropped in the window before its run's conversation_update seeds
   // agentRuns. queuesRef gives the latest queue keys without that dependency.
   useEffect(() => {
     const live = new Set(Object.values(agentRuns).map((r) => r.ID))
@@ -1193,8 +1203,8 @@ export default function Board() {
       })
       if (res.ok) {
         try {
-          const body = (await res.json()) as { run_id?: string; delegate_error?: string }
-          const runID = body.run_id
+          const body = (await res.json()) as { conversation_id?: string; delegate_error?: string }
+          const runID = body.conversation_id
           if (runID) {
             setAgentRuns((prev) => ({
               ...prev,
@@ -1471,9 +1481,9 @@ function ColumnContents({
 }: {
   colId: ColumnId
   tasks: Task[]
-  agentRuns: Record<string, AgentRun>
+  agentRuns: Record<string, Conversation>
   runFeeds: Record<string, RunCardFeed>
-  chainStepRuns: Record<string, AgentRun[]>
+  chainStepRuns: Record<string, Conversation[]>
   permQueues: Record<string, PendingPermission[]>
   onResolvePermission: (
     runID: string,
@@ -1638,8 +1648,8 @@ const SortableAgentCard = memo(function SortableAgentCard({
   ...picker
 }: {
   task: Task
-  run: AgentRun
-  chainSteps?: AgentRun[]
+  run: Conversation
+  chainSteps?: Conversation[]
   feed?: RunCardFeed
   pendingPermissions?: PendingPermission[]
   onResolvePermission: (

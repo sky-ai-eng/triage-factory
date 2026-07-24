@@ -31,7 +31,7 @@ var fixtureStream = []string{
 // on ContentBlocks, and the terminal Result populated.
 func TestParseLine_FixtureStream(t *testing.T) {
 	s := NewStreamState()
-	var all []*domain.AgentMessage
+	var all []*domain.Message
 	var result *Result
 	for _, line := range fixtureStream {
 		msgs, res := s.ParseLine([]byte(line), "run-1")
@@ -53,7 +53,7 @@ func TestParseLine_FixtureStream(t *testing.T) {
 	// single text block is flat Content with no ContentBlocks promotion,
 	// and both tool_use calls landed on ToolCalls in order.
 	asst1 := all[0]
-	if asst1.Role != "assistant" || asst1.RunID != "run-1" || asst1.Subtype != "tool_use" {
+	if asst1.Role != "assistant" || asst1.ConversationID != "run-1" || asst1.Subtype != "tool_use" {
 		t.Errorf("asst1 shape wrong: %+v", asst1)
 	}
 	if asst1.Content != "I'll check both files." {

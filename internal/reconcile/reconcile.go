@@ -175,8 +175,8 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 			continue
 		}
 		transitioned = append(transitioned, updated)
-		if a.RunID != "" && isTerminalState(a.Kind, newState) {
-			terminalRuns[a.RunID] = true
+		if a.ConversationID != "" && isTerminalState(a.Kind, newState) {
+			terminalRuns[a.ConversationID] = true
 		}
 	}
 	for runID := range terminalRuns {
@@ -231,14 +231,14 @@ func (rc *Reconciler) recordRunOutcome(ctx context.Context, orgID, runID string)
 // kind / approval card) is — so the FE handlers refetch the run on this event
 // without touching status. Skipped for a detached artifact (no run) or unset hub.
 func (rc *Reconciler) broadcast(orgID string, a domain.Artifact) {
-	if rc.ws == nil || a.RunID == "" {
+	if rc.ws == nil || a.ConversationID == "" {
 		return
 	}
 	rc.ws.Broadcast(websocket.Event{
-		Type:  "artifact_updated",
-		OrgID: orgID,
-		RunID: a.RunID,
-		Data:  map[string]any{"artifact_id": a.ID, "state": a.State},
+		Type:           "artifact_updated",
+		OrgID:          orgID,
+		ConversationID: a.ConversationID,
+		Data:           map[string]any{"artifact_id": a.ID, "state": a.State},
 	})
 }
 

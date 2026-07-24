@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import type { AgentRun } from '../types'
+import type { Conversation } from '../types'
 import { setPresenceView } from '../hooks/useWebSocket'
 import { useRunDetail } from '../hooks/useRunDetail'
 import { useOrgHref } from '../hooks/useOrgHref'
@@ -36,7 +36,7 @@ export default function RunDetail() {
     softRefresh,
   } = useRunDetail(runID)
 
-  const [chainSteps, setChainSteps] = useState<AgentRun[] | null>(null)
+  const [chainSteps, setChainSteps] = useState<Conversation[] | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [interruptPending, setInterruptPending] = useState(false)
   // Approval is derived now, not a stored run status: the run's unresolved
@@ -103,10 +103,12 @@ export default function RunDetail() {
       .then((r) => (r.ok ? r.json() : null))
       .then(
         (
-          data: { steps?: Array<{ step: { step_index: number }; run?: AgentRun | null }> } | null,
+          data: {
+            steps?: Array<{ step: { step_index: number }; run?: Conversation | null }>
+          } | null,
         ) => {
           if (cancelled || !data?.steps) return
-          const padded: AgentRun[] = data.steps.map((s, i) => {
+          const padded: Conversation[] = data.steps.map((s, i) => {
             if (s.run) return s.run
             return {
               ID: `__pending-${run.blueprint_run_id}-${i}`,
@@ -117,7 +119,7 @@ export default function RunDetail() {
               ResultSummary: '',
               blueprint_run_id: run.blueprint_run_id,
               blueprint_step_index: i,
-            } as unknown as AgentRun
+            } as unknown as Conversation
           })
           setChainSteps(padded)
         },
@@ -131,7 +133,7 @@ export default function RunDetail() {
   const handleCancel = useCallback(async () => {
     if (!run) return
     try {
-      const res = await fetch(`/api/agent/runs/${run.ID}/cancel`, { method: 'POST' })
+      const res = await fetch(`/api/agent/conversations/${run.ID}/cancel`, { method: 'POST' })
       if (!res.ok) toast.error(await readError(res, 'Failed to cancel run'))
     } catch (err) {
       toast.error(`Failed to cancel run: ${(err as Error).message}`)
@@ -140,12 +142,12 @@ export default function RunDetail() {
 
   // Steer a run: a free-form message lands on the live process (or wakes an
   // `open` run via resume). The backend records + broadcasts it as an
-  // agent_message, so useRunDetail's append renders it — no optimistic insert.
+  // `message` event, so useRunDetail's append renders it — no optimistic insert.
   const handleMessage = useCallback(
     async (text: string) => {
       if (!run) return
       try {
-        const res = await fetch(`/api/agent/runs/${run.ID}/message`, {
+        const res = await fetch(`/api/agent/conversations/${run.ID}/message`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text }),
@@ -166,7 +168,7 @@ export default function RunDetail() {
     if (!run || interruptPending) return
     setInterruptPending(true)
     try {
-      const res = await fetch(`/api/agent/runs/${run.ID}/interrupt`, { method: 'POST' })
+      const res = await fetch(`/api/agent/conversations/${run.ID}/interrupt`, { method: 'POST' })
       if (!res.ok) toast.error(await readError(res, 'Failed to interrupt run'))
     } catch (err) {
       toast.error(`Failed to interrupt run: ${(err as Error).message}`)

@@ -27,7 +27,7 @@ import (
 //     methods — the tracker (writes entities for every polled repo
 //     regardless of which user configured the repo) and the project
 //     classifier (reads every org's unclassified entities to triage
-//     them). Mirrors the AgentRunStore precedent: explicit `...System`
+//     them). Mirrors the ConversationStore precedent: explicit `...System`
 //     method names keep call-site intent grep-able; the impl routes
 //     per-method internally.
 //

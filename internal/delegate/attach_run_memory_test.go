@@ -33,13 +33,13 @@ func attachMakeEntity(t *testing.T, database *sql.DB, source, sourceID, kind str
 	return ent
 }
 
-// attachRoleFor reads the run_memory_entities role for one (run, entity) pair,
+// attachRoleFor reads the conversation_memory_entities role for one (run, entity) pair,
 // or "" when no join row exists.
 func attachRoleFor(t *testing.T, database *sql.DB, runID, entityID string) string {
 	t.Helper()
 	var role string
 	err := database.QueryRow(
-		`SELECT role FROM run_memory_entities WHERE conversation_id = ? AND entity_id = ?`,
+		`SELECT role FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ?`,
 		runID, entityID,
 	).Scan(&role)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -75,7 +75,7 @@ func seedProducedPR(t *testing.T, s *Spawner, runID, repoPath string, number int
 }
 
 // TestAttachRunMemoryEntities_PrimaryAlwaysWritten: the primary join row is
-// written unconditionally at termination, exactly like the run_memory upsert —
+// written unconditionally at termination, exactly like the conversation_memory upsert —
 // even when the agent wrote no memory file (agent_content NULL).
 func TestAttachRunMemoryEntities_PrimaryAlwaysWritten(t *testing.T) {
 	database := newDelegateTestDB(t)
@@ -180,7 +180,7 @@ func TestAttachRunMemoryEntities_RepoLevelTargetsSkipped(t *testing.T) {
 	}
 	// The only join row is the primary — the skipped targets add nothing.
 	var n int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM run_memory_entities WHERE conversation_id = ?`, "r-skip").Scan(&n); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ?`, "r-skip").Scan(&n); err != nil {
 		t.Fatalf("count join rows: %v", err)
 	}
 	if n != 1 {
@@ -335,7 +335,7 @@ func TestAttachRunMemoryEntities_MultiStepPrimaryPerStep(t *testing.T) {
 	}
 	brID := seedRunBlueprint(t, database, "r-step2", run1.TaskID)
 	stepIdx := 1
-	dbtest.SeedConversation(t, database, domain.AgentRun{
+	dbtest.SeedConversation(t, database, domain.Conversation{
 		ID: "r-step2", TaskID: run1.TaskID, PromptID: "test-prompt",
 		Status: "running", Model: "claude-sonnet-4-6",
 		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,

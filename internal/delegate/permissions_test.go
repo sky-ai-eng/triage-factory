@@ -568,9 +568,9 @@ func readPermissionResolved(t *testing.T, conn *ws.Conn) (runID, requestID strin
 			t.Fatalf("read ws frame: %v", err)
 		}
 		var evt struct {
-			Type  string `json:"type"`
-			RunID string `json:"run_id"`
-			Data  struct {
+			Type           string `json:"type"`
+			ConversationID string `json:"conversation_id"`
+			Data           struct {
 				RequestID string `json:"request_id"`
 			} `json:"data"`
 		}
@@ -578,7 +578,7 @@ func readPermissionResolved(t *testing.T, conn *ws.Conn) (runID, requestID strin
 			t.Fatalf("decode frame: %v (raw=%q)", err, data)
 		}
 		if evt.Type == "permission_resolved" {
-			return evt.RunID, evt.Data.RequestID
+			return evt.ConversationID, evt.Data.RequestID
 		}
 	}
 }

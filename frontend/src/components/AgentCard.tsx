@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import * as Popover from '@radix-ui/react-popover'
-import type { AgentRun, Task } from '../types'
+import type { Conversation, Task } from '../types'
 import { EMPTY_FEED, type FeedLine, type RunCardFeed } from '../lib/runFeed'
 import { useOrgHref } from '../hooks/useOrgHref'
 import ArtifactList from './ArtifactList'
@@ -31,8 +31,8 @@ import {
 
 interface Props {
   task: Task
-  run: AgentRun
-  chainSteps?: AgentRun[]
+  run: Conversation
+  chainSteps?: Conversation[]
   // Bounded live-feed projection for this run (running stats + last few ticker
   // lines) — see lib/runFeed. The board maintains it incrementally instead of
   // holding every run's full message array in state.
@@ -176,7 +176,7 @@ export default function AgentCard({
                     type="button"
                     onClick={async () => {
                       try {
-                        const res = await fetch(`/api/agent/runs/${run.ID}/cancel`, {
+                        const res = await fetch(`/api/agent/conversations/${run.ID}/cancel`, {
                           method: 'POST',
                         })
                         if (!res.ok) toast.error(await readError(res, 'Failed to cancel run'))
@@ -318,7 +318,7 @@ function ArtifactsAffordance({
   run,
   onOpenArtifact,
 }: {
-  run: AgentRun
+  run: Conversation
   onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -483,7 +483,7 @@ function ResultBlock({
 
 // chainStepStates maps a chain's runs to the progress-track states.
 function chainStepStates(
-  steps: AgentRun[],
+  steps: Conversation[],
   currentRunID: string,
   currentStepIndex?: number,
 ): StepState[] {

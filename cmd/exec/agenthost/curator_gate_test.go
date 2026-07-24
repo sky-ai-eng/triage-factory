@@ -9,7 +9,7 @@ import (
 )
 
 // gateRuntime is a minimal Runtime for exercising authorizeRepo in isolation:
-// it answers the team-tracks + run_worktrees reads the gate makes and records
+// it answers the team-tracks + conversation_worktrees reads the gate makes and records
 // git-denied audit rows, panicking on any other method (none is reached).
 type gateRuntime struct {
 	Runtime
@@ -39,7 +39,7 @@ func newGateClient(pinnedRepos []string, rt *gateRuntime) *LocalClient {
 }
 
 // TestAuthorizeRepo_CuratorPinnedSet pins the fix: a curator turn
-// creates no run_worktrees rows, so exec-gh verbs authorize against its pinned
+// creates no conversation_worktrees rows, so exec-gh verbs authorize against its pinned
 // set instead of the ledger. Without the pinned arm (the pre-640 behavior) an
 // empty ledger denied every curator gh verb even for a tracked repo — that is
 // the failing case the pinned set closes.
@@ -47,7 +47,7 @@ func TestAuthorizeRepo_CuratorPinnedSet(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("tracked_and_pinned_is_authorized", func(t *testing.T) {
-		rt := &gateRuntime{tracks: true} // no run_worktrees rows — a curator turn
+		rt := &gateRuntime{tracks: true} // no conversation_worktrees rows — a curator turn
 		c := newGateClient([]string{"acme/widgets"}, rt)
 		if err := c.authorizeRepo(ctx, "acme", "widgets"); err != nil {
 			t.Fatalf("authorizeRepo = %v, want nil (tracked + pinned)", err)
@@ -91,7 +91,7 @@ func TestAuthorizeRepo_CuratorPinnedSet(t *testing.T) {
 }
 
 // TestAuthorizeRepo_DelegatedRunUnchanged pins that a delegated run (empty
-// PinnedRepos) authorizes purely off the run_worktrees ledger, exactly as
+// PinnedRepos) authorizes purely off the conversation_worktrees ledger, exactly as
 // before — the pinned arm is inert with an empty list.
 func TestAuthorizeRepo_DelegatedRunUnchanged(t *testing.T) {
 	ctx := context.Background()

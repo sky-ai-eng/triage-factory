@@ -4,8 +4,8 @@ import "time"
 
 // Agent is the workload-identity domain type — the org's bot. One row
 // per org in multi mode; one row in the synthetic single-org world in
-// local mode. Distinct from AgentRun (which is the execution domain in
-// the same package): an Agent is "who acts," an AgentRun is "what they
+// local mode. Distinct from Conversation (which is the execution domain in
+// the same package): an Agent is "who acts," an Conversation is "what they
 // did in one delegation." This domain gives the bot first-class
 // identity separate from human users.
 //

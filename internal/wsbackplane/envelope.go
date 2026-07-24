@@ -30,7 +30,7 @@ func newWireEvent(evt websocket.Event) (wireEvent, error) {
 	}
 	return wireEvent{
 		Type:      evt.Type,
-		RunID:     evt.RunID,
+		RunID:     evt.ConversationID,
 		ProjectID: evt.ProjectID,
 		OrgID:     evt.OrgID,
 		UserID:    evt.UserID,
@@ -45,12 +45,12 @@ func (w wireEvent) toEvent() websocket.Event {
 	// only the event-specific payload is empty.
 	_ = json.Unmarshal(w.Data, &data)
 	return websocket.Event{
-		Type:      w.Type,
-		RunID:     w.RunID,
-		ProjectID: w.ProjectID,
-		OrgID:     w.OrgID,
-		UserID:    w.UserID,
-		Data:      data,
+		Type:           w.Type,
+		ConversationID: w.RunID,
+		ProjectID:      w.ProjectID,
+		OrgID:          w.OrgID,
+		UserID:         w.UserID,
+		Data:           data,
 	}
 }
 

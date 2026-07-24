@@ -238,12 +238,12 @@ func slackOpRecordThreadRoot(ctx context.Context, stores db.Stores, info agentho
 
 // workspaceFromRunTaskMetadata resolves the run's own Slack context — its task,
 // if a slack:message task, and that message's event metadata — via
-// AgentRuns.GetSystem → Task → PrimaryEventID → Events.GetMetadataSystem. Every
+// Conversations.GetSystem → Task → PrimaryEventID → Events.GetMetadataSystem. Every
 // store call propagates its error; only a genuine "not found" maps to (ok=false,
 // nil), so a masked failure never silently falls through to the org-wide
 // fallback and replies as the wrong bot identity.
 func workspaceFromRunTaskMetadata(ctx context.Context, stores db.Stores, info agenthost.RunInfo) (ws slackstore.Workspace, channel string, ok bool, err error) {
-	run, err := stores.AgentRuns.GetSystem(ctx, info.OrgID, info.RunID)
+	run, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.RunID)
 	if err != nil {
 		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load run: %w", err)
 	}

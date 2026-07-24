@@ -32,7 +32,7 @@ import (
 //   - Jira (lazy): hasWT=false, wtPath=runRoot is the throwaway run-root
 //     (initial cwd; holds _scratch/entity-memory/ but no codebase), owner/repo empty.
 //     Per-repo worktrees materialize as subdirs under runRoot via the
-//     `triagefactory exec workspace add` CLI; the run_worktrees DB table
+//     `triagefactory exec workspace add` CLI; the conversation_worktrees DB table
 //     is the source of truth for cleanup, which iterates the table at
 //     runAgent terminal.
 type runConfig struct {
@@ -41,8 +41,8 @@ type runConfig struct {
 	scope     string  // what the agent is scoped to (repo, PR, issue)
 	toolsRef  string  // tool documentation to inject
 	wtPath    string  // initial cwd: GitHub PR worktree, or Jira run-root
-	hasWT     bool    // GitHub PR has a real worktree to clean up via RemoveAt; Jira's worktrees are tracked in run_worktrees and cleaned by iterating that table
-	runRoot   string  // run-root path: GitHub PR runs == wtPath; Jira lazy runs == the throwaway parent of materialized worktrees. Always set so $TRIAGE_FACTORY_RUN_ROOT resolves uniformly for the memory-gate retry.
+	hasWT     bool    // GitHub PR has a real worktree to clean up via RemoveAt; Jira's worktrees are tracked in conversation_worktrees and cleaned by iterating that table
+	runRoot   string  // run-root path: GitHub PR runs == wtPath; Jira lazy runs == the throwaway parent of materialized worktrees. Always set so $TRIAGE_FACTORY_CONVERSATION_ROOT resolves uniformly for the memory-gate retry.
 	owner     string  // resolved GitHub owner (empty for Jira lazy runs)
 	repo      string  // resolved GitHub repo (empty for Jira lazy runs)
 	prNumber  int     // PR number (0 for non-PR runs); set so the runAgent defer can call worktree.CleanupPRConfig and reclaim the per-run branch + push remote the bare repo would otherwise accumulate
@@ -532,7 +532,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, rootKey string,
 		delegateLog.Warn("update worktree path for run failed", "run", runID, "error", err)
 	}
 
-	// Record the eager worktree in run_worktrees so the least-privilege gates
+	// Record the eager worktree in conversation_worktrees so the least-privilege gates
 	// (git proxy + exec gh) treat the task repo uniformly with workspace-add'd
 	// repos: a run may touch a repo only if its team tracks it AND it appears in
 	// this ledger. ref = pr-<N> is the materialization selector (the push gate
@@ -548,7 +548,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, rootKey string,
 			Path:   wtPath,
 			Ref:    worktree.PRRefSlug(prNumber),
 		}); werr != nil {
-			delegateLog.Warn("record eager worktree in run_worktrees failed; pushes to this repo will be denied until retried", "run", runID, "repo", owner+"/"+repo, "error", werr)
+			delegateLog.Warn("record eager worktree in conversation_worktrees failed; pushes to this repo will be denied until retried", "run", runID, "repo", owner+"/"+repo, "error", werr)
 		}
 	}
 
@@ -564,7 +564,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, rootKey string,
 		toolsRef:  ai.GHToolsTemplate,
 		wtPath:    wtPath,
 		hasWT:     true,
-		runRoot:   wtPath, // GitHub PR runs: worktree IS the run-root, so $TRIAGE_FACTORY_RUN_ROOT resolves to the worktree
+		runRoot:   wtPath, // GitHub PR runs: worktree IS the run-root, so $TRIAGE_FACTORY_CONVERSATION_ROOT resolves to the worktree
 		owner:     owner,
 		repo:      repo,
 		prNumber:  prNumber,
@@ -576,7 +576,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, rootKey string,
 // pre-cloned — the agent decides which repo(s) it needs after reading
 // the ticket and materializes them via `triagefactory exec workspace
 // add <owner/repo>`. Each materialization lands a worktree at
-// {runRoot}/{owner}/{repo}/ and inserts a row into run_worktrees.
+// {runRoot}/{owner}/{repo}/ and inserts a row into conversation_worktrees.
 //
 // The agent's initial cwd is the run-root: a throwaway dir holding
 // only ./_scratch/entity-memory/ (populated by materializePriorMemories

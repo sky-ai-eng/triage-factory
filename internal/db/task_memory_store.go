@@ -8,7 +8,7 @@ import (
 
 //go:generate go run github.com/vektra/mockery/v2 --name=TaskMemoryStore --output=./mocks --case=underscore --with-expecter
 
-// TaskMemoryStore is the per-resource store for the run_memory table —
+// TaskMemoryStore is the per-resource store for the conversation_memory table —
 // the durable agent-side narrative + the human's post-run verdict for
 // every run on every task. Lifted out of the pre-D2 package-level
 // functions in internal/db/task_memory.go so multi-mode Postgres
@@ -41,7 +41,7 @@ import (
 // omit unused variants until a real caller arrives.
 //
 // RecordEntityTouchSystem and CountMemoriesForEntitySystem are the
-// deliberate exception to that precedent: they're the run_memory_entities
+// deliberate exception to that precedent: they're the conversation_memory_entities
 // foundation TFAC-622 lands ahead of their production callers, which
 // arrive with the sibling touch-capture (TFAC-623) and memory-load
 // (TFAC-624) tickets. Until then they're exercised only by tests and the
@@ -77,7 +77,7 @@ type TaskMemoryStore interface {
 	UpsertAgentMemorySystem(ctx context.Context, orgID, runID, entityID, blueprintRunID, content string) error
 
 	// UpdateRunMemoryHumanContent records the human's verdict on a
-	// run's agent draft into the run_memory row keyed by runID. The
+	// run's agent draft into the conversation_memory row keyed by runID. The
 	// gate-teardown upsert at termination guarantees the row exists
 	// by the time the human writes a verdict, so this is a plain
 	// UPDATE with no INSERT-or-UPDATE branching.
@@ -112,8 +112,8 @@ type TaskMemoryStore interface {
 	// SQLite collapses onto the one connection.
 	UpdateRunMemoryHumanContentSystem(ctx context.Context, orgID, runID, content string) error
 
-	// GetMemoriesForEntity returns every run_memory row reachable for
-	// this entity through run_memory_entities — the run touched,
+	// GetMemoriesForEntity returns every conversation_memory row reachable for
+	// this entity through conversation_memory_entities — the run touched,
 	// produced for, or was primarily about this entity — oldest
 	// first. The returned TaskMemory.Content is materialized from
 	// agent_content + human_content via the stable separator format
@@ -130,7 +130,7 @@ type TaskMemoryStore interface {
 	//
 	// teamID is the materializing run's owning team (runs.team_id).
 	// The admin pool bypasses RLS, so the app-pool variant's team
-	// scoping (run_memory_all → runs_select) is hand-rolled here: the
+	// scoping (conversation_memory_all → runs_select) is hand-rolled here: the
 	// result is restricted to memory whose parent run that team can see
 	// — team-visible runs owned by teamID plus any org-visible run —
 	// matching what a member of that team sees in the UI (TFAC-506).
@@ -155,7 +155,7 @@ type TaskMemoryStore interface {
 	GetRecentMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string, limit int) ([]domain.TaskMemory, error)
 
 	// RecordEntityTouchSystem upserts a (run_id, entity_id) row in
-	// run_memory_entities with role-precedence upgrade: insert if
+	// conversation_memory_entities with role-precedence upgrade: insert if
 	// absent; on conflict, set role only if the new role outranks the
 	// stored one (domain.MemoryRoleOutranks — primary > produced >
 	// touched), so a later stronger classification upgrades the row
@@ -166,8 +166,8 @@ type TaskMemoryStore interface {
 	// on this method's error.
 	RecordEntityTouchSystem(ctx context.Context, orgID, runID, entityID, role string) error
 
-	// CountMemoriesForEntitySystem returns the number of run_memory
-	// rows reachable for entityID through run_memory_entities, under
+	// CountMemoriesForEntitySystem returns the number of conversation_memory
+	// rows reachable for entityID through conversation_memory_entities, under
 	// the same team-visibility filter as GetMemoriesForEntitySystem.
 	CountMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) (int, error)
 }

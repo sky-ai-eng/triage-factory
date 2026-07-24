@@ -128,7 +128,7 @@ func TestBroadcastMessage_ToolUsePublishesActivity(t *testing.T) {
 	pub := &fakeEventPublisher{}
 	s.SetEventPublisher(pub)
 
-	s.broadcastMessage("org-a", "run-1", &domain.AgentMessage{
+	s.broadcastMessage("org-a", "run-1", &domain.Message{
 		Subtype: "tool_use",
 		ToolCalls: []domain.ToolCall{
 			{ID: "1", Name: "Bash", Input: map[string]any{"description": "run tests", "command": "go test ./..."}},
@@ -168,7 +168,7 @@ func TestBroadcastMessage_NonToolUseSubtypesPublishNothing(t *testing.T) {
 			pub := &fakeEventPublisher{}
 			s.SetEventPublisher(pub)
 
-			s.broadcastMessage("org-a", "run-1", &domain.AgentMessage{Subtype: subtype})
+			s.broadcastMessage("org-a", "run-1", &domain.Message{Subtype: subtype})
 
 			if got := pub.eventsCopy(); len(got) != 0 {
 				t.Fatalf("subtype %q published %d events, want 0", subtype, len(got))
@@ -185,7 +185,7 @@ func TestBroadcast_NilPublisher_NoPanic(t *testing.T) {
 
 	s.broadcastRunUpdate("org-a", "run-1", "running")
 	s.broadcastRunFailed("org-a", "run-1", domain.RunFailureMemoryLimit)
-	s.broadcastMessage("org-a", "run-1", &domain.AgentMessage{
+	s.broadcastMessage("org-a", "run-1", &domain.Message{
 		Subtype:   "tool_use",
 		ToolCalls: []domain.ToolCall{{ID: "1", Name: "Bash"}},
 	})

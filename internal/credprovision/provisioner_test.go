@@ -92,7 +92,7 @@ func (f *fakeRunWorktrees) ListSystem(context.Context, string, string) ([]domain
 // brain-side half of "the App private key lives on control; executors hold
 // only minted, hour-lived, scoped tokens": the provisioner mints one
 // repo-scoped installation token per repo in the run's authorized set (the
-// task's own repo plus its run_worktrees, intersected with what the team
+// task's own repo plus its conversation_worktrees, intersected with what the team
 // tracks) and seals nothing outside it. An untracked worktree repo is never
 // minted for — minting there would be pointless (the git proxy would 403 it
 // anyway) and widens the bundle for no reason.

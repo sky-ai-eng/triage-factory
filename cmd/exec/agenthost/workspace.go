@@ -19,7 +19,7 @@ import (
 // `workspace add` used to run its git materialization in the calling process.
 // Local mode that IS the host, so everything lined up; in the sandbox it built
 // a jail-local checkout (ephemeral /tmp, jail-local bare, jail path recorded in
-// run_worktrees) that the host could never see — the push gate authorized zero
+// conversation_worktrees) that the host could never see — the push gate authorized zero
 // refs, the workspace snapshot captured nothing, and resume restored an empty
 // run root. Moving the create behind the Client seam puts the git work on the
 // host in both modes: the LocalClient body below runs in the exec process in
@@ -56,7 +56,7 @@ var (
 // the value the resume path maintains. The derivation is only the fallback for
 // a run whose worktree_path write failed at setup.
 func (c *LocalClient) WorkspaceRoots(ctx context.Context) (hostRoot, agentRoot string, err error) {
-	run, err := c.GetAgentRun(ctx)
+	run, err := c.GetConversation(ctx)
 	if err != nil {
 		return "", "", fmt.Errorf("load run for workspace roots: %w", err)
 	}
@@ -73,7 +73,7 @@ func (c *LocalClient) WorkspaceRoots(ctx context.Context) (hostRoot, agentRoot s
 // CreateWorkspaceCheckout implements Client: it materializes the checkout for
 // (owner/repo, ref|pr) into the run's host run root and returns the created
 // path in HOST view (the workspace CLI translates to the agent view). The
-// caller is expected to have reserved the run_worktrees row first
+// caller is expected to have reserved the conversation_worktrees row first
 // (materializeWorkspace's ordering); this method only does the git work.
 //
 // Everything authorization-relevant is re-derived here rather than trusted

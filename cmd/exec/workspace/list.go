@@ -66,7 +66,7 @@ type listMaterialized struct {
 //
 // All reads route through the agenthost client — in local mode the
 // LocalClient hits the SQLite store directly, in sandbox mode the
-// IPCClient round-trips to the host daemon. The TRIAGE_FACTORY_RUN_ID
+// IPCClient round-trips to the host daemon. The TRIAGE_FACTORY_CONVERSATION_ID
 // validation happens inside host.LookupRun.
 func listWorkspaces(host agenthost.Client) (listOutput, error) {
 	ctx := context.Background()
@@ -75,7 +75,7 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 		return listOutput{}, translateLookupErr("workspace list", "", err)
 	}
 
-	run, err := host.GetAgentRun(ctx)
+	run, err := host.GetConversation(ctx)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load run: %w", err)
 	}
@@ -92,7 +92,7 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 		return listOutput{}, fmt.Errorf("workspace list: load materialized worktrees: %w", err)
 	}
 
-	// run_worktrees paths are recorded in HOST view (the push gate and the
+	// conversation_worktrees paths are recorded in HOST view (the push gate and the
 	// workspace snapshot read them host-side); the agent needs cd-able paths in
 	// ITS namespace, so translate through the run-root pair (identity in local
 	// mode, /work-prefixed in the sandbox). TFAC-546.

@@ -95,9 +95,9 @@ func (s *turnSink) OnSession(sessionID string) error {
 // conversation's transcript and broadcasts it to the websocket so the open
 // project page paints it as it arrives. Per-row failures are returned to
 // agentproc which logs and continues.
-func (s *turnSink) OnMessage(msg *domain.AgentMessage) error {
-	row := &domain.AgentMessage{
-		RunID:               s.conversationID,
+func (s *turnSink) OnMessage(msg *domain.Message) error {
+	row := &domain.Message{
+		ConversationID:      s.conversationID,
 		UserID:              s.creatorUserID,
 		ClaimID:             s.claimID,
 		Role:                msg.Role,
@@ -122,7 +122,7 @@ func (s *turnSink) OnMessage(msg *domain.AgentMessage) error {
 	ctx := context.Background()
 	var id int64
 	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, s.orgID, s.creatorUserID, func(ts db.TxStores) error {
-		got, err := ts.AgentRuns.InsertMessage(ctx, s.orgID, row)
+		got, err := ts.Conversations.InsertMessage(ctx, s.orgID, row)
 		if err != nil {
 			return err
 		}
@@ -131,25 +131,8 @@ func (s *turnSink) OnMessage(msg *domain.AgentMessage) error {
 	}); err != nil {
 		return fmt.Errorf("insert curator message: %w", err)
 	}
-	wire := &domain.CuratorMessage{
-		ID:                  int(id),
-		RequestID:           s.requestID,
-		Role:                row.Role,
-		Subtype:             row.Subtype,
-		Content:             row.Content,
-		ToolCalls:           row.ToolCalls,
-		ToolCallID:          row.ToolCallID,
-		IsError:             row.IsError,
-		Metadata:            row.Metadata,
-		Model:               row.Model,
-		InputTokens:         row.InputTokens,
-		OutputTokens:        row.OutputTokens,
-		CacheReadTokens:     row.CacheReadTokens,
-		CacheCreationTokens: row.CacheCreationTokens,
-		CreatedAt:           row.CreatedAt,
-		Reasoning:           row.Reasoning,
-		ContentBlocks:       row.ContentBlocks,
-	}
+	row.ID = int(id)
+	wire := row.ToDTO()
 	s.curator.broadcastMessage(s.orgID, s.projectID, wire)
 	return nil
 }
@@ -157,33 +140,34 @@ func (s *turnSink) OnMessage(msg *domain.AgentMessage) error {
 // Compile-time check that turnSink satisfies the agentproc.Sink contract.
 var _ agentproc.Sink = (*turnSink)(nil)
 
-// broadcastMessage pushes a CuratorMessage onto the websocket. Empty
-// hub is tolerated (test harnesses construct curators without a hub).
-// orgID scopes the event to the owning tenant so the hub's per-
-// connection filter routes it only to clients authed against that
-// org — leaks of curator transcripts across tenants would surface
-// another team's prompts and responses.
-func (c *Curator) broadcastMessage(orgID, projectID string, msg *domain.CuratorMessage) {
+// broadcastMessage pushes a transcript row onto the websocket as the shared
+// `message` event. Empty hub is tolerated (test harnesses construct curators
+// without a hub). orgID scopes the event to the owning tenant so the hub's
+// per-connection filter routes it only to clients authed against that org —
+// leaks of curator transcripts across tenants would surface another team's
+// prompts and responses.
+func (c *Curator) broadcastMessage(orgID, projectID string, msg domain.MessageDTO) {
 	if c.wsHub == nil {
 		return
 	}
 	c.wsHub.Broadcast(websocket.Event{
-		Type:      "curator_message",
-		OrgID:     orgID,
-		ProjectID: projectID,
-		Data:      msg,
+		Type:           "message",
+		OrgID:          orgID,
+		ProjectID:      projectID,
+		ConversationID: msg.ConversationID,
+		Data:           msg,
 	})
 }
 
-// broadcastRequestUpdate pushes a status transition for a turn.
-// Frontend uses this to flip the UI from "queued" → "running" →
-// terminal without re-fetching history.
+// broadcastRequestUpdate pushes a status transition for a turn as the shared
+// `conversation_update` event. Frontend uses this to flip the UI from
+// "queued" → "running" → terminal without re-fetching history.
 func (c *Curator) broadcastRequestUpdate(orgID, projectID, requestID, status string) {
 	if c.wsHub == nil {
 		return
 	}
 	c.wsHub.Broadcast(websocket.Event{
-		Type:      "curator_request_update",
+		Type:      "conversation_update",
 		OrgID:     orgID,
 		ProjectID: projectID,
 		Data: map[string]string{

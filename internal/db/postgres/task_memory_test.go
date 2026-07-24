@@ -48,26 +48,26 @@ func TestTaskMemoryStore_Postgres(t *testing.T) {
 	})
 }
 
-// roleForPgJoinRow reads back run_memory_entities.role directly via the
+// roleForPgJoinRow reads back conversation_memory_entities.role directly via the
 // admin pool (bypasses RLS) — the store interface has no role-returning
 // read, so the RecordEntityTouchSystem precedence conformance subtest
 // needs a raw escape hatch. Returns "" if no row exists.
 func roleForPgJoinRow(t *testing.T, h *pgtest.Harness, runID, entityID string) string {
 	t.Helper()
 	var role string
-	err := h.AdminDB.QueryRow(`SELECT role FROM run_memory_entities WHERE conversation_id = $1 AND entity_id = $2`, runID, entityID).Scan(&role)
+	err := h.AdminDB.QueryRow(`SELECT role FROM conversation_memory_entities WHERE conversation_id = $1 AND entity_id = $2`, runID, entityID).Scan(&role)
 	if err == sql.ErrNoRows {
 		return ""
 	}
 	if err != nil {
-		t.Fatalf("read run_memory_entities role: %v", err)
+		t.Fatalf("read conversation_memory_entities role: %v", err)
 	}
 	return role
 }
 
 // TestTaskMemoryStore_Postgres_CrossOrgLeakage pins the defense-in-
 // depth org_id filter on every read + write path. RLS via
-// run_memory_all also enforces this in production; the org_id = $N
+// conversation_memory_all also enforces this in production; the org_id = $N
 // clause in each query is the belt to RLS's suspenders that fires
 // regardless of whether the admin pool bypasses RLS.
 func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
@@ -93,7 +93,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	// GetMemoriesForEntity (app-pool variant) under orgB must NOT
 	// see orgA's row — both because the entity belongs to a
 	// different org and because the org_id WHERE filter is applied
-	// to run_memory in addition to entity_links/entities.
+	// to conversation_memory in addition to entity_links/entities.
 	memsB, err := stores.TaskMemory.GetMemoriesForEntity(ctx, orgB, entA)
 	if err != nil {
 		t.Fatalf("GetMemoriesForEntity orgB on orgA entity: %v", err)
@@ -132,7 +132,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	// Confirm orgA's row is unchanged.
 	contentA, ok := queryRunMemoryAgentContent(t, h, orgA, runA)
 	if !ok {
-		t.Fatalf("orgA run_memory row missing")
+		t.Fatalf("orgA conversation_memory row missing")
 	}
 	if contentA != "orgA narrative" {
 		t.Errorf("orgA Content mutated by orgB-scoped UPDATE: got %q, want %q", contentA, "orgA narrative")
@@ -140,7 +140,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	_ = entB
 }
 
-// queryRunMemoryAgentContent reads run_memory.agent_content directly via
+// queryRunMemoryAgentContent reads conversation_memory.agent_content directly via
 // the admin pool for a (orgID, runID) pair — a raw-row escape hatch for
 // tests that need to pin the org_id filter independent of the
 // entity-scoped read path (GetMemoriesForEntity), now that GetRunMemory
@@ -149,21 +149,21 @@ func TestTaskMemoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 func queryRunMemoryAgentContent(t *testing.T, h *pgtest.Harness, orgID, runID string) (string, bool) {
 	t.Helper()
 	var content sql.NullString
-	err := h.AdminDB.QueryRow(`SELECT agent_content FROM run_memory WHERE org_id = $1 AND conversation_id = $2`, orgID, runID).Scan(&content)
+	err := h.AdminDB.QueryRow(`SELECT agent_content FROM conversation_memory WHERE org_id = $1 AND conversation_id = $2`, orgID, runID).Scan(&content)
 	if err == sql.ErrNoRows {
 		return "", false
 	}
 	if err != nil {
-		t.Fatalf("query run_memory: %v", err)
+		t.Fatalf("query conversation_memory: %v", err)
 	}
 	return content.String, true
 }
 
 // TestTaskMemoryStore_Postgres_CrossOrgRLSDenied pins the production
-// RLS layer for run_memory. Where CrossOrgLeakage above wires both
+// RLS layer for conversation_memory. Where CrossOrgLeakage above wires both
 // pools against AdminDB to prove the defense-in-depth WHERE-clause
 // filter is intact, this test runs the store through the app pool
-// under tf_app with real JWT claims so the actual run_memory_all
+// under tf_app with real JWT claims so the actual conversation_memory_all
 // policy is exercised. Same-org reads succeed; cross-org reads are
 // silently filtered (USING); cross-org UpsertAgentMemory raises
 // 42501 from the WITH CHECK side of the same policy.
@@ -225,7 +225,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_write_denied", func(t *testing.T) {
 		// bob's claims point at orgB; UpsertAgentMemory against orgA
-		// would land a row with org_id=orgA. run_memory_all WITH CHECK
+		// would land a row with org_id=orgA. conversation_memory_all WITH CHECK
 		// requires org_id = tf.current_org_id(), so 42501 is the
 		// expected outcome. Seed a second run in orgA with NO existing
 		// memory row so the UPSERT exercises the INSERT side of the
@@ -243,7 +243,7 @@ func TestTaskMemoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 // TestTaskMemoryStore_Postgres_BlueprintRunCrossOrgFKRejected pins the
 // tenant-isolation guarantee of the composite (blueprint_run_id, org_id) FK:
-// a run_memory row in orgA cannot reference a blueprint_run that lives in orgB.
+// a conversation_memory row in orgA cannot reference a blueprint_run that lives in orgB.
 // RLS's WITH CHECK only validates org_id, not which blueprint_run the row
 // points at, so without the composite FK a confused/hostile write (even one
 // that passes RLS) could plant a cross-org reference. The FK applies on the
@@ -292,7 +292,7 @@ func TestTaskMemoryStore_Postgres_BlueprintRunCrossOrgFKRejected(t *testing.T) {
 // for that entity. Two teams in ONE org both run on a single SHARED entity
 // (entities are org-wide); each team's run authors its own memory. A System
 // read scoped to team T1 must see only T1's memory — never T2's — and vice
-// versa, matching what the app-pool RLS path (run_memory_all → runs_select)
+// versa, matching what the app-pool RLS path (conversation_memory_all → runs_select)
 // shows a member of that team.
 func TestTaskMemoryStore_Postgres_SystemReadTeamScoped(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -378,8 +378,8 @@ func TestTaskMemoryStore_Postgres_SystemReadTeamScoped(t *testing.T) {
 }
 
 // TestTaskMemoryStore_Postgres_BackfillProducesPrimaryJoinRows pins the
-// migration's backfill statement directly: a run_memory row inserted with
-// NO corresponding run_memory_entities row (simulating a pre-migration
+// migration's backfill statement directly: a conversation_memory row inserted with
+// NO corresponding conversation_memory_entities row (simulating a pre-migration
 // row) gets exactly one 'primary' join row once the backfill INSERT runs,
 // and the entity-scoped read then returns it — the read-path switch's
 // result-identical claim for pre-existing data.
@@ -394,10 +394,10 @@ func TestTaskMemoryStore_Postgres_BackfillProducesPrimaryJoinRows(t *testing.T) 
 	runID, entityID := seedPgRunForTaskMemory(t, h, orgID, userID, promptID, "backfill")
 
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO run_memory (id, org_id, conversation_id, entity_id, agent_content, created_at)
+		INSERT INTO conversation_memory (id, org_id, conversation_id, entity_id, agent_content, created_at)
 		VALUES (gen_random_uuid(), $1, $2, $3, 'pre-migration note', now())
 	`, orgID, runID, entityID); err != nil {
-		t.Fatalf("seed pre-migration run_memory row: %v", err)
+		t.Fatalf("seed pre-migration conversation_memory row: %v", err)
 	}
 
 	// No join row exists yet — the read path finds nothing.
@@ -409,8 +409,8 @@ func TestTaskMemoryStore_Postgres_BackfillProducesPrimaryJoinRows(t *testing.T) 
 
 	// The exact backfill statement from the baseline migration.
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO run_memory_entities (org_id, conversation_id, entity_id, role, created_at)
-		SELECT org_id, conversation_id, entity_id, 'primary', created_at FROM run_memory
+		INSERT INTO conversation_memory_entities (org_id, conversation_id, entity_id, role, created_at)
+		SELECT org_id, conversation_id, entity_id, 'primary', created_at FROM conversation_memory
 		WHERE org_id = $1
 		ON CONFLICT (conversation_id, entity_id) DO NOTHING
 	`, orgID); err != nil {
@@ -590,7 +590,7 @@ func seedPgTeamRunOnEntity(t *testing.T, h *pgtest.Harness, orgID, userID, promp
 }
 
 // seedPgTaskMemoryOrg builds the auth user + public user + org +
-// org_membership + default team graph the run_memory FK chain
+// org_membership + default team graph the conversation_memory FK chain
 // transitively needs (runs → tasks → events → entities → orgs).
 // Mirrors seedPgFactoryOrg minus the prompt seed (which we want as
 // a separate helper so a single org can host multiple prompts).
@@ -638,7 +638,7 @@ func seedPgTaskMemoryPrompt(t *testing.T, h *pgtest.Harness, orgID, userID strin
 }
 
 // seedPgRunForTaskMemory seeds the entity + event + task + run FK
-// chain run_memory needs. Returns (runID, entityID).
+// chain conversation_memory needs. Returns (runID, entityID).
 func seedPgRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, promptID, suffix string) (string, string) {
 	t.Helper()
 	conn := h.AdminDB
@@ -707,7 +707,7 @@ func seedPgRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, prom
 }
 
 // seedPgBlueprintRunForTaskMemory seeds the entity + event + task + blueprint +
-// blueprint_run FK chain a run_memory.blueprint_run_id can point at (the column
+// blueprint_run FK chain a conversation_memory.blueprint_run_id can point at (the column
 // FKs blueprint_runs(id) ON DELETE SET NULL). Returns the blueprint_run id.
 func seedPgBlueprintRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, suffix string) string {
 	t.Helper()

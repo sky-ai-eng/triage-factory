@@ -83,7 +83,7 @@ func TestNonterminalFragmentFramesContinueAsDefault(t *testing.T) {
 // and the invalid-envelope re-prompt. These tests feed processCompletion
 // directly (the one-shot / resume shape) to pin how it records each outcome.
 
-func loadRun(t *testing.T, s *Spawner, runID string) *domain.AgentRun {
+func loadRun(t *testing.T, s *Spawner, runID string) *domain.Conversation {
 	t.Helper()
 	r, err := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrgID, runID)
 	if err != nil || r == nil {

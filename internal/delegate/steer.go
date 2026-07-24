@@ -90,7 +90,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 		// In flight on an executor (claimed, setting up or running). s.Steer routes
 		// through the controller: it retries THIS pod's registry — covering the
 		// getProc→GetSystem race where the process just registered here — and, on a
-		// miss, delivers over run_signals to the owning executor. A run mid-setup
+		// miss, delivers over conversation_signals to the owning executor. A run mid-setup
 		// whose owner has no process registered yet acks "gone" and degrades to the
 		// same 409 the old path returned, never a lost message. In local mode the
 		// controller is local-only, so an active run absent from this (sole)
@@ -131,7 +131,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 // each other is cosmetic. Returns "" (prepend nothing) when neither has anything
 // pending; a read failure in either source degrades to no block for that source,
 // never blocking the resume.
-func (s *Spawner) resumeSystemPrepends(ctx context.Context, orgID string, run *domain.AgentRun) string {
+func (s *Spawner) resumeSystemPrepends(ctx context.Context, orgID string, run *domain.Conversation) string {
 	var prefix string
 	if block := s.artifactLedgerForResume(ctx, orgID, run); block != "" {
 		prefix = block + "\n\n"

@@ -483,7 +483,7 @@ type BlueprintStore interface {
 
 	// RunsForBlueprint returns every step run linked to a blueprint instance,
 	// ordered by blueprint_step_index ASC, started_at ASC.
-	RunsForBlueprint(ctx context.Context, orgID string, blueprintRunID string) ([]domain.AgentRun, error)
+	RunsForBlueprint(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
 
 	// ActiveStepRunIDs returns the IDs of step runs on a blueprint that have
 	// not reached a terminal state.
@@ -503,6 +503,6 @@ type BlueprintStore interface {
 	GetRunSystem(ctx context.Context, orgID string, id string) (*domain.BlueprintRun, error)
 	GetRunForRunSystem(ctx context.Context, orgID string, runID string) (*domain.BlueprintRun, *int, error)
 	MarkRunStatusSystem(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
-	RunsForBlueprintSystem(ctx context.Context, orgID string, blueprintRunID string) ([]domain.AgentRun, error)
+	RunsForBlueprintSystem(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
 	ActiveStepRunIDsSystem(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
 }

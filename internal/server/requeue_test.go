@@ -73,7 +73,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 		t.Fatalf("seed run: %v", err)
 	}
 
-	// run_memory: agent finished and wrote its self-report (the
+	// conversation_memory: agent finished and wrote its self-report (the
 	// termination upsert). We assert below that
 	// human_content lands without trampling agent_content.
 	if err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_pa", "e_pa", "", "agent self-report"); err != nil {
@@ -93,7 +93,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	// call — the draft is local). Returns the artifact id.
 	line := 1
 	reviewArt := domain.NewReviewArtifact("owner/repo", 7, "headsha_pa", "r_pa")
-	reviewArt.RunID = "r_pa"
+	reviewArt.ConversationID = "r_pa"
 	reviewArt.OrgID = runmode.LocalDefaultOrgID
 	reviewArt.TeamID = runmode.LocalDefaultTeamID
 	rd, _ := domain.ParseReviewArtifactDetails(reviewArt.DetailsJSON)
@@ -166,9 +166,9 @@ func assertPendingApprovalCleanedUp(
 
 	var agentContent, humanContent sql.NullString
 	if err := database.QueryRow(
-		`SELECT agent_content, human_content FROM run_memory WHERE conversation_id = ?`, runID,
+		`SELECT agent_content, human_content FROM conversation_memory WHERE conversation_id = ?`, runID,
 	).Scan(&agentContent, &humanContent); err != nil {
-		t.Fatalf("scan run_memory: %v", err)
+		t.Fatalf("scan conversation_memory: %v", err)
 	}
 	if !agentContent.Valid || agentContent.String != "agent self-report" {
 		t.Errorf("agent_content = %v, want preserved %q", agentContent, "agent self-report")
@@ -1238,7 +1238,7 @@ func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 
 	var humanContentBefore sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT human_content FROM run_memory WHERE conversation_id = ?`, runID,
+		`SELECT human_content FROM conversation_memory WHERE conversation_id = ?`, runID,
 	).Scan(&humanContentBefore); err != nil {
 		t.Fatalf("scan after first call: %v", err)
 	}
@@ -1254,7 +1254,7 @@ func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 	var runStatusAfter string
 	if err := s.db.QueryRow(
 		`SELECT rm.human_content, r.status
-		 FROM run_memory rm JOIN conversations r ON r.id = rm.conversation_id
+		 FROM conversation_memory rm JOIN conversations r ON r.id = rm.conversation_id
 		 WHERE rm.conversation_id = ?`, runID,
 	).Scan(&humanContentAfter, &runStatusAfter); err != nil {
 		t.Fatalf("scan after second call: %v", err)
@@ -1298,8 +1298,8 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 		t.Fatalf("run.status = %q after failure; want %q (run untouched)", runStatus, "completed")
 	}
 	var humanContent sql.NullString
-	if err := s.db.QueryRow(`SELECT human_content FROM run_memory WHERE conversation_id = ?`, runID).Scan(&humanContent); err != nil {
-		t.Fatalf("scan run_memory after failure: %v", err)
+	if err := s.db.QueryRow(`SELECT human_content FROM conversation_memory WHERE conversation_id = ?`, runID).Scan(&humanContent); err != nil {
+		t.Fatalf("scan conversation_memory after failure: %v", err)
 	}
 	if humanContent.Valid {
 		t.Errorf("human_content = %q after failure; want NULL (batch must roll back atomically)", humanContent.String)
@@ -1323,7 +1323,7 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 
 // TestTeardownTaskArtifacts_AgentContentNullSurvives is the
 // synthetic-row case: agent skipped the memory file, so
-// run_memory exists with agent_content NULL. The discard teardown
+// conversation_memory exists with agent_content NULL. The discard teardown
 // still lands human_content cleanly on the existing row (the spec's
 // guarantee that the unconditional termination-time upsert means
 // no INSERT-or-UPDATE branching is needed downstream).
@@ -1335,7 +1335,7 @@ func TestTeardownTaskArtifacts_AgentContentNullSurvives(t *testing.T) {
 	// (UpsertAgentMemory("") would have done this in
 	// production; we set it directly to skip the dependency).
 	if _, err := s.db.Exec(
-		`UPDATE run_memory SET agent_content = NULL WHERE conversation_id = ?`, runID,
+		`UPDATE conversation_memory SET agent_content = NULL WHERE conversation_id = ?`, runID,
 	); err != nil {
 		t.Fatalf("force null agent_content: %v", err)
 	}
@@ -1344,9 +1344,9 @@ func TestTeardownTaskArtifacts_AgentContentNullSurvives(t *testing.T) {
 
 	var agentContent, humanContent sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT agent_content, human_content FROM run_memory WHERE conversation_id = ?`, runID,
+		`SELECT agent_content, human_content FROM conversation_memory WHERE conversation_id = ?`, runID,
 	).Scan(&agentContent, &humanContent); err != nil {
-		t.Fatalf("scan run_memory: %v", err)
+		t.Fatalf("scan conversation_memory: %v", err)
 	}
 	if agentContent.Valid {
 		t.Errorf("agent_content was NULL pre-cleanup; should still be NULL post-cleanup, got %q", agentContent.String)

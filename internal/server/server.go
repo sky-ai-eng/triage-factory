@@ -41,12 +41,12 @@ type Server struct {
 	users        db.UsersStore           // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities
 	blueprints   db.BlueprintStore       // used by event-handler + project test fixtures
 	tasks        db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
-	agentRuns    db.AgentRunStore        // agent run lifecycle + transcript
+	agentRuns    db.ConversationStore    // agent run lifecycle + transcript
 	repos        db.RepoStore            // repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
 	projects     db.ProjectStore         // projects CRUD for projects/curator/backfill/project_entities handlers
 	curatorStore db.CuratorStore         // curator view of conversations/messages/claims — handler-side System writes (cancel release, pending-context producer) go through here; claims-bound reads ride tx.Curator
 	events       db.EventStore           // events audit log Record/Latest for stock carry-over + factory drag-to-delegate
-	taskMemory   db.TaskMemoryStore      // run_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
+	taskMemory   db.TaskMemoryStore      // conversation_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
 	secrets      db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
 	teams        db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, projects, prompts)
 	orgs         db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
@@ -534,7 +534,7 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 		users:        stores.Users,
 		blueprints:   stores.Blueprints,
 		tasks:        stores.Tasks,
-		agentRuns:    stores.AgentRuns,
+		agentRuns:    stores.Conversations,
 		repos:        stores.Repos,
 		projects:     stores.Projects,
 		events:       stores.Events,
@@ -993,19 +993,19 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/tasks/{id}/advance", s.handleTaskAdvance)
 
 	ag := &agentHandler{tx: s.tx, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }, reconciler: func() *reconcile.Reconciler { return s.reconciler }}
-	s.api("GET /api/agent/runs/{runID}", ag.handleAgentStatus)
-	s.api("GET /api/agent/runs/{runID}/messages", ag.handleAgentMessages)
+	s.api("GET /api/agent/conversations/{conversationID}", ag.handleAgentStatus)
+	s.api("GET /api/agent/conversations/{conversationID}/messages", ag.handleMessages)
 	// Run-scoped artifact read (A·6, TFAC-465): the run's artifacts across
 	// every kind, team-scoped via the run. Backs the run-detail surface (TFAC-470).
-	s.api("GET /api/agent/runs/{runID}/artifacts", ag.handleAgentArtifacts)
-	s.apiMutating("POST /api/agent/runs/{runID}/cancel", ag.handleAgentCancel)
-	s.apiMutating("POST /api/agent/runs/{runID}/message", ag.handleAgentMessage)
-	s.apiMutating("POST /api/agent/runs/{runID}/interrupt", ag.handleAgentInterrupt)
-	s.apiMutating("POST /api/agent/runs/{runID}/permissions/{requestID}", ag.handleAgentPermission)
+	s.api("GET /api/agent/conversations/{conversationID}/artifacts", ag.handleAgentArtifacts)
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/cancel", ag.handleAgentCancel)
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/message", ag.handleMessage)
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/interrupt", ag.handleAgentInterrupt)
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/permissions/{requestID}", ag.handleAgentPermission)
 	// Tier-2 run-scoped artifact reconcile (TFAC-464): the run view polls this
 	// while open to refresh that run's non-terminal artifacts against GitHub.
-	s.apiMutating("POST /api/agent/runs/{runID}/artifacts/refresh", ag.handleArtifactRefresh)
-	s.api("GET /api/agent/runs", ag.handleAgentRuns)
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/artifacts/refresh", ag.handleArtifactRefresh)
+	s.api("GET /api/agent/conversations", ag.handleConversations)
 
 	// Projects. Pure CRUD over the projects table; the
 	// Curator runtime that populates curator_session_id and per-project
