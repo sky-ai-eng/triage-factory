@@ -354,3 +354,56 @@ func TestManager_resolveGitHub_NoCredentialIsNotAnError(t *testing.T) {
 		t.Errorf("TokenForRepoScoped called %d times, want 0 (nothing to mint without a credential)", len(res.calls))
 	}
 }
+
+// TestManager_resolveGitHub_GHChannelMintFailureIsNonFatal pins the deliberate
+// asymmetry against the per-repo loop: the gh-channel token is ADDITIVE, so a
+// mint failure must degrade the gh channel, never abort provisioning. The run
+// still gets its per-repo RepoTokens, which is what the exec-verb channel and
+// the git proxy actually consume. Hard-failing here would turn "gh unavailable"
+// into "run cannot start" — and this failure is reachable in normal operation,
+// not just on a blip: a "selected repositories" App install 422s a mint naming a
+// repo outside its grant.
+func TestManager_resolveGitHub_GHChannelMintFailureIsNonFatal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"transient backend error", errors.New("github: 503 while minting")},
+		{"422 repo outside the installation grant", errors.New("github: mint installation token: status 422")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := &fakeScopedResolver{
+				base:    "https://github.com",
+				hasCred: true,
+				token:   githubapp.Token{Value: "ghs_scoped", ExpiresAt: time.Now().Add(time.Hour)},
+				// Keyed by OWNER — only the gh-channel (repos-scoped) mint fails;
+				// the per-repo mints, keyed "owner/repo", still succeed.
+				errFor: map[string]error{"acme": tc.err},
+			}
+			m := &Manager{
+				stores: db.Stores{
+					TeamGitHubRepos: &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
+					Tasks:           &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
+					RunWorktrees:    &fakeRunWorktrees{},
+				},
+				ghResolver: res,
+			}
+
+			gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "run-1")
+			if err != nil {
+				t.Fatalf("resolveGitHub failed on a gh-channel mint error: %v (it must be non-fatal)", err)
+			}
+			if gh == nil {
+				t.Fatal("resolveGitHub returned nil; the run must still get its per-repo credentials")
+			}
+			if gh.CLIToken != nil {
+				t.Errorf("CLIToken = %+v, want nil when the gh-channel mint failed", gh.CLIToken)
+			}
+			// The load-bearing part: the channels that don't depend on the gh
+			// token are untouched, so the run is fully operable.
+			if _, ok := gh.RepoTokens["acme/widgets"]; !ok {
+				t.Errorf("RepoTokens lost the authorized repo; got %v", gh.RepoTokens)
+			}
+		})
+	}
+}

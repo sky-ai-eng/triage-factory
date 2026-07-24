@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -326,5 +327,116 @@ func TestParseObservation_IgnoresMalformed(t *testing.T) {
 	// Sanity: a well-formed body still parses.
 	if _, ok := parseObservation("review", "o", "r", 3, []byte(`{"id":5,"state":"COMMENTED"}`)); !ok {
 		t.Error("failed to parse a well-formed review body")
+	}
+}
+
+// TestInjector_OversizedBodyReachesAgentIntact is the regression for the
+// observation buffer truncating the agent's response. A mutation response larger
+// than maxObserveBody must reach the caller byte-for-byte — only the observation
+// degrades (the reconciler backstop covers that). Truncating here would corrupt
+// gh's JSON parse on large responses.
+func TestInjector_OversizedBodyReachesAgentIntact(t *testing.T) {
+	// A well-formed PR JSON padded past the buffer cap.
+	pad := strings.Repeat("x", maxObserveBody+4096)
+	prJSON := `{"number":42,"node_id":"PR_kwABC","html_url":"https://github.com/octo/repo/pull/42",` +
+		`"title":"Fix it","draft":false,"head":{"ref":"fix"},"base":{"ref":"main"},"body":"` + pad + `"}`
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(prJSON))
+	}))
+	defer upstream.Close()
+
+	var observed int
+	observe := func(context.Context, ObservedMutation) { observed++ }
+	_, client, host := newInjector(t, upstream.URL, "", observe)
+
+	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/v3/repos/octo/repo/pulls",
+		strings.NewReader(`{"title":"Fix it"}`))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	got, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	if len(got) != len(prJSON) {
+		t.Errorf("caller received %d bytes, want the full %d — the response was truncated", len(got), len(prJSON))
+	}
+	if string(got) != prJSON {
+		t.Error("caller's body differs from the upstream body")
+	}
+	// The response must still be parseable JSON, which truncation would break.
+	var probe map[string]any
+	if err := json.Unmarshal(got, &probe); err != nil {
+		t.Errorf("delivered body is not valid JSON (truncated?): %v", err)
+	}
+	if observed != 0 {
+		t.Errorf("observations = %d, want 0 (oversized bodies skip observation)", observed)
+	}
+}
+
+// TestInjector_BodyAtExactlyCapStillObserves guards the off-by-one in the
+// oversize probe: a body of exactly maxObserveBody is buffered and observed, not
+// misread as "over the cap".
+func TestInjector_BodyAtExactlyCapStillObserves(t *testing.T) {
+	head := `{"number":7,"node_id":"PR_x","html_url":"u","title":"t","draft":false,` +
+		`"head":{"ref":"h"},"base":{"ref":"b"},"body":"`
+	tail := `"}`
+	pad := strings.Repeat("y", maxObserveBody-len(head)-len(tail))
+	prJSON := head + pad + tail
+	if len(prJSON) != maxObserveBody {
+		t.Fatalf("fixture is %d bytes, want exactly %d", len(prJSON), maxObserveBody)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(prJSON))
+	}))
+	defer upstream.Close()
+
+	var observed int
+	observe := func(context.Context, ObservedMutation) { observed++ }
+	_, client, host := newInjector(t, upstream.URL, "", observe)
+
+	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/v3/repos/octo/repo/pulls",
+		strings.NewReader(`{}`))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if len(got) != len(prJSON) {
+		t.Errorf("caller received %d bytes, want %d", len(got), len(prJSON))
+	}
+	if observed != 1 {
+		t.Errorf("observations = %d, want 1 (a body exactly at the cap is still observed)", observed)
+	}
+}
+
+// TestGraphQLUpstream_ExactHostMatch is the regression for the dotcom detector:
+// a substring test routed any host merely CONTAINING api.github.com to
+// github.com's GraphQL endpoint, sending a GHES org's queries off its own host.
+func TestGraphQLUpstream_ExactHostMatch(t *testing.T) {
+	cases := []struct{ base, want string }{
+		// Real dotcom.
+		{"https://api.github.com", "https://api.github.com/graphql"},
+		{"https://api.github.com/", "https://api.github.com/graphql"},
+		// Lookalikes that must NOT be treated as dotcom.
+		{"https://api.github.com.example.com/api/v3", "https://api.github.com.example.com/api/graphql"},
+		{"https://evil-api.github.com.attacker.test/api/v3", "https://evil-api.github.com.attacker.test/api/graphql"},
+		{"https://ghe.corp/api/v3?x=api.github.com", "https://ghe.corp/api/v3?x=api.github.com/graphql"},
+		// Ordinary GHES.
+		{"https://ghe.corp/api/v3", "https://ghe.corp/api/graphql"},
+	}
+	for _, tc := range cases {
+		if got := graphqlUpstream(tc.base); got != tc.want {
+			t.Errorf("graphqlUpstream(%q) = %q, want %q", tc.base, got, tc.want)
+		}
 	}
 }

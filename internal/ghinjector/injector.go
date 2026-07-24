@@ -71,10 +71,12 @@ const (
 )
 
 // maxObserveBody caps how much of an observed mutation's response body the
-// injector buffers to parse the created object's coordinates. PR-create and
+// injector will BUFFER to parse the created object's coordinates. PR-create and
 // review-post responses are a few KB; the cap only guards against a pathological
-// upstream. Beyond it, observation is skipped (the reconciler backstop covers
-// it) but the body still streams to the agent in full.
+// upstream. A body past the cap is never truncated — the consumed prefix is
+// stitched back in front of the untouched remainder and observation is skipped
+// for that response (the reconciler backstop covers it). The agent's response is
+// always delivered whole; observation is the only thing that degrades.
 const maxObserveBody = 1 << 20
 
 // TokenSource supplies the single real GitHub credential to inject on every
@@ -198,18 +200,27 @@ func parseUpstream(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-// graphqlUpstream derives the GraphQL endpoint from the REST base, mirroring
-// internal/github's graphqlURL:
+// graphqlUpstream derives the GraphQL endpoint from the REST base:
 //
 //	https://api.github.com      → https://api.github.com/graphql
 //	https://<host>/api/v3       → https://<host>/api/graphql
+//
+// Dotcom is detected by an EXACT hostname compare, not a substring test: a
+// GHES host that merely contains the dotcom name (api.github.com.example.com,
+// or a lookalike an org mis-configures) must keep routing GraphQL to its own
+// host, never to github.com. A base that won't parse falls through to the
+// sibling-path derivation, which is the safe default (it stays on whatever host
+// the REST base named).
 func graphqlUpstream(restBase string) string {
-	restBase = strings.TrimRight(restBase, "/")
-	if strings.Contains(restBase, "api.github.com") {
+	trimmed := strings.TrimRight(restBase, "/")
+	if u, err := url.Parse(trimmed); err == nil && strings.EqualFold(u.Hostname(), dotcomAPIHost) {
 		return "https://api.github.com/graphql"
 	}
-	return strings.TrimSuffix(restBase, "/v3") + "/graphql"
+	return strings.TrimSuffix(trimmed, "/v3") + "/graphql"
 }
+
+// dotcomAPIHost is the public GitHub REST API host, matched exactly.
+const dotcomAPIHost = "api.github.com"
 
 // authCtxKey carries the resolved upstream Authorization value from the Handler
 // wrapper to the Rewrite hook (off the inbound header set, so it never logs).
@@ -331,20 +342,37 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 		return nil
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxObserveBody))
-	if err != nil {
-		// Body read failed mid-stream; restore what we have and skip observation.
-		resp.Body = io.NopCloser(bytes.NewReader(body))
+	// Read one byte past the cap so "body exceeded the cap" is distinguishable
+	// from "body is exactly the cap" (ReadAll on a LimitReader reports no error
+	// when it stops at the limit).
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxObserveBody+1))
+	if err != nil || len(buf) > maxObserveBody {
+		// The read broke mid-stream, or the body is bigger than we will buffer.
+		// Either way the agent's response must arrive intact: put the consumed
+		// prefix back in front of the untouched remainder (keeping the original
+		// body as the Closer, since it is still open) and skip observation.
+		resp.Body = &prefixedBody{r: io.MultiReader(bytes.NewReader(buf), resp.Body), c: resp.Body}
 		return nil
 	}
 	_ = resp.Body.Close()
-	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.Body = io.NopCloser(bytes.NewReader(buf))
 
-	if m, parsed := parseObservation(kind, owner, repo, number, body); parsed && s.cfg.Observe != nil {
+	if m, parsed := parseObservation(kind, owner, repo, number, buf); parsed && s.cfg.Observe != nil {
 		s.cfg.Observe(context.Background(), m)
 	}
 	return nil
 }
+
+// prefixedBody re-presents an already-partially-consumed response body: reads
+// deliver the buffered prefix followed by the live remainder, while Close still
+// closes the original body (which was never closed, so the remainder is intact).
+type prefixedBody struct {
+	r io.Reader
+	c io.Closer
+}
+
+func (b *prefixedBody) Read(p []byte) (int, error) { return b.r.Read(p) }
+func (b *prefixedBody) Close() error               { return b.c.Close() }
 
 // classifyMutationPath recognizes the two artifact-bearing POST paths on the
 // upstream request URL (post-rewrite, so REST base already prepended): a PR

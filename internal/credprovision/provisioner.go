@@ -291,15 +291,25 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runI
 	// multiple owners gets gh-channel coverage for the primary owner only;
 	// repos under other owners surface GitHub's standard 404 on this channel
 	// (the per-repo RepoTokens above still cover them for the exec/git channels
-	// until P4). A mint blip is non-fatal — the run keeps the per-repo tokens
-	// and the next refresh re-mints.
+	// until P4).
+	//
+	// EVERY failure here is non-fatal, deliberately unlike the per-repo loop
+	// above: this token is additive: a bundle without it still serves the
+	// exec-verb channel and the git proxy from RepoTokens, so the run works with
+	// only the gh channel degraded. Hard-failing would turn "gh unavailable"
+	// into "run cannot start" — and the failure is reachable in normal
+	// operation, not just on a blip: a "selected repositories" App install 422s
+	// a mint naming a repo outside its grant, which would otherwise abort every
+	// run for that org. The next refresh sweep re-mints.
 	if owner, names := cliChannelScope(m.taskPrimaryRepo(ctx, orgID, taskID), repoIDs); owner != "" {
 		cliTok, err := scoped.TokenForReposScoped(ctx, orgID, owner, names, nil)
-		if err != nil {
+		switch {
+		case err != nil:
 			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-				return nil, fmt.Errorf("mint gh-channel token for owner %s: %w", owner, err)
+				log.Warn("gh-channel token mint failed; run continues without the gh channel",
+					"org", orgID, "owner", owner, "repos", len(names), "error", err)
 			}
-		} else if cliTok.Value != "" {
+		case cliTok.Value != "":
 			gh.CLIToken = &credbundle.RepoToken{Token: cliTok.Value, ExpiresAt: cliTok.ExpiresAt}
 		}
 	}
