@@ -172,7 +172,7 @@ require (
 )
 
 // Pinned to the AidanAllchin/bifrost fork commit carrying the chat-surface
-// tool-result is_error fix, until upstream maximhq/bifrost#5450 merges. Remove
-// this replace (and bump the require to the upstream release that lands the
-// fix) once it does.
+// tool-result is_error fix, until upstream maximhq/bifrost#5450 merges. 
+// TODO: Remove this replace (and bump the require to the upstream release
+// that lands the fix) once it does.
 replace github.com/maximhq/bifrost/core => github.com/AidanAllchin/bifrost/core v1.7.4-0.20260722042948-0f07e6f726be
