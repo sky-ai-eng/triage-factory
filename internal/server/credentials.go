@@ -514,7 +514,7 @@ func (s *Server) localOrgProvisioned(ctx context.Context) (bool, error) {
 // + Jira) via SecretStore. Used by the Settings "Clear All Tokens"
 // flow when the user wants a fresh slate. Unbinding ONE credential goes
 // through that credential's own resource (DELETE
-// /api/orgs/{org_id}/github-access/pat, .../jira-access/credential).
+// /api/orgs/{org_id}/github/access/pat, .../jira/access/credential).
 //
 // Env-overlay UX: if any of the four well-known integration secrets
 // are supplied by TRIAGE_FACTORY_* env vars (local mode only —

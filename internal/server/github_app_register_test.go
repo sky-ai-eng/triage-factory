@@ -29,8 +29,8 @@ func TestGitHubAppRegister_LocalMode_NilDeployConfig_Returns404(t *testing.T) {
 	for _, tc := range []struct {
 		method, path string
 	}{
-		{"GET", "/api/orgs/" + runmode.LocalDefaultOrgID + "/github-app/register/launch?owner_type=user&owner_login=testuser"},
-		{"GET", "/api/orgs/" + runmode.LocalDefaultOrgID + "/github-app/register/callback?code=x&state=y"},
+		{"GET", "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/app/register/launch?owner_type=user&owner_login=testuser"},
+		{"GET", "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/app/register/callback?code=x&state=y"},
 	} {
 		rec := doJSON(t, s, tc.method, tc.path, nil)
 		if rec.Code != http.StatusNotFound {
@@ -52,7 +52,7 @@ func TestGitHubAppRegister_LocalMode_WithDeployConfig_Works(t *testing.T) {
 	s.SetDeployConfig("http://localhost:3000", key)
 
 	rec := doJSON(t, s, "GET",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/register/launch?owner_type=user&owner_login=testuser", nil)
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/register/launch?owner_type=user&owner_login=testuser", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("launch endpoint status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -91,7 +91,7 @@ func TestGitHubAppRegister_Launch_ErrorPageOnBadInput(t *testing.T) {
 	}
 	s.SetDeployConfig("http://localhost:3000", key)
 
-	base := "/api/orgs/" + runmode.LocalDefaultOrgID + "/github-app/register/launch?owner_type=user"
+	base := "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/app/register/launch?owner_type=user"
 
 	// owner_login omitted, no return_to → defaults to the Settings back-link.
 	rec := doJSON(t, s, "GET", base, nil)
@@ -341,7 +341,7 @@ func TestGitHubAppRegister_LaunchEndpoint_MultiMode(t *testing.T) {
 
 	launch := func(orgID, sid, query string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("GET",
-			"/api/orgs/"+orgID+"/github-app/register/launch?"+query, nil)
+			"/api/orgs/"+orgID+"/github/app/register/launch?"+query, nil)
 		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sid})
 		rec := httptest.NewRecorder()
 		rig.srv.mux.ServeHTTP(rec, req)
@@ -419,7 +419,7 @@ func TestGitHubAppRegister_LaunchEndpoint_GHES(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("GET",
-		"/api/orgs/"+orgA.String()+"/github-app/register/launch?owner_type=org&owner_login=acme-eng", nil)
+		"/api/orgs/"+orgA.String()+"/github/app/register/launch?owner_type=org&owner_login=acme-eng", nil)
 	req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
 	rec := httptest.NewRecorder()
 	rig.srv.mux.ServeHTTP(rec, req)
@@ -498,7 +498,7 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 
 	t.Run("valid_exchange", func(t *testing.T) {
 		req := httptest.NewRequest("GET",
-			"/api/orgs/"+orgA.String()+"/github-app/register/callback?code=test_code&state="+signed, nil)
+			"/api/orgs/"+orgA.String()+"/github/app/register/callback?code=test_code&state="+signed, nil)
 		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
 		rec := httptest.NewRecorder()
 		rig.srv.mux.ServeHTTP(rec, req)
@@ -539,7 +539,7 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 	t.Run("status_carries_owner_type", func(t *testing.T) {
 		// The row registered above must surface owner_type through the status
 		// endpoint so Setup/Settings can seed the App account-type summary.
-		req := httptest.NewRequest("GET", "/api/orgs/"+orgA.String()+"/github-app", nil)
+		req := httptest.NewRequest("GET", "/api/orgs/"+orgA.String()+"/github/app", nil)
 		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
 		rec := httptest.NewRecorder()
 		rig.srv.mux.ServeHTTP(rec, req)
@@ -568,7 +568,7 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 		signed2, _ := state2.sign(rig.srv.deployCfg.hmacKey)
 
 		req := httptest.NewRequest("GET",
-			"/api/orgs/"+orgA.String()+"/github-app/register/callback?code=test_code2&state="+signed2, nil)
+			"/api/orgs/"+orgA.String()+"/github/app/register/callback?code=test_code2&state="+signed2, nil)
 		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
 		rec := httptest.NewRecorder()
 		rig.srv.mux.ServeHTTP(rec, req)
@@ -586,7 +586,7 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 		tok, _ := expired.sign(rig.srv.deployCfg.hmacKey)
 
 		req := httptest.NewRequest("GET",
-			"/api/orgs/"+orgA.String()+"/github-app/register/callback?code=c&state="+tok, nil)
+			"/api/orgs/"+orgA.String()+"/github/app/register/callback?code=c&state="+tok, nil)
 		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
 		rec := httptest.NewRecorder()
 		rig.srv.mux.ServeHTTP(rec, req)
@@ -604,7 +604,7 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 		tok, _ := wrongOrg.sign(rig.srv.deployCfg.hmacKey)
 
 		req := httptest.NewRequest("GET",
-			"/api/orgs/"+orgA.String()+"/github-app/register/callback?code=c&state="+tok, nil)
+			"/api/orgs/"+orgA.String()+"/github/app/register/callback?code=c&state="+tok, nil)
 		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
 		rec := httptest.NewRecorder()
 		rig.srv.mux.ServeHTTP(rec, req)
@@ -667,7 +667,7 @@ func TestGitHubAppRegister_Callback_HooklessNoWebhookSecret(t *testing.T) {
 	}
 
 	req := httptest.NewRequest("GET",
-		"/api/orgs/"+orgA.String()+"/github-app/register/callback?code=hookless_code&state="+signed, nil)
+		"/api/orgs/"+orgA.String()+"/github/app/register/callback?code=hookless_code&state="+signed, nil)
 	req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sidA})
 	rec := httptest.NewRecorder()
 	rig.srv.mux.ServeHTTP(rec, req)
@@ -774,7 +774,7 @@ func TestGitHubAppRegister_Launch_ReturnTo(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := doJSON(t, s, "GET",
-				"/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/register/launch?owner_type=user&owner_login=testuser"+tc.query, nil)
+				"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/register/launch?owner_type=user&owner_login=testuser"+tc.query, nil)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
 			}
@@ -850,7 +850,7 @@ func TestGitHubAppRegister_Callback_ReturnToRedirect(t *testing.T) {
 			t.Fatalf("sign state: %v", err)
 		}
 		req := httptest.NewRequest("GET",
-			"/api/orgs/"+org.String()+"/github-app/register/callback?code=c&state="+signed, nil)
+			"/api/orgs/"+org.String()+"/github/app/register/callback?code=c&state="+signed, nil)
 		req.AddCookie(&http.Cookie{Name: rig.srv.sidCookieName(), Value: sid})
 		rec := httptest.NewRecorder()
 		rig.srv.mux.ServeHTTP(rec, req)

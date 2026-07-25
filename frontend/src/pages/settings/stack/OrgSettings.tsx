@@ -21,7 +21,7 @@
 // GitHub access control, the App register panel) carry no Save footer, and Jira
 // disconnect commits inline on its own button. The Jira *credential* is the
 // exception that proves the rule it used to break: its Save footer ("Connect" /
-// "Replace credential") drives PUT /api/orgs/{org}/jira-access/credential rather
+// "Replace credential") drives PUT /api/orgs/{org}/jira/access/credential rather
 // than the org POST, but it's a footer all the same.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -121,7 +121,7 @@ export default function OrgSettings({
     // wizard uses) so the mode header, the staged banner, and the clone-protocol
     // gate read the LIVE mode, AND it seeds the App account-type from the App's
     // persisted owner_type (so an org-owned App doesn't render as "Personal" on
-    // reload) — one GET /github-app, not two. Both loaders catch internally and
+    // reload) — one GET /github/app, not two. Both loaders catch internally and
     // resolve to {} on any failure, so neither rejects the Promise.all — only a
     // loadOrg failure surfaces the retry. The app slice merges LAST so its
     // tab/staged override wins over loadOrg's naive value.

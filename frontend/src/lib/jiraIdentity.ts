@@ -31,7 +31,7 @@ async function postJiraIdentity(
   body: Record<string, string>,
 ): Promise<JiraIdentityCaptured> {
   try {
-    return await apiJSON<JiraIdentityCaptured>('/identity/jira/pat', {
+    return await apiJSON<JiraIdentityCaptured>('/jira/identity/pat', {
       org: orgId,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

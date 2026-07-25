@@ -545,8 +545,8 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 
 // orgSettingsUpdate is the body of POST /api/settings/org — the org's PURE
 // CONFIG. No secrets: the GitHub PAT and the Jira service credential each live
-// on their own resource (PUT/DELETE /api/orgs/{org_id}/github-access/pat and
-// .../jira-access/credential, see org_credentials.go), so this route touches no
+// on their own resource (PUT/DELETE /api/orgs/{org_id}/github/access/pat and
+// .../jira/access/credential, see org_credentials.go), so this route touches no
 // vault key, makes no outbound call, and cannot revoke access as a side effect.
 // The Anthropic key and the Bedrock set are likewise writable only through
 // their own validated capture endpoints. A stray credential field in the

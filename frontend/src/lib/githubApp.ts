@@ -2,7 +2,7 @@
 // registration ceremony is a top-level browser navigation to a backend
 // bounce page, which then POSTs the manifest to github.com (manifest
 // flow) — see startGitHubAppRegistration. The endpoints are org-scoped
-// under /api/orgs/{org_id}/github-app.
+// under /api/orgs/{org_id}/github/app.
 
 import { readError } from './api'
 import { isHttpUrl } from './reachability'
@@ -48,7 +48,7 @@ export interface GitHubAppStatus {
 }
 
 export async function getGitHubAppStatus(orgId: string): Promise<GitHubAppStatus> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-app`)
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app`)
   if (!res.ok) throw new Error(await readError(res, 'Failed to load GitHub App status'))
   return (await res.json()) as GitHubAppStatus
 }
@@ -61,7 +61,7 @@ export async function getGitHubAppStatus(orgId: string): Promise<GitHubAppStatus
 // step and Settings' "Check installation" action POST here to actually find it.
 export async function refreshGitHubAppInstallations(orgId: string): Promise<GitHubAppStatus> {
   const res = await fetch(
-    `/api/orgs/${encodeURIComponent(orgId)}/github-app/installations/refresh`,
+    `/api/orgs/${encodeURIComponent(orgId)}/github/app/installations/refresh`,
     { method: 'POST' },
   )
   if (!res.ok) throw new Error(await readError(res, 'Failed to refresh GitHub App installations'))
@@ -69,7 +69,7 @@ export async function refreshGitHubAppInstallations(orgId: string): Promise<GitH
 }
 
 export async function getGitHubAppInstallURL(orgId: string): Promise<string> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-app/install-url`)
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app/install-url`)
   if (!res.ok) throw new Error(await readError(res, 'Failed to load install URL'))
   const body = (await res.json()) as { url: string }
   // The URL is backend-derived from the org's GitHub base URL. Reject any
@@ -139,12 +139,12 @@ export type GitHubAppImportOutcome =
 // structured outcome rather than throwing, so the form can render the permission
 // table on a gap (instead of a bare error string).
 //
-// POST /api/orgs/{org_id}/github-app/import
+// POST /api/orgs/{org_id}/github/app/import
 export async function importGitHubApp(
   orgId: string,
   input: GitHubAppImportInput,
 ): Promise<GitHubAppImportOutcome> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-app/import`, {
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app/import`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -192,7 +192,7 @@ export function startGitHubAppRegistration(
     return_to: payload.return_to,
   })
   window.location.assign(
-    `/api/orgs/${encodeURIComponent(orgId)}/github-app/register/launch?${params.toString()}`,
+    `/api/orgs/${encodeURIComponent(orgId)}/github/app/register/launch?${params.toString()}`,
   )
 }
 
@@ -250,9 +250,9 @@ async function switchError(res: Response, fallback: string): Promise<string> {
 // atomically. Rejects with the backend's message — notably the 409 "install
 // the App before switching" when no installation is found yet.
 //
-// POST /api/orgs/{org_id}/github-app/cutover
+// POST /api/orgs/{org_id}/github/app/cutover
 export async function cutoverToApp(orgId: string): Promise<void> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-app/cutover`, {
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app/cutover`, {
     method: 'POST',
   })
   if (!res.ok) throw new Error(await switchError(res, 'Failed to switch to the GitHub App.'))
@@ -263,9 +263,9 @@ export async function cutoverToApp(orgId: string): Promise<void> {
 // server-side write side-effect (it reconciles the installation mirror), so the
 // endpoint is uncacheable — call it right before showing the diff screen.
 //
-// GET /api/orgs/{org_id}/github-app/cutover-preflight
+// GET /api/orgs/{org_id}/github/app/cutover-preflight
 export async function cutoverPreflight(orgId: string): Promise<AccessDiff> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-app/cutover-preflight`)
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app/cutover-preflight`)
   if (!res.ok) throw new Error(await switchError(res, 'Failed to check repository reachability.'))
   return (await res.json()) as AccessDiff
 }
@@ -274,9 +274,9 @@ export async function cutoverPreflight(orgId: string): Promise<AccessDiff> {
 // validates the PAT, stores it, and deletes the App registration + secrets in
 // one transaction; the App still exists on GitHub (the result flags that).
 //
-// POST /api/orgs/{org_id}/github-access/switch-to-pat
+// POST /api/orgs/{org_id}/github/access/switch-to-pat
 export async function switchToPat(orgId: string, pat: string): Promise<SwitchToPatResult> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-access/switch-to-pat`, {
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/access/switch-to-pat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pat }),
@@ -290,9 +290,9 @@ export async function switchToPat(orgId: string, pat: string): Promise<SwitchToP
 // reachability diff for an App→PAT switch plus the login it authenticates as.
 // Stores nothing — switchToPat re-validates on commit.
 //
-// POST /api/orgs/{org_id}/github-access/pat-preflight
+// POST /api/orgs/{org_id}/github/access/pat-preflight
 export async function patPreflight(orgId: string, pat: string): Promise<PatPreflight> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-access/pat-preflight`, {
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/access/pat-preflight`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pat }),
@@ -305,9 +305,9 @@ export async function patPreflight(orgId: string, pat: string): Promise<PatPrefl
 // abandoned PAT→App switch. The live PAT is untouched. 409s for an active App
 // (use switchToPat to remove a live one).
 //
-// DELETE /api/orgs/{org_id}/github-app
+// DELETE /api/orgs/{org_id}/github/app
 export async function discardStagedApp(orgId: string): Promise<void> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github-app`, {
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app`, {
     method: 'DELETE',
   })
   if (!res.ok) throw new Error(await switchError(res, 'Failed to discard the staged GitHub App.'))

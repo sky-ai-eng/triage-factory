@@ -326,7 +326,7 @@ type githubIdentityStatusResponse struct {
 // the durable supported state runtime tolerates (this endpoint never asserts
 // a row must exist; it just reports presence).
 //
-// GET /api/orgs/{org_id}/identity/github
+// GET /api/orgs/{org_id}/github/identity
 func (s *Server) handleGitHubIdentityStatus(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
@@ -444,7 +444,7 @@ func validateGitHubIdentityPAT(ctx context.Context, ghWeb, pat string) (string, 
 // and stored independently). It's the always-available fallback to Connect, and
 // the only capture path when no GitHub App is registered.
 //
-// POST /api/orgs/{org_id}/identity/github/pat
+// POST /api/orgs/{org_id}/github/identity/pat
 func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {

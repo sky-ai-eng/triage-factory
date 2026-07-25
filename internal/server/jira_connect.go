@@ -93,7 +93,7 @@ type jiraIdentityStatusResponse struct {
 // handleGitHubIdentityStatus, but `connected` keys on credential presence
 // rather than an identity row.
 //
-// GET /api/orgs/{org_id}/identity/jira
+// GET /api/orgs/{org_id}/jira/identity
 func (s *Server) handleJiraIdentityStatus(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
@@ -236,7 +236,7 @@ type jiraIdentityCaptureResponse struct {
 // Distinct failure shapes, like the GitHub handler: a host TF couldn't reach is
 // a 502 (infra), a credential the host rejected is a 422 (your action).
 //
-// POST /api/orgs/{org_id}/identity/jira/pat
+// POST /api/orgs/{org_id}/jira/identity/pat
 func (s *Server) handleJiraIdentityPAT(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {

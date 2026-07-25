@@ -255,7 +255,7 @@ func mapAppOwnerType(githubType string) string {
 // stages active=false; a fresh setup imports active=true). Org-admin only; works
 // in both local and multi mode.
 //
-// POST /api/orgs/{org_id}/github-app/import
+// POST /api/orgs/{org_id}/github/app/import
 func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {

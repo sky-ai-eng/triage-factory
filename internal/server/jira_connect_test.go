@@ -130,7 +130,7 @@ func TestJiraIdentityPAT_Cloud_StoresEnvelopeAndBindsIdentity(t *testing.T) {
 	seedLocalOrgJiraAuthMethod(t, s, "cloud_api_token")
 
 	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
 		map[string]any{"email": "me@acme.com", "token": "cloud-tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
@@ -189,7 +189,7 @@ func TestJiraIdentityPAT_Cloud_MissingHalf_Returns400(t *testing.T) {
 			seedLocalOrgJiraAuthMethod(t, s, "cloud_api_token")
 
 			rec := doJSON(t, s, "POST",
-				"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat", body)
+				"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat", body)
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
 			}
@@ -211,13 +211,13 @@ func TestJiraIdentityStatus_Cloud_Connected(t *testing.T) {
 	seedLocalOrgJiraAuthMethod(t, s, "cloud_api_token")
 
 	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
 		map[string]any{"email": "me@acme.com", "token": "cloud-tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("capture status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
 
-	statusRec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira", nil)
+	statusRec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity", nil)
 	if statusRec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", statusRec.Code, statusRec.Body.String())
 	}
@@ -254,7 +254,7 @@ func TestJiraIdentityPAT_StoresCredentialAndBindsIdentity(t *testing.T) {
 	seedLocalOrgJiraHost(t, s, jiraStub.URL)
 
 	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
 		map[string]any{"pat": "jira_secret_token"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
@@ -314,7 +314,7 @@ func TestJiraIdentityStatus(t *testing.T) {
 	seedLocalOrgJiraHost(t, s, jiraStub.URL)
 
 	get := func() jiraIdentityStatusResponse {
-		rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira", nil)
+		rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity", nil)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status endpoint=%d body=%s", rec.Code, rec.Body.String())
 		}
@@ -331,7 +331,7 @@ func TestJiraIdentityStatus(t *testing.T) {
 
 	// Bind via the PAT endpoint; the status must then resume connected.
 	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
 		map[string]any{"pat": "tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("capture status=%d body=%s, want 200", rec.Code, rec.Body.String())
@@ -373,7 +373,7 @@ func TestJiraIdentityStatus_StaleCrossSchemeCredential_NotConnected(t *testing.T
 	jiraStub := jiraMyselfStub(t, `{"accountId":"acc-9","displayName":"Octo Jira"}`, nil)
 	seedLocalOrgJiraHost(t, s, jiraStub.URL)
 	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
 		map[string]any{"pat": "tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("capture status=%d body=%s, want 200", rec.Code, rec.Body.String())
@@ -382,7 +382,7 @@ func TestJiraIdentityStatus_StaleCrossSchemeCredential_NotConnected(t *testing.T
 	// Org cuts over to Cloud — the marker is now authoritative.
 	seedLocalOrgJiraAuthMethod(t, s, "cloud_api_token")
 
-	statusRec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira", nil)
+	statusRec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity", nil)
 	if statusRec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", statusRec.Code, statusRec.Body.String())
 	}
@@ -413,7 +413,7 @@ func TestJiraIdentityStatus_ConfiguredHostNoCredential(t *testing.T) {
 	const host = "https://jira.corp.example.com"
 	seedLocalOrgJiraHost(t, s, host)
 
-	rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira", nil)
+	rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status endpoint=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -450,7 +450,7 @@ func TestJiraIdentityStatus_NoJiraConfigured_EmptyHost(t *testing.T) {
 	s := newTestServer(t)
 	// Deliberately do NOT seed a Jira host — a GitHub-only org.
 
-	rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira", nil)
+	rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status endpoint=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -482,7 +482,7 @@ func TestJiraIdentityPAT_BadToken_Returns422(t *testing.T) {
 	seedLocalOrgJiraHost(t, s, jiraStub.URL)
 
 	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
 		map[string]any{"pat": "bad"})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
@@ -510,7 +510,7 @@ func TestJiraIdentityPAT_HostUnreachable_Returns502(t *testing.T) {
 	seedLocalOrgJiraHost(t, s, deadURL)
 
 	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
 		map[string]any{"pat": "whatever"})
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status=%d body=%s, want 502", rec.Code, rec.Body.String())
@@ -534,7 +534,7 @@ func TestJiraIdentityPAT_EmptyToken_Returns400(t *testing.T) {
 	seedLocalOrgJiraHost(t, s, "https://jira.example.com")
 
 	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
 		map[string]any{"pat": "   "})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d, want 400", rec.Code)
@@ -551,7 +551,7 @@ func TestJiraIdentityPAT_NoJiraHost_Returns422(t *testing.T) {
 	// Deliberately do NOT seed a Jira host.
 
 	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
 		map[string]any{"pat": "tok"})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
@@ -573,7 +573,7 @@ func TestJiraIdentityPAT_EmptyAccount_Returns422(t *testing.T) {
 	seedLocalOrgJiraHost(t, s, jiraStub.URL)
 
 	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
 		map[string]any{"pat": "tok"})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())

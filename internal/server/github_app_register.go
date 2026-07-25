@@ -164,13 +164,13 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 	manifest := map[string]any{
 		"name":         appName,
 		"url":          homepageURL,
-		"redirect_url": publicURL + "/api/orgs/" + orgID + "/github-app/register/callback",
+		"redirect_url": publicURL + "/api/orgs/" + orgID + "/github/app/register/callback",
 		// Two callbacks: the manifest-conversion redirect (this same URL), and
 		// the user-to-server Connect callback — the identity-capture flow
 		// reuses this App's client_id and redirects back here after consent,
 		// so its callback must be registered on the App at creation.
 		"callback_urls": []string{
-			publicURL + "/api/orgs/" + orgID + "/github-app/register/callback",
+			publicURL + "/api/orgs/" + orgID + "/github/app/register/callback",
 			s.connectCallbackURL(orgID),
 		},
 		"public": false,
@@ -309,7 +309,7 @@ button:hover{background:#2ea043}
 // can't make under the global CSP happens here instead. Org-admin only.
 // Works in both local and multi mode.
 //
-// GET /api/orgs/{org_id}/github-app/register/launch?owner_type=&owner_login=
+// GET /api/orgs/{org_id}/github/app/register/launch?owner_type=&owner_login=
 func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Request) {
 	if s.deployCfg == nil {
 		http.NotFound(w, r)
@@ -451,7 +451,7 @@ func (s *Server) renderLaunchError(w http.ResponseWriter, status int, orgID, ret
 // for the App's credentials, writes org_github_apps + vault secrets,
 // and redirects the browser to the workspace settings page.
 //
-// GET /api/orgs/{org_id}/github-app/register/callback?code=...&state=...
+// GET /api/orgs/{org_id}/github/app/register/callback?code=...&state=...
 func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.Request) {
 	if s.deployCfg == nil {
 		http.NotFound(w, r)

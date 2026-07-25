@@ -2,7 +2,7 @@
 // way the GitHub PAT flow drives its save: the caller's Continue (setup
 // wizard) / Save (Settings) performs the connect, rather than a field group
 // owning a separate Connect button. PUT
-// /api/orgs/{org}/jira-access/credential validates the credential server-side
+// /api/orgs/{org}/jira/access/credential validates the credential server-side
 // (reachability + auth) and persists it, so a successful result IS the
 // validation — there's no separate probe.
 //
@@ -82,7 +82,7 @@ export async function connectJira(
       ? { url: url.trim(), email: creds.jira_email.trim(), token: creds.jira_api_token.trim() }
       : { url: url.trim(), pat: creds.jira_pat.trim() }
   try {
-    const res = await fetch(`/api/orgs/${orgId}/jira-access/credential`, {
+    const res = await fetch(`/api/orgs/${orgId}/jira/access/credential`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

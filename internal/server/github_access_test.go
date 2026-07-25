@@ -214,7 +214,7 @@ func TestGitHubAppRegisterCallback_Staging(t *testing.T) {
 			}
 
 			rec := doJSON(t, s, http.MethodGet,
-				"/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/register/callback?code=c&state="+signed, nil)
+				"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/register/callback?code=c&state="+signed, nil)
 			if rec.Code != http.StatusFound {
 				t.Fatalf("callback = %d, want 302; body=%s", rec.Code, rec.Body.String())
 			}
@@ -243,9 +243,9 @@ func TestGitHubAppDiscard_Staged(t *testing.T) {
 		t.Fatalf("seed pat: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodDelete, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app", nil)
+	rec := doJSON(t, s, http.MethodDelete, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app", nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("DELETE github-app = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("DELETE github/app = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
 	if app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID); app != nil {
@@ -271,9 +271,9 @@ func TestGitHubAppDiscard_Active(t *testing.T) {
 	s := newTestServer(t)
 	seedLocalApp(t, s, true) // active
 
-	rec := doJSON(t, s, http.MethodDelete, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app", nil)
+	rec := doJSON(t, s, http.MethodDelete, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app", nil)
 	if rec.Code != http.StatusConflict {
-		t.Fatalf("DELETE active github-app = %d, want 409; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("DELETE active github/app = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 	if app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID); app == nil {
 		t.Error("active app was deleted on a 409 discard")
@@ -287,7 +287,7 @@ func TestGitHubAppCutover_NoApp404(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/cutover", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("cutover with no app = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
@@ -299,7 +299,7 @@ func TestGitHubAppCutover_AlreadyActive409(t *testing.T) {
 	s := newTestServer(t)
 	seedLocalApp(t, s, true)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/cutover", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover", nil)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("cutover of active app = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -316,7 +316,7 @@ func TestGitHubAppCutover_NoInstallations409(t *testing.T) {
 	setOrgGitHubBase(t, s, stub.URL)
 	seedLocalApp(t, s, false)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/cutover", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover", nil)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("cutover with no installations = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -340,7 +340,7 @@ func TestGitHubAppCutover_Success(t *testing.T) {
 		t.Fatalf("seed pat: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/cutover", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("cutover = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -367,7 +367,7 @@ func TestGitHubAccessSwitchToPAT_Success(t *testing.T) {
 	seedLocalApp(t, s, true)
 	seedInstallation(t, s, 1, "acme")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-access/switch-to-pat", map[string]string{"pat": "ghp_valid"})
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/switch-to-pat", map[string]string{"pat": "ghp_valid"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("switch-to-pat = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -397,7 +397,7 @@ func TestGitHubAccessSwitchToPAT_InvalidPAT(t *testing.T) {
 	setOrgGitHubBase(t, s, stub.URL)
 	seedLocalApp(t, s, true)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-access/switch-to-pat", map[string]string{"pat": "ghp_bad"})
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/switch-to-pat", map[string]string{"pat": "ghp_bad"})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("switch-to-pat with bad token = %d, want 422; body=%s", rec.Code, rec.Body.String())
 	}
@@ -416,7 +416,7 @@ func TestGitHubAccessSwitchToPAT_NoApp404(t *testing.T) {
 	stub := newGitHubAccessStub(t, ghAccessStub{login: "octocat"})
 	setOrgGitHubBase(t, s, stub.URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-access/switch-to-pat", map[string]string{"pat": "ghp_valid"})
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/switch-to-pat", map[string]string{"pat": "ghp_valid"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("switch-to-pat with no app = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
@@ -438,7 +438,7 @@ func TestGitHubAccessPATPreflight_StoresNothing(t *testing.T) {
 	seedConfiguredRepo(t, s, "acme", "web")
 	seedConfiguredRepo(t, s, "acme", "api")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-access/pat-preflight", map[string]string{"pat": "ghp_x"})
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/pat-preflight", map[string]string{"pat": "ghp_x"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("pat-preflight = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -487,7 +487,7 @@ func TestGitHubAppCutoverPreflight_Diff(t *testing.T) {
 	seedConfiguredRepo(t, s, "acme", "web")
 	seedConfiguredRepo(t, s, "acme", "api")
 
-	rec := doJSON(t, s, http.MethodGet, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/cutover-preflight", nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover-preflight", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("cutover-preflight = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -693,5 +693,5 @@ func orgPATLogin(t *testing.T, s *Server) string {
 
 // patRoute is the org's GitHub-PAT credential resource in local mode.
 func patRoute() string {
-	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/github-access/pat"
+	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/access/pat"
 }

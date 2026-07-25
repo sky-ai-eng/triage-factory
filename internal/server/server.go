@@ -135,7 +135,7 @@ type Server struct {
 	jiraApps db.JiraAppsStore
 	// jiraOAuthApps resolves the Atlassian OAuth app for an org (per-org
 	// override → deployment first-party in hosted; local-supplied BYO else
-	// not-configured). Backs the jira-app settings card's status + the
+	// not-configured). Backs the Jira app settings card's status + the
 	// connect_available signal the per-user Jira status endpoint returns.
 	// Built in New, so it's never nil — handlers don't guard.
 	jiraOAuthApps jira.OAuthAppResolver
@@ -792,8 +792,8 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/setup/start", s.handleSetupStart)
 	// DELETE on the collection = nuke every integration credential at once (the
 	// Settings danger zone). Unbinding ONE credential goes through that
-	// credential's own resource — DELETE /api/orgs/{org_id}/github-access/pat or
-	// .../jira-access/credential — which is why there's no per-integration
+	// credential's own resource — DELETE /api/orgs/{org_id}/github/access/pat or
+	// .../jira/access/credential — which is why there's no per-integration
 	// subpath here any more.
 	s.apiMutating("DELETE /api/integrations", s.handleIntegrationsClear)
 
@@ -1179,47 +1179,58 @@ func (s *Server) routes() {
 	// current snapshot into the caller's team as a brand-new fork.
 	s.apiMutating("POST /api/marketplace/listings/{id}/install", mh.handleMarketplaceInstall)
 
+	// The org-scoped provider surfaces are provider-first: everything the org
+	// configures about GitHub hangs off /api/orgs/{org_id}/github/, and Jira
+	// mirrors it. Each is sub-foldered by concern — access/ (how the org
+	// reaches the provider: the org credential and the either/or transitions),
+	// app/ (the registered App or OAuth app), identity/ (how the caller binds
+	// their own account), connect/ (the OAuth leg of that binding). The App is
+	// an access mode, not a sibling of access, which is why cutover (PAT→App)
+	// and switch-to-pat (App→PAT) live one level apart rather than under two
+	// unrelated parents. Provider is the stable axis: a GHES host change
+	// ripples through access, identity, and webhooks together.
+
 	// GitHub App manifest registration. The launch endpoint serves a
 	// script-free bounce page (carrying its own per-response CSP) that
 	// POSTs the manifest cross-origin to the org's GitHub host; the
 	// callback exchanges the temp code for App credentials. Both validate
 	// org membership + admin role inside the handler via
 	// r.PathValue("org_id"). Works in both local and multi mode.
-	s.api("GET /api/orgs/{org_id}/github-app/register/launch", s.handleGitHubAppRegisterLaunch)
-	s.api("GET /api/orgs/{org_id}/github-app/register/callback", s.handleGitHubAppRegisterCallback)
+	s.api("GET /api/orgs/{org_id}/github/app/register/launch", s.handleGitHubAppRegisterLaunch)
+	s.api("GET /api/orgs/{org_id}/github/app/register/callback", s.handleGitHubAppRegisterCallback)
 	// Bring-your-own-App import: the second way into App mode for orgs
 	// that can't or shouldn't create the App themselves. Validates an App ID +
 	// private key via an app-JWT GET /app, permission-preflights, and persists
 	// through the same path the manifest callback uses (staging rule unchanged).
 	// A JSON fetch from the SPA (not a top-level navigation like launch/callback),
 	// so it rides apiMutating (CSRF). Org-admin (gated inside the handler).
-	s.apiMutating("POST /api/orgs/{org_id}/github-app/import", s.handleGitHubAppImport)
+	s.apiMutating("POST /api/orgs/{org_id}/github/app/import", s.handleGitHubAppImport)
 	// Read-only status + install deep-link for the Workspace Settings panel.
 	// Any org member (read), so requireOrgMember rather than requireOrgAdmin.
-	s.api("GET /api/orgs/{org_id}/github-app", s.handleGitHubAppStatus)
-	s.api("GET /api/orgs/{org_id}/github-app/install-url", s.handleGitHubAppInstallURL)
+	s.api("GET /api/orgs/{org_id}/github/app", s.handleGitHubAppStatus)
+	s.api("GET /api/orgs/{org_id}/github/app/install-url", s.handleGitHubAppInstallURL)
 	// On-demand installation reconcile — the "UI panel refresh" half of D11
 	// installation discovery (the poller cycle is the other). Admin-only (the
 	// setup wizard's install step + the Settings App panel call it) and
 	// mode-agnostic. Mutating: it reconciles the installation mirror via the
 	// same API backfill the poller runs, so it rides apiMutating (CSRF).
-	s.apiMutating("POST /api/orgs/{org_id}/github-app/installations/refresh", s.handleGitHubAppInstallationsRefresh)
+	s.apiMutating("POST /api/orgs/{org_id}/github/app/installations/refresh", s.handleGitHubAppInstallationsRefresh)
 
 	// GitHub access either/or transitions (TFAC-328). GitHub access is
 	// strictly App XOR PAT per org; these commit the switches and surface the
 	// inform-only reachability diffs. All org-admin (gated inside the handler).
 	//   - cutover: commit a staged PAT→App switch (activate App + delete PAT).
 	//   - switch-to-pat: full App teardown, validate + store the new PAT.
-	//   - DELETE github-app: discard a staged (not-yet-live) App registration.
+	//   - DELETE github/app: discard a staged (not-yet-live) App registration.
 	//   - cutover-preflight / pat-preflight: inform-only reachability diffs.
 	// The two commits + the discard mutate state (apiMutating, CSRF); the
 	// cutover-preflight is a read (api); pat-preflight POSTs a token to probe
 	// reach but stores nothing — still apiMutating for the same-origin guard.
-	s.apiMutating("POST /api/orgs/{org_id}/github-app/cutover", s.handleGitHubAppCutover)
-	s.apiMutating("POST /api/orgs/{org_id}/github-access/switch-to-pat", s.handleGitHubAccessSwitchToPAT)
-	s.apiMutating("DELETE /api/orgs/{org_id}/github-app", s.handleGitHubAppDiscard)
-	s.api("GET /api/orgs/{org_id}/github-app/cutover-preflight", s.handleGitHubAppCutoverPreflight)
-	s.apiMutating("POST /api/orgs/{org_id}/github-access/pat-preflight", s.handleGitHubAccessPATPreflight)
+	s.apiMutating("POST /api/orgs/{org_id}/github/app/cutover", s.handleGitHubAppCutover)
+	s.apiMutating("POST /api/orgs/{org_id}/github/access/switch-to-pat", s.handleGitHubAccessSwitchToPAT)
+	s.apiMutating("DELETE /api/orgs/{org_id}/github/app", s.handleGitHubAppDiscard)
+	s.api("GET /api/orgs/{org_id}/github/app/cutover-preflight", s.handleGitHubAppCutoverPreflight)
+	s.apiMutating("POST /api/orgs/{org_id}/github/access/pat-preflight", s.handleGitHubAccessPATPreflight)
 
 	// The org integration credentials, each an addressable resource with an
 	// explicit bind + unbind rather than a field on the bulk settings save.
@@ -1229,10 +1240,10 @@ func (s *Server) routes() {
 	// forgotten) from whichever fields a bulk save happened to carry. See
 	// org_credentials.go. POST /api/settings/org is now pure config: no secret,
 	// no outbound call, and it can no longer revoke access as a side effect.
-	s.apiMutating("PUT /api/orgs/{org_id}/github-access/pat", s.handleGitHubPATPut)
-	s.apiMutating("DELETE /api/orgs/{org_id}/github-access/pat", s.handleGitHubPATDelete)
-	s.apiMutating("PUT /api/orgs/{org_id}/jira-access/credential", se.handleJiraConnect)
-	s.apiMutating("DELETE /api/orgs/{org_id}/jira-access/credential", s.handleJiraCredentialDelete)
+	// The Jira half of the pair is registered with the rest of the Jira
+	// surface below; the rationale above covers both.
+	s.apiMutating("PUT /api/orgs/{org_id}/github/access/pat", s.handleGitHubPATPut)
+	s.apiMutating("DELETE /api/orgs/{org_id}/github/access/pat", s.handleGitHubPATDelete)
 
 	// "Connect GitHub" user-to-server OAuth — binds a host-verified GitHub
 	// login to the signed-in user (identity, not access, not login).
@@ -1243,14 +1254,29 @@ func (s *Server) routes() {
 	// from GitHub's redirect), so they ride s.api (withSession, no CSRF wrap)
 	// and carry their own OAuth state-cookie CSRF defense. Any org member
 	// binds their own identity. The identity-status read backs the gate.
+	//
+	// These two paths are frozen — they are the one part of the org-scoped
+	// GitHub surface that isn't ours to rename. The callback is baked into a
+	// manifest-created App's callback_urls at creation time, and a
+	// bring-your-own-App owner registers it by hand (githubAppStatusResponse
+	// .ConnectCallbackURL exists to hand them the exact string). It is the
+	// redirect_uri sent on every user consent, and GitHub rejects a mismatch,
+	// so a rename breaks per-user Connect for every already-registered App
+	// until each owner edits their App settings on GitHub. start shares the
+	// parent and moves with the callback or not at all.
 	s.api("GET /api/orgs/{org_id}/github/connect/start", s.handleGitHubConnectStart)
 	s.api("GET /api/orgs/{org_id}/github/connect/callback", s.handleGitHubConnectCallback)
-	s.api("GET /api/orgs/{org_id}/identity/github", s.handleGitHubIdentityStatus)
+	s.api("GET /api/orgs/{org_id}/github/identity", s.handleGitHubIdentityStatus)
 	// Capture-and-discard per-user identity from a user-supplied PAT (PAT_2):
 	// validate → whoami → write user_github_identities → drop the token. The
 	// always-available fallback to Connect (and the only path when no App is
 	// registered). Never stores the token.
-	s.apiMutating("POST /api/orgs/{org_id}/identity/github/pat", s.handleGitHubIdentityPAT)
+	s.apiMutating("POST /api/orgs/{org_id}/github/identity/pat", s.handleGitHubIdentityPAT)
+
+	// The org's Jira credential — the Jira half of the addressable-resource
+	// pair whose rationale sits with the GitHub PAT routes above.
+	s.apiMutating("PUT /api/orgs/{org_id}/jira/access/credential", se.handleJiraConnect)
+	s.apiMutating("DELETE /api/orgs/{org_id}/jira/access/credential", s.handleJiraCredentialDelete)
 
 	// Per-user Jira access — the Jira sibling of the GitHub identity flow
 	// (jira_connect.go). status reports connected from a STORED credential
@@ -1259,8 +1285,8 @@ func (s *Server) routes() {
 	// user's Jira identity. DC = paste-a-PAT; connect_available now reflects
 	// whether an Atlassian OAuth app resolves (the Cloud Connect gate). Any org
 	// member binds their own access.
-	s.api("GET /api/orgs/{org_id}/identity/jira", s.handleJiraIdentityStatus)
-	s.apiMutating("POST /api/orgs/{org_id}/identity/jira/pat", s.handleJiraIdentityPAT)
+	s.api("GET /api/orgs/{org_id}/jira/identity", s.handleJiraIdentityStatus)
+	s.apiMutating("POST /api/orgs/{org_id}/jira/identity/pat", s.handleJiraIdentityPAT)
 
 	// Per-user "Connect Jira" Cloud OAuth (3LO) — the one-click counterpart of
 	// the paste path, gated on connect_available (an Atlassian app resolves).
@@ -1269,6 +1295,11 @@ func (s *Server) routes() {
 	// token (source='connect_oauth'). Both are GETs reached via top-level
 	// navigation, so they ride s.api (withSession, no CSRF wrap) and carry their
 	// own OAuth state-cookie CSRF defense — the GitHub Connect pattern.
+	//
+	// Frozen for the same reason as the GitHub connect pair above: the
+	// callback is the redirect_uri registered on the Atlassian OAuth app,
+	// external config an operator owns, so renaming it breaks Connect Jira
+	// for every already-configured app until its owner updates it.
 	s.api("GET /api/orgs/{org_id}/jira/connect/start", s.handleJiraConnectStart)
 	s.api("GET /api/orgs/{org_id}/jira/connect/callback", s.handleJiraConnectCallback)
 
@@ -1280,9 +1311,9 @@ func (s *Server) routes() {
 	// app itself (local). status is any-member (the card renders for everyone);
 	// import + delete are admin (gated inside the handler). The two mutators are
 	// JSON fetches from the SPA, so they ride apiMutating (CSRF).
-	s.api("GET /api/orgs/{org_id}/jira-app", s.handleJiraAppStatus)
-	s.apiMutating("POST /api/orgs/{org_id}/jira-app", s.handleJiraAppImport)
-	s.apiMutating("DELETE /api/orgs/{org_id}/jira-app", s.handleJiraAppDelete)
+	s.api("GET /api/orgs/{org_id}/jira/app", s.handleJiraAppStatus)
+	s.apiMutating("POST /api/orgs/{org_id}/jira/app", s.handleJiraAppImport)
+	s.apiMutating("DELETE /api/orgs/{org_id}/jira/app", s.handleJiraAppDelete)
 
 	// Per-org GitHub App webhook receiver. Pre-auth (GitHub has no
 	// session) and identified by org_id from the path; the handler
