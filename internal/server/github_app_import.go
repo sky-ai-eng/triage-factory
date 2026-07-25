@@ -505,7 +505,14 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 				return fmt.Errorf("vault put webhook_secret: %w", err)
 			}
 		}
-		return nil
+		// The same audit row the manifest-register path writes — importing
+		// an existing App binds the identical credential, just sourced by paste
+		// rather than by manifest exchange.
+		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialSet,
+			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindGitHubApp, base, app.Slug),
+		})
 	}); err != nil {
 		// Local-mode SecretStore writes hit the OS keychain outside the SQLite tx;
 		// clean up any entries that landed before the error so a failed import

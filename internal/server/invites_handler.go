@@ -218,7 +218,20 @@ func (ih *invitesHandler) handleInviteCreate(w http.ResponseWriter, r *http.Requ
 			InvitedBy:    userID,
 			ExpiresAt:    expiresAt,
 		})
-		return e
+		if e != nil {
+			return e
+		}
+		// An outstanding invite is granted access waiting to be
+		// claimed — the log has to show it at issue time, not only when the
+		// accept lands (an invite that is revoked or expires unaccepted would
+		// otherwise never appear at all). The later org_member_granted row
+		// carries the same invite id, closing the loop.
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionInviteCreated,
+			TeamID:      targetTeamID,
+			DetailJSON:  accessDetailInviteCreated(inviteID, email, role),
+		})
 	}); err != nil {
 		if isUniqueViolation(err) {
 			// org_invites_active_uniq — a pending invite to this address
@@ -341,9 +354,35 @@ func (ih *invitesHandler) handleInviteRevoke(w http.ResponseWriter, r *http.Requ
 
 	var outcome db.RevokeOutcome
 	if err := ih.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		// Resolve the address off the active list BEFORE revoking, so the audit
+		// row can name who lost the invite. Best-effort: the list is small and
+		// org-scoped, and a miss (already revoked, or expired out of the list)
+		// just leaves the email off the row rather than failing the revoke.
+		email := ""
+		if active, e := tx.Invites.ListActive(r.Context(), orgID); e == nil {
+			for _, iv := range active {
+				if iv.ID == inviteID {
+					email = iv.Email
+					break
+				}
+			}
+		}
 		var e error
 		outcome, e = tx.Invites.Revoke(r.Context(), orgID, inviteID)
-		return e
+		if e != nil {
+			return e
+		}
+		// Only a real revoke is a change. A 404/already-accepted outcome altered
+		// nothing, and logging it would put access changes in the log that never
+		// happened.
+		if outcome != db.RevokeOK {
+			return nil
+		}
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionInviteRevoked,
+			DetailJSON:  accessDetailInviteRevoked(inviteID, email),
+		})
 	}); err != nil {
 		internalError(w, "invites", err)
 		return

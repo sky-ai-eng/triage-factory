@@ -470,7 +470,7 @@ describe('Usage page', () => {
   it('local mode (N=1) renders one flat console from a single /org fetch', async () => {
     // Local mode: no AuthProvider (useOptionalAuth null), useOrgRole reports
     // non-admin, the sole team reports admin. Instead of three duplicated
-    // sections, LocalConsole renders a flat layout: over-time + allocation /
+    // sections, LocalConsole renders a flat layout: over-time + by-team /
     // category + by-rule, ALL from one /api/usage/org read — in local mode the
     // rollup folds in by_rule, so there's no second team round-trip.
     authMock.local = true
@@ -484,12 +484,12 @@ describe('Usage page', () => {
 
     // Flat instruments, no section headings.
     expect(await screen.findByText('Over time')).toBeInTheDocument()
-    expect(screen.getByText('Allocation')).toBeInTheDocument()
+    expect(screen.getByText('By team')).toBeInTheDocument()
     expect(screen.getByText('Category')).toBeInTheDocument()
     expect(screen.getByText('By rule')).toBeInTheDocument()
     expect(screen.queryByText('Personal')).not.toBeInTheDocument()
 
-    // System-overhead surfaces (allocation), by_rule comes from the rollup itself,
+    // System-overhead surfaces (the by-team ring), by_rule comes from the rollup itself,
     // and the headline carries the org total.
     expect((await screen.findAllByText('System')).length).toBeGreaterThan(0)
     expect(await screen.findByText('CI Fixer')).toBeInTheDocument()

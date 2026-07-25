@@ -158,15 +158,25 @@ func (se *settingsHandler) handleBedrockConnect(w http.ResponseWriter, r *http.R
 	// Anthropic empty-key arm; idempotent.
 	if req.AuthMethod == bedrockAuthMethodNone {
 		if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			if err := clearBedrockSecrets(r, tx, orgID); err != nil {
-				return err
-			}
+			// Settings first — its ref tells us whether there was anything to
+			// revoke, which the idempotent vault deletes cannot.
 			orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
 			if err != nil {
 				return fmt.Errorf("load org settings: %w", err)
 			}
+			hadBedrock := orgSet.BedrockCredentialsRef != ""
+			if err := clearBedrockSecrets(r, tx, orgID); err != nil {
+				return err
+			}
 			orgSet.BedrockCredentialsRef = ""
-			return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
+			if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
+				return err
+			}
+			if !hadBedrock {
+				return nil
+			}
+			return recordCredentialRemovals(r.Context(), tx, orgID, userID,
+				[]string{domain.CredentialKindBedrock})
 		}); err != nil {
 			settingsLog.Error("bedrock connect clear failed", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update Bedrock credentials"})
@@ -294,6 +304,7 @@ func (se *settingsHandler) handleBedrockConnect(w http.ResponseWriter, r *http.R
 				return fmt.Errorf("clear stale %s on provider switch: %w", k, err)
 			}
 		}
+		droppedAnthropic := orgSet.AnthropicAPIKeyRef != ""
 		orgSet.AnthropicAPIKeyRef = ""
 		if req.AuthMethod == bedrockAuthMethodBearer {
 			orgSet.BedrockCredentialsRef = integrations.KeyAWSBearerTokenBedrock
@@ -303,14 +314,23 @@ func (se *settingsHandler) handleBedrockConnect(w http.ResponseWriter, r *http.R
 		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return err
 		}
-		// TFAC-471: audit the bind/rotate in the same tx, like the
-		// Anthropic arm. The endpoint override is the closest thing to a
-		// host and is recorded when set.
-		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+		// Audit the bind/rotate in the same tx, like the Anthropic arm. The
+		// endpoint override is the closest thing to a host and is recorded when set.
+		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialSet,
 			DetailJSON:  accessDetailCredential(domain.CredentialKindBedrock, req.BaseURL),
-		})
+		}); err != nil {
+			return err
+		}
+		// The exclusivity sweep above revoked the org's Anthropic key — an
+		// admin auditing "when did we stop using the Anthropic key" should find
+		// it here, not have to infer it from the Bedrock bind.
+		if !droppedAnthropic {
+			return nil
+		}
+		return recordCredentialRemovals(r.Context(), tx, orgID, userID,
+			[]string{domain.CredentialKindAnthropicKey})
 	}); err != nil {
 		if missing, ok := err.(bedrockMissingSecretError); ok {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": string(missing)})
