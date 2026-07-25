@@ -841,6 +841,39 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 			if realSource != realTrusted {
 				return fmt.Errorf("sandbox: mount %q source %q is not this run's own gh-injector cert (want %q)", m.Destination, m.Source, trusted)
 			}
+		case TrustedSkillsDestination:
+			// This run's own step-skill staging dir (optional — present only on a
+			// launch that carries a blueprint step skill). Validate-not-override,
+			// like the agenthost socket: the orchestrator staged it before the RPC,
+			// so the broker requires the claimed source to resolve to its own
+			// derivation from THIS launch's run id — which rejects a sibling run's
+			// staging dir (shape-valid, still someone else's step) and any foreign
+			// path. Read-only is required, not merely permitted: the mount exists so
+			// the jail can READ a skill TF authored, and an rw bind would let the
+			// agent rewrite orchestrator-owned state outside its run tree.
+			if err := requireReadOnlyMount(m); err != nil {
+				return err
+			}
+			if runID == "" {
+				return fmt.Errorf("sandbox: mount %q requires a run id to derive this run's own staging dir", m.Destination)
+			}
+			// Resolve the staging BASE and re-derive, rather than resolving the
+			// per-run path whole. Both forms reject a foreign source, but this one
+			// additionally pins the final component to a real directory: resolving
+			// <base>/<runID> whole would follow a symlink planted THERE — by the
+			// same (compromised) orchestrator that owns the staging namespace —
+			// and then agree with the equally-followed source, waving through a
+			// read-only bind of anywhere on the host. With the base resolved
+			// first, a symlinked per-run entry resolves outside the derived path
+			// and is rejected.
+			realBase, rErr := realPath(SkillStagingBase())
+			if rErr != nil {
+				return fmt.Errorf("sandbox: resolve step-skill staging base: %w", rErr)
+			}
+			trusted := filepath.Join(realBase, runID)
+			if realSource != trusted {
+				return fmt.Errorf("sandbox: mount %q source %q is not this run's own step-skill staging dir (want %q)", m.Destination, m.Source, trusted)
+			}
 		default:
 			if !hasScope {
 				return fmt.Errorf("sandbox: mount %q source %q is not a recognized broker-global/per-run mount, and this run's worktree carries no org scope to authorize it", m.Destination, m.Source)
@@ -850,6 +883,26 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 				return fmt.Errorf("sandbox: mount %q source %q is outside this run's own org tree %q", m.Destination, m.Source, orgPrefix)
 			}
 		}
+	}
+	return nil
+}
+
+// requireReadOnlyMount enforces that a mount is read-only: "ro" present and
+// "rw" absent. The generic option check above only bounds the option SET; a
+// destination whose whole purpose is read-only delivery of TF-authored content
+// needs the stronger form, so a caller can never quietly upgrade it to writable.
+func requireReadOnlyMount(m Mount) error {
+	ro := false
+	for _, o := range m.Options {
+		if o == "rw" {
+			return fmt.Errorf("sandbox: mount %q must be read-only, got %q", m.Destination, o)
+		}
+		if o == "ro" {
+			ro = true
+		}
+	}
+	if !ro {
+		return fmt.Errorf("sandbox: mount %q must carry the \"ro\" option", m.Destination)
 	}
 	return nil
 }

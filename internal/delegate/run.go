@@ -265,19 +265,33 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// the contract can reference it deterministically.
 	namespace := memoryNamespace(cfg.blueprintRunID, runID)
 
-	// Materialize any prior task memories into ./_scratch/entity-memory/, one
-	// folder per workflow run, and create this run's own namespace folder, so
-	// the agent sees what previous iterations on this task have already tried.
-	// The directory is git-excluded by writeLocalExcludes
-	// (managedExcludePatterns in internal/worktree/worktree.go) so
-	// nothing leaks into the PR.
-	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, claudeCwd, task.EntityID, namespace)
+	// Both materializations below write into <runRoot>/_scratch/, so they only run
+	// while the tree is still ours. Once a launch has handed it to the sandbox
+	// uid — a warm blueprint step N>0, or a warm resume — every create/truncate
+	// under it is EACCES for the capability-less orchestrator, and forcing it is
+	// exactly the pattern the staged step skill exists to avoid. Skipping loses
+	// nothing: whatever these passes would write is already on disk from the
+	// build-time (or cold-rehydrate) pass that ran while the tree was ours, and
+	// the one genuinely new item at step N — step N-1's memory — was written into
+	// this same shared tree by the agent itself. A cold rehydrate rebuilds the
+	// tree orchestrator-owned, so the full pass runs there.
+	if sandbox.RunTreeHandedOff(claudeCwd) {
+		delegateLog.Debug("run tree already handed to the sandbox identity; skipping memory/knowledge materialization (its content is already on disk from the pre-launch pass)", "run", runID, "cwd", claudeCwd)
+	} else {
+		// Materialize any prior task memories into ./_scratch/entity-memory/, one
+		// folder per workflow run, and create this run's own namespace folder, so
+		// the agent sees what previous iterations on this task have already tried.
+		// The directory is git-excluded by writeLocalExcludes
+		// (managedExcludePatterns in internal/worktree/worktree.go) so
+		// nothing leaks into the PR.
+		materializePriorMemories(s.taskMemory, orgID, cfg.teamID, claudeCwd, task.EntityID, namespace)
 
-	// Copy the entity's project knowledge-base into
-	// ./_scratch/project-knowledge/ if the entity is assigned to a
-	// project, so the agent has curated project context available
-	// alongside prior memories.
-	materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID)
+		// Copy the entity's project knowledge-base into
+		// ./_scratch/project-knowledge/ if the entity is assigned to a
+		// project, so the agent has curated project context available
+		// alongside prior memories.
+		materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID)
+	}
 
 	selfBin, err := os.Executable()
 	if err != nil {
@@ -411,6 +425,10 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		// the GH_* env, when the sidecar bound the injector. nil-safe on a nil
 		// execSandbox (local/non-sandbox keeps the SDK exec-verb gh).
 		GHChannel: cfg.execSandbox.ghChannel(runID),
+		// This step's staged skill, bind-mounted read-only. Empty for every
+		// non-blueprint run and in local mode (where the skill lives in the
+		// worktree instead).
+		SkillsSourcePath: cfg.skillsSourcePath,
 		// Org commit identity (TFAC-452): empty when none resolved → ambient git
 		// config inherited (today's behavior).
 		GitUserName:  commitIdentity.Name,

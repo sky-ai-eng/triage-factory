@@ -312,6 +312,8 @@ func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, runI
 		return "", fmt.Errorf("write local git excludes: %w", err)
 	}
 
+	plantSandboxSkillsLink(wtDir)
+
 	worktreeLog.Info("checkout run clone created (self-contained)", "dir", wtDir, "ref", ref, "detached", true)
 	return wtDir, nil
 }
@@ -593,6 +595,7 @@ func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBran
 	if err := addExcludesOrRollback(runID, wtDir); err != nil {
 		return "", err
 	}
+	plantSandboxSkillsLink(wtDir)
 
 	worktreeLog.Debug("branch worktree at", "dir", wtDir, "branch", featureBranch, "base", baseBranch)
 	return wtDir, nil

@@ -217,6 +217,23 @@ type RunOptions struct {
 	// GHChannelParams.
 	GHChannel *GHChannelParams
 
+	// SkillsSourcePath, when non-empty, is the orchestrator-owned staging dir
+	// holding exactly this launch's blueprint step skill
+	// (sandbox.TrustedSkillsSourcePath(TraceID)). The sandbox branch bind-mounts
+	// it READ-ONLY at sandbox.TrustedSkillsDestination; the agent finds it through
+	// the symlink the run tree carries at `.claude/skills`, which in-jail is the
+	// engine's ~/.claude/skills.
+	//
+	// This is how a step skill reaches a sandboxed agent WITHOUT TF writing into
+	// the run tree: the tree belongs to the per-run sandbox uid from the first
+	// launch onward, so the capability-less orchestrator could not create (or
+	// remove) a SKILL.md inside it at the next step's setup.
+	//
+	// Sandbox-only, and empty on every non-blueprint run (only blueprint steps
+	// carry a skill). Local mode keeps materializing into the worktree instead —
+	// it owns the tree and there is no jail to mount into.
+	SkillsSourcePath string
+
 	// ReadOnlyRepoMounts are extra host directories bind-mounted READ-ONLY
 	// into the sandbox under Cwd. The Curator populates this with its shared
 	// per-(org, repo) pinned-repo worktrees so the agent reads them without a
@@ -704,6 +721,25 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 				Destination: sandboxGHBinary,
 				Options:     []string{"ro"},
 			})
+		}
+	}
+
+	// This launch's blueprint step skill, bind-mounted RO from the
+	// orchestrator-owned staging dir at the fixed rootfs destination. Optional:
+	// only a blueprint step carries one. The os.Stat guard keeps a staging dir
+	// that vanished (a swept orphan on a cold cross-executor resume) from failing
+	// the whole launch on the broker's source-resolution check — the agent then
+	// continues from its transcript without the skill file, which is a discovery
+	// degradation, not a broken run.
+	if opts.SkillsSourcePath != "" {
+		if _, statErr := os.Stat(opts.SkillsSourcePath); statErr == nil {
+			extraMounts = append(extraMounts, sandbox.Mount{
+				Source:      opts.SkillsSourcePath,
+				Destination: sandbox.TrustedSkillsDestination,
+				Options:     []string{"ro"},
+			})
+		} else {
+			agentprocLog.Warn("step-skill staging dir missing; launching without the skills mount", "path", opts.SkillsSourcePath, "error", statErr)
 		}
 	}
 

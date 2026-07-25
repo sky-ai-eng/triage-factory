@@ -131,6 +131,8 @@ func CleanupWithOptions(opts CleanupOptions) {
 		}
 	}
 
+	sweepOrphanedSkillStagingDirs(opts.PreserveWorktreeFor)
+
 	// Prune all bare repos — always, regardless of the runs dir above.
 	// Clear stale locked ghosts first (plain prune skips their lock
 	// marker), then run the ordinary prune for unlocked stale entries.
@@ -142,6 +144,46 @@ func CleanupWithOptions(opts CleanupOptions) {
 	reposRoot := paths.BareCacheRoot(runmode.LocalDefaultOrgID)
 	clearStaleLockedWorktreesAll(reposRoot)
 	pruneAll(reposRoot)
+}
+
+// sweepOrphanedSkillStagingDirs reclaims per-run step-skill staging dirs left
+// behind by runs that are gone — the leftover-artifact counterpart of the run-
+// tree sweep above and the orphaned-cgroup sweep on the privileged side. Cheap:
+// each dir holds one SKILL.md, but a crash loop would otherwise accumulate them
+// under $TMPDIR forever.
+//
+// Plain os.RemoveAll, not the privileged seam: a staging dir is orchestrator-
+// owned by construction and never chowned to a sandbox identity — that is the
+// entire point of staging outside the run tree.
+//
+// preserve is the caller's warm-worktree keep set, keyed by worktree directory
+// name (a run id for a standalone run, the blueprint_run_id for a blueprint's
+// shared tree). Staging dirs are keyed by the step's own conversation id, so
+// only the standalone shape ever matches — enough to keep the sweep from
+// fighting a preserved run, and moot for the blueprint shape today because the
+// only mode that stages at all (multi) passes no preserve set, so its parked
+// worktrees are swept here regardless and rehydrate from snapshot.
+func sweepOrphanedSkillStagingDirs(preserve map[string]bool) {
+	base := sandbox.SkillStagingBase()
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return // nothing staged on this host
+	}
+	count := 0
+	for _, e := range entries {
+		if !e.IsDir() || preserve[e.Name()] {
+			continue
+		}
+		full := filepath.Join(base, e.Name())
+		if err := os.RemoveAll(full); err != nil {
+			worktreeLog.Warn("orphaned step-skill staging dir not removed", "path", full, "error", err)
+			continue
+		}
+		count++
+	}
+	if count > 0 {
+		worktreeLog.Info("cleaned up orphaned step-skill staging dirs", "count", count)
+	}
 }
 
 func pruneAll(baseDir string) {

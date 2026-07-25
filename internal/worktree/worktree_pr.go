@@ -233,6 +233,8 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 		return "", fmt.Errorf("write local git excludes: %w", err)
 	}
 
+	plantSandboxSkillsLink(wtDir)
+
 	worktreeLog.Info("PR worktree created", "dir", wtDir, "branch", localBranch, "head", headBranch, "fork", isFork)
 	return wtDir, nil
 }
@@ -280,6 +282,8 @@ func finishSelfContainedPRClone(ctx context.Context, bareDir, wtDir, localBranch
 		_ = os.RemoveAll(wtDir)
 		return "", fmt.Errorf("write local git excludes: %w", err)
 	}
+
+	plantSandboxSkillsLink(wtDir)
 
 	worktreeLog.Info("PR run clone created (self-contained)", "dir", wtDir, "branch", localBranch, "head", headBranch, "fork", isFork)
 	return wtDir, nil
