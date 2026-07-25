@@ -23,3 +23,7 @@ func removeRunTree(_ context.Context, path string) error {
 func captureRunDelta(_ context.Context, _, _ string) ([]byte, error) {
 	return nil, ErrUnsupportedPlatform
 }
+
+// runTreeHandedOff is always false off Linux: no sandbox identity ever takes
+// ownership of a run tree there, so the orchestrator can always write into it.
+func runTreeHandedOff(_ string) bool { return false }

@@ -408,6 +408,10 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		PrebuiltProxyEnv: opts.execSandbox.proxyEnv(),
 		StartAgentHost:   startAgentHost,
 		GHChannel:        opts.execSandbox.ghChannel(runID),
+		// Re-mount the step skill this run's original claim staged, when it's
+		// still on disk — a resume continues the same step, so it should see the
+		// same skill it started with.
+		SkillsSourcePath: stagedStepSkillsSource(runID),
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
 

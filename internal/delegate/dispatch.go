@@ -15,14 +15,17 @@ package delegate
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 )
@@ -386,17 +389,39 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 		dispatchLog.Warn("increment usage for step prompt failed", "prompt", stepPrompt.ID, "error", e)
 	}
 
-	// Materialize this step's skill, wiping any prior step's so step N only sees
-	// its own SKILL.md.
-	if err := skills.WipeBlueprintSkills(cfg.wtPath); err != nil {
-		dispatchLog.Warn("wipe skills failed", "run", run.ID, "step", stepIdx, "error", err)
-	}
+	// Materialize this step's skill so step N only ever sees its own SKILL.md.
+	// Two shapes, chosen by whether this host jails the agent:
+	//
+	//   - sandboxed (multi + Linux): stage it OUTSIDE the workspace, in an
+	//     orchestrator-owned dir the launch bind-mounts read-only. The run tree
+	//     belongs to step 0's sandbox uid from its first launch onward, and the
+	//     orchestrator holds no capabilities after its exec-time drop, so writing
+	//     a skill into the tree at step 1's setup is EACCES — the deterministic
+	//     failure every multi-step blueprint hit. Isolation is structural here:
+	//     the staging dir is keyed by this step's own conversation id and holds
+	//     exactly one skill.
+	//   - local: byte-identical to released behavior — write `.claude/skills`
+	//     inside the worktree, wiping any prior step's first. No jail, and the
+	//     orchestrator owns the tree, so nothing to change.
 	slug := skills.SlugForBlueprintStep(stepIdx, stepPrompt.Name)
-	if err := skills.MaterializeStepSkill(cfg.wtPath, slug, stepPrompt, step.Brief); err != nil {
+	if err := s.materializeStepSkill(&cfg, run.ID, slug, stepPrompt, step.Brief); err != nil {
 		s.terminateBlueprint(orgID, br.ID, task.ID, run.TriggerType, run.CreatorUserID, startTime, cfg,
 			domain.BlueprintRunStatusFailed, fmt.Sprintf("materialize step %d skill: %s", stepIdx, err.Error()), &stepIdx, false)
 		return
 	}
+	// The staging dir outlives this function only while the step can still be
+	// resumed: a parked (`open`) step's next claim re-mounts it. Every other
+	// disposition — completed, failed, cancelled — is the end of the step, so
+	// reclaim it. A leftover from a crash is swept at startup.
+	stepParked := false
+	defer func() {
+		if stepParked {
+			return
+		}
+		if err := skills.RemoveStagedSkills(cfg.skillsSourcePath); err != nil {
+			dispatchLog.Warn("remove staged step skill failed", "run", run.ID, "step", stepIdx, "error", err)
+		}
+	}()
 
 	// Position bit + tool extensions, exactly as the old loop set them.
 	cfg.appendSysPrompt = nonterminalStepSysPrompt(stepIdx, len(plan))
@@ -452,6 +477,9 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	stepRun.TriggerType = run.TriggerType
 	stepRun.CreatorUserID = run.CreatorUserID
 	stepRun.Model = run.Model
+	// Same predicate reactToStepTerminal uses to leave the blueprint running: an
+	// `open` step is dormant, not done, so its staged skill stays for the resume.
+	stepParked = stepRun.Status == "open"
 	s.reactToStepTerminal(orgID, br, *stepRun, cfg, startTime)
 }
 
@@ -897,6 +925,54 @@ func parseGitHubTask(task domain.Task) (owner, repo string, prNumber int) {
 	}
 	owner, repo = parseOwnerRepo(repoStr)
 	return owner, repo, prNumber
+}
+
+// materializeStepSkill places one blueprint step's SKILL.md where this host's
+// agent will find it, and records the staging path on cfg when there is one.
+//
+// The branch is the sandbox gate, not the run mode directly: a jailed agent
+// reads its skill from a read-only bind mount of an orchestrator-owned staging
+// dir (nothing TF writes ever touches the sandbox-owned run tree again after its
+// first launch), while an un-jailed one keeps the released behavior of a
+// `.claude/skills` directory inside the worktree.
+//
+// runID is the step's own conversation id — the staging key, which is what makes
+// each launch's mount hold exactly that step's skill.
+func (s *Spawner) materializeStepSkill(cfg *runConfig, runID, slug string, stepPrompt *domain.Prompt, brief string) error {
+	if !agentproc.WillSandbox() {
+		// Wipe first so step N+1 doesn't inherit step N's SKILL.md from the shared
+		// worktree. Non-fatal, exactly as before: a stale sibling skill is a
+		// discovery nuisance, a failed blueprint is not.
+		if err := skills.WipeBlueprintSkills(cfg.wtPath); err != nil {
+			dispatchLog.Warn("wipe skills failed", "run", runID, "error", err)
+		}
+		return skills.MaterializeStepSkill(cfg.wtPath, slug, stepPrompt, brief)
+	}
+	dir := sandbox.TrustedSkillsSourcePath(runID)
+	if err := skills.StageStepSkill(dir, slug, stepPrompt, brief); err != nil {
+		return err
+	}
+	cfg.skillsSourcePath = dir
+	return nil
+}
+
+// stagedStepSkillsSource returns runID's step-skill staging dir when one is
+// still on disk, else "". A resume re-invokes the agent in the same conversation
+// and deliberately runs none of the blueprint-step machinery, so it re-mounts
+// whatever the step's original claim staged rather than re-deriving the step
+// from the frozen plan. Absent — a cold resume on an executor that never staged
+// it, or after a startup sweep — the resumed agent continues from its transcript
+// without the skill file; the mount is a discovery convenience, not the
+// conversation's state.
+func stagedStepSkillsSource(runID string) string {
+	if runID == "" || !agentproc.WillSandbox() {
+		return ""
+	}
+	dir := sandbox.TrustedSkillsSourcePath(runID)
+	if _, err := os.Stat(dir); err != nil {
+		return ""
+	}
+	return dir
 }
 
 // handleStepSetupError requeues a claimed run whose workspace setup hit a

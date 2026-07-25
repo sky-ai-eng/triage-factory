@@ -12,8 +12,11 @@ import (
 
 	_ "embed" // powers blueprintStepNonterminalPrompt
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -174,6 +177,13 @@ func (s *Spawner) terminateBlueprint(
 		s.runBlueprintWorktreeCleanup(blueprintRunID, cfg)
 	}
 
+	// Reclaim any step-skill staging dir still held for this blueprint. Each
+	// step's own dispatch drops its dir on a terminal disposition, so what
+	// reaches here is the parked case — a step left `open` as the warm resume
+	// point, whose blueprint then terminated (a cancel, or an abort) and will
+	// never resume. Best-effort, and the startup sweep is the backstop.
+	s.reclaimBlueprintStepSkills(bgCtx, orgID, blueprintRunID)
+
 	// Drop the durable workspace snapshot now the blueprint is terminal so the
 	// blob store doesn't orphan it — EXCEPT an aborted terminal, whose
 	// completed+abort step run stays message-resumable. An abort snapshot is
@@ -196,6 +206,27 @@ func (s *Spawner) terminateBlueprint(
 	dur := time.Since(startTime)
 	blueprintLog.Info("blueprint_run terminated",
 		"blueprint_run", blueprintRunID, "status", status, "reason", abortReason, "duration", dur)
+}
+
+// reclaimBlueprintStepSkills removes the orchestrator-owned step-skill staging
+// dir of every run in a terminated blueprint. Keyed per step run (that is the
+// staging key), and idempotent — a step that already dropped its own dir at its
+// terminal is a no-op here. A read failure just forgoes the reclaim; the dirs
+// hold one SKILL.md each and the startup sweep collects them.
+func (s *Spawner) reclaimBlueprintStepSkills(ctx context.Context, orgID, blueprintRunID string) {
+	if !agentproc.WillSandbox() {
+		return // local mode never stages outside the worktree
+	}
+	stepRuns, err := s.blueprints.RunsForBlueprintSystem(ctx, orgID, blueprintRunID)
+	if err != nil {
+		blueprintLog.Warn("list step runs for step-skill reclaim failed", "blueprint_run", blueprintRunID, "error", err)
+		return
+	}
+	for _, sr := range stepRuns {
+		if err := skills.RemoveStagedSkills(sandbox.TrustedSkillsSourcePath(sr.ID)); err != nil {
+			blueprintLog.Warn("remove staged step skill failed", "blueprint_run", blueprintRunID, "step_run", sr.ID, "error", err)
+		}
+	}
 }
 
 // runBlueprintWorktreeCleanup performs the cleanup runAgent would have done
