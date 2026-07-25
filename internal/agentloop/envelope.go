@@ -6,10 +6,12 @@ import (
 )
 
 // codingAgentSystemPrompt is the base coding-agent system prompt — the
-// stable, task-independent half of every native system prompt. It is
-// vendored as a file rather than composed in Go because it co-evolved with
-// the seven tool definitions and is iterated by hand, not by code. See
-// prompts/PROVENANCE.md for its source and current status.
+// stable, task-independent half of every native system prompt, and the first
+// thing in the prefix every provider caches. It is a file rather than text
+// composed in Go because it is iterated by hand alongside the seven tool
+// definitions it was written against: the descriptions in
+// tools/definitions.json and the wording here are one artifact, and editing
+// either alone changes model behavior for the worse.
 //
 //go:embed prompts/coding-agent-system.txt
 var codingAgentSystemPrompt string
@@ -29,14 +31,18 @@ var codingAgentSystemPrompt string
 var completionBlueprint string
 
 // blueprintStepNonterminal is the addendum appended on a non-terminal
-// blueprint step — the same guidance the SDK path's addendum carries, minus
-// its JSON-envelope references.
+// blueprint step. It changes no tool: within a blueprint the tool set is the
+// same everywhere. What it changes is what an ordinary stop means, since on
+// a non-final step that is a handoff rather than the end of the task. Step
+// position is carried here and nowhere else, which is why a prompt and a
+// tool list cannot fall out of step.
 //
-// It changes no tool: the tool set is the same everywhere. What it changes
-// is what an ordinary stop means, since on a non-final step that is a
-// handoff rather than the end of the task. Step position is carried here and
-// nowhere else, which is why a prompt and a tool list cannot fall out of
-// step.
+// It shares its handoff and external-action guidance with the SDK path's
+// file of the same name, but it is NOT a rewrite of it and the two must be
+// edited independently: there, a step declares `continue` in a JSON envelope
+// and stopping any other way ends the blueprint; here stopping IS the
+// handoff. Porting wording across mechanically would invert the safe
+// default on one side or the other.
 //
 //go:embed prompts/blueprint-step-nonterminal.txt
 var blueprintStepNonterminal string
