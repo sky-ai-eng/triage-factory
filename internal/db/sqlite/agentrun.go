@@ -364,7 +364,7 @@ func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID,
 // engagement's setup sub-state surfaces through the field the wire has
 // always carried; predicates elsewhere keep using the stored column.
 const sqliteRunColumns = `
-	r.id, COALESCE(r.task_id, ''),
+	r.id, COALESCE(r.task_id, ''), COALESCE(r.runtime, ''),
 	COALESCE((SELECT cl.phase FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL),
 	         r.status, ''),
 	r.model, r.started_at, r.queued_at,
@@ -1033,14 +1033,17 @@ func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string
 }
 
 // MarkDelivered flips delivered=true on the given message ids, scoped to
-// runID. ids outside the run or already delivered are silently unaffected.
-func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, ids []int) error {
+// runID, stamping subtype in the same statement when non-empty. ids outside
+// the run or already delivered are silently unaffected.
+func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, ids []int, subtype string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
 	if len(ids) == 0 {
 		return nil
 	}
+	// NULLIF keeps the stamp optional without forking the statement: an
+	// empty subtype leaves each row's own value in place.
 	for start := 0; start < len(ids); start += inListChunkSize {
 		end := start + inListChunkSize
 		if end > len(ids) {
@@ -1048,14 +1051,14 @@ func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, 
 		}
 		chunk := ids[start:end]
 		placeholders := make([]string, len(chunk))
-		args := make([]any, 0, len(chunk)+1)
-		args = append(args, runID)
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, subtype, runID)
 		for i, id := range chunk {
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
 		if _, err := s.q.ExecContext(ctx, `
-			UPDATE messages SET delivered = 1
+			UPDATE messages SET delivered = 1, subtype = COALESCE(NULLIF(?, ''), subtype)
 			WHERE conversation_id = ? AND id IN (`+strings.Join(placeholders, ",")+`)
 		`, args...); err != nil {
 			return err
@@ -1150,7 +1153,7 @@ func scanConversation(row *sql.Row, r *domain.Conversation) error {
 	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
 	if err := row.Scan(
-		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
@@ -1170,7 +1173,7 @@ func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
 	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
 	if err := rows.Scan(
-		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,

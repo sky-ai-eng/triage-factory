@@ -45,3 +45,9 @@
 # CI / release tooling
 .golangci.yml
 .goreleaser.yaml
+
+# The tool host's own cargo target dir. The toolhost-builder stage rebuilds
+# from source inside a cache mount, so a host-built target tree is dead
+# weight in the context (and would be the wrong libc anyway).
+/harness/target
+/harness/*/target

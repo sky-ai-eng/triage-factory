@@ -253,9 +253,12 @@ type ConversationStore interface {
 	// messages.role is app-validated (no CHECK): "assistant" | "tool" |
 	// "user". "user" covers both a human's free-form message and the native
 	// loop's injected input; subtype further discriminates the latter via
-	// the reserved (not yet minted by any code in this repo) subtypes
-	// "injection:compaction-request", "injection:compaction-result", and
-	// "injection:steer".
+	// the "injection:*" subtypes. "injection:steer" (input drained between
+	// turns, while the model was mid-work) and "injection:executor-changed"
+	// (the claim-time notice that the workspace was restored from its last
+	// snapshot) are minted by the native loop;
+	// "injection:compaction-request" and "injection:compaction-result" are
+	// reserved and not yet minted by any code in this repo.
 	//
 	// InsertMessage/InsertMessageSystem/Messages/MessagesForRuns below serve
 	// today's readers (the SDK runtime's live stream, the UI transcript
@@ -327,7 +330,16 @@ type ConversationStore interface {
 	// batch primitive a native loop calls once it has folded a run of
 	// pending rows into an assembly. ids outside runID, already delivered,
 	// or nonexistent are silently skipped (no error, no-op).
-	MarkDelivered(ctx context.Context, orgID, runID string, ids []int) error
+	//
+	// subtype, when non-empty, is stamped onto the same rows in the same
+	// statement. The loop's mid-turn drain flushes with
+	// "injection:steer" so the row records — durably, in the column
+	// assembly reads — that the input arrived while the model was working;
+	// a bare drain passes "" and leaves each row's own subtype alone. One
+	// statement rather than flush-then-stamp because a crash between the
+	// two would leave a delivered row whose provenance was lost, and
+	// assembly would then render it as an ordinary user turn.
+	MarkDelivered(ctx context.Context, orgID, runID string, ids []int, subtype string) error
 
 	// SetWindowState is the elision/compaction primitive: a batched range
 	// flip of window_state from `from` to `to`, restricted to rows currently

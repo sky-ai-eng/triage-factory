@@ -71,10 +71,87 @@ func RowsToMessages(rows []domain.Message, opts AssemblyOptions) ([]schemas.Chat
 		out = append(out, m)
 	}
 
+	out = consolidateAdjacentUsers(out)
+
 	if !opts.NoCacheBreakpoint {
 		applyMovingCacheBreakpoint(out)
 	}
 	return out, nil
+}
+
+// consolidateAdjacentUsers merges each run of two or more adjacent
+// `role=user` messages into one message carrying their content blocks in
+// order. Persistence and display stay row-granular — this is a packing step
+// on the way to the wire, run over the assembled list and nowhere else.
+//
+// It exists because bifrost's Anthropic packer groups consecutive TOOL
+// messages into one user turn but passes adjacent plain-user messages
+// through unmerged, and the Anthropic API rejects (or degrades on)
+// back-to-back user turns. A drain that flushes a follow-up next to a
+// steer, or an injection landing beside the delegation prompt, produces
+// exactly that shape.
+//
+// Two properties the loop depends on:
+//
+//   - Deterministic: the output is a pure function of the input order, so
+//     two executors assembling the same rows build the same request.
+//   - Append-stable: a newly drained row can only extend the final run, so
+//     every message before the last user run keeps its exact packed form
+//     and the cached prefix survives. This is also why it runs BEFORE the
+//     moving cache breakpoint is stamped — the breakpoint must land on the
+//     merged message's last block, not on a block that a later merge moves.
+//
+// A run of one is returned untouched (a lone string-content user message
+// keeps its string form, so the common case is byte-identical on the wire).
+func consolidateAdjacentUsers(msgs []schemas.ChatMessage) []schemas.ChatMessage {
+	out := make([]schemas.ChatMessage, 0, len(msgs))
+	for i := 0; i < len(msgs); {
+		if msgs[i].Role != schemas.ChatMessageRoleUser {
+			out = append(out, msgs[i])
+			i++
+			continue
+		}
+		j := i
+		for j < len(msgs) && msgs[j].Role == schemas.ChatMessageRoleUser {
+			j++
+		}
+		if j-i == 1 {
+			out = append(out, msgs[i])
+			i = j
+			continue
+		}
+		var blocks []schemas.ChatContentBlock
+		for _, m := range msgs[i:j] {
+			blocks = append(blocks, contentAsBlocks(m.Content)...)
+		}
+		merged := schemas.ChatMessage{Role: schemas.ChatMessageRoleUser}
+		if len(blocks) > 0 {
+			merged.Content = &schemas.ChatMessageContent{ContentBlocks: blocks}
+		}
+		out = append(out, merged)
+		i = j
+	}
+	return out
+}
+
+// contentAsBlocks normalizes a message's content union to a block slice so
+// consolidation can concatenate across the two representations. String
+// content becomes one text block; nil content contributes nothing.
+func contentAsBlocks(c *schemas.ChatMessageContent) []schemas.ChatContentBlock {
+	if c == nil {
+		return nil
+	}
+	if c.ContentStr != nil {
+		if *c.ContentStr == "" {
+			return nil
+		}
+		text := *c.ContentStr
+		return []schemas.ChatContentBlock{{
+			Type: schemas.ChatContentBlockTypeText,
+			Text: &text,
+		}}
+	}
+	return append([]schemas.ChatContentBlock(nil), c.ContentBlocks...)
 }
 
 // effectiveKey is COALESCE(seq, id) as a float so a fractional seq interleaves
@@ -106,7 +183,7 @@ func rowToMessage(r domain.Message) (schemas.ChatMessage, error) {
 
 	switch r.Role {
 	case "user":
-		return schemas.ChatMessage{Role: schemas.ChatMessageRoleUser, Content: content}, nil
+		return schemas.ChatMessage{Role: schemas.ChatMessageRoleUser, Content: wrapSteer(r, content)}, nil
 
 	case "tool":
 		return schemas.ChatMessage{
@@ -190,6 +267,42 @@ func MessageToRow(msg schemas.ChatMessage) (domain.Message, error) {
 		return domain.Message{}, fmt.Errorf("unsupported role %q", msg.Role)
 	}
 	return row, nil
+}
+
+// steerOpen / steerClose bracket a row that was drained mid-turn — input
+// that arrived while the model was working. The tag tells the model the
+// message is not a fresh instruction replacing what it was doing, which is
+// how an unwrapped user turn between tool batches would otherwise read.
+const (
+	steerOpen  = "<steer note=\"sent while you were working; keep going and respond if appropriate\">\n"
+	steerClose = "\n</steer>"
+)
+
+// wrapSteer brackets an `injection:steer` row's content. It is a function of
+// the row's own columns and nothing else — the loop stamps the subtype at
+// flush time and assembly reads it back, so two executors assembling the
+// same rows produce the same request. A steer row with no content is left
+// alone: an empty envelope would be pure noise.
+func wrapSteer(r domain.Message, content *schemas.ChatMessageContent) *schemas.ChatMessageContent {
+	if r.Subtype != domain.MessageSubtypeInjectionSteer || content == nil {
+		return content
+	}
+	if content.ContentStr != nil {
+		if *content.ContentStr == "" {
+			return content
+		}
+		wrapped := steerOpen + *content.ContentStr + steerClose
+		return &schemas.ChatMessageContent{ContentStr: &wrapped}
+	}
+	if len(content.ContentBlocks) == 0 {
+		return content
+	}
+	open, closing := steerOpen, steerClose
+	blocks := make([]schemas.ChatContentBlock, 0, len(content.ContentBlocks)+2)
+	blocks = append(blocks, schemas.ChatContentBlock{Type: schemas.ChatContentBlockTypeText, Text: &open})
+	blocks = append(blocks, content.ContentBlocks...)
+	blocks = append(blocks, schemas.ChatContentBlock{Type: schemas.ChatContentBlockTypeText, Text: &closing})
+	return &schemas.ChatMessageContent{ContentBlocks: blocks}
 }
 
 // rowContent maps a row's content into the bifrost content union. The row's

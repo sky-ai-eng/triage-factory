@@ -275,7 +275,11 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 		}
 		// This claim won't run the agent, so a resume message staged for it
 		// must not survive to be mis-delivered on a later reclaim — discard it.
-		if s.pendingInput != nil {
+		// Skipped for a native conversation for the same reason the resume
+		// routing below is: its undelivered rows are its ordinary input queue,
+		// not a staged resume message, and flipping one delivered here would
+		// silently drop a turn from a cancelled-then-restarted conversation.
+		if s.pendingInput != nil && run.Runtime != domain.ConversationRuntimeNative {
 			if _, _, _, cErr := s.pendingInput.Consume(context.Background(), orgID, run.ID); cErr != nil {
 				dispatchLog.Warn("clear pending input for raced-cancel step failed", "run", run.ID, "error", cErr)
 			}
@@ -296,7 +300,14 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// resume path — dispatchResumeClaim deletes the row only once it is about
 	// to deliver, so a crash during the intervening workspace rehydrate leaves
 	// the row for the next claim rather than losing the message.
-	if s.pendingInput != nil {
+	//
+	// Native conversations never take this branch. Undelivered rows are how
+	// ALL input reaches a native loop — the delegation's opening turn, a
+	// user follow-up, the loop's own repair notice — so their presence says
+	// nothing about whether this claim is a resume, and the loop drains them
+	// itself on its first iteration. Routing one here would hand a native
+	// conversation to a path that resumes a Claude session it never had.
+	if s.pendingInput != nil && run.Runtime != domain.ConversationRuntimeNative {
 		if msg, userID, ok, perr := s.pendingInput.Peek(ctx, orgID, run.ID); perr != nil {
 			dispatchLog.Warn("peek pending input failed; falling through to the blueprint-step path", "run", run.ID, "error", perr)
 		} else if ok {
@@ -428,7 +439,16 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// agent start, so resume/cancel claims don't skew it.
 	s.recordSpawnMS(time.Since(startTime))
 
-	s.runAgent(stepCtx, run.ID, *task, mission, cfg, time.Now(), run.Model, run.TriggerType, run.CreatorUserID, run.SessionID)
+	// The runtime ratchet decides which engine drives this claim. It is
+	// stamped on the conversation at mint and never changes, so a transcript
+	// that ran under one engine is never continued by the other — the native
+	// rows do not reconstruct the SDK's session-file state, and the SDK's
+	// session does not reconstruct the rows.
+	if run.Runtime == domain.ConversationRuntimeNative {
+		s.runNativeAgent(stepCtx, run.ID, *task, mission, cfg, time.Now(), run.Model, run.TriggerType, run.CreatorUserID)
+	} else {
+		s.runAgent(stepCtx, run.ID, *task, mission, cfg, time.Now(), run.Model, run.TriggerType, run.CreatorUserID, run.SessionID)
+	}
 
 	s.mu.Lock()
 	delete(s.cancels, run.ID)

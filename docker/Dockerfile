@@ -104,6 +104,27 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="$LDFLAGS" -o /out/triagefactory .
 
+# --- stage 3b: compiled tool host -------------------------------------------
+#
+# The resident tool host the native runtime launches as the jail's main
+# process. Built here rather than fetched: it is our own source, and the
+# broker's argv pin names this exact path, so the image is the only place it
+# can come from.
+#
+# musl-static for the same reason the Go binary is: it is bind-mounted into
+# the sandbox's alpine rootfs and must exec there. Building ON alpine with
+# the musl target gives that without a cross-toolchain.
+FROM --platform=$BUILDPLATFORM rust:1.85-alpine AS toolhost-builder
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY harness ./harness
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/harness/target \
+    cd harness/tf-harness-tools && \
+    cargo build --release --bin tf-harness-tools && \
+    mkdir -p /out && \
+    cp /src/harness/target/release/tf-harness-tools /out/tf-harness-tools
+
 # --- stage 4: runtime -------------------------------------------------------
 
 FROM alpine:3.20 AS runtime
@@ -259,6 +280,12 @@ ENV TF_TOOLCHAIN_ROOT=/opt/triagefactory
 
 # The TF binary itself.
 COPY --from=go-builder /out/triagefactory /usr/local/bin/triagefactory
+
+# The compiled tool host, at the fixed path the broker validates the native
+# jail's binary mount and argv pin against (sandbox.TrustedToolHostBinaryPath /
+# TrustedToolHostBinaryDestination). Same PATH-leading dir as the pinned gh.
+COPY --from=toolhost-builder /out/tf-harness-tools /opt/tf/bin/tf-harness-tools
+RUN chmod 0755 /opt/tf/bin/tf-harness-tools
 
 # Entrypoint script: runs goose migrations with bounded retry against
 # a not-yet-ready Postgres, then exec's the binary so tini's signal

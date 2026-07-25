@@ -64,7 +64,9 @@
 //! future verb (a subagent spawn, say) is addable without changing the framing.
 //! No such verb exists yet; only the contract does.
 
+use std::fs::Permissions;
 use std::io::{self, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
@@ -449,6 +451,26 @@ pub fn serve(socket_path: &Path, cwd: &str) -> io::Result<()> {
         )
     })?;
 
+    // Make the socket connectable by the out-of-jail loop, which runs as a
+    // different uid in the same group. `bind` creates the socket
+    // 0777 & ~umask (0755 under the usual 022), and connect(2) requires write
+    // permission — so without this the peer the socket exists for gets
+    // EACCES. The host cannot fix it afterwards: chmod requires ownership,
+    // and the socket is owned by this in-jail uid.
+    //
+    // 0660, not world-writable: the socket's group is this process's own gid,
+    // and the launch wiring's contract is that the loop runs as a member of
+    // that group — the same owner-legal group grant the `agenthost` socket
+    // uses in the other direction.
+    if let Err(e) = std::fs::set_permissions(socket_path, Permissions::from_mode(0o660)) {
+        // Best-effort with a loud failure: a same-uid peer (a standalone run,
+        // a test) connects fine regardless, so this must not abort those.
+        eprintln!(
+            "serve: could not widen socket permissions on {}: {e}",
+            socket_path.display()
+        );
+    }
+
     let result = match listener.accept() {
         Ok((stream, _addr)) => serve_connection(stream, cwd),
         Err(e) => Err(e),
@@ -598,5 +620,45 @@ mod tests {
     fn truncated_header_is_an_io_error_not_a_clean_close() {
         let mut cursor = io::Cursor::new(vec![0u8, 0u8]); // 2 of 4 header bytes
         assert!(matches!(read_frame(&mut cursor), ReadOutcome::Io));
+    }
+
+    #[test]
+    fn bound_socket_is_group_connectable() {
+        // The out-of-jail loop runs as a different uid in the same group, and
+        // connect(2) needs write permission. Without the post-bind chmod the
+        // socket lands 0755 under the usual umask and the peer it exists for
+        // gets EACCES — with no way for that peer to fix it, since chmod
+        // requires ownership.
+        let dir = std::env::temp_dir().join(format!("tf-serve-perm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("tools.sock");
+
+        let handle = {
+            let sock = sock.clone();
+            std::thread::spawn(move || {
+                let _ = serve(&sock, ".");
+            })
+        };
+
+        // Wait for the bind, then read the mode before the engagement ends.
+        let mut mode = None;
+        for _ in 0..200 {
+            if let Ok(meta) = std::fs::metadata(&sock) {
+                mode = Some(meta.permissions().mode() & 0o777);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Connect so `serve` completes its single engagement and the thread
+        // exits rather than blocking the test run.
+        let _ = UnixStream::connect(&sock);
+        let _ = handle.join();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            mode,
+            Some(0o660),
+            "the bound socket must be group-connectable"
+        );
     }
 }

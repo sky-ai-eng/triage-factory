@@ -1785,7 +1785,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Ask to flip id1 (belongs to runID) and idOther (belongs to a
 		// DIFFERENT run) via a call scoped to runID — idOther must NOT flip.
-		if err := store.MarkDelivered(ctx, orgID, runID, []int{int(id1), int(idOther)}); err != nil {
+		if err := store.MarkDelivered(ctx, orgID, runID, []int{int(id1), int(idOther)}, ""); err != nil {
 			t.Fatalf("MarkDelivered: %v", err)
 		}
 
@@ -1810,6 +1810,50 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if len(otherMsgs) != 1 || otherMsgs[0].Delivered == nil || *otherMsgs[0].Delivered {
 			t.Errorf("otherRunID message Delivered = %+v, want still false (run-scoped, must not leak across runs)", otherMsgs)
+		}
+	})
+
+	t.Run("MarkDelivered_StampsSubtypeWhenGivenAndPreservesItWhenEmpty", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		delivered := false
+		steered, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "user", Subtype: "text", Content: "mid-turn", Delivered: &delivered})
+		if err != nil {
+			t.Fatalf("InsertMessage steered: %v", err)
+		}
+		bare, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "user", Subtype: "text", Content: "bare", Delivered: &delivered})
+		if err != nil {
+			t.Fatalf("InsertMessage bare: %v", err)
+		}
+
+		// A steer drain flushes and stamps in one call.
+		if err := store.MarkDelivered(ctx, orgID, runID, []int{int(steered)}, "injection:steer"); err != nil {
+			t.Fatalf("MarkDelivered(steer): %v", err)
+		}
+		// A bare drain flushes without touching the row's own subtype.
+		if err := store.MarkDelivered(ctx, orgID, runID, []int{int(bare)}, ""); err != nil {
+			t.Fatalf("MarkDelivered(bare): %v", err)
+		}
+
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		byID := map[int]*domain.Message{}
+		for i := range msgs {
+			byID[msgs[i].ID] = &msgs[i]
+		}
+		if got := byID[int(steered)]; got == nil || got.Subtype != "injection:steer" {
+			t.Errorf("steered row subtype = %+v, want injection:steer", got)
+		} else if got.Delivered == nil || !*got.Delivered {
+			t.Errorf("steered row Delivered = %v, want true", got.Delivered)
+		}
+		if got := byID[int(bare)]; got == nil || got.Subtype != "text" {
+			t.Errorf("bare row subtype = %+v, want the row's own \"text\" preserved", got)
+		} else if got.Delivered == nil || !*got.Delivered {
+			t.Errorf("bare row Delivered = %v, want true", got.Delivered)
 		}
 	})
 

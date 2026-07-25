@@ -1,0 +1,135 @@
+package agentloop
+
+import (
+	"context"
+	"errors"
+	"net"
+	"strings"
+	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/inference"
+)
+
+// RetryPolicy bounds the same-provider-same-model retry. There is no
+// fallback of any kind — not a different model, not a different provider,
+// not a degraded request. A run that cannot reach the model it was given
+// fails; silently substituting a different model would make the transcript a
+// lie about what produced it, and the cost ledger a lie about what was
+// bought.
+type RetryPolicy struct {
+	// MaxAttempts counts the first try. Zero uses defaultMaxAttempts.
+	MaxAttempts int
+	// BaseDelay is the first backoff; each retry doubles it. Zero uses
+	// defaultBaseDelay.
+	BaseDelay time.Duration
+	// MaxDelay caps the doubling. Zero uses defaultMaxDelay.
+	MaxDelay time.Duration
+	// Sleep is the wait function, injectable so tests don't sleep. nil uses
+	// a context-aware timer.
+	Sleep func(ctx context.Context, d time.Duration) error
+}
+
+const (
+	defaultMaxAttempts = 5
+	defaultBaseDelay   = time.Second
+	defaultMaxDelay    = 30 * time.Second
+)
+
+// streamWithRetry makes one provider call, retrying only transient classes
+// (rate limits, 5xx, network timeouts) with bounded exponential backoff.
+// Exhaustion returns the last error; the caller fails the conversation.
+func (e *Engine) streamWithRetry(ctx context.Context, client Provider, req inference.Request) (*inference.Completion, error) {
+	p := e.Retry
+	if p.MaxAttempts <= 0 {
+		p.MaxAttempts = defaultMaxAttempts
+	}
+	if p.BaseDelay <= 0 {
+		p.BaseDelay = defaultBaseDelay
+	}
+	if p.MaxDelay <= 0 {
+		p.MaxDelay = defaultMaxDelay
+	}
+	sleep := p.Sleep
+	if sleep == nil {
+		sleep = sleepCtx
+	}
+
+	delay := p.BaseDelay
+	var lastErr error
+	for attempt := 1; attempt <= p.MaxAttempts; attempt++ {
+		completion, err := client.Stream(ctx, req)
+		if err == nil {
+			return completion, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !isTransient(err) || attempt == p.MaxAttempts {
+			break
+		}
+		e.warn("provider call failed; retrying same provider and model",
+			"model", req.Model, "attempt", attempt, "delay", delay, "error", err)
+		if serr := sleep(ctx, delay); serr != nil {
+			return nil, serr
+		}
+		if delay *= 2; delay > p.MaxDelay {
+			delay = p.MaxDelay
+		}
+	}
+	return nil, lastErr
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// transientMarkers are the substrings that classify a provider error as
+// worth retrying. The neutral layer flattens provider errors to a message
+// string, so this is substring classification rather than status-code
+// inspection — deliberately conservative: an unclassified error is treated
+// as permanent and fails the run rather than burning the retry budget on
+// something that will never succeed (a bad key, an unknown model).
+var transientMarkers = []string{
+	"429",
+	"rate limit",
+	"rate_limit",
+	"overloaded",
+	"500",
+	"502",
+	"503",
+	"504",
+	"internal server error",
+	"bad gateway",
+	"service unavailable",
+	"gateway timeout",
+	"timeout",
+	"timed out",
+	"connection reset",
+	"connection refused",
+	"eof",
+}
+
+func isTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, m := range transientMarkers {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
+}

@@ -482,7 +482,7 @@ func markCancelledIfActive(ctx context.Context, q queryer, orgID, runID, stopRea
 // through the field the wire has always carried; predicates elsewhere keep
 // using the stored column.
 const pgRunColumns = `
-	r.id, COALESCE(r.task_id::text, ''), COALESCE(cl.phase, r.status, ''), COALESCE(r.model, ''), r.started_at, r.queued_at, cl.claimed_at, r.completed_at,
+	r.id, COALESCE(r.task_id::text, ''), COALESCE(r.runtime, ''), COALESCE(cl.phase, r.status, ''), COALESCE(r.model, ''), r.started_at, r.queued_at, cl.claimed_at, r.completed_at,
 	msum.total_cost_usd, cl.duration_ms, cl.num_turns,
 	COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
 	COALESCE(r.result_summary, ''),
@@ -1102,15 +1102,18 @@ func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string
 }
 
 // MarkDelivered flips delivered=true on the given message ids, scoped to
-// runID. ids outside the run or already delivered are silently unaffected.
-func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, ids []int) error {
+// runID, stamping subtype in the same statement when non-empty. ids outside
+// the run or already delivered are silently unaffected.
+func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, ids []int, subtype string) error {
 	if len(ids) == 0 {
 		return nil
 	}
+	// NULLIF keeps the stamp optional without forking the statement: an
+	// empty subtype leaves each row's own value in place.
 	_, err := s.q.ExecContext(ctx, `
-		UPDATE messages SET delivered = true
+		UPDATE messages SET delivered = true, subtype = COALESCE(NULLIF($4, ''), subtype)
 		WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3)
-	`, orgID, runID, pgIntArray(ids))
+	`, orgID, runID, pgIntArray(ids), subtype)
 	return err
 }
 
@@ -1192,7 +1195,7 @@ func scanConversation(row *sql.Row, r *domain.Conversation) error {
 	var failureKind string
 
 	if err := row.Scan(
-		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
@@ -1213,7 +1216,7 @@ func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
 	var failureKind string
 
 	if err := rows.Scan(
-		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,

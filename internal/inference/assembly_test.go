@@ -216,12 +216,14 @@ func TestContentBlocksToSchema_RejectsOutOfVocabDomainType(t *testing.T) {
 }
 
 func TestRowsToMessages_SeqOrdering(t *testing.T) {
-	// Ids arrive out of order; seq overrides. A compaction result at seq 1.5
-	// lands between id 1 and id 2.
+	// Ids arrive out of order; seq overrides. A row at seq 1.5 lands between
+	// id 1 and id 2. Roles alternate so adjacent-user consolidation (which
+	// runs after ordering) leaves each message its own — ordering is what
+	// this pins, and TestConsolidateAdjacentUsers covers the packing.
 	rows := []domain.Message{
-		{ID: 2, Role: "assistant", Content: "second"},
+		{ID: 2, Role: "user", Content: "second"},
 		{ID: 1, Role: "user", Content: "first"},
-		{ID: 3, Role: "user", Content: "third", Seq: f64(1.5)},
+		{ID: 3, Role: "assistant", Content: "third", Seq: f64(1.5)},
 	}
 	msgs, err := RowsToMessages(rows, AssemblyOptions{NoCacheBreakpoint: true})
 	if err != nil {
@@ -250,12 +252,19 @@ func TestRowsToMessages_UndeliveredExcludedByDefault(t *testing.T) {
 		t.Fatalf("undelivered row must be excluded by default: %+v", msgs)
 	}
 
+	// With pending rows folded in, both user rows are present — packed into
+	// one message by adjacent-user consolidation, which is the shape the
+	// wire needs.
 	withPending, err := RowsToMessages(rows, AssemblyOptions{IncludeUndelivered: true, NoCacheBreakpoint: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(withPending) != 2 {
-		t.Fatalf("IncludeUndelivered must fold pending rows in: %+v", withPending)
+	if len(withPending) != 1 {
+		t.Fatalf("two adjacent user rows must pack into one message: %+v", withPending)
+	}
+	blocks := withPending[0].Content.ContentBlocks
+	if len(blocks) != 2 || *blocks[0].Text != "delivered" || *blocks[1].Text != "pending" {
+		t.Fatalf("IncludeUndelivered must fold pending rows in, in order: %+v", blocks)
 	}
 }
 
