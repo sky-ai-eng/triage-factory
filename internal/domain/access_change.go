@@ -7,7 +7,7 @@ import "time"
 // invite lifecycle, and credential bind/rotate/remove (GitHub PAT + App +
 // per-user identity, Jira org + per-user + OAuth app, Anthropic key, Bedrock).
 // Append-only, low-volume, org-scoped. The capture layer for the future
-// org-governance / team-activity audit view (TFAC-449 bucket C/D); the read UI
+// org-governance / team-activity audit view; the read UI
 // itself is out of scope here.
 //
 // Each row is written in the SAME transaction as the action it records, so the
