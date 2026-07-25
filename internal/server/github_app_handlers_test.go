@@ -48,7 +48,7 @@ func TestGitHubAppStatus_LocalMode_NoApp(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 
-	rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app", nil)
+	rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -104,7 +104,7 @@ func TestGitHubAppStatus_BadOrgID(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 
-	rec := doJSON(t, s, "GET", "/api/orgs/not-a-uuid/github-app", nil)
+	rec := doJSON(t, s, "GET", "/api/orgs/not-a-uuid/github/app", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status=%d, want 404", rec.Code)
 	}
@@ -116,7 +116,7 @@ func TestGitHubAppInstallURL_LocalMode_NoApp(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 
-	rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/install-url", nil)
+	rec := doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/install-url", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status=%d body=%s, want 404", rec.Code, rec.Body.String())
 	}
@@ -175,7 +175,7 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 	}
 
 	t.Run("member_sees_app", func(t *testing.T) {
-		rec := get(sidA, "/api/orgs/"+orgA.String()+"/github-app")
+		rec := get(sidA, "/api/orgs/"+orgA.String()+"/github/app")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
 		}
@@ -205,7 +205,7 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 	})
 
 	t.Run("install_url", func(t *testing.T) {
-		rec := get(sidA, "/api/orgs/"+orgA.String()+"/github-app/install-url")
+		rec := get(sidA, "/api/orgs/"+orgA.String()+"/github/app/install-url")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
 		}
@@ -220,14 +220,14 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 	})
 
 	t.Run("non_admin_member_sees_app", func(t *testing.T) {
-		rec := get(sidC, "/api/orgs/"+orgA.String()+"/github-app")
+		rec := get(sidC, "/api/orgs/"+orgA.String()+"/github/app")
 		if rec.Code != http.StatusOK {
 			t.Errorf("non-admin member status=%d body=%s, want 200", rec.Code, rec.Body.String())
 		}
 	})
 
 	t.Run("non_member_404", func(t *testing.T) {
-		rec := get(sidB, "/api/orgs/"+orgA.String()+"/github-app")
+		rec := get(sidB, "/api/orgs/"+orgA.String()+"/github/app")
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("non-member status=%d, want 404", rec.Code)
 		}
@@ -242,7 +242,7 @@ func TestGitHubAppInstallationsRefresh_NoApp(t *testing.T) {
 	fake := &fakeGitHubAppsStore{app: nil}
 	s.githubApps = fake
 
-	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/installations/refresh", nil)
+	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s, want 404", rec.Code, rec.Body.String())
 	}
@@ -264,7 +264,7 @@ func TestGitHubAppInstallationsRefresh_Success(t *testing.T) {
 	}
 	s.githubApps = fake
 
-	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/installations/refresh", nil)
+	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -294,7 +294,7 @@ func TestGitHubAppInstallationsRefresh_BackfillError(t *testing.T) {
 	}
 	s.githubApps = fake
 
-	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/installations/refresh", nil)
+	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status=%d body=%s, want 502", rec.Code, rec.Body.String())
 	}
@@ -350,7 +350,7 @@ func TestGitHubAppInstallationsRefresh_MultiMode_AdminGate(t *testing.T) {
 		t.Fatalf("seed org_github_apps: %v", err)
 	}
 
-	path := "/api/orgs/" + orgA.String() + "/github-app/installations/refresh"
+	path := "/api/orgs/" + orgA.String() + "/github/app/installations/refresh"
 
 	t.Run("non_admin_member_404", func(t *testing.T) {
 		if resp := rig.requestWithSid("POST", path, sidC); resp.StatusCode != http.StatusNotFound {

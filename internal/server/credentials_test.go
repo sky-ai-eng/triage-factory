@@ -117,7 +117,7 @@ func TestJiraCredentialDelete_SurfacesJiraOnlyWarning(t *testing.T) {
 	t.Setenv("TRIAGE_FACTORY_JIRA_BOT_PAT", "env-jira-pat")
 
 	req := httptest.NewRequest(http.MethodDelete,
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira-access/credential", nil)
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/access/credential", nil)
 	rec := httptest.NewRecorder()
 	s.mux.ServeHTTP(rec, req)
 

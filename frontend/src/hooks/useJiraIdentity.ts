@@ -14,7 +14,7 @@ export interface UseJiraIdentity {
 
 /**
  * useJiraIdentity reads the caller's Jira access-binding status for an org
- * (GET /api/orgs/{org}/identity/jira) — the Jira sibling of useGitHubIdentity.
+ * (GET /api/orgs/{org}/jira/identity) — the Jira sibling of useGitHubIdentity.
  * `connected` reflects a stored per-user credential (Jira's user level holds
  * access, not just identity). Re-fetches whenever orgId changes; a null orgId
  * stays at 'loading' (the active org hasn't resolved yet).
@@ -32,7 +32,7 @@ export function useJiraIdentity(orgId: string | null): UseJiraIdentity {
       if (!orgId) return
       setState({ status: 'loading' })
       try {
-        const data = await apiJSON<JiraIdentityStatus>('/identity/jira', { org: orgId, signal })
+        const data = await apiJSON<JiraIdentityStatus>('/jira/identity', { org: orgId, signal })
         if (signal?.aborted) return
         setState({ status: 'ready', data })
       } catch (err) {

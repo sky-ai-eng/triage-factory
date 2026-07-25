@@ -520,7 +520,7 @@ const githubAppImportStep: WizardStep = {
 // account-type picker's value), so the account step needs no load of its own
 // and Settings needs only this one fetch — every step's load() fans out in
 // parallel on mount, so a separate owner-type loader would just duplicate this
-// GET /github-app.
+// GET /github/app.
 export async function loadGitHubAppInstall(ctx: LoadContext): Promise<Partial<WizardState>> {
   if (!ctx.orgId) return {}
   try {
@@ -1307,7 +1307,7 @@ export async function loadUserIdentity(ctx: LoadContext): Promise<Partial<Wizard
   // Through apiClient so a stale-session 401 is routed to AuthContext; a hard
   // failure (HttpError / network) throws, and the host shows a retry rather
   // than wrongly prompting a connected user to reconnect.
-  const data = await apiJSON<GitHubIdentityStatus>('/identity/github', { org: ctx.orgId })
+  const data = await apiJSON<GitHubIdentityStatus>('/github/identity', { org: ctx.orgId })
   return {
     userIdentityConnected: data.connected,
     userIdentityLogin: data.login ?? '',
@@ -1370,7 +1370,7 @@ export async function loadJiraUserAccess(ctx: LoadContext): Promise<Partial<Wiza
   if (!ctx.orgId) throw new Error('No organization context for the Jira access check.')
   // Through apiClient so a stale-session 401 is routed to AuthContext; a hard
   // failure (HttpError / network) throws.
-  const data = await apiJSON<JiraIdentityStatus>('/identity/jira', { org: ctx.orgId })
+  const data = await apiJSON<JiraIdentityStatus>('/jira/identity', { org: ctx.orgId })
   return {
     jiraUserConnected: data.connected,
     jiraUserAccount: data.account ?? '',

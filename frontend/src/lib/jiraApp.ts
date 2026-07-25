@@ -2,7 +2,7 @@
 // sibling of githubApp.ts. An admin enters a bring-your-own Atlassian OAuth
 // app (client_id + client_secret) that the per-user "Connect Jira" flow runs
 // against; the card also shows the callback URL the app owner must register.
-// The endpoints are org-scoped under /api/orgs/{org_id}/jira-app.
+// The endpoints are org-scoped under /api/orgs/{org_id}/jira/app.
 
 import { readError } from './api'
 
@@ -31,7 +31,7 @@ export interface JiraAppStatus {
 }
 
 export async function getJiraAppStatus(orgId: string): Promise<JiraAppStatus> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/jira-app`)
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/jira/app`)
   if (!res.ok) throw new Error(await readError(res, 'Failed to load Atlassian app status'))
   return (await res.json()) as JiraAppStatus
 }
@@ -54,12 +54,12 @@ export type JiraAppImportOutcome =
 // app. Returns a structured outcome rather than throwing so the form can map a
 // field-level rejection to the right input.
 //
-// POST /api/orgs/{org_id}/jira-app
+// POST /api/orgs/{org_id}/jira/app
 export async function importJiraApp(
   orgId: string,
   input: JiraAppImportInput,
 ): Promise<JiraAppImportOutcome> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/jira-app`, {
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/jira/app`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
@@ -83,9 +83,9 @@ export async function importJiraApp(
 // and its stored client_secret). Idempotent. After this the org falls back to
 // the deployment first-party app (hosted) or has no app (local).
 //
-// DELETE /api/orgs/{org_id}/jira-app
+// DELETE /api/orgs/{org_id}/jira/app
 export async function deleteJiraApp(orgId: string): Promise<JiraAppStatus> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/jira-app`, { method: 'DELETE' })
+  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/jira/app`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await readError(res, 'Failed to remove the Atlassian app'))
   return (await res.json()) as JiraAppStatus
 }

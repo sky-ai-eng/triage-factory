@@ -327,7 +327,7 @@ func projectKeysFromConfigs(projects []jiraProjectConfig) []string {
 // enforces it too (org_settings_update RLS), but an explicit 403 beats an
 // opaque rolled-back transaction.
 //
-// PUT /api/orgs/{org_id}/jira-access/credential
+// PUT /api/orgs/{org_id}/jira/access/credential
 func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := se.az.RequireOrgAdmin(w, r)
 	if !ok {
@@ -403,7 +403,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 	//
 	// This is org-level Jira ACCESS (PAT_1) only — it deliberately does NOT
 	// write the caller's per-user Jira identity. That is captured solely by
-	// the dedicated bind surface (POST .../identity/jira/pat), so org access
+	// the dedicated bind surface (POST .../jira/identity/pat), so org access
 	// and user identity stay independent even when the same token connects
 	// the org.
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {

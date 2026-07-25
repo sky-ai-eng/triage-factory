@@ -117,7 +117,7 @@ func teardownAppSecrets(ctx context.Context, tx db.TxStores, orgID string, app *
 // the App is actually installed somewhere. After the commit XOR holds — the
 // App is the live credential and no PAT remains. Org-admin only.
 //
-// POST /api/orgs/{org_id}/github-app/cutover
+// POST /api/orgs/{org_id}/github/app/cutover
 func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
@@ -225,7 +225,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 // that so the UI can point the admin at GitHub to delete it there. Org-admin
 // only. Also valid from a staged state (re-committing to PAT mid-switch).
 //
-// POST /api/orgs/{org_id}/github-access/switch-to-pat
+// POST /api/orgs/{org_id}/github/access/switch-to-pat
 func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
@@ -344,7 +344,7 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 // poller restart). 409 for an active App: removing a live App only happens
 // through switch-to-pat. Org-admin only.
 //
-// DELETE /api/orgs/{org_id}/github-app
+// DELETE /api/orgs/{org_id}/github/app
 func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
@@ -426,7 +426,7 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 // Cache-Control: no-store below, and why it can't be treated as a pure-safe GET
 // despite the verb.
 //
-// GET /api/orgs/{org_id}/github-app/cutover-preflight
+// GET /api/orgs/{org_id}/github/app/cutover-preflight
 func (s *Server) handleGitHubAppCutoverPreflight(w http.ResponseWriter, r *http.Request) {
 	orgID, _, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
@@ -571,7 +571,7 @@ type patPreflightResponse struct {
 // plus the PAT's login. Does NOT store the PAT — the commit endpoint
 // re-validates. Org-admin only.
 //
-// POST /api/orgs/{org_id}/github-access/pat-preflight
+// POST /api/orgs/{org_id}/github/access/pat-preflight
 func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.Request) {
 	orgID, _, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {

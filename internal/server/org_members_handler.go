@@ -16,9 +16,9 @@ import (
 )
 
 // orgMembersHandler serves /api/orgs/{org_id}/members — the org People
-// roster (TFAC-417) and its role-change / remove affordances. It mirrors
+// roster and its role-change / remove affordances. It mirrors
 // teamsHandler's shape (transactional store runner + authz checker) and the
-// /api/orgs/{org_id}/... gating the github-app handlers use: read is any-
+// /api/orgs/{org_id}/... gating the github/app handlers use: read is any-
 // member, mutate is org-admin (or self for a leave), all 404-not-403 so a
 // non-admin never learns the org exists.
 //

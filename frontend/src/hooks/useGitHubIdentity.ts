@@ -14,7 +14,7 @@ export interface UseGitHubIdentity {
 
 /**
  * useGitHubIdentity reads the caller's GitHub identity-binding status for an
- * org (GET /api/orgs/{org}/identity/github) — the data the onboarding gate
+ * org (GET /api/orgs/{org}/github/identity) — the data the onboarding gate
  * blocks on. Re-fetches whenever orgId changes; a null orgId stays at
  * 'loading' (the active org hasn't resolved yet).
  *
@@ -31,7 +31,7 @@ export function useGitHubIdentity(orgId: string | null): UseGitHubIdentity {
       if (!orgId) return
       setState({ status: 'loading' })
       try {
-        const data = await apiJSON<GitHubIdentityStatus>('/identity/github', { org: orgId, signal })
+        const data = await apiJSON<GitHubIdentityStatus>('/github/identity', { org: orgId, signal })
         if (signal?.aborted) return
         setState({ status: 'ready', data })
       } catch (err) {

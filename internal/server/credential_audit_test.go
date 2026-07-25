@@ -494,7 +494,7 @@ func TestGitHubIdentityPAT_AuditsIdentityBind(t *testing.T) {
 	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": gh.URL})
 
 	rec := doJSON(t, s, http.MethodPost,
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/github/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",
 		map[string]any{"pat": "ghp_identity"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("identity status = %d, body = %s", rec.Code, rec.Body.String())

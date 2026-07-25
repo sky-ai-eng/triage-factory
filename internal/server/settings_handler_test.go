@@ -573,7 +573,7 @@ func TestOrgSettingsPost_GitHubURLClear_PreservesUserIdentity(t *testing.T) {
 // These mirror the GitHub untangle above for Jira: org-level Jira ACCESS
 // (PAT_1, the bot connection) must never write or clear the *caller's* per-user
 // Jira identity or credential. The only writer of user_jira_identities is the
-// dedicated bind surface (POST .../identity/jira/pat); the org connect /
+// dedicated bind surface (POST .../jira/identity/pat); the org connect /
 // settings-save / disconnect paths leave both the identity and the per-user
 // credential untouched. We assert that by seeding a distinct user identity /
 // credential and proving the org operation didn't disturb it.
@@ -1142,5 +1142,5 @@ func TestTeamSettingsPost_GraceClampedToBand(t *testing.T) {
 // mode — the PUT that replaced POST /api/jira/connect when credentials became
 // addressable resources rather than fields on the bulk settings save.
 func jiraCredentialRoute() string {
-	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/jira-access/credential"
+	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/jira/access/credential"
 }

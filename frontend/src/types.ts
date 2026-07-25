@@ -564,7 +564,7 @@ export interface IdentitiesResponse {
   methods: LoginMethod[]
 }
 
-/** GET /api/orgs/{org}/identity/github — the onboarding gate's status read.
+/** GET /api/orgs/{org}/github/identity — the onboarding gate's status read.
  *  `connected` is the single bit the gate blocks on (a host-verified GitHub
  *  identity exists for the active org's host). An absent binding is
  *  connected=false, which the runtime tolerates as NULL — the gate just
@@ -581,7 +581,7 @@ export interface GitHubIdentityStatus {
   connect_available: boolean
 }
 
-/** GET /api/orgs/{org}/identity/jira — the Jira sibling of GitHubIdentityStatus.
+/** GET /api/orgs/{org}/jira/identity — the Jira sibling of GitHubIdentityStatus.
  *  Unlike GitHub (identity only), Jira's user level holds *access*, so
  *  `connected` reflects a STORED per-user credential, not just an identity row.
  *  An absent credential is connected=false (the gate asks the user to bind one
