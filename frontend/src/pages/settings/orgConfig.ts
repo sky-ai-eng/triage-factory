@@ -267,11 +267,18 @@ function dailyCapToWire(raw: string): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
-// saveOrgConfig persists the org-level field group via POST
-// /api/settings/org. Token fields are sent only when re-typed (undefined
-// = don't touch, matching the backend's pointer-nil semantics). Returns a
-// discriminated result; `warning` carries the backend's model-cap clamp
-// notice on an otherwise-successful save.
+// saveOrgConfig persists the org-level CONFIG via POST /api/settings/org.
+//
+// It sends no secrets. The GitHub PAT and the Jira service credential each
+// have their own resource (connectGitHubPAT / connectJira and their
+// disconnects), so there is no "" -vs- undefined "leave blank to keep current"
+// dance on the wire any more: a credential you didn't retype simply isn't part
+// of this request. Base URLs stay here — they're host config the GitHub App
+// path needs before any credential exists — and clearing one no longer
+// destroys the matching credential.
+//
+// Returns a discriminated result; `warning` carries the backend's model-cap
+// clamp notice on an otherwise-successful save.
 export async function saveOrgConfig(
   form: OrgConfigForm,
 ): Promise<{ ok: true; warning?: string } | { ok: false; error: string }> {
@@ -280,11 +287,9 @@ export async function saveOrgConfig(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       github_base_url: form.github_url,
-      github_pat: form.github_pat || undefined,
       github_poll_interval: form.github_poll_interval,
       github_clone_protocol: form.github_clone_protocol,
       jira_base_url: form.jira_url,
-      jira_pat: form.jira_pat || undefined,
       jira_poll_interval: form.jira_poll_interval,
       max_llm_model_tier: form.max_llm_model_tier,
       max_daily_cost_usd: dailyCapToWire(form.max_daily_cost_usd),

@@ -94,7 +94,7 @@ export function JiraModeStep({ state, patch, advance }: StepContext) {
 // on success), so there's no Connect button here. A disconnect clears the
 // connection and re-opens the URL step (jiraUrlConfirmed drops). The deployment
 // chosen in JiraModeStep selects which fields render.
-export function JiraAccessStep({ state, patch, isLocal }: StepContext) {
+export function JiraAccessStep({ state, patch, isLocal, orgId }: StepContext) {
   const deployment = state.jiraDeployment ?? 'data_center'
   return (
     <div className="space-y-5">
@@ -107,6 +107,7 @@ export function JiraAccessStep({ state, patch, isLocal }: StepContext) {
         }}
         onChange={(p) => patch({ org: { ...state.org, ...p } })}
         connected={state.jiraConnected}
+        orgId={orgId}
         deployment={deployment}
         onDisconnected={() =>
           // JiraAccessGroup blanks the credential fields via its onChange immediately

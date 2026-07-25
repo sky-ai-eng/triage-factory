@@ -520,7 +520,7 @@ func TestJiraConnect_DoesNotWriteUserIdentity(t *testing.T) {
 		t.Fatalf("seed identity: %v", err)
 	}
 
-	rec := doJSON(t, s, "POST", "/api/jira/connect",
+	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
 		map[string]any{"url": jiraStub.URL, "pat": "org_pat"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
@@ -554,7 +554,7 @@ func TestJiraConnect_Cloud_StoresAPITokenCredential(t *testing.T) {
 	}))
 	t.Cleanup(jiraStub.Close)
 
-	rec := doJSON(t, s, "POST", "/api/jira/connect",
+	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
 		map[string]any{"url": jiraStub.URL, "email": "bot@acme.com", "token": "cloud_tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
@@ -594,7 +594,7 @@ func TestJiraConnect_Cloud_RequiresBothHalves(t *testing.T) {
 	s := newTestServer(t)
 	ctx := t.Context()
 
-	rec := doJSON(t, s, "POST", "/api/jira/connect",
+	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
 		map[string]any{"url": "https://acme.atlassian.net", "email": "bot@acme.com"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
@@ -625,7 +625,7 @@ func TestJiraConnect_Cloud_MismatchHint(t *testing.T) {
 	}))
 	t.Cleanup(jiraStub.Close)
 
-	rec := doJSON(t, s, "POST", "/api/jira/connect",
+	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
 		map[string]any{"url": jiraStub.URL, "email": "bot@acme.com", "token": "tok"})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
@@ -654,7 +654,7 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 	t.Cleanup(jiraStub.Close)
 
 	// 1) Connect as Data Center (PAT).
-	rec := doJSON(t, s, "POST", "/api/jira/connect",
+	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
 		map[string]any{"url": jiraStub.URL, "pat": "dc_pat"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("DC connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
@@ -665,7 +665,7 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 	}
 
 	// 2) Reconnect the same org as Cloud (email + API token).
-	rec = doJSON(t, s, "POST", "/api/jira/connect",
+	rec = doJSON(t, s, "PUT", jiraCredentialRoute(),
 		map[string]any{"url": jiraStub.URL, "email": "bot@acme.com", "token": "cloud_tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("Cloud connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
@@ -683,7 +683,7 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 
 	// 3) Switch back to Data Center — the Cloud pair must now be gone, leaving
 	//    exactly the DC scheme.
-	rec = doJSON(t, s, "POST", "/api/jira/connect",
+	rec = doJSON(t, s, "PUT", jiraCredentialRoute(),
 		map[string]any{"url": jiraStub.URL, "pat": "dc_pat_2"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("DC reconnect status=%d body=%s, want 200", rec.Code, rec.Body.String())
@@ -697,36 +697,38 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 	}
 }
 
-// TestOrgSettingsPost_JiraPAT_DoesNotWriteUserIdentity covers the org settings
-// save path (POST /api/settings/org with jira_pat → handleOrgSettingsPost):
-// saving the org Jira PAT (PAT_1) validates the token but must not bind the
-// caller's identity.
-func TestOrgSettingsPost_JiraPAT_DoesNotWriteUserIdentity(t *testing.T) {
+// TestJiraCredentialPut_DoesNotWriteUserIdentity covers the org Jira credential
+// resource: binding the org's service credential (PAT_1) validates the token
+// but must not bind the caller's identity, even though the same /myself
+// round-trip yields an account. (This used to ride the bulk settings save; the
+// property is the same, the route isn't.)
+func TestJiraCredentialPut_DoesNotWriteUserIdentity(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 	ctx := t.Context()
 
-	// The PAT branch reads creds.JiraURL, so the org must already have a Jira
-	// host; the /myself stub maps the token to the org's bot account.
+	// The /myself stub maps the token to the org's bot account.
 	jiraStub := jiraMyselfStub(t, `{"accountId":"org-bot","displayName":"Org Bot"}`, nil)
-	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{JiraURL: jiraStub.URL}); err != nil {
-		t.Fatalf("seed creds url: %v", err)
-	}
-	// A pre-existing user identity (keyed on the org's Jira host) the org PAT
-	// save must leave alone.
+	// A pre-existing user identity (keyed on the org's Jira host) the org
+	// credential bind must leave alone.
 	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL, "user-acct", "User Name", "pat"); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
 
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"jira_pat": "org_pat"})
+	rec := doJSON(t, s, "PUT", jiraCredentialRoute(), map[string]any{
+		"url": jiraStub.URL, "pat": "org_pat",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("jira bind = %d, body=%s", rec.Code, rec.Body.String())
+	}
 
 	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL)
 	if err != nil {
 		t.Fatalf("GetJiraIdentity: %v", err)
 	}
 	if accountID != "user-acct" || displayName != "User Name" {
-		t.Errorf("org Jira PAT save overwrote the caller's identity: got (%q, %q), want (user-acct, User Name)", accountID, displayName)
+		t.Errorf("org Jira credential bind overwrote the caller's identity: got (%q, %q), want (user-acct, User Name)", accountID, displayName)
 	}
 }
 
@@ -760,13 +762,12 @@ func TestOrgSettingsPost_JiraURLClear_PreservesUserIdentity(t *testing.T) {
 	}
 }
 
-// TestOrgSettingsPost_JiraPatClear_PreservesUserCredential is the credential
-// half of the untangle (the URL-clear test above covers the identity half):
-// clearing the org's Jira PAT (PAT_1) deletes only the org credential key —
-// the user's own stored credential, custodied under the separate per-user
-// "jira_token/<host>" namespace, is untouched. Org access and per-user access
-// are independent.
-func TestOrgSettingsPost_JiraPatClear_PreservesUserCredential(t *testing.T) {
+// TestJiraCredentialDelete_PreservesUserCredential is the credential half of
+// the untangle (the URL-clear test above covers the identity half): unbinding
+// the org's Jira credential (PAT_1) deletes only the org key — the user's own
+// stored credential, custodied under the separate per-user "jira_token/<host>"
+// namespace, is untouched. Org access and per-user access are independent.
+func TestJiraCredentialDelete_PreservesUserCredential(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -783,16 +784,19 @@ func TestOrgSettingsPost_JiraPatClear_PreservesUserCredential(t *testing.T) {
 		t.Fatalf("seed user credential: %v", err)
 	}
 
-	// Clear the org Jira PAT.
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"jira_pat": ""})
+	// Unbind the org Jira credential.
+	rec := doJSON(t, s, "DELETE", jiraCredentialRoute(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("jira unbind = %d, body=%s", rec.Code, rec.Body.String())
+	}
 
 	// The user's per-user credential survives — it lives under a different key.
 	stored, err := s.secrets.GetUserSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "jira_token/"+host)
 	if err != nil {
-		t.Fatalf("GetUserSystem after org PAT clear: %v", err)
+		t.Fatalf("GetUserSystem after org unbind: %v", err)
 	}
 	if stored != "user-token" {
-		t.Errorf("org Jira PAT clear wiped the user's per-user credential: got %q, want user-token", stored)
+		t.Errorf("org Jira unbind wiped the user's per-user credential: got %q, want user-token", stored)
 	}
 }
 
@@ -1053,4 +1057,11 @@ func TestTeamSettingsPost_GraceClampedToBand(t *testing.T) {
 	if ms, _, _ := teamGrace(t, s); ms != 20000 {
 		t.Errorf("after POST 20s, stored grace = %dms, want 20000ms (in-band, verbatim)", ms)
 	}
+}
+
+// jiraCredentialRoute is the org's Jira service-credential resource in local
+// mode — the PUT that replaced POST /api/jira/connect when credentials became
+// addressable resources rather than fields on the bulk settings save.
+func jiraCredentialRoute() string {
+	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/jira-access/credential"
 }

@@ -790,10 +790,12 @@ func (s *Server) routes() {
 	// the synthetic tenant + materializes shipped defaults via the shared
 	// bootstrap chain. Idempotent; no-op once a tenant exists.
 	s.apiMutating("POST /api/setup/start", s.handleSetupStart)
-	// DELETE on the collection = nuke all integration credentials.
-	// Targeted clears (Jira only) get explicit subpaths.
+	// DELETE on the collection = nuke every integration credential at once (the
+	// Settings danger zone). Unbinding ONE credential goes through that
+	// credential's own resource — DELETE /api/orgs/{org_id}/github-access/pat or
+	// .../jira-access/credential — which is why there's no per-integration
+	// subpath here any more.
 	s.apiMutating("DELETE /api/integrations", s.handleIntegrationsClear)
-	s.apiMutating("DELETE /api/integrations/jira", s.handleIntegrationsDeleteJira)
 
 	// Logout-everywhere: must be authenticated to use it (you can only
 	// nuke your own sessions).
@@ -1075,7 +1077,7 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/skills/import", sk.handleSkillsImport)
 	s.apiMutating("POST /api/skills/upload", sk.handleSkillUpload)
 	s.api("GET /api/github/repos", s.handleGitHubRepos)
-	se := &settingsHandler{tx: s.tx, bedrockRole: func() bedrockRoleResolver { return s.bedrockRole }}
+	se := &settingsHandler{tx: s.tx, az: s.az, bedrockRole: func() bedrockRoleResolver { return s.bedrockRole }}
 	s.apiMutating("POST /api/github/preflight-ssh", se.handleGitHubPreflightSSH)
 	// URL-only host reachability (the wizard's URL sub-step) — no auth sent,
 	// distinct from the creds stage (auth.ValidateGitHub / /api/jira/connect).
@@ -1084,7 +1086,6 @@ func (s *Server) routes() {
 	s.apiMutating("PATCH /api/repos/{owner}/{repo}", s.handleRepoUpdate)
 	s.api("GET /api/repos/{owner}/{repo}/branches", s.handleRepoBranches)
 	s.apiMutating("POST /api/jira/reachability", handleJiraReachability)
-	s.apiMutating("POST /api/jira/connect", se.handleJiraConnect)
 	// Validated org Anthropic-key capture — the single write path for the
 	// anthropic_api_key vault secret (an empty key clears it for "system creds").
 	s.apiMutating("POST /api/anthropic/connect", se.handleAnthropicConnect)
@@ -1219,6 +1220,19 @@ func (s *Server) routes() {
 	s.apiMutating("DELETE /api/orgs/{org_id}/github-app", s.handleGitHubAppDiscard)
 	s.api("GET /api/orgs/{org_id}/github-app/cutover-preflight", s.handleGitHubAppCutoverPreflight)
 	s.apiMutating("POST /api/orgs/{org_id}/github-access/pat-preflight", s.handleGitHubAccessPATPreflight)
+
+	// The org integration credentials, each an addressable resource with an
+	// explicit bind + unbind rather than a field on the bulk settings save.
+	// Everything a credential write owes — live validation, the vault write, the
+	// poller re-due, an access change-log row — belongs to exactly one route
+	// per credential, which is what keeps it from being re-derived (and
+	// forgotten) from whichever fields a bulk save happened to carry. See
+	// org_credentials.go. POST /api/settings/org is now pure config: no secret,
+	// no outbound call, and it can no longer revoke access as a side effect.
+	s.apiMutating("PUT /api/orgs/{org_id}/github-access/pat", s.handleGitHubPATPut)
+	s.apiMutating("DELETE /api/orgs/{org_id}/github-access/pat", s.handleGitHubPATDelete)
+	s.apiMutating("PUT /api/orgs/{org_id}/jira-access/credential", se.handleJiraConnect)
+	s.apiMutating("DELETE /api/orgs/{org_id}/jira-access/credential", s.handleJiraCredentialDelete)
 
 	// "Connect GitHub" user-to-server OAuth — binds a host-verified GitHub
 	// login to the signed-in user (identity, not access, not login).

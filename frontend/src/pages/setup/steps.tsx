@@ -78,6 +78,7 @@ import {
   saveOrgConfig,
 } from '../settings/orgConfig'
 import { connectJira, type JiraDeployment } from '../settings/jiraConnect'
+import { connectGitHubPAT } from '../settings/githubAccess'
 import { connectAnthropic } from '../settings/anthropicConnect'
 import { connectBedrock, bedrockPayloadFromForm } from '../settings/bedrockConnect'
 import {
@@ -269,24 +270,16 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
 // GitHub step shows a retry when its load fails, so this guard only trips if
 // the user reaches a later org step while that load is still broken.
 //
-// It also scrubs a lingering org PAT (`state.org.github_pat`) whenever a GitHub
-// App is registered (staged OR live): GitHub access is App XOR PAT, and the
-// backend 409s ("use the switch flow") on a non-empty PAT while an App exists.
-// A wizard session that tried the PAT path first — typed a token, failed/abandoned
-// the connect, then switched to the App path — leaves that token lingering in the
-// in-memory form (it was never stored; `handleIntegrationsSetup` validates before
-// writing). Re-sending it on an unrelated whole-form save (the poll-interval /
-// model steps after the App steps) would trip the XOR guard and dead-end the
-// wizard (TFAC-410). The App is the live credential here, so the PAT field is
-// moot — switching TO a PAT is the dedicated switch flow's job, never a bulk org
-// save. Blank ('') rides saveOrgConfig's "leave blank to keep current" contract,
-// so a staged App's still-live stored PAT is left untouched.
+// A lingering in-memory org PAT is no longer a hazard here. The org save sends
+// no credentials at all, so a token typed on an abandoned PAT attempt can't
+// reach the backend and can't trip the App-XOR-PAT guard on a later
+// poll-interval / model step — which is what this function used to have to
+// scrub around.
 export async function persistOrg(state: WizardState): Promise<void> {
   if (!state.orgLoaded) {
     throw new Error('Settings didn’t load — reopen the GitHub step and retry before saving.')
   }
-  const org = state.githubAppRegistered ? { ...state.org, github_pat: '' } : state.org
-  const result = await saveOrgConfig(org)
+  const result = await saveOrgConfig(state.org)
   if (!result.ok) throw new Error(result.error)
 }
 
@@ -611,8 +604,8 @@ const githubAppInstallStep: WizardStep = {
 }
 
 // Step · Personal access token (mandatory, visible when PAT is the chosen
-// method). No separate Connect button — Continue performs the connect:
-// saveOrgConfig POSTs the org form; the backend validates the PAT against the
+// method). No separate Connect button — Continue performs the connect: a PUT on
+// the org's GitHub credential resource, which validates the PAT against the
 // base URL and 422s on a bad token. A freshly-entered token is trusted on a
 // successful save; an empty field relied on a *stored* token, which the save
 // does NOT re-validate, so confirm against the server's github_ready signal
@@ -680,17 +673,21 @@ const githubPatStep: WizardStep = {
       return
     }
     const typedPat = state.org.github_pat.trim()
-    // Save the org credential with the TRIMMED token: a whitespace-only entry
-    // collapses to '' ("leave blank to keep current" — so it never clobbers a
-    // good stored token), and a padded real token is normalized — matching the
-    // other capture paths (ConnectGitHub / UserSettings use pat.trim()).
-    const result = await saveOrgConfig({ ...state.org, github_pat: typedPat })
-    if (!result.ok) throw new Error(result.error)
+    // A typed token is bound through the credential resource, which validates
+    // it against the base URL and 422s on a bad one. A BLANK field means the
+    // user is relying on an already-stored token — there's nothing to write, so
+    // we don't write: confirm the stored credential still resolves and move on.
+    // (Under the old bulk save, blank rode a "leave blank to keep current"
+    // contract through the same request that could have rotated it.)
     if (typedPat === '') {
       const { githubReady } = await fetchIntegrationsState()
       if (!githubReady) {
         throw new Error('Couldn’t verify your stored GitHub token. Re-enter it to reconnect.')
       }
+    } else {
+      if (!orgId) throw new Error('No organization context.')
+      const result = await connectGitHubPAT(orgId, state.org.github_url, typedPat)
+      if (!result.ok) throw new Error(result.error)
     }
     // Local-mode convenience (the "use this token as my own GitHub identity too"
     // checkbox): reuse the just-connected org PAT to also bind the operator's own
@@ -868,7 +865,8 @@ const jiraModeStep: WizardStep = {
 
 // Step · Jira access (visible only when Jira is the chosen tracker). The Jira
 // mirror of the GitHub PAT step: no separate Connect button — Continue performs
-// the connect via the shared connectJira helper (POST /api/jira/connect, which
+// the connect via the shared connectJira helper (PUT on the Jira credential
+// resource, which
 // validates the credential server-side and 4xxs on a bad one). The credential
 // shape follows the deployment chosen in the prior step: Cloud sends an email +
 // API token, Data Center a PAT. On success the step marks connected and
@@ -906,7 +904,8 @@ const jiraAccessStep: WizardStep = {
     const typedPat = state.org.jira_pat.trim()
     const typedEmail = state.org.jira_email.trim()
     const typedToken = state.org.jira_api_token.trim()
-    const result = await connectJira(state.org.jira_url, deployment, state.org)
+    if (!orgId) throw new Error('No organization context.')
+    const result = await connectJira(orgId, state.org.jira_url, deployment, state.org)
     if (!result.ok) throw new Error(result.error)
     // Local-mode convenience — the Jira sibling of the GitHub PAT step's reuse
     // (see there for the rationale + the navigation-safety note). Reuse the

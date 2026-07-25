@@ -417,6 +417,7 @@ export default function OrgSettings({
             }}
             onChange={(p) => patch({ org: { ...draft.org, ...p } })}
             connected
+            orgId={orgId}
             // The connected view shows only a status line, so the deployment
             // doesn't pick fields here; loadOrg seeded it from the stored host.
             deployment={draft.jiraDeployment ?? 'data_center'}
@@ -462,7 +463,11 @@ export default function OrgSettings({
             try {
               const url = normalizeBaseUrl(draft.org.jira_url)
               const deployment = draft.jiraDeployment ?? 'data_center'
-              const result = await connectJira(url, deployment, draft.org)
+              if (!orgId) {
+                toast.error('No organization context — reload and try again.')
+                return false
+              }
+              const result = await connectJira(orgId, url, deployment, draft.org)
               if (!result.ok) {
                 toast.error(result.error)
                 return false
@@ -510,6 +515,7 @@ export default function OrgSettings({
                 }}
                 onChange={(p) => patch({ org: { ...draft.org, ...p } })}
                 connected={false}
+                orgId={orgId}
                 deployment={draft.jiraDeployment}
                 bare
               />
