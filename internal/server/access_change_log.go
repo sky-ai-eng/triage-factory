@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -59,14 +61,94 @@ func accessDetailAddedRole(role string) string {
 	return string(b)
 }
 
-// accessDetailCredential builds the detail_json for a credential_set action:
-// {"kind":...} with an optional "host" when one is cheaply available (omitted
-// for host-less credentials like the Anthropic key).
+// accessDetailCredential builds the detail_json for a credential_set /
+// credential_removed action: {"kind":...} with an optional "host" when one is
+// cheaply available (omitted for host-less credentials like the Anthropic key).
 func accessDetailCredential(kind, host string) string {
+	return accessDetailCredentialNamed(kind, host, "")
+}
+
+// accessDetailCredentialNamed is accessDetailCredential plus a "name" — the
+// human handle of the specific credential, where one exists and is not itself
+// secret: a GitHub App's slug, the @login a per-user identity binds to. It's
+// what lets the viewer say WHICH App was registered or torn down rather than
+// just "a GitHub App", which is the whole question an admin is asking of the log.
+func accessDetailCredentialNamed(kind, host, name string) string {
 	b, _ := json.Marshal(struct {
 		Kind string `json:"kind"`
 		Host string `json:"host,omitempty"`
-	}{Kind: kind, Host: host})
+		Name string `json:"name,omitempty"`
+	}{Kind: kind, Host: host, Name: name})
+	return string(b)
+}
+
+// configuredLLMCredentialKinds names the org-level LLM credentials the settings
+// row says are actually stored. The refs are the record here, not the vault: the
+// deletes that clear a provider are idempotent and can't report whether anything
+// was there, and a credential_removed row for a provider that was never
+// configured is a phantom revocation in an audit log. Used by the "system
+// credentials" arm, the one path that drops BOTH providers at once.
+func configuredLLMCredentialKinds(s domain.OrgSettings) []string {
+	var kinds []string
+	if s.AnthropicAPIKeyRef != "" {
+		kinds = append(kinds, domain.CredentialKindAnthropicKey)
+	}
+	if s.BedrockCredentialsRef != "" {
+		kinds = append(kinds, domain.CredentialKindBedrock)
+	}
+	return kinds
+}
+
+// recordCredentialRemovals writes one host-less credential_removed row per kind
+// through the caller's tx, so the audit rows commit with the removal itself. A
+// nil/empty kinds slice is a no-op.
+func recordCredentialRemovals(ctx context.Context, tx db.TxStores, orgID, userID string, kinds []string) error {
+	for _, kind := range kinds {
+		if err := tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialRemoved,
+			DetailJSON:  accessDetailCredential(kind, ""),
+		}); err != nil {
+			return fmt.Errorf("audit credential removal: %w", err)
+		}
+	}
+	return nil
+}
+
+// auditJiraHost canonicalizes a Jira base URL for a credential row's "host", so
+// org-credential rows share a host string with the per-user jira_user rows for
+// the same instance — both key off the same resolved org_settings.jira_base_url,
+// whereas a connect/settings write carries whatever the admin typed (trailing
+// slash, casing). Falls back to the raw value when it doesn't resolve, so a
+// misconfigured URL still records something.
+func auditJiraHost(rawURL string) string {
+	if canon, ok := resolveJiraHost(rawURL); ok {
+		return canon
+	}
+	return rawURL
+}
+
+// accessDetailInviteCreated builds the detail_json for an invite_created action:
+// the invited address + the role it grants, so the log answers "who did we open
+// the door to, and at what privilege" before the invite is ever accepted (the
+// later org_member_granted row carries the invite id and closes the loop).
+func accessDetailInviteCreated(inviteID, email, role string) string {
+	b, _ := json.Marshal(struct {
+		InviteID string `json:"invite_id"`
+		Email    string `json:"email"`
+		Role     string `json:"role"`
+	}{InviteID: inviteID, Email: email, Role: role})
+	return string(b)
+}
+
+// accessDetailInviteRevoked builds the detail_json for an invite_revoked action.
+// The email is best-effort — resolved from the org's active invites in the same
+// tx — so a row whose address didn't resolve still records the revocation.
+func accessDetailInviteRevoked(inviteID, email string) string {
+	b, _ := json.Marshal(struct {
+		InviteID string `json:"invite_id"`
+		Email    string `json:"email,omitempty"`
+	}{InviteID: inviteID, Email: email})
 	return string(b)
 }
 

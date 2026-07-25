@@ -235,7 +235,18 @@ func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 		}); err != nil {
 			return err
 		}
-		return tx.Secrets.Put(r.Context(), orgID, jiraOAuthClientSecretKey, clientSecret, "Atlassian OAuth app client secret")
+		if err := tx.Secrets.Put(r.Context(), orgID, jiraOAuthClientSecretKey, clientSecret, "Atlassian OAuth app client secret"); err != nil {
+			return err
+		}
+		// A bring-your-own OAuth app is an org credential (its client
+		// secret is what every user's Jira consent is minted against), so its
+		// bind/rotate belongs in the change-log next to the GitHub App's. The
+		// client ID is public, so it rides as the row's name.
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialSet,
+			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindJiraOAuthApp, "", clientID),
+		})
 	}); err != nil {
 		// Local-mode SecretStore writes hit the OS keychain outside the SQLite
 		// tx; clean up a secret that landed before a later failure so a failed
@@ -276,7 +287,24 @@ func (s *Server) handleJiraAppDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.JiraApps.DeleteForOrg(r.Context(), orgID)
+		// Read first: the delete is idempotent, so without knowing whether an
+		// override existed we'd log a removal every time an admin hits the
+		// button on an org that never had one.
+		app, err := tx.JiraApps.GetForOrg(r.Context(), orgID)
+		if err != nil {
+			return err
+		}
+		if err := tx.JiraApps.DeleteForOrg(r.Context(), orgID); err != nil {
+			return err
+		}
+		if app == nil {
+			return nil
+		}
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialRemoved,
+			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindJiraOAuthApp, "", app.ClientID),
+		})
 	}); err != nil {
 		internalError(w, "jira-app", err)
 		return

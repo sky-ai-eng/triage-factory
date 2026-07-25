@@ -291,7 +291,10 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, ghUser.Login, "connect_oauth")
+		if err := tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, ghUser.Login, "connect_oauth"); err != nil {
+			return err
+		}
+		return recordGitHubIdentityBind(r.Context(), tx, orgID, userID, ghWeb, ghUser.Login)
 	}); err != nil {
 		internalError(w, "github-connect", err)
 		return
@@ -399,6 +402,21 @@ type githubIdentityCaptureResponse struct {
 // callers can render the right message.
 var errGitHubNoLogin = errors.New("github returned no username for the token")
 
+// recordGitHubIdentityBind audits a per-user GitHub identity binding, shared by
+// the Connect OAuth callback and the PAT-capture handler. Neither retains a
+// token, but "which GitHub account does this TF user act as" is
+// squarely an access fact — every review and comment the user authorizes goes
+// out under that login — so it belongs in the change-log alongside the org
+// credentials. Actor and target are both the user: identity is self-bound.
+func recordGitHubIdentityBind(ctx context.Context, tx db.TxStores, orgID, userID, host, login string) error {
+	return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
+		ActorUserID:  userID,
+		TargetUserID: userID,
+		Action:       domain.AccessActionCredentialSet,
+		DetailJSON:   accessDetailCredentialNamed(domain.CredentialKindGitHubIdentity, host, "@"+login),
+	})
+}
+
 // validateGitHubIdentityPAT proves a PAT against the org's resolved GitHub host
 // (GET /user) and returns the bound @login, WITHOUT storing the token. It is the
 // shared validation core of the PAT-capture HTTP handler and the headless
@@ -488,7 +506,10 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, login, "pat")
+		if err := tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, login, "pat"); err != nil {
+			return err
+		}
+		return recordGitHubIdentityBind(r.Context(), tx, orgID, userID, ghWeb, login)
 	}); err != nil {
 		internalError(w, "github-identity", err)
 		return

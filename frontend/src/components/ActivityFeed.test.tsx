@@ -102,6 +102,37 @@ describe('ActivityFeed', () => {
     expect(prLink?.textContent).toContain('merged')
   })
 
+  it('holds the loaded rows while the next request is in flight (no skeleton collapse)', async () => {
+    // Park the Objects request so the mid-switch render is observable: the feed
+    // must keep the Actions rows on screen rather than blanking to the skeleton,
+    // which is what made the section's height jump on every toggle.
+    let releaseObjects: (rows: ActivityArtifact[]) => void = () => {}
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('view=objects')) {
+        return new Promise((resolve) => {
+          releaseObjects = (rows) => resolve({ ok: true, json: () => Promise.resolve(rows) })
+        })
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve([action({ id: 'pr', target: 'org/repo#1' })]),
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<ActivityFeed baseUrl="/api/usage/teams/t1/activity" />)
+    await screen.findByText('org/repo#1')
+
+    fireEvent.click(screen.getByRole('tab', { name: /objects/i }))
+    // Mid-switch: the held row is still mounted and no skeleton replaced it.
+    expect(screen.getByText('org/repo#1')).toBeInTheDocument()
+    expect(screen.getByText(/1 action/)).toBeInTheDocument()
+
+    releaseObjects([artifact({ id: 'art', target: 'org/repo#42' })])
+    expect(await screen.findByText('org/repo#42')).toBeInTheDocument()
+    expect(screen.queryByText('org/repo#1')).not.toBeInTheDocument()
+  })
+
   it('shows a zero state when the log is empty', async () => {
     stubByView([])
     render(<ActivityFeed baseUrl="/api/usage/teams/t1/activity" />)

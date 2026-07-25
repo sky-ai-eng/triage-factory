@@ -3,8 +3,9 @@ package domain
 import "time"
 
 // AccessChange is one row in access_change_log — a governance action that has
-// no external entity: org/team membership & role grants/changes/revokes, and
-// credential bind/rotate (GitHub PAT, Jira org + per-user, Anthropic key).
+// no external entity: org/team membership & role grants/changes/revokes, the
+// invite lifecycle, and credential bind/rotate/remove (GitHub PAT + App +
+// per-user identity, Jira org + per-user + OAuth app, Anthropic key, Bedrock).
 // Append-only, low-volume, org-scoped. The capture layer for the future
 // org-governance / team-activity audit view (TFAC-449 bucket C/D); the read UI
 // itself is out of scope here.
@@ -52,7 +53,10 @@ const (
 	AccessActionTeamMemberAdded         = "team_member_added"
 	AccessActionTeamRoleChanged         = "team_role_changed"
 	AccessActionTeamMemberRemoved       = "team_member_removed"
+	AccessActionInviteCreated           = "invite_created"
+	AccessActionInviteRevoked           = "invite_revoked"
 	AccessActionCredentialSet           = "credential_set"
+	AccessActionCredentialRemoved       = "credential_removed"
 )
 
 // Access-change "source" values carried in an org_member_granted action's
@@ -65,16 +69,25 @@ const (
 	AccessSourceSSOJIT = "sso_jit"
 )
 
-// Credential kinds carried in a credential_set action's DetailJSON {"kind":...}.
-// Bind-vs-rotate isn't reliably distinguishable at the write-point, so every
-// credential write records credential_set and lets the detail carry the kind
-// (and host where cheap). See TFAC-471 §2.
+// Credential kinds carried in a credential_set / credential_removed action's
+// DetailJSON {"kind":...}. Bind-vs-rotate isn't reliably distinguishable at the
+// write-point, so every credential write records credential_set and lets the
+// detail carry the kind (and host / name where cheap); an unbind, clear, or
+// teardown records credential_removed with the same kind.
+//
+// GitHubIdentity is the per-user GitHub *identity* binding (PAT_2 / the Connect
+// OAuth flow). No token is retained for it — the binding itself is the access
+// fact an admin audits ("this TF user acts as @login"), so it shares the
+// credential category rather than getting a third one.
 const (
-	CredentialKindGitHubPAT    = "github_pat"
-	CredentialKindJiraOrg      = "jira_org"
-	CredentialKindJiraUser     = "jira_user"
-	CredentialKindAnthropicKey = "anthropic_key"
-	CredentialKindBedrock      = "bedrock"
+	CredentialKindGitHubPAT      = "github_pat"
+	CredentialKindGitHubApp      = "github_app"
+	CredentialKindGitHubIdentity = "github_identity"
+	CredentialKindJiraOrg        = "jira_org"
+	CredentialKindJiraUser       = "jira_user"
+	CredentialKindJiraOAuthApp   = "jira_oauth_app"
+	CredentialKindAnthropicKey   = "anthropic_key"
+	CredentialKindBedrock        = "bedrock"
 )
 
 // AccessChangeListOpts bounds a ListByOrg read for the audit viewer (TFAC-484).
@@ -106,9 +119,10 @@ const (
 // AccessActionsInCategory returns the action discriminators that make up a
 // filter category, or nil for "" / an unrecognized category (the caller treats
 // nil as "no filter — every action"). Membership covers every org/team
-// grant / role-change / revoke / ownership-transfer; credential is the lone
-// credential_set. Keeping the grouping here, next to the action constants, means
-// a newly-added action is classified in exactly one place.
+// grant / role-change / revoke / ownership-transfer plus the invite lifecycle
+// that precedes a grant; credential covers binds and removals alike. Keeping the
+// grouping here, next to the action constants, means a newly-added action is
+// classified in exactly one place.
 func AccessActionsInCategory(category string) []string {
 	switch category {
 	case AccessCategoryMembership:
@@ -120,9 +134,11 @@ func AccessActionsInCategory(category string) []string {
 			AccessActionTeamMemberAdded,
 			AccessActionTeamRoleChanged,
 			AccessActionTeamMemberRemoved,
+			AccessActionInviteCreated,
+			AccessActionInviteRevoked,
 		}
 	case AccessCategoryCredential:
-		return []string{AccessActionCredentialSet}
+		return []string{AccessActionCredentialSet, AccessActionCredentialRemoved}
 	default:
 		return nil
 	}

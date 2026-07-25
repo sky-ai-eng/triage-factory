@@ -107,6 +107,56 @@ func TestAccessChangeLabel(t *testing.T) {
 			want:   "set the credential",
 		},
 		{
+			name:   "credential_set bedrock (kind was previously unmapped)",
+			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: `{"kind":"bedrock"}`},
+			want:   "set the Bedrock credentials",
+		},
+		{
+			name:   "credential_set github app names the app + host",
+			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: `{"kind":"github_app","host":"https://github.com","name":"acme-triage"}`},
+			want:   "set the GitHub App acme-triage for https://github.com",
+		},
+		{
+			name:   "credential_set per-user github identity carries the login",
+			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: `{"kind":"github_identity","host":"https://github.com","name":"@alice"}`},
+			want:   "set the personal GitHub identity @alice for https://github.com",
+		},
+		{
+			name:   "credential_removed reads as a removal of the same kind",
+			change: domain.AccessChange{Action: domain.AccessActionCredentialRemoved, DetailJSON: `{"kind":"github_pat","host":"github.example.com"}`},
+			want:   "removed the GitHub PAT for github.example.com",
+		},
+		{
+			name:   "credential_removed github app names the torn-down app",
+			change: domain.AccessChange{Action: domain.AccessActionCredentialRemoved, DetailJSON: `{"kind":"github_app","name":"acme-triage"}`},
+			want:   "removed the GitHub App acme-triage",
+		},
+		{
+			name:   "credential_removed atlassian oauth app",
+			change: domain.AccessChange{Action: domain.AccessActionCredentialRemoved, DetailJSON: `{"kind":"jira_oauth_app","name":"abc123"}`},
+			want:   "removed the Atlassian OAuth app abc123",
+		},
+		{
+			name:   "invite_created names the address + granted role",
+			change: domain.AccessChange{Action: domain.AccessActionInviteCreated, DetailJSON: `{"invite_id":"i1","email":"bob@example.com","role":"admin"}`},
+			want:   "invited bob@example.com as admin",
+		},
+		{
+			name:   "invite_created without a role degrades to the bare invite",
+			change: domain.AccessChange{Action: domain.AccessActionInviteCreated, DetailJSON: `{"invite_id":"i1","email":"bob@example.com"}`},
+			want:   "invited bob@example.com",
+		},
+		{
+			name:   "invite_revoked names the address",
+			change: domain.AccessChange{Action: domain.AccessActionInviteRevoked, DetailJSON: `{"invite_id":"i1","email":"bob@example.com"}`},
+			want:   "revoked the invite for bob@example.com",
+		},
+		{
+			name:   "invite_revoked with an unresolved address stays generic",
+			change: domain.AccessChange{Action: domain.AccessActionInviteRevoked, DetailJSON: `{"invite_id":"i1"}`},
+			want:   "revoked a pending invite",
+		},
+		{
 			name:   "unresolved target falls back to a generic noun",
 			change: domain.AccessChange{Action: domain.AccessActionOrgMemberRevoked, TargetUserID: "u9"},
 			target: "", // GetDisplayName returned "" (a since-revoked member)

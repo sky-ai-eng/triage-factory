@@ -1,0 +1,250 @@
+package server
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/zalando/go-keyring"
+)
+
+// Coverage for the credential half of the access change-log: every surface that
+// binds, rotates, or destroys an org credential must leave a row, and no surface
+// may invent one. The gap these close was user-visible — an admin connecting a
+// GitHub App or rotating a PAT from Settings produced an empty audit view, which
+// reads as "nobody touched our credentials" rather than "we don't record that".
+//
+// Local (SQLite) server: the write-points are mode-agnostic, and the change-log
+// table is in both dialects' baseline, so the cheap rig proves the wiring. The
+// EE *viewer* on top of these rows is exercised separately.
+
+// credAuditRow is one recorded change, decoded far enough to assert on.
+type credAuditRow struct {
+	Action string
+	Kind   string `json:"kind"`
+	Host   string `json:"host"`
+	Name   string `json:"name"`
+}
+
+// credAuditRows reads every credential_set / credential_removed row for the
+// local org, oldest-first, with detail_json flattened onto the row.
+func credAuditRows(t *testing.T, s *Server) []credAuditRow {
+	t.Helper()
+	rows, err := s.db.QueryContext(t.Context(), `
+		SELECT action, COALESCE(detail_json, '')
+		  FROM access_change_log
+		 WHERE org_id = ? AND action IN (?, ?)
+		 ORDER BY created_at, rowid
+	`, runmode.LocalDefaultOrgID, domain.AccessActionCredentialSet, domain.AccessActionCredentialRemoved)
+	if err != nil {
+		t.Fatalf("query access_change_log: %v", err)
+	}
+	defer rows.Close()
+	var out []credAuditRow
+	for rows.Next() {
+		var action, detail string
+		if err := rows.Scan(&action, &detail); err != nil {
+			t.Fatalf("scan audit row: %v", err)
+		}
+		row := credAuditRow{Action: action}
+		if detail != "" {
+			if err := json.Unmarshal([]byte(detail), &row); err != nil {
+				t.Fatalf("decode detail_json %q: %v", detail, err)
+			}
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("audit rows: %v", err)
+	}
+	return out
+}
+
+// findCredAudit returns the single row with the given action+kind, failing if
+// there isn't exactly one — "exactly one" is the property that matters for an
+// audit log, in both directions.
+func findCredAudit(t *testing.T, rows []credAuditRow, action, kind string) credAuditRow {
+	t.Helper()
+	var hits []credAuditRow
+	for _, r := range rows {
+		if r.Action == action && r.Kind == kind {
+			hits = append(hits, r)
+		}
+	}
+	if len(hits) != 1 {
+		t.Fatalf("rows matching (%s, %s) = %d, want exactly 1; all rows: %+v", action, kind, len(hits), rows)
+	}
+	return hits[0]
+}
+
+// githubUserStub stands up a GHES-shaped host whose /api/v3/user returns the
+// given login — enough for auth.ValidateGitHub without a real network call.
+func githubUserStub(t *testing.T, login string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/user" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"login": login})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestIntegrationsSetup_AuditsBothOrgCredentials: the setup wizard stores a
+// GitHub PAT and (optionally) a Jira one in a single call. It recorded only the
+// GitHub bind, so an org that connected Jira during setup had no record of it
+// ever being bound.
+func TestIntegrationsSetup_AuditsBothOrgCredentials(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	gh := githubUserStub(t, "acme-bot")
+	jiraStub := jiraMyselfStub(t, `{"accountId":"org-bot","displayName":"Org Bot"}`, nil)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/integrations/setup", map[string]string{
+		"github_url":     gh.URL,
+		"github_pat":     "ghp_test",
+		"jira_url":       jiraStub.URL,
+		"jira_pat":       "jira_test",
+		"clone_protocol": "https",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rows := credAuditRows(t, s)
+	ghRow := findCredAudit(t, rows, domain.AccessActionCredentialSet, domain.CredentialKindGitHubPAT)
+	if ghRow.Host != gh.URL {
+		t.Errorf("github row host = %q, want %q", ghRow.Host, gh.URL)
+	}
+	if ghRow.Name != "acme-bot" {
+		t.Errorf("github row name = %q, want the validated login acme-bot", ghRow.Name)
+	}
+	findCredAudit(t, rows, domain.AccessActionCredentialSet, domain.CredentialKindJiraOrg)
+}
+
+// TestOrgSettingsPost_GitHubPATRotate_AuditsSet: rotating the org PAT from the
+// Settings page is the other org-PAT write-point besides setup, and left no
+// trace at all.
+func TestOrgSettingsPost_GitHubPATRotate_AuditsSet(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	gh := githubUserStub(t, "rotated-bot")
+	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID,
+		auth.Credentials{GitHubURL: gh.URL, GitHubPAT: "ghp_old"}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_pat": "ghp_new"})
+
+	row := findCredAudit(t, credAuditRows(t, s), domain.AccessActionCredentialSet, domain.CredentialKindGitHubPAT)
+	if row.Name != "rotated-bot" {
+		t.Errorf("name = %q, want the login the new PAT authenticates as", row.Name)
+	}
+	if row.Host != gh.URL {
+		t.Errorf("host = %q, want %q", row.Host, gh.URL)
+	}
+}
+
+// TestOrgSettingsPost_Disconnect_AuditsRemoval: clearing the org's GitHub URL
+// destroys the stored PAT, which is the removal side the log never carried.
+func TestOrgSettingsPost_Disconnect_AuditsRemoval(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	const host = "https://github.example.com"
+	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID,
+		auth.Credentials{GitHubURL: host, GitHubPAT: "ghp_old"}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+	// The base URL has to be in org_settings too — the removal row records the
+	// PREVIOUS host, which is read from there, not from the vault.
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": host})
+
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": ""})
+
+	row := findCredAudit(t, credAuditRows(t, s), domain.AccessActionCredentialRemoved, domain.CredentialKindGitHubPAT)
+	if row.Host != host {
+		t.Errorf("host = %q, want the host the removed PAT was bound to (%q)", row.Host, host)
+	}
+}
+
+// TestOrgSettingsPost_ClearWithNothingStored_AuditsNothing guards the other
+// direction: the frontend re-sends the whole settings form on every save, so a
+// blank credential field that was already blank must not manufacture a
+// revocation. A change-log full of removals that never happened is worse than
+// one with gaps.
+func TestOrgSettingsPost_ClearWithNothingStored_AuditsNothing(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_pat": "", "jira_pat": ""})
+
+	if rows := credAuditRows(t, s); len(rows) != 0 {
+		t.Errorf("credential rows = %+v, want none (nothing was stored to remove)", rows)
+	}
+}
+
+// TestAnthropicConnect_ClearAuditsRemoval: switching back to system credentials
+// revokes the org's stored LLM key. Only the bind was recorded, so the log
+// showed a key being set and never unset.
+func TestAnthropicConnect_ClearAuditsRemoval(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	auth.SetAnthropicModelsURLForTest(t, anthropicModelsStub(t, http.StatusOK).URL)
+	if rec := doJSON(t, s, "POST", "/api/anthropic/connect", map[string]any{"api_key": "sk-ant-seed"}); rec.Code != http.StatusOK {
+		t.Fatalf("seed status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, s, "POST", "/api/anthropic/connect", map[string]any{"api_key": ""}); rec.Code != http.StatusOK {
+		t.Fatalf("clear status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+
+	rows := credAuditRows(t, s)
+	findCredAudit(t, rows, domain.AccessActionCredentialSet, domain.CredentialKindAnthropicKey)
+	findCredAudit(t, rows, domain.AccessActionCredentialRemoved, domain.CredentialKindAnthropicKey)
+	// The org never had Bedrock configured, so the exclusivity sweep on either
+	// call must not log a Bedrock revocation.
+	for _, r := range rows {
+		if r.Kind == domain.CredentialKindBedrock {
+			t.Errorf("unexpected Bedrock row %+v — Bedrock was never configured", r)
+		}
+	}
+}
+
+// TestGitHubIdentityPAT_AuditsIdentityBind: binding a personal GitHub identity
+// stores no token, but "this TF user acts as @login" is an access fact the
+// change-log has to carry — every review the user authorizes goes out under it.
+func TestGitHubIdentityPAT_AuditsIdentityBind(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	gh := githubUserStub(t, "octocat")
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": gh.URL})
+
+	rec := doJSON(t, s, http.MethodPost,
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/github/pat",
+		map[string]any{"pat": "ghp_identity"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("identity status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	row := findCredAudit(t, credAuditRows(t, s), domain.AccessActionCredentialSet, domain.CredentialKindGitHubIdentity)
+	if row.Name != "@octocat" {
+		t.Errorf("name = %q, want @octocat", row.Name)
+	}
+}

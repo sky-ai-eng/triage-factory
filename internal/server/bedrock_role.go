@@ -160,16 +160,26 @@ func (se *settingsHandler) handleBedrockRoleConnect(w http.ResponseWriter, r *ht
 				return fmt.Errorf("clear stale %s: %w", k, err)
 			}
 		}
+		droppedAnthropic := orgSet.AnthropicAPIKeyRef != ""
 		orgSet.AnthropicAPIKeyRef = ""
 		orgSet.BedrockCredentialsRef = integrations.KeyAWSRoleARN
 		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return err
 		}
-		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialSet,
 			DetailJSON:  accessDetailCredential(domain.CredentialKindBedrock, req.BaseURL),
-		})
+		}); err != nil {
+			return err
+		}
+		// The exclusivity sweep above revoked the org's Anthropic key; record
+		// that as its own removal (same stance as the static-Bedrock arm).
+		if !droppedAnthropic {
+			return nil
+		}
+		return recordCredentialRemovals(r.Context(), tx, orgID, userID,
+			[]string{domain.CredentialKindAnthropicKey})
 	}); err != nil {
 		settingsLog.Error("bedrock role connect persist failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store Bedrock role configuration"})
