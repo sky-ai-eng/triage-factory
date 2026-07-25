@@ -226,8 +226,8 @@ func githubLoginOf(u *auth.GitHubUser) string {
 }
 
 // persistOrgGitHubLogin records the org credential's OWN GitHub login on the
-// agents row so the credential resolver's OrgIdentityFor PAT tier
-// can stamp the org commit-author identity on delegated-agent commits. Called
+// agents row so the credential resolver's OrgIdentityFor PAT tier can stamp the
+// org commit-author identity on delegated-agent commits. Called
 // inside the same WithTx that saves the org PAT, by every org-PAT writer that
 // already validated the login (handleIntegrationsSetup, the App→PAT switch, the
 // settings PAT update). This is org ACCESS metadata — it deliberately does NOT

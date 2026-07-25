@@ -314,9 +314,8 @@ func (se *settingsHandler) handleBedrockConnect(w http.ResponseWriter, r *http.R
 		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return err
 		}
-// Audit the bind/rotate in the same tx, like the
-		// Anthropic arm. The endpoint override is the closest thing to a
-		// host and is recorded when set.
+		// Audit the bind/rotate in the same tx, like the Anthropic arm. The
+		// endpoint override is the closest thing to a host and is recorded when set.
 		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialSet,
