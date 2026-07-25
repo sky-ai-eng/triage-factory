@@ -453,6 +453,85 @@ func postJSONResp(t *testing.T, s *Server, path string, body any) map[string]str
 	return resp
 }
 
+// TestOrgSettingsPost_BlankGitHubURLWithApp_409 closes the settings-route half
+// of the hazard TestGitHubPATDelete_StagedApp_KeepsHost covers for the PAT
+// unbind: githubBaseFor falls org_settings → github_url secret → github.com, so
+// blanking the column while an App is registered silently sends a GHES org's
+// App to github.com. The config route refuses instead of skipping, because here
+// the clear is the request itself, not a side effect of one.
+func TestOrgSettingsPost_BlankGitHubURLWithApp_409(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	const host = "https://github.example.com"
+
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": host})
+	seedLocalApp(t, s, false) // staged is enough — the App resolves against this host either way
+
+	rec := doJSON(t, s, "POST", "/api/settings/org", map[string]any{"github_base_url": ""})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); !strings.Contains(got, "github_base_url") {
+		t.Errorf("body %s should name the offending field", got)
+	}
+
+	var stored string
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT COALESCE(github_base_url, '') FROM org_settings WHERE org_id = ?`,
+		runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
+		t.Fatalf("read github_base_url: %v", err)
+	}
+	if stored != host {
+		t.Errorf("github_base_url = %q, want %q — the refused save must not have partially applied", stored, host)
+	}
+}
+
+// TestOrgSettingsPost_BlankGitHubURLWithoutApp_OK is the other half: with no App
+// to strand, clearing the host is an ordinary config edit and stays allowed. The
+// guard above must not turn into a blanket ban on emptying the field.
+func TestOrgSettingsPost_BlankGitHubURLWithoutApp_OK(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": "https://github.example.com"})
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": ""})
+
+	var stored string
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT COALESCE(github_base_url, '') FROM org_settings WHERE org_id = ?`,
+		runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
+		t.Fatalf("read github_base_url: %v", err)
+	}
+	if stored != "" {
+		t.Errorf("github_base_url = %q, want cleared", stored)
+	}
+}
+
+// TestOrgSettingsPost_RetargetGitHubURLWithApp_OK: moving an App org to a
+// different non-empty host is a legitimate GHES domain change and stays
+// allowed. The guard is aimed at the silent-default case, not at host edits.
+func TestOrgSettingsPost_RetargetGitHubURLWithApp_OK(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": "https://old.example.com"})
+	seedLocalApp(t, s, true)
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": "https://new.example.com"})
+
+	var stored string
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT COALESCE(github_base_url, '') FROM org_settings WHERE org_id = ?`,
+		runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
+		t.Fatalf("read github_base_url: %v", err)
+	}
+	if stored != "https://new.example.com" {
+		t.Errorf("github_base_url = %q, want the retargeted host", stored)
+	}
+}
+
 // TestOrgSettingsPost_GitHubURLClear_PreservesUserIdentity asserts the
 // access/identity decoupling: clearing the org's GitHub URL is an
 // access change (PAT_1), and it must NOT touch the user's per-user GitHub

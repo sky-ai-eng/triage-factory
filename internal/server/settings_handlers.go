@@ -552,6 +552,37 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 	orgSet := prevOrgSet
 
 	if req.GitHubBaseURL != nil {
+		// Blanking the host while an App registration exists is REFUSED. The
+		// resolver's base lookup falls org_settings → the github_url secret →
+		// github.com, so an empty column silently re-points a GHES org's App at
+		// github.com: wrong host, no error, nothing in any log.
+		//
+		// Refused rather than skipped, which is where this differs from the PAT
+		// unbind's identical hazard. There, clearing the host is a side effect of
+		// unbinding a token, so quietly keeping it is right. Here the clear IS
+		// the request, and answering "saved" for work we declined to do is the
+		// parse-and-drop bug in another costume.
+		//
+		// Re-targeting to a different NON-empty host stays allowed: that's a real
+		// move during a GHES domain change, and whatever breaks is at least the
+		// value the admin typed rather than a default they never chose.
+		//
+		// GitHub-only: jira.CanonicalHost returns ok=false on a blank base URL,
+		// so the Jira surfaces fail loudly instead of resolving somewhere wrong.
+		if *req.GitHubBaseURL == "" {
+			app, err := s.githubApps.GetForOrgSystem(r.Context(), orgID)
+			if err != nil {
+				internalError(w, "settings/org", err)
+				return
+			}
+			if app != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"error": "this workspace's GitHub App is registered against this host — remove the App before clearing it",
+					"field": "github_base_url",
+				})
+				return
+			}
+		}
 		orgSet.GitHubBaseURL = *req.GitHubBaseURL
 	}
 	if req.JiraBaseURL != nil {
