@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -199,6 +201,71 @@ func TestGitHubPATPut_RequiresBothHalves(t *testing.T) {
 	}
 	if rows := credAuditRows(t, s); len(rows) != 0 {
 		t.Errorf("rejected binds recorded %+v, want nothing", rows)
+	}
+}
+
+// TestGitHubPATPut_AppRegisteredDuringValidation_409 pins the App-XOR-PAT gate
+// against the read-then-act window. The handler checks for an App, then goes
+// off to GitHub to validate the token — and that round-trip is the one place it
+// is provably not holding the org's registration lock. Registering an App there
+// used to be invisible to the rest of the request, so the bind would write a PAT
+// underneath a live App.
+//
+// The validation stub doubles as the interleaving point, which makes the race
+// deterministic rather than timing-dependent: the App appears exactly once,
+// exactly while the token is in flight. What this asserts is the re-check inside
+// the critical section — the advisory check before validation has already run
+// and passed by then.
+func TestGitHubPATPut_AppRegisteredDuringValidation_409(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	var (
+		once    sync.Once
+		mu      sync.Mutex
+		seedErr error
+	)
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/user" {
+			http.NotFound(w, r)
+			return
+		}
+		// Racing writer: an App registration commits mid-validation. Errors are
+		// captured rather than t.Fatal'd — this runs on the server's goroutine.
+		once.Do(func() {
+			err := s.githubApps.CreateForOrg(context.Background(), domain.OrgGitHubApp{
+				OrgID: runmode.LocalDefaultOrgID, AppID: "1", Slug: "tf-bot",
+				ClientID: "Iv1.x", Active: true,
+			})
+			mu.Lock()
+			seedErr = err
+			mu.Unlock()
+		})
+		_ = json.NewEncoder(w).Encode(map[string]any{"login": "acme-bot"})
+	}))
+	t.Cleanup(gh.Close)
+
+	rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
+		"base_url": gh.URL, "pat": "ghp_new",
+	})
+
+	mu.Lock()
+	err := seedErr
+	mu.Unlock()
+	if err != nil {
+		t.Fatalf("racing app registration failed to seed: %v", err)
+	}
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 — the re-check must see the App that landed during validation; body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT); stored != "" {
+		t.Errorf("stored PAT %q under a live App — App XOR PAT violated", stored)
+	}
+	if rows := credAuditRows(t, s); len(rows) != 0 {
+		t.Errorf("a refused bind recorded %+v, want nothing", rows)
 	}
 }
 

@@ -82,6 +82,10 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	// credentials through the dedicated switch flow, which tears the App down
 	// atomically. Binding a PAT underneath a live App would leave two live
 	// credentials and an ambiguous resolver.
+	//
+	// Checked twice. This first read is unlocked and advisory — it rejects the
+	// common case before spending a network round-trip on a token we're going to
+	// refuse anyway. The authoritative check is the one under the lock below.
 	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-access", err)
@@ -99,6 +103,33 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 			"error": "GitHub: " + err.Error(),
+			"field": "pat",
+		})
+		return
+	}
+
+	// Serialize against App registration for this org — the same lock the
+	// manifest callback and the import take, so a registration can't land
+	// between our XOR check and our write. Without it the two orderings both
+	// break the invariant: a registration that reads "no PAT" registers itself
+	// ACTIVE, and our write then puts a live PAT under a live App. Taken after
+	// the network round-trip above, matching the import handler, so a slow or
+	// rate-limited GitHub API window never pins a pool connection.
+	release, err := s.acquireKeyedLock(ctx, &s.githubAppRegMu, githubAppRegRMWLockSalt, orgID)
+	if err != nil {
+		internalError(w, "github-access", err)
+		return
+	}
+	defer release()
+
+	// The authoritative XOR gate: re-read inside the critical section, because
+	// the advisory check above raced everything that happened during validation.
+	if app, err := s.githubApps.GetForOrgSystem(ctx, orgID); err != nil {
+		internalError(w, "github-access", err)
+		return
+	} else if app != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "this workspace uses a GitHub App — use the switch flow",
 			"field": "pat",
 		})
 		return
@@ -134,6 +165,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "github-access", err)
 		return
 	}
+	release() // idempotent; the defer stays as the early-return safety net
 
 	s.kickGitHubChanged(r, orgID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "connected", "login": ghUser.Login})
@@ -166,9 +198,22 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
+	// Serialize against App registration for this org, and hold it across the
+	// read AND the write. The read decides whether the host survives, so a
+	// registration landing in between would have us clear the host out from
+	// under a brand-new App — the same broken state as the unconditional clear,
+	// arrived at by a race instead. There's no network call in this handler, so
+	// the critical section costs nothing to widen this far.
+	release, err := s.acquireKeyedLock(ctx, &s.githubAppRegMu, githubAppRegRMWLockSalt, orgID)
+	if err != nil {
+		internalError(w, "github-access", err)
+		return
+	}
+	defer release()
+
 	// Staged OR active — either way a registration is still pointing at the
-	// host. Read before the tx: this is a system read, and a failure here must
-	// not be mistaken for "no App" (which would clear the host).
+	// host. A read failure must not be mistaken for "no App", which would clear
+	// the host, so it aborts rather than defaulting.
 	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-access", err)
@@ -211,6 +256,7 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "github-access", err)
 		return
 	}
+	release() // idempotent; the defer stays as the early-return safety net
 
 	s.kickGitHubChanged(r, orgID)
 	writeJSON(w, http.StatusOK, disconnectedResponse("github"))
