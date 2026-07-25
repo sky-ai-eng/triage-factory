@@ -106,8 +106,11 @@ func TestToolDefinitions_MatchHarness(t *testing.T) {
 // no `continue` type — stopping is what continuing means, so offering it
 // here would restore the ambiguity the consolidation removed.
 func TestFlowControlTools_IsOneToolWithBothArgumentsRequired(t *testing.T) {
-	flow := flowControlTools()
-	if len(flow) != 1 || flow[0].Function.Name != ToolStopRun {
+	if flow := flowControlTools(false); len(flow) != 0 {
+		t.Fatalf("a conversation with no blueprint has nothing to stop: %+v", flow)
+	}
+	flow := flowControlTools(true)
+	if len(flow) != 1 || flow[0].Function.Name != ToolStopBlueprint {
 		t.Fatalf("flow control is exactly one tool: %+v", flow)
 	}
 	req := flow[0].Function.Parameters.Required
@@ -139,12 +142,12 @@ func TestFlowControlOutcome_MapsToTheBlueprintVocabulary(t *testing.T) {
 	}{
 		{
 			name:        "finish",
-			call:        domain.ToolCall{Name: ToolStopRun, Input: map[string]any{"type": "finish", "reason": "nothing to review"}},
+			call:        domain.ToolCall{Name: ToolStopBlueprint, Input: map[string]any{"type": "finish", "reason": "nothing to review"}},
 			wantOutcome: domain.RunOutcomeFinish, wantReason: "nothing to review", wantFlow: true,
 		},
 		{
 			name:        "abort",
-			call:        domain.ToolCall{Name: ToolStopRun, Input: map[string]any{"type": "abort", "reason": "blocked"}},
+			call:        domain.ToolCall{Name: ToolStopBlueprint, Input: map[string]any{"type": "abort", "reason": "blocked"}},
 			wantOutcome: domain.RunOutcomeAbort, wantReason: "blocked", wantFlow: true,
 		},
 		{
@@ -152,22 +155,27 @@ func TestFlowControlOutcome_MapsToTheBlueprintVocabulary(t *testing.T) {
 			// it must not resolve to an outcome: the run keeps going and the
 			// model is told to just stop instead.
 			name:       "continue is not a type",
-			call:       domain.ToolCall{Name: ToolStopRun, Input: map[string]any{"type": "continue", "reason": "did my part"}},
+			call:       domain.ToolCall{Name: ToolStopBlueprint, Input: map[string]any{"type": "continue", "reason": "did my part"}},
 			wantReason: "did my part", wantFlow: true,
 		},
 		{
 			name:       "no type at all",
-			call:       domain.ToolCall{Name: ToolStopRun, Input: map[string]any{"reason": "r"}},
+			call:       domain.ToolCall{Name: ToolStopBlueprint, Input: map[string]any{"reason": "r"}},
 			wantReason: "r", wantFlow: true,
 		},
 		{name: "a sandbox tool is not flow control", call: domain.ToolCall{Name: "bash"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			outcome, reason, isFlow := flowControlOutcome(tc.call)
+			outcome, reason, isFlow := flowControlOutcome(tc.call, true)
 			if isFlow != tc.wantFlow || outcome != tc.wantOutcome || reason != tc.wantReason {
 				t.Errorf("-> (%q, %q, %v), want (%q, %q, %v)",
 					outcome, reason, isFlow, tc.wantOutcome, tc.wantReason, tc.wantFlow)
+			}
+			// Without a blueprint the name carries no meaning at all, so the
+			// same call is an ordinary (unknown) tool call.
+			if _, _, isFlow := flowControlOutcome(tc.call, false); isFlow {
+				t.Error("nothing is flow control in a conversation with no blueprint")
 			}
 		})
 	}
@@ -193,10 +201,10 @@ func TestFlowControlAck_CorrectsRatherThanTerminates(t *testing.T) {
 }
 
 func TestBuildSystemPrompt_OrderAndAddendumGating(t *testing.T) {
-	parts := EnvelopeParts{TaskContext: "TASKCTX", Envelope: "ENVELOPE", Mission: "MISSION"}
+	parts := EnvelopeParts{TaskContext: "TASKCTX", Envelope: "ENVELOPE", Mission: "MISSION", HasBlueprint: true}
 
 	terminal := BuildSystemPrompt(parts)
-	for _, want := range []string{"coding agent", "TASKCTX", "ENVELOPE", "MISSION", "<completion>"} {
+	for _, want := range []string{"coding agent", "TASKCTX", "ENVELOPE", "MISSION", "<completion>", "<blueprint_control>"} {
 		if !containsSub(terminal, want) {
 			t.Errorf("terminal system prompt is missing %q", want)
 		}
@@ -204,8 +212,8 @@ func TestBuildSystemPrompt_OrderAndAddendumGating(t *testing.T) {
 	if containsSub(terminal, "NOT the final step") {
 		t.Error("a terminal step must not carry the non-terminal addendum")
 	}
-	// Order: base, task context, envelope, mission, completion.
-	if !inOrder(terminal, "coding agent", "TASKCTX", "ENVELOPE", "MISSION", "<completion>") {
+	// Order: base, task context, envelope, mission, completion, control.
+	if !inOrder(terminal, "coding agent", "TASKCTX", "ENVELOPE", "MISSION", "<completion>", "<blueprint_control>") {
 		t.Error("the fixed assembly order is what makes the prefix cacheable")
 	}
 
@@ -219,8 +227,25 @@ func TestBuildSystemPrompt_OrderAndAddendumGating(t *testing.T) {
 	if !containsSub(nonTerminal, "hands off to the step that comes next") {
 		t.Error("the addendum must state that stopping normally is the handoff")
 	}
-	if !containsSub(nonTerminal, `stop_run(type: "finish")`) {
+	if !containsSub(nonTerminal, `stop_blueprint(type: "finish")`) {
 		t.Error("the addendum must name the tool that ends the whole blueprint")
+	}
+}
+
+// TestBuildSystemPrompt_TasklessOmitsBlueprintControl pins the other half of
+// the gate: a conversation with no blueprint is never told about a tool it
+// was not given, and never promised the artifact check that goes with having
+// a mission.
+func TestBuildSystemPrompt_TasklessOmitsBlueprintControl(t *testing.T) {
+	taskless := BuildSystemPrompt(EnvelopeParts{Envelope: "ENVELOPE", Mission: "MISSION"})
+
+	if !containsSub(taskless, "<completion>") {
+		t.Error("stopping is how every conversation concludes, blueprint or not")
+	}
+	for _, unwanted := range []string{"<blueprint_control>", "stop_blueprint", "external artifact"} {
+		if containsSub(taskless, unwanted) {
+			t.Errorf("a taskless conversation must not be told about %q — there is nobody absent to leave a reason for", unwanted)
+		}
 	}
 }
 

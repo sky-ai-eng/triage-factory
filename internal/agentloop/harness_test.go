@@ -275,12 +275,15 @@ func newTestEngine(t *memTranscript, p Provider, tools ToolHost) *Engine {
 	}
 }
 
+// testSpec is a delegation-shaped engagement: a conversation executing a
+// blueprint, which is the only shape the loop drives today.
 func testSpec() Spec {
 	return Spec{
 		OrgID:          "org",
 		ConversationID: "conv",
 		Model:          "claude-sonnet-4-5",
 		SystemPrompt:   "system",
+		HasBlueprint:   true,
 	}
 }
 

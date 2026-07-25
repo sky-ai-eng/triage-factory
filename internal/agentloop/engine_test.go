@@ -345,11 +345,11 @@ func TestRun_BeforeToolCallGateDeniesInBand(t *testing.T) {
 }
 
 func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
-	t.Run("stop_run alone terminates and takes the turn's prose as its summary", func(t *testing.T) {
+	t.Run("stop_blueprint alone terminates and takes the turn's prose as its summary", func(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
 		p := &scriptedProvider{turns: []scriptedTurn{{
 			text:  "Nothing to review here — the PR only touches generated files.",
-			calls: []domain.ToolCall{{ID: "c1", Name: ToolStopRun, Input: map[string]any{"type": "finish", "reason": "no reviewable changes"}}},
+			calls: []domain.ToolCall{{ID: "c1", Name: ToolStopBlueprint, Input: map[string]any{"type": "finish", "reason": "no reviewable changes"}}},
 		}}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
 		got := e.Run(context.Background(), testSpec())
@@ -357,17 +357,17 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 			t.Fatalf("finish must reach the outcome unchanged: %+v", got)
 		}
 		if got.ResultSummary != "Nothing to review here — the PR only touches generated files." {
-			t.Errorf("result summary = %q, want the accompanying prose — stop_run carries no summary of its own", got.ResultSummary)
+			t.Errorf("result summary = %q, want the accompanying prose — stop_blueprint carries no summary of its own", got.ResultSummary)
 		}
 	})
 
-	t.Run("stop_run paired with work does not terminate", func(t *testing.T) {
+	t.Run("stop_blueprint paired with work does not terminate", func(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
 		host := newScriptedToolHost()
 		p := &scriptedProvider{turns: []scriptedTurn{
 			{calls: []domain.ToolCall{
 				{ID: "c1", Name: "write"},
-				{ID: "c2", Name: ToolStopRun, Input: map[string]any{"type": "abort", "reason": "r"}},
+				{ID: "c2", Name: ToolStopBlueprint, Input: map[string]any{"type": "abort", "reason": "r"}},
 			}},
 			{text: "actually finished"},
 		}}
@@ -384,8 +384,8 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 	t.Run("a stop with no reason is corrected, not accepted", func(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
 		p := &scriptedProvider{turns: []scriptedTurn{
-			{calls: []domain.ToolCall{{ID: "c1", Name: ToolStopRun, Input: map[string]any{"type": "abort"}}}},
-			{calls: []domain.ToolCall{{ID: "c2", Name: ToolStopRun, Input: map[string]any{"type": "abort", "reason": "the branch is gone"}}}},
+			{calls: []domain.ToolCall{{ID: "c1", Name: ToolStopBlueprint, Input: map[string]any{"type": "abort"}}}},
+			{calls: []domain.ToolCall{{ID: "c2", Name: ToolStopBlueprint, Input: map[string]any{"type": "abort", "reason": "the branch is gone"}}}},
 		}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
 		got := e.Run(context.Background(), testSpec())
@@ -401,7 +401,7 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 	t.Run("a stop typed continue is refused and the run keeps going", func(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
 		p := &scriptedProvider{turns: []scriptedTurn{
-			{calls: []domain.ToolCall{{ID: "c1", Name: ToolStopRun, Input: map[string]any{"type": "continue", "reason": "did my part"}}}},
+			{calls: []domain.ToolCall{{ID: "c1", Name: ToolStopBlueprint, Input: map[string]any{"type": "continue", "reason": "did my part"}}}},
 			{text: "handing off"},
 		}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
@@ -529,29 +529,72 @@ func TestRun_WouldStopHookOwnsWhetherItRepeats(t *testing.T) {
 	})
 }
 
-// TestRun_ToolSetDoesNotVaryWithStepPosition pins that flow control is
-// registered identically everywhere. Position is carried by the system
-// prompt alone, so a tool list and the text describing it cannot disagree.
-func TestRun_ToolSetDoesNotVaryWithStepPosition(t *testing.T) {
-	tr := newMemTranscript(pendingUser("go"))
-	p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
-	e := newTestEngine(tr, p, newScriptedToolHost())
-
-	if got := e.Run(context.Background(), testSpec()); got.Disposition != DispositionConcluded {
-		t.Fatalf("disposition = %v (err: %v)", got.Disposition, got.Err)
-	}
-	var flow []string
-	for _, tool := range p.requests[0].Tools {
-		if tool.Function != nil && tool.Function.Name == ToolStopRun {
-			flow = append(flow, tool.Function.Name)
+// TestRun_FlowControlIsRegisteredOnlyWithABlueprint pins both halves of the
+// gate. Within a blueprint the tool set does not vary with step position —
+// position is carried by the system prompt alone, so a tool list and the
+// text describing it cannot disagree. Without one there is no flow control
+// at all.
+func TestRun_FlowControlIsRegisteredOnlyWithABlueprint(t *testing.T) {
+	toolsFor := func(t *testing.T, spec Spec) []string {
+		t.Helper()
+		tr := newMemTranscript(pendingUser("go"))
+		p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
+		e := newTestEngine(tr, p, newScriptedToolHost())
+		if got := e.Run(context.Background(), spec); got.Disposition != DispositionConcluded {
+			t.Fatalf("disposition = %v (err: %v)", got.Disposition, got.Err)
 		}
+		var names []string
+		for _, tool := range p.requests[0].Tools {
+			if tool.Function != nil {
+				names = append(names, tool.Function.Name)
+			}
+		}
+		return names
 	}
-	if len(flow) != 1 {
-		t.Fatalf("flow-control tools = %v, want exactly stop_run", flow)
+
+	t.Run("a blueprint gets the seven sandbox tools plus stop_blueprint", func(t *testing.T) {
+		names := toolsFor(t, testSpec())
+		if len(names) != 8 || names[7] != ToolStopBlueprint {
+			t.Fatalf("tools = %v, want the seven sandbox tools then stop_blueprint", names)
+		}
+	})
+
+	t.Run("a taskless conversation gets the sandbox tools only", func(t *testing.T) {
+		spec := testSpec()
+		spec.HasBlueprint = false
+		names := toolsFor(t, spec)
+		if len(names) != 7 {
+			t.Fatalf("tools = %v, want the seven sandbox tools alone", names)
+		}
+		for _, n := range names {
+			if n == ToolStopBlueprint {
+				t.Error("there is no blueprint to stop; the way to say so is to say it")
+			}
+		}
+	})
+}
+
+// TestRun_StopBlueprintIsInertWithoutABlueprint pins what happens if a model
+// calls the tool anyway. It must not terminate: the name means nothing where
+// the tool was never offered, so the call goes to the sandbox and comes back
+// unknown, and the conversation carries on.
+func TestRun_StopBlueprintIsInertWithoutABlueprint(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	host := newScriptedToolHost()
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{calls: []domain.ToolCall{{ID: "c1", Name: ToolStopBlueprint, Input: map[string]any{"type": "abort", "reason": "r"}}}},
+		{text: "sorry, ignore that"},
+	}}
+	e := newTestEngine(tr, p, host)
+	spec := testSpec()
+	spec.HasBlueprint = false
+
+	got := e.Run(context.Background(), spec)
+	if got.Outcome != domain.RunOutcomeContinue || got.ResultSummary != "sorry, ignore that" {
+		t.Fatalf("a hallucinated stop must not end the conversation: %+v", got)
 	}
-	// The seven in-jail tools are always registered alongside.
-	if len(p.requests[0].Tools) != 8 {
-		t.Errorf("tool count = %d, want the seven sandbox tools plus stop_run", len(p.requests[0].Tools))
+	if calls := host.calls(); len(calls) != 1 || calls[0] != ToolStopBlueprint {
+		t.Fatalf("the call must be dispatched like any other unknown tool: %v", calls)
 	}
 }
 

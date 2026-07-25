@@ -23,7 +23,7 @@ const fatalToolHostNotice = "This tool call was not executed: the tool host beca
 //
 // terminated reports that a flow-control call ended the run. It follows the
 // all-results-terminate contract: the batch terminates iff EVERY result in
-// it sets a terminal outcome, so a model that pairs `stop_run` with real
+// it sets a terminal outcome, so a model that pairs `stop_blueprint` with real
 // work in one message gets the work done and keeps going rather than
 // silently losing the call it made alongside.
 func (e *Engine) dispatchBatch(ctx context.Context, spec Spec, calls []domain.ToolCall) (result Result, terminated bool, err error) {
@@ -38,7 +38,7 @@ func (e *Engine) dispatchBatch(ctx context.Context, spec Spec, calls []domain.To
 		// Flow control resolves loop-side and never enters the sandbox. Its
 		// result row still lands, so the transcript stays legal and a later
 		// reader sees why the run ended.
-		if outcome, reason, ok := flowControlOutcome(call); ok {
+		if outcome, reason, ok := flowControlOutcome(call, spec.HasBlueprint); ok {
 			ack := flowControlAck(outcome, reason)
 			if err := e.insertToolResult(ctx, spec, call, ack.text, ack.isError); err != nil {
 				return Result{}, false, err
@@ -162,7 +162,7 @@ type flowControlAckResult struct {
 	isError bool
 }
 
-// flowControlAck acknowledges a stop_run call, or tells the model what its
+// flowControlAck acknowledges a stop_blueprint call, or tells the model what its
 // call was missing. Both arguments are enforced here rather than by the
 // schema alone because a schema is advisory: a model can and does emit a
 // call without one, and an unenforced stop with no reason would land a
@@ -174,14 +174,14 @@ type flowControlAckResult struct {
 func flowControlAck(outcome domain.RunOutcome, reason string) flowControlAckResult {
 	if outcome != domain.RunOutcomeFinish && outcome != domain.RunOutcomeAbort {
 		return flowControlAckResult{
-			text: "stop_run needs a type of \"finish\" or \"abort\". If you meant to finish your part normally " +
+			text: "stop_blueprint needs a type of \"finish\" or \"abort\". If you meant to finish your part normally " +
 				"and hand off whatever comes next, do not call this at all — reply with a message and no tool calls.",
 			isError: true,
 		}
 	}
 	if reason == "" {
 		return flowControlAckResult{
-			text: "stop_run requires a reason. Call it again with a plain statement of why you are stopping here " +
+			text: "stop_blueprint requires a reason. Call it again with a plain statement of why you are stopping here " +
 				"and what a human needs to know or do next.",
 			isError: true,
 		}

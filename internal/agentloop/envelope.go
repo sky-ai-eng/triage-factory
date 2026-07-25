@@ -15,11 +15,20 @@ import (
 var codingAgentSystemPrompt string
 
 // completionNative is the native path's terminal contract: stopping is
-// concluding, plus the flow-control tools. It replaces the SDK path's JSON
-// completion envelope, which this runtime never emits and never parses.
+// concluding. It replaces the SDK path's JSON completion envelope, which
+// this runtime never emits and never parses. True of every conversation the
+// loop drives, so it carries nothing that presupposes a task.
 //
 //go:embed prompts/completion-native.txt
 var completionNative string
+
+// blueprintControl is what a conversation executing a blueprint gets on top:
+// the flow-control tool and the artifact contract. Both presuppose an absent
+// human — a task to leave open, a mission that expected an artifact — so
+// neither belongs in a conversation someone is present for.
+//
+//go:embed prompts/blueprint-control.txt
+var blueprintControl string
 
 // blueprintStepNonterminal is the addendum appended on a non-terminal
 // blueprint step — the same guidance the SDK path's addendum carries, minus
@@ -49,9 +58,15 @@ type EnvelopeParts struct {
 	Envelope string
 	// Mission is the step's prompt body.
 	Mission string
+	// HasBlueprint appends the flow-control and artifact contract. It must
+	// agree with Spec.HasBlueprint, which registers the tool that section
+	// describes: a model must never be handed a tool its instructions don't
+	// mention, nor told about one it doesn't have.
+	HasBlueprint bool
 	// NonTerminalStep appends the blueprint addendum, which tells the model
 	// that stopping hands off rather than ending the task. This is the only
-	// place step position is expressed.
+	// place step position is expressed. It implies HasBlueprint — a step is
+	// a step of something.
 	NonTerminalStep bool
 }
 
@@ -63,6 +78,7 @@ type EnvelopeParts struct {
 //	TF envelope
 //	mission
 //	completion contract
+//	[blueprint control]
 //	[non-terminal step addendum]
 //
 // The order is what makes the prefix cacheable: the base prompt and the tool
@@ -75,6 +91,9 @@ func BuildSystemPrompt(parts EnvelopeParts) string {
 		strings.TrimSpace(parts.Envelope),
 		strings.TrimSpace(parts.Mission),
 		strings.TrimSpace(completionNative),
+	}
+	if parts.HasBlueprint {
+		sections = append(sections, strings.TrimSpace(blueprintControl))
 	}
 	if parts.NonTerminalStep {
 		sections = append(sections, strings.TrimSpace(blueprintStepNonterminal))

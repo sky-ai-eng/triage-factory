@@ -105,6 +105,13 @@ type Spec struct {
 	Model        string
 	SystemPrompt string
 
+	// HasBlueprint registers the flow-control tool. True for a delegation,
+	// where the conversation executes a blueprint against a task; false for
+	// a conversation with a human in it, which has no blueprint to stop and
+	// nobody absent to leave a reason for. It must agree with
+	// EnvelopeParts.HasBlueprint, which appends the text describing the tool.
+	HasBlueprint bool
+
 	// MaxIterations bounds the engagement's provider calls. Zero uses
 	// DefaultMaxIterations.
 	MaxIterations int
@@ -238,7 +245,7 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 		if err != nil {
 			return e.failed(started, turn, fmt.Errorf("list rows for assembly: %w", err))
 		}
-		tools, err := e.toolSchemas()
+		tools, err := e.toolSchemas(spec)
 		if err != nil {
 			return e.failed(started, turn, err)
 		}
@@ -312,7 +319,7 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 				return e.failed(started, turn, err)
 			}
 			if terminated {
-				// stop_run carries no summary of its own — the prose in the
+				// stop_blueprint carries no summary of its own — the prose in the
 				// same assistant message is the account of the work, exactly
 				// as it is when the model concludes by stopping.
 				outcome.ResultSummary = lastText
@@ -360,7 +367,7 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 		// a part being done ends the task. On a final or single step it
 		// resolves `continue` to a structural finish, so the common case is
 		// unchanged; on a non-final step it hands off. Ending the whole task
-		// early is the deliberate act, and it goes through stop_run.
+		// early is the deliberate act, and it goes through stop_blueprint.
 		return Result{
 			Disposition:   DispositionConcluded,
 			Outcome:       domain.RunOutcomeContinue,
@@ -371,16 +378,17 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 	}
 }
 
-// toolSchemas assembles the call's tool list: the seven in-jail tools plus
-// flow control. Built per call from immutable inputs so no mutation can leak
-// between engagements. The list does not vary with the step's position —
-// only the system prompt does.
-func (e *Engine) toolSchemas() ([]schemas.ChatTool, error) {
+// toolSchemas assembles the call's tool list: the seven in-jail tools, plus
+// flow control when there is a blueprint to control. Built per call from
+// immutable inputs so no mutation can leak between engagements. Within a
+// blueprint the list does not vary with the step's position — only the
+// system prompt does.
+func (e *Engine) toolSchemas(spec Spec) ([]schemas.ChatTool, error) {
 	sandboxed, err := SandboxTools()
 	if err != nil {
 		return nil, err
 	}
-	flow := flowControlTools()
+	flow := flowControlTools(spec.HasBlueprint)
 	out := make([]schemas.ChatTool, 0, len(sandboxed)+len(flow))
 	out = append(out, sandboxed...)
 	out = append(out, flow...)

@@ -24,9 +24,9 @@ import (
 //go:embed tools/definitions.json
 var toolDefinitionsJSON []byte
 
-// ToolStopRun is the one flow-control tool. It executes loop-side and never
-// enters the sandbox — it is how a run reaches decideBlueprintStep now that
-// the SDK's JSON completion envelope is gone from this path.
+// ToolStopBlueprint is the one flow-control tool. It executes loop-side and
+// never enters the sandbox — it is how a run reaches decideBlueprintStep now
+// that the SDK's JSON completion envelope is gone from this path.
 //
 // Every deliberate ending goes through this single name, with `type` naming
 // which one. The alternative — a tool per ending — put the destructive
@@ -35,9 +35,12 @@ var toolDefinitionsJSON []byte
 // prompt had to spend a paragraph arguing against the easier option.
 // Stopping now means `continue`, and the tool is only ever reached to do
 // something other than the safe default.
-const ToolStopRun = "stop_run"
+//
+// The name says what it acts on, because that is what makes its absence
+// obvious: a conversation with no blueprint has nothing for it to stop.
+const ToolStopBlueprint = "stop_blueprint"
 
-// stop_run's `type` argument. The values are the stored RunOutcome
+// stop_blueprint's `type` argument. The values are the stored RunOutcome
 // vocabulary verbatim rather than a second, friendlier set of words: a
 // translation table between what the model says and what the row holds is a
 // thing that drifts.
@@ -99,14 +102,23 @@ func parseToolDefinitions(raw []byte) ([]schemas.ChatTool, error) {
 	return out, nil
 }
 
-// flowControlTools returns the loop-side tool set, which does not vary.
+// flowControlTools returns the loop-side tool set for this conversation.
 //
-// Registration is unconditional — including `finish` on a step that is
-// already the last one, where it is an exact alias for stopping normally and
-// decideBlueprintStep gives the identical answer. A harmless alias costs
-// less than a tool list that changes shape with step position and can fall
-// out of step with the prompt that describes it.
-func flowControlTools() []schemas.ChatTool {
+// A conversation with no blueprint gets none. There is nothing for the tool
+// to act on, and its two endings both presuppose an absent human: aborting
+// leaves a task open for someone to inherit, and there is no task. In a
+// conversation someone is actually having, the way to say "I can't do this"
+// is to say it — to the person reading, who is right there.
+//
+// Within a blueprint the set does not vary by step position, `finish`
+// included on a step that is already the last one, where it is an exact
+// alias for stopping normally and decideBlueprintStep gives the identical
+// answer. A harmless alias costs less than a tool list that changes shape
+// mid-workflow and can fall out of step with the prompt describing it.
+func flowControlTools(hasBlueprint bool) []schemas.ChatTool {
+	if !hasBlueprint {
+		return nil
+	}
 	props := schemas.NewOrderedMap()
 	props.Set("type", map[string]any{
 		"type": "string",
@@ -118,7 +130,7 @@ func flowControlTools() []schemas.ChatTool {
 		"type":        "string",
 		"description": "Why you are stopping here, and what a human needs to know or do next.",
 	})
-	return []schemas.ChatTool{functionTool(ToolStopRun,
+	return []schemas.ChatTool{functionTool(ToolStopBlueprint,
 		"End this run in a way other than simply finishing. You do NOT need this to complete your work normally — "+
 			"for that, reply with a message and no tool calls. Reach for this only to abort, or to end an entire "+
 			"multi-step workflow early.",
@@ -147,8 +159,13 @@ func functionTool(name, description string, params *schemas.ToolFunctionParamete
 // An unrecognized `type` yields an empty outcome rather than an error:
 // isFlowControl still holds, so the caller answers the call in band and the
 // model gets to correct itself.
-func flowControlOutcome(call domain.ToolCall) (outcome domain.RunOutcome, reason string, isFlowControl bool) {
-	if call.Name != ToolStopRun {
+//
+// hasBlueprint mirrors registration, so the name means nothing where the
+// tool was never offered. A hallucinated call then falls through to the
+// sandbox and comes back "unknown tool", which is the right answer — far
+// better than silently ending a conversation someone is in the middle of.
+func flowControlOutcome(call domain.ToolCall, hasBlueprint bool) (outcome domain.RunOutcome, reason string, isFlowControl bool) {
+	if !hasBlueprint || call.Name != ToolStopBlueprint {
 		return "", "", false
 	}
 	reason = stringArg(call.Input, "reason")

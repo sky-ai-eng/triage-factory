@@ -118,6 +118,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		ConversationID: runID,
 		Model:          model,
 		SystemPrompt:   systemPrompt,
+		HasBlueprint:   true,
 		MaxIterations:  nativeMaxIterations(),
 		UserID:         creatorUserID,
 	})
@@ -224,9 +225,14 @@ func (s *Spawner) buildNativeSystemPrompt(ctx context.Context, task domain.Task,
 
 	replacer := BuildPromptReplacer(task, metadataJSON, runID, agentBin, agentRunRoot, namespace, branchTemplate, runURL)
 	return agentloop.BuildSystemPrompt(agentloop.EnvelopeParts{
-		TaskContext:     BuildTaskContext(task, metadataJSON, cfg.prSkeleton),
-		Envelope:        replacer.Replace(envelope),
-		Mission:         replacer.Replace(body),
+		TaskContext: BuildTaskContext(task, metadataJSON, cfg.prSkeleton),
+		Envelope:    replacer.Replace(envelope),
+		Mission:     replacer.Replace(body),
+		// A delegation always executes a blueprint — a single-step one is
+		// still one — so this path never builds the taskless shape. The
+		// distinction exists for the conversations the loop does not drive
+		// yet, where a person is present to be answered instead.
+		HasBlueprint:    true,
 		NonTerminalStep: cfg.appendSysPrompt != "",
 	}), nil
 }
@@ -447,7 +453,7 @@ func (s *Spawner) recordNativeResult(
 		delegateLog.Warn("snapshot workspace at native conclusion failed", "run", runID, "error", err)
 	}
 
-	// Only a stop_run terminal carries a reason; concluding by stopping says
+	// Only a stop_blueprint terminal carries a reason; concluding by stopping says
 	// what it has to say in the summary.
 	outcome := string(result.Outcome)
 	outcomeReason := result.OutcomeReason
