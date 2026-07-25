@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { AnimatePresence, motion } from 'motion/react'
 import { Store, ThumbsUp, X } from 'lucide-react'
 import { useOrgHref } from '../hooks/useOrgHref'

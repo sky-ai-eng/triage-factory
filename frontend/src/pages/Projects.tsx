@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router'
 import { Plus, Trash2, Upload } from 'lucide-react'
 import { useOrgHref } from '../hooks/useOrgHref'
 import type { Project, ProjectImportError, ProjectImportResult } from '../types'

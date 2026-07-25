@@ -19,3 +19,12 @@
 # minimumReleaseAgeExclude:
 #   - "@my-scope/*"
 minimumReleaseAge: 1440
+
+# brace-expansion 1.x is unpatchable in place: the DoS fix landed only in 5.x,
+# whose export shape is an object rather than the bare function minimatch@3
+# calls, so forcing 5.x under minimatch@3 breaks every consumer. Retiring
+# minimatch@3 itself — reached solely through eslint's config loading — drops
+# the 1.x branch from the tree instead. Remove once eslint ships a minimatch
+# whose own range excludes brace-expansion 1.x.
+overrides:
+  minimatch@3: ^10.2.5

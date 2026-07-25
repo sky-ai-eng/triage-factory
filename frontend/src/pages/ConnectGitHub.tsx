@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Navigate, useLocation, useParams } from 'react-router-dom'
+import { Navigate, useLocation, useParams } from 'react-router'
 import { useGitHubIdentity } from '../hooks/useGitHubIdentity'
 import { captureGitHubIdentityPat } from '../lib/githubIdentity'
 

@@ -1,4 +1,4 @@
-import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
+import { Link, NavLink, Outlet, useLocation } from 'react-router'
 import { Settings } from 'lucide-react'
 import { useOrgHref } from './hooks/useOrgHref'
 import { useOptionalAuth } from './contexts/AuthContext'

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import * as Popover from '@radix-ui/react-popover'
 import { ChevronDown, GitBranch, Plus, RotateCw, AlertTriangle } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import RepoPickerModal from '../components/RepoPickerModal'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { useWebSocket } from '../hooks/useWebSocket'

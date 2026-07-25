@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router'
 import type { Conversation } from '../types'
 import { setPresenceView } from '../hooks/useWebSocket'
 import { useRunDetail } from '../hooks/useRunDetail'

@@ -20,6 +20,16 @@ import (
 // package.json template in sync with this constant.
 const sdkVersion = "0.3.195"
 
+// Floor for @hono/node-server, forced past the range its own consumer
+// declares. It reaches this tree only as a required dependency of
+// @modelcontextprotocol/sdk (a peer of the Agent SDK), which pins
+// ^1.19.9 — and every 1.x carries a serve-static path-traversal
+// advisory whose fix landed only in 2.0.5. MCP's sole use of the package
+// is getRequestListener, which 2.x still exports, so raising the major
+// past the declared range costs nothing here. Retire this override once
+// @modelcontextprotocol/sdk admits 2.x on its own.
+const honoNodeServerOverride = "^2.0.5"
+
 // Embedded shim that translates the flag-based argv BuildArgs emits into
 // Agent SDK Options. Materialized to disk at first install so the Node
 // process can `import` from `node_modules/` next to it.
@@ -51,7 +61,8 @@ var (
 //
 // The install is idempotent: re-running against an already-populated dir
 // re-writes wrapper.mjs + package.json + package-lock.json (cheap) and
-// skips `npm ci` when the pinned SDK version is already in node_modules.
+// skips `npm ci` when the pinned SDK version is already in node_modules
+// and the lockfile on disk already matches the embedded one.
 func EnsureSDK() (string, error) {
 	installOnce.Do(func() {
 		installPath, installErr = doInstall()
@@ -80,12 +91,13 @@ func doInstall() (string, error) {
 		return "", err
 	}
 
-	if err := writeFileIfChanged(filepath.Join(sdkDir, "package-lock.json"), packageLockJSON, 0o644); err != nil {
+	lockChanged, err := writeFileIfChanged(filepath.Join(sdkDir, "package-lock.json"), packageLockJSON, 0o644)
+	if err != nil {
 		return "", fmt.Errorf("write package-lock.json: %w", err)
 	}
 
 	wrapperPath := filepath.Join(sdkDir, "wrapper.mjs")
-	if err := writeFileIfChanged(wrapperPath, wrapperJS, 0o644); err != nil {
+	if _, err := writeFileIfChanged(wrapperPath, wrapperJS, 0o644); err != nil {
 		return "", fmt.Errorf("write wrapper.mjs: %w", err)
 	}
 
@@ -97,7 +109,7 @@ func doInstall() (string, error) {
 	// because nothing on PATH satisfies them. Local-mode users on a
 	// fresh laptop still hit the install path and still get the
 	// human-readable "install Node 18+" error in that case.
-	if sdkAlreadyInstalled(sdkDir) {
+	if !needsInstall(sdkDir, lockChanged) {
 		return wrapperPath, nil
 	}
 
@@ -108,54 +120,87 @@ func doInstall() (string, error) {
 		return "", err
 	}
 
-	if err := installSDKIfNeeded(sdkDir); err != nil {
+	if err := installSDK(sdkDir, lockChanged); err != nil {
 		return "", err
 	}
 
 	return wrapperPath, nil
 }
 
+// needsInstall reports whether node_modules has to be reconciled with the
+// embedded pins before the wrapper can run against it.
+//
+// A rewritten lockfile disqualifies the presence check on its own: the
+// pinned tree moved while sdkVersion stood still, which is the shape of a
+// transitive security bump. node_modules still holds the superseded
+// resolution and the version-only check cannot see past it, so an upgraded
+// install would otherwise keep serving the tree the bump was meant to
+// replace. A lockfile that matches byte-for-byte — the baked Docker image,
+// or any second call in a process — leaves the presence check in charge,
+// which is what keeps a runtime layer with no node on PATH working.
+func needsInstall(sdkDir string, lockChanged bool) bool {
+	return lockChanged || !sdkAlreadyInstalled(sdkDir)
+}
+
 // sdkAlreadyInstalled returns true when the pinned SDK version is
 // present in node_modules. Mirrors the version-pinned check inside
-// installSDKIfNeeded so a sdkVersion bump in a future release still
-// triggers a re-install (with node/npm available locally) instead of
-// silently keeping the stale tree.
+// installSDK so a sdkVersion bump in a future release still triggers a
+// re-install (with node/npm available locally) instead of silently
+// keeping the stale tree.
 func sdkAlreadyInstalled(sdkDir string) bool {
 	pkgFile := filepath.Join(sdkDir, "node_modules", "@anthropic-ai", "claude-agent-sdk", "package.json")
 	installed, err := readInstalledSDKVersion(pkgFile)
 	return err == nil && installed == sdkVersion
 }
 
-// writePackageJSON pins the SDK version. We re-write every install pass
-// so a Triage Factory upgrade that bumps sdkVersion picks up the new
-// pin even if the user already has an older copy installed (the
-// installSDKIfNeeded check below will then trigger a re-install).
-func writePackageJSON(sdkDir string) error {
-	body := fmt.Sprintf(`{
+// sdkPackageJSON renders the manifest `npm ci` resolves the embedded
+// lockfile against. The Docker image bakes a byte-identical copy from its
+// own printf — the sdk-builder stage has no Go available to call this —
+// so a drift test compares the two renderings. Drift is not cosmetic:
+// npm ci hard-refuses to install when the manifest and the lockfile
+// disagree about a dependency or an override.
+func sdkPackageJSON() []byte {
+	return []byte(fmt.Sprintf(`{
   "name": "triagefactory-sdk-runtime",
   "private": true,
   "type": "module",
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "%s"
+  },
+  "overrides": {
+    "@hono/node-server": "%s"
   }
 }
-`, sdkVersion)
-	return writeFileIfChanged(filepath.Join(sdkDir, "package.json"), []byte(body), 0o644)
+`, sdkVersion, honoNodeServerOverride))
+}
+
+// writePackageJSON pins the SDK version. We re-write every install pass
+// so a Triage Factory upgrade that bumps sdkVersion picks up the new pin
+// even if the user already has an older copy installed (the installSDK
+// check below will then trigger a re-install).
+func writePackageJSON(sdkDir string) error {
+	_, err := writeFileIfChanged(filepath.Join(sdkDir, "package.json"), sdkPackageJSON(), 0o644)
+	return err
 }
 
 // writeFileIfChanged writes content to path only when it isn't already there
-// byte-for-byte. The Docker image bakes the SDK scaffolding (package.json,
-// package-lock.json, wrapper.mjs) from the same sources this file embeds, into
-// a root-owned read-only /opt/triagefactory/sdk — so an unconditional rewrite
-// by the unprivileged runtime EACCESes. Skipping the write when the content
-// already matches keeps that baked runtime immutable (the orchestrator and the
-// sandboxed agent can't tamper with it) while still refreshing a genuinely
-// writable local-mode SDK dir on an upgrade.
-func writeFileIfChanged(path string, content []byte, perm os.FileMode) error {
+// byte-for-byte, reporting whether it wrote. The Docker image bakes the SDK
+// scaffolding (package.json, package-lock.json, wrapper.mjs) from the same
+// sources this file embeds, into a root-owned read-only /opt/triagefactory/sdk
+// — so an unconditional rewrite by the unprivileged runtime EACCESes. Skipping
+// the write when the content already matches keeps that baked runtime immutable
+// (the orchestrator and the sandboxed agent can't tamper with it) while still
+// refreshing a genuinely writable local-mode SDK dir on an upgrade — and it is
+// what lets the baked image, whose files match by construction, keep reporting
+// no change and skip straight past the install.
+func writeFileIfChanged(path string, content []byte, perm os.FileMode) (bool, error) {
 	if existing, err := os.ReadFile(path); err == nil && bytes.Equal(existing, content) {
-		return nil
+		return false, nil
 	}
-	return os.WriteFile(path, content, perm)
+	if err := os.WriteFile(path, content, perm); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // checkNode verifies a usable Node is on PATH. Required floor is 18 —
@@ -199,12 +244,13 @@ func parseNodeMajor(version string) (int, error) {
 	return strconv.Atoi(v[:dot])
 }
 
-// installSDKIfNeeded skips when the pinned SDK is already on disk.
-// We parse the installed package's version field rather than just
-// checking directory existence so a sdkVersion bump in a future release
-// re-triggers `npm ci`. JSON parse (not substring match) so npm
-// reformatting the file — different whitespace, key order, etc. — never
-// causes us to spuriously re-run `npm ci` on every process start.
+// installSDK skips when the pinned SDK is already on disk and the caller
+// hasn't reported the lockfile moving underneath it. We parse the
+// installed package's version field rather than just checking directory
+// existence so a sdkVersion bump in a future release re-triggers `npm
+// ci`. JSON parse (not substring match) so npm reformatting the file —
+// different whitespace, key order, etc. — never causes us to spuriously
+// re-run `npm ci` on every process start.
 //
 // Uses `npm ci` (not `npm install`) so the embedded package-lock.json is
 // authoritative: every Triage Factory binary version produces the same
@@ -218,16 +264,16 @@ func parseNodeMajor(version string) (int, error) {
 // or compromised transitive dependency can't ride a postinstall hook to
 // execute arbitrary code at install time — npm postinstall is the most
 // commonly abused supply-chain channel. Verified against the pinned
-// tree (package-lock.json): none of its 110 packages set
+// tree (package-lock.json): none of its 109 packages set
 // hasInstallScript, and the SDK's per-platform native binaries
 // (@anthropic-ai/claude-agent-sdk-<os>-<arch>) ship prebuilt, selected
 // by npm via optionalDependencies os/cpu fields — no build step to lose.
 // If a future sdkVersion bump pulls in a dependency that genuinely
 // needs a lifecycle script, that's a signal to vendor/prebuild it, not
 // to drop this flag.
-func installSDKIfNeeded(sdkDir string) error {
+func installSDK(sdkDir string, lockChanged bool) error {
 	pkgFile := filepath.Join(sdkDir, "node_modules", "@anthropic-ai", "claude-agent-sdk", "package.json")
-	if installed, err := readInstalledSDKVersion(pkgFile); err == nil && installed == sdkVersion {
+	if installed, err := readInstalledSDKVersion(pkgFile); !lockChanged && err == nil && installed == sdkVersion {
 		return nil
 	}
 
