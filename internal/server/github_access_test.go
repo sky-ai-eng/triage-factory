@@ -600,20 +600,95 @@ func TestOrgSettingsGet_ReportsBoundPATLogin(t *testing.T) {
 	}
 }
 
-// orgPATLogin reads github_pat_login off the org settings GET.
-func orgPATLogin(t *testing.T, s *Server) string {
+// TestOrgSettingsGet_EnvOverlaidPATIsSettled covers the local-mode env overlay,
+// where TRIAGE_FACTORY_GITHUB_BOT_PAT supplies the token TF actually
+// authenticates with and every write to the vault is invisible to the next read.
+//
+// Two things have to give. The recorded login describes the last token bound
+// through a route, which is NOT the token in use, so naming it on a surface
+// whose job is "here's the account you're replacing" would point the operator
+// at the wrong account. And the replacement itself can't be honored at all —
+// hence the flag the UI reads to render the credential as settled instead of
+// offering a control that would report success and change nothing.
+func TestOrgSettingsGet_EnvOverlaidPATIsSettled(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	// A real bind first, so there IS a recorded login to (wrongly) show.
+	gh := githubUserStub(t, "acme-bot")
+	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
+		"base_url": gh.URL, "pat": "ghp_bound",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if view := orgCredentialView(t, s); view.Login != "acme-bot" || view.PATEnvProvided {
+		t.Fatalf("before the overlay: %+v, want login acme-bot and env_provided false", view)
+	}
+
+	// The operator starts the server with a bot token in the environment. It now
+	// outranks the bound one on every read.
+	t.Setenv("TRIAGE_FACTORY_GITHUB_BOT_PAT", "ghp_from_env")
+
+	view := orgCredentialView(t, s)
+	if !view.PATEnvProvided {
+		t.Errorf("github_pat_env_provided = false with the env var set, want true")
+	}
+	if !view.HasPAT {
+		t.Errorf("has_github_pat = false, want true — the env token IS the live credential")
+	}
+	if view.Login != "" {
+		t.Errorf("github_pat_login = %q under the env overlay, want empty — the recorded login "+
+			"belongs to the shadowed token, not the one in use", view.Login)
+	}
+}
+
+// TestOrgSettingsGet_EnvOverlaidJiraIsSettled is the Jira half. Either env half
+// is enough: the resolver reads the host from the same overlaid secret, so an
+// env-supplied URL makes a rebind partly ineffective even when the token isn't
+// shadowed.
+func TestOrgSettingsGet_EnvOverlaidJiraIsSettled(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	if orgCredentialView(t, s).JiraEnvProvided {
+		t.Fatalf("jira_credential_env_provided = true with no env vars set")
+	}
+
+	t.Setenv("TRIAGE_FACTORY_JIRA_URL", "https://jira.example.com")
+	if !orgCredentialView(t, s).JiraEnvProvided {
+		t.Errorf("jira_credential_env_provided = false with the URL env var set, want true")
+	}
+}
+
+// orgCredentialView is the org settings GET's credential-facing fields — what
+// Settings reads to decide between reporting a credential and offering to
+// replace it.
+type orgCredentialViewJSON struct {
+	HasPAT          bool   `json:"has_github_pat"`
+	Login           string `json:"github_pat_login"`
+	PATEnvProvided  bool   `json:"github_pat_env_provided"`
+	JiraEnvProvided bool   `json:"jira_credential_env_provided"`
+}
+
+func orgCredentialView(t *testing.T, s *Server) orgCredentialViewJSON {
 	t.Helper()
 	rec := doJSON(t, s, http.MethodGet, "/api/settings/org", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/settings/org = %d: %s", rec.Code, rec.Body.String())
 	}
-	var out struct {
-		Login string `json:"github_pat_login"`
-	}
+	var out orgCredentialViewJSON
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode org settings: %v", err)
 	}
-	return out.Login
+	return out
+}
+
+// orgPATLogin reads github_pat_login off the org settings GET.
+func orgPATLogin(t *testing.T, s *Server) string {
+	t.Helper()
+	return orgCredentialView(t, s).Login
 }
 
 // patRoute is the org's GitHub-PAT credential resource in local mode.

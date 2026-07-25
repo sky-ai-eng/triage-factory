@@ -65,6 +65,16 @@ describe('GitHubAccessControl · PAT rotation', () => {
     expect(screen.queryByRole('button', { name: 'Replace token…' })).not.toBeInTheDocument()
   })
 
+  // The env overlay wins on read: a token written from here would be stored and
+  // then ignored, and the recorded login belongs to the shadowed credential. So
+  // the section reports the connection and offers nothing to change it.
+  it('reports an env-supplied token as settled, with no replacement or login', () => {
+    renderControl({ githubPatEnvProvided: true, githubPatLogin: '' })
+    expect(screen.getByText(/TRIAGE_FACTORY_GITHUB_BOT_PAT/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Replace token…' })).not.toBeInTheDocument()
+    expect(screen.queryByText('@acme-bot')).not.toBeInTheDocument()
+  })
+
   it('validates, shows the reach, then binds the new token against the saved host', async () => {
     ghMocks.patPreflight.mockResolvedValue({
       login: 'acme-bot-2',

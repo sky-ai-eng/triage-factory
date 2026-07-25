@@ -79,16 +79,27 @@ export interface OrgSettingsData {
   github_clone_protocol: CloneProtocol
   has_github_pat: boolean
   // The @login the stored org PAT authenticates as — the credential's own
-  // identity, not the viewer's. Absent when no PAT is bound (or when the bind
-  // predates the login being recorded); Settings shows it beside the "Replace
-  // token" control so a rotation names the account it's swapping out.
+  // identity, not the viewer's. Absent when no PAT is bound, when the bind
+  // predates the login being recorded, or when the live token comes from the
+  // environment (the recorded login wouldn't be the one in use). Settings shows
+  // it beside the "Replace token" control so a rotation names the account it's
+  // swapping out.
   github_pat_login?: string
+  // True when the live GitHub token is supplied by TRIAGE_FACTORY_GITHUB_BOT_PAT
+  // (local mode only). The overlay is read-wins, so a replacement written from
+  // here would be stored and then ignored — the surface reports the credential
+  // instead of offering to change it.
+  github_pat_env_provided?: boolean
   jira_base_url: string
   jira_poll_interval: string
   // True when a Jira service credential is stored for the org's auth-method
   // marker (DC PAT or Cloud email + API token) — not the presence of a PAT
   // specifically, so a Cloud org reports true despite having no PAT.
   has_jira_credential: boolean
+  // The Jira half of github_pat_env_provided — true when the env supplies the
+  // Jira host and/or service token, either of which makes an in-place rebind
+  // partly or wholly unobservable.
+  jira_credential_env_provided?: boolean
   max_llm_model_tier?: string
   // Org-wide daily spend cap in USD (TFAC-477); 0 = no cap. Always present.
   max_daily_cost_usd: number

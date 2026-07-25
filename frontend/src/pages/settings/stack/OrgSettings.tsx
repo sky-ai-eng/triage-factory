@@ -428,6 +428,13 @@ export default function OrgSettings({
             // doesn't pick fields here; loadOrg seeded it from the stored host.
             deployment={draft.jiraDeployment ?? 'data_center'}
             onReplace={() => setJiraRebinding(true)}
+            // Suppresses that rebind (and says why) when TRIAGE_FACTORY_JIRA_*
+            // supplies the host or the token: the overlay wins on read, so a
+            // credential typed here would be stored and then ignored. Reported,
+            // not managed — the same rule the GitHub section applies to an
+            // env-supplied PAT. Disconnect stays available: it's honest about
+            // its outcome, warning that the env vars keep supplying the value.
+            envProvided={draft.jiraCredentialEnvProvided}
             onDisconnected={() => {
               setDraft((d) => ({
                 ...d,

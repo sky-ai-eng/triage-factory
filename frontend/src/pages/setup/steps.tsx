@@ -101,6 +101,8 @@ export const initialWizardState = (): WizardState => ({
   orgLoaded: false,
   hasGitHubPat: false,
   githubPatLogin: '',
+  githubPatEnvProvided: false,
+  jiraCredentialEnvProvided: false,
   githubReady: false,
   githubUrlConfirmed: false,
   githubAccessTab: null,
@@ -224,6 +226,8 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
     duplicateJiraToUser: ctx.isLocal,
     hasGitHubPat: org.has_github_pat,
     githubPatLogin: org.github_pat_login ?? '',
+    githubPatEnvProvided: org.github_pat_env_provided ?? false,
+    jiraCredentialEnvProvided: org.jira_credential_env_provided ?? false,
     githubReady: integrations.githubReady,
     // Seeded only from a live connection — NOT from a stored base URL. A stored
     // URL must not pre-satisfy the step, or Continue would skip the probe and
