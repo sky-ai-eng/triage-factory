@@ -57,6 +57,13 @@ type ToolHostOptions struct {
 	// GHChannel wires the real-gh credential injector, when the sidecar
 	// bound one.
 	GHChannel *GHChannelParams
+	// SkillsSourcePath is the orchestrator-owned staging dir holding this
+	// step's SKILL.md, bind-mounted read-only. Same contract as
+	// RunOptions.SkillsSourcePath and set from the same runConfig field:
+	// only a blueprint step carries one, and it must reach a native jail
+	// exactly as it reaches an SDK one or a sandboxed step silently loses
+	// the skill it staged.
+	SkillsSourcePath string
 	// MemoryLimitMB caps the jail's cgroup. Zero uses the process default.
 	MemoryLimitMB int
 }
@@ -128,7 +135,7 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (*ToolHostJail, e
 		return nil, fmt.Errorf("agentproc: chown worktree for tool host: %w", err)
 	}
 
-	mounts, err := toolHostMounts(sockDir, opts.GHChannel)
+	mounts, err := toolHostMounts(sockDir, opts.GHChannel, opts.SkillsSourcePath)
 	if err != nil {
 		_ = jail.Close()
 		return nil, err
@@ -220,9 +227,9 @@ func prepareToolHostSocketDir(runID string) (string, error) {
 
 // toolHostMounts assembles the jail's bind mounts: the tool host binary and
 // the socket directory it needs, plus the same TF-side mounts an SDK jail
-// gets (the TF binary under both names, the git-hooks dir, and the gh
-// channel's cert + pinned binary).
-func toolHostMounts(sockDir string, gh *GHChannelParams) ([]sandbox.Mount, error) {
+// gets (the TF binary under both names, the git-hooks dir, the gh channel's
+// cert + pinned binary, and this step's staged skill).
+func toolHostMounts(sockDir string, gh *GHChannelParams, skillsSource string) ([]sandbox.Mount, error) {
 	if _, err := os.Stat(hostToolHostBinaryPath); err != nil {
 		return nil, fmt.Errorf("agentproc: tool host binary is not present at %s: %w", hostToolHostBinaryPath, err)
 	}
@@ -247,6 +254,18 @@ func toolHostMounts(sockDir string, gh *GHChannelParams) ([]sandbox.Mount, error
 		}
 		if _, err := os.Stat(hostGHBinaryPath); err == nil {
 			mounts = append(mounts, sandbox.Mount{Source: hostGHBinaryPath, Destination: sandboxGHBinary, Options: []string{"ro"}})
+		}
+	}
+	// The stat guard matches the SDK path's: a staging dir that vanished (a
+	// swept orphan on a cold cross-executor resume) must not fail the launch
+	// on the broker's source-resolution check. The agent then continues from
+	// its transcript without the skill file, which is a discovery
+	// degradation, not a broken run.
+	if skillsSource != "" {
+		if _, err := os.Stat(skillsSource); err == nil {
+			mounts = append(mounts, sandbox.Mount{Source: skillsSource, Destination: sandbox.TrustedSkillsDestination, Options: []string{"ro"}})
+		} else {
+			agentprocLog.Warn("step-skill staging dir missing; launching the tool host without the skills mount", "path", skillsSource, "error", err)
 		}
 	}
 	return mounts, nil

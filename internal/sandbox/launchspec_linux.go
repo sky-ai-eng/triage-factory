@@ -928,6 +928,7 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 			trusted := filepath.Join(realBase, runID)
 			if realSource != trusted {
 				return fmt.Errorf("sandbox: mount %q source %q is not this run's own step-skill staging dir (want %q)", m.Destination, m.Source, trusted)
+			}
 		case TrustedToolHostBinaryDestination:
 			realTrusted, rErr := realPath(TrustedToolHostBinaryPath())
 			if rErr != nil {

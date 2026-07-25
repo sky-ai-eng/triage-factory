@@ -75,6 +75,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		PrebuiltNetwork:  cfg.execSandbox.runNetwork(),
 		PrebuiltProxyEnv: cfg.execSandbox.proxyEnv(),
 		GHChannel:        cfg.execSandbox.ghChannel(runID),
+		SkillsSourcePath: cfg.skillsSourcePath,
 	})
 	if err != nil {
 		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "launch tool host: "+err.Error(), domain.RunFailureUnclassified)
