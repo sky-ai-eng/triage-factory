@@ -35,26 +35,25 @@ func (e *Engine) dispatchBatch(ctx context.Context, spec Spec, calls []domain.To
 			return Result{}, false, ctxErr
 		}
 
-		// Flow control resolves loop-side and never enters the sandbox. Its
-		// result row still lands, so the transcript stays legal and a later
-		// reader sees why the run ended.
-		if outcome, reason, ok := flowControlOutcome(call, spec.HasBlueprint); ok {
-			ack := flowControlAck(outcome, reason)
-			if err := e.insertToolResult(ctx, spec, call, ack.text, ack.isError); err != nil {
+		// A handler-backed tool resolves loop-side and never enters the
+		// sandbox. Its result row still lands, so the transcript stays legal
+		// and a later reader sees why the run ended.
+		if out, ok := resolveLoopSide(call, spec.HasBlueprint); ok {
+			if err := e.insertToolResult(ctx, spec, call, out.Content, out.IsError); err != nil {
 				return Result{}, false, err
 			}
-			if ack.isError {
-				// A malformed flow-control call (a bad type, a missing reason)
-				// is not a termination — the model is told what it owes and
-				// continues.
+			if out.Terminal == "" {
+				// Either a correction (a bad type, a missing reason) or a
+				// loop-side tool that simply did its job. Neither ends the
+				// run, so this batch is no different from one that did work.
 				allTerminate = false
 				continue
 			}
 			if terminal == nil {
 				terminal = &Result{
 					Disposition:   DispositionConcluded,
-					Outcome:       outcome,
-					OutcomeReason: reason,
+					Outcome:       out.Terminal,
+					OutcomeReason: out.Reason,
 				}
 			}
 			continue
@@ -154,40 +153,4 @@ func (e *Engine) failRemainingCalls(ctx context.Context, spec Spec, calls []doma
 		}
 	}
 	return nil
-}
-
-// flowControlAck is the tool-result text a flow-control call gets back.
-type flowControlAckResult struct {
-	text    string
-	isError bool
-}
-
-// flowControlAck acknowledges a stop_blueprint call, or tells the model what its
-// call was missing. Both arguments are enforced here rather than by the
-// schema alone because a schema is advisory: a model can and does emit a
-// call without one, and an unenforced stop with no reason would land a
-// terminal state carrying no explanation for the human who inherits it.
-//
-// The correction for a bad type restates the whole contract, since a model
-// that reached for a type that does not exist has usually reached for
-// `continue` — and the answer to that is not another tool.
-func flowControlAck(outcome domain.RunOutcome, reason string) flowControlAckResult {
-	if outcome != domain.RunOutcomeFinish && outcome != domain.RunOutcomeAbort {
-		return flowControlAckResult{
-			text: "stop_blueprint needs a type of \"finish\" or \"abort\". If you meant to finish your part normally " +
-				"and hand off whatever comes next, do not call this at all — reply with a message and no tool calls.",
-			isError: true,
-		}
-	}
-	if reason == "" {
-		return flowControlAckResult{
-			text: "stop_blueprint requires a reason. Call it again with a plain statement of why you are stopping here " +
-				"and what a human needs to know or do next.",
-			isError: true,
-		}
-	}
-	if outcome == domain.RunOutcomeAbort {
-		return flowControlAckResult{text: "Stopping this run. Recorded: " + reason}
-	}
-	return flowControlAckResult{text: "Ending the task here. Recorded: " + reason}
 }

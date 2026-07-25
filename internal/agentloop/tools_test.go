@@ -4,16 +4,12 @@ import (
 	"encoding/json"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
-
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-func TestSandboxTools_ParseTheVendoredDefinitions(t *testing.T) {
-	tools, err := SandboxTools()
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestSandboxTools_AreTheSevenInHarnessOrder(t *testing.T) {
+	tools := SandboxTools()
 	want := []string{"read", "bash", "edit", "write", "grep", "find", "ls"}
 	if len(tools) != len(want) {
 		t.Fatalf("got %d tools, want %d", len(tools), len(want))
@@ -37,13 +33,8 @@ func TestSandboxTools_ParseTheVendoredDefinitions(t *testing.T) {
 // Property order is part of the cached prefix, so churning it between
 // processes would quietly cost cache hits.
 func TestSandboxTools_PreserveHarnessPropertyOrder(t *testing.T) {
-	tools, err := SandboxTools()
-	if err != nil {
-		t.Fatal(err)
-	}
+	tools := SandboxTools()
 	// `read` is declared path, offset, limit in the harness.
-	var read *string
-	_ = read
 	for _, tool := range tools {
 		if tool.Function == nil || tool.Function.Name != "read" {
 			continue
@@ -63,15 +54,50 @@ func TestSandboxTools_PreserveHarnessPropertyOrder(t *testing.T) {
 	t.Fatal("the read tool is missing")
 }
 
-// TestToolDefinitions_MatchHarness regenerates the vendored definitions from
-// the harness and compares. It skips when cargo is unavailable, so the
-// default `go test ./...` needs no Rust toolchain — but on a machine that
-// has one, a definitions.rs edit that never made it into the vendored file
-// fails here rather than silently changing model behavior.
+// TestSandboxTools_PreserveNestedPropertyOrder pins that ordering holds at
+// depth too. `edit`'s replacement objects are declared oldText then newText,
+// which is the order the model reads them in and the order it tends to write
+// them in; a map-ordered render would flip it to alphabetical.
+func TestSandboxTools_PreserveNestedPropertyOrder(t *testing.T) {
+	for _, tool := range SandboxTools() {
+		if tool.Function == nil || tool.Function.Name != "edit" {
+			continue
+		}
+		edits, ok := tool.Function.Parameters.Properties.Get("edits")
+		if !ok {
+			t.Fatal("edit has no edits property")
+		}
+		raw, err := json.Marshal(edits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := string(raw), `"oldText"`; !strings.Contains(got, want) {
+			t.Fatalf("edits schema is missing %s: %s", want, got)
+		}
+		if strings.Index(string(raw), `"oldText"`) > strings.Index(string(raw), `"newText"`) {
+			t.Errorf("nested property order is alphabetical, want declaration order: %s", raw)
+		}
+		return
+	}
+	t.Fatal("the edit tool is missing")
+}
+
+// TestToolDefinitions_MatchHarness is the guard on the seam this package's
+// registry opens: the definitions the model reads are Go, and the code they
+// describe is Rust in the jail. Nothing but this test stops the two from
+// telling different stories.
+//
+// It compares the whole document — names, order, descriptions, every nested
+// property and its order — because all of it reaches the provider verbatim.
+//
+// It skips when cargo is unavailable, so the default `go test ./...` needs no
+// Rust toolchain. That is a real gap, not a nicety: on a machine without
+// cargo a divergence ships silently, so anything touching either side should
+// be run somewhere cargo exists.
 func TestToolDefinitions_MatchHarness(t *testing.T) {
 	cargo, err := exec.LookPath("cargo")
 	if err != nil {
-		t.Skip("cargo is not available; the vendored tool definitions cannot be regenerated here")
+		t.Skip("cargo is not available; the harness definitions cannot be regenerated here")
 	}
 	crate, err := filepath.Abs(filepath.Join("..", "..", "harness", "tf-harness-tools"))
 	if err != nil {
@@ -81,123 +107,59 @@ func TestToolDefinitions_MatchHarness(t *testing.T) {
 	cmd.Dir = crate
 	out, err := cmd.Output()
 	if err != nil {
-		t.Skipf("could not run the harness to regenerate definitions: %v", err)
+		t.Skipf("could not run the harness to emit definitions: %v", err)
 	}
 
-	var fresh, vendored any
-	if err := json.Unmarshal(out, &fresh); err != nil {
-		t.Fatalf("harness output is not JSON: %v", err)
-	}
-	if err := json.Unmarshal(toolDefinitionsJSON, &vendored); err != nil {
-		t.Fatalf("vendored definitions are not JSON: %v", err)
-	}
-	freshCanon, _ := json.Marshal(fresh)
-	vendoredCanon, _ := json.Marshal(vendored)
-	if string(freshCanon) != string(vendoredCanon) {
-		t.Fatalf("internal/agentloop/tools/definitions.json has drifted from the harness.\n" +
-			"Regenerate it:\n" +
-			"  (cd harness/tf-harness-tools && cargo run --quiet --bin tf-harness-tools -- --definitions) \\\n" +
-			"    > internal/agentloop/tools/definitions.json")
-	}
-}
-
-// TestFlowControlTools_IsOneToolWithBothArgumentsRequired pins the shape the
-// prompts are written against: a single tool, both arguments required, and
-// no `continue` type — stopping is what continuing means, so offering it
-// here would restore the ambiguity the consolidation removed.
-func TestFlowControlTools_IsOneToolWithBothArgumentsRequired(t *testing.T) {
-	if flow := flowControlTools(false); len(flow) != 0 {
-		t.Fatalf("a conversation with no blueprint has nothing to stop: %+v", flow)
-	}
-	flow := flowControlTools(true)
-	if len(flow) != 1 || flow[0].Function.Name != ToolStopBlueprint {
-		t.Fatalf("flow control is exactly one tool: %+v", flow)
-	}
-	req := flow[0].Function.Parameters.Required
-	if len(req) != 2 || req[0] != "type" || req[1] != "reason" {
-		t.Fatalf("required = %v, want both type and reason — an unexplained stop is the thing being prevented", req)
-	}
-	spec, ok := flow[0].Function.Parameters.Properties.Get("type")
-	if !ok {
-		t.Fatal("the type argument must be declared")
-	}
-	enum := spec.(map[string]any)["enum"].([]string)
-	if len(enum) != 2 || enum[0] != stopTypeFinish || enum[1] != stopTypeAbort {
-		t.Errorf("type enum = %v, want exactly finish and abort", enum)
-	}
-	for _, v := range enum {
-		if v == string(domain.RunOutcomeContinue) {
-			t.Error("continue must not be callable: it is what stopping already means")
+	registry := make([]toolDoc, 0, 7)
+	for _, tool := range SandboxTools() {
+		params, err := json.Marshal(tool.Function.Parameters)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-}
-
-func TestFlowControlOutcome_MapsToTheBlueprintVocabulary(t *testing.T) {
-	tests := []struct {
-		name        string
-		call        domain.ToolCall
-		wantOutcome domain.RunOutcome
-		wantReason  string
-		wantFlow    bool
-	}{
-		{
-			name:        "finish",
-			call:        domain.ToolCall{Name: ToolStopBlueprint, Input: map[string]any{"type": "finish", "reason": "nothing to review"}},
-			wantOutcome: domain.RunOutcomeFinish, wantReason: "nothing to review", wantFlow: true,
-		},
-		{
-			name:        "abort",
-			call:        domain.ToolCall{Name: ToolStopBlueprint, Input: map[string]any{"type": "abort", "reason": "blocked"}},
-			wantOutcome: domain.RunOutcomeAbort, wantReason: "blocked", wantFlow: true,
-		},
-		{
-			// Reaching for `continue` is the mistake most worth catching, and
-			// it must not resolve to an outcome: the run keeps going and the
-			// model is told to just stop instead.
-			name:       "continue is not a type",
-			call:       domain.ToolCall{Name: ToolStopBlueprint, Input: map[string]any{"type": "continue", "reason": "did my part"}},
-			wantReason: "did my part", wantFlow: true,
-		},
-		{
-			name:       "no type at all",
-			call:       domain.ToolCall{Name: ToolStopBlueprint, Input: map[string]any{"reason": "r"}},
-			wantReason: "r", wantFlow: true,
-		},
-		{name: "a sandbox tool is not flow control", call: domain.ToolCall{Name: "bash"}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			outcome, reason, isFlow := flowControlOutcome(tc.call, true)
-			if isFlow != tc.wantFlow || outcome != tc.wantOutcome || reason != tc.wantReason {
-				t.Errorf("-> (%q, %q, %v), want (%q, %q, %v)",
-					outcome, reason, isFlow, tc.wantOutcome, tc.wantReason, tc.wantFlow)
-			}
-			// Without a blueprint the name carries no meaning at all, so the
-			// same call is an ordinary (unknown) tool call.
-			if _, _, isFlow := flowControlOutcome(tc.call, false); isFlow {
-				t.Error("nothing is flow control in a conversation with no blueprint")
-			}
+		registry = append(registry, toolDoc{
+			Name:        tool.Function.Name,
+			Description: *tool.Function.Description,
+			Parameters:  params,
 		})
 	}
+	mine, err := json.Marshal(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both sides go through the same key-sorting round trip, so a difference
+	// in the bytes is a difference in the definitions rather than in how each
+	// side happened to lay them out. Ordering is deliberately not compared
+	// here — it is pinned by the explicit order tests, which say what the
+	// right order is instead of merely that the two sides agree.
+	want, got := canonicalJSON(t, out), canonicalJSON(t, mine)
+	if got != want {
+		t.Fatalf("internal/agentloop/tooldefs has drifted from the harness.\n"+
+			"The model would be told one thing and the jail would do another.\n\n"+
+			"tooldefs says:\n%s\n\nharness/tf-harness-tools says:\n%s", got, want)
+	}
 }
 
-// TestFlowControlAck_CorrectsRatherThanTerminates pins that a malformed stop
-// never lands a terminal state: each correction is an in-band error the
-// model can act on.
-func TestFlowControlAck_CorrectsRatherThanTerminates(t *testing.T) {
-	badType := flowControlAck("", "did my part")
-	if !badType.isError || !containsSub(badType.text, "no tool calls") {
-		t.Errorf("a bad type must be corrected by naming the real way to hand off: %+v", badType)
+// toolDoc is the harness's `--definitions` record shape.
+type toolDoc struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+// canonicalJSON re-renders a document with every object's keys sorted, which
+// is what encoding/json does for a map.
+func canonicalJSON(t *testing.T, raw []byte) string {
+	t.Helper()
+	var doc any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, raw)
 	}
-	noReason := flowControlAck(domain.RunOutcomeAbort, "")
-	if !noReason.isError {
-		t.Errorf("a reasonless stop must be refused: %+v", noReason)
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, outcome := range []domain.RunOutcome{domain.RunOutcomeAbort, domain.RunOutcomeFinish} {
-		if ack := flowControlAck(outcome, "because"); ack.isError {
-			t.Errorf("%s with a reason must be accepted: %+v", outcome, ack)
-		}
-	}
+	return string(out)
 }
 
 func TestBuildSystemPrompt_OrderAndAddendumGating(t *testing.T) {

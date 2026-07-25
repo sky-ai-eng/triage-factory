@@ -245,10 +245,7 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 		if err != nil {
 			return e.failed(started, turn, fmt.Errorf("list rows for assembly: %w", err))
 		}
-		tools, err := e.toolSchemas(spec)
-		if err != nil {
-			return e.failed(started, turn, err)
-		}
+		tools := e.toolSchemas(spec)
 
 		// 4. Credentials, per call.
 		provider, client, release, err := e.Credentials.ForCall(ctx)
@@ -383,16 +380,13 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 // immutable inputs so no mutation can leak between engagements. Within a
 // blueprint the list does not vary with the step's position — only the
 // system prompt does.
-func (e *Engine) toolSchemas(spec Spec) ([]schemas.ChatTool, error) {
-	sandboxed, err := SandboxTools()
-	if err != nil {
-		return nil, err
-	}
+func (e *Engine) toolSchemas(spec Spec) []schemas.ChatTool {
+	sandboxed := SandboxTools()
 	flow := flowControlTools(spec.HasBlueprint)
 	out := make([]schemas.ChatTool, 0, len(sandboxed)+len(flow))
 	out = append(out, sandboxed...)
 	out = append(out, flow...)
-	return out, nil
+	return out
 }
 
 // checkGuards runs the turn backstop and every configured guard, returning
