@@ -412,6 +412,10 @@ func MakeRunRoot(runID string) (string, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("mkdir run root: %w", err)
 	}
+	// The run root is the agent's cwd AND its in-jail HOME, so a blueprint step
+	// running on a Jira task discovers its skill through the same symlink a
+	// GitHub PR run's worktree carries.
+	plantSandboxSkillsLink(dir)
 	return dir, nil
 }
 

@@ -71,6 +71,12 @@ type runConfig struct {
 	isBlueprintStep bool
 	appendSysPrompt string
 
+	// skillsSourcePath is the orchestrator-owned staging dir holding this step's
+	// SKILL.md, bind-mounted read-only into the jail (agentproc's
+	// SkillsSourcePath). Set only for a sandboxed blueprint step; empty in local
+	// mode, where the skill is written into the worktree instead.
+	skillsSourcePath string
+
 	// execSandbox, when non-nil (TF_ROLE=executor), is the run network +
 	// credential sidecar + proxy coordinates the dispatcher stood up before
 	// workspace setup. runAgent threads it into agentproc.RunOptions

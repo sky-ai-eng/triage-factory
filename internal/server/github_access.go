@@ -164,6 +164,13 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// The host both audit rows below record against.
+	base, err := s.ghResolver.BaseURLFor(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+
 	// Atomic flip: activate the App AND delete the org PAT in one transaction.
 	// Both are app-pool writes (SetActive is org-admin-gated UPDATE; the PAT
 	// delete is a Vault delete), so either both land or neither does.
@@ -174,7 +181,23 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		if _, err := tx.Secrets.Delete(ctx, orgID, integrations.KeyGitHubPAT); err != nil {
 			return fmt.Errorf("delete org pat: %w", err)
 		}
-		return nil
+		// The cutover IS the credential change — the App goes live and
+		// the PAT is destroyed in this one transaction. Record both sides, so
+		// "when did this org stop using a PAT" is answerable from the log rather
+		// than inferred from the App's registration date (which can predate the
+		// cutover by any amount while staged).
+		if err := tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialSet,
+			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindGitHubApp, base, app.Slug),
+		}); err != nil {
+			return fmt.Errorf("audit app cutover: %w", err)
+		}
+		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialRemoved,
+			DetailJSON:  accessDetailCredential(domain.CredentialKindGitHubPAT, base),
+		})
 	}); err != nil {
 		internalError(w, "github-app", err)
 		return
@@ -276,7 +299,23 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 		// SQLite row delete already ran), the worst case is orphan secrets whose
 		// refs no longer exist on any row — unreachable dead weight, never a
 		// credential risk (the App row, and thus tier-1 minting, is already gone).
-		return teardownAppSecrets(ctx, tx, orgID, app)
+		if err := teardownAppSecrets(ctx, tx, orgID, app); err != nil {
+			return err
+		}
+		// Mirror of the cutover — a PAT is bound and the App's stored key is
+		// destroyed, both in this transaction, both recorded.
+		if err := tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialSet,
+			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindGitHubPAT, base, ghUser.Login),
+		}); err != nil {
+			return fmt.Errorf("audit pat switch: %w", err)
+		}
+		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialRemoved,
+			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindGitHubApp, base, app.Slug),
+		})
 	}); err != nil {
 		internalError(w, "github-app", err)
 		return
@@ -339,7 +378,17 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 		if err := tx.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {
 			return fmt.Errorf("delete app: %w", err)
 		}
-		return teardownAppSecrets(ctx, tx, orgID, app)
+		if err := teardownAppSecrets(ctx, tx, orgID, app); err != nil {
+			return err
+		}
+		// The staged App was never live, but its private key WAS
+		// stored — destroying it is a credential removal like any other, and the
+		// log already carries the matching registration row.
+		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialRemoved,
+			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindGitHubApp, "", app.Slug),
+		})
 	}); err != nil {
 		internalError(w, "github-app", err)
 		return

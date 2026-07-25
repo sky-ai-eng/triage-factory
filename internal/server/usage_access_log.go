@@ -227,10 +227,13 @@ type accessDetail struct {
 	NewRole  string `json:"new_role"`
 	Kind     string `json:"kind"`
 	Host     string `json:"host"`
+	Name     string `json:"name"`
 	InviteID string `json:"invite_id"`
-	// Source + Role are the sso_jit grant payload. Role is the granted role and
-	// is deliberately distinct from NewRole (which the team-add / role-change
-	// actions carry) — the sso_jit builder writes a "role" key, not "new_role".
+	Email    string `json:"email"`
+	// Source is the sso_jit grant marker. Role is the granted/invited role,
+	// shared by the sso_jit grant and invite_created payloads, and deliberately
+	// distinct from NewRole (which the team-add / role-change actions carry) —
+	// both builders write a "role" key, not "new_role".
 	Source string `json:"source"`
 	Role   string `json:"role"`
 }
@@ -274,12 +277,21 @@ func accessChangeLabel(e domain.AccessChange, targetName, teamName string) strin
 			" to " + orFallback(d.NewRole, "an unknown role") + " on " + team
 	case domain.AccessActionTeamMemberRemoved:
 		return "removed " + target + " from " + team
-	case domain.AccessActionCredentialSet:
-		kind := credentialKindLabel(d.Kind)
-		if d.Host != "" {
-			return "set the " + kind + " for " + d.Host
+	case domain.AccessActionInviteCreated:
+		invited := "invited " + orFallback(d.Email, "someone")
+		if d.Role != "" {
+			return invited + " as " + d.Role
 		}
-		return "set the " + kind
+		return invited
+	case domain.AccessActionInviteRevoked:
+		if d.Email != "" {
+			return "revoked the invite for " + d.Email
+		}
+		return "revoked a pending invite"
+	case domain.AccessActionCredentialSet:
+		return credentialActionLabel("set the ", d)
+	case domain.AccessActionCredentialRemoved:
+		return credentialActionLabel("removed the ", d)
 	default:
 		// An unrecognized discriminator (forward-compat: the column has no CHECK)
 		// shows raw so the row still renders meaningfully.
@@ -298,17 +310,41 @@ func parseAccessDetail(raw string) accessDetail {
 	return d
 }
 
-// credentialKindLabel maps a credential_set kind to its human name.
+// credentialActionLabel renders a credential_set / credential_removed predicate
+// from the shared {kind, host, name} detail — verb ("set the " / "removed the ")
+// + the kind's human name, qualified by the specific credential's name and/or
+// host when the write-point had them ("set the GitHub App acme-bot on
+// github.example.com").
+func credentialActionLabel(verb string, d accessDetail) string {
+	s := verb + credentialKindLabel(d.Kind)
+	if d.Name != "" {
+		s += " " + d.Name
+	}
+	if d.Host != "" {
+		s += " for " + d.Host
+	}
+	return s
+}
+
+// credentialKindLabel maps a credential kind to its human name.
 func credentialKindLabel(kind string) string {
 	switch kind {
 	case domain.CredentialKindGitHubPAT:
 		return "GitHub PAT"
+	case domain.CredentialKindGitHubApp:
+		return "GitHub App"
+	case domain.CredentialKindGitHubIdentity:
+		return "personal GitHub identity"
 	case domain.CredentialKindJiraOrg:
 		return "Jira credential"
 	case domain.CredentialKindJiraUser:
 		return "personal Jira credential"
+	case domain.CredentialKindJiraOAuthApp:
+		return "Atlassian OAuth app"
 	case domain.CredentialKindAnthropicKey:
 		return "Anthropic API key"
+	case domain.CredentialKindBedrock:
+		return "Bedrock credentials"
 	default:
 		return "credential"
 	}

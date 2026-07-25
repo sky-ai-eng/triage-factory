@@ -428,20 +428,12 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return fmt.Errorf("save org settings: %w", err)
 		}
-		// TFAC-471: audit the org Jira credential bind/rotate in the same tx.
-		// Record the canonical host (resolveJiraHost) so org-credential rows
-		// share a host string with the per-user jira_user rows for the same
-		// instance — those key off the same resolved org_settings.jira_base_url,
-		// whereas req.URL is whatever the user typed (trailing slash / casing).
-		// Fall back to the raw URL if it doesn't resolve.
-		auditHost := req.URL
-		if canon, ok := resolveJiraHost(req.URL); ok {
-			auditHost = canon
-		}
+		// Audit the org Jira credential bind/rotate in the same tx,
+		// against the canonicalized host (see auditJiraHost).
 		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialSet,
-			DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditHost),
+			DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditJiraHost(req.URL)),
 		}); err != nil {
 			return fmt.Errorf("audit credential set: %w", err)
 		}
@@ -496,19 +488,29 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 	// config. Idempotent — a Delete with no matching row is not an error.
 	if key == "" {
 		if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+			// Settings first: its refs are the record of which provider was
+			// actually configured, and the audit rows below must not claim a
+			// removal for a provider that was never set.
+			orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
+			if err != nil {
+				return fmt.Errorf("load org settings: %w", err)
+			}
+			removed := configuredLLMCredentialKinds(orgSet)
 			if _, err := tx.Secrets.Delete(r.Context(), orgID, secretKeyAnthropicAPIKey); err != nil {
 				return fmt.Errorf("clear Anthropic key: %w", err)
 			}
 			if err := clearBedrockSecrets(r, tx, orgID); err != nil {
 				return err
 			}
-			orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
-			if err != nil {
-				return fmt.Errorf("load org settings: %w", err)
-			}
 			orgSet.AnthropicAPIKeyRef = ""
 			orgSet.BedrockCredentialsRef = ""
-			return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
+			if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
+				return err
+			}
+			// Switching to system credentials revokes the org's stored LLM
+			// credential — the removal side of the bind this endpoint's other
+			// arm records.
+			return recordCredentialRemovals(r.Context(), tx, orgID, userID, removed)
 		}); err != nil {
 			settingsLog.Error("anthropic connect clear failed", "error", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update Claude credentials"})
@@ -547,6 +549,7 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 		// Bedrock set would be dead config under the resolver's
 		// Anthropic-first precedence — clear it so the UI never shows two
 		// providers configured at once.
+		droppedBedrock := orgSet.BedrockCredentialsRef != ""
 		if err := clearBedrockSecrets(r, tx, orgID); err != nil {
 			return err
 		}
@@ -555,14 +558,23 @@ func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http
 		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return err
 		}
-		// TFAC-471: audit the org Anthropic key bind/rotate in the same tx. Only
-		// the set branch records — clearing the key (the empty-key arm above) is
-		// a removal, not a credential_set. No host for an API key.
-		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+		// Audit the org Anthropic key bind/rotate in the same tx. The
+		// empty-key arm above records the matching credential_removed. No host
+		// for an API key.
+		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialSet,
 			DetailJSON:  accessDetailCredential(domain.CredentialKindAnthropicKey, ""),
-		})
+		}); err != nil {
+			return err
+		}
+		// The exclusivity sweep revoked a stored Bedrock credential — record it
+		// as its own removal rather than leaving it implied by the bind.
+		if !droppedBedrock {
+			return nil
+		}
+		return recordCredentialRemovals(r.Context(), tx, orgID, userID,
+			[]string{domain.CredentialKindBedrock})
 	}); err != nil {
 		settingsLog.Error("anthropic connect persist failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store Claude credentials"})

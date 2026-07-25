@@ -258,7 +258,7 @@ function ruleBars(rows: UsageRuleBucket[] | undefined): BarDatum[] {
   }))
 }
 
-// by_team + org_level are consolidated into the org AllocationDonut (which builds
+// by_team + org_level are consolidated into the org TeamSpendDonut (which builds
 // its own DonutSeg list with palette colors + the overhead tag), so they need no
 // flat BarDatum adapter here.
 
@@ -339,7 +339,7 @@ function Meter({
 }
 
 // InfoHint is a small "?" affordance whose hover popup explains a term — used in
-// the allocation legend so a non-team slice can say what it is without a cryptic
+// the by-team legend so a non-team slice can say what it is without a cryptic
 // inline tag. Styled to match the board/run-detail tooltips.
 function InfoHint({ text }: { text: string }) {
   return (
@@ -371,7 +371,7 @@ function InfoHint({ text }: { text: string }) {
 
 // Donut is the composition instrument — a thin wireframe ring (a stroke, not a
 // bulbous pie) with gapped segments and a monospace legend that carries the
-// numbers. Used for both the category split and the org allocation. The ring is
+// numbers. Used for both the category split and the org by-team split. The ring is
 // decorative (renders nothing in jsdom); the legend is the readable record.
 interface DonutSeg {
   key: string
@@ -379,7 +379,7 @@ interface DonutSeg {
   color: string
   value: number
   /** Optional explainer — renders a "?" after the label whose hover popup shows
-   *  this text. Used by the org allocation's non-team slices (system jobs /
+   *  this text. Used by the org by-team ring's non-team slices (system jobs /
    *  team-less curator). */
   hint?: string
   title?: string
@@ -686,7 +686,7 @@ function Trace({ data, heightClass = 'h-24' }: { data: UsageDayBucket[]; heightC
   )
 }
 
-// A shared categorical palette for series with no inherent tone — the allocation
+// A shared categorical palette for series with no inherent tone — the by-team
 // ring's teams and the over-time chart's models both cycle through it. (Org-level
 // slices keep their category color instead.)
 const SERIES_PALETTE = [
@@ -708,13 +708,13 @@ const ORG_LEVEL_HINT: Record<string, string> = {
   curator: 'Curator turns on projects that aren’t attached to a team.',
 }
 
-// AllocationDonut is the org hero: the WHOLE org spend as one ring, partitioned
+// TeamSpendDonut is the org hero: the WHOLE org spend as one ring, partitioned
 // across teams + the org-level (non-team) slices. This is exactly the backend's
 // partition invariant — total == sum(by_team) + sum(org_level) — so it reads as
 // "where every dollar went". Team slices take palette colors; the org-level
 // slices keep their category tone + label (System / Curator) and carry a "?"
 // explainer.
-function AllocationDonut({
+function TeamSpendDonut({
   byTeam,
   orgLevel,
 }: {
@@ -1445,14 +1445,14 @@ function OrgSection({ since, days, gov }: { since: string; days: number; gov: bo
         error={error}
         empty={total === 0}
       >
-        {/* Allocation + Category as two half-width dials — larger rings with
+        {/* By team + Category as two half-width dials — larger rings with
             scrollable, hover-linked side legends — then the wide by-user roster, the
             EE daily-cap editor, and the full-width throughput. */}
         <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2">
-          {/* Allocation — the whole org spend partitioned across teams + the org-
-              level (non-team) slices (merges the old "by team" + "org-level"). */}
-          <Instrument label="Allocation">
-            <AllocationDonut byTeam={data?.by_team ?? []} orgLevel={data?.org_level ?? []} />
+          {/* By team — the whole org spend partitioned across teams + the org-
+              level (non-team) slices. */}
+          <Instrument label="By team">
+            <TeamSpendDonut byTeam={data?.by_team ?? []} orgLevel={data?.org_level ?? []} />
           </Instrument>
           <Instrument label="Category">
             <CategoryDonut data={data?.by_category ?? []} large />
@@ -1516,11 +1516,23 @@ function fmtAccessTime(iso: string): string {
   })
 }
 
-// accessTone colors a row's leading dot by category — credential binds in the
-// claim hue, membership/role/ownership in the rust accent — reusing the console's
-// semantic palette so the two row kinds read apart at a glance.
+// accessTone colors a row's leading dot by what the change DID — credential
+// binds in the claim hue, anything that took access away (a credential removed,
+// a member revoked, an invite pulled) in the dismiss hue, and the remaining
+// membership/role/ownership grants in the rust accent. Reuses the console's
+// semantic palette so a revocation reads apart from a grant at a glance, which
+// is the scan an admin actually does down this log.
+const ACCESS_REVOCATIONS = new Set([
+  'credential_removed',
+  'org_member_revoked',
+  'team_member_removed',
+  'invite_revoked',
+])
+
 function accessTone(action: string): string {
-  return action === 'credential_set' ? 'var(--color-claim)' : 'var(--color-accent)'
+  if (action === 'credential_set') return 'var(--color-claim)'
+  if (ACCESS_REVOCATIONS.has(action)) return 'var(--color-dismiss)'
+  return 'var(--color-accent)'
 }
 
 // AccessCategoryFilter is the membership/credential toggle, styled like the
@@ -1735,7 +1747,7 @@ function ConsoleFrame({ children }: { children: React.ReactNode }) {
 // LocalConsole is the flattened N=1 view. In local mode personal == team == org
 // (one user, one team), so the three stacked sections duplicate every total and
 // breakdown. Collapse to a single console with no section headings: a headline
-// total, the over-time throughput, the allocation + category dials, and by-rule.
+// total, the over-time throughput, the by-team + category dials, and by-rule.
 // One fetch does it all: the org rollup omits by_rule for multi-tenant orgs (per-
 // rule detail stays with the owning team), but in local mode the boundary is moot
 // — there's one team — so /api/usage/org folds by_rule in for exactly this view,
@@ -1768,8 +1780,8 @@ function LocalConsole({ since, days }: { since: string; days: number }) {
       />
 
       <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2">
-        <Instrument label="Allocation">
-          <AllocationDonut byTeam={org.by_team} orgLevel={org.org_level} />
+        <Instrument label="By team">
+          <TeamSpendDonut byTeam={org.by_team} orgLevel={org.org_level} />
         </Instrument>
         <Instrument label="Category">
           <CategoryDonut data={org.by_category} large />

@@ -64,11 +64,64 @@ func sanitizeSlug(s string) string {
 // The caller is responsible for wiping `<wt>/.claude/skills/` (or at
 // least the slug subdirectory) between steps so step N+1 doesn't see
 // step N's leftover skill.
+//
+// This is the LOCAL-mode form: it writes inside the run's worktree, which
+// only stays writable to the orchestrator when no sandbox ever took
+// ownership of the tree. A sandboxed (multi-mode) run stages the same
+// content outside the workspace instead — see StageStepSkill.
 func MaterializeStepSkill(worktree, slug string, prompt *domain.Prompt, brief string) error {
+	return MaterializeStepSkillInDir(filepath.Join(worktree, ".claude", "skills"), slug, prompt, brief)
+}
+
+// StageStepSkill materializes one step's skill into an orchestrator-owned
+// staging directory that a sandboxed launch bind-mounts read-only, replacing
+// whatever the directory held before.
+//
+// This is the multi-mode counterpart of MaterializeStepSkill, and the reason
+// multi-step blueprints work under privilege separation: the run tree belongs
+// to the per-run sandbox uid from the first launch onward, so the
+// capability-less orchestrator can neither remove the previous step's SKILL.md
+// nor create the next one inside it. Staging moves both operations onto a
+// directory the orchestrator owns outright — the "wipe" is a RemoveAll of its
+// own dir, trivially permitted.
+//
+// Recreating the directory rather than writing into it is also what makes step
+// isolation structural: the staged dir holds exactly one skill, so a launch
+// that mounts it cannot expose a sibling step's SKILL.md even if a prior
+// attempt left one behind. Content is byte-identical to the in-worktree form —
+// same synthesis, different root.
+func StageStepSkill(stagingDir, slug string, prompt *domain.Prompt, brief string) error {
 	if prompt == nil {
 		return fmt.Errorf("nil prompt")
 	}
-	dir := filepath.Join(worktree, ".claude", "skills", slug)
+	if err := RemoveStagedSkills(stagingDir); err != nil {
+		return fmt.Errorf("wipe staging dir: %w", err)
+	}
+	return MaterializeStepSkillInDir(stagingDir, slug, prompt, brief)
+}
+
+// RemoveStagedSkills removes a staging directory created by StageStepSkill.
+// A missing directory is success. Safe for the capability-less orchestrator:
+// the staging dir is its own, never chowned to a sandbox identity.
+func RemoveStagedSkills(stagingDir string) error {
+	if stagingDir == "" {
+		return nil
+	}
+	if err := os.RemoveAll(stagingDir); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// MaterializeStepSkillInDir writes `<skillsDir>/<slug>/SKILL.md` with the
+// content synthesis MaterializeStepSkill documents. skillsDir is the root a
+// skill-discovery pass indexes — the worktree's `.claude/skills` in local mode,
+// a per-run staging dir bind-mounted into the jail in multi mode.
+func MaterializeStepSkillInDir(skillsDir, slug string, prompt *domain.Prompt, brief string) error {
+	if prompt == nil {
+		return fmt.Errorf("nil prompt")
+	}
+	dir := filepath.Join(skillsDir, slug)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create skill dir: %w", err)
 	}
@@ -152,6 +205,11 @@ func synthesizeSkillFile(slug, promptName, body, brief string) string {
 // materialization (blueprints run on PRs/Jira, the curator runs on
 // projects), so collateral damage to other materialized skills is
 // not a concern in this code path.
+//
+// LOCAL mode only, paired with MaterializeStepSkill. A sandboxed run's tree is
+// owned by the sandbox uid after its first launch, so this unlink would fail
+// with EACCES at every step boundary; that path stages outside the workspace
+// and wipes by recreating its own staging dir (StageStepSkill).
 func WipeBlueprintSkills(worktree string) error {
 	dir := filepath.Join(worktree, ".claude", "skills")
 	if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {

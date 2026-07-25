@@ -84,6 +84,20 @@ const EMPTY_FILTERS: Filters = {
 
 type FeedRow = ActivityArtifact | ActivityAction
 
+// Loaded is one settled server page-set, tagged with the request that produced
+// it. Keeping the lens + url ALONGSIDE the rows is what lets the feed hold its
+// last good content while the next request is in flight (stale-while-revalidate,
+// same stance as the Usage page's useUsageFetch): `mode` says which row
+// component can render these rows, and `url` says whether they still answer the
+// current lens + filters. Without the tag we'd have to blank the list on every
+// toggle, which collapses the section to a 4-row skeleton and back.
+interface Loaded {
+  mode: Mode
+  url: string
+  rows: FeedRow[]
+  hasMore: boolean
+}
+
 // buildUrl composes the activity request: the lens (?view=), the server-side
 // filters for that lens, and limit/offset paging. 'all' / '' selections are
 // omitted so the backend leaves that column unfiltered.
@@ -116,9 +130,8 @@ export default function ActivityFeed({
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS)
   const [teamFilter, setTeamFilter] = useState('') // org feed only; '' = all teams
   const [actorFilter, setActorFilter] = useState('') // org + actions only; '' = all actors
-  const [rows, setRows] = useState<FeedRow[] | null>(null)
+  const [loaded, setLoaded] = useState<Loaded | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [hasMore, setHasMore] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
 
   const setFilter = useCallback(<K extends keyof Filters>(key: K, value: Filters[K]) => {
@@ -134,22 +147,30 @@ export default function ActivityFeed({
     setActorFilter('')
   }, [])
 
+  // The page-0 request for the current lens + filters. It doubles as the freshness
+  // key: `loaded.url !== pageURL` means what's on screen answers a superseded
+  // request. (loadMore appends later pages without changing it.)
+  const pageURL = buildUrl(baseUrl, mode, filters, 0)
+
   // Page 0 (replace) on mount and whenever the lens, server-side filters, or the
   // base url (team switch) change. The in-memory team/actor scopes are
   // deliberately NOT dependencies — narrowing never refetches.
+  //
+  // Deliberately does NOT blank `loaded` first: the last good page stays on
+  // screen (dimmed) until the new one lands, so toggling the lens or a filter
+  // never collapses the section to a skeleton and springs back. `loaded.mode`
+  // picks the row component, so holding rows across a lens switch is safe —
+  // action rows keep rendering as action rows until the objects page arrives.
   useEffect(() => {
     let cancelled = false
-    setRows(null)
     setError(null)
-    setHasMore(false)
     ;(async () => {
       try {
-        const res = await fetch(buildUrl(baseUrl, mode, filters, 0))
+        const res = await fetch(pageURL)
         if (!res.ok) throw new Error(await readError(res, "Couldn't load activity"))
         const data = ((await res.json()) as FeedRow[] | null) ?? []
         if (!cancelled) {
-          setRows(data)
-          setHasMore(data.length === PAGE_SIZE)
+          setLoaded({ mode, url: pageURL, rows: data, hasMore: data.length === PAGE_SIZE })
         }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err))
@@ -158,66 +179,83 @@ export default function ActivityFeed({
     return () => {
       cancelled = true
     }
-  }, [baseUrl, mode, filters])
+  }, [pageURL, mode])
+
+  // `superseded` = the rows on screen answer an older request than the current
+  // lens + filters, so paging against them would splice two views together.
+  // `stale` is the VISUAL hold that dims them; it clears on error so a failed
+  // refetch doesn't leave the list dimmed forever — the error note renders under
+  // the rows we still have instead.
+  const superseded = loaded !== null && loaded.url !== pageURL
+  const stale = superseded && error === null
 
   const loadMore = useCallback(async () => {
-    if (rows === null || loadingMore) return
+    if (loaded === null || loaded.url !== pageURL || loadingMore) return
     setLoadingMore(true)
     try {
-      // Offset is the count actually fetched from the server (rows accumulates
-      // server pages; the in-memory filters only narrow the render), so paging
-      // stays aligned with the server's newest-first cursor.
-      const res = await fetch(buildUrl(baseUrl, mode, filters, rows.length))
+      // Offset is the count actually fetched from the server (loaded.rows
+      // accumulates server pages; the in-memory filters only narrow the render),
+      // so paging stays aligned with the server's newest-first cursor.
+      const res = await fetch(buildUrl(baseUrl, mode, filters, loaded.rows.length))
       if (!res.ok) throw new Error(await readError(res, "Couldn't load activity"))
       const data = ((await res.json()) as FeedRow[] | null) ?? []
-      setRows((prev) => [...(prev ?? []), ...data])
-      setHasMore(data.length === PAGE_SIZE)
+      // Drop the page if the lens/filters moved while it was in flight — appending
+      // it would splice another request's rows into the current view.
+      setLoaded((prev) =>
+        prev && prev.url === pageURL
+          ? { ...prev, rows: [...prev.rows, ...data], hasMore: data.length === PAGE_SIZE }
+          : prev,
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoadingMore(false)
     }
-  }, [baseUrl, mode, filters, rows, loadingMore])
+  }, [baseUrl, mode, filters, pageURL, loaded, loadingMore])
 
   // Distinct teams present in the loaded rows — the org feed's team-scope
   // options. In-memory because the org endpoint is org-wide (no team param).
   const teamOptions = useMemo(() => {
-    if (!showTeam || rows === null) return []
+    if (!showTeam || loaded === null) return []
     const seen = new Map<string, string>()
-    for (const r of rows) {
+    for (const r of loaded.rows) {
       if (r.team_id) seen.set(r.team_id, r.team_name || r.team_id)
     }
     return [...seen.entries()]
       .map(([id, name]) => ({ id, name }))
       .sort((a, b) => a.name.localeCompare(b.name))
-  }, [showTeam, rows])
+  }, [showTeam, loaded])
 
   // Distinct human actors present in the loaded action rows — the org + Actions
   // feed's actor-scope options (mirrors the team scope). Empty on Objects (no
   // actor) or the team feed (names unresolved there).
   const actorOptions = useMemo(() => {
-    if (!showTeam || mode !== 'actions' || rows === null) return []
+    if (!showTeam || loaded === null || loaded.mode !== 'actions') return []
     const seen = new Map<string, string>()
-    for (const r of rows as ActivityAction[]) {
+    for (const r of loaded.rows as ActivityAction[]) {
       if (r.actor_user_id) seen.set(r.actor_user_id, r.actor_name || r.actor_user_id)
     }
     return [...seen.entries()]
       .map(([id, name]) => ({ id, name }))
       .sort((a, b) => a.name.localeCompare(b.name))
-  }, [showTeam, mode, rows])
+  }, [showTeam, loaded])
 
   const visible = useMemo(() => {
-    if (rows === null) return null
-    let out = rows
+    if (loaded === null) return null
+    let out = loaded.rows
     if (showTeam && teamFilter) out = out.filter((r) => r.team_id === teamFilter)
-    if (showTeam && mode === 'actions' && actorFilter) {
+    if (showTeam && loaded.mode === 'actions' && actorFilter) {
       out = out.filter((r) => (r as ActivityAction).actor_user_id === actorFilter)
     }
     return out
-  }, [rows, showTeam, mode, teamFilter, actorFilter])
+  }, [loaded, showTeam, teamFilter, actorFilter])
 
   const count = visible?.length ?? 0
-  const noun = mode === 'actions' ? 'action' : 'object'
+  // The noun follows the rows actually on screen, not the selected lens — during
+  // a hold the header would otherwise count "objects" over a list of actions.
+  const rowMode = loaded?.mode ?? mode
+  const noun = rowMode === 'actions' ? 'action' : 'object'
+  const hasMore = loaded?.hasMore ?? false
 
   return (
     <section className="mb-12 last:mb-0">
@@ -322,8 +360,12 @@ export default function ActivityFeed({
         </span>
       </div>
 
-      {/* Body — skeleton on first load, error, zero state, or the rows. */}
-      <div className="mt-5">
+      {/* Body — skeleton on the FIRST load only; every later request keeps the
+          previous rows in place (dimmed) so the section holds its height. */}
+      <div
+        className={`mt-5 transition-opacity duration-150 ${stale ? 'opacity-50' : ''}`}
+        aria-busy={stale || undefined}
+      >
         {visible === null ? (
           error ? (
             <FeedNote msg={error} tone="error" />
@@ -336,7 +378,7 @@ export default function ActivityFeed({
           <>
             <ul className="space-y-1.5">
               {visible.map((r) =>
-                mode === 'actions' ? (
+                rowMode === 'actions' ? (
                   <ActionRow
                     key={r.id}
                     action={r as ActivityAction}
@@ -357,7 +399,7 @@ export default function ActivityFeed({
                 <button
                   type="button"
                   onClick={loadMore}
-                  disabled={loadingMore}
+                  disabled={loadingMore || superseded}
                   className="rounded-[4px] border border-border-subtle bg-white/60 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-text-tertiary transition-colors hover:bg-white hover:text-text-secondary disabled:opacity-50"
                 >
                   {loadingMore ? 'loading…' : 'load more'}

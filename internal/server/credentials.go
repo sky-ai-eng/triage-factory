@@ -171,14 +171,25 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return fmt.Errorf("save org settings: %w", err)
 		}
-		// TFAC-471: audit the org GitHub PAT bind/rotate in the same tx. The
-		// setup wizard requires a GitHub PAT (guarded above), so this seam is
-		// the github_pat write-point; the host carries the configured base URL.
+		// Audit the org credential binds in the same tx. The setup
+		// wizard requires a GitHub PAT (guarded above) and optionally carries a
+		// Jira one; each records its own row with the configured host, so the
+		// change-log shows the same two binds a later Settings rotation would.
 		if req.GitHubPAT != "" {
 			if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
 				ActorUserID: userID,
 				Action:      domain.AccessActionCredentialSet,
-				DetailJSON:  accessDetailCredential(domain.CredentialKindGitHubPAT, req.GitHubURL),
+				DetailJSON: accessDetailCredentialNamed(
+					domain.CredentialKindGitHubPAT, req.GitHubURL, githubLoginOf(resp.GitHub)),
+			}); err != nil {
+				return fmt.Errorf("audit credential set: %w", err)
+			}
+		}
+		if req.JiraPAT != "" {
+			if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+				ActorUserID: userID,
+				Action:      domain.AccessActionCredentialSet,
+				DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditJiraHost(req.JiraURL)),
 			}); err != nil {
 				return fmt.Errorf("audit credential set: %w", err)
 			}
@@ -205,9 +216,18 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// githubLoginOf returns the login a validated GitHub user resolved to, or ""
+// when no validation ran (nil) — the audit detail's optional "name".
+func githubLoginOf(u *auth.GitHubUser) string {
+	if u == nil {
+		return ""
+	}
+	return u.Login
+}
+
 // persistOrgGitHubLogin records the org credential's OWN GitHub login on the
-// agents row (TFAC-452) so the credential resolver's OrgIdentityFor PAT tier
-// can stamp the org commit-author identity on delegated-agent commits. Called
+// agents row so the credential resolver's OrgIdentityFor PAT tier can stamp the
+// org commit-author identity on delegated-agent commits. Called
 // inside the same WithTx that saves the org PAT, by every org-PAT writer that
 // already validated the login (handleIntegrationsSetup, the App→PAT switch, the
 // settings PAT update). This is org ACCESS metadata — it deliberately does NOT

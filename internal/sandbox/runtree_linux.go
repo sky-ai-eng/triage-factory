@@ -27,6 +27,25 @@ func captureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, e
 	return defaultOps.CaptureRunDelta(ctx, worktree, sessionID)
 }
 
+// runTreeHandedOff stats path and reports whether the sandbox identity owns it
+// while this process does not — the post-chown state. Deliberately a plain
+// Lstat, not a privileged op: reading a mode/owner needs no capability, and the
+// answer only ever suppresses a doomed write.
+func runTreeHandedOff(path string) bool {
+	if path == "" {
+		return false
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	return int(st.Uid) == WorktreeUID && os.Geteuid() != WorktreeUID
+}
+
 // runTreeOwnerExtraUID is the orchestrator's uid when this code runs
 // inside the broker, and the flag that puts allowedRunTreeOwner into its
 // brokered mode. The broker runs as root but operates only on trees the

@@ -566,6 +566,14 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 
 	orgSet := prevOrgSet
 
+	// Snapshot which org bot credentials were actually stored before this save
+	// rewrites `creds` in place. The audit rows below need it: clearing a field
+	// that was already blank is a no-op, not a credential removal, and logging
+	// it as one would fill the change-log with phantom revocations every time an
+	// admin saves an unrelated setting.
+	hadGitHubPAT := creds.GitHubPAT != ""
+	hadJiraPAT := creds.JiraPAT != ""
+
 	if req.GitHubBaseURL != nil {
 		orgSet.GitHubBaseURL = *req.GitHubBaseURL
 		creds.GitHubURL = *req.GitHubBaseURL
@@ -698,6 +706,48 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Compose the access-log rows for whatever this save did to the org's bot
+	// credentials. Built here from the request shape — the tx below
+	// writes them alongside the credential change itself, so an audit row can't
+	// outlive a rolled-back save. The settings surface is the OTHER org-PAT
+	// write-point besides the setup wizard; without these, rotating or
+	// disconnecting a PAT from Settings left no trace in the change-log.
+	var credAudit []domain.AccessChange
+	if (req.GitHubBaseURL != nil && *req.GitHubBaseURL == "") ||
+		(req.GitHubPAT != nil && *req.GitHubPAT == "") {
+		if hadGitHubPAT {
+			credAudit = append(credAudit, domain.AccessChange{
+				ActorUserID: userID,
+				Action:      domain.AccessActionCredentialRemoved,
+				DetailJSON:  accessDetailCredential(domain.CredentialKindGitHubPAT, prevOrgSet.GitHubBaseURL),
+			})
+		}
+	} else if newGitHubLogin != "" {
+		// A validated non-empty PAT — record the @login it authenticates as, the
+		// same identity persistOrgGitHubLogin stamps on the agents row.
+		credAudit = append(credAudit, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialSet,
+			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindGitHubPAT, creds.GitHubURL, newGitHubLogin),
+		})
+	}
+	if (req.JiraBaseURL != nil && *req.JiraBaseURL == "") ||
+		(req.JiraPAT != nil && *req.JiraPAT == "") {
+		if hadJiraPAT {
+			credAudit = append(credAudit, domain.AccessChange{
+				ActorUserID: userID,
+				Action:      domain.AccessActionCredentialRemoved,
+				DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditJiraHost(prevOrgSet.JiraBaseURL)),
+			})
+		}
+	} else if req.JiraPAT != nil && *req.JiraPAT != "" {
+		credAudit = append(credAudit, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialSet,
+			DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditJiraHost(creds.JiraURL)),
+		})
+	}
+
 	// SSH preflight: gate the transition into SSH mode. Local-mode only —
 	// PreflightSSH writes the container's ~/.ssh/known_hosts and probes the
 	// operator's ssh-agent, neither of which belongs in a hosted
@@ -777,7 +827,15 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		// The Anthropic API key is intentionally not written here — it has its
 		// own validated capture endpoint (POST /api/anthropic/connect). See the
 		// note on orgSettingsUpdate.
-		return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
+		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
+			return err
+		}
+		for _, e := range credAudit {
+			if err := tx.AccessChangeLog.Record(r.Context(), orgID, e); err != nil {
+				return fmt.Errorf("audit credential change: %w", err)
+			}
+		}
+		return nil
 	}); err != nil {
 		internalError(w, "settings/org", err)
 		return

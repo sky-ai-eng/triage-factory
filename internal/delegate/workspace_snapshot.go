@@ -341,10 +341,19 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID, owner, repo,
 		if err := worktree.RestoreWorkspaceGit(ctx, owner, repo, wtDir, delta, cloneURL, auth); err != nil {
 			return fmt.Errorf("rehydrate: restore git: %w", err)
 		}
-	} else if err := os.MkdirAll(wtDir, 0o700); err != nil {
+	} else {
 		// Non-git run-root (Jira lazy): just recreate the parent directory; the
 		// agent re-materializes per-repo worktrees via `workspace add`.
-		return fmt.Errorf("rehydrate: make run root: %w", err)
+		if err := os.MkdirAll(wtDir, 0o700); err != nil {
+			return fmt.Errorf("rehydrate: make run root: %w", err)
+		}
+		// The git path plants this inside RestoreWorkspaceGit; do the same here so
+		// a rehydrated Jira run root carries the jail's skills symlink too. The
+		// tree is orchestrator-owned at this instant and won't be again after the
+		// launch chown.
+		if err := worktree.EnsureSandboxSkillsLink(wtDir); err != nil {
+			delegateLog.Warn("plant sandbox skills symlink on rehydrated run root failed", "dir", wtDir, "error", err)
+		}
 	}
 
 	if sawScratch {

@@ -61,6 +61,24 @@ func RemoveRunTree(ctx context.Context, path string) error {
 	return removeRunTree(ctx, path)
 }
 
+// RunTreeHandedOff reports whether path has already been handed to the sandbox
+// identity — i.e. a launch chowned it and the calling (orchestrator) process no
+// longer owns it. That hand-off is one-way for the life of the run tree, so this
+// is the predicate for "a write in here would fail": after the chown only the
+// run root's own scaffold directories are group-writable by the orchestrator, and
+// everything inside belongs to the sandbox uid with the modes it was created
+// with. A capability-less orchestrator therefore cannot create, truncate, or
+// unlink anything below the top level.
+//
+// Callers use it to SKIP work that would otherwise fail with EACCES, not to
+// decide whether to force it: the standing rule is that nothing TF-side writes
+// into a run tree after its first launch. Conservative on error and off Linux —
+// an unreadable or non-existent path reports false, since a caller that then
+// proceeds gets the pre-existing behavior rather than a silent skip.
+func RunTreeHandedOff(path string) bool {
+	return runTreeHandedOff(path)
+}
+
 // CaptureRunDelta runs the parked-run capture in a child dropped to the
 // sandbox uid inside an empty network namespace and returns its raw JSON
 // stdout (a worktree.CapturedState — the git delta plus, when sessionID is

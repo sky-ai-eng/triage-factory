@@ -592,7 +592,17 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 				return fmt.Errorf("vault put webhook_secret: %w", err)
 			}
 		}
-		return nil
+		// Registering an App binds the org's most powerful GitHub
+		// credential (private key + client secret). Audit it here, where the
+		// secrets actually land, so the change-log shows the App arriving and
+		// not just the later cutover. A staged registration still records — the
+		// key is stored either way, whether or not it's live yet.
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialSet,
+			DetailJSON: accessDetailCredentialNamed(
+				domain.CredentialKindGitHubApp, ghBase, convResp.Slug),
+		})
 	}); err != nil {
 		// In local mode SecretStore writes go to the OS keychain
 		// outside the SQLite tx. If the tx failed, clean up any
