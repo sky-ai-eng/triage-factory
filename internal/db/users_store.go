@@ -104,7 +104,7 @@ type UsersStore interface {
 	// Note: an org-credential disconnect deliberately does NOT call this
 	// — identity is owned by its own capture surface, never swept as a
 	// side effect of an org-access change. No live HTTP handler surfaces
-	// this yet: the /identity/jira routes are status + PAT-bind only, so
+	// this yet: the /jira/identity routes are status + PAT-bind only, so
 	// a user-facing disconnect is still future capture-flow UI work
 	// (symmetric with ClearGitHubIdentity, which is likewise unwired). It
 	// exists now so that handler is a pure addition, not a store change.

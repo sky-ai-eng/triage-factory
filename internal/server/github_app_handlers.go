@@ -111,7 +111,7 @@ func (s *Server) registrantDisplayName(ctx context.Context, orgID, userID string
 // handleGitHubAppStatus returns the org's GitHub App registration +
 // installation state. Read-only; any org member (or local-mode user).
 //
-// GET /api/orgs/{org_id}/github-app
+// GET /api/orgs/{org_id}/github/app
 func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
@@ -165,7 +165,7 @@ func (s *Server) connectCallbackURLSafe(orgID string) string {
 // a manual reconcile is the same harmless GET /app/installations the poller
 // runs, so it's offered everywhere rather than gated on runmode.
 //
-// POST /api/orgs/{org_id}/github-app/installations/refresh
+// POST /api/orgs/{org_id}/github/app/installations/refresh
 func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
@@ -214,7 +214,7 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 // "Install on another GitHub account" button opens. 404 when the org
 // has no registered App (nothing to install). Read-only; any org member.
 //
-// GET /api/orgs/{org_id}/github-app/install-url
+// GET /api/orgs/{org_id}/github/app/install-url
 func (s *Server) handleGitHubAppInstallURL(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {

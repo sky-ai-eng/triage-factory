@@ -78,12 +78,28 @@ export interface OrgSettingsData {
   github_poll_interval: string
   github_clone_protocol: CloneProtocol
   has_github_pat: boolean
+  // The @login the stored org PAT authenticates as — the credential's own
+  // identity, not the viewer's. Absent when no PAT is bound, when the bind
+  // predates the login being recorded, or when the live token comes from the
+  // environment (the recorded login wouldn't be the one in use). Settings shows
+  // it beside the "Replace token" control so a rotation names the account it's
+  // swapping out.
+  github_pat_login?: string
+  // True when the live GitHub token is supplied by TRIAGE_FACTORY_GITHUB_BOT_PAT
+  // (local mode only). The overlay is read-wins, so a replacement written from
+  // here would be stored and then ignored — the surface reports the credential
+  // instead of offering to change it.
+  github_pat_env_provided?: boolean
   jira_base_url: string
   jira_poll_interval: string
   // True when a Jira service credential is stored for the org's auth-method
   // marker (DC PAT or Cloud email + API token) — not the presence of a PAT
   // specifically, so a Cloud org reports true despite having no PAT.
   has_jira_credential: boolean
+  // The Jira half of github_pat_env_provided — true when the env supplies the
+  // Jira host and/or service token, either of which makes an in-place rebind
+  // partly or wholly unobservable.
+  jira_credential_env_provided?: boolean
   max_llm_model_tier?: string
   // Org-wide daily spend cap in USD (TFAC-477); 0 = no cap. Always present.
   max_daily_cost_usd: number
@@ -267,11 +283,18 @@ function dailyCapToWire(raw: string): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
-// saveOrgConfig persists the org-level field group via POST
-// /api/settings/org. Token fields are sent only when re-typed (undefined
-// = don't touch, matching the backend's pointer-nil semantics). Returns a
-// discriminated result; `warning` carries the backend's model-cap clamp
-// notice on an otherwise-successful save.
+// saveOrgConfig persists the org-level CONFIG via POST /api/settings/org.
+//
+// It sends no secrets. The GitHub PAT and the Jira service credential each
+// have their own resource (connectGitHubPAT / connectJira and their
+// disconnects), so there is no "" -vs- undefined "leave blank to keep current"
+// dance on the wire any more: a credential you didn't retype simply isn't part
+// of this request. Base URLs stay here — they're host config the GitHub App
+// path needs before any credential exists — and clearing one no longer
+// destroys the matching credential.
+//
+// Returns a discriminated result; `warning` carries the backend's model-cap
+// clamp notice on an otherwise-successful save.
 export async function saveOrgConfig(
   form: OrgConfigForm,
 ): Promise<{ ok: true; warning?: string } | { ok: false; error: string }> {
@@ -280,11 +303,9 @@ export async function saveOrgConfig(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       github_base_url: form.github_url,
-      github_pat: form.github_pat || undefined,
       github_poll_interval: form.github_poll_interval,
       github_clone_protocol: form.github_clone_protocol,
       jira_base_url: form.jira_url,
-      jira_pat: form.jira_pat || undefined,
       jira_poll_interval: form.jira_poll_interval,
       max_llm_model_tier: form.max_llm_model_tier,
       max_daily_cost_usd: dailyCapToWire(form.max_daily_cost_usd),

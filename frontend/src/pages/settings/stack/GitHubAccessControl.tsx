@@ -1,10 +1,19 @@
 // GitHubAccessControl is the body of Settings' single "GitHub access" section —
 // the post-TFAC-328 replacement for the old independently-editable App/PAT
 // credential sections. GitHub access is either/or per org, so this surface shows
-// the LIVE mode plainly and offers exactly one affordance: an explicit, guided
-// switch to the other mode (with an inform-only reachability diff and a confirm
-// step), plus the staged-switch banner when a PAT→App switch is registered but
-// not yet cut over.
+// the LIVE mode plainly and offers a guided switch to the other mode (with an
+// inform-only reachability diff and a confirm step), plus the staged-switch
+// banner when a PAT→App switch is registered but not yet cut over.
+//
+// A PAT org gets one more affordance: replace the token in place. Rotation is
+// hygiene, not a mode change — expiry, a revocation, an offboarding — and the
+// only alternatives were switching to an App and back, clearing every token in
+// the danger zone, or calling the API by hand. It reuses the switch flow's two
+// screens (token entry → validated login + reachability diff) because a rotation
+// can darken repositories exactly like a switch can: a replacement token with
+// narrower reach is the offboarding case, not an edge case. The commit is the
+// credential resource's own PUT, which validates live and leaves the existing
+// credential in place on a bad token.
 //
 // It reuses the same step components the wizard composes — GitHubAccountTypeStep
 // and GitHubAppStep (GitHubAppPanel, returnTo="settings"), and the shared
@@ -39,14 +48,18 @@ import {
   switchToPat,
   type AccessDiff,
 } from '../../../lib/githubApp'
+import { connectGitHubPAT } from '../orgCredentials'
 import type { StepContext } from '../../setup/types'
 
 // The guided-switch state machine. `idle` shows the live mode + the switch
 // affordance (or the staged banner); the rest are the stepper screens, split by
-// direction. The register screen is transient — clicking Register redirects
+// direction, with the two `rotate-*` screens serving the same-mode PAT
+// replacement. The register screen is transient — clicking Register redirects
 // away, and the user returns to `idle` on the staged banner.
 type Phase =
   | { kind: 'idle' }
+  | { kind: 'rotate-token' }
+  | { kind: 'rotate-diff'; diff: AccessDiff; login: string; pat: string }
   | { kind: 'to-app-source' }
   | { kind: 'to-app-account' }
   | { kind: 'to-app-register' }
@@ -55,16 +68,22 @@ type Phase =
   | { kind: 'to-app-diff'; diff: AccessDiff }
   | { kind: 'to-pat-token' }
   | { kind: 'to-pat-diff'; diff: AccessDiff; login: string; pat: string }
-  | { kind: 'to-pat-success'; settingsUrl: string }
+  | { kind: 'to-pat-success'; settingsUrl: string; login: string }
 
 export default function GitHubAccessControl({
   ctx,
+  baseUrl,
   reload,
 }: {
   // The StepContext OrgSettings owns — its live draft (with the githubApp*
   // fields its load seeded) + patch, reused so the account-type/register step
   // bodies render identically to /setup.
   ctx: StepContext
+  // The org's SAVED GitHub host — the baseline, deliberately not the draft the
+  // GitHub URL section above may be mid-edit. A token is bound against the host
+  // it was validated against, so a rotation must not quietly re-point the org at
+  // a URL nobody has committed to yet.
+  baseUrl: string
   // Re-run OrgSettings' load after a committed switch, so the live mode, the
   // section summary, and the clone-protocol gate all re-derive.
   reload: () => void
@@ -75,6 +94,11 @@ export default function GitHubAccessControl({
   const staged = s.githubAppStaged
   const liveApp = registered && !staged
   const slug = s.githubAppSlug
+  // The live token is env-supplied, so this workspace can report GitHub access
+  // but not change it (see the idle branch below). Ranked under the App states:
+  // a registered App is its own credential tier, and the overlay only shadows
+  // the PAT the App path doesn't read.
+  const envPat = s.githubPatEnvProvided
 
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' })
   const [busy, setBusy] = useState(false)
@@ -179,8 +203,51 @@ export default function GitHubAccessControl({
     }
   }
 
+  // ── PAT→PAT: validate the replacement token + fetch the diff ──
+  // The same preflight the App→PAT switch runs — it validates against the org's
+  // resolved host and enumerates the token's reach, storing nothing, so a bad
+  // token fails here with the live credential untouched.
+  const rotatePreflight = async (pat: string) => {
+    if (!orgId || busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const pre = await patPreflight(orgId, pat)
+      setPhase({ kind: 'rotate-diff', diff: pre, login: pre.login, pat })
+      setBusy(false)
+    } catch (e) {
+      setError((e as Error).message)
+      setBusy(false)
+    }
+  }
+
+  // ── PAT→PAT: commit the replacement ──
+  // The credential resource's PUT re-validates and swaps the stored token in one
+  // transaction; nothing is destroyed if it 422s, so a failure leaves the org on
+  // the token it was already using.
+  const commitRotate = async (pat: string, login: string) => {
+    if (!orgId || busy) return
+    setBusy(true)
+    setError(null)
+    const res = await connectGitHubPAT(orgId, baseUrl, pat)
+    if (!res.ok) {
+      setError(res.error)
+      setBusy(false)
+      return
+    }
+    const bound = res.login || login
+    toast.success(
+      bound ? `GitHub token replaced — connected as @${bound}` : 'GitHub token replaced',
+    )
+    // Optimistic so the idle view names the new account immediately; reload
+    // confirms it from the server.
+    ctx.patch({ hasGitHubPat: true, githubPatLogin: bound })
+    reset()
+    reload()
+  }
+
   // ── App→PAT: commit the teardown ──
-  const commitSwitchToPat = async (pat: string) => {
+  const commitSwitchToPat = async (pat: string, login: string) => {
     if (!orgId || busy) return
     setBusy(true)
     setError(null)
@@ -192,7 +259,7 @@ export default function GitHubAccessControl({
       // derives it from the validated base URL, but a javascript: href would
       // still execute despite rel=noopener), mirroring getGitHubAppInstallURL.
       const settingsUrl = isHttpUrl(res.github_app_settings_url) ? res.github_app_settings_url : ''
-      setPhase({ kind: 'to-pat-success', settingsUrl })
+      setPhase({ kind: 'to-pat-success', settingsUrl, login })
       setBusy(false)
     } catch (e) {
       setError((e as Error).message)
@@ -201,6 +268,47 @@ export default function GitHubAccessControl({
   }
 
   // ─────────────────────────────── render ───────────────────────────────
+
+  // rotate-token — enter the replacement token; Continue validates it and
+  // fetches the diff. Nothing has changed yet at this point.
+  if (phase.kind === 'rotate-token') {
+    return (
+      <Frame onCancel={reset} busy={busy} cancelLabel="Cancel">
+        <TokenScreen
+          title="Replace your personal access token"
+          detail={
+            <>
+              Enter the new token, with <code className="text-text-secondary">repo</code> and{' '}
+              <code className="text-text-secondary">read:org</code> scopes. We&rsquo;ll validate it
+              and show what it can reach before your current token is replaced.
+            </>
+          }
+          busy={busy}
+          error={error}
+          onSubmit={(pat) => void rotatePreflight(pat)}
+        />
+      </Frame>
+    )
+  }
+
+  // rotate-diff — the validated login + what the replacement can reach, with the
+  // same acknowledgment the switch flows require when repositories would go
+  // dark. The swap happens on confirm.
+  if (phase.kind === 'rotate-diff') {
+    return (
+      <Frame onCancel={reset} busy={busy} cancelLabel="Cancel">
+        <AccessDiffScreen
+          diff={phase.diff}
+          login={phase.login}
+          action="replacement"
+          confirmLabel="Replace token"
+          busy={busy}
+          error={error}
+          onConfirm={() => void commitRotate(phase.pat, phase.login)}
+        />
+      </Frame>
+    )
+  }
 
   // to-app-source — the create-vs-connect fork (same chooser the wizard uses).
   // Create continues to the account-type/register path; connect goes to the
@@ -332,7 +440,7 @@ export default function GitHubAccessControl({
           confirmLabel="Switch to a personal access token"
           busy={busy}
           error={error}
-          onConfirm={() => void commitSwitchToPat(phase.pat)}
+          onConfirm={() => void commitSwitchToPat(phase.pat, phase.login)}
         />
       </Frame>
     )
@@ -383,6 +491,7 @@ export default function GitHubAccessControl({
                 githubAppInstallCount: 0,
                 githubAppSlug: '',
                 hasGitHubPat: true,
+                githubPatLogin: phase.login,
               })
               reset()
               reload()
@@ -427,20 +536,64 @@ export default function GitHubAccessControl({
             Switch to a personal access token…
           </button>
         </>
+      ) : envPat ? (
+        // Env-supplied token: reported, not managed. TRIAGE_FACTORY_* wins on
+        // read, so a replacement written here would be stored in the keychain
+        // and then ignored on every subsequent read — the operator would rotate,
+        // see a success, and keep polling with the old token. There's also no
+        // honest identity to show: the agents row records the last token bound
+        // through a route, which by definition isn't the one in use. So the
+        // section states the fact and points at the only control that actually
+        // changes anything, which is the shell the process was started from.
+        <>
+          <p className="text-[13px] leading-relaxed text-text-tertiary">
+            Triage Factory connects to GitHub with the token in{' '}
+            <code className="text-text-secondary">TRIAGE_FACTORY_GITHUB_BOT_PAT</code>. Environment
+            variables take precedence over anything stored here, so this token is managed where the
+            server is started — unset that variable to manage GitHub access from Settings.
+          </p>
+        </>
       ) : (
         <>
           <p className="text-[13px] leading-relaxed text-text-tertiary">
-            {s.hasGitHubPat
-              ? 'Triage Factory connects to GitHub with a personal access token. Switch to a GitHub App to poll under its own bot identity with support for multiple installations.'
-              : 'GitHub access isn’t configured for this workspace yet. Register a GitHub App to poll under its own bot identity with support for multiple installations.'}
+            {s.hasGitHubPat ? (
+              <>
+                Triage Factory connects to GitHub with a personal access token
+                {s.githubPatLogin ? (
+                  <>
+                    , authenticating as{' '}
+                    <span className="font-medium text-text-secondary">@{s.githubPatLogin}</span>
+                  </>
+                ) : null}
+                . Switch to a GitHub App to poll under its own bot identity with support for
+                multiple installations.
+              </>
+            ) : (
+              'GitHub access isn’t configured for this workspace yet. Register a GitHub App to poll under its own bot identity with support for multiple installations.'
+            )}
           </p>
-          <button
-            type="button"
-            onClick={() => setPhase({ kind: 'to-app-source' })}
-            className="rounded-xl border border-border-glass px-4 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary"
-          >
-            {s.hasGitHubPat ? 'Switch to GitHub App…' : 'Set up a GitHub App…'}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Rotation lives beside the switch, not inside it: replacing an
+                expired or revoked token is routine hygiene, and routing it
+                through a mode change (App and back) would be a teardown to swap
+                a string. */}
+            {s.hasGitHubPat && (
+              <button
+                type="button"
+                onClick={() => setPhase({ kind: 'rotate-token' })}
+                className="rounded-xl border border-border-glass px-4 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary"
+              >
+                Replace token…
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setPhase({ kind: 'to-app-source' })}
+              className="rounded-xl border border-border-glass px-4 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary"
+            >
+              {s.hasGitHubPat ? 'Switch to GitHub App…' : 'Set up a GitHub App…'}
+            </button>
+          </div>
         </>
       )}
     </div>
@@ -456,10 +609,13 @@ function Frame({
   children,
   onCancel,
   busy,
+  // The rotation screens aren't a switch, so they name their own exit.
+  cancelLabel = 'Cancel switch',
 }: {
   children: React.ReactNode
   onCancel: () => void
   busy?: boolean
+  cancelLabel?: string
 }) {
   return (
     <div className="space-y-5">
@@ -470,7 +626,7 @@ function Frame({
         disabled={busy}
         className="text-[12px] text-text-tertiary underline transition-colors hover:text-text-secondary disabled:opacity-40"
       >
-        Cancel switch
+        {cancelLabel}
       </button>
     </div>
   )
@@ -519,13 +675,19 @@ function StagedBanner({
   )
 }
 
-// TokenScreen is the App→PAT token entry: a password field whose Continue runs
-// the pat-preflight (validate + diff).
+// TokenScreen is the token entry shared by the App→PAT switch and the in-place
+// rotation: a password field whose Continue runs the pat-preflight (validate +
+// diff). The heading/detail are supplied because the two read differently —
+// one is changing how the org connects, the other is changing only the string.
 function TokenScreen({
+  title = 'Switch to a personal access token',
+  detail,
   busy,
   error,
   onSubmit,
 }: {
+  title?: string
+  detail?: React.ReactNode
   busy: boolean
   error: string | null
   onSubmit: (pat: string) => void
@@ -534,13 +696,15 @@ function TokenScreen({
   return (
     <div className="space-y-3">
       <div className="space-y-1.5">
-        <h3 className="text-[15px] font-medium text-text-primary">
-          Switch to a personal access token
-        </h3>
+        <h3 className="text-[15px] font-medium text-text-primary">{title}</h3>
         <p className="text-[13px] leading-relaxed text-text-tertiary">
-          Enter a token with <code className="text-text-secondary">repo</code> and{' '}
-          <code className="text-text-secondary">read:org</code> scopes. We&rsquo;ll validate it and
-          show which repositories it can reach before anything changes.
+          {detail ?? (
+            <>
+              Enter a token with <code className="text-text-secondary">repo</code> and{' '}
+              <code className="text-text-secondary">read:org</code> scopes. We&rsquo;ll validate it
+              and show which repositories it can reach before anything changes.
+            </>
+          )}
         </p>
       </div>
       <input
@@ -569,11 +733,14 @@ function TokenScreen({
 }
 
 // AccessDiffScreen renders the inform-only reachability diff with an explicit
-// acknowledgment when repos would go dark. Shared by both directions; the
-// optional `login` heads the App→PAT variant with the validated identity.
+// acknowledgment when repos would go dark. Shared by both switch directions and
+// the rotation; the optional `login` heads the variants that validated a token
+// with the identity it resolved to, and `action` names what the numbers are
+// about to describe ("after the switch" / "after the replacement").
 function AccessDiffScreen({
   diff,
   login,
+  action = 'switch',
   confirmLabel,
   busy,
   error,
@@ -581,6 +748,7 @@ function AccessDiffScreen({
 }: {
   diff: AccessDiff
   login?: string
+  action?: string
   confirmLabel: string
   busy: boolean
   error: string | null
@@ -598,14 +766,15 @@ function AccessDiffScreen({
       )}
       <p className="text-[13px] text-text-secondary">
         {diff.reachable} of {diff.tracked} tracked{' '}
-        {diff.tracked === 1 ? 'repository stays' : 'repositories stay'} reachable after the switch.
+        {diff.tracked === 1 ? 'repository stays' : 'repositories stay'} reachable after the {action}
+        .
       </p>
 
       {needsAck ? (
         <div className="space-y-2.5">
           <p className="text-[13px] leading-relaxed text-text-tertiary">
-            These repositories will stop updating after the switch. Existing tasks and open work are
-            kept. You can untrack them later in each team&rsquo;s repository settings.
+            These repositories will stop updating after the {action}. Existing tasks and open work
+            are kept. You can untrack them later in each team&rsquo;s repository settings.
           </p>
           <ul className="space-y-1">
             {dark.map((d) => (
@@ -638,7 +807,7 @@ function AccessDiffScreen({
         </div>
       ) : (
         <p className="text-[13px] leading-relaxed text-text-tertiary">
-          All tracked repositories remain reachable after the switch.
+          All tracked repositories remain reachable after the {action}.
         </p>
       )}
 

@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -23,6 +24,12 @@ import (
 // settings endpoints, holding the transactional store runner.
 type settingsHandler struct {
 	tx db.TxRunner
+	// az gates the org-scoped credential routes on the {org_id} path segment.
+	// Always set — the single construction site in routes() passes the server's
+	// checker — and dereferenced unguarded by those handlers. The struct's other
+	// handlers are session-scoped and resolve the org from the session instead,
+	// so they never read it.
+	az *authz.Checker
 	// bedrockRole resolves live AWS calls for the Bedrock role-mode setup +
 	// connect probe (TFAC-616): sts:GetCallerIdentity for the trust-policy
 	// snippet and a real sts:AssumeRole round-trip for the connect probe. A
@@ -304,9 +311,10 @@ func projectKeysFromConfigs(projects []jiraProjectConfig) []string {
 	return keys
 }
 
-// handleJiraConnect validates and stores the org's Jira service credential
-// without saving the rest of the settings. This powers the two-stage settings
-// flow: connect first, then configure projects and statuses.
+// handleJiraConnect binds (or rotates) the org's Jira service credential. It is
+// the Jira half of the credential-resource pair — see org_credentials.go for
+// why credentials are their own routes rather than fields on the bulk settings
+// save; handleJiraCredentialDelete is the unbind.
 //
 // It accepts both backends, keyed off the credential shape the client sends
 // (the deployment is chosen explicitly in the onboarding step's picker): a
@@ -315,11 +323,13 @@ func projectKeysFromConfigs(projects []jiraProjectConfig) []string {
 // v2). The chosen scheme is recorded as an auth-method marker so the system
 // resolver (jira.Resolver.ForSystem) rebuilds the matching client.
 //
-// Requires an active org because credentials write through the SecretStore
-// — see handleSettingsPost for the multi-mode rationale.
+// Org-admin gated at the handler, from the {org_id} path segment. The DB layer
+// enforces it too (org_settings_update RLS), but an explicit 403 beats an
+// opaque rolled-back transaction.
+//
+// PUT /api/orgs/{org_id}/jira/access/credential
 func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
-	userID := ClaimsFrom(r.Context()).Subject
-	orgID, ok := requireOrg(w, r)
+	orgID, userID, ok := se.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
 	}
@@ -393,7 +403,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 	//
 	// This is org-level Jira ACCESS (PAT_1) only — it deliberately does NOT
 	// write the caller's per-user Jira identity. That is captured solely by
-	// the dedicated bind surface (POST .../identity/jira/pat), so org access
+	// the dedicated bind surface (POST .../jira/identity/pat), so org access
 	// and user identity stay independent even when the same token connects
 	// the org.
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {

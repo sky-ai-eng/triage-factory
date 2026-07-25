@@ -2,13 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { initialWizardState, persistOrg, bedrockFormError } from './steps'
 import type { WizardState } from './types'
 
-// TFAC-410: a wizard session that tried the GitHub PAT path first (typed a
-// token, failed/abandoned the connect) then switched to the App path leaves the
-// typed PAT lingering in the in-memory org form. persistOrg (the whole-form save
-// behind the poll-interval / model steps) must not re-send it once an App is
-// registered, or the backend App-XOR guard 409s ("use the switch flow") and the
-// wizard dead-ends. These tests assert the wire payload, since that's exactly
-// what the guard inspects.
+// The org save carries CONFIG ONLY — credentials live on their own resources.
+// That's what makes the App-XOR hazard structurally impossible: a wizard session
+// that tried the GitHub PAT path first (typed a token, failed/abandoned the
+// connect) then switched to the App path leaves the typed PAT lingering in the
+// in-memory form, and the whole-form save behind the later poll-interval / model
+// steps used to re-send it and 409 ("use the switch flow"), dead-ending the
+// wizard. It can't now: there is no field to re-send it in. These tests assert
+// the wire payload, since the payload is the whole property.
 
 // A loaded wizard state carrying a stale typed org PAT in the form.
 function loadedStateWithStalePat(over: Partial<WizardState> = {}): WizardState {
@@ -34,41 +35,35 @@ function captureSaveBodies(): () => Record<string, unknown>[] {
   return () => bodies
 }
 
-describe('persistOrg — App-XOR stale-PAT guard (TFAC-410)', () => {
+describe('persistOrg — the org save carries no credentials', () => {
   beforeEach(() => vi.restoreAllMocks())
   afterEach(() => vi.unstubAllGlobals())
 
-  it('omits a lingering github_pat from the save when a GitHub App is registered', async () => {
-    const bodies = captureSaveBodies()
-    await persistOrg(loadedStateWithStalePat({ githubAppRegistered: true }))
-    const sent = bodies()
-    expect(sent).toHaveLength(1)
-    // saveOrgConfig sends `github_pat: form.github_pat || undefined`, so a scrubbed
-    // '' drops out of the JSON entirely — the XOR guard never sees a PAT to reject.
-    expect(sent[0]).not.toHaveProperty('github_pat')
-    // The rest of the form still round-trips, so an unrelated save isn't lossy.
-    expect(sent[0]).toMatchObject({ github_base_url: 'https://github.com' })
-  })
+  // Parameterized over the App states that used to need a scrub, plus the
+  // no-App case that used to be REQUIRED to send the token. All three now have
+  // the same answer, which is the point: the payload no longer depends on
+  // credential state at all.
+  const cases: { name: string; over: Partial<WizardState> }[] = [
+    { name: 'a live App is registered', over: { githubAppRegistered: true } },
+    {
+      name: 'a STAGED App is registered (the PAT is still live)',
+      over: { githubAppRegistered: true, githubAppStaged: true, hasGitHubPat: true },
+    },
+    { name: 'no App is registered', over: { githubAppRegistered: false } },
+  ]
 
-  it('scrubs for a STAGED App too (PAT still live, but the switch flow owns it)', async () => {
-    const bodies = captureSaveBodies()
-    await persistOrg(
-      loadedStateWithStalePat({
-        githubAppRegistered: true,
-        githubAppStaged: true,
-        hasGitHubPat: true,
-      }),
-    )
-    expect(bodies()[0]).not.toHaveProperty('github_pat')
-  })
-
-  it('sends a typed github_pat unchanged when NO App is registered', async () => {
-    const bodies = captureSaveBodies()
-    await persistOrg(loadedStateWithStalePat({ githubAppRegistered: false }))
-    // No App ⇒ the PAT-path whole-form saves (e.g. the clone step) must still
-    // carry a typed token; the scrub is scoped strictly to the App-registered case.
-    expect(bodies()[0]).toHaveProperty('github_pat', 'stale-pat-ghp_xxx')
-  })
+  for (const { name, over } of cases) {
+    it(`omits the typed org PAT when ${name}`, async () => {
+      const bodies = captureSaveBodies()
+      await persistOrg(loadedStateWithStalePat(over))
+      const sent = bodies()
+      expect(sent).toHaveLength(1)
+      expect(sent[0]).not.toHaveProperty('github_pat')
+      expect(sent[0]).not.toHaveProperty('jira_pat')
+      // The rest of the form still round-trips, so an unrelated save isn't lossy.
+      expect(sent[0]).toMatchObject({ github_base_url: 'https://github.com' })
+    })
+  }
 
   it('refuses to save (and makes no request) when the org load failed', async () => {
     const bodies = captureSaveBodies()

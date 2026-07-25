@@ -512,8 +512,9 @@ func (s *Server) localOrgProvisioned(ctx context.Context) (bool, error) {
 
 // DELETE /api/integrations — clears all integration credentials (GitHub
 // + Jira) via SecretStore. Used by the Settings "Clear All Tokens"
-// flow when the user wants a fresh slate. Granular per-integration
-// clears live on subpaths (e.g. DELETE /api/integrations/jira).
+// flow when the user wants a fresh slate. Unbinding ONE credential goes
+// through that credential's own resource (DELETE
+// /api/orgs/{org_id}/github/access/pat, .../jira/access/credential).
 //
 // Env-overlay UX: if any of the four well-known integration secrets
 // are supplied by TRIAGE_FACTORY_* env vars (local mode only —
@@ -527,7 +528,14 @@ func (s *Server) handleIntegrationsClear(w http.ResponseWriter, r *http.Request)
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return integrations.Clear(r.Context(), tx.Secrets, orgID)
+		// Read before clearing so the audit rows name only what was really
+		// bound — the vault deletes are idempotent and can't report it, and a
+		// revocation the log invents is worse than one it omits.
+		creds, _ := integrations.Load(r.Context(), tx.Secrets, orgID)
+		if err := integrations.Clear(r.Context(), tx.Secrets, orgID); err != nil {
+			return err
+		}
+		return recordOrgCredentialClear(r.Context(), tx, orgID, userID, creds)
 	}); err != nil {
 		internalError(w, "auth", err)
 		return
@@ -537,42 +545,6 @@ func (s *Server) handleIntegrationsClear(w http.ResponseWriter, r *http.Request)
 		if envs := auth.EnvProvided(); len(envs) > 0 {
 			resp["warning"] = fmt.Sprintf("env vars (%v) still supply credentials — unset them in your shell to fully clear", envs)
 			resp["env_provided"] = envs
-		}
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// DELETE /api/integrations/jira — clears Jira credentials only,
-// preserving GitHub. Counterpart to the collection-level clear at
-// DELETE /api/integrations. See the env-overlay note on
-// handleIntegrationsClear for the warning shape.
-func (s *Server) handleIntegrationsDeleteJira(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
-	if !ok {
-		return
-	}
-	userID := ClaimsFrom(r.Context()).Subject
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return integrations.ClearJira(r.Context(), tx.Secrets, orgID)
-	}); err != nil {
-		internalError(w, "auth", err)
-		return
-	}
-	// Stop the Jira poller and clear the in-memory client so it doesn't
-	// keep polling with stale credentials.
-	if s.onJiraChanged != nil {
-		s.MarkJiraRestarted(r.Context(), orgID)
-		go s.onJiraChanged(orgID)
-	}
-	resp := map[string]any{"status": "cleared"}
-	if runmode.Current() == runmode.ModeLocal {
-		envs := auth.EnvProvided()
-		for _, e := range envs {
-			if e == "jira" {
-				resp["warning"] = "env vars (TRIAGE_FACTORY_JIRA_URL/BOT_PAT) still supply this credential — unset them in your shell to fully clear"
-				resp["env_provided"] = []string{"jira"}
-				break
-			}
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)

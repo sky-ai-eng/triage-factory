@@ -1,9 +1,12 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -131,10 +134,11 @@ func TestIntegrationsSetup_AuditsBothOrgCredentials(t *testing.T) {
 	findCredAudit(t, rows, domain.AccessActionCredentialSet, domain.CredentialKindJiraOrg)
 }
 
-// TestOrgSettingsPost_GitHubPATRotate_AuditsSet: rotating the org PAT from the
-// Settings page is the other org-PAT write-point besides setup, and left no
-// trace at all.
-func TestOrgSettingsPost_GitHubPATRotate_AuditsSet(t *testing.T) {
+// TestGitHubPATPut_AuditsSet: binding/rotating the org PAT through the
+// credential resource records the bind with the @login the token authenticates
+// as. This is the write-point that left no trace at all while it was a field on
+// the bulk settings save.
+func TestGitHubPATPut_AuditsSet(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -145,7 +149,12 @@ func TestOrgSettingsPost_GitHubPATRotate_AuditsSet(t *testing.T) {
 		t.Fatalf("seed creds: %v", err)
 	}
 
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_pat": "ghp_new"})
+	rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
+		"base_url": gh.URL, "pat": "ghp_new",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
+	}
 
 	row := findCredAudit(t, credAuditRows(t, s), domain.AccessActionCredentialSet, domain.CredentialKindGitHubPAT)
 	if row.Name != "rotated-bot" {
@@ -154,11 +163,116 @@ func TestOrgSettingsPost_GitHubPATRotate_AuditsSet(t *testing.T) {
 	if row.Host != gh.URL {
 		t.Errorf("host = %q, want %q", row.Host, gh.URL)
 	}
+	// The bind persists the host too, so a caller never needs a second config
+	// save to keep the credential and the host it was validated against in sync.
+	stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT)
+	if stored != "ghp_new" {
+		t.Errorf("stored PAT = %q, want the rotated one", stored)
+	}
 }
 
-// TestOrgSettingsPost_Disconnect_AuditsRemoval: clearing the org's GitHub URL
-// destroys the stored PAT, which is the removal side the log never carried.
-func TestOrgSettingsPost_Disconnect_AuditsRemoval(t *testing.T) {
+// TestGitHubPATPut_RequiresBothHalves: a token without a host (or a host
+// without a token) is not a credential. Rejecting it is what lets this route
+// drop the "leave blank to keep current" ambiguity the bulk field carried —
+// blank no longer means anything here, because you just don't call it.
+func TestGitHubPATPut_RequiresBothHalves(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	for _, tc := range []struct {
+		name  string
+		body  map[string]any
+		field string
+	}{
+		{"no host", map[string]any{"pat": "ghp_x"}, "base_url"},
+		{"no token", map[string]any{"base_url": "https://github.com"}, "pat"},
+		{"blank token", map[string]any{"base_url": "https://github.com", "pat": "   "}, "pat"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doJSON(t, s, http.MethodPut, patRoute(), tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			if got := rec.Body.String(); !strings.Contains(got, tc.field) {
+				t.Errorf("body %s should name the offending field %q", got, tc.field)
+			}
+		})
+	}
+	if rows := credAuditRows(t, s); len(rows) != 0 {
+		t.Errorf("rejected binds recorded %+v, want nothing", rows)
+	}
+}
+
+// TestGitHubPATPut_AppRegisteredDuringValidation_409 pins the App-XOR-PAT gate
+// against the read-then-act window. The handler checks for an App, then goes
+// off to GitHub to validate the token — and that round-trip is the one place it
+// is provably not holding the org's registration lock. Registering an App there
+// used to be invisible to the rest of the request, so the bind would write a PAT
+// underneath a live App.
+//
+// The validation stub doubles as the interleaving point, which makes the race
+// deterministic rather than timing-dependent: the App appears exactly once,
+// exactly while the token is in flight. What this asserts is the re-check inside
+// the critical section — the advisory check before validation has already run
+// and passed by then.
+func TestGitHubPATPut_AppRegisteredDuringValidation_409(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	var (
+		once    sync.Once
+		mu      sync.Mutex
+		seedErr error
+	)
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/user" {
+			http.NotFound(w, r)
+			return
+		}
+		// Racing writer: an App registration commits mid-validation. Errors are
+		// captured rather than t.Fatal'd — this runs on the server's goroutine.
+		once.Do(func() {
+			err := s.githubApps.CreateForOrg(context.Background(), domain.OrgGitHubApp{
+				OrgID: runmode.LocalDefaultOrgID, AppID: "1", Slug: "tf-bot",
+				ClientID: "Iv1.x", Active: true,
+			})
+			mu.Lock()
+			seedErr = err
+			mu.Unlock()
+		})
+		_ = json.NewEncoder(w).Encode(map[string]any{"login": "acme-bot"})
+	}))
+	t.Cleanup(gh.Close)
+
+	rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
+		"base_url": gh.URL, "pat": "ghp_new",
+	})
+
+	mu.Lock()
+	err := seedErr
+	mu.Unlock()
+	if err != nil {
+		t.Fatalf("racing app registration failed to seed: %v", err)
+	}
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 — the re-check must see the App that landed during validation; body=%s",
+			rec.Code, rec.Body.String())
+	}
+	if stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT); stored != "" {
+		t.Errorf("stored PAT %q under a live App — App XOR PAT violated", stored)
+	}
+	if rows := credAuditRows(t, s); len(rows) != 0 {
+		t.Errorf("a refused bind recorded %+v, want nothing", rows)
+	}
+}
+
+// TestGitHubPATDelete_AuditsRemoval: the disconnect clears the credential and
+// the host together, in one request, and records the removal against the host
+// the token was bound to.
+func TestGitHubPATDelete_AuditsRemoval(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -168,32 +282,175 @@ func TestOrgSettingsPost_Disconnect_AuditsRemoval(t *testing.T) {
 		auth.Credentials{GitHubURL: host, GitHubPAT: "ghp_old"}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
-	// The base URL has to be in org_settings too — the removal row records the
-	// PREVIOUS host, which is read from there, not from the vault.
 	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": host})
 
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": ""})
+	rec := doJSON(t, s, http.MethodDelete, patRoute(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disconnect = %d, body=%s", rec.Code, rec.Body.String())
+	}
 
 	row := findCredAudit(t, credAuditRows(t, s), domain.AccessActionCredentialRemoved, domain.CredentialKindGitHubPAT)
 	if row.Host != host {
 		t.Errorf("host = %q, want the host the removed PAT was bound to (%q)", row.Host, host)
 	}
+	stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT)
+	if stored != "" {
+		t.Errorf("PAT still stored after disconnect: %q", stored)
+	}
 }
 
-// TestOrgSettingsPost_ClearWithNothingStored_AuditsNothing guards the other
-// direction: the frontend re-sends the whole settings form on every save, so a
-// blank credential field that was already blank must not manufacture a
-// revocation. A change-log full of removals that never happened is worse than
-// one with gaps.
-func TestOrgSettingsPost_ClearWithNothingStored_AuditsNothing(t *testing.T) {
+// TestGitHubPATDelete_Idempotent: disconnecting an org with nothing bound
+// succeeds and records nothing. A removal row for a credential that was never
+// there is a phantom revocation — worse in an audit log than a gap.
+func TestGitHubPATDelete_Idempotent(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_pat": "", "jira_pat": ""})
-
+	rec := doJSON(t, s, http.MethodDelete, patRoute(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disconnect = %d, body=%s", rec.Code, rec.Body.String())
+	}
 	if rows := credAuditRows(t, s); len(rows) != 0 {
-		t.Errorf("credential rows = %+v, want none (nothing was stored to remove)", rows)
+		t.Errorf("credential rows = %+v, want none (nothing was bound)", rows)
+	}
+}
+
+// TestGitHubPATDelete_StagedApp_KeepsHost: a staged App coexists with a live
+// PAT during a PAT→App switch, and it resolves against the SAME host. Clearing
+// the host here would send a GHES org's App to github.com without an error —
+// the resolver falls org_settings → github_url secret → github.com, and this
+// disconnect clears the first two. So with any App registration present the
+// unbind takes the token only.
+func TestGitHubPATDelete_StagedApp_KeepsHost(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	const host = "https://github.example.com"
+	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID,
+		auth.Credentials{GitHubURL: host, GitHubPAT: "ghp_live"}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": host})
+	seedLocalApp(t, s, false) // staged: the PAT is still the live credential
+
+	rec := doJSON(t, s, http.MethodDelete, patRoute(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disconnect = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Token gone, host intact — in org_settings AND in the secret the resolver
+	// falls back to.
+	if stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT); stored != "" {
+		t.Errorf("PAT still stored after disconnect: %q", stored)
+	}
+	var settingsHost string
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT COALESCE(github_base_url, '') FROM org_settings WHERE org_id = ?`,
+		runmode.LocalDefaultOrgID).Scan(&settingsHost); err != nil {
+		t.Fatalf("read github_base_url: %v", err)
+	}
+	if settingsHost != host {
+		t.Errorf("github_base_url = %q, want %q kept for the staged App", settingsHost, host)
+	}
+	if secretHost, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubURL); secretHost != host {
+		t.Errorf("github_url secret = %q, want %q — it is the resolver's fallback", secretHost, host)
+	}
+	// The removal is still audited, against the host it was bound to.
+	row := findCredAudit(t, credAuditRows(t, s), domain.AccessActionCredentialRemoved, domain.CredentialKindGitHubPAT)
+	if row.Host != host {
+		t.Errorf("audit host = %q, want %q", row.Host, host)
+	}
+}
+
+// TestJiraCredentialDelete_AuditsRemoval: the Jira unbind clears the credential
+// and the URL column in ONE server-side transaction. The frontend used to do
+// this as two calls with a real "credentials were removed, but clearing the
+// saved URL failed" half-state.
+func TestJiraCredentialDelete_AuditsRemoval(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	const host = "https://jira.example.com"
+	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID,
+		auth.Credentials{JiraURL: host, JiraPAT: "jira_old"}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"jira_base_url": host})
+
+	rec := doJSON(t, s, http.MethodDelete, jiraCredentialRoute(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disconnect = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	findCredAudit(t, credAuditRows(t, s), domain.AccessActionCredentialRemoved, domain.CredentialKindJiraOrg)
+	// Both halves gone, from the one call.
+	stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyJiraPAT)
+	if stored != "" {
+		t.Errorf("Jira PAT still stored after disconnect: %q", stored)
+	}
+	var url string
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT COALESCE(jira_base_url, '') FROM org_settings WHERE org_id = ?`,
+		runmode.LocalDefaultOrgID).Scan(&url); err != nil {
+		t.Fatalf("read jira_base_url: %v", err)
+	}
+	if url != "" {
+		t.Errorf("jira_base_url = %q, want cleared by the same request", url)
+	}
+}
+
+// TestIntegrationsClear_AuditsEveryBoundCredential: the danger-zone sweep
+// destroys both org credentials at once and had no audit coverage at all.
+func TestIntegrationsClear_AuditsEveryBoundCredential(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
+		GitHubURL: "https://github.com", GitHubPAT: "ghp_x",
+		JiraURL: "https://jira.example.com", JiraPAT: "jira_x",
+	}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodDelete, "/api/integrations", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	rows := credAuditRows(t, s)
+	findCredAudit(t, rows, domain.AccessActionCredentialRemoved, domain.CredentialKindGitHubPAT)
+	findCredAudit(t, rows, domain.AccessActionCredentialRemoved, domain.CredentialKindJiraOrg)
+}
+
+// TestOrgSettingsPost_TouchesNoCredential: the config route is inert with
+// respect to credentials in BOTH directions — it can't bind one and it can't
+// revoke one. Clearing a base URL used to destroy the matching token as a side
+// effect; now it clears a column, and disconnecting is an explicit DELETE.
+func TestOrgSettingsPost_TouchesNoCredential(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	const host = "https://github.example.com"
+	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID,
+		auth.Credentials{GitHubURL: host, GitHubPAT: "ghp_live"}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+
+	postJSONResp(t, s, "/api/settings/org", map[string]any{
+		"github_base_url": "", "jira_base_url": "", "github_pat": "", "jira_pat": "",
+	})
+
+	stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT)
+	if stored != "ghp_live" {
+		t.Errorf("stored PAT = %q, want it untouched — clearing a URL is not a disconnect", stored)
+	}
+	if rows := credAuditRows(t, s); len(rows) != 0 {
+		t.Errorf("credential rows = %+v, want none (a config save is not a credential change)", rows)
 	}
 }
 
@@ -237,7 +494,7 @@ func TestGitHubIdentityPAT_AuditsIdentityBind(t *testing.T) {
 	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": gh.URL})
 
 	rec := doJSON(t, s, http.MethodPost,
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/github/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",
 		map[string]any{"pat": "ghp_identity"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("identity status = %d, body = %s", rec.Code, rec.Body.String())

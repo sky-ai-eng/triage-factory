@@ -172,7 +172,7 @@ func TestGitHubConnect_ManifestIncludesConnectCallback(t *testing.T) {
 		cbs[c.(string)] = true
 	}
 	wantConnect := "http://localhost:3000/api/orgs/" + org + "/github/connect/callback"
-	wantRegister := "http://localhost:3000/api/orgs/" + org + "/github-app/register/callback"
+	wantRegister := "http://localhost:3000/api/orgs/" + org + "/github/app/register/callback"
 	if !cbs[wantConnect] {
 		t.Errorf("callback_urls missing the Connect callback %q: %v", wantConnect, rawCBs)
 	}
@@ -516,7 +516,7 @@ func TestGitHubIdentityStatus(t *testing.T) {
 	seedOrgGitHubHost(t, rig, orgA.String(), ghesHost)
 
 	get := func() githubIdentityStatusResponse {
-		r := rig.requestWithSid("GET", "/api/orgs/"+orgA.String()+"/identity/github", sidA)
+		r := rig.requestWithSid("GET", "/api/orgs/"+orgA.String()+"/github/identity", sidA)
 		if r.StatusCode != http.StatusOK {
 			t.Fatalf("status endpoint status=%d", r.StatusCode)
 		}
@@ -650,7 +650,7 @@ func TestGitHubIdentityPAT_BindsIdentityAndDiscardsToken(t *testing.T) {
 	seedLocalOrgGitHubHost(t, s, ghStub.URL)
 
 	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/github/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",
 		map[string]any{"pat": "ghp_secret_token"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
@@ -711,7 +711,7 @@ func TestGitHubIdentityPAT_BadToken_Returns422(t *testing.T) {
 	seedLocalOrgGitHubHost(t, s, ghStub.URL)
 
 	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/github/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",
 		map[string]any{"pat": "ghp_bad"})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
@@ -729,7 +729,7 @@ func TestGitHubIdentityPAT_EmptyToken_Returns400(t *testing.T) {
 	s := newTestServer(t)
 
 	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/github/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",
 		map[string]any{"pat": "   "})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d, want 400", rec.Code)
@@ -751,7 +751,7 @@ func TestGitHubIdentityPAT_HostUnreachable_Returns502(t *testing.T) {
 	seedLocalOrgGitHubHost(t, s, deadURL)
 
 	rec := doJSON(t, s, "POST",
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/github/pat",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",
 		map[string]any{"pat": "ghp_whatever"})
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status=%d body=%s, want 502", rec.Code, rec.Body.String())

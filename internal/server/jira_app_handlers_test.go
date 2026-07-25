@@ -11,9 +11,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// jiraAppPath is the org-scoped jira-app endpoint for the local sentinel org.
+// jiraAppPath is the org-scoped jira/app endpoint for the local sentinel org.
 func jiraAppPath() string {
-	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/jira-app"
+	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/jira/app"
 }
 
 // TestJiraApp_LocalMode_StatusEmpty: with no per-org app and no first-party
@@ -70,7 +70,7 @@ func TestJiraApp_LocalMode_ImportFlipsConnectAvailable(t *testing.T) {
 	}
 
 	// The per-user Jira status endpoint must now advertise connect_available.
-	rec = doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/jira", nil)
+	rec = doJSON(t, s, "GET", "/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("identity status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}

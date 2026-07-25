@@ -25,7 +25,7 @@ export async function captureGitHubIdentityPat(
   pat: string,
 ): Promise<GitHubIdentityCaptured> {
   try {
-    return await apiJSON<GitHubIdentityCaptured>('/identity/github/pat', {
+    return await apiJSON<GitHubIdentityCaptured>('/github/identity/pat', {
       org: orgId,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -154,7 +154,7 @@ func (s *Server) connectAvailableForOrg(r *http.Request, orgID string) bool {
 // only; any org member (the card renders for everyone, the import/delete are
 // admin-gated).
 //
-// GET /api/orgs/{org_id}/jira-app
+// GET /api/orgs/{org_id}/jira/app
 func (s *Server) handleJiraAppStatus(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
@@ -201,7 +201,7 @@ type jiraAppImportRequest struct {
 // exposes no way to verify an OAuth app's client credentials without running the
 // authorize/token flow itself (a separate ticket), so this only stores them.
 //
-// POST /api/orgs/{org_id}/jira-app
+// POST /api/orgs/{org_id}/jira/app
 func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
@@ -279,7 +279,7 @@ func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 // Idempotent: a no-op (200) when the org has no override. After this, the org
 // falls back to the deployment first-party app (hosted) or has no app (local).
 //
-// DELETE /api/orgs/{org_id}/jira-app
+// DELETE /api/orgs/{org_id}/jira/app
 func (s *Server) handleJiraAppDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {

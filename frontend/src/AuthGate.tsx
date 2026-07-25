@@ -167,7 +167,7 @@ export function RequireGitHubIdentity({
  *
  * Unlike GitHub, Jira is an OPTIONAL tracker: a GitHub-only org has no Jira to
  * bind, so the gate self-disables there. Both signals come from the SAME read,
- * /identity/jira (useJiraIdentity): `host` is the org's configured Jira host
+ * /jira/identity (useJiraIdentity): `host` is the org's configured Jira host
  * (empty ⇒ GitHub-only org, nothing to gate) and `connected` is whether this
  * user has bound a credential. One source of truth, so "is Jira configured" and
  * "is the user bound" can never disagree across a two-endpoint window. In every

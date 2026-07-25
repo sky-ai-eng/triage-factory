@@ -1,6 +1,6 @@
 import { Section, Field, inputClass, glassInputClass } from './primitives'
 import { toast } from '../../components/Toast/toastStore'
-import { readError } from '../../lib/api'
+import { disconnectJira } from './orgCredentials'
 import type { JiraDeployment } from './jiraConnect'
 
 interface JiraAccessValue {
@@ -17,11 +17,17 @@ interface JiraAccessValue {
  * (Settings) performs the connect via the shared `connectJira` helper, exactly
  * as the GitHub PAT flow does. The group itself carries no Connect button.
  *
- * What it still owns is the disconnect half of the lifecycle (DELETE
- * /api/integrations/jira + the URL-column clear): that's an inline action on
- * the already-connected state, with no Continue/Save to fold into. On a
+ * What it still owns is the disconnect half of the lifecycle (DELETE on the
+ * credential resource): that's an inline action on the already-connected
+ * state, with no Continue/Save to fold into. On a
  * successful disconnect it fires onDisconnected so the container can do its
  * own follow-up (clearing wizard URL-confirmation, resetting baseline).
+ *
+ * Sitting beside it is `onReplace` — a request to rebind, not a rebind. The
+ * container answers by rendering this same group in its unconnected (fields +
+ * Save) form, so rotating a credential doesn't have to start with a disconnect
+ * and the window where the org has no credential and its poller is stopped
+ * never opens.
  *
  * Project tracking + status rules are TEAM-level (a separate surface), so
  * they live outside this group.
@@ -50,6 +56,9 @@ export default function JiraAccessGroup({
   onChange,
   connected,
   deployment,
+  orgId,
+  onReplace,
+  envProvided = false,
   onDisconnected,
   showBaseUrl = true,
   bare = false,
@@ -57,59 +66,52 @@ export default function JiraAccessGroup({
   value: JiraAccessValue
   onChange: (patch: Partial<JiraAccessValue>) => void
   connected: boolean
+  /** Org the credential belongs to — the DELETE is org-scoped by path. Null
+   *  only while a multi-mode active org is still resolving, which the disconnect
+   *  guards on rather than building a request against an unknown org. */
+  orgId: string | null
   // The deployment chosen upstream (the wizard's deployment-picker step / the
   // Settings deployment toggle). It decides which credential fields render —
   // Cloud shows the Atlassian email + API token, Data Center the single PAT.
   // The choice is NOT inferred from the URL here: it's made explicitly so the
   // fields the user fills always match the scheme the connect sends.
   deployment: JiraDeployment
+  // Asks the container to re-open its credential form against the still-
+  // connected org (see the note above). Omit on surfaces with no form to
+  // re-open — the control simply doesn't render.
+  onReplace?: () => void
+  // The connection's host and/or token come from TRIAGE_FACTORY_* env vars
+  // (local mode only). Those win on read, so a credential typed here would be
+  // stored and then ignored — the group states that and withholds the rebind
+  // rather than offering a control that appears to work and doesn't.
+  envProvided?: boolean
   onDisconnected?: () => void
   showBaseUrl?: boolean
   bare?: boolean
 }) {
   const cloud = deployment === 'cloud'
   const field = bare ? glassInputClass : inputClass
+  // An env-supplied connection can be reported but not replaced from here.
+  const canReplace = !!onReplace && !envProvided
 
   const disconnect = async () => {
-    // DELETE /api/integrations/jira clears the SecretStore entries
-    // (URL + PAT) but leaves org_settings.jira_base_url populated. Once that
-    // succeeds the connection is effectively broken, so we reflect the
-    // disconnected state regardless of whether the URL-column clear lands.
-    let credCleared = false
-    try {
-      const credRes = await fetch('/api/integrations/jira', { method: 'DELETE' })
-      if (!credRes.ok) {
-        toast.error(await readError(credRes, 'Failed to disconnect Jira'))
-        return
-      }
-      credCleared = true
-      // Follow with an explicit org POST so the URL column also clears,
-      // otherwise reloading would show the stale URL prefilled with
-      // has_jira_credential:false. This is a deliberately sparse body: the
-      // /api/settings/org handler treats absent fields as nil/unchanged
-      // (pointer fields) or empty-omit (interval strings), so the GitHub
-      // URL/PAT, poll intervals, and model cap are untouched.
-      const orgRes = await fetch('/api/settings/org', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jira_base_url: '' }),
-      })
-      if (!orgRes.ok) {
-        toast.error(
-          await readError(
-            orgRes,
-            'Jira credentials were removed, but clearing the saved URL failed',
-          ),
-        )
-      }
-    } catch {
-      toast.error(
-        credCleared
-          ? 'Jira credentials were removed, but clearing the saved URL failed.'
-          : 'Could not reach the server to disconnect Jira.',
-      )
-      if (!credCleared) return
+    // One request: the credential resource's DELETE clears the stored
+    // credential AND the URL column in a single server-side transaction. This
+    // used to be two calls (clear the secrets, then a sparse settings save to
+    // clear the column) with a real "credentials were removed, but clearing the
+    // saved URL failed" half-state to explain to the user.
+    if (!orgId) {
+      toast.error('No organization context — reload and try again.')
+      return
     }
+    const res = await disconnectJira(orgId)
+    if (!res.ok) {
+      toast.error(res.error)
+      return
+    }
+    // Local mode only: TRIAGE_FACTORY_* env vars shadow the vault on read, so
+    // the disconnect landed but the value keeps surfacing until they're unset.
+    if (res.warning) toast.error(res.warning)
     onChange({ jira_url: '', jira_pat: '', jira_email: '', jira_api_token: '' })
     onDisconnected?.()
   }
@@ -123,13 +125,24 @@ export default function JiraAccessGroup({
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-[13px] font-medium text-text-secondary">Jira connection</h2>
           {connected && (
-            <button
-              type="button"
-              onClick={disconnect}
-              className="text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
-            >
-              Disconnect
-            </button>
+            <div className="flex items-center gap-3">
+              {canReplace && (
+                <button
+                  type="button"
+                  onClick={onReplace}
+                  className="text-[11px] text-accent transition-colors hover:underline"
+                >
+                  Replace credential
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={disconnect}
+                className="text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
+              >
+                Disconnect
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -205,15 +218,35 @@ export default function JiraAccessGroup({
               Connected to {value.jira_url.replace(/^https?:\/\//, '')}
             </span>
             {bare && (
-              <button
-                type="button"
-                onClick={disconnect}
-                className="ml-auto text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
-              >
-                Disconnect
-              </button>
+              <div className="ml-auto flex items-center gap-3">
+                {canReplace && (
+                  <button
+                    type="button"
+                    onClick={onReplace}
+                    className="text-[11px] text-accent transition-colors hover:underline"
+                  >
+                    Replace credential
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={disconnect}
+                  className="text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
+                >
+                  Disconnect
+                </button>
+              </div>
             )}
           </div>
+          {/* Says why there's no Replace here, rather than leaving its absence
+              to be discovered. */}
+          {envProvided && (
+            <p className="text-[11px] leading-relaxed text-text-tertiary">
+              This connection comes from <code>TRIAGE_FACTORY_JIRA_*</code> environment variables,
+              which take precedence over anything stored here — change it where the server is
+              started, or unset those variables to manage it from Settings.
+            </p>
+          )}
         </div>
       )}
     </>

@@ -166,7 +166,7 @@ func TestSecurityHeaders_HandlerCanOverrideCSP(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/api/orgs/x/github-app/register/launch", nil))
+	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/api/orgs/x/github/app/register/launch", nil))
 
 	if got := rec.Header().Get("Content-Security-Policy"); got != override {
 		t.Errorf("handler CSP override didn't win:\n got %q\nwant %q", got, override)

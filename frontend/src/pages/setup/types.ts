@@ -73,6 +73,21 @@ export interface WizardState {
   // tracked separately from the (always-blank-on-load) org.github_pat field,
   // mirroring orgConfig's "leave blank to keep current" contract.
   hasGitHubPat: boolean
+  // The @login the stored org PAT authenticates as, when there is one — the
+  // credential's own identity, not the operator's. Read-only context: Settings'
+  // GitHub section names the account beside its "Replace token" control, so a
+  // rotation says which bot it's swapping out. Empty in App mode (the App's bot
+  // login resolves from the registration), before any bind, and whenever the
+  // live token is env-supplied (see githubPatEnvProvided — the recorded login
+  // describes the last token bound through a route, which isn't the one in use).
+  githubPatLogin: string
+  // The live GitHub token / Jira credential come from TRIAGE_FACTORY_* env vars
+  // rather than the vault (local mode only). The overlay wins on read, so these
+  // credentials can be reported but not managed: the surfaces that would
+  // otherwise offer to replace them render a settled statement instead of a
+  // control that would appear to work and then not.
+  githubPatEnvProvided: boolean
+  jiraCredentialEnvProvided: boolean
   // GitHub access is satisfied by ANY means — a stored/typed PAT or a
   // registered App — so the GitHub step reads the server's folded github_ready
   // signal rather than re-deriving it. Drives the step's isComplete (GitHub is

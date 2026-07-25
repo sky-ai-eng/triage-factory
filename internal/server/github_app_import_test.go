@@ -127,7 +127,7 @@ func TestGitHubAppImport_HappyPath_FreshSetup(t *testing.T) {
 	})
 	setOrgGitHubBase(t, s, stub.URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("123", testRSAPEM(t), map[string]any{"client_secret": "cs", "webhook_secret": "wh"}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("import = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -190,7 +190,7 @@ func TestGitHubAppImport_PersistsBotUserID(t *testing.T) {
 	})
 	setOrgGitHubBase(t, s, stub.URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("41", testRSAPEM(t), nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("import = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -217,7 +217,7 @@ func TestGitHubAppImport_BotUserIDFetchFailure_StoresNull(t *testing.T) {
 	stub := newImportStub(t, importStubCfg{appID: 42, slug: "acme-bot", clientID: "Iv1.x"})
 	setOrgGitHubBase(t, s, stub.URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("42", testRSAPEM(t), nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("import = %d, want 200 (bot-id fetch failure must not block import); body=%s", rec.Code, rec.Body.String())
@@ -245,7 +245,7 @@ func TestGitHubAppImport_StagedWhenPATLive(t *testing.T) {
 		t.Fatalf("seed pat: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("7", testRSAPEM(t), nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("import = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -281,7 +281,7 @@ func TestGitHubAppImport_BaseURLFromSecret(t *testing.T) {
 		t.Fatalf("seed github_url secret: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("77", testRSAPEM(t), nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("import = %d, want 200 (base URL resolved from the github_url secret); body=%s", rec.Code, rec.Body.String())
@@ -301,7 +301,7 @@ func TestGitHubAppImport_AppIDMismatch(t *testing.T) {
 	stub := newImportStub(t, importStubCfg{appID: 999, slug: "other-bot", clientID: "Iv1.x"})
 	setOrgGitHubBase(t, s, stub.URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("123", testRSAPEM(t), nil)) // submit 123, GitHub says 999
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("import = %d, want 422; body=%s", rec.Code, rec.Body.String())
@@ -320,7 +320,7 @@ func TestGitHubAppImport_BadPEM(t *testing.T) {
 	stub := newImportStub(t, importStubCfg{appID: 1})
 	setOrgGitHubBase(t, s, stub.URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("1", "not-a-pem", nil))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("import = %d, want 422; body=%s", rec.Code, rec.Body.String())
@@ -342,7 +342,7 @@ func TestGitHubAppImport_HardPermGap(t *testing.T) {
 	stub := newImportStub(t, importStubCfg{appID: 5, slug: "b", clientID: "Iv1.x", permissions: perms})
 	setOrgGitHubBase(t, s, stub.URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("5", testRSAPEM(t), map[string]any{"accept_partial": true})) // even with accept_partial
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("import = %d, want 422; body=%s", rec.Code, rec.Body.String())
@@ -385,7 +385,7 @@ func TestGitHubAppImport_SoftPermGap(t *testing.T) {
 	}
 	stub := newImportStub(t, importStubCfg{appID: 8, slug: "soft", clientID: "Iv1.x", permissions: perms})
 	setOrgGitHubBase(t, s, stub.URL)
-	path := "/api/orgs/" + runmode.LocalDefaultOrgID + "/github-app/import"
+	path := "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/app/import"
 
 	// Without accept_partial → 422, non-blocking, table present.
 	rec := doJSON(t, s, http.MethodPost, path, importBody("8", testRSAPEM(t), nil))
@@ -426,7 +426,7 @@ func TestGitHubAppImport_BadClientSecret(t *testing.T) {
 	})
 	setOrgGitHubBase(t, s, stub.URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("11", testRSAPEM(t), map[string]any{"client_secret": "wrong"}))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("import = %d, want 422; body=%s", rec.Code, rec.Body.String())
@@ -452,7 +452,7 @@ func TestGitHubAppImport_ClientSecretUnknown_StoresUnvalidated(t *testing.T) {
 	})
 	setOrgGitHubBase(t, s, stub.URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("21", testRSAPEM(t), map[string]any{"client_secret": "maybe-good"}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("import = %d, want 200 (inconclusive check stores unvalidated); body=%s", rec.Code, rec.Body.String())
@@ -487,7 +487,7 @@ func TestGitHubAppImport_PersonalOwnerType(t *testing.T) {
 	stub := newImportStub(t, importStubCfg{appID: 31, slug: "personal-bot", clientID: "Iv1.x", ownerType: "User"})
 	setOrgGitHubBase(t, s, stub.URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("31", testRSAPEM(t), nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("import = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -512,7 +512,7 @@ func TestGitHubAppImport_OccupiedSlot(t *testing.T) {
 	stub := newImportStub(t, importStubCfg{appID: 2, slug: "b", clientID: "Iv1.x"})
 	setOrgGitHubBase(t, s, stub.URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("2", testRSAPEM(t), nil))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("import into occupied slot = %d, want 409; body=%s", rec.Code, rec.Body.String())
@@ -530,7 +530,7 @@ func TestGitHubAppImport_NoSecret_ConnectUnavailable(t *testing.T) {
 	stub := newImportStub(t, importStubCfg{appID: 3, slug: "b", clientID: "Iv1.x"})
 	setOrgGitHubBase(t, s, stub.URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/import",
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("3", testRSAPEM(t), nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("import = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -540,7 +540,7 @@ func TestGitHubAppImport_NoSecret_ConnectUnavailable(t *testing.T) {
 		t.Fatalf("app = %+v, want ClientSecretRef empty", app)
 	}
 
-	rec = doJSON(t, s, http.MethodGet, "/api/orgs/"+runmode.LocalDefaultOrgID+"/identity/github", nil)
+	rec = doJSON(t, s, http.MethodGet, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("identity status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -566,7 +566,7 @@ func TestGitHubAppStatus_CarriesConnectCallbackURL(t *testing.T) {
 	s.SetDeployConfig("http://localhost:3000", key)
 	seedLocalApp(t, s, true)
 
-	rec := doJSON(t, s, http.MethodGet, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app", nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}

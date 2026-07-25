@@ -214,7 +214,7 @@ func TestGitHubAppRegisterCallback_Staging(t *testing.T) {
 			}
 
 			rec := doJSON(t, s, http.MethodGet,
-				"/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/register/callback?code=c&state="+signed, nil)
+				"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/register/callback?code=c&state="+signed, nil)
 			if rec.Code != http.StatusFound {
 				t.Fatalf("callback = %d, want 302; body=%s", rec.Code, rec.Body.String())
 			}
@@ -243,9 +243,9 @@ func TestGitHubAppDiscard_Staged(t *testing.T) {
 		t.Fatalf("seed pat: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodDelete, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app", nil)
+	rec := doJSON(t, s, http.MethodDelete, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app", nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("DELETE github-app = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("DELETE github/app = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
 	if app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID); app != nil {
@@ -271,9 +271,9 @@ func TestGitHubAppDiscard_Active(t *testing.T) {
 	s := newTestServer(t)
 	seedLocalApp(t, s, true) // active
 
-	rec := doJSON(t, s, http.MethodDelete, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app", nil)
+	rec := doJSON(t, s, http.MethodDelete, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app", nil)
 	if rec.Code != http.StatusConflict {
-		t.Fatalf("DELETE active github-app = %d, want 409; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("DELETE active github/app = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 	if app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID); app == nil {
 		t.Error("active app was deleted on a 409 discard")
@@ -287,7 +287,7 @@ func TestGitHubAppCutover_NoApp404(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/cutover", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("cutover with no app = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
@@ -299,7 +299,7 @@ func TestGitHubAppCutover_AlreadyActive409(t *testing.T) {
 	s := newTestServer(t)
 	seedLocalApp(t, s, true)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/cutover", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover", nil)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("cutover of active app = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -316,7 +316,7 @@ func TestGitHubAppCutover_NoInstallations409(t *testing.T) {
 	setOrgGitHubBase(t, s, stub.URL)
 	seedLocalApp(t, s, false)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/cutover", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover", nil)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("cutover with no installations = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -340,7 +340,7 @@ func TestGitHubAppCutover_Success(t *testing.T) {
 		t.Fatalf("seed pat: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/cutover", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("cutover = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -367,7 +367,7 @@ func TestGitHubAccessSwitchToPAT_Success(t *testing.T) {
 	seedLocalApp(t, s, true)
 	seedInstallation(t, s, 1, "acme")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-access/switch-to-pat", map[string]string{"pat": "ghp_valid"})
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/switch-to-pat", map[string]string{"pat": "ghp_valid"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("switch-to-pat = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -397,7 +397,7 @@ func TestGitHubAccessSwitchToPAT_InvalidPAT(t *testing.T) {
 	setOrgGitHubBase(t, s, stub.URL)
 	seedLocalApp(t, s, true)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-access/switch-to-pat", map[string]string{"pat": "ghp_bad"})
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/switch-to-pat", map[string]string{"pat": "ghp_bad"})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("switch-to-pat with bad token = %d, want 422; body=%s", rec.Code, rec.Body.String())
 	}
@@ -416,7 +416,7 @@ func TestGitHubAccessSwitchToPAT_NoApp404(t *testing.T) {
 	stub := newGitHubAccessStub(t, ghAccessStub{login: "octocat"})
 	setOrgGitHubBase(t, s, stub.URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-access/switch-to-pat", map[string]string{"pat": "ghp_valid"})
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/switch-to-pat", map[string]string{"pat": "ghp_valid"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("switch-to-pat with no app = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
@@ -438,7 +438,7 @@ func TestGitHubAccessPATPreflight_StoresNothing(t *testing.T) {
 	seedConfiguredRepo(t, s, "acme", "web")
 	seedConfiguredRepo(t, s, "acme", "api")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-access/pat-preflight", map[string]string{"pat": "ghp_x"})
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/pat-preflight", map[string]string{"pat": "ghp_x"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("pat-preflight = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -487,7 +487,7 @@ func TestGitHubAppCutoverPreflight_Diff(t *testing.T) {
 	seedConfiguredRepo(t, s, "acme", "web")
 	seedConfiguredRepo(t, s, "acme", "api")
 
-	rec := doJSON(t, s, http.MethodGet, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github-app/cutover-preflight", nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover-preflight", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("cutover-preflight = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -514,33 +514,184 @@ func TestGitHubAppCutoverPreflight_Diff(t *testing.T) {
 	}
 }
 
-// --- settings XOR guard --------------------------------------------------
+// --- App XOR PAT guard ---------------------------------------------------
 
-// TestOrgSettingsSave_PATWithApp409 rejects setting a PAT while an App is
-// registered; the switch flow is the only path.
-func TestOrgSettingsSave_PATWithApp409(t *testing.T) {
+// TestGitHubPATPut_WithApp409 rejects binding a PAT while an App is registered;
+// the switch flow is the only path between the two. The guard lives on the
+// credential resource now — the bulk settings save can no longer carry a token
+// at all, so it has nothing to guard.
+func TestGitHubPATPut_WithApp409(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedLocalApp(t, s, true)
+
+	rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
+		"base_url": "https://github.com", "pat": "ghp_new",
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("pat bind with app = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOrgSettingsSave_CarriesNoCredential proves the bulk settings save can't
+// reach the vault: a body carrying a token is accepted as an ordinary config
+// save (the field is not part of the schema, so it's ignored) and stores
+// nothing. This is the structural version of the old XOR guard on this route —
+// there is no longer a code path from here to a credential write to guard.
+func TestOrgSettingsSave_CarriesNoCredential(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	seedLocalApp(t, s, true)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/settings/org", map[string]any{"github_pat": "ghp_new"})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("settings save with PAT + app = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("settings save = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT)
+	if stored != "" {
+		t.Errorf("settings save stored a PAT (%q) — it must not be a vault write path", stored)
 	}
 }
 
-// TestOrgSettingsSave_ClearPATWithApp_Allowed proves clearing the PAT field is
-// still permitted while an App is registered (the guard only blocks a non-empty
-// PAT).
-func TestOrgSettingsSave_ClearPATWithApp_Allowed(t *testing.T) {
+// --- the bound identity Settings shows next to the token ------------------
+
+// TestOrgSettingsGet_ReportsBoundPATLogin pins the @login the Settings GitHub
+// section renders beside its "Replace token" control. It tracks the LIVE
+// credential: it appears on a bind, re-points on a rotation, and disappears
+// with the token — a name left behind by a since-replaced credential would tell
+// the operator they're about to rotate an account they aren't.
+func TestOrgSettingsGet_ReportsBoundPATLogin(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
-	seedLocalApp(t, s, true)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/settings/org", map[string]any{"github_pat": ""})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("settings save clearing PAT with app = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	if got := orgPATLogin(t, s); got != "" {
+		t.Errorf("github_pat_login = %q with nothing bound, want empty", got)
 	}
+
+	gh := githubUserStub(t, "acme-bot")
+	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
+		"base_url": gh.URL, "pat": "ghp_first",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := orgPATLogin(t, s); got != "acme-bot" {
+		t.Errorf("github_pat_login = %q after bind, want acme-bot", got)
+	}
+
+	// Rotation: same route, a token that authenticates as someone else.
+	rotated := githubUserStub(t, "acme-bot-2")
+	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
+		"base_url": rotated.URL, "pat": "ghp_second",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("pat rotate = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := orgPATLogin(t, s); got != "acme-bot-2" {
+		t.Errorf("github_pat_login = %q after rotation, want acme-bot-2", got)
+	}
+
+	if rec := doJSON(t, s, http.MethodDelete, patRoute(), nil); rec.Code != http.StatusOK {
+		t.Fatalf("pat unbind = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := orgPATLogin(t, s); got != "" {
+		t.Errorf("github_pat_login = %q after unbind, want empty", got)
+	}
+}
+
+// TestOrgSettingsGet_EnvOverlaidPATIsSettled covers the local-mode env overlay,
+// where TRIAGE_FACTORY_GITHUB_BOT_PAT supplies the token TF actually
+// authenticates with and every write to the vault is invisible to the next read.
+//
+// Two things have to give. The recorded login describes the last token bound
+// through a route, which is NOT the token in use, so naming it on a surface
+// whose job is "here's the account you're replacing" would point the operator
+// at the wrong account. And the replacement itself can't be honored at all —
+// hence the flag the UI reads to render the credential as settled instead of
+// offering a control that would report success and change nothing.
+func TestOrgSettingsGet_EnvOverlaidPATIsSettled(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	// A real bind first, so there IS a recorded login to (wrongly) show.
+	gh := githubUserStub(t, "acme-bot")
+	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
+		"base_url": gh.URL, "pat": "ghp_bound",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if view := orgCredentialView(t, s); view.Login != "acme-bot" || view.PATEnvProvided {
+		t.Fatalf("before the overlay: %+v, want login acme-bot and env_provided false", view)
+	}
+
+	// The operator starts the server with a bot token in the environment. It now
+	// outranks the bound one on every read.
+	t.Setenv("TRIAGE_FACTORY_GITHUB_BOT_PAT", "ghp_from_env")
+
+	view := orgCredentialView(t, s)
+	if !view.PATEnvProvided {
+		t.Errorf("github_pat_env_provided = false with the env var set, want true")
+	}
+	if !view.HasPAT {
+		t.Errorf("has_github_pat = false, want true — the env token IS the live credential")
+	}
+	if view.Login != "" {
+		t.Errorf("github_pat_login = %q under the env overlay, want empty — the recorded login "+
+			"belongs to the shadowed token, not the one in use", view.Login)
+	}
+}
+
+// TestOrgSettingsGet_EnvOverlaidJiraIsSettled is the Jira half. Either env half
+// is enough: the resolver reads the host from the same overlaid secret, so an
+// env-supplied URL makes a rebind partly ineffective even when the token isn't
+// shadowed.
+func TestOrgSettingsGet_EnvOverlaidJiraIsSettled(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	if orgCredentialView(t, s).JiraEnvProvided {
+		t.Fatalf("jira_credential_env_provided = true with no env vars set")
+	}
+
+	t.Setenv("TRIAGE_FACTORY_JIRA_URL", "https://jira.example.com")
+	if !orgCredentialView(t, s).JiraEnvProvided {
+		t.Errorf("jira_credential_env_provided = false with the URL env var set, want true")
+	}
+}
+
+// orgCredentialView is the org settings GET's credential-facing fields — what
+// Settings reads to decide between reporting a credential and offering to
+// replace it.
+type orgCredentialViewJSON struct {
+	HasPAT          bool   `json:"has_github_pat"`
+	Login           string `json:"github_pat_login"`
+	PATEnvProvided  bool   `json:"github_pat_env_provided"`
+	JiraEnvProvided bool   `json:"jira_credential_env_provided"`
+}
+
+func orgCredentialView(t *testing.T, s *Server) orgCredentialViewJSON {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodGet, "/api/settings/org", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/settings/org = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out orgCredentialViewJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode org settings: %v", err)
+	}
+	return out
+}
+
+// orgPATLogin reads github_pat_login off the org settings GET.
+func orgPATLogin(t *testing.T, s *Server) string {
+	t.Helper()
+	return orgCredentialView(t, s).Login
+}
+
+// patRoute is the org's GitHub-PAT credential resource in local mode.
+func patRoute() string {
+	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/access/pat"
 }
