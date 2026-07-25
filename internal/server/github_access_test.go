@@ -514,33 +514,48 @@ func TestGitHubAppCutoverPreflight_Diff(t *testing.T) {
 	}
 }
 
-// --- settings XOR guard --------------------------------------------------
+// --- App XOR PAT guard ---------------------------------------------------
 
-// TestOrgSettingsSave_PATWithApp409 rejects setting a PAT while an App is
-// registered; the switch flow is the only path.
-func TestOrgSettingsSave_PATWithApp409(t *testing.T) {
+// TestGitHubPATPut_WithApp409 rejects binding a PAT while an App is registered;
+// the switch flow is the only path between the two. The guard lives on the
+// credential resource now — the bulk settings save can no longer carry a token
+// at all, so it has nothing to guard.
+func TestGitHubPATPut_WithApp409(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	seedLocalApp(t, s, true)
+
+	rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
+		"base_url": "https://github.com", "pat": "ghp_new",
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("pat bind with app = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOrgSettingsSave_CarriesNoCredential proves the bulk settings save can't
+// reach the vault: a body carrying a token is accepted as an ordinary config
+// save (the field is not part of the schema, so it's ignored) and stores
+// nothing. This is the structural version of the old XOR guard on this route —
+// there is no longer a code path from here to a credential write to guard.
+func TestOrgSettingsSave_CarriesNoCredential(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 	seedLocalApp(t, s, true)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/settings/org", map[string]any{"github_pat": "ghp_new"})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("settings save with PAT + app = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("settings save = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT)
+	if stored != "" {
+		t.Errorf("settings save stored a PAT (%q) — it must not be a vault write path", stored)
 	}
 }
 
-// TestOrgSettingsSave_ClearPATWithApp_Allowed proves clearing the PAT field is
-// still permitted while an App is registered (the guard only blocks a non-empty
-// PAT).
-func TestOrgSettingsSave_ClearPATWithApp_Allowed(t *testing.T) {
-	keyring.MockInit()
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-	seedLocalApp(t, s, true)
-
-	rec := doJSON(t, s, http.MethodPost, "/api/settings/org", map[string]any{"github_pat": ""})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("settings save clearing PAT with app = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
+// patRoute is the org's GitHub-PAT credential resource in local mode.
+func patRoute() string {
+	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/github-access/pat"
 }

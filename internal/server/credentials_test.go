@@ -97,10 +97,11 @@ func TestHandleIntegrationsClear_NoWarningWithoutEnv(t *testing.T) {
 	}
 }
 
-// TestHandleIntegrationsDeleteJira_SurfacesJiraOnlyWarning pins the
-// targeted Jira clear handler's env-overlay behavior: a GitHub env
-// overlay shouldn't trigger a warning on a Jira-only clear.
-func TestHandleIntegrationsDeleteJira_SurfacesJiraOnlyWarning(t *testing.T) {
+// TestJiraCredentialDelete_SurfacesJiraOnlyWarning pins the Jira unbind's
+// env-overlay behavior: the delete succeeds, but a TRIAGE_FACTORY_JIRA_* pair
+// keeps supplying the credential on read, so the response has to say so rather
+// than report a clean disconnect the operator can see isn't one.
+func TestJiraCredentialDelete_SurfacesJiraOnlyWarning(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
 	ctx := t.Context()
@@ -115,7 +116,8 @@ func TestHandleIntegrationsDeleteJira_SurfacesJiraOnlyWarning(t *testing.T) {
 	t.Setenv("TRIAGE_FACTORY_JIRA_URL", "https://env.example.com")
 	t.Setenv("TRIAGE_FACTORY_JIRA_BOT_PAT", "env-jira-pat")
 
-	req := httptest.NewRequest(http.MethodDelete, "/api/integrations/jira", nil)
+	req := httptest.NewRequest(http.MethodDelete,
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira-access/credential", nil)
 	rec := httptest.NewRecorder()
 	s.mux.ServeHTTP(rec, req)
 

@@ -1,13 +1,15 @@
 // The Jira connect action, factored out so every surface drives it the same
 // way the GitHub PAT flow drives its save: the caller's Continue (setup
 // wizard) / Save (Settings) performs the connect, rather than a field group
-// owning a separate Connect button. POST /api/jira/connect validates the
-// credential server-side (reachability + auth) and persists it, so a
-// successful result IS the validation — there's no separate probe.
+// owning a separate Connect button. PUT
+// /api/orgs/{org}/jira-access/credential validates the credential server-side
+// (reachability + auth) and persists it, so a successful result IS the
+// validation — there's no separate probe.
 //
-// The disconnect lifecycle (DELETE /api/integrations/jira + the URL-column
-// clear) stays inside JiraAccessGroup: it's an inline action on the
-// already-connected state, with no Continue/Save to fold into.
+// The unbind is the DELETE on the same resource (disconnectJira in
+// orgCredentials.ts, alongside the GitHub pair), driven from JiraAccessGroup:
+// it's an inline action on the already-connected state, with no Continue/Save
+// to fold into.
 
 // JiraDeployment is the backend a Jira org connects to. It mirrors the
 // jira.Deployment enum (Go side) and is the explicit choice made in the
@@ -64,12 +66,13 @@ export interface JiraConnectCreds {
   jira_api_token: string
 }
 
-// connectJira posts the org-level Jira service credential. The deployment
-// (chosen upstream) selects which credential shape is sent — Cloud posts
-// {url, email, token}; Data Center posts {url, pat}. Returns a discriminated
+// connectJira binds the org-level Jira service credential. The deployment
+// (chosen upstream) selects which credential shape is sent — Cloud sends
+// {url, email, token}; Data Center sends {url, pat}. Returns a discriminated
 // result mirroring saveOrgConfig — the caller surfaces the error inline
 // (wizard error line) or as a toast (Settings).
 export async function connectJira(
+  orgId: string,
   url: string,
   deployment: JiraDeployment,
   creds: JiraConnectCreds,
@@ -79,8 +82,8 @@ export async function connectJira(
       ? { url: url.trim(), email: creds.jira_email.trim(), token: creds.jira_api_token.trim() }
       : { url: url.trim(), pat: creds.jira_pat.trim() }
   try {
-    const res = await fetch('/api/jira/connect', {
-      method: 'POST',
+    const res = await fetch(`/api/orgs/${orgId}/jira-access/credential`, {
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })

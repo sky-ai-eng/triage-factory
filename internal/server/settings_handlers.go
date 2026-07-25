@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -11,7 +12,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
-	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -488,30 +488,41 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// orgSettingsUpdate is the body of POST /api/settings/org — the org's PURE
+// CONFIG. No secrets: the GitHub PAT and the Jira service credential each live
+// on their own resource (PUT/DELETE /api/orgs/{org_id}/github-access/pat and
+// .../jira-access/credential, see org_credentials.go), so this route touches no
+// vault key, makes no outbound call, and cannot revoke access as a side effect.
+// The Anthropic key and the Bedrock set are likewise writable only through
+// their own validated capture endpoints. A stray credential field in the
+// request body is ignored by the decoder, not stored.
+//
+// Every field is a pointer with ONE meaning: nil = leave it alone, present =
+// apply (including the zero value, which clears). The route used to mix three
+// different "unset" encodings — nil-vs-empty for some fields, empty-means-
+// untouched for others, zero-means-clear for the caps — which among other
+// things left the poll intervals with no way to be cleared at all.
 type orgSettingsUpdate struct {
 	GitHubBaseURL       *string `json:"github_base_url"`
-	GitHubPAT           *string `json:"github_pat"`
-	GitHubPollInterval  string  `json:"github_poll_interval,omitempty"`
-	GitHubCloneProtocol string  `json:"github_clone_protocol,omitempty"`
+	GitHubPollInterval  *string `json:"github_poll_interval"`
+	GitHubCloneProtocol *string `json:"github_clone_protocol"`
 	JiraBaseURL         *string `json:"jira_base_url"`
-	JiraPAT             *string `json:"jira_pat"`
-	JiraPollInterval    string  `json:"jira_poll_interval,omitempty"`
+	JiraPollInterval    *string `json:"jira_poll_interval"`
 	MaxLLMModelTier     *string `json:"max_llm_model_tier"`
-	// MaxDailyCostUSD is the org-wide daily LLM spend cap (TFAC-477). Pointer so
-	// nil = don't touch (an unrelated save leaves it alone) and a present value
-	// (including 0, which clears the cap) is applied. Validated >= 0.
+	// MaxDailyCostUSD is the org-wide daily LLM spend cap; 0 clears it.
 	MaxDailyCostUSD *float64 `json:"max_daily_cost_usd"`
-	// MaxConcurrentRuns is the org-wide concurrent-run ceiling. Pointer with the
-	// same semantics as MaxDailyCostUSD: nil = don't touch, a present value
-	// (including 0, which clears it back to unlimited) is applied. Validated >= 0.
+	// MaxConcurrentRuns is the org-wide concurrent-run ceiling; 0 clears it
+	// back to unlimited.
 	MaxConcurrentRuns *int `json:"max_concurrent_runs"`
-	// NOTE: the Anthropic API key is deliberately NOT a field here. It is
-	// writable only through the validated POST /api/anthropic/connect endpoint
-	// (which clears it on an empty key), so the bulk settings form can never be
-	// an unvalidated back door into the vault. A stray anthropic_api_key in the
-	// request body is ignored by the decoder, not stored.
 }
 
+// handleOrgSettingsPost saves the org's configuration. Org-admin only.
+//
+// Base URLs stay here rather than moving onto the credential resources: the
+// GitHub App path has to set a host with no credential in sight (the manifest
+// is built against the stored host, before any App exists), so the host is
+// genuinely config. Clearing one no longer destroys the matching credential the
+// way it used to — disconnecting is an explicit DELETE on the credential.
 func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -528,37 +539,11 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// XOR guard (TFAC-328): GitHub access is strictly App XOR PAT per org. An
-	// org that has a registered GitHub App (staged or active) switches
-	// credentials through the dedicated switch flow, never by dropping a PAT
-	// into the settings field. Reject setting a non-empty PAT while an App is
-	// registered; clearing the field (empty string / nil) stays allowed so
-	// disconnect + the switch flow's own teardown aren't blocked.
-	if req.GitHubPAT != nil && *req.GitHubPAT != "" {
-		app, err := s.githubApps.GetForOrgSystem(r.Context(), orgID)
-		if err != nil {
-			internalError(w, "settings/org", err)
-			return
-		}
-		if app != nil {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "this workspace uses a GitHub App — use the switch flow",
-				"field": "github_pat",
-			})
-			return
-		}
-	}
-
 	var prevOrgSet domain.OrgSettings
-	var creds auth.Credentials
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var err error
 		prevOrgSet, err = tx.Orgs.GetSettings(r.Context(), orgID)
-		if err != nil {
-			return err
-		}
-		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
-		return nil
+		return err
 	}); err != nil {
 		internalError(w, "settings/org", err)
 		return
@@ -566,48 +551,77 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 
 	orgSet := prevOrgSet
 
-	// Snapshot which org bot credentials were actually stored before this save
-	// rewrites `creds` in place. The audit rows below need it: clearing a field
-	// that was already blank is a no-op, not a credential removal, and logging
-	// it as one would fill the change-log with phantom revocations every time an
-	// admin saves an unrelated setting.
-	hadGitHubPAT := creds.GitHubPAT != ""
-	hadJiraPAT := creds.JiraPAT != ""
-
 	if req.GitHubBaseURL != nil {
+		// Blanking the host while an App registration exists is REFUSED. The
+		// resolver's base lookup falls org_settings → the github_url secret →
+		// github.com, so an empty column silently re-points a GHES org's App at
+		// github.com: wrong host, no error, nothing in any log.
+		//
+		// Refused rather than skipped, which is where this differs from the PAT
+		// unbind's identical hazard. There, clearing the host is a side effect of
+		// unbinding a token, so quietly keeping it is right. Here the clear IS
+		// the request, and answering "saved" for work we declined to do is the
+		// parse-and-drop bug in another costume.
+		//
+		// Re-targeting to a different NON-empty host stays allowed: that's a real
+		// move during a GHES domain change, and whatever breaks is at least the
+		// value the admin typed rather than a default they never chose.
+		//
+		// GitHub-only: jira.CanonicalHost returns ok=false on a blank base URL,
+		// so the Jira surfaces fail loudly instead of resolving somewhere wrong.
+		if *req.GitHubBaseURL == "" {
+			app, err := s.githubApps.GetForOrgSystem(r.Context(), orgID)
+			if err != nil {
+				internalError(w, "settings/org", err)
+				return
+			}
+			if app != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"error": "this workspace's GitHub App is registered against this host — remove the App before clearing it",
+					"field": "github_base_url",
+				})
+				return
+			}
+		}
 		orgSet.GitHubBaseURL = *req.GitHubBaseURL
-		creds.GitHubURL = *req.GitHubBaseURL
-	}
-	if req.GitHubPollInterval != "" {
-		if d, err := parseMinDuration(req.GitHubPollInterval, 10); err == nil {
-			orgSet.GitHubPollInterval = d
-		}
-	}
-	if req.GitHubCloneProtocol != "" {
-		if req.GitHubCloneProtocol != "ssh" && req.GitHubCloneProtocol != "https" {
-			badRequest(w, "github_clone_protocol must be 'ssh' or 'https'")
-			return
-		}
-		// Multi-mode is HTTPS-only: refuse an ssh write rather than
-		// persist a value the effective resolver (and the clone path) will
-		// ignore. The UI hides the control in multi mode; this rejects a
-		// direct API call.
-		if req.GitHubCloneProtocol == "ssh" && runmode.Current() != runmode.ModeLocal {
-			badRequest(w, "ssh clone protocol is not available in this deployment; use https")
-			return
-		}
-		orgSet.GitHubCloneProtocol = req.GitHubCloneProtocol
 	}
 	if req.JiraBaseURL != nil {
 		orgSet.JiraBaseURL = *req.JiraBaseURL
-		creds.JiraURL = *req.JiraBaseURL
 	}
-	if req.JiraPollInterval != "" {
-		if d, err := parseMinDuration(req.JiraPollInterval, 10); err == nil {
-			orgSet.JiraPollInterval = d
+	// A malformed duration is rejected rather than silently ignored — the old
+	// parse-and-drop behavior meant a typo'd interval reported "saved" while
+	// keeping the previous value.
+	if req.GitHubPollInterval != nil {
+		d, err := parseOrgPollInterval(*req.GitHubPollInterval, domain.DefaultOrgSettings().GitHubPollInterval)
+		if err != nil {
+			badRequestField(w, err.Error(), "github_poll_interval")
+			return
 		}
+		orgSet.GitHubPollInterval = d
 	}
-	// Max model tier: nil = don't touch, "" = clear the cap, value = set.
+	if req.JiraPollInterval != nil {
+		d, err := parseOrgPollInterval(*req.JiraPollInterval, domain.DefaultOrgSettings().JiraPollInterval)
+		if err != nil {
+			badRequestField(w, err.Error(), "jira_poll_interval")
+			return
+		}
+		orgSet.JiraPollInterval = d
+	}
+	if req.GitHubCloneProtocol != nil {
+		proto := *req.GitHubCloneProtocol
+		if proto != "ssh" && proto != "https" {
+			badRequest(w, "github_clone_protocol must be 'ssh' or 'https'")
+			return
+		}
+		// Multi-mode is HTTPS-only: refuse an ssh write rather than persist a
+		// value the effective resolver (and the clone path) will ignore. The UI
+		// hides the control in multi mode; this rejects a direct API call.
+		if proto == "ssh" && runmode.Current() != runmode.ModeLocal {
+			badRequest(w, "ssh clone protocol is not available in this deployment; use https")
+			return
+		}
+		orgSet.GitHubCloneProtocol = proto
+	}
 	if req.MaxLLMModelTier != nil {
 		tier := *req.MaxLLMModelTier
 		if tier != "" && domain.ParseTier(tier) == domain.TierUnknown {
@@ -616,8 +630,6 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		}
 		orgSet.MaxLLMModelTier = tier
 	}
-
-	// Daily spend cap (TFAC-477): nil = don't touch, 0 = clear the cap, >0 = set.
 	// Reject a negative cap — it would either block every run (if the trip is
 	// >=) or be silently inert, neither a meaningful input.
 	if req.MaxDailyCostUSD != nil {
@@ -627,13 +639,9 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		}
 		orgSet.MaxDailyCostUSD = *req.MaxDailyCostUSD
 	}
-
-	// Concurrent-run limit: nil = don't touch, 0 = clear it (unlimited), >0 =
-	// set. Reject a negative — the claim treats <= 0 as unlimited, so a negative
-	// would silently read as "no limit" rather than any meaningful ceiling. The
-	// upper bound keeps a validated value inside the Postgres int4 column, so an
-	// oversized input 400s here rather than 500ing on an "integer out of range"
-	// at the DB.
+	// A negative concurrency limit reads as "unlimited" to the claim path, so
+	// it can't mean anything; the ceiling keeps a validated value inside the
+	// Postgres int4 column rather than 500ing on "integer out of range".
 	if req.MaxConcurrentRuns != nil {
 		if *req.MaxConcurrentRuns < 0 {
 			badRequest(w, "max_concurrent_runs must be >= 0")
@@ -646,117 +654,14 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		orgSet.MaxConcurrentRuns = *req.MaxConcurrentRuns
 	}
 
-	// GitHub PAT (PAT_1, the org bot credential): nil = don't touch, "" =
-	// clear, non-empty = validate + set. We validate to reject a bad token,
-	// but we do NOT bind the caller's GitHub identity here — saving the org
-	// credential is an access concern, not an identity one. Per-user identity
-	// (PAT_2) is captured only by the dedicated identity surface (the setup
-	// wizard's User step / the Connect gate page → POST .../identity/github*),
-	// so access and identity stay independent even when the same token is used.
-	// newGitHubLogin captures the login a freshly-validated org PAT authenticates
-	// as, so the tx below can persist it for OrgIdentityFor (TFAC-452). Empty
-	// unless a non-empty PAT was set + validated in this request.
-	var newGitHubLogin string
-	if req.GitHubPAT != nil {
-		if *req.GitHubPAT == "" {
-			creds.GitHubPAT = ""
-		} else {
-			url := creds.GitHubURL
-			if url == "" {
-				badRequest(w, "GitHub URL is required before setting a PAT")
-				return
-			}
-			ghUser, err := auth.ValidateGitHub(r.Context(), url, *req.GitHubPAT)
-			if err != nil {
-				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-					"error": "GitHub: " + err.Error(),
-					"field": "github_pat",
-				})
-				return
-			}
-			creds.GitHubPAT = *req.GitHubPAT
-			newGitHubLogin = ghUser.Login
-		}
-	}
-
-	// Jira PAT (PAT_1, the org bot credential): nil = don't touch, "" = clear,
-	// non-empty = validate + set. We validate to reject a bad token, but we do
-	// NOT bind the caller's Jira identity here — saving the org credential is an
-	// access concern, not an identity one. Per-user Jira access (the stored
-	// credential + derived identity) is captured only by the dedicated bind
-	// surface (POST .../identity/jira/pat), so access and identity stay
-	// independent even when the same token is used.
-	if req.JiraPAT != nil {
-		if *req.JiraPAT == "" {
-			creds.JiraPAT = ""
-		} else {
-			url := creds.JiraURL
-			if url == "" {
-				badRequest(w, "Jira URL is required before setting a PAT")
-				return
-			}
-			if _, err := auth.ValidateJira(r.Context(), jira.DataCenterPAT(url, *req.JiraPAT)); err != nil {
-				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-					"error": "Jira: " + err.Error(),
-					"field": "jira_pat",
-				})
-				return
-			}
-			creds.JiraPAT = *req.JiraPAT
-		}
-	}
-
-	// Compose the access-log rows for whatever this save did to the org's bot
-	// credentials. Built here from the request shape — the tx below
-	// writes them alongside the credential change itself, so an audit row can't
-	// outlive a rolled-back save. The settings surface is the OTHER org-PAT
-	// write-point besides the setup wizard; without these, rotating or
-	// disconnecting a PAT from Settings left no trace in the change-log.
-	var credAudit []domain.AccessChange
-	if (req.GitHubBaseURL != nil && *req.GitHubBaseURL == "") ||
-		(req.GitHubPAT != nil && *req.GitHubPAT == "") {
-		if hadGitHubPAT {
-			credAudit = append(credAudit, domain.AccessChange{
-				ActorUserID: userID,
-				Action:      domain.AccessActionCredentialRemoved,
-				DetailJSON:  accessDetailCredential(domain.CredentialKindGitHubPAT, prevOrgSet.GitHubBaseURL),
-			})
-		}
-	} else if newGitHubLogin != "" {
-		// A validated non-empty PAT — record the @login it authenticates as, the
-		// same identity persistOrgGitHubLogin stamps on the agents row.
-		credAudit = append(credAudit, domain.AccessChange{
-			ActorUserID: userID,
-			Action:      domain.AccessActionCredentialSet,
-			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindGitHubPAT, creds.GitHubURL, newGitHubLogin),
-		})
-	}
-	if (req.JiraBaseURL != nil && *req.JiraBaseURL == "") ||
-		(req.JiraPAT != nil && *req.JiraPAT == "") {
-		if hadJiraPAT {
-			credAudit = append(credAudit, domain.AccessChange{
-				ActorUserID: userID,
-				Action:      domain.AccessActionCredentialRemoved,
-				DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditJiraHost(prevOrgSet.JiraBaseURL)),
-			})
-		}
-	} else if req.JiraPAT != nil && *req.JiraPAT != "" {
-		credAudit = append(credAudit, domain.AccessChange{
-			ActorUserID: userID,
-			Action:      domain.AccessActionCredentialSet,
-			DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditJiraHost(creds.JiraURL)),
-		})
-	}
-
-	// SSH preflight: gate the transition into SSH mode. Local-mode only —
+	// SSH preflight: gate the transition INTO SSH mode. Local-mode only —
 	// PreflightSSH writes the container's ~/.ssh/known_hosts and probes the
-	// operator's ssh-agent, neither of which belongs in a hosted
-	// runtime. In multi mode the ssh write is already rejected above, so
-	// orgSet.GitHubCloneProtocol can't be "ssh" here; the explicit mode gate
-	// makes the no-SSH-in-multi guarantee provable at this call site too.
+	// operator's ssh-agent, neither of which belongs in a hosted runtime. In
+	// multi mode the ssh write is already rejected above, so the explicit mode
+	// gate makes the no-SSH-in-multi guarantee provable at this call site too.
 	if runmode.Current() == runmode.ModeLocal &&
 		orgSet.GitHubCloneProtocol == "ssh" && prevOrgSet.GitHubCloneProtocol != "ssh" {
-		sshHost := worktree.SSHHostFromBaseURL(creds.GitHubURL)
+		sshHost := worktree.SSHHostFromBaseURL(orgSet.GitHubBaseURL)
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		err := worktree.PreflightSSH(ctx, sshHost)
 		cancel()
@@ -772,83 +677,19 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		// Clear SecretStore entries when the caller explicitly empties a
-		// field. integrations.Save skips empty strings, so zeroing a
-		// creds field without an explicit clear would leave the old
-		// value in the store.
-		// These clears touch ONLY the org access credentials (PAT_1). Per-user
-		// identity is deliberately never swept on an org disconnect — it's owned
-		// by its own capture surface (see the per-branch notes below).
-		if req.GitHubBaseURL != nil && *req.GitHubBaseURL == "" {
-			if err := integrations.ClearGitHub(r.Context(), tx.Secrets, orgID); err != nil {
-				return fmt.Errorf("clear GitHub secrets: %w", err)
-			}
-			creds.GitHubURL = ""
-			creds.GitHubPAT = ""
-			// Per-user GitHub identity (PAT_2) is deliberately left intact:
-			// it's owned by the dedicated identity surface, not the org
-			// credential. Disconnecting the org's GitHub access doesn't unmake
-			// the fact that this user is @login on that host — a leftover row is
-			// harmless (runtime tolerates absent/stale identity) and still valid
-			// if GitHub is reconnected to the same host. Identity is cleared
-			// only by its own surface, never as a side effect of an org-access
-			// change.
-		} else if req.GitHubPAT != nil && *req.GitHubPAT == "" {
-			if _, err := tx.Secrets.Delete(r.Context(), orgID, integrations.KeyGitHubPAT); err != nil {
-				return fmt.Errorf("clear GitHub PAT: %w", err)
-			}
-		}
-		if req.JiraBaseURL != nil && *req.JiraBaseURL == "" {
-			if err := integrations.ClearJira(r.Context(), tx.Secrets, orgID); err != nil {
-				return fmt.Errorf("clear Jira secrets: %w", err)
-			}
-			creds.JiraURL = ""
-			creds.JiraPAT = ""
-			// Per-user Jira access (the user's own stored credential + derived
-			// identity) is deliberately left intact: it's owned by the dedicated
-			// bind surface, not the org credential, and is custodied under a
-			// separate per-user secret key. Disconnecting the org's Jira access
-			// doesn't unmake the user's own binding — it's cleared only by its own
-			// surface, never as a side effect of an org-access change.
-		} else if req.JiraPAT != nil && *req.JiraPAT == "" {
-			if _, err := tx.Secrets.Delete(r.Context(), orgID, integrations.KeyJiraPAT); err != nil {
-				return fmt.Errorf("clear Jira PAT: %w", err)
-			}
-		}
-		if err := integrations.Save(r.Context(), tx.Secrets, orgID, creds); err != nil {
-			return fmt.Errorf("save credentials: %w", err)
-		}
-		// Persist the org PAT's own GitHub login (set above only when a new PAT
-		// was validated) so OrgIdentityFor can stamp the org commit identity
-		// (TFAC-452). No-op when no PAT was set this request.
-		if err := persistOrgGitHubLogin(r.Context(), tx, orgID, newGitHubLogin); err != nil {
-			return fmt.Errorf("persist org github login: %w", err)
-		}
-		// The Anthropic API key is intentionally not written here — it has its
-		// own validated capture endpoint (POST /api/anthropic/connect). See the
-		// note on orgSettingsUpdate.
-		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
-			return err
-		}
-		for _, e := range credAudit {
-			if err := tx.AccessChangeLog.Record(r.Context(), orgID, e); err != nil {
-				return fmt.Errorf("audit credential change: %w", err)
-			}
-		}
-		return nil
+		return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
 	}); err != nil {
 		internalError(w, "settings/org", err)
 		return
 	}
 
+	// Re-due polling only for what this route can still change. Credential
+	// rotations kick their own restart from the credential routes.
 	ghChanged := orgSet.GitHubBaseURL != prevOrgSet.GitHubBaseURL ||
 		orgSet.GitHubPollInterval != prevOrgSet.GitHubPollInterval ||
-		orgSet.GitHubCloneProtocol != prevOrgSet.GitHubCloneProtocol ||
-		req.GitHubPAT != nil
-
+		orgSet.GitHubCloneProtocol != prevOrgSet.GitHubCloneProtocol
 	jiraChanged := orgSet.JiraBaseURL != prevOrgSet.JiraBaseURL ||
-		orgSet.JiraPollInterval != prevOrgSet.JiraPollInterval ||
-		req.JiraPAT != nil
+		orgSet.JiraPollInterval != prevOrgSet.JiraPollInterval
 
 	if ghChanged && s.onGitHubChanged != nil {
 		s.MarkJiraRestarted(r.Context(), orgID)
@@ -859,13 +700,13 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]string{"status": "saved"}
-	// Lowering the cap doesn't block the save — the admin has authority —
-	// but if the default team already prefers a higher tier, surface that
-	// its effective model just dropped. Gate on an actual cap change: the
-	// frontend re-sends max_llm_model_tier on every org save, so without
-	// this an unrelated save would re-warn each time the default team
-	// sits above an unchanged cap. Single-team-per-org today, so we check
-	// the default team; broadens to a team list when multi-team lands.
+	// Lowering the cap doesn't block the save — the admin has authority — but if
+	// the default team already prefers a higher tier, surface that its effective
+	// model just dropped. Gate on an actual cap change: the frontend re-sends
+	// max_llm_model_tier on every org save, so without this an unrelated save
+	// would re-warn each time the default team sits above an unchanged cap.
+	// Single-team-per-org today, so we check the default team; broadens to a
+	// team list when multi-team lands.
 	if orgSet.MaxLLMModelTier != "" && orgSet.MaxLLMModelTier != prevOrgSet.MaxLLMModelTier {
 		if w := s.capDowngradeWarning(r.Context(), orgID, userID, orgSet.MaxLLMModelTier); w != "" {
 			resp["warning"] = w
@@ -873,6 +714,25 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// parseOrgPollInterval resolves a poll-interval field: an empty string clears
+// the override back to that poller's shipped default, any other value must
+// parse as a duration of at least the floor. `def` is the caller's own default
+// so the two pollers can diverge without this helper picking a side.
+func parseOrgPollInterval(raw string, def time.Duration) (time.Duration, error) {
+	if strings.TrimSpace(raw) == "" {
+		return def, nil
+	}
+	d, err := parseMinDuration(raw, orgPollIntervalMinMinutes)
+	if err != nil {
+		return 0, fmt.Errorf("poll interval must be a duration of at least %dm (e.g. \"15m\")", orgPollIntervalMinMinutes)
+	}
+	return d, nil
+}
+
+// orgPollIntervalMinMinutes is the floor for an org poll interval. Anything
+// tighter risks GitHub/Jira rate limits across a fleet of orgs.
+const orgPollIntervalMinMinutes = 10
 
 // capDowngradeWarning returns a non-empty message when the org's default
 // team prefers a model above the given cap — i.e. the cap clamps it. Empty
