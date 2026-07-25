@@ -216,7 +216,7 @@ func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// githubLoginOf returns the @login a validated GitHub user resolved to, or ""
+// githubLoginOf returns the login a validated GitHub user resolved to, or ""
 // when no validation ran (nil) — the audit detail's optional "name".
 func githubLoginOf(u *auth.GitHubUser) string {
 	if u == nil {
