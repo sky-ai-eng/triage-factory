@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// codingAgentSystemPrompt is the base coding-agent system prompt — the
+// machinistSystemPrompt is the base machinist system prompt — the
 // stable, task-independent half of every native system prompt, and the first
 // thing in the prefix every provider caches. It is a file rather than text
 // composed in Go because it is iterated by hand alongside the seven tool
@@ -13,8 +13,8 @@ import (
 // tools/definitions.json and the wording here are one artifact, and editing
 // either alone changes model behavior for the worse.
 //
-//go:embed prompts/coding-agent-system.txt
-var codingAgentSystemPrompt string
+//go:embed prompts/machinist-system.txt
+var machinistSystemPrompt string
 
 // completionBlueprint is the terminal contract for a conversation executing
 // a blueprint: stopping is concluding, plus the flow-control tool and the
@@ -89,7 +89,7 @@ type EnvelopeParts struct {
 // that varies comes after them.
 func BuildSystemPrompt(parts EnvelopeParts) string {
 	sections := []string{
-		strings.TrimSpace(codingAgentSystemPrompt),
+		strings.TrimSpace(machinistSystemPrompt),
 		strings.TrimSpace(parts.TaskContext),
 		strings.TrimSpace(parts.Envelope),
 		strings.TrimSpace(parts.Mission),
