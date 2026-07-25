@@ -7,8 +7,9 @@
 // validation — there's no separate probe.
 //
 // The unbind is the DELETE on the same resource (disconnectJira in
-// githubAccess.ts), driven from JiraAccessGroup: it's an inline action on the
-// already-connected state, with no Continue/Save to fold into.
+// orgCredentials.ts, alongside the GitHub pair), driven from JiraAccessGroup:
+// it's an inline action on the already-connected state, with no Continue/Save
+// to fold into.
 
 // JiraDeployment is the backend a Jira org connects to. It mirrors the
 // jira.Deployment enum (Go side) and is the explicit choice made in the

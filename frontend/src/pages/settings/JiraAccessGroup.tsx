@@ -1,6 +1,6 @@
 import { Section, Field, inputClass, glassInputClass } from './primitives'
 import { toast } from '../../components/Toast/toastStore'
-import { disconnectJira } from './githubAccess'
+import { disconnectJira } from './orgCredentials'
 import type { JiraDeployment } from './jiraConnect'
 
 interface JiraAccessValue {

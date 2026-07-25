@@ -1,8 +1,14 @@
-// The org GitHub bot credential (PAT_1), as its own action pair — the GitHub
-// mirror of jiraConnect.ts. Both credentials are addressable resources on the
-// backend (PUT/DELETE /api/orgs/{org}/github-access/pat), not fields inside the
-// bulk org-settings save, so binding one is a single request that validates,
-// stores, re-dues the poller, and lands an audit row.
+// The org's integration credentials — the GitHub bot PAT and the Jira service
+// credential — as bind/unbind actions against their backend resources
+// (PUT/DELETE /api/orgs/{org}/github-access/pat and .../jira-access/credential;
+// see internal/server/org_credentials.go, which this mirrors). They are not
+// fields inside the bulk org-settings save, so each action is a single request
+// that validates, stores, re-dues the poller, and lands an audit row.
+//
+// Both providers live here rather than in per-provider modules because the call
+// shape is identical and shared (credentialRequest below); the Jira *bind* is
+// the exception and stays in jiraConnect.ts with the deployment picker it's
+// coupled to — the credential shape it sends depends on Cloud vs Data Center.
 //
 // The practical consequence for callers: there is no "send blank to keep the
 // current token" contract to remember. If the user didn't type a token, don't

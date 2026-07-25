@@ -249,6 +249,54 @@ func TestGitHubPATDelete_Idempotent(t *testing.T) {
 	}
 }
 
+// TestGitHubPATDelete_StagedApp_KeepsHost: a staged App coexists with a live
+// PAT during a PAT→App switch, and it resolves against the SAME host. Clearing
+// the host here would send a GHES org's App to github.com without an error —
+// the resolver falls org_settings → github_url secret → github.com, and this
+// disconnect clears the first two. So with any App registration present the
+// unbind takes the token only.
+func TestGitHubPATDelete_StagedApp_KeepsHost(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	const host = "https://github.example.com"
+	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID,
+		auth.Credentials{GitHubURL: host, GitHubPAT: "ghp_live"}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": host})
+	seedLocalApp(t, s, false) // staged: the PAT is still the live credential
+
+	rec := doJSON(t, s, http.MethodDelete, patRoute(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disconnect = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Token gone, host intact — in org_settings AND in the secret the resolver
+	// falls back to.
+	if stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT); stored != "" {
+		t.Errorf("PAT still stored after disconnect: %q", stored)
+	}
+	var settingsHost string
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT COALESCE(github_base_url, '') FROM org_settings WHERE org_id = ?`,
+		runmode.LocalDefaultOrgID).Scan(&settingsHost); err != nil {
+		t.Fatalf("read github_base_url: %v", err)
+	}
+	if settingsHost != host {
+		t.Errorf("github_base_url = %q, want %q kept for the staged App", settingsHost, host)
+	}
+	if secretHost, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubURL); secretHost != host {
+		t.Errorf("github_url secret = %q, want %q — it is the resolver's fallback", secretHost, host)
+	}
+	// The removal is still audited, against the host it was bound to.
+	row := findCredAudit(t, credAuditRows(t, s), domain.AccessActionCredentialRemoved, domain.CredentialKindGitHubPAT)
+	if row.Host != host {
+		t.Errorf("audit host = %q, want %q", row.Host, host)
+	}
+}
+
 // TestJiraCredentialDelete_AuditsRemoval: the Jira unbind clears the credential
 // and the URL column in ONE server-side transaction. The frontend used to do
 // this as two calls with a real "credentials were removed, but clearing the

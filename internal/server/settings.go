@@ -25,8 +25,10 @@ import (
 type settingsHandler struct {
 	tx db.TxRunner
 	// az gates the org-scoped credential routes on the {org_id} path segment.
-	// Nil on the session-scoped handlers this struct also serves, which resolve
-	// the org from the session instead.
+	// Always set — the single construction site in routes() passes the server's
+	// checker — and dereferenced unguarded by those handlers. The struct's other
+	// handlers are session-scoped and resolve the org from the session instead,
+	// so they never read it.
 	az *authz.Checker
 	// bedrockRole resolves live AWS calls for the Bedrock role-mode setup +
 	// connect probe (TFAC-616): sts:GetCallerIdentity for the trust-policy

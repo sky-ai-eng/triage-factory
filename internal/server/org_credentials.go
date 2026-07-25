@@ -139,12 +139,20 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "connected", "login": ghUser.Login})
 }
 
-// handleGitHubPATDelete unbinds the org's GitHub bot PAT — the disconnect. It
-// clears the credential AND the base URL in one transaction, because those are
-// the two halves of "this workspace is connected to GitHub"; leaving a host
-// behind would show a connected-looking, credential-less GitHub card.
+// handleGitHubPATDelete unbinds the org's GitHub bot PAT — the disconnect.
 // Idempotent: disconnecting an org that has nothing bound is a 200 with no
 // audit row (a removal that removed nothing isn't an access change).
+//
+// The base URL goes with it ONLY when no App registration remains. Host and
+// credential are the two halves of "this workspace is connected to GitHub", so
+// a plain disconnect clears both — leaving a host behind would render a
+// connected-looking, credential-less GitHub card. But an App registration keeps
+// using that host: a staged App coexists with a live PAT during a PAT→App
+// switch, and the resolver's base lookup falls through org_settings → the
+// github_url secret → github.com, so clearing both while an App row survives
+// would silently re-point a GHES org's App at github.com. Wrong host, no error.
+// With an App present the disconnect touches the credential only, and the App's
+// own teardown (discard / switch-to-pat) owns the host from there.
 //
 // Per-user GitHub identity (PAT_2) is deliberately untouched: it's owned by its
 // own surface, and disconnecting the org's access doesn't unmake the fact that
@@ -158,21 +166,38 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	var had bool
+	// Staged OR active — either way a registration is still pointing at the
+	// host. Read before the tx: this is a system read, and a failure here must
+	// not be mistaken for "no App" (which would clear the host).
+	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-access", err)
+		return
+	}
+	keepHost := app != nil
+
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		creds, _ := integrations.Load(ctx, tx.Secrets, orgID)
-		had = creds.GitHubPAT != ""
+		had := creds.GitHubPAT != ""
 		orgSet, err := tx.Orgs.GetSettings(ctx, orgID)
 		if err != nil {
 			return fmt.Errorf("load org settings: %w", err)
 		}
 		prevHost := orgSet.GitHubBaseURL
-		if err := integrations.ClearGitHub(ctx, tx.Secrets, orgID); err != nil {
-			return fmt.Errorf("clear credential: %w", err)
-		}
-		orgSet.GitHubBaseURL = ""
-		if err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
-			return fmt.Errorf("save org settings: %w", err)
+		if keepHost {
+			// Drop the token alone. ClearGitHub would take the github_url
+			// secret too, which is the resolver's second fallback.
+			if _, err := tx.Secrets.Delete(ctx, orgID, integrations.KeyGitHubPAT); err != nil {
+				return fmt.Errorf("clear credential: %w", err)
+			}
+		} else {
+			if err := integrations.ClearGitHub(ctx, tx.Secrets, orgID); err != nil {
+				return fmt.Errorf("clear credential: %w", err)
+			}
+			orgSet.GitHubBaseURL = ""
+			if err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
+				return fmt.Errorf("save org settings: %w", err)
+			}
 		}
 		if !had {
 			return nil

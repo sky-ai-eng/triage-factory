@@ -78,7 +78,7 @@ import {
   saveOrgConfig,
 } from '../settings/orgConfig'
 import { connectJira, type JiraDeployment } from '../settings/jiraConnect'
-import { connectGitHubPAT } from '../settings/githubAccess'
+import { connectGitHubPAT } from '../settings/orgCredentials'
 import { connectAnthropic } from '../settings/anthropicConnect'
 import { connectBedrock, bedrockPayloadFromForm } from '../settings/bedrockConnect'
 import {
