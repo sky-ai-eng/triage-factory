@@ -126,14 +126,23 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # musl-static for the same reason the Go binary is: it is bind-mounted into
 # the sandbox's alpine rootfs and must exec there. Building ON alpine with
 # the musl target gives that without a cross-toolchain.
-FROM --platform=$BUILDPLATFORM rust:1.85-alpine AS toolhost-builder
+#
+# The toolchain floor is set by harness/Cargo.lock, not by our own source:
+# the locked `ignore` and `image` releases declare rust-version 1.88, and
+# cargo refuses the build outright below that. Keep this at or above the
+# highest MSRV in the lockfile — when a `cargo update` raises one, this pin
+# moves with it or the image build fails at resolve time.
+FROM --platform=$BUILDPLATFORM rust:1.94-alpine AS toolhost-builder
 RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY harness ./harness
+# --locked builds exactly what harness/Cargo.lock pins and fails if the lock
+# is absent or stale, so the shipped binary is the one the tests ran against
+# rather than whatever resolved at image-build time.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/harness/target \
     cd harness/tf-harness-tools && \
-    cargo build --release --bin tf-harness-tools && \
+    cargo build --release --locked --bin tf-harness-tools && \
     mkdir -p /out && \
     cp /src/harness/target/release/tf-harness-tools /out/tf-harness-tools
 
