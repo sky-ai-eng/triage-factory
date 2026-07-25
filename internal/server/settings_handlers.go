@@ -371,8 +371,16 @@ type orgSettingsResponse struct {
 	GitHubPollInterval  string `json:"github_poll_interval"`
 	GitHubCloneProtocol string `json:"github_clone_protocol"`
 	HasGitHubPAT        bool   `json:"has_github_pat"`
-	JiraBaseURL         string `json:"jira_base_url"`
-	JiraPollInterval    string `json:"jira_poll_interval"`
+	// GitHubPATLogin is the @login the org's stored bot PAT authenticates as —
+	// the credential's own identity, not the caller's. Not a secret (it's the
+	// account name that shows up as the commit author on delegated work), and
+	// it's the context that makes replacing the token from Settings feel safe:
+	// you can see which account you're about to swap out. Empty (omitted) when
+	// no PAT is bound, or when the bind predates the login being recorded — it
+	// self-heals on the next bind.
+	GitHubPATLogin   string `json:"github_pat_login,omitempty"`
+	JiraBaseURL      string `json:"jira_base_url"`
+	JiraPollInterval string `json:"jira_poll_interval"`
 	// HasJiraCredential reports whether a usable Jira service credential is
 	// stored for the org's auth-method marker — a Data Center PAT or a Cloud
 	// email + API token — rather than the presence of a specific key, so a
@@ -419,6 +427,7 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 
 	var orgSet domain.OrgSettings
 	var creds auth.Credentials
+	var ghPATLogin string
 	var bedrockRegion, bedrockModelID, bedrockBaseURL, bedrockRoleARN, bedrockExternalID string
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var err error
@@ -427,6 +436,17 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
+		// The login the org PAT authenticates as, recorded on the agents row by
+		// every PAT bind. Only meaningful while a PAT is the credential — an App
+		// org's bot login (<slug>[bot]) resolves live from the registration, and a
+		// stale login left over from a since-replaced PAT would be a lie. Best-
+		// effort like the Bedrock reads below: a read failure degrades the form to
+		// "connected" without a name, not a 500.
+		if creds.GitHubPAT != "" {
+			if agent, aerr := tx.Agents.GetForOrg(r.Context(), orgID); aerr == nil && agent != nil {
+				ghPATLogin = agent.GitHubOrgLogin
+			}
+		}
 		// Bedrock non-secret config rides the same vault as the
 		// credential; missing keys come back ("", nil). Best-effort like
 		// the integrations.Load above — a vault hiccup degrades the form
@@ -470,6 +490,7 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		GitHubPollInterval:  orgSet.GitHubPollInterval.String(),
 		GitHubCloneProtocol: defaultedCloneProtocolView(orgSet.GitHubCloneProtocol),
 		HasGitHubPAT:        creds.GitHubPAT != "",
+		GitHubPATLogin:      ghPATLogin,
 		JiraBaseURL:         jiraBaseURL,
 		JiraPollInterval:    orgSet.JiraPollInterval.String(),
 		HasJiraCredential:   hasJiraCred,

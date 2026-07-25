@@ -23,6 +23,12 @@ interface JiraAccessValue {
  * successful disconnect it fires onDisconnected so the container can do its
  * own follow-up (clearing wizard URL-confirmation, resetting baseline).
  *
+ * Sitting beside it is `onReplace` — a request to rebind, not a rebind. The
+ * container answers by rendering this same group in its unconnected (fields +
+ * Save) form, so rotating a credential doesn't have to start with a disconnect
+ * and the window where the org has no credential and its poller is stopped
+ * never opens.
+ *
  * Project tracking + status rules are TEAM-level (a separate surface), so
  * they live outside this group.
  *
@@ -51,6 +57,7 @@ export default function JiraAccessGroup({
   connected,
   deployment,
   orgId,
+  onReplace,
   onDisconnected,
   showBaseUrl = true,
   bare = false,
@@ -68,6 +75,10 @@ export default function JiraAccessGroup({
   // The choice is NOT inferred from the URL here: it's made explicitly so the
   // fields the user fills always match the scheme the connect sends.
   deployment: JiraDeployment
+  // Asks the container to re-open its credential form against the still-
+  // connected org (see the note above). Omit on surfaces with no form to
+  // re-open — the control simply doesn't render.
+  onReplace?: () => void
   onDisconnected?: () => void
   showBaseUrl?: boolean
   bare?: boolean
@@ -106,13 +117,24 @@ export default function JiraAccessGroup({
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-[13px] font-medium text-text-secondary">Jira connection</h2>
           {connected && (
-            <button
-              type="button"
-              onClick={disconnect}
-              className="text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
-            >
-              Disconnect
-            </button>
+            <div className="flex items-center gap-3">
+              {onReplace && (
+                <button
+                  type="button"
+                  onClick={onReplace}
+                  className="text-[11px] text-accent transition-colors hover:underline"
+                >
+                  Replace credential
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={disconnect}
+                className="text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
+              >
+                Disconnect
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -188,13 +210,24 @@ export default function JiraAccessGroup({
               Connected to {value.jira_url.replace(/^https?:\/\//, '')}
             </span>
             {bare && (
-              <button
-                type="button"
-                onClick={disconnect}
-                className="ml-auto text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
-              >
-                Disconnect
-              </button>
+              <div className="ml-auto flex items-center gap-3">
+                {onReplace && (
+                  <button
+                    type="button"
+                    onClick={onReplace}
+                    className="text-[11px] text-accent transition-colors hover:underline"
+                  >
+                    Replace credential
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={disconnect}
+                  className="text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
+                >
+                  Disconnect
+                </button>
+              </div>
             )}
           </div>
         </div>

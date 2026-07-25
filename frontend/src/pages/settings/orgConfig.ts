@@ -78,6 +78,11 @@ export interface OrgSettingsData {
   github_poll_interval: string
   github_clone_protocol: CloneProtocol
   has_github_pat: boolean
+  // The @login the stored org PAT authenticates as — the credential's own
+  // identity, not the viewer's. Absent when no PAT is bound (or when the bind
+  // predates the login being recorded); Settings shows it beside the "Replace
+  // token" control so a rotation names the account it's swapping out.
+  github_pat_login?: string
   jira_base_url: string
   jira_poll_interval: string
   // True when a Jira service credential is stored for the org's auth-method

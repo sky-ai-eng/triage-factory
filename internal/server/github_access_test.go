@@ -555,6 +555,67 @@ func TestOrgSettingsSave_CarriesNoCredential(t *testing.T) {
 	}
 }
 
+// --- the bound identity Settings shows next to the token ------------------
+
+// TestOrgSettingsGet_ReportsBoundPATLogin pins the @login the Settings GitHub
+// section renders beside its "Replace token" control. It tracks the LIVE
+// credential: it appears on a bind, re-points on a rotation, and disappears
+// with the token — a name left behind by a since-replaced credential would tell
+// the operator they're about to rotate an account they aren't.
+func TestOrgSettingsGet_ReportsBoundPATLogin(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	if got := orgPATLogin(t, s); got != "" {
+		t.Errorf("github_pat_login = %q with nothing bound, want empty", got)
+	}
+
+	gh := githubUserStub(t, "acme-bot")
+	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
+		"base_url": gh.URL, "pat": "ghp_first",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := orgPATLogin(t, s); got != "acme-bot" {
+		t.Errorf("github_pat_login = %q after bind, want acme-bot", got)
+	}
+
+	// Rotation: same route, a token that authenticates as someone else.
+	rotated := githubUserStub(t, "acme-bot-2")
+	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
+		"base_url": rotated.URL, "pat": "ghp_second",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("pat rotate = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := orgPATLogin(t, s); got != "acme-bot-2" {
+		t.Errorf("github_pat_login = %q after rotation, want acme-bot-2", got)
+	}
+
+	if rec := doJSON(t, s, http.MethodDelete, patRoute(), nil); rec.Code != http.StatusOK {
+		t.Fatalf("pat unbind = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := orgPATLogin(t, s); got != "" {
+		t.Errorf("github_pat_login = %q after unbind, want empty", got)
+	}
+}
+
+// orgPATLogin reads github_pat_login off the org settings GET.
+func orgPATLogin(t *testing.T, s *Server) string {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodGet, "/api/settings/org", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/settings/org = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Login string `json:"github_pat_login"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode org settings: %v", err)
+	}
+	return out.Login
+}
+
 // patRoute is the org's GitHub-PAT credential resource in local mode.
 func patRoute() string {
 	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/github-access/pat"

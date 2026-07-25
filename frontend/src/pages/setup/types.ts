@@ -73,6 +73,12 @@ export interface WizardState {
   // tracked separately from the (always-blank-on-load) org.github_pat field,
   // mirroring orgConfig's "leave blank to keep current" contract.
   hasGitHubPat: boolean
+  // The @login the stored org PAT authenticates as, when there is one — the
+  // credential's own identity, not the operator's. Read-only context: Settings'
+  // GitHub section names the account beside its "Replace token" control, so a
+  // rotation says which bot it's swapping out. Empty in App mode (the App's bot
+  // login resolves from the registration) and before any bind.
+  githubPatLogin: string
   // GitHub access is satisfied by ANY means — a stored/typed PAT or a
   // registered App — so the GitHub step reads the server's folded github_ready
   // signal rather than re-deriving it. Drives the step's isComplete (GitHub is
