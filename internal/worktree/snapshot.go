@@ -262,17 +262,29 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 	if _, err := gitCapture(ctx, wtPath, env, "rm", "-r", "--cached", "--ignore-unmatch", "--", "_scratch"); err != nil {
 		return nil, fmt.Errorf("drop _scratch from temp index: %w", err)
 	}
-	// Keep `.claude/skills` out of the delta the same way, for the same reason:
-	// it is TF mechanism, not the agent's work. In a sandboxed tree the path is
-	// our symlink to the read-only skills mount, and in local mode it's the
-	// materialized SKILL.md — carrying either would persist TF plumbing into a
-	// snapshot that a future restore re-establishes for itself. `reset` rather
-	// than `rm --cached`: reset restores HEAD's entry for the path, so a repo
-	// that legitimately TRACKS `.claude/skills` doesn't come back from the
-	// snapshot with those files recorded as deletions. On the (usual) untracked
-	// path HEAD has no entry and reset drops it from the index outright.
-	if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", ".claude/skills"); err != nil {
-		return nil, fmt.Errorf("drop .claude/skills from temp index: %w", err)
+	// Keep `.claude/skills` out of the delta for the same reason: it is TF
+	// mechanism, not the agent's work. In a sandboxed tree the path is our symlink
+	// to the read-only skills mount, and in local mode it's the materialized
+	// SKILL.md — carrying either would persist TF plumbing into a snapshot that a
+	// future restore re-establishes for itself.
+	//
+	// `reset` rather than `rm --cached`: reset restores HEAD's entry for the path,
+	// so a repo that legitimately TRACKS `.claude/skills` doesn't come back from
+	// the snapshot with those files recorded as deletions (which is exactly what
+	// dropping them from the staged set would produce, since HEAD still has them).
+	//
+	// Guarded on the path actually appearing in the diff so the reset only ever
+	// runs with a matching pathspec. Most captures — every non-blueprint run, and
+	// any repo without a `.claude` — have nothing there at all, and `git reset`'s
+	// treatment of a pathspec that matches neither the index nor HEAD is not a
+	// contract worth betting EVERY snapshot capture on. When the diff is empty the
+	// reset would be a no-op anyway, so the guard costs nothing but the read.
+	if changed, err := gitCapture(ctx, wtPath, env, "diff", "--cached", "--name-only", "HEAD", "--", ".claude/skills"); err != nil {
+		return nil, fmt.Errorf("check .claude/skills in temp index: %w", err)
+	} else if len(bytes.TrimSpace(changed)) > 0 {
+		if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", ".claude/skills"); err != nil {
+			return nil, fmt.Errorf("drop .claude/skills from temp index: %w", err)
+		}
 	}
 	patch, err := gitCapture(ctx, wtPath, env, "diff", "--cached", "--binary", "HEAD")
 	if err != nil {

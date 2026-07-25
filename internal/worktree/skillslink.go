@@ -67,13 +67,22 @@ func EnsureSandboxSkillsLink(dir string) error {
 }
 
 // plantSandboxSkillsLink is the best-effort wrapper every tree-materializing
-// path calls. A failure is logged rather than failing the run: the link only
-// affects skill discovery, and the wrapper prompt names the skill's in-jail path
-// explicitly, so a blueprint step degrades to reading the file by path rather
-// than dying at setup. The log line is the diagnostic for the systemic case
-// (e.g. `.claude` present as a regular file).
+// path calls. A failure is logged rather than failing the run, but do not read
+// that as "harmless": this symlink is the ONLY thing that makes the step skill
+// reachable from inside the jail. Both routes to it go through
+// <worktree>/.claude/skills — the engine's personal-skill discovery, and the
+// literal `./.claude/skills/<slug>/SKILL.md` path the step wrapper prompt names
+// (internal/delegate.buildBlueprintStepWrapperPrompt) — so without the link the
+// skill exists only at the unadvertised mount point and the step runs on its
+// brief alone.
+//
+// It is still not worth failing a run over: the tree is fresh and
+// orchestrator-owned at every call site, so a failure here means something
+// systemically wrong with the host (e.g. `.claude` present as a regular file)
+// that the run may well survive, and dying at setup would turn a degraded step
+// into a dead blueprint. The log line is the diagnostic.
 func plantSandboxSkillsLink(dir string) {
 	if err := EnsureSandboxSkillsLink(dir); err != nil {
-		worktreeLog.Warn("plant sandbox skills symlink failed; a blueprint step in this tree will not discover its skill through ~/.claude/skills", "dir", dir, "error", err)
+		worktreeLog.Warn("plant sandbox skills symlink failed; a blueprint step in this tree cannot reach its skill at ~/.claude/skills — neither by discovery nor at the path its prompt names", "dir", dir, "error", err)
 	}
 }

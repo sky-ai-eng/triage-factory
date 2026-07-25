@@ -81,6 +81,38 @@ func TestRestoreWorkspaceGit_PreFixSkillsPatchConvergesToSymlink(t *testing.T) {
 	assertSkillsSymlink(t, wtDir)
 }
 
+// TestCaptureWorkspaceGit_NoSkillsPathStillCaptures is the regression guard for
+// the exclusion's blast radius: capture is shared by EVERY run, and the vast
+// majority of worktrees have no `.claude` at all. Excluding a path that matches
+// nothing must not disturb the capture — the agent's work still lands in the
+// patch, and no step of the pipeline errors out.
+func TestCaptureWorkspaceGit_NoSkillsPathStillCaptures(t *testing.T) {
+	withTestHome(t)
+	const runID = "capture-no-skills-run"
+	upstream := makeTestUpstream(t)
+	wtDir, err := CreateForBranch(context.Background(), "acme", "repo", upstream, "main", "aa/feature", runID)
+	if err != nil {
+		t.Fatalf("CreateForBranch: %v", err)
+	}
+	t.Cleanup(func() { _ = RemoveAt(wtDir, runID) })
+	// Local mode (the default here): no symlink is planted, and this repo tracks
+	// no .claude — the ordinary non-blueprint shape.
+	if _, err := os.Lstat(filepath.Join(wtDir, ".claude")); !os.IsNotExist(err) {
+		t.Fatalf("fixture has a .claude dir; this test is about the absence of one (err=%v)", err)
+	}
+	if err := os.WriteFile(filepath.Join(wtDir, "agent.txt"), []byte("agent edit\n"), 0o644); err != nil {
+		t.Fatalf("write agent file: %v", err)
+	}
+
+	delta, err := CaptureWorkspaceGit(context.Background(), wtDir)
+	if err != nil {
+		t.Fatalf("CaptureWorkspaceGit on a tree with no .claude/skills: %v", err)
+	}
+	if delta == nil || !strings.Contains(string(delta.Patch), "agent.txt") {
+		t.Errorf("agent's change missing from the patch: %+v", delta)
+	}
+}
+
 // TestCaptureWorkspaceGit_ExcludesSkillsPath: `.claude/skills` is TF mechanism,
 // not the agent's work, so it stays out of the delta — both the symlink a
 // sandboxed tree carries and, critically, any files a repo TRACKS there, which
