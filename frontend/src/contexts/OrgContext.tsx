@@ -3,7 +3,7 @@
    useActiveOrgId / useOrgContext hooks belong together. HMR
    boundary trade-off is acceptable for stable plumbing. */
 import { createContext, useContext, useEffect, useMemo, useState } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useLocation } from 'react-router'
 import { useOptionalAuth } from './AuthContext'
 
 /**

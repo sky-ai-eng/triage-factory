@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { useOrgHref } from '../hooks/useOrgHref'
 
 interface TeamSettingsResponse {

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter } from 'react-router'
 import AgentCard from './AgentCard'
 import { QUEUE_DWELL_VISIBLE_MS } from '../lib/runStatus'
 import type { Conversation, Task } from '../types'

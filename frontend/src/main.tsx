@@ -5,7 +5,7 @@
    heuristic doesn't apply to an entrypoint. */
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router'
 import { useEffect } from 'react'
 import './index.css'
 import { watchSystemTheme } from './lib/theme'
