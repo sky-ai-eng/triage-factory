@@ -16,7 +16,7 @@
 // motion swaps the recede animation for an instant collapse.
 
 import { useCallback, useEffect, useMemo, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { Check } from 'lucide-react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useActiveOrgId } from '../../contexts/OrgContext'

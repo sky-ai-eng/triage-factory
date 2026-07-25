@@ -9,7 +9,7 @@ import {
   RotateCcw,
   BookOpen,
 } from 'lucide-react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router'
 import { useCuratorChat } from '../hooks/useCuratorChat'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { linkifyMarkdown, type LinkifyContext } from '../lib/linkify'

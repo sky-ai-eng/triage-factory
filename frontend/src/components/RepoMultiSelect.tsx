@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { Check, X } from 'lucide-react'
 import { readError } from '../lib/api'
 import { useOrgHref } from '../hooks/useOrgHref'

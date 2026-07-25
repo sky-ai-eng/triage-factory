@@ -31,7 +31,12 @@ WORKDIR /src/frontend
 # in frontend/package.json. COREPACK_ENABLE_DOWNLOAD_PROMPT=0 keeps the
 # pinned-version download non-interactive in the build.
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
+# pnpm-workspace.yaml carries the dependency overrides, and pnpm records them
+# in the lockfile — so a frozen install that can't see the file reads it as a
+# config/lockfile mismatch and refuses to proceed. It belongs in the same
+# dependency-only layer as the manifest, ahead of the full source copy, so an
+# unrelated source edit doesn't invalidate the install cache.
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN corepack enable && pnpm install --frozen-lockfile
 COPY frontend/ ./
 RUN pnpm run build
@@ -50,13 +55,15 @@ FROM --platform=$BUILDPLATFORM node:22-alpine AS sdk-builder
 WORKDIR /sdk-install
 # package-lock.json is the source of truth for transitive deps.
 # wrapper.mjs is the runtime shim the host binary materializes.
-# install.go is consulted ONLY to extract the sdkVersion constant —
-# we don't want to hardcode the version here and let it drift from
-# the Go source. The grep below dies (and fails the build) if the
-# constant moves or changes shape, which is the right failure mode:
-# better a loud build break than a silent runtime SDK reinstall
-# attempt against a runtime layer that has no node/npm.
-# --ignore-scripts mirrors installSDKIfNeeded in install.go: this bakes
+# install.go is consulted ONLY to extract the pin constants (the SDK
+# version and the @hono/node-server override) — we don't want to
+# hardcode either here and let it drift from the Go source. The greps
+# below die (and fail the build) if a constant moves or changes shape,
+# which is the right failure mode: better a loud build break than a
+# silent runtime SDK reinstall attempt against a runtime layer that has
+# no node/npm. The manifest's *shape* is guarded from the other side by
+# a drift test against install.go's sdkPackageJSON.
+# --ignore-scripts mirrors installSDK in install.go: this bakes
 # the same pinned tree into the shipped image, so it gets the same
 # supply-chain hardening against a malicious postinstall hook.
 COPY internal/agentproc/package-lock.json ./package-lock.json
@@ -68,8 +75,13 @@ RUN set -eu; \
         echo "Could not extract sdkVersion from internal/agentproc/install.go" >&2; \
         exit 1; \
     fi; \
+    HONO_OVERRIDE=$(grep -E '^const honoNodeServerOverride = "[^"]+"' /tmp/install.go | sed -E 's/.*"([^"]+)".*/\1/'); \
+    if [ -z "$HONO_OVERRIDE" ]; then \
+        echo "Could not extract honoNodeServerOverride from internal/agentproc/install.go" >&2; \
+        exit 1; \
+    fi; \
     echo "Using sdkVersion=${SDK_VERSION} (from internal/agentproc/install.go)"; \
-    printf '{\n  "name": "triagefactory-sdk-runtime",\n  "private": true,\n  "type": "module",\n  "dependencies": {\n    "@anthropic-ai/claude-agent-sdk": "%s"\n  }\n}\n' "$SDK_VERSION" > package.json; \
+    printf '{\n  "name": "triagefactory-sdk-runtime",\n  "private": true,\n  "type": "module",\n  "dependencies": {\n    "@anthropic-ai/claude-agent-sdk": "%s"\n  },\n  "overrides": {\n    "@hono/node-server": "%s"\n  }\n}\n' "$SDK_VERSION" "$HONO_OVERRIDE" > package.json; \
     npm ci --no-audit --no-fund --omit=dev --ignore-scripts; \
     rm -f /tmp/install.go
 

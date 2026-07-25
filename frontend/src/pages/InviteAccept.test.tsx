@@ -1,14 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter } from 'react-router'
 import InviteAccept from './InviteAccept'
 import { HttpError } from '../lib/apiClient'
 
 // Capture navigate; keep the rest of react-router (MemoryRouter, useLocation)
 // real so the ?token= query resolves normally.
 const navigateMock = vi.hoisted(() => vi.fn())
-vi.mock('react-router-dom', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('react-router-dom')>()
+vi.mock('react-router', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-router')>()
   return { ...actual, useNavigate: () => navigateMock }
 })
 

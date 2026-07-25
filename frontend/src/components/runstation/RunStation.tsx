@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link } from 'react-router'
 import { motion, useReducedMotion } from 'motion/react'
 import { ArrowLeft, ExternalLink, Pause, Send, Square } from 'lucide-react'
 import type { Message, Conversation, Task } from '../../types'
