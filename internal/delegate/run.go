@@ -266,17 +266,30 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	namespace := memoryNamespace(cfg.blueprintRunID, runID)
 
 	// Both materializations below write into <runRoot>/_scratch/, so they only run
-	// while the tree is still ours. Once a launch has handed it to the sandbox
-	// uid — a warm blueprint step N>0, or a warm resume — every create/truncate
-	// under it is EACCES for the capability-less orchestrator, and forcing it is
-	// exactly the pattern the staged step skill exists to avoid. Skipping loses
-	// nothing: whatever these passes would write is already on disk from the
-	// build-time (or cold-rehydrate) pass that ran while the tree was ours, and
-	// the one genuinely new item at step N — step N-1's memory — was written into
-	// this same shared tree by the agent itself. A cold rehydrate rebuilds the
-	// tree orchestrator-owned, so the full pass runs there.
+	// while the tree is still ours. Once a launch has handed it to the sandbox uid
+	// — a warm blueprint step N>0, or a warm resume — every create AND every
+	// O_TRUNC rewrite under it is EACCES for the capability-less orchestrator, so
+	// this branch is observably identical to running them: each file would fail and
+	// log, which both passes treat as advisory by contract. Forcing the write
+	// instead is the pattern the staged step skill exists to eliminate.
+	//
+	// The cost is real, and it is worth naming rather than calling this free. On a
+	// warm step N>0 the tree keeps exactly what the pre-launch pass wrote, so a
+	// project knowledge-base edited mid-blueprint — and a prior memory that first
+	// appeared after step 0 — do not reach later steps. That staleness is
+	// PRE-EXISTING, not introduced here (the writes that would have refreshed them
+	// already failed EACCES, silently, as warnings rather than a decision) and it
+	// is confined to the sandboxed path: local mode never hands the tree off, so it
+	// keeps full per-step freshness. It is acceptable because the handoff a
+	// blueprint actually depends on is unaffected — step N-1's memory is written
+	// into this same shared tree by the agent itself, not by us — and because a
+	// cold rehydrate rebuilds the tree orchestrator-owned, so the full pass runs
+	// again there. Giving the KB genuine per-step freshness means giving it the
+	// step skill's treatment (a read-only mount off an orchestrator-owned dir,
+	// restaged per step); that changes how the agent reads the KB, so it belongs in
+	// its own change, not smuggled into this call site.
 	if sandbox.RunTreeHandedOff(claudeCwd) {
-		delegateLog.Debug("run tree already handed to the sandbox identity; skipping memory/knowledge materialization (its content is already on disk from the pre-launch pass)", "run", runID, "cwd", claudeCwd)
+		delegateLog.Debug("run tree already handed to the sandbox identity; skipping memory/knowledge materialization (these writes cannot succeed here — the tree keeps what the pre-launch pass wrote, so a mid-blueprint knowledge-base edit will not reach this step)", "run", runID, "cwd", claudeCwd)
 	} else {
 		// Materialize any prior task memories into ./_scratch/entity-memory/, one
 		// folder per workflow run, and create this run's own namespace folder, so
