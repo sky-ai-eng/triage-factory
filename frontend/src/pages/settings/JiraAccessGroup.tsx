@@ -23,6 +23,12 @@ interface JiraAccessValue {
  * successful disconnect it fires onDisconnected so the container can do its
  * own follow-up (clearing wizard URL-confirmation, resetting baseline).
  *
+ * Sitting beside it is `onReplace` — a request to rebind, not a rebind. The
+ * container answers by rendering this same group in its unconnected (fields +
+ * Save) form, so rotating a credential doesn't have to start with a disconnect
+ * and the window where the org has no credential and its poller is stopped
+ * never opens.
+ *
  * Project tracking + status rules are TEAM-level (a separate surface), so
  * they live outside this group.
  *
@@ -51,6 +57,8 @@ export default function JiraAccessGroup({
   connected,
   deployment,
   orgId,
+  onReplace,
+  envProvided = false,
   onDisconnected,
   showBaseUrl = true,
   bare = false,
@@ -68,12 +76,23 @@ export default function JiraAccessGroup({
   // The choice is NOT inferred from the URL here: it's made explicitly so the
   // fields the user fills always match the scheme the connect sends.
   deployment: JiraDeployment
+  // Asks the container to re-open its credential form against the still-
+  // connected org (see the note above). Omit on surfaces with no form to
+  // re-open — the control simply doesn't render.
+  onReplace?: () => void
+  // The connection's host and/or token come from TRIAGE_FACTORY_* env vars
+  // (local mode only). Those win on read, so a credential typed here would be
+  // stored and then ignored — the group states that and withholds the rebind
+  // rather than offering a control that appears to work and doesn't.
+  envProvided?: boolean
   onDisconnected?: () => void
   showBaseUrl?: boolean
   bare?: boolean
 }) {
   const cloud = deployment === 'cloud'
   const field = bare ? glassInputClass : inputClass
+  // An env-supplied connection can be reported but not replaced from here.
+  const canReplace = !!onReplace && !envProvided
 
   const disconnect = async () => {
     // One request: the credential resource's DELETE clears the stored
@@ -106,13 +125,24 @@ export default function JiraAccessGroup({
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-[13px] font-medium text-text-secondary">Jira connection</h2>
           {connected && (
-            <button
-              type="button"
-              onClick={disconnect}
-              className="text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
-            >
-              Disconnect
-            </button>
+            <div className="flex items-center gap-3">
+              {canReplace && (
+                <button
+                  type="button"
+                  onClick={onReplace}
+                  className="text-[11px] text-accent transition-colors hover:underline"
+                >
+                  Replace credential
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={disconnect}
+                className="text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
+              >
+                Disconnect
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -188,15 +218,35 @@ export default function JiraAccessGroup({
               Connected to {value.jira_url.replace(/^https?:\/\//, '')}
             </span>
             {bare && (
-              <button
-                type="button"
-                onClick={disconnect}
-                className="ml-auto text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
-              >
-                Disconnect
-              </button>
+              <div className="ml-auto flex items-center gap-3">
+                {canReplace && (
+                  <button
+                    type="button"
+                    onClick={onReplace}
+                    className="text-[11px] text-accent transition-colors hover:underline"
+                  >
+                    Replace credential
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={disconnect}
+                  className="text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
+                >
+                  Disconnect
+                </button>
+              </div>
             )}
           </div>
+          {/* Says why there's no Replace here, rather than leaving its absence
+              to be discovered. */}
+          {envProvided && (
+            <p className="text-[11px] leading-relaxed text-text-tertiary">
+              This connection comes from <code>TRIAGE_FACTORY_JIRA_*</code> environment variables,
+              which take precedence over anything stored here — change it where the server is
+              started, or unset those variables to manage it from Settings.
+            </p>
+          )}
         </div>
       )}
     </>

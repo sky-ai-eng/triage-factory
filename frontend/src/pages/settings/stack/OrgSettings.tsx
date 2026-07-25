@@ -6,27 +6,23 @@
 // GitHub *access* is the exception (TFAC-328/329): it's either/or per org, so
 // the old independently-editable selector / account-type / App-register /
 // App-install / free-form-PAT sections are replaced by ONE "GitHub access"
-// section — a mode header plus an explicit guided switch (GitHubAccessControl),
-// which composes the same step components internally (account type, App panel,
-// install view) but gates credential changes behind the switch flow + an
-// inform-only reachability diff. Setting a PAT through the plain settings save
-// while an App is registered 409s on the backend, so the switch flow is the
-// only credential-mutation path here.
+// section — a mode header plus a guided switch and, on a PAT org, an in-place
+// token replacement (GitHubAccessControl), which composes the same step
+// components internally (account type, App panel, install view) but routes every
+// credential change through a validated preflight + an inform-only reachability
+// diff. There is no free-form PAT field: the bulk settings save carries no
+// credential at all.
 //
 // What Settings adds over /setup is the per-section Save model (the approved
 // design): expand a section, edit its draft, Save (or Cancel/discard). The
 // org-form sections all persist through the single POST /api/settings/org, so
 // each saves {...baseline.org, ...ownFields} against the LIVE baseline — saving
 // one never flushes another's unsaved edits. Selector/panel sections (the
-// access-method picker, the App register panel) carry no Save footer. Jira
-// disconnect is footer-less too — it commits inline on its own button — though
-// note it DOES mutate org settings (JiraAccessGroup.disconnect POSTs
-// /api/settings/org to clear jira_base_url, on top of DELETE
-// /api/integrations/jira); footer-less is about how it commits, not whether it
-// persists. The Jira *connect* is the exception that proves the rule it used to
-// break: its Save footer ("Connect") drives POST /api/jira/connect rather than
-// the org POST, but it's a footer all the same — the same one-button shape as
-// the GitHub PAT section.
+// GitHub access control, the App register panel) carry no Save footer, and Jira
+// disconnect commits inline on its own button. The Jira *credential* is the
+// exception that proves the rule it used to break: its Save footer ("Connect" /
+// "Replace credential") drives PUT /api/orgs/{org}/jira-access/credential rather
+// than the org POST, but it's a footer all the same.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import TeamPicker from '../../../components/TeamPicker'
@@ -87,6 +83,11 @@ export default function OrgSettings({
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [urlError, setUrlError] = useState<string | null>(null)
+  // The connected Jira section, re-opened as its own connect form to bind a
+  // replacement credential in place. Not derived from the draft: it's a UI
+  // intent ("I want to retype this"), and it has to survive the fields being
+  // blank, which is the state it starts in.
+  const [jiraRebinding, setJiraRebinding] = useState(false)
 
   // EE SSO / Slack entitlements — dark until the probe resolves, matching the
   // backend's 404-and-hide at every /api/sso/* and /api/slack/* seam.
@@ -325,20 +326,21 @@ export default function OrgSettings({
         <GitHubUrlStep {...ctx} error={urlError} />
       </SettingsSection>
 
-      {/* ── GitHub access (one mode header + explicit guided switch) ──
-          Either/or per org (TFAC-328): the section states the live mode and
-          offers exactly one affordance — switch to the other mode, with a
-          reachability diff + confirm — plus the staged-switch banner. It
-          replaces the old independently-editable selector / account-type /
-          register / install / free-form-PAT sections (the backend 409s a plain
-          PAT save while an App is registered, so the switch flow is the only
-          path). Auto-opens on a staged switch so the banner is visible. */}
+      {/* ── GitHub access (mode header + guided switch / token replacement) ──
+          Either/or per org (TFAC-328): the section states the live mode and the
+          identity it connects as, and offers a switch to the other mode — with a
+          reachability diff + confirm — plus, on a PAT org, replacing the token in
+          place. Both go through the same validate-then-confirm path; the staged-
+          switch banner takes over when a PAT→App switch is pending. It replaces
+          the old independently-editable selector / account-type / register /
+          install / free-form-PAT sections. Auto-opens on a staged switch so the
+          banner is visible. */}
       <SettingsSection
         title="GitHub access"
         summary={ghAccessSummary}
         defaultExpanded={draft.githubAppStaged}
       >
-        <GitHubAccessControl ctx={ctx} reload={load} />
+        <GitHubAccessControl ctx={ctx} baseUrl={baseline.org.github_url} reload={load} />
       </SettingsSection>
 
       {/* ── Clone protocol (PAT + local only) ── */}
@@ -398,12 +400,16 @@ export default function OrgSettings({
         </div>
       </SettingsSection>
 
-      {/* ── Jira connection ── When disconnected, this is a form section whose
-          Save ("Connect") performs the connect on the section's button — the
-          same shape as the GitHub PAT section, no separate Connect button.
-          Once connected there's nothing to save, so it reverts to an action
-          section carrying just the inline Disconnect. */}
-      {draft.jiraConnected ? (
+      {/* ── Jira connection ── Two faces of one section. Without a credential
+          to show, it's a form whose Save ("Connect") performs the bind on the
+          section's own button — no separate Connect button anywhere. Connected,
+          it collapses to a status line carrying the inline Disconnect and
+          "Replace credential"; the latter just re-opens this same form
+          (jiraRebinding) against the still-connected org, because the credential
+          resource's PUT accepts a bind on one. Rotating therefore no longer
+          starts with a disconnect, which is what used to open a window with no
+          credential stored and the poller stopped. */}
+      {draft.jiraConnected && !jiraRebinding ? (
         <SettingsSection
           title="Jira connection"
           summary={`Connected · ${hostOf(baseline.org.jira_url)}`}
@@ -421,6 +427,14 @@ export default function OrgSettings({
             // The connected view shows only a status line, so the deployment
             // doesn't pick fields here; loadOrg seeded it from the stored host.
             deployment={draft.jiraDeployment ?? 'data_center'}
+            onReplace={() => setJiraRebinding(true)}
+            // Suppresses that rebind (and says why) when TRIAGE_FACTORY_JIRA_*
+            // supplies the host or the token: the overlay wins on read, so a
+            // credential typed here would be stored and then ignored. Reported,
+            // not managed — the same rule the GitHub section applies to an
+            // env-supplied PAT. Disconnect stays available: it's honest about
+            // its outcome, warning that the env vars keep supplying the value.
+            envProvided={draft.jiraCredentialEnvProvided}
             onDisconnected={() => {
               setDraft((d) => ({
                 ...d,
@@ -428,7 +442,12 @@ export default function OrgSettings({
                 jiraDeployment: null,
                 org: { ...d.org, jira_url: '', jira_pat: '', jira_email: '', jira_api_token: '' },
               }))
-              setBaseline((b) => ({ ...b, jiraConnected: false, org: { ...b.org, jira_url: '' } }))
+              setBaseline((b) => ({
+                ...b,
+                jiraConnected: false,
+                jiraDeployment: null,
+                org: { ...b.org, jira_url: '' },
+              }))
             }}
             bare
           />
@@ -436,16 +455,20 @@ export default function OrgSettings({
       ) : (
         <SettingsSection
           title="Jira connection"
-          summary="Not connected"
-          saveLabel="Connect"
+          summary={jiraRebinding ? `Connected · ${hostOf(baseline.org.jira_url)}` : 'Not connected'}
+          saveLabel={jiraRebinding ? 'Replace credential' : 'Connect'}
           // dirty reflects any draft change against the baseline — it arms the
           // discard guard + unsaved dot, so a partially-typed URL/credential or a
           // deployment pick isn't silently dropped on collapse. The "needs the
           // right fields filled" rule that gates the connect lives in
           // saveDisabled instead (mirrors the old Connect button's condition).
+          // The deployment term compares against the baseline rather than null so
+          // it means the same thing in both modes: a fresh org's baseline is
+          // null, so any pick is a change; a rebinding org is only dirty if it
+          // switches backends.
           dirty={
             draft.org.jira_url !== baseline.org.jira_url ||
-            draft.jiraDeployment !== null ||
+            draft.jiraDeployment !== baseline.jiraDeployment ||
             draft.org.jira_pat.trim() !== '' ||
             draft.org.jira_email.trim() !== '' ||
             draft.org.jira_api_token.trim() !== ''
@@ -467,6 +490,9 @@ export default function OrgSettings({
                 toast.error('No organization context — reload and try again.')
                 return false
               }
+              // Same call for a first bind and a replacement: the backend
+              // validates against the host before it stores anything, so a bad
+              // credential 422s with the org still on the one it had.
               const result = await connectJira(orgId, url, deployment, draft.org)
               if (!result.ok) {
                 toast.error(result.error)
@@ -484,7 +510,8 @@ export default function OrgSettings({
                 jiraDeployment: deployment,
                 org: { ...b.org, jira_url: url },
               }))
-              toast.success('Jira connected')
+              toast.success(jiraRebinding ? 'Jira credential replaced' : 'Jira connected')
+              setJiraRebinding(false)
               return true
             } finally {
               setSavingKey('jira-connect', false)
@@ -493,6 +520,7 @@ export default function OrgSettings({
           onCancel={() => {
             revertOrg(['jira_url', 'jira_pat', 'jira_email', 'jira_api_token'])
             patch({ jiraDeployment: baseline.jiraDeployment })
+            setJiraRebinding(false)
           }}
         >
           {/* Deployment picker first (the explicit Cloud-vs-DC choice), then the

@@ -16,13 +16,24 @@
 
 import { readError } from '../../lib/api'
 
-export type CredentialResult = { ok: true; warning?: string } | { ok: false; error: string }
+// CredentialResult carries the bind/unbind outcome. `login` is the identity the
+// bound credential resolved to (GitHub only, and only on a bind) — the caller
+// shows it back so a rotation confirms which account the new token authenticates
+// as rather than just reporting "saved".
+export type CredentialResult =
+  | { ok: true; warning?: string; login?: string }
+  | { ok: false; error: string }
 
 // connectGitHubPAT binds (or rotates) the org's GitHub bot token against
 // `baseUrl`. The backend validates the token live and 422s on a bad one, so a
 // successful result IS the validation — there's no separate probe. 409 when the
 // org is on a GitHub App: switching credentials is the dedicated switch flow's
 // job, never a credential save.
+//
+// Rotation and first bind are the same call: the route replaces whatever was
+// stored, and the previous credential survives untouched if this one fails
+// validation — which is what makes it safe to offer as an in-place "replace
+// this token" from Settings.
 export async function connectGitHubPAT(
   orgId: string,
   baseUrl: string,
@@ -52,7 +63,8 @@ export async function disconnectJira(orgId: string): Promise<CredentialResult> {
 // credentialRequest is the shared call shape for the credential resources:
 // a discriminated result, and the backend's optional `warning` (today: the
 // local-mode env-overlay caveat, where a delete succeeds but TRIAGE_FACTORY_*
-// vars keep supplying the value) passed through rather than swallowed.
+// vars keep supplying the value) and `login` (the GitHub bind's resolved
+// identity) passed through rather than swallowed.
 async function credentialRequest(
   url: string,
   method: 'PUT' | 'DELETE',
@@ -68,8 +80,11 @@ async function credentialRequest(
     if (!res.ok) {
       return { ok: false, error: await readError(res, 'Request failed') }
     }
-    const parsed = (await res.json().catch(() => null)) as { warning?: string } | null
-    return { ok: true, warning: parsed?.warning }
+    const parsed = (await res.json().catch(() => null)) as {
+      warning?: string
+      login?: string
+    } | null
+    return { ok: true, warning: parsed?.warning, login: parsed?.login }
   } catch {
     return { ok: false, error: 'Could not reach the server.' }
   }

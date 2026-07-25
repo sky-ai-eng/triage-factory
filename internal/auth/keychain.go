@@ -72,6 +72,22 @@ func EnvProvided() []string {
 	return out
 }
 
+// EnvProvidesKey reports whether ONE well-known credential key's effective
+// value comes from a TRIAGE_FACTORY_* env var — i.e. whether GetSecret(key)
+// will return the env value and ignore whatever is stored. False for any key
+// with no env mapping.
+//
+// This is deliberately finer-grained than EnvProvided above, which asks whether
+// an integration is wholly env-configured (URL *and* PAT) for the setup-status
+// surface. The overlay itself is per-key: with only the PAT var set, a rotation
+// still writes the keychain and Get still returns the env token. Anything that
+// offers to REPLACE a credential has to ask the per-key question, because the
+// answer decides whether the write it's about to make can be observed at all.
+func EnvProvidesKey(key string) bool {
+	envName, ok := envKeys[key]
+	return ok && os.Getenv(envName) != ""
+}
+
 // GetSecret reads a single secret by key, returning "" (not an error) when no
 // entry exists. For the four well-known credential keys (github_url,
 // github_pat, jira_url, jira_pat) any matching TRIAGE_FACTORY_* env var

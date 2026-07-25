@@ -371,14 +371,41 @@ type orgSettingsResponse struct {
 	GitHubPollInterval  string `json:"github_poll_interval"`
 	GitHubCloneProtocol string `json:"github_clone_protocol"`
 	HasGitHubPAT        bool   `json:"has_github_pat"`
-	JiraBaseURL         string `json:"jira_base_url"`
-	JiraPollInterval    string `json:"jira_poll_interval"`
+	// GitHubPATLogin is the @login the org's stored bot PAT authenticates as —
+	// the credential's own identity, not the caller's. Not a secret (it's the
+	// account name that shows up as the commit author on delegated work), and
+	// it's the context that makes replacing the token from Settings feel safe:
+	// you can see which account you're about to swap out. Empty (omitted) when
+	// no PAT is bound, when the bind predates the login being recorded (it
+	// self-heals on the next bind), or when the live token comes from the
+	// environment — see GitHubPATEnvProvided.
+	GitHubPATLogin string `json:"github_pat_login,omitempty"`
+	// GitHubPATEnvProvided reports that the token TF actually authenticates
+	// with is supplied by TRIAGE_FACTORY_GITHUB_BOT_PAT, not by the vault.
+	// Local mode only (there is no env overlay in multi).
+	//
+	// The overlay is read-only and read-wins: a write lands in the keychain but
+	// every subsequent read still returns the env value. So a credential the
+	// environment supplies can be seen but not managed here, and a UI that
+	// offered to replace it would be promising something it cannot deliver —
+	// the operator would rotate, get a success, and keep polling with the old
+	// token. Surfaces render this as settled rather than editable.
+	GitHubPATEnvProvided bool   `json:"github_pat_env_provided,omitempty"`
+	JiraBaseURL          string `json:"jira_base_url"`
+	JiraPollInterval     string `json:"jira_poll_interval"`
 	// HasJiraCredential reports whether a usable Jira service credential is
 	// stored for the org's auth-method marker — a Data Center PAT or a Cloud
 	// email + API token — rather than the presence of a specific key, so a
 	// Cloud org (which has no PAT) still reports true.
-	HasJiraCredential bool   `json:"has_jira_credential"`
-	MaxLLMModelTier   string `json:"max_llm_model_tier,omitempty"`
+	HasJiraCredential bool `json:"has_jira_credential"`
+	// JiraCredentialEnvProvided is the Jira half of GitHubPATEnvProvided, and
+	// covers the URL as well as the token: the resolver reads BOTH from the
+	// overlaid secret, so an env-supplied host makes a rebind partly ineffective
+	// even for a Cloud org whose email + API token aren't shadowed at all.
+	// Either half being env-supplied is enough to make "replace this credential"
+	// a promise Settings can't keep. Local mode only.
+	JiraCredentialEnvProvided bool   `json:"jira_credential_env_provided,omitempty"`
+	MaxLLMModelTier           string `json:"max_llm_model_tier,omitempty"`
 	// MaxDailyCostUSD is the org-wide daily LLM spend cap (TFAC-477); 0 = no
 	// cap. Always emitted (not omitempty) so the Settings form can render the
 	// numeric input's current value, including an explicit "0 / no cap".
@@ -419,7 +446,17 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 
 	var orgSet domain.OrgSettings
 	var creds auth.Credentials
+	var ghPATLogin string
 	var bedrockRegion, bedrockModelID, bedrockBaseURL, bedrockRoleARN, bedrockExternalID string
+
+	// Which credentials the environment supplies, and therefore which ones this
+	// deployment can only report rather than manage. Multi mode has no overlay,
+	// so the question is local-only and both flags are false there.
+	local := runmode.Current() == runmode.ModeLocal
+	ghPATEnv := local && auth.EnvProvidesKey(integrations.KeyGitHubPAT)
+	jiraCredEnv := local &&
+		(auth.EnvProvidesKey(integrations.KeyJiraPAT) || auth.EnvProvidesKey(integrations.KeyJiraURL))
+
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var err error
 		orgSet, err = tx.Orgs.GetSettings(r.Context(), orgID)
@@ -427,6 +464,21 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
+		// The login the org PAT authenticates as, recorded on the agents row by
+		// every PAT bind. Only meaningful while the BOUND PAT is the credential —
+		// an App org's bot login (<slug>[bot]) resolves live from the
+		// registration, and an env-overlaid org authenticates as whoever the env
+		// token belongs to while the agents row still describes the last token
+		// bound through a route. Neither describes the live credential, and a
+		// name that names the wrong account is worse than no name on a surface
+		// whose whole job is "here's what you're about to replace". Best-effort
+		// like the Bedrock reads below: a read failure degrades the form to
+		// "connected" without a name, not a 500.
+		if creds.GitHubPAT != "" && !ghPATEnv {
+			if agent, aerr := tx.Agents.GetForOrg(r.Context(), orgID); aerr == nil && agent != nil {
+				ghPATLogin = agent.GitHubOrgLogin
+			}
+		}
 		// Bedrock non-secret config rides the same vault as the
 		// credential; missing keys come back ("", nil). Best-effort like
 		// the integrations.Load above — a vault hiccup degrades the form
@@ -466,25 +518,28 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 	_, hasJiraCred := integrations.JiraSystemConfig(creds)
 
 	writeJSON(w, http.StatusOK, orgSettingsResponse{
-		GitHubBaseURL:       ghBaseURL,
-		GitHubPollInterval:  orgSet.GitHubPollInterval.String(),
-		GitHubCloneProtocol: defaultedCloneProtocolView(orgSet.GitHubCloneProtocol),
-		HasGitHubPAT:        creds.GitHubPAT != "",
-		JiraBaseURL:         jiraBaseURL,
-		JiraPollInterval:    orgSet.JiraPollInterval.String(),
-		HasJiraCredential:   hasJiraCred,
-		MaxLLMModelTier:     orgSet.MaxLLMModelTier,
-		MaxDailyCostUSD:     orgSet.MaxDailyCostUSD,
-		MaxConcurrentRuns:   orgSet.MaxConcurrentRuns,
-		HasAnthropicAPIKey:  orgSet.AnthropicAPIKeyRef != "",
-		HasBedrockCreds:     orgSet.BedrockCredentialsRef != "",
-		BedrockAuthMethod:   bedrockAuthMethodFromRef(orgSet.BedrockCredentialsRef),
-		BedrockRegion:       bedrockRegion,
-		BedrockModelID:      bedrockModelID,
-		BedrockBaseURL:      bedrockBaseURL,
-		BedrockRoleARN:      bedrockRoleARN,
-		BedrockExternalID:   bedrockExternalID,
-		MemberCount:         memberCount,
+		GitHubBaseURL:             ghBaseURL,
+		GitHubPollInterval:        orgSet.GitHubPollInterval.String(),
+		GitHubCloneProtocol:       defaultedCloneProtocolView(orgSet.GitHubCloneProtocol),
+		HasGitHubPAT:              creds.GitHubPAT != "",
+		GitHubPATLogin:            ghPATLogin,
+		GitHubPATEnvProvided:      ghPATEnv,
+		JiraBaseURL:               jiraBaseURL,
+		JiraPollInterval:          orgSet.JiraPollInterval.String(),
+		HasJiraCredential:         hasJiraCred,
+		JiraCredentialEnvProvided: jiraCredEnv,
+		MaxLLMModelTier:           orgSet.MaxLLMModelTier,
+		MaxDailyCostUSD:           orgSet.MaxDailyCostUSD,
+		MaxConcurrentRuns:         orgSet.MaxConcurrentRuns,
+		HasAnthropicAPIKey:        orgSet.AnthropicAPIKeyRef != "",
+		HasBedrockCreds:           orgSet.BedrockCredentialsRef != "",
+		BedrockAuthMethod:         bedrockAuthMethodFromRef(orgSet.BedrockCredentialsRef),
+		BedrockRegion:             bedrockRegion,
+		BedrockModelID:            bedrockModelID,
+		BedrockBaseURL:            bedrockBaseURL,
+		BedrockRoleARN:            bedrockRoleARN,
+		BedrockExternalID:         bedrockExternalID,
+		MemberCount:               memberCount,
 	})
 }
 
