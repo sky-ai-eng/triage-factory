@@ -136,7 +136,7 @@ type Server struct {
 	// jiraOAuthApps resolves the Atlassian OAuth app for an org (per-org
 	// override → deployment first-party in hosted; local-supplied BYO else
 	// not-configured). Backs the Jira app settings card's status + the
-	// connect_available signal the per-user Jira status endpoint returns.
+	// connect_available signal that the per-user Jira status endpoint returns.
 	// Built in New, so it's never nil — handlers don't guard.
 	jiraOAuthApps jira.OAuthAppResolver
 	// jiraOAuthMinter performs the stateless Atlassian OAuth HTTP exchanges for
@@ -1216,7 +1216,7 @@ func (s *Server) routes() {
 	// same API backfill the poller runs, so it rides apiMutating (CSRF).
 	s.apiMutating("POST /api/orgs/{org_id}/github/app/installations/refresh", s.handleGitHubAppInstallationsRefresh)
 
-	// GitHub access either/or transitions (TFAC-328). GitHub access is
+	// GitHub access either/or transitions. GitHub access is
 	// strictly App XOR PAT per org; these commit the switches and surface the
 	// inform-only reachability diffs. All org-admin (gated inside the handler).
 	//   - cutover: commit a staged PAT→App switch (activate App + delete PAT).
