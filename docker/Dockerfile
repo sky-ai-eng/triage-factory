@@ -31,7 +31,12 @@ WORKDIR /src/frontend
 # in frontend/package.json. COREPACK_ENABLE_DOWNLOAD_PROMPT=0 keeps the
 # pinned-version download non-interactive in the build.
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
+# pnpm-workspace.yaml carries the dependency overrides, and pnpm records them
+# in the lockfile — so a frozen install that can't see the file reads it as a
+# config/lockfile mismatch and refuses to proceed. It belongs in the same
+# dependency-only layer as the manifest, ahead of the full source copy, so an
+# unrelated source edit doesn't invalidate the install cache.
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN corepack enable && pnpm install --frozen-lockfile
 COPY frontend/ ./
 RUN pnpm run build
