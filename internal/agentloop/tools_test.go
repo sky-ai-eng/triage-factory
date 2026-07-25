@@ -204,7 +204,7 @@ func TestBuildSystemPrompt_OrderAndAddendumGating(t *testing.T) {
 	parts := EnvelopeParts{TaskContext: "TASKCTX", Envelope: "ENVELOPE", Mission: "MISSION", HasBlueprint: true}
 
 	terminal := BuildSystemPrompt(parts)
-	for _, want := range []string{"coding agent", "TASKCTX", "ENVELOPE", "MISSION", "<completion>", "<blueprint_control>"} {
+	for _, want := range []string{"coding agent", "TASKCTX", "ENVELOPE", "MISSION", "<completion>"} {
 		if !containsSub(terminal, want) {
 			t.Errorf("terminal system prompt is missing %q", want)
 		}
@@ -212,8 +212,8 @@ func TestBuildSystemPrompt_OrderAndAddendumGating(t *testing.T) {
 	if containsSub(terminal, "NOT the final step") {
 		t.Error("a terminal step must not carry the non-terminal addendum")
 	}
-	// Order: base, task context, envelope, mission, completion, control.
-	if !inOrder(terminal, "coding agent", "TASKCTX", "ENVELOPE", "MISSION", "<completion>", "<blueprint_control>") {
+	// Order: base, task context, envelope, mission, completion.
+	if !inOrder(terminal, "coding agent", "TASKCTX", "ENVELOPE", "MISSION", "<completion>") {
 		t.Error("the fixed assembly order is what makes the prefix cacheable")
 	}
 
@@ -232,17 +232,17 @@ func TestBuildSystemPrompt_OrderAndAddendumGating(t *testing.T) {
 	}
 }
 
-// TestBuildSystemPrompt_TasklessOmitsBlueprintControl pins the other half of
-// the gate: a conversation with no blueprint is never told about a tool it
-// was not given, and never promised the artifact check that goes with having
-// a mission.
-func TestBuildSystemPrompt_TasklessOmitsBlueprintControl(t *testing.T) {
+// TestBuildSystemPrompt_TasklessHasNoCompletionContract pins the other half
+// of the gate. A conversation with a person in it ends when they stop
+// writing: there is no run to conclude, no tool to be told about, and no
+// mission whose artifact could be missing.
+func TestBuildSystemPrompt_TasklessHasNoCompletionContract(t *testing.T) {
 	taskless := BuildSystemPrompt(EnvelopeParts{Envelope: "ENVELOPE", Mission: "MISSION"})
 
-	if !containsSub(taskless, "<completion>") {
-		t.Error("stopping is how every conversation concludes, blueprint or not")
+	if !containsSub(taskless, "ENVELOPE") || !containsSub(taskless, "MISSION") {
+		t.Fatal("the caller's own sections must still be assembled")
 	}
-	for _, unwanted := range []string{"<blueprint_control>", "stop_blueprint", "external artifact"} {
+	for _, unwanted := range []string{"<completion>", "stop_blueprint", "external artifact"} {
 		if containsSub(taskless, unwanted) {
 			t.Errorf("a taskless conversation must not be told about %q — there is nobody absent to leave a reason for", unwanted)
 		}

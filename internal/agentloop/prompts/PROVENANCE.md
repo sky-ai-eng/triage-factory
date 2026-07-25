@@ -22,26 +22,23 @@ Prompt composition and quality iteration are human-owned and deliberately out
 of scope for the code that assembles them; see `../envelope.go` for what is
 mechanical.
 
-## `completion-native.txt`
+## `completion-blueprint.txt`
 
-TF-authored. The native path's terminal contract: implicit completion — an
+TF-authored. The native path's terminal contract: implicit completion (an
 assistant message with no tool calls concludes the run and its text is the
-summary. It replaces the SDK path's JSON completion envelope
+summary), the `stop_blueprint` tool, and the artifact contract. It replaces
+the SDK path's JSON completion envelope
 (`internal/ai/prompts/completion-sdk.txt`), which the native loop never parses.
 
-Carries nothing that presupposes a task, because it is appended to every
-conversation the loop drives.
+Appended only when the conversation executes a blueprint, gated by
+`EnvelopeParts.HasBlueprint` — which must agree with `Spec.HasBlueprint`,
+since that is what registers the tool this text describes.
 
-## `blueprint-control.txt`
-
-TF-authored. Appended only when the conversation executes a blueprint: the
-`stop_blueprint` tool and the artifact contract. Both presuppose an absent
-human — a task left open for someone to inherit, a mission that expected an
-artifact — so neither belongs in a conversation someone is present for, where
-the way to say "I can't do this" is to say it.
-
-Gated by `EnvelopeParts.HasBlueprint`, which must agree with
-`Spec.HasBlueprint`; that is what registers the tool this text describes.
+There is no taskless counterpart, and adding one would be a mistake. Every
+line here presupposes an absent human: a run that was dispatched, a task to
+leave open, a mission that expected an artifact. A conversation with a person
+in it ends when they stop writing, which is not a protocol and does not need
+stating.
 
 ## `blueprint-step-nonterminal.txt`
 

@@ -1,3 +1,0 @@
-<completion>
-You end this run by simply stopping: when the work is done, reply with a normal message and no tool calls. That message IS your completion — it is recorded as the run's summary, so make it a plain, specific account of what you did and what state you left behind. There is no JSON envelope, no `done()` call, and no special format.
-</completion>

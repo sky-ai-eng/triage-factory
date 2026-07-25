@@ -14,21 +14,19 @@ import (
 //go:embed prompts/coding-agent-system.txt
 var codingAgentSystemPrompt string
 
-// completionNative is the native path's terminal contract: stopping is
-// concluding. It replaces the SDK path's JSON completion envelope, which
-// this runtime never emits and never parses. True of every conversation the
-// loop drives, so it carries nothing that presupposes a task.
+// completionBlueprint is the terminal contract for a conversation executing
+// a blueprint: stopping is concluding, plus the flow-control tool and the
+// artifact contract. It replaces the SDK path's JSON completion envelope,
+// which this runtime never emits and never parses.
 //
-//go:embed prompts/completion-native.txt
-var completionNative string
-
-// blueprintControl is what a conversation executing a blueprint gets on top:
-// the flow-control tool and the artifact contract. Both presuppose an absent
-// human — a task to leave open, a mission that expected an artifact — so
-// neither belongs in a conversation someone is present for.
+// There is deliberately no taskless counterpart. A completion contract
+// answers "how does this run end", and that is only a question when a run
+// was dispatched to do something for someone who is not here. A conversation
+// with a person in it ends when they stop writing, which is not a protocol
+// and does not need stating.
 //
-//go:embed prompts/blueprint-control.txt
-var blueprintControl string
+//go:embed prompts/completion-blueprint.txt
+var completionBlueprint string
 
 // blueprintStepNonterminal is the addendum appended on a non-terminal
 // blueprint step — the same guidance the SDK path's addendum carries, minus
@@ -58,10 +56,10 @@ type EnvelopeParts struct {
 	Envelope string
 	// Mission is the step's prompt body.
 	Mission string
-	// HasBlueprint appends the flow-control and artifact contract. It must
-	// agree with Spec.HasBlueprint, which registers the tool that section
-	// describes: a model must never be handed a tool its instructions don't
-	// mention, nor told about one it doesn't have.
+	// HasBlueprint appends the completion contract. It must agree with
+	// Spec.HasBlueprint, which registers the tool that contract describes: a
+	// model must never be handed a tool its instructions don't mention, nor
+	// told about one it doesn't have.
 	HasBlueprint bool
 	// NonTerminalStep appends the blueprint addendum, which tells the model
 	// that stopping hands off rather than ending the task. This is the only
@@ -77,8 +75,7 @@ type EnvelopeParts struct {
 //	task context
 //	TF envelope
 //	mission
-//	completion contract
-//	[blueprint control]
+//	[completion contract]
 //	[non-terminal step addendum]
 //
 // The order is what makes the prefix cacheable: the base prompt and the tool
@@ -90,10 +87,9 @@ func BuildSystemPrompt(parts EnvelopeParts) string {
 		strings.TrimSpace(parts.TaskContext),
 		strings.TrimSpace(parts.Envelope),
 		strings.TrimSpace(parts.Mission),
-		strings.TrimSpace(completionNative),
 	}
 	if parts.HasBlueprint {
-		sections = append(sections, strings.TrimSpace(blueprintControl))
+		sections = append(sections, strings.TrimSpace(completionBlueprint))
 	}
 	if parts.NonTerminalStep {
 		sections = append(sections, strings.TrimSpace(blueprintStepNonterminal))
