@@ -126,6 +126,10 @@ func (t *memTranscript) toolResults() []domain.Message {
 type scriptedProvider struct {
 	mu    sync.Mutex
 	turns []scriptedTurn
+	// repeat, when set, is returned for every call past the end of turns —
+	// for tests about what stops an otherwise unbounded loop, where the
+	// script cannot know how many turns it will take.
+	repeat *scriptedTurn
 	// requests records every request the engine made, so a test can assert
 	// on what the model actually saw.
 	requests []inference.Request
@@ -148,10 +152,15 @@ func (p *scriptedProvider) Stream(_ context.Context, req inference.Request) (*in
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.requests = append(p.requests, req)
-	if p.calls >= len(p.turns) {
+	if p.calls >= len(p.turns) && p.repeat == nil {
 		return nil, fmt.Errorf("scripted provider ran out of turns after %d calls", p.calls)
 	}
-	turn := p.turns[p.calls]
+	var turn scriptedTurn
+	if p.calls < len(p.turns) {
+		turn = p.turns[p.calls]
+	} else {
+		turn = *p.repeat
+	}
 	p.calls++
 	if turn.onCall != nil {
 		turn.onCall()

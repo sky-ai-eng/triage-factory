@@ -76,8 +76,14 @@ type Hooks struct {
 	// ShouldStopAfterTurn runs when the model would conclude (an assistant
 	// message with no tool calls). A non-empty nudge is inserted as pending
 	// input and the loop continues instead of concluding; "" lets the
-	// conclusion stand. This is where the one-shot artifact-contract nudge
-	// lives.
+	// conclusion stand. This is where the artifact-contract nudge lives.
+	//
+	// Whether a nudge repeats is the hook's business, not the engine's. The
+	// engine deliberately keeps no "already nudged" flag: that would be
+	// process state governing behavior, and the transcript already records
+	// what was asked and what has happened since. A hook that never returns
+	// "" is bounded by the turn backstop and the spend guard like any other
+	// work.
 	ShouldStopAfterTurn func(ctx context.Context, turn int, finalText string) (nudge string)
 
 	// PrepareNextTurn is RESERVED and never called. Compaction attaches
@@ -98,11 +104,6 @@ type Spec struct {
 	// itself beyond the drain/repair notices.
 	Model        string
 	SystemPrompt string
-
-	// NonTerminalStep registers the `continue` flow-control tool. It must
-	// match whether the step's addendum prompt was appended: a tool the
-	// instructions never mention is a trap.
-	NonTerminalStep bool
 
 	// MaxIterations bounds the engagement's provider calls. Zero uses
 	// DefaultMaxIterations.
@@ -206,7 +207,6 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 	// happens between turns, while the model is mid-work, and is stamped as
 	// a steer so assembly can wrap it in the keep-working envelope.
 	bareDrain := true
-	nudged := false
 	turn := 0
 	lastText := ""
 
@@ -238,7 +238,7 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 		if err != nil {
 			return e.failed(started, turn, fmt.Errorf("list rows for assembly: %w", err))
 		}
-		tools, err := e.toolSchemas(spec)
+		tools, err := e.toolSchemas()
 		if err != nil {
 			return e.failed(started, turn, err)
 		}
@@ -312,6 +312,10 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 				return e.failed(started, turn, err)
 			}
 			if terminated {
+				// stop_run carries no summary of its own — the prose in the
+				// same assistant message is the account of the work, exactly
+				// as it is when the model concludes by stopping.
+				outcome.ResultSummary = lastText
 				outcome.NumTurns = turn
 				outcome.DurationMs = msSince(started)
 				return outcome
@@ -336,12 +340,11 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 			continue
 		}
 
-		// One-shot nudge (the artifact contract, today). Fires at most once
-		// per engagement: the second conclusion stands, so a model that has
-		// genuinely nothing to add is never trapped in a nudge loop.
-		if !nudged && e.Hooks.ShouldStopAfterTurn != nil {
+		// The would-stop hook (the artifact contract, today). Its answer is
+		// taken as given — see Hooks.ShouldStopAfterTurn for why the engine
+		// keeps no state about whether it has fired.
+		if e.Hooks.ShouldStopAfterTurn != nil {
 			if nudge := e.Hooks.ShouldStopAfterTurn(ctx, turn, lastText); nudge != "" {
-				nudged = true
 				if err := e.insertPending(ctx, spec, nudge, ""); err != nil {
 					return e.failed(started, turn, fmt.Errorf("insert turn-end nudge: %w", err))
 				}
@@ -351,9 +354,16 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 
 		// Implicit completion. The final assistant text is the summary —
 		// there is no JSON envelope to parse on this path.
+		//
+		// The outcome is `continue`, not `finish`, on every step: stopping
+		// means "my part is done", and only decideBlueprintStep knows whether
+		// a part being done ends the task. On a final or single step it
+		// resolves `continue` to a structural finish, so the common case is
+		// unchanged; on a non-final step it hands off. Ending the whole task
+		// early is the deliberate act, and it goes through stop_run.
 		return Result{
 			Disposition:   DispositionConcluded,
-			Outcome:       domain.RunOutcomeFinish,
+			Outcome:       domain.RunOutcomeContinue,
 			ResultSummary: lastText,
 			NumTurns:      turn,
 			DurationMs:    msSince(started),
@@ -362,14 +372,15 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 }
 
 // toolSchemas assembles the call's tool list: the seven in-jail tools plus
-// this step's flow-control tools. Built per call from immutable inputs so no
-// mutation can leak between engagements.
-func (e *Engine) toolSchemas(spec Spec) ([]schemas.ChatTool, error) {
+// flow control. Built per call from immutable inputs so no mutation can leak
+// between engagements. The list does not vary with the step's position —
+// only the system prompt does.
+func (e *Engine) toolSchemas() ([]schemas.ChatTool, error) {
 	sandboxed, err := SandboxTools()
 	if err != nil {
 		return nil, err
 	}
-	flow := flowControlTools(spec.NonTerminalStep)
+	flow := flowControlTools()
 	out := make([]schemas.ChatTool, 0, len(sandboxed)+len(flow))
 	out = append(out, sandboxed...)
 	out = append(out, flow...)

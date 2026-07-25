@@ -114,13 +114,12 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	}
 
 	result := engine.Run(ctx, agentloop.Spec{
-		OrgID:           orgID,
-		ConversationID:  runID,
-		Model:           model,
-		SystemPrompt:    systemPrompt,
-		NonTerminalStep: cfg.appendSysPrompt != "",
-		MaxIterations:   nativeMaxIterations(),
-		UserID:          creatorUserID,
+		OrgID:          orgID,
+		ConversationID: runID,
+		Model:          model,
+		SystemPrompt:   systemPrompt,
+		MaxIterations:  nativeMaxIterations(),
+		UserID:         creatorUserID,
 	})
 
 	s.recordNativeResult(ctx, orgID, runID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result)
@@ -193,8 +192,8 @@ func dialToolHostWithRetry(ctx context.Context, socketPath string) (agentloop.To
 // buildNativeSystemPrompt assembles the native envelope from the same inputs
 // buildPrompt uses on the SDK path — the task context block, the shared
 // envelope body, the step's mission — with the runtime-specific completion
-// contract and, on a non-terminal step, the addendum that introduces the
-// `continue` tool.
+// contract and, on a non-terminal step, the addendum that redefines what
+// stopping means.
 //
 // Interpolation is the same single non-re-scanning pass, applied before the
 // untrusted task-context block is prepended, so no externally-authored text
@@ -287,9 +286,23 @@ func envSliceToMap(entries []string) map[string]string {
 	return out
 }
 
-// artifactContractNudge builds the one-shot would-stop hook: a run whose
-// task expects an external artifact, that is about to conclude having
-// recorded none, is asked once whether it meant to.
+// artifactNudgeTag opens the nudge note and is how a later turn recognizes
+// one in the transcript. The identity lives in the tag, not the prose, so
+// the wording can be reworded without silently re-arming the check on every
+// conversation that is mid-flight.
+const artifactNudgeTag = `<system-note kind="artifact-contract">`
+
+// artifactNudgeNote is what the model is asked when it would stop having
+// published nothing.
+const artifactNudgeNote = artifactNudgeTag + "\n" +
+	"You are about to finish without having produced any external artifact — no branch pushed, " +
+	"no pull request or review, no ticket updated. If the work called for one, do it now. " +
+	"If it genuinely did not, say so plainly and stop again; you will not be asked again.\n" +
+	"</system-note>"
+
+// artifactContractNudge builds the would-stop hook: a run whose task expects
+// an external artifact, that is about to conclude having recorded none, is
+// asked whether it meant to.
 //
 // "Expects an artifact" is deliberately narrow — the terminal step of a run
 // against a GitHub or Jira entity, the shape whose whole point is to leave
@@ -297,8 +310,13 @@ func envSliceToMap(entries []string) map[string]string {
 // owns the blueprint's terminal external action, which is what its addendum
 // tells it.
 //
-// The hook fires at most once per engagement (the engine enforces that), so
-// a run with genuinely nothing to publish says so and stops.
+// Asking twice about the same silence would be badgering — the model already
+// answered. Asking again after a human has intervened is not: the premise
+// changed, there is new work, and the same question about that work has not
+// been put. So the check re-arms on human input and only on human input, and
+// it reads that from the transcript rather than remembering it, which is
+// what makes the behavior identical whether the engagement is the first or a
+// crash's successor.
 func (s *Spawner) artifactContractNudge(orgID, runID string, task domain.Task, cfg runConfig) func(context.Context, int, string) string {
 	expects := cfg.appendSysPrompt == "" && (task.EntitySource == "github" || task.EntitySource == "jira")
 	if !expects || s.artifacts == nil {
@@ -315,10 +333,37 @@ func (s *Spawner) artifactContractNudge(orgID, runID string, task domain.Task, c
 		if len(arts) > 0 {
 			return ""
 		}
-		return "<system-note>\nYou are about to finish without having produced any external artifact — no branch pushed, " +
-			"no pull request or review, no ticket updated. If the work called for one, do it now. " +
-			"If it genuinely did not, say so plainly and stop again; you will not be asked twice.\n</system-note>"
+		rows, err := s.agentRuns.ListForAssembly(ctx, orgID, runID)
+		if err != nil {
+			delegateLog.Warn("read transcript for the turn-end contract check failed; not nudging", "run", runID, "error", err)
+			return ""
+		}
+		if askedAboutArtifactAlready(rows) {
+			return ""
+		}
+		return artifactNudgeNote
 	}
+}
+
+// askedAboutArtifactAlready reports whether the nudge has been put with no
+// human input since.
+//
+// Walking back from the newest row to the first one that speaks for someone:
+// the nudge itself means the question stands answered and nothing has
+// happened to change it. Any other user row means a person spoke afterwards,
+// so the run is working on something the question was never asked about. The
+// loop's own crash notice speaks for no one and is skipped.
+func askedAboutArtifactAlready(rows []domain.Message) bool {
+	for i := len(rows) - 1; i >= 0; i-- {
+		if rows[i].Role != "user" {
+			continue
+		}
+		if rows[i].Subtype == domain.MessageSubtypeInjectionExecutorChanged {
+			continue
+		}
+		return strings.Contains(rows[i].Content, artifactNudgeTag)
+	}
+	return false
 }
 
 // nativeMaxIterations reads the per-engagement provider-call backstop from
@@ -402,11 +447,10 @@ func (s *Spawner) recordNativeResult(
 		delegateLog.Warn("snapshot workspace at native conclusion failed", "run", runID, "error", err)
 	}
 
+	// Only a stop_run terminal carries a reason; concluding by stopping says
+	// what it has to say in the summary.
 	outcome := string(result.Outcome)
-	outcomeReason := ""
-	if result.Outcome == domain.RunOutcomeAbort {
-		outcomeReason = result.OutcomeReason
-	}
+	outcomeReason := result.OutcomeReason
 
 	bgCtx := context.Background()
 	if triggerType == "manual" {

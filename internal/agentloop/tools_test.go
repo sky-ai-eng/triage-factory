@@ -101,45 +101,93 @@ func TestToolDefinitions_MatchHarness(t *testing.T) {
 	}
 }
 
-func TestFlowControlTools_RegisteredByStepPosition(t *testing.T) {
-	terminal := flowControlTools(false)
-	if len(terminal) != 1 || terminal[0].Function.Name != ToolAbort {
-		t.Fatalf("a terminal step gets abort only: %+v", terminal)
+// TestFlowControlTools_IsOneToolWithBothArgumentsRequired pins the shape the
+// prompts are written against: a single tool, both arguments required, and
+// no `continue` type — stopping is what continuing means, so offering it
+// here would restore the ambiguity the consolidation removed.
+func TestFlowControlTools_IsOneToolWithBothArgumentsRequired(t *testing.T) {
+	flow := flowControlTools()
+	if len(flow) != 1 || flow[0].Function.Name != ToolStopRun {
+		t.Fatalf("flow control is exactly one tool: %+v", flow)
 	}
-	nonTerminal := flowControlTools(true)
-	if len(nonTerminal) != 2 || nonTerminal[0].Function.Name != ToolContinue || nonTerminal[1].Function.Name != ToolAbort {
-		t.Fatalf("a non-terminal step gets continue and abort: %+v", nonTerminal)
+	req := flow[0].Function.Parameters.Required
+	if len(req) != 2 || req[0] != "type" || req[1] != "reason" {
+		t.Fatalf("required = %v, want both type and reason — an unexplained stop is the thing being prevented", req)
 	}
-	for _, tool := range append(terminal, nonTerminal...) {
-		if len(tool.Function.Parameters.Required) == 0 {
-			t.Errorf("%s must require its companion field", tool.Function.Name)
+	spec, ok := flow[0].Function.Parameters.Properties.Get("type")
+	if !ok {
+		t.Fatal("the type argument must be declared")
+	}
+	enum := spec.(map[string]any)["enum"].([]string)
+	if len(enum) != 2 || enum[0] != stopTypeFinish || enum[1] != stopTypeAbort {
+		t.Errorf("type enum = %v, want exactly finish and abort", enum)
+	}
+	for _, v := range enum {
+		if v == string(domain.RunOutcomeContinue) {
+			t.Error("continue must not be callable: it is what stopping already means")
 		}
 	}
 }
 
 func TestFlowControlOutcome_MapsToTheBlueprintVocabulary(t *testing.T) {
 	tests := []struct {
+		name        string
 		call        domain.ToolCall
 		wantOutcome domain.RunOutcome
-		wantSummary string
 		wantReason  string
-		wantOK      bool
+		wantFlow    bool
 	}{
 		{
-			call:        domain.ToolCall{Name: ToolContinue, Input: map[string]any{"summary": "did it"}},
-			wantOutcome: domain.RunOutcomeContinue, wantSummary: "did it", wantOK: true,
+			name:        "finish",
+			call:        domain.ToolCall{Name: ToolStopRun, Input: map[string]any{"type": "finish", "reason": "nothing to review"}},
+			wantOutcome: domain.RunOutcomeFinish, wantReason: "nothing to review", wantFlow: true,
 		},
 		{
-			call:        domain.ToolCall{Name: ToolAbort, Input: map[string]any{"reason": "blocked"}},
-			wantOutcome: domain.RunOutcomeAbort, wantReason: "blocked", wantOK: true,
+			name:        "abort",
+			call:        domain.ToolCall{Name: ToolStopRun, Input: map[string]any{"type": "abort", "reason": "blocked"}},
+			wantOutcome: domain.RunOutcomeAbort, wantReason: "blocked", wantFlow: true,
 		},
-		{call: domain.ToolCall{Name: "bash"}, wantOK: false},
+		{
+			// Reaching for `continue` is the mistake most worth catching, and
+			// it must not resolve to an outcome: the run keeps going and the
+			// model is told to just stop instead.
+			name:       "continue is not a type",
+			call:       domain.ToolCall{Name: ToolStopRun, Input: map[string]any{"type": "continue", "reason": "did my part"}},
+			wantReason: "did my part", wantFlow: true,
+		},
+		{
+			name:       "no type at all",
+			call:       domain.ToolCall{Name: ToolStopRun, Input: map[string]any{"reason": "r"}},
+			wantReason: "r", wantFlow: true,
+		},
+		{name: "a sandbox tool is not flow control", call: domain.ToolCall{Name: "bash"}},
 	}
 	for _, tc := range tests {
-		outcome, summary, reason, ok := flowControlOutcome(tc.call)
-		if ok != tc.wantOK || outcome != tc.wantOutcome || summary != tc.wantSummary || reason != tc.wantReason {
-			t.Errorf("%s -> (%q, %q, %q, %v), want (%q, %q, %q, %v)",
-				tc.call.Name, outcome, summary, reason, ok, tc.wantOutcome, tc.wantSummary, tc.wantReason, tc.wantOK)
+		t.Run(tc.name, func(t *testing.T) {
+			outcome, reason, isFlow := flowControlOutcome(tc.call)
+			if isFlow != tc.wantFlow || outcome != tc.wantOutcome || reason != tc.wantReason {
+				t.Errorf("-> (%q, %q, %v), want (%q, %q, %v)",
+					outcome, reason, isFlow, tc.wantOutcome, tc.wantReason, tc.wantFlow)
+			}
+		})
+	}
+}
+
+// TestFlowControlAck_CorrectsRatherThanTerminates pins that a malformed stop
+// never lands a terminal state: each correction is an in-band error the
+// model can act on.
+func TestFlowControlAck_CorrectsRatherThanTerminates(t *testing.T) {
+	badType := flowControlAck("", "did my part")
+	if !badType.isError || !containsSub(badType.text, "no tool calls") {
+		t.Errorf("a bad type must be corrected by naming the real way to hand off: %+v", badType)
+	}
+	noReason := flowControlAck(domain.RunOutcomeAbort, "")
+	if !noReason.isError {
+		t.Errorf("a reasonless stop must be refused: %+v", noReason)
+	}
+	for _, outcome := range []domain.RunOutcome{domain.RunOutcomeAbort, domain.RunOutcomeFinish} {
+		if ack := flowControlAck(outcome, "because"); ack.isError {
+			t.Errorf("%s with a reason must be accepted: %+v", outcome, ack)
 		}
 	}
 }
@@ -164,10 +212,15 @@ func TestBuildSystemPrompt_OrderAndAddendumGating(t *testing.T) {
 	parts.NonTerminalStep = true
 	nonTerminal := BuildSystemPrompt(parts)
 	if !containsSub(nonTerminal, "NOT the final step") {
-		t.Error("a non-terminal step must carry the addendum that introduces `continue`")
+		t.Error("a non-terminal step must carry the addendum that redefines what stopping means")
 	}
-	if !containsSub(nonTerminal, "`continue(summary)`") {
-		t.Error("the addendum must describe the tool, not a JSON envelope")
+	// The addendum's whole job: say that stopping hands off, and that ending
+	// the workflow early is the thing requiring a deliberate call.
+	if !containsSub(nonTerminal, "hands off to the step that comes next") {
+		t.Error("the addendum must state that stopping normally is the handoff")
+	}
+	if !containsSub(nonTerminal, `stop_run(type: "finish")`) {
+		t.Error("the addendum must name the tool that ends the whole blueprint")
 	}
 }
 

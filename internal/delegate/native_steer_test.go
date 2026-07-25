@@ -112,6 +112,9 @@ func TestSendMessage_NativeTerminalNotSteerable(t *testing.T) {
 		{"failed", "failed", ""},
 		{"cancelled", "cancelled", ""},
 		{"completed finish", "completed", "finish"},
+		// The outcome a run that simply stopped now carries. It is the
+		// ordinary completed state, so it must be as closed as `finish`.
+		{"completed continue", "completed", "continue"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			database := newDelegateTestDB(t)

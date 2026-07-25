@@ -25,16 +25,21 @@ mechanical.
 ## `completion-native.txt`
 
 TF-authored. The native path's terminal contract: implicit completion (an
-assistant message with no tool calls) plus the `abort` flow-control tool. It
-replaces the SDK path's JSON completion envelope
-(`internal/ai/prompts/completion-sdk.txt`), which the native loop never parses.
+assistant message with no tool calls) plus the single `stop_run` tool for the
+two endings that are not that. It replaces the SDK path's JSON completion
+envelope (`internal/ai/prompts/completion-sdk.txt`), which the native loop
+never parses.
 
 ## `blueprint-step-nonterminal.txt`
 
 TF-authored, adapted from `internal/delegate/prompts/blueprint-step-nonterminal.txt`.
-Same content and same guidance; the JSON-envelope references are rewritten as
-the `continue` / `abort` tools, which is the only difference between the two
-runtimes' non-terminal step instructions.
+
+The guidance on handoff and external actions is the same, but the two runtimes
+differ on what stopping means, so this file is not a mechanical rewrite of the
+SDK one. On the SDK path a step declares `continue` in its JSON envelope and
+stopping any other way ends the blueprint; here stopping IS the handoff, and
+ending the blueprint early is what takes a deliberate call. Edit them
+independently.
 
 ## `../tools/definitions.json`
 

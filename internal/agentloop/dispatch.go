@@ -23,7 +23,7 @@ const fatalToolHostNotice = "This tool call was not executed: the tool host beca
 //
 // terminated reports that a flow-control call ended the run. It follows the
 // all-results-terminate contract: the batch terminates iff EVERY result in
-// it sets a terminal outcome, so a model that pairs `continue` with real
+// it sets a terminal outcome, so a model that pairs `stop_run` with real
 // work in one message gets the work done and keeps going rather than
 // silently losing the call it made alongside.
 func (e *Engine) dispatchBatch(ctx context.Context, spec Spec, calls []domain.ToolCall) (result Result, terminated bool, err error) {
@@ -38,14 +38,15 @@ func (e *Engine) dispatchBatch(ctx context.Context, spec Spec, calls []domain.To
 		// Flow control resolves loop-side and never enters the sandbox. Its
 		// result row still lands, so the transcript stays legal and a later
 		// reader sees why the run ended.
-		if outcome, summary, reason, ok := flowControlOutcome(call); ok {
-			ack := flowControlAck(outcome, summary, reason)
+		if outcome, reason, ok := flowControlOutcome(call); ok {
+			ack := flowControlAck(outcome, reason)
 			if err := e.insertToolResult(ctx, spec, call, ack.text, ack.isError); err != nil {
 				return Result{}, false, err
 			}
 			if ack.isError {
-				// A malformed flow-control call (abort with no reason) is not
-				// a termination — the model is told what it owes and continues.
+				// A malformed flow-control call (a bad type, a missing reason)
+				// is not a termination — the model is told what it owes and
+				// continues.
 				allTerminate = false
 				continue
 			}
@@ -54,7 +55,6 @@ func (e *Engine) dispatchBatch(ctx context.Context, spec Spec, calls []domain.To
 					Disposition:   DispositionConcluded,
 					Outcome:       outcome,
 					OutcomeReason: reason,
-					ResultSummary: summary,
 				}
 			}
 			continue
@@ -162,30 +162,32 @@ type flowControlAckResult struct {
 	isError bool
 }
 
-// flowControlAck acknowledges a flow-control call, or tells the model what
-// its call was missing. A required field is enforced here rather than by the
+// flowControlAck acknowledges a stop_run call, or tells the model what its
+// call was missing. Both arguments are enforced here rather than by the
 // schema alone because a schema is advisory: a model can and does emit a
-// call without one, and an unenforced abort with no reason would land a
+// call without one, and an unenforced stop with no reason would land a
 // terminal state carrying no explanation for the human who inherits it.
-func flowControlAck(outcome domain.RunOutcome, summary, reason string) flowControlAckResult {
-	switch outcome {
-	case domain.RunOutcomeAbort:
-		if reason == "" {
-			return flowControlAckResult{
-				text:    "abort requires a reason. Call abort again with a plain statement of why you are stopping and what a human needs to do next.",
-				isError: true,
-			}
+//
+// The correction for a bad type restates the whole contract, since a model
+// that reached for a type that does not exist has usually reached for
+// `continue` — and the answer to that is not another tool.
+func flowControlAck(outcome domain.RunOutcome, reason string) flowControlAckResult {
+	if outcome != domain.RunOutcomeFinish && outcome != domain.RunOutcomeAbort {
+		return flowControlAckResult{
+			text: "stop_run needs a type of \"finish\" or \"abort\". If you meant to finish your part normally " +
+				"and hand off whatever comes next, do not call this at all — reply with a message and no tool calls.",
+			isError: true,
 		}
-		return flowControlAckResult{text: "Stopping this run. Recorded: " + reason}
-	case domain.RunOutcomeContinue:
-		if summary == "" {
-			return flowControlAckResult{
-				text:    "continue requires a summary. Call continue again with one or two sentences describing what you did, for the step that picks this up.",
-				isError: true,
-			}
-		}
-		return flowControlAckResult{text: "Handing off to the next step. Recorded: " + summary}
-	default:
-		return flowControlAckResult{text: "Acknowledged."}
 	}
+	if reason == "" {
+		return flowControlAckResult{
+			text: "stop_run requires a reason. Call it again with a plain statement of why you are stopping here " +
+				"and what a human needs to know or do next.",
+			isError: true,
+		}
+	}
+	if outcome == domain.RunOutcomeAbort {
+		return flowControlAckResult{text: "Stopping this run. Recorded: " + reason}
+	}
+	return flowControlAckResult{text: "Ending the task here. Recorded: " + reason}
 }

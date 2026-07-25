@@ -21,8 +21,12 @@ func TestRun_ImplicitCompletionConcludesWithFinalText(t *testing.T) {
 	if got.Disposition != DispositionConcluded {
 		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Disposition, got.Err)
 	}
-	if got.Outcome != domain.RunOutcomeFinish {
-		t.Errorf("outcome = %q, want finish", got.Outcome)
+	// `continue`, not `finish`: stopping says "my part is done", and only
+	// decideBlueprintStep knows whether that ends the task. It resolves a
+	// final-step continue to a structural finish, so a single run is
+	// unaffected — but the loop must not be the thing that decides.
+	if got.Outcome != domain.RunOutcomeContinue {
+		t.Errorf("outcome = %q, want continue", got.Outcome)
 	}
 	if got.ResultSummary != "Done: renamed the field." {
 		t.Errorf("result summary = %q, want the final assistant text", got.ResultSummary)
@@ -341,31 +345,35 @@ func TestRun_BeforeToolCallGateDeniesInBand(t *testing.T) {
 }
 
 func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
-	t.Run("continue alone terminates", func(t *testing.T) {
+	t.Run("stop_run alone terminates and takes the turn's prose as its summary", func(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
-		p := &scriptedProvider{turns: []scriptedTurn{
-			{calls: []domain.ToolCall{{ID: "c1", Name: ToolContinue, Input: map[string]any{"summary": "did step one"}}}},
-		}}
+		p := &scriptedProvider{turns: []scriptedTurn{{
+			text:  "Nothing to review here — the PR only touches generated files.",
+			calls: []domain.ToolCall{{ID: "c1", Name: ToolStopRun, Input: map[string]any{"type": "finish", "reason": "no reviewable changes"}}},
+		}}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
 		got := e.Run(context.Background(), testSpec())
-		if got.Outcome != domain.RunOutcomeContinue || got.ResultSummary != "did step one" {
-			t.Fatalf("continue must reach the outcome unchanged: %+v", got)
+		if got.Outcome != domain.RunOutcomeFinish || got.OutcomeReason != "no reviewable changes" {
+			t.Fatalf("finish must reach the outcome unchanged: %+v", got)
+		}
+		if got.ResultSummary != "Nothing to review here — the PR only touches generated files." {
+			t.Errorf("result summary = %q, want the accompanying prose — stop_run carries no summary of its own", got.ResultSummary)
 		}
 	})
 
-	t.Run("continue paired with work does not terminate", func(t *testing.T) {
+	t.Run("stop_run paired with work does not terminate", func(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
 		host := newScriptedToolHost()
 		p := &scriptedProvider{turns: []scriptedTurn{
 			{calls: []domain.ToolCall{
 				{ID: "c1", Name: "write"},
-				{ID: "c2", Name: ToolContinue, Input: map[string]any{"summary": "s"}},
+				{ID: "c2", Name: ToolStopRun, Input: map[string]any{"type": "abort", "reason": "r"}},
 			}},
 			{text: "actually finished"},
 		}}
 		e := newTestEngine(tr, p, host)
 		got := e.Run(context.Background(), testSpec())
-		if got.Outcome != domain.RunOutcomeFinish {
+		if got.Outcome != domain.RunOutcomeContinue {
 			t.Fatalf("a batch that also did real work must keep going: %+v", got)
 		}
 		if calls := host.calls(); len(calls) != 1 || calls[0] != "write" {
@@ -373,11 +381,11 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 		}
 	})
 
-	t.Run("abort with no reason is corrected, not accepted", func(t *testing.T) {
+	t.Run("a stop with no reason is corrected, not accepted", func(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
 		p := &scriptedProvider{turns: []scriptedTurn{
-			{calls: []domain.ToolCall{{ID: "c1", Name: ToolAbort}}},
-			{calls: []domain.ToolCall{{ID: "c2", Name: ToolAbort, Input: map[string]any{"reason": "the branch is gone"}}}},
+			{calls: []domain.ToolCall{{ID: "c1", Name: ToolStopRun, Input: map[string]any{"type": "abort"}}}},
+			{calls: []domain.ToolCall{{ID: "c2", Name: ToolStopRun, Input: map[string]any{"type": "abort", "reason": "the branch is gone"}}}},
 		}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
 		got := e.Run(context.Background(), testSpec())
@@ -386,7 +394,27 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 		}
 		first := tr.toolResults()[0]
 		if !first.IsError || !strings.Contains(first.Content, "requires a reason") {
-			t.Fatalf("a reasonless abort must be told what it owes: %+v", first)
+			t.Fatalf("a reasonless stop must be told what it owes: %+v", first)
+		}
+	})
+
+	t.Run("a stop typed continue is refused and the run keeps going", func(t *testing.T) {
+		tr := newMemTranscript(pendingUser("go"))
+		p := &scriptedProvider{turns: []scriptedTurn{
+			{calls: []domain.ToolCall{{ID: "c1", Name: ToolStopRun, Input: map[string]any{"type": "continue", "reason": "did my part"}}}},
+			{text: "handing off"},
+		}}
+		e := newTestEngine(tr, p, newScriptedToolHost())
+		got := e.Run(context.Background(), testSpec())
+		// It ends as a continue anyway — but by stopping, which is the point:
+		// the tool never mints one, so the loop stays the only thing that
+		// decides what an ordinary ending means.
+		if got.Outcome != domain.RunOutcomeContinue || got.ResultSummary != "handing off" {
+			t.Fatalf("a bad type must not terminate the run: %+v", got)
+		}
+		first := tr.toolResults()[0]
+		if !first.IsError || !strings.Contains(first.Content, "no tool calls") {
+			t.Fatalf("the correction must point at stopping, not at another tool: %+v", first)
 		}
 	})
 }
@@ -451,29 +479,79 @@ func TestRun_GuardReadFailureFailsOpen(t *testing.T) {
 	}
 }
 
-func TestRun_OneShotNudgeFiresOnceThenTheConclusionStands(t *testing.T) {
-	tr := newMemTranscript(pendingUser("go"))
-	p := &scriptedProvider{turns: []scriptedTurn{{text: "first stop"}, {text: "second stop"}}}
-	e := newTestEngine(tr, p, newScriptedToolHost())
-	nudges := 0
-	e.Hooks.ShouldStopAfterTurn = func(context.Context, int, string) string {
-		nudges++
-		return "you produced no artifact"
-	}
+// TestRun_WouldStopHookOwnsWhetherItRepeats pins the division of labour: the
+// engine inserts what the hook returns and keeps no memory of having done
+// so. Whether asking again is badgering or a fair question about new work
+// depends on the transcript, which the hook can read and the engine
+// deliberately does not summarize into a flag.
+func TestRun_WouldStopHookOwnsWhetherItRepeats(t *testing.T) {
+	t.Run("an empty answer lets the conclusion stand", func(t *testing.T) {
+		tr := newMemTranscript(pendingUser("go"))
+		p := &scriptedProvider{turns: []scriptedTurn{{text: "first stop"}, {text: "second stop"}}}
+		e := newTestEngine(tr, p, newScriptedToolHost())
+		asked := 0
+		e.Hooks.ShouldStopAfterTurn = func(context.Context, int, string) string {
+			asked++
+			if asked == 1 {
+				return "you produced no artifact"
+			}
+			return ""
+		}
 
-	got := e.Run(context.Background(), testSpec())
-	if got.Disposition != DispositionConcluded || got.ResultSummary != "second stop" {
-		t.Fatalf("the second conclusion must stand: %+v", got)
+		got := e.Run(context.Background(), testSpec())
+		if got.Disposition != DispositionConcluded || got.ResultSummary != "second stop" {
+			t.Fatalf("the conclusion the hook allows must stand: %+v", got)
+		}
+		if asked != 2 {
+			t.Errorf("the hook must be consulted on every would-stop, consulted %d times", asked)
+		}
+		n := tr.find(func(m domain.Message) bool { return m.Content == "you produced no artifact" })
+		if n == nil {
+			t.Fatal("the nudge must be recorded as input")
+		}
+		if n.Delivered == nil || !*n.Delivered {
+			t.Error("the nudge must be drained on the next iteration like any other input")
+		}
+	})
+
+	t.Run("a hook that keeps asking is bounded by the turn backstop, not by the engine", func(t *testing.T) {
+		tr := newMemTranscript(pendingUser("go"))
+		p := &scriptedProvider{repeat: &scriptedTurn{text: "still nothing to add"}}
+		e := newTestEngine(tr, p, newScriptedToolHost())
+		e.Hooks.ShouldStopAfterTurn = func(context.Context, int, string) string { return "answer me" }
+		spec := testSpec()
+		spec.MaxIterations = 3
+
+		got := e.Run(context.Background(), spec)
+		if got.Disposition != DispositionParked {
+			t.Fatalf("disposition = %v, want parked — the backstop is what stops a hook that never yields", got.Disposition)
+		}
+	})
+}
+
+// TestRun_ToolSetDoesNotVaryWithStepPosition pins that flow control is
+// registered identically everywhere. Position is carried by the system
+// prompt alone, so a tool list and the text describing it cannot disagree.
+func TestRun_ToolSetDoesNotVaryWithStepPosition(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+
+	if got := e.Run(context.Background(), testSpec()); got.Disposition != DispositionConcluded {
+		t.Fatalf("disposition = %v (err: %v)", got.Disposition, got.Err)
 	}
-	if nudges != 1 {
-		t.Errorf("the nudge must fire at most once per engagement, fired %d times", nudges)
+	var flow []string
+	for _, tool := range p.requests[0].Tools {
+		if tool.Function != nil && tool.Function.Name == ToolStopRun {
+			flow = append(flow, tool.Function.Name)
+		}
 	}
-	n := tr.find(func(m domain.Message) bool { return m.Content == "you produced no artifact" })
-	if n == nil {
-		t.Fatal("the nudge must be recorded as input")
+	if len(flow) != 1 {
+		t.Fatalf("flow-control tools = %v, want exactly stop_run", flow)
 	}
-	if n.Delivered == nil || !*n.Delivered {
-		t.Error("the nudge must be drained on the next iteration like any other input")
+	// The seven in-jail tools are always registered alongside.
+	if len(p.requests[0].Tools) != 8 {
+		t.Errorf("tool count = %d, want the seven sandbox tools plus stop_run", len(p.requests[0].Tools))
 	}
 }
 
@@ -592,50 +670,6 @@ func TestRun_CredentialsResolvePerCall(t *testing.T) {
 	}
 	if creds.resolves != 2 {
 		t.Errorf("credentials must resolve per call (an STS triple expires mid-run), resolved %d times for 2 calls", creds.resolves)
-	}
-}
-
-func TestRun_NonTerminalStepRegistersContinue(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		nonTerminal bool
-		wantTools   []string
-	}{
-		{"terminal step", false, []string{ToolAbort}},
-		{"non-terminal step", true, []string{ToolContinue, ToolAbort}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			tr := newMemTranscript(pendingUser("go"))
-			p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
-			e := newTestEngine(tr, p, newScriptedToolHost())
-			spec := testSpec()
-			spec.NonTerminalStep = tc.nonTerminal
-
-			if got := e.Run(context.Background(), spec); got.Disposition != DispositionConcluded {
-				t.Fatalf("disposition = %v (err: %v)", got.Disposition, got.Err)
-			}
-			var flow []string
-			for _, tool := range p.requests[0].Tools {
-				if tool.Function == nil {
-					continue
-				}
-				if tool.Function.Name == ToolContinue || tool.Function.Name == ToolAbort {
-					flow = append(flow, tool.Function.Name)
-				}
-			}
-			if len(flow) != len(tc.wantTools) {
-				t.Fatalf("flow-control tools = %v, want %v", flow, tc.wantTools)
-			}
-			for i := range tc.wantTools {
-				if flow[i] != tc.wantTools[i] {
-					t.Fatalf("flow-control tools = %v, want %v", flow, tc.wantTools)
-				}
-			}
-			// The seven in-jail tools are always registered alongside.
-			if len(p.requests[0].Tools) != 7+len(tc.wantTools) {
-				t.Errorf("tool count = %d, want the seven sandbox tools plus %d flow-control", len(p.requests[0].Tools), len(tc.wantTools))
-			}
-		})
 	}
 }
 

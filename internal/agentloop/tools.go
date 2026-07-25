@@ -24,20 +24,30 @@ import (
 //go:embed tools/definitions.json
 var toolDefinitionsJSON []byte
 
-// Flow-control tool names. These execute loop-side and never enter the
-// sandbox — they are how a blueprint step reaches decideBlueprintStep now
-// that the SDK's JSON completion envelope is gone from this path.
+// ToolStopRun is the one flow-control tool. It executes loop-side and never
+// enters the sandbox — it is how a run reaches decideBlueprintStep now that
+// the SDK's JSON completion envelope is gone from this path.
+//
+// Every deliberate ending goes through this single name, with `type` naming
+// which one. The alternative — a tool per ending — put the destructive
+// ending on the zero-effort path: handing off to the next step needed an
+// explicit call while ending the entire workflow needed only silence, so the
+// prompt had to spend a paragraph arguing against the easier option.
+// Stopping now means `continue`, and the tool is only ever reached to do
+// something other than the safe default.
+const ToolStopRun = "stop_run"
+
+// stop_run's `type` argument. The values are the stored RunOutcome
+// vocabulary verbatim rather than a second, friendlier set of words: a
+// translation table between what the model says and what the row holds is a
+// thing that drifts.
+//
+// RunOutcomeContinue is deliberately absent. It is what an ordinary stop
+// means, so offering it here would reintroduce the ambiguity this tool
+// exists to remove.
 const (
-	// ToolAbort is the voluntary stop: the agent is functioning but
-	// choosing not to continue. Always registered; the reason is required
-	// because "why" is the only thing worth collecting from a deliberate
-	// stop (an involuntary death is a `failed` conversation, not this).
-	ToolAbort = "abort"
-	// ToolContinue hands off to the next blueprint step. Registered ONLY on
-	// a non-terminal step — the addendum prompt that introduces it is
-	// appended on exactly those steps, so a model never sees a tool its
-	// instructions don't mention.
-	ToolContinue = "continue"
+	stopTypeFinish = string(domain.RunOutcomeFinish)
+	stopTypeAbort  = string(domain.RunOutcomeAbort)
 )
 
 var (
@@ -89,37 +99,34 @@ func parseToolDefinitions(raw []byte) ([]schemas.ChatTool, error) {
 	return out, nil
 }
 
-// flowControlTools returns the loop-side tools for this step. `abort` is
-// always present; `continue` only on a non-terminal blueprint step.
-func flowControlTools(nonTerminalStep bool) []schemas.ChatTool {
-	abortProps := schemas.NewOrderedMap()
-	abortProps.Set("reason", map[string]any{
-		"type":        "string",
-		"description": "Why you are stopping, and what a human needs to do next.",
+// flowControlTools returns the loop-side tool set, which does not vary.
+//
+// Registration is unconditional — including `finish` on a step that is
+// already the last one, where it is an exact alias for stopping normally and
+// decideBlueprintStep gives the identical answer. A harmless alias costs
+// less than a tool list that changes shape with step position and can fall
+// out of step with the prompt that describes it.
+func flowControlTools() []schemas.ChatTool {
+	props := schemas.NewOrderedMap()
+	props.Set("type", map[string]any{
+		"type": "string",
+		"enum": []string{stopTypeFinish, stopTypeAbort},
+		"description": "\"finish\" ends the whole task successfully, skipping any workflow steps after this one. " +
+			"\"abort\" stops without completing it and leaves the task open for a human.",
 	})
-	abort := functionTool(ToolAbort,
-		"Stop this run deliberately without completing the task. Use this only when you are functioning correctly but have concluded the work cannot or should not proceed — a blocker you cannot resolve, a task that turns out to be already done, or an instruction you should not follow. State plainly why, so a human can pick it up.",
+	props.Set("reason", map[string]any{
+		"type":        "string",
+		"description": "Why you are stopping here, and what a human needs to know or do next.",
+	})
+	return []schemas.ChatTool{functionTool(ToolStopRun,
+		"End this run in a way other than simply finishing. You do NOT need this to complete your work normally — "+
+			"for that, reply with a message and no tool calls. Reach for this only to abort, or to end an entire "+
+			"multi-step workflow early.",
 		&schemas.ToolFunctionParameters{
 			Type:       "object",
-			Properties: abortProps,
-			Required:   []string{"reason"},
-		})
-	if !nonTerminalStep {
-		return []schemas.ChatTool{abort}
-	}
-	contProps := schemas.NewOrderedMap()
-	contProps.Set("summary", map[string]any{
-		"type":        "string",
-		"description": "What you did, in one or two sentences, for the step that picks this up.",
-	})
-	cont := functionTool(ToolContinue,
-		"Hand this workflow off to its next step. Call this when your own step is done and the remaining work belongs to the step that follows.",
-		&schemas.ToolFunctionParameters{
-			Type:       "object",
-			Properties: contProps,
-			Required:   []string{"summary"},
-		})
-	return []schemas.ChatTool{cont, abort}
+			Properties: props,
+			Required:   []string{"type", "reason"},
+		})}
 }
 
 func functionTool(name, description string, params *schemas.ToolFunctionParameters) schemas.ChatTool {
@@ -133,17 +140,25 @@ func functionTool(name, description string, params *schemas.ToolFunctionParamete
 	}
 }
 
-// flowControlOutcome maps a flow-control call onto the terminal outcome
-// vocabulary decideBlueprintStep reads. ok is false for any other tool name,
-// which is what makes this the single place the mapping lives.
-func flowControlOutcome(call domain.ToolCall) (outcome domain.RunOutcome, summary, reason string, ok bool) {
-	switch call.Name {
-	case ToolContinue:
-		return domain.RunOutcomeContinue, stringArg(call.Input, "summary"), "", true
-	case ToolAbort:
-		return domain.RunOutcomeAbort, "", stringArg(call.Input, "reason"), true
+// flowControlOutcome reports whether call is the flow-control tool and, if
+// so, the outcome and reason it carries — the single place the model-facing
+// vocabulary meets the one decideBlueprintStep reads.
+//
+// An unrecognized `type` yields an empty outcome rather than an error:
+// isFlowControl still holds, so the caller answers the call in band and the
+// model gets to correct itself.
+func flowControlOutcome(call domain.ToolCall) (outcome domain.RunOutcome, reason string, isFlowControl bool) {
+	if call.Name != ToolStopRun {
+		return "", "", false
+	}
+	reason = stringArg(call.Input, "reason")
+	switch stringArg(call.Input, "type") {
+	case stopTypeFinish:
+		return domain.RunOutcomeFinish, reason, true
+	case stopTypeAbort:
+		return domain.RunOutcomeAbort, reason, true
 	default:
-		return "", "", "", false
+		return "", reason, true
 	}
 }
 

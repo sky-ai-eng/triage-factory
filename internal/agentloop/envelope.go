@@ -22,11 +22,14 @@ var codingAgentSystemPrompt string
 var completionNative string
 
 // blueprintStepNonterminal is the addendum appended on a non-terminal
-// blueprint step — the same guidance the SDK path's addendum carries, with
-// its JSON-envelope references rewritten as the `continue` / `abort` tools.
-// It is appended exactly when the `continue` tool is registered: a model
-// must never be handed a tool its instructions don't mention, nor told about
-// one it doesn't have.
+// blueprint step — the same guidance the SDK path's addendum carries, minus
+// its JSON-envelope references.
+//
+// It changes no tool: the tool set is the same everywhere. What it changes
+// is what an ordinary stop means, since on a non-final step that is a
+// handoff rather than the end of the task. Step position is carried here and
+// nowhere else, which is why a prompt and a tool list cannot fall out of
+// step.
 //
 //go:embed prompts/blueprint-step-nonterminal.txt
 var blueprintStepNonterminal string
@@ -46,8 +49,9 @@ type EnvelopeParts struct {
 	Envelope string
 	// Mission is the step's prompt body.
 	Mission string
-	// NonTerminalStep appends the blueprint addendum. It must agree with
-	// Spec.NonTerminalStep, which registers the tool the addendum describes.
+	// NonTerminalStep appends the blueprint addendum, which tells the model
+	// that stopping hands off rather than ending the task. This is the only
+	// place step position is expressed.
 	NonTerminalStep bool
 }
 
