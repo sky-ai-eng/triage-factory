@@ -3,13 +3,12 @@ package domain
 import "time"
 
 // TaskMemory is a durable per-run narrative of what an agent tried on a task
-// and why. Written to `./_scratch/entity-memory/<namespace>/<run_id>.md` in the
-// worktree during the run, then ingested into the `conversation_memory` table before
-// worktree teardown. The namespace is the run's BlueprintRunID when set, else
-// the run's own id (see the spawner's memoryNamespace helper).
-// Materialized back into future runs' worktrees so iterations on the same
-// entity can read what prior attempts tried — and so the sibling steps of one
-// blueprint run can read each other's memory as their handoff.
+// and why. The agent writes it to the one fixed path `./_scratch/memory.md` in
+// its run root; the orchestrator reads it at termination and ingests it into
+// the `conversation_memory` table before worktree teardown. Materialized back
+// into future runs' worktrees under `_scratch/entity-memory/` so iterations on
+// the same entity can read what prior attempts tried — and so the sibling steps
+// of one blueprint run can read each other's memory as their handoff.
 //
 // Stored in the `conversation_memory` table with a denormalized `entity_id` for fast
 // entity-scoped queries (memory materialization walks the entity graph) and a
@@ -21,4 +20,13 @@ type TaskMemory struct {
 	BlueprintRunID string // denormalized from the run; empty for a standalone (non-blueprint) run
 	Content        string
 	CreatedAt      time.Time
+
+	// StepIndex and PromptName come from the producing conversation, not the
+	// memory row: they are what lets a materializer name the file after the
+	// work it records — "02-implement.md" rather than an opaque id. Both are
+	// zero-valued when the conversation carries no step index / prompt (or the
+	// reader's visibility can't see it), so every consumer must tolerate their
+	// absence.
+	StepIndex  *int   // 0-based blueprint step index of the producing conversation
+	PromptName string // display name of the prompt that conversation ran
 }

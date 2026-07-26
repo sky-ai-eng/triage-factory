@@ -258,11 +258,10 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		worktree.RemoveClaudeProjectDir(claudeCwd)
 	}()
 
-	// The memory namespace groups this run's memory file with its siblings:
-	// the blueprint_run_id when this run is a blueprint step (so step N+1 reads
-	// step N's memory as its handoff), else the run's own id. It names the
-	// folder the agent reads from and writes into, and it's exported below so
-	// the contract can reference it deterministically.
+	// The namespace groups this run with its blueprint siblings — the run tree,
+	// the workspace snapshot, and which prior memories count as this run's own
+	// handoff rather than history. Exported below so per-run scratch paths the
+	// prompts name (the review passes' shared drop point) resolve deterministically.
 	namespace := memoryNamespace(cfg.blueprintRunID, runID)
 
 	// Both materializations below write into <runRoot>/_scratch/, so they only run
@@ -280,24 +279,33 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// PRE-EXISTING, not introduced here (the writes that would have refreshed them
 	// already failed EACCES, silently, as warnings rather than a decision) and it
 	// is confined to the sandboxed path: local mode never hands the tree off, so it
-	// keeps full per-step freshness. It is acceptable because the handoff a
-	// blueprint actually depends on is unaffected — step N-1's memory is written
-	// into this same shared tree by the agent itself, not by us — and because a
-	// cold rehydrate rebuilds the tree orchestrator-owned, so the full pass runs
-	// again there. Giving the KB genuine per-step freshness means giving it the
+	// keeps full per-step freshness. A warm step also keeps its predecessor's
+	// memory file at the fixed write path, so the reset below is skipped with the
+	// rest — a warm step that terminates writing nothing has the previous step's
+	// memory ingested as its own. A cold rehydrate rebuilds the tree
+	// orchestrator-owned, so the full pass runs again there. Giving either the KB
+	// or this reset genuine per-step reach in a handed-off tree means giving it the
 	// step skill's treatment (a read-only mount off an orchestrator-owned dir,
 	// restaged per step); that changes how the agent reads the KB, so it belongs in
 	// its own change, not smuggled into this call site.
 	if sandbox.RunTreeHandedOff(claudeCwd) {
 		delegateLog.Debug("run tree already handed to the sandbox identity; skipping memory/knowledge materialization (these writes cannot succeed here — the tree keeps what the pre-launch pass wrote, so a mid-blueprint knowledge-base edit will not reach this step)", "run", runID, "cwd", claudeCwd)
 	} else {
-		// Materialize any prior task memories into ./_scratch/entity-memory/, one
-		// folder per workflow run, and create this run's own namespace folder, so
-		// the agent sees what previous iterations on this task have already tried.
-		// The directory is git-excluded by writeLocalExcludes
-		// (managedExcludePatterns in internal/worktree/worktree.go) so
-		// nothing leaks into the PR.
-		materializePriorMemories(s.taskMemory, orgID, cfg.teamID, claudeCwd, task.EntityID, namespace)
+		// Materialize any prior task memories into ./_scratch/entity-memory/ —
+		// this workflow run's earlier steps under this-run/, prior separate runs
+		// under history/ — so the agent sees what previous iterations on this
+		// task have already tried. The directory is git-excluded by
+		// writeLocalExcludes (managedExcludePatterns in
+		// internal/worktree/worktree.go) so nothing leaks into the PR.
+		materializePriorMemories(s.taskMemory, orgID, cfg.teamID, claudeCwd, task.EntityID, cfg.blueprintRunID)
+
+		// A blueprint's steps share this tree and all write the same memory
+		// filename, so a step starting a fresh conversation in it starts from a
+		// clean slate. A run continuing a session (a mid-flight re-claim) keeps
+		// what it already wrote.
+		if priorSessionID == "" {
+			clearAgentMemoryFile(claudeCwd)
+		}
 
 		// Copy the entity's project knowledge-base into
 		// ./_scratch/project-knowledge/ if the entity is assigned to a
@@ -349,11 +357,11 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	extraEnv := []string{
 		"TRIAGE_FACTORY_CONVERSATION_ID=" + runID,
-		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot, // Set for both sources so the completion-gate retry message can reference an absolute _scratch/entity-memory path that resolves regardless of which worktree the agent has cd'd into.
-		// The memory namespace folder: blueprint_run_id for a blueprint step
-		// (its siblings' handoff), else the run's own id. Non-absolute, so it
-		// passes through translateEnvForSandbox unchanged. The <entity_memory>
-		// contract names this folder via the env var.
+		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot, // Set for both sources so the completion-gate retry message can reference the absolute _scratch/memory.md path that resolves regardless of which worktree the agent has cd'd into.
+		// The workflow run this step belongs to. Non-absolute, so it passes
+		// through translateEnvForSandbox unchanged. Prompts that share a drop
+		// point across the steps of one run (the parallel review passes) name
+		// their directory through this.
 		"TRIAGE_FACTORY_BLUEPRINT_RUN_ID=" + namespace,
 	}
 	// Set TRIAGE_FACTORY_REPO when the run has a resolved GitHub repo context
@@ -565,10 +573,10 @@ func (s *Spawner) processCompletion(
 	completion *agentproc.Result,
 	claudeCwd, sessionID, triggerType, creatorUserID string,
 ) (parked bool) {
-	// The memory namespace is the folder grouping this run's memory file with
-	// its blueprint siblings (so step N+1 reads step N's as its handoff).
-	// Derived from the caller-supplied blueprint_run_id — no DB fetch, so it
-	// can't silently fall back to the wrong namespace on a transient read error.
+	// The namespace keys this run's workspace (tree + snapshot) among its
+	// blueprint siblings. Derived from the caller-supplied blueprint_run_id —
+	// no DB fetch, so it can't silently fall back to the wrong key on a
+	// transient read error.
 	namespace := memoryNamespace(blueprintRunID, runID)
 
 	// Classify the turn-end up front. A no-conclusion turn (prose / nothing) is
@@ -594,8 +602,9 @@ func (s *Spawner) processCompletion(
 	// === "the run terminated", agent_content NULL === "the agent didn't write a
 	// usable memory file" (UpsertAgentMemory normalizes empty/whitespace input
 	// to NULL on the way in). blueprint_run_id is denormalized onto the row so
-	// the next run's materializer folders this file under the right namespace.
-	agentContent, fileState := readAgentMemoryFile(claudeCwd, namespace, runID)
+	// the next run's materializer can tell this workflow run's own steps from
+	// history.
+	agentContent, fileState := readAgentMemoryFile(claudeCwd)
 	if err := s.taskMemory.UpsertAgentMemorySystem(context.Background(), orgID, runID, task.EntityID, blueprintRunID, agentContent); err != nil {
 		delegateLog.Warn("upsert memory for run failed", "run", runID, "error", err)
 	}

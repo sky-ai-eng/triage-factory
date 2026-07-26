@@ -620,9 +620,9 @@ func addExcludesOrRollback(runID, wtDir string) error {
 // managedExcludePatterns are the gitignore patterns writeLocalExcludes
 // ensures are present in .git/info/exclude for every delegated worktree.
 //
-//   - _scratch/ — CI log archives, ephemeral downloads, entity-memory
-//     and project-knowledge subdirs populated by the spawner.
-//     One prefix covers everything under it.
+//   - _scratch/ — CI log archives, ephemeral downloads, the agent's own
+//     memory.md, and the entity-memory / project-knowledge subdirs the
+//     spawner populates. One prefix covers everything under it.
 var managedExcludePatterns = []string{"_scratch/"}
 
 // Markers delimiting the managed section of .git/info/exclude. writeLocalExcludes

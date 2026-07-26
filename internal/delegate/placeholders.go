@@ -27,16 +27,16 @@ import (
 // event-derived placeholders just stay empty.
 //
 // runRoot is the run-root path AS THE AGENT SEES IT (agentproc.AgentVisibleRoot
-// — "/work" under the sandbox, the host run-root otherwise); blueprintRunID is
-// the memory namespace folder. Both feed the run-root / entity-memory paths the
-// agent is told to write to. We register them under both the canonical
-// {{RUN_ROOT}} / {{BLUEPRINT_RUN_ID}} placeholders and the shell-style
-// $TRIAGE_FACTORY_CONVERSATION_ROOT / $TRIAGE_FACTORY_BLUEPRINT_RUN_ID names: the env
-// vars are exported for Bash, but the agent's file tools do no shell expansion,
-// so any prompt that references the bare env var would otherwise write to a
-// literal "$TRIAGE_FACTORY_CONVERSATION_ROOT/..." path the completion gate never finds.
-// Pre-expanding both forms makes the path resolve regardless of which tool the
-// agent reaches for or which form a (possibly user-authored) prompt used.
+// — "/work" under the sandbox, the host run-root otherwise); blueprintRunID
+// names the workflow run, which prompts use for scratch paths the steps of one
+// run share (the parallel review passes' drop point). We register them under
+// both the canonical {{RUN_ROOT}} / {{BLUEPRINT_RUN_ID}} placeholders and the
+// shell-style $TRIAGE_FACTORY_CONVERSATION_ROOT / $TRIAGE_FACTORY_BLUEPRINT_RUN_ID
+// names: the env vars are exported for Bash, but the agent's file tools do no
+// shell expansion, so any prompt that references the bare env var would otherwise
+// write to a literal "$TRIAGE_FACTORY_CONVERSATION_ROOT/..." path that resolves
+// nowhere. Pre-expanding both forms makes the path resolve regardless of which
+// tool the agent reaches for or which form a (possibly user-authored) prompt used.
 //
 // {{SCOPE}} and {{TOOLS_REFERENCE}} are deliberately NOT handled here — buildPrompt
 // inlines those sections into the template text before this pass, because

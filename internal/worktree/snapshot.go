@@ -233,8 +233,8 @@ func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, err
 // (nil, nil) for a clean tree.
 //
 // _scratch is removed from the staged set explicitly rather than left to the
-// worktree's excludes: snapshot owns the _scratch capture separately (with its
-// own entity-memory / project-knowledge exclusions), and a linked worktree's
+// worktree's excludes: snapshot owns the _scratch capture separately (skipping
+// the subtrees that re-materialize on the next run), and a linked worktree's
 // managed excludes live in the per-worktree gitdir while `add` consults the
 // common dir — so relying on them here would leak _scratch into the patch.
 func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {

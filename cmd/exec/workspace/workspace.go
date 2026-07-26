@@ -3,7 +3,7 @@
 // inside a delegation run.
 //
 // The flow: a run that starts without a codebase (a Jira or taskless run is
-// spawned at the run-root — a throwaway dir holding only _scratch/entity-memory/)
+// spawned at the run-root — a throwaway dir holding only _scratch/)
 // decides which repo(s) it needs and calls `workspace add <owner/repo>` to
 // materialize a worktree. By default the repo's default branch is checked out
 // (detached); `--ref <branch>` checks out a named branch and `--pr <N>` checks

@@ -254,7 +254,7 @@ Current contract (in `internal/ai/prompts/envelope.txt`):
 
 After SKY-148: `status` can also be `"task_unsolvable"`. The spawner-assigned `"failed"` state is never returned by the agent — it's set by the spawner when no valid JSON arrives.
 
-After SKY-141: the agent is required to have written `./_scratch/entity-memory/<run_id>.md` on disk **before** returning its completion JSON. The spawner verifies this and auto-resumes the session once with a correction message if the file is missing. This happens externally via `--resume`, not via hooks.
+After SKY-141: the agent is required to have written its run memory on disk **before** returning its completion JSON — at the fixed path `./_scratch/memory.md`, which the orchestrator reads at termination and files under the run's ids. The spawner verifies this and auto-resumes the session once with a correction message if the file is missing. This happens externally via `--resume`, not via hooks.
 
 ---
 

@@ -37,29 +37,25 @@ func lookupRun(host agenthost.Client) agenthost.RunInfo {
 }
 
 // agentMemoryFile returns the absolute path the delegated agent must write its
-// run-memory file to, composed from the run-scoped env vars the spawner exports
-// into the agent's environment (TRIAGE_FACTORY_CONVERSATION_ROOT,
-// TRIAGE_FACTORY_BLUEPRINT_RUN_ID, and TRIAGE_FACTORY_CONVERSATION_ID — see
-// internal/delegate/run.go). This mirrors the path the completion gate reads
-// (cwd/_scratch/entity-memory/<blueprint_run_id>/<run_id>.md), so the "do not
-// retry, finish by writing ..." messages below can point the agent at the file
-// concretely.
+// run-memory file to: the fixed _scratch/memory.md under the run root the
+// spawner exports as TRIAGE_FACTORY_CONVERSATION_ROOT (see
+// internal/delegate/run.go). This mirrors the path the completion gate reads,
+// so the "do not retry, finish by writing ..." messages below can point the
+// agent at the file concretely.
 //
 // The bare env-var reference these messages used to carry would be written
 // verbatim by the agent's Write tool — which does no shell expansion — so the
 // file landed at a literal "$TRIAGE_FACTORY_CONVERSATION_ROOT/..." path the gate never
 // found. Inside the sandbox TRIAGE_FACTORY_CONVERSATION_ROOT is already translated to
 // /work, so reading it here yields a path the agent can actually reach. Falls
-// back to the env-var-reference form if any piece is unset (subcommand invoked
+// back to the env-var-reference form when the root is unset (subcommand invoked
 // outside a delegated run) so the message still reads coherently.
 func agentMemoryFile() string {
 	root := os.Getenv("TRIAGE_FACTORY_CONVERSATION_ROOT")
-	ns := os.Getenv("TRIAGE_FACTORY_BLUEPRINT_RUN_ID")
-	runID := os.Getenv("TRIAGE_FACTORY_CONVERSATION_ID")
-	if root == "" || ns == "" || runID == "" {
-		return "$TRIAGE_FACTORY_CONVERSATION_ROOT/_scratch/entity-memory/$TRIAGE_FACTORY_BLUEPRINT_RUN_ID/$TRIAGE_FACTORY_CONVERSATION_ID.md"
+	if root == "" {
+		return "$TRIAGE_FACTORY_CONVERSATION_ROOT/_scratch/memory.md"
 	}
-	return filepath.Join(root, "_scratch", "entity-memory", ns, runID+".md")
+	return filepath.Join(root, "_scratch", "memory.md")
 }
 
 func handlePR(ctx context.Context, host agenthost.Client, args []string) {

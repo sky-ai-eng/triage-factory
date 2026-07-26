@@ -46,7 +46,8 @@ const (
 // re-materialize on the next run and so never ride in the snapshot:
 // entity-memory rebuilds from conversation_memory, project-knowledge is re-copied from
 // the project KB. Everything else under _scratch (ci-logs, skill scratch,
-// ad-hoc agent files) is non-recoverable and IS captured.
+// ad-hoc agent files, and the agent's own memory.md — which is not in the DB
+// until termination ingests it) is non-recoverable and IS captured.
 var scratchExcludes = map[string]bool{"entity-memory": true, "project-knowledge": true}
 
 // snapshotManifest is the small header describing what a snapshot blob carries,

@@ -32,4 +32,4 @@ Failure modes:
 - "repo is not tracked by this team" — the repo is configured org-wide but not attached to your team; you can't materialize (or push to) it. Pick a tracked repo from `workspace list available`.
 - "repo has no clone URL on its profile; try re-profiling" — the user's repo profile is incomplete. Report `task_unsolvable` and surface the message; the user fixes it on the Settings page.
 
-Don't `cd` outside the materialized worktrees for code work. Files outside `{{RUN_ROOT}}` are blocked by the session's file-access scope, and the only writable area outside the worktrees is `{{RUN_ROOT}}/_scratch/entity-memory/` (see <entity_memory> in the envelope).
+Don't `cd` outside the materialized worktrees for code work. Files outside `{{RUN_ROOT}}` are blocked by the session's file-access scope, and the only writable area outside the worktrees is `{{RUN_ROOT}}/_scratch/` (which is where your run memory goes — see <entity_memory> in the envelope).

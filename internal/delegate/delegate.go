@@ -32,7 +32,7 @@ import (
 //     Cleanup uses RemoveAt(wtPath) + CleanupPRConfig.
 //
 //   - Jira (lazy): hasWT=false, wtPath=runRoot is the throwaway run-root
-//     (initial cwd; holds _scratch/entity-memory/ but no codebase), owner/repo empty.
+//     (initial cwd; holds _scratch/ but no codebase), owner/repo empty.
 //     Per-repo worktrees materialize as subdirs under runRoot via the
 //     `triagefactory exec workspace add` CLI; the conversation_worktrees DB table
 //     is the source of truth for cleanup, which iterates the table at
@@ -629,8 +629,8 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 // {runRoot}/{owner}/{repo}/ and inserts a row into conversation_worktrees.
 //
 // The agent's initial cwd is the run-root: a throwaway dir holding
-// only ./_scratch/entity-memory/ (populated by materializePriorMemories
-// below). Both gh and jira tool surfaces are exposed since the agent
+// only ./_scratch/ (its entity-memory tree populated by
+// materializePriorMemories below). Both gh and jira tool surfaces are exposed since the agent
 // will need both to implement and ship a PR.
 //
 // runs.worktree_path is set to the run-root. The resume path reads this

@@ -57,6 +57,6 @@ STEP 8 — Finalize once.
 This drafts the review and hands it off for human approval (it does NOT submit to GitHub — the human's approval does); the response is `{"status": "drafted_awaiting_approval", ...}`. That means success — your work on this review is complete. Do NOT call `finalize-review` again — a second call is a hard error. (Nothing posts to GitHub until a human approves the draft; your review is staged TF-side until then.)
 
 STEP 9 — Finish.
-Write your run memory file to `{{RUN_ROOT}}/_scratch/entity-memory/{{BLUEPRINT_RUN_ID}}/{{RUN_ID}}.md` — a couple of sentences: how many findings you posted, how many you skipped, and the event you submitted. Then return your completion JSON.
+Write your run memory file to `{{RUN_ROOT}}/_scratch/memory.md` — a couple of sentences: how many findings you posted, how many you skipped, and the event you submitted. Then return your completion JSON.
 
 This task is read-only with respect to the code: do not edit, stage, commit, or push anything. Your only writes are to `_scratch/` and the review queue.
