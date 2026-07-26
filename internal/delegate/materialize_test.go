@@ -143,6 +143,38 @@ func TestMaterializePriorMemories_HistoryNameCollision(t *testing.T) {
 	assertMemoryFile(t, filepath.Join(historyDir, "2026-07-20-ci-fix-2.md"), "second attempt")
 }
 
+// TestBlueprintHandoff_MemorySurvivesTheFixedPathClear is the round trip the
+// shared worktree depends on. Step 1 writes the one path it is told about;
+// termination ingests it into conversation_memory under the workflow run; step
+// 2 starting in the SAME tree renders it back as a numbered file under
+// this-run/ and only then clears the path for its own write. The clear must
+// never be the reason a later step loses its predecessor's handoff.
+func TestBlueprintHandoff_MemorySurvivesTheFixedPathClear(t *testing.T) {
+	s, database, runID, taskID := setupAdvanceFixture(t, "handoff")
+	makeRunBlueprintStep(t, database, runID, taskID)
+	task := loadTask(t, s, taskID)
+	cwd := t.TempDir()
+	blueprintRunID := "bpr-" + runID
+
+	// Step 1 writes the fixed path and terminates.
+	writeAgentMemory(t, cwd, "step 1 chose approach X because Y")
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, blueprintRunID, task,
+		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "event", "")
+
+	// Step 2's run start, in the order runAgent performs it.
+	materializePriorMemories(s.taskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, task.EntityID, blueprintRunID, nil)
+	clearAgentMemoryFile(cwd, nil)
+
+	// Step 1's narrative is where the prompt tells step 2 to look — named for
+	// the step and the prompt that produced it, not for either id.
+	assertMemoryFile(t, filepath.Join(cwd, "_tfac", "entity-memory", "this-run", "01-t.md"), "step 1 chose approach X because Y")
+	// And the write path is free, so step 2's own memory can't be confused for
+	// step 1's if step 2 writes nothing.
+	if _, state := readAgentMemoryFile(cwd); state != memoryFileMissing {
+		t.Errorf("state = %v, want memoryFileMissing after the clear", state)
+	}
+}
+
 // TestClearAgentMemoryFile pins the shared-worktree guard: the steps of one
 // blueprint run all write the same filename, so a fresh step must not inherit
 // its predecessor's file and have it ingested as its own memory.
