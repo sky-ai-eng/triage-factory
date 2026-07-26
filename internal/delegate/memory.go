@@ -255,21 +255,35 @@ func memorySlug(promptName string) string {
 	var b strings.Builder
 	dash := false
 	for _, r := range strings.ToLower(promptName) {
-		switch {
-		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
-			if dash && b.Len() > 0 {
-				b.WriteByte('-')
-			}
-			dash = false
-			b.WriteRune(r)
-		default:
+		if !isSlugChar(r) {
 			dash = true
+			continue
 		}
-		if b.Len() >= memorySlugMaxLen {
+		// Every byte this loop writes is ASCII, so the cost of taking this
+		// character is one byte plus the separator it may need. Charge it
+		// before writing: a check after the fact would let a word boundary
+		// land the pair past the cap.
+		cost := 1
+		if dash && b.Len() > 0 {
+			cost = 2
+		}
+		if b.Len()+cost > memorySlugMaxLen {
 			break
 		}
+		if cost == 2 {
+			b.WriteByte('-')
+		}
+		dash = false
+		b.WriteByte(byte(r))
 	}
 	return strings.Trim(b.String(), "-")
+}
+
+// isSlugChar reports whether r survives into a slug as itself. Everything else
+// — punctuation, whitespace, any non-ASCII letter — reads as a word boundary,
+// which is what keeps a slug's byte count equal to its character count.
+func isSlugChar(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
 }
 
 // lookupEntityProjectID returns the entity's project_id (or nil if the

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -176,10 +177,21 @@ func TestMemorySlug(t *testing.T) {
 		{"", ""},
 		{"///", ""},
 		{"A very long prompt name that runs well past the cap", "a-very-long-prompt-name-that-run"},
+		// A word boundary one byte under the cap: the next character costs its
+		// separator too, so neither is taken. Charging that pair only after
+		// writing it puts the slug two bytes over the bound.
+		{strings.Repeat("a", memorySlugMaxLen-1) + " de", strings.Repeat("a", memorySlugMaxLen-1)},
+		// Non-ASCII never contributes bytes of its own — it reads as a
+		// separator, so the cap accounting stays a byte count.
+		{"ünïcödé wörds hére", "n-c-d-w-rds-h-re"},
 	}
 	for _, c := range cases {
-		if got := memorySlug(c.in); got != c.want {
+		got := memorySlug(c.in)
+		if got != c.want {
 			t.Errorf("memorySlug(%q) = %q, want %q", c.in, got, c.want)
+		}
+		if len(got) > memorySlugMaxLen {
+			t.Errorf("memorySlug(%q) = %q (%d bytes), over the %d cap", c.in, got, len(got), memorySlugMaxLen)
 		}
 	}
 }
