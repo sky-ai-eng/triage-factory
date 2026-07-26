@@ -234,10 +234,12 @@ func (s *Server) isOrgAdmin(ctx context.Context, orgID, userID string) (bool, er
 	return s.az.UserIsOrgAdmin(ctx, userID, orgID)
 }
 
-// repoAccessAllowed reports whether the caller may read or write the given
-// repo (TFAC-559): an org admin always may; a non-admin member may only when
-// the repo is tracked by at least one of their teams. Local mode (N=1) has
-// no team boundary and is covered by isOrgAdmin's short-circuit.
+// repoAccessAllowed reports whether the caller may *read* the given repo
+// (TFAC-559): an org admin always may; a non-admin member may only when the
+// repo is tracked by at least one of their teams. Local mode (N=1) has no
+// team boundary and is covered by isOrgAdmin's short-circuit.
+//
+// Mutations are a strictly narrower gate — see repoMutationAccess.
 func (s *Server) repoAccessAllowed(ctx context.Context, orgID, userID, owner, repo string) (bool, error) {
 	isAdmin, err := s.isOrgAdmin(ctx, orgID, userID)
 	if err != nil {
@@ -253,6 +255,73 @@ func (s *Server) repoAccessAllowed(ctx context.Context, orgID, userID, owner, re
 		return e
 	})
 	return tracked, err
+}
+
+// repoWriteAccess is the outcome of the repo-mutation gate. Three-valued
+// rather than a bool because "may not" splits into two different answers to
+// the caller: a repo they can't see at all versus one they can see but may
+// not change.
+type repoWriteAccess int
+
+const (
+	// repoWriteInvisible — the repo is outside the caller's tracked set.
+	// It isn't in their GET /api/repos list either, so the handler answers
+	// 404 and discloses nothing about whether it exists.
+	repoWriteInvisible repoWriteAccess = iota
+	// repoWriteForbidden — the caller can see the repo but administers
+	// none of the teams tracking it. 404 here would contradict their own
+	// repo list, so this is an honest 403.
+	repoWriteForbidden
+	// repoWriteAllowed — org admin, or team admin of a tracking team.
+	repoWriteAllowed
+)
+
+// repoMutationAccess resolves the write gate for a repo's org-wide
+// configuration. repo_profiles carries no team_id, so a write by any member
+// of any tracking team lands on every tracking team's runs — membership is
+// therefore the read gate only, and mutating requires an admin: org admin,
+// or team admin of at least one team that tracks the repo.
+//
+// There is no DB backstop for this. repo_profiles_all's RLS is org-wide by
+// construction (it cannot express team scoping for an entity that has no
+// team), so this predicate is the whole enforcement — keep it here, in front
+// of every mutating repo handler.
+//
+// Local mode (N=1) resolves to repoWriteAllowed via isOrgAdmin's
+// short-circuit, before any store call.
+func (s *Server) repoMutationAccess(ctx context.Context, orgID, userID, owner, repo string) (repoWriteAccess, error) {
+	isAdmin, err := s.isOrgAdmin(ctx, orgID, userID)
+	if err != nil {
+		return repoWriteInvisible, err
+	}
+	if isAdmin {
+		return repoWriteAllowed, nil
+	}
+
+	var teamAdmin, tracked bool
+	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var e error
+		teamAdmin, e = tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, orgID, owner, repo)
+		if e != nil || teamAdmin {
+			// A team admin of a tracking team is necessarily a member of
+			// one, so the visibility read below would only confirm what we
+			// already know.
+			return e
+		}
+		tracked, e = tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgID, owner, repo)
+		return e
+	}); err != nil {
+		return repoWriteInvisible, err
+	}
+
+	switch {
+	case teamAdmin:
+		return repoWriteAllowed, nil
+	case tracked:
+		return repoWriteForbidden, nil
+	default:
+		return repoWriteInvisible, nil
+	}
 }
 
 // handleRepoProfiles returns configured repo profiles from the DB. Org
@@ -273,7 +342,15 @@ func (s *Server) handleRepoProfiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var profiles []domain.RepoProfile
+	// canEdit mirrors the PATCH gate (repoMutationAccess) per row, so the
+	// page can render a read-only base branch instead of a control that
+	// 403s on use. The client must not re-derive this from role — org admin
+	// and team admin are orthogonal, and only the server knows which teams
+	// tracking a given repo the caller administers.
+	var (
+		profiles []domain.RepoProfile
+		canEdit  []bool
+	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		if isAdmin {
@@ -281,7 +358,26 @@ func (s *Server) handleRepoProfiles(w http.ResponseWriter, r *http.Request) {
 		} else {
 			profiles, e = tx.Repos.ListTeamScoped(r.Context(), orgID)
 		}
-		return e
+		if e != nil {
+			return e
+		}
+		canEdit = make([]bool, len(profiles))
+		if isAdmin {
+			for i := range canEdit {
+				canEdit[i] = true
+			}
+			return nil
+		}
+		// One EXISTS per row. The list is already narrowed to the caller's
+		// own teams' tracked repos, so this is bounded by their tracked set
+		// and runs inside the single transaction the list read used.
+		for i, p := range profiles {
+			canEdit[i], e = tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(r.Context(), orgID, p.Owner, p.Repo)
+			if e != nil {
+				return e
+			}
+		}
+		return nil
 	}); err != nil {
 		internalError(w, "repos", err)
 		return
@@ -302,6 +398,7 @@ func (s *Server) handleRepoProfiles(w http.ResponseWriter, r *http.Request) {
 		CloneStatus    string  `json:"clone_status,omitempty"`
 		CloneError     string  `json:"clone_error,omitempty"`
 		CloneErrorKind string  `json:"clone_error_kind,omitempty"`
+		CanEdit        bool    `json:"can_edit"`
 	}
 
 	result := make([]repoJSON, len(profiles))
@@ -320,6 +417,7 @@ func (s *Server) handleRepoProfiles(w http.ResponseWriter, r *http.Request) {
 			CloneStatus:    p.CloneStatus,
 			CloneError:     p.CloneError,
 			CloneErrorKind: p.CloneErrorKind,
+			CanEdit:        canEdit[i],
 		}
 		if p.ProfiledAt != nil {
 			t := p.ProfiledAt.UTC().Format(time.RFC3339)
@@ -330,10 +428,11 @@ func (s *Server) handleRepoProfiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// handleRepoUpdate updates per-repo settings like base_branch. Gated the same
-// as handleRepoProfiles (TFAC-559): an org admin may update any repo, a
-// non-admin member only one their own team tracks — otherwise a member could
-// repoint another team's push-protection floor (base_branch).
+// handleRepoUpdate updates per-repo settings like base_branch. The write
+// gate is narrower than the read gate: a repo profile is org-wide, so
+// changing one changes behaviour for every team tracking it, and that takes
+// an admin — org admin, or team admin of a tracking team. Plain members of a
+// tracking team read the repo but can't repoint it.
 func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -348,14 +447,25 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	repoID := owner + "/" + repo
 
-	if allowed, err := s.repoAccessAllowed(r.Context(), orgID, userID, owner, repo); err != nil {
+	access, err := s.repoMutationAccess(r.Context(), orgID, userID, owner, repo)
+	if err != nil {
 		internalError(w, "repos", err)
 		return
-	} else if !allowed {
+	}
+	switch access {
+	case repoWriteInvisible:
 		// 404, not 403 — a repo outside the caller's tracked set doesn't
 		// appear in their GET /api/repos list either, so don't disclose
 		// its existence via a role-boundary error.
 		notFound(w, "repo")
+		return
+	case repoWriteForbidden:
+		// The inverse of the above: this repo *is* in the caller's own
+		// GET /api/repos list, so 404 would read as a bug. Say plainly
+		// that it's a permission boundary.
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "changing repo settings requires org admin or team admin of a team tracking this repo",
+		})
 		return
 	}
 
@@ -450,6 +560,10 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 // old org-global POST /api/repos was removed in favor of that single,
 // team-admin-gated entry point; GET /api/repos (the union profiles),
 // PATCH /api/repos/{owner}/{repo} (base_branch), and GET
-// /api/repos/{owner}/{repo}/branches remain, now scoped per-caller
-// (isOrgAdmin / repoAccessAllowed, TFAC-559): an org admin sees/touches
-// every repo, a non-admin member only the repos their own team(s) track.
+// /api/repos/{owner}/{repo}/branches remain, scoped per-caller.
+//
+// Reads (isOrgAdmin / repoAccessAllowed) go by membership: an org admin
+// sees every repo, a member only the repos their own team(s) track. The
+// PATCH gate (repoMutationAccess) is narrower still, because a repo profile
+// is org-wide and has no team to write against: it takes an org admin or a
+// team admin of a team that tracks the repo.

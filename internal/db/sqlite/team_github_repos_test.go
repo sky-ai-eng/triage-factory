@@ -202,6 +202,29 @@ func TestTeamGitHubRepos_SQLite_TracksRepoViewerScoped(t *testing.T) {
 	}
 }
 
+// TestTeamGitHubRepos_SQLite_TracksRepoViewerAdminScoped pins the same
+// local-mode asymmetry on the mutation gate: N=1 has a single implicit
+// owner, so there is no admin/member distinction to enforce and the answer
+// is unconditionally true. The org-id guard still applies.
+func TestTeamGitHubRepos_SQLite_TracksRepoViewerAdminScoped(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	got, err := stores.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, runmode.LocalDefaultOrgID, "acme", "never-tracked")
+	if err != nil {
+		t.Fatalf("TracksRepoViewerAdminScoped: %v", err)
+	}
+	if !got {
+		t.Error("local mode should report true unconditionally (N=1, single implicit owner)")
+	}
+
+	const bogusOrg = "11111111-1111-1111-1111-111111111111"
+	if _, err := stores.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, bogusOrg, "acme", "api"); err == nil {
+		t.Error("TracksRepoViewerAdminScoped with non-local orgID should error")
+	}
+}
+
 // TestTeamGitHubRepos_SQLite_ListOrgReposWithTeams pins the
 // tracked-repos-with-owning-teams read backing the switch reachability
 // preflights (TFAC-328): each repo carries the names of every team tracking
