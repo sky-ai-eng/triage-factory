@@ -1,9 +1,13 @@
 package delegate
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestAskedAboutArtifactAlready pins when the artifact-contract question
@@ -61,6 +65,70 @@ func TestAskedAboutArtifactAlready(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := askedAboutArtifactAlready(tc.rows); got != tc.want {
 				t.Errorf("askedAboutArtifactAlready = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPrepareInheritedMemory_TrustsAClaimThatAlreadyRan pins the distinction
+// the native runtime has no session id to make for it.
+//
+// A blueprint's steps share one run tree and all write the same memory
+// filename, so a fresh step must distrust whatever is at that path. But a
+// PARKED engagement picking up a steer is the same conversation continuing, and
+// the file there is its own — distrusting it would discard the run's notes at
+// termination and file agent_content NULL over real work.
+//
+// Both cases are exercised on a handed-off tree, which is the only shape where
+// the two outcomes differ: with the tree still writable a fresh claim simply
+// deletes the file and fingerprints nothing.
+func TestPrepareInheritedMemory_TrustsAClaimThatAlreadyRan(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		drive       bool
+		wantDigest  bool
+		wantContent string
+	}{
+		{name: "fresh claim distrusts a predecessor's file", drive: false, wantDigest: true},
+		{name: "re-claimed engagement keeps its own", drive: true, wantDigest: false, wantContent: "what I found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := newDelegateTestDB(t)
+			cwd := t.TempDir()
+			seedRun(t, database, "r-mem", "", cwd)
+			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+
+			if err := os.MkdirAll(filepath.Join(cwd, scratchDirName), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(agentMemoryFilePath(cwd), []byte("what I found"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.drive {
+				pending := false
+				if _, err := s.agentRuns.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+					ConversationID: "r-mem",
+					UserID:         runmode.LocalDefaultUserID,
+					Role:           "user",
+					Subtype:        "text",
+					Content:        "go",
+					Delivered:      &pending,
+				}); err != nil {
+					t.Fatalf("seed transcript: %v", err)
+				}
+			}
+
+			// handedOff=true: the warm-step shape, where the orchestrator can
+			// read the file but not delete it.
+			got := s.prepareInheritedMemory(context.Background(), runmode.LocalDefaultOrgID, "r-mem", cwd, nil, true)
+			if (got != nil) != tc.wantDigest {
+				t.Fatalf("fingerprint present = %v, want %v", got != nil, tc.wantDigest)
+			}
+			// The fingerprint's whole purpose is what termination then does with
+			// it, so assert through that rather than on the digest itself.
+			content, _ := readRunMemory(cwd, got)
+			if content != tc.wantContent {
+				t.Errorf("memory ingested at termination = %q, want %q", content, tc.wantContent)
 			}
 		})
 	}

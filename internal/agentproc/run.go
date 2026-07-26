@@ -208,13 +208,16 @@ type RunOptions struct {
 	StartAgentHost func() (mount sandbox.Mount, closer io.Closer, err error)
 
 	// GHChannel, when non-nil, wires the real-gh credential channel into the
-	// sandbox: the pinned gh binary (bind-mounted RO from the host image), the
-	// per-run injector cert (bind-mounted RO from the sidecar-written source
-	// path), and the gh env (GH_HOST → the injector, GH_ENTERPRISE_TOKEN → the
-	// per-run placeholder, SSL_CERT_FILE → the mounted cert, plus the prompt/
-	// update-notifier suppressors). nil on runs that don't touch GitHub, and on
-	// local/non-sandbox paths (which keep the SDK exec-verb gh). See
-	// GHChannelParams.
+	// agent subprocess. On the sandbox path that means the pinned gh binary
+	// (bind-mounted RO from the host image), the per-run injector cert
+	// (bind-mounted RO from the sidecar-written source path), and the gh env;
+	// on the direct path it means the same env pointed at host paths, with the
+	// channel's own bin dir leading PATH. Either way the env is GH_HOST → the
+	// injector, GH_ENTERPRISE_TOKEN → the per-run placeholder, SSL_CERT_FILE →
+	// the trust file, plus the prompt / update-notifier suppressors. nil on
+	// runs that don't touch GitHub, and whenever the channel could not be
+	// provisioned (which degrades the run to the scoped exec verbs, never
+	// fails it). See GHChannelParams.
 	GHChannel *GHChannelParams
 
 	// SkillsSourcePath, when non-empty, is the orchestrator-owned staging dir
@@ -233,6 +236,22 @@ type RunOptions struct {
 	// carry a skill). Local mode keeps materializing into the worktree instead —
 	// it owns the tree and there is no jail to mount into.
 	SkillsSourcePath string
+
+	// MemorySourcePath, when non-empty, is the orchestrator-owned staging dir
+	// holding the entity-memory tree materialized for THIS launch
+	// (sandbox.TrustedMemorySourcePath(TraceID)). The sandbox branch bind-mounts
+	// it READ-ONLY at sandbox.TrustedMemoryDestination; the agent reads it at the
+	// `_tfac/entity-memory` path its prompt names, through the symlink the run
+	// tree carries there.
+	//
+	// This is how a blueprint step's handoff — what its predecessors did, decided,
+	// and ruled out — reaches a sandboxed agent WITHOUT TF writing into the run
+	// tree: the tree belongs to the per-run sandbox uid from the first launch
+	// onward, so rendering prior memory inside it at step 2's setup is EACCES.
+	//
+	// Sandbox-only. Local mode materializes the same tree into the worktree
+	// instead — it owns the tree, and there is no jail to mount into.
+	MemorySourcePath string
 
 	// ReadOnlyRepoMounts are extra host directories bind-mounted READ-ONLY
 	// into the sandbox under Cwd. The Curator populates this with its shared
@@ -262,12 +281,13 @@ type ReadOnlyRepoMount struct {
 	RelPath string
 }
 
-// GHChannelParams carries the per-run coordinates the sandbox branch needs to
-// wire the real-gh credential channel: the injector's bound host:port (GH_HOST),
-// the per-run placeholder token (GH_ENTERPRISE_TOKEN), and the host path of the
-// injector cert the sidecar wrote (bind-mounted RO so SSL_CERT_FILE can point at
-// it in-jail). The real GitHub credential is NEVER here — it lives only in the
-// sidecar and is injected upstream; the placeholder is all the jail ever holds.
+// GHChannelParams carries the per-run coordinates needed to wire the real-gh
+// credential channel: the injector's bound host:port (GH_HOST), the per-run
+// placeholder token (GH_ENTERPRISE_TOKEN), and the host path of the injector's
+// trust file. The real GitHub credential is NEVER here — it lives only in the
+// process running the injector (the sidecar in multi, the TF process in local)
+// and is injected on the upstream hop; the placeholder is all the agent's
+// environment ever holds, in either mode.
 type GHChannelParams struct {
 	// Host is the injector's bound "host:port" (no scheme) — GH_HOST. gh forces
 	// https to it and verifies against the injector's per-run cert.
@@ -275,11 +295,30 @@ type GHChannelParams struct {
 	// Token is the per-run placeholder the agent's gh presents
 	// (GH_ENTERPRISE_TOKEN). The injector strips it and injects the real token.
 	Token string
-	// CertSourcePath is the host path of the injector cert the sidecar wrote
-	// (agenthost.CertPathFor(runID)). agentproc bind-mounts it RO at
-	// sandboxGHInjectorCert; the broker validates the source against its own
-	// derivation.
+	// CertSourcePath is the host path of the injector's trust file. On the
+	// sandbox path it is what the sidecar wrote (agenthost.CertPathFor(runID)),
+	// bind-mounted RO at sandboxGHInjectorCert with the broker validating the
+	// source against its own derivation; on the direct path SSL_CERT_FILE
+	// points at it as-is.
 	CertSourcePath string
+
+	// BinDir is the directory holding the TF-owned gh binary, prepended to the
+	// agent subprocess's PATH. Direct path only — the sandbox mounts the pinned
+	// binary onto a PATH-leading jail directory instead.
+	//
+	// The prepend is what pins WHICH gh a local run executes. The user's own
+	// installation is authenticated as the user, so resolving to it would put
+	// the agent on the human's full personal scope, outside this channel
+	// entirely; TF therefore owns the first PATH entry, and a run with no
+	// provisioned binary carries no gh in its tool allowlist at all rather than
+	// falling through to whatever is installed.
+	BinDir string
+
+	// ConfigDir is the per-run gh config directory — GH_CONFIG_DIR. Direct path
+	// only: a local run executes under the user's real HOME, so without this gh
+	// would read their ~/.config/gh, personal credential included. The sandbox
+	// has no such directory to reach (HOME is the run's own /work).
+	ConfigDir string
 }
 
 // NoopSink discards all stream events. Suitable for one-shot agent
@@ -743,6 +782,24 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		}
 	}
 
+	// This launch's materialized entity-memory tree, bind-mounted RO from the
+	// orchestrator-owned staging dir. Same optional shape as the skills mount: a
+	// staging dir that vanished (a swept orphan on a cold cross-executor resume)
+	// launches without the mount rather than failing on the broker's
+	// source-resolution check. The agent then finds nothing behind its
+	// `_tfac/entity-memory` symlink, which is a context loss, not a broken run.
+	if opts.MemorySourcePath != "" {
+		if _, statErr := os.Stat(opts.MemorySourcePath); statErr == nil {
+			extraMounts = append(extraMounts, sandbox.Mount{
+				Source:      opts.MemorySourcePath,
+				Destination: sandbox.TrustedMemoryDestination,
+				Options:     []string{"ro"},
+			})
+		} else {
+			agentprocLog.Warn("entity-memory staging dir missing; launching without the memory mount", "path", opts.MemorySourcePath, "error", statErr)
+		}
+	}
+
 	// The sandbox's argv targets /usr/bin/node (the apk-installed nodejs in
 	// the cached alpine rootfs) + /sdk/wrapper.mjs (the SDK bind-mount
 	// destination), not host paths. Build the sandbox-side argv from scratch.
@@ -838,6 +895,11 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// TF_AGENT_JSC_JIT=1 opt-in, depending on direction and platform.
 	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey})
 	hookEnv = append(append([]string(nil), hookEnv...), agentRuntimeEnv()...)
+	// The real-gh channel rides the same lane. It is appended last of the
+	// run-scoped entries so its PATH — which must lead with the TF-owned gh
+	// dir — wins over any inherited copy under exec's last-wins duplicate
+	// resolution. Empty when the run has no channel.
+	hookEnv = append(hookEnv, directGHChannelEnv(opts.GHChannel)...)
 	cmd.Env = githooks.DirectAgentEnv(mergeEnv(parentEnv, hookEnv, creds), identityPairs...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {

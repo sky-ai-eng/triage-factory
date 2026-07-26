@@ -24,25 +24,8 @@ var batchPrioritizeSystemPrompt string
 //go:embed prompts/batch-prioritize-user.txt
 var batchPrioritizeUserPrompt string
 
-// EnvelopeBodyTemplate is the runtime-independent half of the delegated-run
-// envelope: scope, tools, guardrails, scratch, entity memory. It says nothing
-// about how a run ends, so both runtimes append their own completion
-// contract — the SDK its terminal JSON envelope, the native loop its
-// flow-control tools.
-//
-//go:embed prompts/envelope-body.txt
-var EnvelopeBodyTemplate string
-
-// completionSDKTemplate is the SDK runtime's terminal contract: the JSON
-// envelope a run's final message must be. It exists only on that path;
-// the native loop concludes implicitly and never parses it.
-//
-//go:embed prompts/completion-sdk.txt
-var completionSDKTemplate string
-
-// EnvelopeTemplate is the full SDK-path envelope — the body plus the JSON
-// completion contract, exactly the text that shipped as one file.
-var EnvelopeTemplate = EnvelopeBodyTemplate + "\n" + completionSDKTemplate
+//go:embed prompts/envelope.txt
+var EnvelopeTemplate string
 
 //go:embed prompts/gh-tools.txt
 var GHToolsTemplate string
@@ -51,7 +34,7 @@ var GHToolsTemplate string
 var JiraToolsTemplate string
 
 // PR review is a three-step blueprint: a security pass and a
-// correctness pass each write findings to _scratch, then a cheap aggregator
+// correctness pass each write findings to _tfac, then a cheap aggregator
 // posts and submits the review. See ShippedBlueprints.
 //
 //go:embed prompts/pr-review-security.txt

@@ -258,52 +258,80 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		worktree.RemoveClaudeProjectDir(claudeCwd)
 	}()
 
-	// The memory namespace groups this run's memory file with its siblings:
-	// the blueprint_run_id when this run is a blueprint step (so step N+1 reads
-	// step N's memory as its handoff), else the run's own id. It names the
-	// folder the agent reads from and writes into, and it's exported below so
-	// the contract can reference it deterministically.
+	// The namespace groups this run with its blueprint siblings — the run tree,
+	// the workspace snapshot, and which prior memories count as this run's own
+	// handoff rather than history. Exported below so per-run scratch paths the
+	// prompts name (the review passes' shared drop point) resolve deterministically.
 	namespace := memoryNamespace(cfg.blueprintRunID, runID)
 
-	// Both materializations below write into <runRoot>/_scratch/, so they only run
-	// while the tree is still ours. Once a launch has handed it to the sandbox uid
-	// — a warm blueprint step N>0, or a warm resume — every create AND every
-	// O_TRUNC rewrite under it is EACCES for the capability-less orchestrator, so
-	// this branch is observably identical to running them: each file would fail and
-	// log, which both passes treat as advisory by contract. Forcing the write
-	// instead is the pattern the staged step skill exists to eliminate.
-	//
-	// The cost is real, and it is worth naming rather than calling this free. On a
-	// warm step N>0 the tree keeps exactly what the pre-launch pass wrote, so a
-	// project knowledge-base edited mid-blueprint — and a prior memory that first
-	// appeared after step 0 — do not reach later steps. That staleness is
-	// PRE-EXISTING, not introduced here (the writes that would have refreshed them
-	// already failed EACCES, silently, as warnings rather than a decision) and it
-	// is confined to the sandboxed path: local mode never hands the tree off, so it
-	// keeps full per-step freshness. It is acceptable because the handoff a
-	// blueprint actually depends on is unaffected — step N-1's memory is written
-	// into this same shared tree by the agent itself, not by us — and because a
-	// cold rehydrate rebuilds the tree orchestrator-owned, so the full pass runs
-	// again there. Giving the KB genuine per-step freshness means giving it the
-	// step skill's treatment (a read-only mount off an orchestrator-owned dir,
-	// restaged per step); that changes how the agent reads the KB, so it belongs in
-	// its own change, not smuggled into this call site.
-	if sandbox.RunTreeHandedOff(claudeCwd) {
-		delegateLog.Debug("run tree already handed to the sandbox identity; skipping memory/knowledge materialization (these writes cannot succeed here — the tree keeps what the pre-launch pass wrote, so a mid-blueprint knowledge-base edit will not reach this step)", "run", runID, "cwd", claudeCwd)
-	} else {
-		// Materialize any prior task memories into ./_scratch/entity-memory/, one
-		// folder per workflow run, and create this run's own namespace folder, so
-		// the agent sees what previous iterations on this task have already tried.
-		// The directory is git-excluded by writeLocalExcludes
-		// (managedExcludePatterns in internal/worktree/worktree.go) so
-		// nothing leaks into the PR.
-		materializePriorMemories(s.taskMemory, orgID, cfg.teamID, claudeCwd, task.EntityID, namespace)
+	// Whether this tree is still ours decides what MAY be written in it, not what
+	// the agent gets. Once a launch has handed the tree to the sandbox uid — a warm
+	// blueprint step N>0, or a warm resume — every create and every O_TRUNC rewrite
+	// under it is EACCES for the capability-less orchestrator, so anything that
+	// must reach a warm step travels as a read-only mount off a directory the
+	// orchestrator owns outright instead.
+	handedOff := sandbox.RunTreeHandedOff(claudeCwd)
 
-		// Copy the entity's project knowledge-base into
-		// ./_scratch/project-knowledge/ if the entity is assigned to a
-		// project, so the agent has curated project context available
-		// alongside prior memories.
-		materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID)
+	// What the REPO tracks under the scratch dir, for the writes that do land in
+	// the tree. The dir is git-excluded by writeLocalExcludes
+	// (managedExcludePatterns in internal/worktree/worktree.go), but an exclude is
+	// powerless over an already-tracked path — and for a GitHub PR run this tree
+	// IS the repo checkout, so an infrastructure write landing on one would ride
+	// the agent's next commit into the PR.
+	var owned repoFiles
+	if !handedOff {
+		// A tree an older binary built holds its scratch under the previous name;
+		// take it over before anything reads or writes there, so files an earlier
+		// step of this same workflow left behind are where this binary's prompts
+		// say they are.
+		worktree.AdoptLegacyScratchDir(ctx, claudeCwd)
+		owned = scanRepoFiles(ctx, claudeCwd)
+
+		// The symlink that stands in for the mounted memory tree, planted while
+		// the tree is still writable — once, up front, so no later step needs a
+		// write here at all. No-op in local mode, where the directory is real.
+		if err := worktree.EnsureSandboxMemoryLink(ctx, claudeCwd); err != nil {
+			delegateLog.Warn("plant sandbox memory symlink failed; this run reads no prior memory", "run", runID, "cwd", claudeCwd, "error", err)
+		}
+	}
+
+	// Prior memory for THIS launch: this workflow run's earlier steps under
+	// this-run/, prior separate runs under history/. Rendered on every launch,
+	// warm tree or cold — only the target moves, into a staging dir the launch
+	// mounts read-only when the agent is jailed. This is the blueprint handoff, so
+	// a step that cannot get it starts from nothing.
+	memoryDir, memoryOwned := entityMemoryTarget(&cfg, runID, claudeCwd, owned)
+	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, cfg.blueprintRunID, memoryOwned)
+
+	// A blueprint's steps share one tree and all write the same memory filename,
+	// so a step starting a fresh conversation must not be credited with whatever
+	// its predecessor left at that path. Delete it where that is possible; where it
+	// is not, digest it, and let termination refuse to ingest content the agent
+	// never wrote. A run continuing a session (a mid-flight re-claim) keeps what it
+	// already wrote and needs neither.
+	var priorMemory *memoryFingerprint
+	if priorSessionID == "" {
+		if !handedOff {
+			clearAgentMemoryFile(claudeCwd, owned)
+		}
+		// After the clear, so a file it removed leaves no fingerprint — and a file
+		// it could not remove (repo-owned, or a failure) still cannot be misread as
+		// this run's work.
+		priorMemory = fingerprintAgentMemoryFile(claudeCwd)
+	}
+
+	// The entity's project knowledge-base, copied into ./_tfac/project-knowledge/
+	// when the entity is assigned to a project, so the agent has curated project
+	// context alongside prior memories. Still an in-tree write, so a warm step
+	// keeps whatever the first step's copy left there: a knowledge base edited
+	// mid-blueprint does not reach later steps. Pre-existing, and sandbox-only —
+	// local never hands the tree off. The fix is the one the memory tree just got,
+	// a read-only mount off an orchestrator-owned dir; it changes how the agent
+	// reaches the KB, so it belongs in its own change rather than here.
+	if handedOff {
+		delegateLog.Debug("run tree already handed to the sandbox identity; project knowledge-base not refreshed for this step", "run", runID, "cwd", claudeCwd)
+	} else {
+		materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID, owned)
 	}
 
 	selfBin, err := os.Executable()
@@ -349,11 +377,11 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	extraEnv := []string{
 		"TRIAGE_FACTORY_CONVERSATION_ID=" + runID,
-		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot, // Set for both sources so the completion-gate retry message can reference an absolute _scratch/entity-memory path that resolves regardless of which worktree the agent has cd'd into.
-		// The memory namespace folder: blueprint_run_id for a blueprint step
-		// (its siblings' handoff), else the run's own id. Non-absolute, so it
-		// passes through translateEnvForSandbox unchanged. The <entity_memory>
-		// contract names this folder via the env var.
+		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot, // Set for both sources so the completion-gate retry message can reference the absolute _tfac/memory.md path that resolves regardless of which worktree the agent has cd'd into.
+		// The workflow run this step belongs to. Non-absolute, so it passes
+		// through translateEnvForSandbox unchanged. Prompts that share a drop
+		// point across the steps of one run (the parallel review passes) name
+		// their directory through this.
 		"TRIAGE_FACTORY_BLUEPRINT_RUN_ID=" + namespace,
 	}
 	// Set TRIAGE_FACTORY_REPO when the run has a resolved GitHub repo context
@@ -412,13 +440,46 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		delegateLog.Info("run re-claimed mid-flight; resuming session", "run", runID, "session", priorSessionID)
 	}
 
+	// teamID nil-derefs to "" (resolveAbsentAutoDeny then falls back to
+	// defaults); task.TeamID is set for any task that reaches a run.
+	teamID := ""
+	if task.TeamID != nil {
+		teamID = *task.TeamID
+	}
+
+	// Local mode's half of the real-gh channel: a loopback injector holding the
+	// org's live credential, fronted by the TF-owned pinned binary. Multi gets
+	// the same channel from the sidecar (cfg.execSandbox below), so exactly one
+	// of the two is ever non-nil. A host that can't provision it degrades to the
+	// scoped exec verbs rather than failing the run.
+	localGH, localGHCloser := s.startLocalGHChannel(ctx, orgID, runID, cfg.owner, agenthost.RunInfo{
+		OrgID:            orgID,
+		UserID:           creatorUserID,
+		RunID:            runID,
+		TeamID:           teamID,
+		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
+	})
+	defer func() { _ = localGHCloser.Close() }()
+	ghChannel := cfg.execSandbox.ghChannel(runID)
+	if ghChannel == nil {
+		ghChannel = localGH
+	}
+
 	delegateLog.Info("claude starting for run", "run", runID, "cwd", claudeCwd)
 	baseOpts := agentproc.RunOptions{
-		Cwd:             claudeCwd,
-		Model:           model,
-		SessionID:       resumeSession,
-		Message:         prompt,
-		AllowedTools:    agentproc.BuildAllowedToolsWithExtras(selfBin, cfg.extraAllowedTools),
+		Cwd:       claudeCwd,
+		Model:     model,
+		SessionID: resumeSession,
+		Message:   prompt,
+		// The gh subcommands are granted only when the channel is actually
+		// live: without one, `gh` on a local host would resolve to the user's
+		// own installation under the user's own auth, so the allowlist must
+		// not name it at all.
+		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
+			SelfBin: selfBin,
+			Extras:  cfg.extraAllowedTools,
+			GH:      ghChannel != nil,
+		}),
 		MaxTurns:        100,
 		ExtraEnv:        extraEnv,
 		TraceID:         runID,
@@ -434,27 +495,24 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		PrebuiltNetwork:  cfg.execSandbox.runNetwork(),
 		PrebuiltProxyEnv: cfg.execSandbox.proxyEnv(),
 		StartAgentHost:   startAgentHost,
-		// Real-gh channel: the pinned gh binary + per-run injector cert mounts and
-		// the GH_* env, when the sidecar bound the injector. nil-safe on a nil
-		// execSandbox (local/non-sandbox keeps the SDK exec-verb gh).
-		GHChannel: cfg.execSandbox.ghChannel(runID),
+		// Real-gh channel: the sidecar's injector + mounted binary in multi, the
+		// loopback injector + fetched binary in local. nil when neither could be
+		// provisioned, which keeps the run on the scoped exec verbs.
+		GHChannel: ghChannel,
 		// This step's staged skill, bind-mounted read-only. Empty for every
 		// non-blueprint run and in local mode (where the skill lives in the
 		// worktree instead).
 		SkillsSourcePath: cfg.skillsSourcePath,
+		// This launch's materialized prior-memory tree, bind-mounted read-only at
+		// the path the run tree's `_tfac/entity-memory` symlink points to. Empty in
+		// local mode, where that path is the real directory.
+		MemorySourcePath: cfg.memorySourcePath,
 		// Org commit identity (TFAC-452): empty when none resolved → ambient git
 		// config inherited (today's behavior).
 		GitUserName:  commitIdentity.Name,
 		GitUserEmail: commitIdentity.Email,
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
-
-	// teamID nil-derefs to "" (resolveAbsentAutoDeny then falls back to
-	// defaults); task.TeamID is set for any task that reaches a run.
-	teamID := ""
-	if task.TeamID != nil {
-		teamID = *task.TeamID
-	}
 
 	// Off-allowlist tool calls route to one of two dispositions, chosen once
 	// per run:
@@ -510,7 +568,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 
 	if out.result != nil {
-		parked = s.processCompletion(ctx, orgID, runID, cfg.blueprintRunID, task, out.result, claudeCwd, out.sessionID, triggerType, creatorUserID)
+		parked = s.processCompletion(ctx, orgID, runID, cfg.blueprintRunID, task, out.result, claudeCwd, priorMemory, out.sessionID, triggerType, creatorUserID)
 		return
 	}
 
@@ -553,6 +611,11 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 // a DB hiccup can't silently mis-namespace the memory or mis-route the task
 // close.
 //
+// priorMemory digests the memory file this invocation INHERITED at the fixed
+// write path, so content the agent never wrote is not ingested as its work. nil
+// on a resume (whose own file is its work) and wherever there was nothing to
+// inherit, which is the ordinary case.
+//
 // Returns parked: true when the run ended dormant (open) rather than terminal,
 // so runAgent's cleanup defers keep the worktree + session JSONL on disk as the
 // warm resume cache. A terminal completion (including one that produced a draft
@@ -563,12 +626,14 @@ func (s *Spawner) processCompletion(
 	orgID, runID, blueprintRunID string,
 	task domain.Task,
 	completion *agentproc.Result,
-	claudeCwd, sessionID, triggerType, creatorUserID string,
+	claudeCwd string,
+	priorMemory *memoryFingerprint,
+	sessionID, triggerType, creatorUserID string,
 ) (parked bool) {
-	// The memory namespace is the folder grouping this run's memory file with
-	// its blueprint siblings (so step N+1 reads step N's as its handoff).
-	// Derived from the caller-supplied blueprint_run_id — no DB fetch, so it
-	// can't silently fall back to the wrong namespace on a transient read error.
+	// The namespace keys this run's workspace (tree + snapshot) among its
+	// blueprint siblings. Derived from the caller-supplied blueprint_run_id —
+	// no DB fetch, so it can't silently fall back to the wrong key on a
+	// transient read error.
 	namespace := memoryNamespace(blueprintRunID, runID)
 
 	// Classify the turn-end up front. A no-conclusion turn (prose / nothing) is
@@ -594,8 +659,9 @@ func (s *Spawner) processCompletion(
 	// === "the run terminated", agent_content NULL === "the agent didn't write a
 	// usable memory file" (UpsertAgentMemory normalizes empty/whitespace input
 	// to NULL on the way in). blueprint_run_id is denormalized onto the row so
-	// the next run's materializer folders this file under the right namespace.
-	agentContent, fileState := readAgentMemoryFile(claudeCwd, namespace, runID)
+	// the next run's materializer can tell this workflow run's own steps from
+	// history.
+	agentContent, fileState := readRunMemory(claudeCwd, priorMemory)
 	if err := s.taskMemory.UpsertAgentMemorySystem(context.Background(), orgID, runID, task.EntityID, blueprintRunID, agentContent); err != nil {
 		delegateLog.Warn("upsert memory for run failed", "run", runID, "error", err)
 	}
@@ -606,6 +672,8 @@ func (s *Spawner) processCompletion(
 		delegateLog.Debug("memory file present but empty at termination (agent_content NULL)", "run", runID)
 	case memoryFileReadErr:
 		delegateLog.Debug("memory file unreadable at termination (agent_content NULL)", "run", runID)
+	case memoryFileStale:
+		delegateLog.Debug("memory file holds exactly the content this run inherited; it belongs to the previous step (agent_content NULL)", "run", runID)
 	}
 
 	// Attach the run's memory to every entity it materially engaged — the

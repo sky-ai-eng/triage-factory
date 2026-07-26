@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -263,12 +264,12 @@ type ResumeOptions struct {
 	// would be rejected on resume.
 	ExtraAllowedTools string
 
-	// Namespace is the run's memory namespace — its blueprint_run_id (see
+	// Namespace is the run's workspace namespace — its blueprint_run_id (see
 	// memoryNamespace). Exported to the resumed subprocess as
-	// TRIAGE_FACTORY_BLUEPRINT_RUN_ID so the agent's <entity_memory> contract
-	// names the same folder it read and wrote on the initial invocation.
-	// Required for the resume to stay consistent with the initial env; callers
-	// capture it from the run (ResumeOpenRun → run.BlueprintRunID).
+	// TRIAGE_FACTORY_BLUEPRINT_RUN_ID so per-run scratch paths resolve to the
+	// same place they did on the initial invocation. Required for the resume to
+	// stay consistent with the initial env; callers capture it from the run
+	// (ResumeOpenRun → run.BlueprintRunID).
 	Namespace string
 
 	// TeamID is the run's owning team. Resolves the presence-gated
@@ -350,8 +351,8 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		// agentproc Cwd; for GitHub PR runs the worktree IS the run-root,
 		// for Jira lazy runs the run-root is the throwaway parent of
 		// per-repo worktrees). Without this, the memory-gate retry
-		// message — which now references
-		// $TRIAGE_FACTORY_CONVERSATION_ROOT/_scratch/entity-memory/ for
+		// message — which references
+		// $TRIAGE_FACTORY_CONVERSATION_ROOT/_tfac/memory.md for
 		// absolute-path resilience across `cd`s — would resolve to
 		// an empty string in the resumed shell and the agent couldn't
 		// follow the retry instructions. Same env shape as the initial
@@ -359,12 +360,10 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		// every prompt of the conversation.
 		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cwd,
 	}
-	// Mirror runAgent's memory-namespace export so the resumed agent writes
-	// into the same _scratch/entity-memory/<namespace>/ folder it used on the
-	// initial invocation (a resume continuing the work must land its memory in
-	// the same place).
+	// Mirror runAgent's namespace export so a resumed agent resolves the per-run
+	// scratch paths its prompts name to the same place the initial invocation did.
 	if opts.Namespace == "" {
-		return nil, fmt.Errorf("resume: missing namespace (caller must pass the memory namespace captured at run start)")
+		return nil, fmt.Errorf("resume: missing namespace (caller must pass the workspace namespace captured at run start)")
 	}
 	extraEnv = append(extraEnv, "TRIAGE_FACTORY_BLUEPRINT_RUN_ID="+opts.Namespace)
 	// Preserve the initial run's GitHub repo context so gh subcommands
@@ -389,12 +388,35 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		}
 	}
 
+	// A resumed run gets the same gh channel shape the initial invocation had:
+	// the sidecar's in multi, a fresh loopback injector in local (the channel is
+	// per-invocation, not per-run — a cold resume starts a new subprocess, so it
+	// needs its own listener, placeholder and trust file).
+	ownerForGH, _, _ := strings.Cut(opts.RepoEnv, "/")
+	localGH, localGHCloser := s.startLocalGHChannel(ctx, orgID, runID, ownerForGH, agenthost.RunInfo{
+		OrgID:            orgID,
+		UserID:           creatorUserID,
+		RunID:            runID,
+		TeamID:           opts.TeamID,
+		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
+	})
+	defer func() { _ = localGHCloser.Close() }()
+	ghChannel := opts.execSandbox.ghChannel(runID)
+	if ghChannel == nil {
+		ghChannel = localGH
+	}
+
 	baseOpts := agentproc.RunOptions{
-		Cwd:             cwd,
-		Model:           model,
-		SessionID:       sessionID,
-		Message:         message,
-		AllowedTools:    agentproc.BuildAllowedToolsWithExtras(selfBin, opts.ExtraAllowedTools),
+		Cwd:       cwd,
+		Model:     model,
+		SessionID: sessionID,
+		Message:   message,
+		// gh is granted only alongside a live channel — see runAgent's note.
+		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
+			SelfBin: selfBin,
+			Extras:  opts.ExtraAllowedTools,
+			GH:      ghChannel != nil,
+		}),
 		MaxTurns:        100,
 		ExtraEnv:        extraEnv,
 		TraceID:         runID,
@@ -407,11 +429,14 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		PrebuiltNetwork:  opts.execSandbox.runNetwork(),
 		PrebuiltProxyEnv: opts.execSandbox.proxyEnv(),
 		StartAgentHost:   startAgentHost,
-		GHChannel:        opts.execSandbox.ghChannel(runID),
+		GHChannel:        ghChannel,
 		// Re-mount the step skill this run's original claim staged, when it's
 		// still on disk — a resume continues the same step, so it should see the
 		// same skill it started with.
 		SkillsSourcePath: stagedStepSkillsSource(runID),
+		// Same for the prior-memory tree: a resume continues the same step, so it
+		// reads the same handoff it started with rather than a freshly rendered one.
+		MemorySourcePath: stagedEntityMemorySource(runID),
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
 

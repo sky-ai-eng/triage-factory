@@ -27,7 +27,7 @@ func TestProcessCompletion_DraftPRWritesNoSnapshot(t *testing.T) {
 
 	task := loadTask(t, s, taskID)
 	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
-		res(`{"outcome":"continue","summary":"opened a PR"}`), t.TempDir(), "", "event", "")
+		res(`{"outcome":"continue","summary":"opened a PR"}`), t.TempDir(), nil, "", "event", "")
 
 	if parked {
 		t.Fatal("processCompletion(draft PR) = true; want parked=false (a draft PR is a sidecar; the step never parks)")
@@ -51,7 +51,7 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 	task := loadTask(t, s, taskID)
 	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
 		res(`{"outcome":"abort","summary":"looked into it","reason":"needs a human to rotate the token"}`),
-		t.TempDir(), "", "event", "")
+		t.TempDir(), nil, "", "event", "")
 
 	if parked {
 		t.Error("processCompletion(plain abort) = true; want parked=false (worktree torn down, snapshot is the resume path)")
@@ -72,7 +72,7 @@ func TestProcessCompletion_FinishNoPendingWritesNoSnapshot(t *testing.T) {
 
 	task := loadTask(t, s, taskID)
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
-		res(`{"outcome":"finish","summary":"shipped it"}`), t.TempDir(), "", "event", "")
+		res(`{"outcome":"finish","summary":"shipped it"}`), t.TempDir(), nil, "", "event", "")
 
 	assertSnapshotPresent(t, s, bpr, false)
 }

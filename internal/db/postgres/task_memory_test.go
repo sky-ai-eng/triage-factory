@@ -346,6 +346,10 @@ func TestTaskMemoryStore_Postgres_SystemReadTeamScoped(t *testing.T) {
 	if mems1[0].Content != "team1 narrative" {
 		t.Errorf("team1 System read Content = %q, want %q", mems1[0].Content, "team1 narrative")
 	}
+	// The team-scoped SELECT is its own SQL — it must project the producing
+	// conversation's naming facts exactly like the app-pool read the shared
+	// conformance suite covers. This is the read the run-start materializer uses.
+	dbtest.AssertTaskMemoryNamingFacts(t, mems1[0])
 
 	// Symmetric: a run owned by team2 sees only team2's memory.
 	mems2, err := stores.TaskMemory.GetMemoriesForEntitySystem(ctx, orgID, entityID, team2)
@@ -581,9 +585,9 @@ func seedPgTeamRunOnEntity(t *testing.T, h *pgtest.Harness, orgID, userID, promp
 
 	runID := uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id)
-		VALUES ($1, $2, $3, $4, 'team', $5, $6, 'manual', 'completed', $7)
-	`, runID, orgID, userID, teamID, taskID, promptID, brID); err != nil {
+		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id, blueprint_step_index)
+		VALUES ($1, $2, $3, $4, 'team', $5, $6, 'manual', 'completed', $7, $8)
+	`, runID, orgID, userID, teamID, taskID, promptID, brID, dbtest.TaskMemorySeedStepIndex); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	return runID
@@ -630,8 +634,8 @@ func seedPgTaskMemoryPrompt(t *testing.T, h *pgtest.Harness, orgID, userID strin
 	teamID := firstTeamForOrg(t, h, orgID)
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'Task Memory Test', 'body', 'user', '', now(), now())
-	`, promptID, orgID, userID, teamID); err != nil {
+		VALUES ($1, $2, $3, $4, $5, 'body', 'user', '', now(), now())
+	`, promptID, orgID, userID, teamID, dbtest.TaskMemorySeedPromptName); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
 	return promptID
@@ -696,11 +700,11 @@ func seedPgRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, prom
 
 	runID := uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id)
+		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id, blueprint_step_index)
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-		        'team', $4, $5, 'manual', 'completed', $6)
-	`, runID, orgID, userID, taskID, promptID, brID); err != nil {
+		        'team', $4, $5, 'manual', 'completed', $6, $7)
+	`, runID, orgID, userID, taskID, promptID, brID, dbtest.TaskMemorySeedStepIndex); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	return runID, entityID

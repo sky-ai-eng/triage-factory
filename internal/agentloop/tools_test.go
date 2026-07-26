@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop/tooldefs"
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 func TestSandboxTools_AreTheSevenInHarnessOrder(t *testing.T) {
@@ -232,6 +234,48 @@ func TestNativeEnvelope_CarriesNoPlaceholders(t *testing.T) {
 		}
 	}
 }
+
+// TestNativePrompts_NameTheRealPaths ties the absolute paths the vendored
+// prompts spell out to the constants that actually produce them. The prompts
+// name them literally because they must stay placeholder-free to be cacheable,
+// which trades interpolation for a drift risk: rename the scratch dir or move
+// the sandbox work root, and every native run is told to write its handoff
+// somewhere that does not exist, with nothing else failing.
+//
+// It asserts the composed strings appear, not merely the two constants, since
+// the failure being guarded is a stale path rather than a missing word.
+func TestNativePrompts_NameTheRealPaths(t *testing.T) {
+	root := agentproc.SandboxWorkRoot + "/" + worktree.ScratchDir
+	for name, body := range map[string]string{
+		"envelope.txt":                   nativeEnvelope,
+		"machinist-system.txt":           machinistSystemPrompt,
+		"blueprint-step-nonterminal.txt": blueprintStepNonterminal,
+	} {
+		for _, stale := range []string{"_scratch/", "./_tfac", "{{RUN_ROOT}}"} {
+			if containsSub(body, stale) {
+				t.Errorf("%s still names %q", name, stale)
+			}
+		}
+		// Every occurrence of the scratch dir must be reached from the fixed
+		// run root: a bare relative one resolves against whatever the agent
+		// last cd'd into, which for a materialized repo is the wrong tree.
+		if bare, rooted := strings.Count(body, worktree.ScratchDir), strings.Count(body, root); bare != rooted {
+			t.Errorf("%s names %q %d times but only %d are under the fixed %q root", name, worktree.ScratchDir, bare, rooted, root)
+		}
+	}
+	// The memory write path is the whole contract with the orchestrator: it
+	// reads back exactly this file, so a prompt naming another one loses the
+	// run's memory silently.
+	if want := root + "/" + agentMemoryFileNameForTest; !containsSub(nativeEnvelope, want) {
+		t.Errorf("the envelope does not name the memory write path %q", want)
+	}
+}
+
+// agentMemoryFileNameForTest mirrors internal/delegate's unexported
+// agentMemoryFileName. Duplicated rather than exported: the constant is that
+// package's contract with itself, and widening its visibility to let a test in
+// another package read it would be the larger change.
+const agentMemoryFileNameForTest = "memory.md"
 
 // TestBuildSystemPrompt_TasklessHasNoCompletionContract pins the other half
 // of the gate. A conversation with a person in it ends when they stop

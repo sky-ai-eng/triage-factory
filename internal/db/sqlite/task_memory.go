@@ -141,9 +141,7 @@ func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, 
 	if limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
-		FROM conversation_memory rm
+	rows, err := s.q.QueryContext(ctx, taskMemorySelect+`
 		WHERE rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE entity_id = ?)
 		ORDER BY rm.created_at DESC
 		LIMIT ?
@@ -161,9 +159,7 @@ func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, 
 }
 
 func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]domain.TaskMemory, error) {
-	rows, err := q.QueryContext(ctx, `
-		SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
-		FROM conversation_memory rm
+	rows, err := q.QueryContext(ctx, taskMemorySelect+`
 		WHERE rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE entity_id = ?)
 		ORDER BY rm.created_at ASC
 	`, entityID)
@@ -174,20 +170,41 @@ func getMemoriesForEntity(ctx context.Context, q queryer, entityID string) ([]do
 	return scanTaskMemories(rows)
 }
 
+// taskMemorySelect is the shared projection + FROM every conversation_memory
+// read starts from: the memory row itself, plus the two facts about the
+// producing conversation that let a reader name the memory after the work it
+// records (its blueprint step index and the prompt it ran) rather than after a
+// row id. Both joins are LEFT so a row whose conversation or prompt is gone
+// still comes back — it loses its legible name, never its content.
+const taskMemorySelect = `
+	SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at,
+	       c.blueprint_step_index, p.name
+	FROM conversation_memory rm
+	LEFT JOIN conversations c ON c.id = rm.conversation_id
+	LEFT JOIN prompts p ON p.id = c.prompt_id
+`
+
 // scanTaskMemories drains a conversation_memory result set (the shared column list) into
 // materialized TaskMemory rows.
 func scanTaskMemories(rows *sql.Rows) ([]domain.TaskMemory, error) {
 	var out []domain.TaskMemory
 	for rows.Next() {
 		var m domain.TaskMemory
-		var blueprintRunID, agentContent, humanContent sql.NullString
+		var blueprintRunID, agentContent, humanContent, promptName sql.NullString
+		var stepIndex sql.NullInt64
 		var createdAt time.Time
-		if err := rows.Scan(&m.ID, &m.RunID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.RunID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt,
+			&stepIndex, &promptName); err != nil {
 			return nil, err
 		}
 		m.BlueprintRunID = blueprintRunID.String
 		m.Content = materializeMemory(agentContent.String, humanContent.String)
 		m.CreatedAt = createdAt
+		if stepIndex.Valid {
+			idx := int(stepIndex.Int64)
+			m.StepIndex = &idx
+		}
+		m.PromptName = promptName.String
 		out = append(out, m)
 	}
 	return out, rows.Err()

@@ -12,7 +12,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path"
 	"strings"
 	"time"
 
@@ -21,7 +20,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // toolHostDialTimeout bounds how long setup waits for the in-jail server to
@@ -49,10 +50,30 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	claudeCwd := cfg.wtPath
 
 	// Ambient context the agent reads from disk, identical to the SDK path:
-	// prior task memories and the project knowledge base, materialized under
-	// _scratch/ before the jail starts so they are present at first read.
-	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, claudeCwd, task.EntityID, namespace)
-	materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID)
+	// prior task memories and the project knowledge base, staged before the jail
+	// starts so they are present at first read. The sequencing below mirrors
+	// runAgent's exactly — a native step and an SDK step of the same blueprint
+	// share one run tree, so the two paths must agree on who may write in it.
+	handedOff := sandbox.RunTreeHandedOff(claudeCwd)
+	var owned repoFiles
+	if !handedOff {
+		worktree.AdoptLegacyScratchDir(ctx, claudeCwd)
+		owned = scanRepoFiles(ctx, claudeCwd)
+		if err := worktree.EnsureSandboxMemoryLink(ctx, claudeCwd); err != nil {
+			delegateLog.Warn("plant sandbox memory symlink failed; this run reads no prior memory", "run", runID, "cwd", claudeCwd, "error", err)
+		}
+	}
+
+	memoryDir, memoryOwned := entityMemoryTarget(&cfg, runID, claudeCwd, owned)
+	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, cfg.blueprintRunID, memoryOwned)
+
+	priorMemory := s.prepareInheritedMemory(ctx, orgID, runID, claudeCwd, owned, handedOff)
+
+	if handedOff {
+		delegateLog.Debug("run tree already handed to the sandbox identity; project knowledge-base not refreshed for this step", "run", runID, "cwd", claudeCwd)
+	} else {
+		materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID, owned)
+	}
 
 	systemPrompt, err := s.buildNativeSystemPrompt(ctx, task, mission, cfg, runID, namespace)
 	if err != nil {
@@ -76,6 +97,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		PrebuiltProxyEnv: cfg.execSandbox.proxyEnv(),
 		GHChannel:        cfg.execSandbox.ghChannel(runID),
 		SkillsSourcePath: cfg.skillsSourcePath,
+		MemorySourcePath: cfg.memorySourcePath,
 	})
 	if err != nil {
 		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "launch tool host: "+err.Error(), domain.RunFailureUnclassified)
@@ -124,7 +146,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		UserID:         creatorUserID,
 	})
 
-	s.recordNativeResult(ctx, orgID, runID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result)
+	s.recordNativeResult(ctx, orgID, runID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, priorMemory)
 }
 
 // openingTurn is the delegation's first user message. The mission itself
@@ -221,7 +243,7 @@ func (s *Spawner) buildNativeSystemPrompt(ctx context.Context, task domain.Task,
 	body := strings.ReplaceAll(mission, "triagefactory exec", agentBin+" exec")
 	replacer := BuildPromptReplacer(task, metadataJSON, runID, agentBin, agentRunRoot, namespace, branchTemplate, runURL)
 	return agentloop.BuildSystemPrompt(agentloop.EnvelopeParts{
-		RunContext:  nativeRunContext(branchTemplate, agentRunRoot, namespace, runID),
+		RunContext:  nativeRunContext(branchTemplate),
 		TaskContext: BuildTaskContext(task, metadataJSON, cfg.prSkeleton),
 		Mission:     replacer.Replace(body),
 		// A delegation always executes a blueprint — a single-step one is
@@ -233,20 +255,55 @@ func (s *Spawner) buildNativeSystemPrompt(ctx context.Context, task domain.Task,
 	}), nil
 }
 
-// nativeRunContext renders the two facts the standing envelope refers to but
-// cannot contain: the team's branch convention, and where this run writes its
-// memory.
+// prepareInheritedMemory readies the fixed memory write path for this claim,
+// returning the fingerprint termination uses to tell the agent's own notes from
+// a file it merely inherited (nil meaning "nothing to distrust").
 //
-// They live here rather than interpolated into the envelope because the
+// A predecessor step's memory sits at that path, because a blueprint's steps
+// share one run tree and all write the same filename. Delete it where the tree
+// is still ours; where it is not — a warm step, whose tree belongs to the
+// sandbox identity — digest it instead, so termination can refuse to ingest
+// content this agent never wrote.
+//
+// Both are skipped for a conversation that has already been driven: a parked
+// engagement picking up a steer, whose own memory file is at that path. The
+// transcript is this runtime's "has it run before". It stands in for the SDK
+// path's prior session id, which the native runtime has no counterpart to, and
+// it is the same signal mintOpeningTurn reads to answer the same question a few
+// calls later.
+func (s *Spawner) prepareInheritedMemory(ctx context.Context, orgID, runID, cwd string, owned repoFiles, handedOff bool) *memoryFingerprint {
+	driven, err := s.agentRuns.ListForAssembly(ctx, orgID, runID)
+	if err != nil {
+		// An unreadable transcript is treated as a fresh claim. The two ways of
+		// being wrong are not symmetric: crediting this run with a predecessor's
+		// memory corrupts the entity's durable record, while distrusting a
+		// re-claimed engagement's own notes costs one run's notes and nothing
+		// downstream.
+		delegateLog.Warn("read transcript to classify the inherited memory file failed; treating this claim as fresh", "run", runID, "error", err)
+	} else if len(driven) > 0 {
+		return nil
+	}
+	if !handedOff {
+		clearAgentMemoryFile(cwd, owned)
+	}
+	return fingerprintAgentMemoryFile(cwd)
+}
+
+// nativeRunContext renders the fact the standing envelope refers to but cannot
+// contain: the team's branch convention.
+//
+// It lives here rather than interpolated into the envelope because the
 // envelope's value is being byte-identical for every run in the fleet — one
-// cached prefix instead of per-run tokens. Two lines of genuinely per-run text
-// belong in the part that was never going to be cached anyway. It is
+// cached prefix instead of per-run tokens. A line of genuinely per-run text
+// belongs in the part that was never going to be cached anyway. It is
 // system-authored, so unlike the task context it carries no untrusted markers.
-func nativeRunContext(branchTemplate, agentRunRoot, namespace, runID string) string {
-	memoryPath := path.Join(agentRunRoot, "_scratch", "entity-memory", namespace, runID+".md")
+//
+// The memory path used to be the second line here, assembled out of the run
+// root and TF's own primary keys. It is a fixed path now, so it says the same
+// thing for every run and has moved into the envelope where it is cached.
+func nativeRunContext(branchTemplate string) string {
 	return "<run_context>\n" +
 		"Branch naming convention for this team: " + branchTemplate + "\n" +
-		"Write your entity-memory notes to: " + memoryPath + "\n" +
 		"</run_context>"
 }
 
@@ -416,6 +473,7 @@ func (s *Spawner) recordNativeResult(
 	namespace, claudeCwd, triggerType, creatorUserID string,
 	startTime time.Time,
 	result agentloop.Result,
+	priorMemory *memoryFingerprint,
 ) {
 	switch result.Disposition {
 	case agentloop.DispositionCancelled:
@@ -449,7 +507,7 @@ func (s *Spawner) recordNativeResult(
 	// Concluded. Record the run's memory exactly as processCompletion does —
 	// row presence means "the run terminated", NULL content means the agent
 	// wrote no usable memory file.
-	agentContent, fileState := readAgentMemoryFile(claudeCwd, namespace, runID)
+	agentContent, fileState := readRunMemory(claudeCwd, priorMemory)
 	if err := s.taskMemory.UpsertAgentMemorySystem(context.Background(), orgID, runID, task.EntityID, cfg.blueprintRunID, agentContent); err != nil {
 		delegateLog.Warn("upsert memory for run failed", "run", runID, "error", err)
 	}

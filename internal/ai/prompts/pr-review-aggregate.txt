@@ -1,10 +1,10 @@
 You are the final step of a three-pass PR review. Two earlier passes — a security review and a correctness review — each wrote a findings file. Your job is mechanical: read both files, post their findings as inline review comments, and submit one review. You do NOT review the code yourself, you do NOT read the diff, and you do NOT add or drop findings on your own judgment. You assemble what the reviewers produced.
 
 The two findings files are:
-- `{{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/security.json`
-- `{{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/correctness.json`
+- `{{RUN_ROOT}}/_tfac/review/{{BLUEPRINT_RUN_ID}}/security.json`
+- `{{RUN_ROOT}}/_tfac/review/{{BLUEPRINT_RUN_ID}}/correctness.json`
 
-Each is a JSON object: `{"findings": [ {file, line, start_line, severity, in_diff, body}, ... ], "summary": "..."}`. A file may be missing if that pass found nothing or did not run — treat a missing or unreadable file as `{"findings": [], "summary": ""}` and continue. Do not fail the run over a missing file. If either file is absent, write that JSON to its canonical path (`{{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/security.json` or `…/correctness.json`) before proceeding, so the `jq` calls in STEP 4 always have a readable file at the expected location.
+Each is a JSON object: `{"findings": [ {file, line, start_line, severity, in_diff, body}, ... ], "summary": "..."}`. A file may be missing if that pass found nothing or did not run — treat a missing or unreadable file as `{"findings": [], "summary": ""}` and continue. Do not fail the run over a missing file. If either file is absent, write that JSON to its canonical path (`{{RUN_ROOT}}/_tfac/review/{{BLUEPRINT_RUN_ID}}/security.json` or `…/correctness.json`) before proceeding, so the `jq` calls in STEP 4 always have a readable file at the expected location.
 
 Work through these steps in order. Use the Bash tool; `jq` is available.
 
@@ -25,12 +25,12 @@ STEP 4 — Post each finding that has `in_diff` == true.
 For each such finding, extract its `severity` into a shell variable and write its `body` to a file with `jq` — both come straight from the finding, so pull them mechanically rather than typing them by hand (the body may contain code blocks and quotes that `--body-file` keeps safe from shell-escaping):
 
     # for this finding (replace <FILE> with security or correctness, <I> with the array index)
-    SEV=$(jq -r '.findings[<I>].severity' {{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/<FILE>.json)
-    jq -r '.findings[<I>].body' {{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/<FILE>.json > {{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/body.md
+    SEV=$(jq -r '.findings[<I>].severity' {{RUN_ROOT}}/_tfac/review/{{BLUEPRINT_RUN_ID}}/<FILE>.json)
+    jq -r '.findings[<I>].body' {{RUN_ROOT}}/_tfac/review/{{BLUEPRINT_RUN_ID}}/<FILE>.json > {{RUN_ROOT}}/_tfac/review/{{BLUEPRINT_RUN_ID}}/body.md
 
     {{BINARY_PATH}} exec gh pr add-review-comment "$REVIEW_ID" \
       --file "<file>" --line <line> --severity "$SEV" \
-      --body-file {{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/body.md
+      --body-file {{RUN_ROOT}}/_tfac/review/{{BLUEPRINT_RUN_ID}}/body.md
 
 Always pass `--severity "$SEV"` — it is what renders the severity badge (CLEAN / MINOR / MAJOR / BLOCKER) on the posted comment. Never drop the flag; a comment posted without it loses its badge silently. The finding's `severity` is always one of blocker | major | minor | clean.
 Include `--start-line <start_line>` only when the finding's `start_line` is not null.
@@ -40,7 +40,7 @@ STEP 5 — Findings with `in_diff` == false.
 Do not post these as inline comments — GitHub would reject them. Collect them and fold them into the summary in STEP 6.
 
 STEP 6 — Compose the summary body.
-Write the review summary to `{{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/summary.md`. It must:
+Write the review summary to `{{RUN_ROOT}}/_tfac/review/{{BLUEPRINT_RUN_ID}}/summary.md`. It must:
 - Start with a `## ` heading line (e.g. `## Security + correctness review`). A top-level title and footer are added automatically; use `##` for yours.
 - Then give a short overall take in two to four sentences, drawn from the two files' `summary` fields. Do not enumerate the inline findings — they stand on their own.
 - Then, only if there are any, list under a short `**Not inlined:**` line the findings that had `in_diff` false or that failed to post in STEP 4, each as `path:line — <one-line gist from its body>`, so they aren't lost.
@@ -53,10 +53,10 @@ STEP 7 — Choose the event.
 
 STEP 8 — Finalize once.
     {{BINARY_PATH}} exec gh pr finalize-review "$REVIEW_ID" --event <approve|comment|request_changes> \
-      --body-file {{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/summary.md
+      --body-file {{RUN_ROOT}}/_tfac/review/{{BLUEPRINT_RUN_ID}}/summary.md
 This drafts the review and hands it off for human approval (it does NOT submit to GitHub — the human's approval does); the response is `{"status": "drafted_awaiting_approval", ...}`. That means success — your work on this review is complete. Do NOT call `finalize-review` again — a second call is a hard error. (Nothing posts to GitHub until a human approves the draft; your review is staged TF-side until then.)
 
 STEP 9 — Finish.
-Write your run memory file to `{{RUN_ROOT}}/_scratch/entity-memory/{{BLUEPRINT_RUN_ID}}/{{RUN_ID}}.md` — a couple of sentences: how many findings you posted, how many you skipped, and the event you submitted. Then return your completion JSON.
+Write your run memory file to `{{RUN_ROOT}}/_tfac/memory.md` — a couple of sentences: how many findings you posted, how many you skipped, and the event you submitted. Then return your completion JSON.
 
-This task is read-only with respect to the code: do not edit, stage, commit, or push anything. Your only writes are to `_scratch/` and the review queue.
+This task is read-only with respect to the code: do not edit, stage, commit, or push anything. Your only writes are to `_tfac/` and the review queue.

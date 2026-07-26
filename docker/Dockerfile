@@ -264,12 +264,15 @@ RUN set -eux; \
 # would have no credentials anyway. GitHub's official linux tarballs are static,
 # so this musl-alpine-jail-safe binary execs fine in the rootfs.
 #
-# Bumping: pick a newer tag from https://github.com/cli/cli/releases and refresh
-# both SHA256s from that release's gh_<VER>_checksums.txt. This ARG is also the
-# single source the test workflow reads to stage gh for the internal/ghinjector
-# wire tests, which drive this exact binary to pin what the injector observes —
-# so a bump that changes gh's mutation transport fails those tests rather than
-# silently dropping artifacts.
+# The pin's source of truth is internal/ghpin — local mode fetches the same
+# release at runtime, and a Dockerfile ARG can't read Go, so the version and the
+# two linux checksums are spelled in both places with a drift test
+# (internal/ghpin) asserting they agree. Bump BOTH sides together: pick a newer
+# tag from https://github.com/cli/cli/releases and refresh every SHA256 from that
+# release's gh_<VER>_checksums.txt. These ARGs are also what the test workflow
+# reads to stage gh for the wire tests, which drive this exact binary to pin what
+# the injector observes — so a bump that changes gh's mutation transport fails
+# those tests rather than silently dropping artifacts.
 ARG GH_VERSION=2.96.0
 ARG GH_SHA256_AMD64=83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60
 ARG GH_SHA256_ARM64=06f86ec7103d41993b76cd78072f43595c34aaa56506d971d9860e67140bf909

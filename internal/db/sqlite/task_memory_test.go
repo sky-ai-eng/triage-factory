@@ -212,8 +212,8 @@ func seedSQLiteRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (runI
 		t.Fatalf("seed event: %v", err)
 	}
 	if _, err := conn.Exec(`
-		INSERT OR IGNORE INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_task_memory', 'TaskMemory', 'body', ?, ?)
-	`, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
+		INSERT OR IGNORE INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_task_memory', ?, 'body', ?, ?)
+	`, dbtest.TaskMemorySeedPromptName, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
 	taskID := uuid.New().String()
@@ -231,8 +231,9 @@ func seedSQLiteRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (runI
 	blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
 	runID = uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO conversations (id, task_id, prompt_id, status, blueprint_run_id) VALUES (?, ?, 'p_task_memory', 'completed', ?)
-	`, runID, taskID, blueprintRunID); err != nil {
+		INSERT INTO conversations (id, task_id, prompt_id, status, blueprint_run_id, blueprint_step_index)
+		VALUES (?, ?, 'p_task_memory', 'completed', ?, ?)
+	`, runID, taskID, blueprintRunID, dbtest.TaskMemorySeedStepIndex); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	return runID, entityID

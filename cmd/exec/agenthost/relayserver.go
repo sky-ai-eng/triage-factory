@@ -336,15 +336,19 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 	}
 }
 
-// dispatchCoreNotify serves the "core" fire-and-forget audit ops.
-// observationArtifact turns a gh-injector observation into the domain artifact
-// the orchestrator upserts. The run identity (ConversationID/OrgID/TeamID) is
-// stamped downstream by RecordExternalWrite from this server's RunInfo — never
+// ObservationArtifact turns a gh-injector observation into the domain artifact
+// the recording side upserts. The run identity (ConversationID/OrgID/TeamID) is
+// stamped downstream by RecordExternalWrite from the caller's RunInfo — never
 // from the wire — so a sidecar cannot attribute an artifact to another run. A
-// review anchors to the run's own RunID for its dedup key (the same run-scoped
-// key a TF-side draft would use, so a gh submit migrates a draft in place). ok
-// is false for a malformed observation (missing coordinates), which is dropped.
-func (s *RelayServer) observationArtifact(a agentproc.RecordObservationArgs) (domain.Artifact, bool) {
+// review anchors to runID for its dedup key (the same run-scoped key a TF-side
+// draft would use, so a gh submit migrates a draft in place). ok is false for a
+// malformed observation (missing coordinates), which is dropped.
+//
+// Exported because both channel placements need the identical mapping: the
+// sidecar relays its observations here through the RelayServer, and a local-mode
+// run — whose injector runs in this very process — records them directly with no
+// relay hop at all.
+func ObservationArtifact(a agentproc.RecordObservationArgs, runID string) (domain.Artifact, bool) {
 	if a.Owner == "" || a.Repo == "" {
 		return domain.Artifact{}, false
 	}
@@ -359,10 +363,12 @@ func (s *RelayServer) observationArtifact(a agentproc.RecordObservationArgs) (do
 		if a.Number == 0 || a.ReviewID == 0 {
 			return domain.Artifact{}, false
 		}
-		return domain.NewSubmittedReviewArtifact(repoPath, a.Number, a.ReviewID, a.ReviewState, a.URL, s.info.RunID), true
+		return domain.NewSubmittedReviewArtifact(repoPath, a.Number, a.ReviewID, a.ReviewState, a.URL, runID), true
 	}
 	return domain.Artifact{}, false
 }
+
+// dispatchCoreNotify serves the "core" fire-and-forget audit ops.
 
 func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args json.RawMessage) {
 	switch op {
@@ -421,7 +427,7 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 			agenthostLog.Warn("decode relayed gh observation failed", "error", err)
 			return
 		}
-		art, ok := s.observationArtifact(a)
+		art, ok := ObservationArtifact(a, s.info.RunID)
 		if !ok {
 			return
 		}

@@ -13,7 +13,7 @@ const HelpText = `GitHub PR Commands:
   gh pr view <number> [--repo o/r] [-v]                  PR details + reviews + comments
   gh pr diff <number> [--repo o/r] [--file <path>] [--stdout]
                                                           Persists the diff to
-                                                          ./_scratch/pr-diffs/<owner>__<repo>__<number>/
+                                                          ./_tfac/pr-diffs/<owner>__<repo>__<number>/
                                                           (full.diff + manifest.json) and prints the
                                                           manifest JSON. Use Read/Grep on full.diff.
                                                           --file <path>: print one file's diff inline.
@@ -78,7 +78,7 @@ Direct Comments (hit GitHub API immediately):
 GitHub Actions Commands:
   gh actions download-logs <run_id> [--repo o/r]          Download & extract the full log
                                                           archive for a workflow run into
-                                                          ./_scratch/ci-logs/<run_id>/
+                                                          ./_tfac/ci-logs/<run_id>/
 
 Repo Resolution (all gh commands):
   Priority order: --repo flag > TRIAGE_FACTORY_REPO env var > .git/config origin of cwd.

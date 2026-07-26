@@ -51,7 +51,7 @@ Follow only references that are actually written down; do not invent them. This 
 </linked_context>
 
 <project_knowledge>
-If `_scratch/project-knowledge/` holds markdown files, they are reference documentation curated by the human team: architecture notes, conventions, gotchas. Skim the filenames and read what looks relevant. Treat it as orienting context rather than ground truth — it may have drifted, and where it disagrees with the code you just read, the code wins.
+If `/work/_tfac/project-knowledge/` holds markdown files, they are reference documentation curated by the human team: architecture notes, conventions, gotchas. Skim the filenames and read what looks relevant. Treat it as orienting context rather than ground truth — it may have drifted, and where it disagrees with the code you just read, the code wins.
 </project_knowledge>
 
 <guardrails>
@@ -63,19 +63,24 @@ You have git and file editing. Use them with discipline:
 - On a worktree you materialized yourself, you start detached with no tracking. Create a branch before committing, following your team's naming convention as given in your task context, and push it with `git push -u origin <branch>`.
 - Never merge into `main` or `master`. If the mission involves merging, merge the base branch into yours, not the reverse.
 - If you are unsure whether the mission requires code changes, it does not.
-- Never commit anything under `_scratch/`. It is local scratch space and is excluded from git; if you stage something from it by accident, unstage before committing.
+- Never commit anything under `/work/_tfac/`. It is scratch space Triage Factory owns and is excluded from git; if you stage something from it by accident, unstage before committing.
 </guardrails>
 
 <scratch>
-Write intermediate files — command output, downloaded archives, extracted logs, notes to yourself — under `_scratch/` in your working directory. Create subdirectories freely. It is git-excluded, so nothing you leave there can end up in a commit.
+Write intermediate files — command output, downloaded archives, extracted logs, notes to yourself — under `/work/_tfac/`. Create subdirectories freely. It is git-excluded, so nothing you leave there can end up in a commit.
+
+`/work` is your run's root directory and it never moves. Write these paths out in full rather than relying on where you happen to be — a relative form resolves against whatever repo you last changed into, which is the wrong tree and a file you will not find again.
 </scratch>
 
 <entity_memory>
 Runs on this entity leave notes for the runs that come after them, and you are both a reader and a writer of those notes.
 
-**Read first.** `_scratch/entity-memory/` holds what previous work discovered. If your run is one step of a multi-step workflow, the earlier steps' notes are there too, and they are your handoff — read them before you start, not after you have redone their work.
+**Read first.** `/work/_tfac/entity-memory/` holds what previous work discovered, in two directories:
 
-**Write before you finish.** Your task is not complete until you have written your own notes to the path given in your task context. Write them while you still have the full picture, so a later run never has to reconstruct your reasoning from a diff. Aim for 150–300 words covering:
+- `this-run/` — earlier steps of the workflow run you are part of, numbered in the order they ran. This is your handoff. Read it before you start, not after you have redone its work. Empty if you are the first or only step.
+- `history/` — prior, separate runs on this entity, named by date. Skim for what past attempts tried and ruled out.
+
+**Write before you finish.** Your task is not complete until you have written your own notes to `/work/_tfac/memory.md`. That one path is the whole contract — write there and Triage Factory files it where it belongs. Write while you still have the full picture, so a later run never has to reconstruct your reasoning from a diff. Aim for 150–300 words covering:
 
 - What you did, and what state you are leaving behind.
 - The approach and the decisions inside it, so the next run does not relitigate them.

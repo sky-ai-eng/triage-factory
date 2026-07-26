@@ -32,7 +32,7 @@ import (
 //     Cleanup uses RemoveAt(wtPath) + CleanupPRConfig.
 //
 //   - Jira (lazy): hasWT=false, wtPath=runRoot is the throwaway run-root
-//     (initial cwd; holds _scratch/entity-memory/ but no codebase), owner/repo empty.
+//     (initial cwd; holds _tfac/ but no codebase), owner/repo empty.
 //     Per-repo worktrees materialize as subdirs under runRoot via the
 //     `triagefactory exec workspace add` CLI; the conversation_worktrees DB table
 //     is the source of truth for cleanup, which iterates the table at
@@ -48,7 +48,7 @@ type runConfig struct {
 	owner     string  // resolved GitHub owner (empty for Jira lazy runs)
 	repo      string  // resolved GitHub repo (empty for Jira lazy runs)
 	prNumber  int     // PR number (0 for non-PR runs); set so the runAgent defer can call worktree.CleanupPRConfig and reclaim the per-run branch + push remote the bare repo would otherwise accumulate
-	projectID *string // entity's project assignment (nil for un-assigned); used to copy the project's knowledge-base into ./_scratch/project-knowledge/
+	projectID *string // entity's project assignment (nil for un-assigned); used to copy the project's knowledge-base into ./_tfac/project-knowledge/
 
 	// prSkeleton is the rendered PR history block folded into the run's
 	// static task context. Empty for a non-PR run, and empty (never fatal)
@@ -76,6 +76,13 @@ type runConfig struct {
 	// SkillsSourcePath). Set only for a sandboxed blueprint step; empty in local
 	// mode, where the skill is written into the worktree instead.
 	skillsSourcePath string
+
+	// memorySourcePath is the orchestrator-owned staging dir holding the
+	// entity-memory tree materialized for this launch, bind-mounted read-only
+	// into the jail (agentproc's MemorySourcePath). Set for every sandboxed
+	// launch; empty in local mode, where the same tree is rendered inside the
+	// worktree instead.
+	memorySourcePath string
 
 	// execSandbox, when non-nil (TF_ROLE=executor), is the run network +
 	// credential sidecar + proxy coordinates the dispatcher stood up before
@@ -629,8 +636,9 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 // {runRoot}/{owner}/{repo}/ and inserts a row into conversation_worktrees.
 //
 // The agent's initial cwd is the run-root: a throwaway dir holding
-// only ./_scratch/entity-memory/ (populated by materializePriorMemories
-// below). Both gh and jira tool surfaces are exposed since the agent
+// only ./_tfac/ (whose entity-memory is materializePriorMemories' rendering, or
+// under a jail the symlink standing in for its read-only mount). Both gh and
+// jira tool surfaces are exposed since the agent
 // will need both to implement and ship a PR.
 //
 // runs.worktree_path is set to the run-root. The resume path reads this

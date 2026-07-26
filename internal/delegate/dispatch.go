@@ -420,10 +420,14 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 			domain.BlueprintRunStatusFailed, fmt.Sprintf("materialize step %d skill: %s", stepIdx, err.Error()), &stepIdx, false)
 		return
 	}
-	// The staging dir outlives this function only while the step can still be
-	// resumed: a parked (`open`) step's next claim re-mounts it. Every other
+	// The staging dirs outlive this function only while the step can still be
+	// resumed: a parked (`open`) step's next claim re-mounts them. Every other
 	// disposition — completed, failed, cancelled — is the end of the step, so
-	// reclaim it. A leftover from a crash is swept at startup.
+	// reclaim them. A leftover from a crash is swept at startup.
+	//
+	// The memory dir is re-derived rather than read off cfg: runAgent materializes
+	// it (it needs the entity and the priors, which setup does not carry), and cfg
+	// travels there by value, so the path this scope holds would always be empty.
 	stepParked := false
 	defer func() {
 		if stepParked {
@@ -431,6 +435,9 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 		}
 		if err := skills.RemoveStagedSkills(cfg.skillsSourcePath); err != nil {
 			dispatchLog.Warn("remove staged step skill failed", "run", run.ID, "step", stepIdx, "error", err)
+		}
+		if agentproc.WillSandbox() {
+			removeStagedMemory(sandbox.TrustedMemorySourcePath(run.ID))
 		}
 	}()
 
@@ -655,7 +662,9 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		return
 	}
 
-	parked := s.processCompletion(stepCtx, orgID, run.ID, blueprintRunID, *task, outcome.Completion, resumeCwd, run.SessionID, "manual", userID)
+	// No inherited-memory fingerprint: a resume continues this run's own
+	// conversation in its own tree, so the file at the fixed path is its work.
+	parked := s.processCompletion(stepCtx, orgID, run.ID, blueprintRunID, *task, outcome.Completion, resumeCwd, nil, run.SessionID, "manual", userID)
 	// The resumed step reached a terminal state (it didn't go open again)
 	// → hand back to the blueprint orchestrator to finalize.
 	if !parked {

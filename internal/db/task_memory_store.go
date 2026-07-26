@@ -118,8 +118,11 @@ type TaskMemoryStore interface {
 	// first. The returned TaskMemory.Content is materialized from
 	// agent_content + human_content via the stable separator format
 	// the next agent's prompt context parses. Each row carries its
-	// BlueprintRunID so the materializer can drop the file into the
-	// right per-blueprint-run namespace folder.
+	// BlueprintRunID so the materializer can tell this workflow run's
+	// own steps from prior separate runs, plus the producing
+	// conversation's step index and prompt name so it can name the
+	// materialized file after the work it records rather than after a
+	// row id.
 	GetMemoriesForEntity(ctx context.Context, orgID, entityID string) ([]domain.TaskMemory, error)
 
 	// GetMemoriesForEntitySystem mirrors GetMemoriesForEntity but

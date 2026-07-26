@@ -123,7 +123,7 @@ func TestPersistPRDiff_WritesFullDiffAndManifest(t *testing.T) {
 		t.Fatalf("persistPRDiff: %v", err)
 	}
 
-	wantDir := filepath.Join(cwd, "_scratch", "pr-diffs", "owner__repo__42")
+	wantDir := filepath.Join(cwd, "_tfac", "pr-diffs", "owner__repo__42")
 	if m.Dir != wantDir {
 		t.Errorf("Dir = %q, want %q", m.Dir, wantDir)
 	}
@@ -301,11 +301,11 @@ func TestPersistPRDiff_ReDiff(t *testing.T) {
 }
 
 // TestPersistPRDiff_RejectsSymlinkedScratch confirms the shared symlink guard
-// fires for the pr-diffs path too: a symlinked _scratch component is refused.
+// fires for the pr-diffs path too: a symlinked _tfac component is refused.
 func TestPersistPRDiff_RejectsSymlinkedScratch(t *testing.T) {
 	cwd := t.TempDir()
 	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(cwd, "_scratch")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(cwd, "_tfac")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
 	srv := newPRDiffServer(t, prDiffBackend{

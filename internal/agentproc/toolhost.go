@@ -64,6 +64,13 @@ type ToolHostOptions struct {
 	// exactly as it reaches an SDK one or a sandboxed step silently loses
 	// the skill it staged.
 	SkillsSourcePath string
+	// MemorySourcePath is the orchestrator-owned staging dir holding the
+	// entity-memory tree materialized for THIS launch, bind-mounted read-only.
+	// Same contract as RunOptions.MemorySourcePath and set from the same
+	// runConfig field: a jailed agent reads its blueprint handoff through this
+	// mount, so a native step that does not get it starts from nothing where
+	// an SDK step of the same blueprint would have had its predecessor's notes.
+	MemorySourcePath string
 	// MemoryLimitMB caps the jail's cgroup. Zero uses the process default.
 	MemoryLimitMB int
 }
@@ -135,7 +142,7 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (*ToolHostJail, e
 		return nil, fmt.Errorf("agentproc: chown worktree for tool host: %w", err)
 	}
 
-	mounts, err := toolHostMounts(sockDir, opts.GHChannel, opts.SkillsSourcePath)
+	mounts, err := toolHostMounts(sockDir, opts.GHChannel, opts.SkillsSourcePath, opts.MemorySourcePath)
 	if err != nil {
 		_ = jail.Close()
 		return nil, err
@@ -229,7 +236,7 @@ func prepareToolHostSocketDir(runID string) (string, error) {
 // the socket directory it needs, plus the same TF-side mounts an SDK jail
 // gets (the TF binary under both names, the git-hooks dir, the gh channel's
 // cert + pinned binary, and this step's staged skill).
-func toolHostMounts(sockDir string, gh *GHChannelParams, skillsSource string) ([]sandbox.Mount, error) {
+func toolHostMounts(sockDir string, gh *GHChannelParams, skillsSource, memorySource string) ([]sandbox.Mount, error) {
 	if _, err := os.Stat(hostToolHostBinaryPath); err != nil {
 		return nil, fmt.Errorf("agentproc: tool host binary is not present at %s: %w", hostToolHostBinaryPath, err)
 	}
@@ -266,6 +273,15 @@ func toolHostMounts(sockDir string, gh *GHChannelParams, skillsSource string) ([
 			mounts = append(mounts, sandbox.Mount{Source: skillsSource, Destination: sandbox.TrustedSkillsDestination, Options: []string{"ro"}})
 		} else {
 			agentprocLog.Warn("step-skill staging dir missing; launching the tool host without the skills mount", "path", skillsSource, "error", err)
+		}
+	}
+	// Same stat guard, same reasoning: a swept staging dir costs this step its
+	// predecessor's notes, which is a degraded handoff rather than a broken run.
+	if memorySource != "" {
+		if _, err := os.Stat(memorySource); err == nil {
+			mounts = append(mounts, sandbox.Mount{Source: memorySource, Destination: sandbox.TrustedMemoryDestination, Options: []string{"ro"}})
+		} else {
+			agentprocLog.Warn("entity-memory staging dir missing; launching the tool host without the memory mount", "path", memorySource, "error", err)
 		}
 	}
 	return mounts, nil

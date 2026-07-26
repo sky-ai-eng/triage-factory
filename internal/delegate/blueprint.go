@@ -177,12 +177,13 @@ func (s *Spawner) terminateBlueprint(
 		s.runBlueprintWorktreeCleanup(blueprintRunID, cfg)
 	}
 
-	// Reclaim any step-skill staging dir still held for this blueprint. Each
-	// step's own dispatch drops its dir on a terminal disposition, so what
-	// reaches here is the parked case — a step left `open` as the warm resume
-	// point, whose blueprint then terminated (a cancel, or an abort) and will
-	// never resume. Best-effort, and the startup sweep is the backstop.
-	s.reclaimBlueprintStepSkills(bgCtx, orgID, blueprintRunID)
+	// Reclaim any staging dir still held for this blueprint — the step skill and
+	// the materialized memory tree alike. Each step's own dispatch drops its dirs
+	// on a terminal disposition, so what reaches here is the parked case — a step
+	// left `open` as the warm resume point, whose blueprint then terminated (a
+	// cancel, or an abort) and will never resume. Best-effort, and the startup
+	// sweep is the backstop.
+	s.reclaimBlueprintStepStaging(bgCtx, orgID, blueprintRunID)
 
 	// Drop the durable workspace snapshot now the blueprint is terminal so the
 	// blob store doesn't orphan it — EXCEPT an aborted terminal, whose
@@ -208,24 +209,26 @@ func (s *Spawner) terminateBlueprint(
 		"blueprint_run", blueprintRunID, "status", status, "reason", abortReason, "duration", dur)
 }
 
-// reclaimBlueprintStepSkills removes the orchestrator-owned step-skill staging
-// dir of every run in a terminated blueprint. Keyed per step run (that is the
-// staging key), and idempotent — a step that already dropped its own dir at its
-// terminal is a no-op here. A read failure just forgoes the reclaim; the dirs
-// hold one SKILL.md each and the startup sweep collects them.
-func (s *Spawner) reclaimBlueprintStepSkills(ctx context.Context, orgID, blueprintRunID string) {
+// reclaimBlueprintStepStaging removes the orchestrator-owned staging dirs of
+// every run in a terminated blueprint — the step skill and the materialized
+// memory tree. Keyed per step run (that is the staging key for both), and
+// idempotent — a step that already dropped its own dirs at its terminal is a
+// no-op here. A read failure just forgoes the reclaim; the dirs are small and
+// the startup sweep collects them.
+func (s *Spawner) reclaimBlueprintStepStaging(ctx context.Context, orgID, blueprintRunID string) {
 	if !agentproc.WillSandbox() {
 		return // local mode never stages outside the worktree
 	}
 	stepRuns, err := s.blueprints.RunsForBlueprintSystem(ctx, orgID, blueprintRunID)
 	if err != nil {
-		blueprintLog.Warn("list step runs for step-skill reclaim failed", "blueprint_run", blueprintRunID, "error", err)
+		blueprintLog.Warn("list step runs for staging reclaim failed", "blueprint_run", blueprintRunID, "error", err)
 		return
 	}
 	for _, sr := range stepRuns {
 		if err := skills.RemoveStagedSkills(sandbox.TrustedSkillsSourcePath(sr.ID)); err != nil {
 			blueprintLog.Warn("remove staged step skill failed", "blueprint_run", blueprintRunID, "step_run", sr.ID, "error", err)
 		}
+		removeStagedMemory(sandbox.TrustedMemorySourcePath(sr.ID))
 	}
 }
 
@@ -379,10 +382,9 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 		}
 		fmt.Fprintf(&b, "Next step: %q\n", nextLabel)
 	}
-	// Prior steps' findings are their memory files in this blueprint run's
-	// namespace folder under _scratch/entity-memory/ — the <entity_memory>
-	// contract tells the agent to read them first as its handoff. No separate
-	// handoff file.
+	// Prior steps' findings are their memory files under
+	// _tfac/entity-memory/this-run/ — the <entity_memory> contract tells the
+	// agent to read them first as its handoff. No separate handoff file.
 	return b.String()
 }
 

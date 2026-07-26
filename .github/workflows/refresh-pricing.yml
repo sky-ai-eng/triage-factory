@@ -19,10 +19,13 @@ name: refresh-pricing
 #     unmodeled dimension becomes a reviewed formula change, not silent
 #     underpricing.
 #
-# The PR is opened with the default GITHUB_TOKEN, which deliberately does NOT
-# trigger downstream workflows (same reason release-please.yml uses a PAT). That
-# is fine here: the gate already ran in THIS job, and a human reviews the price
-# diff before merge.
+# The PR is opened as sky-ai-bot via RELEASES_TOKEN, the same identity
+# release-please.yml and release.yml push with. The default GITHUB_TOKEN cannot
+# open it at all — repo policy forbids Actions from creating pull requests, and
+# the API call fails after the branch has already been pushed, which strands a
+# refreshed snapshot on a branch nobody is told about. A side effect of the PAT
+# is that this PR DOES trigger downstream workflows, unlike a GITHUB_TOKEN one:
+# the full suite runs on the price diff on top of the gate that ran in this job.
 
 on:
   schedule:
@@ -30,9 +33,12 @@ on:
     - cron: '23 6 * * *'
   workflow_dispatch:
 
+# Governs the default GITHUB_TOKEN only, which here files the two tracking
+# issues and checks the repo out. The branch push and the PR both go through
+# RELEASES_TOKEN, so neither contents: write nor pull-requests: write would
+# grant anything this job uses.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
   issues: write
 
 jobs:
@@ -118,7 +124,12 @@ jobs:
         if: steps.gate.outputs.ok == '1'
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASES_TOKEN }}
+          # Without these the action attributes the commit to github.actor,
+          # which on a scheduled run is whoever last touched the workflow —
+          # a human's name on a commit they did not make.
+          author: 'sky-ai-bot <258129642+sky-ai-bot@users.noreply.github.com>'
+          committer: 'sky-ai-bot <258129642+sky-ai-bot@users.noreply.github.com>'
           branch: bot/pricing-refresh
           delete-branch: true
           commit-message: 'chore(inference): refresh model pricing snapshot'
@@ -133,4 +144,4 @@ jobs:
 
             If an open **"pricing schema drift"** issue exists, upstream added a cost field the formula doesn't read yet — address that before relying on the affected models' cost.
 
-            _Opened with the default `GITHUB_TOKEN`, so downstream CI is not triggered on this PR; the gate already ran in the refresh job._
+            _Opened as `sky-ai-bot`, so CI runs on this PR normally — on top of the gate that already ran in the refresh job._

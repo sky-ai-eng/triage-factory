@@ -278,6 +278,58 @@ func HooksDir() string {
 	return filepath.Join(StateRoot(), "hooks")
 }
 
+// GHBinDir is the directory holding the TF-owned `gh` release binary:
+// <StateRoot>/bin. Like HooksDir it is fetched/written by the running binary
+// rather than baked into an image, so it hangs off the writable state root and
+// NOT the image-baked ToolchainRoot — the runtime image bakes its own gh at a
+// fixed path and never consults this one.
+//
+// The directory itself is the unit, not just the file: it is prepended to the
+// agent subprocess's PATH so `gh` resolves to the pinned binary and never to
+// whatever gh the user has installed (theirs carries the user's own GitHub
+// auth, entirely outside the credential channel). Keep it TF-owned and
+// single-purpose for that reason.
+func GHBinDir() string {
+	return filepath.Join(StateRoot(), "bin")
+}
+
+// GHBinaryPath is the TF-owned gh binary: <GHBinDir>/gh.
+func GHBinaryPath() string {
+	return filepath.Join(GHBinDir(), "gh")
+}
+
+// GHChannelRunDir is one local-mode run's private gh-channel directory:
+// <StateRoot>/gh-channel/<runID>. It holds the per-run injector trust file and
+// the per-run gh config dir, and is removed when the run ends.
+//
+// The config dir matters as much as the cert: local mode runs the agent under
+// the user's own HOME, so without an explicit GH_CONFIG_DIR gh would read the
+// user's ~/.config/gh — including the hosts entry carrying their personal
+// credential. Pointing it at an empty per-run dir is the local-mode analogue of
+// the jail's HOME isolation in multi mode.
+func GHChannelRunDir(runID string) string {
+	return filepath.Join(StateRoot(), "gh-channel", sanitizePathSegment(runID))
+}
+
+// sanitizePathSegment reduces an id to a filesystem-safe single segment. Run ids
+// are UUIDs in every production caller, so this is defense in depth against a
+// future caller with a less constrained shape — never a path separator, never a
+// climb out of the parent.
+func sanitizePathSegment(id string) string {
+	clean := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			return r
+		default:
+			return '-'
+		}
+	}, id)
+	if clean == "" {
+		return "unnamed"
+	}
+	return clean
+}
+
 // --- Class 3: local-only -------------------------------------------------
 
 // DBPath is the SQLite database path: <StateRoot>/triagefactory.db.

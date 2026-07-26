@@ -169,3 +169,86 @@ func TestBuildAllowedTools_CapBrokerNotReachable(t *testing.T) {
 		t.Error("allowlist must not name cap-broker — that would let a sandboxed agent invoke the privileged broker subcommand")
 	}
 }
+
+// ghAllowlist is the allowlist a run WITH a live gh credential channel gets.
+func ghAllowlist() string {
+	return BuildAllowedToolsFor(AllowedToolsOptions{SelfBin: "/usr/local/bin/tf", GH: true})
+}
+
+// TestBuildAllowedTools_GHRequiresChannel pins the gate: `gh` appears only when
+// the caller says a channel is live. Without one, a local host's `gh` would
+// resolve to the USER's own installation under the user's own GitHub auth — an
+// agent acting as the human, outside the per-run credential channel entirely.
+// Silence in the allowlist is what makes that unreachable.
+func TestBuildAllowedTools_GHRequiresChannel(t *testing.T) {
+	if base := BuildAllowedTools("/usr/local/bin/tf"); strings.Contains(base, "Bash(gh ") {
+		t.Error("allowlist names gh with no channel wired — that grants the user's own gh, authenticated as the user")
+	}
+	if !strings.Contains(ghAllowlist(), "Bash(gh pr view)") {
+		t.Error("allowlist omits gh even with a channel wired")
+	}
+}
+
+// TestBuildAllowedTools_GHPorcelainAllowed pins the subcommands the delegated
+// workflows actually need.
+func TestBuildAllowedTools_GHPorcelainAllowed(t *testing.T) {
+	gh := ghAllowlist()
+	for _, want := range []string{
+		"Bash(gh pr view)", "Bash(gh pr view *)",
+		"Bash(gh pr list)", "Bash(gh pr diff *)", "Bash(gh pr checkout *)",
+		"Bash(gh pr create *)", "Bash(gh pr comment *)",
+		"Bash(gh pr ready *)", "Bash(gh pr close *)",
+		"Bash(gh issue view *)", "Bash(gh issue list)",
+		"Bash(gh issue create *)", "Bash(gh issue comment *)",
+		"Bash(gh run view *)", "Bash(gh run list)", "Bash(gh run download *)",
+		"Bash(gh repo view)", "Bash(gh search *)",
+	} {
+		if !strings.Contains(gh, want) {
+			t.Errorf("allowlist must contain %q — it's part of the shipped gh workflow", want)
+		}
+	}
+}
+
+// TestBuildAllowedTools_GHEscapeHatchesBlocked is the counterpart guard, and
+// the reason gh is enumerated rather than granted as a binary. `gh api` POSTs
+// an arbitrary body to an arbitrary path with the org's credential attached —
+// the same network-exfil channel omitting curl/wget/nc closes. `gh auth` /
+// `config` / `alias` / `extension` are credential and configuration surfaces
+// (extension install is plain arbitrary code execution). `gh pr merge` has no
+// local equivalent of the native loop's intent gate, so it stays unreachable
+// rather than ungated. A blanket `Bash(gh *)` added for convenience would
+// silently reopen every one of these.
+func TestBuildAllowedTools_GHEscapeHatchesBlocked(t *testing.T) {
+	gh := ghAllowlist()
+	if strings.Contains(gh, "Bash(gh *)") {
+		t.Fatal("allowlist grants the whole gh binary — that reopens `gh api` as an arbitrary-request exfil primitive")
+	}
+	for _, forbidden := range []string{
+		"Bash(gh api",
+		"Bash(gh auth",
+		"Bash(gh config",
+		"Bash(gh alias",
+		"Bash(gh extension",
+		"Bash(gh pr merge",
+	} {
+		if strings.Contains(gh, forbidden) {
+			t.Errorf("allowlist must NOT contain %q", forbidden)
+		}
+	}
+}
+
+// Extras still merge on top of the gh surface — the two options are
+// independent, and a skill's MCP tools must not be dropped because gh is on.
+func TestBuildAllowedTools_GHComposesWithExtras(t *testing.T) {
+	got := BuildAllowedToolsFor(AllowedToolsOptions{
+		SelfBin: "/usr/local/bin/tf",
+		Extras:  "mcp__acme__search",
+		GH:      true,
+	})
+	if !strings.Contains(got, "mcp__acme__search") {
+		t.Error("extras dropped when GH is enabled")
+	}
+	if !strings.Contains(got, "Bash(gh pr create *)") {
+		t.Error("gh patterns dropped when extras are supplied")
+	}
+}
