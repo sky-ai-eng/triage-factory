@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 )
 
@@ -124,5 +125,62 @@ func TestRelayServer_RecordDenialRoutesToRecorder(t *testing.T) {
 	got := <-recorded
 	if got.Owner != "acme" || got.Repo != "widgets" || got.Reason != "off-ref" {
 		t.Fatalf("recorder saw wrong denial: %+v", got)
+	}
+}
+
+// TestRelayServer_EgressDenialWritesAuditRow pins the executor-side half of the
+// egress audit: the sidecar relays only (target, reason), and the orchestrator
+// binds the conversation from its OWN RunInfo — so a sidecar can neither
+// attribute a probe to another run nor forge the dedup key that collapses the
+// repeats.
+func TestRelayServer_EgressDenialWritesAuditRow(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	s := NewRelayServer(stores, info, nil)
+
+	args, _ := json.Marshal(agentproc.RecordEgressDenialArgs{
+		Target: "api.github.com:443",
+		Reason: `host "api.github.com" is not on the sandbox egress allowlist`,
+	})
+	// Relayed twice, as a probing agent would: one row.
+	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordEgressDenial, args)
+	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordEgressDenial, args)
+
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want 1 egress row after two relays, got %d: %+v", len(acts), acts)
+	}
+	a := acts[0]
+	if a.Action != domain.ActionEgressDenied || a.Target != "api.github.com:443" ||
+		a.Provider != domain.ArtifactProviderNetwork {
+		t.Errorf("relayed egress row mismatch: %+v", a)
+	}
+	if a.ConversationID != info.RunID {
+		t.Errorf("conversation = %q, want the server's own run %q (never the wire)", a.ConversationID, info.RunID)
+	}
+}
+
+// TestRelayServer_GHWriteWritesAuditRow pins the same for the gh channel: the
+// relayed method/path/status become a gh_channel_write row attributed to this
+// run, including a refused write.
+func TestRelayServer_GHWriteWritesAuditRow(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	s := NewRelayServer(stores, info, nil)
+
+	args, _ := json.Marshal(agentproc.RecordGHWriteArgs{
+		Method: "PATCH", Path: "/repos/octo/repo/pulls/7", Status: 404,
+	})
+	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
+
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("want 1 gh write row, got %d: %+v", len(acts), acts)
+	}
+	a := acts[0]
+	if a.Action != domain.ActionGHChannelWrite || a.Target != "octo/repo" ||
+		a.ConversationID != info.RunID {
+		t.Errorf("relayed gh write row mismatch: %+v", a)
+	}
+	if !strings.Contains(a.DetailJSON, `"http_status":404`) {
+		t.Errorf("detail_json = %q, want the refused status recorded", a.DetailJSON)
 	}
 }

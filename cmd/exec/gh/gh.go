@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 )
 
-// HelpText is the help output for gh commands, shared with the top-level exec help.
-const HelpText = `GitHub PR Commands:
+// PRHelpText is the `gh pr` half of the help, printed on its own by
+// `gh pr --help` and folded into the gh-wide and exec-wide overviews.
+const PRHelpText = `GitHub PR Commands:
   gh pr view <number> [--repo o/r] [-v]                  PR details + reviews + comments
   gh pr diff <number> [--repo o/r] [--file <path>] [--stdout]
                                                           Persists the diff to
@@ -25,6 +27,9 @@ const HelpText = `GitHub PR Commands:
                                                           hit the 1000-file cap.
   gh pr thread-view <number> <comment_id> [--page N]      Comment thread with replies
   gh pr review-view <review_id> --pr <N> [--repo o/r] [-v]  Expand a review + inline comments
+  gh pr review-dismiss <review_id> --pr <N> [--repo o/r] [--body <reason>]
+                                                          Dismiss a submitted review (defaults the
+                                                          reason to "Dismissed").
 
 PR Creation:
   gh pr create --title <T> (--body <B> | --body-file <path>) --base <branch> [--head <branch>] [--draft] [--repo o/r]
@@ -57,7 +62,6 @@ Review Lifecycle (managed locally, submitted atomically):
                                                           MINOR, CLEAN. Renders as a chip in the human
                                                           approval UI and a badge on the posted comment.
                                                           Optional — omit for an un-badged comment.
-  gh pr comment-list-pending <review_id>                  List pending review comments
   gh pr finalize-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)
                                                           Hand the drafted review off for human approval
                                                           (does NOT submit to GitHub — approval does).
@@ -73,16 +77,52 @@ Direct Comments (hit GitHub API immediately):
                                                           add-review-comment) = a staged review comment;
                                                           pass --severity to keep its chip on edit.
   gh pr comment-delete <comment_id>                       Delete a comment. Numeric id = published;
-                                                          non-numeric id = staged review comment.
+                                                          non-numeric id = staged review comment.`
 
-GitHub Actions Commands:
+// ActionsHelpText is the `gh actions` half, printed on its own by
+// `gh actions --help`.
+const ActionsHelpText = `GitHub Actions Commands:
   gh actions download-logs <run_id> [--repo o/r]          Download & extract the full log
                                                           archive for a workflow run into
                                                           ./_tfac/ci-logs/<run_id>/
+  gh actions list-runs (--pr <N> | --sha <SHA>) [--repo o/r]
+                                                          List recent workflow runs for a PR's head
+                                                          commit or an explicit SHA.`
 
-Repo Resolution (all gh commands):
+// RepoResolutionHelpText applies to every gh command, so both halves append it.
+const RepoResolutionHelpText = `Repo Resolution (all gh commands):
   Priority order: --repo flag > TRIAGE_FACTORY_REPO env var > .git/config origin of cwd.
   Commands fail with a clear error if none resolve.`
+
+// HelpText is the full gh help, shared with the top-level exec help.
+var HelpText = PRHelpText + "\n\n" + ActionsHelpText + "\n\n" + RepoResolutionHelpText
+
+// ValueFlags is every gh flag that takes a value. Two callers need exactly this
+// set and would drift if each kept its own: firstPositional (which must skip a
+// flag's value when hunting for the leading positional arg) and the --help scan
+// (which must not read `--body "--help"` as a help request).
+//
+// Booleans (-v/--verbose, --stdout, --draft, --fresh) are deliberately absent:
+// listing one would make `--stdout --help` look like the boolean's value and
+// swallow a real help request.
+var ValueFlags = map[string]bool{
+	"--repo":       true,
+	"--file":       true,
+	"--pr":         true,
+	"--body":       true,
+	"--body-file":  true,
+	"--line":       true,
+	"--start-line": true,
+	"--event":      true,
+	"--status":     true,
+	"--severity":   true,
+	"--title":      true,
+	"--base":       true,
+	"--head":       true,
+	"--emoji":      true,
+	"--sha":        true,
+	"--page":       true,
+}
 
 // Handle dispatches gh subcommands. host is the agenthost.Client every
 // GitHub API call (and the PR/review DB write paths) route through: in the
@@ -105,9 +145,26 @@ func Handle(ctx context.Context, host agenthost.Client, args []string) {
 	case "actions":
 		handleActions(ctx, host, cmdArgs)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown gh resource: %s\n", resource)
+		fmt.Fprintln(os.Stderr, unknownVerbMessage("gh resource", "gh resources", resource,
+			[]string{"pr", "actions"}, "triagefactory exec gh --help"))
 		os.Exit(1)
 	}
+}
+
+// unknownVerbMessage is the shared shape of every "you typed something that
+// isn't a verb here" error: what was wrong, what the valid set is, and the
+// command that expands it — which the help routing above makes work at this
+// depth. A message that names only the mistake costs the agent turns of blind
+// retrying to recover from.
+//
+// Deliberately harness-neutral: it asserts only what is true of this binary.
+// The exec CLI cannot tell which agent harness is driving it, so any claim
+// about what OTHER tooling is or isn't reachable would be wrong half the time
+// — `gh` itself is available and recommended on one path and withheld on the
+// other.
+func unknownVerbMessage(kind, kindPlural, got string, valid []string, helpCmd string) string {
+	return fmt.Sprintf("unknown %s: %s\nvalid %s: %s\nRun '%s' for usage.",
+		kind, got, kindPlural, strings.Join(valid, ", "), helpCmd)
 }
 
 func printHelp() {

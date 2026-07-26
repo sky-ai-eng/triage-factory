@@ -71,6 +71,18 @@
 // only clientMutationId — the PR it targets is named in the *request*, so
 // observing it is out of scope by the invariant above; a reconciler backstop
 // owns that case.
+//
+// # Write audit
+//
+// Observation covers only the two artifact-bearing creates, so an edit, a
+// merge, a close, and every refused write used to leave no trace at all. The
+// second callback (ObserveWrite) closes that gap for the REST surface: each
+// mutating method is reported with its path and the upstream's status, success
+// and failure alike. It reads three fields the response already carries —
+// method, path, status — so no request is read and no body is buffered on
+// either side; the invariant above is untouched. GraphQL is deliberately excluded:
+// a porcelain mutation and an ordinary `gh pr view` are both POST
+// /api/graphql, and telling them apart means parsing the request body.
 package ghinjector
 
 import (
@@ -143,6 +155,20 @@ type ObservedMutation struct {
 	ReviewState string // GitHub's review state, e.g. APPROVED / COMMENTED / CHANGES_REQUESTED
 }
 
+// ObservedWrite is one mutating REST request the injector forwarded, with the
+// outcome the upstream returned. Every field comes off the response's own
+// request record — no body is read on either side.
+type ObservedWrite struct {
+	// Method is the HTTP method, one of the mutating set (POST/PATCH/PUT/DELETE).
+	Method string
+	// Path is the upstream request path the injector forwarded to (post-rewrite,
+	// so the GHE /api/v3 prefix is already resolved to the org's real API shape).
+	Path string
+	// Status is the upstream response code. Non-2xx is recorded too: a refused
+	// write is exactly the outcome the audit log must not omit.
+	Status int
+}
+
 // Config bundles the per-run injector inputs. One Server per run.
 type Config struct {
 	// Upstream is the org's real REST API base — "https://api.github.com" or a
@@ -166,6 +192,14 @@ type Config struct {
 	// injector sees complete. Best-effort and out of the response's critical
 	// path shape (called after the body is buffered, before it streams on).
 	Observe func(ctx context.Context, m ObservedMutation)
+
+	// ObserveWrite, when non-nil, is called for every mutating REST request the
+	// injector forwarded, whatever the outcome — the audit-parity callback, as
+	// opposed to Observe's artifact-parity one. Both fire for a successful REST
+	// PR create: they answer different questions (what exists vs what was
+	// attempted), the same way branch_pushed and branch_push_failed coexist.
+	// Called inline on the response path, so the callback must not block.
+	ObserveWrite func(ctx context.Context, w ObservedWrite)
 
 	// AllowNonLoopback opts into binding a non-loopback address (the veth IP the
 	// sandbox reaches). Loopback-only by default, exactly like the sibling
@@ -360,15 +394,42 @@ func singleJoiningSlash(a, b string) string {
 	return a + b
 }
 
-// modifyResponse bumps the request counter and, for the observable mutation
-// shapes, buffers+parses the response body to emit an observation before
-// streaming it on unchanged. Never returns an error (that would 502 the agent
-// on a successful upstream write) — observation failures are silently dropped
-// and left to the reconciler backstop.
+// writeMethods is the set of REST methods that mutate. A method outside it is
+// a read, and reads are outside the audit charter (a refused GET is
+// indistinguishable from an ordinary 404).
+var writeMethods = map[string]bool{
+	http.MethodPost:   true,
+	http.MethodPatch:  true,
+	http.MethodPut:    true,
+	http.MethodDelete: true,
+}
+
+// auditWrite reports one mutating REST request to the write-audit callback,
+// whatever the upstream returned. GraphQL is skipped by the caller's flag: its
+// mutations are indistinguishable from its reads without the request body.
+// Reads three already-parsed fields and nothing else — no body on either side
+// of the hop is touched, so the package's never-inspect-requests invariant is
+// unaffected.
+func (s *Server) auditWrite(resp *http.Response, graphql bool) {
+	if s.cfg.ObserveWrite == nil || graphql || !writeMethods[resp.Request.Method] {
+		return
+	}
+	s.cfg.ObserveWrite(context.Background(), ObservedWrite{
+		Method: resp.Request.Method,
+		Path:   resp.Request.URL.Path,
+		Status: resp.StatusCode,
+	})
+}
+
+// modifyResponse bumps the request counter, reports every mutating REST request
+// to the write audit, and, for the observable mutation shapes, buffers+parses
+// the response body to emit an observation before streaming it on unchanged.
+// Never returns an error (that would 502 the agent on a successful upstream
+// write) — observation failures are silently dropped and left to the
+// reconciler backstop.
 func (s *Server) modifyResponse(resp *http.Response) error {
 	s.requestCount.Add(1)
-	if s.cfg.Observe == nil || resp.Request == nil || resp.Request.Method != http.MethodPost ||
-		resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.Request == nil {
 		return nil
 	}
 
@@ -376,6 +437,17 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	// which is off limits, so the response itself has to say what it was. REST
 	// candidates are recognized from the path alone.
 	graphql := resp.Request.URL.Path == s.graphqlURL.Path
+
+	// Write audit first, and before the success/method filters below, so it also
+	// covers the outcomes observation drops: a refused write, and every mutating
+	// method that creates no artifact.
+	s.auditWrite(resp, graphql)
+
+	if s.cfg.Observe == nil || resp.Request.Method != http.MethodPost ||
+		resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+
 	var (
 		kind, owner, repo string
 		number            int

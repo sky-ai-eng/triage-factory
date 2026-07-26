@@ -117,6 +117,25 @@ const (
 	// {op, ref, reason}.
 	ActionGitDenied = "git_denied"
 
+	// Outbound network connection refused by the sandbox's gating egress proxy
+	// (an off-allowlist host, a non-443 port, a hostname resolving only to
+	// internal addresses). Provider is ArtifactProviderNetwork, target is the
+	// CONNECT authority (host:port), detail_json carries {target, reason}.
+	// Repeated denials collapse per (conversation, host) — see
+	// EgressDenialDedupKey — because the signal is that this conversation was
+	// refused a destination at all, not how many times it retried.
+	ActionEgressDenied = "egress_denied"
+
+	// A write the agent made through the real-`gh` credential channel: a REST
+	// request whose method mutates, recorded with its upstream outcome so a
+	// refused write is as visible as a successful one. detail_json carries
+	// {method, path, http_status}. Appended unconditionally (no dedup key) —
+	// each attempt is its own event, exactly like ActionBranchPushFailed.
+	// GraphQL is deliberately out: gh's porcelain mutations and its ordinary
+	// reads are the same POST /api/graphql, separable only by parsing the
+	// request body, which the injector never does.
+	ActionGHChannelWrite = "gh_channel_write"
+
 	// Jira issue lifecycle + comments.
 	ActionIssueCreated       = "issue_created"
 	ActionIssueTransitioned  = "issue_transitioned"
@@ -139,6 +158,11 @@ const (
 	CredentialGitHubApp = "github_app"
 	CredentialJiraOrg   = "jira_org"
 	CredentialSlackBot  = "slack_bot"
+	// CredentialNone is the honest value for an action that spent no credential
+	// at all: the sandbox egress denial, where nothing left the box and no
+	// external system was ever reached. The column is NOT NULL, so a refused
+	// connection needs a name rather than an empty string.
+	CredentialNone = "none"
 )
 
 // BranchPushDedupKey builds the deterministic dedup key for a branch push:
@@ -147,10 +171,27 @@ const (
 // produce an identical key and the twin collapses under ON CONFLICT(org_id,
 // dedup_key) DO NOTHING — while a genuinely new push (a force-push to the same
 // ref, or new commits) carries a different sha and is recorded as its own row.
-// This is the ONLY action with a deterministic natural key; every other action
-// leaves DedupKey empty (the store fills a uuid) so it can never be deduped away.
+// This is one of the two actions with a deterministic natural key (the other is
+// EgressDenialDedupKey); every other action leaves DedupKey empty (the store
+// fills a uuid) so it can never be deduped away.
 func BranchPushDedupKey(runID, ref, sha string) string {
 	return strings.Join([]string{"branch", runID, ref, sha}, ":")
+}
+
+// EgressDenialDedupKey builds the deterministic dedup key for a refused sandbox
+// egress connection: "egress:<conversationID>:<target>", where target is the
+// CONNECT authority (host:port). An agent that has lost its way retries the same
+// blocked host in a tight loop, and hundreds of identical rows would bury the
+// signal rather than sharpen it — the thing worth recording is that THIS
+// conversation was refused THIS destination, so the repeats collapse under
+// ON CONFLICT(org_id, dedup_key) DO NOTHING.
+//
+// The conversation id is load-bearing, not decoration: the unique index spans
+// (org_id, dedup_key), so a key built from the host alone would let one
+// conversation's probe silently swallow every later conversation's probe of the
+// same host — org-wide, for the lifetime of the table.
+func EgressDenialDedupKey(conversationID, target string) string {
+	return strings.Join([]string{"egress", conversationID, target}, ":")
 }
 
 // ExternalActionListOpts bounds + filters a list read for the action-log feeds.

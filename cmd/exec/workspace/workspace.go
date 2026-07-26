@@ -22,6 +22,7 @@ import (
 	"os"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
 )
 
 // HelpText is the help block for `workspace` commands, surfaced both
@@ -52,11 +53,22 @@ Usage notes:
   - 'add' rejects unconfigured / untracked repos; use 'list' to enumerate
     options before guessing.`
 
+// ValueFlags is every workspace flag that takes a value, for the shared help
+// scan (see execflags.HasHelpFlag). workspace has no boolean flags.
+var ValueFlags = map[string]bool{
+	"--ref": true,
+	"--pr":  true,
+}
+
 // Handle dispatches workspace subcommands. host is the agenthost.Client
 // every DB-touching path routes through (local SQLite or daemon IPC,
 // chosen by agenthost.AutoDetect at the top of cmd/exec/exec.go).
 func Handle(host agenthost.Client, args []string) {
-	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+	// Help at either depth — `workspace --help` and `workspace add --help` —
+	// since both commands' usage lives in the one help block. Value-taking
+	// flags are excluded so `--ref "--help"` still resolves as a ref.
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" ||
+		execflags.HasHelpFlag(args[1:], ValueFlags) {
 		printHelp()
 		return
 	}

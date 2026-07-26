@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -60,14 +61,29 @@ func handleActions(ctx context.Context, host agenthost.Client, args []string) {
 	action := args[0]
 	flags := args[1:]
 
+	// Help at both depths, matching `gh pr`: the resource help lists the two
+	// verbs, which is also the right answer for a mistyped verb asking for help.
+	if action == "--help" || action == "-h" || execflags.HasHelpFlag(flags, ValueFlags) {
+		printActionsHelp()
+		return
+	}
+
 	switch action {
 	case "download-logs":
 		actionsDownloadLogs(ctx, host, flags)
 	case "list-runs":
 		actionsListRuns(ctx, host, flags)
 	default:
-		exitErr(fmt.Sprintf("unknown actions action: %s", action))
+		exitErr(unknownVerbMessage("actions action", "actions", action,
+			[]string{"download-logs", "list-runs"}, "triagefactory exec gh actions --help"))
 	}
+}
+
+// printActionsHelp prints the `gh actions` usage plus the shared
+// repo-resolution rules.
+func printActionsHelp() {
+	fmt.Printf("Usage: triagefactory exec gh actions <action> [flags]\n\n%s\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n",
+		ActionsHelpText, RepoResolutionHelpText)
 }
 
 // maxListedRuns caps the per-request run list. Agents asking "what runs are

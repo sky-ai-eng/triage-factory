@@ -36,6 +36,17 @@ const (
 	// the coordinates. The orchestrator (which holds the DB and domain types)
 	// builds and upserts the artifact row — the capless sidecar never does.
 	OpRecordObservation = "record_observation"
+	// OpRecordEgressDenial is the egress proxy's fire-and-forget report of a
+	// refused CONNECT. Same shape as record_denial, one layer down: the proxy
+	// runs in the capless sidecar and the audit row is a DB write, so the
+	// coordinates travel up and the orchestrator writes.
+	OpRecordEgressDenial = "record_egress_denial"
+	// OpRecordGHWrite is the gh-channel injector's fire-and-forget report of a
+	// REST write it forwarded, with the upstream's outcome. Distinct from
+	// record_observation, which reports only the artifact-bearing creates: this
+	// one covers every mutating REST method and both outcomes, so an edit, a
+	// merge, and a refused write all leave a trace.
+	OpRecordGHWrite = "record_gh_write"
 )
 
 // AuthorizeRepoArgs / AuthorizeRepoReply are the authorize_repo op's payloads
@@ -69,6 +80,25 @@ type RecordDenialArgs struct {
 	Ref    string `json:"ref"`
 	Op     string `json:"op"`
 	Reason string `json:"reason"`
+}
+
+// RecordEgressDenialArgs is record_egress_denial's payload: the CONNECT
+// authority the sandbox asked for (host:port) and the policy reason it was
+// refused, mirroring egressproxy.DeniedConnect across the wire. The
+// orchestrator binds the conversation from its own RunInfo, so a sidecar can
+// never attribute a probe to another run.
+type RecordEgressDenialArgs struct {
+	Target string `json:"target"`
+	Reason string `json:"reason"`
+}
+
+// RecordGHWriteArgs is record_gh_write's payload: the method, upstream path,
+// and response status of one mutating REST request the gh-channel injector
+// forwarded. Nothing from the request body — the injector never reads one.
+type RecordGHWriteArgs struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+	Status int    `json:"status"`
 }
 
 // RecordPushArgs is record_push's payload: one branch ref a receive-pack
