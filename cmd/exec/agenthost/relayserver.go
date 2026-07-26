@@ -247,6 +247,20 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(updateReviewDetailsResult{Updated: updated})
 
+	case opTransitionReviewState:
+		var a transitionReviewStateArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		// Relayed as a CALL, never a notify: the sidecar's auto-post path blocks
+		// on the claim's answer — publishing without knowing whether it won the
+		// CAS is exactly the double-submit this guards.
+		moved, err := s.rt.TransitionReviewState(ctx, a.ArtifactID, a.From, a.To, a.ExternalID, a.URL, a.DetailsJSON)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(transitionReviewStateResult{Moved: moved})
+
 	case opReviewPosture:
 		var a reviewPostureArgs
 		if err := json.Unmarshal(args, &a); err != nil {

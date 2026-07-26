@@ -64,6 +64,15 @@ type Runtime interface {
 	// review, which the unconditional UpsertArtifact (state last-writer-wins)
 	// would do with its stale in-memory pending state.
 	UpdateReviewDetailsIfPending(ctx context.Context, artifactID, detailsJSON string) (bool, error)
+	// TransitionReviewState is the review artifact's compare-and-swap: the row
+	// moves from → to only while it still holds `from`, optionally stamping the
+	// resolved review's coordinates in the same write. It is the claim primitive
+	// the auto-posting posture takes BEFORE calling GitHub — a finalized draft is
+	// simultaneously reachable by a human in the approval queue, and both callers
+	// submit the same review, so exactly one of them has to win a CAS or the
+	// review posts twice. Returns false when the race was lost (or the row is
+	// gone), never an error.
+	TransitionReviewState(ctx context.Context, artifactID, from, to, externalID, url, detailsJSON string) (bool, error)
 	// Record is the void, best-effort external-write funnel (RecordExternalWrite):
 	// a recording failure is logged host-side and never fails the agent's
 	// already-applied action, so it needs no error return.
@@ -145,6 +154,7 @@ const (
 	opBuildAgentFooter        = "build_agent_run_footer"
 	opUpsertArtifact          = "upsert_artifact"
 	opUpdateReviewDetails     = "update_review_details_if_pending"
+	opTransitionReviewState   = "transition_review_state"
 	opRecordExternalWrite     = "record_external_write"
 	opRecordReadTouch         = "record_read_touch"
 	opMemoryLoad              = "memory_load"
@@ -166,6 +176,22 @@ type updateReviewDetailsArgs struct {
 
 type updateReviewDetailsResult struct {
 	Updated bool `json:"updated"`
+}
+
+// transitionReviewStateArgs / transitionReviewStateResult are the
+// transition_review_state op's payloads — the CAS's from/to states plus the
+// optional coordinate stamp, and whether this caller won the transition.
+type transitionReviewStateArgs struct {
+	ArtifactID  string `json:"artifact_id"`
+	From        string `json:"from"`
+	To          string `json:"to"`
+	ExternalID  string `json:"external_id,omitempty"`
+	URL         string `json:"url,omitempty"`
+	DetailsJSON string `json:"details_json,omitempty"`
+}
+
+type transitionReviewStateResult struct {
+	Moved bool `json:"moved"`
 }
 
 // checkEntitlementArgs / checkEntitlementResult are the check_entitlement op's
@@ -430,6 +456,24 @@ func (r *directRuntime) UpdateReviewDetailsIfPending(ctx context.Context, artifa
 	return updated, err
 }
 
+// TransitionReviewState routes the review CAS through the same event-vs-manual
+// pool split UpdateReviewDetailsIfPending uses: event-triggered runs claim on
+// the admin pool (no JWT claims); manual runs claim under the kicking-off user's
+// synthetic claims — the same pool the approve handler races on, which is what
+// makes the two callers contend for one row rather than pass each other.
+func (r *directRuntime) TransitionReviewState(ctx context.Context, artifactID, from, to, externalID, url, detailsJSON string) (bool, error) {
+	if r.info.IsEventTriggered {
+		return r.stores.Artifacts.TransitionReviewStateSystem(ctx, r.info.OrgID, artifactID, from, to, externalID, url, detailsJSON)
+	}
+	var moved bool
+	err := r.stores.Tx.SyntheticClaimsWithTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
+		m, e := ts.Artifacts.TransitionReviewState(ctx, r.info.OrgID, artifactID, from, to, externalID, url, detailsJSON)
+		moved = m
+		return e
+	})
+	return moved, err
+}
+
 func (r *directRuntime) Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction) {
 	RecordExternalWrite(ctx, r.stores, r.info, a, act)
 }
@@ -628,6 +672,16 @@ func (r *relayRuntime) UpdateReviewDetailsIfPending(ctx context.Context, artifac
 		return false, err
 	}
 	return res.Updated, nil
+}
+
+func (r *relayRuntime) TransitionReviewState(ctx context.Context, artifactID, from, to, externalID, url, detailsJSON string) (bool, error) {
+	var res transitionReviewStateResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opTransitionReviewState, transitionReviewStateArgs{
+		ArtifactID: artifactID, From: from, To: to, ExternalID: externalID, URL: url, DetailsJSON: detailsJSON,
+	}, &res); err != nil {
+		return false, err
+	}
+	return res.Moved, nil
 }
 
 func (r *relayRuntime) Record(_ context.Context, a *domain.Artifact, act *domain.ExternalAction) {

@@ -241,11 +241,16 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 		return staged, fmt.Errorf("snapshot review draft into artifact: %w", err)
 	}
 
-	// Posture decision AFTER the snapshot, never before: the guarded write is
-	// what arms the anti-double-submit sentinel, so ordering it first makes the
-	// auto-post at-most-once. A crash (or a GitHub failure) between here and the
-	// submit leaves a finalized draft a human can still approve — the inverse
-	// order would leave a posted review that finalize would happily post again.
+	// Posture decision AFTER the snapshot, never before: the guarded write is what
+	// arms the sentinel that refuses a second finalize from this run. A crash (or
+	// a GitHub failure) between here and the submit leaves a finalized draft a
+	// human can still approve — the inverse order would leave a posted review
+	// this run would happily post again.
+	//
+	// The sentinel does NOT make the post at-most-once on its own: from the
+	// instant it is saved the draft is also reachable by a human in the approval
+	// queue, and their approve calls the same SubmitReview. The pending →
+	// submitted CAS inside postFinalizedReview is what settles that race.
 	if !c.shouldPostReview(ctx, art, details) {
 		return staged, nil
 	}
@@ -277,13 +282,25 @@ func (c *LocalClient) shouldPostReview(ctx context.Context, art *domain.Artifact
 // postFinalizedReview submits an already-finalized draft to GitHub through the
 // shared publish path (internal/review.SubmitStaged — the same function the
 // human-approval handler calls, so comment anchoring, the commit pin, and the
-// composed deep link behave identically), then records the artifact as submitted
-// with the posted review's id + URL and appends the review_submitted audit row.
+// composed deep link behave identically), then stamps the artifact with the
+// posted review's id + URL and appends the review_submitted audit row.
 //
-// A submit failure is not fatal: the draft stays finalized and pending, which is
-// precisely the state a human approves from, so the run reports the staged
-// outcome and the review is recoverable in the UI. It is logged host-side —
-// stdout belongs to the verb's JSON.
+// The pending → submitted CAS is taken BEFORE the GitHub write, exactly as the
+// approve handler takes it and for exactly the same reason: a finalized draft is
+// reachable by two independent callers — this run, and any human looking at the
+// approval queue — and both publish by calling SubmitReview. Whoever wins the
+// CAS posts; the loser backs off having touched nothing. Without it the two
+// windows overlap (the sentinel is saved a few round-trips before the submit)
+// and one review reaches GitHub twice, with each writer's coordinates
+// overwriting the other's on the artifact row.
+//
+// A submit failure releases the claim (submitted → pending) so the draft returns
+// to the approval queue intact, and the run reports the staged outcome. The
+// release runs AFTER the failed write, mirroring the handler: a crash mid-flight
+// strands the artifact as submitted-without-URL, which is preferable to the
+// inverse order, where a crash between a successful post and the flip leaves the
+// review re-submittable. Failures are logged host-side — stdout belongs to the
+// verb's JSON.
 func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artifact, details domain.ReviewArtifactDetails) ReviewFinalizeResult {
 	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
@@ -296,13 +313,40 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 		return ReviewFinalizeResult{}
 	}
 	// The footer is the same run-attribution block the approval path appends, so
-	// an auto-posted review carries the identical provenance line.
+	// an auto-posted review carries the identical provenance line. Resolved before
+	// the claim: it is a plain read, and holding the claim across it would widen
+	// the window in which a crash strands the row as submitted-without-URL.
 	footer, ferr := c.rt.AgentFooter(ctx, "review")
 	if ferr != nil {
 		agenthostLog.Warn("auto-post review: agent footer unavailable; posting without it",
 			"run", c.info.RunID, "artifact", art.ID, "error", ferr)
 		footer = ""
 	}
+
+	// Claim the review. A lost CAS means a human approved this draft in the window
+	// since the sentinel was saved — their approve is posting it, so this run must
+	// not, and reports the staged outcome (it did not publish; the agent's next
+	// step is the same either way). A CAS error is treated identically: never
+	// publish on an unconfirmed claim.
+	claimed, cerr := c.rt.TransitionReviewState(ctx, art.ID,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	if cerr != nil || !claimed {
+		agenthostLog.Warn("auto-post review: could not claim the draft; leaving it for human approval",
+			"run", c.info.RunID, "artifact", art.ID, "claimed", claimed, "error", cerr)
+		return ReviewFinalizeResult{}
+	}
+	// releaseClaim undoes the claim so the draft is approvable again. Best-effort
+	// and loud: a failed release strands the row as submitted with no posted
+	// review behind it, which no other writer can now correct.
+	releaseClaim := func() {
+		released, rerr := c.rt.TransitionReviewState(ctx, art.ID,
+			domain.ArtifactStateReviewSubmitted, domain.ArtifactStateReviewPending, "", "", "")
+		if rerr != nil || !released {
+			agenthostLog.Error("auto-post review: failed to release the claim — the review is stuck as submitted without a posted review",
+				"run", c.info.RunID, "artifact", art.ID, "released", released, "error", rerr)
+		}
+	}
+
 	res, err := review.SubmitStaged(ctx, client, review.SubmitInput{
 		Owner:   owner,
 		Repo:    repo,
@@ -322,22 +366,39 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 	if err != nil {
 		agenthostLog.Warn("auto-post review: submit failed; the review stays staged for human approval",
 			"run", c.info.RunID, "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+		releaseClaim()
 		return ReviewFinalizeResult{}
 	}
 
-	// Record what landed: the event GitHub was asked for, the review's id + URL,
-	// and the pending → submitted flip, composed with the audit row in one write.
-	// Unlike the approval path there is no CAS claim to release — the run owns
-	// this draft and the submit already happened, so the row is brought in line
-	// with GitHub best-effort (the recording funnel logs and swallows failures
-	// rather than unwinding an applied external write).
+	// Stamp the posted review's coordinates onto the claimed row — a
+	// submitted → submitted CAS, not an Upsert, whose state column is
+	// last-writer-wins and would let a concurrent writer's stale snapshot
+	// overwrite what GitHub just minted. Retried once; a double failure is loud,
+	// because until it lands the row reads submitted with no URL.
 	details.ReviewEvent = res.Event
 	submitted := *art
 	submitted.State = domain.ArtifactStateReviewSubmitted
 	submitted.ExternalID = strconv.Itoa(res.ReviewID)
 	submitted.URL = res.URL
 	submitted.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
-	c.upsertGithubArtifact(ctx, submitted, githubAction(submitted, domain.ActionReviewSubmitted,
+	stamp := func() (bool, error) {
+		return c.rt.TransitionReviewState(ctx, art.ID,
+			domain.ArtifactStateReviewSubmitted, domain.ArtifactStateReviewSubmitted,
+			submitted.ExternalID, submitted.URL, submitted.DetailsJSON)
+	}
+	if stamped, serr := stamp(); serr != nil || !stamped {
+		agenthostLog.Warn("auto-post review: stamping the posted review onto the artifact failed; retrying once",
+			"run", c.info.RunID, "artifact", art.ID, "stamped", stamped, "error", serr)
+		if stamped, serr := stamp(); serr != nil || !stamped {
+			agenthostLog.Error("auto-post review: stamp failed twice — the artifact shows submitted without the posted review's id/URL",
+				"run", c.info.RunID, "artifact", art.ID, "review", submitted.ExternalID, "url", submitted.URL, "error", serr)
+		}
+	}
+	// The audit row is appended on its own (the artifact is already written by the
+	// CAS above, so there is nothing to compose it with). Best-effort like every
+	// other recording here — the GitHub write already landed and must not be
+	// unwound by a bookkeeping failure.
+	c.recordBotAction(ctx, githubAction(submitted, domain.ActionReviewSubmitted,
 		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted))
 
 	return ReviewFinalizeResult{Posted: true, URL: res.URL}

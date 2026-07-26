@@ -995,3 +995,74 @@ func seedArtifactRunWithID(t *testing.T, conn *sql.DB, id string) string {
 	}
 	return id
 }
+
+// TestArtifactStore_SQLite_TransitionReviewStateSystem pins the admin-pool CAS
+// the auto-posting review posture claims with: exactly one caller moves the row
+// out of pending, and the loser learns it lost rather than silently proceeding
+// to a second SubmitReview. Same contract as the app-pool twin the approve
+// handler uses — the two are what stop a run and a human from both publishing
+// one drafted review.
+func TestArtifactStore_SQLite_TransitionReviewStateSystem(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	runID := seedArtifactRun(t, conn)
+
+	draft, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
+		ConversationID: runID,
+		OrgID:          runmode.LocalDefaultOrgID,
+		TeamID:         runmode.LocalDefaultTeamID,
+		Provider:       domain.ArtifactProviderGitHub,
+		Kind:           domain.ArtifactKindReview,
+		Target:         "octo/repo#7",
+		State:          domain.ArtifactStateReviewPending,
+		DedupKey:       domain.ReviewDedupKey("octo/repo", 7, runID),
+		DetailsJSON:    `{"review_event":"COMMENT"}`,
+	})
+	if err != nil {
+		t.Fatalf("seed review draft: %v", err)
+	}
+
+	won, err := stores.Artifacts.TransitionReviewStateSystem(ctx, runmode.LocalDefaultOrgID, draft.ID,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	if err != nil || !won {
+		t.Fatalf("first claim = %v, %v; want it to win", won, err)
+	}
+	// The second caller — a human approve racing the run's auto-post, or vice
+	// versa — must lose, having made no GitHub call on the strength of it.
+	lost, err := stores.Artifacts.TransitionReviewStateSystem(ctx, runmode.LocalDefaultOrgID, draft.ID,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if lost {
+		t.Error("second claim won too — the CAS must admit exactly one publisher")
+	}
+
+	// The winner's stamp (submitted → submitted) carries the posted review's
+	// coordinates onto the claimed row.
+	stamped, err := stores.Artifacts.TransitionReviewStateSystem(ctx, runmode.LocalDefaultOrgID, draft.ID,
+		domain.ArtifactStateReviewSubmitted, domain.ArtifactStateReviewSubmitted,
+		"555", "https://github.com/octo/repo/pull/7#pullrequestreview-555", "")
+	if err != nil || !stamped {
+		t.Fatalf("stamp = %v, %v; want it to land", stamped, err)
+	}
+	got, err := stores.Artifacts.Get(ctx, runmode.LocalDefaultOrgID, draft.ID)
+	if err != nil || got == nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	if got.ExternalID != "555" || got.URL == "" || got.State != domain.ArtifactStateReviewSubmitted {
+		t.Errorf("after stamp: %+v, want submitted with the review id + URL", got)
+	}
+	// details_json was passed empty — preserve-on-empty leaves it untouched.
+	if got.DetailsJSON != `{"review_event":"COMMENT"}` {
+		t.Errorf("details_json = %q, want the draft's details preserved", got.DetailsJSON)
+	}
+
+	// A release (submitted → pending) puts the draft back in the approval queue.
+	released, err := stores.Artifacts.TransitionReviewStateSystem(ctx, runmode.LocalDefaultOrgID, draft.ID,
+		domain.ArtifactStateReviewSubmitted, domain.ArtifactStateReviewPending, "", "", "")
+	if err != nil || !released {
+		t.Fatalf("release = %v, %v; want it to land", released, err)
+	}
+}

@@ -308,3 +308,104 @@ func TestFinalizeReviewDraft_AutoPost_SubmitFailureStaysStaged(t *testing.T) {
 		t.Errorf("the staged draft must survive a failed submit intact: %+v", d)
 	}
 }
+
+// TestPostFinalizedReview_LosesClaimToConcurrentApprove is the regression guard
+// on the double-post race. A finalized draft is reachable by two independent
+// publishers: this run's auto-post, and any human clicking Approve in the queue
+// — both of which submit by calling SubmitReview. The window is real, because
+// the ready sentinel is saved several round-trips (a settings read, a credential
+// probe, a client build) before the submit, and the draft is approvable from the
+// instant that write commits.
+//
+// The anti-double-submit sentinel does not cover this: it only refuses a second
+// finalize from the same run. What settles it is the pending → submitted CAS,
+// which admits exactly one publisher. Here the human wins it, and the auto-post
+// must back off having made zero GitHub calls.
+func TestPostFinalizedReview_LosesClaimToConcurrentApprove(t *testing.T) {
+	head := "commit_v1"
+	gh := newReviewPostureGitHub(t, &head)
+	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
+	client.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "tok", identity: ghclient.IdentityApp})
+	setTeamReviewPosture(t, stores, info.TeamID, domain.ReviewPostureDraft)
+
+	ctx := context.Background()
+	handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+	if _, err := client.GithubAddPendingReviewComment(ctx, "octo", "repo", handle, "a.go", "nit", 3, nil, "worktree_head"); err != nil {
+		t.Fatalf("GithubAddPendingReviewComment: %v", err)
+	}
+	// Finalize under a staging posture: the sentinel is armed and the draft is
+	// pending — exactly the state the auto-post path would find it in, and
+	// exactly the state a human can approve from.
+	if _, err := client.FinalizeReviewDraft(ctx, handle, "COMMENT", "## body"); err != nil {
+		t.Fatalf("FinalizeReviewDraft: %v", err)
+	}
+	art := listRunArtifacts(t, stores, info.RunID)[0]
+	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	if err != nil {
+		t.Fatalf("parse details: %v", err)
+	}
+
+	// The human approve lands first, taking the claim the handler takes.
+	won, err := stores.Artifacts.TransitionReviewStateSystem(ctx, info.OrgID, art.ID,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	if err != nil || !won {
+		t.Fatalf("simulated approve claim = %v, %v; want it to win", won, err)
+	}
+
+	// Now the auto-post runs against the snapshot it read before the race.
+	res := client.postFinalizedReview(ctx, &art, details)
+
+	if res.Posted || res.URL != "" {
+		t.Errorf("result = %+v, want the staged outcome — this run lost the claim and must not publish", res)
+	}
+	if n := len(gh.submitted()); n != 0 {
+		t.Errorf("GitHub saw %d review submits from the losing publisher, want 0", n)
+	}
+	// The winner's claim is intact: the loser must not have released it, which
+	// would put an already-approved review back in the queue.
+	after := listRunArtifacts(t, stores, info.RunID)[0]
+	if after.State != domain.ArtifactStateReviewSubmitted {
+		t.Errorf("state = %q, want the approver's claim left untouched (submitted)", after.State)
+	}
+}
+
+// TestPostFinalizedReview_ClaimsBeforePosting is the other side of the race: the
+// auto-post takes the claim first, so a human approve arriving afterwards loses
+// it and never reaches GitHub.
+func TestPostFinalizedReview_ClaimsBeforePosting(t *testing.T) {
+	head := "commit_v1"
+	gh := newReviewPostureGitHub(t, &head)
+	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
+	client.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "tok", identity: ghclient.IdentityApp})
+	setTeamReviewPosture(t, stores, info.TeamID, domain.ReviewPostureAuto)
+
+	ctx := context.Background()
+	handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+	if _, err := client.GithubAddPendingReviewComment(ctx, "octo", "repo", handle, "a.go", "nit", 3, nil, "worktree_head"); err != nil {
+		t.Fatalf("GithubAddPendingReviewComment: %v", err)
+	}
+	if _, err := client.FinalizeReviewDraft(ctx, handle, "COMMENT", "## body"); err != nil {
+		t.Fatalf("FinalizeReviewDraft: %v", err)
+	}
+	if n := len(gh.submitted()); n != 1 {
+		t.Fatalf("GitHub saw %d submits, want 1", n)
+	}
+
+	// A human approve arriving now takes the same CAS the handler takes — and
+	// loses, so the handler 409s instead of posting the review a second time.
+	art := listRunArtifacts(t, stores, info.RunID)[0]
+	claimed, err := stores.Artifacts.TransitionReviewStateSystem(ctx, info.OrgID, art.ID,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	if err != nil {
+		t.Fatalf("late approve claim: %v", err)
+	}
+	if claimed {
+		t.Error("a human approve after the auto-post won the claim — that is the double-submit")
+	}
+}
