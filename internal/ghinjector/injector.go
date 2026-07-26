@@ -12,10 +12,20 @@
 // The credential carries the policy: an App-org token is minted scoped to the
 // team's authorized repo set, so a request for a repo outside that set gets
 // GitHub's own 404 masking, verbatim. The injector therefore does NO path
-// allowlist and NO GraphQL inspection — GraphQL opacity is irrelevant because
-// the token, not the traffic, is what's bounded. It only (a) maps the two
-// GHE-shaped path prefixes gh emits to the org's real API and (b) selects the
-// one credential to inject. That is the whole of its logic.
+// allowlist and applies no rule to what the agent may ask for — scope is
+// bounded by the token, not by the traffic. It only (a) maps the two GHE-shaped
+// path prefixes gh emits to the org's real API and (b) selects the one
+// credential to inject.
+//
+// # Requests are never inspected
+//
+// Treat this as an invariant of the package, not a scoping decision: the
+// injector reads responses and forwards requests. rewrite touches the URL and
+// the Authorization header and nothing else — no request body is ever buffered,
+// parsed, delayed, or altered. This is the one process that holds a run's live
+// GitHub credential while parsing hostile upstream output; widening it to also
+// parse every outbound request is not free, so a change that wants request
+// visibility has to re-derive that cost first.
 //
 // # TLS, but no interception
 //
@@ -38,10 +48,29 @@
 // # Observation
 //
 // Exec-verb self-reporting doesn't exist on this channel, so the injector emits
-// an observation for the two artifact-bearing REST mutations gh performs —
-// POST .../pulls (PR created) and POST .../pulls/{n}/reviews (review posted) —
-// via a caller-supplied callback the sidecar turns into an orchestrator relay.
-// GraphQL is never inspected (gh does these via REST).
+// an observation for the artifact-bearing mutations it can recognize, via a
+// caller-supplied callback the sidecar turns into an orchestrator relay. Two
+// transports carry them, because gh's porcelain and `gh api` do not agree:
+//
+//   - GraphQL. Every mutation in gh's porcelain goes through POST /api/graphql
+//     (verified against the pinned gh release). A successful create is
+//     recognized by the exact top-level response key data.createPullRequest —
+//     never by walking the payload for any pullRequest object, since a mere
+//     `gh pr view` nests one under data.repository.pullRequest and attributing
+//     a PR the run only read as one it produced is worse than missing a
+//     mutation. gh's field selection is just `pullRequest { id url }`, so the
+//     observation carries the node id and the html url (owner/repo/number
+//     parsed out of it) and nothing else; title and refs are left empty for
+//     the reconciler to fill, as it already does for its backstop rows.
+//   - REST, for `gh api` calls the agent writes by hand:
+//     POST .../pulls (PR created) and POST .../pulls/{n}/reviews (review
+//     posted), which is also the only way inline review comments are posted.
+//
+// Decoding a response narrows nothing the agent may do and never alters a
+// request. `gh pr review` posts addPullRequestReview, whose response carries
+// only clientMutationId — the PR it targets is named in the *request*, so
+// observing it is out of scope by the invariant above; a reconciler backstop
+// owns that case.
 package ghinjector
 
 import (
@@ -86,17 +115,19 @@ const maxObserveBody = 1 << 20
 // silently-unauthenticated forward.
 type TokenSource func(ctx context.Context) (string, error)
 
-// ObservedMutation is one artifact-bearing REST mutation the injector saw
-// complete successfully. The sidecar relays it to the orchestrator, which owns
-// the DB and builds the artifact row (the injector holds no DB handle and no
-// domain types). Kind is "pull_request" or "review".
+// ObservedMutation is one artifact-bearing mutation the injector saw complete
+// successfully. The sidecar relays it to the orchestrator, which owns the DB and
+// builds the artifact row (the injector holds no DB handle and no domain types).
+// Kind is "pull_request" or "review".
 type ObservedMutation struct {
 	Kind   string
 	Owner  string
 	Repo   string
-	Number int // PR number (from the response for a PR; from the path for a review)
+	Number int // PR number (response for a PR; request path for a REST review)
 
-	// PR-create fields.
+	// PR-create fields. A GraphQL create populates only NodeID and URL — gh
+	// selects nothing else — so Head/Base/Title/Body/Draft carry values only on
+	// the REST path.
 	NodeID string
 	Head   string
 	Base   string
@@ -327,40 +358,73 @@ func singleJoiningSlash(a, b string) string {
 	return a + b
 }
 
-// modifyResponse bumps the request counter and, for the two observed mutation
+// modifyResponse bumps the request counter and, for the observable mutation
 // shapes, buffers+parses the response body to emit an observation before
 // streaming it on unchanged. Never returns an error (that would 502 the agent
 // on a successful upstream write) — observation failures are silently dropped
 // and left to the reconciler backstop.
 func (s *Server) modifyResponse(resp *http.Response) error {
 	s.requestCount.Add(1)
-	if s.cfg.Observe == nil || resp.Request == nil || resp.Request.Method != http.MethodPost {
-		return nil
-	}
-	kind, owner, repo, number, ok := classifyMutationPath(resp.Request.URL.Path)
-	if !ok || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if s.cfg.Observe == nil || resp.Request == nil || resp.Request.Method != http.MethodPost ||
+		resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil
 	}
 
+	// Every GraphQL POST is a candidate — the operation is named in the request,
+	// which is off limits, so the response itself has to say what it was. REST
+	// candidates are recognized from the path alone.
+	graphql := resp.Request.URL.Path == s.graphqlURL.Path
+	var (
+		kind, owner, repo string
+		number            int
+	)
+	if !graphql {
+		var ok bool
+		kind, owner, repo, number, ok = classifyMutationPath(resp.Request.URL.Path)
+		if !ok {
+			return nil
+		}
+	}
+
+	buf, ok := bufferForObservation(resp)
+	if !ok {
+		return nil
+	}
+
+	var (
+		m      ObservedMutation
+		parsed bool
+	)
+	if graphql {
+		m, parsed = parseGraphQLObservation(buf)
+	} else {
+		m, parsed = parseObservation(kind, owner, repo, number, buf)
+	}
+	if parsed {
+		s.cfg.Observe(context.Background(), m)
+	}
+	return nil
+}
+
+// bufferForObservation reads the whole response body into memory and re-presents
+// it to the caller, returning the buffered bytes. ok is false when the body is
+// larger than the injector will buffer or the read broke mid-stream; in both
+// cases the response is restored to a readable state (consumed prefix stitched
+// back in front of the untouched remainder, original body kept as the Closer)
+// and observation is skipped for it. The agent's response is always delivered
+// whole; observation is the only thing that degrades.
+func bufferForObservation(resp *http.Response) ([]byte, bool) {
 	// Read one byte past the cap so "body exceeded the cap" is distinguishable
 	// from "body is exactly the cap" (ReadAll on a LimitReader reports no error
 	// when it stops at the limit).
 	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxObserveBody+1))
 	if err != nil || len(buf) > maxObserveBody {
-		// The read broke mid-stream, or the body is bigger than we will buffer.
-		// Either way the agent's response must arrive intact: put the consumed
-		// prefix back in front of the untouched remainder (keeping the original
-		// body as the Closer, since it is still open) and skip observation.
 		resp.Body = &prefixedBody{r: io.MultiReader(bytes.NewReader(buf), resp.Body), c: resp.Body}
-		return nil
+		return nil, false
 	}
 	_ = resp.Body.Close()
 	resp.Body = io.NopCloser(bytes.NewReader(buf))
-
-	if m, parsed := parseObservation(kind, owner, repo, number, buf); parsed && s.cfg.Observe != nil {
-		s.cfg.Observe(context.Background(), m)
-	}
-	return nil
+	return buf, true
 }
 
 // prefixedBody re-presents an already-partially-consumed response body: reads
@@ -398,6 +462,79 @@ func classifyMutationPath(path string) (kind, owner, repo string, number int, ok
 		return "review", segs[0], segs[1], n, true
 	}
 	return "", "", "", 0, false
+}
+
+// createPullRequestField is the exact top-level response key GitHub returns for
+// the create mutation, and the sole trigger for a GraphQL observation.
+const createPullRequestField = "createPullRequest"
+
+// parseGraphQLObservation recognizes a PR creation in a GraphQL response body.
+// It keys on the exact top-level data.createPullRequest field rather than
+// searching the payload for a pullRequest object: a query result nests one under
+// data.repository.pullRequest, and recording a PR the run merely read as one it
+// created is a worse failure than missing an aliased hand-written mutation.
+//
+// gh's selection set is `createPullRequest(input:$input){ pullRequest{ id url }}`
+// and nothing more, so owner/repo/number come from parsing the html url; the
+// fields the REST shape supplies (title, refs, draft) have no GraphQL source
+// here and stay empty for the reconciler to fill.
+func parseGraphQLObservation(body []byte) (ObservedMutation, bool) {
+	// The field name is a prerequisite for the key being present, so this
+	// prescreen never costs a real observation — it just keeps the ordinary
+	// query traffic (which is most of what gh sends) out of the decoder.
+	if !bytes.Contains(body, []byte(createPullRequestField)) {
+		return ObservedMutation{}, false
+	}
+	var payload struct {
+		Data struct {
+			CreatePullRequest *struct {
+				PullRequest struct {
+					ID  string `json:"id"`
+					URL string `json:"url"`
+				} `json:"pullRequest"`
+			} `json:"createPullRequest"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || payload.Data.CreatePullRequest == nil {
+		return ObservedMutation{}, false
+	}
+	pr := payload.Data.CreatePullRequest.PullRequest
+	owner, repo, number, ok := parsePullRequestURL(pr.URL)
+	if !ok {
+		return ObservedMutation{}, false
+	}
+	return ObservedMutation{
+		Kind:   "pull_request",
+		Owner:  owner,
+		Repo:   repo,
+		Number: number,
+		NodeID: pr.ID,
+		URL:    pr.URL,
+	}, true
+}
+
+// parsePullRequestURL pulls the coordinates out of a PR's html url, whose shape
+// is {scheme}://{host}/{owner}/{repo}/pull/{n} on dotcom and GHES alike. The
+// scan takes the first "pull" segment with two segments before it and a
+// positive integer after it, so a repository literally named "pull" still
+// resolves.
+func parsePullRequestURL(raw string) (owner, repo string, number int, ok bool) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", 0, false
+	}
+	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+	for i, seg := range segs {
+		if seg != "pull" || i < 2 || i+1 >= len(segs) {
+			continue
+		}
+		n, err := strconv.Atoi(segs[i+1])
+		if err != nil || n <= 0 || segs[i-2] == "" || segs[i-1] == "" {
+			continue
+		}
+		return segs[i-2], segs[i-1], n, true
+	}
+	return "", "", 0, false
 }
 
 // parseObservation extracts the created object's coordinates from a mutation's

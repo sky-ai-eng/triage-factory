@@ -87,10 +87,12 @@ type RecordPushArgs struct {
 
 // RecordObservationArgs is record_observation's payload: the coordinates of an
 // artifact-bearing mutation the gh-channel injector saw complete. Kind is
-// "pull_request" or "review". For a PR create, Number/NodeID/Head/Base/URL/
-// Title/Body/Draft come from the 201 response; for a review post, Number comes
-// from the request path and ReviewID/ReviewState/URL from the response. The
-// orchestrator binds ConversationID/OrgID/TeamID from its own RunInfo (the
+// "pull_request" or "review". A PR created through gh's porcelain (GraphQL)
+// carries only Number/NodeID/URL, since that is gh's whole selection set — the
+// reconciler fills the rest; one created through `gh api` (REST) also carries
+// Head/Base/Title/Body/Draft from the 201 response. For a review post, Number
+// comes from the request path and ReviewID/ReviewState/URL from the response.
+// The orchestrator binds ConversationID/OrgID/TeamID from its own RunInfo (the
 // sidecar never names them), so a sidecar cannot attribute an artifact to
 // another run.
 type RecordObservationArgs struct {

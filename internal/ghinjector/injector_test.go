@@ -330,6 +330,67 @@ func TestParseObservation_IgnoresMalformed(t *testing.T) {
 	}
 }
 
+// TestParseGraphQLObservation_KeysOnCreateMutationOnly pins the discrimination
+// the gh-driven wire tests exercise end to end, over the shapes that would be
+// tedious to provoke through gh: only the exact top-level data.createPullRequest
+// key counts, and a url that doesn't carry coordinates yields nothing rather
+// than a half-formed artifact.
+func TestParseGraphQLObservation_KeysOnCreateMutationOnly(t *testing.T) {
+	observed := []struct {
+		name                string
+		body                string
+		owner, repo, nodeID string
+		number              int
+	}{
+		{
+			name:  "create mutation",
+			body:  `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw1","url":"https://github.com/octo/repo/pull/42"}}}}`,
+			owner: "octo", repo: "repo", number: 42, nodeID: "PR_kw1",
+		},
+		{
+			name:  "GHES host and a repo named pull",
+			body:  `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw2","url":"https://ghe.corp/octo/pull/pull/7"}}}}`,
+			owner: "octo", repo: "pull", number: 7, nodeID: "PR_kw2",
+		},
+	}
+	for _, tc := range observed {
+		t.Run(tc.name, func(t *testing.T) {
+			m, ok := parseGraphQLObservation([]byte(tc.body))
+			if !ok {
+				t.Fatalf("no observation parsed from %s", tc.body)
+			}
+			if m.Kind != "pull_request" || m.Owner != tc.owner || m.Repo != tc.repo ||
+				m.Number != tc.number || m.NodeID != tc.nodeID {
+				t.Errorf("observation = %+v, want %s/%s#%d node %s", m, tc.owner, tc.repo, tc.number, tc.nodeID)
+			}
+		})
+	}
+
+	ignored := []struct{ name, body string }{
+		// A read nests its pullRequest under repository — recording it would
+		// attribute a PR the run only looked at.
+		{"pr view query", `{"data":{"repository":{"pullRequest":{"id":"PR_kw1","url":"https://github.com/octo/repo/pull/42"}}}}`},
+		{"pr list query", `{"data":{"repository":{"pullRequests":{"nodes":[{"id":"PR_kw1","url":"https://github.com/octo/repo/pull/42"}]}}}}`},
+		// Other mutations gh performs, none of which created anything.
+		{"review mutation", `{"data":{"addPullRequestReview":{"clientMutationId":null}}}`},
+		{"ready mutation", `{"data":{"markPullRequestReadyForReview":{"pullRequest":{"id":"PR_kw1"}}}}`},
+		{"merge mutation", `{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_kw1"}}}}`},
+		// Create shapes with nothing usable in them.
+		{"errors only", `{"data":{"createPullRequest":null},"errors":[{"message":"nope"}]}`},
+		{"no url", `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw1"}}}}`},
+		{"url without coordinates", `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw1","url":"https://github.com/octo/repo"}}}}`},
+		{"non-numeric number", `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw1","url":"https://github.com/octo/repo/pull/abc"}}}}`},
+		{"not json", `createPullRequest`},
+	}
+	for _, tc := range ignored {
+		t.Run(tc.name, func(t *testing.T) {
+			if m, ok := parseGraphQLObservation([]byte(tc.body)); ok {
+				t.Errorf("observed %+v, want nothing from %s", m, tc.body)
+			}
+		})
+	}
+}
+
 // TestInjector_OversizedBodyReachesAgentIntact is the regression for the
 // observation buffer truncating the agent's response. A mutation response larger
 // than maxObserveBody must reach the caller byte-for-byte — only the observation

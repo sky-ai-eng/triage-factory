@@ -235,8 +235,11 @@ RUN set -eux; \
 # so this musl-alpine-jail-safe binary execs fine in the rootfs.
 #
 # Bumping: pick a newer tag from https://github.com/cli/cli/releases and refresh
-# both SHA256s from that release's gh_<VER>_checksums.txt. Keep the version in
-# step with the spike-validated surface (the injector's two path prefixes).
+# both SHA256s from that release's gh_<VER>_checksums.txt. This ARG is also the
+# single source the test workflow reads to stage gh for the internal/ghinjector
+# wire tests, which drive this exact binary to pin what the injector observes —
+# so a bump that changes gh's mutation transport fails those tests rather than
+# silently dropping artifacts.
 ARG GH_VERSION=2.96.0
 ARG GH_SHA256_AMD64=83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60
 ARG GH_SHA256_ARM64=06f86ec7103d41993b76cd78072f43595c34aaa56506d971d9860e67140bf909
