@@ -35,7 +35,7 @@ func (s *recordingSubmitter) SubmitReview(_ context.Context, owner, repo string,
 func linePtr(n int) *int { return &n }
 
 // TestSubmitStaged_PayloadAndLink pins the publish contract both callers depend
-// on — the human-approval handler and the auto-post posture (TFAC-680) go
+// on — the human-approval handler and the auto-post posture go
 // through this one function, so what it sends IS what a review looks like on
 // GitHub regardless of which one triggered it.
 func TestSubmitStaged_PayloadAndLink(t *testing.T) {

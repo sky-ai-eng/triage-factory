@@ -47,7 +47,7 @@ export interface TeamConfigForm {
   // create a branch (TFAC-498). The `<ticket-id>` literal is replaced with the
   // ticket id at run time. Same key on the GET and POST wire.
   branch_template: string
-  // How this team's delegated reviews reach GitHub (TFAC-680): 'identity' |
+  // How this team's delegated reviews reach GitHub: 'identity' |
   // 'draft' | 'auto' | 'auto_unless_blocking'. GET returns it as ReviewPosture;
   // the POST key is review_posture.
   review_posture: string

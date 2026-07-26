@@ -771,11 +771,11 @@ func reviewedPRWorktreePath(host agenthost.Client, owner, repo string) string {
 
 // prFinalizeReview hands the finished review to the host, which snapshots the
 // agent's draft (body + event + the locally staged inline comments) into the
-// run's review artifact and sets the ready sentinel. The TFAC-358
-// anti-double-submit guard fires host-side: a second call gets a hard error.
+// run's review artifact and sets the ready sentinel. The anti-double-submit
+// guard fires host-side: a second call gets a hard error.
 //
 // Whether the review is then staged for a human or submitted to GitHub is the
-// team's review posture (TFAC-680) — resolved host-side, where the settings and
+// team's review posture — resolved host-side, where the settings and
 // the credential live. This verb knows nothing about posture; it reports which
 // of the two happened, from what the host returns. That split is the standing
 // rule the response contract rests on: the PROMPT describes the shape of the

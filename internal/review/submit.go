@@ -58,7 +58,7 @@ type SubmitResult struct {
 
 // SubmitStaged publishes a finalized review draft to GitHub. It is the ONE
 // implementation of "publish a staged review", shared by the human-approval
-// handler and the auto-post posture (TFAC-680) — two copies would drift, and
+// handler and the auto-post posture — two copies would drift, and
 // the freshness/anchoring rules (ReconcileToHead, and the commit pin derived
 // here) have to hold identically whichever path publishes.
 //

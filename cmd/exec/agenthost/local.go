@@ -142,13 +142,14 @@ func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*
 }
 
 // FinalizeReviewDraft is the host side of `gh pr finalize-review`: it locates the
-// run's review artifact, gates on comment freshness vs. the PR's current head
-// (TFAC-499), stages the body + event, snapshots the agent's draft (body + event
-// + the locally staged inline comments) into details.proposed as the approve-time
-// human-feedback baseline, and sets the ready sentinel (details_json.review_event)
-// that marks the review awaiting approval.
+// run's review artifact, gates on comment freshness vs. the PR's current head,
+// stages the body + event, snapshots the agent's draft (body + event + the
+// locally staged inline comments) into details.proposed as the approve-time
+// human-feedback baseline, and sets the ready sentinel
+// (details_json.review_event) that marks the draft finished — the guard against
+// a second finalize, whether the first one staged the review or posted it.
 //
-// Whether the review then goes to GitHub is the team's posture (TFAC-680),
+// Whether the review then goes to GitHub is the team's posture,
 // resolved here and nowhere else: this is the only place holding the DB handle,
 // the team settings, and the credential resolver — the in-sandbox verb has none
 // of them and must not learn about posture. Under a staging posture nothing

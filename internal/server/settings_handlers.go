@@ -190,7 +190,7 @@ type teamSettingsUpdate struct {
 	// string coalesces to domain.DefaultBranchTemplate so a blank never persists.
 	BranchTemplate *string `json:"branch_template,omitempty"`
 	// ReviewPosture is how the team's delegated reviews reach GitHub
-	// (TFAC-680) — one of domain.ValidReviewPostures. Pointer for the same
+	// — one of domain.ValidReviewPostures. Pointer for the same
 	// reason as BranchTemplate: an unrelated save that omits the key must not
 	// clobber the stored posture. An empty string coalesces to
 	// domain.DefaultReviewPosture; an unrecognized value is a 400.

@@ -56,7 +56,7 @@ func captureStdout(t *testing.T, fn func()) string {
 }
 
 // TestPrFinalizeReview_ReportsWhatHappened pins the response contract behind the
-// per-team review posture (TFAC-680): the prompt describes the SHAPE of the
+// per-team review posture: the prompt describes the SHAPE of the
 // call, the tool response reports WHICH of the two things the host did. A verb
 // that hardcoded "drafted_awaiting_approval" would be wrong for every team that
 // switches posture, and the agent's wrap-up would be told a review is waiting on

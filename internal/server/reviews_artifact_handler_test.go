@@ -98,7 +98,7 @@ func TestReviewArtifactGet_SeverityRoundTrip(t *testing.T) {
 // completes, and the human verdict lands in conversation_memory.
 //
 // The POST asserted here is composed by review.SubmitStaged — the same function
-// the auto-post posture calls from the agent's finalize (TFAC-680), whose test
+// the auto-post posture calls from the agent's finalize, whose test
 // (cmd/exec/agenthost TestFinalizeReviewDraft_PostureDecidesPosting) pins the
 // identical payload shape. Keep the two assertion sets in step: they exist to
 // catch either path drifting away from the shared publish.

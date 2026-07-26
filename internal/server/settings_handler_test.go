@@ -1145,7 +1145,7 @@ func jiraCredentialRoute() string {
 	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/jira/access/credential"
 }
 
-// --- TFAC-680 review posting posture ---------------------------------------
+// --- review posting posture ------------------------------------------------
 
 // teamReviewPosture reads the stored posture back off the team settings GET.
 // The GET serializes domain.TeamSettings wholesale (no JSON tags), so the wire

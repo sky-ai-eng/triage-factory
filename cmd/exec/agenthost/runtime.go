@@ -45,9 +45,9 @@ type Runtime interface {
 	OrgJiraBaseURL(ctx context.Context) (string, error)
 	AgentFooter(ctx context.Context, kind string) (string, error)
 
-	// ReviewPosture resolves the review-posting decision inputs for owner/repo
-	// (TFAC-680): the run team's configured posture, and the identity of the
-	// credential that would post the review. Both live where the stores and the
+	// ReviewPosture resolves the review-posting decision inputs for owner/repo:
+	// the run team's configured posture, and the identity of the credential that
+	// would post the review. Both live where the stores and the
 	// credential resolver do, so the capless sidecar relays for them — its own
 	// gh clients speak to per-run REST proxies whose reported identity is
 	// descriptive only, never the real App-vs-PAT tier.
@@ -179,7 +179,7 @@ type checkEntitlementResult struct {
 }
 
 // ReviewPostureResolution is what the review-posting decision reads from
-// (TFAC-680): the team's configured posture (one of domain.ValidReviewPostures)
+// the team's configured posture (one of domain.ValidReviewPostures)
 // and the acting credential's identity. It doubles as the review_posture op's
 // result — Identity rides the wire as github.Identity's integer value, and its
 // zero value IS IdentityUnknown, so a truncated or older peer decodes to the

@@ -294,7 +294,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Publish through the shared submit (internal/review, TFAC-680) — the same
+	// Publish through the shared submit (internal/review) — the same
 	// function the auto-post posture calls from the agent's finalize choke point,
 	// so the commit pin, the comment payload, and the composed deep link can't
 	// drift between a human-approved and an auto-posted review.

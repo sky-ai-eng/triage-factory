@@ -1569,7 +1569,7 @@ CREATE TABLE public.team_settings (
     -- Postgres is net-new and unshipped; the SQLite tree, which HAS shipped,
     -- carries the equivalent forward migration 202606280001_team_branch_template.sql.
     branch_template text DEFAULT 'tfac/<ticket-id>'::text NOT NULL,
-    -- Per-team review-posting posture (TFAC-680): how a delegated agent's
+    -- Per-team review-posting posture: how a delegated agent's
     -- finalized review reaches GitHub. 'identity' (the default) decides from the
     -- acting credential — an App installation posts as a bot and goes direct, a
     -- borrowed PAT posts as the lending user and stages for approval, and an

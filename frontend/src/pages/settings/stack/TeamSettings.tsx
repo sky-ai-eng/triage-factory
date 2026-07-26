@@ -49,7 +49,7 @@ import SettingsSection from './SettingsSection'
 
 const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
 
-// Review-posting postures (TFAC-680), in the order they're offered: the
+// Review-posting postures, in the order they're offered: the
 // identity-derived default first, then the three fixed choices from most to
 // least human oversight. `help` is what distinguishes them — the setting is
 // about who the review posts as and what a wrong comment costs, which the value
@@ -155,7 +155,7 @@ export default function TeamSettings({
   const [autoDelegate, setAutoDelegate] = useState(true)
   // Advisory branch-name template suggested to delegated agents (TFAC-498).
   const [branchTemplate, setBranchTemplate] = useState('tfac/<ticket-id>')
-  // How finished agent reviews reach GitHub (TFAC-680).
+  // How finished agent reviews reach GitHub.
   const [reviewPosture, setReviewPosture] = useState('identity')
   // Presence-gated absent auto-deny (TFAC-392).
   const [absentAutodeny, setAbsentAutodeny] = useState(true)
