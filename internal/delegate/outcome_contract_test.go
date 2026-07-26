@@ -112,7 +112,7 @@ func TestProcessCompletion_FinishRecordsOutcome(t *testing.T) {
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
-		res(`{"outcome":"finish","summary":"shipped it"}`), cwd, "", "event", "")
+		res(`{"outcome":"finish","summary":"shipped it"}`), cwd, nil, "", "event", "")
 
 	run := loadRun(t, s, runID)
 	if run.Status != "completed" {
@@ -139,7 +139,7 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
 		res(`{"outcome":"abort","summary":"investigated the failure","reason":"needs a human to rotate the token"}`),
-		cwd, "", "event", "")
+		cwd, nil, "", "event", "")
 
 	run := loadRun(t, s, runID)
 	if run.Status != "completed" {
@@ -173,7 +173,7 @@ func TestProcessCompletion_AbortMissingReasonFails(t *testing.T) {
 	cwd := t.TempDir()
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
-		res(`{"outcome":"abort","summary":"stopped, couldn't proceed"}`), cwd, "", "event", "")
+		res(`{"outcome":"abort","summary":"stopped, couldn't proceed"}`), cwd, nil, "", "event", "")
 
 	run := loadRun(t, s, runID)
 	if run.Status != "failed" {
@@ -196,7 +196,7 @@ func TestProcessCompletion_NoConclusionParksOpen(t *testing.T) {
 	cwd := t.TempDir()
 
 	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
-		res(`this is not a JSON envelope`), cwd, "", "event", "")
+		res(`this is not a JSON envelope`), cwd, nil, "", "event", "")
 
 	if !parked {
 		t.Error("processCompletion(no-conclusion) = false; want true (open, not terminal)")
@@ -222,7 +222,7 @@ func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
 	cwd := t.TempDir()
 
 	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
-		res(`{"outcome":"finish"}`), cwd, "", "event", "")
+		res(`{"outcome":"finish"}`), cwd, nil, "", "event", "")
 
 	if parked {
 		t.Error("processCompletion(invalid) = true; want false (terminal failure, not parked)")
@@ -244,7 +244,7 @@ func TestProcessCompletion_FinishReturnsNotParked(t *testing.T) {
 	s, _, runID, taskID := setupAdvanceFixture(t, "pc-finish")
 	if parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, "",
 		loadTask(t, s, taskID), res(`{"outcome":"finish","summary":"done"}`),
-		t.TempDir(), "", "event", ""); parked {
+		t.TempDir(), nil, "", "event", ""); parked {
 		t.Error("processCompletion(finish) = true; want false (terminal, not parked)")
 	}
 }

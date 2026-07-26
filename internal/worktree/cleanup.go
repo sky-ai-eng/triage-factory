@@ -131,7 +131,7 @@ func CleanupWithOptions(opts CleanupOptions) {
 		}
 	}
 
-	sweepOrphanedSkillStagingDirs(opts.PreserveWorktreeFor)
+	sweepOrphanedStagingDirs(opts.PreserveWorktreeFor)
 
 	// Prune all bare repos — always, regardless of the runs dir above.
 	// Clear stale locked ghosts first (plain prune skips their lock
@@ -146,11 +146,12 @@ func CleanupWithOptions(opts CleanupOptions) {
 	pruneAll(reposRoot)
 }
 
-// sweepOrphanedSkillStagingDirs reclaims per-run step-skill staging dirs left
-// behind by runs that are gone — the leftover-artifact counterpart of the run-
-// tree sweep above and the orphaned-cgroup sweep on the privileged side. Cheap:
-// each dir holds one SKILL.md, but a crash loop would otherwise accumulate them
-// under $TMPDIR forever.
+// sweepOrphanedStagingDirs reclaims the per-run staging dirs left behind by runs
+// that are gone — the step skill a launch mounts, and the prior-memory tree it
+// mounts beside it. The leftover-artifact counterpart of the run-tree sweep above
+// and the orphaned-cgroup sweep on the privileged side. Cheap: the dirs hold one
+// SKILL.md and a handful of markdown files, but a crash loop would otherwise
+// accumulate them under $TMPDIR forever.
 //
 // Plain os.RemoveAll, not the privileged seam: a staging dir is orchestrator-
 // owned by construction and never chowned to a sandbox identity — that is the
@@ -163,26 +164,27 @@ func CleanupWithOptions(opts CleanupOptions) {
 // fighting a preserved run, and moot for the blueprint shape today because the
 // only mode that stages at all (multi) passes no preserve set, so its parked
 // worktrees are swept here regardless and rehydrate from snapshot.
-func sweepOrphanedSkillStagingDirs(preserve map[string]bool) {
-	base := sandbox.SkillStagingBase()
-	entries, err := os.ReadDir(base)
-	if err != nil {
-		return // nothing staged on this host
-	}
-	count := 0
-	for _, e := range entries {
-		if !e.IsDir() || preserve[e.Name()] {
-			continue
+func sweepOrphanedStagingDirs(preserve map[string]bool) {
+	for _, base := range []string{sandbox.SkillStagingBase(), sandbox.MemoryStagingBase()} {
+		entries, err := os.ReadDir(base)
+		if err != nil {
+			continue // nothing of this kind staged on this host
 		}
-		full := filepath.Join(base, e.Name())
-		if err := os.RemoveAll(full); err != nil {
-			worktreeLog.Warn("orphaned step-skill staging dir not removed", "path", full, "error", err)
-			continue
+		count := 0
+		for _, e := range entries {
+			if !e.IsDir() || preserve[e.Name()] {
+				continue
+			}
+			full := filepath.Join(base, e.Name())
+			if err := os.RemoveAll(full); err != nil {
+				worktreeLog.Warn("orphaned staging dir not removed", "path", full, "error", err)
+				continue
+			}
+			count++
 		}
-		count++
-	}
-	if count > 0 {
-		worktreeLog.Info("cleaned up orphaned step-skill staging dirs", "count", count)
+		if count > 0 {
+			worktreeLog.Info("cleaned up orphaned staging dirs", "base", base, "count", count)
+		}
 	}
 }
 

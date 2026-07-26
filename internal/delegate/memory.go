@@ -8,6 +8,7 @@ package delegate
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -16,9 +17,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -60,6 +63,7 @@ const (
 	memoryFileMissing                        // file does not exist on disk
 	memoryFileEmpty                          // file exists but is empty / whitespace-only
 	memoryFileReadErr                        // file exists, read failed (permissions, race, etc.)
+	memoryFileStale                          // file exists, holding byte-for-byte what this run inherited
 )
 
 // Layout of the memory tree the orchestrator owns inside a run root.
@@ -75,10 +79,14 @@ const (
 //	this-run/01-triage.md          earlier steps of the current workflow run
 //	this-run/02-implement.md
 //	history/2026-07-20-ci-fix.md   prior, separate runs on this entity
+//
+// That path is what the AGENT sees. Where those files physically live depends on
+// who owns the run tree: local mode writes them in it, a sandboxed launch stages
+// them outside and mounts them there read-only (entityMemoryTarget).
 const (
 	scratchDirName          = worktree.ScratchDir
 	agentMemoryFileName     = "memory.md"
-	entityMemoryDirName     = "entity-memory"
+	entityMemoryDirName     = worktree.EntityMemoryDir
 	projectKnowledgeDirName = "project-knowledge"
 	currentRunDirName       = "this-run"
 	priorRunsDirName        = "history"
@@ -94,7 +102,7 @@ const (
 // missing file are logged at the read site so they aren't lost when
 // the caller picks a higher-level message.
 func readAgentMemoryFile(cwd string) (string, memoryFileState) {
-	path := filepath.Join(cwd, scratchDirName, agentMemoryFileName)
+	path := agentMemoryFilePath(cwd)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -108,6 +116,88 @@ func readAgentMemoryFile(cwd string) (string, memoryFileState) {
 		return "", memoryFileEmpty
 	}
 	return content, memoryFilePresent
+}
+
+// agentMemoryFilePath is the one path the agent writes its memory to, and the
+// one path the orchestrator reads it back from.
+func agentMemoryFilePath(cwd string) string {
+	return filepath.Join(cwd, scratchDirName, agentMemoryFileName)
+}
+
+// memoryFingerprint identifies the memory file a run INHERITED at the fixed
+// write path, so its own termination can tell "the agent wrote this" from "the
+// previous step left it there".
+//
+// It is a digest of the file's CONTENT, not its metadata. Metadata cannot answer
+// this question: a rewrite to the same length inside one timestamp quantum — and
+// mtime resolution is a filesystem property, not something this code can bound —
+// is indistinguishable from an untouched file by (size, mtime), and the cost of
+// getting it wrong falls on the wrong side. A step whose real memory is
+// misclassified has its work silently discarded; a digest gets that case right
+// by construction.
+//
+// The residual ambiguity is a step that writes content byte-identical to what it
+// inherited, which reads as untouched. Nothing is lost when that happens: the
+// narrative that would have been ingested is the one already recorded.
+//
+// Hashing is available here for the same reason this type has to exist at all:
+// the orchestrator can still stat and READ inside a run tree handed to the
+// sandbox uid, it just cannot write. Deleting the inherited file is the simpler
+// answer and is what clearAgentMemoryFile does whenever it can — but a warm
+// blueprint step cannot delete anything in its tree, and its predecessor's
+// memory is sitting at the path it is about to be judged on.
+type memoryFingerprint struct {
+	sum [sha256.Size]byte
+}
+
+// fingerprintAgentMemoryFile digests the memory file a run is starting with.
+// Returns nil when there is nothing at the path (the common case, and the only
+// one on a cold tree), when it is not a regular file, or when it cannot be read
+// — all of which mean "nothing to distrust", so the run's own file is taken at
+// face value exactly as on the paths that carry no fingerprint at all.
+//
+// Streamed rather than read whole: the agent chooses this file's size, and a
+// pre-launch bookkeeping step has no business holding an arbitrary amount of it
+// in the orchestrator's heap.
+func fingerprintAgentMemoryFile(cwd string) *memoryFingerprint {
+	f, err := os.Open(agentMemoryFilePath(cwd))
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		delegateLog.Warn("fingerprint inherited memory file failed; this run's memory will be taken at face value", "cwd", cwd, "error", err)
+		return nil
+	}
+	var fp memoryFingerprint
+	h.Sum(fp.sum[:0])
+	return &fp
+}
+
+// covers reports whether content is the very file this fingerprint recorded —
+// i.e. the agent never wrote. A nil fingerprint covers nothing: there was no
+// inherited file, so whatever is there now is this run's.
+func (f *memoryFingerprint) covers(content string) bool {
+	return f != nil && sha256.Sum256([]byte(content)) == f.sum
+}
+
+// readRunMemory returns what THIS run wrote at the fixed path. Content identical
+// to what the run inherited is not this run's work: it reads as "wrote nothing",
+// so the conversation_memory row lands with agent_content NULL rather than
+// adopting a predecessor's narrative.
+//
+// prior is nil on every path with no inherited file to distrust — a resume,
+// whose own file is its work, and a fresh tree.
+func readRunMemory(cwd string, prior *memoryFingerprint) (string, memoryFileState) {
+	content, state := readAgentMemoryFile(cwd)
+	if state == memoryFilePresent && prior.covers(content) {
+		return "", memoryFileStale
+	}
+	return content, state
 }
 
 // repoFiles is the set of paths under the scratch dir that belong to the REPO,
@@ -172,11 +262,16 @@ func clearAgentMemoryFile(cwd string, owned repoFiles) {
 	}
 }
 
-// materializePriorMemories writes any existing conversation_memory rows for the
-// entity into <cwd>/_tfac/entity-memory/ as individual markdown files, so a
-// fresh agent invocation sees what previous iterations on the same task have
+// materializePriorMemories renders any existing conversation_memory rows for the
+// entity as individual markdown files under the agent's _tfac/entity-memory/, so
+// a fresh agent invocation sees what previous iterations on the same task have
 // already tried — and so the later steps of one blueprint run read the earlier
 // steps' memory as their handoff.
+//
+// root is the directory the layout is rendered into — the agent's
+// _tfac/entity-memory in local mode, this launch's staging dir under a sandbox.
+// The caller resolves it (entityMemoryTarget); this function is indifferent to
+// which, and to whether the tree it will be read from is still writable.
 //
 // blueprintRunID is the CURRENT run's workflow run. Memory produced under it is
 // this run's own handoff and lands in this-run/, numbered by step so the
@@ -189,10 +284,9 @@ func clearAgentMemoryFile(cwd string, owned repoFiles) {
 // there are no priors: the prompt tells the agent to look in them early, and a
 // missing directory turns that into noise.
 //
-// Pattern: DB is the source of truth, we materialize into the worktree
-// at startup, and ingest back on completion. The worktree is destroyed
-// after every run, so these files never outlive their run on disk —
-// only the DB rows do.
+// Pattern: DB is the source of truth, we materialize before each launch and
+// ingest back on completion. Both the worktree and the staging dir are destroyed
+// after their run, so these files never outlive it on disk — only the DB rows do.
 //
 // Degrades gracefully: database errors, mkdir failures, or per-file
 // write failures are logged but do not fail the run. An agent running
@@ -203,8 +297,7 @@ func clearAgentMemoryFile(cwd string, owned repoFiles) {
 // target: a name that collides with a tracked file yields that file to the
 // repo and skips the prior, rather than overwriting content the agent would
 // then commit.
-func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, cwd, entityID, blueprintRunID string, owned repoFiles) {
-	root := filepath.Join(cwd, scratchDirName, entityMemoryDirName)
+func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, root, entityID, blueprintRunID string, owned repoFiles) {
 	thisRunDir := filepath.Join(root, currentRunDirName)
 	historyDir := filepath.Join(root, priorRunsDirName)
 	for _, dir := range []string{thisRunDir, historyDir} {
@@ -273,6 +366,59 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, cwd,
 	}
 	if written > 0 {
 		delegateLog.Info("materialized prior memories for entity", "count", written, "entity", entityID)
+	}
+}
+
+// entityMemoryTarget resolves where THIS launch's prior-memory tree is
+// rendered, and records the staging path on cfg when the launch will mount it.
+// Returns the target directory plus the repo-owned set that applies to it.
+//
+// The branch is the sandbox gate, not the run mode: a jailed agent reads its
+// handoff from a read-only bind mount of an orchestrator-owned staging dir, keyed
+// by its own conversation id, because nothing TF writes may touch the run tree
+// after its first launch — and every blueprint step but the first launches into a
+// tree that was already handed off. An un-jailed run keeps writing the real
+// directory inside the tree it owns.
+//
+// The repo-owned set only travels with the in-tree target. A staging dir is TF's
+// outright, is no repo, and shares no path with one.
+func entityMemoryTarget(cfg *runConfig, runID, cwd string, owned repoFiles) (string, repoFiles) {
+	if !agentproc.WillSandbox() {
+		return filepath.Join(cwd, scratchDirName, entityMemoryDirName), owned
+	}
+	dir := sandbox.TrustedMemorySourcePath(runID)
+	cfg.memorySourcePath = dir
+	return dir, nil
+}
+
+// stagedEntityMemorySource returns runID's memory staging dir when one is still
+// on disk, else "". A resume re-invokes the agent in the same conversation and
+// runs none of the per-launch setup, so it re-mounts whatever its original claim
+// materialized rather than re-rendering it. Absent — a cold resume on an executor
+// that never staged it, or after a startup sweep — the resumed agent continues
+// from its transcript with nothing behind the symlink; the mount is ambient
+// context, not the conversation's state.
+func stagedEntityMemorySource(runID string) string {
+	if runID == "" || !agentproc.WillSandbox() {
+		return ""
+	}
+	dir := sandbox.TrustedMemorySourcePath(runID)
+	if _, err := os.Stat(dir); err != nil {
+		return ""
+	}
+	return dir
+}
+
+// removeStagedMemory drops a launch's memory staging dir. A missing directory is
+// success. Safe for the capability-less orchestrator: the staging dir is its own
+// and is never chowned to a sandbox identity — that is the point of staging
+// outside the run tree.
+func removeStagedMemory(dir string) {
+	if dir == "" {
+		return
+	}
+	if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
+		delegateLog.Warn("remove staged entity memory failed", "path", dir, "error", err)
 	}
 }
 

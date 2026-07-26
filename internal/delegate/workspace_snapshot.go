@@ -46,9 +46,11 @@ const (
 	snapScratchPrefix = "scratch/"
 )
 
-// scratchExcludes are the top-level _tfac subdirectories that already
-// re-materialize on the next run and so never ride in the snapshot:
-// entity-memory rebuilds from conversation_memory, project-knowledge is re-copied from
+// scratchExcludes are the top-level _tfac entries that already re-materialize on
+// the next run and so never ride in the snapshot: entity-memory rebuilds from
+// conversation_memory (and under a jail is not even a directory — it is the
+// symlink standing in for the read-only mount, which the walk skips as
+// non-regular regardless), project-knowledge is re-copied from
 // the project KB. Everything else under _tfac (ci-logs, skill scratch,
 // ad-hoc agent files, and the agent's own memory.md — which is not in the DB
 // until termination ingests it) is non-recoverable and IS captured.
@@ -367,6 +369,15 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID, owner, repo,
 		if err := os.Rename(scratchStaging, filepath.Join(wtDir, worktree.ScratchDir)); err != nil {
 			return fmt.Errorf("rehydrate: install scratch: %w", err)
 		}
+	}
+	// Plant the jail's memory symlink AFTER the scratch install, never before: the
+	// install is a wholesale rename onto _tfac, which fails outright if the link's
+	// parent already exists. This is the rehydrated tree's one orchestrator-owned
+	// moment — the run that resumes into it may find the tree already handed off,
+	// and the snapshot never carries the link (entity-memory is excluded from
+	// capture, and the walk skips non-regular files anyway).
+	if err := worktree.EnsureSandboxMemoryLink(ctx, wtDir); err != nil {
+		delegateLog.Warn("plant sandbox memory symlink on rehydrated tree failed", "dir", wtDir, "error", err)
 	}
 	if len(session) > 0 && man.SessionID != "" {
 		if err := restoreSessionTranscript(wtDir, man.SessionID, session); err != nil {

@@ -237,6 +237,22 @@ type RunOptions struct {
 	// it owns the tree and there is no jail to mount into.
 	SkillsSourcePath string
 
+	// MemorySourcePath, when non-empty, is the orchestrator-owned staging dir
+	// holding the entity-memory tree materialized for THIS launch
+	// (sandbox.TrustedMemorySourcePath(TraceID)). The sandbox branch bind-mounts
+	// it READ-ONLY at sandbox.TrustedMemoryDestination; the agent reads it at the
+	// `_tfac/entity-memory` path its prompt names, through the symlink the run
+	// tree carries there.
+	//
+	// This is how a blueprint step's handoff — what its predecessors did, decided,
+	// and ruled out — reaches a sandboxed agent WITHOUT TF writing into the run
+	// tree: the tree belongs to the per-run sandbox uid from the first launch
+	// onward, so rendering prior memory inside it at step 2's setup is EACCES.
+	//
+	// Sandbox-only. Local mode materializes the same tree into the worktree
+	// instead — it owns the tree, and there is no jail to mount into.
+	MemorySourcePath string
+
 	// ReadOnlyRepoMounts are extra host directories bind-mounted READ-ONLY
 	// into the sandbox under Cwd. The Curator populates this with its shared
 	// per-(org, repo) pinned-repo worktrees so the agent reads them without a
@@ -763,6 +779,24 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 			})
 		} else {
 			agentprocLog.Warn("step-skill staging dir missing; launching without the skills mount", "path", opts.SkillsSourcePath, "error", statErr)
+		}
+	}
+
+	// This launch's materialized entity-memory tree, bind-mounted RO from the
+	// orchestrator-owned staging dir. Same optional shape as the skills mount: a
+	// staging dir that vanished (a swept orphan on a cold cross-executor resume)
+	// launches without the mount rather than failing on the broker's
+	// source-resolution check. The agent then finds nothing behind its
+	// `_tfac/entity-memory` symlink, which is a context loss, not a broken run.
+	if opts.MemorySourcePath != "" {
+		if _, statErr := os.Stat(opts.MemorySourcePath); statErr == nil {
+			extraMounts = append(extraMounts, sandbox.Mount{
+				Source:      opts.MemorySourcePath,
+				Destination: sandbox.TrustedMemoryDestination,
+				Options:     []string{"ro"},
+			})
+		} else {
+			agentprocLog.Warn("entity-memory staging dir missing; launching without the memory mount", "path", opts.MemorySourcePath, "error", statErr)
 		}
 	}
 

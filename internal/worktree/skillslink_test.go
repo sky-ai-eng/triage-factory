@@ -132,23 +132,27 @@ func TestEnsureSandboxSkillsLink_ForceReplaces(t *testing.T) {
 	})
 }
 
-// TestSweepOrphanedSkillStagingDirs reclaims leftover per-run staging dirs while
-// honoring the caller's warm-worktree keep set.
-func TestSweepOrphanedSkillStagingDirs(t *testing.T) {
+// TestSweepOrphanedStagingDirs reclaims leftover per-run staging dirs of both
+// kinds a launch mounts, while honoring the caller's warm-worktree keep set.
+func TestSweepOrphanedStagingDirs(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
-	base := sandbox.SkillStagingBase()
-	for _, name := range []string{"gone-run", "kept-run"} {
-		if err := os.MkdirAll(filepath.Join(base, name, "chain-step-0-x"), 0o755); err != nil {
-			t.Fatalf("seed %s: %v", name, err)
+	bases := []string{sandbox.SkillStagingBase(), sandbox.MemoryStagingBase()}
+	for _, base := range bases {
+		for _, name := range []string{"gone-run", "kept-run"} {
+			if err := os.MkdirAll(filepath.Join(base, name, "chain-step-0-x"), 0o755); err != nil {
+				t.Fatalf("seed %s: %v", name, err)
+			}
 		}
 	}
 
-	sweepOrphanedSkillStagingDirs(map[string]bool{"kept-run": true})
+	sweepOrphanedStagingDirs(map[string]bool{"kept-run": true})
 
-	if _, err := os.Stat(filepath.Join(base, "gone-run")); !os.IsNotExist(err) {
-		t.Errorf("orphaned staging dir survived the sweep (err=%v)", err)
-	}
-	if _, err := os.Stat(filepath.Join(base, "kept-run")); err != nil {
-		t.Errorf("preserved staging dir was swept: %v", err)
+	for _, base := range bases {
+		if _, err := os.Stat(filepath.Join(base, "gone-run")); !os.IsNotExist(err) {
+			t.Errorf("orphaned staging dir under %s survived the sweep (err=%v)", base, err)
+		}
+		if _, err := os.Stat(filepath.Join(base, "kept-run")); err != nil {
+			t.Errorf("preserved staging dir under %s was swept: %v", base, err)
+		}
 	}
 }

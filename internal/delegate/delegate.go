@@ -77,6 +77,13 @@ type runConfig struct {
 	// mode, where the skill is written into the worktree instead.
 	skillsSourcePath string
 
+	// memorySourcePath is the orchestrator-owned staging dir holding the
+	// entity-memory tree materialized for this launch, bind-mounted read-only
+	// into the jail (agentproc's MemorySourcePath). Set for every sandboxed
+	// launch; empty in local mode, where the same tree is rendered inside the
+	// worktree instead.
+	memorySourcePath string
+
 	// execSandbox, when non-nil (TF_ROLE=executor), is the run network +
 	// credential sidecar + proxy coordinates the dispatcher stood up before
 	// workspace setup. runAgent threads it into agentproc.RunOptions
@@ -629,8 +636,9 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 // {runRoot}/{owner}/{repo}/ and inserts a row into conversation_worktrees.
 //
 // The agent's initial cwd is the run-root: a throwaway dir holding
-// only ./_tfac/ (its entity-memory tree populated by
-// materializePriorMemories below). Both gh and jira tool surfaces are exposed since the agent
+// only ./_tfac/ (whose entity-memory is materializePriorMemories' rendering, or
+// under a jail the symlink standing in for its read-only mount). Both gh and
+// jira tool surfaces are exposed since the agent
 // will need both to implement and ship a PR.
 //
 // runs.worktree_path is set to the run-root. The resume path reads this
