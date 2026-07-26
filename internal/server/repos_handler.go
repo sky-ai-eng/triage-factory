@@ -266,7 +266,9 @@ type repoWriteAccess int
 const (
 	// repoWriteInvisible — the repo is outside the caller's tracked set.
 	// It isn't in their GET /api/repos list either, so the handler answers
-	// 404 and discloses nothing about whether it exists.
+	// 404 and discloses nothing about whether it exists. Deliberately the
+	// zero value, so a repoWriteAccess that was never assigned denies
+	// rather than permits.
 	repoWriteInvisible repoWriteAccess = iota
 	// repoWriteForbidden — the caller can see the repo but administers
 	// none of the teams tracking it. 404 here would contradict their own
@@ -452,7 +454,14 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "repos", err)
 		return
 	}
+	// Every arm is spelled out, including the permitting one, and anything
+	// unrecognized denies. This is the only enforcement point for an
+	// org-wide write (RLS can't back it up), so a future enum member must
+	// fail closed by default rather than reach the write by falling off the
+	// end of the switch.
 	switch access {
+	case repoWriteAllowed:
+		// Proceed to the write below.
 	case repoWriteInvisible:
 		// 404, not 403 — a repo outside the caller's tracked set doesn't
 		// appear in their GET /api/repos list either, so don't disclose
@@ -466,6 +475,9 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "changing repo settings requires org admin or team admin of a team tracking this repo",
 		})
+		return
+	default:
+		internalError(w, "repos", fmt.Errorf("unhandled repo write access %d for %s", access, repoID))
 		return
 	}
 

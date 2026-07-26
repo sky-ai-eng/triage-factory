@@ -259,11 +259,15 @@ func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, own
 	return true, nil
 }
 
-// TracksRepoViewerScoped always reports true in local mode — N=1 has no
-// team boundary to enforce, mirroring the local-mode asymmetry of
-// ListActiveJiraTeamScoped / FactoryReadStore.Entities (TFAC-559). The
-// caller's org-admin-or-local short-circuit means this is only reached in
-// multi-mode anyway; kept here for interface conformance.
+// TracksRepoViewerScoped always reports true — this backend only ever runs
+// local mode, where N=1 has no team boundary to enforce, mirroring the
+// local-mode asymmetry of ListActiveJiraTeamScoped /
+// FactoryReadStore.Entities (TFAC-559).
+//
+// The handler gate never reaches it — isOrgAdmin short-circuits to true in
+// local before any store call, and multi-mode resolves against the Postgres
+// implementation instead. It exists for interface conformance, and for
+// store-level callers (tests) that address it directly.
 func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID, owner, repo string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -271,11 +275,15 @@ func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID
 	return true, nil
 }
 
-// TracksRepoViewerAdminScoped reports true in local mode for the same
-// reason as TracksRepoViewerScoped: N=1 has a single implicit owner, so
-// there is neither a team boundary nor an admin/member distinction to
-// enforce. The caller's org-admin-or-local short-circuit means this is
-// only reached in multi-mode anyway; kept here for interface conformance.
+// TracksRepoViewerAdminScoped reports true for the same reason as
+// TracksRepoViewerScoped: this backend only ever runs local mode, where
+// N=1 has a single implicit owner and so neither a team boundary nor an
+// admin/member distinction to enforce.
+//
+// The handler gate never reaches it — isOrgAdmin short-circuits to true
+// in local before any store call, and multi-mode resolves against the
+// Postgres implementation instead. It exists for interface conformance,
+// and for store-level callers (tests) that address it directly.
 func (s *teamGitHubReposStore) TracksRepoViewerAdminScoped(ctx context.Context, orgID, owner, repo string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
