@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -172,8 +172,14 @@ func TestProcessCompletion_RefusesThePredecessorsMemory(t *testing.T) {
 
 // TestProcessCompletion_IngestsWhatThisStepWrote is the positive control for the
 // test above: the same inherited file, overwritten by the agent, IS this run's
-// work and must be ingested. Without this the fingerprint could pass by refusing
+// work and must be ingested. Without it the guard could pass by refusing
 // everything.
+//
+// The rewrite is deliberately the shape file metadata cannot distinguish —
+// identical length, mtime pinned to the inherited file's — because that is the
+// case where an over-eager guard silently discards a step's real memory, and it
+// is reachable in production on any filesystem whose mtime is coarse enough that
+// a step's write lands in the same quantum as the pre-launch read.
 func TestProcessCompletion_IngestsWhatThisStepWrote(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "fresh-memory")
 	makeRunBlueprintStep(t, database, runID, taskID)
@@ -181,14 +187,27 @@ func TestProcessCompletion_IngestsWhatThisStepWrote(t *testing.T) {
 	cwd := t.TempDir()
 	blueprintRunID := "bpr-" + runID
 
-	writeAgentMemory(t, cwd, "the PREVIOUS step's narrative")
+	const previous = "the PREVIOUS step's narrative"
+	const mine = "the CURRENT step's narrative!"
+	if len(previous) != len(mine) {
+		t.Fatalf("fixture is wrong: the two narratives must be the same length (%d vs %d)", len(previous), len(mine))
+	}
+
+	writeAgentMemory(t, cwd, previous)
 	inherited := fingerprintAgentMemoryFile(cwd)
-	writeAgentMemory(t, cwd, "what THIS step did")
+	stat, err := os.Stat(agentMemoryFilePath(cwd))
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	writeAgentMemory(t, cwd, mine)
+	if err := os.Chtimes(agentMemoryFilePath(cwd), stat.ModTime(), stat.ModTime()); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
 
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, blueprintRunID, task,
 		res(`{"outcome":"continue","summary":"did step work"}`), cwd, inherited, "", "event", "")
 
-	if got := memoryContentFor(t, s, task.EntityID, runID); got != "what THIS step did" {
+	if got := memoryContentFor(t, s, task.EntityID, runID); got != mine {
 		t.Errorf("agent_content = %q, want this step's own narrative", got)
 	}
 }
@@ -257,62 +276,73 @@ func TestRehydrate_RestoredTreeCarriesTheMemorySymlink(t *testing.T) {
 	}
 }
 
-// TestMemoryFingerprint_TracksBothSizeAndMtime pins what "the agent never
-// touched it" means. Size alone would miss a same-length rewrite; mtime alone
-// would miss a filesystem that rounds it. Both must be consulted, and a nil
-// fingerprint (no inherited file, or a resume) must never claim a match — that
-// would refuse every run's own memory.
-func TestMemoryFingerprint_TracksBothSizeAndMtime(t *testing.T) {
+// TestMemoryFingerprint_IdentifiesByContent pins what "the agent never wrote"
+// means, and pins it against the case file metadata gets wrong: a rewrite to the
+// SAME LENGTH with the SAME modification time. Size and mtime cannot tell that
+// apart from an untouched file — mtime resolution is a filesystem property, and
+// a rewrite can land inside one quantum — and the run whose memory is
+// misclassified loses it silently. The digest has no such blind spot.
+func TestMemoryFingerprint_IdentifiesByContent(t *testing.T) {
 	cwd := t.TempDir()
+	path := agentMemoryFilePath(cwd)
 
 	var absent *memoryFingerprint
-	if absent.matches(cwd) {
-		t.Error("a nil fingerprint claimed a match; every run's own memory would be refused")
+	if absent.covers("anything at all") {
+		t.Error("a nil fingerprint claimed coverage; every run's own memory would be refused")
 	}
 
-	writeAgentMemory(t, cwd, "the previous step's narrative")
+	const inherited = "step 1 chose approach X because Y"
+	writeAgentMemory(t, cwd, inherited)
 	fp := fingerprintAgentMemoryFile(cwd)
 	if fp == nil {
 		t.Fatal("fingerprint of an existing file = nil")
 	}
-	if !fp.matches(cwd) {
-		t.Error("an untouched file did not match its own fingerprint")
+	if !fp.covers(inherited) {
+		t.Error("the inherited content is not covered by its own fingerprint")
 	}
 
-	// Same length, rewritten: only the timestamp distinguishes them, so this is
-	// the case size alone would get wrong. Stamped explicitly rather than raced
-	// against the clock's resolution.
-	path := agentMemoryFilePath(cwd)
-	writeFileT(t, path, "the CURRENT step's narrativ!")
-	fi, err := os.Stat(path)
+	// The case metadata gets wrong: identical length, and mtime pinned to the
+	// inherited file's so the two are indistinguishable by stat. This step's work
+	// must still be recognized as its own.
+	rewritten := "step 2 chose approach Z instead"
+	if len(rewritten) > len(inherited) {
+		t.Fatalf("fixture is wrong: the rewrite must not exceed the inherited length (%d vs %d)", len(rewritten), len(inherited))
+	}
+	rewritten += strings.Repeat("!", len(inherited)-len(rewritten))
+	stat, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if err := os.Chtimes(path, fi.ModTime(), fi.ModTime().Add(time.Second)); err != nil {
+	writeFileT(t, path, rewritten)
+	if err := os.Chtimes(path, stat.ModTime(), stat.ModTime()); err != nil {
 		t.Fatalf("chtimes: %v", err)
 	}
-	if fp.matches(cwd) {
-		t.Error("a rewritten file matched the inherited fingerprint; this step's work would be dropped")
+	if fp.covers(rewritten) {
+		t.Fatal("a same-length, same-mtime rewrite read as inherited; this step's memory would be dropped")
+	}
+	content, state := readRunMemory(cwd, fp)
+	if state != memoryFilePresent || content != rewritten {
+		t.Errorf("readRunMemory = (%q, %v), want this step's own rewrite", content, state)
 	}
 
-	// Restored timestamp, different length: the case mtime alone would get wrong.
-	writeFileT(t, path, "much longer content than the file this run inherited")
-	if err := os.Chtimes(path, fp.modTime, fp.modTime); err != nil {
-		t.Fatalf("chtimes: %v", err)
-	}
-	if fp.matches(cwd) {
-		t.Error("a resized file matched the inherited fingerprint")
+	// And the file it did inherit, untouched, is still refused.
+	writeFileT(t, path, inherited)
+	if content, state := readRunMemory(cwd, fp); state != memoryFileStale || content != "" {
+		t.Errorf("readRunMemory on the inherited file = (%q, %v), want ('', memoryFileStale)", content, state)
 	}
 
-	// A file that is gone is not the inherited one either.
+	// Nothing to inherit is not the same as inheriting nothing readable.
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	if fp.matches(cwd) {
-		t.Error("a missing file matched the inherited fingerprint")
-	}
 	if fingerprintAgentMemoryFile(cwd) != nil {
 		t.Error("fingerprint of a missing file is not nil")
+	}
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("mkdir over the write path: %v", err)
+	}
+	if fingerprintAgentMemoryFile(cwd) != nil {
+		t.Error("fingerprint of a non-regular file is not nil")
 	}
 }
 

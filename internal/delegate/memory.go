@@ -8,6 +8,7 @@ package delegate
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -15,7 +16,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -63,7 +63,7 @@ const (
 	memoryFileMissing                        // file does not exist on disk
 	memoryFileEmpty                          // file exists but is empty / whitespace-only
 	memoryFileReadErr                        // file exists, read failed (permissions, race, etc.)
-	memoryFileStale                          // file exists, byte-for-byte the one this run inherited
+	memoryFileStale                          // file exists, holding byte-for-byte what this run inherited
 )
 
 // Layout of the memory tree the orchestrator owns inside a run root.
@@ -126,58 +126,78 @@ func agentMemoryFilePath(cwd string) string {
 
 // memoryFingerprint identifies the memory file a run INHERITED at the fixed
 // write path, so its own termination can tell "the agent wrote this" from "the
-// previous step did".
+// previous step left it there".
 //
-// Identity, not content: size plus modification time, which the orchestrator can
-// read in a run tree it has already handed to the sandbox uid — statting and
-// reading still work there, only writing does not. That is the whole reason this
-// exists. Deleting the inherited file would be the simpler answer and is what
-// clearAgentMemoryFile does whenever it can, but a warm blueprint step cannot
-// delete anything in its tree, and its predecessor's memory is sitting right at
-// the path it is about to be judged on.
+// It is a digest of the file's CONTENT, not its metadata. Metadata cannot answer
+// this question: a rewrite to the same length inside one timestamp quantum — and
+// mtime resolution is a filesystem property, not something this code can bound —
+// is indistinguishable from an untouched file by (size, mtime), and the cost of
+// getting it wrong falls on the wrong side. A step whose real memory is
+// misclassified has its work silently discarded; a digest gets that case right
+// by construction.
+//
+// The residual ambiguity is a step that writes content byte-identical to what it
+// inherited, which reads as untouched. Nothing is lost when that happens: the
+// narrative that would have been ingested is the one already recorded.
+//
+// Hashing is available here for the same reason this type has to exist at all:
+// the orchestrator can still stat and READ inside a run tree handed to the
+// sandbox uid, it just cannot write. Deleting the inherited file is the simpler
+// answer and is what clearAgentMemoryFile does whenever it can — but a warm
+// blueprint step cannot delete anything in its tree, and its predecessor's
+// memory is sitting at the path it is about to be judged on.
 type memoryFingerprint struct {
-	size    int64
-	modTime time.Time
+	sum [sha256.Size]byte
 }
 
-// fingerprintAgentMemoryFile records the memory file a run is starting with.
+// fingerprintAgentMemoryFile digests the memory file a run is starting with.
 // Returns nil when there is nothing at the path (the common case, and the only
-// one on a cold tree) or when it cannot be stat'ed — either way the run's own
-// file is taken at face value, which is the behavior of every path that has no
-// fingerprint at all.
+// one on a cold tree), when it is not a regular file, or when it cannot be read
+// — all of which mean "nothing to distrust", so the run's own file is taken at
+// face value exactly as on the paths that carry no fingerprint at all.
+//
+// Streamed rather than read whole: the agent chooses this file's size, and a
+// pre-launch bookkeeping step has no business holding an arbitrary amount of it
+// in the orchestrator's heap.
 func fingerprintAgentMemoryFile(cwd string) *memoryFingerprint {
-	fi, err := os.Stat(agentMemoryFilePath(cwd))
-	if err != nil || !fi.Mode().IsRegular() {
+	f, err := os.Open(agentMemoryFilePath(cwd))
+	if err != nil {
 		return nil
 	}
-	return &memoryFingerprint{size: fi.Size(), modTime: fi.ModTime()}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		delegateLog.Warn("fingerprint inherited memory file failed; this run's memory will be taken at face value", "cwd", cwd, "error", err)
+		return nil
+	}
+	var fp memoryFingerprint
+	h.Sum(fp.sum[:0])
+	return &fp
 }
 
-// matches reports whether the file at the fixed write path is still the one this
-// fingerprint recorded — i.e. the agent never touched it.
-func (f *memoryFingerprint) matches(cwd string) bool {
-	if f == nil {
-		return false
-	}
-	fi, err := os.Stat(agentMemoryFilePath(cwd))
-	if err != nil {
-		return false
-	}
-	return fi.Size() == f.size && fi.ModTime().Equal(f.modTime)
+// covers reports whether content is the very file this fingerprint recorded —
+// i.e. the agent never wrote. A nil fingerprint covers nothing: there was no
+// inherited file, so whatever is there now is this run's.
+func (f *memoryFingerprint) covers(content string) bool {
+	return f != nil && sha256.Sum256([]byte(content)) == f.sum
 }
 
-// readRunMemory returns what THIS run wrote at the fixed path. A file identical
-// to the one the run inherited is not this run's work, however plausible its
-// contents: it reads as "wrote nothing", so the conversation_memory row lands
-// with agent_content NULL rather than adopting a predecessor's narrative.
+// readRunMemory returns what THIS run wrote at the fixed path. Content identical
+// to what the run inherited is not this run's work: it reads as "wrote nothing",
+// so the conversation_memory row lands with agent_content NULL rather than
+// adopting a predecessor's narrative.
 //
 // prior is nil on every path with no inherited file to distrust — a resume,
 // whose own file is its work, and a fresh tree.
 func readRunMemory(cwd string, prior *memoryFingerprint) (string, memoryFileState) {
-	if prior.matches(cwd) {
+	content, state := readAgentMemoryFile(cwd)
+	if state == memoryFilePresent && prior.covers(content) {
 		return "", memoryFileStale
 	}
-	return readAgentMemoryFile(cwd)
+	return content, state
 }
 
 // repoFiles is the set of paths under the scratch dir that belong to the REPO,

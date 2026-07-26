@@ -306,9 +306,9 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// A blueprint's steps share one tree and all write the same memory filename,
 	// so a step starting a fresh conversation must not be credited with whatever
 	// its predecessor left at that path. Delete it where that is possible; where it
-	// is not, remember it, and let termination refuse to ingest a file the agent
-	// never touched. A run continuing a session (a mid-flight re-claim) keeps what
-	// it already wrote and needs neither.
+	// is not, digest it, and let termination refuse to ingest content the agent
+	// never wrote. A run continuing a session (a mid-flight re-claim) keeps what it
+	// already wrote and needs neither.
 	var priorMemory *memoryFingerprint
 	if priorSessionID == "" {
 		if !handedOff {
@@ -611,8 +611,8 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 // a DB hiccup can't silently mis-namespace the memory or mis-route the task
 // close.
 //
-// priorMemory identifies the memory file this invocation INHERITED at the fixed
-// write path, so a file the agent never touched is not ingested as its work. nil
+// priorMemory digests the memory file this invocation INHERITED at the fixed
+// write path, so content the agent never wrote is not ingested as its work. nil
 // on a resume (whose own file is its work) and wherever there was nothing to
 // inherit, which is the ordinary case.
 //
@@ -673,7 +673,7 @@ func (s *Spawner) processCompletion(
 	case memoryFileReadErr:
 		delegateLog.Debug("memory file unreadable at termination (agent_content NULL)", "run", runID)
 	case memoryFileStale:
-		delegateLog.Debug("memory file untouched since this run started; it belongs to the previous step (agent_content NULL)", "run", runID)
+		delegateLog.Debug("memory file holds exactly the content this run inherited; it belongs to the previous step (agent_content NULL)", "run", runID)
 	}
 
 	// Attach the run's memory to every entity it materially engaged — the
