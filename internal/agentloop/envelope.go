@@ -5,16 +5,33 @@ import (
 	"strings"
 )
 
-// machinistSystemPrompt is the base machinist system prompt — the
-// stable, task-independent half of every native system prompt, and the first
-// thing in the prefix every provider caches. It is a file rather than text
-// composed in Go because it is iterated by hand alongside the seven tool
-// definitions it was written against: the descriptions in
-// tools/definitions.json and the wording here are one artifact, and editing
-// either alone changes model behavior for the worse.
+// The four vendored prompt files below are the native runtime's own. They
+// deliberately do not share text with the SDK path's files in
+// internal/ai/prompts: those describe a different harness — a tool allowlist,
+// approval prompts, a different set of tool names — and the two drifting into
+// one file is how the native prompt came to assert a permission model that
+// does not exist here. Edit them independently.
+
+// machinistSystemPrompt is the base system prompt: who the agent is, what the
+// harness actually does, how to work, and who reads the result. It is the
+// first thing in the prefix every provider caches.
 //
 //go:embed prompts/machinist-system.txt
 var machinistSystemPrompt string
+
+// nativeEnvelope is the standing contract every delegated run works under —
+// the GitHub surface, the TF verbs, workspace materialization, guardrails,
+// scratch discipline, entity memory.
+//
+// It carries no placeholders, which is the property that matters: everything
+// here is identical for every Machinist run in the fleet, so it sits inside
+// the cached prefix rather than being re-sent per run. The two values that do
+// vary — the team's branch convention and this run's memory path — are
+// supplied by EnvelopeParts.RunContext, and this text refers to them rather
+// than embedding them.
+//
+//go:embed prompts/envelope.txt
+var nativeEnvelope string
 
 // completionBlueprint is the terminal contract for a conversation executing
 // a blueprint: stopping is concluding, plus the flow-control tool and the
@@ -37,13 +54,6 @@ var completionBlueprint string
 // position is carried here and nowhere else, which is why a prompt and a
 // tool list cannot fall out of step.
 //
-// It shares its handoff and external-action guidance with the SDK path's
-// file of the same name, but it is NOT a rewrite of it and the two must be
-// edited independently: there, a step declares `continue` in a JSON envelope
-// and stopping any other way ends the blueprint; here stopping IS the
-// handoff. Porting wording across mechanically would invert the safe
-// default on one side or the other.
-//
 //go:embed prompts/blueprint-step-nonterminal.txt
 var blueprintStepNonterminal string
 
@@ -53,13 +63,15 @@ var blueprintStepNonterminal string
 // quality are owned by the caller (and by the humans who edit the vendored
 // files).
 type EnvelopeParts struct {
+	// RunContext is trusted, system-authored fact about this particular run:
+	// the team's branch convention, the path this run writes its memory to.
+	// It is the only per-run text the vendored envelope depends on, which is
+	// what lets that envelope stay byte-identical across the fleet.
+	RunContext string
 	// TaskContext is the system-rendered task/entity block. It carries
 	// externally-authored text (PR titles, issue bodies), so the caller is
 	// responsible for having marked it as untrusted before it gets here.
 	TaskContext string
-	// Envelope is the runtime-independent TF envelope: scope, tools,
-	// guardrails, scratch, entity memory.
-	Envelope string
 	// Mission is the step's prompt body.
 	Mission string
 	// HasBlueprint appends the completion contract. It must agree with
@@ -77,22 +89,30 @@ type EnvelopeParts struct {
 // BuildSystemPrompt assembles the native system prompt in the one fixed
 // order every native call uses:
 //
-//	base coding-agent prompt
-//	task context
-//	TF envelope
-//	mission
-//	[completion contract]
+//	base coding-agent prompt   ─┐
+//	standing envelope           ├─ identical for every run in the fleet
+//	[completion contract]      ─┘
 //	[non-terminal step addendum]
+//	run context
+//	task context
+//	mission
 //
-// The order is what makes the prefix cacheable: the base prompt and the tool
-// schemas are byte-identical across every run in the fleet, and everything
-// that varies comes after them.
+// The split is the point. Everything above the addendum is the same bytes
+// for every Machinist run anywhere, so it is one cacheable prefix rather
+// than per-run tokens; everything below it varies. The addendum sits on the
+// boundary rather than inside the shared block because gating it there would
+// fork that block into terminal and non-terminal variants for a few hundred
+// bytes.
+//
+// Within the varying tail, the mission comes last so the authoritative
+// instruction is the most recent thing the model reads, after the
+// externally-authored task context rather than before it. That ordering
+// forgoes a per-prompt cache tier — two runs of the same prompt could
+// otherwise have shared a little further — and the trade is deliberate.
 func BuildSystemPrompt(parts EnvelopeParts) string {
 	sections := []string{
 		strings.TrimSpace(machinistSystemPrompt),
-		strings.TrimSpace(parts.TaskContext),
-		strings.TrimSpace(parts.Envelope),
-		strings.TrimSpace(parts.Mission),
+		strings.TrimSpace(nativeEnvelope),
 	}
 	if parts.HasBlueprint {
 		sections = append(sections, strings.TrimSpace(completionBlueprint))
@@ -100,6 +120,12 @@ func BuildSystemPrompt(parts EnvelopeParts) string {
 	if parts.NonTerminalStep {
 		sections = append(sections, strings.TrimSpace(blueprintStepNonterminal))
 	}
+	sections = append(sections,
+		strings.TrimSpace(parts.RunContext),
+		strings.TrimSpace(parts.TaskContext),
+		strings.TrimSpace(parts.Mission),
+	)
+
 	kept := sections[:0]
 	for _, s := range sections {
 		if s != "" {

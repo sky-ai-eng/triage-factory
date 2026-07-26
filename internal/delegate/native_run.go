@@ -12,12 +12,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -219,15 +219,10 @@ func (s *Spawner) buildNativeSystemPrompt(ctx context.Context, task domain.Task,
 	runURL := s.runURLFor(cfg.orgID, runID)
 
 	body := strings.ReplaceAll(mission, "triagefactory exec", agentBin+" exec")
-	envelope := strings.NewReplacer(
-		"{{TOOLS_REFERENCE}}", cfg.toolsRef,
-		"{{SCOPE}}", cfg.scope,
-	).Replace(ai.EnvelopeBodyTemplate)
-
 	replacer := BuildPromptReplacer(task, metadataJSON, runID, agentBin, agentRunRoot, namespace, branchTemplate, runURL)
 	return agentloop.BuildSystemPrompt(agentloop.EnvelopeParts{
+		RunContext:  nativeRunContext(branchTemplate, agentRunRoot, namespace, runID),
 		TaskContext: BuildTaskContext(task, metadataJSON, cfg.prSkeleton),
-		Envelope:    replacer.Replace(envelope),
 		Mission:     replacer.Replace(body),
 		// A delegation always executes a blueprint — a single-step one is
 		// still one — so this path never builds the taskless shape. The
@@ -236,6 +231,23 @@ func (s *Spawner) buildNativeSystemPrompt(ctx context.Context, task domain.Task,
 		HasBlueprint:    true,
 		NonTerminalStep: cfg.appendSysPrompt != "",
 	}), nil
+}
+
+// nativeRunContext renders the two facts the standing envelope refers to but
+// cannot contain: the team's branch convention, and where this run writes its
+// memory.
+//
+// They live here rather than interpolated into the envelope because the
+// envelope's value is being byte-identical for every run in the fleet — one
+// cached prefix instead of per-run tokens. Two lines of genuinely per-run text
+// belong in the part that was never going to be cached anyway. It is
+// system-authored, so unlike the task context it carries no untrusted markers.
+func nativeRunContext(branchTemplate, agentRunRoot, namespace, runID string) string {
+	memoryPath := path.Join(agentRunRoot, "_scratch", "entity-memory", namespace, runID+".md")
+	return "<run_context>\n" +
+		"Branch naming convention for this team: " + branchTemplate + "\n" +
+		"Write your entity-memory notes to: " + memoryPath + "\n" +
+		"</run_context>"
 }
 
 // nativeAgentEnv is the env the jail's tool host exports to every `bash`

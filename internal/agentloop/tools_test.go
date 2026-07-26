@@ -170,18 +170,20 @@ func TestBuildSystemPrompt_OrderAndAddendumGating(t *testing.T) {
 	// to churn; what must not churn is which sections are assembled, in what
 	// order, under which flags.
 	base := strings.TrimSpace(machinistSystemPrompt)
+	envelope := strings.TrimSpace(nativeEnvelope)
 	completion := strings.TrimSpace(completionBlueprint)
 	addendum := strings.TrimSpace(blueprintStepNonterminal)
 
-	parts := EnvelopeParts{TaskContext: "TASKCTX", Envelope: "ENVELOPE", Mission: "MISSION", HasBlueprint: true}
+	parts := EnvelopeParts{RunContext: "RUNCTX", TaskContext: "TASKCTX", Mission: "MISSION", HasBlueprint: true}
 
 	terminal := BuildSystemPrompt(parts)
 	for name, want := range map[string]string{
 		"base prompt":         base,
-		"task context":        "TASKCTX",
-		"envelope":            "ENVELOPE",
-		"mission":             "MISSION",
+		"standing envelope":   envelope,
 		"completion contract": completion,
+		"run context":         "RUNCTX",
+		"task context":        "TASKCTX",
+		"mission":             "MISSION",
 	} {
 		if !containsSub(terminal, want) {
 			t.Errorf("the terminal system prompt is missing the %s", name)
@@ -190,15 +192,44 @@ func TestBuildSystemPrompt_OrderAndAddendumGating(t *testing.T) {
 	if containsSub(terminal, addendum) {
 		t.Error("a terminal step must not carry the non-terminal addendum")
 	}
-	// Order is what makes the prefix cacheable: the bytes every run in the
-	// fleet shares come first, everything that varies per run after them.
-	if !inOrder(terminal, base, "TASKCTX", "ENVELOPE", "MISSION", completion) {
+	// The shared block comes first and in one piece — that contiguity is what
+	// makes it a cacheable prefix rather than three fragments — and every
+	// per-run section follows it.
+	if !inOrder(terminal, base, envelope, completion, "RUNCTX", "TASKCTX", "MISSION") {
 		t.Error("the fixed assembly order is what makes the prefix cacheable")
+	}
+	// The mission is last so the authoritative instruction is read after the
+	// externally-authored task context, not before it.
+	if !inOrder(terminal, "TASKCTX", "MISSION") {
+		t.Error("the mission must come after the untrusted task context")
 	}
 
 	parts.NonTerminalStep = true
-	if nonTerminal := BuildSystemPrompt(parts); !containsSub(nonTerminal, addendum) {
+	nonTerminal := BuildSystemPrompt(parts)
+	if !containsSub(nonTerminal, addendum) {
 		t.Error("a non-terminal step must carry the addendum that redefines what stopping means")
+	}
+	// The addendum sits on the boundary: after the whole shared block, before
+	// anything per-run. Inside it, the block would fork into two variants.
+	if !inOrder(nonTerminal, completion, addendum, "RUNCTX") {
+		t.Error("the addendum must fall between the shared block and the per-run sections")
+	}
+}
+
+// TestNativeEnvelope_CarriesNoPlaceholders is the guard on the property the
+// whole split exists for. A single {{...}} in the standing envelope makes it
+// per-run text, and the fleet-wide cached prefix silently becomes a per-run
+// one — with nothing else failing to reveal it.
+func TestNativeEnvelope_CarriesNoPlaceholders(t *testing.T) {
+	for name, body := range map[string]string{
+		"envelope.txt":                   nativeEnvelope,
+		"machinist-system.txt":           machinistSystemPrompt,
+		"completion-blueprint.txt":       completionBlueprint,
+		"blueprint-step-nonterminal.txt": blueprintStepNonterminal,
+	} {
+		if containsSub(body, "{{") {
+			t.Errorf("%s carries a placeholder; per-run values belong in RunContext", name)
+		}
 	}
 }
 
@@ -207,9 +238,9 @@ func TestBuildSystemPrompt_OrderAndAddendumGating(t *testing.T) {
 // writing: there is no run to conclude, no tool to be told about, and no
 // mission whose artifact could be missing.
 func TestBuildSystemPrompt_TasklessHasNoCompletionContract(t *testing.T) {
-	taskless := BuildSystemPrompt(EnvelopeParts{Envelope: "ENVELOPE", Mission: "MISSION"})
+	taskless := BuildSystemPrompt(EnvelopeParts{RunContext: "RUNCTX", Mission: "MISSION"})
 
-	if !containsSub(taskless, "ENVELOPE") || !containsSub(taskless, "MISSION") {
+	if !containsSub(taskless, "RUNCTX") || !containsSub(taskless, "MISSION") {
 		t.Fatal("the caller's own sections must still be assembled")
 	}
 	if containsSub(taskless, strings.TrimSpace(completionBlueprint)) {
