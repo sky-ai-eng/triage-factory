@@ -102,10 +102,12 @@ const (
 // maxObserveBody caps how much of an observed mutation's response body the
 // injector will BUFFER to parse the created object's coordinates. PR-create and
 // review-post responses are a few KB; the cap only guards against a pathological
-// upstream. A body past the cap is never truncated — the consumed prefix is
-// stitched back in front of the untouched remainder and observation is skipped
-// for that response (the reconciler backstop covers it). The agent's response is
-// always delivered whole; observation is the only thing that degrades.
+// upstream. A body past the cap is never truncated — observation is skipped for
+// that response (the reconciler backstop covers it) and the body streams on: a
+// declared Content-Length over the cap is skipped without reading anything at
+// all, and one discovered mid-read has its consumed prefix stitched back in
+// front of the untouched remainder. The agent's response is always delivered
+// whole; observation is the only thing that degrades.
 const maxObserveBody = 1 << 20
 
 // TokenSource supplies the single real GitHub credential to inject on every
@@ -414,6 +416,14 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 // and observation is skipped for it. The agent's response is always delivered
 // whole; observation is the only thing that degrades.
 func bufferForObservation(resp *http.Response) ([]byte, bool) {
+	// A declared length past the cap settles the outcome before any I/O: the
+	// body would be skipped anyway, so read none of it and leave it streaming
+	// straight through to the agent. ContentLength is -1 when unknown (chunked),
+	// which falls through to the read below.
+	if resp.ContentLength > maxObserveBody {
+		return nil, false
+	}
+
 	// Read one byte past the cap so "body exceeded the cap" is distinguishable
 	// from "body is exactly the cap" (ReadAll on a LimitReader reports no error
 	// when it stops at the limit).

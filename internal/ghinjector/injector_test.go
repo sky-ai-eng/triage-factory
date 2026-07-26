@@ -440,6 +440,68 @@ func TestInjector_OversizedBodyReachesAgentIntact(t *testing.T) {
 	}
 }
 
+// countingBody reports how much of a response body was actually read.
+type countingBody struct {
+	r    io.Reader
+	read int
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	b.read += n
+	return n, err
+}
+
+func (b *countingBody) Close() error { return nil }
+
+// TestBufferForObservation_DeclaredOversizeReadsNothing pins the short-circuit:
+// when the upstream advertises a Content-Length past the cap the outcome is
+// already settled, so the body must stream to the agent untouched rather than
+// being dragged through a megabyte of doomed buffering first.
+func TestBufferForObservation_DeclaredOversizeReadsNothing(t *testing.T) {
+	payload := strings.Repeat("z", maxObserveBody+4096)
+	body := &countingBody{r: strings.NewReader(payload)}
+	resp := &http.Response{ContentLength: int64(len(payload)), Body: body}
+
+	if buf, ok := bufferForObservation(resp); ok || buf != nil {
+		t.Errorf("bufferForObservation = (%d bytes, %v), want (nil, false)", len(buf), ok)
+	}
+	if body.read != 0 {
+		t.Errorf("read %d bytes from an over-cap declared body, want 0", body.read)
+	}
+	if resp.Body != body {
+		t.Error("response body was replaced; an unread body must stream on as-is")
+	}
+	// The agent still gets every byte.
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(got) != payload {
+		t.Errorf("delivered %d bytes, want the full %d", len(got), len(payload))
+	}
+}
+
+// TestBufferForObservation_UnknownLengthStillBuffers is the other side of that
+// short-circuit: a chunked response declares -1, which must not be read as
+// "under the cap" nor as "over" — it falls through to the read.
+func TestBufferForObservation_UnknownLengthStillBuffers(t *testing.T) {
+	const payload = `{"number":1}`
+	resp := &http.Response{ContentLength: -1, Body: io.NopCloser(strings.NewReader(payload))}
+
+	buf, ok := bufferForObservation(resp)
+	if !ok {
+		t.Fatal("bufferForObservation skipped a chunked response")
+	}
+	if string(buf) != payload {
+		t.Errorf("buffered %q, want %q", buf, payload)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != payload {
+		t.Errorf("re-presented body = %q, want %q", got, payload)
+	}
+}
+
 // TestInjector_BodyAtExactlyCapStillObserves guards the off-by-one in the
 // oversize probe: a body of exactly maxObserveBody is buffered and observed, not
 // misread as "over the cap".
