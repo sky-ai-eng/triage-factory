@@ -268,6 +268,11 @@ func clearAgentMemoryFile(cwd string, owned repoFiles) {
 // already tried — and so the later steps of one blueprint run read the earlier
 // steps' memory as their handoff.
 //
+// root is the directory the layout is rendered into — the agent's
+// _tfac/entity-memory in local mode, this launch's staging dir under a sandbox.
+// The caller resolves it (entityMemoryTarget); this function is indifferent to
+// which, and to whether the tree it will be read from is still writable.
+//
 // blueprintRunID is the CURRENT run's workflow run. Memory produced under it is
 // this run's own handoff and lands in this-run/, numbered by step so the
 // listing reads in execution order; everything else is history and lands in
@@ -292,10 +297,6 @@ func clearAgentMemoryFile(cwd string, owned repoFiles) {
 // target: a name that collides with a tracked file yields that file to the
 // repo and skips the prior, rather than overwriting content the agent would
 // then commit.
-// root is the directory the layout is rendered into — the agent's
-// _tfac/entity-memory in local mode, this launch's staging dir under a sandbox.
-// The caller resolves it (entityMemoryTarget); this function is indifferent to
-// which, and to whether the tree it will be read from is still writable.
 func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, root, entityID, blueprintRunID string, owned repoFiles) {
 	thisRunDir := filepath.Join(root, currentRunDirName)
 	historyDir := filepath.Join(root, priorRunsDirName)
