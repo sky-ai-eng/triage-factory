@@ -27,6 +27,26 @@ func (e *UnanchoredCommentError) Error() string {
 	return "a staged review comment on " + e.Path + " has no line anchor and can't be submitted"
 }
 
+// DivergentAnchorsError reports staged comments anchored to two DIFFERENT
+// commits. The atomic submit carries one commit_id for the whole review, so
+// there is no pin that is correct for both: whichever won, the other comment's
+// line would be read in a frame it was never validated against, and land on the
+// wrong code or be rejected outright.
+//
+// This is an invariant violation, not user error — finalize reconciles every
+// comment to one head and hard-fails on anything it can't, and Refresh re-pins
+// the survivors together. It is checked here anyway because the cost of being
+// wrong is a mis-anchored review on someone's PR, and because a silent
+// last-anchor-wins pick would make the breakage look like a GitHub quirk rather
+// than the bug it is. Raised BEFORE the GitHub call, like the unanchored guard,
+// and the recovery is the same Refresh that re-establishes the invariant.
+type DivergentAnchorsError struct{ First, Second string }
+
+func (e *DivergentAnchorsError) Error() string {
+	return "staged review comments are anchored to two different commits (" +
+		e.First + " and " + e.Second + "); a review submits under one commit_id"
+}
+
 // SubmitInput is the staged draft to publish plus the two pieces of context the
 // artifact row can't supply: the agentmeta footer to append to the body, and
 // the org's GitHub web host for the submitted review's deep link.
@@ -66,9 +86,12 @@ type SubmitResult struct {
 // the atomic submit carries ONE commit_id for the whole review. finalize-review
 // already reconciled every comment to the PR's single current head — auto-
 // remapping pure shifts, hard-failing on anything outdated — so a submittable
-// draft's comments all share one CommitSHA and the pin simply follows it. A
+// draft's anchored comments all carry that one SHA, and the pin is it rather
+// than a representative sampled from them. A draft that disagrees with itself is
+// refused (DivergentAnchorsError) instead of posted under an arbitrary pick. A
 // comment-less review (approve / body-only) has no inline anchor, so it falls
-// back to the start-review head (Details.HeadSHA).
+// back to the start-review head (Details.HeadSHA), as does a draft whose
+// comments all predate per-comment anchoring.
 //
 // Callers keep their own persistence: this makes the GitHub write and reports
 // what happened, and never touches the artifact row (the two callers claim,
@@ -76,13 +99,19 @@ type SubmitResult struct {
 // drafting run's own action).
 func SubmitStaged(ctx context.Context, gh Submitter, in SubmitInput) (SubmitResult, error) {
 	comments := make([]ghclient.SubmitReviewComment, 0, len(in.Details.StagedComments))
-	commitID := in.Details.HeadSHA
+	// anchored is the single commit every anchored comment names. A comment with
+	// no CommitSHA predates per-comment anchoring and constrains nothing, so it
+	// is skipped rather than treated as disagreement.
+	anchored := ""
 	for _, c := range in.Details.StagedComments {
 		if c.Line == nil {
 			return SubmitResult{}, &UnanchoredCommentError{Path: c.Path}
 		}
 		if c.CommitSHA != "" {
-			commitID = c.CommitSHA
+			if anchored != "" && c.CommitSHA != anchored {
+				return SubmitResult{}, &DivergentAnchorsError{First: anchored, Second: c.CommitSHA}
+			}
+			anchored = c.CommitSHA
 		}
 		comments = append(comments, ghclient.SubmitReviewComment{
 			Path:      c.Path,
@@ -90,6 +119,10 @@ func SubmitStaged(ctx context.Context, gh Submitter, in SubmitInput) (SubmitResu
 			StartLine: c.StartLine,
 			Body:      c.Body,
 		})
+	}
+	commitID := in.Details.HeadSHA
+	if anchored != "" {
+		commitID = anchored
 	}
 
 	// SubmitReview returns the event it submitted (it doesn't parse an

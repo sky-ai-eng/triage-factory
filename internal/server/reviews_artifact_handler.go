@@ -333,6 +333,20 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 			})
 			return
 		}
+		var divergent *review.DivergentAnchorsError
+		if errors.As(err, &divergent) {
+			// Also pre-GitHub. Reported as its own 422 rather than folded into the
+			// 502 below, because "GitHub API error" would point the user at an
+			// outage for a draft that never left this process — and Refresh, which
+			// re-pins every surviving comment to the live head, is the fix.
+			artifactsLog.Error("staged review comments disagree on their anchor commit",
+				"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+			releaseClaim()
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+				"error": divergent.Error() + " — refresh the review, then approve again",
+			})
+			return
+		}
 		artifactsLog.Warn("SubmitReview failed",
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		// Release the claim so the user can retry — nothing reached GitHub.

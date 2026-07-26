@@ -131,6 +131,61 @@ func TestSubmitStaged_UnanchoredCommentFailsBeforeGitHub(t *testing.T) {
 	}
 }
 
+// TestSubmitStaged_LegacyUnanchoredCommentsPinToStartHead pins that comments
+// with no CommitSHA — rows staged before per-comment anchoring existed —
+// constrain the pin not at all rather than counting as disagreement. The review
+// falls back to the start-review head, which is the only frame it has.
+func TestSubmitStaged_LegacyUnanchoredCommentsPinToStartHead(t *testing.T) {
+	sub := &recordingSubmitter{}
+	if _, err := SubmitStaged(context.Background(), sub, SubmitInput{
+		Owner: "octo", Repo: "repo", Number: 7,
+		Details: domain.ReviewArtifactDetails{
+			HeadSHA:     "start_review_head",
+			ReviewEvent: "COMMENT",
+			StagedComments: []domain.ReviewArtifactComment{
+				{Path: "a.go", Line: linePtr(3), Body: "legacy"},
+				{Path: "b.go", Line: linePtr(4), Body: "also legacy"},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("SubmitStaged: %v", err)
+	}
+	if sub.commitID != "start_review_head" {
+		t.Errorf("commit_id = %q, want the start-review head", sub.commitID)
+	}
+}
+
+// TestSubmitStaged_DivergentAnchorsRefused pins the invariant the commit pin
+// depends on rather than assuming it. Finalize reconciles every comment to one
+// head and Refresh re-pins the survivors together, so two live anchors is a bug
+// upstream — but the submit carries ONE commit_id, so picking one anyway would
+// read the other comment's line in a frame it was never validated against. It
+// is refused before any GitHub call.
+func TestSubmitStaged_DivergentAnchorsRefused(t *testing.T) {
+	sub := &recordingSubmitter{}
+	_, err := SubmitStaged(context.Background(), sub, SubmitInput{
+		Owner: "octo", Repo: "repo", Number: 7,
+		Details: domain.ReviewArtifactDetails{
+			HeadSHA:     "start_review_head",
+			ReviewEvent: "COMMENT",
+			StagedComments: []domain.ReviewArtifactComment{
+				{Path: "a.go", Line: linePtr(3), Body: "old frame", CommitSHA: "head_one"},
+				{Path: "b.go", Line: linePtr(4), Body: "new frame", CommitSHA: "head_two"},
+			},
+		},
+	})
+	var divergent *DivergentAnchorsError
+	if !errors.As(err, &divergent) {
+		t.Fatalf("err = %v, want a DivergentAnchorsError", err)
+	}
+	if divergent.First != "head_one" || divergent.Second != "head_two" {
+		t.Errorf("error names %q and %q, want both disagreeing anchors", divergent.First, divergent.Second)
+	}
+	if sub.calls != 0 {
+		t.Errorf("GitHub was called %d times, want 0 — the check runs before the submit", sub.calls)
+	}
+}
+
 // TestSubmitStaged_SubmitFailurePropagates pins that a GitHub failure surfaces
 // verbatim (each caller decides what to do about it) and yields no URL.
 func TestSubmitStaged_SubmitFailurePropagates(t *testing.T) {
