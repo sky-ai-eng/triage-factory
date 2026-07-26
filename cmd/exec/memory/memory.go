@@ -7,7 +7,7 @@
 // a PR it opened from a ticket, a ticket referenced in a thread — it pulls what
 // past runs learned about that entity as the tool result rather than having the
 // host write files into a live run tree (privsep forbids that). The agent owns
-// /work and can persist what it loads into its own _scratch/ if it wants
+// /work and can persist what it loads into its own _tfac/ if it wants
 // grep-ability.
 //
 // `memory` is a first-class core verb (like gh/jira/workspace), not an ee
@@ -42,7 +42,7 @@ const HelpText = `Memory Commands:
 Usage notes:
   - --limit defaults to 20 (the most recent memories).
   - Prior memory for THIS task's OWN entity is already materialized under
-    _scratch/entity-memory/ — use this only for a different entity you pull
+    _tfac/entity-memory/ — use this only for a different entity you pull
     in mid-run.
   - Conversation id is read from $TRIAGE_FACTORY_CONVERSATION_ID (set by the delegation spawner).`
 

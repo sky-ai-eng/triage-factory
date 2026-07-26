@@ -42,7 +42,7 @@ func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
 
 	// Written after the snapshot: a rehydrate rebuilds from the (older) blob and
 	// would lose this, so its survival distinguishes warm reuse from a rebuild.
-	marker := filepath.Join(wtPath, "_scratch", "ci-logs", "warm-marker.txt")
+	marker := filepath.Join(wtPath, "_tfac", "ci-logs", "warm-marker.txt")
 	writeFile(t, marker, "warm")
 
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
@@ -62,7 +62,7 @@ func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
 // acceptance: a parked run whose local worktree (and session JSONL) are then
 // lost — simulating host loss / a /tmp wipe — resumes by rebuilding from the
 // snapshot. The agent's committed work (carried in the git bundle), the
-// uncommitted changes (the patch), the ephemeral _scratch (minus the
+// uncommitted changes (the patch), the ephemeral _tfac (minus the
 // re-materializable subdirs), and an intact `--resume` session must all be
 // restored.
 func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
@@ -82,11 +82,11 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	// ...then leaves an uncommitted edit (rides in the patch).
 	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nuncommitted edit\n")
 
-	// Ephemeral _scratch is snapshotted; entity-memory / project-knowledge are
+	// Ephemeral _tfac is snapshotted; entity-memory / project-knowledge are
 	// excluded (they re-materialize from the DB / project KB).
-	writeFile(t, filepath.Join(wtPath, "_scratch", "ci-logs", "build.log"), "ci log line")
-	writeFile(t, filepath.Join(wtPath, "_scratch", "entity-memory", "ns", "x.md"), "memory")
-	writeFile(t, filepath.Join(wtPath, "_scratch", "project-knowledge", "kb.md"), "kb")
+	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "build.log"), "ci log line")
+	writeFile(t, filepath.Join(wtPath, "_tfac", "entity-memory", "ns", "x.md"), "memory")
+	writeFile(t, filepath.Join(wtPath, "_tfac", "project-knowledge", "kb.md"), "kb")
 
 	const sessionID = "sess-cold"
 	sessPath := writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"cold"}`)
@@ -123,9 +123,9 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 
 	assertFileContains(t, filepath.Join(got, "agent.txt"), "committed by agent") // bundle
 	assertFileContains(t, filepath.Join(got, "README.md"), "uncommitted edit")   // patch
-	assertFileContains(t, filepath.Join(got, "_scratch", "ci-logs", "build.log"), "ci log line")
-	assertMissing(t, filepath.Join(got, "_scratch", "entity-memory", "ns", "x.md"))
-	assertMissing(t, filepath.Join(got, "_scratch", "project-knowledge", "kb.md"))
+	assertFileContains(t, filepath.Join(got, "_tfac", "ci-logs", "build.log"), "ci log line")
+	assertMissing(t, filepath.Join(got, "_tfac", "entity-memory", "ns", "x.md"))
+	assertMissing(t, filepath.Join(got, "_tfac", "project-knowledge", "kb.md"))
 
 	// The session transcript lands under the rebuilt cwd's encoded project dir
 	// so `claude --resume` reconnects.
@@ -153,7 +153,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptBearingSnapshotIsResumable(t *testin
 	// persist-new-path branch (SetWorktreePathSystem is unwired in this spawner).
 	wtPath := worktree.RunRoot(runID)
 	t.Cleanup(func() { _ = os.RemoveAll(wtPath) })
-	writeFile(t, filepath.Join(wtPath, "_scratch", "notes.txt"), "scratch survived")
+	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch survived")
 	const sessionID = "sess-present"
 	writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"present"}`)
 
@@ -188,7 +188,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable(t *testin
 	const runID = "wt-no-transcript"
 	wtPath := worktree.RunRoot(runID)
 	t.Cleanup(func() { _ = os.RemoveAll(wtPath) })
-	writeFile(t, filepath.Join(wtPath, "_scratch", "notes.txt"), "scratch survived")
+	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch survived")
 	const sessionID = "sess-lost"
 	// Deliberately NO writeSession: the run carries a session id but its
 	// transcript is not on disk when the snapshot is taken.
@@ -205,7 +205,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable(t *testin
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
 	// The workspace itself rebuilt...
-	assertFileContains(t, filepath.Join(got, "_scratch", "notes.txt"), "scratch survived")
+	assertFileContains(t, filepath.Join(got, "_tfac", "notes.txt"), "scratch survived")
 	// ...but no transcript rode along, so the guard must report it unresumable.
 	if sessionTranscriptExists(got, sessionID) {
 		t.Fatal("sessionTranscriptExists = true for a transcript-less snapshot; the resume guard would not fire and the SDK would get a doomed --resume")
@@ -225,7 +225,7 @@ func TestSnapshotWorkspace_StoresGzip(t *testing.T) {
 	// A non-git run-root is enough: format is decided by the writer wrapper,
 	// not by which members ride in the tar.
 	wtPath := t.TempDir()
-	writeFile(t, filepath.Join(wtPath, "_scratch", "notes.txt"), "scratch note")
+	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch note")
 
 	const runID = "wt-gzip"
 	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, ""); err != nil {
@@ -260,7 +260,7 @@ func TestEnsureWorkspace_ColdPath_CorruptGzipChecksumErrors(t *testing.T) {
 
 	const runID = "wt-corrupt"
 	src := t.TempDir()
-	writeFile(t, filepath.Join(src, "_scratch", "ci-logs", "x.log"), "log bytes the gzip trailer checksums over")
+	writeFile(t, filepath.Join(src, "_tfac", "ci-logs", "x.log"), "log bytes the gzip trailer checksums over")
 	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, src, ""); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestSnapshotWorkspace_CompressionShrinksTranscriptHeavyBlob(t *testing.T) {
 		fmt.Fprintf(&jsonl, `{"type":"tool_result","seq":%d,"content":"$ go test ./...\nok  \tgithub.com/sky-ai-eng/triage-factory/internal/delegate\t1.2s\n"}%s`, i, "\n")
 	}
 	writeSession(t, wtPath, sessionID, jsonl.String())
-	writeFile(t, filepath.Join(wtPath, "_scratch", "ci-logs", "test.log"),
+	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "test.log"),
 		strings.Repeat("=== RUN   TestSomething\n--- PASS: TestSomething (0.01s)\n", 2000))
 
 	const runID = "wt-fat"

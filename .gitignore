@@ -16,6 +16,7 @@ frontend/dist/
 
 # Custom
 _scratch/
+_tfac/
 .claude/*
 !.claude/settings.json
 docs/triagefactory-spec.md

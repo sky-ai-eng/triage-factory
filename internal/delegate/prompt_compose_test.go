@@ -49,9 +49,24 @@ func TestBuildPrompt_InterpolatesInjectedSections(t *testing.T) {
 	if !strings.Contains(out, "/usr/local/bin/triagefactory exec gh") {
 		t.Error("expected interpolated binary path in the tools section")
 	}
-	// The entity-memory write path must resolve to the concrete absolute path.
-	if !strings.Contains(out, "/work/_scratch/entity-memory/bp-run-1/run-1.md") {
-		t.Errorf("expected concrete entity-memory write path in the composed prompt;\n%s", out)
+	// The memory write path must resolve to the concrete absolute path.
+	if !strings.Contains(out, "/work/_tfac/memory.md") {
+		t.Errorf("expected concrete memory write path in the composed prompt;\n%s", out)
+	}
+}
+
+// TestBlueprintStepNonterminalPrompt_MemoryPathCarriesNoIDs is the handoff
+// addendum's half of the fixed-path contract (its ai/prompts sibling covers the
+// envelope + tools docs): the step it hands off to reads a folder the
+// orchestrator names, never a path composed from run ids.
+func TestBlueprintStepNonterminalPrompt_MemoryPathCarriesNoIDs(t *testing.T) {
+	for _, bad := range []string{"entity-memory/{{", "entity-memory/$"} {
+		if strings.Contains(blueprintStepNonterminalPrompt, bad) {
+			t.Errorf("blueprint-step-nonterminal.txt composes an entity-memory path from placeholders (%q)", bad)
+		}
+	}
+	if !strings.Contains(blueprintStepNonterminalPrompt, "_tfac/entity-memory/this-run/") {
+		t.Error("expected the handoff addendum to point the agent at _tfac/entity-memory/this-run/")
 	}
 }
 

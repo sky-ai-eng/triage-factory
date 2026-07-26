@@ -24,7 +24,7 @@ func ShippedPrompts() []domain.Prompt {
 	return []domain.Prompt{
 		// PR review is a three-step blueprint (system-pr-review, see
 		// ShippedBlueprints): a security pass and a correctness pass each
-		// write findings to _scratch, then a cheap aggregator posts and
+		// write findings to _tfac, then a cheap aggregator posts and
 		// submits the review. The two reviewer steps inherit the team
 		// default model; the aggregator is mechanical assembly, so it runs
 		// on haiku (a downgrade — stepModelOrInherit never lets a per-step

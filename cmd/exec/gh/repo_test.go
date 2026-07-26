@@ -88,7 +88,7 @@ func TestSplitOwnerRepoStr(t *testing.T) {
 		{"leading slash", "/repo", true, "", ""},
 		{"only slash", "/", true, "", ""},
 		// Path-traversal guard: extra segments / .. must be rejected so
-		// owner/repo can't escape the _scratch dir when used in a path.
+		// owner/repo can't escape the _tfac dir when used in a path.
 		{"extra segment", "owner/repo/extra", true, "", ""},
 		{"dotdot repo", "owner/../../../etc", true, "", ""},
 		{"dotdot owner", "../owner/repo", true, "", ""},

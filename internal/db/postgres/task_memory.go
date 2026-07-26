@@ -150,9 +150,7 @@ func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID,
 }
 
 func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string) ([]domain.TaskMemory, error) {
-	rows, err := q.QueryContext(ctx, `
-		SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
-		FROM conversation_memory rm
+	rows, err := q.QueryContext(ctx, taskMemorySelect+`
 		WHERE rm.org_id = $1
 		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE org_id = $1 AND entity_id = $2)
 		ORDER BY rm.created_at ASC
@@ -187,10 +185,7 @@ func (s *taskMemoryStore) GetRecentMemoriesForEntitySystem(ctx context.Context, 
 	if limit <= 0 {
 		return nil, nil
 	}
-	rows, err := s.admin.QueryContext(ctx, `
-		SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
-		FROM conversation_memory rm
-		JOIN conversations r ON r.id = rm.conversation_id AND r.org_id = rm.org_id
+	rows, err := s.admin.QueryContext(ctx, taskMemorySelectTeamScoped+`
 		WHERE rm.org_id = $1
 		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE org_id = $1 AND entity_id = $2)
 		  AND (r.visibility = 'org' OR (r.visibility = 'team' AND r.team_id = NULLIF($3, '')::uuid))
@@ -219,10 +214,7 @@ func reverseTaskMemories(mems []domain.TaskMemory) {
 }
 
 func getMemoriesForEntityTeamScoped(ctx context.Context, q queryer, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
-	rows, err := q.QueryContext(ctx, `
-		SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at
-		FROM conversation_memory rm
-		JOIN conversations r ON r.id = rm.conversation_id AND r.org_id = rm.org_id
+	rows, err := q.QueryContext(ctx, taskMemorySelectTeamScoped+`
 		WHERE rm.org_id = $1
 		  AND rm.conversation_id IN (SELECT conversation_id FROM conversation_memory_entities WHERE org_id = $1 AND entity_id = $2)
 		  AND (r.visibility = 'org' OR (r.visibility = 'team' AND r.team_id = NULLIF($3, '')::uuid))
@@ -235,20 +227,51 @@ func getMemoriesForEntityTeamScoped(ctx context.Context, q queryer, orgID, entit
 	return scanTaskMemories(rows)
 }
 
+// taskMemorySelect / taskMemorySelectTeamScoped are the projection + FROM the
+// entity reads start from: the memory row, plus the two facts about the
+// producing conversation that let a reader name the memory after the work it
+// records (its blueprint step index and the prompt it ran) rather than after a
+// row id. They differ only in how the conversation is reached — the app-pool
+// read leaves visibility to RLS and LEFT JOINs, the admin-pool reads hand-roll
+// the team filter off an INNER JOIN. The prompts arm is LEFT in both: a memory
+// row whose prompt is gone still comes back, minus its legible name.
+const taskMemorySelect = `
+	SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at,
+	       c.blueprint_step_index, p.name
+	FROM conversation_memory rm
+	LEFT JOIN conversations c ON c.id = rm.conversation_id AND c.org_id = rm.org_id
+	LEFT JOIN prompts p ON p.id = c.prompt_id
+`
+
+const taskMemorySelectTeamScoped = `
+	SELECT rm.id, rm.conversation_id, rm.entity_id, rm.blueprint_run_id, rm.agent_content, rm.human_content, rm.created_at,
+	       r.blueprint_step_index, p.name
+	FROM conversation_memory rm
+	JOIN conversations r ON r.id = rm.conversation_id AND r.org_id = rm.org_id
+	LEFT JOIN prompts p ON p.id = r.prompt_id
+`
+
 // scanTaskMemories drains a conversation_memory result set (the column list the
-// two entity reads above share) into materialized TaskMemory rows.
+// two SELECTs above share) into materialized TaskMemory rows.
 func scanTaskMemories(rows *sql.Rows) ([]domain.TaskMemory, error) {
 	var out []domain.TaskMemory
 	for rows.Next() {
 		var m domain.TaskMemory
-		var blueprintRunID, agentContent, humanContent sql.NullString
+		var blueprintRunID, agentContent, humanContent, promptName sql.NullString
+		var stepIndex sql.NullInt64
 		var createdAt time.Time
-		if err := rows.Scan(&m.ID, &m.RunID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.RunID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt,
+			&stepIndex, &promptName); err != nil {
 			return nil, err
 		}
 		m.BlueprintRunID = blueprintRunID.String
 		m.Content = materializeMemory(agentContent.String, humanContent.String)
 		m.CreatedAt = createdAt
+		if stepIndex.Valid {
+			idx := int(stepIndex.Int64)
+			m.StepIndex = &idx
+		}
+		m.PromptName = promptName.String
 		out = append(out, m)
 	}
 	return out, rows.Err()

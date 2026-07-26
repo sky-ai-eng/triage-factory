@@ -14,14 +14,14 @@ import (
 
 // TestMaterializeProjectKnowledge_NilProjectID_CreatesEmptyDir guards
 // the same `ls`-without-ENOENT invariant materializePriorMemories
-// guards: the agent's pre-flight scan of ./_scratch/project-knowledge/
+// guards: the agent's pre-flight scan of ./_tfac/project-knowledge/
 // must succeed even when the entity has no project assigned.
 func TestMaterializeProjectKnowledge_NilProjectID_CreatesEmptyDir(t *testing.T) {
 	cwd := t.TempDir()
 
-	materializeProjectKnowledge(runmode.LocalDefaultOrgID, cwd, nil)
+	materializeProjectKnowledge(runmode.LocalDefaultOrgID, cwd, nil, nil)
 
-	dir := filepath.Join(cwd, "_scratch", "project-knowledge")
+	dir := filepath.Join(cwd, "_tfac", "project-knowledge")
 	info, err := os.Stat(dir)
 	if err != nil {
 		t.Fatalf("project-knowledge dir not created at %s: %v", dir, err)
@@ -40,7 +40,7 @@ func TestMaterializeProjectKnowledge_NilProjectID_CreatesEmptyDir(t *testing.T) 
 
 // TestMaterializeProjectKnowledge_CopiesAllMarkdown verifies the
 // happy path: every .md file under <home>/.triagefactory/projects/<id>/
-// knowledge-base/ lands in _scratch/project-knowledge/ flat, preserving
+// knowledge-base/ lands in _tfac/project-knowledge/ flat, preserving
 // filenames.
 func TestMaterializeProjectKnowledge_CopiesAllMarkdown(t *testing.T) {
 	home := t.TempDir()
@@ -63,9 +63,9 @@ func TestMaterializeProjectKnowledge_CopiesAllMarkdown(t *testing.T) {
 	}
 
 	cwd := t.TempDir()
-	materializeProjectKnowledge(runmode.LocalDefaultOrgID, cwd, &projectID)
+	materializeProjectKnowledge(runmode.LocalDefaultOrgID, cwd, &projectID, nil)
 
-	dst := filepath.Join(cwd, "_scratch", "project-knowledge")
+	dst := filepath.Join(cwd, "_tfac", "project-knowledge")
 	for _, name := range []string{"architecture.md", "conventions.md"} {
 		if _, err := os.Stat(filepath.Join(dst, name)); err != nil {
 			t.Errorf("expected %s in project-knowledge: %v", name, err)
@@ -94,9 +94,9 @@ func TestMaterializeProjectKnowledge_OversizedLogs(t *testing.T) {
 	}
 
 	cwd := t.TempDir()
-	materializeProjectKnowledge(runmode.LocalDefaultOrgID, cwd, &projectID)
+	materializeProjectKnowledge(runmode.LocalDefaultOrgID, cwd, &projectID, nil)
 
-	dst := filepath.Join(cwd, "_scratch", "project-knowledge", "huge.md")
+	dst := filepath.Join(cwd, "_tfac", "project-knowledge", "huge.md")
 	info, err := os.Stat(dst)
 	if err != nil {
 		t.Fatalf("oversized file should still copy: %v", err)
@@ -116,9 +116,9 @@ func TestMaterializeProjectKnowledge_MissingKnowledgeDir_NoOp(t *testing.T) {
 
 	projectID := "proj-empty"
 	cwd := t.TempDir()
-	materializeProjectKnowledge(runmode.LocalDefaultOrgID, cwd, &projectID)
+	materializeProjectKnowledge(runmode.LocalDefaultOrgID, cwd, &projectID, nil)
 
-	dst := filepath.Join(cwd, "_scratch", "project-knowledge")
+	dst := filepath.Join(cwd, "_tfac", "project-knowledge")
 	info, err := os.Stat(dst)
 	if err != nil {
 		t.Fatalf("project-knowledge dir not created: %v", err)

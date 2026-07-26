@@ -8,14 +8,18 @@ package delegate
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // maxCompletionRetries is the hard cap on how many times the live driver
@@ -30,15 +34,14 @@ import (
 // it.
 const maxCompletionRetries = 3
 
-// memoryNamespace is the folder under _scratch/entity-memory/ that groups a
-// run's memory file: the blueprint_run_id its run belongs to, so every step of
-// one blueprint shares a folder and step N+1 reads step N's memory as its
-// handoff. Every run is a blueprint step now (a single prompt is a 1-step
+// memoryNamespace is the key that groups everything one workflow run's steps
+// share: the run tree on disk, its workspace snapshot blob, and — as the value
+// materializePriorMemories compares against — which prior memories belong to
+// the current run rather than to history. It is the blueprint_run_id the run
+// belongs to. Every run is a blueprint step now (a single prompt is a 1-step
 // blueprint), so there is no run-id fallback — the value is always the
 // blueprint_run_id. The runID arg is retained so call sites read uniformly and a
-// future change can't silently mis-key. Both the write path (the agent's own
-// file) and the read path (materialized priors) resolve through this, so the
-// tree is uniformly foldered with no top-level .md files.
+// future change can't silently mis-key.
 func memoryNamespace(blueprintRunID, runID string) string {
 	_ = runID
 	return blueprintRunID
@@ -59,16 +62,39 @@ const (
 	memoryFileReadErr                        // file exists, read failed (permissions, race, etc.)
 )
 
-// readAgentMemoryFile returns the agent-written
-// ./_scratch/entity-memory/<namespace>/<runID>.md content along with a state
-// classification. The content string is empty for every non-Present
-// state — callers pass it straight to UpsertAgentMemory either way,
+// Layout of the memory tree the orchestrator owns inside a run root.
+//
+// The agent writes exactly one file, at a fixed path it never has to assemble:
+// _tfac/memory.md. The orchestrator reads it at termination, where it
+// already knows which conversation and which workflow run it belongs to, and
+// files it into conversation_memory under those ids.
+//
+// What the orchestrator materializes for the agent to READ lives under
+// _tfac/entity-memory/, split by relevance and named for a human:
+//
+//	this-run/01-triage.md          earlier steps of the current workflow run
+//	this-run/02-implement.md
+//	history/2026-07-20-ci-fix.md   prior, separate runs on this entity
+const (
+	scratchDirName          = worktree.ScratchDir
+	agentMemoryFileName     = "memory.md"
+	entityMemoryDirName     = "entity-memory"
+	projectKnowledgeDirName = "project-knowledge"
+	currentRunDirName       = "this-run"
+	priorRunsDirName        = "history"
+	memorySlugMaxLen        = 32
+	historyDateLayoutUTC    = "2006-01-02"
+)
+
+// readAgentMemoryFile returns the agent-written ./_tfac/memory.md content
+// along with a state classification. The content string is empty for every
+// non-Present state — callers pass it straight to UpsertAgentMemory either way,
 // but inspect the state to log distinctly rather than collapsing every
 // form of noncompliance to the same line. Read errors that aren't a
 // missing file are logged at the read site so they aren't lost when
 // the caller picks a higher-level message.
-func readAgentMemoryFile(cwd, namespace, runID string) (string, memoryFileState) {
-	path := filepath.Join(cwd, "_scratch", "entity-memory", namespace, runID+".md")
+func readAgentMemoryFile(cwd string) (string, memoryFileState) {
+	path := filepath.Join(cwd, scratchDirName, agentMemoryFileName)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -84,22 +110,84 @@ func readAgentMemoryFile(cwd, namespace, runID string) (string, memoryFileState)
 	return content, memoryFilePresent
 }
 
-// materializePriorMemories writes any existing conversation_memory rows for the
-// entity into <cwd>/_scratch/entity-memory/<namespace>/<prior_run_id>.md as
-// individual markdown files, so a fresh agent invocation sees what previous
-// iterations on the same task have already tried — and so the sibling steps of
-// one blueprint run land in a shared folder the later steps read as their
-// handoff. Each prior's namespace is its own blueprint_run_id (else its run
-// id); the tree is all <namespace>/ folders with no top-level .md files. The
-// agent is taught to read this layout by the envelope.
+// repoFiles is the set of paths under the scratch dir that belong to the REPO,
+// not to TF — what git tracks there, slash-separated and repo-relative. For a
+// GitHub PR run the run tree IS the repo checkout, and .git/info/exclude does
+// nothing for an already-tracked path, so every infrastructure write and delete
+// in the tree consults this first: a mutation TF makes to a tracked file rides
+// the agent's next `git add -A` straight into its PR.
 //
-// namespace is the CURRENT run's namespace — its folder is created
-// unconditionally, even on the very first run when there are no priors. Two
-// reasons: the prompt instructs the agent to `ls` its namespace folder early
-// (fails noisily without the dir), and the completion-gate retry message tells
-// the agent to write to
-// `$TRIAGE_FACTORY_CONVERSATION_ROOT/_scratch/entity-memory/<namespace>/<run>.md` (which
-// fails on a missing parent dir unless the agent guesses to mkdir first).
+// The zero value permits everything, which is the honest answer for a run root
+// that is no repo at all (Jira, taskless) and for the overwhelmingly common repo
+// that tracks nothing under our directory.
+type repoFiles map[string]bool
+
+// owns reports whether the repo — not TF — owns the scratch-relative path parts.
+func (r repoFiles) owns(parts ...string) bool {
+	if len(r) == 0 {
+		return false
+	}
+	return r[path.Join(append([]string{scratchDirName}, parts...)...)]
+}
+
+// scanRepoFiles asks git what the repo tracks under the scratch dir and warns
+// when the answer isn't "nothing" — a repo that stores files there and an agent
+// run that treats the directory as its own are on a collision course TF can
+// only half-prevent: it can refuse to touch those paths, but the agent writes
+// its own files and may still bury one.
+func scanRepoFiles(ctx context.Context, cwd string) repoFiles {
+	tracked := worktree.TrackedUnder(ctx, cwd, scratchDirName)
+	if len(tracked) > 0 {
+		names := make([]string, 0, len(tracked))
+		for p := range tracked {
+			names = append(names, p)
+		}
+		sort.Strings(names)
+		delegateLog.Warn("repo tracks files under the agent scratch directory; leaving them untouched (an agent writing there may still dirty them)",
+			"cwd", cwd, "paths", strings.Join(names, ", "))
+	}
+	return tracked
+}
+
+// clearAgentMemoryFile drops any memory file already sitting at the fixed write
+// path when a fresh run starts in the tree. The steps of one blueprint run share
+// a worktree and every step writes the same filename, so a step that terminates
+// without writing must not have its predecessor's memory ingested as its own —
+// row presence means "this run terminated", agent_content means "THIS run wrote
+// it". Called only when the run is starting a new conversation in the tree: a
+// resumed run's own file is its work, not a leftover.
+//
+// A repo-owned path is left alone: the collision costs this run's memory
+// attribution, which is worth strictly less than the user's committed file.
+//
+// Best-effort otherwise. A failure leaves a stale file, which is the state a run
+// that skipped this would have had anyway.
+func clearAgentMemoryFile(cwd string, owned repoFiles) {
+	if owned.owns(agentMemoryFileName) {
+		return
+	}
+	file := filepath.Join(cwd, scratchDirName, agentMemoryFileName)
+	if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
+		delegateLog.Warn("clear stale memory file failed", "path", file, "error", err)
+	}
+}
+
+// materializePriorMemories writes any existing conversation_memory rows for the
+// entity into <cwd>/_tfac/entity-memory/ as individual markdown files, so a
+// fresh agent invocation sees what previous iterations on the same task have
+// already tried — and so the later steps of one blueprint run read the earlier
+// steps' memory as their handoff.
+//
+// blueprintRunID is the CURRENT run's workflow run. Memory produced under it is
+// this run's own handoff and lands in this-run/, numbered by step so the
+// listing reads in execution order; everything else is history and lands in
+// history/, dated. Both names are chosen here, from what the row already
+// carries — no id an agent could mistype appears in either the tree or the
+// prompt that describes it.
+//
+// Both folders are created unconditionally, even on the very first run when
+// there are no priors: the prompt tells the agent to look in them early, and a
+// missing directory turns that into noise.
 //
 // Pattern: DB is the source of truth, we materialize into the worktree
 // at startup, and ingest back on completion. The worktree is destroyed
@@ -111,15 +199,19 @@ func readAgentMemoryFile(cwd, namespace, runID string) (string, memoryFileState)
 // without materialized priors is still useful, just without the
 // cross-run memory benefit. This "advisory" posture only holds for
 // the read side — the write-before-finish gate is enforced separately
-// for NEW memories produced during the run.
-func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, cwd, entityID, namespace string) {
-	// Create the current run's namespace folder up front so the agent's
-	// pre-flight `ls` and its own memory write both have a parent dir, even
-	// when this entity has no prior memories.
-	ownDir := filepath.Join(cwd, "_scratch", "entity-memory", namespace)
-	if err := os.MkdirAll(ownDir, 0755); err != nil {
-		delegateLog.Warn("create entity-memory namespace dir failed", "path", ownDir, "error", err)
-		return
+// for NEW memories produced during the run. It extends to a repo-owned
+// target: a name that collides with a tracked file yields that file to the
+// repo and skips the prior, rather than overwriting content the agent would
+// then commit.
+func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, cwd, entityID, blueprintRunID string, owned repoFiles) {
+	root := filepath.Join(cwd, scratchDirName, entityMemoryDirName)
+	thisRunDir := filepath.Join(root, currentRunDirName)
+	historyDir := filepath.Join(root, priorRunsDirName)
+	for _, dir := range []string{thisRunDir, historyDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			delegateLog.Warn("create entity-memory dir failed", "path", dir, "error", err)
+			return
+		}
 	}
 
 	// teamID is THIS run's owning team. The System read scopes the prior
@@ -134,23 +226,121 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, cwd,
 		return
 	}
 
-	written := 0
+	var thisRun, history []domain.TaskMemory
 	for _, m := range memories {
-		dir := filepath.Join(cwd, "_scratch", "entity-memory", memoryNamespace(m.BlueprintRunID, m.RunID))
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			delegateLog.Warn("create entity-memory namespace dir failed", "path", dir, "error", err)
+		if blueprintRunID != "" && m.BlueprintRunID == blueprintRunID {
+			thisRun = append(thisRun, m)
 			continue
 		}
-		filename := filepath.Join(dir, m.RunID+".md")
-		if err := os.WriteFile(filename, []byte(m.Content), 0644); err != nil {
-			delegateLog.Warn("materialize task memory failed", "path", filename, "error", err)
+		history = append(history, m)
+	}
+	// The rows arrive oldest-first, which is already step order for a workflow
+	// run that ran its steps in sequence. Sorting on the recorded step index
+	// makes that explicit and survives a step whose memory landed out of
+	// created_at order; a row with no index keeps its arrival position.
+	sort.SliceStable(thisRun, func(i, j int) bool {
+		a, b := thisRun[i].StepIndex, thisRun[j].StepIndex
+		if a == nil || b == nil {
+			return false
+		}
+		return *a < *b
+	})
+
+	written := 0
+	used := map[string]bool{}
+	for i, m := range thisRun {
+		ordinal := i + 1
+		if m.StepIndex != nil {
+			ordinal = *m.StepIndex + 1
+		}
+		name := uniqueMemoryFileName(used, fmt.Sprintf("%02d", ordinal), memorySlug(m.PromptName))
+		if owned.owns(entityMemoryDirName, currentRunDirName, name) {
 			continue
 		}
-		written++
+		if writeMemoryFile(filepath.Join(thisRunDir, name), m.Content) {
+			written++
+		}
+	}
+	used = map[string]bool{}
+	for _, m := range history {
+		name := uniqueMemoryFileName(used, m.CreatedAt.UTC().Format(historyDateLayoutUTC), memorySlug(m.PromptName))
+		if owned.owns(entityMemoryDirName, priorRunsDirName, name) {
+			continue
+		}
+		if writeMemoryFile(filepath.Join(historyDir, name), m.Content) {
+			written++
+		}
 	}
 	if written > 0 {
 		delegateLog.Info("materialized prior memories for entity", "count", written, "entity", entityID)
 	}
+}
+
+// writeMemoryFile writes one materialized memory, reporting whether it landed.
+// A failure is logged and skipped — the read side is advisory.
+func writeMemoryFile(path, content string) bool {
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		delegateLog.Warn("materialize task memory failed", "path", path, "error", err)
+		return false
+	}
+	return true
+}
+
+// uniqueMemoryFileName composes "<prefix>-<slug>.md" (or "<prefix>.md" when the
+// producing prompt is unknown) and disambiguates against names already written
+// to the same folder. Collisions are possible in both folders — two runs of one
+// prompt on the same day, a re-run of a step — and a silently overwritten file
+// would lose a prior narrative, so the loser gets a numeric suffix instead.
+func uniqueMemoryFileName(used map[string]bool, prefix, slug string) string {
+	base := prefix
+	if slug != "" {
+		base += "-" + slug
+	}
+	name := base + ".md"
+	for n := 2; used[name]; n++ {
+		name = fmt.Sprintf("%s-%d.md", base, n)
+	}
+	used[name] = true
+	return name
+}
+
+// memorySlug renders a prompt name as a filename fragment: lowercase, ASCII
+// alphanumerics only, single dashes between words, bounded in length. Returns
+// "" for a name with nothing usable in it, which drops the suffix entirely
+// rather than leaving a dangling dash.
+func memorySlug(promptName string) string {
+	var b strings.Builder
+	dash := false
+	for _, r := range strings.ToLower(promptName) {
+		if !isSlugChar(r) {
+			dash = true
+			continue
+		}
+		// Every byte this loop writes is ASCII, so the cost of taking this
+		// character is one byte plus the separator it may need. Charge it
+		// before writing: a check after the fact would let a word boundary
+		// land the pair past the cap.
+		cost := 1
+		if dash && b.Len() > 0 {
+			cost = 2
+		}
+		if b.Len()+cost > memorySlugMaxLen {
+			break
+		}
+		if cost == 2 {
+			b.WriteByte('-')
+		}
+		dash = false
+		b.WriteByte(byte(r))
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// isSlugChar reports whether r survives into a slug as itself. Everything else
+// — punctuation, whitespace, any non-ASCII letter — reads as a word boundary,
+// which is what keeps a slug's byte count equal to its character count.
+func isSlugChar(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
 }
 
 // lookupEntityProjectID returns the entity's project_id (or nil if the
@@ -253,7 +443,7 @@ func streamCopyFile(src, dst string) (int64, error) {
 }
 
 // materializeProjectKnowledge stages the entity's project knowledge-base
-// into <cwd>/_scratch/project-knowledge/ so the agent can read it as
+// into <cwd>/_tfac/project-knowledge/ so the agent can read it as
 // ambient context. Mirrors materializePriorMemories' "create the dir
 // unconditionally" pattern so the agent's pre-flight `ls` doesn't fail
 // noisily on ENOENT when no project is assigned.
@@ -261,7 +451,7 @@ func streamCopyFile(src, dst string) (int64, error) {
 // Reads from the Curator's per-project knowledge base (the path the
 // Curator writes to, resolved through internal/paths under
 // the project-owning org's subtree) and copies each .md file flat into
-// _scratch/project-knowledge/, preserving source filenames. orgID is the
+// _tfac/project-knowledge/, preserving source filenames. orgID is the
 // run's owning tenant — the same org the assigned project belongs to —
 // so in multi mode this reads the org-scoped dir the Curator wrote
 // rather than the org-stripped default (the curator's on-disk path
@@ -269,8 +459,8 @@ func streamCopyFile(src, dst string) (int64, error) {
 //
 // Degrades gracefully: a nil projectID, a missing knowledge-base dir,
 // or per-file copy failures are logged but never fail the run.
-func materializeProjectKnowledge(orgID, cwd string, projectID *string) {
-	dir := filepath.Join(cwd, "_scratch", "project-knowledge")
+func materializeProjectKnowledge(orgID, cwd string, projectID *string, owned repoFiles) {
+	dir := filepath.Join(cwd, scratchDirName, projectKnowledgeDirName)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		delegateLog.Warn("create project-knowledge dir failed", "path", dir, "error", err)
 		return
@@ -299,6 +489,9 @@ func materializeProjectKnowledge(orgID, cwd string, projectID *string) {
 	totalBytes := int64(0)
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		if owned.owns(projectKnowledgeDirName, e.Name()) {
 			continue
 		}
 		src := filepath.Join(srcDir, e.Name())

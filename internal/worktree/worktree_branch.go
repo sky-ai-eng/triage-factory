@@ -617,13 +617,28 @@ func addExcludesOrRollback(runID, wtDir string) error {
 	return nil
 }
 
+// ScratchDir is the one directory TF claims inside a run tree: CI log archives,
+// ephemeral downloads, the agent's own memory.md, the entity-memory /
+// project-knowledge subdirs the spawner populates, and whatever intermediates
+// the agent writes. Every producer of a path under it — spawner, exec verbs,
+// prompts — names it through this constant.
+//
+// The name is deliberately ours rather than descriptive. For a GitHub PR run
+// the run tree IS the repo checkout, so this directory lands in someone else's
+// source tree: a plausible generic name is a name a repo might already use, and
+// a collision there means TF writing over, or deleting, tracked content that
+// then rides the agent's next commit.
+const ScratchDir = "_tfac"
+
+// legacyScratchDir is what ScratchDir was called before. It survives in two
+// places on purpose: the managed exclude list, so a tree built by an older
+// binary can't leak its leftovers into a commit, and AdoptLegacyScratchDir.
+const legacyScratchDir = "_scratch"
+
 // managedExcludePatterns are the gitignore patterns writeLocalExcludes
 // ensures are present in .git/info/exclude for every delegated worktree.
-//
-//   - _scratch/ — CI log archives, ephemeral downloads, entity-memory
-//     and project-knowledge subdirs populated by the spawner.
-//     One prefix covers everything under it.
-var managedExcludePatterns = []string{"_scratch/"}
+// One prefix covers everything under it.
+var managedExcludePatterns = []string{ScratchDir + "/", legacyScratchDir + "/"}
 
 // Markers delimiting the managed section of .git/info/exclude. writeLocalExcludes
 // rewrites the content between these markers in place when both are present,

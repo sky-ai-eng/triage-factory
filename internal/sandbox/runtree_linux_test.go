@@ -212,9 +212,9 @@ func TestChownRunTree_GroupTargetAndScaffoldMode(t *testing.T) {
 	SetRunTreeGroupGID(orchGID)
 	t.Cleanup(func() { SetRunTreeGroupGID(WorktreeGID) })
 
-	// Run-start form (subpath==""): a lazy run root with a _scratch child.
+	// Run-start form (subpath==""): a lazy run root with a _tfac child.
 	root := t.TempDir()
-	scratch := filepath.Join(root, "_scratch")
+	scratch := filepath.Join(root, "_tfac")
 	if err := os.Mkdir(scratch, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -233,10 +233,10 @@ func TestChownRunTree_GroupTargetAndScaffoldMode(t *testing.T) {
 	}
 	// A non-scaffold child keeps its creation mode; only its group moves.
 	if m := statMode(t, scratch); m != 0o700 {
-		t.Errorf("_scratch mode = %o, want its 0700 preserved (children are not re-moded)", m)
+		t.Errorf("_tfac mode = %o, want its 0700 preserved (children are not re-moded)", m)
 	}
 	if _, gid := statUIDGID(t, scratch); gid != orchGID {
-		t.Errorf("_scratch gid = %d, want %d", gid, orchGID)
+		t.Errorf("_tfac gid = %d, want %d", gid, orchGID)
 	}
 
 	// Mid-run form (subpath!=""): owner/repo intermediates become scaffold-mode;

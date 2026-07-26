@@ -169,7 +169,7 @@ func buildPrompt(task domain.Task, metadataJSON, skeleton, mission, scope, tools
 	// strings.Replacer does a single non-re-scanning pass, so a section
 	// injected as a replacement *value* keeps any placeholders it carries
 	// verbatim — and the tools docs reference {{BINARY_PATH}}, {{BRANCH_TEMPLATE}},
-	// and the run-root entity-memory paths. Folding them in here lets the single
+	// and run-root-relative paths. Folding them in here lets the single
 	// BuildPromptReplacer pass below interpolate them too.
 	full = strings.NewReplacer(
 		"{{TOOLS_REFERENCE}}", toolsRef,

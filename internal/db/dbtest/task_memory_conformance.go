@@ -21,12 +21,43 @@ import (
 //     shape's schema into the assertions).
 type TaskMemoryStoreFactory func(t *testing.T) (store db.TaskMemoryStore, orgID string, seed TaskMemorySeeder)
 
+// TaskMemorySeedPromptName and TaskMemorySeedStepIndex are the producing-
+// conversation facts every backend's Run seeder must stamp on the conversation
+// it creates. The entity reads project both back onto TaskMemory (they are what
+// lets a materializer name a memory after the work it records), so the suite
+// asserts them against these values — pinning them here rather than per-backend
+// keeps the two SQL trees answering the same question. The step index is
+// deliberately non-zero so a column that never made it into the SELECT can't
+// pass as an unset one.
+const (
+	TaskMemorySeedPromptName = "Task Memory Test"
+	TaskMemorySeedStepIndex  = 2
+)
+
+// AssertTaskMemoryNamingFacts checks one read's row against what the seeders
+// stamp. Exported so a backend's own team-scoped tests — the arm the shared
+// suite deliberately leaves to them — assert the same contract.
+func AssertTaskMemoryNamingFacts(t *testing.T, mem domain.TaskMemory) {
+	t.Helper()
+	if mem.PromptName != TaskMemorySeedPromptName {
+		t.Errorf("PromptName = %q, want %q", mem.PromptName, TaskMemorySeedPromptName)
+	}
+	switch {
+	case mem.StepIndex == nil:
+		t.Errorf("StepIndex = nil, want %d", TaskMemorySeedStepIndex)
+	case *mem.StepIndex != TaskMemorySeedStepIndex:
+		t.Errorf("StepIndex = %d, want %d", *mem.StepIndex, TaskMemorySeedStepIndex)
+	}
+}
+
 // TaskMemorySeeder is a bag of callbacks the conformance suite uses
 // to stage fixture rows the TaskMemoryStore doesn't own. Each backend
 // implements them against its own SQL.
 type TaskMemorySeeder struct {
 	// Run inserts the entity + event + prompt + task + run FK chain
 	// needed to attach a conversation_memory row, and returns (runID, entityID).
+	// The conversation it inserts carries TaskMemorySeedPromptName as its
+	// prompt's name and TaskMemorySeedStepIndex as its blueprint step index.
 	// suffix discriminates per-subtest seeds so the unique indexes on
 	// entities/runs don't collide.
 	Run func(t *testing.T, suffix string) (runID, entityID string)
@@ -451,6 +482,28 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 		if mem2.BlueprintRunID != "" {
 			t.Errorf("standalone BlueprintRunID = %q, want empty (NULL)", mem2.BlueprintRunID)
 		}
+	})
+
+	t.Run("GetMemoriesForEntity_carries_producing_conversation_naming_facts", func(t *testing.T) {
+		// The reader names materialized memory after the work it records —
+		// step order plus the prompt that ran — so both entity reads must
+		// project those two facts off the producing conversation, not just
+		// the memory row's own columns.
+		s, orgID, seed := mk(t)
+		runID, entityID := seed.Run(t, "naming-facts")
+		if err := s.UpsertAgentMemory(ctx, orgID, runID, entityID, "", "agent wrote this"); err != nil {
+			t.Fatalf("UpsertAgentMemory: %v", err)
+		}
+		seedPrimary(t, s, orgID, runID, entityID)
+
+		mems, err := s.GetMemoriesForEntity(ctx, orgID, entityID)
+		if err != nil {
+			t.Fatalf("GetMemoriesForEntity: %v", err)
+		}
+		if len(mems) != 1 {
+			t.Fatalf("len(mems) = %d, want 1", len(mems))
+		}
+		AssertTaskMemoryNamingFacts(t, mems[0])
 	})
 
 	t.Run("RecordEntityTouchSystem_role_precedence", func(t *testing.T) {

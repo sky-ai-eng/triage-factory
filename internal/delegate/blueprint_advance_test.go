@@ -144,24 +144,23 @@ func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testin
 }
 
 // TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow pins the write
-// side of the namespacing: processCompletion ingests the agent's memory file
-// from _scratch/entity-memory/<blueprint_run_id>/<run_id>.md (not the old
-// top-level path) and stamps the run's blueprint_run_id onto the conversation_memory
-// row, so the next step's materializer folders it correctly.
+// side: processCompletion ingests the agent's memory file from the one fixed
+// path (_tfac/memory.md) and stamps the run's blueprint_run_id onto the
+// conversation_memory row, so the next step's materializer files it as this
+// workflow run's own handoff rather than as history.
 func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "bp-memrow")
 	makeRunBlueprintStep(t, database, runID, taskID) // sets blueprint_run_id = "bpr-<runID>"
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
 
-	// Stage the agent's memory file at the namespaced path the contract
-	// dictates. The blueprint_run_id is the namespace folder.
+	// Stage the agent's memory file at the one path the contract names.
 	blueprintRunID := "bpr-" + runID
-	memDir := filepath.Join(cwd, "_scratch", "entity-memory", blueprintRunID)
+	memDir := filepath.Join(cwd, "_tfac")
 	if err := os.MkdirAll(memDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(memDir, runID+".md"), []byte("step did X; next step needs Y"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(memDir, "memory.md"), []byte("step did X; next step needs Y"), 0o644); err != nil {
 		t.Fatalf("write memory: %v", err)
 	}
 
@@ -183,7 +182,7 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 		t.Fatalf("scan conversation_memory: %v", err)
 	}
 	if agentContent.String != "step did X; next step needs Y" {
-		t.Errorf("agent_content = %q; processCompletion should ingest the file from the namespaced path", agentContent.String)
+		t.Errorf("agent_content = %q; processCompletion should ingest the file from _tfac/memory.md", agentContent.String)
 	}
 	if gotBlueprintRunID.String != blueprintRunID {
 		t.Errorf("conversation_memory.blueprint_run_id = %q, want %q", gotBlueprintRunID.String, blueprintRunID)
