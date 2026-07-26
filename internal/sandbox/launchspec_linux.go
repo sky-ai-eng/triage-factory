@@ -874,6 +874,32 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 			if realSource != trusted {
 				return fmt.Errorf("sandbox: mount %q source %q is not this run's own step-skill staging dir (want %q)", m.Destination, m.Source, trusted)
 			}
+		case TrustedMemoryDestination:
+			// This launch's own materialized entity-memory tree (optional — absent
+			// on a resume whose staging dir was swept). Same validate-not-override
+			// contract, and the same two properties, as the step-skill case above:
+			// read-only is REQUIRED, since an rw bind would let the agent rewrite
+			// orchestrator-owned state outside its run tree — and here it would also
+			// let one step forge the handoff a later step reads as fact.
+			if err := requireReadOnlyMount(m); err != nil {
+				return err
+			}
+			if runID == "" {
+				return fmt.Errorf("sandbox: mount %q requires a run id to derive this run's own staging dir", m.Destination)
+			}
+			// Resolve the staging BASE and re-derive, never the per-run path whole
+			// — see the step-skill case for why: resolving the whole path would
+			// follow a symlink planted at the per-run entry and then agree with the
+			// equally-followed source, waving through a read-only bind of anywhere
+			// on the host.
+			realMemBase, rErr := realPath(MemoryStagingBase())
+			if rErr != nil {
+				return fmt.Errorf("sandbox: resolve entity-memory staging base: %w", rErr)
+			}
+			trustedMem := filepath.Join(realMemBase, runID)
+			if realSource != trustedMem {
+				return fmt.Errorf("sandbox: mount %q source %q is not this run's own entity-memory staging dir (want %q)", m.Destination, m.Source, trustedMem)
+			}
 		default:
 			if !hasScope {
 				return fmt.Errorf("sandbox: mount %q source %q is not a recognized broker-global/per-run mount, and this run's worktree carries no org scope to authorize it", m.Destination, m.Source)

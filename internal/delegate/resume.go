@@ -434,6 +434,9 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		// still on disk — a resume continues the same step, so it should see the
 		// same skill it started with.
 		SkillsSourcePath: stagedStepSkillsSource(runID),
+		// Same for the prior-memory tree: a resume continues the same step, so it
+		// reads the same handoff it started with rather than a freshly rendered one.
+		MemorySourcePath: stagedEntityMemorySource(runID),
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
 

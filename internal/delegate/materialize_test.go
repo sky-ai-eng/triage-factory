@@ -39,7 +39,7 @@ func TestMaterializePriorMemories_CreatesDirsEvenWithNoPriors(t *testing.T) {
 		t.Fatalf("expected 0 priors for new entity, got %d", len(mems))
 	}
 
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, "bpr-noprior", nil)
+	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), entity.ID, "bpr-noprior", nil)
 
 	for _, name := range []string{currentRunDirName, priorRunsDirName} {
 		dir := filepath.Join(cwd, "_tfac", "entity-memory", name)
@@ -100,7 +100,7 @@ func TestMaterializePriorMemories_ReadableLayout(t *testing.T) {
 		content: "what i did last time", createdAt: "2026-07-20 09:30:00+00:00",
 	})
 
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, currentBlueprintRunID, nil)
+	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), entity.ID, currentBlueprintRunID, nil)
 
 	root := filepath.Join(cwd, "_tfac", "entity-memory")
 	assertMemoryFile(t, filepath.Join(root, "this-run", "01-triage.md"), "step 1 findings")
@@ -136,7 +136,7 @@ func TestMaterializePriorMemories_HistoryNameCollision(t *testing.T) {
 		entityID: entity.ID, taskID: task.ID, content: "second attempt", createdAt: "2026-07-20 17:00:00+00:00",
 	})
 
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, "bpr-current", nil)
+	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), entity.ID, "bpr-current", nil)
 
 	historyDir := filepath.Join(cwd, "_tfac", "entity-memory", "history")
 	assertMemoryFile(t, filepath.Join(historyDir, "2026-07-20-ci-fix.md"), "first attempt")
@@ -159,10 +159,10 @@ func TestBlueprintHandoff_MemorySurvivesTheFixedPathClear(t *testing.T) {
 	// Step 1 writes the fixed path and terminates.
 	writeAgentMemory(t, cwd, "step 1 chose approach X because Y")
 	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, blueprintRunID, task,
-		res(`{"outcome":"continue","summary":"did step work"}`), cwd, "", "event", "")
+		res(`{"outcome":"continue","summary":"did step work"}`), cwd, nil, "", "event", "")
 
 	// Step 2's run start, in the order runAgent performs it.
-	materializePriorMemories(s.taskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, task.EntityID, blueprintRunID, nil)
+	materializePriorMemories(s.taskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), task.EntityID, blueprintRunID, nil)
 	clearAgentMemoryFile(cwd, nil)
 
 	// Step 1's narrative is where the prompt tells step 2 to look — named for
@@ -240,13 +240,21 @@ func TestScanRepoFiles_GuardsEveryWriteIntoATrackedScratchDir(t *testing.T) {
 	})
 
 	clearAgentMemoryFile(cwd, owned)
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, "bpr-current", owned)
+	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, localMemoryRoot(cwd), entity.ID, "bpr-current", owned)
 
 	assertMemoryFile(t, filepath.Join(cwd, "_tfac", "memory.md"), "repo-authored memory")
 	assertMemoryFile(t, historyName, "repo-authored history")
 	if out := runTestGit(t, cwd, "status", "--porcelain"); strings.TrimSpace(out) != "" {
 		t.Errorf("run start dirtied the repo: git status --porcelain = %q", out)
 	}
+}
+
+// localMemoryRoot is where local mode renders the prior-memory layout: inside
+// the run tree, at the path the agent's prompt names. Under a jail the same
+// layout is rendered into a staging dir instead and mounted there read-only —
+// see entityMemoryTarget.
+func localMemoryRoot(cwd string) string {
+	return filepath.Join(cwd, "_tfac", "entity-memory")
 }
 
 func writeAgentMemory(t *testing.T, cwd, content string) {
