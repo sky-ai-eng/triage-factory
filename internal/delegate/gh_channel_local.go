@@ -93,6 +93,13 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, runID, owner s
 			}
 			recordLocalObservation(ctx, stores, info, m)
 		},
+		ObserveWrite: func(ctx context.Context, w ghinjector.ObservedWrite) {
+			if !storesSet {
+				return
+			}
+			agenthost.RecordExternalWrite(ctx, stores, info, nil,
+				agenthost.GHChannelWriteAction(w.Method, w.Path, w.Status))
+		},
 	})
 	if err != nil {
 		delegateLog.Warn("start local gh channel failed; run continues on the scoped exec verbs", "run", runID, "error", err)

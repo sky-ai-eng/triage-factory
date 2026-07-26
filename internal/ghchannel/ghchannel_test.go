@@ -2,12 +2,18 @@ package ghchannel
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -167,5 +173,56 @@ func TestStart_ObserveOptional(t *testing.T) {
 
 	if ch.Host == "" {
 		t.Error("channel bound no listener")
+	}
+}
+
+// TestStart_ObserveWriteReachesInjector pins the local half of the write audit:
+// a mutating REST call through the channel reaches the caller's ObserveWrite
+// hook with the upstream's outcome. Local mode has no relay hop, so this
+// callback IS the audit path — an unwired one loses every gh-channel write on
+// the local surface while multi keeps recording them.
+func TestStart_ObserveWriteReachesInjector(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer upstream.Close()
+
+	writes := make(chan ghinjector.ObservedWrite, 2)
+	cfg := okConfig(t)
+	cfg.Upstream = upstream.URL
+	cfg.ObserveWrite = func(_ context.Context, w ghinjector.ObservedWrite) { writes <- w }
+	ch, err := Start(cfg)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ch.Close() })
+
+	pem, err := os.ReadFile(ch.CertPath)
+	if err != nil {
+		t.Fatalf("read trust file: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		t.Fatal("trust file carried no usable cert")
+	}
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
+	req, _ := http.NewRequest(http.MethodPatch, "https://"+ch.Host+"/api/v3/repos/octo/repo/pulls/7", nil)
+	req.Header.Set("Authorization", "token "+ch.Token)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request through channel: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	select {
+	case w := <-writes:
+		if w.Method != http.MethodPatch || w.Status != http.StatusNotFound ||
+			!strings.Contains(w.Path, "/repos/octo/repo/pulls/7") {
+			t.Errorf("observed write = %+v, want the PATCH, its path, and the 404", w)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a gh-channel write never reached ObserveWrite")
 	}
 }

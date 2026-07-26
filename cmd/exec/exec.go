@@ -9,6 +9,7 @@ import (
 	"github.com/pressly/goose/v3"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/gh"
 	jiraexec "github.com/sky-ai-eng/triage-factory/cmd/exec/jira"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/memory"
@@ -94,7 +95,7 @@ func Handle(args []string) {
 		// through gh.Handle into every GitHub API call so the surface is
 		// ctx-aware (a future signal-rooted ctx slots in here without touching
 		// the call sites).
-		if isHelp(cmdArgs) {
+		if isHelp(cmdArgs, gh.ValueFlags) {
 			gh.Handle(context.Background(), nil, cmdArgs)
 			return
 		}
@@ -115,7 +116,7 @@ func Handle(args []string) {
 		// LocalClient), so the DB opened at the top of Handle is consulted
 		// here only by the local-mode LocalClient; the sandbox IPC path
 		// ignores it.
-		if isHelp(cmdArgs) {
+		if isHelp(cmdArgs, jiraexec.ValueFlags) {
 			jiraexec.Handle(nil, cmdArgs)
 			return
 		}
@@ -126,6 +127,10 @@ func Handle(args []string) {
 	case "workspace":
 		// No credentials needed — workspace acts on the agenthost client
 		// (DB + filesystem in local mode, IPC + filesystem in sandbox).
+		if isHelp(cmdArgs, workspace.ValueFlags) {
+			workspace.Handle(nil, cmdArgs)
+			return
+		}
 		host := buildAgentHost()
 		defer func() { _ = host.Close() }()
 		workspace.Handle(host, cmdArgs)
@@ -136,7 +141,7 @@ func Handle(args []string) {
 		// best-effort touch land on the daemon). No credentials — like
 		// workspace. Mirrors the gh case's host lifecycle: help routes skip
 		// buildAgentHost() (no run identity needed), otherwise Close is deferred.
-		if isHelp(cmdArgs) {
+		if isHelp(cmdArgs, memory.ValueFlags) {
 			memory.Handle(context.Background(), nil, cmdArgs)
 			return
 		}
@@ -170,8 +175,17 @@ func HandleStatus(args []string) {
 	fmt.Fprintln(os.Stderr, "not implemented: status")
 }
 
-func isHelp(args []string) bool {
-	return len(args) == 0 || args[0] == "--help" || args[0] == "-h"
+// isHelp reports whether this invocation is a help request at ANY depth, so
+// the dispatcher routes it before building the agenthost. That short-circuit is
+// what makes `exec gh pr --help` work outside a run: resolving run identity
+// first would fail a help request for want of a conversation it never needed.
+//
+// The scan runs over the whole arg tail rather than args[0] alone (which is a
+// resource name at this level, never a flag), with the verb surface's own
+// value-taking flags supplied so a `--body "--help"` payload is not mistaken
+// for a request.
+func isHelp(args []string, valueFlags map[string]bool) bool {
+	return len(args) == 0 || execflags.HasHelpFlag(args, valueFlags)
 }
 
 func printHelp() {

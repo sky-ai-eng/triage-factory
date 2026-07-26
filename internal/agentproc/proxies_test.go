@@ -470,7 +470,7 @@ func TestStartProxiesForSandbox_AnthropicEndToEnd(t *testing.T) {
 		"ANTHROPIC_API_KEY":  realKey,
 		"ANTHROPIC_BASE_URL": upstream.URL,
 	}
-	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil)
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -530,7 +530,7 @@ func TestStartProxiesForSandbox_GitProxyStandsDownPrePushHook(t *testing.T) {
 		},
 		Upstream: upstream.URL,
 	}
-	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, git, nil)
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, git, nil, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox (with git): %v", err)
 	}
@@ -543,7 +543,7 @@ func TestStartProxiesForSandbox_GitProxyStandsDownPrePushHook(t *testing.T) {
 		t.Errorf("%s = %q with a git proxy wired, want %q", githooks.PushCaptureEnvVar, got, githooks.PushCaptureProxy)
 	}
 
-	bundleNoGit, envNoGit, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil)
+	bundleNoGit, envNoGit, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox (no git): %v", err)
 	}
@@ -575,7 +575,7 @@ func TestStartProxiesForSandbox_TokenAuthEnforced(t *testing.T) {
 	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{
 		"ANTHROPIC_API_KEY":  realKey,
 		"ANTHROPIC_BASE_URL": upstream.URL,
-	}, nil, nil)
+	}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -643,7 +643,7 @@ func TestStartProxiesForSandbox_SigV4LifecycleAndGate(t *testing.T) {
 		"AWS_ACCESS_KEY_ID":     "AKIAREALORGKEY",
 		"AWS_SECRET_ACCESS_KEY": realSecret,
 		"AWS_REGION":            "us-east-1",
-	}, nil, nil)
+	}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -712,12 +712,12 @@ func TestStartProxiesForSandbox_TokensArePerRun(t *testing.T) {
 		"ANTHROPIC_BASE_URL": upstream.URL,
 	}
 
-	b1, env1, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil)
+	b1, env1, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("run 1: %v", err)
 	}
 	t.Cleanup(func() { _ = b1.Shutdown(context.Background()) })
-	b2, env2, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil)
+	b2, env2, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("run 2: %v", err)
 	}
@@ -747,7 +747,7 @@ func TestStartProxiesForSandbox_ShutdownTearsDownProxy(t *testing.T) {
 		"ANTHROPIC_API_KEY":  "k",
 		"ANTHROPIC_BASE_URL": upstream.URL,
 	}
-	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil)
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -782,7 +782,7 @@ func TestStartProxiesForSandbox_ShutdownTearsDownProxy(t *testing.T) {
 // credentialed proxy to anything that can reach the host. Fail
 // loudly at construction.
 func TestStartProxiesForSandbox_EmptyHostIPRejected(t *testing.T) {
-	_, _, err := startProxiesForSandbox(context.Background(), "", map[string]string{"ANTHROPIC_API_KEY": "k"}, nil, nil)
+	_, _, err := startProxiesForSandbox(context.Background(), "", map[string]string{"ANTHROPIC_API_KEY": "k"}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("startProxiesForSandbox accepted empty hostVethIP; should reject")
 	}
@@ -849,7 +849,7 @@ func TestRunProxies_ShutdownAggregatesErrors(t *testing.T) {
 	bundle, _, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{
 		"ANTHROPIC_API_KEY":  "k",
 		"ANTHROPIC_BASE_URL": upstream.URL,
-	}, nil, nil)
+	}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -1061,7 +1061,7 @@ func TestStartProxiesForSandbox_GitNilSkipsGitProxy(t *testing.T) {
 	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{
 		"ANTHROPIC_API_KEY":  "k",
 		"ANTHROPIC_BASE_URL": upstream.URL,
-	}, nil, nil)
+	}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -1106,7 +1106,7 @@ func TestStartProxiesForSandbox_GitNoCredentialsTypedError(t *testing.T) {
 	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{
 		"ANTHROPIC_API_KEY":  "k",
 		"ANTHROPIC_BASE_URL": upstream.URL,
-	}, &GitProxyConfig{TokenSource: src, ProbeCredentials: probe}, nil)
+	}, &GitProxyConfig{TokenSource: src, ProbeCredentials: probe}, nil, nil)
 	if !errors.Is(err, ErrNoSandboxGitCredentials) {
 		t.Fatalf("err = %v, want ErrNoSandboxGitCredentials", err)
 	}
@@ -1134,7 +1134,7 @@ func TestStartProxiesForSandbox_GitProxyTornDownOnShutdown(t *testing.T) {
 	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{
 		"ANTHROPIC_API_KEY":  "k",
 		"ANTHROPIC_BASE_URL": llmUp.URL,
-	}, &GitProxyConfig{TokenSource: src, Upstream: gitUp.URL}, nil)
+	}, &GitProxyConfig{TokenSource: src, Upstream: gitUp.URL}, nil, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -1175,7 +1175,7 @@ func TestStartProxiesForSandbox_FoldsOrgIdentity(t *testing.T) {
 	creds := map[string]string{"ANTHROPIC_API_KEY": "sk-ant-test"}
 	identity := githooks.IdentityConfigPairs("acme-bot[bot]", "acme-bot[bot]@users.noreply.github.com")
 
-	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil, identity...)
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil, nil, identity...)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -1241,7 +1241,7 @@ func TestStartProxiesForSandbox_EgressProxyEnv(t *testing.T) {
 	defer upstream.Close()
 	creds := map[string]string{"ANTHROPIC_API_KEY": "sk-ant-x", "ANTHROPIC_BASE_URL": upstream.URL}
 
-	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil)
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -1302,7 +1302,7 @@ func TestStartProxiesForSandbox_EgressProxyGatesConnect(t *testing.T) {
 	defer upstream.Close()
 	creds := map[string]string{"ANTHROPIC_API_KEY": "sk-ant-x", "ANTHROPIC_BASE_URL": upstream.URL}
 
-	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil)
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("startProxiesForSandbox: %v", err)
 	}
@@ -1341,5 +1341,61 @@ func TestStartProxiesForSandbox_EgressProxyGatesConnect(t *testing.T) {
 	}
 	if resp := connect(egressproxy.BasicUser + ":not-the-token"); !strings.Contains(resp, "407") {
 		t.Errorf("wrong-token CONNECT got:\n%s\nwant 407", resp)
+	}
+}
+
+// TestStartProxiesForSandbox_EgressDenialReachesRecorder is the regression
+// test for the gap this ticket closes: egressproxy.Config.RecordDenial existed
+// — bounded queue, drain goroutine, drop counter — but the production
+// construction path never set it, so denials reached slog and nothing else for
+// a full release cycle. The proxy is started through the SAME function
+// production calls, and the assertion is behavioral: a refused CONNECT must
+// arrive at the caller's hook, target and reason intact.
+func TestStartProxiesForSandbox_EgressDenialReachesRecorder(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+	creds := map[string]string{"ANTHROPIC_API_KEY": "sk-ant-x", "ANTHROPIC_BASE_URL": upstream.URL}
+
+	denied := make(chan egressproxy.DeniedConnect, 4)
+	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", creds, nil,
+		func(_ context.Context, d egressproxy.DeniedConnect) { denied <- d }, nil)
+	if err != nil {
+		t.Fatalf("startProxiesForSandbox: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = bundle.Shutdown(ctx)
+	})
+
+	u, err := url.Parse(envValue(env, "HTTPS_PROXY"))
+	if err != nil {
+		t.Fatalf("parse HTTPS_PROXY: %v", err)
+	}
+	token, _ := u.User.Password()
+
+	conn, err := net.DialTimeout("tcp", u.Host, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial egress proxy: %v", err)
+	}
+	defer conn.Close()
+	auth := base64.StdEncoding.EncodeToString([]byte(egressproxy.BasicUser + ":" + token))
+	_, _ = conn.Write([]byte("CONNECT api.github.com:443 HTTP/1.1\r\nHost: api.github.com:443\r\n" +
+		"Proxy-Authorization: Basic " + auth + "\r\n\r\n"))
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _ = conn.Read(make([]byte, 512))
+
+	select {
+	case d := <-denied:
+		if d.Target != "api.github.com:443" {
+			t.Errorf("recorded target = %q, want the CONNECT authority", d.Target)
+		}
+		if !strings.Contains(d.Reason, "allowlist") {
+			t.Errorf("recorded reason = %q, want the policy reason the agent also saw", d.Reason)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a refused CONNECT never reached the audit hook — RecordDenial is unwired on the production construction path")
 	}
 }

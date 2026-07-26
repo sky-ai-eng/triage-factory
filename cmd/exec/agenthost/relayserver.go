@@ -36,6 +36,12 @@ type RelayServer struct {
 	stores db.Stores
 	info   RunInfo
 
+	// audit is the host-side client the relayed audit-only ops record through —
+	// the same seam the in-process git gate uses (executorGitGate's
+	// denialHost), so a sandbox's denial and a local run's land the identical
+	// row through the identical method.
+	audit *LocalClient
+
 	// git is the run's push authz + audit gate (the delegate's executorGitGate).
 	// nil for a run with no git surface (a Jira-only run) — authorize_repo then
 	// fails closed (deny), the audit ops no-op.
@@ -58,7 +64,13 @@ func (s *RelayServer) SetProxyCreds(pc *ProxyCredentials) { s.proxyCreds = pc }
 // NewRelayServer builds the run's relay op server. git may be nil (no git
 // surface); stores/info are the run's own, admin-pool + RunInfo-bound.
 func NewRelayServer(stores db.Stores, info RunInfo, git *agentproc.GitProxyConfig) *RelayServer {
-	return &RelayServer{rt: newDirectRuntime(stores, info), stores: stores, info: info, git: git}
+	return &RelayServer{
+		rt:     newDirectRuntime(stores, info),
+		stores: stores,
+		info:   info,
+		git:    git,
+		audit:  NewLocal(stores, info),
+	}
 }
 
 // recordPushRelayTimeout bounds the orchestrator-side artifact write kicked off
@@ -387,6 +399,33 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 				Reason: a.Reason,
 			})
 		}
+
+	case agentproc.OpRecordEgressDenial:
+		var a agentproc.RecordEgressDenialArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			agenthostLog.Warn("decode relayed egress denial failed", "error", err)
+			return
+		}
+		// Unconditional, unlike the git denial above: every sandbox has an egress
+		// proxy, so there is no run shape where this op should be dropped. The
+		// conversation comes from THIS server's client, never the wire, so a
+		// sidecar cannot file a probe against another run — which also makes the
+		// dedup key unforgeable.
+		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
+		defer cancel()
+		s.audit.RecordEgressDenied(recCtx, a.Target, a.Reason)
+
+	case agentproc.OpRecordGHWrite:
+		var a agentproc.RecordGHWriteArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			agenthostLog.Warn("decode relayed gh write failed", "error", err)
+			return
+		}
+		// The request already transited; recording it is best-effort and capped
+		// like the other audit ops.
+		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
+		defer cancel()
+		s.audit.RecordGHChannelWrite(recCtx, a.Method, a.Path, a.Status)
 
 	case agentproc.OpRecordPush:
 		var a agentproc.RecordPushArgs
