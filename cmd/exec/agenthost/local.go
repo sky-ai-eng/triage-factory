@@ -87,6 +87,18 @@ func NewLocal(stores db.Stores, info RunInfo) *LocalClient {
 	}
 }
 
+// SetGitHubResolver overrides the credential resolver this client resolves gh
+// verbs through, AND the one the in-process runtime's review-posture identity
+// probe uses. They must be the same object: two resolvers would mean the posture
+// decision classified a different credential than the one that goes on to make
+// the call. Used by the local-mode wiring and by tests injecting a fake tier.
+func (c *LocalClient) SetGitHubResolver(r ghclient.Resolver) {
+	c.ghResolver = r
+	if dr, ok := c.rt.(*directRuntime); ok {
+		dr.ghResolver = r
+	}
+}
+
 func (c *LocalClient) LookupRun(_ context.Context) (RunInfo, error) {
 	// Empty RunID at this stage means AutoDetect's env probe was
 	// bypassed (test seam) or the caller constructed a LocalClient
@@ -129,14 +141,20 @@ func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*
 	return art, nil
 }
 
-// FinalizeReviewDraft is the host side of `gh pr finalize-review`: it finalizes a
-// fully TF-side review draft for human approval and makes NO GitHub write (the
-// atomic create+submit happens at approval). It locates the run's review
-// artifact, gates on comment freshness vs. the PR's current head (TFAC-499),
-// stages the body + event, snapshots the agent's draft (body + event + the
-// locally staged inline comments) into details.proposed as the approve-time
+// FinalizeReviewDraft is the host side of `gh pr finalize-review`: it locates the
+// run's review artifact, gates on comment freshness vs. the PR's current head
+// (TFAC-499), stages the body + event, snapshots the agent's draft (body + event
+// + the locally staged inline comments) into details.proposed as the approve-time
 // human-feedback baseline, and sets the ready sentinel (details_json.review_event)
 // that marks the review awaiting approval.
+//
+// Whether the review then goes to GitHub is the team's posture (TFAC-680),
+// resolved here and nowhere else: this is the only place holding the DB handle,
+// the team settings, and the credential resolver — the in-sandbox verb has none
+// of them and must not learn about posture. Under a staging posture nothing
+// reaches GitHub (the atomic create+submit happens at approval, exactly as
+// before); under a posting posture the review is submitted through the shared
+// publish path the human-approval handler uses. The result reports which.
 //
 // reviewID is the local review handle the agent passes through (the artifact id);
 // it's validated against the artifact's id so a stale handle fails loudly rather
@@ -153,27 +171,30 @@ func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*
 // deleted) fails finalize with a per-comment list so the agent re-reads the new
 // diff, edits/deletes/re-adds against the new head, and retries. On success every
 // comment shares the current head, so approval pins that single commit_id.
-func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) error {
+func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) (ReviewFinalizeResult, error) {
+	staged := ReviewFinalizeResult{}
 	art, err := c.runReviewArtifact(ctx, reviewID)
 	if err != nil {
-		return err
+		return staged, err
 	}
 
 	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
 	if err != nil {
-		return fmt.Errorf("parse review artifact details: %w", err)
+		return staged, fmt.Errorf("parse review artifact details: %w", err)
 	}
 	// Anti-double-submit (TFAC-358): the ready sentinel is already set, so the
-	// agent already finalized this review. Hard error so it stops looping.
+	// agent already finalized this review. Hard error so it stops looping. This
+	// holds under every posture — the sentinel is armed before any GitHub write,
+	// so a second call is refused whether the first one posted or staged.
 	if details.ReviewEvent != "" {
-		return ErrReviewAlreadyFinalized
+		return staged, ErrReviewAlreadyFinalized
 	}
 
 	// A comment / request_changes review must carry something actionable: a body,
 	// inline comments, or both. An approve needs neither (the approval is the
 	// signal). The comments are the locally staged set the agent added.
 	if body == "" && event != "APPROVE" && len(details.StagedComments) == 0 {
-		return fmt.Errorf("a %s review needs --body/--body-file or at least one inline comment", strings.ToLower(event))
+		return staged, fmt.Errorf("a %s review needs --body/--body-file or at least one inline comment", strings.ToLower(event))
 	}
 
 	// Freshness gate (TFAC-499): reconcile the staged comments to the PR's current
@@ -197,7 +218,7 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 	if len(details.StagedComments) > 0 {
 		base, head, err := c.reconcileStagedCommentsToHead(ctx, art, &details)
 		if err != nil {
-			return err
+			return staged, err
 		}
 		finalizeHead = head
 		finalizeBase = base
@@ -216,9 +237,109 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 	details.Proposed = proposed
 
 	if err := c.saveReviewDraftDetails(ctx, art.ID, details); err != nil {
-		return fmt.Errorf("snapshot review draft into artifact: %w", err)
+		return staged, fmt.Errorf("snapshot review draft into artifact: %w", err)
 	}
-	return nil
+
+	// Posture decision AFTER the snapshot, never before: the guarded write is
+	// what arms the anti-double-submit sentinel, so ordering it first makes the
+	// auto-post at-most-once. A crash (or a GitHub failure) between here and the
+	// submit leaves a finalized draft a human can still approve — the inverse
+	// order would leave a posted review that finalize would happily post again.
+	if !c.shouldPostReview(ctx, art, details) {
+		return staged, nil
+	}
+	return c.postFinalizedReview(ctx, art, details), nil
+}
+
+// shouldPostReview resolves the team's review posture and answers whether this
+// finalized draft goes straight to GitHub. Both inputs (the team setting, the
+// acting credential's identity) come from the runtime, so the answer is the same
+// in-process on all/local and relayed from the capless sidecar.
+//
+// A resolution failure stages. The posture setting exists to let a team opt INTO
+// posting; a backend blip must not be the thing that decides to publish, and the
+// staged draft loses nothing — a human can approve it.
+func (c *LocalClient) shouldPostReview(ctx context.Context, art *domain.Artifact, details domain.ReviewArtifactDetails) bool {
+	owner, repo, _, ok := domain.ParsePRTarget(art.Target)
+	if !ok {
+		return false
+	}
+	res, err := c.rt.ReviewPosture(ctx, owner, repo)
+	if err != nil {
+		agenthostLog.Warn("review posture unresolved; staging the review for approval",
+			"run", c.info.RunID, "artifact", art.ID, "error", err)
+		return false
+	}
+	return review.PostureSubmits(res.Posture, res.Identity, details.ReviewEvent, details.StagedComments)
+}
+
+// postFinalizedReview submits an already-finalized draft to GitHub through the
+// shared publish path (internal/review.SubmitStaged — the same function the
+// human-approval handler calls, so comment anchoring, the commit pin, and the
+// composed deep link behave identically), then records the artifact as submitted
+// with the posted review's id + URL and appends the review_submitted audit row.
+//
+// A submit failure is not fatal: the draft stays finalized and pending, which is
+// precisely the state a human approves from, so the run reports the staged
+// outcome and the review is recoverable in the UI. It is logged host-side —
+// stdout belongs to the verb's JSON.
+func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artifact, details domain.ReviewArtifactDetails) ReviewFinalizeResult {
+	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
+	if !ok {
+		return ReviewFinalizeResult{}
+	}
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		agenthostLog.Warn("auto-post review: no GitHub client; leaving the review staged for approval",
+			"run", c.info.RunID, "artifact", art.ID, "error", err)
+		return ReviewFinalizeResult{}
+	}
+	// The footer is the same run-attribution block the approval path appends, so
+	// an auto-posted review carries the identical provenance line.
+	footer, ferr := c.rt.AgentFooter(ctx, "review")
+	if ferr != nil {
+		agenthostLog.Warn("auto-post review: agent footer unavailable; posting without it",
+			"run", c.info.RunID, "artifact", art.ID, "error", ferr)
+		footer = ""
+	}
+	res, err := review.SubmitStaged(ctx, client, review.SubmitInput{
+		Owner:   owner,
+		Repo:    repo,
+		Number:  number,
+		Details: details,
+		Footer:  footer,
+		WebBase: func() string {
+			base, berr := c.githubResolver().BaseURLFor(ctx, c.info.OrgID)
+			if berr != nil {
+				agenthostLog.Warn("auto-post review: github base unresolved; using default host",
+					"run", c.info.RunID, "artifact", art.ID, "error", berr)
+				return ""
+			}
+			return base
+		},
+	})
+	if err != nil {
+		agenthostLog.Warn("auto-post review: submit failed; the review stays staged for human approval",
+			"run", c.info.RunID, "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+		return ReviewFinalizeResult{}
+	}
+
+	// Record what landed: the event GitHub was asked for, the review's id + URL,
+	// and the pending → submitted flip, composed with the audit row in one write.
+	// Unlike the approval path there is no CAS claim to release — the run owns
+	// this draft and the submit already happened, so the row is brought in line
+	// with GitHub best-effort (the recording funnel logs and swallows failures
+	// rather than unwinding an applied external write).
+	details.ReviewEvent = res.Event
+	submitted := *art
+	submitted.State = domain.ArtifactStateReviewSubmitted
+	submitted.ExternalID = strconv.Itoa(res.ReviewID)
+	submitted.URL = res.URL
+	submitted.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
+	c.upsertGithubArtifact(ctx, submitted, githubAction(submitted, domain.ActionReviewSubmitted,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted))
+
+	return ReviewFinalizeResult{Posted: true, URL: res.URL}
 }
 
 // reconcileStagedCommentsToHead forward-maps every staged comment from the commit
@@ -909,7 +1030,9 @@ func jiraBodySnippet(body string) string {
 // in the resolver — no gh-specific credential logic here.
 func (c *LocalClient) githubResolver() ghclient.Resolver {
 	if c.ghResolver == nil {
-		c.ghResolver = ghclient.NewResolver(c.stores.Secrets, c.stores.GitHubApps, c.stores.Orgs, c.stores.Agents, nil)
+		// Through SetGitHubResolver so the in-process runtime's review-posture
+		// identity probe shares this one cache rather than building a second.
+		c.SetGitHubResolver(ghclient.NewResolver(c.stores.Secrets, c.stores.GitHubApps, c.stores.Orgs, c.stores.Agents, nil))
 	}
 	return c.ghResolver
 }

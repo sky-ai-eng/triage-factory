@@ -189,6 +189,12 @@ type teamSettingsUpdate struct {
 	// unrelated save that omits it leaves the stored value untouched; an empty
 	// string coalesces to domain.DefaultBranchTemplate so a blank never persists.
 	BranchTemplate *string `json:"branch_template,omitempty"`
+	// ReviewPosture is how the team's delegated reviews reach GitHub
+	// (TFAC-680) — one of domain.ValidReviewPostures. Pointer for the same
+	// reason as BranchTemplate: an unrelated save that omits the key must not
+	// clobber the stored posture. An empty string coalesces to
+	// domain.DefaultReviewPosture; an unrecognized value is a 400.
+	ReviewPosture *string `json:"review_posture,omitempty"`
 	// Presence-gated absent auto-deny knobs (TFAC-392). Pointers so an
 	// unrelated save (e.g. editing projects) that omits them leaves the
 	// stored values untouched. Grace is in seconds on the wire (the UI input
@@ -271,6 +277,22 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 				bt = domain.DefaultBranchTemplate
 			}
 			teamSet.BranchTemplate = bt
+		}
+		if req.ReviewPosture != nil {
+			// Blank coalesces to the default (same convention as the template
+			// above); anything else must name a known posture — an unrecognized
+			// value would silently degrade to "stage everything" at finalize
+			// time, which is exactly the misconfiguration a team switching to
+			// auto would never notice.
+			rp := *req.ReviewPosture
+			if rp == "" {
+				rp = domain.DefaultReviewPosture
+			}
+			if !domain.ValidReviewPosture(rp) {
+				badRequest(w, "review_posture: unknown value "+rp)
+				return errAbortHandler
+			}
+			teamSet.ReviewPosture = rp
 		}
 		if req.PermissionAbsentAutodenyEnabled != nil {
 			teamSet.PermissionAbsentAutodenyEnabled = *req.PermissionAbsentAutodenyEnabled

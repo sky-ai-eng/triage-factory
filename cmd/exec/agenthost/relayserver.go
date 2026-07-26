@@ -247,6 +247,22 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(updateReviewDetailsResult{Updated: updated})
 
+	case opReviewPosture:
+		var a reviewPostureArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		// The sidecar relays here because neither input exists in its process:
+		// the team settings live behind the stores it doesn't hold, and its own
+		// gh clients speak to per-run REST proxies that report a descriptive
+		// identity, not the real App-vs-PAT tier. Identity is the run's own
+		// RunInfo, so a sidecar cannot read another team's posture.
+		res, err := s.rt.ReviewPosture(ctx, a.Owner, a.Repo)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(res)
+
 	case opCheckEntitlement:
 		var a checkEntitlementArgs
 		if err := json.Unmarshal(args, &a); err != nil {

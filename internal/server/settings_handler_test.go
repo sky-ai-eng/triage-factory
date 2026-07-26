@@ -1144,3 +1144,67 @@ func TestTeamSettingsPost_GraceClampedToBand(t *testing.T) {
 func jiraCredentialRoute() string {
 	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/jira/access/credential"
 }
+
+// --- TFAC-680 review posting posture ---------------------------------------
+
+// teamReviewPosture reads the stored posture back off the team settings GET.
+// The GET serializes domain.TeamSettings wholesale (no JSON tags), so the wire
+// key is the Go field name.
+func teamReviewPosture(t *testing.T, s *Server) string {
+	t.Helper()
+	rec := doJSON(t, s, "GET", "/api/settings/team/default", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/settings/team/default: %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		TeamSettings struct {
+			ReviewPosture string `json:"ReviewPosture"`
+		} `json:"team_settings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode team settings: %v", err)
+	}
+	return resp.TeamSettings.ReviewPosture
+}
+
+// TestTeamSettingsPost_ReviewPosture pins the posture's write path: it defaults
+// to the identity-derived value, accepts each known posture, coalesces a blank
+// to the default, is left untouched by a save that omits the key (the pointer
+// field's whole purpose — an unrelated save must not silently re-gate a team's
+// reviews), and rejects an unknown value rather than storing something that
+// would quietly resolve to "stage everything".
+func TestTeamSettingsPost_ReviewPosture(t *testing.T) {
+	s := newTestServer(t)
+
+	if got := teamReviewPosture(t, s); got != domain.DefaultReviewPosture {
+		t.Errorf("fresh team posture = %q, want the %q default", got, domain.DefaultReviewPosture)
+	}
+
+	for _, p := range domain.ValidReviewPostures {
+		postJSONResp(t, s, "/api/settings/team/default", map[string]any{"review_posture": p})
+		if got := teamReviewPosture(t, s); got != p {
+			t.Errorf("after POST %q, stored posture = %q", p, got)
+		}
+	}
+
+	// An unrelated save leaves the stored posture alone.
+	postJSONResp(t, s, "/api/settings/team/default", map[string]any{"review_posture": domain.ReviewPostureAuto})
+	postJSONResp(t, s, "/api/settings/team/default", map[string]any{"ai_model": "haiku"})
+	if got := teamReviewPosture(t, s); got != domain.ReviewPostureAuto {
+		t.Errorf("an unrelated save clobbered the posture: got %q, want %q", got, domain.ReviewPostureAuto)
+	}
+
+	// A blank coalesces to the default rather than persisting an empty column.
+	postJSONResp(t, s, "/api/settings/team/default", map[string]any{"review_posture": ""})
+	if got := teamReviewPosture(t, s); got != domain.DefaultReviewPosture {
+		t.Errorf("blank posture stored as %q, want the %q default", got, domain.DefaultReviewPosture)
+	}
+
+	rec := doJSON(t, s, "POST", "/api/settings/team/default", map[string]any{"review_posture": "yolo"})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown posture = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := teamReviewPosture(t, s); got != domain.DefaultReviewPosture {
+		t.Errorf("a rejected posture must not be stored: got %q", got)
+	}
+}

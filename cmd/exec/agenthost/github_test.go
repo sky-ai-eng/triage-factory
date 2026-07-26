@@ -140,7 +140,7 @@ func startGitHubDaemon(t *testing.T, resolver ghclient.Resolver, info RunInfo) *
 		t.Fatalf("listen: %v", err)
 	}
 	srv := NewServer(emptyStores(), info, nil)
-	srv.ghResolver = resolver
+	srv.SetGitHubResolver(resolver)
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = listener.Close()
@@ -399,7 +399,7 @@ func TestLocalClient_GithubAddComment_DirectPath(t *testing.T) {
 	defer gh.Close()
 
 	lc := NewLocal(emptyStores(), ghInfo())
-	lc.ghResolver = fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"}
+	lc.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"})
 
 	id, err := lc.GithubAddComment(context.Background(), "o", "r", 1, "direct")
 	if err != nil {
@@ -422,7 +422,7 @@ func TestGithub_NotConfigured_BothModes(t *testing.T) {
 
 	t.Run("local", func(t *testing.T) {
 		lc := NewLocal(emptyStores(), ghInfo())
-		lc.ghResolver = resolver
+		lc.SetGitHubResolver(resolver)
 		_, err := lc.GithubAddComment(context.Background(), "o", "r", 1, "hi")
 		if err == nil || !strings.Contains(err.Error(), "not configured") {
 			t.Fatalf("err = %v, want the friendly 'not configured' guidance", err)
@@ -484,7 +484,7 @@ func TestLocalClient_GithubCreatePR_ExecutorBundleFirst(t *testing.T) {
 
 	poisoned := fakeGitHubResolver{errOnRepo: db.ErrSecretStoreUnavailable}
 	lc := NewLocal(emptyStores(), ghInfo())
-	lc.ghResolver = poisoned
+	lc.SetGitHubResolver(poisoned)
 
 	t.Run("no proxy creds: hits the disabled secret store (the pre-fix executor failure)", func(t *testing.T) {
 		_, _, _, err := lc.GithubCreatePR(context.Background(), "o", "r", "feat", "main", "T", "B", false)

@@ -769,17 +769,26 @@ func reviewedPRWorktreePath(host agenthost.Client, owner, repo string) string {
 	return match
 }
 
-// prFinalizeReview hands the finished review off for human approval — it does NOT
-// submit to GitHub (approval does that). The host snapshots the agent's draft
-// (body + event + the locally staged inline comments) into the run's review
-// artifact and sets the ready sentinel. The TFAC-358 anti-double-submit guard
-// fires host-side: a second call gets a hard error.
+// prFinalizeReview hands the finished review to the host, which snapshots the
+// agent's draft (body + event + the locally staged inline comments) into the
+// run's review artifact and sets the ready sentinel. The TFAC-358
+// anti-double-submit guard fires host-side: a second call gets a hard error.
 //
-// The verb is "finalize-review", not "submit-review": post-494 it makes no
-// GitHub call at all (approval submits), so "submit" misleads a GitHub-literate
-// agent (it implies submitPullRequestReview / publish). "finalize" matches the
-// internal vocabulary (FinalizeReviewDraft, the ready sentinel) and the
-// drafted_awaiting_approval status this prints.
+// Whether the review is then staged for a human or submitted to GitHub is the
+// team's review posture (TFAC-680) — resolved host-side, where the settings and
+// the credential live. This verb knows nothing about posture; it reports which
+// of the two happened, from what the host returns. That split is the standing
+// rule the response contract rests on: the PROMPT describes the shape of the
+// call, the TOOL RESPONSE reports what actually happened. Making the prompt text
+// posture-dependent would fragment the cached system-prompt prefix per team
+// config, and hardcoding one outcome makes it wrong for every team that changes
+// the setting.
+//
+// The verb is "finalize-review", not "submit-review": the agent's act is
+// finishing the review, not choosing to publish it — the posture decides that —
+// and "submit" would imply the agent is calling submitPullRequestReview itself.
+// "finalize" matches the internal vocabulary (FinalizeReviewDraft, the ready
+// sentinel).
 func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr finalize-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)")
@@ -825,24 +834,33 @@ func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string)
 
 	_ = lookupRun(host)
 
-	// Snapshot the draft into the run's review artifact and set the ready
-	// sentinel. No GitHub submit — approval applies body + event atomically. The
-	// "meaningful review" check (body or inline comments for a non-approve) runs
-	// host-side, where the live comments are known.
-	err := host.FinalizeReviewDraft(ctx, reviewID, ghEvent, body)
+	// Snapshot the draft into the run's review artifact, set the ready sentinel,
+	// and — under a posting posture — submit it. The "meaningful review" check
+	// (body or inline comments for a non-approve) runs host-side, where the live
+	// comments are known.
+	res, err := host.FinalizeReviewDraft(ctx, reviewID, ghEvent, body)
 	if errors.Is(err, agenthost.ErrReviewAlreadyFinalized) {
 		exitErr(fmt.Sprintf(
-			"review %s has already been finalized for human approval. Do not call finalize-review again — your work on this review is complete. Finish the run by writing %s and returning your completion JSON.",
+			"review %s has already been finalized. Do not call finalize-review again — your work on this review is complete. Finish the run by writing %s and returning your completion JSON.",
 			reviewID, agentMemoryFile(),
 		))
 	}
 	exitOnErr(err)
 
+	// Two shapes, one per outcome. Both carry next_step spelling out the same
+	// wrap-up, so an agent that isn't reading the prompt closely still gets the
+	// "your review work is done" signal directly from the tool result.
+	if res.Posted {
+		printJSON(map[string]any{
+			"status":    "submitted",
+			"review_id": reviewID,
+			"event":     ghEvent,
+			"url":       res.URL,
+			"next_step": "Review is submitted to GitHub. Do not call finalize-review again. Finish the run by writing " + agentMemoryFile() + " and returning your completion JSON.",
+		})
+		return
+	}
 	printJSON(map[string]any{
-		// drafted_awaiting_approval makes the contract explicit: the review is
-		// handed off to the human approval queue and the agent's work on this PR
-		// is done. next_step spells out the wrap-up so even agents that aren't
-		// reading the prompt closely get the signal directly from the tool result.
 		"status":    "drafted_awaiting_approval",
 		"review_id": reviewID,
 		"event":     ghEvent,

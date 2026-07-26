@@ -176,6 +176,15 @@ type finalizeReviewDraftArgs struct {
 	Body     string `json:"body"`
 }
 
+// finalizeReviewDraftResult carries which of the two things finalize did
+// (TFAC-680): staged the draft for human approval, or submitted it to GitHub
+// under the team's posture. Posted=false leaves URL empty — nothing exists on
+// GitHub to link to yet.
+type finalizeReviewDraftResult struct {
+	Posted bool   `json:"posted"`
+	URL    string `json:"url,omitempty"`
+}
+
 type agentRunResult struct {
 	Run *domain.Conversation `json:"run,omitempty"`
 }

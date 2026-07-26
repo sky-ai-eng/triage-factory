@@ -190,7 +190,7 @@ func TestCapture_BranchPush_RecordsActionAndDedupsTwin(t *testing.T) {
 func TestCapture_BranchPush_AnchorsURLToOrgHost(t *testing.T) {
 	stores, info := newCaptureStores(t, false)
 	client := NewLocal(stores, info)
-	client.ghResolver = fakeGitHubResolver{baseURL: "https://ghe.example.com", token: "org-pat"}
+	client.SetGitHubResolver(fakeGitHubResolver{baseURL: "https://ghe.example.com", token: "org-pat"})
 
 	branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat/x", "abc123", true)
 	if !ok {
@@ -312,7 +312,7 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsArtifactlessAction(t *test
 				if !eventTriggered {
 					info.UserID = runmode.LocalDefaultUserID
 					client = NewLocal(stores, info)
-					client.ghResolver = fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"}
+					client.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"})
 				}
 
 				if err := client.GithubUpdateComment(context.Background(), "octo", "repo", 999, "edit a review comment"); err != nil {
@@ -341,7 +341,7 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsArtifactlessAction(t *test
 				if !eventTriggered {
 					info.UserID = runmode.LocalDefaultUserID
 					client = NewLocal(stores, info)
-					client.ghResolver = fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"}
+					client.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"})
 				}
 
 				if err := client.GithubDeleteComment(context.Background(), "octo", "repo", 999); err != nil {

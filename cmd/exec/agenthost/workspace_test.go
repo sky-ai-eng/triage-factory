@@ -294,10 +294,10 @@ func TestLocalClient_CreateWorkspaceCheckout_PRPath(t *testing.T) {
 	rec := &createRecorder{path: "/wt/pr-path"}
 	stubWorkspaceCreates(t, rec)
 	client := NewLocal(stores, workspaceInfo("run-pr"))
-	client.ghResolver = tokenResolver{
+	client.SetGitHubResolver(tokenResolver{
 		fakeGitHubResolver: fakeGitHubResolver{baseURL: gh.URL, token: "api-token"},
 		cloneToken:         "ghs_clone_token",
-	}
+	})
 
 	path, err := client.CreateWorkspaceCheckout(context.Background(), "sky", "core", "", 42)
 	if err != nil {

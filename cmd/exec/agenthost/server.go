@@ -110,15 +110,32 @@ type Server struct {
 // proxy branch and every gh/jira verb resolves through ghResolver / the Jira
 // resolver exactly as before.
 func NewServer(stores db.Stores, info RunInfo, proxyCreds *ProxyCredentials) *Server {
+	resolver := ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil)
+	rt := newDirectRuntime(stores, info)
+	// Share the one resolver with the runtime so the review-posture identity
+	// probe reuses the same installation-token cache every gh verb in this
+	// daemon already warms, instead of building a second resolver per call.
+	rt.ghResolver = resolver
 	return &Server{
-		rt:           newDirectRuntime(stores, info),
+		rt:           rt,
 		stores:       stores,
 		info:         info,
 		gateWired:    stores.TeamGitHubRepos != nil && stores.RunWorktrees != nil,
-		ghResolver:   ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil),
+		ghResolver:   resolver,
 		proxyCreds:   proxyCreds,
 		upstreamGate: newUpstreamThrottle(maxUpstreamConcurrencyFromEnv()),
 		shutdown:     make(chan struct{}),
+	}
+}
+
+// SetGitHubResolver replaces the daemon's credential resolver, keeping the
+// runtime's review-posture identity probe on the same object — the posture
+// decision must classify the very credential the gh verbs then use. Test seam
+// (a fake tier in place of the real resolver NewServer builds from stores).
+func (s *Server) SetGitHubResolver(r ghclient.Resolver) {
+	s.ghResolver = r
+	if dr, ok := s.rt.(*directRuntime); ok {
+		dr.ghResolver = r
 	}
 }
 
@@ -348,7 +365,11 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		return emptyResult{}, client.FinalizeReviewDraft(ctx, a.ReviewID, a.Event, a.Body)
+		fin, err := client.FinalizeReviewDraft(ctx, a.ReviewID, a.Event, a.Body)
+		if err != nil {
+			return nil, err
+		}
+		return finalizeReviewDraftResult(fin), nil
 
 	case methodResetReviewDraft:
 		var a resetReviewDraftArgs
