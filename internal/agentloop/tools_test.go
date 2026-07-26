@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop/tooldefs"
 )
 
 func TestSandboxTools_AreTheSevenInHarnessOrder(t *testing.T) {
@@ -163,34 +165,40 @@ func canonicalJSON(t *testing.T, raw []byte) string {
 }
 
 func TestBuildSystemPrompt_OrderAndAddendumGating(t *testing.T) {
+	// Every assertion here is against an embedded prompt file as a whole,
+	// never a sentence inside one. The wording is hand-iterated and expected
+	// to churn; what must not churn is which sections are assembled, in what
+	// order, under which flags.
+	base := strings.TrimSpace(machinistSystemPrompt)
+	completion := strings.TrimSpace(completionBlueprint)
+	addendum := strings.TrimSpace(blueprintStepNonterminal)
+
 	parts := EnvelopeParts{TaskContext: "TASKCTX", Envelope: "ENVELOPE", Mission: "MISSION", HasBlueprint: true}
 
 	terminal := BuildSystemPrompt(parts)
-	for _, want := range []string{"coding agent", "TASKCTX", "ENVELOPE", "MISSION", "<completion>"} {
+	for name, want := range map[string]string{
+		"base prompt":         base,
+		"task context":        "TASKCTX",
+		"envelope":            "ENVELOPE",
+		"mission":             "MISSION",
+		"completion contract": completion,
+	} {
 		if !containsSub(terminal, want) {
-			t.Errorf("terminal system prompt is missing %q", want)
+			t.Errorf("the terminal system prompt is missing the %s", name)
 		}
 	}
-	if containsSub(terminal, "NOT the final step") {
+	if containsSub(terminal, addendum) {
 		t.Error("a terminal step must not carry the non-terminal addendum")
 	}
-	// Order: base, task context, envelope, mission, completion.
-	if !inOrder(terminal, "coding agent", "TASKCTX", "ENVELOPE", "MISSION", "<completion>") {
+	// Order is what makes the prefix cacheable: the bytes every run in the
+	// fleet shares come first, everything that varies per run after them.
+	if !inOrder(terminal, base, "TASKCTX", "ENVELOPE", "MISSION", completion) {
 		t.Error("the fixed assembly order is what makes the prefix cacheable")
 	}
 
 	parts.NonTerminalStep = true
-	nonTerminal := BuildSystemPrompt(parts)
-	if !containsSub(nonTerminal, "NOT the final step") {
+	if nonTerminal := BuildSystemPrompt(parts); !containsSub(nonTerminal, addendum) {
 		t.Error("a non-terminal step must carry the addendum that redefines what stopping means")
-	}
-	// The addendum's whole job: say that stopping hands off, and that ending
-	// the workflow early is the thing requiring a deliberate call.
-	if !containsSub(nonTerminal, "hands off to the step that comes next") {
-		t.Error("the addendum must state that stopping normally is the handoff")
-	}
-	if !containsSub(nonTerminal, `stop_blueprint(type: "finish")`) {
-		t.Error("the addendum must name the tool that ends the whole blueprint")
 	}
 }
 
@@ -204,10 +212,14 @@ func TestBuildSystemPrompt_TasklessHasNoCompletionContract(t *testing.T) {
 	if !containsSub(taskless, "ENVELOPE") || !containsSub(taskless, "MISSION") {
 		t.Fatal("the caller's own sections must still be assembled")
 	}
-	for _, unwanted := range []string{"<completion>", "stop_blueprint", "external artifact"} {
-		if containsSub(taskless, unwanted) {
-			t.Errorf("a taskless conversation must not be told about %q — there is nobody absent to leave a reason for", unwanted)
-		}
+	if containsSub(taskless, strings.TrimSpace(completionBlueprint)) {
+		t.Error("a taskless conversation must not be handed the completion contract — there is nobody absent to leave a reason for")
+	}
+	// The tool's wire name, unlike the prose around it, is a stable identifier:
+	// naming it here at all would mean describing a tool this conversation was
+	// never given.
+	if containsSub(taskless, tooldefs.StopBlueprintName) {
+		t.Error("a taskless conversation must never be told about a tool it does not have")
 	}
 }
 
