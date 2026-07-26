@@ -412,13 +412,46 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		delegateLog.Info("run re-claimed mid-flight; resuming session", "run", runID, "session", priorSessionID)
 	}
 
+	// teamID nil-derefs to "" (resolveAbsentAutoDeny then falls back to
+	// defaults); task.TeamID is set for any task that reaches a run.
+	teamID := ""
+	if task.TeamID != nil {
+		teamID = *task.TeamID
+	}
+
+	// Local mode's half of the real-gh channel: a loopback injector holding the
+	// org's live credential, fronted by the TF-owned pinned binary. Multi gets
+	// the same channel from the sidecar (cfg.execSandbox below), so exactly one
+	// of the two is ever non-nil. A host that can't provision it degrades to the
+	// scoped exec verbs rather than failing the run.
+	localGH, localGHCloser := s.startLocalGHChannel(ctx, orgID, runID, cfg.owner, agenthost.RunInfo{
+		OrgID:            orgID,
+		UserID:           creatorUserID,
+		RunID:            runID,
+		TeamID:           teamID,
+		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
+	})
+	defer func() { _ = localGHCloser.Close() }()
+	ghChannel := cfg.execSandbox.ghChannel(runID)
+	if ghChannel == nil {
+		ghChannel = localGH
+	}
+
 	delegateLog.Info("claude starting for run", "run", runID, "cwd", claudeCwd)
 	baseOpts := agentproc.RunOptions{
-		Cwd:             claudeCwd,
-		Model:           model,
-		SessionID:       resumeSession,
-		Message:         prompt,
-		AllowedTools:    agentproc.BuildAllowedToolsWithExtras(selfBin, cfg.extraAllowedTools),
+		Cwd:       claudeCwd,
+		Model:     model,
+		SessionID: resumeSession,
+		Message:   prompt,
+		// The gh subcommands are granted only when the channel is actually
+		// live: without one, `gh` on a local host would resolve to the user's
+		// own installation under the user's own auth, so the allowlist must
+		// not name it at all.
+		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
+			SelfBin: selfBin,
+			Extras:  cfg.extraAllowedTools,
+			GH:      ghChannel != nil,
+		}),
 		MaxTurns:        100,
 		ExtraEnv:        extraEnv,
 		TraceID:         runID,
@@ -434,10 +467,10 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		PrebuiltNetwork:  cfg.execSandbox.runNetwork(),
 		PrebuiltProxyEnv: cfg.execSandbox.proxyEnv(),
 		StartAgentHost:   startAgentHost,
-		// Real-gh channel: the pinned gh binary + per-run injector cert mounts and
-		// the GH_* env, when the sidecar bound the injector. nil-safe on a nil
-		// execSandbox (local/non-sandbox keeps the SDK exec-verb gh).
-		GHChannel: cfg.execSandbox.ghChannel(runID),
+		// Real-gh channel: the sidecar's injector + mounted binary in multi, the
+		// loopback injector + fetched binary in local. nil when neither could be
+		// provisioned, which keeps the run on the scoped exec verbs.
+		GHChannel: ghChannel,
 		// This step's staged skill, bind-mounted read-only. Empty for every
 		// non-blueprint run and in local mode (where the skill lives in the
 		// worktree instead).
@@ -448,13 +481,6 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		GitUserEmail: commitIdentity.Email,
 	}
 	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
-
-	// teamID nil-derefs to "" (resolveAbsentAutoDeny then falls back to
-	// defaults); task.TeamID is set for any task that reaches a run.
-	teamID := ""
-	if task.TeamID != nil {
-		teamID = *task.TeamID
-	}
 
 	// Off-allowlist tool calls route to one of two dispositions, chosen once
 	// per run:
