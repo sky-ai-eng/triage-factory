@@ -3,10 +3,10 @@ package domain
 import "time"
 
 // TaskMemory is a durable per-run narrative of what an agent tried on a task
-// and why. The agent writes it to the one fixed path `./_scratch/memory.md` in
+// and why. The agent writes it to the one fixed path `./_tfac/memory.md` in
 // its run root; the orchestrator reads it at termination and ingests it into
 // the `conversation_memory` table before worktree teardown. Materialized back
-// into future runs' worktrees under `_scratch/entity-memory/` so iterations on
+// into future runs' worktrees under `_tfac/entity-memory/` so iterations on
 // the same entity can read what prior attempts tried — and so the sibling steps
 // of one blueprint run can read each other's memory as their handoff.
 //

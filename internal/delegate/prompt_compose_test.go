@@ -50,7 +50,7 @@ func TestBuildPrompt_InterpolatesInjectedSections(t *testing.T) {
 		t.Error("expected interpolated binary path in the tools section")
 	}
 	// The memory write path must resolve to the concrete absolute path.
-	if !strings.Contains(out, "/work/_scratch/memory.md") {
+	if !strings.Contains(out, "/work/_tfac/memory.md") {
 		t.Errorf("expected concrete memory write path in the composed prompt;\n%s", out)
 	}
 }
@@ -65,8 +65,8 @@ func TestBlueprintStepNonterminalPrompt_MemoryPathCarriesNoIDs(t *testing.T) {
 			t.Errorf("blueprint-step-nonterminal.txt composes an entity-memory path from placeholders (%q)", bad)
 		}
 	}
-	if !strings.Contains(blueprintStepNonterminalPrompt, "_scratch/entity-memory/this-run/") {
-		t.Error("expected the handoff addendum to point the agent at _scratch/entity-memory/this-run/")
+	if !strings.Contains(blueprintStepNonterminalPrompt, "_tfac/entity-memory/this-run/") {
+		t.Error("expected the handoff addendum to point the agent at _tfac/entity-memory/this-run/")
 	}
 }
 

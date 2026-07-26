@@ -55,7 +55,7 @@ type GitDelta struct {
 	Bundle []byte
 	// Patch is a single binary diff capturing every uncommitted change
 	// (tracked modifications and untracked additions alike), with the managed
-	// _scratch tree excluded. nil when the working tree is clean.
+	// _tfac tree excluded. nil when the working tree is clean.
 	Patch []byte
 }
 
@@ -142,7 +142,7 @@ func SandboxClaudeSessionPath(runRoot, sessionID string) string {
 // IsGitWorktree reports whether wtPath is the root of a git working tree (a
 // `.git` file for a linked worktree, or a `.git` directory for a plain
 // checkout). False for an empty path or a Jira lazy run-root that holds only
-// _scratch.
+// _tfac.
 func IsGitWorktree(wtPath string) bool {
 	if wtPath == "" {
 		return false
@@ -227,16 +227,16 @@ func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, err
 // captureUncommitted produces one binary patch of every uncommitted change in
 // wtPath via a throwaway index seeded from HEAD: stage everything (add -A
 // records modifications, deletions, and untracked additions alike), drop the
-// managed _scratch tree, then diff that index against HEAD. Using
+// managed _tfac tree, then diff that index against HEAD. Using
 // GIT_INDEX_FILE keeps the worktree's real index untouched so a warm-path
 // resume still sees the agent's staging exactly as it left it. Returns
 // (nil, nil) for a clean tree.
 //
-// _scratch is removed from the staged set explicitly rather than left to the
-// worktree's excludes: snapshot owns the _scratch capture separately (skipping
+// _tfac is removed from the staged set explicitly rather than left to the
+// worktree's excludes: snapshot owns the _tfac capture separately (skipping
 // the subtrees that re-materialize on the next run), and a linked worktree's
 // managed excludes live in the per-worktree gitdir while `add` consults the
-// common dir — so relying on them here would leak _scratch into the patch.
+// common dir — so relying on them here would leak _tfac into the patch.
 func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 	idx, err := os.CreateTemp("", "tf-index-*")
 	if err != nil {
@@ -256,11 +256,14 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 	if _, err := gitCapture(ctx, wtPath, env, "add", "-A"); err != nil {
 		return nil, fmt.Errorf("stage worktree: %w", err)
 	}
-	// --ignore-unmatch: a no-op when _scratch was never staged (excludes did
-	// hold, or there is no _scratch). The working-tree files stay on disk;
-	// only the staged entries are dropped from the temp index.
-	if _, err := gitCapture(ctx, wtPath, env, "rm", "-r", "--cached", "--ignore-unmatch", "--", "_scratch"); err != nil {
-		return nil, fmt.Errorf("drop _scratch from temp index: %w", err)
+	// `reset` rather than `rm --cached`, for the reason spelled out at the
+	// `.claude/skills` drop below: reset restores HEAD's entry for the path, so a
+	// repo that legitimately TRACKS files under our directory doesn't come back
+	// from the snapshot with them recorded as deletions. For the ordinary
+	// untracked case it drops the entry outright, which is what we want — the
+	// working-tree files stay on disk either way, only the temp index changes.
+	if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", ScratchDir); err != nil {
+		return nil, fmt.Errorf("drop %s from temp index: %w", ScratchDir, err)
 	}
 	// Keep `.claude/skills` out of the delta for the same reason: it is TF
 	// mechanism, not the agent's work. In a sandboxed tree the path is our symlink
@@ -299,7 +302,7 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 // RestoreWorkspaceGit rebuilds a worktree at wtDir from the durable bare clone
 // plus the captured delta: ensure the bare exists, fold the bundled local-only
 // commits into its branch ref, check out a fresh worktree at that branch,
-// re-establish the managed _scratch excludes, and replay the uncommitted
+// re-establish the managed _tfac excludes, and replay the uncommitted
 // patch. It deliberately rebuilds rather than untarring a worktree so a
 // snapshot taken on one host rehydrates cleanly on another — the worktree's
 // `.git` pointer is host-specific and never travels.
@@ -409,7 +412,7 @@ func RestoreWorkspaceGit(ctx context.Context, owner, repo, wtDir string, d *GitD
 		return fmt.Errorf("restore: %w", err)
 	}
 
-	// Re-establish the managed _scratch excludes the fresh worktree lacks, then
+	// Re-establish the managed _tfac excludes the fresh worktree lacks, then
 	// replay the uncommitted changes on top of the committed branch state.
 	if err := writeLocalExcludes(wtDir); err != nil {
 		return fmt.Errorf("restore: write excludes: %w", err)

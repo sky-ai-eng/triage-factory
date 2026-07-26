@@ -61,7 +61,7 @@ func resolveRepo(args []string) (owner, repo string, err error) {
 // owner and repo must each be a single path segment. GitHub names never
 // contain slashes, so rejecting them isn't a usability cost — and it's a
 // security guard: owner/repo flow into filesystem paths (e.g. the pr-diff
-// _scratch directory), where a crafted "--repo owner/../../.." would
+// _tfac directory), where a crafted "--repo owner/../../.." would
 // otherwise let filepath.Join + Clean escape the intended directory and a
 // subsequent RemoveAll touch paths outside it.
 func splitOwnerRepoStr(value, source string) (owner, repo string, err error) {

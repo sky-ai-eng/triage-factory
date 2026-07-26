@@ -32,20 +32,24 @@ import (
 )
 
 // Snapshot tar member names. The blob is one gzip-compressed tar holding the
-// git delta, the ephemeral _scratch tree, the Claude session transcript, and a
+// git delta, the ephemeral _tfac tree, the Claude session transcript, and a
 // manifest; rehydrate demuxes by these names.
 const (
-	snapManifest      = "manifest.json"
-	snapBundle        = "repo.bundle"
-	snapPatch         = "uncommitted.patch"
-	snapSession       = "session.jsonl"
+	snapManifest = "manifest.json"
+	snapBundle   = "repo.bundle"
+	snapPatch    = "uncommitted.patch"
+	snapSession  = "session.jsonl"
+	// snapScratchPrefix names the scratch members INSIDE the blob, which is a
+	// storage format rather than a path: it is deliberately not derived from the
+	// on-disk directory name, so renaming that directory never strands the
+	// snapshot of a parked run written by an earlier build.
 	snapScratchPrefix = "scratch/"
 )
 
-// scratchExcludes are the top-level _scratch subdirectories that already
+// scratchExcludes are the top-level _tfac subdirectories that already
 // re-materialize on the next run and so never ride in the snapshot:
 // entity-memory rebuilds from conversation_memory, project-knowledge is re-copied from
-// the project KB. Everything else under _scratch (ci-logs, skill scratch,
+// the project KB. Everything else under _tfac (ci-logs, skill scratch,
 // ad-hoc agent files, and the agent's own memory.md — which is not in the DB
 // until termination ingests it) is non-recoverable and IS captured.
 var scratchExcludes = map[string]bool{"entity-memory": true, "project-knowledge": true}
@@ -73,7 +77,7 @@ func snapshotKey(orgID, keyID string) string {
 }
 
 // snapshotWorkspace writes a parked run's non-recoverable workspace state — the
-// git delta, the ephemeral _scratch subdirs, and the Claude session transcript
+// git delta, the ephemeral _tfac subdirs, and the Claude session transcript
 // — to durable storage under the run's snapshot key, so a resume that lands
 // without the warm on-disk worktree can rebuild it (see ensureWorkspace). It
 // runs identically in both modes: local writes the same blob through fsStorage
@@ -107,7 +111,7 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 	}
 
 	// Stage the tar on disk, then stream it into Put. A large workspace (the
-	// _scratch tree especially) never buffers whole in memory: scratch files
+	// _tfac tree especially) never buffers whole in memory: scratch files
 	// are copied into the tar file by file, and Put reads the staged tar back
 	// incrementally rather than from a single in-RAM buffer. The stream is
 	// gzipped on its way to the staging file — the transcript and ci-logs
@@ -150,7 +154,7 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 
 // writeSnapshotTar streams the snapshot members into w as one tar: the git
 // bundle + uncommitted patch (bounded — they're the delta, not full history),
-// the ephemeral _scratch tree (streamed file by file), the Claude session
+// the ephemeral _tfac tree (streamed file by file), the Claude session
 // transcript, and the manifest.
 func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID string, transcript []byte) error {
 	tw := tar.NewWriter(w)
@@ -248,12 +252,12 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 
 // rehydrateFromSnapshot unpacks a snapshot blob and reconstructs the worktree
 // at wtDir: rebuild the git worktree from the bare + delta (or just the
-// directory for a non-git run-root), restore the ephemeral _scratch tree, and
+// directory for a non-git run-root), restore the ephemeral _tfac tree, and
 // drop the Claude session transcript at the new cwd's encoding so
 // `claude --resume` reconnects.
 //
 // The bounded members (manifest, bundle, patch, session) are read into memory;
-// the _scratch tree — which can run to GBs — is streamed to a staging dir on
+// the _tfac tree — which can run to GBs — is streamed to a staging dir on
 // disk as it's read (the worktree it belongs in doesn't exist until
 // RestoreWorkspaceGit runs below), then moved into place with one rename. This
 // mirrors the snapshot side's temp-file staging so neither direction buffers a
@@ -358,9 +362,9 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID, owner, repo,
 	}
 
 	if sawScratch {
-		// The fresh worktree has no _scratch (git-excluded), so move the staged
+		// The fresh worktree has no _tfac (git-excluded), so move the staged
 		// tree in wholesale.
-		if err := os.Rename(scratchStaging, filepath.Join(wtDir, "_scratch")); err != nil {
+		if err := os.Rename(scratchStaging, filepath.Join(wtDir, "_tfac")); err != nil {
 			return fmt.Errorf("rehydrate: install scratch: %w", err)
 		}
 	}
@@ -397,11 +401,11 @@ func (s *Spawner) discardWorkspaceSnapshot(ctx context.Context, orgID, keyID str
 	}
 }
 
-// tarScratch walks wtPath/_scratch and writes every regular file under the
+// tarScratch walks wtPath/_tfac and writes every regular file under the
 // snapScratchPrefix, skipping the re-materializable entity-memory and
-// project-knowledge subtrees. A missing _scratch is fine (nothing to capture).
+// project-knowledge subtrees. A missing _tfac is fine (nothing to capture).
 func tarScratch(tw *tar.Writer, wtPath string) error {
-	root := filepath.Join(wtPath, "_scratch")
+	root := filepath.Join(wtPath, "_tfac")
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
 		return nil
 	}
@@ -429,13 +433,13 @@ func tarScratch(tw *tar.Writer, wtPath string) error {
 		if !fi.Mode().IsRegular() {
 			return nil // directories implied by their files; skip symlinks/etc.
 		}
-		// Stream each file into the tar rather than reading it whole — _scratch
+		// Stream each file into the tar rather than reading it whole — _tfac
 		// (ci-logs, etc.) is the part that can run to GBs.
 		return writeTarFile(tw, snapScratchPrefix+filepath.ToSlash(rel), path, fi.Size())
 	})
 }
 
-// stageScratchMember streams one _scratch tar member to relPath under
+// stageScratchMember streams one _tfac tar member to relPath under
 // stagingDir without buffering it whole. The cleaned destination is verified to
 // stay under stagingDir so a crafted blob (multi-mode object store) can't escape
 // via a "../" member name.
@@ -479,7 +483,7 @@ func restoreSessionTranscript(wtDir, sessionID string, data []byte) error {
 
 // writeTarBytes writes one regular-file member into the snapshot tar from an
 // in-memory buffer. Used for the bounded members (bundle, patch, session,
-// manifest); _scratch files stream through writeTarFile instead.
+// manifest); _tfac files stream through writeTarFile instead.
 func writeTarBytes(tw *tar.Writer, name string, data []byte) error {
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     name,
@@ -497,7 +501,7 @@ func writeTarBytes(tw *tar.Writer, name string, data []byte) error {
 
 // writeTarFile streams a file into the snapshot tar without buffering it whole.
 // size is the header length; the run is parked (dormant) when a snapshot is
-// taken, so _scratch isn't being written concurrently and the on-disk size is
+// taken, so _tfac isn't being written concurrently and the on-disk size is
 // stable. If a short read still occurs, io.Copy's count mismatch surfaces as a
 // tar error rather than silent corruption.
 func writeTarFile(tw *tar.Writer, name, path string, size int64) error {

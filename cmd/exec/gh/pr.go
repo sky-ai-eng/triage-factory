@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // lookupRun is the per-subcommand entry point for routing-sensitive
@@ -37,7 +38,7 @@ func lookupRun(host agenthost.Client) agenthost.RunInfo {
 }
 
 // agentMemoryFile returns the absolute path the delegated agent must write its
-// run-memory file to: the fixed _scratch/memory.md under the run root the
+// run-memory file to: the fixed _tfac/memory.md under the run root the
 // spawner exports as TRIAGE_FACTORY_CONVERSATION_ROOT (see
 // internal/delegate/run.go). This mirrors the path the completion gate reads,
 // so the "do not retry, finish by writing ..." messages below can point the
@@ -53,9 +54,9 @@ func lookupRun(host agenthost.Client) agenthost.RunInfo {
 func agentMemoryFile() string {
 	root := os.Getenv("TRIAGE_FACTORY_CONVERSATION_ROOT")
 	if root == "" {
-		return "$TRIAGE_FACTORY_CONVERSATION_ROOT/_scratch/memory.md"
+		return "$TRIAGE_FACTORY_CONVERSATION_ROOT/" + worktree.ScratchDir + "/memory.md"
 	}
-	return filepath.Join(root, "_scratch", "memory.md")
+	return filepath.Join(root, worktree.ScratchDir, "memory.md")
 }
 
 func handlePR(ctx context.Context, host agenthost.Client, args []string) {
@@ -175,7 +176,7 @@ const (
 	manifestFilename = "manifest.json"
 )
 
-// prDiff persists the PR diff under _scratch/ and prints a manifest, rather
+// prDiff persists the PR diff under _tfac/ and prints a manifest, rather
 // than dumping the whole diff to stdout (which lands the entire thing in the
 // delegated agent's context in one shot — unbounded and not navigable with
 // Read/Grep/Glob).
@@ -260,7 +261,7 @@ func inlineDiff(ctx context.Context, client ghAPI, checkout localCheckout, owner
 }
 
 // persistPRDiff writes full.diff and manifest.json into a per-PR directory
-// under _scratch/ and returns the manifest. The directory is keyed by (owner,
+// under _tfac/ and returns the manifest. The directory is keyed by (owner,
 // repo, number) — the task's identity, which the agent always knows — so a
 // later blueprint step can locate an earlier capture without first looking up
 // the head SHA. Each `pr diff` overwrites the capture in place.
@@ -297,7 +298,7 @@ func persistPRDiff(ctx context.Context, client ghAPI, checkout localCheckout, cw
 	// Key on the task identity (owner, repo, number) the agent always knows,
 	// so it can locate an earlier capture without first resolving the head SHA.
 	dirKey := owner + "__" + repo + "__" + strconv.Itoa(number)
-	destDir, err := safeScratchSubdir(cwd, "_scratch", "pr-diffs", dirKey)
+	destDir, err := safeScratchSubdir(cwd, worktree.ScratchDir, "pr-diffs", dirKey)
 	if err != nil {
 		return diffManifest{}, err
 	}

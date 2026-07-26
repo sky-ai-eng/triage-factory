@@ -264,7 +264,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// prompts name (the review passes' shared drop point) resolve deterministically.
 	namespace := memoryNamespace(cfg.blueprintRunID, runID)
 
-	// Both materializations below write into <runRoot>/_scratch/, so they only run
+	// Both materializations below write into <runRoot>/_tfac/, so they only run
 	// while the tree is still ours. Once a launch has handed it to the sandbox uid
 	// — a warm blueprint step N>0, or a warm resume — every create AND every
 	// O_TRUNC rewrite under it is EACCES for the capability-less orchestrator, so
@@ -291,27 +291,39 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	if sandbox.RunTreeHandedOff(claudeCwd) {
 		delegateLog.Debug("run tree already handed to the sandbox identity; skipping memory/knowledge materialization (these writes cannot succeed here — the tree keeps what the pre-launch pass wrote, so a mid-blueprint knowledge-base edit will not reach this step)", "run", runID, "cwd", claudeCwd)
 	} else {
-		// Materialize any prior task memories into ./_scratch/entity-memory/ —
+		// A tree an older binary built holds its scratch under the previous
+		// name; take it over before anything reads or writes there, so files an
+		// earlier step of this same workflow left behind are where this
+		// binary's prompts say they are.
+		worktree.AdoptLegacyScratchDir(ctx, claudeCwd)
+
+		// What the REPO tracks under the scratch dir, resolved once for every
+		// write below. The dir is git-excluded by writeLocalExcludes
+		// (managedExcludePatterns in internal/worktree/worktree.go), but an
+		// exclude is powerless over an already-tracked path — and for a GitHub
+		// PR run this tree IS the repo checkout, so an infrastructure write
+		// landing on one would ride the agent's next commit into the PR.
+		owned := scanRepoFiles(ctx, claudeCwd)
+
+		// Materialize any prior task memories into ./_tfac/entity-memory/ —
 		// this workflow run's earlier steps under this-run/, prior separate runs
 		// under history/ — so the agent sees what previous iterations on this
-		// task have already tried. The directory is git-excluded by
-		// writeLocalExcludes (managedExcludePatterns in
-		// internal/worktree/worktree.go) so nothing leaks into the PR.
-		materializePriorMemories(s.taskMemory, orgID, cfg.teamID, claudeCwd, task.EntityID, cfg.blueprintRunID)
+		// task have already tried.
+		materializePriorMemories(s.taskMemory, orgID, cfg.teamID, claudeCwd, task.EntityID, cfg.blueprintRunID, owned)
 
 		// A blueprint's steps share this tree and all write the same memory
 		// filename, so a step starting a fresh conversation in it starts from a
 		// clean slate. A run continuing a session (a mid-flight re-claim) keeps
 		// what it already wrote.
 		if priorSessionID == "" {
-			clearAgentMemoryFile(claudeCwd)
+			clearAgentMemoryFile(claudeCwd, owned)
 		}
 
 		// Copy the entity's project knowledge-base into
-		// ./_scratch/project-knowledge/ if the entity is assigned to a
+		// ./_tfac/project-knowledge/ if the entity is assigned to a
 		// project, so the agent has curated project context available
 		// alongside prior memories.
-		materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID)
+		materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID, owned)
 	}
 
 	selfBin, err := os.Executable()
@@ -357,7 +369,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	extraEnv := []string{
 		"TRIAGE_FACTORY_CONVERSATION_ID=" + runID,
-		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot, // Set for both sources so the completion-gate retry message can reference the absolute _scratch/memory.md path that resolves regardless of which worktree the agent has cd'd into.
+		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot, // Set for both sources so the completion-gate retry message can reference the absolute _tfac/memory.md path that resolves regardless of which worktree the agent has cd'd into.
 		// The workflow run this step belongs to. Non-absolute, so it passes
 		// through translateEnvForSandbox unchanged. Prompts that share a drop
 		// point across the steps of one run (the parallel review passes) name

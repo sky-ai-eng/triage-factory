@@ -288,7 +288,7 @@ func ChownWorkspaceCheckoutForSandbox(ctx context.Context, runRoot, wtDir string
 //
 // Why: delegate/resume callers set TRIAGE_FACTORY_CONVERSATION_ROOT to a host
 // path (e.g. /data/worktrees/<run>) so the agent's memory-gate retry
-// message can reference an absolute "$TRIAGE_FACTORY_CONVERSATION_ROOT/_scratch/
+// message can reference an absolute "$TRIAGE_FACTORY_CONVERSATION_ROOT/_tfac/
 // memory.md" path. Inside the sandbox that host path
 // doesn't exist — the run root is bind-mounted at /work — so the agent
 // would write to a path that resolves to nothing. Translate before

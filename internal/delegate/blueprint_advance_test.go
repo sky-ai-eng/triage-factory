@@ -145,7 +145,7 @@ func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testin
 
 // TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow pins the write
 // side: processCompletion ingests the agent's memory file from the one fixed
-// path (_scratch/memory.md) and stamps the run's blueprint_run_id onto the
+// path (_tfac/memory.md) and stamps the run's blueprint_run_id onto the
 // conversation_memory row, so the next step's materializer files it as this
 // workflow run's own handoff rather than as history.
 func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) {
@@ -156,7 +156,7 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 
 	// Stage the agent's memory file at the one path the contract names.
 	blueprintRunID := "bpr-" + runID
-	memDir := filepath.Join(cwd, "_scratch")
+	memDir := filepath.Join(cwd, "_tfac")
 	if err := os.MkdirAll(memDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestProcessCompletion_BlueprintStepWritesNamespacedMemoryRow(t *testing.T) 
 		t.Fatalf("scan conversation_memory: %v", err)
 	}
 	if agentContent.String != "step did X; next step needs Y" {
-		t.Errorf("agent_content = %q; processCompletion should ingest the file from _scratch/memory.md", agentContent.String)
+		t.Errorf("agent_content = %q; processCompletion should ingest the file from _tfac/memory.md", agentContent.String)
 	}
 	if gotBlueprintRunID.String != blueprintRunID {
 		t.Errorf("conversation_memory.blueprint_run_id = %q, want %q", gotBlueprintRunID.String, blueprintRunID)

@@ -178,14 +178,14 @@ func TestBuildPromptReplacer_RunRootAndBlueprintRunID(t *testing.T) {
 	task := domain.Task{EntitySource: "github", EntitySourceID: "owner/repo#1"}
 	r := BuildPromptReplacer(task, "", "run-xyz", "/bin/tf", "/work", "bp-run-1", "tfac/<ticket-id>", "")
 
-	got := interpolate(r, "ph={{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/security.json")
-	want := "ph=/work/_scratch/review/bp-run-1/security.json"
+	got := interpolate(r, "ph={{RUN_ROOT}}/_tfac/review/{{BLUEPRINT_RUN_ID}}/security.json")
+	want := "ph=/work/_tfac/review/bp-run-1/security.json"
 	if got != want {
 		t.Errorf("placeholder form: got %q want %q", got, want)
 	}
 
-	gotEnv := interpolate(r, "env=$TRIAGE_FACTORY_CONVERSATION_ROOT/_scratch/review/$TRIAGE_FACTORY_BLUEPRINT_RUN_ID/{{RUN_ID}}.json")
-	wantEnv := "env=/work/_scratch/review/bp-run-1/run-xyz.json"
+	gotEnv := interpolate(r, "env=$TRIAGE_FACTORY_CONVERSATION_ROOT/_tfac/review/$TRIAGE_FACTORY_BLUEPRINT_RUN_ID/{{RUN_ID}}.json")
+	wantEnv := "env=/work/_tfac/review/bp-run-1/run-xyz.json"
 	if gotEnv != wantEnv {
 		t.Errorf("env-var form: got %q want %q", gotEnv, wantEnv)
 	}

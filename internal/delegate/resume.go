@@ -351,7 +351,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		// for Jira lazy runs the run-root is the throwaway parent of
 		// per-repo worktrees). Without this, the memory-gate retry
 		// message — which references
-		// $TRIAGE_FACTORY_CONVERSATION_ROOT/_scratch/memory.md for
+		// $TRIAGE_FACTORY_CONVERSATION_ROOT/_tfac/memory.md for
 		// absolute-path resilience across `cd`s — would resolve to
 		// an empty string in the resumed shell and the agent couldn't
 		// follow the retry instructions. Same env shape as the initial

@@ -58,7 +58,7 @@ When the fix is a single obviously-correct replacement that fits the comment's l
 </suggestions>
 
 <handoff>
-Write your findings to `{{RUN_ROOT}}/_scratch/review/{{BLUEPRINT_RUN_ID}}/security.json` as a single JSON object. This file is your entire deliverable — a later step reads it and posts the review. Use the absolute path; create the directory if needed.
+Write your findings to `{{RUN_ROOT}}/_tfac/review/{{BLUEPRINT_RUN_ID}}/security.json` as a single JSON object. This file is your entire deliverable — a later step reads it and posts the review. Use the absolute path; create the directory if needed.
 
 Schema:
 

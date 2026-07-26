@@ -42,7 +42,7 @@ Worktrees are **destroyed after every run** (`internal/worktree/worktree.go`). D
 3. Agent reads/writes files normally
 4. Spawner ingests new/modified files back to the DB on teardown
 
-This is how SKY-141 (task memory) works, and it's how SKY-146 puts log archives under `_scratch/` inside the worktree.
+This is how SKY-141 (task memory) works, and it's how SKY-146 puts log archives under the managed scratch dir (`_tfac/`, `_scratch/` before it was renamed) inside the worktree.
 
 ### 3. Filesystem > tool proxy for agent data access
 
@@ -83,7 +83,7 @@ Per project convention: update `CREATE TABLE` in `internal/db/db.go` directly. A
 
 ### 9. Local excludes, not committed gitignore
 
-The `_scratch/` directory (covering both `_scratch/entity-memory/` from SKY-141 and `_scratch/ci-logs/` from SKY-146) is added to `.git/info/exclude` at worktree creation, **not** to a committed `.gitignore`. We don't want to pollute the tracked repo with entries for our internal scratch dirs. One prefix exclude covers everything under it.
+The managed scratch directory `_tfac/` (covering both `_tfac/entity-memory/` from SKY-141 and `_tfac/ci-logs/` from SKY-146) is added to `.git/info/exclude` at worktree creation, **not** to a committed `.gitignore`. We don't want to pollute the tracked repo with entries for our internal scratch dirs. One prefix exclude covers everything under it.
 
 ### 10. Build order
 
@@ -137,10 +137,10 @@ Several tickets touch the same plumbing. You can assume you're the only agent ma
 - **Reused by**: the open-run resume path (waking a run that ended a turn without a conclusion)
 - Capture `session_id` from `claude -p --output-format json` stdout. Store on `agent_runs.session_id`. Build the resume helper as a standalone function in the spawner package so the resume path can call it directly later.
 
-### `_scratch/` directory convention
+### Managed scratch directory convention
 
-- **Built in**: SKY-141 (for `_scratch/entity-memory/`) and SKY-146 (for `_scratch/ci-logs/`)
-- Subsumed under a single `_scratch/` prefix in SKY-219; one `.git/info/exclude` entry covers both.
+- **Built in**: SKY-141 (for `entity-memory/`) and SKY-146 (for `ci-logs/`)
+- Subsumed under a single prefix in SKY-219 — `_scratch/` then, `_tfac/` now (the old name stays excluded so a worktree built by an older binary can't leak leftovers into a commit). One `.git/info/exclude` entry covers everything under it.
 
 ### `trigger_source` column
 
@@ -156,7 +156,7 @@ Several tickets touch the same plumbing. You can assume you're the only agent ma
 
 ### Reading prior memory: the `## Human feedback (post-run)` block
 
-When you read materialized `_scratch/entity-memory/*.md` files from a prior run on the same entity (or a linked entity), you may see a section like:
+When you read materialized `_tfac/entity-memory/**/*.md` files from a prior run on the same entity (or a linked entity), you may see a section like:
 
 ```
 ## Human feedback (post-run)
@@ -254,7 +254,7 @@ Current contract (in `internal/ai/prompts/envelope.txt`):
 
 After SKY-148: `status` can also be `"task_unsolvable"`. The spawner-assigned `"failed"` state is never returned by the agent — it's set by the spawner when no valid JSON arrives.
 
-After SKY-141: the agent is required to have written its run memory on disk **before** returning its completion JSON — at the fixed path `./_scratch/memory.md`, which the orchestrator reads at termination and files under the run's ids. The spawner verifies this and auto-resumes the session once with a correction message if the file is missing. This happens externally via `--resume`, not via hooks.
+After SKY-141: the agent is required to have written its run memory on disk **before** returning its completion JSON — at the fixed path `./_tfac/memory.md`, which the orchestrator reads at termination and files under the run's ids. The spawner verifies this and auto-resumes the session once with a correction message if the file is missing. This happens externally via `--resume`, not via hooks.
 
 ---
 

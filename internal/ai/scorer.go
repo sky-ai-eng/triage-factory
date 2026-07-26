@@ -34,7 +34,7 @@ var GHToolsTemplate string
 var JiraToolsTemplate string
 
 // PR review is a three-step blueprint: a security pass and a
-// correctness pass each write findings to _scratch, then a cheap aggregator
+// correctness pass each write findings to _tfac, then a cheap aggregator
 // posts and submits the review. See ShippedBlueprints.
 //
 //go:embed prompts/pr-review-security.txt

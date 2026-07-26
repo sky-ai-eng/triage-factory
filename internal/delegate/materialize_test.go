@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,10 +39,10 @@ func TestMaterializePriorMemories_CreatesDirsEvenWithNoPriors(t *testing.T) {
 		t.Fatalf("expected 0 priors for new entity, got %d", len(mems))
 	}
 
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, "bpr-noprior")
+	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, "bpr-noprior", nil)
 
 	for _, name := range []string{currentRunDirName, priorRunsDirName} {
-		dir := filepath.Join(cwd, "_scratch", "entity-memory", name)
+		dir := filepath.Join(cwd, "_tfac", "entity-memory", name)
 		info, err := os.Stat(dir)
 		if err != nil {
 			t.Fatalf("%s/ not created at %s: %v", name, dir, err)
@@ -99,9 +100,9 @@ func TestMaterializePriorMemories_ReadableLayout(t *testing.T) {
 		content: "what i did last time", createdAt: "2026-07-20 09:30:00+00:00",
 	})
 
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, currentBlueprintRunID)
+	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, currentBlueprintRunID, nil)
 
-	root := filepath.Join(cwd, "_scratch", "entity-memory")
+	root := filepath.Join(cwd, "_tfac", "entity-memory")
 	assertMemoryFile(t, filepath.Join(root, "this-run", "01-triage.md"), "step 1 findings")
 	assertMemoryFile(t, filepath.Join(root, "this-run", "02-implement-the-fix.md"), "step 2 findings")
 	assertMemoryFile(t, filepath.Join(root, "history", "2026-07-20-ci-fix.md"), "what i did last time")
@@ -135,9 +136,9 @@ func TestMaterializePriorMemories_HistoryNameCollision(t *testing.T) {
 		entityID: entity.ID, taskID: task.ID, content: "second attempt", createdAt: "2026-07-20 17:00:00+00:00",
 	})
 
-	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, "bpr-current")
+	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, "bpr-current", nil)
 
-	historyDir := filepath.Join(cwd, "_scratch", "entity-memory", "history")
+	historyDir := filepath.Join(cwd, "_tfac", "entity-memory", "history")
 	assertMemoryFile(t, filepath.Join(historyDir, "2026-07-20-ci-fix.md"), "first attempt")
 	assertMemoryFile(t, filepath.Join(historyDir, "2026-07-20-ci-fix-2.md"), "second attempt")
 }
@@ -149,23 +150,109 @@ func TestClearAgentMemoryFile(t *testing.T) {
 	cwd := t.TempDir()
 
 	// Absent file: a no-op, not an error path anyone notices.
-	clearAgentMemoryFile(cwd)
+	clearAgentMemoryFile(cwd, nil)
 	if _, state := readAgentMemoryFile(cwd); state != memoryFileMissing {
 		t.Errorf("state = %v, want memoryFileMissing", state)
 	}
 
-	scratch := filepath.Join(cwd, "_scratch")
-	if err := os.MkdirAll(scratch, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(scratch, "memory.md"), []byte("the previous step's memory"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	clearAgentMemoryFile(cwd)
+	writeAgentMemory(t, cwd, "the previous step's memory")
+	clearAgentMemoryFile(cwd, nil)
 	content, state := readAgentMemoryFile(cwd)
 	if state != memoryFileMissing {
 		t.Errorf("state = %v (content %q), want memoryFileMissing", state, content)
 	}
+}
+
+// TestScanRepoFiles_GuardsEveryWriteIntoATrackedScratchDir is the
+// repo-content guard, end to end. A GitHub PR run's tree IS the repo checkout,
+// and .git/info/exclude does nothing for a path the repo already tracks — so a
+// repo that happens to keep files under the scratch dir would have them deleted
+// or overwritten by TF's own materialization and the change swept into the
+// agent's next commit. Neither the delete nor a materialized write may touch
+// one, and the repo must come out of run start exactly as clean as it went in.
+func TestScanRepoFiles_GuardsEveryWriteIntoATrackedScratchDir(t *testing.T) {
+	ctx := context.Background()
+	cwd := t.TempDir()
+	initTestRepo(t, cwd)
+
+	// A repo that tracks BOTH the agent's write path and a name the history
+	// materializer would otherwise choose for itself.
+	writeAgentMemory(t, cwd, "repo-authored memory")
+	historyName := filepath.Join(cwd, "_tfac", "entity-memory", "history", "2026-07-20-ci-fix.md")
+	if err := os.MkdirAll(filepath.Dir(historyName), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFileT(t, historyName, "repo-authored history")
+	runTestGit(t, cwd, "add", "-A")
+	runTestGit(t, cwd, "commit", "-qm", "track files under the scratch dir")
+	// The managed exclude a real worktree carries — present, and beside the
+	// point for an already-tracked path. That is the whole hazard.
+	writeFileT(t, filepath.Join(cwd, ".git", "info", "exclude"), "_tfac/\n")
+
+	owned := scanRepoFiles(ctx, cwd)
+	if !owned.owns("memory.md") || !owned.owns("entity-memory", "history", "2026-07-20-ci-fix.md") {
+		t.Fatalf("scanRepoFiles missed a tracked path: %v", owned)
+	}
+
+	// Run start: the clear, plus a materialization whose history name collides
+	// with the tracked one.
+	database := newDelegateTestDB(t)
+	stores := sqlitestore.New(database)
+	entity, task := seedMemoryFixture(t, database, stores, "owner/repo#42")
+	seedBlueprintRun(t, database, stores, "bp-guard", "bpr-guard", task.ID)
+	ensureTestPrompt(t, database, domain.Prompt{ID: "p-cifix", Name: "CI Fix", Body: "x", Source: "user"})
+	seedMemory(t, ctx, stores, database, memoryFixture{
+		runID: "prior-run", promptID: "p-cifix", stepIndex: 0, blueprintRunID: "bpr-guard",
+		entityID: entity.ID, taskID: task.ID, content: "TF memory that must not land",
+		createdAt: "2026-07-20 09:30:00+00:00",
+	})
+
+	clearAgentMemoryFile(cwd, owned)
+	materializePriorMemories(stores.TaskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, cwd, entity.ID, "bpr-current", owned)
+
+	assertMemoryFile(t, filepath.Join(cwd, "_tfac", "memory.md"), "repo-authored memory")
+	assertMemoryFile(t, historyName, "repo-authored history")
+	if out := runTestGit(t, cwd, "status", "--porcelain"); strings.TrimSpace(out) != "" {
+		t.Errorf("run start dirtied the repo: git status --porcelain = %q", out)
+	}
+}
+
+func writeAgentMemory(t *testing.T, cwd, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(cwd, "_tfac"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFileT(t, filepath.Join(cwd, "_tfac", "memory.md"), content)
+}
+
+func writeFileT(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// initTestRepo makes cwd a git working tree, skipping the test when git isn't
+// installed (the same posture the worktree package's git-backed tests take).
+func initTestRepo(t *testing.T, cwd string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	runTestGit(t, cwd, "init", "-q", ".")
+	runTestGit(t, cwd, "config", "user.email", "test@example.com")
+	runTestGit(t, cwd, "config", "user.name", "Test")
+}
+
+func runTestGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
 }
 
 func TestMemorySlug(t *testing.T) {

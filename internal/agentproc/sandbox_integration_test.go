@@ -167,9 +167,9 @@ func TestTranslateEnvForSandbox(t *testing.T) {
 		},
 		{
 			name: "abs_subpath_under_cwd_translates",
-			env:  []string{"TRIAGE_FACTORY_CONVERSATION_ROOT=/data/worktrees/abc/_scratch"},
+			env:  []string{"TRIAGE_FACTORY_CONVERSATION_ROOT=/data/worktrees/abc/_tfac"},
 			cwd:  "/data/worktrees/abc",
-			want: []string{"TRIAGE_FACTORY_CONVERSATION_ROOT=/work/_scratch"},
+			want: []string{"TRIAGE_FACTORY_CONVERSATION_ROOT=/work/_tfac"},
 		},
 		{
 			name: "abs_path_outside_cwd_dropped",

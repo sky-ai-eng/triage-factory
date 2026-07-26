@@ -54,8 +54,8 @@ func TestWriteLocalExcludes_CreatesFileWhenMissing(t *testing.T) {
 	}
 	s := string(content)
 
-	if !strings.Contains(s, "_scratch/") {
-		t.Errorf("missing _scratch/ pattern: %q", s)
+	if !strings.Contains(s, "_tfac/") {
+		t.Errorf("missing _tfac/ pattern: %q", s)
 	}
 	if !strings.Contains(s, managedExcludeBegin) || !strings.Contains(s, managedExcludeEnd) {
 		t.Errorf("missing marker pair: %q", s)
@@ -102,8 +102,8 @@ node_modules/
 	}
 
 	// Our managed pattern must be present too.
-	if !strings.Contains(gotStr, "_scratch/") {
-		t.Error("missing _scratch/ after append")
+	if !strings.Contains(gotStr, "_tfac/") {
+		t.Error("missing _tfac/ after append")
 	}
 }
 
@@ -146,17 +146,17 @@ func TestWriteLocalExcludes_Idempotent(t *testing.T) {
 
 // TestWriteLocalExcludes_PartialExisting covers the case where one of our
 // managed patterns is present in unrelated user content (e.g. the user
-// added _scratch/ manually before we ran) and the other isn't. The
+// added _tfac/ manually before we ran) and the other isn't. The
 // managed block is always written as a complete manifest, so the user's
 // line stays untouched AND our block appears with both patterns. Git
-// dedupes duplicate lines internally, so two occurrences of _scratch/
+// dedupes duplicate lines internally, so two occurrences of _tfac/
 // are functionally equivalent to one — the important invariant is
 // "user content preserved, managed block complete."
 func TestWriteLocalExcludes_PartialExisting(t *testing.T) {
 	wtDir, excludePath := setupPlainCheckout(t)
 
-	// _scratch/ lives in user content; we still write the managed block.
-	if err := os.WriteFile(excludePath, []byte("other-tool-pattern/\n_scratch/\n"), 0644); err != nil {
+	// _tfac/ lives in user content; we still write the managed block.
+	if err := os.WriteFile(excludePath, []byte("other-tool-pattern/\n_tfac/\n"), 0644); err != nil {
 		t.Fatalf("pre-populate: %v", err)
 	}
 
@@ -172,7 +172,7 @@ func TestWriteLocalExcludes_PartialExisting(t *testing.T) {
 
 	// User content preserved (both lines still present as whole lines)
 	gotLines := strings.Split(s, "\n")
-	wantUserLines := []string{"other-tool-pattern/", "_scratch/"}
+	wantUserLines := []string{"other-tool-pattern/", "_tfac/"}
 	for _, want := range wantUserLines {
 		found := false
 		for _, line := range gotLines {
@@ -211,12 +211,12 @@ func TestWriteLocalExcludes_PartialExisting(t *testing.T) {
 func TestWriteLocalExcludes_GrowthReusesBlock(t *testing.T) {
 	wtDir, excludePath := setupPlainCheckout(t)
 
-	// Simulate a previous run that only knew about _scratch/. Format matches
+	// Simulate a previous run that only knew about the legacy pattern. Format matches
 	// what writeLocalExcludes would produce — begin marker, patterns, end
 	// marker — but with a subset of the current managedExcludePatterns.
 	stale := "user-pattern/\n\n" +
 		managedExcludeBegin + "\n" +
-		"_scratch/\n" +
+		legacyScratchDir + "/\n" +
 		managedExcludeEnd + "\n"
 	if err := os.WriteFile(excludePath, []byte(stale), 0644); err != nil {
 		t.Fatalf("pre-populate: %v", err)
@@ -362,7 +362,7 @@ func TestWriteLocalExcludes_LinkedWorktreePointer(t *testing.T) {
 		t.Fatalf("read external exclude: %v", err)
 	}
 	s := string(content)
-	if !strings.Contains(s, "_scratch/") {
+	if !strings.Contains(s, "_tfac/") {
 		t.Errorf("managed patterns not written through pointer file; got:\n%s", s)
 	}
 }
@@ -457,7 +457,7 @@ func TestWriteLocalExcludes_StrayEndMarkerBeforeBlock(t *testing.T) {
 		"# " + managedExcludeEnd + "\n" +
 		"node_modules/\n\n" +
 		managedExcludeBegin + "\n" +
-		"_scratch/\n" +
+		legacyScratchDir + "/\n" +
 		managedExcludeEnd + "\n"
 	if err := os.WriteFile(excludePath, []byte(stray), 0644); err != nil {
 		t.Fatalf("pre-populate: %v", err)
@@ -546,7 +546,7 @@ func TestWriteLocalExcludes_StrayBeginBeforeBlock(t *testing.T) {
 		"*.swp\n" +
 		"\n" +
 		managedExcludeBegin + "\n" + // real begin
-		"_scratch/\n" +
+		legacyScratchDir + "/\n" +
 		managedExcludeEnd + "\n"
 	if err := os.WriteFile(excludePath, []byte(stale), 0644); err != nil {
 		t.Fatalf("pre-populate: %v", err)

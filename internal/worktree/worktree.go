@@ -399,7 +399,7 @@ func RunRoot(runID string) string {
 
 // MakeRunRoot creates the run-root directory and returns its absolute
 // path. Used by the spawner's setupJira path: the agent's initial cwd
-// is the run-root (a throwaway dir holding only _scratch/ scratch
+// is the run-root (a throwaway dir holding only the _tfac/ scratch
 // subdirs until the agent calls `workspace add` to materialize
 // worktrees as subdirs).
 //
@@ -631,6 +631,68 @@ func gitBaseEnv() []string {
 		out = append(out, kv)
 	}
 	return append(out, "GIT_TERMINAL_PROMPT=0")
+}
+
+// TrackedUnder returns the slash-separated repo-relative paths git tracks under
+// prefix in the working tree at dir. Empty for a prefix the repo knows nothing
+// about, and for a dir that is no working tree at all (a Jira run-root) — a
+// caller uses this to tell the repo's files from ours, and "not a repo" means
+// every path under the prefix can only be ours.
+//
+// This is what makes .git/info/exclude's blind spot safe to work around: an
+// exclude pattern does nothing for an already-tracked path, so a repo that
+// happens to track something under the directory TF claims would have that
+// content mutated by an infrastructure write and the change swept into the
+// agent's next commit. Ask git, don't infer from the exclude list.
+//
+// Errors are folded into "nothing tracked" deliberately: the answer's only use
+// is to hold TF back from touching a path, and a git that won't answer is not a
+// reason to fail a run.
+// AdoptLegacyScratchDir renames a run tree's pre-rename scratch dir to the
+// current name, so a run reusing a tree an older binary built still finds the
+// files an earlier step of the same workflow dropped there — a review pass's
+// findings, a downloaded CI log — where this binary's prompts say they are.
+// Without it that step reads an empty directory and, per its own instructions,
+// proceeds as though there was nothing to read.
+//
+// Refuses to move anything the repo tracks (the dir would be the repo's, not
+// ours) and never overwrites an existing current-name dir. Best-effort
+// otherwise: on failure the tree keeps both names and the run proceeds.
+func AdoptLegacyScratchDir(ctx context.Context, dir string) {
+	if dir == "" {
+		return
+	}
+	legacy := filepath.Join(dir, legacyScratchDir)
+	if info, err := os.Stat(legacy); err != nil || !info.IsDir() {
+		return
+	}
+	if _, err := os.Stat(filepath.Join(dir, ScratchDir)); err == nil {
+		return
+	}
+	if len(TrackedUnder(ctx, dir, legacyScratchDir)) > 0 {
+		worktreeLog.Warn("repo tracks files under the legacy scratch dir; leaving it in place", "dir", legacy)
+		return
+	}
+	if err := os.Rename(legacy, filepath.Join(dir, ScratchDir)); err != nil {
+		worktreeLog.Warn("adopt legacy scratch dir failed", "dir", legacy, "error", err)
+	}
+}
+
+func TrackedUnder(ctx context.Context, dir, prefix string) map[string]bool {
+	if dir == "" || prefix == "" {
+		return nil
+	}
+	out, err := gitOutputCtx(ctx, dir, "ls-files", "-z", "--", prefix)
+	if err != nil {
+		return nil
+	}
+	tracked := map[string]bool{}
+	for _, p := range strings.Split(out, "\x00") {
+		if p != "" {
+			tracked[p] = true
+		}
+	}
+	return tracked
 }
 
 func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, error) {
