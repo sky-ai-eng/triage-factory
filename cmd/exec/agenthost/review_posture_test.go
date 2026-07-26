@@ -343,10 +343,6 @@ func TestPostFinalizedReview_LosesClaimToConcurrentApprove(t *testing.T) {
 		t.Fatalf("FinalizeReviewDraft: %v", err)
 	}
 	art := listRunArtifacts(t, stores, info.RunID)[0]
-	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
-	if err != nil {
-		t.Fatalf("parse details: %v", err)
-	}
 
 	// The human approve lands first, taking the claim the handler takes.
 	won, err := stores.Artifacts.TransitionReviewStateSystem(ctx, info.OrgID, art.ID,
@@ -355,8 +351,10 @@ func TestPostFinalizedReview_LosesClaimToConcurrentApprove(t *testing.T) {
 		t.Fatalf("simulated approve claim = %v, %v; want it to win", won, err)
 	}
 
-	// Now the auto-post runs against the snapshot it read before the race.
-	res := client.postFinalizedReview(ctx, &art, details)
+	// Now the auto-post runs, having resolved its posture before the race.
+	res := client.postFinalizedReview(ctx, &art, ReviewPostureResolution{
+		Posture: domain.ReviewPostureAuto, Identity: ghclient.IdentityApp,
+	})
 
 	if res.Posted || res.URL != "" {
 		t.Errorf("result = %+v, want the staged outcome — this run lost the claim and must not publish", res)
@@ -407,5 +405,113 @@ func TestPostFinalizedReview_ClaimsBeforePosting(t *testing.T) {
 	}
 	if claimed {
 		t.Error("a human approve after the auto-post won the claim — that is the double-submit")
+	}
+}
+
+// TestPostFinalizedReview_PostsThePostClaimContent pins the claim as the
+// linearization point for the draft's CONTENT, not just for who publishes.
+// Every human draft mutation is pending-guarded, so one landing in the window
+// between the sentinel write and the claim commits first and must be what
+// reaches GitHub — posting the run's pre-claim snapshot would silently drop it.
+func TestPostFinalizedReview_PostsThePostClaimContent(t *testing.T) {
+	head := "commit_v1"
+	gh := newReviewPostureGitHub(t, &head)
+	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
+	client.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "tok", identity: ghclient.IdentityApp})
+	setTeamReviewPosture(t, stores, info.TeamID, domain.ReviewPostureDraft)
+
+	ctx := context.Background()
+	handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+	if _, err := client.GithubAddPendingReviewComment(ctx, "octo", "repo", handle, "a.go", "nit", 3, nil, "worktree_head"); err != nil {
+		t.Fatalf("GithubAddPendingReviewComment: %v", err)
+	}
+	if _, err := client.FinalizeReviewDraft(ctx, handle, "COMMENT", "## agent body"); err != nil {
+		t.Fatalf("FinalizeReviewDraft: %v", err)
+	}
+	art := listRunArtifacts(t, stores, info.RunID)[0]
+
+	// A human edits the staged body while the draft is still pending — the
+	// PATCH the overlay makes, guarded on pending exactly like this one.
+	edited, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	if err != nil {
+		t.Fatalf("parse details: %v", err)
+	}
+	edited.ReviewBody = "## human-edited body"
+	ok, err := stores.Artifacts.UpdateReviewDetailsIfPendingSystem(ctx, info.OrgID, art.ID,
+		domain.MarshalReviewArtifactDetails(edited))
+	if err != nil || !ok {
+		t.Fatalf("simulated human edit = %v, %v; want it to land while pending", ok, err)
+	}
+
+	// The auto-post runs holding the pre-edit snapshot in `art`.
+	res := client.postFinalizedReview(ctx, &art, ReviewPostureResolution{
+		Posture: domain.ReviewPostureAuto, Identity: ghclient.IdentityApp,
+	})
+	if !res.Posted {
+		t.Fatalf("result = %+v, want the review posted", res)
+	}
+	submits := gh.submitted()
+	if len(submits) != 1 {
+		t.Fatalf("GitHub saw %d submits, want 1", len(submits))
+	}
+	if body, _ := submits[0]["body"].(string); !strings.HasPrefix(body, "## human-edited body") {
+		t.Errorf("submitted body = %q, want the human's edit — the claim is the linearization point", body)
+	}
+}
+
+// TestPostFinalizedReview_ReEvaluatesPostureAgainstPostClaimContent pins the
+// other half of that re-read: the posture decision is about the content, so a
+// human flipping the draft to REQUEST_CHANGES in the claim window turns an
+// auto_unless_blocking review into one that must be staged. Honoring the stale
+// answer would post the very review the posture exists to hold back.
+func TestPostFinalizedReview_ReEvaluatesPostureAgainstPostClaimContent(t *testing.T) {
+	head := "commit_v1"
+	gh := newReviewPostureGitHub(t, &head)
+	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
+	client.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "tok", identity: ghclient.IdentityApp})
+	setTeamReviewPosture(t, stores, info.TeamID, domain.ReviewPostureDraft)
+
+	ctx := context.Background()
+	handle, err := client.GithubCreatePendingReview(ctx, "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+	if _, err := client.GithubAddPendingReviewComment(ctx, "octo", "repo", handle, "a.go", "nit", 3, nil, "worktree_head"); err != nil {
+		t.Fatalf("GithubAddPendingReviewComment: %v", err)
+	}
+	if _, err := client.FinalizeReviewDraft(ctx, handle, "COMMENT", "## body"); err != nil {
+		t.Fatalf("FinalizeReviewDraft: %v", err)
+	}
+	art := listRunArtifacts(t, stores, info.RunID)[0]
+
+	// The human escalates the verdict while it's still pending.
+	escalated, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
+	if err != nil {
+		t.Fatalf("parse details: %v", err)
+	}
+	escalated.ReviewEvent = "REQUEST_CHANGES"
+	ok, err := stores.Artifacts.UpdateReviewDetailsIfPendingSystem(ctx, info.OrgID, art.ID,
+		domain.MarshalReviewArtifactDetails(escalated))
+	if err != nil || !ok {
+		t.Fatalf("simulated escalation = %v, %v; want it to land while pending", ok, err)
+	}
+
+	// The posture was resolved against the pre-escalation COMMENT verdict.
+	res := client.postFinalizedReview(ctx, &art, ReviewPostureResolution{
+		Posture: domain.ReviewPostureAutoUnlessBlocking, Identity: ghclient.IdentityApp,
+	})
+	if res.Posted {
+		t.Error("posted a REQUEST_CHANGES review under auto_unless_blocking — the posture must be re-applied to the claimed content")
+	}
+	if n := len(gh.submitted()); n != 0 {
+		t.Errorf("GitHub saw %d submits, want 0", n)
+	}
+	// The claim is released, so the escalated review is back in the queue.
+	after := listRunArtifacts(t, stores, info.RunID)[0]
+	if after.State != domain.ArtifactStateReviewPending {
+		t.Errorf("state = %q, want pending — the claim must be released when the run declines to post", after.State)
 	}
 }

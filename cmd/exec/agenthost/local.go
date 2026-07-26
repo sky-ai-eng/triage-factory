@@ -251,32 +251,36 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 	// instant it is saved the draft is also reachable by a human in the approval
 	// queue, and their approve calls the same SubmitReview. The pending →
 	// submitted CAS inside postFinalizedReview is what settles that race.
-	if !c.shouldPostReview(ctx, art, details) {
+	posture, ok := c.resolveReviewPosture(ctx, art)
+	if !ok || !review.PostureSubmits(posture.Posture, posture.Identity, details.ReviewEvent, details.StagedComments) {
 		return staged, nil
 	}
-	return c.postFinalizedReview(ctx, art, details), nil
+	return c.postFinalizedReview(ctx, art, posture), nil
 }
 
-// shouldPostReview resolves the team's review posture and answers whether this
-// finalized draft goes straight to GitHub. Both inputs (the team setting, the
-// acting credential's identity) come from the runtime, so the answer is the same
-// in-process on all/local and relayed from the capless sidecar.
+// resolveReviewPosture reads the team's posture and the acting credential's
+// identity from the runtime, so the answer is the same in-process on all/local
+// and relayed from the capless sidecar. ok is false when the decision can't be
+// made, which the caller treats as "stage": the posture setting exists to let a
+// team opt INTO posting, so a backend blip must not be the thing that decides to
+// publish, and a staged draft loses nothing — a human can approve it.
 //
-// A resolution failure stages. The posture setting exists to let a team opt INTO
-// posting; a backend blip must not be the thing that decides to publish, and the
-// staged draft loses nothing — a human can approve it.
-func (c *LocalClient) shouldPostReview(ctx context.Context, art *domain.Artifact, details domain.ReviewArtifactDetails) bool {
+// The resolution is returned rather than collapsed to a bool because the
+// decision is re-applied to the post-claim content (see postFinalizedReview);
+// re-resolving there would mean a second settings read and credential probe to
+// answer a question already answered.
+func (c *LocalClient) resolveReviewPosture(ctx context.Context, art *domain.Artifact) (ReviewPostureResolution, bool) {
 	owner, repo, _, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
-		return false
+		return ReviewPostureResolution{}, false
 	}
 	res, err := c.rt.ReviewPosture(ctx, owner, repo)
 	if err != nil {
 		agenthostLog.Warn("review posture unresolved; staging the review for approval",
 			"run", c.info.RunID, "artifact", art.ID, "error", err)
-		return false
+		return ReviewPostureResolution{}, false
 	}
-	return review.PostureSubmits(res.Posture, res.Identity, details.ReviewEvent, details.StagedComments)
+	return res, true
 }
 
 // postFinalizedReview submits an already-finalized draft to GitHub through the
@@ -294,6 +298,24 @@ func (c *LocalClient) shouldPostReview(ctx context.Context, art *domain.Artifact
 // and one review reaches GitHub twice, with each writer's coordinates
 // overwriting the other's on the artifact row.
 //
+// The claim is also the LINEARIZATION POINT for the draft's content, same as the
+// handler's: what gets posted is re-read after winning it, never the snapshot
+// this run wrote before the window opened. Every draft mutation a human can make
+// in that window — a body/event edit, a comment edit or delete, a Refresh that
+// re-pins the comments to a newer head — is pending-guarded, so it either
+// commits before the claim (and is picked up by the re-read) or loses to it.
+// Posting the pre-claim snapshot would silently drop whichever of those landed.
+// The re-read needs no transaction with the CAS, unlike the handler's: once this
+// caller holds the claim the row is frozen — every mutation path requires
+// pending — so the read cannot see a torn state, and a read failure is handled
+// by releasing the claim rather than by a rollback.
+//
+// The posture decision is re-applied to the re-read content, because the content
+// is what it was made about: a human flipping the draft to REQUEST_CHANGES in
+// that window turns an auto_unless_blocking review into one that must be staged,
+// and honoring the stale answer would post the very review the posture exists to
+// hold back.
+//
 // A submit failure releases the claim (submitted → pending) so the draft returns
 // to the approval queue intact, and the run reports the staged outcome. The
 // release runs AFTER the failed write, mirroring the handler: a crash mid-flight
@@ -301,7 +323,7 @@ func (c *LocalClient) shouldPostReview(ctx context.Context, art *domain.Artifact
 // inverse order, where a crash between a successful post and the flip leaves the
 // review re-submittable. Failures are logged host-side — stdout belongs to the
 // verb's JSON.
-func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artifact, details domain.ReviewArtifactDetails) ReviewFinalizeResult {
+func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artifact, posture ReviewPostureResolution) ReviewFinalizeResult {
 	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
 		return ReviewFinalizeResult{}
@@ -345,6 +367,25 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 			agenthostLog.Error("auto-post review: failed to release the claim — the review is stuck as submitted without a posted review",
 				"run", c.info.RunID, "artifact", art.ID, "released", released, "error", rerr)
 		}
+	}
+
+	// Re-read the now-frozen draft: this, not the caller's snapshot, is what gets
+	// posted. An unreadable or vanished row releases the claim rather than
+	// publishing content this caller can no longer vouch for.
+	details, derr := c.claimedReviewDetails(ctx, art.ID)
+	if derr != nil {
+		agenthostLog.Warn("auto-post review: re-reading the claimed draft failed; leaving it for human approval",
+			"run", c.info.RunID, "artifact", art.ID, "error", derr)
+		releaseClaim()
+		return ReviewFinalizeResult{}
+	}
+	// The content may have moved under the posture decision while the window was
+	// open; re-apply it to what is actually about to be posted.
+	if !review.PostureSubmits(posture.Posture, posture.Identity, details.ReviewEvent, details.StagedComments) {
+		agenthostLog.Info("auto-post review: the draft changed under the posture while claiming; staging it for approval",
+			"run", c.info.RunID, "artifact", art.ID, "posture", posture.Posture)
+		releaseClaim()
+		return ReviewFinalizeResult{}
 	}
 
 	res, err := review.SubmitStaged(ctx, client, review.SubmitInput{
@@ -402,6 +443,32 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted))
 
 	return ReviewFinalizeResult{Posted: true, URL: res.URL}
+}
+
+// claimedReviewDetails re-reads a review draft this caller has already claimed
+// and returns its details. It goes through the run's artifact list — the same
+// read runReviewArtifact uses — rather than a by-id fetch, because that read is
+// already on the runtime in both placements; a claimed draft is one of a
+// handful of rows, so the difference is a slice scan.
+//
+// Deliberately NOT filtered on pending: the caller's own claim just moved the
+// row to submitted, so a pending-only lookup would never find it.
+func (c *LocalClient) claimedReviewDetails(ctx context.Context, artifactID string) (domain.ReviewArtifactDetails, error) {
+	arts, err := c.listArtifactsByRun(ctx)
+	if err != nil {
+		return domain.ReviewArtifactDetails{}, err
+	}
+	for _, a := range arts {
+		if a.ID != artifactID {
+			continue
+		}
+		details, perr := domain.ParseReviewArtifactDetails(a.DetailsJSON)
+		if perr != nil {
+			return domain.ReviewArtifactDetails{}, fmt.Errorf("parse claimed review details: %w", perr)
+		}
+		return details, nil
+	}
+	return domain.ReviewArtifactDetails{}, fmt.Errorf("claimed review %s is no longer readable on this run", artifactID)
 }
 
 // reconcileStagedCommentsToHead forward-maps every staged comment from the commit
