@@ -16,7 +16,7 @@ Two things follow from there being no terminal attached:
 - Nothing interactive will work. A command that waits for input — `git rebase -i`, an editor, a pager, anything prompting for confirmation — will hang until it is killed rather than returning. Pass the non-interactive flag (`--no-pager`, `-y`, `--yes`, `GIT_EDITOR=true`) instead.
 - `bash` has no default timeout. Pass one explicitly for anything that could block or run long, so a hang costs you seconds rather than the entire run.
 
-Tool output is truncated — roughly 2000 lines or 50KB, whichever comes first. For output you expect to be large, redirect it to a file under `_scratch/` and then `grep` or `read` the parts you need, rather than paging it through the tool result.
+Tool output is truncated to roughly the last 2000 lines or 50KB, whichever comes first. When that happens you are told so, and the full output is written to a file whose path the result gives you — read that file rather than re-running the command with narrower flags to squeeze under the limit. Note that what you are shown is the *tail*; for a command whose interesting output is at the top, the spilled file is the whole story. Redirecting to `_scratch/` yourself is still worth doing when you already know the output will be large.
 
 You may call several tools in one turn. They execute one at a time, in order, but batching them still saves a round trip to the model, so group calls that do not depend on each other's results.
 </harness>

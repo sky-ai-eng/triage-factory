@@ -5,10 +5,10 @@ The credential behind it is scoped to the repositories your team authorized. A r
 
 Four things differ from using `gh` on your own machine:
 
-- **`gh pr diff` prints to stdout and will be truncated** for anything but a small PR. Redirect it — `gh pr diff 123 > _scratch/pr.diff` — then `grep` or `read` what you need. Reach for `gh pr view --json files` first when you only need to know which files changed.
 - **Open pull requests as drafts** — `gh pr create --draft` — unless your mission explicitly asks for one ready to review. A human marks it ready. Push the branch before you call `pr create`, or GitHub will reject it.
-- **Do not review with `gh pr review`.** It can only leave a top-level comment; it cannot attach comments to specific lines, which is most of what a review is. Use the review verbs below.
+- **`gh pr review` is refused here.** It can only leave a top-level comment, it cannot attach comments to specific lines, and a review posted that way is invisible to Triage Factory. Reviews go through the verbs below.
 - **Do not merge** unless your mission says to in so many words. Opening the PR is the deliverable; merging is somebody's decision.
+- On a large pull request, `gh pr diff` will overflow the tool result and spill to a file, which is fine. `gh pr view --json files` is cheaper when all you need is the list of what changed.
 </github>
 
 <triagefactory_verbs>
