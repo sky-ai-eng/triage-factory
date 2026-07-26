@@ -51,9 +51,9 @@ import (
 // re-create them — POST /api/setup/start avoids that by no-op'ing once a
 // tenant exists, which is where the non-resurrection guarantee lives.
 // shippedPrompts + shippedBlueprints are passed in
-// (rather than read from internal/ai) so internal/db stays free of the
-// ai dependency — the caller supplies ai.ShippedPrompts() /
-// ai.ShippedBlueprints().
+// (rather than read from internal/promptseed) so internal/db
+// stays free of that dependency — the caller supplies promptseed.Prompts() /
+// promptseed.Blueprints().
 func BootstrapLocalOrg(ctx context.Context, stores Stores, shippedPrompts []domain.Prompt, shippedBlueprints []domain.SeedBlueprint) error {
 	if err := stores.Orgs.CreateLocalTenant(ctx); err != nil {
 		return fmt.Errorf("bootstrap local org: create tenant rows: %w", err)
@@ -115,11 +115,11 @@ func BootstrapTeamAgent(ctx context.Context, stores Stores, orgID, teamID string
 // in an existing org*: the team's default-enabled bot
 // membership (team_agents) plus its own copies of the prompts + blueprints +
 // event handlers (rules/triggers) — seeded directly from the TF-shipped Go
-// slices (ai.ShippedPrompts() / ai.ShippedBlueprints() / db.ShippedEventHandlers),
+// slices (promptseed.Prompts() / promptseed.Blueprints() / db.ShippedEventHandlers),
 // same as the founder's first team (BootstrapNewOrg). shippedPrompts +
-// shippedBlueprints are passed in (rather than read from internal/ai) so
-// internal/db stays free of the ai dependency — the caller supplies
-// ai.ShippedPrompts() / ai.ShippedBlueprints().
+// shippedBlueprints are passed in (rather than read from internal/promptseed) so
+// internal/db stays free of that dependency — the caller supplies
+// promptseed.Prompts() / promptseed.Blueprints().
 //
 // Per-team seeding is correct: handler + prompt rows carry a
 // random-UUID id and a system_slug, deduped on (org_id, team_id,
@@ -148,9 +148,9 @@ func BootstrapNewTeam(ctx context.Context, stores Stores, orgID, teamID string, 
 // the org's single agents row, the founder's first team's prompts +
 // blueprints + handlers (seeded directly from the shipped lists), and the
 // team's default-enabled bot membership. shippedPrompts + shippedBlueprints
-// are passed in (rather than read from internal/ai) so internal/db stays
-// free of the ai dependency — main / server supply ai.ShippedPrompts() /
-// ai.ShippedBlueprints().
+// are passed in (rather than read from internal/promptseed) so internal/db stays
+// free of that dependency — main / server supply promptseed.Prompts() /
+// promptseed.Blueprints().
 //
 // Order is load-bearing: agent → seed shipped defaults into the first team →
 // team_agents. The first team is seeded the exact same way every later team

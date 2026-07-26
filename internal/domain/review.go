@@ -7,7 +7,7 @@ import (
 
 // Review-finding severity levels. These mirror the four levels the
 // pr-review prompt assigns to every finding (see
-// internal/ai/prompts/pr-review.txt). They are surfaced two ways: as a
+// internal/promptseed/prompts/pr-review-*.txt). They are surfaced two ways: as a
 // native chip in the local pre-render diff UI, and as a shields.io badge
 // prepended to the comment body when the review is posted to GitHub.
 //

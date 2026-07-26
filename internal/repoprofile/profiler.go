@@ -435,9 +435,9 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secre
 	result, err := recorder.Complete(ctx, systemllm.CompleteOptions{
 		OrgID:        orgID,
 		Job:          systemllm.JobRepoProfiler,
-		Message:      fmt.Sprintf(ai.RepoProfilePrompt, string(inputJSON)),
-		SystemPrompt: ai.RepoProfileSystemPrompt,
-		UserMessage:  fmt.Sprintf(ai.RepoProfileUserPrompt, string(inputJSON)),
+		Message:      fmt.Sprintf(repoProfilePrompt, string(inputJSON)),
+		SystemPrompt: repoProfileSystemPrompt,
+		UserMessage:  fmt.Sprintf(repoProfileUserPrompt, string(inputJSON)),
 		Model:        ai.SystemJobModel,
 		DirectModel:  ai.SystemJobModelDirect,
 		MaxTokens:    16384,

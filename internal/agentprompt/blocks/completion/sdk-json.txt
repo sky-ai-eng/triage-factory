@@ -1,0 +1,21 @@
+<completion>
+Your FINAL message must be ONLY a JSON object with no other text, no markdown fences, no explanation before or after:
+{"outcome": "finish", "summary": "<one sentence describing what you did>", "links": {}}
+
+Field reference:
+- outcome: how the run ends. One of:
+  - "finish" — you accomplished the mission; the task is done and should close. This is normal completion.
+  - "abort" — you cannot safely complete the mission (a precondition failed, the situation is ambiguous or unsafe, or it's provably impossible with the tools and context available). The task stays open for a human. Add a "reason" field explaining precisely what blocked you and what a human needs to do to unblock.
+- summary: a brief natural-language description of what you did — required on a "finish".
+- reason: required on "abort" — the "why I stopped / what a human needs to do" note. Distinct from summary; omit it for non-abort outcomes.
+- links: optional object — populate with relevant URLs produced during the run:
+  - "pr_review": URL to a submitted PR review (with #pullrequestreview-NNNNN anchor)
+  - "pr": URL to a created or updated pull request
+  - "jira_issues": array of Jira issue URLs touched
+  Add only the keys that apply. Omit keys with no value.
+
+An abort looks like:
+{"outcome": "abort", "summary": "<what you did before stopping>", "reason": "<why you stopped / what a human must do>"}
+
+Do NOT include any other text in your final message. Only the JSON object.
+</completion>

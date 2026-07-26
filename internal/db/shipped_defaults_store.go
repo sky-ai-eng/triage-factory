@@ -8,8 +8,8 @@ import (
 
 // ShippedDefaultsStore seeds a team's prompts + blueprints (+ steps) +
 // event_handlers directly from TF's compile-time shipped lists —
-// ai.ShippedPrompts() / ai.ShippedBlueprints() (passed in so internal/db
-// stays free of the internal/ai dependency) plus the in-package
+// promptseed.Prompts() / promptseed.Blueprints() (passed in so internal/db
+// stays free of the internal/promptseed dependency) plus the in-package
 // db.ShippedEventHandlers. Every new team — the founder's first team and
 // every later one — is seeded the same way, straight from the shipped Go
 // slices.

@@ -103,3 +103,14 @@ func ValidProjectVisibility(v string) bool {
 //     SpecAuthorshipBlueprintID is empty (covers projects created before the
 //     seed landed).
 const SystemTicketSpecPromptID = "system-ticket-spec"
+
+// SystemJiraFormattingPromptID is the stable system_slug of the seeded Jira
+// markup guidance the Curator materializes as an always-on skill. Unlike
+// SystemTicketSpecPromptID a project never points at it — the curator resolves
+// the team's copy by this slug directly — so only the seed step and that
+// dispatch-time lookup consume it.
+//
+// It is a prompt row rather than an embedded file so a team whose Jira
+// conventions differ can fix it on the Prompts page. Shipping a default nobody
+// can see or change is how guidance quietly goes stale.
+const SystemJiraFormattingPromptID = "system-jira-formatting"

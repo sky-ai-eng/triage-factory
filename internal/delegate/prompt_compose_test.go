@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -21,7 +21,7 @@ func TestBuildPrompt_InterpolatesInjectedSections(t *testing.T) {
 		EntitySource:   "github",
 		EntitySourceID: "owner/repo#1",
 	}
-	toolsRef := ai.GHToolsTemplate + "\n\n" + ai.JiraToolsTemplate
+	toolsRef := agentprompt.GitHubToolsReference() + "\n\n" + agentprompt.JiraToolsReference()
 
 	out := buildPrompt(task, "", "", "mission body", "Repository: owner/repo", toolsRef,
 		"/usr/local/bin/triagefactory", "run-1", "/work", "bp-run-1", "tfac/SKY-9", "")
@@ -56,16 +56,17 @@ func TestBuildPrompt_InterpolatesInjectedSections(t *testing.T) {
 }
 
 // TestBlueprintStepNonterminalPrompt_MemoryPathCarriesNoIDs is the handoff
-// addendum's half of the fixed-path contract (its ai/prompts sibling covers the
-// envelope + tools docs): the step it hands off to reads a folder the
+// addendum's half of the fixed-path contract (the composed framework prompt and
+// the tools docs cover the rest): the step it hands off to reads a folder the
 // orchestrator names, never a path composed from run ids.
 func TestBlueprintStepNonterminalPrompt_MemoryPathCarriesNoIDs(t *testing.T) {
+	addendum := agentprompt.NonTerminalCompletion(machinistSpec())
 	for _, bad := range []string{"entity-memory/{{", "entity-memory/$"} {
-		if strings.Contains(blueprintStepNonterminalPrompt, bad) {
-			t.Errorf("blueprint-step-nonterminal.txt composes an entity-memory path from placeholders (%q)", bad)
+		if strings.Contains(addendum, bad) {
+			t.Errorf("the handoff addendum composes an entity-memory path from placeholders (%q)", bad)
 		}
 	}
-	if !strings.Contains(blueprintStepNonterminalPrompt, "_tfac/entity-memory/this-run/") {
+	if !strings.Contains(addendum, "_tfac/entity-memory/this-run/") {
 		t.Error("expected the handoff addendum to point the agent at _tfac/entity-memory/this-run/")
 	}
 }
@@ -139,7 +140,7 @@ func TestBuildPrompt_PrependOnly(t *testing.T) {
 	metadata := `{"reviewer":"octocat","review_type":"changes_requested"}`
 	mission := "mission body with {{PR_NUMBER}}"
 	scope := "Repository: owner/repo"
-	toolsRef := ai.GHToolsTemplate
+	toolsRef := agentprompt.GitHubToolsReference()
 
 	out := buildPrompt(task, metadata, "", mission, scope, toolsRef,
 		"/bin/tf", "run-1", "/work", "bp-run-1", "tfac/SKY-9", "")
@@ -147,7 +148,7 @@ func TestBuildPrompt_PrependOnly(t *testing.T) {
 	// Reconstruct the pre-injection return value: the same shim + section
 	// pre-pass + replacer pass buildPrompt runs, without the prepended block.
 	body := strings.ReplaceAll(mission, "triagefactory exec", "/bin/tf exec")
-	full := body + "\n\n" + ai.EnvelopeTemplate
+	full := body + "\n\n" + agentprompt.Build(machinistSpec(), agentprompt.Parts{})
 	full = strings.NewReplacer("{{TOOLS_REFERENCE}}", toolsRef, "{{SCOPE}}", scope).Replace(full)
 	prev := BuildPromptReplacer(task, metadata, "run-1", "/bin/tf", "/work", "bp-run-1", "tfac/SKY-9", "").Replace(full)
 

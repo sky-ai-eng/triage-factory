@@ -1,0 +1,5 @@
+<git_access>
+Your git traffic is mediated. Pushes leave through a per-run proxy that holds the credential host-side — you never see it, and it is scoped to the repositories your team authorized. The proxy is also the push gate: it refuses a push to a base or protected ref regardless of what the rules above say, and it authorizes whatever branch your checkout is on, so the branch name you pick for your own work is up to you.
+
+The gate is a backstop, not permission to be careless: a refused push is recorded as a denial against this run.
+</git_access>

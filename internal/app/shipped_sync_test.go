@@ -7,10 +7,10 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -42,14 +42,14 @@ func openLocalStores(t *testing.T) (db.Stores, *sql.DB) {
 func TestShippedDefaultsSync_LocalBoot(t *testing.T) {
 	stores, conn := openLocalStores(t)
 	ctx := context.Background()
-	if err := db.BootstrapLocalOrg(ctx, stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapLocalOrg(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("provision local tenant: %v", err)
 	}
 	org, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 
 	const slug = "system-ci-fix"
 	var shippedBody string
-	for _, p := range ai.ShippedPrompts() {
+	for _, p := range promptseed.Prompts() {
 		if p.SystemSlug == slug {
 			shippedBody = p.Body
 		}
@@ -68,7 +68,7 @@ func TestShippedDefaultsSync_LocalBoot(t *testing.T) {
 	if _, err := conn.Exec(`UPDATE prompts SET body = 'stale hand-edit' WHERE id = ?`, seeded.ID); err != nil {
 		t.Fatalf("simulate direct edit: %v", err)
 	}
-	if err := db.SyncShippedDefaultsForAllTeams(ctx, stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.SyncShippedDefaultsForAllTeams(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("sync (restore): %v", err)
 	}
 	restored, _ := stores.Prompts.GetBySystemSlug(ctx, org, team, slug)
@@ -80,7 +80,7 @@ func TestShippedDefaultsSync_LocalBoot(t *testing.T) {
 	if err := stores.Prompts.Update(ctx, org, restored.ID, "My CI Fix", "my custom body", ""); err != nil {
 		t.Fatalf("user update: %v", err)
 	}
-	if err := db.SyncShippedDefaultsForAllTeams(ctx, stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.SyncShippedDefaultsForAllTeams(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("sync (protect): %v", err)
 	}
 	survived, _ := stores.Prompts.GetBySystemSlug(ctx, org, team, slug)
@@ -89,11 +89,54 @@ func TestShippedDefaultsSync_LocalBoot(t *testing.T) {
 	}
 }
 
+// TestShippedDefaultsSync_EveryPromptRoundTrips walks the whole shipped set
+// rather than one representative slug: each body must survive the seed
+// verbatim, and a direct DB edit of any of them must be restored by the boot
+// sweep. A prompt reachable by the seeder but not by the drift sync (one no
+// blueprint wraps) passes the first half and fails the second, which is
+// exactly the failure this catches.
+func TestShippedDefaultsSync_EveryPromptRoundTrips(t *testing.T) {
+	stores, conn := openLocalStores(t)
+	ctx := context.Background()
+	if err := db.BootstrapLocalOrg(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
+		t.Fatalf("provision local tenant: %v", err)
+	}
+	org, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+
+	for _, want := range promptseed.Prompts() {
+		seeded, err := stores.Prompts.GetBySystemSlug(ctx, org, team, want.SystemSlug)
+		if err != nil || seeded == nil {
+			t.Fatalf("%s: not seeded: (%v, %v)", want.SystemSlug, seeded, err)
+		}
+		if seeded.Body != want.Body {
+			t.Errorf("%s: seeded body differs from the shipped file", want.SystemSlug)
+		}
+		if _, err := conn.Exec(`UPDATE prompts SET body = 'stale hand-edit' WHERE id = ?`, seeded.ID); err != nil {
+			t.Fatalf("%s: simulate direct edit: %v", want.SystemSlug, err)
+		}
+	}
+
+	if err := db.SyncShippedDefaultsForAllTeams(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	for _, want := range promptseed.Prompts() {
+		got, err := stores.Prompts.GetBySystemSlug(ctx, org, team, want.SystemSlug)
+		if err != nil || got == nil {
+			t.Fatalf("%s: missing after sync: (%v, %v)", want.SystemSlug, got, err)
+		}
+		if got.Body != want.Body {
+			t.Errorf("%s: drift sync did not restore the shipped body (got %q) — is it wrapped by a shipped blueprint?",
+				want.SystemSlug, bodyOf(got))
+		}
+	}
+}
+
 // TestShippedDefaultsSync_NoTenant pins that the sweep no-ops cleanly on a fresh
 // install with zero provisioned tenants (the common local first-run state).
 func TestShippedDefaultsSync_NoTenant(t *testing.T) {
 	stores, _ := openLocalStores(t)
-	if err := db.SyncShippedDefaultsForAllTeams(context.Background(), stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.SyncShippedDefaultsForAllTeams(context.Background(), stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("sweep on unprovisioned install returned error: %v", err)
 	}
 }

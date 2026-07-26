@@ -25,7 +25,7 @@ type Prompt struct {
 	// prompt — e.g. "system-ci-fix" or domain.SystemTicketSpecPromptID. NULL
 	// (empty) for user/imported prompts. The id is a random UUID per team
 	// copy, so seed/idempotency and slug→id resolution key on this column
-	// instead. ShippedPrompts() sets it; the seeder dedupes on
+	// instead. promptseed.Prompts() sets it; the seeder dedupes on
 	// (org_id, team_id, system_slug).
 	SystemSlug string    `json:"system_slug,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`

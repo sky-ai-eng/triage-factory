@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -580,7 +580,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, rootKey string,
 	return runConfig{
 		orgID:      orgID,
 		scope:      fmt.Sprintf("Repository: %s/%s\nPR: #%d\nBranch: %s", owner, repo, prNumber, pr.HeadRef),
-		toolsRef:   ai.GHToolsTemplate,
+		toolsRef:   agentprompt.GitHubToolsReference(),
 		wtPath:     wtPath,
 		hasWT:      true,
 		runRoot:    wtPath, // GitHub PR runs: worktree IS the run-root, so $TRIAGE_FACTORY_CONVERSATION_ROOT resolves to the worktree
@@ -668,7 +668,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID, rootKey string, t
 	return runConfig{
 		orgID:     orgID,
 		scope:     fmt.Sprintf("Jira issue: %s", task.EntitySourceID),
-		toolsRef:  ai.GHToolsTemplate + "\n\n" + ai.JiraToolsTemplate,
+		toolsRef:  agentprompt.GitHubToolsReference() + "\n\n" + agentprompt.JiraToolsReference(),
 		wtPath:    runRoot,
 		hasWT:     false,
 		runRoot:   runRoot,
@@ -687,7 +687,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID, rootKey string, t
 //   - Slack threads are not project-classifier targets, so
 //     awaitClassification is skipped and projectID stays nil.
 //   - The tools reference layers in an ee-registered Slack verb doc (if
-//     any registered via ai.RegisterToolsReference) on top of the GH
+//     any registered via agentprompt.RegisterToolsReference) on top of the GH
 //     template — GH tools are included because the agent acquires repos on
 //     demand and then needs the gh verbs, the same reasoning as the Jira
 //     arm's GH+Jira composition. No registered reference is not an error:
@@ -704,8 +704,8 @@ func (s *Spawner) setupSlack(ctx context.Context, orgID, runID, rootKey string, 
 		delegateLog.Warn("set worktree_path for Slack run failed; resume will reject this run", "run", runID, "error", err)
 	}
 
-	toolsRef := ai.GHToolsTemplate
-	if ref, ok := ai.ToolsReferenceFor("slack"); ok {
+	toolsRef := agentprompt.GitHubToolsReference()
+	if ref, ok := agentprompt.ToolsReferenceFor("slack"); ok {
 		toolsRef += "\n\n" + ref
 	}
 

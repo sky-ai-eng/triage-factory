@@ -1,0 +1,8 @@
+<linked_context>
+Before any other tool calls, scan the mission for references that point at richer context elsewhere — the description in the mission is rarely the whole story:
+
+- If your mission involves a GitHub PR number, fetch the PR (`pr view <pr_number> -v`) and skim the title, body, and branch name for Jira ticket references (e.g. `SKY-123`, `PROJ-456`). If the mission only mentions a branch, do not assume you can look up a PR from the available tools; only use references that are explicitly provided or already available in fetched context. When you find a Jira reference AND your tools above include a Jira reader, retrieve those tickets and read them in full before doing anything else. Tickets routinely carry the constraints, motivation, and acceptance criteria the PR description omits, and acting without that context is the most common way agents go off-track.
+- Skip lookups whose tools you don't have. Do not fabricate references that aren't actually in the mission — only follow links that are written down.
+
+This is a one-shot pre-flight pass to gather context, not a loop. Once you've fetched what's available, proceed with the actual work.
+</linked_context>
