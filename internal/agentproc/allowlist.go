@@ -48,6 +48,30 @@ import (
 // delegated agent invokes it as `<selfBin> exec ...` for scoped GH/Jira
 // operations.
 func BuildAllowedTools(selfBin string) string {
+	return BuildAllowedToolsFor(AllowedToolsOptions{SelfBin: selfBin})
+}
+
+// AllowedToolsOptions selects which surfaces the allowlist grants.
+type AllowedToolsOptions struct {
+	// SelfBin is the absolute path of the running triagefactory binary.
+	SelfBin string
+
+	// Extras are additional comma-separated tool names/patterns from skill and
+	// agent definitions, merged after deduplication against the base set. The
+	// base allowlist is the security boundary; extras only ADD surface.
+	Extras string
+
+	// GH grants the enumerated real-`gh` subcommands. Set ONLY when the run has
+	// a live gh credential channel — the point of gating it is that a run
+	// without one must not fall through to a gh binary TF doesn't own and
+	// didn't authenticate. See ghBashPatterns for what is granted and, more
+	// importantly, what isn't.
+	GH bool
+}
+
+// BuildAllowedToolsFor is the full-control form of BuildAllowedTools.
+func BuildAllowedToolsFor(o AllowedToolsOptions) string {
+	selfBin := o.SelfBin
 	// Leading `Bash(...)` patterns - curated per-command allowlist.
 	bashPatterns := []string{
 		// Triagefactory CLI - scoped GH/Jira operations the agent uses
@@ -277,7 +301,13 @@ func BuildAllowedTools(selfBin string) string {
 		//   - env (no args) - prints environment including any secrets
 		//   - go run, go install, go get - run arbitrary Go source / install binaries
 		//   - pip install, cargo install, brew install - arbitrary code
+		//   - gh api, gh auth, gh config, gh alias, gh extension, gh pr merge
+		//     - see ghBashPatterns for why each is excluded
 		//   - *** anything not on this list is blocked ***
+	}
+
+	if o.GH {
+		bashPatterns = append(bashPatterns, ghBashPatterns()...)
 	}
 
 	// Non-Bash tools stay explicit so the allowlist still documents the
@@ -289,7 +319,58 @@ func BuildAllowedTools(selfBin string) string {
 		"Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch",
 	}
 
-	return strings.Join(append(bashPatterns, otherTools...), ",")
+	all := strings.Join(append(bashPatterns, otherTools...), ",")
+	return mergeExtras(all, o.Extras)
+}
+
+// ghBashPatterns is the real-`gh` surface: enumerated subcommands, never the
+// binary.
+//
+// The distinction is the same one the git block above makes, and for the same
+// class of reason. `gh api` POSTs an arbitrary body to an arbitrary path with
+// the org's credential attached — it is a network-exfiltration primitive of
+// exactly the kind this file closes by omitting curl/wget/nc, so a blanket
+// `Bash(gh *)` would quietly reopen the channel the rest of the list
+// deliberately shuts. The porcelain below covers the workflows; the escape
+// hatch does not come with them.
+//
+// Deliberately NOT granted:
+//
+//   - gh api — the arbitrary-request escape hatch, above. Its one legitimate
+//     use, inline review comments (which `gh pr review` cannot attach at all),
+//     goes through the TF review verbs, where the human-approval and posture
+//     gates live.
+//   - gh auth, gh config, gh alias, gh extension — credential and
+//     configuration surfaces. `gh auth` would let an agent re-point or re-read
+//     the channel's identity; `gh extension install` is arbitrary code
+//     execution, the same reason `pnpm dlx` and `go install` are absent.
+//   - gh pr merge — merging is gated on the native loop's intent check, which
+//     lives in internal/agentloop and does not run here. Leaving merge
+//     unreachable is the honest answer while there is no local equivalent of
+//     that gate; an ungated merge is not.
+//
+// Each verb gets a bare and a trailing-`*` form: gh's own porcelain is
+// frequently argument-free (`gh pr list`, `gh repo view`) and the pattern
+// syntax matches literally.
+func ghBashPatterns() []string {
+	verbs := []string{
+		// Pull requests — the delegated agent's main surface.
+		"gh pr view", "gh pr list", "gh pr diff", "gh pr checkout",
+		"gh pr create", "gh pr comment", "gh pr ready", "gh pr close",
+		// Issues.
+		"gh issue view", "gh issue list", "gh issue create", "gh issue comment",
+		// Actions — CI triage reads run metadata and pulls log archives.
+		"gh run view", "gh run list", "gh run download",
+		// Repository metadata.
+		"gh repo view",
+		// Search covers prs/issues/repos/code/commits; all read-only.
+		"gh search",
+	}
+	out := make([]string, 0, 2*len(verbs))
+	for _, v := range verbs {
+		out = append(out, "Bash("+v+")", "Bash("+v+" *)")
+	}
+	return out
 }
 
 // BuildAllowedToolsWithExtras returns the base allowlist merged with
@@ -301,7 +382,11 @@ func BuildAllowedTools(selfBin string) string {
 // extras is a comma-separated string (same format as --allowedTools);
 // empty or whitespace-only is a no-op.
 func BuildAllowedToolsWithExtras(selfBin, extras string) string {
-	base := BuildAllowedTools(selfBin)
+	return BuildAllowedToolsFor(AllowedToolsOptions{SelfBin: selfBin, Extras: extras})
+}
+
+// mergeExtras appends extras to base, skipping anything base already grants.
+func mergeExtras(base, extras string) string {
 	extras = strings.TrimSpace(extras)
 	if extras == "" {
 		return base

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -389,12 +390,35 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		}
 	}
 
+	// A resumed run gets the same gh channel shape the initial invocation had:
+	// the sidecar's in multi, a fresh loopback injector in local (the channel is
+	// per-invocation, not per-run — a cold resume starts a new subprocess, so it
+	// needs its own listener, placeholder and trust file).
+	ownerForGH, _, _ := strings.Cut(opts.RepoEnv, "/")
+	localGH, localGHCloser := s.startLocalGHChannel(ctx, orgID, runID, ownerForGH, agenthost.RunInfo{
+		OrgID:            orgID,
+		UserID:           creatorUserID,
+		RunID:            runID,
+		TeamID:           opts.TeamID,
+		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
+	})
+	defer func() { _ = localGHCloser.Close() }()
+	ghChannel := opts.execSandbox.ghChannel(runID)
+	if ghChannel == nil {
+		ghChannel = localGH
+	}
+
 	baseOpts := agentproc.RunOptions{
-		Cwd:             cwd,
-		Model:           model,
-		SessionID:       sessionID,
-		Message:         message,
-		AllowedTools:    agentproc.BuildAllowedToolsWithExtras(selfBin, opts.ExtraAllowedTools),
+		Cwd:       cwd,
+		Model:     model,
+		SessionID: sessionID,
+		Message:   message,
+		// gh is granted only alongside a live channel — see runAgent's note.
+		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
+			SelfBin: selfBin,
+			Extras:  opts.ExtraAllowedTools,
+			GH:      ghChannel != nil,
+		}),
 		MaxTurns:        100,
 		ExtraEnv:        extraEnv,
 		TraceID:         runID,
@@ -407,7 +431,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		PrebuiltNetwork:  opts.execSandbox.runNetwork(),
 		PrebuiltProxyEnv: opts.execSandbox.proxyEnv(),
 		StartAgentHost:   startAgentHost,
-		GHChannel:        opts.execSandbox.ghChannel(runID),
+		GHChannel:        ghChannel,
 		// Re-mount the step skill this run's original claim staged, when it's
 		// still on disk — a resume continues the same step, so it should see the
 		// same skill it started with.

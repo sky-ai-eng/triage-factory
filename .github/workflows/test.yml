@@ -88,13 +88,15 @@ jobs:
         if: steps.docs.outputs.only != 'true'
         run: go build ./...
 
-      # The gh-channel wire tests (internal/ghinjector) drive the REAL pinned gh
-      # binary against a fake endpoint, which is the only way to pin what
-      # transport gh's porcelain actually uses — asserting the injector against
-      # an assumption about that is what let it watch the wrong requests. They
-      # skip when the binary is absent, so stage the same release the sandbox
-      # image bakes. Version and checksum are read out of the Dockerfile so the
-      # repo keeps one pinned gh, not two that can drift.
+      # The gh-channel wire tests drive the REAL pinned gh binary against a fake
+      # endpoint: internal/ghinjector pins what transport gh's porcelain
+      # actually uses (asserting the injector against an assumption about that
+      # is what let it watch the wrong requests), and internal/agentproc pins
+      # how local mode wires it — PATH resolution, config isolation, and the
+      # placeholder-only environment. Both skip when the binary is absent, so
+      # stage the same release the sandbox image bakes. Version and checksum are
+      # read out of the Dockerfile, which internal/ghpin's drift test holds
+      # equal to the Go pin local mode fetches from.
       - name: Stage pinned gh binary
         if: steps.docs.outputs.only != 'true'
         run: |
