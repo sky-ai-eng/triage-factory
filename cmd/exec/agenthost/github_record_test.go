@@ -89,7 +89,7 @@ func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered boo
 		IsEventTriggered: eventTriggered,
 	}
 	client := NewLocal(stores, info)
-	client.ghResolver = fakeGitHubResolver{baseURL: ghURL, token: "org-pat"}
+	client.SetGitHubResolver(fakeGitHubResolver{baseURL: ghURL, token: "org-pat"})
 	return conn, stores, info, client
 }
 

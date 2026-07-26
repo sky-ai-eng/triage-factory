@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -293,44 +294,59 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Translate the staged comments into the SubmitReview payload, and derive the
-	// commit_id to pin the review to. GitHub reads each comment's line in the frame
-	// of a commit; the atomic submit carries ONE commit_id for the whole review.
-	// finalize-review already reconciled every comment to the PR's single current
-	// head (TFAC-499) — auto-remapping pure shifts and failing on anything outdated
-	// — so by the time a review is approvable its comments all share one CommitSHA;
-	// the pin simply follows it. A comment-less review (approve / body-only) has no
-	// inline anchor, so it falls back to the start-review head (details.HeadSHA).
-	submitComments := make([]ghclient.SubmitReviewComment, 0, len(details.StagedComments))
-	commitID := details.HeadSHA
-	for _, c := range details.StagedComments {
-		if c.Line == nil {
+	// Publish through the shared submit (internal/review) — the same
+	// function the auto-post posture calls from the agent's finalize choke point,
+	// so the commit pin, the comment payload, and the composed deep link can't
+	// drift between a human-approved and an auto-posted review.
+	//
+	// cleanupCtx is detached from the request: the post-write block below must not
+	// turn on request liveness once the review is live on GitHub. That includes
+	// the review URL's host resolution (WebBase, called only after the submit
+	// lands) — a client disconnect between the submit and the stamp would
+	// otherwise cancel the resolve and silently downgrade a GHES/GHEC org's link
+	// to github.com.
+	cleanupCtx := context.WithoutCancel(r.Context())
+	res, err := review.SubmitStaged(r.Context(), gh, review.SubmitInput{
+		Owner:   owner,
+		Repo:    repo,
+		Number:  number,
+		Details: details,
+		Footer:  agentmeta.Build(ah.agentRuns, orgID, fresh.ConversationID, "review"),
+		WebBase: func() string {
+			base, baseErr := ah.ghResolver.BaseURLFor(cleanupCtx, orgID)
+			if baseErr != nil {
+				artifactsLog.Warn("resolve github base for review URL failed; using default host",
+					"artifact", art.ID, "org", orgID, "error", baseErr)
+				return ""
+			}
+			return base
+		},
+	})
+	if err != nil {
+		var unanchored *review.UnanchoredCommentError
+		if errors.As(err, &unanchored) {
+			// Raised before the GitHub call — nothing was published, so this is a
+			// content problem the user fixes in the overlay.
 			releaseClaim()
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error": "a staged review comment on " + c.Path + " has no line anchor and can't be submitted — edit or delete it, then approve again",
+				"error": unanchored.Error() + " — edit or delete it, then approve again",
 			})
 			return
 		}
-		if c.CommitSHA != "" {
-			commitID = c.CommitSHA
+		var divergent *review.DivergentAnchorsError
+		if errors.As(err, &divergent) {
+			// Also pre-GitHub. Reported as its own 422 rather than folded into the
+			// 502 below, because "GitHub API error" would point the user at an
+			// outage for a draft that never left this process — and Refresh, which
+			// re-pins every surviving comment to the live head, is the fix.
+			artifactsLog.Error("staged review comments disagree on their anchor commit",
+				"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+			releaseClaim()
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+				"error": divergent.Error() + " — refresh the review, then approve again",
+			})
+			return
 		}
-		submitComments = append(submitComments, ghclient.SubmitReviewComment{
-			Path:      c.Path,
-			Line:      *c.Line,
-			StartLine: c.StartLine,
-			Body:      c.Body,
-		})
-	}
-
-	// Create + submit the review in one POST, pinned to commitID (the commit its
-	// inline comments were validated against), with the staged body + event +
-	// footer. SubmitReview returns the event it submitted (it doesn't parse an
-	// authoritative event back from GitHub's response) — capture it so the
-	// persisted artifact, the verdict diff, and the response all reflect the
-	// same value that was requested.
-	body := details.ReviewBody + agentmeta.Build(ah.agentRuns, orgID, fresh.ConversationID, "review")
-	reviewID, submittedEvent, err := gh.SubmitReview(r.Context(), owner, repo, number, commitID, details.ReviewEvent, body, submitComments)
-	if err != nil {
 		artifactsLog.Warn("SubmitReview failed",
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		// Release the claim so the user can retry — nothing reached GitHub.
@@ -338,11 +354,10 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
 		return
 	}
+	submittedEvent := res.Event
 	// Record the event we submitted so a later reader — and the
 	// proposed-vs-final diff below — sees what was sent.
 	details.ReviewEvent = submittedEvent
-
-	cleanupCtx := context.WithoutCancel(r.Context())
 
 	// Step 1: stamp the submitted review's id + URL onto the claimed artifact (a
 	// submitted review finally has both — a never-published draft had neither) and
@@ -355,28 +370,8 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// stay a silent Warn.
 	submitted := *fresh
 	submitted.State = domain.ArtifactStateReviewSubmitted
-	submitted.ExternalID = strconv.Itoa(reviewID)
-	// Anchor the "View on GitHub" deep link to the org's own GitHub host —
-	// github.com, a GHES host, or a GHEC data-residency host — not a hardcoded
-	// github.com. A review artifact carries no GitHub-minted html_url (unlike a PR
-	// artifact), so the URL is composed here; BaseURLFor is the same host
-	// resolution the client that just submitted the review used, so the link and
-	// the submit agree on the server. A resolve failure degrades to the public
-	// host rather than failing the stamp after the review is already live.
-	//
-	// On cleanupCtx, not r.Context(): this runs after the review is live on
-	// GitHub, so it must not turn on request liveness. A client disconnect
-	// between the submit and here would cancel r.Context(), fail the resolve, and
-	// silently downgrade the stamped link to github.com — reintroducing this very
-	// bug in a GHES/GHEC org through a narrow race. The detached context makes the
-	// host resolution unconditional, like the rest of this post-write block.
-	webBase, baseErr := ah.ghResolver.BaseURLFor(cleanupCtx, orgID)
-	if baseErr != nil {
-		artifactsLog.Warn("resolve github base for review URL failed; using default host",
-			"artifact", art.ID, "org", orgID, "error", baseErr)
-		webBase = ""
-	}
-	submitted.URL = fmt.Sprintf("%s#pullrequestreview-%d", domain.GitHubPullURLBase(webBase, owner+"/"+repo, number), reviewID)
+	submitted.ExternalID = strconv.Itoa(res.ReviewID)
+	submitted.URL = res.URL
 	submitted.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
 	stamp := func() error {
 		return ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {

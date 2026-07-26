@@ -187,7 +187,7 @@ func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
 		t.Fatalf("GithubAddPendingReviewComment: %v", err)
 	}
 
-	if err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## Review body"); err != nil {
+	if _, err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## Review body"); err != nil {
 		t.Fatalf("FinalizeReviewDraft: %v", err)
 	}
 
@@ -207,7 +207,7 @@ func TestLocalClient_FinalizeReviewDraft(t *testing.T) {
 	}
 
 	// Anti-double-submit (TFAC-358): a second finalize hard-errors.
-	err = client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## again")
+	_, err = client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## again")
 	if !errors.Is(err, ErrReviewAlreadyFinalized) {
 		t.Errorf("second finalize-review = %v, want ErrReviewAlreadyFinalized", err)
 	}
@@ -241,7 +241,7 @@ func TestLocalClient_MultipleReviewDrafts_ResolveByHandle(t *testing.T) {
 		t.Fatalf("add comment to review 8: %v", err)
 	}
 	// Finalize the SECOND draft by its handle.
-	if err := client.FinalizeReviewDraft(context.Background(), h8, "COMMENT", "## review 8"); err != nil {
+	if _, err := client.FinalizeReviewDraft(context.Background(), h8, "COMMENT", "## review 8"); err != nil {
 		t.Fatalf("finalize review 8: %v", err)
 	}
 
@@ -284,7 +284,7 @@ func TestLocalClient_ResetReviewDraft(t *testing.T) {
 	if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "nit", 3, nil, "worktree_head"); err != nil {
 		t.Fatalf("GithubAddPendingReviewComment: %v", err)
 	}
-	if err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
+	if _, err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
 		t.Fatalf("FinalizeReviewDraft: %v", err)
 	}
 
@@ -415,7 +415,7 @@ func TestLocalClient_StagedReviewComment_RejectedAfterFinalize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add comment: %v", err)
 	}
-	if err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
+	if _, err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
 		t.Fatalf("FinalizeReviewDraft: %v", err)
 	}
 

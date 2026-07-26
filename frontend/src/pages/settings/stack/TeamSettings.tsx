@@ -49,6 +49,39 @@ import SettingsSection from './SettingsSection'
 
 const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
 
+// Review-posting postures, in the order they're offered: the
+// identity-derived default first, then the three fixed choices from most to
+// least human oversight. `help` is what distinguishes them — the setting is
+// about who the review posts as and what a wrong comment costs, which the value
+// names alone don't convey. Keep the values in sync with
+// domain.ValidReviewPostures (internal/domain/settings.go).
+const REVIEW_POSTURES: { value: string; label: string; help: string }[] = [
+  {
+    value: 'identity',
+    label: 'Match the credential',
+    help: 'Posts as the app, drafts when acting as you.',
+  },
+  {
+    value: 'draft',
+    label: 'Always draft for approval',
+    help: 'Every review waits for a human to approve it before it reaches GitHub.',
+  },
+  {
+    value: 'auto',
+    label: 'Always post',
+    help: 'Reviews go straight to GitHub when the agent finishes them.',
+  },
+  {
+    value: 'auto_unless_blocking',
+    label: 'Post unless blocking',
+    help: 'Posts directly, except a request-changes review or one with a blocker-severity comment, which waits for approval.',
+  },
+]
+
+const REVIEW_POSTURE_LABELS: Record<string, string> = Object.fromEntries(
+  REVIEW_POSTURES.map((p) => [p.value, p.label]),
+)
+
 // Fallback bounds for the grace-window slider when the backend doesn't advertise
 // them (an older server). The backend is authoritative when present — the
 // permission_absent_grace_{min,max}_seconds fields are preferred and these only
@@ -122,6 +155,8 @@ export default function TeamSettings({
   const [autoDelegate, setAutoDelegate] = useState(true)
   // Advisory branch-name template suggested to delegated agents (TFAC-498).
   const [branchTemplate, setBranchTemplate] = useState('tfac/<ticket-id>')
+  // How finished agent reviews reach GitHub.
+  const [reviewPosture, setReviewPosture] = useState('identity')
   // Presence-gated absent auto-deny (TFAC-392).
   const [absentAutodeny, setAbsentAutodeny] = useState(true)
   const [absentGraceSeconds, setAbsentGraceSeconds] = useState(15)
@@ -182,6 +217,7 @@ export default function TeamSettings({
         setDefaultModel(form.default_model)
         setAutoDelegate(form.auto_delegate_enabled)
         setBranchTemplate(form.branch_template)
+        setReviewPosture(form.review_posture)
         setAbsentAutodeny(form.permission_absent_autodeny_enabled)
         setAbsentGraceSeconds(seededGrace)
         setRepos(teamRepos ?? [])
@@ -274,7 +310,8 @@ export default function TeamSettings({
   const defaultsDirty =
     defaultModel !== baseline.default_model ||
     autoDelegate !== baseline.auto_delegate_enabled ||
-    branchTemplate !== baseline.branch_template
+    branchTemplate !== baseline.branch_template ||
+    reviewPosture !== baseline.review_posture
   const saveDefaults = async (): Promise<boolean> => {
     setSavingDefaults(true)
     try {
@@ -283,6 +320,7 @@ export default function TeamSettings({
         default_model: defaultModel,
         auto_delegate_enabled: autoDelegate,
         branch_template: branchTemplate,
+        review_posture: reviewPosture,
       })
       if (!res.ok) {
         toast.error(res.error)
@@ -293,6 +331,7 @@ export default function TeamSettings({
         default_model: defaultModel,
         auto_delegate_enabled: autoDelegate,
         branch_template: branchTemplate,
+        review_posture: reviewPosture,
       }))
       if (res.warning) toast.info(res.warning)
       toast.success('Team defaults saved')
@@ -452,7 +491,7 @@ export default function TeamSettings({
         title="Team defaults"
         summary={`Model: ${TIER_LABELS[baseline.default_model] ?? baseline.default_model}${
           baseline.auto_delegate_enabled ? ' · auto-delegate on' : ''
-        }`}
+        } · Reviews: ${REVIEW_POSTURE_LABELS[baseline.review_posture] ?? baseline.review_posture}`}
         dirty={defaultsDirty}
         saving={savingDefaults}
         onSave={saveDefaults}
@@ -460,6 +499,7 @@ export default function TeamSettings({
           setDefaultModel(baseline.default_model)
           setAutoDelegate(baseline.auto_delegate_enabled)
           setBranchTemplate(baseline.branch_template)
+          setReviewPosture(baseline.review_posture)
         }}
       >
         {/* The actual /setup team-model body — same heading + tier ladder. */}
@@ -512,6 +552,27 @@ export default function TeamSettings({
             placeholder="tfac/<ticket-id>"
             className="mt-1.5 w-full rounded-md border border-border-subtle bg-transparent px-2 py-1 text-[13px] text-text-primary focus:border-accent focus:outline-none"
           />
+        </div>
+        <div>
+          <p className="text-[13px] text-text-primary">Review posting</p>
+          <p className="mt-0.5 text-[11px] text-text-tertiary">
+            What happens when an agent finishes a code review. A drafted review waits in the
+            approval queue; a posted one appears on the pull request immediately.
+          </p>
+          <select
+            value={reviewPosture}
+            onChange={(e) => setReviewPosture(e.target.value)}
+            className="mt-1.5 w-full rounded-md border border-border-subtle bg-transparent px-2 py-1 text-[13px] text-text-primary focus:border-accent focus:outline-none"
+          >
+            {REVIEW_POSTURES.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-[11px] text-text-tertiary">
+            {REVIEW_POSTURES.find((p) => p.value === reviewPosture)?.help}
+          </p>
         </div>
       </SettingsSection>
 

@@ -1569,6 +1569,20 @@ CREATE TABLE public.team_settings (
     -- Postgres is net-new and unshipped; the SQLite tree, which HAS shipped,
     -- carries the equivalent forward migration 202606280001_team_branch_template.sql.
     branch_template text DEFAULT 'tfac/<ticket-id>'::text NOT NULL,
+    -- Per-team review-posting posture: how a delegated agent's
+    -- finalized review reaches GitHub. 'identity' (the default) decides from the
+    -- acting credential — an App installation posts as a bot and goes direct, a
+    -- borrowed PAT posts as the lending user and stages for approval, and an
+    -- indeterminate identity stages. 'draft' always stages, 'auto' always
+    -- submits, 'auto_unless_blocking' stages only a consequential review
+    -- (REQUEST_CHANGES, or any BLOCKER-severity inline comment). NOT NULL with a
+    -- literal DEFAULT so partial upserts (e.g. SetDailyCostCapSystem) materialize
+    -- it without the writer naming the column; the app coalesces an empty write
+    -- to the default and validates the value set app-side (no CHECK — the
+    -- max_llm_model_tier precedent). Rolled into the baseline (not a forward
+    -- migration) because multi-mode / Postgres is net-new and unshipped; the
+    -- SQLite tree carries 202607260001_team_review_posture.sql.
+    review_posture text DEFAULT 'identity'::text NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 

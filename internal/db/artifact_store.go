@@ -87,6 +87,15 @@ type ArtifactStore interface {
 	// handler under claims. org_id stays bound as defense in depth.
 	TransitionReviewState(ctx context.Context, orgID, id, from, to, externalID, url, detailsJSON string) (bool, error)
 
+	// TransitionReviewStateSystem is the admin-pool (BYPASSRLS) variant of
+	// TransitionReviewState, for the exec choke point's event-triggered review
+	// writers — the same split UpdateReviewDetailsIfPendingSystem covers. The
+	// auto-posting review posture needs the identical claim the approve handler
+	// takes: the drafting run and a human approver can both reach a finalized
+	// draft, so whichever calls SubmitReview must win this CAS first or the
+	// review posts twice. Identical to TransitionReviewState in SQLite.
+	TransitionReviewStateSystem(ctx context.Context, orgID, id, from, to, externalID, url, detailsJSON string) (bool, error)
+
 	// UpdateReviewDetailsIfPending rewrites a review artifact's details_json
 	// only while the draft is still state=pending, returning false when the row
 	// is missing, not a review, or already resolved. Draft mutations (staged
