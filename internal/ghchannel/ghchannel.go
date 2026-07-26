@@ -114,6 +114,12 @@ func Start(cfg Config) (*Channel, error) {
 		upstream = "https://api.github.com"
 	}
 
+	// Pre-flight the state root through the error-returning form: the path
+	// resolvers below panic on an unresolvable $HOME, and this constructor
+	// returns an error, so a missing home has to surface as one.
+	if _, err := paths.StateRootErr(); err != nil {
+		return nil, fmt.Errorf("ghchannel: resolve state root: %w", err)
+	}
 	runDir := paths.GHChannelRunDir(cfg.RunID)
 	configDir := filepath.Join(runDir, "config")
 	// 0700 throughout: the agent runs as this same user in local mode, so the
