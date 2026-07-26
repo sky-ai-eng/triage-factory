@@ -88,6 +88,26 @@ jobs:
         if: steps.docs.outputs.only != 'true'
         run: go build ./...
 
+      # The gh-channel wire tests (internal/ghinjector) drive the REAL pinned gh
+      # binary against a fake endpoint, which is the only way to pin what
+      # transport gh's porcelain actually uses — asserting the injector against
+      # an assumption about that is what let it watch the wrong requests. They
+      # skip when the binary is absent, so stage the same release the sandbox
+      # image bakes. Version and checksum are read out of the Dockerfile so the
+      # repo keeps one pinned gh, not two that can drift.
+      - name: Stage pinned gh binary
+        if: steps.docs.outputs.only != 'true'
+        run: |
+          set -euo pipefail
+          ver=$(sed -n 's/^ARG GH_VERSION=//p' docker/Dockerfile)
+          sha=$(sed -n 's/^ARG GH_SHA256_AMD64=//p' docker/Dockerfile)
+          curl -fsSL -o /tmp/gh.tgz \
+            "https://github.com/cli/cli/releases/download/v${ver}/gh_${ver}_linux_amd64.tar.gz"
+          echo "${sha}  /tmp/gh.tgz" | sha256sum -c -
+          tar -xzf /tmp/gh.tgz -C /tmp
+          sudo install -D -m 0755 "/tmp/gh_${ver}_linux_amd64/bin/gh" /opt/tf/bin/gh
+          /opt/tf/bin/gh --version
+
       # gotestsum wraps `go test` so individually failed tests are re-run
       # (up to twice) in a fresh process before the job is marked failed.
       # This is the backstop for infra-level flakes — e.g. the shared

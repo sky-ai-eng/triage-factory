@@ -330,6 +330,67 @@ func TestParseObservation_IgnoresMalformed(t *testing.T) {
 	}
 }
 
+// TestParseGraphQLObservation_KeysOnCreateMutationOnly pins the discrimination
+// the gh-driven wire tests exercise end to end, over the shapes that would be
+// tedious to provoke through gh: only the exact top-level data.createPullRequest
+// key counts, and a url that doesn't carry coordinates yields nothing rather
+// than a half-formed artifact.
+func TestParseGraphQLObservation_KeysOnCreateMutationOnly(t *testing.T) {
+	observed := []struct {
+		name                string
+		body                string
+		owner, repo, nodeID string
+		number              int
+	}{
+		{
+			name:  "create mutation",
+			body:  `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw1","url":"https://github.com/octo/repo/pull/42"}}}}`,
+			owner: "octo", repo: "repo", number: 42, nodeID: "PR_kw1",
+		},
+		{
+			name:  "GHES host and a repo named pull",
+			body:  `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw2","url":"https://ghe.corp/octo/pull/pull/7"}}}}`,
+			owner: "octo", repo: "pull", number: 7, nodeID: "PR_kw2",
+		},
+	}
+	for _, tc := range observed {
+		t.Run(tc.name, func(t *testing.T) {
+			m, ok := parseGraphQLObservation([]byte(tc.body))
+			if !ok {
+				t.Fatalf("no observation parsed from %s", tc.body)
+			}
+			if m.Kind != "pull_request" || m.Owner != tc.owner || m.Repo != tc.repo ||
+				m.Number != tc.number || m.NodeID != tc.nodeID {
+				t.Errorf("observation = %+v, want %s/%s#%d node %s", m, tc.owner, tc.repo, tc.number, tc.nodeID)
+			}
+		})
+	}
+
+	ignored := []struct{ name, body string }{
+		// A read nests its pullRequest under repository — recording it would
+		// attribute a PR the run only looked at.
+		{"pr view query", `{"data":{"repository":{"pullRequest":{"id":"PR_kw1","url":"https://github.com/octo/repo/pull/42"}}}}`},
+		{"pr list query", `{"data":{"repository":{"pullRequests":{"nodes":[{"id":"PR_kw1","url":"https://github.com/octo/repo/pull/42"}]}}}}`},
+		// Other mutations gh performs, none of which created anything.
+		{"review mutation", `{"data":{"addPullRequestReview":{"clientMutationId":null}}}`},
+		{"ready mutation", `{"data":{"markPullRequestReadyForReview":{"pullRequest":{"id":"PR_kw1"}}}}`},
+		{"merge mutation", `{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_kw1"}}}}`},
+		// Create shapes with nothing usable in them.
+		{"errors only", `{"data":{"createPullRequest":null},"errors":[{"message":"nope"}]}`},
+		{"no url", `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw1"}}}}`},
+		{"url without coordinates", `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw1","url":"https://github.com/octo/repo"}}}}`},
+		{"non-numeric number", `{"data":{"createPullRequest":{"pullRequest":{"id":"PR_kw1","url":"https://github.com/octo/repo/pull/abc"}}}}`},
+		{"not json", `createPullRequest`},
+	}
+	for _, tc := range ignored {
+		t.Run(tc.name, func(t *testing.T) {
+			if m, ok := parseGraphQLObservation([]byte(tc.body)); ok {
+				t.Errorf("observed %+v, want nothing from %s", m, tc.body)
+			}
+		})
+	}
+}
+
 // TestInjector_OversizedBodyReachesAgentIntact is the regression for the
 // observation buffer truncating the agent's response. A mutation response larger
 // than maxObserveBody must reach the caller byte-for-byte — only the observation
@@ -376,6 +437,68 @@ func TestInjector_OversizedBodyReachesAgentIntact(t *testing.T) {
 	}
 	if observed != 0 {
 		t.Errorf("observations = %d, want 0 (oversized bodies skip observation)", observed)
+	}
+}
+
+// countingBody reports how much of a response body was actually read.
+type countingBody struct {
+	r    io.Reader
+	read int
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	b.read += n
+	return n, err
+}
+
+func (b *countingBody) Close() error { return nil }
+
+// TestBufferForObservation_DeclaredOversizeReadsNothing pins the short-circuit:
+// when the upstream advertises a Content-Length past the cap the outcome is
+// already settled, so the body must stream to the agent untouched rather than
+// being dragged through a megabyte of doomed buffering first.
+func TestBufferForObservation_DeclaredOversizeReadsNothing(t *testing.T) {
+	payload := strings.Repeat("z", maxObserveBody+4096)
+	body := &countingBody{r: strings.NewReader(payload)}
+	resp := &http.Response{ContentLength: int64(len(payload)), Body: body}
+
+	if buf, ok := bufferForObservation(resp); ok || buf != nil {
+		t.Errorf("bufferForObservation = (%d bytes, %v), want (nil, false)", len(buf), ok)
+	}
+	if body.read != 0 {
+		t.Errorf("read %d bytes from an over-cap declared body, want 0", body.read)
+	}
+	if resp.Body != body {
+		t.Error("response body was replaced; an unread body must stream on as-is")
+	}
+	// The agent still gets every byte.
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(got) != payload {
+		t.Errorf("delivered %d bytes, want the full %d", len(got), len(payload))
+	}
+}
+
+// TestBufferForObservation_UnknownLengthStillBuffers is the other side of that
+// short-circuit: a chunked response declares -1, which must not be read as
+// "under the cap" nor as "over" — it falls through to the read.
+func TestBufferForObservation_UnknownLengthStillBuffers(t *testing.T) {
+	const payload = `{"number":1}`
+	resp := &http.Response{ContentLength: -1, Body: io.NopCloser(strings.NewReader(payload))}
+
+	buf, ok := bufferForObservation(resp)
+	if !ok {
+		t.Fatal("bufferForObservation skipped a chunked response")
+	}
+	if string(buf) != payload {
+		t.Errorf("buffered %q, want %q", buf, payload)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if string(got) != payload {
+		t.Errorf("re-presented body = %q, want %q", got, payload)
 	}
 }
 
