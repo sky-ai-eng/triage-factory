@@ -3,6 +3,7 @@ package runsidecar
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -307,7 +308,28 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string) (strin
 	if err != nil {
 		return "", "", err
 	}
-	srv, err := ghinjector.New(ghinjector.Config{
+	srv, err := ghinjector.New(r.ghInjectorConfig(upstream, cert, token))
+	if err != nil {
+		return "", "", fmt.Errorf("runsidecar: construct gh injector: %w", err)
+	}
+	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
+	if err != nil {
+		return "", "", fmt.Errorf("runsidecar: start gh injector: %w", err)
+	}
+	r.ghInjector = srv
+	return addr, token, nil
+}
+
+// ghInjectorConfig builds the gh channel's per-run wiring, the sibling of
+// gitProxyConfig: the TokenSource reads the held bundle's single
+// team-set-scoped CLIToken live (so a mid-run re-seal is picked up), and the
+// two fire-and-forget callbacks relay to the orchestrator, which holds the DB.
+//
+// Split from startGHInjector because that function's cert write lands under the
+// privileged per-run socket root — so the wiring is only reachable to a test
+// through this seam.
+func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, token string) ghinjector.Config {
+	return ghinjector.Config{
 		Upstream:         upstream,
 		IncomingToken:    token,
 		Cert:             cert,
@@ -347,16 +369,7 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string) (strin
 			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite,
 				agentproc.RecordGHWriteArgs{Method: w.Method, Path: w.Path, Status: w.Status})
 		},
-	})
-	if err != nil {
-		return "", "", fmt.Errorf("runsidecar: construct gh injector: %w", err)
 	}
-	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
-	if err != nil {
-		return "", "", fmt.Errorf("runsidecar: start gh injector: %w", err)
-	}
-	r.ghInjector = srv
-	return addr, token, nil
 }
 
 // startGitHubAPIProxy binds a GitHub-REST credential proxy on the veth IP.

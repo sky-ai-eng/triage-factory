@@ -3,6 +3,7 @@ package runsidecar
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
@@ -347,6 +349,12 @@ func TestRuntime_EgressDenialRelaysToOrchestrator(t *testing.T) {
 // half: a mutating REST call through the injector relays a record_gh_write
 // carrying method, path, and the upstream's status — including a non-2xx,
 // which the artifact observation path drops entirely.
+//
+// It drives the injector built from the production config (ghInjectorConfig)
+// rather than through startGHInjector, whose cert write lands under the
+// privileged per-run socket root — unreachable to an unprivileged test runner.
+// The wiring under test is the config's, so this is the whole of it: a missing
+// ObserveWrite fails here.
 func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// An off-scope write masked as a not-found: the outcome that used to
@@ -383,31 +391,40 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 		t.Fatalf("relay bundle: %v", err)
 	}
 
-	var res sidecarproto.StartProxiesResult
-	if err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{
-		HostVethIP:        "127.0.0.1",
-		GHChannelEnabled:  true,
-		GHChannelUpstream: upstream.URL,
-		AgentHost:         &sidecarproto.AgentHostInfo{RunID: "11111111-1111-1111-1111-111111111111"},
-	}, &res); err != nil {
-		t.Fatalf("start proxies: %v", err)
+	cert, certPEM, err := ghinjector.GenerateCert("127.0.0.1")
+	if err != nil {
+		t.Fatalf("GenerateCert: %v", err)
 	}
-	if res.GHChannelHost == "" {
-		t.Fatalf("no gh channel host in result: %+v", res)
+	const placeholder = "per-run-placeholder"
+	srv, err := ghinjector.New(rt.ghInjectorConfig(upstream.URL, cert, placeholder))
+	if err != nil {
+		t.Fatalf("construct injector: %v", err)
 	}
+	host, err := srv.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start injector: %v", err)
+	}
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+		defer shutdownCancel()
+		_ = srv.Shutdown(shutdownCtx)
+	})
 
-	client := &http.Client{Transport: &http.Transport{
-		// The injector serves its per-run self-signed cert; the jail trusts it
-		// through a bind-mounted bundle, which a test has no use for.
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-	}}
-	req, _ := http.NewRequest(http.MethodPatch, "https://"+res.GHChannelHost+"/api/v3/repos/acme/widgets/pulls/7", nil)
-	req.Header.Set("Authorization", "token "+res.GHChannelToken)
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(certPEM) {
+		t.Fatal("append injector cert to pool failed")
+	}
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
+	req, _ := http.NewRequest(http.MethodPatch, "https://"+host+"/api/v3/repos/acme/widgets/pulls/7", nil)
+	req.Header.Set("Authorization", "token "+placeholder)
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("request through injector: %v", err)
 	}
 	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("caller saw %d, want the upstream's 404 (a 502 means the bundle token never resolved)", resp.StatusCode)
+	}
 
 	deadline := time.After(4 * time.Second)
 	for {
