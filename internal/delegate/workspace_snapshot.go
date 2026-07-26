@@ -364,7 +364,7 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID, owner, repo,
 	if sawScratch {
 		// The fresh worktree has no _tfac (git-excluded), so move the staged
 		// tree in wholesale.
-		if err := os.Rename(scratchStaging, filepath.Join(wtDir, "_tfac")); err != nil {
+		if err := os.Rename(scratchStaging, filepath.Join(wtDir, worktree.ScratchDir)); err != nil {
 			return fmt.Errorf("rehydrate: install scratch: %w", err)
 		}
 	}
@@ -405,7 +405,7 @@ func (s *Spawner) discardWorkspaceSnapshot(ctx context.Context, orgID, keyID str
 // snapScratchPrefix, skipping the re-materializable entity-memory and
 // project-knowledge subtrees. A missing _tfac is fine (nothing to capture).
 func tarScratch(tw *tar.Writer, wtPath string) error {
-	root := filepath.Join(wtPath, "_tfac")
+	root := filepath.Join(wtPath, worktree.ScratchDir)
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
 		return nil
 	}
