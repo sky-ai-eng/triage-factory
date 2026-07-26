@@ -87,6 +87,18 @@ func NewLocal(stores db.Stores, info RunInfo) *LocalClient {
 	}
 }
 
+// SetGitHubResolver overrides the credential resolver this client resolves gh
+// verbs through, AND the one the in-process runtime's review-posture identity
+// probe uses. They must be the same object: two resolvers would mean the posture
+// decision classified a different credential than the one that goes on to make
+// the call. Used by the local-mode wiring and by tests injecting a fake tier.
+func (c *LocalClient) SetGitHubResolver(r ghclient.Resolver) {
+	c.ghResolver = r
+	if dr, ok := c.rt.(*directRuntime); ok {
+		dr.ghResolver = r
+	}
+}
+
 func (c *LocalClient) LookupRun(_ context.Context) (RunInfo, error) {
 	// Empty RunID at this stage means AutoDetect's env probe was
 	// bypassed (test seam) or the caller constructed a LocalClient
@@ -129,14 +141,21 @@ func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*
 	return art, nil
 }
 
-// FinalizeReviewDraft is the host side of `gh pr finalize-review`: it finalizes a
-// fully TF-side review draft for human approval and makes NO GitHub write (the
-// atomic create+submit happens at approval). It locates the run's review
-// artifact, gates on comment freshness vs. the PR's current head (TFAC-499),
+// FinalizeReviewDraft is the host side of `gh pr finalize-review`: it locates the
+// run's review artifact, gates on comment freshness vs. the PR's current head,
 // stages the body + event, snapshots the agent's draft (body + event + the
 // locally staged inline comments) into details.proposed as the approve-time
-// human-feedback baseline, and sets the ready sentinel (details_json.review_event)
-// that marks the review awaiting approval.
+// human-feedback baseline, and sets the ready sentinel
+// (details_json.review_event) that marks the draft finished — the guard against
+// a second finalize, whether the first one staged the review or posted it.
+//
+// Whether the review then goes to GitHub is the team's posture,
+// resolved here and nowhere else: this is the only place holding the DB handle,
+// the team settings, and the credential resolver — the in-sandbox verb has none
+// of them and must not learn about posture. Under a staging posture nothing
+// reaches GitHub (the atomic create+submit happens at approval, exactly as
+// before); under a posting posture the review is submitted through the shared
+// publish path the human-approval handler uses. The result reports which.
 //
 // reviewID is the local review handle the agent passes through (the artifact id);
 // it's validated against the artifact's id so a stale handle fails loudly rather
@@ -153,27 +172,30 @@ func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*
 // deleted) fails finalize with a per-comment list so the agent re-reads the new
 // diff, edits/deletes/re-adds against the new head, and retries. On success every
 // comment shares the current head, so approval pins that single commit_id.
-func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) error {
+func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) (ReviewFinalizeResult, error) {
+	staged := ReviewFinalizeResult{}
 	art, err := c.runReviewArtifact(ctx, reviewID)
 	if err != nil {
-		return err
+		return staged, err
 	}
 
 	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
 	if err != nil {
-		return fmt.Errorf("parse review artifact details: %w", err)
+		return staged, fmt.Errorf("parse review artifact details: %w", err)
 	}
 	// Anti-double-submit (TFAC-358): the ready sentinel is already set, so the
-	// agent already finalized this review. Hard error so it stops looping.
+	// agent already finalized this review. Hard error so it stops looping. This
+	// holds under every posture — the sentinel is armed before any GitHub write,
+	// so a second call is refused whether the first one posted or staged.
 	if details.ReviewEvent != "" {
-		return ErrReviewAlreadyFinalized
+		return staged, ErrReviewAlreadyFinalized
 	}
 
 	// A comment / request_changes review must carry something actionable: a body,
 	// inline comments, or both. An approve needs neither (the approval is the
 	// signal). The comments are the locally staged set the agent added.
 	if body == "" && event != "APPROVE" && len(details.StagedComments) == 0 {
-		return fmt.Errorf("a %s review needs --body/--body-file or at least one inline comment", strings.ToLower(event))
+		return staged, fmt.Errorf("a %s review needs --body/--body-file or at least one inline comment", strings.ToLower(event))
 	}
 
 	// Freshness gate (TFAC-499): reconcile the staged comments to the PR's current
@@ -197,7 +219,7 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 	if len(details.StagedComments) > 0 {
 		base, head, err := c.reconcileStagedCommentsToHead(ctx, art, &details)
 		if err != nil {
-			return err
+			return staged, err
 		}
 		finalizeHead = head
 		finalizeBase = base
@@ -216,9 +238,237 @@ func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, 
 	details.Proposed = proposed
 
 	if err := c.saveReviewDraftDetails(ctx, art.ID, details); err != nil {
-		return fmt.Errorf("snapshot review draft into artifact: %w", err)
+		return staged, fmt.Errorf("snapshot review draft into artifact: %w", err)
 	}
-	return nil
+
+	// Posture decision AFTER the snapshot, never before: the guarded write is what
+	// arms the sentinel that refuses a second finalize from this run. A crash (or
+	// a GitHub failure) between here and the submit leaves a finalized draft a
+	// human can still approve — the inverse order would leave a posted review
+	// this run would happily post again.
+	//
+	// The sentinel does NOT make the post at-most-once on its own: from the
+	// instant it is saved the draft is also reachable by a human in the approval
+	// queue, and their approve calls the same SubmitReview. The pending →
+	// submitted CAS inside postFinalizedReview is what settles that race.
+	posture, ok := c.resolveReviewPosture(ctx, art)
+	if !ok || !review.PostureSubmits(posture.Posture, posture.Identity, details.ReviewEvent, details.StagedComments) {
+		return staged, nil
+	}
+	return c.postFinalizedReview(ctx, art, posture), nil
+}
+
+// resolveReviewPosture reads the team's posture and the acting credential's
+// identity from the runtime, so the answer is the same in-process on all/local
+// and relayed from the capless sidecar. ok is false when the decision can't be
+// made, which the caller treats as "stage": the posture setting exists to let a
+// team opt INTO posting, so a backend blip must not be the thing that decides to
+// publish, and a staged draft loses nothing — a human can approve it.
+//
+// The resolution is returned rather than collapsed to a bool because the
+// decision is re-applied to the post-claim content (see postFinalizedReview);
+// re-resolving there would mean a second settings read and credential probe to
+// answer a question already answered.
+func (c *LocalClient) resolveReviewPosture(ctx context.Context, art *domain.Artifact) (ReviewPostureResolution, bool) {
+	owner, repo, _, ok := domain.ParsePRTarget(art.Target)
+	if !ok {
+		return ReviewPostureResolution{}, false
+	}
+	res, err := c.rt.ReviewPosture(ctx, owner, repo)
+	if err != nil {
+		agenthostLog.Warn("review posture unresolved; staging the review for approval",
+			"run", c.info.RunID, "artifact", art.ID, "error", err)
+		return ReviewPostureResolution{}, false
+	}
+	return res, true
+}
+
+// postFinalizedReview submits an already-finalized draft to GitHub through the
+// shared publish path (internal/review.SubmitStaged — the same function the
+// human-approval handler calls, so comment anchoring, the commit pin, and the
+// composed deep link behave identically), then stamps the artifact with the
+// posted review's id + URL and appends the review_submitted audit row.
+//
+// The pending → submitted CAS is taken BEFORE the GitHub write, exactly as the
+// approve handler takes it and for exactly the same reason: a finalized draft is
+// reachable by two independent callers — this run, and any human looking at the
+// approval queue — and both publish by calling SubmitReview. Whoever wins the
+// CAS posts; the loser backs off having touched nothing. Without it the two
+// windows overlap (the sentinel is saved a few round-trips before the submit)
+// and one review reaches GitHub twice, with each writer's coordinates
+// overwriting the other's on the artifact row.
+//
+// The claim is also the LINEARIZATION POINT for the draft's content, same as the
+// handler's: what gets posted is re-read after winning it, never the snapshot
+// this run wrote before the window opened. Every draft mutation a human can make
+// in that window — a body/event edit, a comment edit or delete, a Refresh that
+// re-pins the comments to a newer head — is pending-guarded, so it either
+// commits before the claim (and is picked up by the re-read) or loses to it.
+// Posting the pre-claim snapshot would silently drop whichever of those landed.
+// The re-read needs no transaction with the CAS, unlike the handler's: once this
+// caller holds the claim the row is frozen — every mutation path requires
+// pending — so the read cannot see a torn state, and a read failure is handled
+// by releasing the claim rather than by a rollback.
+//
+// The posture decision is re-applied to the re-read content, because the content
+// is what it was made about: a human flipping the draft to REQUEST_CHANGES in
+// that window turns an auto_unless_blocking review into one that must be staged,
+// and honoring the stale answer would post the very review the posture exists to
+// hold back.
+//
+// A submit failure releases the claim (submitted → pending) so the draft returns
+// to the approval queue intact, and the run reports the staged outcome. The
+// release runs AFTER the failed write, mirroring the handler: a crash mid-flight
+// strands the artifact as submitted-without-URL, which is preferable to the
+// inverse order, where a crash between a successful post and the flip leaves the
+// review re-submittable. Failures are logged host-side — stdout belongs to the
+// verb's JSON.
+func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artifact, posture ReviewPostureResolution) ReviewFinalizeResult {
+	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
+	if !ok {
+		return ReviewFinalizeResult{}
+	}
+	client, err := c.githubClientForRepo(ctx, owner, repo)
+	if err != nil {
+		agenthostLog.Warn("auto-post review: no GitHub client; leaving the review staged for approval",
+			"run", c.info.RunID, "artifact", art.ID, "error", err)
+		return ReviewFinalizeResult{}
+	}
+	// The footer is the same run-attribution block the approval path appends, so
+	// an auto-posted review carries the identical provenance line. Resolved before
+	// the claim: it is a plain read, and holding the claim across it would widen
+	// the window in which a crash strands the row as submitted-without-URL.
+	footer, ferr := c.rt.AgentFooter(ctx, "review")
+	if ferr != nil {
+		agenthostLog.Warn("auto-post review: agent footer unavailable; posting without it",
+			"run", c.info.RunID, "artifact", art.ID, "error", ferr)
+		footer = ""
+	}
+
+	// Claim the review. A lost CAS means a human approved this draft in the window
+	// since the sentinel was saved — their approve is posting it, so this run must
+	// not, and reports the staged outcome (it did not publish; the agent's next
+	// step is the same either way). A CAS error is treated identically: never
+	// publish on an unconfirmed claim.
+	claimed, cerr := c.rt.TransitionReviewState(ctx, art.ID,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
+	if cerr != nil || !claimed {
+		agenthostLog.Warn("auto-post review: could not claim the draft; leaving it for human approval",
+			"run", c.info.RunID, "artifact", art.ID, "claimed", claimed, "error", cerr)
+		return ReviewFinalizeResult{}
+	}
+	// releaseClaim undoes the claim so the draft is approvable again. Best-effort
+	// and loud: a failed release strands the row as submitted with no posted
+	// review behind it, which no other writer can now correct.
+	releaseClaim := func() {
+		released, rerr := c.rt.TransitionReviewState(ctx, art.ID,
+			domain.ArtifactStateReviewSubmitted, domain.ArtifactStateReviewPending, "", "", "")
+		if rerr != nil || !released {
+			agenthostLog.Error("auto-post review: failed to release the claim — the review is stuck as submitted without a posted review",
+				"run", c.info.RunID, "artifact", art.ID, "released", released, "error", rerr)
+		}
+	}
+
+	// Re-read the now-frozen draft: this, not the caller's snapshot, is what gets
+	// posted. An unreadable or vanished row releases the claim rather than
+	// publishing content this caller can no longer vouch for.
+	details, derr := c.claimedReviewDetails(ctx, art.ID)
+	if derr != nil {
+		agenthostLog.Warn("auto-post review: re-reading the claimed draft failed; leaving it for human approval",
+			"run", c.info.RunID, "artifact", art.ID, "error", derr)
+		releaseClaim()
+		return ReviewFinalizeResult{}
+	}
+	// The content may have moved under the posture decision while the window was
+	// open; re-apply it to what is actually about to be posted.
+	if !review.PostureSubmits(posture.Posture, posture.Identity, details.ReviewEvent, details.StagedComments) {
+		agenthostLog.Info("auto-post review: the draft changed under the posture while claiming; staging it for approval",
+			"run", c.info.RunID, "artifact", art.ID, "posture", posture.Posture)
+		releaseClaim()
+		return ReviewFinalizeResult{}
+	}
+
+	res, err := review.SubmitStaged(ctx, client, review.SubmitInput{
+		Owner:   owner,
+		Repo:    repo,
+		Number:  number,
+		Details: details,
+		Footer:  footer,
+		WebBase: func() string {
+			base, berr := c.githubResolver().BaseURLFor(ctx, c.info.OrgID)
+			if berr != nil {
+				agenthostLog.Warn("auto-post review: github base unresolved; using default host",
+					"run", c.info.RunID, "artifact", art.ID, "error", berr)
+				return ""
+			}
+			return base
+		},
+	})
+	if err != nil {
+		agenthostLog.Warn("auto-post review: submit failed; the review stays staged for human approval",
+			"run", c.info.RunID, "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+		releaseClaim()
+		return ReviewFinalizeResult{}
+	}
+
+	// Stamp the posted review's coordinates onto the claimed row — a
+	// submitted → submitted CAS, not an Upsert, whose state column is
+	// last-writer-wins and would let a concurrent writer's stale snapshot
+	// overwrite what GitHub just minted. Retried once; a double failure is loud,
+	// because until it lands the row reads submitted with no URL.
+	details.ReviewEvent = res.Event
+	submitted := *art
+	submitted.State = domain.ArtifactStateReviewSubmitted
+	submitted.ExternalID = strconv.Itoa(res.ReviewID)
+	submitted.URL = res.URL
+	submitted.DetailsJSON = domain.MarshalReviewArtifactDetails(details)
+	stamp := func() (bool, error) {
+		return c.rt.TransitionReviewState(ctx, art.ID,
+			domain.ArtifactStateReviewSubmitted, domain.ArtifactStateReviewSubmitted,
+			submitted.ExternalID, submitted.URL, submitted.DetailsJSON)
+	}
+	if stamped, serr := stamp(); serr != nil || !stamped {
+		agenthostLog.Warn("auto-post review: stamping the posted review onto the artifact failed; retrying once",
+			"run", c.info.RunID, "artifact", art.ID, "stamped", stamped, "error", serr)
+		if stamped, serr := stamp(); serr != nil || !stamped {
+			agenthostLog.Error("auto-post review: stamp failed twice — the artifact shows submitted without the posted review's id/URL",
+				"run", c.info.RunID, "artifact", art.ID, "review", submitted.ExternalID, "url", submitted.URL, "error", serr)
+		}
+	}
+	// The audit row is appended on its own (the artifact is already written by the
+	// CAS above, so there is nothing to compose it with). Best-effort like every
+	// other recording here — the GitHub write already landed and must not be
+	// unwound by a bookkeeping failure.
+	c.recordBotAction(ctx, githubAction(submitted, domain.ActionReviewSubmitted,
+		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted))
+
+	return ReviewFinalizeResult{Posted: true, URL: res.URL}
+}
+
+// claimedReviewDetails re-reads a review draft this caller has already claimed
+// and returns its details. It goes through the run's artifact list — the same
+// read runReviewArtifact uses — rather than a by-id fetch, because that read is
+// already on the runtime in both placements; a claimed draft is one of a
+// handful of rows, so the difference is a slice scan.
+//
+// Deliberately NOT filtered on pending: the caller's own claim just moved the
+// row to submitted, so a pending-only lookup would never find it.
+func (c *LocalClient) claimedReviewDetails(ctx context.Context, artifactID string) (domain.ReviewArtifactDetails, error) {
+	arts, err := c.listArtifactsByRun(ctx)
+	if err != nil {
+		return domain.ReviewArtifactDetails{}, err
+	}
+	for _, a := range arts {
+		if a.ID != artifactID {
+			continue
+		}
+		details, perr := domain.ParseReviewArtifactDetails(a.DetailsJSON)
+		if perr != nil {
+			return domain.ReviewArtifactDetails{}, fmt.Errorf("parse claimed review details: %w", perr)
+		}
+		return details, nil
+	}
+	return domain.ReviewArtifactDetails{}, fmt.Errorf("claimed review %s is no longer readable on this run", artifactID)
 }
 
 // reconcileStagedCommentsToHead forward-maps every staged comment from the commit
@@ -909,7 +1159,9 @@ func jiraBodySnippet(body string) string {
 // in the resolver — no gh-specific credential logic here.
 func (c *LocalClient) githubResolver() ghclient.Resolver {
 	if c.ghResolver == nil {
-		c.ghResolver = ghclient.NewResolver(c.stores.Secrets, c.stores.GitHubApps, c.stores.Orgs, c.stores.Agents, nil)
+		// Through SetGitHubResolver so the in-process runtime's review-posture
+		// identity probe shares this one cache rather than building a second.
+		c.SetGitHubResolver(ghclient.NewResolver(c.stores.Secrets, c.stores.GitHubApps, c.stores.Orgs, c.stores.Agents, nil))
 	}
 	return c.ghResolver
 }

@@ -71,7 +71,7 @@ func TestLocalClient_FinalizeReview_Freshness_CleanAnchorAtHead(t *testing.T) {
 		t.Fatalf("add comment: %v", err)
 	}
 
-	if err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
+	if _, err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
 		t.Fatalf("finalize (clean) must pass: %v", err)
 	}
 
@@ -111,7 +111,7 @@ func TestLocalClient_FinalizeReview_Freshness_ShiftAutoRemaps(t *testing.T) {
 		t.Fatalf("add comment: %v", err)
 	}
 
-	if err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
+	if _, err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
 		t.Fatalf("finalize (pure shift) must pass: %v", err)
 	}
 
@@ -152,7 +152,7 @@ func TestLocalClient_FinalizeReview_Freshness_OutdatedFails(t *testing.T) {
 		t.Fatalf("add comment: %v", err)
 	}
 
-	err = client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body")
+	_, err = client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body")
 	if err == nil {
 		t.Fatal("finalize with an outdated comment must fail")
 	}
@@ -214,7 +214,7 @@ func TestLocalClient_FinalizeReview_Freshness_MixedMultiComment(t *testing.T) {
 		t.Fatalf("add comment b: %v", err)
 	}
 
-	err = client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body")
+	_, err = client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body")
 	if err == nil {
 		t.Fatal("finalize must fail when any comment is outdated")
 	}
@@ -266,7 +266,7 @@ func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
 		if _, err := client.GithubAddPendingReviewComment(context.Background(), "octo", "repo", handle, "a.go", "nit", 3, nil, "head1"); err != nil {
 			t.Fatalf("add comment: %v", err)
 		}
-		if err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
+		if _, err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
 			t.Fatalf("finalize: %v", err)
 		}
 
@@ -293,7 +293,7 @@ func TestLocalClient_FinalizeReview_StampsFinalizedHead(t *testing.T) {
 		}
 		// A pure approve carries no body and no inline comments — allowed, and it
 		// reconciles nothing, so finalize touches GitHub not at all.
-		if err := client.FinalizeReviewDraft(context.Background(), handle, "APPROVE", ""); err != nil {
+		if _, err := client.FinalizeReviewDraft(context.Background(), handle, "APPROVE", ""); err != nil {
 			t.Fatalf("finalize (comment-less approve): %v", err)
 		}
 
@@ -347,7 +347,7 @@ func TestLocalClient_FinalizeReview_Freshness_HTTP406Fallback(t *testing.T) {
 		t.Fatalf("add comment: %v", err)
 	}
 
-	if err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
+	if _, err := client.FinalizeReviewDraft(context.Background(), handle, "COMMENT", "## body"); err != nil {
 		t.Fatalf("finalize via the 406 patch fallback must pass: %v", err)
 	}
 

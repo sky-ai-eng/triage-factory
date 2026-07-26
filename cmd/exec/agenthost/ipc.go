@@ -172,10 +172,14 @@ func (c *IPCClient) LookupRun(ctx context.Context) (RunInfo, error) {
 	return res.Info, nil
 }
 
-func (c *IPCClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) error {
-	return c.call(ctx, methodFinalizeReviewDraft, finalizeReviewDraftArgs{
+func (c *IPCClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) (ReviewFinalizeResult, error) {
+	var res finalizeReviewDraftResult
+	if err := c.call(ctx, methodFinalizeReviewDraft, finalizeReviewDraftArgs{
 		ReviewID: reviewID, Event: event, Body: body,
-	}, nil)
+	}, &res); err != nil {
+		return ReviewFinalizeResult{}, err
+	}
+	return ReviewFinalizeResult(res), nil
 }
 
 func (c *IPCClient) ResetReviewDraft(ctx context.Context, owner, repo string, number int) (string, string, error) {

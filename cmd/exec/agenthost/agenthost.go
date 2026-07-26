@@ -114,13 +114,26 @@ var ErrProtocolVersion = errors.New("agenthost: protocol version mismatch")
 
 // ErrReviewAlreadyFinalized is returned by FinalizeReviewDraft when the run's
 // review artifact already carries a ready sentinel (details_json.review_event is
-// set) — i.e. the agent already called finalize-review once. exec (TFAC-358) turns
-// it into the "do not call finalize-review again, your work on this review is
-// complete" message that stops agents looping on the approval hand-off. It
-// crosses the IPC boundary as a response-envelope marker so the sandbox client
-// reconstructs the same sentinel (errors.Is matches on both the in-process and
-// daemon paths).
-var ErrReviewAlreadyFinalized = errors.New("agenthost: this run's review has already been finalized for human approval; do not call finalize-review again")
+// set) — i.e. the agent already called finalize-review once. exec turns it into
+// the "do not call finalize-review again, your work on this review is complete"
+// message that stops agents looping on the hand-off. It crosses the IPC boundary
+// as a response-envelope marker so the sandbox client reconstructs the same
+// sentinel (errors.Is matches on both the in-process and daemon paths).
+//
+// Deliberately posture-neutral: the first call may have staged the review for
+// approval or posted it, and this error is raised without knowing which, so
+// naming an outcome here would mislead whichever way it guessed.
+var ErrReviewAlreadyFinalized = errors.New("agenthost: this run's review has already been finalized; do not call finalize-review again")
+
+// ReviewFinalizeResult is what FinalizeReviewDraft actually did.
+// Posted is false when the draft was staged for human approval — today's
+// behavior, and what every staging posture produces — and true when the review
+// was submitted to GitHub on finalize, with URL the posted review's deep link.
+// URL is empty whenever Posted is false: nothing exists on GitHub to link to.
+type ReviewFinalizeResult struct {
+	Posted bool
+	URL    string
+}
 
 // MemoryLoadResult is what MemoryLoad returns: the entity's coordinates plus
 // the prior run memory attached to it, team-visibility-scoped to the run's
@@ -169,15 +182,21 @@ type Client interface {
 
 	// --- review draft finalization (gh pr finalize-review) ---
 	//
-	// FinalizeReviewDraft finalizes the run's fully TF-side `review` draft for
-	// human approval: it locates the run's review artifact, stages body + event,
-	// snapshots the agent's draft (body + event + the locally staged inline
-	// comments) into details.proposed, and sets the ready sentinel
-	// (details_json.review_event) that marks it awaiting approval. No GitHub write
-	// happens here — the atomic create+submit happens at approval. Returns
+	// FinalizeReviewDraft finalizes the run's fully TF-side `review` draft: it
+	// locates the run's review artifact, stages body + event, snapshots the
+	// agent's draft (body + event + the locally staged inline comments) into
+	// details.proposed, and sets the ready sentinel (details_json.review_event).
+	//
+	// What happens next is the team's review posture, resolved here
+	// on the host — the only side holding the team settings and the credential
+	// resolver. Under a staging posture the draft is handed to the human
+	// approval queue and nothing reaches GitHub (the atomic create+submit runs
+	// at approval); under a posting posture the review is submitted right here.
+	// The returned ReviewFinalizeResult says which happened, so the CLI reports
+	// the outcome rather than the prompt asserting one. Returns
 	// ErrReviewAlreadyFinalized when the ready sentinel is already set (the
-	// TFAC-358 anti-double-submit guard).
-	FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) error
+	// anti-double-submit guard) — under every posture.
+	FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) (ReviewFinalizeResult, error)
 
 	// ResetReviewDraft is the host side of `gh pr start-review --fresh`: a pure
 	// local reset of this run's review draft for owner/repo#number, with zero

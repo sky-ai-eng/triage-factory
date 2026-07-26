@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
@@ -44,6 +45,14 @@ type Runtime interface {
 	OrgJiraBaseURL(ctx context.Context) (string, error)
 	AgentFooter(ctx context.Context, kind string) (string, error)
 
+	// ReviewPosture resolves the review-posting decision inputs for owner/repo:
+	// the run team's configured posture, and the identity of the credential that
+	// would post the review. Both live where the stores and the
+	// credential resolver do, so the capless sidecar relays for them — its own
+	// gh clients speak to per-run REST proxies whose reported identity is
+	// descriptive only, never the real App-vs-PAT tier.
+	ReviewPosture(ctx context.Context, owner, repo string) (ReviewPostureResolution, error)
+
 	// Writes.
 	InsertRunWorktree(ctx context.Context, row domain.RunWorktree) (inserted bool, winningPath string, err error)
 	DeleteRunWorktree(ctx context.Context, repoID, ref string) error
@@ -55,6 +64,15 @@ type Runtime interface {
 	// review, which the unconditional UpsertArtifact (state last-writer-wins)
 	// would do with its stale in-memory pending state.
 	UpdateReviewDetailsIfPending(ctx context.Context, artifactID, detailsJSON string) (bool, error)
+	// TransitionReviewState is the review artifact's compare-and-swap: the row
+	// moves from → to only while it still holds `from`, optionally stamping the
+	// resolved review's coordinates in the same write. It is the claim primitive
+	// the auto-posting posture takes BEFORE calling GitHub — a finalized draft is
+	// simultaneously reachable by a human in the approval queue, and both callers
+	// submit the same review, so exactly one of them has to win a CAS or the
+	// review posts twice. Returns false when the race was lost (or the row is
+	// gone), never an error.
+	TransitionReviewState(ctx context.Context, artifactID, from, to, externalID, url, detailsJSON string) (bool, error)
 	// Record is the void, best-effort external-write funnel (RecordExternalWrite):
 	// a recording failure is logged host-side and never fails the agent's
 	// already-applied action, so it needs no error return.
@@ -136,10 +154,12 @@ const (
 	opBuildAgentFooter        = "build_agent_run_footer"
 	opUpsertArtifact          = "upsert_artifact"
 	opUpdateReviewDetails     = "update_review_details_if_pending"
+	opTransitionReviewState   = "transition_review_state"
 	opRecordExternalWrite     = "record_external_write"
 	opRecordReadTouch         = "record_read_touch"
 	opMemoryLoad              = "memory_load"
 	opCheckEntitlement        = "check_entitlement"
+	opReviewPosture           = "review_posture"
 	// opCreateWorkspaceCheckout materializes a `workspace add` checkout. Unlike
 	// the other core ops it is FS-bearing: the sidecar relays it because it owns
 	// neither the shared bare cache nor the run-root; the orchestrator serves it.
@@ -158,6 +178,22 @@ type updateReviewDetailsResult struct {
 	Updated bool `json:"updated"`
 }
 
+// transitionReviewStateArgs / transitionReviewStateResult are the
+// transition_review_state op's payloads — the CAS's from/to states plus the
+// optional coordinate stamp, and whether this caller won the transition.
+type transitionReviewStateArgs struct {
+	ArtifactID  string `json:"artifact_id"`
+	From        string `json:"from"`
+	To          string `json:"to"`
+	ExternalID  string `json:"external_id,omitempty"`
+	URL         string `json:"url,omitempty"`
+	DetailsJSON string `json:"details_json,omitempty"`
+}
+
+type transitionReviewStateResult struct {
+	Moved bool `json:"moved"`
+}
+
 // checkEntitlementArgs / checkEntitlementResult are the check_entitlement op's
 // payloads — a feature name, and whether the run's org holds it.
 type checkEntitlementArgs struct {
@@ -166,6 +202,25 @@ type checkEntitlementArgs struct {
 
 type checkEntitlementResult struct {
 	Allowed bool `json:"allowed"`
+}
+
+// ReviewPostureResolution is what the review-posting decision reads from
+// the team's configured posture (one of domain.ValidReviewPostures)
+// and the acting credential's identity. It doubles as the review_posture op's
+// result — Identity rides the wire as github.Identity's integer value, and its
+// zero value IS IdentityUnknown, so a truncated or older peer decodes to the
+// conservative case rather than a fabricated App.
+type ReviewPostureResolution struct {
+	Posture  string            `json:"posture"`
+	Identity ghclient.Identity `json:"identity"`
+}
+
+// reviewPostureArgs is the review_posture op's payload — the repo whose acting
+// credential is being classified. Team + org identity is bound orchestrator-side
+// from the run's RunInfo, so the wire carries neither.
+type reviewPostureArgs struct {
+	Owner string `json:"owner"`
+	Repo  string `json:"repo"`
 }
 
 // listRunArtifactsResult / orgJiraBaseResult / recordExternalWriteArgs are the
@@ -201,6 +256,13 @@ type recordReadTouchArgs struct {
 type directRuntime struct {
 	stores db.Stores
 	info   RunInfo
+
+	// ghResolver classifies the acting GitHub credential for the review-posture
+	// decision (ReviewPosture). Seeded by NewServer with the Server's shared
+	// resolver so the App-coverage probe reuses its installation-token cache;
+	// lazily built from stores when unset (the local-mode CLI's directRuntime,
+	// which has no Server), and pre-set by tests.
+	ghResolver ghclient.Resolver
 }
 
 func newDirectRuntime(stores db.Stores, info RunInfo) *directRuntime {
@@ -270,6 +332,51 @@ func (r *directRuntime) OrgJiraBaseURL(ctx context.Context) (string, error) {
 
 func (r *directRuntime) AgentFooter(ctx context.Context, kind string) (string, error) {
 	return agentmeta.Build(r.stores.Conversations, r.info.OrgID, r.info.RunID, kind), nil
+}
+
+// ReviewPosture reads the run team's posture and — only when the posture
+// actually depends on it — classifies the credential that would post the
+// review. The identity probe is skipped for the three fixed postures because it
+// costs a resolver round-trip (and, on the App tier, a coverage probe) to
+// produce a value nothing reads.
+//
+// A team with no settings row (or a column written before the default landed)
+// reads as the empty string; it resolves to the default posture here rather
+// than at every call site. A resolver failure is NOT an error: identity stays
+// IdentityUnknown, which the decision treats as the conservative case, so a
+// transient credential-backend blip stages a review instead of failing the
+// agent's finalize outright.
+func (r *directRuntime) ReviewPosture(ctx context.Context, owner, repo string) (ReviewPostureResolution, error) {
+	out := ReviewPostureResolution{Posture: domain.DefaultReviewPosture}
+	if r.stores.Teams != nil && r.info.TeamID != "" {
+		set, err := r.stores.Teams.GetSettingsSystem(ctx, r.info.TeamID)
+		if err != nil {
+			return ReviewPostureResolution{}, err
+		}
+		if set.ReviewPosture != "" {
+			out.Posture = set.ReviewPosture
+		}
+	}
+	if out.Posture != domain.ReviewPostureIdentity {
+		return out, nil
+	}
+	resolver := r.ghResolver
+	if resolver == nil {
+		resolver = ghclient.NewResolver(r.stores.Secrets, r.stores.GitHubApps, r.stores.Orgs, r.stores.Agents, nil)
+		r.ghResolver = resolver
+	}
+	ir, ok := resolver.(ghclient.RepoIdentityResolver)
+	if !ok {
+		return out, nil
+	}
+	_, identity, err := ir.ClientForRepoWithIdentity(ctx, r.info.OrgID, owner, repo)
+	if err != nil {
+		agenthostLog.Warn("review posture: credential identity unresolved; treating as unknown (review will be staged)",
+			"run", r.info.RunID, "owner", owner, "repo", repo, "error", err)
+		return out, nil
+	}
+	out.Identity = identity
+	return out, nil
 }
 
 func (r *directRuntime) InsertRunWorktree(ctx context.Context, row domain.RunWorktree) (bool, string, error) {
@@ -347,6 +454,24 @@ func (r *directRuntime) UpdateReviewDetailsIfPending(ctx context.Context, artifa
 		return e
 	})
 	return updated, err
+}
+
+// TransitionReviewState routes the review CAS through the same event-vs-manual
+// pool split UpdateReviewDetailsIfPending uses: event-triggered runs claim on
+// the admin pool (no JWT claims); manual runs claim under the kicking-off user's
+// synthetic claims — the same pool the approve handler races on, which is what
+// makes the two callers contend for one row rather than pass each other.
+func (r *directRuntime) TransitionReviewState(ctx context.Context, artifactID, from, to, externalID, url, detailsJSON string) (bool, error) {
+	if r.info.IsEventTriggered {
+		return r.stores.Artifacts.TransitionReviewStateSystem(ctx, r.info.OrgID, artifactID, from, to, externalID, url, detailsJSON)
+	}
+	var moved bool
+	err := r.stores.Tx.SyntheticClaimsWithTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
+		m, e := ts.Artifacts.TransitionReviewState(ctx, r.info.OrgID, artifactID, from, to, externalID, url, detailsJSON)
+		moved = m
+		return e
+	})
+	return moved, err
 }
 
 func (r *directRuntime) Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction) {
@@ -513,6 +638,14 @@ func (r *relayRuntime) AgentFooter(ctx context.Context, kind string) (string, er
 	return res.Footer, nil
 }
 
+func (r *relayRuntime) ReviewPosture(ctx context.Context, owner, repo string) (ReviewPostureResolution, error) {
+	var res ReviewPostureResolution
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opReviewPosture, reviewPostureArgs{Owner: owner, Repo: repo}, &res); err != nil {
+		return ReviewPostureResolution{}, err
+	}
+	return res, nil
+}
+
 func (r *relayRuntime) InsertRunWorktree(ctx context.Context, row domain.RunWorktree) (bool, string, error) {
 	var res insertRunWorktreeResult
 	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opInsertRunWorktree, insertRunWorktreeArgs{Row: row}, &res); err != nil {
@@ -539,6 +672,16 @@ func (r *relayRuntime) UpdateReviewDetailsIfPending(ctx context.Context, artifac
 		return false, err
 	}
 	return res.Updated, nil
+}
+
+func (r *relayRuntime) TransitionReviewState(ctx context.Context, artifactID, from, to, externalID, url, detailsJSON string) (bool, error) {
+	var res transitionReviewStateResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opTransitionReviewState, transitionReviewStateArgs{
+		ArtifactID: artifactID, From: from, To: to, ExternalID: externalID, URL: url, DetailsJSON: detailsJSON,
+	}, &res); err != nil {
+		return false, err
+	}
+	return res.Moved, nil
 }
 
 func (r *relayRuntime) Record(_ context.Context, a *domain.Artifact, act *domain.ExternalAction) {

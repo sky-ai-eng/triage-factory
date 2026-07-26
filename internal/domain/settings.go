@@ -17,6 +17,49 @@ const DefaultModel = "sonnet"
 // substituted with the run's ticket id at prompt-render time.
 const DefaultBranchTemplate = "tfac/<ticket-id>"
 
+// Review-posting postures — how a delegated agent's finalized review reaches
+// GitHub. The gate is right for some deployments and wrong for others, and what
+// decides which is *who the review posts as*: an App-backed review lands as a
+// bot (a wrong comment is a bot being wrong), a PAT-backed one lands as the
+// borrowed user (a wrong comment is that person being wrong in front of their
+// colleagues). Same mechanism, materially different cost of error — hence a
+// per-team setting whose default derives from credential identity.
+const (
+	// ReviewPostureIdentity resolves at finalize time from the acting
+	// credential: an App installation posts directly, a borrowed PAT stages for
+	// human approval. An indeterminate identity stages too — that is the
+	// documented contract of github.IdentityUnknown, not a fallback.
+	ReviewPostureIdentity = "identity"
+	// ReviewPostureDraft always stages for human approval.
+	ReviewPostureDraft = "draft"
+	// ReviewPostureAuto always submits on finalize.
+	ReviewPostureAuto = "auto"
+	// ReviewPostureAutoUnlessBlocking submits unless the review is
+	// consequential: a REQUEST_CHANGES verdict, or any staged inline comment at
+	// severity BLOCKER, stages for a human instead.
+	ReviewPostureAutoUnlessBlocking = "auto_unless_blocking"
+)
+
+// DefaultReviewPosture is the posture a team gets with no explicit choice —
+// derive from the credential identity. NOT NULL with a schema DEFAULT of the
+// same literal; the write path coalesces a blank to it so an empty string never
+// persists.
+const DefaultReviewPosture = ReviewPostureIdentity
+
+// ValidReviewPostures is the accepted value set for TeamSettings.ReviewPosture.
+// Validated app-side rather than with a DB CHECK (the MaxLLMModelTier
+// precedent): a CHECK buys little over a closed handler and would force
+// SQLite's whole table-rebuild dance to ever change.
+var ValidReviewPostures = []string{
+	ReviewPostureIdentity,
+	ReviewPostureDraft,
+	ReviewPostureAuto,
+	ReviewPostureAutoUnlessBlocking,
+}
+
+// ValidReviewPosture reports whether s is one of ValidReviewPostures.
+func ValidReviewPosture(s string) bool { return slices.Contains(ValidReviewPostures, s) }
+
 // MaxConcurrentRunsCeiling is the largest value OrgSettings.MaxConcurrentRuns
 // accepts. It's a sanity bound far beyond any real fleet (per-executor
 // concurrency tops out in the low hundreds; even a large fleet stays in the
@@ -180,6 +223,15 @@ type TeamSettings struct {
 	// DefaultBranchTemplate. The write path coalesces an empty string to the
 	// default so a blank never persists.
 	BranchTemplate string
+
+	// ReviewPosture is how this team's delegated reviews reach GitHub — one of
+	// ValidReviewPostures, read at finalize time by the agenthost's review
+	// finalize choke point. NOT NULL with a schema DEFAULT; defaults to
+	// DefaultReviewPosture ("identity" — derive from the acting credential).
+	// The write path coalesces an empty string to the default so a blank never
+	// persists. Deliberately team-grained, with no per-prompt override: a
+	// prompt author must not be able to opt their runs out of the team's gate.
+	ReviewPosture string
 }
 
 // DefaultTeamSettings returns the NOT NULL DEFAULT values from the
@@ -203,6 +255,7 @@ func DefaultTeamSettings() TeamSettings {
 		PermissionAbsentGraceMS:         15000,
 		PermissionAbsentAutodenyEnabled: true,
 		BranchTemplate:                  DefaultBranchTemplate,
+		ReviewPosture:                   DefaultReviewPosture,
 	}
 }
 

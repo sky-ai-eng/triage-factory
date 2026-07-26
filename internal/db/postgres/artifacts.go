@@ -167,7 +167,19 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 // caller is a request handler under claims; RLS scopes the row by team like
 // every other app-side artifact write.
 func (s *artifactStore) TransitionReviewState(ctx context.Context, orgID, id, from, to, externalID, url, detailsJSON string) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `
+	return s.transitionReviewState(ctx, s.q, orgID, id, from, to, externalID, url, detailsJSON)
+}
+
+// TransitionReviewStateSystem runs the same CAS on the admin pool (BYPASSRLS)
+// for event-triggered exec writers that have no JWT-claims context — the same
+// split UpdateReviewDetailsIfPendingSystem covers. org_id stays bound as
+// defense in depth.
+func (s *artifactStore) TransitionReviewStateSystem(ctx context.Context, orgID, id, from, to, externalID, url, detailsJSON string) (bool, error) {
+	return s.transitionReviewState(ctx, s.admin, orgID, id, from, to, externalID, url, detailsJSON)
+}
+
+func (s *artifactStore) transitionReviewState(ctx context.Context, q queryer, orgID, id, from, to, externalID, url, detailsJSON string) (bool, error) {
+	res, err := q.ExecContext(ctx, `
 		UPDATE artifacts
 		SET state        = $1,
 		    external_id  = COALESCE(NULLIF($2, ''), external_id),

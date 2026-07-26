@@ -74,18 +74,19 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		permAbsentAutodeny      bool
 		maxDailyCost            sql.NullFloat64
 		branchTemplate          string
+		reviewPosture           string
 	)
 	err := q.QueryRowContext(ctx, `
 		SELECT jira_projects, ai_reprioritize_threshold, ai_preference_update_interval,
 		       default_model, auto_delegate_enabled,
 		       permission_absent_grace_ms, permission_absent_autodeny_enabled,
-		       max_daily_cost_usd, branch_template
+		       max_daily_cost_usd, branch_template, review_posture
 		FROM team_settings WHERE team_id = ?
 	`, teamID).Scan(
 		&projectsJSON, &aiThreshold, &aiInterval,
 		&defaultModel, &autoDelegate,
 		&permAbsentGraceMS, &permAbsentAutodeny,
-		&maxDailyCost, &branchTemplate,
+		&maxDailyCost, &branchTemplate, &reviewPosture,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		// See OrgsStore for the rationale: defaults here are the
@@ -113,6 +114,7 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		PermissionAbsentAutodenyEnabled: permAbsentAutodeny,
 		MaxDailyCostUSD:                 maxDailyCost.Float64, // NULL → 0 (no cap)
 		BranchTemplate:                  branchTemplate,
+		ReviewPosture:                   reviewPosture,
 	}, nil
 }
 
@@ -405,9 +407,9 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 			team_id, jira_projects, ai_reprioritize_threshold,
 			ai_preference_update_interval, default_model, auto_delegate_enabled,
 			permission_absent_grace_ms, permission_absent_autodeny_enabled,
-			max_daily_cost_usd, branch_template,
+			max_daily_cost_usd, branch_template, review_posture,
 			updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(team_id) DO UPDATE SET
 			jira_projects = excluded.jira_projects,
 			ai_reprioritize_threshold = excluded.ai_reprioritize_threshold,
@@ -418,12 +420,13 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 			permission_absent_autodeny_enabled = excluded.permission_absent_autodeny_enabled,
 			max_daily_cost_usd = excluded.max_daily_cost_usd,
 			branch_template = excluded.branch_template,
+			review_posture = excluded.review_posture,
 			updated_at = CURRENT_TIMESTAMP
 	`,
 		teamID, projectsJSON, u.AIReprioritizeThreshold,
 		u.AIPreferenceUpdateInterval, u.DefaultModel, u.AutoDelegateEnabled,
 		u.PermissionAbsentGraceMS, u.PermissionAbsentAutodenyEnabled,
-		nullFloatValue(u.MaxDailyCostUSD), u.BranchTemplate,
+		nullFloatValue(u.MaxDailyCostUSD), u.BranchTemplate, u.ReviewPosture,
 	); err != nil {
 		return fmt.Errorf("upsert team_settings: %w", err)
 	}

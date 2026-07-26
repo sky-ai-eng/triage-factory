@@ -96,6 +96,12 @@ func TestReviewArtifactGet_SeverityRoundTrip(t *testing.T) {
 // POSTs the staged body+event+footer+comments to GitHub, the artifact flips
 // pending → submitted and gains the submitted review's id + URL, the run
 // completes, and the human verdict lands in conversation_memory.
+//
+// The POST asserted here is composed by review.SubmitStaged — the same function
+// the auto-post posture calls from the agent's finalize, whose test
+// (cmd/exec/agenthost TestFinalizeReviewDraft_PostureDecidesPosting) pins the
+// identical payload shape. Keep the two assertion sets in step: they exist to
+// catch either path drifting away from the shared publish.
 func TestReviewArtifactApprove(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)

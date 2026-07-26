@@ -180,6 +180,14 @@ func (s *artifactStore) TransitionReviewState(ctx context.Context, orgID, id, fr
 	return n == 1, nil
 }
 
+// TransitionReviewStateSystem is identical to TransitionReviewState in SQLite:
+// local mode is single-tenant (N=1) with no RLS, so there is no admin/app pool
+// split. The method exists for parity with the Postgres store, where the
+// event-triggered exec writers (no JWT-claims context) need an admin-pool path.
+func (s *artifactStore) TransitionReviewStateSystem(ctx context.Context, orgID, id, from, to, externalID, url, detailsJSON string) (bool, error) {
+	return s.TransitionReviewState(ctx, orgID, id, from, to, externalID, url, detailsJSON)
+}
+
 // UpdateReviewDetailsIfPending guards the draft-mutation write on the row still
 // being a pending review, so a stale writer can't resurrect a resolved one.
 func (s *artifactStore) UpdateReviewDetailsIfPending(ctx context.Context, orgID, id, detailsJSON string) (bool, error) {
