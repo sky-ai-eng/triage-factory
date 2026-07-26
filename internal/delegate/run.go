@@ -289,7 +289,8 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// restaged per step); that changes how the agent reads the KB, so it belongs in
 	// its own change, not smuggled into this call site.
 	if sandbox.RunTreeHandedOff(claudeCwd) {
-		delegateLog.Debug("run tree already handed to the sandbox identity; skipping memory/knowledge materialization (these writes cannot succeed here — the tree keeps what the pre-launch pass wrote, so a mid-blueprint knowledge-base edit will not reach this step)", "run", runID, "cwd", claudeCwd)
+		delegateLog.Warn("run tree already handed to the sandbox identity; skipping memory/knowledge materialization — this step reads no prior memory and no refreshed knowledge base, and a memory file left by the previous step stays on disk",
+			"run", runID, "cwd", claudeCwd)
 	} else {
 		// A tree an older binary built holds its scratch under the previous
 		// name; take it over before anything reads or writes there, so files an
