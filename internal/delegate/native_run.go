@@ -17,6 +17,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -213,16 +214,14 @@ func dialToolHostWithRetry(ctx context.Context, socketPath string) (agentloop.To
 	}
 }
 
-// buildNativeSystemPrompt assembles the native envelope from the same inputs
-// buildPrompt uses on the SDK path — the task context block, the shared
-// envelope body, the step's mission — with the runtime-specific completion
-// contract and, on a non-terminal step, the addendum that redefines what
-// stopping means.
+// buildNativeSystemPrompt assembles this run's system prompt: the composed
+// framework blocks for the native runtime, then the per-run sections.
 //
-// Interpolation is the same single non-re-scanning pass, applied before the
-// untrusted task-context block is prepended, so no externally-authored text
-// is ever interpolated. That ordering is a security property, not a style
-// choice; see buildPrompt.
+// Interpolation runs on the mission alone, before the untrusted task-context
+// block joins it, so no externally-authored text is ever interpolated. That
+// ordering is a security property, not a style choice; see buildPrompt. The
+// framework blocks themselves carry no placeholders — the two values that vary
+// reach the model through RunContext.
 func (s *Spawner) buildNativeSystemPrompt(ctx context.Context, task domain.Task, mission string, cfg runConfig, runID, namespace string) (string, error) {
 	selfBin, err := os.Executable()
 	if err != nil {
@@ -242,7 +241,7 @@ func (s *Spawner) buildNativeSystemPrompt(ctx context.Context, task domain.Task,
 
 	body := strings.ReplaceAll(mission, "triagefactory exec", agentBin+" exec")
 	replacer := BuildPromptReplacer(task, metadataJSON, runID, agentBin, agentRunRoot, namespace, branchTemplate, runURL)
-	return agentloop.BuildSystemPrompt(agentloop.EnvelopeParts{
+	return agentprompt.Build(nativeSpec(), agentprompt.Parts{
 		RunContext:  nativeRunContext(branchTemplate),
 		TaskContext: BuildTaskContext(task, metadataJSON, cfg.prSkeleton),
 		Mission:     replacer.Replace(body),
@@ -253,6 +252,23 @@ func (s *Spawner) buildNativeSystemPrompt(ctx context.Context, task domain.Task,
 		HasBlueprint:    true,
 		NonTerminalStep: cfg.appendSysPrompt != "",
 	}), nil
+}
+
+// nativeSpec is the prompt selector for every native engagement.
+//
+// Mode is pinned to multi rather than read from runmode: a native engagement
+// runs its tools inside a jail whose launch hard-requires a prebuilt per-run
+// network, which only multi provisions, so a native run reaching here in local
+// mode is a wiring bug. Passing the ambient mode would compose a local-mode
+// prompt for it and let it proceed on paths that do not exist; pinning makes
+// agentprompt refuse, which is the same answer the launch gives moments later.
+func nativeSpec() agentprompt.Spec {
+	return agentprompt.Spec{
+		Surface: agentprompt.SurfaceMachinist,
+		Runtime: agentprompt.RuntimeNative,
+		Family:  agentprompt.FamilyClaude,
+		Mode:    agentprompt.ModeMulti,
+	}
 }
 
 // prepareInheritedMemory readies the fixed memory write path for this claim,

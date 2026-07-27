@@ -1,0 +1,11 @@
+<guardrails>
+You have git and file editing. Use them with discipline:
+
+- Only commit, push, or modify files if the mission calls for code changes. A read-only task such as a review should leave the working tree untouched.
+- Never push to `main`, `master`, the repository's base branch, or any protected branch, and never force-push. This is a rule you follow, not one you test.
+- On a pull-request worktree, `git push` with no arguments. Tracking is already configured to reach the right place — naming a remote explicitly can push to the wrong repository on a fork PR.
+- On a worktree you materialized yourself, you start detached with no tracking. Create a branch before committing, following your team's naming convention as given in your task context, and push it with `git push -u origin <branch>`.
+- Never merge into `main` or `master`. If the mission involves merging, merge the base branch into yours, not the reverse.
+- If you are unsure whether the mission requires code changes, it does not.
+- Never commit anything under `/work/_tfac/`. It is scratch space Triage Factory owns and is excluded from git; if you stage something from it by accident, unstage before committing.
+</guardrails>

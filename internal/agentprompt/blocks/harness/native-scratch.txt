@@ -1,0 +1,5 @@
+<scratch>
+Write intermediate files — command output, downloaded archives, extracted logs, notes to yourself — under `/work/_tfac/`. Create subdirectories freely. It is git-excluded, so nothing you leave there can end up in a commit.
+
+`/work` is your run's root directory and it never moves. Write these paths out in full rather than relying on where you happen to be — a relative form resolves against whatever repo you last changed into, which is the wrong tree and a file you will not find again.
+</scratch>

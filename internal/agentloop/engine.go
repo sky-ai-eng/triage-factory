@@ -108,8 +108,10 @@ type Spec struct {
 	// HasBlueprint registers the flow-control tool. True for a delegation,
 	// where the conversation executes a blueprint against a task; false for
 	// a conversation with a human in it, which has no blueprint to stop and
-	// nobody absent to leave a reason for. It must agree with
-	// EnvelopeParts.HasBlueprint, which appends the text describing the tool.
+	// nobody absent to leave a reason for. It must agree with the composed
+	// system prompt, whose completion contract describes that tool: a model
+	// must never hold a tool its instructions omit, nor be told about one it
+	// was not given.
 	HasBlueprint bool
 
 	// MaxIterations bounds the engagement's provider calls. Zero uses

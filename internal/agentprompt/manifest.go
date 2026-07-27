@@ -15,13 +15,18 @@ import "fmt"
 const (
 	// surface
 	blockIdentityMachinist   = "identity/machinist.txt"
+	blockIdentityMachinistNv = "identity/machinist-native.txt"
 	blockIdentityCurator     = "identity/curator.txt"
 	blockIdentityCuratorTone = "identity/curator-style.txt"
 
 	// runtime
-	blockHarnessSDK        = "harness/sdk-claude-code.txt"
-	blockHarnessSDKScratch = "harness/sdk-scratch.txt"
-	blockHarnessSDKCurator = "harness/sdk-curator.txt"
+	blockHarnessSDK           = "harness/sdk-claude-code.txt"
+	blockHarnessSDKScratch    = "harness/sdk-scratch.txt"
+	blockHarnessSDKCurator    = "harness/sdk-curator.txt"
+	blockHarnessNative        = "harness/native.txt"
+	blockHarnessNativeGH      = "harness/native-gh.txt"
+	blockHarnessNativeVerbs   = "harness/native-verbs.txt"
+	blockHarnessNativeScratch = "harness/native-scratch.txt"
 
 	// invariant
 	blockVerbLinkedContext   = "verbs/linked-context.txt"
@@ -32,6 +37,29 @@ const (
 	blockGuardrailsCommon    = "guardrails/common.txt"
 	blockCompletionSDKJSON   = "completion/sdk-json.txt"
 	blockCompletionSDKNonTrm = "completion/nonterminal-sdk.txt"
+
+	// The native counterparts of the sections above. They are separate files
+	// rather than arms of the same file because the two runtimes are different
+	// harnesses that happen to discuss the same subjects: the SDK's text names
+	// wrapper verbs (`exec gh pr view`) and carries the interpolation its
+	// caller resolves, while the native loop's names the real `gh` and the
+	// fixed in-jail paths. Several pairs will converge once the placeholder
+	// pass lands, and merging them then is a text edit, not a structural one.
+	blockVerbLinkedContextNv = "verbs/linked-context-native.txt"
+	blockVerbWorkspaceNv     = "verbs/workspace-native.txt"
+	blockVerbProjectKnowNv   = "verbs/project-knowledge-native.txt"
+	blockVerbMemoryNv        = "verbs/memory-native.txt"
+	blockGuardrailsCommonNv  = "guardrails/common-native.txt"
+	blockCompletionNative    = "completion/native-blueprint.txt"
+	blockCompletionNativeNT  = "completion/nonterminal-native.txt"
+
+	// Native-only today, but nothing in either file is runtime-specific: the
+	// SDK gets this material from Claude Code's own base system prompt, which
+	// the native loop has no equivalent of and must supply itself. Promoting
+	// them to the SDK arm is a prompt-quality question, deliberately not
+	// bundled with a package move.
+	blockPracticesCoding = "practices/coding.txt"
+	blockPracticesComms  = "practices/communication.txt"
 
 	// mode
 	blockGitAccessLocal = "github/local.txt"
@@ -73,7 +101,7 @@ func manifest(spec Spec) ([]string, error) {
 	}
 	switch spec.Surface {
 	case SurfaceMachinist:
-		return machinistBlocks(spec), nil
+		return machinistBlocks(spec)
 	case SurfaceCurator:
 		return curatorBlocks(spec)
 	default:
@@ -83,33 +111,65 @@ func manifest(spec Spec) ([]string, error) {
 
 // machinistBlocks composes the delegated agent's framework prompt.
 //
-// The native arm resolves today to the runtime-invariant subset: the harness
-// and completion sections are the SDK's own, and the native loop engine brings
-// its replacements (harness/native.txt, completion/native-blueprint.txt,
-// completion/nonterminal-native.txt) as new files dropped into the sections
-// already named here. That is the point of shipping both arms now — the axis
-// exists, so the engine adds files rather than retrofitting a seam.
-func machinistBlocks(spec Spec) []string {
-	blocks := []string{blockIdentityMachinist}
-	if spec.Runtime == RuntimeSDK {
-		blocks = append(blocks, blockHarnessSDK)
+// Both runtimes walk the same section order — identity, harness, orientation,
+// rules, then the completion contract last — and differ only in which file
+// each section resolves to. The two mode sections are the exception and are
+// shared verbatim: what backs `git` and what the process is wrapped in are
+// facts about the deployment, not about the loop reading them.
+func machinistBlocks(spec Spec) ([]string, error) {
+	if spec.Runtime == RuntimeNative {
+		return nativeMachinistBlocks(spec)
 	}
-	blocks = append(blocks,
+	return []string{
+		blockIdentityMachinist,
+		blockHarnessSDK,
 		blockVerbLinkedContext,
 		blockVerbWorkspace,
 		blockVerbProjectKnow,
 		blockGuardrailsCommon,
 		gitAccessFor(spec.Mode),
 		isolationFor(spec.Mode),
-	)
-	if spec.Runtime == RuntimeSDK {
-		blocks = append(blocks, blockHarnessSDKScratch)
+		blockHarnessSDKScratch,
+		blockVerbMemory,
+		blockCompletionSDKJSON,
+	}, nil
+}
+
+// nativeMachinistBlocks is the native loop's arm.
+//
+// It requires multi mode. A native engagement runs its tools inside a gVisor
+// jail whose launch hard-requires a prebuilt per-run network, so there is no
+// local-mode native run to compose for — and the blocks say so concretely,
+// naming the in-jail `/work` root the agent actually sees. Returning an error
+// rather than composing a local variant keeps that from becoming the next
+// prompt that asserts something untrue: if the native loop ever runs
+// unsandboxed, the paths change and this arm has to be written, not inherited.
+//
+// The completion contract is unconditional because every delegation executes a
+// blueprint — a single-step one is still one — so there is no machinist shape
+// that lacks it. Gating it on a Parts flag would also make the static prefix
+// depend on per-run state, which is exactly what rule 3 forbids.
+func nativeMachinistBlocks(spec Spec) ([]string, error) {
+	if spec.Mode != ModeMulti {
+		return nil, fmt.Errorf("agentprompt: the native runtime has no %q block set — a native engagement is always sandboxed", spec.Mode)
 	}
-	blocks = append(blocks, blockVerbMemory)
-	if spec.Runtime == RuntimeSDK {
-		blocks = append(blocks, blockCompletionSDKJSON)
-	}
-	return blocks
+	return []string{
+		blockIdentityMachinistNv,
+		blockHarnessNative,
+		blockPracticesCoding,
+		blockPracticesComms,
+		blockHarnessNativeGH,
+		blockHarnessNativeVerbs,
+		blockVerbLinkedContextNv,
+		blockVerbWorkspaceNv,
+		blockVerbProjectKnowNv,
+		blockGuardrailsCommonNv,
+		gitAccessFor(spec.Mode),
+		isolationFor(spec.Mode),
+		blockHarnessNativeScratch,
+		blockVerbMemoryNv,
+		blockCompletionNative,
+	}, nil
 }
 
 // curatorBlocks composes the per-project chat assistant's framework prompt.
@@ -133,11 +193,8 @@ func curatorBlocks(spec Spec) ([]string, error) {
 // delivers it on its own channel (--append-system-prompt), at a different
 // point in the prompt, from the composed framework text.
 func nonTerminalBlock(spec Spec) string {
-	if spec.Runtime == RuntimeSDK {
-		return blockCompletionSDKNonTrm
+	if spec.Runtime == RuntimeNative {
+		return blockCompletionNativeNT
 	}
-	// The native arm's nonterminal-native.txt arrives with the native loop
-	// engine; until then a native step gets no addendum rather than the SDK's
-	// (whose JSON-envelope framing does not apply).
-	return ""
+	return blockCompletionSDKNonTrm
 }

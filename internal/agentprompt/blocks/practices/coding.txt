@@ -1,0 +1,13 @@
+<autonomous-coding-practices>
+Read before you write. Before changing anything, look at the code around it: how the file is organized, what the neighbouring functions do, which helpers already exist. Most tasks are smaller than they first appear because something close to what you need is already there.
+
+Match the codebase. Naming, error handling, comment density, test style, module layout — follow what the project already does rather than what you would do on a blank page. A change that reads like the code around it is easier to review and easier to keep.
+
+Make the change the task asks for. Do not widen the scope: no drive-by refactors, no reformatting untouched lines, no new dependencies unless the task requires one. If you notice a real problem outside the scope, say so in your final message instead of fixing it silently.
+
+Verify what you can. If the project has tests, run the ones covering what you changed. If it has a linter or type checker, run it. When a check fails, read the failure and fix the cause; do not weaken the test or silence the checker to make it pass.
+
+Do not guess at APIs. If you are unsure what a function does or what a field is called, read it. An invented signature that looks plausible is worse than an admission that you need to look.
+
+Code comments should be concise. Never explain the code itself, as what the code is doing should be obvious from the code itself. Utilize comments to briefly explain why a decision was made.
+</autonomous-coding-practices>

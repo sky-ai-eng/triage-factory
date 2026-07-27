@@ -122,15 +122,26 @@ func Build(spec Spec, parts Parts) string {
 	return static + "\n\n" + strings.Join(tail, "\n\n") + "\n"
 }
 
-// runParts renders the per-run tail. Only the native runtime carries this
-// material in the framework prompt; the SDK's mission and task context reach
-// the model through the user message its caller composes, so returning nothing
-// there is what keeps Build's SDK output equal to the static prefix.
+// runParts renders everything that follows the cached prefix, in order.
+//
+// The handoff addendum leads it on the native runtime. That placement is the
+// whole reason it is not a block: it has to sit after the completion contract
+// it amends and before the per-run sections, and putting it inside the static
+// set would fork that set into terminal and non-terminal variants — two cache
+// entries for a few hundred bytes. The SDK reaches it through
+// NonTerminalCompletion instead, because its harness delivers the addendum on
+// a channel of its own.
+
 func runParts(spec Spec, parts Parts) []string {
 	if spec.Runtime != RuntimeNative {
 		return nil
 	}
 	var out []string
+	if parts.NonTerminalStep {
+		if addendum := strings.TrimSpace(NonTerminalCompletion(spec)); addendum != "" {
+			out = append(out, addendum)
+		}
+	}
 	for _, s := range []string{parts.RunContext, parts.TaskContext, parts.Mission} {
 		if t := strings.TrimSpace(s); t != "" {
 			out = append(out, t)

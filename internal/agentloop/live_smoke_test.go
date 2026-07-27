@@ -11,6 +11,7 @@ import (
 
 	"github.com/maximhq/bifrost/core/schemas"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
 )
@@ -95,8 +96,20 @@ func TestNativeLoop_LiveSmoke(t *testing.T) {
 		OrgID:          "live",
 		ConversationID: "live-conv",
 		Model:          model,
-		SystemPrompt:   BuildSystemPrompt(EnvelopeParts{Mission: "Answer the user's question using your tools."}),
-		MaxIterations:  10,
+		// The real composed prompt rather than a stub: this is the one test
+		// that runs a live model against the real tool host, so it is also the
+		// only place the production prompt and the production tool schemas are
+		// put in front of a provider together.
+		SystemPrompt: agentprompt.Build(
+			agentprompt.Spec{
+				Surface: agentprompt.SurfaceMachinist,
+				Runtime: agentprompt.RuntimeNative,
+				Family:  agentprompt.FamilyClaude,
+				Mode:    agentprompt.ModeMulti,
+			},
+			agentprompt.Parts{Mission: "Answer the user's question using your tools."},
+		),
+		MaxIterations: 10,
 	})
 
 	if got.Disposition != DispositionConcluded {

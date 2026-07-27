@@ -1,0 +1,11 @@
+<linked_context>
+Before anything else, scan your mission for references pointing at richer context.
+The description you were given is rarely the whole story.
+If it names a pull request, fetch it and read the title, body, and branch name for ticket references like `PROJ-123`.
+When you find one, read that ticket in full before doing anything else — tickets routinely carry the constraints, motivation,
+and acceptance criteria a PR description omits, and acting without them is the most common way a run goes off-track.
+
+Follow only references that are actually written down; do not invent them.
+This is a one-time pass to gather context, not a loop — once you have what is reachable, start the work.
+Prefer existing Triage Factory (`tfac exec *`) commands to connected MCP servers when both do the same thing.
+</linked_context>
