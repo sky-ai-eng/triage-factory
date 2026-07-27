@@ -82,6 +82,33 @@ const REVIEW_POSTURE_LABELS: Record<string, string> = Object.fromEntries(
   REVIEW_POSTURES.map((p) => [p.value, p.label]),
 )
 
+// Base-branch push policies, strictest first. The setting is a safety guard
+// against an agent pushing to main by mistake — not a security control, since
+// a local-mode agent runs as the operator — so `help` says what it does rather
+// than promising enforcement. Keep the values in sync with
+// domain.ValidBaseBranchPushPolicies (internal/domain/settings.go).
+const BASE_BRANCH_PUSH_POLICIES: { value: string; label: string; help: string }[] = [
+  {
+    value: 'never',
+    label: 'Never',
+    help: 'Agents push to their own branch and open a pull request. Refused on every run.',
+  },
+  {
+    value: 'manual_only',
+    label: 'Only runs a human started',
+    help: 'Allowed when someone dispatched the run themselves; refused on runs a trigger fired.',
+  },
+  {
+    value: 'always',
+    label: 'Always',
+    help: 'Allowed on every run — for trunk-based repos, docs and config repos, generated files.',
+  },
+]
+
+const BASE_BRANCH_PUSH_LABELS: Record<string, string> = Object.fromEntries(
+  BASE_BRANCH_PUSH_POLICIES.map((p) => [p.value, p.label]),
+)
+
 // Fallback bounds for the grace-window slider when the backend doesn't advertise
 // them (an older server). The backend is authoritative when present — the
 // permission_absent_grace_{min,max}_seconds fields are preferred and these only
@@ -157,6 +184,8 @@ export default function TeamSettings({
   const [branchTemplate, setBranchTemplate] = useState('tfac/<ticket-id>')
   // How finished agent reviews reach GitHub.
   const [reviewPosture, setReviewPosture] = useState('identity')
+  // Whether agents may push to a repo's base/default branch.
+  const [basePushPolicy, setBasePushPolicy] = useState('never')
   // Presence-gated absent auto-deny (TFAC-392).
   const [absentAutodeny, setAbsentAutodeny] = useState(true)
   const [absentGraceSeconds, setAbsentGraceSeconds] = useState(15)
@@ -218,6 +247,7 @@ export default function TeamSettings({
         setAutoDelegate(form.auto_delegate_enabled)
         setBranchTemplate(form.branch_template)
         setReviewPosture(form.review_posture)
+        setBasePushPolicy(form.base_branch_push_policy)
         setAbsentAutodeny(form.permission_absent_autodeny_enabled)
         setAbsentGraceSeconds(seededGrace)
         setRepos(teamRepos ?? [])
@@ -311,7 +341,8 @@ export default function TeamSettings({
     defaultModel !== baseline.default_model ||
     autoDelegate !== baseline.auto_delegate_enabled ||
     branchTemplate !== baseline.branch_template ||
-    reviewPosture !== baseline.review_posture
+    reviewPosture !== baseline.review_posture ||
+    basePushPolicy !== baseline.base_branch_push_policy
   const saveDefaults = async (): Promise<boolean> => {
     setSavingDefaults(true)
     try {
@@ -321,6 +352,7 @@ export default function TeamSettings({
         auto_delegate_enabled: autoDelegate,
         branch_template: branchTemplate,
         review_posture: reviewPosture,
+        base_branch_push_policy: basePushPolicy,
       })
       if (!res.ok) {
         toast.error(res.error)
@@ -332,6 +364,7 @@ export default function TeamSettings({
         auto_delegate_enabled: autoDelegate,
         branch_template: branchTemplate,
         review_posture: reviewPosture,
+        base_branch_push_policy: basePushPolicy,
       }))
       if (res.warning) toast.info(res.warning)
       toast.success('Team defaults saved')
@@ -491,7 +524,12 @@ export default function TeamSettings({
         title="Team defaults"
         summary={`Model: ${TIER_LABELS[baseline.default_model] ?? baseline.default_model}${
           baseline.auto_delegate_enabled ? ' · auto-delegate on' : ''
-        } · Reviews: ${REVIEW_POSTURE_LABELS[baseline.review_posture] ?? baseline.review_posture}`}
+        } · Reviews: ${
+          REVIEW_POSTURE_LABELS[baseline.review_posture] ?? baseline.review_posture
+        } · Base-branch pushes: ${
+          BASE_BRANCH_PUSH_LABELS[baseline.base_branch_push_policy] ??
+          baseline.base_branch_push_policy
+        }`}
         dirty={defaultsDirty}
         saving={savingDefaults}
         onSave={saveDefaults}
@@ -500,6 +538,7 @@ export default function TeamSettings({
           setAutoDelegate(baseline.auto_delegate_enabled)
           setBranchTemplate(baseline.branch_template)
           setReviewPosture(baseline.review_posture)
+          setBasePushPolicy(baseline.base_branch_push_policy)
         }}
       >
         {/* The actual /setup team-model body — same heading + tier ladder. */}
@@ -572,6 +611,28 @@ export default function TeamSettings({
           </select>
           <p className="mt-1 text-[11px] text-text-tertiary">
             {REVIEW_POSTURES.find((p) => p.value === reviewPosture)?.help}
+          </p>
+        </div>
+        <div>
+          <p className="text-[13px] text-text-primary">Pushes to the base branch</p>
+          <p className="mt-0.5 text-[11px] text-text-tertiary">
+            Whether a delegated agent may push straight to a repo&rsquo;s base or default branch
+            (main, master, or whatever the repo profile records). A safety guard against an agent
+            pushing there by mistake &mdash; not a substitute for branch protection on the host.
+          </p>
+          <select
+            value={basePushPolicy}
+            onChange={(e) => setBasePushPolicy(e.target.value)}
+            className="mt-1.5 w-full rounded-md border border-border-subtle bg-transparent px-2 py-1 text-[13px] text-text-primary focus:border-accent focus:outline-none"
+          >
+            {BASE_BRANCH_PUSH_POLICIES.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-[11px] text-text-tertiary">
+            {BASE_BRANCH_PUSH_POLICIES.find((p) => p.value === basePushPolicy)?.help}
           </p>
         </div>
       </SettingsSection>

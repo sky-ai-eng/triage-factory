@@ -51,6 +51,10 @@ export interface TeamConfigForm {
   // 'draft' | 'auto' | 'auto_unless_blocking'. GET returns it as ReviewPosture;
   // the POST key is review_posture.
   review_posture: string
+  // Whether delegated agents may push to a repo's base/default branch:
+  // 'never' | 'manual_only' | 'always'. GET returns it as
+  // BaseBranchPushPolicy; the POST key is base_branch_push_policy.
+  base_branch_push_policy: string
   // Carried for round-trip fidelity (they're part of the team_settings the
   // GET returns and the POST accepts) even though no surface exposes an
   // input for them yet — seeded from the GET and written back unchanged, so
@@ -86,6 +90,7 @@ export interface TeamSettingsData {
     AutoDelegateEnabled: boolean
     BranchTemplate: string
     ReviewPosture: string
+    BaseBranchPushPolicy: string
     PermissionAbsentGraceMS: number
     PermissionAbsentAutodenyEnabled: boolean
   }
@@ -157,6 +162,7 @@ export const emptyTeamConfig = (): TeamConfigForm => ({
   auto_delegate_enabled: true,
   branch_template: 'tfac/<ticket-id>',
   review_posture: 'identity',
+  base_branch_push_policy: 'never',
   ai_reprioritize_threshold: 0,
   ai_preference_update_interval: 0,
   permission_absent_autodeny_enabled: true,
@@ -175,6 +181,7 @@ export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
     auto_delegate_enabled: data.team_settings.AutoDelegateEnabled,
     branch_template: data.team_settings.BranchTemplate || 'tfac/<ticket-id>',
     review_posture: data.team_settings.ReviewPosture || 'identity',
+    base_branch_push_policy: data.team_settings.BaseBranchPushPolicy || 'never',
     ai_reprioritize_threshold: data.team_settings.AIReprioritizeThreshold,
     ai_preference_update_interval: data.team_settings.AIPreferenceUpdateInterval,
     permission_absent_autodeny_enabled: data.team_settings.PermissionAbsentAutodenyEnabled,
@@ -236,6 +243,7 @@ export async function saveTeamSettings(teamId: string, form: TeamConfigForm): Pr
       ai_auto_delegate_enabled: form.auto_delegate_enabled,
       branch_template: form.branch_template,
       review_posture: form.review_posture,
+      base_branch_push_policy: form.base_branch_push_policy,
       ai_reprioritize_threshold: form.ai_reprioritize_threshold,
       ai_preference_update_interval: form.ai_preference_update_interval,
       permission_absent_autodeny_enabled: form.permission_absent_autodeny_enabled,

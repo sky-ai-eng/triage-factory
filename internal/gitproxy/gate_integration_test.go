@@ -289,6 +289,51 @@ func TestGatedProxy_RefEnforcement(t *testing.T) {
 	}
 }
 
+// TestGatedProxy_ProtectedRefDenialExplainsItself is acceptance criterion 4 of
+// the base-branch push policy: a push refused because the ref is the repo's
+// base branch must reach the agent as a message that names the ref, says why,
+// and says what to do — not the flat "ref not allowed" every ref-level refusal
+// used to share. The gate is the only side that knows the ref was excluded by
+// policy rather than by "that isn't your branch", so it carries ProtectedRefs
+// on the decision to tell the receive-pack path apart.
+func TestGatedProxy_ProtectedRefDenialExplainsItself(t *testing.T) {
+	authorize := func(_ context.Context, _, _ string) (gitproxy.Decision, error) {
+		return gitproxy.Decision{
+			Allowed:       true,
+			AllowedRefs:   []string{"refs/heads/agent/x"},
+			ProtectedRefs: []string{"refs/heads/main", "refs/heads/master"},
+		}, nil
+	}
+	rec := &fakeUpstreamRecord{}
+	upstream := fakeGitHub(rec)
+	defer upstream.Close()
+	ts := &constantTokenSource{value: "ghs", expiresAt: time.Now().Add(time.Hour)}
+	sink := newDenialSink()
+	_, proxyURL := startGatedProxy(t, ts.source, upstream.URL, authorize, sink.record)
+
+	body := pkt(zeroOID+" aaaa refs/heads/main\n") + "0000PACKDATA"
+	req, _ := http.NewRequest("POST", proxyURL+"/octo/repo/git-receive-pack", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+	resp, err := directClient().Do(req)
+	if err != nil {
+		t.Fatalf("roundtrip: %v", err)
+	}
+	msg, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden || rec.hits.Load() != 0 {
+		t.Fatalf("status=%d hits=%d, want 403 with no upstream call", resp.StatusCode, rec.hits.Load())
+	}
+	for _, want := range []string{"refs/heads/main", "protected branch", "octo/repo", "pull request", "team admin"} {
+		if !strings.Contains(string(msg), want) {
+			t.Errorf("403 body %q does not mention %q", strings.TrimSpace(string(msg)), want)
+		}
+	}
+	if d := sink.next(t); d.Reason != "ref-protected" || d.Ref != "refs/heads/main" {
+		t.Errorf("denial = %+v, want a ref-protected denial naming refs/heads/main", d)
+	}
+}
+
 // TestGatedProxy_PerRepoTokenCache pins the per-repo token cache: two requests
 // for the same repo mint once; a different repo mints again.
 func TestGatedProxy_PerRepoTokenCache(t *testing.T) {

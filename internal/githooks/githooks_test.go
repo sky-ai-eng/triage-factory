@@ -254,11 +254,82 @@ func TestPrePushHook_RecordFailureDoesNotFailPush(t *testing.T) {
 	}
 }
 
+// TestPrePushHook_PolicyRefusalAbortsPush drives the real embedded hook over a
+// real push with a fake binary whose check-push verb answers "refused by
+// policy" (exit 3). The push must abort, and nothing may be recorded — a push
+// that never happens must not leave a branch artifact behind.
+func TestPrePushHook_PolicyRefusalAbortsPush(t *testing.T) {
+	requireGit(t)
+	env, recLog := setupEmbeddedHookBody(t, "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \"$REC_LOG\"\n"+
+		"case \"$2\" in check-push) exit 3 ;; esac\n"+
+		"exit 0\n")
+	work := newRepoWithRemote(t, env)
+
+	out, err := runGit(env, work, "push", "-u", "origin", "main")
+	if err == nil {
+		t.Fatalf("push succeeded despite a policy refusal:\n%s", out)
+	}
+	if got := readMarker(t, recLog); strings.Contains(got, "record-push") {
+		t.Errorf("recorded %q for a push that was refused; want no recording", got)
+	}
+}
+
+// TestPrePushHook_PolicyCheckFailureAllowsPush is the fail-open half: every
+// check-push exit status OTHER than the dedicated refusal one means the guard
+// could not evaluate the policy — a missing binary, a broken database, a crash
+// — and the push must proceed. A mistake-guard that blocks on its own outage
+// is a broken tool.
+func TestPrePushHook_PolicyCheckFailureAllowsPush(t *testing.T) {
+	requireGit(t)
+	env, recLog := setupEmbeddedHookBody(t, "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \"$REC_LOG\"\n"+
+		"case \"$2\" in check-push) exit 1 ;; esac\n"+
+		"exit 0\n")
+	work := newRepoWithRemote(t, env)
+
+	if out, err := runGit(env, work, "push", "-u", "origin", "main"); err != nil {
+		t.Fatalf("push failed on an inconclusive policy check: %v\n%s", err, out)
+	}
+	if got := readMarker(t, recLog); !strings.Contains(got, "record-push") {
+		t.Errorf("recorder log %q missing the record-push call; the allowed push should still be recorded", got)
+	}
+}
+
+// TestPrePushHook_StandsDownUnderProxyCaptureForPolicy pins that the proxy
+// stand-down covers the policy pass too: under a proxy the ref gate has
+// already adjudicated the same policy, so the hook must not double-judge.
+func TestPrePushHook_StandsDownUnderProxyCaptureForPolicy(t *testing.T) {
+	requireGit(t)
+	env, recLog := setupEmbeddedHookBody(t, "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \"$REC_LOG\"\n"+
+		"case \"$2\" in check-push) exit 3 ;; esac\n"+
+		"exit 0\n")
+	env = append(env, PushCaptureEnvVar+"="+PushCaptureProxy)
+	work := newRepoWithRemote(t, env)
+
+	if out, err := runGit(env, work, "push", "-u", "origin", "main"); err != nil {
+		t.Fatalf("push failed under proxy capture: %v\n%s", err, out)
+	}
+	if got, err := os.ReadFile(recLog); err == nil && strings.Contains(string(got), "check-push") {
+		t.Errorf("hook ran check-push under proxy capture (%q); the proxy's ref gate owns the policy there", got)
+	}
+}
+
 // setupEmbeddedHook pins the state root, calls Ensure (which writes the real
 // embedded pre-push hook), and wires a recorder script as TRIAGE_FACTORY_BIN
 // that appends its argv to recLog and exits recorderExit. Returns the agent
 // git env and the recorder log path.
 func setupEmbeddedHook(t *testing.T, recorderExit int) (env []string, recLog string) {
+	t.Helper()
+	return setupEmbeddedHookBody(t, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$REC_LOG\"\nexit "+
+		strconv.Itoa(recorderExit)+"\n")
+}
+
+// setupEmbeddedHookBody is setupEmbeddedHook with the fake binary's script
+// supplied verbatim, for tests that need it to answer differently per verb
+// (the policy check refusing while recording still succeeds, say).
+func setupEmbeddedHookBody(t *testing.T, body string) (env []string, recLog string) {
 	t.Helper()
 	runmode.SetForTest(t, runmode.ModeLocal)
 	paths.SetForTest(t, t.TempDir())
@@ -268,8 +339,6 @@ func setupEmbeddedHook(t *testing.T, recorderExit int) (env []string, recLog str
 
 	recLog = filepath.Join(t.TempDir(), "rec.log")
 	recorder := filepath.Join(t.TempDir(), "triagefactory")
-	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$REC_LOG\"\nexit " +
-		strconv.Itoa(recorderExit) + "\n"
 	if err := os.WriteFile(recorder, []byte(body), 0o755); err != nil {
 		t.Fatalf("write recorder: %v", err)
 	}

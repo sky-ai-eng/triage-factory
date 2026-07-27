@@ -1208,3 +1208,64 @@ func TestTeamSettingsPost_ReviewPosture(t *testing.T) {
 		t.Errorf("a rejected posture must not be stored: got %q", got)
 	}
 }
+
+// --- base-branch push policy -----------------------------------------------
+
+// teamBasePushPolicy reads the stored policy back off the team settings GET
+// (same wholesale-serialized shape as the posture above).
+func teamBasePushPolicy(t *testing.T, s *Server) string {
+	t.Helper()
+	rec := doJSON(t, s, "GET", "/api/settings/team/default", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/settings/team/default: %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		TeamSettings struct {
+			BaseBranchPushPolicy string `json:"BaseBranchPushPolicy"`
+		} `json:"team_settings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode team settings: %v", err)
+	}
+	return resp.TeamSettings.BaseBranchPushPolicy
+}
+
+// TestTeamSettingsPost_BaseBranchPushPolicy pins the policy's write path, same
+// contract as the review posture: defaults to refusing, accepts each known
+// value, coalesces a blank to the default, survives an unrelated save
+// untouched (an unrelated save must never re-open base-branch pushes, nor
+// silently close them on a team that opted in), and rejects an unknown value —
+// which would otherwise resolve as "never" forever and read as a bug.
+func TestTeamSettingsPost_BaseBranchPushPolicy(t *testing.T) {
+	s := newTestServer(t)
+
+	if got := teamBasePushPolicy(t, s); got != domain.DefaultBaseBranchPushPolicy {
+		t.Errorf("fresh team policy = %q, want the %q default", got, domain.DefaultBaseBranchPushPolicy)
+	}
+
+	for _, p := range domain.ValidBaseBranchPushPolicies {
+		postJSONResp(t, s, "/api/settings/team/default", map[string]any{"base_branch_push_policy": p})
+		if got := teamBasePushPolicy(t, s); got != p {
+			t.Errorf("after POST %q, stored policy = %q", p, got)
+		}
+	}
+
+	postJSONResp(t, s, "/api/settings/team/default", map[string]any{"base_branch_push_policy": domain.BaseBranchPushAlways})
+	postJSONResp(t, s, "/api/settings/team/default", map[string]any{"ai_model": "haiku"})
+	if got := teamBasePushPolicy(t, s); got != domain.BaseBranchPushAlways {
+		t.Errorf("an unrelated save clobbered the policy: got %q, want %q", got, domain.BaseBranchPushAlways)
+	}
+
+	postJSONResp(t, s, "/api/settings/team/default", map[string]any{"base_branch_push_policy": ""})
+	if got := teamBasePushPolicy(t, s); got != domain.DefaultBaseBranchPushPolicy {
+		t.Errorf("blank policy stored as %q, want the %q default", got, domain.DefaultBaseBranchPushPolicy)
+	}
+
+	rec := doJSON(t, s, "POST", "/api/settings/team/default", map[string]any{"base_branch_push_policy": "sometimes"})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown policy = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := teamBasePushPolicy(t, s); got != domain.DefaultBaseBranchPushPolicy {
+		t.Errorf("a rejected policy must not be stored: got %q", got)
+	}
+}

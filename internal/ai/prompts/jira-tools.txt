@@ -23,7 +23,7 @@ Discovery:
 Materialize (two separate Bash calls — do NOT chain with `cd "$(...)"`; the permission allowlist matches per-call and a `cd` wrapping a substitution is rejected as an unrecognized command shape, even though each piece on its own would pass):
 1. `{{BINARY_PATH}} exec workspace add <owner>/<repo>` — clones (or reuses the bare cache) and checks out the repo's default branch, DETACHED, then prints the absolute worktree path on stdout. `--ref <branch>` checks out an existing branch instead; `--pr <N>` checks out PR #N's head (fork-aware). Idempotent: a second `add` for the same repo prints the existing path without re-creating, so re-running on retry is safe.
 2. In the next Bash call, `cd <printed-path>` — once you're inside the worktree you have a real git checkout: gh subcommands resolve via `.git/config` (no `--repo` needed), and you can use the full git/build/test toolchain.
-3. Before committing, create your own working branch: `git checkout -b {{BRANCH_TEMPLATE}}` (your team's convention — adapt the suffix to the work). Push it with `git push -u origin <your-branch>`. The push gate authorizes whatever branch you're on (base/protected refs are still refused), so the exact name is yours to choose.
+3. Before committing, create your own working branch: `git checkout -b {{BRANCH_TEMPLATE}}` (your team's convention — adapt the suffix to the work). Push it with `git push -u origin <your-branch>`. The exact name is yours to choose — push the branch you're on, never a base or protected one.
 
 If the ticket spans multiple repos, repeat the pattern for each — they materialize as siblings under the run-root.
 

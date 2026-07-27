@@ -135,11 +135,19 @@ type TokenSource func(ctx context.Context, owner, repo string) (Token, error)
 // (falls back to the generic "repo not authorized for this run" when empty).
 // Both are ignored on an Allowed decision. Loopback/test allow-all wiring
 // leaves them empty and keeps the original generic denial.
+// ProtectedRefs names the refs the caller's base-branch protection policy
+// excluded from AllowedRefs (full refs/heads/... form, empty when the policy
+// permits base-branch pushes). It refines a REF-level denial the way
+// DenyReason/DenyMessage refine a repo-level one: without it every rejected
+// ref collapses to one string, and "that is the repo's base branch" and "that
+// isn't your worktree's branch" have different remedies. The gate that built
+// the decision is the only side that knows which is which.
 type Decision struct {
-	Allowed     bool
-	AllowedRefs []string
-	DenyReason  string
-	DenyMessage string
+	Allowed       bool
+	AllowedRefs   []string
+	ProtectedRefs []string
+	DenyReason    string
+	DenyMessage   string
 }
 
 // DeniedGitOp is one denied git operation handed to Config.RecordDenial for
@@ -478,7 +486,7 @@ func (s *Server) Handler() http.Handler {
 				// per-ref allowlist (reject deletes / foreign refs) BEFORE
 				// forwarding, then proxy the reconstructed stream and report
 				// each ref + the upstream's final status to RecordPush.
-				s.serveReceivePackGated(w, r, owner, repo, decision.AllowedRefs)
+				s.serveReceivePackGated(w, r, owner, repo, decision)
 				return
 			}
 			// Non-gated (loopback/test): the observe-only backstop (TFAC-467)

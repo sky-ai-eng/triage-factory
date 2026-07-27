@@ -1,9 +1,17 @@
 #!/bin/sh
 # Triage Factory pre-push hook (A·3, TFAC-460).
 #
-# Records each pushed branch as a durable `branch` artifact — the one
-# external action the exec CLIs don't mediate, so a branch pushed with raw
-# `git` (and maybe never opened as a PR) would otherwise be invisible to TF.
+# Two jobs, in this order:
+#
+#  1. Enforce the team's base-branch push policy (`hook check-push`). This is
+#     local mode's only enforcement point for it — multi mode enforces the same
+#     policy at the per-run git proxy's ref gate. A SAFETY GUARD against a
+#     mistaken agent, not a security control: the agent runs as the operator,
+#     so `git push --no-verify` (or a rewritten remote) walks past this hook.
+#     It catches the naive command, which is the failure that actually happens.
+#  2. Record each pushed branch as a durable `branch` artifact — the one
+#     external action the exec CLIs don't mediate, so a branch pushed with raw
+#     `git` (and maybe never opened as a PR) would otherwise be invisible to TF.
 #
 # git invokes this hook with:
 #   $1 = remote name (e.g. "origin")
@@ -13,23 +21,39 @@
 # A delete has an all-zero <local sha>; a new branch has an all-zero
 # <remote sha>.
 #
-# Best-effort, non-blocking by contract: every recording call is guarded and
-# the hook always exits 0, so a record failure never aborts the agent's push.
+# Only the policy check may abort the push, and only on the one exit status
+# that means "refused by policy" (3). Every other status — a missing binary
+# (127), a crash, a database that won't open — allows it, so the guard fails
+# open by construction. Recording stays best-effort and non-blocking: every
+# recording call is guarded and can never change the hook's exit status.
 # The binary is resolved from $TRIAGE_FACTORY_BIN (set by the spawner in both
 # run modes), falling back to PATH.
 #
 # When TF_GIT_PUSH_CAPTURE=proxy (the sandbox env, set whenever the per-run
 # git proxy is wired), this hook stands down entirely: every push transits the
-# proxy, whose receive-pack capture sees the upstream's ACTUAL outcome — it
-# records the branch only when the push landed (2xx) and an audit failure row
-# when it was refused. This hook fires before the transfer and cannot know the
-# outcome, so recording here would mint artifacts for pushes GitHub rejected.
+# proxy, which already adjudicates the same policy at its ref gate — so the
+# hook must not double-judge — and whose receive-pack capture sees the
+# upstream's ACTUAL outcome, recording the branch only when the push landed
+# (2xx) and an audit failure row when it was refused. This hook fires before
+# the transfer and cannot know the outcome, so recording here would mint
+# artifacts for pushes GitHub rejected.
 [ "${TF_GIT_PUSH_CAPTURE:-}" = "proxy" ] && exit 0
 
 remote_url="$2"
 bin="${TRIAGE_FACTORY_BIN:-triagefactory}"
 
-while read -r local_ref local_sha remote_ref remote_sha; do
+# stdin is readable exactly once, and both passes need it — so buffer it. The
+# policy pass has to complete before anything is recorded: a push we are about
+# to abort must not leave a branch artifact behind.
+refs=$(cat)
+
+printf '%s\n' "$refs" | "$bin" hook check-push --remote "$remote_url"
+policy_status=$?
+if [ "$policy_status" -eq 3 ]; then
+	exit 1 # refused by policy; check-push already explained why on stderr
+fi
+
+printf '%s\n' "$refs" | while read -r local_ref local_sha remote_ref remote_sha; do
 	# Skip deletes: an all-zero (or empty) local sha means nothing was
 	# pushed, so there is no branch to record.
 	case "$local_sha" in
