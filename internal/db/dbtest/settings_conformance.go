@@ -320,6 +320,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			MaxDailyCostUSD:                 12.50, // TFAC-482 per-team daily cap
 			BranchTemplate:                  "team/<ticket-id>-wip",
 			ReviewPosture:                   domain.ReviewPostureAutoUnlessBlocking,
+			BaseBranchPushPolicy:            domain.BaseBranchPushManualOnly,
 		}
 		if err := stores.Teams.UpdateSettings(ctx, ids.TeamID, want); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)

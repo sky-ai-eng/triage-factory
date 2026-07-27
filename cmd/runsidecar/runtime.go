@@ -523,10 +523,11 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 				return gitproxy.Decision{Allowed: false}, err
 			}
 			return gitproxy.Decision{
-				Allowed:     reply.Allowed,
-				AllowedRefs: reply.AllowedRefs,
-				DenyReason:  reply.DenyReason,
-				DenyMessage: reply.DenyMessage,
+				Allowed:       reply.Allowed,
+				AllowedRefs:   reply.AllowedRefs,
+				ProtectedRefs: reply.ProtectedRefs,
+				DenyReason:    reply.DenyReason,
+				DenyMessage:   reply.DenyMessage,
 			}, nil
 		},
 		RecordDenial: func(_ context.Context, denied gitproxy.DeniedGitOp) {

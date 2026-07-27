@@ -206,3 +206,65 @@ func TestStatusRecorder_CapturesFirstFinalStatus(t *testing.T) {
 		}
 	})
 }
+
+// TestRefDenial covers the three situations a rejected ref can be in, which
+// used to collapse to one flat "ref not allowed" string. The point of the
+// split is the remedy: a protected ref means "open a PR (or ask an admin to
+// change the policy)", an empty allowlist means "your worktree isn't recorded
+// yet", and a foreign ref means "push from the checkout you have".
+func TestRefDenial(t *testing.T) {
+	cases := []struct {
+		name          string
+		ref           string
+		allowedRefs   []string
+		protectedRefs []string
+		wantReason    string
+		// wantContains are substrings the message must carry: what was refused,
+		// why, and what to do about it.
+		wantContains []string
+	}{
+		{
+			name:          "protected ref names the branch, the reason and both remedies",
+			ref:           "refs/heads/main",
+			allowedRefs:   []string{"refs/heads/agent/x"},
+			protectedRefs: []string{"refs/heads/main", "refs/heads/master"},
+			wantReason:    "ref-protected",
+			wantContains:  []string{"refs/heads/main", "protected branch", "acme/api", "pull request", "team admin"},
+		},
+		{
+			name:         "no pushable branch points at the missing worktree",
+			ref:          "refs/heads/agent/x",
+			allowedRefs:  nil,
+			wantReason:   "ref-no-pushable-branch",
+			wantContains: []string{"acme/api", "workspace add"},
+		},
+		{
+			name:         "foreign ref names the branch this run may actually push",
+			ref:          "refs/heads/somebody-elses",
+			allowedRefs:  []string{"refs/heads/agent/x"},
+			wantReason:   "ref-not-allowed",
+			wantContains: []string{"refs/heads/somebody-elses", "refs/heads/agent/x"},
+		},
+		{
+			name:          "a protected ref wins over the empty-allowlist case",
+			ref:           "refs/heads/main",
+			allowedRefs:   nil,
+			protectedRefs: []string{"refs/heads/main"},
+			wantReason:    "ref-protected",
+			wantContains:  []string{"protected branch"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			reason, msg := refDenial(c.ref, "acme/api", c.allowedRefs, c.protectedRefs)
+			if reason != c.wantReason {
+				t.Errorf("reason = %q, want %q", reason, c.wantReason)
+			}
+			for _, want := range c.wantContains {
+				if !strings.Contains(msg, want) {
+					t.Errorf("message %q does not mention %q", msg, want)
+				}
+			}
+		})
+	}
+}

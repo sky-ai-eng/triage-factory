@@ -195,6 +195,12 @@ type teamSettingsUpdate struct {
 	// clobber the stored posture. An empty string coalesces to
 	// domain.DefaultReviewPosture; an unrecognized value is a 400.
 	ReviewPosture *string `json:"review_posture,omitempty"`
+	// BaseBranchPushPolicy is whether the team's delegated agents may push to a
+	// repo's base/default branch — one of domain.ValidBaseBranchPushPolicies.
+	// Pointer for the same reason as the two above: an unrelated save that omits
+	// the key must not clobber the stored policy. An empty string coalesces to
+	// domain.DefaultBaseBranchPushPolicy; an unrecognized value is a 400.
+	BaseBranchPushPolicy *string `json:"base_branch_push_policy,omitempty"`
 	// Presence-gated absent auto-deny knobs (TFAC-392). Pointers so an
 	// unrelated save (e.g. editing projects) that omits them leaves the
 	// stored values untouched. Grace is in seconds on the wire (the UI input
@@ -293,6 +299,22 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 				return errAbortHandler
 			}
 			teamSet.ReviewPosture = rp
+		}
+		if req.BaseBranchPushPolicy != nil {
+			// Same blank-coalesces-to-default convention. An unrecognized value
+			// must not persist: pushpolicy reads anything it doesn't recognize as
+			// the strictest policy, so a typo would silently look like "never"
+			// forever — exactly the misconfiguration a team that just enabled
+			// base-branch pushes would spend an afternoon debugging.
+			bp := *req.BaseBranchPushPolicy
+			if bp == "" {
+				bp = domain.DefaultBaseBranchPushPolicy
+			}
+			if !domain.ValidBaseBranchPushPolicy(bp) {
+				badRequest(w, "base_branch_push_policy: unknown value "+bp)
+				return errAbortHandler
+			}
+			teamSet.BaseBranchPushPolicy = bp
 		}
 		if req.PermissionAbsentAutodenyEnabled != nil {
 			teamSet.PermissionAbsentAutodenyEnabled = *req.PermissionAbsentAutodenyEnabled

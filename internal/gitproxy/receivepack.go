@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -274,7 +275,8 @@ func isZeroOID(s string) bool {
 // unread packfile) and proxies it, then reports each ref + the upstream's
 // final status to RecordPush exactly like the observe path (the wiring gates
 // artifacts on 2xx and records a refused push as an audit failure row).
-func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, owner, repo string, allowedRefs []string) {
+func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, owner, repo string, decision Decision) {
+	allowedRefs := decision.AllowedRefs
 	block, sawFlush, err := readCommandBlock(r.Body, maxReceivePackCapture)
 	if err != nil {
 		http.Error(w, "gitproxy: malformed receive-pack request", http.StatusBadRequest)
@@ -296,8 +298,9 @@ func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, o
 			http.Error(w, "gitproxy: ref delete not allowed", http.StatusForbidden)
 			return
 		case !allowed[c.ref]:
-			s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Ref: c.ref, Op: gitOpPush, Reason: "ref-not-allowed"})
-			http.Error(w, "gitproxy: ref not allowed", http.StatusForbidden)
+			reason, msg := refDenial(c.ref, owner+"/"+repo, allowedRefs, decision.ProtectedRefs)
+			s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Ref: c.ref, Op: gitOpPush, Reason: reason})
+			http.Error(w, msg, http.StatusForbidden)
 			return
 		}
 	}
@@ -323,6 +326,40 @@ func (s *Server) serveReceivePackGated(w http.ResponseWriter, r *http.Request, o
 	// RecordPush (the gated path runs regardless, since the ref gate is
 	// enforcement, not recording).
 	s.recordReceivePack(repoPath, block, sr.status)
+}
+
+// refDenial builds the audit reason + 403 body for one rejected ref. Three
+// situations reach this point and they have three different remedies, so they
+// get three messages rather than the one flat string every refusal used to
+// collapse to:
+//
+//   - The ref is protected — the repo's base/default branch, which the team's
+//     base-branch push policy refuses. Name it, and name both ways out: the
+//     branch-plus-PR path the agent can take right now, and the policy a team
+//     admin can change.
+//   - The run has no pushable branch here at all (empty allowlist): the repo is
+//     authorized for read but no worktree of it is recorded for this run, so
+//     push authority hasn't been earned yet.
+//   - The ref simply isn't the branch this run's worktree is on.
+//
+// Wording mirrors the repo-level deny builders in internal/delegate
+// (gitDenyNotTracked and friends) — same "gitproxy: " prefix, same
+// "what happened / what to do" shape — so an agent reading git's remote output
+// gets one consistent voice. Keep them in sync.
+func refDenial(ref, repoID string, allowedRefs, protectedRefs []string) (reason, msg string) {
+	if slices.Contains(protectedRefs, ref) {
+		return "ref-protected", fmt.Sprintf(
+			"gitproxy: %s is a protected branch on %s (its base/default branch) and this team's base-branch push policy refuses pushes to it; commit to a new branch and open a pull request instead. A team admin can change the policy in Settings → Team.",
+			ref, repoID)
+	}
+	if len(allowedRefs) == 0 {
+		return "ref-no-pushable-branch", fmt.Sprintf(
+			"gitproxy: no branch of %s is pushable in this run: push authority comes from a worktree TF materialized for the run, and none is recorded. If you just ran 'workspace add %s', retry once the checkout has landed.",
+			repoID, repoID)
+	}
+	return "ref-not-allowed", fmt.Sprintf(
+		"gitproxy: ref %s is not pushable in %s: this run may push only %s (the branch its worktree is checked out on). Push from that checkout, or create your branch there first.",
+		ref, repoID, strings.Join(allowedRefs, ", "))
 }
 
 // readCommandBlock reads the leading pkt-line command block of a receive-pack

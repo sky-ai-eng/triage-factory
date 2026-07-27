@@ -63,12 +63,18 @@ type AuthorizeRepoArgs struct {
 // gitproxy.Decision's actionable-denial fields across the wire so a sandboxed
 // run's denied clone/fetch surfaces the same specific 403 body + audit reason
 // (workspace-add vs admin) the in-process path does, instead of the generic
-// fallback. Both empty on an allowed decision.
+// fallback. Both empty on an allowed decision. ProtectedRefs does the same job
+// one level down, for a REF-level denial: it names the refs the team's
+// base-branch push policy excluded, so the sandbox's receive-pack gate can say
+// "that is the base branch" rather than a flat "ref not allowed". It rides an
+// ALLOWED reply (the refusal it explains happens per-ref, after the repo was
+// authorized) and is empty when the policy permits base-branch pushes.
 type AuthorizeRepoReply struct {
-	Allowed     bool     `json:"allowed"`
-	AllowedRefs []string `json:"allowed_refs,omitempty"`
-	DenyReason  string   `json:"deny_reason,omitempty"`
-	DenyMessage string   `json:"deny_message,omitempty"`
+	Allowed       bool     `json:"allowed"`
+	AllowedRefs   []string `json:"allowed_refs,omitempty"`
+	ProtectedRefs []string `json:"protected_refs,omitempty"`
+	DenyReason    string   `json:"deny_reason,omitempty"`
+	DenyMessage   string   `json:"deny_message,omitempty"`
 }
 
 // RecordDenialArgs is record_denial's payload: a denied git op for the

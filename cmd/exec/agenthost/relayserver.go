@@ -150,10 +150,11 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 			return nil, err
 		}
 		return json.Marshal(agentproc.AuthorizeRepoReply{
-			Allowed:     dec.Allowed,
-			AllowedRefs: dec.AllowedRefs,
-			DenyReason:  dec.DenyReason,
-			DenyMessage: dec.DenyMessage,
+			Allowed:       dec.Allowed,
+			AllowedRefs:   dec.AllowedRefs,
+			ProtectedRefs: dec.ProtectedRefs,
+			DenyReason:    dec.DenyReason,
+			DenyMessage:   dec.DenyMessage,
 		})
 
 	case opGetConversation:

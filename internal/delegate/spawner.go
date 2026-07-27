@@ -26,6 +26,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/pushpolicy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -845,8 +846,10 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string
 // comparing against the local name rejected every PR push with a 403
 // (ref-not-allowed). A detached HEAD (the state a fresh default / --ref
 // `workspace add` lands in) authorizes nothing until the agent creates its own
-// branch; the repo's base / default branch is never authorized even when the
-// mapping resolves to it. Reads live each call, so untracking a repo, removing
+// branch; the repo's base / default branch is authorized only when the team's
+// base-branch push policy (internal/pushpolicy) permits it for this run —
+// under the default policy it never is, even when the mapping resolves to it.
+// Reads live each call, so untracking a repo, removing
 // a worktree, or switching branches propagates to the next request with no
 // re-mint. Fails closed (deny) when a store it needs is absent or a lookup it
 // depends on errors — a misconfigured or degraded gate must never allow-all,
@@ -873,12 +876,14 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 		return gitproxy.Decision{}, err
 	}
 
-	// Base / protected refs are never pushable, regardless of what the worktree
-	// is checked out on. A failure to resolve them fails the whole decision
-	// closed (proxy denies) rather than silently authorizing — being unable to
-	// tell whether the live branch IS the base branch is exactly when we must
-	// not allow the push.
-	protected, err := protectedBranches(ctx, stores, info.OrgID, repoID)
+	// Base / protected refs are not pushable regardless of what the worktree is
+	// checked out on, unless the team's base-branch push policy says otherwise
+	// for this run (pushpolicy.ProtectedFor returns an empty set then). A
+	// failure to resolve either half fails the whole decision closed (proxy
+	// denies) rather than silently authorizing — being unable to tell whether
+	// the live branch IS the base branch, or whether the team lifted the guard,
+	// is exactly when we must not allow the push.
+	protected, err := pushpolicy.ProtectedFor(ctx, stores, info.OrgID, info.TeamID, repoID, info.IsEventTriggered)
 	if err != nil {
 		return gitproxy.Decision{}, err
 	}
@@ -913,11 +918,20 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 		// authority is earned once the checkout's branch resolves through a real
 		// ledger row.
 		if isTaskOwnRepo(ctx, stores, info, owner, repo) {
-			return gitproxy.Decision{Allowed: true}, nil
+			return gitproxy.Decision{Allowed: true, ProtectedRefs: pushpolicy.Refs(protected)}, nil
 		}
 		return gitDenyNotMaterialized(repoID), nil
 	}
-	return gitproxy.Decision{Allowed: true, AllowedRefs: allowedRefs}, nil
+	// ProtectedRefs rides along on the allow so a ref-level refusal downstream
+	// can say WHY it refused: the receive-pack gate sees only the ref set, and
+	// "that's the base branch" and "that isn't your worktree's branch" have
+	// different remedies. Empty when the team's policy permits base-branch
+	// pushes — there is then nothing protected to explain.
+	return gitproxy.Decision{
+		Allowed:       true,
+		AllowedRefs:   allowedRefs,
+		ProtectedRefs: pushpolicy.Refs(protected),
+	}, nil
 }
 
 // The git-proxy deny builders below mirror the exec-gh repo gate
@@ -974,34 +988,6 @@ func isTaskOwnRepo(ctx context.Context, stores db.Stores, info agenthost.RunInfo
 	}
 	taskOwner, taskRepo, _ := parseGitHubTask(*task)
 	return strings.EqualFold(taskOwner, owner) && strings.EqualFold(taskRepo, repo)
-}
-
-// protectedBranches returns the refs that must never be pushed for a repo. The
-// universal default-branch names (main, master) are ALWAYS protected, so a repo
-// that has no profile yet — or whose profile omits the default — still can't be
-// pushed to on them; the repo's recorded default branch and the user-configured
-// base branch are added on top when the profile is readable.
-//
-// A profile lookup error is returned (not swallowed): the caller fails the
-// decision closed, since authorizing a push without knowing the protected set
-// risks allowing a base-branch push. A nil profile (configured-but-unprofiled
-// repo) is NOT an error — the universal set still applies.
-func protectedBranches(ctx context.Context, stores db.Stores, orgID, repoID string) (map[string]bool, error) {
-	// Universal protected names, refused regardless of profile state.
-	out := map[string]bool{"main": true, "master": true}
-	profile, err := stores.Repos.GetSystem(ctx, orgID, repoID)
-	if err != nil {
-		return nil, fmt.Errorf("resolve protected branches for %s: %w", repoID, err)
-	}
-	if profile != nil {
-		if profile.DefaultBranch != "" {
-			out[profile.DefaultBranch] = true
-		}
-		if profile.BaseBranch != "" {
-			out[profile.BaseBranch] = true
-		}
-	}
-	return out, nil
 }
 
 // gitPushRecorder builds the git proxy's RecordPush callback for one run. The

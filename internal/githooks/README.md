@@ -40,9 +40,17 @@ process in both modes:
 
 ## Contract for hooks added here
 
-- **Best-effort, non-blocking.** A hook failure must never fail the
-  agent's git op. Exit `0` regardless of what the recording side-channel
-  does (e.g. `triagefactory exec ... || true`).
+- **Recording is best-effort, non-blocking.** A *recording* failure must
+  never fail the agent's git op — guard every such call (e.g.
+  `triagefactory exec ... || true`) so it cannot change the exit status.
+- **Policy enforcement is the one exception, and it fails open.** A hook
+  may abort the git op to enforce a configured policy (today: `pre-push`
+  and the team's base-branch push policy), but only on a positive
+  "refused by policy" answer, signalled by a dedicated exit status the
+  hook checks for explicitly. Every other status — binary missing,
+  database unreachable, crash — must let the op through. This is a guard
+  against a *mistaken* agent, never a security boundary: the agent runs
+  as the operator and `git push --no-verify` skips hooks entirely.
 - **Executable.** Files must be `0755`; git skips non-executable hooks.
 - **Named after the git hook** they implement (`pre-push`,
   `prepare-commit-msg`, ...). A hooks dir with no file matching the hook
@@ -50,17 +58,30 @@ process in both modes:
 
 ## Shipped hooks
 
-- `pre-push` (A·3, TFAC-456→TFAC-460) — records each pushed branch as a
-  durable `branch` artifact via `triagefactory hook record-push`. git
-  feeds it the pushed refs on stdin; it skips deletes, marks new branches,
-  and always exits `0`. Rewritten by `Ensure` on every startup so an
-  upgraded binary refreshes a stale on-disk copy.
+- `pre-push` (A·3, TFAC-456→TFAC-460) — two passes over the refs git
+  feeds it on stdin.
+
+  1. **Base-branch push policy** via `triagefactory hook check-push`. This
+     is local mode's enforcement point for the team's setting (multi mode
+     enforces the same policy at the git proxy's ref gate). The hook
+     aborts the push only when `check-push` exits `3` ("refused by
+     policy"); any other status allows it, so a missing binary or an
+     unreadable database can never block a push. Runs first: a push about
+     to be aborted must not leave a branch artifact behind.
+  2. **Branch recording** via `triagefactory hook record-push` — each
+     pushed branch as a durable `branch` artifact. Skips deletes, marks
+     new branches, guarded so it can never change the exit status.
+
+  Rewritten by `Ensure` on every startup so an upgraded binary refreshes a
+  stale on-disk copy.
 
   **Stands down when `TF_GIT_PUSH_CAPTURE=proxy`** (the sandbox env, set
-  whenever the per-run git proxy is wired): pre-push fires *before* the
-  transfer, so it cannot know whether the push will land — recording there
-  would mint artifacts for pushes GitHub refuses. Under a proxy, the
-  proxy's receive-pack capture owns the record instead: artifact +
-  `branch_pushed` audit row on a 2xx, a `branch_push_failed` audit row on
-  anything else. Local mode has no proxy, so the hook keeps its
-  record-at-pre-push role there (outcome unobservable — accepted).
+  whenever the per-run git proxy is wired), for both passes: the proxy
+  already adjudicates the same policy at its ref gate, so the hook must
+  not double-judge; and pre-push fires *before* the transfer, so it cannot
+  know whether the push will land — recording there would mint artifacts
+  for pushes GitHub refuses. Under a proxy, the proxy's receive-pack
+  capture owns the record instead: artifact + `branch_pushed` audit row on
+  a 2xx, a `branch_push_failed` audit row on anything else. Local mode has
+  no proxy, so the hook keeps both roles there (push outcome unobservable
+  — accepted).
