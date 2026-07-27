@@ -92,15 +92,21 @@ func runCheckPush(host agenthost.Client, stores db.Stores, args []string, refsIn
 // "<local ref> SP <local sha> SP <remote ref> SP <remote sha>" line per ref —
 // and returns the REMOTE refs, which are what the policy is about (the local
 // name can differ under a push refspec). Deletes are included: dropping the
-// base branch is the mistake this guard most wants to catch. Lines it can't
-// parse are skipped, since an unrecognized line is not evidence of a
-// protected push.
+// base branch is the mistake this guard most wants to catch.
+//
+// The shape is checked strictly — exactly four fields, with a remote ref that
+// actually looks like one — and anything else is skipped. Loose parsing would
+// undo the fail-open contract from the inside: a line this function had to
+// guess at could put an arbitrary token in the ref position, and a wrong guess
+// here doesn't degrade to "allow", it refuses a push that was never asking to
+// touch a protected branch. git emits exactly this format, so a line that
+// doesn't match is not evidence of anything and is treated as such.
 func readPushRefs(r io.Reader) []string {
 	var out []string
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
-		if len(fields) < 3 {
+		if len(fields) != 4 || !strings.HasPrefix(fields[2], "refs/") {
 			continue
 		}
 		out = append(out, fields[2])

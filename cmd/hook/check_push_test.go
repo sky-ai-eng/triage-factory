@@ -157,12 +157,22 @@ func TestCheckPush_FailsOpen(t *testing.T) {
 // TestReadPushRefs pins the stdin parse: git's own pre-push format, remote ref
 // (field 3) — the name the policy is about, since a push refspec can map a
 // local branch onto a different remote one. Deletes stay in, because deleting
-// the base branch is the mistake this guard most wants to catch.
+// the base branch is the mistake this guard most wants to catch. Everything
+// that isn't exactly git's four-field shape is dropped: a line we had to guess
+// at could put anything in the ref position, and guessing wrong here REFUSES a
+// push rather than degrading to "allow".
 func TestReadPushRefs(t *testing.T) {
 	in := strings.NewReader(
 		"refs/heads/x abc refs/heads/main def\n" +
 			"\n" +
 			"short line\n" +
+			// Three fields: not git's format. Under a looser parse this would
+			// read as a push to refs/heads/main and refuse one that never was.
+			"refs/heads/x abc refs/heads/main\n" +
+			// Four fields, but the ref position holds something that isn't a ref.
+			"one two three four\n" +
+			// Five fields: also not git's format.
+			"refs/heads/x abc refs/heads/main def extra\n" +
 			"refs/heads/y 0000000000000000000000000000000000000000 refs/heads/master 111\n")
 	got := readPushRefs(in)
 	want := []string{"refs/heads/main", "refs/heads/master"}
@@ -172,6 +182,26 @@ func TestReadPushRefs(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("refs[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestCheckPush_MalformedLinesDoNotRefuse is the fail-open guarantee stated as
+// behavior rather than as a parse detail: input that isn't git's format must
+// never produce a refusal, however protected-looking the tokens in it are.
+func TestCheckPush_MalformedLinesDoNotRefuse(t *testing.T) {
+	stores := newPolicyStores(t)
+	host := policyHost(stores, false)
+	for _, line := range []string{
+		"refs/heads/x abc refs/heads/main\n",     // three fields
+		"refs/heads/main\n",                      // one field
+		"refs/heads/x abc refs/heads/main a b\n", // five fields
+		"main\n",                                 // a bare branch name
+		"refs/heads/x abc main 0000\n",           // ref position isn't a ref
+	} {
+		if got := runCheckPush(host, stores,
+			[]string{"--remote", "https://github.com/octo/repo.git"}, strings.NewReader(line)); got != 0 {
+			t.Errorf("exit = %d for malformed input %q, want 0", got, line)
 		}
 	}
 }

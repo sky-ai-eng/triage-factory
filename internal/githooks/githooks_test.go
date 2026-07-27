@@ -1,6 +1,7 @@
 package githooks
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -313,6 +314,53 @@ func TestPrePushHook_StandsDownUnderProxyCaptureForPolicy(t *testing.T) {
 	}
 	if got, err := os.ReadFile(recLog); err == nil && strings.Contains(string(got), "check-push") {
 		t.Errorf("hook ran check-push under proxy capture (%q); the proxy's ref gate owns the policy there", got)
+	}
+}
+
+// TestPrePushHook_LargeRefListSurvivesBothPasses drives the hook directly with
+// a ref list far larger than any single push git normally produces (a
+// `git push --all` on a big repo is the realistic shape). Both passes must see
+// every ref: the policy check can't be allowed to inspect a truncated list and
+// call it clean, and the recording pass can't silently drop branches. This is
+// why the hook spools stdin to a file rather than holding it in a variable and
+// re-emitting it.
+func TestPrePushHook_LargeRefListSurvivesBothPasses(t *testing.T) {
+	env, recLog := setupEmbeddedHookBody(t, "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \"$REC_LOG\"\n"+
+		"exit 0\n")
+
+	// One process per ref bounds how big this can get and stay a fast test, so
+	// the refs are long rather than merely numerous: enough bytes that a
+	// truncating implementation would drop some, without a five-figure fanout.
+	const refs = 1000
+	const pad = "long-branch-name-segment/that-makes-each-line-substantial/"
+	var stdin strings.Builder
+	for i := range refs {
+		fmt.Fprintf(&stdin, "refs/heads/%s%d aaaa%d refs/heads/%s%d 0000000000000000000000000000000000000000\n",
+			pad, i, i, pad, i)
+	}
+
+	cmd := exec.Command("sh", filepath.Join(HostDir(), "pre-push"), "origin", "https://github.com/octo/repo.git")
+	cmd.Env = env
+	cmd.Stdin = strings.NewReader(stdin.String())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("hook failed on a large ref list: %v\n%s", err, out)
+	}
+
+	log, err := os.ReadFile(recLog)
+	if err != nil {
+		t.Fatalf("read recorder log: %v", err)
+	}
+	if got := strings.Count(string(log), "check-push"); got != 1 {
+		t.Errorf("check-push invocations = %d, want exactly 1 (one pass over the whole list)", got)
+	}
+	if got := strings.Count(string(log), "record-push"); got != refs {
+		t.Errorf("record-push invocations = %d, want %d — the ref list was truncated", got, refs)
+	}
+	// The last ref specifically: a truncation would lose the tail, which a count
+	// alone could mask if the recorder were called for something else.
+	if !strings.Contains(string(log), fmt.Sprintf("--ref refs/heads/%s%d ", pad, refs-1)) {
+		t.Errorf("recorder log is missing the final ref refs/heads/%s%d", pad, refs-1)
 	}
 }
 
