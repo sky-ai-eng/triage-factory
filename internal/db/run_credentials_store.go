@@ -1,6 +1,37 @@
 package db
 
-import "context"
+import (
+	"context"
+	"time"
+)
+
+// SealedBundle is one row of the sealed per-claim credential channel: the
+// opaque ciphertext plus the non-secret facts a reader needs BEFORE deciding
+// whether to unseal it (and, for a reader that never can, instead of it).
+type SealedBundle struct {
+	// ExecutorID / BootEpoch identify the claiming executor this bundle was
+	// sealed for. Both travel in cleartext specifically so a reader can
+	// compare them against its own identity before calling credseal.Open —
+	// see Get's doc.
+	ExecutorID string
+	BootEpoch  int64
+
+	// Sealed is the ciphertext. Only the holder of the matching private key
+	// (the run's credential sidecar) can open it.
+	Sealed []byte
+
+	// SealedAt is claim_credentials.created_at. Put replaces it on every
+	// re-seal, so it dates the bundle currently in the row rather than the
+	// claim's first provision — which makes it a freshness proof an
+	// orchestrator can use without holding any unseal authority: "this bundle
+	// was sealed after event X" is decidable from a timestamp alone. The
+	// relayed `workspace add` gate is the caller that needs exactly that (the
+	// provisioner recomputes a run's authorized repo set from scratch on
+	// every pass, so a bundle sealed after a conversation_worktrees row
+	// covers that row's repo by construction). Zero in local mode, which has
+	// no sealed bundles at all.
+	SealedAt time.Time
+}
 
 // RunCredentialsStore owns the claim_credentials table — the sealed
 // per-claim credential bundle channel. An executor parks a claimed run's
@@ -51,11 +82,11 @@ type RunCredentialsStore interface {
 
 	// Get returns the sealed bundle for runID's active claim, or ok=false
 	// when none has been provisioned yet (or the run has no active claim).
-	// Callers MUST compare the returned bootEpoch against their own
+	// Callers MUST compare the returned BootEpoch against their own
 	// current boot_epoch before attempting to unseal — a bundle sealed for
 	// an earlier boot must never be handed to credseal.Open, even though a
 	// mismatched key would just fail the box auth tag; the contract is
 	// stronger than "fails safe" (never attempt it at all), so a resume
 	// path after a restart always re-requests provisioning instead.
-	Get(ctx context.Context, orgID, runID string) (executorID string, bootEpoch int64, sealed []byte, ok bool, err error)
+	Get(ctx context.Context, orgID, runID string) (SealedBundle, bool, error)
 }

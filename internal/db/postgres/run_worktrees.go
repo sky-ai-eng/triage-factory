@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -64,19 +65,61 @@ func insertRunWorktree(
 	// supposed to handle them. With insert first, the loser sees
 	// inserted=false and returns the winner's path without
 	// touching git.
-	res, err := q.ExecContext(ctx, `
-		INSERT INTO conversation_worktrees (conversation_id, org_id, repo_id, path, ref)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (conversation_id, repo_id, ref) DO NOTHING
-	`, w.RunID, orgID, w.RepoID, w.Path, w.Ref)
+	//
+	// priorRows counts this run's EXISTING rows for the same repo, evaluated
+	// against the statement's own snapshot so it never sees the row this
+	// statement is inserting. It decides the credential doorbell below:
+	// credentials are minted per repo, not per (repo, ref), so a second
+	// checkout in a repo the run already holds widens nothing.
+	var inserted, priorRows int
+	err := q.QueryRowContext(ctx, `
+		WITH prior AS (
+			SELECT 1 FROM conversation_worktrees
+			WHERE org_id = $2 AND conversation_id = $1 AND lower(repo_id) = lower($3)
+			LIMIT 1
+		), ins AS (
+			INSERT INTO conversation_worktrees (conversation_id, org_id, repo_id, path, ref)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (conversation_id, repo_id, ref) DO NOTHING
+			RETURNING 1
+		)
+		SELECT (SELECT count(*) FROM ins), (SELECT count(*) FROM prior)
+	`, w.RunID, orgID, w.RepoID, w.Path, w.Ref).Scan(&inserted, &priorRows)
 	if err != nil {
 		return false, "", fmt.Errorf("insert run_worktree: %w", err)
 	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return false, "", fmt.Errorf("rows affected: %w", err)
-	}
-	if rows == 1 {
+	if inserted == 1 {
+		if priorRows == 0 {
+			// A repo the run did not hold before, so its authorized repo set
+			// genuinely widened. The sealed credential bundle is a point-in-time
+			// snapshot of the OLD set, so without this the new repo is
+			// authorized-but-uncredentialed: the git proxy's Authorize relays live
+			// and admits it, while the bundle carries no token to clone it with.
+			// Ring the same doorbell a claim's own credential request rings
+			// (MarkAwaitingCredentials) so the brain re-seals; the provisioner
+			// recomputes the authorized set from scratch, so the next bundle
+			// covers this repo by construction.
+			//
+			// Gated on priorRows because the provisioner dedups by repo id: a
+			// second ref in a repo already in the set (a run reviewing two PRs in
+			// one repo) needs no new token, and re-sealing for it would spend
+			// GitHub App mint quota to produce a byte-identical grant. Two
+			// concurrent adds of two refs of the SAME new repo each see priorRows=0
+			// and both ring — an extra doorbell, which is the safe direction; a
+			// missed one is the failure that matters.
+			//
+			// Published on q — the SAME connection that ran the INSERT, never a
+			// separate pool handle. pg_notify inside a transaction is delivered
+			// at COMMIT, and this insert runs inside a tx on the non-event path;
+			// publishing elsewhere would fire BEFORE the commit and let the brain
+			// seal a bundle from a pre-insert read, reintroducing the very bug
+			// through its own fix.
+			//
+			// Lossy like every ctlbus message: a dropped notification just defers
+			// the re-seal to the periodic refresh sweep, and the checkout op is
+			// what actually waits for a bundle newer than this row.
+			_ = ctlbus.Publish(ctx, q, ctlbus.Message{Kind: "cred_request", OrgID: orgID, RunID: w.RunID})
+		}
 		return true, w.Path, nil
 	}
 	existing, err := lookup(ctx, orgID, w.RunID, w.RepoID, w.Ref)
