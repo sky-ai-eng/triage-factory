@@ -80,9 +80,12 @@ const (
 
 // Mode names the deployment posture — the "what is actually enforced around
 // me" axis. It is the axis that stops the prompts from asserting things that
-// are false: local mode has no push gate, no per-run credential scoping on
-// raw git, and no egress allowlist, and an agent that discovers a stated rule
-// is false has reason to doubt the rest.
+// are false: the two modes check the same base-branch push policy but enforce
+// it at opposite postures (the multi proxy fails closed, the local pre-push
+// hook fails open and is skippable), and only multi scopes a per-run git
+// credential or applies an egress allowlist. An agent that discovers a stated
+// rule is false has reason to doubt the rest — and one told a fail-open check
+// is a boundary will over-trust it.
 type Mode string
 
 const (

@@ -1,7 +1,7 @@
 <git_access>
-Two different credentials are in play here, and only one of them is mediated.
+Two different credentials are in play here, and only one of them is scoped.
 
 The `exec` verbs (and `gh`, when it is available to you) run through Triage Factory, which holds the credential and scopes each call to the repositories this team configured. Raw `git` does not: it authenticates as the operator running Triage Factory on this machine — their SSH key or credential helper — so it reaches every repository they can reach, and it pushes with their identity.
 
-There is no push gate. Nothing will stop a `git push` to a base or protected ref, or to a repository unrelated to your mission; the rules above are the only thing standing between you and a write a human has to undo. Pushes are recorded after the fact, so a mistake is visible but not prevented.
+Your team's base-branch push policy is checked by a pre-push hook, but treat it as a seatbelt rather than a wall: it fails open, so anything that stops it running lets the push through. Nothing here will reliably catch a push you should not have made. The rule above is the whole boundary.
 </git_access>

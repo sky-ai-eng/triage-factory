@@ -43,20 +43,27 @@ func TestBuild_StableForSpec(t *testing.T) {
 	}
 }
 
-// TestBuild_ModeArmsDiverge is the reason the mode axis exists: local mode has
-// no push gate and no egress allowlist, so a single text serving both would
-// have to assert something false in one of them.
+// TestBuild_ModeArmsDiverge is the reason the mode axis exists. Both modes now
+// check the same base-branch push policy, but they enforce it at opposite
+// postures — the multi proxy fails closed, the local pre-push hook fails open —
+// and only multi has an egress allowlist and a scoped per-run credential. A
+// single text serving both would have to assert something false in one.
 func TestBuild_ModeArmsDiverge(t *testing.T) {
 	local := Build(machinistSpec(ModeLocal), Parts{})
 	multi := Build(machinistSpec(ModeMulti), Parts{})
 	if local == multi {
 		t.Fatal("ModeLocal and ModeMulti composed identical text; the mode arms are not wired")
 	}
-	if !strings.Contains(multi, "push gate") {
-		t.Error("multi-mode text does not mention the push gate it actually has")
+	if !strings.Contains(multi, "fails closed") {
+		t.Error("multi-mode text does not state that its gate fails closed")
 	}
-	if !strings.Contains(local, "no push gate") {
-		t.Error("local-mode text does not state that there is no push gate")
+	if !strings.Contains(local, "fails open") {
+		t.Error("local-mode text does not state that its check fails open — an agent told otherwise would over-trust it")
+	}
+	// The credential difference is the other half, and it survives 691: multi
+	// scopes per run, local pushes as the operator.
+	if !strings.Contains(local, "as the operator") {
+		t.Error("local-mode text does not state that raw git runs as the operator")
 	}
 }
 
