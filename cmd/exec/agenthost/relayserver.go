@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -52,7 +53,36 @@ type RelayServer struct {
 	// The workspace materialization served here clones + GetPRs through them, so the
 	// orchestrator holds no real credential for either. nil until bring-up completes.
 	proxyCreds *ProxyCredentials
+
+	// credRefresh is the sealed-bundle freshness gate the workspace
+	// materialization waits on. Optional: only the delegated executor path
+	// wires it (SetCredentialRefresh) — local mode has no sealed bundle at all
+	// and the curator's own RelayServer never serves a `workspace add`, so both
+	// leave it nil and the wait no-ops.
+	credRefresh *CredentialRefresh
 }
+
+// CredentialRefresh is the orchestrator's read-only handle on the run's sealed
+// credential bundle. Neither half opens it: SealedAt reports only
+// claim_credentials.created_at, and Relay hands the opaque bytes to the
+// executor goroutine that already owns the sidecar hop. The orchestrator's
+// no-unseal posture (Property B) is therefore untouched by the wait below.
+type CredentialRefresh struct {
+	// SealedAt reports when the run's current bundle was sealed, and whether
+	// one exists for this executor's claim at all.
+	SealedAt func(ctx context.Context) (time.Time, bool, error)
+
+	// Relay asks the credential-refresh relay to re-read the bundle channel and
+	// push any new blob down to the sidecar now, returning once that push has
+	// landed. The 30s refresh tick would get there eventually; a clone starting
+	// milliseconds after the reservation cannot wait for it.
+	Relay func(ctx context.Context) error
+}
+
+// SetCredentialRefresh wires the sealed-bundle freshness gate. Optional and
+// nil-safe, injected late for the same reason SetProxyCreds is: the bundle
+// channel's coordinates only exist once the sidecar is up.
+func (s *RelayServer) SetCredentialRefresh(cr *CredentialRefresh) { s.credRefresh = cr }
 
 // SetProxyCreds records the run's proxy coordinates once the sidecar bring-up
 // has returned them — the create_workspace_checkout op clones and fetches PRs
@@ -326,6 +356,13 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		if s.proxyCreds == nil {
 			return nil, fmt.Errorf("agenthost: workspace materialization requested before the run's git proxy was ready")
 		}
+		// The reservation this checkout answers widened the run's authorized
+		// repo set; the sidecar's bundle predates it. Block until a bundle
+		// sealed AFTER the reservation has reached the sidecar, or the clone
+		// authenticates with a token the new repo has no entry for.
+		if err := s.awaitCredentialsForRepo(ctx, a.Owner, a.Repo); err != nil {
+			return nil, err
+		}
 		// Materialize on the orchestrator, which owns the bare cache + run-root
 		// and clones / fetches PRs through the run's proxies. Identity is the
 		// run's own RunInfo, so the repo-config + team-tracking gate re-binds to
@@ -346,6 +383,114 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 	default:
 		return nil, fmt.Errorf("agenthost: unsupported core relay call op %q", op)
 	}
+}
+
+// workspaceCredWaitTimeout bounds the wait for a re-sealed credential bundle
+// after a `workspace add` widened the run's repo set. Generous against the
+// whole chain the doorbell kicks off (NOTIFY → mint → seal → read → relay) and
+// well inside the executor's own 2-minute awaiting-credentials deadline, so a
+// wedged brain surfaces here as an actionable error rather than as a 502
+// halfway through a clone.
+const workspaceCredWaitTimeout = 15 * time.Second
+
+// workspaceCredPollInterval is how often the wait re-reads the bundle's seal
+// timestamp. The doorbell fired one relay round trip ago (`workspace add`
+// reserves the row and materializes in two separate ops), so the brain already
+// has a head start and the poll is just the pickup.
+const workspaceCredPollInterval = 250 * time.Millisecond
+
+// awaitCredentialsForRepo blocks until the run's sealed credential bundle is
+// newer than the conversation_worktrees reservation for repoID — then pushes it
+// to the sidecar, which is what actually holds the token the clone will use.
+//
+// Freshness is decided from claim_credentials.created_at alone, never from the
+// bundle's contents: the provisioner recomputes a run's authorized repo set
+// from scratch on every pass and the seal timestamp is replaced on every
+// re-seal, so "sealed after the row exists" implies "covers the row's repo" by
+// construction. That keeps the orchestrator's zero-unseal posture intact.
+//
+// No-ops when unwired (local mode, curator) or when the run has no reservation
+// for this repo — nothing widened, so there is nothing to wait for. A repeat
+// `workspace add` finds its original row, whose reservation any seal since then
+// already postdates, and returns on the first poll.
+//
+// One race is knowingly left open: a provision that read the authorized set
+// BEFORE the reservation but wrote its bundle after it satisfies the comparison
+// without covering the new repo. The clone then fails with the sandbox's own
+// no-git-credentials error, and the provision our doorbell kicked off lands
+// right behind it, so a retry succeeds. Not papered over with a retry loop —
+// closing it properly means recording the covered repo set on the row, which is
+// a schema change deliberately deferred.
+func (s *RelayServer) awaitCredentialsForRepo(ctx context.Context, owner, repo string) error {
+	if s.credRefresh == nil || s.credRefresh.SealedAt == nil {
+		return nil
+	}
+	repoID := owner + "/" + repo
+	reservedAt, ok, err := s.repoReservedAt(ctx, repoID)
+	if err != nil {
+		return fmt.Errorf("agenthost: read worktree reservations for %s: %w", repoID, err)
+	}
+	if !ok {
+		return nil
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, workspaceCredWaitTimeout)
+	defer cancel()
+	ticker := time.NewTicker(workspaceCredPollInterval)
+	defer ticker.Stop()
+	// The poll is fast enough that logging every failed read would bury the
+	// signal; one line names the condition and the timeout reports the outcome.
+	warned := false
+	for {
+		sealedAt, ok, err := s.credRefresh.SealedAt(waitCtx)
+		if err != nil {
+			if !warned {
+				warned = true
+				agenthostLog.Warn("read sealed credential bundle timestamp failed; retrying until the workspace wait expires", "run", s.info.RunID, "repo", repoID, "error", err)
+			}
+		} else if ok && sealedAt.After(reservedAt) {
+			if s.credRefresh.Relay == nil {
+				return nil
+			}
+			// The bundle is fresh in the database; the sidecar still holds the
+			// old one until the relay pushes it down.
+			if err := s.credRefresh.Relay(waitCtx); err != nil {
+				return fmt.Errorf("agenthost: hand the re-sealed credential bundle for %s to the run's credential sidecar: %w", repoID, err)
+			}
+			return nil
+		}
+		select {
+		case <-ticker.C:
+		case <-waitCtx.Done():
+			return fmt.Errorf("agenthost: %s was added to this run but its git credentials have not been re-issued yet "+
+				"(the request is filed and still in flight) — retry `workspace add %s` in a moment", repoID, repoID)
+		}
+	}
+}
+
+// repoReservedAt reports when this run most recently reserved a
+// conversation_worktrees row for repoID. Newest wins: a run may hold several
+// rows for one repo (a PR checkout and a branch checkout), and the wait must
+// clear the latest of them. Repo ids are compared case-insensitively because
+// the reservation records the agent's spelling while the checkout op carries
+// the repo profile's.
+func (s *RelayServer) repoReservedAt(ctx context.Context, repoID string) (time.Time, bool, error) {
+	rows, err := s.rt.ListRunWorktrees(ctx)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	var newest time.Time
+	found := false
+	for _, w := range rows {
+		if !strings.EqualFold(w.RepoID, repoID) {
+			continue
+		}
+		if !found || w.CreatedAt.After(newest) {
+			newest = w.CreatedAt
+			found = true
+		}
+	}
+	return newest, found, nil
 }
 
 // ObservationArtifact turns a gh-injector observation into the domain artifact

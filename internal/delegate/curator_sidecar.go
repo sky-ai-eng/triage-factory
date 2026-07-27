@@ -125,10 +125,13 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, conversation
 	// each new sealed blob down so a long turn keeps signing with live
 	// credentials.
 	_, myBootEpoch := s.executorIdentity()
+	// nil nudge channel: a curator turn never calls `workspace add` (its pinned
+	// worktrees are seeded ahead of the turn), so nothing here widens the repo
+	// set out of band and the periodic tick is the whole contract.
 	go s.relayCredentialRefreshes(conversationID, func(ctx context.Context) (int64, []byte, bool, error) {
-		_, be, sealed, ok, err := s.runCredentials.Get(ctx, orgID, conversationID)
-		return be, sealed, ok, err
-	}, myBootEpoch, conn, es.stopRelay)
+		b, ok, err := s.runCredentials.Get(ctx, orgID, conversationID)
+		return b.BootEpoch, b.Sealed, ok, err
+	}, myBootEpoch, conn, nil, es.stopRelay)
 	return es, nil
 }
 
@@ -151,11 +154,11 @@ func (s *Spawner) curatorSidecarProvisionFor(orgID, conversationID string) agent
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		for {
-			_, bootEpoch, sealed, ok, err := s.runCredentials.Get(provCtx, orgID, conversationID)
+			b, ok, err := s.runCredentials.Get(provCtx, orgID, conversationID)
 			if err != nil {
 				dispatchLog.Warn("read curator turn credential bundle failed; retrying", "conversation", conversationID, "error", err)
-			} else if ok && bootEpoch == myBootEpoch {
-				return sealed, bootEpoch, nil
+			} else if ok && b.BootEpoch == myBootEpoch {
+				return b.Sealed, b.BootEpoch, nil
 			}
 			select {
 			case <-provCtx.Done():

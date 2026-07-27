@@ -138,23 +138,34 @@ func seedCuratorTurn(t *testing.T, database *sql.DB, stores db.Stores, executorI
 // the Postgres-only claim_credentials channel (the SQLite impl refuses every
 // call), so the provision loop's poll half is exercisable here.
 type fakeRunCredentials struct {
-	mu        sync.Mutex
-	sealed    []byte
-	bootEpoch int64
-	ok        bool
+	mu         sync.Mutex
+	executorID string
+	sealed     []byte
+	bootEpoch  int64
+	sealedAt   time.Time
+	ok         bool
 }
 
-func (f *fakeRunCredentials) Put(_ context.Context, _, _, _ string, bootEpoch int64, sealed []byte) error {
+func (f *fakeRunCredentials) Put(_ context.Context, _, _, executorID string, bootEpoch int64, sealed []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.sealed, f.bootEpoch, f.ok = sealed, bootEpoch, true
+	f.executorID, f.sealed, f.bootEpoch, f.ok = executorID, sealed, bootEpoch, true
+	// The real store stamps created_at on every write (created_at =
+	// EXCLUDED.created_at), which is what the workspace-add freshness gate
+	// compares against a reservation.
+	f.sealedAt = time.Now()
 	return nil
 }
 
-func (f *fakeRunCredentials) Get(context.Context, string, string) (string, int64, []byte, bool, error) {
+func (f *fakeRunCredentials) Get(context.Context, string, string) (db.SealedBundle, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return "", f.bootEpoch, f.sealed, f.ok, nil
+	return db.SealedBundle{
+		ExecutorID: f.executorID,
+		BootEpoch:  f.bootEpoch,
+		Sealed:     f.sealed,
+		SealedAt:   f.sealedAt,
+	}, f.ok, nil
 }
 
 // TestCuratorSidecarProvisionFor pins the curator provision fn's handshake:

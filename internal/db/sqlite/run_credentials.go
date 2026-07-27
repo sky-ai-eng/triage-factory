@@ -23,6 +23,6 @@ func (runCredentialsStore) Put(ctx context.Context, orgID, runID, executorID str
 	return db.ErrNotApplicableInLocal
 }
 
-func (runCredentialsStore) Get(ctx context.Context, orgID, runID string) (string, int64, []byte, bool, error) {
-	return "", 0, nil, false, db.ErrNotApplicableInLocal
+func (runCredentialsStore) Get(ctx context.Context, orgID, runID string) (db.SealedBundle, bool, error) {
+	return db.SealedBundle{}, false, db.ErrNotApplicableInLocal
 }

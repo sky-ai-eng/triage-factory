@@ -38,7 +38,7 @@ func TestRunCredentialsStore_Postgres_PutGet(t *testing.T) {
 	if err := stores.RunCredentials.Put(ctx, orgID, runID, "executor-0", 1, []byte("orphan")); err != nil {
 		t.Fatalf("Put with no active claim: %v", err)
 	}
-	if _, _, _, ok, err := stores.RunCredentials.Get(ctx, orgID, runID); err != nil || ok {
+	if _, ok, err := stores.RunCredentials.Get(ctx, orgID, runID); err != nil || ok {
 		t.Fatalf("Get with no active claim: ok=%v err=%v, want ok=false", ok, err)
 	}
 
@@ -46,12 +46,15 @@ func TestRunCredentialsStore_Postgres_PutGet(t *testing.T) {
 	if err := stores.RunCredentials.Put(ctx, orgID, runID, "executor-1", 1, []byte("sealed-v1")); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	executorID, bootEpoch, sealed, ok, err := stores.RunCredentials.Get(ctx, orgID, runID)
+	got, ok, err := stores.RunCredentials.Get(ctx, orgID, runID)
 	if err != nil || !ok {
 		t.Fatalf("Get after Put: ok=%v err=%v", ok, err)
 	}
-	if executorID != "executor-1" || bootEpoch != 1 || string(sealed) != "sealed-v1" {
-		t.Fatalf("Get = (%q, %d, %q), want (executor-1, 1, sealed-v1)", executorID, bootEpoch, sealed)
+	if got.ExecutorID != "executor-1" || got.BootEpoch != 1 || string(got.Sealed) != "sealed-v1" {
+		t.Fatalf("Get = (%q, %d, %q), want (executor-1, 1, sealed-v1)", got.ExecutorID, got.BootEpoch, got.Sealed)
+	}
+	if got.SealedAt.IsZero() {
+		t.Error("Get returned a zero SealedAt; the workspace-add freshness gate has nothing to compare")
 	}
 
 	// Releasing the claim takes the bundle out of reach (Get resolves the
@@ -61,7 +64,7 @@ func TestRunCredentialsStore_Postgres_PutGet(t *testing.T) {
 	`, runID); err != nil {
 		t.Fatalf("release claim: %v", err)
 	}
-	if _, _, _, ok, err := stores.RunCredentials.Get(ctx, orgID, runID); err != nil || ok {
+	if _, ok, err := stores.RunCredentials.Get(ctx, orgID, runID); err != nil || ok {
 		t.Fatalf("Get after release: ok=%v err=%v, want ok=false", ok, err)
 	}
 }
@@ -90,13 +93,13 @@ func TestRunCredentialsStore_Postgres_PutNeverRegressesBootEpoch(t *testing.T) {
 		t.Fatalf("Put (epoch 1, stale): %v", err)
 	}
 
-	executorID, bootEpoch, sealed, ok, err := stores.RunCredentials.Get(ctx, orgID, runID)
+	got, ok, err := stores.RunCredentials.Get(ctx, orgID, runID)
 	if err != nil || !ok {
 		t.Fatalf("Get: ok=%v err=%v", ok, err)
 	}
-	if executorID != "executor-b" || bootEpoch != 2 || string(sealed) != "sealed-for-b" {
+	if got.ExecutorID != "executor-b" || got.BootEpoch != 2 || string(got.Sealed) != "sealed-for-b" {
 		t.Fatalf("stale write clobbered the fresher one: got (%q, %d, %q), want (executor-b, 2, sealed-for-b)",
-			executorID, bootEpoch, sealed)
+			got.ExecutorID, got.BootEpoch, got.Sealed)
 	}
 
 	// A same-epoch refresh (re-minted tokens for the same still-live claim)
@@ -104,11 +107,17 @@ func TestRunCredentialsStore_Postgres_PutNeverRegressesBootEpoch(t *testing.T) {
 	if err := stores.RunCredentials.Put(ctx, orgID, runID, "executor-b", 2, []byte("sealed-for-b-refreshed")); err != nil {
 		t.Fatalf("Put (epoch 2, refresh): %v", err)
 	}
-	_, _, sealed, ok, err = stores.RunCredentials.Get(ctx, orgID, runID)
+	refreshed, ok, err := stores.RunCredentials.Get(ctx, orgID, runID)
 	if err != nil || !ok {
 		t.Fatalf("Get after refresh: ok=%v err=%v", ok, err)
 	}
-	if string(sealed) != "sealed-for-b-refreshed" {
-		t.Fatalf("same-epoch refresh did not apply: got %q, want sealed-for-b-refreshed", sealed)
+	if string(refreshed.Sealed) != "sealed-for-b-refreshed" {
+		t.Fatalf("same-epoch refresh did not apply: got %q, want sealed-for-b-refreshed", refreshed.Sealed)
+	}
+	// created_at is replaced on every re-seal, never left at the claim's
+	// first provision — the whole basis for deciding freshness from the
+	// timestamp instead of from the bundle's contents.
+	if !refreshed.SealedAt.After(got.SealedAt) {
+		t.Errorf("SealedAt did not advance on re-seal: %s then %s", got.SealedAt, refreshed.SealedAt)
 	}
 }

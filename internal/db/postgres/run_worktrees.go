@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -77,6 +78,26 @@ func insertRunWorktree(
 		return false, "", fmt.Errorf("rows affected: %w", err)
 	}
 	if rows == 1 {
+		// A genuinely new row widened the run's authorized repo set. Its
+		// sealed credential bundle is a point-in-time snapshot of the OLD
+		// set, so without this the new repo is authorized-but-uncredentialed:
+		// the git proxy's Authorize relays live and admits it, while the
+		// bundle carries no token to clone it with. Ring the same doorbell a
+		// claim's own credential request rings (MarkAwaitingCredentials) so
+		// the brain re-seals; the provisioner recomputes the authorized set
+		// from scratch, so the next bundle covers this repo by construction.
+		//
+		// Published on q — the SAME connection that ran the INSERT, never a
+		// separate pool handle. pg_notify inside a transaction is delivered
+		// at COMMIT, and this insert runs inside a tx on the non-event path;
+		// publishing elsewhere would fire BEFORE the commit and let the brain
+		// seal a bundle from a pre-insert read, reintroducing the very bug
+		// through its own fix.
+		//
+		// Lossy like every ctlbus message: a dropped notification just defers
+		// the re-seal to the periodic refresh sweep, and the checkout op is
+		// what actually waits for a bundle newer than this row.
+		_ = ctlbus.Publish(ctx, q, ctlbus.Message{Kind: "cred_request", OrgID: orgID, RunID: w.RunID})
 		return true, w.Path, nil
 	}
 	existing, err := lookup(ctx, orgID, w.RunID, w.RepoID, w.Ref)
