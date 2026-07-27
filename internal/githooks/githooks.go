@@ -53,16 +53,18 @@ const ConfigKey = "core.hooksPath"
 const BinEnvVar = "TRIAGE_FACTORY_BIN"
 
 // PushCaptureEnvVar names the env entry that tells the pre-push hook who owns
-// branch-push capture for this run. When set to PushCaptureProxy (the sandbox
-// env, written whenever the per-run git proxy is wired), the hook records
-// nothing and exits: every push transits the proxy, whose receive-pack capture
-// observes the upstream's actual outcome — so artifacts are written only for
-// pushes that landed, and refused pushes leave an audit failure row instead.
+// branch-push capture — and base-branch push enforcement — for this run. When
+// set to PushCaptureProxy (the sandbox env, written whenever the per-run git
+// proxy is wired), the hook stands down entirely: the proxy's ref gate already
+// adjudicates the team's base-branch push policy, so a second judgment there
+// would be redundant; and every push transits the proxy, whose receive-pack
+// capture observes the upstream's actual outcome — so artifacts are written
+// only for pushes that landed, and refused pushes leave an audit failure row.
 // The hook fires BEFORE the transfer and cannot know the outcome; letting it
 // record under a proxy would mint branch artifacts for pushes GitHub refused.
-// Unset (local mode — no proxy exists), the hook remains the only capture
-// point and records at pre-push time, accepting that it cannot observe the
-// outcome.
+// Unset (local mode — no proxy exists), the hook is the only capture point
+// AND the only policy gate: it records at pre-push time, accepting that it
+// cannot observe the outcome, and refuses a protected-ref push itself.
 const PushCaptureEnvVar = "TF_GIT_PUSH_CAPTURE"
 
 // PushCaptureProxy is the PushCaptureEnvVar value that stands the pre-push
@@ -73,8 +75,13 @@ const PushCaptureProxy = "proxy"
 var readmeContent []byte
 
 // prePushHook is the embedded pre-push hook (A·3, TFAC-460) Ensure writes
-// into the hooks dir. It records each pushed branch as a durable artifact
-// via `triagefactory hook record-push`. Best-effort: it always exits 0.
+// into the hooks dir. Two passes: it enforces the team's base-branch push
+// policy via `triagefactory hook check-push` (local mode's enforcement point
+// — a safety guard against a mistaken agent, aborting only on that verb's
+// dedicated "refused by policy" status, so every operational failure allows
+// the push), then records each pushed branch as a durable artifact via
+// `triagefactory hook record-push`. Recording stays best-effort and can never
+// change the exit status.
 //
 //go:embed pre-push
 var prePushHook []byte

@@ -60,6 +60,50 @@ var ValidReviewPostures = []string{
 // ValidReviewPosture reports whether s is one of ValidReviewPostures.
 func ValidReviewPosture(s string) bool { return slices.Contains(ValidReviewPostures, s) }
 
+// Base-branch push policies — whether a delegated agent may push to a repo's
+// base / default branch (main, master, the profile's default, the configured
+// base). The default refuses, which is right for a team that reviews through
+// pull requests and wrong for trunk-based teams, docs repos, config repos and
+// generated-file bots — hence a setting rather than a hard-coded rule.
+//
+// This is a safety guard against a MISTAKEN agent, not a control against a
+// hostile one. In multi mode it is enforced at the per-run git proxy's ref
+// gate; in local mode at the TF-controlled pre-push hook, which the agent runs
+// as the operator and could bypass (`git push --no-verify`, a rewritten
+// remote). A mistake does not attempt bypass — it runs the naive command — so
+// the guard catches the failure mode that actually occurs. Nothing here makes
+// local mode a security boundary.
+const (
+	// BaseBranchPushNever refuses every push to a protected ref.
+	BaseBranchPushNever = "never"
+	// BaseBranchPushManualOnly permits it only when a human dispatched the run.
+	// An event-triggered run — one minted from a PR body, an issue comment or a
+	// label, all externally authored — is refused.
+	BaseBranchPushManualOnly = "manual_only"
+	// BaseBranchPushAlways permits it on every run.
+	BaseBranchPushAlways = "always"
+)
+
+// DefaultBaseBranchPushPolicy is what a team gets with no explicit choice:
+// refuse. NOT NULL with a schema DEFAULT of the same literal; the write path
+// coalesces a blank to it so an empty string never persists.
+const DefaultBaseBranchPushPolicy = BaseBranchPushNever
+
+// ValidBaseBranchPushPolicies is the accepted value set for
+// TeamSettings.BaseBranchPushPolicy. Validated app-side rather than with a DB
+// CHECK, for the same reason as ValidReviewPostures.
+var ValidBaseBranchPushPolicies = []string{
+	BaseBranchPushNever,
+	BaseBranchPushManualOnly,
+	BaseBranchPushAlways,
+}
+
+// ValidBaseBranchPushPolicy reports whether s is one of
+// ValidBaseBranchPushPolicies.
+func ValidBaseBranchPushPolicy(s string) bool {
+	return slices.Contains(ValidBaseBranchPushPolicies, s)
+}
+
 // MaxConcurrentRunsCeiling is the largest value OrgSettings.MaxConcurrentRuns
 // accepts. It's a sanity bound far beyond any real fleet (per-executor
 // concurrency tops out in the low hundreds; even a large fleet stays in the
@@ -232,6 +276,18 @@ type TeamSettings struct {
 	// persists. Deliberately team-grained, with no per-prompt override: a
 	// prompt author must not be able to opt their runs out of the team's gate.
 	ReviewPosture string
+
+	// BaseBranchPushPolicy is whether this team's delegated agents may push to
+	// a repo's base / default branch — one of ValidBaseBranchPushPolicies, read
+	// by both enforcement points (the multi-mode git-proxy ref gate and the
+	// local-mode pre-push hook) through internal/pushpolicy. NOT NULL with a
+	// schema DEFAULT; defaults to DefaultBaseBranchPushPolicy ("never"). The
+	// write path coalesces an empty string to the default so a blank never
+	// persists. Team-grained with no per-prompt override, for the same reason
+	// as ReviewPosture and more sharply: task context is minted from PR bodies,
+	// issue comments and labels, so task text saying "push to main" must never
+	// be sufficient authority to unlock a base-branch push.
+	BaseBranchPushPolicy string
 }
 
 // DefaultTeamSettings returns the NOT NULL DEFAULT values from the
@@ -256,6 +312,7 @@ func DefaultTeamSettings() TeamSettings {
 		PermissionAbsentAutodenyEnabled: true,
 		BranchTemplate:                  DefaultBranchTemplate,
 		ReviewPosture:                   DefaultReviewPosture,
+		BaseBranchPushPolicy:            DefaultBaseBranchPushPolicy,
 	}
 }
 

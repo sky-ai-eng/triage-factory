@@ -8,6 +8,7 @@ import (
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -192,9 +193,35 @@ func TestMaterializeSpecSkill_NoPromptClearsStaleFile(t *testing.T) {
 	}
 }
 
-func TestMaterializeJiraFormattingSkill_WritesBuiltInSkill(t *testing.T) {
+// shippedBody returns the seed body for a shipped prompt slug, so a test
+// fixture seeds what a real install would rather than a hand-copied excerpt.
+func shippedBody(t *testing.T, slug string) string {
+	t.Helper()
+	for _, p := range promptseed.Prompts() {
+		if p.SystemSlug == slug {
+			return p.Body
+		}
+	}
+	t.Fatalf("no shipped prompt with slug %q", slug)
+	return ""
+}
+
+// TestMaterializeJiraFormattingSkill_FromSeededRow: the guidance is now a
+// seeded, user-editable prompt row rather than an embedded file, so the skill
+// must render from whatever the row currently holds.
+func TestMaterializeJiraFormattingSkill_FromSeededRow(t *testing.T) {
+	database := newTestDB(t)
+	seedTestPrompt(t, database, domain.Prompt{
+		ID:     domain.SystemJiraFormattingPromptID,
+		Name:   "Curator: Jira Formatting",
+		Body:   shippedBody(t, domain.SystemJiraFormattingPromptID),
+		Source: "system",
+	})
+
 	cwd := t.TempDir()
-	if err := materializeJiraFormattingSkill(cwd); err != nil {
+	project := &domain.Project{ID: "p1", TeamID: runmode.LocalDefaultTeamID}
+	if err := materializeJiraFormattingSkill(t.Context(), sqlitestore.New(database),
+		runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("materialize jira formatting skill: %v", err)
 	}
 
@@ -206,6 +233,9 @@ func TestMaterializeJiraFormattingSkill_WritesBuiltInSkill(t *testing.T) {
 	if !strings.Contains(contents, "name: jira-formatting") {
 		t.Error("expected jira-formatting frontmatter name")
 	}
+	if !strings.Contains(contents, "description: ") {
+		t.Error("expected a description in frontmatter — it is what selects the skill")
+	}
 	if !strings.Contains(contents, "h2. Heading") {
 		t.Error("expected heading guidance")
 	}
@@ -214,5 +244,56 @@ func TestMaterializeJiraFormattingSkill_WritesBuiltInSkill(t *testing.T) {
 	}
 	if !strings.Contains(contents, "{code}") {
 		t.Error("expected code block guidance")
+	}
+}
+
+// TestMaterializeJiraFormattingSkill_UserEditWins is the point of making this
+// a row: a team with different Jira conventions can rewrite it and the next
+// turn picks the edit up.
+func TestMaterializeJiraFormattingSkill_UserEditWins(t *testing.T) {
+	database := newTestDB(t)
+	seedTestPrompt(t, database, domain.Prompt{
+		ID:     domain.SystemJiraFormattingPromptID,
+		Name:   "Curator: Jira Formatting",
+		Body:   "our team writes Jira in plain prose",
+		Source: "system",
+	})
+
+	cwd := t.TempDir()
+	project := &domain.Project{ID: "p1", TeamID: runmode.LocalDefaultTeamID}
+	if err := materializeJiraFormattingSkill(t.Context(), sqlitestore.New(database),
+		runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(cwd, ".claude", "skills", jiraFormattingSkillDirName, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read SKILL.md: %v", err)
+	}
+	if !strings.Contains(string(data), "our team writes Jira in plain prose") {
+		t.Error("edited prompt body did not reach the materialized skill")
+	}
+}
+
+// TestMaterializeJiraFormattingSkill_ClearsStaleWhenUnresolved: an unseeded
+// (or soft-deleted) row must clear a previously written SKILL.md rather than
+// leave the agent applying guidance that no longer exists.
+func TestMaterializeJiraFormattingSkill_ClearsStaleWhenUnresolved(t *testing.T) {
+	database := newTestDB(t)
+	cwd := t.TempDir()
+	skillPath := filepath.Join(cwd, ".claude", "skills", jiraFormattingSkillDirName, "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(skillPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(skillPath, []byte("stale"), 0o644); err != nil {
+		t.Fatalf("write stale: %v", err)
+	}
+
+	project := &domain.Project{ID: "p1", TeamID: runmode.LocalDefaultTeamID}
+	if err := materializeJiraFormattingSkill(t.Context(), sqlitestore.New(database),
+		runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	if _, err := os.Stat(skillPath); !os.IsNotExist(err) {
+		t.Errorf("expected stale SKILL.md removed when no prompt row resolves, stat err=%v", err)
 	}
 }

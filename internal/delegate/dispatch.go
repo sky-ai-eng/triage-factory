@@ -21,7 +21,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -904,7 +904,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		owner, repo, prNumber := parseGitHubTask(task)
 		cfg.owner, cfg.repo, cfg.prNumber = owner, repo, prNumber
 		cfg.scope = fmt.Sprintf("Repository: %s/%s\nPR: #%d", owner, repo, prNumber)
-		cfg.toolsRef = ai.GHToolsTemplate
+		cfg.toolsRef = agentprompt.GitHubToolsReference()
 		cfg.hasWT = true
 		// Re-fetched rather than inherited from the first step: by now the
 		// PR's history includes whatever the earlier steps pushed, which is
@@ -917,7 +917,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		cfg.wtPath, cfg.runRoot = wt, wt
 	case "jira":
 		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
-		cfg.toolsRef = ai.GHToolsTemplate + "\n\n" + ai.JiraToolsTemplate
+		cfg.toolsRef = agentprompt.GitHubToolsReference() + "\n\n" + agentprompt.JiraToolsReference()
 		cfg.hasWT = false
 		wt, err := s.ensureWorkspace(ctx, orgID, runForWS, "", "", "")
 		if err != nil {
@@ -926,8 +926,8 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		cfg.wtPath, cfg.runRoot = wt, wt
 	case "slack":
 		cfg.scope = fmt.Sprintf("Slack thread: %s", task.EntitySourceID)
-		toolsRef := ai.GHToolsTemplate
-		if ref, ok := ai.ToolsReferenceFor("slack"); ok {
+		toolsRef := agentprompt.GitHubToolsReference()
+		if ref, ok := agentprompt.ToolsReferenceFor("slack"); ok {
 			toolsRef += "\n\n" + ref
 		}
 		cfg.toolsRef = toolsRef

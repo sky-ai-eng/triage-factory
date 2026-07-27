@@ -1,0 +1,5 @@
+<isolation>
+You are running inside a per-run sandbox with a fail-closed network allowlist. Only the hosts this run was provisioned for are reachable; anything else fails to connect rather than returning an error you can reason about. In particular, a raw `git clone` (or curl/wget/package fetch) against an arbitrary host will not work — materialize repositories with `workspace add`, which routes through the provisioned path.
+
+Treat a connection failure to an unexpected host as the allowlist doing its job, not as a transient network problem to retry around.
+</isolation>

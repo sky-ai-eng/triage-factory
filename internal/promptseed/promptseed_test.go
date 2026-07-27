@@ -1,4 +1,4 @@
-package ai
+package promptseed
 
 import (
 	"strings"
@@ -13,7 +13,7 @@ import (
 // Drift here means the seeder or a trigger's prompt-slug reference dangles.
 func TestShippedPromptsParse(t *testing.T) {
 	seen := map[string]bool{}
-	for _, p := range ShippedPrompts() {
+	for _, p := range Prompts() {
 		if p.SystemSlug == "" {
 			t.Errorf("shipped prompt has empty SystemSlug: %+v", p)
 		}
@@ -38,21 +38,22 @@ func TestShippedPromptsParse(t *testing.T) {
 // resolves to a shipped prompt here. A typo or a renamed prompt would
 // otherwise only surface as an FK failure at seed time on a fresh install.
 //
-// We can't import internal/db (would be a cycle: db tests import ai),
-// so the trigger-side assertion lives in internal/db; here we just pin
-// the prompt slugs so a rename is a visible, reviewed diff.
+// We can't import internal/db (would be a cycle: db tests import this
+// package), so the trigger-side assertion lives in internal/db; here we
+// just pin the prompt slugs so a rename is a visible, reviewed diff.
 func TestShippedPromptSlugsStable(t *testing.T) {
 	want := map[string]bool{
-		"system-pr-review-security":     true,
-		"system-pr-review-correctness":  true,
-		"system-pr-review-aggregate":    true,
-		"system-conflict-resolution":    true,
-		"system-ci-fix":                 true,
-		"system-jira-implement":         true,
-		"system-fix-review-feedback":    true,
-		domain.SystemTicketSpecPromptID: true,
+		"system-pr-review-security":         true,
+		"system-pr-review-correctness":      true,
+		"system-pr-review-aggregate":        true,
+		"system-conflict-resolution":        true,
+		"system-ci-fix":                     true,
+		"system-jira-implement":             true,
+		"system-fix-review-feedback":        true,
+		domain.SystemTicketSpecPromptID:     true,
+		domain.SystemJiraFormattingPromptID: true,
 	}
-	for _, p := range ShippedPrompts() {
+	for _, p := range Prompts() {
 		delete(want, p.SystemSlug)
 	}
 	if len(want) > 0 {

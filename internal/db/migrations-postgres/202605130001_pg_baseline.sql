@@ -1583,6 +1583,20 @@ CREATE TABLE public.team_settings (
     -- migration) because multi-mode / Postgres is net-new and unshipped; the
     -- SQLite tree carries 202607260001_team_review_posture.sql.
     review_posture text DEFAULT 'identity'::text NOT NULL,
+    -- Per-team base-branch push policy: whether a delegated agent may push to a
+    -- repo's base / default branch (main, master, the profile's default branch,
+    -- the configured base branch). 'never' (the default) refuses every such
+    -- push, 'manual_only' permits it on a human-dispatched run and refuses it on
+    -- an event-triggered one, 'always' permits it. A safety guard against a
+    -- mistaken agent, enforced here at the per-run git proxy's ref gate (local
+    -- mode enforces the same policy at the pre-push hook). NOT NULL with a
+    -- literal DEFAULT so partial upserts (e.g. SetDailyCostCapSystem)
+    -- materialize it without the writer naming the column; the app coalesces an
+    -- empty write to the default and validates the value set app-side (no CHECK
+    -- — the max_llm_model_tier precedent). Rolled into the baseline (not a
+    -- forward migration) because multi-mode / Postgres is net-new and unshipped;
+    -- the SQLite tree carries 202607270001_team_base_branch_push_policy.sql.
+    base_branch_push_policy text DEFAULT 'never'::text NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 

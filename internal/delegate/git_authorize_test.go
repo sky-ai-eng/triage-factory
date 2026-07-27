@@ -442,3 +442,85 @@ func equalRefs(a, b []string) bool {
 	}
 	return true
 }
+
+// TestGitAuthorizeDecision_BaseBranchPushPolicy is the multi-mode half of the
+// base-branch push policy: with the team's setting at its default a worktree
+// sitting ON the base branch authorizes nothing, and the decision carries the
+// protected refs so the receive-pack gate can say WHY. Flipping the team to
+// "always" authorizes the same push; "manual_only" splits on who dispatched
+// the run.
+func TestGitAuthorizeDecision_BaseBranchPushPolicy(t *testing.T) {
+	database := newDelegateTestDB(t)
+	stores := sqlitestore.New(database)
+	ctx := context.Background()
+	seedRun(t, database, "run-bb", "sess", "/tmp/wt")
+
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+		{Owner: "acme", Repo: "api"},
+	}); err != nil {
+		t.Fatalf("track repo: %v", err)
+	}
+	if err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.RepoProfile{
+		ID: "acme/api", Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
+	}); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+	if _, _, err := stores.RunWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.RunWorktree{
+		RunID: "run-bb", RepoID: "acme/api", Path: "/tmp/bb", Ref: "@default",
+	}); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	// The checkout is on the repo's default branch — the situation the policy
+	// is about.
+	stubLiveBranch(t, map[string]string{"/tmp/bb": "main"})
+
+	setPolicy := func(policy string) {
+		t.Helper()
+		set, err := stores.Teams.GetSettingsSystem(ctx, runmode.LocalDefaultTeamID)
+		if err != nil {
+			t.Fatalf("read team settings: %v", err)
+		}
+		set.BaseBranchPushPolicy = policy
+		if err := stores.Teams.UpdateSettings(ctx, runmode.LocalDefaultTeamID, set); err != nil {
+			t.Fatalf("write team settings: %v", err)
+		}
+	}
+
+	cases := []struct {
+		name           string
+		policy         string
+		eventTriggered bool
+		wantRefs       []string
+		// wantProtected is what the decision must hand the receive-pack gate so a
+		// refusal can name the branch instead of collapsing to "ref not allowed".
+		wantProtected []string
+	}{
+		{"default policy refuses the base branch", domain.BaseBranchPushNever, false, nil, []string{"refs/heads/main", "refs/heads/master"}},
+		{"always permits it", domain.BaseBranchPushAlways, false, []string{"refs/heads/main"}, nil},
+		{"always permits it on an event-triggered run too", domain.BaseBranchPushAlways, true, []string{"refs/heads/main"}, nil},
+		{"manual_only permits a human-dispatched run", domain.BaseBranchPushManualOnly, false, []string{"refs/heads/main"}, nil},
+		{"manual_only refuses an event-triggered run", domain.BaseBranchPushManualOnly, true, nil, []string{"refs/heads/main", "refs/heads/master"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			setPolicy(c.policy)
+			info := agenthost.RunInfo{
+				OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+				RunID: "run-bb", IsEventTriggered: c.eventTriggered,
+			}
+			d, err := gitAuthorizeDecision(ctx, stores, info, "acme", "api")
+			if err != nil {
+				t.Fatalf("gitAuthorizeDecision: %v", err)
+			}
+			if !d.Allowed {
+				t.Fatalf("decision = %+v; want Allowed (the repo is tracked and materialized either way)", d)
+			}
+			if !equalRefs(d.AllowedRefs, c.wantRefs) {
+				t.Errorf("AllowedRefs = %v, want %v", d.AllowedRefs, c.wantRefs)
+			}
+			if !equalRefs(d.ProtectedRefs, c.wantProtected) {
+				t.Errorf("ProtectedRefs = %v, want %v", d.ProtectedRefs, c.wantProtected)
+			}
+		})
+	}
+}

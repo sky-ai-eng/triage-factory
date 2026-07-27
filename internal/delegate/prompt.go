@@ -1,5 +1,5 @@
-// Prompt resolution + composition (mission text + envelope template +
-// placeholder interpolation), plus parsing of the agent's terminal
+// Prompt resolution + composition (mission text + the composed agent
+// framework prompt + placeholder interpolation), plus parsing of the agent's terminal
 // completion JSON envelope and the small string utilities the prompt
 // path needs (extra-tools merging, owner/repo splitting).
 
@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -149,13 +149,27 @@ func (s *Spawner) resolvePrompt(orgID string, task domain.Task, explicitPromptID
 	return p, nil
 }
 
-// buildPrompt composes mission + envelope and interpolates all placeholders
-// in one pass. See placeholders.go for the full catalog — every {{X}} in
-// the mission or envelope gets resolved here, with unknown names falling
-// through as literal braces so they're obvious to prompt authors on first
-// run. metadataJSON is the primary event's metadata blob ("" is fine —
-// event-derived placeholders just render empty). skeleton is the rendered PR
-// history block, empty for a task with no pull request behind it.
+// machinistSpec selects the delegated agent's block set from
+// internal/agentprompt. Mode is resolved here rather than inside Build, which
+// stays a pure function of its Spec — that is what makes both mode variants
+// testable without manipulating process state.
+func machinistSpec() agentprompt.Spec {
+	return agentprompt.Spec{
+		Surface: agentprompt.SurfaceMachinist,
+		Runtime: agentprompt.RuntimeSDK,
+		Family:  agentprompt.FamilyClaude,
+		Mode:    agentprompt.ModeFor(string(runmode.Current())),
+	}
+}
+
+// buildPrompt composes mission + the agent framework prompt and interpolates
+// all placeholders in one pass. See placeholders.go for the full catalog —
+// every {{X}} in the mission or the composed framework text gets resolved
+// here, with unknown names falling through as literal braces so they're
+// obvious to prompt authors on first run. metadataJSON is the primary event's
+// metadata blob ("" is fine — event-derived placeholders just render empty).
+// skeleton is the rendered PR history block, empty for a task with no pull
+// request behind it.
 func buildPrompt(task domain.Task, metadataJSON, skeleton, mission, scope, toolsRef, binaryPath, runID, runRoot, blueprintRunID, branchTemplate, runURL string) string {
 	// Compatibility shim: some early prompts were written with the literal
 	// "triagefactory exec" prefix on CLI invocations, assuming the binary
@@ -163,7 +177,7 @@ func buildPrompt(task domain.Task, metadataJSON, skeleton, mission, scope, tools
 	// session, so rewrite those before interpolation. New prompts should
 	// use {{BINARY_PATH}} directly.
 	body := strings.ReplaceAll(mission, "triagefactory exec", binaryPath+" exec")
-	full := body + "\n\n" + ai.EnvelopeTemplate
+	full := body + "\n\n" + agentprompt.Build(machinistSpec(), agentprompt.Parts{})
 
 	// Inline the scope and tools sections into the template text FIRST.
 	// strings.Replacer does a single non-re-scanning pass, so a section
@@ -247,7 +261,7 @@ func (s *Spawner) collectExtraTools(promptAllowedTools string) string {
 type agentResult struct {
 	// Outcome is the single terminal vocabulary (continue|finish|abort) —
 	// renamed from the legacy `status` field for clarity. See domain.RunOutcome
-	// and internal/ai/prompts/envelope.txt.
+	// and the completion block in internal/agentprompt.
 	Outcome string `json:"outcome"`
 	// Summary is the natural-language "what I did" — required on a
 	// finish/continue. Maps to runs.result_summary.

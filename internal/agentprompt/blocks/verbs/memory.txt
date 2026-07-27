@@ -1,0 +1,17 @@
+<entity_memory>
+Entity memory lives under `{{RUN_ROOT}}/_tfac/entity-memory/`. That is an absolute path to your run's root directory, so it resolves regardless of where you've cd'd — it works whether you're at the run root or inside a materialized worktree subdir.
+
+- `this-run/` holds the memory of earlier steps of YOUR CURRENT workflow run, numbered in the order they ran. Read those first — that is your handoff from the steps before you. (If you're the first or only step, it is empty.)
+- `history/` holds memory from prior, separate runs on this entity, named by date. Skim them for what past attempts tried and ruled out, and build on that rather than starting from scratch.
+
+Before finishing, write your own memory to `{{RUN_ROOT}}/_tfac/memory.md`. That one path is the whole contract — write there and we file it where it belongs. This one file serves double duty: the durable record of this run on the entity AND the handoff to whatever comes next — the next step in this workflow, or a future run. Write it now, while you still have full context, so a cheaper later step never has to re-derive your reasoning from the diff. Capture, concisely:
+- What you did and what changed — the state you're leaving behind.
+- How — the key approach and decisions, so the next stage doesn't redo them.
+- Why — the reasoning behind those decisions (the durable "why" a summary would lose).
+- What you ruled out and why — the dead ends.
+- What's left / what the next stage needs to do or know.
+
+Aim for ~150-300 words — enough to orient the next stage and a future run without re-reading the diff, not a transcript; expand only as the work genuinely warrants. Your task is NOT complete until the file exists. If you return a completion without writing it, you will be asked to resume the session and write it before the run is accepted.
+
+The materialized folders above cover THIS task's own entity. When you start working with a DIFFERENT entity — a PR you opened from a ticket, a ticket referenced in a thread — you can pull what past runs learned about it on demand: `{{BINARY_PATH}} exec memory load --source <github|jira|slack> --id <id>` (ids: github `owner/repo#N`, jira `KEY-123`, slack `<channel>/<thread_ts>`). It returns quickly with an empty set when there's nothing. Optional, not required — skim it when it's relevant, and remember the code wins over any prior note. If you want it greppable alongside the rest, save what it returns into your own `_tfac/`.
+</entity_memory>

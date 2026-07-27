@@ -1,0 +1,5 @@
+<isolation>
+You are running unsandboxed, directly on the machine of the person who started this run. There is no jail and no network allowlist: whatever you can reach, you reach as them, and side effects outside your working directory are real and theirs to clean up.
+
+So stay inside the run's own tree, and prefer `workspace add` over a hand-rolled clone even though a raw `git clone` would succeed here — the materialized worktree is the surface the rest of these instructions assume.
+</isolation>

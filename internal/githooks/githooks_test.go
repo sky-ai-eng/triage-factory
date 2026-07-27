@@ -1,6 +1,7 @@
 package githooks
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -254,11 +255,129 @@ func TestPrePushHook_RecordFailureDoesNotFailPush(t *testing.T) {
 	}
 }
 
+// TestPrePushHook_PolicyRefusalAbortsPush drives the real embedded hook over a
+// real push with a fake binary whose check-push verb answers "refused by
+// policy" (exit 3). The push must abort, and nothing may be recorded — a push
+// that never happens must not leave a branch artifact behind.
+func TestPrePushHook_PolicyRefusalAbortsPush(t *testing.T) {
+	requireGit(t)
+	env, recLog := setupEmbeddedHookBody(t, "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \"$REC_LOG\"\n"+
+		"case \"$2\" in check-push) exit 3 ;; esac\n"+
+		"exit 0\n")
+	work := newRepoWithRemote(t, env)
+
+	out, err := runGit(env, work, "push", "-u", "origin", "main")
+	if err == nil {
+		t.Fatalf("push succeeded despite a policy refusal:\n%s", out)
+	}
+	if got := readMarker(t, recLog); strings.Contains(got, "record-push") {
+		t.Errorf("recorded %q for a push that was refused; want no recording", got)
+	}
+}
+
+// TestPrePushHook_PolicyCheckFailureAllowsPush is the fail-open half: every
+// check-push exit status OTHER than the dedicated refusal one means the guard
+// could not evaluate the policy — a missing binary, a broken database, a crash
+// — and the push must proceed. A mistake-guard that blocks on its own outage
+// is a broken tool.
+func TestPrePushHook_PolicyCheckFailureAllowsPush(t *testing.T) {
+	requireGit(t)
+	env, recLog := setupEmbeddedHookBody(t, "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \"$REC_LOG\"\n"+
+		"case \"$2\" in check-push) exit 1 ;; esac\n"+
+		"exit 0\n")
+	work := newRepoWithRemote(t, env)
+
+	if out, err := runGit(env, work, "push", "-u", "origin", "main"); err != nil {
+		t.Fatalf("push failed on an inconclusive policy check: %v\n%s", err, out)
+	}
+	if got := readMarker(t, recLog); !strings.Contains(got, "record-push") {
+		t.Errorf("recorder log %q missing the record-push call; the allowed push should still be recorded", got)
+	}
+}
+
+// TestPrePushHook_StandsDownUnderProxyCaptureForPolicy pins that the proxy
+// stand-down covers the policy pass too: under a proxy the ref gate has
+// already adjudicated the same policy, so the hook must not double-judge.
+func TestPrePushHook_StandsDownUnderProxyCaptureForPolicy(t *testing.T) {
+	requireGit(t)
+	env, recLog := setupEmbeddedHookBody(t, "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \"$REC_LOG\"\n"+
+		"case \"$2\" in check-push) exit 3 ;; esac\n"+
+		"exit 0\n")
+	env = append(env, PushCaptureEnvVar+"="+PushCaptureProxy)
+	work := newRepoWithRemote(t, env)
+
+	if out, err := runGit(env, work, "push", "-u", "origin", "main"); err != nil {
+		t.Fatalf("push failed under proxy capture: %v\n%s", err, out)
+	}
+	if got, err := os.ReadFile(recLog); err == nil && strings.Contains(string(got), "check-push") {
+		t.Errorf("hook ran check-push under proxy capture (%q); the proxy's ref gate owns the policy there", got)
+	}
+}
+
+// TestPrePushHook_LargeRefListSurvivesBothPasses drives the hook directly with
+// a ref list far larger than any single push git normally produces (a
+// `git push --all` on a big repo is the realistic shape). Both passes must see
+// every ref: the policy check can't be allowed to inspect a truncated list and
+// call it clean, and the recording pass can't silently drop branches. This is
+// why the hook spools stdin to a file rather than holding it in a variable and
+// re-emitting it.
+func TestPrePushHook_LargeRefListSurvivesBothPasses(t *testing.T) {
+	env, recLog := setupEmbeddedHookBody(t, "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \"$REC_LOG\"\n"+
+		"exit 0\n")
+
+	// One process per ref bounds how big this can get and stay a fast test, so
+	// the refs are long rather than merely numerous: enough bytes that a
+	// truncating implementation would drop some, without a five-figure fanout.
+	const refs = 1000
+	const pad = "long-branch-name-segment/that-makes-each-line-substantial/"
+	var stdin strings.Builder
+	for i := range refs {
+		fmt.Fprintf(&stdin, "refs/heads/%s%d aaaa%d refs/heads/%s%d 0000000000000000000000000000000000000000\n",
+			pad, i, i, pad, i)
+	}
+
+	cmd := exec.Command("sh", filepath.Join(HostDir(), "pre-push"), "origin", "https://github.com/octo/repo.git")
+	cmd.Env = env
+	cmd.Stdin = strings.NewReader(stdin.String())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("hook failed on a large ref list: %v\n%s", err, out)
+	}
+
+	log, err := os.ReadFile(recLog)
+	if err != nil {
+		t.Fatalf("read recorder log: %v", err)
+	}
+	if got := strings.Count(string(log), "check-push"); got != 1 {
+		t.Errorf("check-push invocations = %d, want exactly 1 (one pass over the whole list)", got)
+	}
+	if got := strings.Count(string(log), "record-push"); got != refs {
+		t.Errorf("record-push invocations = %d, want %d — the ref list was truncated", got, refs)
+	}
+	// The last ref specifically: a truncation would lose the tail, which a count
+	// alone could mask if the recorder were called for something else.
+	if !strings.Contains(string(log), fmt.Sprintf("--ref refs/heads/%s%d ", pad, refs-1)) {
+		t.Errorf("recorder log is missing the final ref refs/heads/%s%d", pad, refs-1)
+	}
+}
+
 // setupEmbeddedHook pins the state root, calls Ensure (which writes the real
 // embedded pre-push hook), and wires a recorder script as TRIAGE_FACTORY_BIN
 // that appends its argv to recLog and exits recorderExit. Returns the agent
 // git env and the recorder log path.
 func setupEmbeddedHook(t *testing.T, recorderExit int) (env []string, recLog string) {
+	t.Helper()
+	return setupEmbeddedHookBody(t, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$REC_LOG\"\nexit "+
+		strconv.Itoa(recorderExit)+"\n")
+}
+
+// setupEmbeddedHookBody is setupEmbeddedHook with the fake binary's script
+// supplied verbatim, for tests that need it to answer differently per verb
+// (the policy check refusing while recording still succeeds, say).
+func setupEmbeddedHookBody(t *testing.T, body string) (env []string, recLog string) {
 	t.Helper()
 	runmode.SetForTest(t, runmode.ModeLocal)
 	paths.SetForTest(t, t.TempDir())
@@ -268,8 +387,6 @@ func setupEmbeddedHook(t *testing.T, recorderExit int) (env []string, recLog str
 
 	recLog = filepath.Join(t.TempDir(), "rec.log")
 	recorder := filepath.Join(t.TempDir(), "triagefactory")
-	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$REC_LOG\"\nexit " +
-		strconv.Itoa(recorderExit) + "\n"
 	if err := os.WriteFile(recorder, []byte(body), 0o755); err != nil {
 		t.Fatalf("write recorder: %v", err)
 	}

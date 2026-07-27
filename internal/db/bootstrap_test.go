@@ -7,10 +7,10 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -29,7 +29,7 @@ func TestBootstrapLocalOrg_FreshInstall(t *testing.T) {
 		t.Fatalf("fresh DB has %d orgs rows; want 0 (boot must provision nothing)", n)
 	}
 
-	if err := db.BootstrapLocalOrg(ctx, stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapLocalOrg(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("BootstrapLocalOrg: %v", err)
 	}
 
@@ -92,7 +92,7 @@ func TestBootstrapLocalOrg_Idempotent(t *testing.T) {
 	ctx := t.Context()
 
 	for i := 0; i < 3; i++ {
-		if err := db.BootstrapLocalOrg(ctx, stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+		if err := db.BootstrapLocalOrg(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 			t.Fatalf("BootstrapLocalOrg call %d: %v", i, err)
 		}
 	}
@@ -104,7 +104,7 @@ func TestBootstrapLocalOrg_Idempotent(t *testing.T) {
 	}
 	// The shipped handler set is stable across re-provisions (no duplication).
 	after := countSystemHandlers(t, conn, runmode.LocalDefaultTeamID)
-	if err := db.BootstrapLocalOrg(ctx, stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapLocalOrg(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("BootstrapLocalOrg re-run: %v", err)
 	}
 	if again := countSystemHandlers(t, conn, runmode.LocalDefaultTeamID); again != after {
@@ -138,7 +138,7 @@ func TestBootstrapLocalOrg_ReEntrantAfterPartial(t *testing.T) {
 	}
 
 	// Re-run reaches the full end state.
-	if err := db.BootstrapLocalOrg(ctx, stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapLocalOrg(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("re-run after partial: %v", err)
 	}
 	if n := countRows(t, conn, "agents"); n != 1 {
@@ -156,7 +156,7 @@ func TestBootstrapLocalOrg_PreservesUserDisable(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()
 
-	if err := db.BootstrapLocalOrg(ctx, stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapLocalOrg(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("first provision: %v", err)
 	}
 	agent, _ := stores.Agents.GetForOrg(ctx, runmode.LocalDefaultOrgID)
@@ -168,7 +168,7 @@ func TestBootstrapLocalOrg_PreservesUserDisable(t *testing.T) {
 		t.Fatalf("SetEnabled false: %v", err)
 	}
 	// Re-provision.
-	if err := db.BootstrapLocalOrg(ctx, stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapLocalOrg(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("second provision: %v", err)
 	}
 	ta, _ := stores.TeamAgents.GetForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, agent.ID)
@@ -214,7 +214,7 @@ func TestBootstrapNewTeam_SeedsPerTeamDefaults(t *testing.T) {
 	// Org-create seeds the agent + the org template + the founder's (sentinel)
 	// team. The 2nd team then copies the same template.
 	if err := db.BootstrapNewOrg(ctx, stores,
-		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints(),
+		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, promptseed.Prompts(), promptseed.Blueprints(),
 	); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestBootstrapNewTeam_SeedsPerTeamDefaults(t *testing.T) {
 		t.Fatalf("insert second team: %v", err)
 	}
 
-	if err := db.BootstrapNewTeam(ctx, stores, runmode.LocalDefaultOrgID, newTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewTeam(ctx, stores, runmode.LocalDefaultOrgID, newTeamID, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("BootstrapNewTeam: %v", err)
 	}
 
@@ -281,7 +281,7 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 	ctx := t.Context()
 
 	if err := db.BootstrapNewOrg(ctx, stores,
-		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints(),
+		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, promptseed.Prompts(), promptseed.Blueprints(),
 	); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestSeedShippedIntoTeam_DistinctUUIDsAcrossTeams(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	team1 := runmode.LocalDefaultTeamID
 
-	if err := db.BootstrapNewOrg(ctx, stores, org, team1, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, org, team1, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
 
@@ -346,7 +346,7 @@ func TestSeedShippedIntoTeam_DistinctUUIDsAcrossTeams(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert second team: %v", err)
 	}
-	if err := db.BootstrapNewTeam(ctx, stores, org, newTeamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewTeam(ctx, stores, org, newTeamID, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("BootstrapNewTeam: %v", err)
 	}
 
@@ -426,10 +426,10 @@ func TestSeedShippedIntoTeam_AllowedToolsRoundTrips(t *testing.T) {
 	// shipped trigger's blueprint slug, so the fixture must carry the real
 	// shipped lists alongside the synthetic prompt/blueprint under test —
 	// not just the synthetic pair on their own.
-	prompts := append(append([]domain.Prompt{}, ai.ShippedPrompts()...),
+	prompts := append(append([]domain.Prompt{}, promptseed.Prompts()...),
 		domain.Prompt{SystemSlug: "test-tools-prompt", Name: "Tools Test", Body: "b", Source: "system", Model: "opus", AllowedTools: "WebFetch,Bash"},
 	)
-	blueprints := append(append([]domain.SeedBlueprint{}, ai.ShippedBlueprints()...),
+	blueprints := append(append([]domain.SeedBlueprint{}, promptseed.Blueprints()...),
 		domain.SeedBlueprint{SystemSlug: "test-tools-prompt", Name: "Tools Test", StepPromptSlugs: []string{"test-tools-prompt"}},
 	)
 	if err := db.BootstrapNewOrg(ctx, stores, org, team, prompts, blueprints); err != nil {
@@ -461,7 +461,7 @@ func TestSeedShippedIntoTeam_ReRunIsExactNoOp(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	team := runmode.LocalDefaultTeamID
 
-	if err := db.BootstrapNewOrg(ctx, stores, org, team, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, org, team, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
 
@@ -474,7 +474,7 @@ func TestSeedShippedIntoTeam_ReRunIsExactNoOp(t *testing.T) {
 		t.Fatalf("Blueprints.GetBySystemSlug before re-run: b=%v err=%v", beforeBP, err)
 	}
 
-	if err := stores.ShippedDefaults.SeedShippedIntoTeam(ctx, org, team, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := stores.ShippedDefaults.SeedShippedIntoTeam(ctx, org, team, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("re-run SeedShippedIntoTeam: %v", err)
 	}
 
@@ -514,7 +514,7 @@ func TestSeedShippedIntoTeam_ReRunIsExactNoOp(t *testing.T) {
 func TestBootstrapLocalTenancy_ConstantsMatchRows(t *testing.T) {
 	conn := openTenantlessSQLite(t)
 	stores := sqlitestore.New(conn)
-	if err := db.BootstrapLocalOrg(t.Context(), stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapLocalOrg(t.Context(), stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("BootstrapLocalOrg: %v", err)
 	}
 

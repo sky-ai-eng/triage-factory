@@ -6,11 +6,11 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 )
@@ -340,7 +340,7 @@ func (th *teamsHandler) handleTeamCreate(w http.ResponseWriter, r *http.Request)
 	// missing-defaults team is degraded (auto-delegation won't fire) but
 	// repairable by re-running bootstrap, whereas failing the create after
 	// the row committed would orphan it.
-	if err := db.BootstrapNewTeam(r.Context(), th.allStores, orgID, created.ID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewTeam(r.Context(), th.allStores, orgID, created.ID, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		teamsLog.Warn("new team created but bootstrap failed, prompts/rules/bot may be missing", "org", orgID, "team", created.ID, "error", err)
 	}
 

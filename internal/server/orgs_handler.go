@@ -7,8 +7,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 )
@@ -113,7 +113,7 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 	// the founder is signed into it; a missing-defaults org is degraded
 	// (auto-delegation won't fire) but repairable by re-running bootstrap,
 	// whereas failing the create after the rows committed would orphan it.
-	if err := db.BootstrapNewOrg(r.Context(), s.allStores, orgID.String(), teamID.String(), ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewOrg(r.Context(), s.allStores, orgID.String(), teamID.String(), promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		orgsLog.Warn("new org created but bootstrap failed, template/bot may be missing", "org", orgID, "team", teamID, "error", err)
 	}
 
