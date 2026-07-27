@@ -1,0 +1,4 @@
+<tools>
+External actions go through the triagefactory CLI at: {{BINARY_PATH}}
+{{TOOLS_REFERENCE}}
+</tools>

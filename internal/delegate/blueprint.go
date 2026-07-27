@@ -10,25 +10,14 @@ import (
 	"strings"
 	"time"
 
-	_ "embed" // powers blueprintStepNonterminalPrompt
-
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
-
-// blueprintStepNonterminalPrompt is the addendum appended to a NON-terminal
-// blueprint step's system prompt. It adds the `continue` outcome (framed as
-// the default hand-off) plus the narrow `finish` exception to the base
-// completion contract. The terminal step and the N=1 single-prompt case
-// append nothing — normal completion there IS `finish`, identical to a
-// single-prompt run, so they never see `continue`.
-//
-//go:embed prompts/blueprint-step-nonterminal.txt
-var blueprintStepNonterminalPrompt string
 
 // blueprintStepOutcome is the orchestrator's decision after a completed
 // blueprint step, derived from the step's runs.outcome and its position.
@@ -350,18 +339,22 @@ func taskEntityID(tasks db.TaskStore, orgID, taskID string) string {
 // — and therefore the empty string for the whole N=1 single-step case, where
 // i==0 is also the last step. This is the one position bit the agent's
 // contract depends on; nothing else about ordering reaches the agent.
+//
+// The fragment itself is a block of internal/agentprompt, resolved per
+// runtime: it extends the base completion contract, so the two must stay in
+// step, and they only do that if one package owns both.
 func nonterminalStepSysPrompt(i, total int) string {
 	if i < total-1 {
-		return blueprintStepNonterminalPrompt
+		return agentprompt.NonTerminalCompletion(machinistSpec())
 	}
 	return ""
 }
 
 // buildBlueprintStepWrapperPrompt produces the per-step user prompt carrying
-// step-specific data. The base completion contract (envelope.txt) plus the
-// non-terminal addendum (blueprint-step-nonterminal.txt, injected only for
-// non-final steps) own the protocol; this wrapper supplies only the step's
-// context.
+// step-specific data. The base completion contract (the composed framework
+// prompt) plus the non-terminal addendum (agentprompt.NonTerminalCompletion,
+// injected only for non-final steps) own the protocol; this wrapper supplies
+// only the step's context.
 func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep, stepPrompt *domain.Prompt, slug string, total int, nextStepName string) string {
 	mission := strings.TrimSpace(step.Brief)
 	if mission == "" {

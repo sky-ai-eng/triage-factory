@@ -38,7 +38,7 @@ import (
 // (the run-namespaced local branch -> the real head branch), so `git
 // push` (no remote argument) lands on the fork's contributor branch
 // (fork PR) or the upstream head (own-repo PR). Agents must use `git
-// push` without a remote arg for this to work; envelope.txt has the
+// push` without a remote arg for this to work; the guardrails block has the
 // corresponding guidance. A deleted-fork PR (head.repo == null) skips
 // push tracking and stays read-only.
 //

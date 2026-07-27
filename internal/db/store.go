@@ -266,7 +266,7 @@ type Stores struct {
 
 	// ShippedDefaults seeds a team's prompts + blueprints (+ steps) +
 	// event_handlers directly from the compile-time shipped lists
-	// (ai.ShippedPrompts() / ai.ShippedBlueprints() / db.ShippedEventHandlers).
+	// (promptseed.Prompts() / promptseed.Blueprints() / db.ShippedEventHandlers).
 	// This is what BootstrapNewOrg/BootstrapNewTeam call — every new team,
 	// first or Nth, is seeded the same way. Admin pool; the SQLite impl
 	// exists so the bootstrap tests can run without Postgres.

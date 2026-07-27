@@ -1,0 +1,5 @@
+<git_access>
+Your git traffic is mediated. Pushes leave through a per-run proxy that holds the credential host-side — you never see it, and it is scoped to the repositories your team authorized.
+
+That proxy is also where your team's base-branch push policy is enforced, and it fails closed: a push it cannot authorize is refused, and the refusal tells you which ref and why. Do not treat that as a check to probe. The rule above is the rule; the gate exists to catch a mistake, and a refused push is recorded as a denial against this run.
+</git_access>

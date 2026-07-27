@@ -7,10 +7,10 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 )
 
 // TestBootstrapNewOrg_Postgres_TwoPool is the regression guard.
@@ -42,7 +42,7 @@ func TestBootstrapNewOrg_Postgres_TwoPool(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	ctx := context.Background()
-	if err := db.BootstrapNewOrg(ctx, stores, orgID, teamID, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, orgID, teamID, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg on the two-pool store: %v", err)
 	}
 
@@ -124,11 +124,11 @@ func TestSeedShippedIntoTeam_Postgres_TwoTeamsAndIdempotent(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	if err := db.BootstrapNewOrg(ctx, stores, orgID, team1, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, orgID, team1, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg: %v", err)
 	}
 	team2 := pgtest.SeedTeam(t, h, orgID, "team2-sky658")
-	if err := db.BootstrapNewTeam(ctx, stores, orgID, team2, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewTeam(ctx, stores, orgID, team2, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("BootstrapNewTeam: %v", err)
 	}
 
@@ -174,7 +174,7 @@ func TestSeedShippedIntoTeam_Postgres_TwoTeamsAndIdempotent(t *testing.T) {
 	}
 
 	// Re-running bootstrap against team1 is a no-op: same prompt row id.
-	if err := db.BootstrapNewOrg(ctx, stores, orgID, team1, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapNewOrg(ctx, stores, orgID, team1, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		t.Fatalf("BootstrapNewOrg re-run: %v", err)
 	}
 	p1IDAgain, _ := readPrompt(team1, "system-pr-review-aggregate")

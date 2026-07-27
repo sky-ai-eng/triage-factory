@@ -1,17 +1,27 @@
 package curator
 
 import (
-	_ "embed"
 	"fmt"
 	"sort"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-//go:embed prompts/curator_envelope.txt
-var curatorEnvelopeTemplate string
+// curatorSpec selects the curator's block set from internal/agentprompt. The
+// mode is resolved at the call site rather than inside Build (which stays a
+// pure function of its Spec); the curator takes neither mode arm today, but
+// passing the real posture keeps the seam honest if it ever grows one.
+func curatorSpec() agentprompt.Spec {
+	return agentprompt.Spec{
+		Surface: agentprompt.SurfaceCurator,
+		Runtime: agentprompt.RuntimeSDK,
+		Family:  agentprompt.FamilyClaude,
+		Mode:    agentprompt.ModeFor(string(runmode.Current())),
+	}
+}
 
 // envelopeInputs is the set of values the curator envelope template
 // consumes. Built once per dispatch from the project row + the running
@@ -25,8 +35,8 @@ type envelopeInputs struct {
 	BinaryPath         string
 }
 
-// renderEnvelope substitutes the templated placeholders in
-// curator_envelope.txt with concrete values, returning the
+// renderEnvelope substitutes the templated placeholders in the composed
+// curator block set with concrete values, returning the
 // --append-system-prompt payload for one curator dispatch. Static at
 // the *project* level (project name + description don't change
 // session-to-session) but rendered fresh each turn so that a) the
@@ -53,7 +63,7 @@ func renderEnvelope(in envelopeInputs) string {
 		"{{TRACKERS_BLOCK}}", renderTrackersBlock(in.JiraProjectKey, in.LinearProjectKey),
 		"{{TOOLS_REFERENCE}}", toolsReference,
 		"{{BINARY_PATH}}", in.BinaryPath,
-	).Replace(curatorEnvelopeTemplate)
+	).Replace(agentprompt.Build(curatorSpec(), agentprompt.Parts{}))
 }
 
 func projectNameOrFallback(name string) string {
@@ -116,7 +126,7 @@ func renderTrackersBlock(jiraKey, linearKey string) string {
 // same vocabulary for `triagefactory exec` invocations. Cheap copy —
 // these strings are kilobytes, not megabytes.
 func renderToolsReference() string {
-	return strings.TrimSpace(ai.GHToolsTemplate) + "\n\n" + strings.TrimSpace(ai.JiraToolsTemplate)
+	return strings.TrimSpace(agentprompt.GitHubToolsReference()) + "\n\n" + strings.TrimSpace(agentprompt.JiraToolsReference())
 }
 
 // pendingChangesNote renders the hidden [system note] block that gets

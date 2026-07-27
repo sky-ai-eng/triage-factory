@@ -468,7 +468,7 @@ func (s *projectSession) dispatch(item queueItem) {
 	if err := materializeSpecSkill(skillCtx, s.curator.stores, item.orgID, item.creatorUserID, project, cwd); err != nil {
 		curatorLog.Warn("materialize spec skill failed", "project", s.projectID, "error", err)
 	}
-	if err := materializeJiraFormattingSkill(cwd); err != nil {
+	if err := materializeJiraFormattingSkill(skillCtx, s.curator.stores, item.orgID, item.creatorUserID, project, cwd); err != nil {
 		curatorLog.Warn("materialize jira formatting skill failed", "project", s.projectID, "error", err)
 	}
 

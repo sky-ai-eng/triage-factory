@@ -6,12 +6,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -480,7 +480,7 @@ func (s *Server) ensureLocalOrgProvisioned(ctx context.Context) (alreadyProvisio
 	// Not (fully) provisioned — fresh install, or org row exists without an
 	// agents row (crash-mid-provision). Re-running BootstrapLocalOrg reaches the
 	// same end state either way.
-	if err := db.BootstrapLocalOrg(ctx, s.allStores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.BootstrapLocalOrg(ctx, s.allStores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		return false, fmt.Errorf("bootstrap local org: %w", err)
 	}
 	return false, nil

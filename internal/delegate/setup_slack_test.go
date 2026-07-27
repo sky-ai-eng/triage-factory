@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -128,7 +128,7 @@ func TestSetupSlack_PersistsWorktreePath(t *testing.T) {
 // with base tools when no ee package has registered a "slack" tools
 // reference — no error, toolsRef is exactly the GH template.
 func TestSetupSlack_ToolsRef_NoRegisteredReference(t *testing.T) {
-	ai.ResetToolsReferences()
+	agentprompt.ResetToolsReferences()
 	s, _, task := slackTaskFixture(t, "notools")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
@@ -140,7 +140,7 @@ func TestSetupSlack_ToolsRef_NoRegisteredReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
-	if cfg.toolsRef != ai.GHToolsTemplate {
+	if cfg.toolsRef != agentprompt.GitHubToolsReference() {
 		t.Errorf("toolsRef = %q, want the base GH template with no registered slack reference", cfg.toolsRef)
 	}
 }
@@ -149,8 +149,8 @@ func TestSetupSlack_ToolsRef_NoRegisteredReference(t *testing.T) {
 // a registered "slack" tools reference is appended after the GH template
 // (GH tools are needed too — the agent acquires repos on demand).
 func TestSetupSlack_ToolsRef_ComposesRegisteredReference(t *testing.T) {
-	t.Cleanup(ai.ResetToolsReferences)
-	ai.RegisterToolsReference("slack", "SLACK VERB DOCS")
+	t.Cleanup(agentprompt.ResetToolsReferences)
+	agentprompt.RegisterToolsReference("slack", "SLACK VERB DOCS")
 
 	s, _, task := slackTaskFixture(t, "withtools")
 	ctx := context.Background()
@@ -163,7 +163,7 @@ func TestSetupSlack_ToolsRef_ComposesRegisteredReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
-	want := ai.GHToolsTemplate + "\n\n" + "SLACK VERB DOCS"
+	want := agentprompt.GitHubToolsReference() + "\n\n" + "SLACK VERB DOCS"
 	if cfg.toolsRef != want {
 		t.Errorf("toolsRef = %q, want %q", cfg.toolsRef, want)
 	}
@@ -278,7 +278,7 @@ func TestBuildStepConfig_Slack_LaterStep(t *testing.T) {
 	if cfg.scope != wantScope {
 		t.Errorf("scope = %q, want %q", cfg.scope, wantScope)
 	}
-	if cfg.toolsRef != ai.GHToolsTemplate {
+	if cfg.toolsRef != agentprompt.GitHubToolsReference() {
 		t.Errorf("toolsRef = %q, want the base GH template with no registered slack reference", cfg.toolsRef)
 	}
 }

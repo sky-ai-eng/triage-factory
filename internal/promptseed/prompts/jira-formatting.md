@@ -1,8 +1,3 @@
----
-name: jira-formatting
-description: Format Jira descriptions and comments with Jira wiki markup whenever you draft or edit Jira content.
----
-
 When drafting Jira issue descriptions/comments, use Jira wiki markup (not Markdown):
 - Headings: use "h2. Heading", "h3. Subheading", etc.
 - Inline code: wrap with double braces like "{{variable_name}}".

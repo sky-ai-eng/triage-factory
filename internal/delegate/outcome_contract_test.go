@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
+	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -43,7 +43,7 @@ func TestNonterminalStepSysPrompt_PositionGated(t *testing.T) {
 // fragment below, which does). It also no longer mentions `yield` — that
 // vocabulary was removed.
 func TestTerminalContractHasNoContinue(t *testing.T) {
-	env := ai.EnvelopeTemplate
+	env := agentprompt.Build(machinistSpec(), agentprompt.Parts{})
 	if strings.Contains(env, "continue") {
 		t.Errorf("terminal completion contract must not mention `continue`")
 	}
@@ -61,7 +61,7 @@ func TestTerminalContractHasNoContinue(t *testing.T) {
 // `continue` framed as the default and `finish` as the explicit-criteria-only
 // exception.
 func TestNonterminalFragmentFramesContinueAsDefault(t *testing.T) {
-	frag := blueprintStepNonterminalPrompt
+	frag := agentprompt.NonTerminalCompletion(machinistSpec())
 	if !strings.Contains(frag, "continue") {
 		t.Fatal("non-terminal fragment must offer `continue`")
 	}

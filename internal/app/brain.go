@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -146,7 +146,7 @@ func (a *App) startBrain(term int64) {
 // so a bad team never blocks boot; a fresh install with no tenant no-ops. Honors
 // ctx so a demoted lease holder stops mid-fleet.
 func (a *App) runShippedDefaultsSync(ctx context.Context) {
-	if err := db.SyncShippedDefaultsForAllTeams(ctx, a.stores, ai.ShippedPrompts(), ai.ShippedBlueprints()); err != nil {
+	if err := db.SyncShippedDefaultsForAllTeams(ctx, a.stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {
 		appLog.Warn("shipped defaults sync: completed with per-team errors", "err", err)
 	}
 }

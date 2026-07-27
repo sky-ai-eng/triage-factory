@@ -15,6 +15,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
+// The three prompts below are this package's own: toolless system-job text for
+// the batch prioritizer, closer to a SQL query than to agent instructions.
+// They are the only prompts internal/ai embeds — agent-facing text lives in
+// internal/agentprompt, seed content in internal/promptseed, and each other
+// system job keeps its prompts next to its own consumer.
+
 //go:embed prompts/batch-prioritize.txt
 var batchPrioritizePrompt string
 
@@ -23,52 +29,6 @@ var batchPrioritizeSystemPrompt string
 
 //go:embed prompts/batch-prioritize-user.txt
 var batchPrioritizeUserPrompt string
-
-//go:embed prompts/envelope.txt
-var EnvelopeTemplate string
-
-//go:embed prompts/gh-tools.txt
-var GHToolsTemplate string
-
-//go:embed prompts/jira-tools.txt
-var JiraToolsTemplate string
-
-// PR review is a three-step blueprint: a security pass and a
-// correctness pass each write findings to _tfac, then a cheap aggregator
-// posts and submits the review. See ShippedBlueprints.
-//
-//go:embed prompts/pr-review-security.txt
-var PRReviewSecurityPromptTemplate string
-
-//go:embed prompts/pr-review-correctness.txt
-var PRReviewCorrectnessPromptTemplate string
-
-//go:embed prompts/pr-review-aggregate.txt
-var PRReviewAggregatePromptTemplate string
-
-//go:embed prompts/jira-implement.txt
-var JiraImplementPromptTemplate string
-
-//go:embed prompts/conflict-resolution.txt
-var ConflictResolutionPromptTemplate string
-
-//go:embed prompts/repo-profile.txt
-var RepoProfilePrompt string
-
-//go:embed prompts/repo-profile-system.txt
-var RepoProfileSystemPrompt string
-
-//go:embed prompts/repo-profile-user.txt
-var RepoProfileUserPrompt string
-
-//go:embed prompts/ci-fix.txt
-var CIFixPromptTemplate string
-
-//go:embed prompts/fix-review-feedback.txt
-var FixReviewFeedbackPromptTemplate string
-
-//go:embed prompts/ticket-spec.txt
-var TicketSpecPromptTemplate string
 
 const batchSize = 10
 

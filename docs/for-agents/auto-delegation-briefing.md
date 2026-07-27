@@ -110,7 +110,7 @@ Files you'll almost certainly need. **Verify each before editing** — line numb
 
 | Path                               | Why                                                                                                                                                 |
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `internal/ai/prompts/envelope.txt` | The agent contract. Injected into every delegated run. Read before editing any prompt behavior.                                                     |
+| `internal/agentprompt/`            | The agent contract, composed from `blocks/` per (surface, runtime, family, mode). Read before editing any prompt behavior.                          |
 | `internal/domain/prompt.go`        | `Prompt` and `PromptBinding` domain types.                                                                                                          |
 | `internal/db/db.go`                | Schema. All table definitions live in `CREATE TABLE` statements here.                                                                               |
 | `internal/db/event_types.go`       | Registered event types (CI failure, PR new commits, etc.).                                                                                          |
@@ -121,9 +121,9 @@ Files you'll almost certainly need. **Verify each before editing** — line numb
 | `internal/delegate/spawner.go`     | Delegation entry point. `parseAgentResult` was around line 522 at writing time; completion handling around line 363.                                |
 | `internal/worktree/worktree.go`    | Worktree lifecycle. `MakeRunCwd`, cleanup, `RemoveClaudeProjectDir`.                                                                                |
 
-**Prompts live in both places.** System prompts exist as `.txt` files under `internal/ai/prompts/` AND as rows in the `prompts` table with `source = 'system'`. User prompts are DB-only. When you add a new system prompt (e.g., SKY-147's `ci-fix.txt`), you need both the file and the seed row in DB initialization.
+**Prompts live in both places.** Shipped mission prompts exist as `.txt` files under `internal/promptseed/prompts/` AND as rows in the `prompts` table with `source = 'system'`. User prompts are DB-only. When you add a new shipped prompt (e.g. a new `ci-fix.txt`), you need both the file and an entry in `promptseed.Prompts()` — the seeder and the boot-time drift sync both read that list.
 
-**The envelope is always injected by the spawner.** It's not part of any prompt body. When editing `envelope.txt`, you're editing the thing every single delegation sees. Prompt bodies are just the mission.
+**The framework prompt is always injected by the spawner.** It's not part of any prompt body. When editing a block under `internal/agentprompt/blocks/`, you're editing the thing every single delegation sees. Prompt bodies are just the mission.
 
 ---
 
@@ -232,13 +232,13 @@ You can land 140, 141, 142 in any order relative to each other — all three are
 
 5. **Worktree cleanup deletes `~/.claude/projects/<cwd-hash>/` too** (commit `ba1df6b`). Preserve that behavior; removing it leaks ghost sessions.
 
-6. **Don't commit memories or scratch files.** Local exclude via `.git/info/exclude` at worktree creation. The envelope also tells the agent not to commit them — belt and suspenders.
+6. **Don't commit memories or scratch files.** Local exclude via `.git/info/exclude` at worktree creation. The guardrails block also tells the agent not to commit them — belt and suspenders.
 
-7. **System prompts need BOTH a file AND a DB seed row.** If you add `internal/ai/prompts/ci-fix.txt`, you also need to seed a `prompts` row with `source = 'system'` at DB initialization. Missing either half results in a prompt that doesn't exist or a dangling reference.
+7. **Shipped prompts need BOTH a file AND a seed-list entry.** If you add `internal/promptseed/prompts/ci-fix.txt`, you also need an entry in `promptseed.Prompts()` (and, so the drift sync reaches it, a wrapping blueprint in `promptseed.Blueprints()`). Missing either half results in a prompt that doesn't exist or a dangling reference.
 
 8. **Check the Claude Code docs before assuming a harness feature works headless.** Confirmed non-headless: `/loop` (scheduled-tasks.md), Stop hooks (hooks.md). When in doubt, verify against https://code.claude.com/docs/en/ before designing against it.
 
-9. **The CI-fix prompt must not force-push or merge.** The envelope forbids it at a platform level; the CI-fix prompt reiterates it. Don't weaken either guard. Pushing to the PR branch you're already on is the only permitted write.
+9. **The CI-fix prompt must not force-push or merge.** The guardrails block forbids it at a platform level; the CI-fix prompt reiterates it. Don't weaken either guard. Pushing to the PR branch you're already on is the only permitted write.
 
 10. **Stale references in Linear tickets.** These tickets were written on 2026-04-11. File paths, line numbers, and function names were correct at writing time but will drift. Before acting on any "edit the thing at file:line" instruction, grep/read the file to confirm the target is still there. If you find something has moved, update the ticket body in Linear as part of your work so the next agent doesn't hit the same stale reference.
 
@@ -246,7 +246,7 @@ You can land 140, 141, 142 in any order relative to each other — all three are
 
 ## Agent return contract (for SKY-141 and SKY-148 in particular)
 
-Current contract (in `internal/ai/prompts/envelope.txt`):
+Current contract (in `internal/agentprompt/blocks/completion/`):
 
 ```json
 { "status": "completed", "summary": "...", "links": {} }

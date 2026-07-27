@@ -2,7 +2,6 @@ package curator
 
 import (
 	"context"
-	_ "embed" // required by //go:embed
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/skills"
 )
 
 // specSkillDirName is the per-session subdirectory Claude Code scans for
@@ -21,8 +21,12 @@ const specSkillDirName = "ticket-spec"
 
 const jiraFormattingSkillDirName = "jira-formatting"
 
-//go:embed prompts/jira_formatting_skill.md
-var jiraFormattingSkillTemplate string
+// jiraFormattingDescription is the trigger sentence Claude Code reads to decide
+// whether the skill applies to the current turn. It stays in code rather than
+// in the prompt row for the same reason the ticket-spec description does: the
+// user edits *what* good Jira markup means, not the Claude-Code-flavored
+// descriptor that gets the skill selected.
+const jiraFormattingDescription = "Format Jira descriptions and comments with Jira wiki markup whenever you draft or edit Jira content."
 
 // materializeSpecSkill writes <cwd>/.claude/skills/<specSkillDirName>/SKILL.md
 // containing the body of the project's effective spec-authorship prompt.
@@ -76,21 +80,66 @@ func materializeSpecSkill(ctx context.Context, stores db.Stores, orgID, creatorU
 	return nil
 }
 
-// materializeJiraFormattingSkill writes a built-in, always-on skill that teaches
-// the Curator Jira-flavored markup (h2., {{inline code}}, {code} blocks, etc.).
-// Unlike ticket-spec, this guidance is intentionally not user-configurable and
-// should be present regardless of tracker integrations.
-func materializeJiraFormattingSkill(cwd string) error {
+// materializeJiraFormattingSkill writes an always-on skill that teaches the
+// Curator Jira-flavored markup (h2., inline code, {code} blocks, etc.),
+// resolved from the team's seeded `system-jira-formatting` prompt row.
+//
+// It is a row rather than an embedded file so a team whose Jira conventions
+// differ can fix it on the Prompts page — shipping a default nobody can see or
+// change is how guidance quietly goes stale. Unlike ticket-spec no project
+// points at it, so resolution is a direct slug lookup with no blueprint hop.
+//
+// A missing or empty row clears any stale SKILL.md rather than failing the
+// dispatch, matching materializeSpecSkill: the Curator should still answer the
+// user even when its guidance can't be resolved.
+func materializeJiraFormattingSkill(ctx context.Context, stores db.Stores, orgID, creatorUserID string, project *domain.Project, cwd string) error {
+	if project == nil {
+		return nil
+	}
+	prompt, err := resolveJiraFormattingPrompt(ctx, stores, orgID, creatorUserID, project)
+	if err != nil {
+		return err
+	}
 	dir := filepath.Join(cwd, ".claude", "skills", jiraFormattingSkillDirName)
 	path := filepath.Join(dir, "SKILL.md")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create jira formatting skill dir: %w", err)
+
+	if prompt == nil || strings.TrimSpace(prompt.Body) == "" {
+		curatorLog.Warn("no jira-formatting prompt resolved; clearing stale skill if any", "project", project.ID)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove stale jira formatting SKILL.md: %w", err)
+		}
+		return nil
 	}
-	contents := strings.TrimSpace(jiraFormattingSkillTemplate) + "\n"
-	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+
+	if err := skills.MaterializeStepSkillInDir(
+		filepath.Join(cwd, ".claude", "skills"),
+		jiraFormattingSkillDirName,
+		prompt,
+		jiraFormattingDescription,
+	); err != nil {
 		return fmt.Errorf("write jira formatting SKILL.md: %w", err)
 	}
 	return nil
+}
+
+// resolveJiraFormattingPrompt loads the team's copy of the seeded
+// `system-jira-formatting` prompt. Read inside SyntheticClaimsWithTx so
+// multi-mode RLS attributes it to the user whose turn triggered the dispatch,
+// same as resolveSpecPrompt.
+func resolveJiraFormattingPrompt(ctx context.Context, stores db.Stores, orgID, creatorUserID string, project *domain.Project) (*domain.Prompt, error) {
+	var result *domain.Prompt
+	err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, creatorUserID, func(ts db.TxStores) error {
+		p, err := ts.Prompts.GetBySystemSlug(ctx, orgID, project.TeamID, domain.SystemJiraFormattingPromptID)
+		if err != nil {
+			return fmt.Errorf("load jira formatting prompt: %w", err)
+		}
+		result = p
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // resolveSpecPrompt returns the prompt backing the project's chosen spec
