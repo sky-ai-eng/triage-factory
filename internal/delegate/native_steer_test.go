@@ -22,7 +22,7 @@ func markNative(t *testing.T, database *sql.DB, runID string) {
 // pendingRows returns the conversation's undelivered user rows, oldest-first.
 func pendingRows(t *testing.T, s *Spawner, runID string) []domain.Message {
 	t.Helper()
-	rows, err := s.agentRuns.ListForAssembly(context.Background(), runmode.LocalDefaultOrgID, runID)
+	rows, err := s.agentRuns.ListForAssemblySystem(context.Background(), runmode.LocalDefaultOrgID, runID)
 	if err != nil {
 		t.Fatalf("list for assembly: %v", err)
 	}

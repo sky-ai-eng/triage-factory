@@ -1611,7 +1611,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.Messages(ctx, orgID, runID); err == nil {
 			t.Fatal("Messages: want a decode error for wrong-shaped reasoning JSON, got nil")
 		}
-		if _, err := store.ListForAssembly(ctx, orgID, runID); err == nil {
+		if _, err := store.ListForAssemblySystem(ctx, orgID, runID); err == nil {
 			t.Fatal("ListForAssembly: want a decode error for wrong-shaped reasoning JSON, got nil")
 		}
 	})
@@ -1624,7 +1624,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.Messages(ctx, orgID, runID); err == nil {
 			t.Fatal("Messages: want a decode error for wrong-shaped content_blocks JSON, got nil")
 		}
-		if _, err := store.ListForAssembly(ctx, orgID, runID); err == nil {
+		if _, err := store.ListForAssemblySystem(ctx, orgID, runID); err == nil {
 			t.Fatal("ListForAssembly: want a decode error for wrong-shaped content_blocks JSON, got nil")
 		}
 	})
@@ -1667,7 +1667,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("InsertMessage inactive: %v", err)
 		}
 
-		got, err := store.ListForAssembly(ctx, orgID, runID)
+		got, err := store.ListForAssemblySystem(ctx, orgID, runID)
 		if err != nil {
 			t.Fatalf("ListForAssembly: %v", err)
 		}
@@ -1749,7 +1749,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		assertContents("MessagesForRuns", batched)
 
 		// Assembly excludes every inactive row — withdrawn AND compacted.
-		asm, err := store.ListForAssembly(ctx, orgID, runID)
+		asm, err := store.ListForAssemblySystem(ctx, orgID, runID)
 		if err != nil {
 			t.Fatalf("ListForAssembly: %v", err)
 		}
@@ -1785,7 +1785,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Ask to flip id1 (belongs to runID) and idOther (belongs to a
 		// DIFFERENT run) via a call scoped to runID — idOther must NOT flip.
-		if err := store.MarkDelivered(ctx, orgID, runID, []int{int(id1), int(idOther)}, ""); err != nil {
+		if err := store.MarkDeliveredSystem(ctx, orgID, runID, []int{int(id1), int(idOther)}, ""); err != nil {
 			t.Fatalf("MarkDelivered: %v", err)
 		}
 
@@ -1829,11 +1829,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 
 		// A steer drain flushes and stamps in one call.
-		if err := store.MarkDelivered(ctx, orgID, runID, []int{int(steered)}, "injection:steer"); err != nil {
+		if err := store.MarkDeliveredSystem(ctx, orgID, runID, []int{int(steered)}, "injection:steer"); err != nil {
 			t.Fatalf("MarkDelivered(steer): %v", err)
 		}
 		// A bare drain flushes without touching the row's own subtype.
-		if err := store.MarkDelivered(ctx, orgID, runID, []int{int(bare)}, ""); err != nil {
+		if err := store.MarkDeliveredSystem(ctx, orgID, runID, []int{int(bare)}, ""); err != nil {
 			t.Fatalf("MarkDelivered(bare): %v", err)
 		}
 
@@ -1873,7 +1873,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Elide everything strictly before m3's assembly key — m1, m2 flip;
 		// m3, m4 stay active.
-		n, err := store.SetWindowState(ctx, orgID, runID, float64(ids[2]), domain.MessageWindowActive, domain.MessageWindowElided)
+		n, err := store.SetWindowStateSystem(ctx, orgID, runID, float64(ids[2]), domain.MessageWindowActive, domain.MessageWindowElided)
 		if err != nil {
 			t.Fatalf("SetWindowState: %v", err)
 		}
@@ -1898,7 +1898,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Re-running the identical flip now matches nothing (m1/m2 are no
 		// longer in the `from` state) — idempotent, not cumulative.
-		n2, err := store.SetWindowState(ctx, orgID, runID, float64(ids[2]), domain.MessageWindowActive, domain.MessageWindowElided)
+		n2, err := store.SetWindowStateSystem(ctx, orgID, runID, float64(ids[2]), domain.MessageWindowActive, domain.MessageWindowElided)
 		if err != nil {
 			t.Fatalf("SetWindowState (rerun): %v", err)
 		}

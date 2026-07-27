@@ -42,11 +42,11 @@ func newNativeTranscript(s *Spawner, orgID, conversationID, triggerType, creator
 // door for both trigger types: it is a system read on a detached goroutine,
 // and org_id + conversation_id are bound as defense in depth regardless.
 func (t *nativeTranscript) ListForAssembly(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
-	return t.spawner.agentRuns.ListForAssembly(ctx, orgID, conversationID)
+	return t.spawner.agentRuns.ListForAssemblySystem(ctx, orgID, conversationID)
 }
 
 func (t *nativeTranscript) MarkDelivered(ctx context.Context, orgID, conversationID string, ids []int, subtype string) error {
-	return t.spawner.agentRuns.MarkDelivered(ctx, orgID, conversationID, ids, subtype)
+	return t.spawner.agentRuns.MarkDeliveredSystem(ctx, orgID, conversationID, ids, subtype)
 }
 
 // Insert appends a row and broadcasts it. Claim attribution is stamped

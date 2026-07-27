@@ -288,7 +288,7 @@ func nativeSpec() agentprompt.Spec {
 // it is the same signal mintOpeningTurn reads to answer the same question a few
 // calls later.
 func (s *Spawner) prepareInheritedMemory(ctx context.Context, orgID, runID, cwd string, owned repoFiles, handedOff bool) *memoryFingerprint {
-	driven, err := s.agentRuns.ListForAssembly(ctx, orgID, runID)
+	driven, err := s.agentRuns.ListForAssemblySystem(ctx, orgID, runID)
 	if err != nil {
 		// An unreadable transcript is treated as a fresh claim. The two ways of
 		// being wrong are not symmetric: crediting this run with a predecessor's
@@ -425,7 +425,7 @@ func (s *Spawner) artifactContractNudge(orgID, runID string, task domain.Task, c
 		if len(arts) > 0 {
 			return ""
 		}
-		rows, err := s.agentRuns.ListForAssembly(ctx, orgID, runID)
+		rows, err := s.agentRuns.ListForAssemblySystem(ctx, orgID, runID)
 		if err != nil {
 			delegateLog.Warn("read transcript for the turn-end contract check failed; not nudging", "run", runID, "error", err)
 			return ""

@@ -1081,14 +1081,21 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 	return scanMessageRows(rows)
 }
 
-// ListForAssembly returns every row a native loop needs to rebuild this run's
-// exact LLM context, ordered by the effective assembly key COALESCE(seq,
+// ListForAssemblySystem returns every row a native loop needs to rebuild this
+// run's exact LLM context, ordered by the effective assembly key COALESCE(seq,
 // id). window_state='inactive' rows are excluded (superseded by
 // compaction); 'elided' and undelivered rows are included — see the
 // interface doc for the full contract. Pure read over messages; no
 // other table or in-process state feeds in.
-func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
-	rows, err := s.q.QueryContext(ctx, `
+//
+// Admin pool, org bound by argument: the only caller is the native loop, which
+// drives a claimed conversation on an executor with no request identity to
+// authenticate as. On the app pool this is an RLS read, and RLS evaluation
+// calls current_user_id() — which a JWT-less background job has no permission
+// to execute, so every assembly would fail at the database rather than return
+// an empty window.
+func (s *agentRunStore) ListForAssemblySystem(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
+	rows, err := s.admin.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
 		FROM messages
 		WHERE org_id = $1 AND conversation_id = $2 AND window_state <> 'inactive'
@@ -1101,28 +1108,34 @@ func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string
 	return scanMessageRows(rows)
 }
 
-// MarkDelivered flips delivered=true on the given message ids, scoped to
+// MarkDeliveredSystem flips delivered=true on the given message ids, scoped to
 // runID, stamping subtype in the same statement when non-empty. ids outside
 // the run or already delivered are silently unaffected.
-func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, ids []int, subtype string) error {
+//
+// Admin pool for the same reason as ListForAssemblySystem: the native loop is
+// the only caller and holds no request identity.
+func (s *agentRunStore) MarkDeliveredSystem(ctx context.Context, orgID, runID string, ids []int, subtype string) error {
 	if len(ids) == 0 {
 		return nil
 	}
 	// NULLIF keeps the stamp optional without forking the statement: an
 	// empty subtype leaves each row's own value in place.
-	_, err := s.q.ExecContext(ctx, `
+	_, err := s.admin.ExecContext(ctx, `
 		UPDATE messages SET delivered = true, subtype = COALESCE(NULLIF($4, ''), subtype)
 		WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3)
 	`, orgID, runID, pgIntArray(ids), subtype)
 	return err
 }
 
-// SetWindowState is the elision/compaction primitive: a batched range flip of
-// window_state from `from` to `to`, restricted to rows currently in state
-// `from` whose effective assembly key (COALESCE(seq, id)) is strictly less
-// than beforeSeq. Returns the number of rows flipped.
-func (s *agentRunStore) SetWindowState(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error) {
-	result, err := s.q.ExecContext(ctx, `
+// SetWindowStateSystem is the elision/compaction primitive: a batched range
+// flip of window_state from `from` to `to`, restricted to rows currently in
+// state `from` whose effective assembly key (COALESCE(seq, id)) is strictly
+// less than beforeSeq. Returns the number of rows flipped.
+//
+// Admin pool for the same reason as ListForAssemblySystem: the native loop is
+// the only caller and holds no request identity.
+func (s *agentRunStore) SetWindowStateSystem(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error) {
+	result, err := s.admin.ExecContext(ctx, `
 		UPDATE messages
 		SET window_state = $1
 		WHERE org_id = $2 AND conversation_id = $3 AND window_state = $4

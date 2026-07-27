@@ -1009,13 +1009,13 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 	return messages, nil
 }
 
-// ListForAssembly returns every row a native loop needs to rebuild this run's
+// ListForAssemblySystem returns every row a native loop needs to rebuild this run's
 // exact LLM context, ordered by the effective assembly key COALESCE(seq, id).
 // window_state='inactive' rows are excluded (superseded by compaction);
 // 'elided' and undelivered rows are included — see the interface doc for the
 // full contract. Pure read over messages; no other table or in-process
 // state feeds in.
-func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
+func (s *agentRunStore) ListForAssemblySystem(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -1032,10 +1032,10 @@ func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string
 	return scanMessageRows(rows)
 }
 
-// MarkDelivered flips delivered=true on the given message ids, scoped to
+// MarkDeliveredSystem flips delivered=true on the given message ids, scoped to
 // runID, stamping subtype in the same statement when non-empty. ids outside
 // the run or already delivered are silently unaffected.
-func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, ids []int, subtype string) error {
+func (s *agentRunStore) MarkDeliveredSystem(ctx context.Context, orgID, runID string, ids []int, subtype string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
@@ -1067,11 +1067,11 @@ func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, 
 	return nil
 }
 
-// SetWindowState is the elision/compaction primitive: a batched range flip of
+// SetWindowStateSystem is the elision/compaction primitive: a batched range flip of
 // window_state from `from` to `to`, restricted to rows currently in state
 // `from` whose effective assembly key (COALESCE(seq, id)) is strictly less
 // than beforeSeq. Returns the number of rows flipped.
-func (s *agentRunStore) SetWindowState(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error) {
+func (s *agentRunStore) SetWindowStateSystem(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}
