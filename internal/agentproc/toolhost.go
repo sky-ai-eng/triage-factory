@@ -3,8 +3,10 @@ package agentproc
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
@@ -75,26 +77,68 @@ type ToolHostOptions struct {
 	MemoryLimitMB int
 }
 
-// ToolHostJail is a launched tool-host sandbox. The caller connects to
-// SocketPath, drives the engagement, then closes: the server observes EOF at
-// a frame boundary and exits, and Close reclaims the jail either way.
+// ToolHostJail is a launched tool-host sandbox. The caller Accepts the
+// in-jail host's connection, drives the engagement, then closes: the server
+// observes EOF at a frame boundary and exits, and Close reclaims the jail
+// either way.
 type ToolHostJail struct {
 	// SocketPath is the host-side path of the tool host's unix socket. It
-	// does not exist until the in-jail server binds it, so the loop's dial
-	// retries.
+	// exists before the jail starts — this side binds it — and is what the
+	// jail's argv points at through the bind mount.
 	SocketPath string
 
-	run     sandbox.LaunchedRun
-	sb      *sandbox.Sandbox
-	sockDir string
+	listener net.Listener
+	run      sandbox.LaunchedRun
+	sb       *sandbox.Sandbox
+	sockDir  string
 }
 
-// Close kills the jail, reclaims its cgroup, and removes the socket
-// directory. The prebuilt network and sidecar are the caller's to close,
-// ordered after this.
+// Accept waits for the in-jail tool host to dial in and returns the resulting
+// connection.
+//
+// It fails early rather than waiting out the deadline when the jail exits
+// first. That case is otherwise indistinguishable from a slow start and was
+// the difference between a one-line diagnosis and a silent timeout: a tool
+// host that cannot exec, or refuses its arguments, dies immediately and would
+// leave the caller blocked on a connection nobody was ever going to make.
+func (j *ToolHostJail) Accept(ctx context.Context, timeout time.Duration) (net.Conn, error) {
+	type accepted struct {
+		conn net.Conn
+		err  error
+	}
+	conns := make(chan accepted, 1)
+	go func() {
+		c, err := j.listener.Accept()
+		conns <- accepted{c, err}
+	}()
+
+	exited := make(chan error, 1)
+	go func() { exited <- j.run.Wait() }()
+
+	select {
+	case a := <-conns:
+		if a.err != nil {
+			return nil, fmt.Errorf("agentproc: accept tool host connection: %w", a.err)
+		}
+		return a.conn, nil
+	case err := <-exited:
+		return nil, fmt.Errorf("agentproc: tool host exited before connecting (%v); stderr: %s", err, j.run.Stderr())
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("agentproc: tool host did not connect within %s", timeout)
+	}
+}
+
+// Close kills the jail, reclaims its cgroup, closes the listener and removes
+// the socket directory. The prebuilt network and sidecar are the caller's to
+// close, ordered after this.
 func (j *ToolHostJail) Close() error {
 	if j == nil {
 		return nil
+	}
+	if j.listener != nil {
+		_ = j.listener.Close()
 	}
 	if j.run != nil {
 		_ = j.run.Close()
@@ -128,12 +172,13 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (*ToolHostJail, e
 		return nil, fmt.Errorf("agentproc: tool host launch requires a prebuilt run network — multi mode is always per-run-isolated")
 	}
 
-	sockDir, err := prepareToolHostSocketDir(opts.RunID)
+	sockDir, listener, err := prepareToolHostSocket(opts.RunID)
 	if err != nil {
 		return nil, err
 	}
 	jail := &ToolHostJail{
 		SocketPath: filepath.Join(sockDir, toolHostSocketName),
+		listener:   listener,
 		sockDir:    sockDir,
 	}
 
@@ -153,12 +198,14 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (*ToolHostJail, e
 	env = append(env, opts.PrebuiltProxyEnv...)
 	env = append(env, ghChannelEnv(opts.GHChannel)...)
 
-	// The socket path and cwd are passed explicitly rather than defaulted, so
-	// the server resolves tool paths against /work regardless of the process
-	// cwd the runtime happens to give it.
+	// --connect, not --bind: the jail runs with gVisor's --host-uds=open,
+	// which permits connecting to a host socket but not creating one, so the
+	// listener has to be on this side. The socket path and cwd are passed
+	// explicitly rather than defaulted, so the server resolves tool paths
+	// against /work regardless of the process cwd the runtime gives it.
 	argv := []string{
 		sandboxToolHostBinary, "serve",
-		"--socket", filepath.Join(sandboxToolHostSocketDir, toolHostSocketName),
+		"--connect", filepath.Join(sandboxToolHostSocketDir, toolHostSocketName),
 		"--cwd", "/work",
 	}
 
@@ -193,43 +240,71 @@ func memoryLimitOrDefault(mb int) int {
 	return runMemoryLimitMB()
 }
 
-// prepareToolHostSocketDir creates the per-run directory the in-jail server
-// binds its socket inside, and grants it to the sandbox identity.
+// prepareToolHostSocket creates the per-run directory, binds the tool host's
+// socket inside it, and grants both to the sandbox identity.
 //
-// The grant is the mirror image of the agenthost socket's: there the
-// orchestrator owns the socket and grants it to the jail, here the jail owns
-// the socket and the orchestrator must be able to reach it. The directory is
-// setgid to the sandbox group so the socket the jail creates carries that
-// group, and the server chmods it 0660 after binding — which is what lets an
-// orchestrator that is a member of that group connect without anyone holding
-// CAP_CHOWN.
-func prepareToolHostSocketDir(runID string) (string, error) {
+// This side binds because the jail cannot. gVisor gates host unix sockets with
+// a sandbox-wide --host-uds flag: "open" permits connect, and creating one
+// needs "create". The jail gets "open" deliberately — "create" would let the
+// process holding hostile input bind host-visible sockets anywhere writable in
+// its mount tree — so a listener inside it is not available, and the in-jail
+// host dials out to this socket instead. The direction is exactly the
+// agenthost socket's, for exactly the same reason.
+//
+// The grant mirrors agenthost's too: the jail runs as another uid, and
+// connect(2) needs write permission on the socket, so it is chowned to the
+// sandbox identity (or group-granted when this process is not root) and
+// chmodded 0660. The directory is setgid so anything created inside it later
+// carries the same group.
+func prepareToolHostSocket(runID string) (string, net.Listener, error) {
 	dir := sandbox.TrustedToolHostSocketDir(runID)
 	// A stale directory from a crashed predecessor would carry a dead socket
-	// that the server's own stale-socket removal handles, but the directory's
-	// mode may not survive; recreate from scratch.
+	// that would make bind fail with EADDRINUSE, and its mode may not have
+	// survived either; recreate from scratch.
 	_ = os.RemoveAll(dir)
 	if err := os.MkdirAll(dir, 0o770); err != nil {
-		return "", fmt.Errorf("agentproc: create tool host socket dir %s: %w", dir, err)
+		return "", nil, fmt.Errorf("agentproc: create tool host socket dir %s: %w", dir, err)
+	}
+	fail := func(err error) (string, net.Listener, error) {
+		_ = os.RemoveAll(dir)
+		return "", nil, err
 	}
 	if os.Getuid() == 0 {
 		if err := os.Chown(dir, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {
-			_ = os.RemoveAll(dir)
-			return "", fmt.Errorf("agentproc: chown tool host socket dir %s: %w", dir, err)
+			return fail(fmt.Errorf("agentproc: chown tool host socket dir %s: %w", dir, err))
 		}
 	} else if err := os.Chown(dir, -1, sandbox.WorktreeGID); err != nil {
-		_ = os.RemoveAll(dir)
-		return "", fmt.Errorf("agentproc: chgrp tool host socket dir %s to gid=%d: %w "+
+		return fail(fmt.Errorf("agentproc: chgrp tool host socket dir %s to gid=%d: %w "+
 			"(an unprivileged orchestrator must be a member of the sandbox group — the provided image's tf-sandbox — for this owner-legal group grant)",
-			dir, sandbox.WorktreeGID, err)
+			dir, sandbox.WorktreeGID, err))
 	}
-	// setgid so the socket the jail binds inherits the sandbox group even if
-	// a future launch changes the jail process's supplementary groups.
 	if err := os.Chmod(dir, 0o2770); err != nil {
-		_ = os.RemoveAll(dir)
-		return "", fmt.Errorf("agentproc: chmod tool host socket dir %s: %w", dir, err)
+		return fail(fmt.Errorf("agentproc: chmod tool host socket dir %s: %w", dir, err))
 	}
-	return dir, nil
+
+	sockPath := filepath.Join(dir, toolHostSocketName)
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		return fail(fmt.Errorf("agentproc: bind tool host socket %s: %w", sockPath, err))
+	}
+	closeAndFail := func(err error) (string, net.Listener, error) {
+		_ = listener.Close()
+		return fail(err)
+	}
+	if os.Getuid() == 0 {
+		if err := os.Chown(sockPath, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {
+			return closeAndFail(fmt.Errorf("agentproc: chown tool host socket %s: %w", sockPath, err))
+		}
+	} else if err := os.Chown(sockPath, -1, sandbox.WorktreeGID); err != nil {
+		return closeAndFail(fmt.Errorf("agentproc: chgrp tool host socket %s to gid=%d: %w", sockPath, sandbox.WorktreeGID, err))
+	}
+	// net.Listen creates the socket 0777&~umask (0755 under the usual 022) and
+	// connect(2) requires write permission, so without this the in-jail peer
+	// the socket exists for gets EACCES.
+	if err := os.Chmod(sockPath, 0o660); err != nil {
+		return closeAndFail(fmt.Errorf("agentproc: chmod tool host socket %s: %w", sockPath, err))
+	}
+	return dir, listener, nil
 }
 
 // toolHostMounts assembles the jail's bind mounts: the tool host binary and

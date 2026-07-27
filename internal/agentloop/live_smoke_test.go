@@ -2,6 +2,7 @@ package agentloop
 
 import (
 	"context"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,33 +53,21 @@ func TestNativeLoop_LiveSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Bind here and let the host dial in — the production direction, since
+	// the jail cannot create a host socket under --host-uds=open.
 	sock := filepath.Join(t.TempDir(), "tools.sock")
-	cmd := exec.Command(bin, "serve", "--socket", sock, "--cwd", work)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start tool host: %v", err)
+	listener, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("bind tool host socket: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	})
+	defer listener.Close()
+
+	conn := startAndAccept(t, listener, exec.Command(bin, "serve", "--connect", sock, "--cwd", work))
+	host := NewToolHost(conn, 2*time.Minute)
+	defer host.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-
-	var host ToolHost
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		h, err := DialToolHost(sock, 2*time.Minute)
-		if err == nil {
-			host = h
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("tool host never accepted a connection: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	defer host.Close()
 
 	tr := newMemTranscript(pendingUser("Read SECRET.txt in the working directory and tell me the answer it names. Then stop."))
 	engine := &Engine{

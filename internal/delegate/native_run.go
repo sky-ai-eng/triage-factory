@@ -27,15 +27,12 @@ import (
 )
 
 // toolHostDialTimeout bounds how long setup waits for the in-jail server to
-// bind its socket. The jail is already launched by then, so this covers
-// process start plus a bind — generous enough to absorb a loaded host,
-// short enough that a jail that never starts fails the claim rather than
-// holding a concurrency slot.
+// dial in. The jail is already launched by then, so this covers process start
+// plus a connect — generous enough to absorb a loaded host, short enough that
+// a jail that never starts fails the claim rather than holding a concurrency
+// slot. A tool host that exits instead of connecting is reported immediately
+// and never waits this out (ToolHostJail.Accept).
 const toolHostDialTimeout = 60 * time.Second
-
-// toolHostDialInterval is the poll between dial attempts while the socket
-// has not yet appeared.
-const toolHostDialInterval = 100 * time.Millisecond
 
 // runNativeAgent drives one native engagement end to end.
 //
@@ -106,7 +103,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	}
 	defer func() { _ = jail.Close() }()
 
-	tools, err := dialToolHostWithRetry(ctx, jail.SocketPath)
+	conn, err := jail.Accept(ctx, toolHostDialTimeout)
 	if err != nil {
 		if ctx.Err() != nil {
 			s.handleCancelled(orgID, runID, startTime, cfg.wtPath, triggerType, creatorUserID)
@@ -115,6 +112,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "connect to tool host: "+err.Error(), domain.RunFailureUnclassified)
 		return
 	}
+	tools := agentloop.NewToolHost(conn, 0)
 	defer func() { _ = tools.Close() }()
 
 	s.updatePhase(orgID, runID, "")
@@ -184,34 +182,6 @@ func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Tran
 		Delivered:      &pending,
 	})
 	return err
-}
-
-// dialToolHostWithRetry polls until the in-jail server has bound its socket.
-// The jail's process start races this call by construction — the launch RPC
-// returns once runsc is running, not once the server inside it is listening —
-// so a connection refused here is the normal case for the first few tries,
-// not an error.
-func dialToolHostWithRetry(ctx context.Context, socketPath string) (agentloop.ToolHost, error) {
-	deadline := time.Now().Add(toolHostDialTimeout)
-	var lastErr error
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		host, err := agentloop.DialToolHost(socketPath, 0)
-		if err == nil {
-			return host, nil
-		}
-		lastErr = err
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("tool host did not accept a connection within %s: %w", toolHostDialTimeout, lastErr)
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(toolHostDialInterval):
-		}
-	}
 }
 
 // buildNativeSystemPrompt assembles this run's system prompt: the composed

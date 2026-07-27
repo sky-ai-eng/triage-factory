@@ -133,18 +133,27 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # highest MSRV in the lockfile — when a `cargo update` raises one, this pin
 # moves with it or the image build fails at resolve time.
 FROM --platform=$BUILDPLATFORM rust:1.94-alpine AS toolhost-builder
+ARG TARGETARCH
 RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY harness ./harness
-# --locked builds exactly what harness/Cargo.lock pins and fails if the lock
-# is absent or stale, so the shipped binary is the one the tests ran against
-# rather than whatever resolved at image-build time.
+# Cross-compile to TARGETARCH explicitly, the way the Go stage passes GOARCH.
+# A plain `cargo build` targets the BUILD host, so building linux/amd64 on an
+# arm64 machine would bake an unrunnable binary — and the failure mode is
+# silent: the jail's main process dies at exec and the launch just never
+# produces a connection.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/harness/target \
+    case "${TARGETARCH}" in \
+      amd64) RUST_TARGET=x86_64-unknown-linux-musl ;; \
+      arm64) RUST_TARGET=aarch64-unknown-linux-musl ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    rustup target add "${RUST_TARGET}" && \
     cd harness/tf-harness-tools && \
-    cargo build --release --locked --bin tf-harness-tools && \
+    cargo build --release --locked --target "${RUST_TARGET}" --bin tf-harness-tools && \
     mkdir -p /out && \
-    cp /src/harness/target/release/tf-harness-tools /out/tf-harness-tools
+    cp "/src/harness/target/${RUST_TARGET}/release/tf-harness-tools" /out/tf-harness-tools
 
 # --- stage 4: runtime -------------------------------------------------------
 

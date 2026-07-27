@@ -104,19 +104,30 @@ type socketToolHost struct {
 	timeout time.Duration
 }
 
-// DialToolHost connects to the resident tool host's socket. The socket is
-// created by the host inside the jail and reaches this side through a bind
-// mount, so a dial can legitimately race the host's bind — the caller
-// (setup) retries.
+// NewToolHost wraps an established connection to the resident tool host.
+//
+// In the real deployment that connection is ACCEPTED, not dialed: this side
+// binds the socket and the in-jail host dials in. The inversion is a gVisor
+// constraint rather than a preference — the jail runs with --host-uds=open,
+// which permits connect but not bind — and it stops at the transport. Once the
+// stream is up this side sends requests and the host answers them, exactly as
+// if it had been dialed.
+func NewToolHost(conn net.Conn, timeout time.Duration) ToolHost {
+	if timeout <= 0 {
+		timeout = defaultToolCallTimeout
+	}
+	return &socketToolHost{conn: conn, timeout: timeout}
+}
+
+// DialToolHost connects to a tool host that is already listening. Only the
+// standalone paths use it — a test driving the binary outside a jail, where
+// binding is unrestricted. The sandboxed path cannot; see NewToolHost.
 func DialToolHost(socketPath string, timeout time.Duration) (ToolHost, error) {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("agentloop: dial tool host at %s: %w", socketPath, err)
 	}
-	if timeout <= 0 {
-		timeout = defaultToolCallTimeout
-	}
-	return &socketToolHost{conn: conn, timeout: timeout}, nil
+	return NewToolHost(conn, timeout), nil
 }
 
 // defaultToolCallTimeout bounds one round trip when the caller names none.

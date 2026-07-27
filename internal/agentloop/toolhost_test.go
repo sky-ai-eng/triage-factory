@@ -1,6 +1,7 @@
 package agentloop
 
 import (
+	"bytes"
 	"encoding/json"
 	"net"
 	"os"
@@ -130,28 +131,18 @@ func TestServeSocket_EndToEnd(t *testing.T) {
 	}
 	sock := filepath.Join(t.TempDir(), "tools.sock")
 
-	cmd := exec.Command(bin, "serve", "--socket", sock, "--cwd", dir)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start serve: %v", err)
+	// This side binds and the host dials in, which is the production
+	// direction: the jail runs under gVisor's --host-uds=open and can connect
+	// to a host socket but not create one. Binding before the spawn also
+	// removes the race the old direction had to poll around.
+	listener, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("bind tool host socket: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	})
+	defer listener.Close()
 
-	var host ToolHost
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		h, err := DialToolHost(sock, 10*time.Second)
-		if err == nil {
-			host = h
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("tool host never accepted a connection: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	conn := startAndAccept(t, listener, exec.Command(bin, "serve", "--connect", sock, "--cwd", dir))
+	host := NewToolHost(conn, 10*time.Second)
 	defer host.Close()
 
 	t.Run("a successful call returns the tool's bytes", func(t *testing.T) {
@@ -200,6 +191,59 @@ func TestServeSocket_EndToEnd(t *testing.T) {
 
 // harnessBinary locates the compiled tool host, or "" when it has not been
 // built.
+// startAndAccept spawns a tool host that dials this listener and returns its
+// connection, failing the test rather than blocking when it never arrives.
+//
+// The bare Accept this replaces turned any non-dialing child into a hang until
+// the package timeout — ten minutes of nothing, for a child that had already
+// exited with a one-line reason on stderr. Watching the process is what turns
+// that into an immediate, self-explaining failure, and it is the same guard
+// ToolHostJail.Accept carries in production for the same reason.
+func startAndAccept(t *testing.T, listener net.Listener, cmd *exec.Cmd) net.Conn {
+	t.Helper()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start serve: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	conns := make(chan net.Conn, 1)
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			conns <- c
+		}
+		close(conns)
+	}()
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+
+	select {
+	case c := <-conns:
+		if c == nil {
+			t.Fatal("accepting the tool host's connection failed")
+		}
+		return c
+	case err := <-exited:
+		t.Fatalf("the tool host exited (%v) instead of dialing in; stderr: %s", err, stderr.String())
+	case <-time.After(15 * time.Second):
+		t.Fatal("the tool host neither dialed in nor exited")
+	}
+	return nil
+}
+
+// harnessBinary returns the freshest compiled tool host, or "" when none is
+// built.
+//
+// Freshest, not first-found: the crate builds into two profiles and the stale
+// one is a live hazard, because a binary predating a CLI change accepts none
+// of the current arguments and exits on startup. Picking by mtime means a
+// `cargo build` in either profile is what the test runs, rather than whichever
+// profile this function happened to look at first.
 func harnessBinary(t *testing.T) string {
 	t.Helper()
 	// The crate lives in a cargo workspace, so the target dir is the
@@ -208,16 +252,21 @@ func harnessBinary(t *testing.T) string {
 		{"..", "..", "harness", "target"},
 		{"..", "..", "harness", "tf-harness-tools", "target"},
 	}
+	var newest string
+	var newestAt time.Time
 	for _, root := range roots {
 		for _, profile := range []string{"debug", "release"} {
 			p := filepath.Join(append(append([]string{}, root...), profile, "tf-harness-tools")...)
-			if _, err := os.Stat(p); err != nil {
+			fi, err := os.Stat(p)
+			if err != nil {
 				continue
 			}
-			if abs, err := filepath.Abs(p); err == nil {
-				return abs
+			if newest == "" || fi.ModTime().After(newestAt) {
+				if abs, absErr := filepath.Abs(p); absErr == nil {
+					newest, newestAt = abs, fi.ModTime()
+				}
 			}
 		}
 	}
-	return ""
+	return newest
 }

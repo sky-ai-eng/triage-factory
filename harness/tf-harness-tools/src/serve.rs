@@ -15,16 +15,32 @@
 //! mount.
 //!
 //! Standalone by design: nothing here knows about sandboxes, mounts, or the
-//! loop. `serve` binds a socket, accepts one connection, and answers frames.
-//! The launch wiring (OCI main-process, socket bind-mount) lives with the loop.
+//! loop. `serve` connects to a socket and answers frames on it. The launch
+//! wiring (OCI main-process, socket bind-mount) lives with the loop.
+//!
+//! # Why this side dials
+//!
+//! Serving over a connection this process *initiates* looks backwards, and it
+//! is deliberate. gVisor gates host unix sockets with a sandbox-wide
+//! `--host-uds` flag whose values are ordered `none < open < create`: `open`
+//! permits `connect`, and binding needs `create`. The jail runs with `open`,
+//! because `create` would let a process holding hostile input bind
+//! host-visible sockets anywhere writable in its mount tree — so a listener in
+//! here cannot work. The peer binds on the host and this side dials, which
+//! keeps the whole transport inside what `open` already allows.
+//!
+//! Only the connection direction inverts. Once the stream is up the protocol
+//! is unchanged: the peer sends requests, this process answers them.
 //!
 //! # Wire protocol
 //!
 //! The [`Request`] and [`Response`] doc comments below are the protocol
 //! specification — there is no separate doc file.
 //!
-//! * **Transport** — a unix *stream* socket at a fixed path. `serve` is the
-//!   listener; the loop connects. One connection is one engagement.
+//! * **Transport** — a unix *stream* socket at a fixed path. The loop binds
+//!   and `serve` connects (see "Why this side dials"); once the stream is up
+//!   the roles are the usual ones — the loop requests, `serve` answers. One
+//!   connection is one engagement.
 //! * **Framing** — length-prefixed JSON: a 4-byte big-endian unsigned length
 //!   followed by exactly that many bytes of UTF-8 JSON. The length counts the
 //!   JSON body only, not the 4-byte header. Frames larger than
@@ -64,10 +80,8 @@
 //! future verb (a subagent spawn, say) is addable without changing the framing.
 //! No such verb exists yet; only the contract does.
 
-use std::fs::Permissions;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -419,69 +433,29 @@ fn serve_connection(stream: UnixStream, cwd: &str) -> io::Result<()> {
     }
 }
 
-/// Bind a unix stream socket at `socket_path`, serve a single engagement, and
-/// return when it ends.
+/// Connect to the unix stream socket at `socket_path`, serve a single
+/// engagement over it, and return when it ends.
 ///
 /// `cwd` is the working directory every tool call resolves against — the
 /// worktree, in the real deployment — passed through verbatim to
 /// [`crate::run_tool`] exactly as the one-shot CLI's `--cwd` is, so resolution
-/// is identical on both paths and independent of the server's own process cwd.
-/// One connection is accepted and served to EOF; additional connections are not
-/// accepted (an engagement is one connection), so a second concurrent caller
-/// cannot interleave.
+/// is identical on both paths and independent of this process's own cwd.
+/// One connection, served to EOF: an engagement is one stream, so a second
+/// concurrent caller cannot interleave.
 ///
-/// Socket ownership/permission grants for a cross-uid peer are the launch
-/// wiring's job (the loop ticket's mount helper, mirroring `agenthost`'s
-/// `grantSocketToSandbox`); `serve` only binds and listens.
-pub fn serve(socket_path: &Path, cwd: &str) -> io::Result<()> {
-    // A stale socket file from a crashed predecessor would make bind fail with
-    // EADDRINUSE. Only a socket is removed — never a regular file that happens
-    // to sit at the path — so a misconfigured path fails loudly at bind.
-    if let Ok(meta) = std::fs::symlink_metadata(socket_path) {
-        use std::os::unix::fs::FileTypeExt;
-        if meta.file_type().is_socket() {
-            let _ = std::fs::remove_file(socket_path);
-        }
-    }
-
-    let listener = UnixListener::bind(socket_path).map_err(|e| {
+/// The peer owns the socket — it binds it, grants it to this process's
+/// identity, and unlinks it afterwards. See this module's header for why the
+/// listener cannot live on this side. A connect failure surfaces as an error
+/// here and, because this is the jail's main process, as a non-zero exit the
+/// launcher can report instead of waiting out a timeout.
+pub fn connect_and_serve(socket_path: &Path, cwd: &str) -> io::Result<()> {
+    let stream = UnixStream::connect(socket_path).map_err(|e| {
         io::Error::new(
             e.kind(),
-            format!("serve: bind {}: {e}", socket_path.display()),
+            format!("serve: connect {}: {e}", socket_path.display()),
         )
     })?;
-
-    // Make the socket connectable by the out-of-jail loop, which runs as a
-    // different uid in the same group. `bind` creates the socket
-    // 0777 & ~umask (0755 under the usual 022), and connect(2) requires write
-    // permission — so without this the peer the socket exists for gets
-    // EACCES. The host cannot fix it afterwards: chmod requires ownership,
-    // and the socket is owned by this in-jail uid.
-    //
-    // 0660, not world-writable: the socket's group is this process's own gid,
-    // and the launch wiring's contract is that the loop runs as a member of
-    // that group — the same owner-legal group grant the `agenthost` socket
-    // uses in the other direction.
-    if let Err(e) = std::fs::set_permissions(socket_path, Permissions::from_mode(0o660)) {
-        // Best-effort with a loud failure: a same-uid peer (a standalone run,
-        // a test) connects fine regardless, so this must not abort those.
-        eprintln!(
-            "serve: could not widen socket permissions on {}: {e}",
-            socket_path.display()
-        );
-    }
-
-    let result = match listener.accept() {
-        Ok((stream, _addr)) => serve_connection(stream, cwd),
-        Err(e) => Err(e),
-    };
-
-    // Best-effort teardown: drop the listener and unlink the socket so a later
-    // startup scan doesn't find a dangling path. The mount helper owns cleanup
-    // in the real deployment; this keeps standalone runs tidy.
-    drop(listener);
-    let _ = std::fs::remove_file(socket_path);
-    result
+    serve_connection(stream, cwd)
 }
 
 #[cfg(test)]
@@ -623,42 +597,47 @@ mod tests {
     }
 
     #[test]
-    fn bound_socket_is_group_connectable() {
-        // The out-of-jail loop runs as a different uid in the same group, and
-        // connect(2) needs write permission. Without the post-bind chmod the
-        // socket lands 0755 under the usual umask and the peer it exists for
-        // gets EACCES — with no way for that peer to fix it, since chmod
-        // requires ownership.
-        let dir = std::env::temp_dir().join(format!("tf-serve-perm-{}", std::process::id()));
+    fn connect_and_serve_answers_on_a_peer_bound_socket() {
+        // The production shape: the peer binds, this side dials, and the
+        // protocol then runs unchanged over the stream the peer accepted.
+        // Binding here instead would need gVisor's --host-uds=create, which
+        // the jail deliberately does not get.
+        let dir = std::env::temp_dir().join(format!("tf-serve-connect-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let sock = dir.join("tools.sock");
 
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let handle = {
             let sock = sock.clone();
-            std::thread::spawn(move || {
-                let _ = serve(&sock, ".");
-            })
+            std::thread::spawn(move || connect_and_serve(&sock, "."))
         };
 
-        // Wait for the bind, then read the mode before the engagement ends.
-        let mut mode = None;
-        for _ in 0..200 {
-            if let Ok(meta) = std::fs::metadata(&sock) {
-                mode = Some(meta.permissions().mode() & 0o777);
-                break;
+        // Frame a request the way the peer does, then read the answer back.
+        let (mut stream, _) = listener.accept().unwrap();
+        let body = serde_json::to_vec(&json!({"id": 1, "tool": "nope", "args": {}})).unwrap();
+        stream
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .unwrap();
+        stream.write_all(&body).unwrap();
+
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        let answered = match read_frame(&mut reader) {
+            ReadOutcome::Frame(bytes) => {
+                let v: Value = serde_json::from_slice(&bytes).unwrap();
+                Some((v["id"].clone(), v["ok"].clone()))
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        // Connect so `serve` completes its single engagement and the thread
-        // exits rather than blocking the test run.
-        let _ = UnixStream::connect(&sock);
+            _ => None,
+        };
+        // BOTH descriptors, and before the join: reader holds a try_clone of
+        // the same socket, so dropping the stream alone leaves the connection
+        // open, the server never sees EOF, and the join blocks forever.
+        drop(reader);
+        drop(stream);
         let _ = handle.join();
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert_eq!(
-            mode,
-            Some(0o660),
-            "the bound socket must be group-connectable"
-        );
+        let (id, ok) = answered.expect("expected a framed answer over the dialed connection");
+        assert_eq!(id, json!(1), "the answer must echo the request id");
+        assert_eq!(ok, json!(false), "an unknown tool is an error");
     }
 }
