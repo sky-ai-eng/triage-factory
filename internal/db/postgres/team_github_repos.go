@@ -280,6 +280,29 @@ func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID
 	return ok, nil
 }
 
+func (s *teamGitHubReposStore) TracksRepoViewerAdminScoped(ctx context.Context, orgID, owner, repo string) (bool, error) {
+	// TracksRepoViewerScoped's query plus tf.user_is_team_admin on the
+	// matched row: RLS narrows the EXISTS to the caller's memberships, the
+	// predicate narrows it again to the ones they administer. Both are
+	// needed — the predicate alone would match a team the caller admins in
+	// another org, and RLS alone is plain membership.
+	var ok bool
+	err := s.app.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM team_github_repos g
+			JOIN teams tm ON tm.id = g.team_id
+			WHERE tm.org_id = $1
+			  AND lower(g.owner) = lower($2)
+			  AND lower(g.repo) = lower($3)
+			  AND tf.user_is_team_admin(g.team_id)
+		)
+	`, orgID, owner, repo).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("tracks repo viewer admin scoped: %w", err)
+	}
+	return ok, nil
+}
+
 // splitRepoColumns transposes a repo slice into parallel owner + repo
 // slices for unnest()-based array binding. Returns empty (non-nil)
 // slices for an empty input so unnest yields zero rows.
