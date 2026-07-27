@@ -2,7 +2,6 @@ package curator
 
 import (
 	"context"
-	_ "embed" // required by //go:embed
 	"fmt"
 	"os"
 	"path/filepath"
