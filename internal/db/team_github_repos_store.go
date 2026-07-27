@@ -107,4 +107,20 @@ type TeamGitHubReposStore interface {
 	// handler layer instead of calling it. Local mode (N=1) always
 	// reports true — no team boundary to enforce.
 	TracksRepoViewerScoped(ctx context.Context, orgID, owner, repo string) (bool, error)
+
+	// TracksRepoViewerAdminScoped narrows TracksRepoViewerScoped to teams
+	// the calling user *administers*: it reports whether ANY team the
+	// caller is a team admin of tracks (owner, repo), matched
+	// case-insensitively. Same app pool, same RLS-does-the-scoping trick,
+	// plus an explicit team-admin predicate on the matched row.
+	//
+	// This is the mutation gate for org-wide repo configuration
+	// (repo_profiles carries no team_id, so a write by a member of one
+	// tracking team lands on every tracking team's runs). Membership alone
+	// is the *read* gate — TracksRepoViewerScoped — and the two are
+	// deliberately separate: a caller who sees a repo in their list but
+	// administers none of the teams tracking it gets 403, not 404. Org
+	// admins bypass this at the handler layer instead of calling it. Local
+	// mode (N=1) always reports true — no team boundary to enforce.
+	TracksRepoViewerAdminScoped(ctx context.Context, orgID, owner, repo string) (bool, error)
 }

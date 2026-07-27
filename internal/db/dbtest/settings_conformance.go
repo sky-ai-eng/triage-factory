@@ -320,6 +320,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			MaxDailyCostUSD:                 12.50, // TFAC-482 per-team daily cap
 			BranchTemplate:                  "team/<ticket-id>-wip",
 			ReviewPosture:                   domain.ReviewPostureAutoUnlessBlocking,
+			BaseBranchPushPolicy:            domain.BaseBranchPushManualOnly,
 		}
 		if err := stores.Teams.UpdateSettings(ctx, ids.TeamID, want); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
@@ -859,6 +860,44 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			}
 			if got != c.want {
 				t.Errorf("TracksRepoSystem(%s/%s) = %v; want %v", c.owner, c.repo, got, c.want)
+			}
+		}
+	})
+
+	t.Run("TeamGitHubRepos_ViewerAdminScoped_NeverBroaderThanViewerScoped", func(t *testing.T) {
+		// The write gate must be a subset of the read gate: every repo a
+		// caller may *mutate* is one they may *see*. Nothing else about
+		// these two is dialect-agnostic — Postgres answers from live RLS
+		// plus the caller's team-admin role, SQLite answers true for both
+		// because N=1 has no team boundary — so the exact values are
+		// pinned in the per-dialect tests and the containment is pinned
+		// here, where a regression on either backend fails immediately.
+		//
+		// The failure this catches: an admin-scoped implementation that
+		// drops or mis-joins the team-admin predicate and ends up matching
+		// rows the membership-scoped read doesn't.
+		stores, ids := factory(t)
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, []domain.TeamGitHubRepo{
+			{Owner: "Acme", Repo: "api"},
+		}); err != nil {
+			t.Fatalf("ReplaceForTeam: %v", err)
+		}
+		for _, c := range []struct{ owner, repo string }{
+			{"Acme", "api"},  // tracked, stored casing
+			{"acme", "API"},  // tracked, mismatched casing
+			{"acme", "web"},  // same owner, untracked repo
+			{"other", "api"}, // untracked owner
+		} {
+			scoped, err := stores.TeamGitHubRepos.TracksRepoViewerScoped(ctx, ids.OrgID, c.owner, c.repo)
+			if err != nil {
+				t.Fatalf("TracksRepoViewerScoped(%s/%s): %v", c.owner, c.repo, err)
+			}
+			adminScoped, err := stores.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, ids.OrgID, c.owner, c.repo)
+			if err != nil {
+				t.Fatalf("TracksRepoViewerAdminScoped(%s/%s): %v", c.owner, c.repo, err)
+			}
+			if adminScoped && !scoped {
+				t.Errorf("%s/%s: admin-scoped=true but viewer-scoped=false; the write gate must never be broader than the read gate", c.owner, c.repo)
 			}
 		}
 	})

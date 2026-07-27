@@ -36,6 +36,17 @@ const (
 	// the coordinates. The orchestrator (which holds the DB and domain types)
 	// builds and upserts the artifact row — the capless sidecar never does.
 	OpRecordObservation = "record_observation"
+	// OpRecordEgressDenial is the egress proxy's fire-and-forget report of a
+	// refused CONNECT. Same shape as record_denial, one layer down: the proxy
+	// runs in the capless sidecar and the audit row is a DB write, so the
+	// coordinates travel up and the orchestrator writes.
+	OpRecordEgressDenial = "record_egress_denial"
+	// OpRecordGHWrite is the gh-channel injector's fire-and-forget report of a
+	// REST write it forwarded, with the upstream's outcome. Distinct from
+	// record_observation, which reports only the artifact-bearing creates: this
+	// one covers every mutating REST method and both outcomes, so an edit, a
+	// merge, and a refused write all leave a trace.
+	OpRecordGHWrite = "record_gh_write"
 )
 
 // AuthorizeRepoArgs / AuthorizeRepoReply are the authorize_repo op's payloads
@@ -52,12 +63,18 @@ type AuthorizeRepoArgs struct {
 // gitproxy.Decision's actionable-denial fields across the wire so a sandboxed
 // run's denied clone/fetch surfaces the same specific 403 body + audit reason
 // (workspace-add vs admin) the in-process path does, instead of the generic
-// fallback. Both empty on an allowed decision.
+// fallback. Both empty on an allowed decision. ProtectedRefs does the same job
+// one level down, for a REF-level denial: it names the refs the team's
+// base-branch push policy excluded, so the sandbox's receive-pack gate can say
+// "that is the base branch" rather than a flat "ref not allowed". It rides an
+// ALLOWED reply (the refusal it explains happens per-ref, after the repo was
+// authorized) and is empty when the policy permits base-branch pushes.
 type AuthorizeRepoReply struct {
-	Allowed     bool     `json:"allowed"`
-	AllowedRefs []string `json:"allowed_refs,omitempty"`
-	DenyReason  string   `json:"deny_reason,omitempty"`
-	DenyMessage string   `json:"deny_message,omitempty"`
+	Allowed       bool     `json:"allowed"`
+	AllowedRefs   []string `json:"allowed_refs,omitempty"`
+	ProtectedRefs []string `json:"protected_refs,omitempty"`
+	DenyReason    string   `json:"deny_reason,omitempty"`
+	DenyMessage   string   `json:"deny_message,omitempty"`
 }
 
 // RecordDenialArgs is record_denial's payload: a denied git op for the
@@ -69,6 +86,25 @@ type RecordDenialArgs struct {
 	Ref    string `json:"ref"`
 	Op     string `json:"op"`
 	Reason string `json:"reason"`
+}
+
+// RecordEgressDenialArgs is record_egress_denial's payload: the CONNECT
+// authority the sandbox asked for (host:port) and the policy reason it was
+// refused, mirroring egressproxy.DeniedConnect across the wire. The
+// orchestrator binds the conversation from its own RunInfo, so a sidecar can
+// never attribute a probe to another run.
+type RecordEgressDenialArgs struct {
+	Target string `json:"target"`
+	Reason string `json:"reason"`
+}
+
+// RecordGHWriteArgs is record_gh_write's payload: the method, upstream path,
+// and response status of one mutating REST request the gh-channel injector
+// forwarded. Nothing from the request body — the injector never reads one.
+type RecordGHWriteArgs struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+	Status int    `json:"status"`
 }
 
 // RecordPushArgs is record_push's payload: one branch ref a receive-pack

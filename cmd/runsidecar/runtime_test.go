@@ -2,14 +2,23 @@ package runsidecar
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
+	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
@@ -18,6 +27,13 @@ import (
 // has no handler (it only originates Calls in these tests).
 func dialRuntime(t *testing.T) (*sidecarproto.Conn, *credRuntime) {
 	t.Helper()
+	return dialRuntimeWithHandler(t, nil)
+}
+
+// dialRuntimeWithHandler is dialRuntime with an orchestrator-side handler, for
+// the tests that assert on what the sidecar relays UP (the audit notifies).
+func dialRuntimeWithHandler(t *testing.T, h sidecarproto.Handler) (*sidecarproto.Conn, *credRuntime) {
+	t.Helper()
 	rt, err := newCredRuntime()
 	if err != nil {
 		t.Fatalf("newCredRuntime: %v", err)
@@ -25,7 +41,7 @@ func dialRuntime(t *testing.T) (*sidecarproto.Conn, *credRuntime) {
 	orch, sidecar := net.Pipe()
 	sidecarConn := sidecarproto.New(sidecar, rt)
 	rt.setConn(sidecarConn)
-	orchConn := sidecarproto.New(orch, nil)
+	orchConn := sidecarproto.New(orch, h)
 	t.Cleanup(func() {
 		_ = orchConn.Close()
 		_ = sidecarConn.Close()
@@ -234,5 +250,200 @@ func TestRuntime_LLMSourceReflectsRefresh(t *testing.T) {
 	}
 	if _, _, err := rt.llmSource(ctx); err == nil {
 		t.Fatal("expected llmSource to error on an expired bundle")
+	}
+}
+
+// TestRuntime_EgressDenialRelaysToOrchestrator drives the whole production
+// path for a refused sandbox connection: the sidecar starts the run's proxies
+// through the same StartRunProxies call the orchestrator asks for, the agent's
+// own egress env is used to attempt an off-allowlist CONNECT, and the denial
+// must arrive at the orchestrator as a record_egress_denial notify.
+//
+// This is the regression test for the class of failure that let the egress
+// audit hook sit unwired for a release: nothing asserted the production
+// construction path reached it. A nil hook at the StartRunProxies call site
+// fails here.
+func TestRuntime_EgressDenialRelaysToOrchestrator(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	notifies := make(chan sidecarproto.RelayCallBody, 4)
+	handler := sidecarproto.HandlerFunc(func(_ context.Context, kind sidecarproto.Kind, body json.RawMessage) (any, error) {
+		if kind != sidecarproto.KindRelayNotify {
+			return nil, nil
+		}
+		var rc sidecarproto.RelayCallBody
+		if err := json.Unmarshal(body, &rc); err != nil {
+			return nil, err
+		}
+		notifies <- rc
+		return nil, nil
+	})
+	orch, rt := dialRuntimeWithHandler(t, handler)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	bundle := &credbundle.Bundle{LLM: map[string]string{
+		"ANTHROPIC_API_KEY":  "sk-ant-real",
+		"ANTHROPIC_BASE_URL": upstream.URL,
+	}}
+	if err := orch.Call(ctx, sidecarproto.KindSealedBundle,
+		sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, bundle)}, nil); err != nil {
+		t.Fatalf("relay bundle: %v", err)
+	}
+
+	var res sidecarproto.StartProxiesResult
+	if err := orch.Call(ctx, sidecarproto.KindStartProxies,
+		sidecarproto.StartProxiesBody{HostVethIP: "127.0.0.1"}, &res); err != nil {
+		t.Fatalf("start proxies: %v", err)
+	}
+
+	// The proxy URL the sandbox itself would use, userinfo token and all.
+	var proxyURL string
+	for _, kv := range res.Env {
+		if strings.HasPrefix(kv, "HTTPS_PROXY=") {
+			proxyURL = strings.TrimPrefix(kv, "HTTPS_PROXY=")
+		}
+	}
+	u, err := url.Parse(proxyURL)
+	if err != nil || u.Host == "" {
+		t.Fatalf("no usable HTTPS_PROXY in sandbox env: %q (%v)", proxyURL, err)
+	}
+	token, _ := u.User.Password()
+
+	conn, err := net.DialTimeout("tcp", u.Host, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial egress proxy: %v", err)
+	}
+	defer conn.Close()
+	auth := base64.StdEncoding.EncodeToString([]byte(egressproxy.BasicUser + ":" + token))
+	_, _ = conn.Write([]byte("CONNECT api.github.com:443 HTTP/1.1\r\nHost: api.github.com:443\r\n" +
+		"Proxy-Authorization: Basic " + auth + "\r\n\r\n"))
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _ = conn.Read(make([]byte, 512))
+
+	deadline := time.After(4 * time.Second)
+	for {
+		select {
+		case got := <-notifies:
+			if got.Op != agentproc.OpRecordEgressDenial {
+				continue
+			}
+			var a agentproc.RecordEgressDenialArgs
+			if err := json.Unmarshal(got.Args, &a); err != nil {
+				t.Fatalf("unmarshal relayed denial: %v", err)
+			}
+			if a.Target != "api.github.com:443" || a.Reason == "" {
+				t.Fatalf("relayed denial = %+v, want the CONNECT authority and a reason", a)
+			}
+			return
+		case <-deadline:
+			t.Fatal("the sidecar never relayed a refused CONNECT — the egress audit hook is unwired at the StartRunProxies call site")
+		}
+	}
+}
+
+// TestRuntime_GHInjectorRelaysWriteAudit pins the gh channel's second audit
+// half: a mutating REST call through the injector relays a record_gh_write
+// carrying method, path, and the upstream's status — including a non-2xx,
+// which the artifact observation path drops entirely.
+//
+// It drives the injector built from the production config (ghInjectorConfig)
+// rather than through startGHInjector, whose cert write lands under the
+// privileged per-run socket root — unreachable to an unprivileged test runner.
+// The wiring under test is the config's, so this is the whole of it: a missing
+// ObserveWrite fails here.
+func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// An off-scope write masked as a not-found: the outcome that used to
+		// leave no trace at all.
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer upstream.Close()
+
+	notifies := make(chan sidecarproto.RelayCallBody, 4)
+	handler := sidecarproto.HandlerFunc(func(_ context.Context, kind sidecarproto.Kind, body json.RawMessage) (any, error) {
+		if kind != sidecarproto.KindRelayNotify {
+			return nil, nil
+		}
+		var rc sidecarproto.RelayCallBody
+		if err := json.Unmarshal(body, &rc); err != nil {
+			return nil, err
+		}
+		notifies <- rc
+		return nil, nil
+	})
+	orch, rt := dialRuntimeWithHandler(t, handler)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	bundle := &credbundle.Bundle{
+		LLM: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"},
+		GitHub: &credbundle.GitHubCreds{
+			Mode:     "app",
+			CLIToken: &credbundle.RepoToken{Token: "ghs_REALCLITOKEN"},
+		},
+	}
+	if err := orch.Call(ctx, sidecarproto.KindSealedBundle,
+		sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, bundle)}, nil); err != nil {
+		t.Fatalf("relay bundle: %v", err)
+	}
+
+	cert, certPEM, err := ghinjector.GenerateCert("127.0.0.1")
+	if err != nil {
+		t.Fatalf("GenerateCert: %v", err)
+	}
+	const placeholder = "per-run-placeholder"
+	srv, err := ghinjector.New(rt.ghInjectorConfig(upstream.URL, cert, placeholder))
+	if err != nil {
+		t.Fatalf("construct injector: %v", err)
+	}
+	host, err := srv.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start injector: %v", err)
+	}
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+		defer shutdownCancel()
+		_ = srv.Shutdown(shutdownCtx)
+	})
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(certPEM) {
+		t.Fatal("append injector cert to pool failed")
+	}
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
+	req, _ := http.NewRequest(http.MethodPatch, "https://"+host+"/api/v3/repos/acme/widgets/pulls/7", nil)
+	req.Header.Set("Authorization", "token "+placeholder)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request through injector: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("caller saw %d, want the upstream's 404 (a 502 means the bundle token never resolved)", resp.StatusCode)
+	}
+
+	deadline := time.After(4 * time.Second)
+	for {
+		select {
+		case got := <-notifies:
+			if got.Op != agentproc.OpRecordGHWrite {
+				continue
+			}
+			var a agentproc.RecordGHWriteArgs
+			if err := json.Unmarshal(got.Args, &a); err != nil {
+				t.Fatalf("unmarshal relayed gh write: %v", err)
+			}
+			if a.Method != http.MethodPatch || a.Status != http.StatusNotFound ||
+				!strings.Contains(a.Path, "/repos/acme/widgets/pulls/7") {
+				t.Fatalf("relayed write = %+v, want the PATCH, its path, and the 404", a)
+			}
+			return
+		case <-deadline:
+			t.Fatal("a gh-channel REST write never reached the orchestrator's audit path")
+		}
 	}
 }

@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
@@ -34,39 +36,36 @@ var ticketHelp = map[string]string{
 	"list-priorities":  "jira ticket list-priorities",
 }
 
-// hasHelpFlag returns true if --help or -h appears as a standalone
-// flag (not as the value of a preceding --xxx flag). Per-action help
-// dispatch trips on this BEFORE the action body runs so the agent
-// can run e.g. `jira ticket view --help` without the leading arg
-// being misread as the issue key.
+// ValueFlags is every jira flag that takes a value — the input
+// execflags.HasHelpFlag needs to tell `--body "--help"` (a comment
+// whose text is literally "--help") from a help request. Exported
+// because the exec dispatcher runs the same check one level up, to
+// route help before it resolves run identity.
 //
-// The "preceding flag" exclusion is what makes
-// `jira ticket comment KEY --body "--help"` execute the comment
-// instead of printing help — the literal "--help" is the body's
-// value, not a help request. Same for a JQL search whose query
-// happens to contain --help. Assumption: jira ticket has no boolean
-// flags. If one is added, --xxxBool --help would be misread as the
-// boolean's value; the assumption is enforced by ticketHelp listing
-// only value-taking flags. Adding a boolean would require revisiting
-// this helper.
+// Only value-taking flags belong here: listing a boolean would make
+// `--someBool --help` a false negative. jira ticket has no boolean
+// flags today, so this is exactly the flag set.
+var ValueFlags = map[string]bool{
+	"--status":       true,
+	"--body":         true,
+	"--type":         true,
+	"--summary":      true,
+	"--description":  true,
+	"--parent":       true,
+	"--priority":     true,
+	"--add-label":    true,
+	"--remove-label": true,
+	"--jql":          true,
+	"--fields":       true,
+	"--max":          true,
+}
+
+// hasHelpFlag reports a standalone --help/-h among args. Per-action
+// help dispatch trips on this BEFORE the action body runs so the
+// agent can run e.g. `jira ticket view --help` without the leading
+// arg being misread as the issue key.
 func hasHelpFlag(args []string) bool {
-	for i, a := range args {
-		if a != "--help" && a != "-h" {
-			continue
-		}
-		if i > 0 {
-			prev := args[i-1]
-			// A `--xxx` arg is treated as a value-taking flag and
-			// the current --help is its value, not a help request.
-			// `--help` itself doesn't claim a value, so an earlier
-			// `--help` doesn't shadow this one.
-			if strings.HasPrefix(prev, "--") && prev != "--help" {
-				continue
-			}
-		}
-		return true
-	}
-	return false
+	return execflags.HasHelpFlag(args, ValueFlags)
 }
 
 func handleTicket(host agenthost.Client, args []string) {
@@ -77,6 +76,13 @@ func handleTicket(host agenthost.Client, args []string) {
 	action := args[0]
 	flags := args[1:]
 
+	// `jira ticket --help` — the resource level, below which the top-level
+	// dispatcher's own help check no longer reaches.
+	if action == "--help" || action == "-h" {
+		printHelp()
+		return
+	}
+
 	// Per-action --help: print just that action's usage and exit cleanly,
 	// without invoking the action body (which would otherwise try to
 	// interpret --help as an issue key / project / etc.).
@@ -86,7 +92,8 @@ func handleTicket(host agenthost.Client, args []string) {
 			return
 		}
 		// Unknown action with --help — fall through to the unknown-action
-		// error below so the user sees that the action itself is wrong.
+		// error below so the user sees that the action itself is wrong, with
+		// the valid set alongside it.
 	}
 
 	switch action {
@@ -119,8 +126,22 @@ func handleTicket(host agenthost.Client, args []string) {
 	case "set-priority":
 		ticketSetPriority(host, flags)
 	default:
-		exitErr(fmt.Sprintf("unknown ticket action: %s", action))
+		exitErr(fmt.Sprintf("unknown ticket action: %s\nvalid actions: %s\nRun 'triagefactory exec jira ticket --help' for usage.",
+			action, strings.Join(ticketActions(), ", ")))
 	}
+}
+
+// ticketActions lists the valid ticket verbs for the unknown-action error.
+// Derived from ticketHelp (sorted for a stable message) so a new verb can't be
+// added to the dispatch without appearing here — ticketHelp already has to
+// grow for its usage line.
+func ticketActions() []string {
+	out := make([]string, 0, len(ticketHelp))
+	for a := range ticketHelp {
+		out = append(out, a)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func ticketView(host agenthost.Client, args []string) {

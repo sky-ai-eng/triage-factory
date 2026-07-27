@@ -27,7 +27,7 @@ func TestRunCredentialsStore_SQLite_NotApplicable(t *testing.T) {
 	if err := stores.RunCredentials.Put(ctx, orgID, runID, "executor-1", 1, []byte("sealed")); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Fatalf("Put = %v, want ErrNotApplicableInLocal", err)
 	}
-	if _, _, _, ok, err := stores.RunCredentials.Get(ctx, orgID, runID); ok || !errors.Is(err, db.ErrNotApplicableInLocal) {
+	if _, ok, err := stores.RunCredentials.Get(ctx, orgID, runID); ok || !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Fatalf("Get = (ok=%v, err=%v), want (false, ErrNotApplicableInLocal)", ok, err)
 	}
 }

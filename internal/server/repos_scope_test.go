@@ -27,6 +27,7 @@ type repoScopeRig struct {
 	teamA, teamB string
 	orgOwner     string // founder: org role 'owner', teamA admin
 	memberB      string // teamB *team* admin but org-level plain "member" (no org-admin role)
+	plainB       string // teamB plain member: no admin role anywhere
 	teamless     string // org member on zero teams
 }
 
@@ -50,6 +51,12 @@ func newRepoScopeRig(t *testing.T) *repoScopeRig {
 	// orthogonal; this is a common real shape (team admins who aren't org
 	// admins).
 	pgtest.AddOrgMember(t, h, memberB, orgID, teamB, "member", "admin")
+	// plainB is on teamB with no admin role at either grain — the shape the
+	// read gate and the write gate answer differently: they can *see*
+	// teamB's repos (membership), but must not be able to mutate an
+	// org-wide repo profile every tracking team's runs read.
+	plainB := pgtest.SeedUser(t, h, "plain-b")
+	pgtest.AddOrgMember(t, h, plainB, orgID, teamB, "member", "member")
 	teamless := pgtest.SeedUser(t, h, "teamless")
 	pgtest.MustExec(t, h.AdminDB,
 		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`, teamless, orgID)
@@ -57,7 +64,7 @@ func newRepoScopeRig(t *testing.T) *repoScopeRig {
 	rig := &repoScopeRig{
 		h: h, s: s, orgID: orgID,
 		teamA: teamA, teamB: teamB,
-		orgOwner: owner, memberB: memberB, teamless: teamless,
+		orgOwner: owner, memberB: memberB, plainB: plainB, teamless: teamless,
 	}
 
 	// teamA (owner's team) tracks acme/api; teamB tracks acme/web.
@@ -150,43 +157,158 @@ func TestHandleRepoProfiles_TeamScoped(t *testing.T) {
 	}
 }
 
-// TestHandleRepoUpdate_TeamScoped pins the PATCH-side fix: a non-admin
-// member may only update base_branch on a repo their own team tracks; an
-// org admin may update any repo; a member reaching for another team's repo
-// gets 404 (not disclosed, matching the GET-side filtering) rather than a
-// silent cross-team write.
+// baseBranch reads a repo profile's stored base_branch straight off the
+// admin pool, so a "the write was rejected" assertion checks the row rather
+// than trusting the status code.
+func (r *repoScopeRig) baseBranch(t *testing.T, owner, repo string) string {
+	t.Helper()
+	var got *string
+	if err := r.h.AdminDB.QueryRow(
+		`SELECT base_branch FROM repo_profiles WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)`,
+		r.orgID, owner, repo,
+	).Scan(&got); err != nil {
+		t.Fatalf("read base_branch for %s/%s: %v", owner, repo, err)
+	}
+	if got == nil {
+		return ""
+	}
+	return *got
+}
+
+func (r *repoScopeRig) patchBaseBranch(t *testing.T, callerID, owner, repo, branch string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := r.req(http.MethodPatch, "/api/repos/"+owner+"/"+repo, callerID, map[string]string{"base_branch": branch})
+	req.SetPathValue("owner", owner)
+	req.SetPathValue("repo", repo)
+	r.s.handleRepoUpdate(rec, req)
+	return rec
+}
+
+// TestHandleRepoUpdate_TeamScoped pins the PATCH-side visibility boundary:
+// a repo outside the caller's tracked set gets 404 (not disclosed, matching
+// the GET-side filtering) rather than a silent cross-team write, and an org
+// admin may update any repo.
 func TestHandleRepoUpdate_TeamScoped(t *testing.T) {
 	rig := newRepoScopeRig(t)
 
-	patch := func(callerID, owner, repo, branch string) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		req := rig.req(http.MethodPatch, "/api/repos/"+owner+"/"+repo, callerID, map[string]string{"base_branch": branch})
-		req.SetPathValue("owner", owner)
-		req.SetPathValue("repo", repo)
-		rig.s.handleRepoUpdate(rec, req)
-		return rec
-	}
-
-	// memberB updates their own team's repo (acme/web) — allowed.
-	if rec := patch(rig.memberB, "acme", "web", "develop"); rec.Code != http.StatusOK {
+	// memberB is teamB's team admin, so their own team's repo is writable.
+	if rec := rig.patchBaseBranch(t, rig.memberB, "acme", "web", "develop"); rec.Code != http.StatusOK {
 		t.Fatalf("memberB PATCH acme/web: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
 	// memberB reaches for teamA's repo (acme/api) — blocked with 404, not
 	// leaked as a 403 (which would confirm the repo's existence).
-	if rec := patch(rig.memberB, "acme", "api", "develop"); rec.Code != http.StatusNotFound {
+	if rec := rig.patchBaseBranch(t, rig.memberB, "acme", "api", "develop"); rec.Code != http.StatusNotFound {
 		t.Fatalf("memberB PATCH acme/api (untracked by their team): status = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
 
 	// The org owner (admin) may update any repo, including one outside
 	// their own team's tracked set.
-	if rec := patch(rig.orgOwner, "acme", "web", "release"); rec.Code != http.StatusOK {
+	if rec := rig.patchBaseBranch(t, rig.orgOwner, "acme", "web", "release"); rec.Code != http.StatusOK {
 		t.Fatalf("org admin PATCH acme/web: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
 	// A teamless member is blocked from every repo.
-	if rec := patch(rig.teamless, "acme", "api", "develop"); rec.Code != http.StatusNotFound {
+	if rec := rig.patchBaseBranch(t, rig.teamless, "acme", "api", "develop"); rec.Code != http.StatusNotFound {
 		t.Fatalf("teamless PATCH acme/api: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleRepoUpdate_RequiresAdmin pins the mutation gate: changing an
+// org-wide repo profile takes an admin, not just membership of a team that
+// tracks it.
+// The two rejection codes are load-bearing and different — 403 for a repo
+// the caller can see in their own GET /api/repos list (404 there would read
+// as a bug), 404 for one they can't (disclosing nothing).
+func TestHandleRepoUpdate_RequiresAdmin(t *testing.T) {
+	rig := newRepoScopeRig(t)
+
+	// Baseline the row so "unchanged" means something.
+	if rec := rig.patchBaseBranch(t, rig.orgOwner, "acme", "web", "release"); rec.Code != http.StatusOK {
+		t.Fatalf("seed base_branch: status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// plainB is on teamB, which tracks acme/web — they can read it, so this
+	// is a permission boundary, not a visibility one: 403, and no write.
+	rec := rig.patchBaseBranch(t, rig.plainB, "acme", "web", "hijacked")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("plain member PATCH acme/web: status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rig.baseBranch(t, "acme", "web"); got != "release" {
+		t.Errorf("base_branch = %q after a rejected PATCH, want it unchanged at %q", got, "release")
+	}
+
+	// The same caller reaching a repo no team of theirs tracks still gets
+	// 404 — the admin check must not turn a non-disclosure into a
+	// disclosure.
+	if rec := rig.patchBaseBranch(t, rig.plainB, "acme", "api", "hijacked"); rec.Code != http.StatusNotFound {
+		t.Fatalf("plain member PATCH acme/api (untracked by their team): status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Team admin of a tracking team, with no org-admin role at all, still
+	// succeeds — this gate is admin-of-a-tracking-team, not org-admin-only.
+	if rec := rig.patchBaseBranch(t, rig.memberB, "acme", "web", "develop"); rec.Code != http.StatusOK {
+		t.Fatalf("team admin PATCH acme/web: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rig.baseBranch(t, "acme", "web"); got != "develop" {
+		t.Errorf("base_branch = %q after an allowed PATCH, want develop", got)
+	}
+}
+
+// TestHandleRepoProfiles_CanEdit pins the projection the Repos page gates
+// its base-branch control on: it mirrors the PATCH gate per row, so the
+// client never has to re-derive authz from role (org admin and team admin
+// are orthogonal, and only the server knows which tracking teams the caller
+// administers).
+func TestHandleRepoProfiles_CanEdit(t *testing.T) {
+	rig := newRepoScopeRig(t)
+
+	canEdit := func(callerID string) map[string]bool {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		rig.s.handleRepoProfiles(rec, rig.req(http.MethodGet, "/api/repos", callerID, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s GET /api/repos: status = %d; body=%s", callerID, rec.Code, rec.Body.String())
+		}
+		var rows []struct {
+			Owner   string `json:"owner"`
+			Repo    string `json:"repo"`
+			CanEdit bool   `json:"can_edit"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+			t.Fatalf("decode repo list: %v; body=%s", err, rec.Body.String())
+		}
+		out := make(map[string]bool, len(rows))
+		for _, row := range rows {
+			out[row.Owner+"/"+row.Repo] = row.CanEdit
+		}
+		return out
+	}
+
+	// Org admin: every repo in the org-wide union is editable.
+	if got := canEdit(rig.orgOwner); !got["acme/api"] || !got["acme/web"] {
+		t.Errorf("org admin can_edit = %v, want both repos true", got)
+	}
+
+	// Team admin of teamB: teamB's repo is editable, and teamA's isn't even
+	// in their list.
+	got := canEdit(rig.memberB)
+	if !got["acme/web"] {
+		t.Errorf("teamB admin can_edit[acme/web] = false, want true; got %v", got)
+	}
+	if _, listed := got["acme/api"]; listed {
+		t.Errorf("teamB admin should not see acme/api at all; got %v", got)
+	}
+
+	// Plain member of teamB: sees the repo, may not edit it — exactly the
+	// state the page renders read-only instead of a control that 403s.
+	got = canEdit(rig.plainB)
+	if _, listed := got["acme/web"]; !listed {
+		t.Fatalf("plain member should still see acme/web; got %v", got)
+	}
+	if got["acme/web"] {
+		t.Errorf("plain member can_edit[acme/web] = true, want false")
 	}
 }
 

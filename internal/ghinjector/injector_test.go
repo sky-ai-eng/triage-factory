@@ -563,3 +563,158 @@ func TestGraphQLUpstream_ExactHostMatch(t *testing.T) {
 		}
 	}
 }
+
+// newInjectorWithWrites is newInjector with the write-audit callback wired too
+// (the observation callback stays available so a test can assert both fire).
+func newInjectorWithWrites(t *testing.T, upstream string,
+	observe func(context.Context, ObservedMutation),
+	observeWrite func(context.Context, ObservedWrite)) (*http.Client, string) {
+	t.Helper()
+	cert, certPEM, err := GenerateCert("127.0.0.1")
+	if err != nil {
+		t.Fatalf("GenerateCert: %v", err)
+	}
+	srv, err := New(Config{
+		Upstream:     upstream,
+		Cert:         cert,
+		Observe:      observe,
+		ObserveWrite: observeWrite,
+		TokenSource:  func(context.Context) (string, error) { return "ghs_realtoken", nil },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	addr, err := srv.Start("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(certPEM) {
+		t.Fatal("append cert PEM to pool failed")
+	}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}, addr
+}
+
+// TestInjector_ObservesRESTWrites pins the write-audit surface: every mutating
+// REST method is reported with its path and the upstream's status — a refused
+// write as loudly as a successful one — while reads and GraphQL are not.
+// GraphQL's exclusion is the load-bearing one: a porcelain mutation and a
+// `gh pr view` are the same POST /api/graphql, so recording it would label
+// every read a write.
+func TestInjector_ObservesRESTWrites(t *testing.T) {
+	cases := []struct {
+		name    string
+		method  string
+		path    string
+		status  int
+		wantHit bool
+	}{
+		{"patch a PR", http.MethodPatch, "/api/v3/repos/octo/repo/pulls/7", http.StatusOK, true},
+		{"off-scope patch masked as 404", http.MethodPatch, "/api/v3/repos/other/repo/pulls/7", http.StatusNotFound, true},
+		{"merge a PR", http.MethodPut, "/api/v3/repos/octo/repo/pulls/7/merge", http.StatusOK, true},
+		{"delete a comment", http.MethodDelete, "/api/v3/repos/octo/repo/issues/comments/5", http.StatusNoContent, true},
+		{"post a comment", http.MethodPost, "/api/v3/repos/octo/repo/issues/7/comments", http.StatusCreated, true},
+		{"read a PR", http.MethodGet, "/api/v3/repos/octo/repo/pulls/7", http.StatusOK, false},
+		{"graphql", http.MethodPost, "/api/graphql", http.StatusOK, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer upstream.Close()
+
+			writes := make(chan ObservedWrite, 4)
+			client, host := newInjectorWithWrites(t, upstream.URL, nil,
+				func(_ context.Context, w ObservedWrite) { writes <- w })
+
+			req, _ := http.NewRequest(tc.method, "https://"+host+tc.path, strings.NewReader(`{"base":"main"}`))
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != tc.status {
+				t.Fatalf("caller saw %d, want the upstream's %d", resp.StatusCode, tc.status)
+			}
+
+			select {
+			case got := <-writes:
+				if !tc.wantHit {
+					t.Fatalf("recorded a write for %s %s, want none", tc.method, tc.path)
+				}
+				if got.Method != tc.method || got.Status != tc.status {
+					t.Errorf("recorded %+v, want method %s status %d", got, tc.method, tc.status)
+				}
+				if !strings.HasSuffix(tc.path, got.Path) {
+					t.Errorf("recorded path %q, want the forwarded form of %q", got.Path, tc.path)
+				}
+			case <-time.After(time.Second):
+				if tc.wantHit {
+					t.Fatalf("no write recorded for %s %s", tc.method, tc.path)
+				}
+			}
+		})
+	}
+}
+
+// TestInjector_WriteAuditCoexistsWithObservation pins the intended overlap: a
+// REST PR create produces BOTH the artifact observation (the object exists) and
+// the write-audit row (the attempt happened). They answer different questions,
+// exactly as branch_pushed and branch_push_failed do — and the request body
+// still reaches the upstream byte-for-byte, since neither path reads it.
+func TestInjector_WriteAuditCoexistsWithObservation(t *testing.T) {
+	const body = `{"title":"Fix it","base":"main"}`
+	gotBody := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody <- string(b)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"number":42,"node_id":"PR_x","html_url":"https://github.com/octo/repo/pull/42"}`))
+	}))
+	defer upstream.Close()
+
+	muts := make(chan ObservedMutation, 2)
+	writes := make(chan ObservedWrite, 2)
+	client, host := newInjectorWithWrites(t, upstream.URL,
+		func(_ context.Context, m ObservedMutation) { muts <- m },
+		func(_ context.Context, w ObservedWrite) { writes <- w })
+
+	req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/v3/repos/octo/repo/pulls", strings.NewReader(body))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	select {
+	case b := <-gotBody:
+		if b != body {
+			t.Errorf("upstream saw body %q, want the caller's %q verbatim (requests are never inspected)", b, body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream never received the request")
+	}
+	select {
+	case m := <-muts:
+		if m.Number != 42 {
+			t.Errorf("observation = %+v, want the created PR", m)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no artifact observation for a successful PR create")
+	}
+	select {
+	case w := <-writes:
+		if w.Method != http.MethodPost || w.Status != http.StatusCreated {
+			t.Errorf("write audit = %+v, want the POST and its 201", w)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no write audit for a successful PR create")
+	}
+}

@@ -50,21 +50,19 @@ func (s *runCredentialsStore) Put(ctx context.Context, orgID, runID, executorID 
 	return err
 }
 
-func (s *runCredentialsStore) Get(ctx context.Context, orgID, runID string) (string, int64, []byte, bool, error) {
-	var executorID string
-	var bootEpoch int64
-	var sealed []byte
+func (s *runCredentialsStore) Get(ctx context.Context, orgID, runID string) (db.SealedBundle, bool, error) {
+	var b db.SealedBundle
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT cc.executor_id, cc.boot_epoch, cc.sealed
+		SELECT cc.executor_id, cc.boot_epoch, cc.sealed, cc.created_at
 		FROM claim_credentials cc
 		JOIN claims cl ON cl.id = cc.claim_id
 		WHERE cl.org_id = $1::uuid AND cl.conversation_id = $2::uuid AND cl.released_at IS NULL
-	`, orgID, runID).Scan(&executorID, &bootEpoch, &sealed)
+	`, orgID, runID).Scan(&b.ExecutorID, &b.BootEpoch, &b.Sealed, &b.SealedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", 0, nil, false, nil
+		return db.SealedBundle{}, false, nil
 	}
 	if err != nil {
-		return "", 0, nil, false, err
+		return db.SealedBundle{}, false, err
 	}
-	return executorID, bootEpoch, sealed, true, nil
+	return b, true, nil
 }

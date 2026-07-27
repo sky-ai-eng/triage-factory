@@ -275,3 +275,53 @@ func TestExternalActionStore_SQLite_ListFiltersAndPaging(t *testing.T) {
 		t.Errorf("limit 2 offset 4 over 5 rows returned %d, want 1", len(last))
 	}
 }
+
+// TestExternalActionStore_SQLite_EgressDenialDedupPerConversation pins the
+// flood control on the sandbox egress denial: one conversation hammering a
+// blocked host leaves exactly one row, while a SECOND conversation probing the
+// same host leaves its own. The dedup key carries the conversation id for
+// precisely this reason — the unique index spans (org_id, dedup_key), so a
+// host-only key would let the first conversation's row swallow every later
+// one, org-wide and forever.
+func TestExternalActionStore_SQLite_EgressDenialDedupPerConversation(t *testing.T) {
+	conn := newSQLiteForArtifactTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	runA := seedArtifactRun(t, conn)
+	runB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+
+	const target = "api.github.com:443"
+	denial := func(runID string) domain.ExternalAction {
+		return domain.ExternalAction{
+			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			Provider: domain.ArtifactProviderNetwork, Action: domain.ActionEgressDenied,
+			Target: target, ConversationID: runID, Credential: domain.CredentialNone,
+			DedupKey: domain.EgressDenialDedupKey(runID, target),
+		}
+	}
+
+	// The retry loop: ten probes of one host from one conversation.
+	for i := 0; i < 10; i++ {
+		if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, denial(runA)); err != nil {
+			t.Fatalf("probe %d (should DO NOTHING after the first, not error): %v", i, err)
+		}
+	}
+	var count int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM external_actions`).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("ten probes of one host from one conversation left %d rows, want 1", count)
+	}
+
+	// A different conversation probing the same host is its own signal.
+	if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, denial(runB)); err != nil {
+		t.Fatalf("second conversation Record: %v", err)
+	}
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM external_actions`).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("a second conversation's probe of the same host left %d rows total, want 2", count)
+	}
+}

@@ -276,7 +276,15 @@ needs them to do its job. Their safety rests on four things:
   operation — the git proxy injects the token only on git fetch/push to
   authorized repos (any other path 403s, no CONNECT tunnel), and Jira/GitHub-API
   calls are fixed host-side `exec` verbs. The git or Jira token can't be
-  repurposed for arbitrary requests.
+  repurposed for arbitrary requests. On a push the proxy also enforces a
+  per-ref allowlist: a run may update only the branch its own worktree is on,
+  and a repository's base/default branch only if the team's base-branch push
+  policy permits it (default: it does not). That policy is team-grained and
+  team-admin-only — a task's text is externally authored, so it must never be
+  able to authorize its own base-branch push. Local mode enforces the same
+  policy at TF's `pre-push` hook, where it is a guard against a mistaken agent
+  rather than a boundary: a local-mode agent runs as the operator and can skip
+  client hooks.
 
 A compromise of a run's proxy still yields the credentials that proxy
 holds — any process that holds a key and serves untrusted callers can leak it if

@@ -128,6 +128,81 @@ func TestTeamGitHubRepos_Postgres_TracksRepoViewerScoped_RLS(t *testing.T) {
 	}
 }
 
+// TestTeamGitHubRepos_Postgres_TracksRepoViewerAdminScoped_RLS pins the
+// mutation gate for org-wide repo configuration: seeing a repo (membership)
+// and being allowed to change it (team admin) are separate answers. repo
+// profiles carry no team_id, so a member of one tracking team writing the
+// row changes behaviour for every tracking team — hence the narrower
+// predicate.
+func TestTeamGitHubRepos_Postgres_TracksRepoViewerAdminScoped_RLS(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	// bob is a plain member of the SAME team alice admins: he sees
+	// acme/api, but must not be able to write it.
+	bob := pgtest.SeedUser(t, h, "bob")
+	pgtest.AddOrgMember(t, h, bob, orgA, teamA, "member", "member")
+	// carol admins a different team that tracks nothing — team admin
+	// somewhere in the org is not team admin *of a tracking team*.
+	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
+	carol := pgtest.SeedUser(t, h, "carol")
+	pgtest.AddOrgMember(t, h, carol, orgA, teamB, "member", "admin")
+
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
+		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, []domain.TeamGitHubRepo{{Owner: "Acme", Repo: "api"}})
+	}); err != nil {
+		t.Fatalf("track acme/api for teamA: %v", err)
+	}
+
+	adminTracksAs := func(userID, owner, repo string) bool {
+		t.Helper()
+		var got bool
+		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
+			var e error
+			got, e = tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, orgA, owner, repo)
+			return e
+		}); err != nil {
+			t.Fatalf("TracksRepoViewerAdminScoped(%s, %s/%s): %v", userID, owner, repo, err)
+		}
+		return got
+	}
+	memberTracksAs := func(userID, owner, repo string) bool {
+		t.Helper()
+		var got bool
+		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
+			var e error
+			got, e = tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgA, owner, repo)
+			return e
+		}); err != nil {
+			t.Fatalf("TracksRepoViewerScoped(%s, %s/%s): %v", userID, owner, repo, err)
+		}
+		return got
+	}
+
+	if !adminTracksAs(alice, "acme", "api") {
+		t.Error("alice admins the team tracking acme/api; want true")
+	}
+	if !adminTracksAs(alice, "ACME", "API") {
+		t.Error("match should be case-insensitive")
+	}
+	if adminTracksAs(alice, "acme", "ghost") {
+		t.Error("acme/ghost is tracked by nobody; want false even for a team admin")
+	}
+	// The split this gate exists for: bob reads the repo, bob cannot write it.
+	if !memberTracksAs(bob, "acme", "api") {
+		t.Error("bob is a member of the team tracking acme/api; the read gate should pass")
+	}
+	if adminTracksAs(bob, "acme", "api") {
+		t.Error("bob is a plain member, not a team admin; the write gate must reject him")
+	}
+	if adminTracksAs(carol, "acme", "api") {
+		t.Error("carol admins teamB, which doesn't track acme/api; want false")
+	}
+}
+
 func pgStrsEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

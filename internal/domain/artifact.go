@@ -62,6 +62,13 @@ const (
 	ArtifactProviderLinear = "linear"
 	ArtifactProviderGit    = "git"
 	ArtifactProviderSlack  = "slack"
+	// ArtifactProviderNetwork is the provider for an action whose target is a
+	// bare network destination rather than an object in a named system — the
+	// sandbox egress proxy's refused CONNECT, whose host is arbitrary
+	// (pypi.org, api.github.com). No artifact is ever written under it; it
+	// exists so the external-action row has a provider that doesn't misfile a
+	// blocked host as a GitHub or Jira write.
+	ArtifactProviderNetwork = "network"
 )
 
 // Artifact kind discriminators.
