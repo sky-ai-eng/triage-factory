@@ -133,3 +133,23 @@ func TestIsTransient(t *testing.T) {
 		}
 	}
 }
+
+// TestIsTransient_BifrostTransportFailure pins the coupling between this
+// classifier and how internal/inference renders a provider error. Every
+// transport failure in every bifrost provider carries the same fixed message,
+// which matches no marker here — so a network blip reads as permanent and
+// ends the engagement on the first attempt unless the wrapped cause and the
+// status code travel with it. That rendering is the contract; this is the
+// half of it that has to hold for a retryable failure to be retried.
+func TestIsTransient_BifrostTransportFailure(t *testing.T) {
+	rendered := "inference: provider error: failed to execute HTTP request to provider API: " +
+		"dial tcp 10.42.7.1:41231: connect: connection refused (HTTP 502) " +
+		"[provider_connection_failed] [endpoint: http://10.42.7.1:41231]"
+	if !isTransient(errors.New(rendered)) {
+		t.Fatalf("a dial failure must be retried: %q", rendered)
+	}
+	bare := "inference: provider error: failed to execute HTTP request to provider API"
+	if isTransient(errors.New(bare)) {
+		t.Fatal("this test's premise is gone: the bare message now matches a marker")
+	}
+}

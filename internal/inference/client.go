@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync/atomic"
 
@@ -19,8 +20,13 @@ import (
 // usage with cache tokens). Construct one per account and reuse it; Close
 // shuts the embedded bifrost workers down.
 type Client struct {
-	bf     *bifrost.Bifrost
-	closed atomic.Bool
+	bf *bifrost.Bifrost
+	// endpoints is the configured base URL per provider, captured at
+	// construction so a failed call can say which host it was talking to.
+	// A provider absent from the map (or mapped to "") was left on its
+	// built-in endpoint.
+	endpoints map[schemas.ModelProvider]string
+	closed    atomic.Bool
 }
 
 // ErrClientClosed is returned by Stream on a nil, uninitialized, or already-
@@ -35,12 +41,31 @@ func New(account schemas.Account) (*Client, error) {
 	}
 	bf, err := bifrost.Init(context.Background(), schemas.BifrostConfig{
 		Account: account,
-		Logger:  bifrost.NewDefaultLogger(schemas.LogLevelWarn),
+		Logger:  newBifrostLogger(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("inference: bifrost init: %w", err)
 	}
-	return &Client{bf: bf}, nil
+	return &Client{bf: bf, endpoints: endpointsOf(account)}, nil
+}
+
+// endpointsOf reads each configured provider's base URL off the account.
+// Best-effort: an account that declines to enumerate itself just yields no
+// annotation, since this exists only to make an error self-explaining.
+func endpointsOf(account schemas.Account) map[schemas.ModelProvider]string {
+	providers, err := account.GetConfiguredProviders()
+	if err != nil {
+		return nil
+	}
+	out := make(map[schemas.ModelProvider]string, len(providers))
+	for _, p := range providers {
+		cfg, err := account.GetConfigForProvider(p)
+		if err != nil || cfg == nil {
+			continue
+		}
+		out[p] = cfg.NetworkConfig.BaseURL
+	}
+	return out
 }
 
 // Close shuts down the embedded bifrost workers. Safe to call more than once
@@ -112,9 +137,52 @@ func (c *Client) Stream(ctx context.Context, req Request) (*Completion, error) {
 
 	ch, berr := c.bf.ChatCompletionStreamRequest(bfCtx, breq)
 	if berr != nil {
-		return nil, bifrostError(berr)
+		return nil, c.wrapProviderError(req.Provider, berr)
 	}
-	return reassembleStream(ch)
+	completion, err := reassembleStream(ch)
+	if err != nil {
+		return nil, c.annotateEndpoint(req.Provider, err)
+	}
+	return completion, nil
+}
+
+// wrapProviderError renders a bifrost error and names the endpoint it was
+// aimed at.
+func (c *Client) wrapProviderError(provider schemas.ModelProvider, e *schemas.BifrostError) error {
+	return c.annotateEndpoint(provider, bifrostError(e))
+}
+
+// annotateEndpoint appends the base URL the call was aimed at. Which host
+// answered (or didn't) is the first thing worth knowing about a transport
+// failure — a run whose credentials point at its own sidecar proxy fails very
+// differently from one that reached the public provider — and bifrost's error
+// carries no endpoint of its own.
+func (c *Client) annotateEndpoint(provider schemas.ModelProvider, err error) error {
+	if err == nil {
+		return nil
+	}
+	base, ok := c.endpoints[provider]
+	if !ok {
+		return err
+	}
+	if base == "" {
+		return fmt.Errorf("%w [endpoint: %s built-in]", err, provider)
+	}
+	return fmt.Errorf("%w [endpoint: %s]", err, redactURL(base))
+}
+
+// redactURL strips userinfo and query from a base URL before it goes into an
+// error string. A customer gateway URL is operator-supplied and may carry a
+// token in either position; scheme + host + path is what identifies the hop.
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }
 
 // buildChatRequest assembles the wire request: the cacheable system prefix,
@@ -245,14 +313,36 @@ func drain(ch chan *schemas.BifrostStreamChunk) {
 	}
 }
 
-// bifrostError converts a bifrost error pointer into a Go error carrying its
-// message.
+// bifrostError converts a bifrost error pointer into a Go error.
+//
+// It renders the wrapped cause and the status code alongside bifrost's own
+// message, because that message is frequently a fixed constant — every
+// transport failure in every provider reports "failed to execute HTTP request
+// to provider API" — while the cause underneath it holds the dial error, the
+// TLS failure, or the reset that actually happened. Dropping it costs twice:
+// the operator gets an error with no lead to follow, and the caller's
+// transient-vs-permanent classification (agentloop's isTransient) sees no
+// "connection refused" or "502" to match on, so a retryable network blip is
+// treated as a permanent failure and ends the engagement on the first attempt.
 func bifrostError(e *schemas.BifrostError) error {
 	if e == nil {
 		return nil
 	}
+	var b strings.Builder
+	b.WriteString("inference: provider error")
 	if msg := e.GetErrorString(); msg != "" {
-		return fmt.Errorf("inference: provider error: %s", msg)
+		b.WriteString(": " + msg)
 	}
-	return fmt.Errorf("inference: provider error")
+	if e.Error != nil && e.Error.Error != nil {
+		if cause := e.Error.Error.Error(); cause != "" && cause != e.GetErrorString() {
+			b.WriteString(": " + cause)
+		}
+	}
+	if e.StatusCode != nil {
+		fmt.Fprintf(&b, " (HTTP %d)", *e.StatusCode)
+	}
+	if e.Error != nil && e.Error.Type != nil && *e.Error.Type != "" {
+		fmt.Fprintf(&b, " [%s]", *e.Error.Type)
+	}
+	return errors.New(b.String())
 }
