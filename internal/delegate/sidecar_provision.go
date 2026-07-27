@@ -3,6 +3,7 @@ package delegate
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -35,6 +36,13 @@ type executorSandbox struct {
 	// Close. relayOnce guards the close against a double Close.
 	stopRelay chan struct{}
 	relayOnce sync.Once
+
+	// credNudge asks that relay goroutine for an out-of-band read-and-push,
+	// for a caller that can't wait out the 30s tick — the relayed
+	// `workspace add` whose clone needs the just-re-sealed bundle now.
+	// Unbuffered — a nudge is served only while that goroutine is alive, and
+	// each request carries its own buffered reply channel.
+	credNudge chan credRelayNudge
 }
 
 // Close tears the executor sandbox down in the order that keeps the veth alive
@@ -57,6 +65,47 @@ func (e *executorSandbox) Close() {
 	}
 	if e.net != nil {
 		_ = e.net.Close()
+	}
+}
+
+// credRelayNudge is a one-shot request to the credential-refresh relay: re-read
+// the sealed-bundle channel now and push any new blob to the sidecar, replying
+// on done with the outcome. Routed through that goroutine rather than calling
+// conn.Call directly so it stays the only writer of sealed bundles on the
+// supervision channel — a second path could hand the sidecar an older blob
+// after a newer one.
+//
+// It carries its caller's ctx because it IS the caller's request: the relay
+// runs the DB read and the sidecar Call under it, so cancelling the nudge
+// actually stops the work rather than just abandoning it. Without that, a
+// caller that gave up would leave a read+Call running for the relay's own step
+// budget, and "bounded by ctx" would be a claim the code doesn't keep.
+type credRelayNudge struct {
+	ctx  context.Context
+	done chan error
+}
+
+// nudgeCredentialRelay drives one out-of-band read-and-push and waits for it,
+// bounded by ctx on both sides — the handoff to the relay goroutine and the
+// work it then does. Nil-safe, and safe on a torn-down sandbox: a stopped relay
+// answers immediately instead of blocking until ctx expires.
+func (e *executorSandbox) nudgeCredentialRelay(ctx context.Context) error {
+	if e == nil || e.credNudge == nil {
+		return nil
+	}
+	req := credRelayNudge{ctx: ctx, done: make(chan error, 1)}
+	select {
+	case e.credNudge <- req:
+	case <-e.stopRelay:
+		return errors.New("credential refresh relay has stopped")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-req.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -242,7 +291,25 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 		GitProxyToken:  res.GitProxyToken,
 	})
 
-	es := &executorSandbox{net: net, sidecar: sc, conn: conn, res: res, stopRelay: make(chan struct{})}
+	es := &executorSandbox{net: net, sidecar: sc, conn: conn, res: res, stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
+	_, myBootEpoch := s.executorIdentity()
+
+	// A relayed `workspace add` widens this run's authorized repo set, which
+	// its already-sealed bundle predates — so the materialization waits for a
+	// bundle sealed after the reservation and has it pushed to the sidecar
+	// before it clones. Both halves are timestamp-and-ciphertext only: the
+	// orchestrator still never opens a bundle.
+	relaySrv.SetCredentialRefresh(&agenthost.CredentialRefresh{
+		SealedAt: func(ctx context.Context) (time.Time, bool, error) {
+			b, ok, err := s.runCredentials.Get(ctx, orgID, run.ID)
+			if err != nil || !ok || b.BootEpoch != myBootEpoch {
+				return time.Time{}, false, err
+			}
+			return b.SealedAt, true, nil
+		},
+		Relay: es.nudgeCredentialRelay,
+	})
+
 	// The sidecar received this run's bundle once, at bring-up, but the brain's
 	// refresh sweep re-mints short-lived credentials mid-run (role-mode STS at
 	// its half-life; hour-lived GitHub installation tokens) and re-seals them
@@ -250,11 +317,10 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 	// with no DB access, so it can't pull them — this goroutine relays each new
 	// sealed blob down (the sidecar idempotently re-accepts it) so a long run
 	// keeps signing with live credentials instead of 502-ing on expiry.
-	_, myBootEpoch := s.executorIdentity()
 	go s.relayCredentialRefreshes(run.ID, func(ctx context.Context) (int64, []byte, bool, error) {
-		_, be, sealed, ok, err := s.runCredentials.Get(ctx, orgID, run.ID)
-		return be, sealed, ok, err
-	}, myBootEpoch, conn, es.stopRelay)
+		b, ok, err := s.runCredentials.Get(ctx, orgID, run.ID)
+		return b.BootEpoch, b.Sealed, ok, err
+	}, myBootEpoch, conn, es.credNudge, es.stopRelay)
 	return es, nil
 }
 
@@ -270,49 +336,66 @@ const credRefreshRelayInterval = 30 * time.Second
 // curatorTurnCredentials.Get. relayCredentialRefreshes never unseals the bytes.
 type credBundleGetter func(ctx context.Context) (bootEpoch int64, sealed []byte, ok bool, err error)
 
+// credRelayStepTimeout bounds one read-and-push through the sealed-bundle
+// channel — the DB read plus the supervision-channel Call.
+const credRelayStepTimeout = 20 * time.Second
+
 // relayCredentialRefreshes polls the sealed-bundle channel for one run/turn and
 // relays any NEW sealed bundle down to the sidecar over the supervision channel
 // — the push half of mid-run credential refresh (the sidecar can't reach the
 // DB). It relays only when the sealed bytes actually change (the brain re-mint),
 // never unsealing them. subject is the run/turn id for logging; getter reads the
-// channel (run vs curator). Runs until stop is closed (executorSandbox.Close) or
-// the supervision channel dies. Never fires on all/local (no executor sandbox).
-func (s *Spawner) relayCredentialRefreshes(subject string, getter credBundleGetter, bootEpoch int64, conn *sidecarproto.Conn, stop <-chan struct{}) {
+// channel (run vs curator). nudge carries out-of-band requests from a caller
+// that can't wait out the tick (the relayed `workspace add`); nil for the
+// curator, which never widens a repo set. Runs until stop is closed
+// (executorSandbox.Close) or the supervision channel dies. Never fires on
+// all/local (no executor sandbox).
+func (s *Spawner) relayCredentialRefreshes(subject string, getter credBundleGetter, bootEpoch int64, conn *sidecarproto.Conn, nudge <-chan credRelayNudge, stop <-chan struct{}) {
 	if getter == nil {
 		return
 	}
 	ticker := time.NewTicker(credRefreshRelayInterval)
 	defer ticker.Stop()
-	// The bytes last handed to the sidecar, so a tick that reads the same blob
-	// does not re-relay it. Starts nil: the first tick re-relays whatever
+	// The bytes last handed to the sidecar, so a pass that reads the same blob
+	// does not re-relay it. Starts nil: the first pass re-relays whatever
 	// bring-up already sent (the sidecar re-accepts it idempotently), and only a
-	// genuine brain re-mint changes the blob thereafter.
+	// genuine brain re-mint changes the blob thereafter. Owned solely by this
+	// goroutine — every pass, ticked or nudged, runs on it.
 	var lastSealed []byte
+	// parent bounds this pass: the ticker's own detached context, or a nudger's
+	// (so its cancellation stops the read and the Call, not just the wait for
+	// them). credRelayStepTimeout is the cap either way; a nudger with a shorter
+	// deadline wins.
+	relayOnce := func(parent context.Context) error {
+		ctx, cancel := context.WithTimeout(parent, credRelayStepTimeout)
+		defer cancel()
+		be, sealed, ok, err := getter(ctx)
+		if err != nil {
+			return fmt.Errorf("read sealed credential bundle: %w", err)
+		}
+		if !ok || be != bootEpoch || len(sealed) == 0 || bytes.Equal(sealed, lastSealed) {
+			return nil
+		}
+		if err := conn.Call(ctx, sidecarproto.KindSealedBundle, sidecarproto.SealedBundleBody{Sealed: sealed, BootEpoch: be}, nil); err != nil {
+			return fmt.Errorf("relay sealed credential bundle to sidecar: %w", err)
+		}
+		lastSealed = sealed
+		return nil
+	}
 	for {
 		select {
 		case <-stop:
 			return
 		case <-conn.Done():
 			return
+		case req := <-nudge:
+			// Buffered reply channel, so a nudger that already gave up on its
+			// own deadline can't wedge this goroutine.
+			req.done <- relayOnce(req.ctx)
 		case <-ticker.C:
-			readCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			be, sealed, ok, err := getter(readCtx)
-			cancel()
-			if err != nil {
-				dispatchLog.Warn("read sealed credential bundle for refresh relay failed; retrying", "subject", subject, "error", err)
-				continue
+			if err := relayOnce(context.Background()); err != nil {
+				dispatchLog.Warn("credential refresh relay pass failed; will retry next tick", "subject", subject, "error", err)
 			}
-			if !ok || be != bootEpoch || len(sealed) == 0 || bytes.Equal(sealed, lastSealed) {
-				continue
-			}
-			relayCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			err = conn.Call(relayCtx, sidecarproto.KindSealedBundle, sidecarproto.SealedBundleBody{Sealed: sealed, BootEpoch: be}, nil)
-			cancel()
-			if err != nil {
-				dispatchLog.Warn("relay refreshed credential bundle to sidecar failed; will retry next tick", "subject", subject, "error", err)
-				continue
-			}
-			lastSealed = sealed
 		}
 	}
 }
@@ -403,10 +486,10 @@ func (s *Spawner) sidecarProvisionFor(orgID, runID string) agentproc.SidecarProv
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		for {
-			credExecutorID, bootEpoch, sealed, ok, err := s.runCredentials.Get(provCtx, orgID, runID)
+			b, ok, err := s.runCredentials.Get(provCtx, orgID, runID)
 			if err != nil {
 				dispatchLog.Warn("read run credential bundle failed; retrying", "run", runID, "error", err)
-			} else if ok && credExecutorID == myID && bootEpoch == myBootEpoch {
+			} else if ok && b.ExecutorID == myID && b.BootEpoch == myBootEpoch {
 				// Opaque ciphertext — the orchestrator relays it verbatim and
 				// never opens it (only the sidecar's private key can). Gate on the
 				// bundle's stamped (executor, boot_epoch) matching ours: a row left
@@ -414,7 +497,7 @@ func (s *Spawner) sidecarProvisionFor(orgID, runID string) agentproc.SidecarProv
 				// is sealed to a sidecar key this run never minted, so relaying it
 				// would just fail the unseal. Skip and keep polling until the brain
 				// re-seals for THIS claim.
-				return sealed, bootEpoch, nil
+				return b.Sealed, b.BootEpoch, nil
 			}
 			select {
 			case <-provCtx.Done():

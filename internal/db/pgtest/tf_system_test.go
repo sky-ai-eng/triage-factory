@@ -468,7 +468,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 			INSERT INTO claim_credentials (claim_id, org_id, executor_id, boot_epoch, sealed)
 			VALUES ($1, $2, $3, 1, $4)
 		`, claimID, orgID, executorID, []byte("sealed-bytes"))
-		_, _, _, ok, err := stores.RunCredentials.Get(ctx, orgID, runID)
+		_, ok, err := stores.RunCredentials.Get(ctx, orgID, runID)
 		if err != nil {
 			t.Fatalf("RunCredentials.Get: %v", err)
 		}
