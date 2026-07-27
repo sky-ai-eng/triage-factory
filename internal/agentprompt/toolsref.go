@@ -11,12 +11,24 @@ package agentprompt
 // exists: ee/ cannot be imported by core, so an ee package contributes its
 // text inward instead of core reaching outward for it.
 
+// The two core references are resolved once at init, not per call. Every run
+// dispatch reads them (a Jira run reads both), and they never vary — so they
+// behave like the plain package-level strings they replaced, with no embed
+// read, copy, or concatenation on the dispatch path.
+
+// githubTools / jiraTools are the resolved reference texts. Package-level so a
+// missing block fails at process start rather than on the first dispatch.
+var (
+	githubTools = block(blockToolsGitHub) + "\n"
+	jiraTools   = block(blockToolsJira) + "\n"
+)
+
 // GitHubToolsReference is the agent-facing docs for the `exec gh` verb family.
-func GitHubToolsReference() string { return block(blockToolsGitHub) + "\n" }
+func GitHubToolsReference() string { return githubTools }
 
 // JiraToolsReference is the agent-facing docs for the `exec jira` verb family
 // plus the per-run workspace materialization every codebase-less run needs.
-func JiraToolsReference() string { return block(blockToolsJira) + "\n" }
+func JiraToolsReference() string { return jiraTools }
 
 // toolsReferenceRegistry is the process-global map of non-core entity sources
 // (e.g. "slack") to their agent-facing tools-reference text. Same no-mutex

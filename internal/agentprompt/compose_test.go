@@ -143,6 +143,19 @@ func TestBlocks_NoUnexpectedPlaceholders(t *testing.T) {
 	}
 }
 
+// TestStaticPrompts_CoversEveryManifestSpec keeps the init-time cache in step
+// with the manifest. A Spec the cache misses still composes correctly — Build
+// falls back to the manifest — so a gap would be silent, showing up only as
+// per-dispatch work the design says is unnecessary. Adding an axis arm without
+// extending the enumeration in compose.go fails here instead.
+func TestStaticPrompts_CoversEveryManifestSpec(t *testing.T) {
+	for _, spec := range allSpecs() {
+		if _, ok := staticPrompts[spec]; !ok {
+			t.Errorf("spec %+v resolves through the manifest but is missing from the init-time cache", spec)
+		}
+	}
+}
+
 // TestBlocks_NoOrphans asserts every embedded block is reachable from the
 // manifest or one of the named accessors. A block nobody selects is dead
 // prompt text, which is worse than dead code: it reads like it is in effect.
