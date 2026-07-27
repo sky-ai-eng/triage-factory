@@ -41,6 +41,21 @@ interface RepoProfile {
   // when the failure is on the git/transport side (show raw stderr,
   // no settings shortcut).
   clone_error_kind?: 'ssh' | 'other'
+  // Whether this caller may change the repo's settings. The server
+  // decides — a repo profile is org-wide, so writing it takes an org
+  // admin or a team admin of a team tracking it, and only the server
+  // knows which of the tracking teams the caller administers. Never
+  // re-derive this from the viewer's role. Absent (older server) reads
+  // as false, which degrades to read-only rather than to a control that
+  // 403s on use.
+  can_edit?: boolean
+}
+
+// The branch a run actually targets: an explicit base_branch override,
+// else the profiler-derived default, else GitHub's own fallback. Shared
+// by the editable picker and the read-only label so the two can't drift.
+function effectiveBranch(profile: RepoProfile): string {
+  return profile.base_branch || profile.default_branch || 'main'
 }
 
 // --- BranchPicker ----------------------------------------------------------
@@ -88,7 +103,7 @@ function BranchPicker({
     setQuery(profile.base_branch || '')
   }, [profile.base_branch])
 
-  const effective = profile.base_branch || profile.default_branch || 'main'
+  const effective = effectiveBranch(profile)
   const usingDefault = !profile.base_branch
 
   const fetchBranches = useCallback(
@@ -230,6 +245,27 @@ function BranchPicker({
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
+  )
+}
+
+// --- BranchLabel -----------------------------------------------------------
+// The read-only twin of BranchPicker's trigger chip, shown when the caller
+// may not change this repo's settings. Same glyph and typography so the row
+// still reads as "this repo targets <branch>" — it just isn't a control.
+// Deliberately not a disabled <button>: there's no action to offer, and a
+// dead button invites the click that would 403.
+
+function BranchLabel({ profile }: { profile: RepoProfile }) {
+  return (
+    <span
+      title="Only an org admin, or a team admin of a team tracking this repo, can change the base branch"
+      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] text-text-tertiary"
+    >
+      <GitBranch size={11} strokeWidth={2} />
+      <span className={profile.base_branch ? 'text-text-secondary' : 'text-text-tertiary'}>
+        {effectiveBranch(profile)}
+      </span>
+    </span>
   )
 }
 
@@ -463,7 +499,11 @@ function RepoCard({
         </h3>
         {profile.clone_status === 'failed' && <CloneFailedBadge profile={profile} />}
         <div className="ml-auto flex items-center gap-3">
-          <BranchPicker profile={profile} onSave={onBranchChange} />
+          {profile.can_edit ? (
+            <BranchPicker profile={profile} onSave={onBranchChange} />
+          ) : (
+            <BranchLabel profile={profile} />
+          )}
           {profile.profiled_at && (
             <span className="text-[10px] text-text-tertiary whitespace-nowrap tabular-nums">
               {formatAge(profile.profiled_at)}

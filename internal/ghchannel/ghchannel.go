@@ -74,6 +74,11 @@ type Config struct {
 	// injector sees complete. Local mode wires this straight into the artifact
 	// recorder in-process — there is no relay hop to make.
 	Observe func(context.Context, ghinjector.ObservedMutation)
+
+	// ObserveWrite, when non-nil, receives every mutating REST request the
+	// injector forwarded, with its outcome — the audit-log half of the same
+	// channel. Wired in-process too.
+	ObserveWrite func(context.Context, ghinjector.ObservedWrite)
 }
 
 // Channel is a live per-run injector and the coordinates an agent subprocess
@@ -155,6 +160,7 @@ func Start(cfg Config) (*Channel, error) {
 		Cert:          cert,
 		TokenSource:   cfg.TokenSource,
 		Observe:       cfg.Observe,
+		ObserveWrite:  cfg.ObserveWrite,
 		// Loopback only — no veth, no other host may reach this listener.
 	})
 	if err != nil {

@@ -24,6 +24,7 @@ import (
 	"strconv"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
 )
 
 // HelpText is the help block for `memory` commands, surfaced both from
@@ -46,6 +47,14 @@ Usage notes:
     in mid-run.
   - Conversation id is read from $TRIAGE_FACTORY_CONVERSATION_ID (set by the delegation spawner).`
 
+// ValueFlags is every memory flag that takes a value, for the shared help scan
+// (see execflags.HasHelpFlag). memory has no boolean flags.
+var ValueFlags = map[string]bool{
+	"--source": true,
+	"--id":     true,
+	"--limit":  true,
+}
+
 // defaultLimit is how many of an entity's most recent memories `memory load`
 // returns when --limit is omitted. Enough to orient without flooding the tool
 // result; the agent can raise it when it needs the full history.
@@ -56,7 +65,11 @@ const defaultLimit = 20
 // agenthost.AutoDetect at the top of cmd/exec/exec.go). host is nil on the help
 // route, which returns before any call.
 func Handle(ctx context.Context, host agenthost.Client, args []string) {
-	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+	// Help at either depth — `memory --help` and `memory load --help` — since
+	// the one command's usage IS the help block. Value-taking flags are
+	// excluded so `--id "--help"` still runs the load.
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" ||
+		execflags.HasHelpFlag(args[1:], ValueFlags) {
 		printHelp()
 		return
 	}

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -59,6 +60,26 @@ func agentMemoryFile() string {
 	return filepath.Join(root, worktree.ScratchDir, "memory.md")
 }
 
+// prActions is the valid `gh pr` verb set in switch order — the list the
+// unknown-action error prints so a mistyped verb routes somewhere instead of
+// stranding the agent.
+var prActions = []string{
+	"create", "view", "diff", "files", "thread-view", "review-view",
+	"review-dismiss", "start-review", "add-review-comment", "finalize-review",
+	"add-comment", "comment-reply", "comment-react", "comment-update",
+	"comment-delete",
+}
+
+// prHelp holds the per-action usage line for the review-lifecycle verbs — the
+// ones the agent envelope directs agents to and the ones that survive the
+// gh-channel cutover. Every other action falls back to the full `gh pr` help,
+// which lists it too; a verb slated for deletion doesn't earn its own entry.
+var prHelp = map[string]string{
+	"start-review":       "gh pr start-review <number> [--repo o/r] [--fresh]",
+	"add-review-comment": "gh pr add-review-comment <review_id> --file <path> --line <N> (--body <text> | --body-file <path>) [--start-line <N>] [--severity <level>]",
+	"finalize-review":    "gh pr finalize-review <review_id> --event <approve|comment|request_changes> (--body <text> | --body-file <path>)",
+}
+
 func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: triagefactory exec gh pr <action> [flags]")
@@ -66,6 +87,24 @@ func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 
 	action := args[0]
 	flags := args[1:]
+
+	// Help at every depth: `gh pr --help` prints the resource help, `gh pr
+	// <action> --help` prints that action's usage (or the resource help, which
+	// names the valid actions, when the verb isn't one of them). All of it
+	// exits 0 and touches no API — the envelope tells agents to run --help on
+	// any subcommand, so every depth has to answer.
+	if action == "--help" || action == "-h" {
+		printPRHelp()
+		return
+	}
+	if execflags.HasHelpFlag(flags, ValueFlags) {
+		if h, ok := prHelp[action]; ok {
+			fmt.Printf("usage: triagefactory exec %s\n", h)
+			return
+		}
+		printPRHelp()
+		return
+	}
 
 	// Every GitHub API call routes through the host. owner/repo are empty
 	// here because the PR verbs all resolve their own and pass them
@@ -104,8 +143,16 @@ func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 	case "comment-delete":
 		prCommentDelete(ctx, api, host, flags)
 	default:
-		exitErr(fmt.Sprintf("unknown pr action: %s", action))
+		exitErr(unknownVerbMessage("pr action", "pr actions", action, prActions,
+			"triagefactory exec gh pr --help"))
 	}
+}
+
+// printPRHelp prints the `gh pr` usage — the PR verbs plus the repo-resolution
+// rules that apply to all of them.
+func printPRHelp() {
+	fmt.Printf("Usage: triagefactory exec gh pr <action> [flags]\n\n%s\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n",
+		PRHelpText, RepoResolutionHelpText)
 }
 
 func prView(ctx context.Context, client ghAPI, args []string) {
@@ -1114,7 +1161,10 @@ func parseRepoAndNumber(args []string) (string, string, int) {
 	return owner, repo, number
 }
 
-// firstPositional returns the first argument that isn't a flag or a flag's value.
+// firstPositional returns the first argument that isn't a flag or a flag's
+// value. Reads the same ValueFlags set the help scan does — the two questions
+// ("is this token a flag's value?") are identical, and two hand-maintained
+// lists would drift.
 func firstPositional(args []string) string {
 	skipNext := false
 	for _, a := range args {
@@ -1122,7 +1172,7 @@ func firstPositional(args []string) string {
 			skipNext = false
 			continue
 		}
-		if a == "--repo" || a == "--file" || a == "--pr" || a == "--body" || a == "--body-file" || a == "--line" || a == "--start-line" || a == "--event" || a == "--status" || a == "--severity" {
+		if ValueFlags[a] {
 			skipNext = true
 			continue
 		}

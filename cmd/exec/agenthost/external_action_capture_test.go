@@ -459,3 +459,99 @@ func (erroringExternalActions) Record(context.Context, string, domain.ExternalAc
 func (erroringExternalActions) RecordSystem(context.Context, string, domain.ExternalAction) error {
 	return errors.New("boom")
 }
+
+// TestCapture_EgressDenied_RecordsOneRowPerConversationAndHost pins the audit
+// row behind a refused sandbox connection — the signal that used to exist only
+// as a log line. The retry loop collapses to one row per (conversation, host),
+// because "the agent tried to reach api.github.com and was refused" is the
+// finding; the hundredth identical row adds nothing and buries the rest of the
+// log.
+func TestCapture_EgressDenied_RecordsOneRowPerConversationAndHost(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	client := NewLocal(stores, info)
+	ctx := context.Background()
+
+	const reason = `host "api.github.com" is not on the sandbox egress allowlist`
+	for i := 0; i < 6; i++ {
+		client.RecordEgressDenied(ctx, "api.github.com:443", reason)
+	}
+	// A different host from the same conversation is its own signal.
+	client.RecordEgressDenied(ctx, "pypi.org:443", "port 8080 is not tunneled")
+
+	acts := listExternalActions(t, stores)
+	if len(acts) != 2 {
+		t.Fatalf("want 2 rows (one per host, repeats collapsed), got %d: %+v", len(acts), acts)
+	}
+	var gh domain.ExternalAction
+	for _, a := range acts {
+		if a.Target == "api.github.com:443" {
+			gh = a
+		}
+	}
+	if gh.Action != domain.ActionEgressDenied || gh.Provider != domain.ArtifactProviderNetwork ||
+		gh.Credential != domain.CredentialNone {
+		t.Errorf("egress row mismatch: %+v", gh)
+	}
+	if gh.ConversationID != info.RunID {
+		t.Errorf("conversation = %q, want the run's own %q", gh.ConversationID, info.RunID)
+	}
+	if want := domain.EgressDenialDedupKey(info.RunID, "api.github.com:443"); gh.DedupKey != want {
+		t.Errorf("dedup_key = %q, want %q", gh.DedupKey, want)
+	}
+	if !strings.Contains(gh.DetailJSON, "allowlist") || !strings.Contains(gh.DetailJSON, "api.github.com:443") {
+		t.Errorf("detail_json = %q, want the target and the refusal reason", gh.DetailJSON)
+	}
+}
+
+// TestCapture_GHChannelWrite_RecordsEveryAttempt pins the gh-channel write
+// audit: each mutating REST call is its own row (no dedup — a retried edit and a
+// refused one are distinct events), a repo path files under owner/repo, and a
+// non-2xx is recorded exactly like a success. The refused write is the whole
+// point: the artifact path drops it, so without this row an off-scope write
+// leaves no trace at all.
+func TestCapture_GHChannelWrite_RecordsEveryAttempt(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	client := NewLocal(stores, info)
+	ctx := context.Background()
+
+	client.RecordGHChannelWrite(ctx, "PATCH", "/repos/octo/repo/pulls/7", 200)
+	client.RecordGHChannelWrite(ctx, "PATCH", "/repos/octo/repo/pulls/7", 200)
+	client.RecordGHChannelWrite(ctx, "PATCH", "/repos/other/repo/pulls/1", 404)
+
+	acts := listExternalActions(t, stores)
+	if len(acts) != 3 {
+		t.Fatalf("want 3 rows (every attempt is its own event), got %d: %+v", len(acts), acts)
+	}
+	var refused domain.ExternalAction
+	for _, a := range acts {
+		if a.Action != domain.ActionGHChannelWrite || a.Provider != domain.ArtifactProviderGitHub ||
+			a.Credential != domain.CredentialGitHubApp {
+			t.Errorf("gh channel row mismatch: %+v", a)
+		}
+		if a.ConversationID != info.RunID {
+			t.Errorf("conversation = %q, want %q", a.ConversationID, info.RunID)
+		}
+		if strings.Contains(a.DetailJSON, "404") {
+			refused = a
+		}
+	}
+	if refused.Target != "other/repo" {
+		t.Errorf("refused write target = %q, want the repo the path names", refused.Target)
+	}
+	if !strings.Contains(refused.DetailJSON, `"method":"PATCH"`) ||
+		!strings.Contains(refused.DetailJSON, "/repos/other/repo/pulls/1") {
+		t.Errorf("detail_json = %q, want method + path + status", refused.DetailJSON)
+	}
+}
+
+// TestGHChannelWriteAction_TargetFallsBackToPath pins the non-repo case: a
+// user- or org-level write names no repo, so the row must not invent one.
+func TestGHChannelWriteAction_TargetFallsBackToPath(t *testing.T) {
+	act := GHChannelWriteAction("POST", "/user/repos", 201)
+	if act.Target != "/user/repos" {
+		t.Errorf("target = %q, want the path when it names no repo", act.Target)
+	}
+	if got := GHChannelWriteAction("DELETE", "/repos/octo/repo/issues/comments/5", 204); got.Target != "octo/repo" {
+		t.Errorf("target = %q, want octo/repo", got.Target)
+	}
+}

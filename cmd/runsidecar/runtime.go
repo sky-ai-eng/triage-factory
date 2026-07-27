@@ -3,6 +3,7 @@ package runsidecar
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/apiproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
+	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
@@ -145,7 +147,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		git = r.gitProxyConfig(req.GitUpstream)
 	}
 
-	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, git, r.llmSource, req.IdentityConfigPairs...)
+	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, git, r.recordEgressDenial, r.llmSource, req.IdentityConfigPairs...)
 	if err != nil {
 		return nil, err
 	}
@@ -306,7 +308,28 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string) (strin
 	if err != nil {
 		return "", "", err
 	}
-	srv, err := ghinjector.New(ghinjector.Config{
+	srv, err := ghinjector.New(r.ghInjectorConfig(upstream, cert, token))
+	if err != nil {
+		return "", "", fmt.Errorf("runsidecar: construct gh injector: %w", err)
+	}
+	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
+	if err != nil {
+		return "", "", fmt.Errorf("runsidecar: start gh injector: %w", err)
+	}
+	r.ghInjector = srv
+	return addr, token, nil
+}
+
+// ghInjectorConfig builds the gh channel's per-run wiring, the sibling of
+// gitProxyConfig: the TokenSource reads the held bundle's single
+// team-set-scoped CLIToken live (so a mid-run re-seal is picked up), and the
+// two fire-and-forget callbacks relay to the orchestrator, which holds the DB.
+//
+// Split from startGHInjector because that function's cert write lands under the
+// privileged per-run socket root — so the wiring is only reachable to a test
+// through this seam.
+func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, token string) ghinjector.Config {
+	return ghinjector.Config{
 		Upstream:         upstream,
 		IncomingToken:    token,
 		Cert:             cert,
@@ -338,16 +361,15 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string) (strin
 					ReviewState: m.ReviewState,
 				})
 		},
-	})
-	if err != nil {
-		return "", "", fmt.Errorf("runsidecar: construct gh injector: %w", err)
+		ObserveWrite: func(_ context.Context, w ghinjector.ObservedWrite) {
+			// Fire-and-forget beside Observe: the request already transited, and
+			// the orchestrator holds the DB that turns it into an audit row.
+			// Every mutating REST call rides this, including the refused ones the
+			// artifact path drops.
+			_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite,
+				agentproc.RecordGHWriteArgs{Method: w.Method, Path: w.Path, Status: w.Status})
+		},
 	}
-	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
-	if err != nil {
-		return "", "", fmt.Errorf("runsidecar: start gh injector: %w", err)
-	}
-	r.ghInjector = srv
-	return addr, token, nil
 }
 
 // startGitHubAPIProxy binds a GitHub-REST credential proxy on the veth IP.
@@ -453,6 +475,16 @@ func (r *credRuntime) llmSource(ctx context.Context) (map[string]string, time.Ti
 		return nil, time.Time{}, fmt.Errorf("runsidecar: current LLM credential expired — refresh lagging")
 	}
 	return bundle.LLM, bundle.LLMExpiry(), nil
+}
+
+// recordEgressDenial relays one refused CONNECT up to the orchestrator, which
+// holds the DB and writes the audit row. Unconditionally wired (unlike the git
+// hooks, which a repo-less run leaves nil): every sandbox gets an egress proxy,
+// and repeated denials are the clearest signal available that an agent is
+// probing for a way out — the reason this hook exists at all.
+func (r *credRuntime) recordEgressDenial(_ context.Context, denied egressproxy.DeniedConnect) {
+	_ = agentproc.NotifyRelay(r.conn, agentproc.RelayNamespaceCore, agentproc.OpRecordEgressDenial,
+		agentproc.RecordEgressDenialArgs{Target: denied.Target, Reason: denied.Reason})
 }
 
 // gitProxyConfig builds the git credential proxy's wiring for the sidecar:

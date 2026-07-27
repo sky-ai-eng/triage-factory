@@ -2103,6 +2103,87 @@ func (c *LocalClient) RecordGitDenied(ctx context.Context, owner, repo, ref, op,
 	})
 }
 
+// egressDeniedAction builds the `egress_denied` audit row for one outbound
+// connection the sandbox's gating egress proxy refused.
+//
+// conversationID feeds the dedup key ONLY; the recording funnel stamps the
+// row's own conversation/org/team from the run identity it holds. Repeated
+// probes of one host from one conversation collapse to a single row (see
+// domain.EgressDenialDedupKey): the signal is that the agent was refused a
+// destination, and a retry loop's hundredth row says nothing the first didn't.
+func egressDeniedAction(conversationID, target, reason string) *domain.ExternalAction {
+	detail, _ := json.Marshal(map[string]string{"target": target, "reason": reason})
+	return &domain.ExternalAction{
+		Provider:   domain.ArtifactProviderNetwork,
+		Action:     domain.ActionEgressDenied,
+		Target:     target,
+		Credential: domain.CredentialNone,
+		DedupKey:   domain.EgressDenialDedupKey(conversationID, target),
+		DetailJSON: string(detail),
+	}
+}
+
+// RecordEgressDenied appends the egress_denied audit row for a refused sandbox
+// CONNECT. Host-side only (not on the Client interface): the proxy that makes
+// the decision runs outside the jail, and the sandbox never names its own
+// denials. Best-effort like the rest of recording — repeated denials are the
+// clearest "this agent is lost or probing" signal the product has, but a
+// recording failure must never disturb the run.
+func (c *LocalClient) RecordEgressDenied(ctx context.Context, target, reason string) {
+	c.recordBotAction(ctx, egressDeniedAction(c.info.RunID, target, reason))
+}
+
+// GHChannelWriteAction builds the `gh_channel_write` audit row for one mutating
+// REST request the real-`gh` channel forwarded. Exported because local mode
+// records it without a LocalClient in hand (the delegate holds stores + RunInfo
+// and writes through the shared funnel), while the sandbox path goes through
+// RecordGHChannelWrite below — one builder, so the row is identical either way.
+//
+// Appended unconditionally (no dedup key): each attempt is its own event, so a
+// retried edit and a refused one both leave their own row. status is recorded
+// verbatim — an off-scope write masked as a 404 is precisely the outcome this
+// row exists to make visible. Target is the repo the path names, so the row
+// files alongside the rest of that repo's activity; a path naming no repo (a
+// user- or org-level endpoint) falls back to the path itself rather than
+// claiming a repo it never touched.
+func GHChannelWriteAction(method, path string, status int) *domain.ExternalAction {
+	detail, _ := json.Marshal(map[string]any{"method": method, "path": path, "http_status": status})
+	target := ghWriteTargetRepo(path)
+	if target == "" {
+		target = path
+	}
+	return &domain.ExternalAction{
+		Provider:   domain.ArtifactProviderGitHub,
+		Action:     domain.ActionGHChannelWrite,
+		Target:     target,
+		Credential: domain.CredentialGitHubApp,
+		DetailJSON: string(detail),
+	}
+}
+
+// ghWriteTargetRepo pulls "owner/repo" out of a REST path shaped
+// .../repos/{owner}/{repo}/..., or returns empty when the path names no repo.
+func ghWriteTargetRepo(path string) string {
+	i := strings.Index(path, "/repos/")
+	if i < 0 {
+		return ""
+	}
+	segs := strings.Split(strings.Trim(path[i+len("/repos/"):], "/"), "/")
+	if len(segs) < 2 || segs[0] == "" || segs[1] == "" {
+		return ""
+	}
+	return segs[0] + "/" + segs[1]
+}
+
+// RecordGHChannelWrite appends the gh_channel_write audit row for one write the
+// agent made through the real-`gh` channel. Host-side only: the injector that
+// observes it runs outside the jail. The artifact recorder covers the two
+// creates that produce an object; this covers every attempt, so an edit, a
+// merge, a close, and a refusal are all in the log. Best-effort.
+func (c *LocalClient) RecordGHChannelWrite(ctx context.Context, method, path string, status int) {
+	c.recordBotAction(ctx, GHChannelWriteAction(method, path, status))
+}
+
 // RecordGitPushFailed records one `branch_push_failed` external-action audit
 // row for a branch push the upstream refused (a non-2xx receive-pack response —
 // observed by the git proxy's outcome capture). The audit log records every

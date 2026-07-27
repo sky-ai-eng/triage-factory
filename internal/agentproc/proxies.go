@@ -251,8 +251,14 @@ func (h *RunProxyHandle) GitProxy() (url, token string) {
 // RecordDenial closures relay the DB-backed decision to the orchestrator, so
 // no database handle enters the capless sidecar. See startProxiesForSandbox
 // for the full contract.
-func StartRunProxies(ctx context.Context, hostVethIP string, resolvedCreds map[string]string, git *GitProxyConfig, llmSource func(ctx context.Context) (env map[string]string, expiry time.Time, err error), identityPairs ...[2]string) (*RunProxyHandle, []string, error) {
-	bundle, env, err := startProxiesForSandbox(ctx, hostVethIP, resolvedCreds, git, sigV4LiveSource(llmSource), identityPairs...)
+//
+// recordEgressDenial is the egress proxy's audit hook, the exact counterpart of
+// git.RecordDenial one layer down: the sidecar relays each refused CONNECT to
+// the orchestrator, which writes the row. nil disables egress denial recording
+// (the slog line remains) — but the production sidecar always supplies it, and
+// a test asserts as much, because this hook shipped unwired once already.
+func StartRunProxies(ctx context.Context, hostVethIP string, resolvedCreds map[string]string, git *GitProxyConfig, recordEgressDenial func(ctx context.Context, denied egressproxy.DeniedConnect), llmSource func(ctx context.Context) (env map[string]string, expiry time.Time, err error), identityPairs ...[2]string) (*RunProxyHandle, []string, error) {
+	bundle, env, err := startProxiesForSandbox(ctx, hostVethIP, resolvedCreds, git, recordEgressDenial, sigV4LiveSource(llmSource), identityPairs...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -289,7 +295,7 @@ func StartRunProxies(ctx context.Context, hostVethIP string, resolvedCreds map[s
 // Caller MUST call returned.Shutdown when the run completes (normal
 // or cancelled). On error, no proxies are running and the returned
 // bundle is nil — defer Shutdown is safe but a no-op.
-func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCreds map[string]string, git *GitProxyConfig, llmSource sigV4LiveSource, identityPairs ...[2]string) (*runProxies, []string, error) {
+func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCreds map[string]string, git *GitProxyConfig, recordEgressDenial func(ctx context.Context, denied egressproxy.DeniedConnect), llmSource sigV4LiveSource, identityPairs ...[2]string) (*runProxies, []string, error) {
 	if hostVethIP == "" {
 		return nil, nil, errors.New("agentproc: startProxiesForSandbox: hostVethIP is required")
 	}
@@ -373,7 +379,7 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	// `pip install` work inside the L3-locked sandbox. Started for
 	// every sandbox run — prompt-only runs never dial it, and one idle
 	// listener is cheaper than a second wiring path.
-	egressEnv, egressSrv, err := startEgressProxyForSandbox(hostVethIP)
+	egressEnv, egressSrv, err := startEgressProxyForSandbox(hostVethIP, recordEgressDenial)
 	if err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -512,7 +518,13 @@ func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitPro
 // here doesn't change shape. The proxy enforces the operator denylist
 // (metadata / private ranges / sandbox pool) against resolved IPs
 // regardless of allowlist content.
-func startEgressProxyForSandbox(hostVethIP string) ([]string, *egressproxy.Server, error) {
+//
+// recordDenial is the caller's audit hook for each refused CONNECT. It is
+// passed through rather than built here for the same reason the git proxy's is:
+// the DB lives on the orchestrator and this runs in the capless sidecar, so the
+// only thing this layer can do is carry the hook. nil leaves denials at the
+// slog line the proxy always writes.
+func startEgressProxyForSandbox(hostVethIP string, recordDenial func(ctx context.Context, denied egressproxy.DeniedConnect)) ([]string, *egressproxy.Server, error) {
 	incoming, err := randomHexToken()
 	if err != nil {
 		return nil, nil, err
@@ -521,6 +533,7 @@ func startEgressProxyForSandbox(hostVethIP string) ([]string, *egressproxy.Serve
 		AllowedHosts:     egressproxy.DefaultRegistryHosts(),
 		IncomingToken:    incoming,
 		AllowNonLoopback: true,
+		RecordDenial:     recordDenial,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("agentproc: construct egress proxy: %w", err)
