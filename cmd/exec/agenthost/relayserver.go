@@ -399,6 +399,13 @@ const workspaceCredWaitTimeout = 15 * time.Second
 // has a head start and the poll is just the pickup.
 const workspaceCredPollInterval = 250 * time.Millisecond
 
+// workspaceCredRelayTimeout bounds handing the re-sealed bundle to the sidecar.
+// Budgeted separately from the wait rather than carved out of what's left of
+// it: the wait is for the brain to produce a bundle, the push is a local hop
+// that shouldn't fail merely because the seal landed on the last poll. The
+// enclosing checkout op's own cap (4 minutes) still covers both.
+const workspaceCredRelayTimeout = 10 * time.Second
+
 // awaitCredentialsForRepo blocks until the run's sealed credential bundle is
 // newer than the conversation_worktrees reservation for repoID — then pushes it
 // to the sidecar, which is what actually holds the token the clone will use.
@@ -453,8 +460,13 @@ func (s *RelayServer) awaitCredentialsForRepo(ctx context.Context, owner, repo s
 				return nil
 			}
 			// The bundle is fresh in the database; the sidecar still holds the
-			// old one until the relay pushes it down.
-			if err := s.credRefresh.Relay(waitCtx); err != nil {
+			// old one until the relay pushes it down. Bounded off the caller's
+			// ctx, not waitCtx — a seal that landed on the final poll deserves a
+			// full push budget, not whatever milliseconds the wait had left.
+			relayCtx, relayCancel := context.WithTimeout(ctx, workspaceCredRelayTimeout)
+			err := s.credRefresh.Relay(relayCtx)
+			relayCancel()
+			if err != nil {
 				return fmt.Errorf("agenthost: hand the re-sealed credential bundle for %s to the run's credential sidecar: %w", repoID, err)
 			}
 			return nil
@@ -468,29 +480,38 @@ func (s *RelayServer) awaitCredentialsForRepo(ctx context.Context, owner, repo s
 	}
 }
 
-// repoReservedAt reports when this run most recently reserved a
-// conversation_worktrees row for repoID. Newest wins: a run may hold several
-// rows for one repo (a PR checkout and a branch checkout), and the wait must
-// clear the latest of them. Repo ids are compared case-insensitively because
-// the reservation records the agent's spelling while the checkout op carries
-// the repo profile's.
+// repoReservedAt reports when repoID entered this run's authorized repo set —
+// the OLDEST conversation_worktrees row the run holds for it.
+//
+// Oldest, not newest, because the two ledgers are keyed differently:
+// reservations are per (repo, ref) while credentials are per repo (the
+// provisioner dedups by repo id). The repo joined the authorized set at its
+// first reservation, so a bundle sealed after that covers it — and every later
+// ref in the same repo, which adds no grant to wait for. Keying on the newest
+// row would make a run's second checkout in a repo it already holds sit out a
+// re-seal that changes nothing.
+//
+// Repo ids are compared case-insensitively because the reservation records the
+// agent's spelling while the checkout op carries the repo profile's — the same
+// rule the insert's doorbell gate uses, so the two halves agree on what counts
+// as the same repo.
 func (s *RelayServer) repoReservedAt(ctx context.Context, repoID string) (time.Time, bool, error) {
 	rows, err := s.rt.ListRunWorktrees(ctx)
 	if err != nil {
 		return time.Time{}, false, err
 	}
-	var newest time.Time
+	var oldest time.Time
 	found := false
 	for _, w := range rows {
 		if !strings.EqualFold(w.RepoID, repoID) {
 			continue
 		}
-		if !found || w.CreatedAt.After(newest) {
-			newest = w.CreatedAt
+		if !found || w.CreatedAt.Before(oldest) {
+			oldest = w.CreatedAt
 			found = true
 		}
 	}
-	return newest, found, nil
+	return oldest, found, nil
 }
 
 // ObservationArtifact turns a gh-injector observation into the domain artifact

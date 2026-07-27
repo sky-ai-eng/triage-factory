@@ -113,6 +113,49 @@ func TestNudgeCredentialRelay(t *testing.T) {
 	}
 }
 
+// TestNudgeCredentialRelay_CancelStopsTheWork pins the nudge's ctx contract:
+// the relay runs the DB read and the sidecar Call under the CALLER's context,
+// so cancelling a nudge actually stops that work instead of leaving it running
+// for the relay's own step budget while the caller walks away.
+func TestNudgeCredentialRelay_CancelStopsTheWork(t *testing.T) {
+	hostSide, sidecarSide := net.Pipe()
+	conn := sidecarproto.New(hostSide, nil)
+	peer := sidecarproto.New(sidecarSide, nil)
+	t.Cleanup(func() {
+		_ = conn.Close()
+		_ = peer.Close()
+	})
+
+	// The getter blocks until its ctx dies, then reports which ctx that was.
+	gotCancelled := make(chan error, 1)
+	getter := func(ctx context.Context) (int64, []byte, bool, error) {
+		<-ctx.Done()
+		gotCancelled <- ctx.Err()
+		return 0, nil, false, ctx.Err()
+	}
+
+	es := &executorSandbox{stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
+	s := &Spawner{}
+	go s.relayCredentialRefreshes("run-1", getter, 7, conn, es.credNudge, es.stopRelay)
+	t.Cleanup(func() { close(es.stopRelay) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := es.nudgeCredentialRelay(ctx); err == nil {
+		t.Fatal("nudge with an expiring ctx returned nil, want the deadline surfaced")
+	}
+	// credRelayStepTimeout is 20s: without ctx propagation the read would still
+	// be running here rather than already cancelled.
+	select {
+	case err := <-gotCancelled:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("relay work ended with %v, want the caller's DeadlineExceeded", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay work outlived the cancelled nudge; its ctx is not the caller's")
+	}
+}
+
 // TestNudgeCredentialRelay_AfterStopDoesNotBlock pins that a nudge racing
 // sandbox teardown reports the relay is gone instead of hanging until its
 // caller's deadline — the materialization then fails with a clear error rather

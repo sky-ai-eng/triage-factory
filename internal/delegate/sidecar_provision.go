@@ -74,16 +74,26 @@ func (e *executorSandbox) Close() {
 // conn.Call directly so it stays the only writer of sealed bundles on the
 // supervision channel — a second path could hand the sidecar an older blob
 // after a newer one.
-type credRelayNudge struct{ done chan error }
+//
+// It carries its caller's ctx because it IS the caller's request: the relay
+// runs the DB read and the sidecar Call under it, so cancelling the nudge
+// actually stops the work rather than just abandoning it. Without that, a
+// caller that gave up would leave a read+Call running for the relay's own step
+// budget, and "bounded by ctx" would be a claim the code doesn't keep.
+type credRelayNudge struct {
+	ctx  context.Context
+	done chan error
+}
 
 // nudgeCredentialRelay drives one out-of-band read-and-push and waits for it,
-// bounded by ctx. Nil-safe, and safe on a torn-down sandbox: a stopped relay
+// bounded by ctx on both sides — the handoff to the relay goroutine and the
+// work it then does. Nil-safe, and safe on a torn-down sandbox: a stopped relay
 // answers immediately instead of blocking until ctx expires.
 func (e *executorSandbox) nudgeCredentialRelay(ctx context.Context) error {
 	if e == nil || e.credNudge == nil {
 		return nil
 	}
-	req := credRelayNudge{done: make(chan error, 1)}
+	req := credRelayNudge{ctx: ctx, done: make(chan error, 1)}
 	select {
 	case e.credNudge <- req:
 	case <-e.stopRelay:
@@ -352,8 +362,12 @@ func (s *Spawner) relayCredentialRefreshes(subject string, getter credBundleGett
 	// genuine brain re-mint changes the blob thereafter. Owned solely by this
 	// goroutine — every pass, ticked or nudged, runs on it.
 	var lastSealed []byte
-	relayOnce := func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), credRelayStepTimeout)
+	// parent bounds this pass: the ticker's own detached context, or a nudger's
+	// (so its cancellation stops the read and the Call, not just the wait for
+	// them). credRelayStepTimeout is the cap either way; a nudger with a shorter
+	// deadline wins.
+	relayOnce := func(parent context.Context) error {
+		ctx, cancel := context.WithTimeout(parent, credRelayStepTimeout)
 		defer cancel()
 		be, sealed, ok, err := getter(ctx)
 		if err != nil {
@@ -377,9 +391,9 @@ func (s *Spawner) relayCredentialRefreshes(subject string, getter credBundleGett
 		case req := <-nudge:
 			// Buffered reply channel, so a nudger that already gave up on its
 			// own deadline can't wedge this goroutine.
-			req.done <- relayOnce()
+			req.done <- relayOnce(req.ctx)
 		case <-ticker.C:
-			if err := relayOnce(); err != nil {
+			if err := relayOnce(context.Background()); err != nil {
 				dispatchLog.Warn("credential refresh relay pass failed; will retry next tick", "subject", subject, "error", err)
 			}
 		}

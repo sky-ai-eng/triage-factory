@@ -152,26 +152,50 @@ func TestAwaitCredentialsForRepo_WaitsForASealAfterTheReservation(t *testing.T) 
 	}
 }
 
-// TestAwaitCredentialsForRepo_NewestReservationWins pins that a run holding
-// several checkouts of one repo waits out the LATEST of them — an older row for
-// the same repo must not let a pre-widening bundle through.
-func TestAwaitCredentialsForRepo_NewestReservationWins(t *testing.T) {
-	old := time.Now().Add(-time.Hour)
-	fresh := time.Now()
+// TestAwaitCredentialsForRepo_SecondRefInAHeldRepoDoesNotWait pins the seam
+// between the two ledgers: reservations are per (repo, ref) but credentials are
+// per repo. A run checking out a second ref in a repo it already holds widened
+// nothing, so it must clear on a bundle sealed after the repo's FIRST
+// reservation — waiting for a re-seal that adds no grant is pure latency.
+func TestAwaitCredentialsForRepo_SecondRefInAHeldRepoDoesNotWait(t *testing.T) {
+	first := time.Now().Add(-time.Hour)
+	second := time.Now()
 	rows := []domain.RunWorktree{
-		{RepoID: "sky-ai-eng/triage-factory", Ref: "@default", CreatedAt: old},
-		{RepoID: "sky-ai-eng/triage-factory", Ref: "pr-42", CreatedAt: fresh},
-		{RepoID: "sky-ai-eng/other", Ref: "@default", CreatedAt: fresh.Add(time.Hour)},
+		{RepoID: "sky-ai-eng/triage-factory", Ref: "@default", CreatedAt: first},
+		{RepoID: "sky-ai-eng/triage-factory", Ref: "pr-42", CreatedAt: second},
+		{RepoID: "sky-ai-eng/other", Ref: "@default", CreatedAt: second.Add(time.Hour)},
 	}
-	// Sealed between the two reservations for this repo: newer than the old
-	// row, older than the one the checkout answers.
-	srv, _ := credWaitServer(t, rows, func() time.Time { return old.Add(time.Minute) })
+	// Sealed after the repo joined the set, before the second ref was reserved
+	// — which is exactly the bundle that already covers this repo.
+	srv, relayed := credWaitServer(t, rows, func() time.Time { return first.Add(time.Minute) })
+
+	start := time.Now()
+	if err := srv.awaitCredentialsForRepo(context.Background(), "sky-ai-eng", "triage-factory"); err != nil {
+		t.Fatalf("wait for a second ref in an already-held repo returned %v, want nil", err)
+	}
+	if elapsed := time.Since(start); elapsed > workspaceCredPollInterval {
+		t.Errorf("wait took %s; a repo already in the authorized set must clear on the first read", elapsed)
+	}
+	if got := atomic.LoadInt32(relayed); got != 1 {
+		t.Errorf("relayed %d bundles, want exactly 1 push to the sidecar", got)
+	}
+}
+
+// TestAwaitCredentialsForRepo_FirstReservationStillGates is the other side of
+// that seam: keying on the repo's first reservation must not let a bundle
+// sealed BEFORE the repo joined the set through.
+func TestAwaitCredentialsForRepo_FirstReservationStillGates(t *testing.T) {
+	first := time.Now()
+	rows := []domain.RunWorktree{
+		{RepoID: "sky-ai-eng/triage-factory", Ref: "@default", CreatedAt: first},
+		{RepoID: "sky-ai-eng/triage-factory", Ref: "pr-42", CreatedAt: first.Add(time.Minute)},
+	}
+	srv, _ := credWaitServer(t, rows, func() time.Time { return first.Add(-time.Minute) })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	err := srv.awaitCredentialsForRepo(ctx, "sky-ai-eng", "triage-factory")
-	if err == nil {
-		t.Fatal("wait cleared on a bundle older than the newest reservation for the repo")
+	if err := srv.awaitCredentialsForRepo(ctx, "sky-ai-eng", "triage-factory"); err == nil {
+		t.Fatal("wait cleared on a bundle sealed before the repo entered the authorized set")
 	}
 }
 
@@ -241,5 +265,39 @@ func TestRepoReservedAt_MatchesCaseInsensitively(t *testing.T) {
 	}
 	if !at.Equal(reserved) {
 		t.Errorf("repoReservedAt = %s, want %s", at, reserved)
+	}
+}
+
+// TestAwaitCredentialsForRepo_RelayGetsItsOwnBudget pins that the push to the
+// sidecar is budgeted separately from the wait: a seal that lands on the final
+// poll must still get a full push window, not whatever milliseconds the wait
+// had left.
+func TestAwaitCredentialsForRepo_RelayGetsItsOwnBudget(t *testing.T) {
+	reserved := time.Now()
+	rows := []domain.RunWorktree{{RepoID: "sky-ai-eng/triage-factory", Ref: "@default", CreatedAt: reserved}}
+	stores := db.Stores{RunWorktrees: &stubWorktrees{rows: rows}}
+	srv := NewRelayServer(stores, RunInfo{OrgID: "org", RunID: "run"}, nil)
+
+	var relayDeadline time.Duration
+	srv.SetCredentialRefresh(&CredentialRefresh{
+		SealedAt: func(context.Context) (time.Time, bool, error) { return reserved.Add(time.Second), true, nil },
+		Relay: func(ctx context.Context) error {
+			dl, ok := ctx.Deadline()
+			if !ok {
+				t.Error("relay ctx carried no deadline")
+				return nil
+			}
+			relayDeadline = time.Until(dl)
+			return nil
+		},
+	})
+
+	if err := srv.awaitCredentialsForRepo(context.Background(), "sky-ai-eng", "triage-factory"); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	// Comfortably more than the sub-second remainder a waitCtx-derived budget
+	// would leave on a late seal.
+	if relayDeadline < workspaceCredRelayTimeout-time.Second {
+		t.Errorf("relay budget = %s, want ~%s", relayDeadline, workspaceCredRelayTimeout)
 	}
 }

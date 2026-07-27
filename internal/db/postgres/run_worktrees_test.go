@@ -132,6 +132,26 @@ func TestRunWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T) {
 		t.Fatalf("InsertSystem (conflict): inserted=%v err=%v, want inserted=false", inserted, err)
 	}
 	expectNoCredRequest(t, msgs)
+
+	// A NEW ref in a repo the run already holds is a genuinely new row, but
+	// credentials are minted per repo — the authorized set is unchanged, so
+	// re-sealing would spend GitHub App mint quota on a byte-identical grant.
+	secondRef := domain.RunWorktree{RunID: runID, RepoID: "sky-ai-eng/other-repo", Path: "/runs/" + runID + "/sky-ai-eng/other-repo/pr-42", Ref: "pr-42"}
+	inserted, _, err = stores.RunWorktrees.InsertSystem(ctx, orgID, secondRef)
+	if err != nil || !inserted {
+		t.Fatalf("InsertSystem (second ref): inserted=%v err=%v, want inserted=true", inserted, err)
+	}
+	expectNoCredRequest(t, msgs)
+
+	// A different repo does widen the set.
+	otherRepo := domain.RunWorktree{RunID: runID, RepoID: "sky-ai-eng/third-repo", Path: "/runs/" + runID + "/sky-ai-eng/third-repo/@default", Ref: "@default"}
+	inserted, _, err = stores.RunWorktrees.InsertSystem(ctx, orgID, otherRepo)
+	if err != nil || !inserted {
+		t.Fatalf("InsertSystem (new repo): inserted=%v err=%v, want inserted=true", inserted, err)
+	}
+	if got := awaitCredRequest(t, msgs); got.RunID != runID {
+		t.Errorf("doorbell = %+v, want run %s", got, runID)
+	}
 }
 
 // TestRunWorktreeStore_Postgres_RolledBackInsertRingsNoDoorbell pins the
