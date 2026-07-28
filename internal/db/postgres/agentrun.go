@@ -139,12 +139,17 @@ func completeRun(ctx context.Context, q queryer, orgID, runID, status string, co
 	if claimID != "" {
 		// Overwrite, not add: the engagement's newest claim-attributed row
 		// is its own fresh row, and the lump is that invocation's whole
-		// total.
+		// total. Runtime-composed rows are skipped as targets — an errored
+		// or interrupted invocation ends on one, and settling there would
+		// bill the whole invocation to a model that never ran. An
+		// engagement whose rows are all synthetic falls through to the
+		// conversation-wide arm below.
 		res, err := q.ExecContext(ctx, `
 			UPDATE messages SET cost_usd = $1
 			WHERE org_id = $2 AND conversation_id = $3
-			  AND id = (SELECT MAX(id) FROM messages WHERE claim_id = $4)
-		`, costUSD, orgID, runID, claimID)
+			  AND id = (SELECT MAX(id) FROM messages
+			            WHERE claim_id = $4 AND model IS DISTINCT FROM $5)
+		`, costUSD, orgID, runID, claimID, domain.ModelSynthetic)
 		if err != nil {
 			return err
 		}
@@ -167,11 +172,22 @@ func completeRun(ctx context.Context, q queryer, orgID, runID, status string, co
 	// invocation's lump. The caveat: a rowless resume's spend lands on an
 	// older invocation's row — totals stay exact, per-row time attribution
 	// smears; accepted for this narrow corner.
+	//
+	// The ORDER BY ranks real-model rows ahead of runtime-composed ones and
+	// takes the newest within the winning group: the newest real-model row
+	// if the conversation has one, else its newest row of any kind. That
+	// last resort keeps the dollars on the ledger when a conversation is
+	// nothing but synthetic rows (a run that errored before its first
+	// provider turn); the model breakdowns exclude them, so the spend shows
+	// in the totals without inventing a model.
 	res, err := q.ExecContext(ctx, `
 		UPDATE messages SET cost_usd = COALESCE(cost_usd, 0) + $1
 		WHERE org_id = $2 AND conversation_id = $3
-		  AND id = (SELECT MAX(id) FROM messages WHERE org_id = $2 AND conversation_id = $3)
-	`, costUSD, orgID, runID)
+		  AND id = (SELECT id FROM messages
+		            WHERE org_id = $2 AND conversation_id = $3
+		            ORDER BY (model IS DISTINCT FROM $4) DESC, id DESC
+		            LIMIT 1)
+	`, costUSD, orgID, runID, domain.ModelSynthetic)
 	if err != nil {
 		return err
 	}

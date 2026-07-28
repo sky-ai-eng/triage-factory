@@ -123,6 +123,35 @@ func TestSpendByModel_SkipsNilModel(t *testing.T) {
 	}
 }
 
+// TestSpendModelBreakdowns_SkipSyntheticModel covers the rows the runtime
+// composes itself (an API-error or interrupt line): they name no model, so the
+// per-model breakdowns drop them exactly like a NULL-model curator row. Their
+// dollars are real and still land in the period total and in by_day.
+func TestSpendModelBreakdowns_SkipSyntheticModel(t *testing.T) {
+	day := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	rows := []domain.SpendRow{
+		{Source: "run", SourceID: "r1", Category: domain.SpendCategoryManual, Model: usageStrPtr("opus"), TotalCostUSD: 1.00, OccurredAt: day},
+		{Source: "run", SourceID: "r2", Category: domain.SpendCategoryManual, Model: usageStrPtr(domain.ModelSynthetic), TotalCostUSD: 0.40, OccurredAt: day},
+	}
+
+	byModel := spendByModel(rows)
+	if len(byModel) != 1 || byModel[0].Model != "opus" || !floatEq(byModel[0].Cost, 1.00) {
+		t.Errorf("byModel = %+v, want opus only", byModel)
+	}
+
+	byDayModel := spendByDayModel(rows)
+	if len(byDayModel) != 1 || byDayModel[0].Model != "opus" || !floatEq(byDayModel[0].Cost, 1.00) {
+		t.Errorf("byDayModel = %+v, want the opus cell only", byDayModel)
+	}
+
+	if got := spendByDay(rows); len(got) != 1 || !floatEq(got[0].Cost, 1.40) {
+		t.Errorf("byDay = %+v, want one 1.40 day (synthetic spend still counts in the total)", got)
+	}
+	if got := sumSpendCost(rows); !floatEq(got, 1.40) {
+		t.Errorf("sumSpendCost = %v, want 1.40", got)
+	}
+}
+
 func TestSpendByDay(t *testing.T) {
 	got := spendByDay(usageTestRows())
 	want := []usageDayBucket{
