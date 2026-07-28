@@ -267,16 +267,45 @@ three different problems.
   type, output modality, provider) touch entitlement. A newly released
   model will appear in the picker and fail at dispatch with
   `AccessDeniedException`.
+  - Verified against the generated SDK (`aws-sdk-go-v2/service/bedrock`
+    v1.66.1): `ListFoundationModelsInput` offers exactly four filters —
+    `ByCustomizationType`, `ByInferenceType`, `ByOutputModality`,
+    `ByProvider` — and `FoundationModelSummary` carries no entitlement
+    field at all. Its only status is `ModelLifecycle` (available vs.
+    deprecated). There is no filter and no field that reflects account
+    grants.
   - Second wrinkle: `ListFoundationModels` returns **base model ids**, not
     **inference-profile ids** (`us.anthropic.…`), and newer Claude models
-    on Bedrock can only be invoked through a profile. The ids you can list
-    and the ids you can call are different sets.
-  - A control-plane entitlement API exists
-    (`GetFoundationModelAvailability`, plus newer model-agreement APIs) but
-    lives on a different service endpoint needing its own IAM action —
-    i.e. asking every admin to widen the assumed role, which is R13's
-    config-file problem in another form. *(Not verified against the SDK;
-    no Bedrock control-plane client is vendored.)*
+    on Bedrock can only be invoked through a profile. `ListInferenceProfiles`
+    is a separate operation. The ids you can list and the ids you can call
+    are different sets.
+  - A control-plane entitlement API does exist, and it does not help as
+    much as it sounds:
+
+    ```go
+    // aws-sdk-go-v2/service/bedrock v1.66.1
+    GetFoundationModelAvailabilityInput{ ModelId *string }   // ONE model
+    GetFoundationModelAvailabilityOutput{
+        AgreementAvailability   *types.AgreementAvailability // {Status, ErrorMessage}
+        AuthorizationStatus     types.AuthorizationStatus    // AUTHORIZED | NOT_AUTHORIZED
+        EntitlementAvailability types.EntitlementAvailability// AVAILABLE  | NOT_AVAILABLE
+        RegionAvailability      types.RegionAvailability     // AVAILABLE  | NOT_AVAILABLE
+    }
+    ```
+
+    It is **per-model — there is no batch or list variant**. The agreement
+    operations are `CreateFoundationModelAgreement`,
+    `DeleteFoundationModelAgreement`, and
+    `ListFoundationModelAgreementOffers`; note the last lists what is *on
+    offer*, not what the account *holds*. **No operation answers "which
+    models am I entitled to."**
+
+    So checking N models costs N calls either way, and the control-plane
+    route additionally needs its own IAM action on a different service
+    endpoint — asking every admin to widen the assumed role, which is R13's
+    config-file problem in another form. It also answers a weaker question
+    (an agreement record exists across four independent axes) than a probe
+    (this credential can invoke this id right now).
 - **Azure** — enablement **is** a deployment, listable on the data plane
   with the same key. But the selectable unit is a deployment whose name is
   admin-chosen and arbitrary (`gpt5-prod`), which appears in no catalog and
@@ -287,8 +316,10 @@ three different problems.
 model, cached. It requires no permission the run does not already need —
 if the probe fails, the run would have failed too — where every
 control-plane option asks the admin to grant something extra so TF can ask
-a question the existing credential could answer. It also tests the exact
-id that will be invoked, which sidesteps the Bedrock profile mismatch
+a question the existing credential could answer. It costs the same number
+of calls as Bedrock's per-model entitlement check, works identically for
+every vendor instead of needing three integrations, and tests the exact id
+that will be invoked, which sidesteps the Bedrock profile mismatch
 entirely.
 
 Probe requirements: bound the candidate set to the allowlist ∩ `ListModels`;
@@ -327,10 +358,31 @@ The consequence is that per-vendor id weirdness need not leak into config,
 pricing, and the picker separately: each org gets an alias table, TF
 requests alias names uniformly, and bifrost resolves.
 
-*Unverified:* whether bifrost reports `ModelName` or `ModelID` back on the
-response. This decides whether pricing joins straight off
-`Completion.Model` or off TF's own alias table. TF can do either — it built
-the table — but it is a short check that settles the shape.
+**What bifrost reports back** (`bifrost.go`, the alias arm of the streaming
+request path): on a match it sets `resolvedModel = aliasConfig.ModelID` and
+calls `req.SetModel(resolvedModel)` — so **`ModelID` is what goes on the
+wire**. It then stamps the response via
+
+```go
+result.PopulateExtraFields(requestType, provider,
+    originalModelRequested,   // → ExtraFields.OriginalModelRequested (the alias name)
+    attemptResolvedModel)     // → ExtraFields.ResolvedModelUsed      (ModelID)
+```
+
+so the answer is **neither**: `ModelName` populates no response field.
+The full `AliasConfig` is available on the context under
+`BifrostContextKeyResolvedAlias`, which is where bifrost's own pricing
+layer reads it.
+
+Note also that `reassembleStream` currently captures `resp.Model` — the
+*provider's* echo, not bifrost's extra fields — and for Azure that is the
+underlying model rather than the deployment, so the two disagree by
+provider.
+
+**Consequence: price off TF's own alias table, keyed by the alias name TF
+requested.** TF builds the table, so it holds the canonical `ModelName`
+without a round trip, and it is the only source that means the same thing
+across every provider. Do not derive the pricing key from the response.
 
 ### 2.6 Local mode stays SDK-bound
 
@@ -426,8 +478,11 @@ Not accepted.
 - **Q4 — Probe eagerness.** Eager on credential save (costs a little money
   as a side effect of saving settings, but the picker is always honest)
   versus lazy on first use (free, worse first-run experience).
-- **Q5 — Does bifrost report `ModelName` or `ModelID` on responses?**
-  (§2.5.) Decides where pricing joins.
+- ~~**Q5 — Does bifrost report `ModelName` or `ModelID` on responses?**~~
+  **Answered** (§2.5): neither. `ModelID` goes on the wire and lands in
+  `ExtraFields.ResolvedModelUsed`; the alias name lands in
+  `OriginalModelRequested`; `ModelName` populates no response field.
+  Pricing joins off TF's own alias table, keyed by the requested alias.
 - **Q6 — Are system-job models org-configurable per job, or one "cheap
   model" setting?** (R11.)
 
