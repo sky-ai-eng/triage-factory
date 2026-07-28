@@ -14,7 +14,7 @@ go build -o ./triagefactory .
 # Run (default :3000, opens browser)
 ./triagefactory [--port N] [--no-browser]
 
-# Lint + format (Go + frontend)
+# Lint + format (Go + Rust harness + frontend) — same gates CI runs
 ./scripts/lint.sh           # check only
 ./scripts/lint.sh --fix     # auto-fix
 
