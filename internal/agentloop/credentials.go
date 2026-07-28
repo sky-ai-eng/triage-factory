@@ -33,6 +33,23 @@ import (
 // models is the key's whitelist and must name every model the caller will
 // request: bifrost reads an empty whitelist as "no models", not "all", so an
 // empty one surfaces at request time as a confusing no-key-for-model error.
+// allowPrivateNetwork lifts bifrost's refusal to dial an RFC 1918 address for
+// every credential this adapter produces.
+//
+// The refusal is an SSRF guard against a base URL an attacker can influence.
+// Nothing in this env map is: it is either the address of this run's own
+// credential sidecar — a private veth IP the orchestrator minted seconds
+// earlier, on the far side of which the real key is attached — or an
+// operator-configured gateway from the org's secrets. The agent, which is the
+// one component deliberately fed hostile text, cannot reach either. So the
+// guard blocks the architecture and stops nothing.
+//
+// It is scoped to this adapter rather than defaulted on in internal/inference,
+// so the claim above stays next to the map it is a claim about. Link-local
+// stays blocked inside bifrost regardless, which is the instance-metadata case
+// that actually matters.
+const allowPrivateNetwork = true
+
 func ProviderCredentialsFromEnv(env map[string]string, models []string) (inference.ProviderCredentials, error) {
 	if len(models) == 0 {
 		return inference.ProviderCredentials{}, fmt.Errorf("agentloop: provider credentials need a non-empty model whitelist")
@@ -41,10 +58,11 @@ func ProviderCredentialsFromEnv(env map[string]string, models []string) (inferen
 
 	if key := get("ANTHROPIC_API_KEY"); key != "" {
 		creds := inference.ProviderCredentials{
-			Provider: inference.ProviderAnthropic,
-			APIKey:   key,
-			BaseURL:  strings.TrimRight(get("ANTHROPIC_BASE_URL"), "/"),
-			Models:   models,
+			Provider:            inference.ProviderAnthropic,
+			APIKey:              key,
+			BaseURL:             strings.TrimRight(get("ANTHROPIC_BASE_URL"), "/"),
+			Models:              models,
+			AllowPrivateNetwork: allowPrivateNetwork,
 		}
 		if token := get("ANTHROPIC_AUTH_TOKEN"); token != "" {
 			// A gateway in front of Anthropic authenticates the caller
@@ -60,20 +78,22 @@ func ProviderCredentialsFromEnv(env map[string]string, models []string) (inferen
 
 	if bearer := get("AWS_BEARER_TOKEN_BEDROCK"); bearer != "" {
 		return inference.ProviderCredentials{
-			Provider: inference.ProviderBedrock,
-			APIKey:   bearer,
-			BaseURL:  baseURL,
-			Models:   models,
-			Bedrock:  &inference.BedrockCredentials{Region: orDefaultRegion(region)},
+			Provider:            inference.ProviderBedrock,
+			APIKey:              bearer,
+			BaseURL:             baseURL,
+			Models:              models,
+			AllowPrivateNetwork: allowPrivateNetwork,
+			Bedrock:             &inference.BedrockCredentials{Region: orDefaultRegion(region)},
 		}, nil
 	}
 
 	access, secret := get("AWS_ACCESS_KEY_ID"), get("AWS_SECRET_ACCESS_KEY")
 	if access != "" && secret != "" {
 		return inference.ProviderCredentials{
-			Provider: inference.ProviderBedrock,
-			BaseURL:  baseURL,
-			Models:   models,
+			Provider:            inference.ProviderBedrock,
+			BaseURL:             baseURL,
+			Models:              models,
+			AllowPrivateNetwork: allowPrivateNetwork,
 			Bedrock: &inference.BedrockCredentials{
 				Region:       orDefaultRegion(region),
 				AccessKey:    access,

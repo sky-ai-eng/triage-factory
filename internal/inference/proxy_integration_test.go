@@ -3,6 +3,7 @@ package inference
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -215,6 +216,162 @@ func TestClient_UnreachableEndpoint(t *testing.T) {
 	if !strings.Contains(strings.ToLower(err.Error()), "refused") {
 		t.Errorf("the error must carry the dial cause: %v", err)
 	}
+}
+
+// TestClient_ThroughRunProxy_OnPrivateIP is the same hop on the address
+// production actually uses.
+//
+// The loopback version above cannot substitute for it. bifrost refuses to dial
+// an RFC 1918 address unless the account opts in, and exempts loopback from
+// that check — so a proxy on 127.0.0.1 passes while the identical proxy on the
+// run's 10.42.x.1 veth IP is refused before a packet leaves the process. That
+// gap is not hypothetical: it is what a native run failed on while the
+// loopback test reported the seam healthy.
+func TestClient_ThroughRunProxy_OnPrivateIP(t *testing.T) {
+	host := privateIPv4(t)
+	if host == "" {
+		t.Skip("no RFC 1918 address on any local interface; nothing to bind the private-IP case on")
+	}
+	const model = "claude-sonnet-5"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		for _, frame := range anthropicStreamFixture(model) {
+			fmt.Fprint(w, frame)
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	proxy, err := llmproxy.New(llmproxy.Config{
+		Provider: llmproxy.ProviderAnthropic,
+		APIKey:   "sk-ant-real",
+		Upstream: upstream.URL,
+		// The per-run veth gateway is not loopback; the proxy's own bind guard
+		// wants that acknowledged, exactly as the sandbox integration does.
+		AllowNonLoopback: true,
+		IncomingToken:    "per-run-placeholder",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr, err := proxy.Start(net.JoinHostPort(host, "0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = proxy.Shutdown(ctx)
+	}()
+
+	// The opt-in is what this case is about. That the delegate path actually
+	// sets it is the other half, pinned in internal/agentloop next to the
+	// decision — it cannot be asserted from here without an import cycle.
+	acct, err := NewAccount(ProviderCredentials{
+		Provider:            ProviderAnthropic,
+		APIKey:              "per-run-placeholder",
+		BaseURL:             "http://" + addr,
+		Models:              []string{model},
+		AllowPrivateNetwork: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := New(acct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	got, err := client.Stream(ctx, Request{
+		Provider: ProviderAnthropic,
+		Model:    model,
+		Rows:     []domain.Message{{Role: "user", Subtype: "text", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("stream through a proxy on a private IP: %v", err)
+	}
+	if got.Message.Content == nil || got.Message.Content.ContentStr == nil ||
+		*got.Message.Content.ContentStr != "hello" {
+		t.Errorf("reassembled content = %+v", got.Message.Content)
+	}
+}
+
+// TestPrivateNetworkOptInIsRequired pins that the opt-in is load-bearing
+// rather than incidental — without it the same call is refused, which is why
+// the field exists at all.
+func TestPrivateNetworkOptInIsRequired(t *testing.T) {
+	host := privateIPv4(t)
+	if host == "" {
+		t.Skip("no RFC 1918 address on any local interface")
+	}
+	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		t.Skipf("cannot bind %s: %v", host, err)
+	}
+	defer listener.Close()
+
+	acct, err := NewAccount(ProviderCredentials{
+		Provider: ProviderAnthropic,
+		APIKey:   "placeholder",
+		BaseURL:  "http://" + listener.Addr().String(),
+		Models:   []string{"claude-sonnet-5"},
+		// AllowPrivateNetwork deliberately left false.
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := New(acct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err = client.Stream(ctx, Request{
+		Provider: ProviderAnthropic,
+		Model:    "claude-sonnet-5",
+		Rows:     []domain.Message{{Role: "user", Subtype: "text", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("without the opt-in, a private-IP endpoint must be refused")
+	}
+	if !strings.Contains(err.Error(), "private IP") {
+		t.Errorf("expected bifrost's private-IP refusal, got: %v", err)
+	}
+}
+
+// privateIPv4 returns an RFC 1918 address bound to some local interface, or ""
+// when the host has none. Real runs reach their sidecar over a private veth
+// address, and loopback is exempt from the guard under test — so a
+// loopback-only host genuinely cannot exercise these cases.
+func privateIPv4(t *testing.T) string {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		ipNet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip := ipNet.IP.To4()
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			continue
+		}
+		if ip.IsPrivate() {
+			return ip.String()
+		}
+	}
+	return ""
 }
 
 // anthropicStreamFixture is a minimal well-formed Anthropic SSE response:

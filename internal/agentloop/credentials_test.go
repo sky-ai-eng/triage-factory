@@ -100,6 +100,28 @@ func TestProviderCredentialsFromEnv(t *testing.T) {
 		}
 	})
 
+	t.Run("every credential opts into dialing a private address", func(t *testing.T) {
+		// A run reaches its own credential sidecar over the private veth IP the
+		// orchestrator minted for it. bifrost refuses RFC 1918 by default as an
+		// SSRF guard, and exempts loopback — so without this the delegate path
+		// fails before a packet leaves the process, while every loopback test
+		// passes. The refusal protects against an attacker-influenced base URL;
+		// nothing in this map is one.
+		for name, env := range map[string]map[string]string{
+			"anthropic":      {"ANTHROPIC_API_KEY": "k"},
+			"bedrock bearer": {"AWS_BEARER_TOKEN_BEDROCK": "b"},
+			"bedrock sigv4":  {"AWS_ACCESS_KEY_ID": "a", "AWS_SECRET_ACCESS_KEY": "s"},
+		} {
+			creds, err := ProviderCredentialsFromEnv(env, []string{"claude-sonnet-5"})
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			if !creds.AllowPrivateNetwork {
+				t.Errorf("%s: must opt into a private-IP endpoint", name)
+			}
+		}
+	})
+
 	t.Run("an empty whitelist is refused up front", func(t *testing.T) {
 		// bifrost reads an empty whitelist as "no models", which surfaces at
 		// request time as a confusing no-key-for-model error. Catch it here.
