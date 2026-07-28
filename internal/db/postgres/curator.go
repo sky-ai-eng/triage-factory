@@ -455,6 +455,12 @@ func (s *curatorStore) ReleaseActiveTurnSystem(ctx context.Context, orgID, conve
 	// API error or an interrupt ends on one, and settling there would bill
 	// the turn to a model that never ran. There is always a non-synthetic
 	// row to land on — the claim's user row carries no model at all.
+	//
+	// Of the rest, a row naming a real model wins over one naming none
+	// however much newer the latter is (a turn cancelled mid-tool ends on a
+	// NULL-model tool row); only the first keeps the lump in the per-model
+	// breakdown. The nothing-streamed case still lands on the user row,
+	// which is then the only candidate.
 	released := false
 	err := inTx(ctx, s.admin, func(q queryer) error {
 		var claimID string
@@ -472,8 +478,10 @@ func (s *curatorStore) ReleaseActiveTurnSystem(ctx context.Context, orgID, conve
 		}
 		if _, err := q.ExecContext(ctx, `
 			UPDATE messages SET cost_usd = $1
-			WHERE id = (SELECT MAX(m.id) FROM messages m
-			            WHERE m.claim_id = $2 AND m.model IS DISTINCT FROM $3)
+			WHERE id = (SELECT m.id FROM messages m
+			            WHERE m.claim_id = $2 AND m.model IS DISTINCT FROM $3
+			            ORDER BY (m.model IS NOT NULL AND m.model <> $3) DESC, m.id DESC
+			            LIMIT 1)
 		`, costUSD, claimID, domain.ModelSynthetic); err != nil {
 			return err
 		}

@@ -110,12 +110,22 @@ func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status strin
 			// settling there would bill the whole invocation to a model
 			// that never ran. An engagement whose rows are all synthetic
 			// falls through to the conversation-wide arm below.
+			//
+			// Among what's left, a row that names a model wins over one
+			// that names none (a user or tool row) however much newer the
+			// latter is: only the first keeps the lump in the per-model
+			// breakdown, and this engagement did run that model. NULL is
+			// not "some other model" here — the comparison has to test IS
+			// NOT NULL explicitly, since every <> test against the
+			// sentinel admits NULL rows into the same tier as real ones.
 			res, err := q.ExecContext(ctx, `
 				UPDATE messages SET cost_usd = ?
 				WHERE conversation_id = ?
-				  AND id = (SELECT MAX(id) FROM messages
-				            WHERE claim_id = ? AND (model IS NULL OR model <> ?))
-			`, costUSD, runID, claimID, domain.ModelSynthetic)
+				  AND id = (SELECT id FROM messages
+				            WHERE claim_id = ? AND (model IS NULL OR model <> ?)
+				            ORDER BY (model IS NOT NULL AND model <> ?) DESC, id DESC
+				            LIMIT 1)
+			`, costUSD, runID, claimID, domain.ModelSynthetic, domain.ModelSynthetic)
 			if err != nil {
 				return err
 			}
@@ -136,12 +146,13 @@ func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status strin
 			// totals stay exact, per-row time attribution smears; accepted
 			// for this narrow corner.
 			//
-			// The ORDER BY ranks real-model rows ahead of runtime-composed
-			// ones and takes the newest within the winning group: the
-			// newest real-model row if the conversation has one, else its
-			// newest row of any kind. That last resort keeps the dollars on
-			// the ledger when a conversation is nothing but synthetic rows
-			// (a run that errored before its first provider turn); the
+			// The ORDER BY ranks rows in three tiers, newest-first within
+			// each, and takes the first: a row naming a real model, else
+			// one naming no model (a user or tool row), else a
+			// runtime-composed one. Both keys are needed — the first alone
+			// would tie NULL with real, the second alone would tie NULL
+			// with synthetic. The bottom tier keeps the dollars on the
+			// ledger when a conversation is nothing but synthetic rows; the
 			// model breakdowns exclude them, so the spend shows in the
 			// totals without inventing a model.
 			res, err := q.ExecContext(ctx, `
@@ -149,9 +160,11 @@ func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status strin
 				WHERE conversation_id = ?
 				  AND id = (SELECT id FROM messages
 				            WHERE conversation_id = ?
-				            ORDER BY (model IS NULL OR model <> ?) DESC, id DESC
+				            ORDER BY (model IS NOT NULL AND model <> ?) DESC,
+				                     (model IS NULL OR model <> ?) DESC,
+				                     id DESC
 				            LIMIT 1)
-			`, costUSD, runID, runID, domain.ModelSynthetic)
+			`, costUSD, runID, runID, domain.ModelSynthetic, domain.ModelSynthetic)
 			if err != nil {
 				return err
 			}

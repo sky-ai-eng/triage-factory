@@ -283,6 +283,15 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			}); err != nil {
 				return err
 			}
+			// A newer no-model row (the turn got as far as a tool call): not
+			// synthetic, so only the real-model preference keeps the lump off
+			// it and inside the per-model breakdown.
+			if _, err := ts.Conversations.InsertMessage(ctx, h.OrgID, &domain.Message{
+				ConversationID: convID, UserID: h.UserID, ClaimID: claimID,
+				Role: "tool", Subtype: "tool", Content: "tool result",
+			}); err != nil {
+				return err
+			}
 			_, err := ts.Conversations.InsertMessage(ctx, h.OrgID, &domain.Message{
 				ConversationID: convID, UserID: h.UserID, ClaimID: claimID,
 				Role: "assistant", Subtype: "text", Content: "API Error: overloaded",
@@ -299,14 +308,17 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			msgs = ms
 			return err
 		})
-		if len(msgs) != 3 {
-			t.Fatalf("messages = %d, want 3 (user + assistant + synthetic)", len(msgs))
+		if len(msgs) != 4 {
+			t.Fatalf("messages = %d, want 4 (user + assistant + tool + synthetic)", len(msgs))
 		}
 		if c := msgs[1].CostUSD; c == nil || *c < 0.069 || *c > 0.071 {
 			t.Errorf("real-model row cost_usd = %v, want ~0.07 (the turn's lump)", msgs[1].CostUSD)
 		}
 		if msgs[2].CostUSD != nil {
-			t.Errorf("synthetic row cost_usd = %v, want nil (never a settle target)", *msgs[2].CostUSD)
+			t.Errorf("no-model row cost_usd = %v, want nil (a real-model row outranks it however much older)", *msgs[2].CostUSD)
+		}
+		if msgs[3].CostUSD != nil {
+			t.Errorf("synthetic row cost_usd = %v, want nil (never a settle target)", *msgs[3].CostUSD)
 		}
 	})
 

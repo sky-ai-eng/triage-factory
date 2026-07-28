@@ -144,11 +144,21 @@ func completeRun(ctx context.Context, q queryer, orgID, runID, status string, co
 		// bill the whole invocation to a model that never ran. An
 		// engagement whose rows are all synthetic falls through to the
 		// conversation-wide arm below.
+		//
+		// Among what's left, a row that names a model wins over one that
+		// names none (a user or tool row) however much newer the latter is:
+		// only the first keeps the lump in the per-model breakdown, and
+		// this engagement did run that model. NULL is not "some other
+		// model" here — the comparison has to test IS NOT NULL explicitly,
+		// since every <>/IS DISTINCT FROM test against the sentinel admits
+		// NULL rows into the same tier as real ones.
 		res, err := q.ExecContext(ctx, `
 			UPDATE messages SET cost_usd = $1
 			WHERE org_id = $2 AND conversation_id = $3
-			  AND id = (SELECT MAX(id) FROM messages
-			            WHERE claim_id = $4 AND model IS DISTINCT FROM $5)
+			  AND id = (SELECT id FROM messages
+			            WHERE claim_id = $4 AND model IS DISTINCT FROM $5
+			            ORDER BY (model IS NOT NULL AND model <> $5) DESC, id DESC
+			            LIMIT 1)
 		`, costUSD, orgID, runID, claimID, domain.ModelSynthetic)
 		if err != nil {
 			return err
@@ -173,19 +183,24 @@ func completeRun(ctx context.Context, q queryer, orgID, runID, status string, co
 	// older invocation's row — totals stay exact, per-row time attribution
 	// smears; accepted for this narrow corner.
 	//
-	// The ORDER BY ranks real-model rows ahead of runtime-composed ones and
-	// takes the newest within the winning group: the newest real-model row
-	// if the conversation has one, else its newest row of any kind. That
-	// last resort keeps the dollars on the ledger when a conversation is
-	// nothing but synthetic rows (a run that errored before its first
-	// provider turn); the model breakdowns exclude them, so the spend shows
-	// in the totals without inventing a model.
+	// The ORDER BY ranks rows in three tiers, newest-first within each, and
+	// takes the first: a row naming a real model, else one naming no model
+	// (a user or tool row), else a runtime-composed one. Both keys are
+	// needed — the first alone would tie NULL with real, the second alone
+	// would tie NULL with synthetic — and neither may be written as a bare
+	// <> against the sentinel, which evaluates to NULL (falsy, so the row
+	// sinks a tier) for exactly the NULL rows the middle tier is about.
+	// The bottom tier keeps the dollars on the ledger when a conversation
+	// is nothing but synthetic rows; the model breakdowns exclude them, so
+	// the spend shows in the totals without inventing a model.
 	res, err := q.ExecContext(ctx, `
 		UPDATE messages SET cost_usd = COALESCE(cost_usd, 0) + $1
 		WHERE org_id = $2 AND conversation_id = $3
 		  AND id = (SELECT id FROM messages
 		            WHERE org_id = $2 AND conversation_id = $3
-		            ORDER BY (model IS DISTINCT FROM $4) DESC, id DESC
+		            ORDER BY (model IS NOT NULL AND model <> $4) DESC,
+		                     (model IS DISTINCT FROM $4) DESC,
+		                     id DESC
 		            LIMIT 1)
 	`, costUSD, orgID, runID, domain.ModelSynthetic)
 	if err != nil {
