@@ -383,6 +383,173 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	t.Run("Complete_SkipsSyntheticRowsWhenSettling", func(t *testing.T) {
+		// An invocation that errored or was interrupted ends on a
+		// runtime-composed row, which names no model. The lump must land on
+		// the newest row of the engagement that actually ran a model, so the
+		// per-model breakdown never bills dollars to "<synthetic>".
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-synth", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		real1, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: runID, Role: "assistant", Subtype: "text", Content: "real turn", Model: "claude-opus-5",
+		})
+		if err != nil {
+			t.Fatalf("InsertMessage real: %v", err)
+		}
+		// A NULL-model row between the two: newer than the real-model row,
+		// and not synthetic, so a filter-only settle would land here and drop
+		// the lump out of the per-model breakdown just as surely.
+		toolRow, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: runID, Role: "tool", Subtype: "tool", Content: "tool result",
+		})
+		if err != nil {
+			t.Fatalf("InsertMessage tool: %v", err)
+		}
+		synth1, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: runID, Role: "assistant", Subtype: "text",
+			Content: "API Error: overloaded", Model: domain.ModelSynthetic,
+		})
+		if err != nil {
+			t.Fatalf("InsertMessage synthetic: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, runID, "failed", 1.5, 1000, 2, "error", "", "", "", "infra"); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		costByID := map[int]*float64{}
+		for i := range msgs {
+			costByID[msgs[i].ID] = msgs[i].CostUSD
+		}
+		if c := costByID[int(real1)]; c == nil || *c != 1.5 {
+			t.Errorf("real-model row cost_usd = %v, want 1.5 (the lump skips past the newer no-model and synthetic rows)", c)
+		}
+		if c := costByID[int(toolRow)]; c != nil {
+			t.Errorf("no-model row cost_usd = %v, want nil (a real-model row outranks it however much older)", *c)
+		}
+		if c := costByID[int(synth1)]; c != nil {
+			t.Errorf("synthetic row cost_usd = %v, want nil (never a settle target)", *c)
+		}
+
+		// Last resort: an engagement whose rows are ALL synthetic still
+		// records its dollars — totals stay exact even though the row names
+		// no model (the usage breakdowns exclude it, by_day still counts it).
+		onlySynthID := seedConversationForTest(t, orgID, seed, "running")
+		if err := store.SetExecutorSystem(ctx, orgID, onlySynthID, "exec-synth-only", 1); err != nil {
+			t.Fatalf("SetExecutorSystem only-synth: %v", err)
+		}
+		onlySynth, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: onlySynthID, Role: "assistant", Subtype: "text",
+			Content: "API Error: overloaded", Model: domain.ModelSynthetic,
+		})
+		if err != nil {
+			t.Fatalf("InsertMessage only-synthetic: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, onlySynthID, "failed", 0.25, 0, 0, "error", "", "", "", "infra"); err != nil {
+			t.Fatalf("Complete only-synth: %v", err)
+		}
+		gotOnly, err := store.Get(ctx, orgID, onlySynthID)
+		if err != nil || gotOnly == nil {
+			t.Fatalf("Get only-synth: err=%v got=%v", err, gotOnly)
+		}
+		if gotOnly.TotalCostUSD == nil || *gotOnly.TotalCostUSD != 0.25 {
+			t.Errorf("all-synthetic total_cost_usd = %v, want 0.25 (dollars stay on the ledger)", gotOnly.TotalCostUSD)
+		}
+		onlyMsgs, err := store.Messages(ctx, orgID, onlySynthID)
+		if err != nil {
+			t.Fatalf("Messages only-synth: %v", err)
+		}
+		if len(onlyMsgs) != 1 || onlyMsgs[0].ID != int(onlySynth) {
+			t.Fatalf("only-synth messages = %+v, want the one synthetic row", onlyMsgs)
+		}
+		if c := onlyMsgs[0].CostUSD; c == nil || *c != 0.25 {
+			t.Errorf("last-resort row cost_usd = %v, want 0.25", c)
+		}
+	})
+
+	t.Run("Complete_ConversationWideFallback_RanksRealModelThenNoModel", func(t *testing.T) {
+		// The claim-less fallback arm ranks the same three tiers: a
+		// real-model row first, then a no-model row, and a synthetic row only
+		// when nothing else exists. Newer never beats a better tier.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		// Tier 1 beats a newer tier-2 row: an older real-model row wins over
+		// the no-model row that follows it.
+		runID := seedConversationForTest(t, orgID, seed, "running")
+		realRow, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: runID, Role: "assistant", Subtype: "text", Content: "real", Model: "claude-opus-5",
+		})
+		if err != nil {
+			t.Fatalf("InsertMessage real: %v", err)
+		}
+		newerNull, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: runID, Role: "tool", Subtype: "tool", Content: "tool result",
+		})
+		if err != nil {
+			t.Fatalf("InsertMessage tool: %v", err)
+		}
+		// No claim at all: the fallback arm owns this settle.
+		if err := store.Complete(ctx, orgID, runID, "completed", 1.25, 0, 0, "", "", "finish", "", ""); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		costByID := map[int]*float64{}
+		for i := range msgs {
+			costByID[msgs[i].ID] = msgs[i].CostUSD
+		}
+		if c := costByID[int(realRow)]; c == nil || *c != 1.25 {
+			t.Errorf("real-model row cost_usd = %v, want 1.25 (outranks the newer no-model row)", c)
+		}
+		if c := costByID[int(newerNull)]; c != nil {
+			t.Errorf("newer no-model row cost_usd = %v, want nil", *c)
+		}
+
+		// Tier 2 beats a newer tier-3 row: with no real-model row anywhere,
+		// the no-model row still wins over the synthetic row after it.
+		noRealID := seedConversationForTest(t, orgID, seed, "running")
+		nullRow, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: noRealID, Role: "user", Subtype: "text", Content: "go",
+		})
+		if err != nil {
+			t.Fatalf("InsertMessage user: %v", err)
+		}
+		newerSynth, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: noRealID, Role: "assistant", Subtype: "text",
+			Content: "API Error: overloaded", Model: domain.ModelSynthetic,
+		})
+		if err != nil {
+			t.Fatalf("InsertMessage synthetic: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, noRealID, "failed", 0.5, 0, 0, "error", "", "", "", "infra"); err != nil {
+			t.Fatalf("Complete no-real: %v", err)
+		}
+		noRealMsgs, err := store.Messages(ctx, orgID, noRealID)
+		if err != nil {
+			t.Fatalf("Messages no-real: %v", err)
+		}
+		noRealCost := map[int]*float64{}
+		for i := range noRealMsgs {
+			noRealCost[noRealMsgs[i].ID] = noRealMsgs[i].CostUSD
+		}
+		if c := noRealCost[int(nullRow)]; c == nil || *c != 0.5 {
+			t.Errorf("no-model row cost_usd = %v, want 0.5 (outranks the newer synthetic row)", c)
+		}
+		if c := noRealCost[int(newerSynth)]; c != nil {
+			t.Errorf("newer synthetic row cost_usd = %v, want nil", *c)
+		}
+	})
+
 	t.Run("Complete_NoRows_DropsLumpWithoutError", func(t *testing.T) {
 		// A conversation with no message rows at all is the one truly
 		// unattributable case: Complete succeeds (even with a live claim —

@@ -291,6 +291,15 @@ type SnapshotReapKey struct {
 	BlueprintRunID string
 }
 
+// ModelSynthetic is the model id the agent runtime stamps on an assistant
+// message it composed itself rather than received from a provider — an API
+// error notice, an interrupt/abort line, a stop-reason placeholder. It names
+// no model and prices to nothing, so spend must never be attributed to it:
+// the cost-settle paths skip these rows when choosing the ledger row an
+// invocation's lump lands on, and the usage breakdowns exclude it the way
+// they exclude a NULL model (the dollars still land in the period total).
+const ModelSynthetic = "<synthetic>"
+
 // Message is one transcript row: a neutral (OpenAI-shaped) API message
 // owned by exactly one conversation. It is the in-memory row shape; the
 // snake_case MessageDTO is what crosses the HTTP/WS wire.
