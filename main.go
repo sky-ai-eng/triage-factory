@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec"
 	"github.com/sky-ai-eng/triage-factory/ee"
 	"github.com/sky-ai-eng/triage-factory/internal/app"
 	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
@@ -89,18 +90,9 @@ func run(ctx context.Context, args []string) error {
 
 	// CLI subcommands short-circuit before any server wiring: exec/status
 	// are used by delegated Claude Code agents; install/uninstall/
-	// migrate/jwk-init are user-facing.
-	//
-	// argv0 applet dispatch (TFAC-669): when this same binary is invoked under
-	// the additive `tfac` name (a second bind mount at /opt/tf/bin/tfac), a bare
-	// `tfac <verb>` means `triagefactory exec <verb>` — the short applet name for
-	// the TF-domain verbs. Additive: the canonical `triagefactory exec` path is
-	// untouched, so envelopes can adopt the short name incrementally.
-	cliArgs := args[1:]
-	if filepath.Base(args[0]) == "tfac" {
-		cliArgs = append([]string{"exec"}, cliArgs...)
-	}
-	if handled, err := dispatchCLI(cliArgs); handled {
+	// migrate/jwk-init are user-facing. argv0 selects the surface — see
+	// resolveCLIArgs for the `tfac` applet's implicit `exec`.
+	if handled, err := dispatchCLI(args[0], resolveCLIArgs(args)); handled {
 		return err
 	}
 
@@ -157,6 +149,27 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	return a.Run(ctx)
+}
+
+// resolveCLIArgs turns a full argv into the args dispatchCLI routes on: the
+// program name stripped, plus the applet's implicit `exec` prefix when the
+// binary was invoked as `tfac`.
+//
+// `tfac <verb>` and `tfac exec <verb>` resolve identically — both spellings are
+// permanently valid (no deprecation, no stderr note: the applet's output lands
+// in agent transcripts). At most ONE leading `exec` collapses, so
+// `tfac exec exec foo` keeps the second one and falls through to the usual
+// unknown-command error. The collapse is unambiguous because no `exec`
+// subcommand of that name exists — this reserves it.
+func resolveCLIArgs(args []string) []string {
+	userArgs := args[1:]
+	if filepath.Base(args[0]) != exec.AppletName {
+		return userArgs
+	}
+	if len(userArgs) > 0 && userArgs[0] == "exec" {
+		return userArgs
+	}
+	return append([]string{"exec"}, userArgs...)
 }
 
 var bootLog = logging.Component("boot")

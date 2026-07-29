@@ -17,21 +17,24 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/uninstall"
 )
 
-// dispatchCLI runs the argv-dispatched subcommands. args is the argument
-// slice with the program name stripped (os.Args[1:]). It returns
-// handled=true when args named a subcommand — the caller should return err
-// and exit — and handled=false to fall through to server mode.
+// dispatchCLI runs the argv-dispatched subcommands. argv0 is the name this
+// process was invoked under (os.Args[0]) — the `exec` surface prints usage
+// under that name, so `tfac --help` says `tfac`. args is the argument slice
+// with the program name stripped (os.Args[1:], after the applet's implicit
+// `exec` prefix is applied). It returns handled=true when args named a
+// subcommand — the caller should return err and exit — and handled=false to
+// fall through to server mode.
 //
 // The subcommands manage their own exit; they're listed here purely to
 // route the two audiences (delegated Claude Code agents vs. human users)
 // before the heavier server boot.
-func dispatchCLI(args []string) (handled bool, err error) {
+func dispatchCLI(argv0 string, args []string) (handled bool, err error) {
 	if len(args) == 0 {
 		return false, nil
 	}
 	switch args[0] {
 	case "exec":
-		exec.Handle(args[1:])
+		exec.Handle(argv0, args[1:])
 	case "hook":
 		// Internal git-hook callbacks (e.g. `hook record-push`), fired by
 		// the TF-controlled git hooks. Deliberately a separate namespace
