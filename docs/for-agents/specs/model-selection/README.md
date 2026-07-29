@@ -48,13 +48,20 @@ position, and a fifth arriving between two existing ones breaks it again.
 - **R1.** A user can choose which model runs each step of a blueprint.
   Unset means the team default.
 - **R2.** A team has a default model. An org has a default a team inherits
-  when it sets none.
+  when it sets none. With R4 resolved (seeds ship unset), the team/org
+  default is the only thing every unset step falls back to — so it must be
+  a **concrete, human-chosen model**, the setup flow must require the
+  choice, and **TF ships no product-wide fallback model anywhere**.
 - **R3.** Curator conversations and taskless run sessions choose a model at
   conversation start.
-- **R4.** Shipped blueprint seeds (`internal/promptseed`) must provision
-  into an org whose configured provider is not Anthropic. They cannot name
-  a concrete Anthropic model id. **See Q1** — this is the one open
-  requirement in this section.
+- **R4. Resolved: shipped blueprint seeds select no model at all.** Every
+  seed provisions with `Model: ""` (inherit the team default). They cannot
+  name a concrete id — the seed goes to every org, whatever its providers —
+  and we decline to invent a vendor-neutral vocabulary to name anything
+  else (see D4 for why). Accepted cost: the aggregate-style steps that
+  today pin Haiku ("cheap step, don't burn the default") run at the team
+  default instead; the mitigation is a UX nudge suggesting a cheap pin on
+  such steps, not a shipped selection.
 - **R5.** A model that cannot run the work must not be selectable. The
   agent loop is tool-driven, so `supports_function_calling` is a hard gate;
   so is a context window large enough to hold a delegation's task context
@@ -151,6 +158,30 @@ differently, enforced at different times, and fail differently.
 - **D3. Parallel tool calls** are not a requirement at all. `engine.go`
   dispatches tool calls *"serially, in call order."* A model that cannot
   batch simply returns one at a time.
+- **D4. Auto-resolving model selection ("pick for me under $X") is
+  deferred indefinitely — a step is unset or pinned.** Any auto-selection
+  needs a defensible ordering over the allowlist, and every candidate
+  ordering was examined and rejected:
+  - *Price as capability proxy* — a hidden assumption we declined to adopt
+    as a product judgment.
+  - *External coding benchmarks* (SWE-bench family, Terminal-Bench, Aider,
+    LiveCodeBench, arena Elo) — fail on allowlist coverage, id mapping,
+    freshness, and fatally on scaffold-dependence: an agentic score is a
+    property of the *(model, harness)* pair, and a number earned in someone
+    else's harness does not transfer to TF's loop.
+  - *A first-party benchmark suite* — the only technically sound option,
+    and rejected on cost grounds: it is real, ongoing, easy-to-get-wrong
+    work that is not this product's job.
+  - *Fleet outcome telemetry* (cost per merged PR) — confounded beyond
+    repair for ranking: a merge is a product of the ticket author, the
+    reviewers, and the implementer, any of whom may be other models or
+    entirely outside TF. Attribution to the diff-writing model is bad
+    causal inference presented as data.
+
+  Until a defensible ordering exists — plausibly never, plausibly when the
+  industry standardizes one — auto-selection would be false confidence
+  with an audit trail. The org/team **rate cap** (R7) already provides the
+  spend guardrail without pretending to know which model is best.
 
 ---
 
@@ -511,60 +542,19 @@ Not accepted.
 
 ## 4. Open questions
 
-- **Q1+Q2 — step configuration: direction adopted, design open.** A
-  blueprint step gets **two configuration modes**, expressing two different
-  user intents:
-  - **Pinned** — an explicit model, named against the org's aliases. "This
-    exact brain." Allowed to be tenant-local (an Azure deployment alias is,
-    unavoidably). Not portable across orgs, and that is fine — it is the
-    escape hatch for the step where the exact model is load-bearing.
-  - **Constrained** — a max spend ($/Mtok); the step auto-resolves at
-    dispatch against what the deployment actually has. "Any adequate brain
-    under $X." Portable by construction: the same step resolves against
-    Anthropic in one org and Bedrock in another.
-  - Unset stays unset — the team default (R1/R2).
-
-  This likely **dissolves both original questions**: shipped seeds ship in
-  constrained mode ("cheap aggregation" was always a spend statement, not a
-  model statement — `system-pr-review-aggregate`'s `Model: "haiku"` becomes
-  a spend ceiling), so no vendor-neutral tier vocabulary needs to exist;
-  and portability stops being a storage-format question because each mode
-  answers it differently on purpose.
-
-  What constrained mode deliberately trades away must be stated: **run-to-run
-  model stability.** A price drop or a new cheap model changes what
-  tomorrow's dispatch resolves to. Earlier in this design that was an
-  objection to $-as-the-key; as an *opt-in per-step semantic* it is the
-  feature — but only if visible: resolution happens **once, at dispatch,
-  and is recorded** (R6/R16), and mid-run fallback stays forbidden.
-  "Auto-fallback" means the *next* dispatch re-resolves when a model
-  disappears; it never means substitution inside a running engagement.
-
-  Open design work (the "deep thinking" item):
-  - **Q2a — the resolution rule.** "Auto-resolve under $X" needs an
-    ordering. Cheapest-under-cap yields the worst adequate model;
-    priciest-under-cap uses price as a capability proxy — an assumption
-    that should be named if adopted, because the catalog deliberately
-    carries no capability ranking and this reintroduces one through the
-    back door. An org-defined preference order over allowlist entries is
-    the explicit alternative. Whatever the rule, it must be deterministic
-    for a fixed (allowlist, prices, availability) so two dispatches in the
-    same hour do not diverge.
-  - **Q2b — stability options.** Re-resolve every dispatch, or sticky —
-    resolve once per blueprint (or per step) and re-resolve only when the
-    held model becomes unavailable or leaves the cap. Sticky trades
-    responsiveness to price drops for fewer surprises mid-blueprint; a
-    multi-step blueprint resolving different steps to different models on
-    different days is the case to design against.
-  - **Q2c — cap composition.** A constrained step's ceiling composes with
-    R7's org/team rate caps as min(step, effective cap); a *pinned* step
-    whose model violates the effective cap should fail at save time, not
-    dispatch time.
-  - **Q2d — the configuration surface.** The stated goal: maximize
-    cross-vendor / cross-model-version / cross-deployment standardization
-    without a sprawling UI. Two knobs (pin | ceiling) plus the team
-    default is the budget; anything the design adds beyond that needs to
-    earn its place.
+- ~~**Q1 — May shipped blueprint seeds name a cost class?**~~ **Answered:
+  no.** Seeds ship with no model at all (R4). No vendor-neutral vocabulary
+  exists anywhere in the product.
+- ~~**Q2 — Does a blueprint step store a model or a provider-pinned
+  entry?**~~ **Answered.** A step is **unset** (inherit the team default)
+  or **pinned** (an explicit model named against the org's aliases —
+  tenant-local allowed, since an Azure deployment alias is unavoidably so).
+  There is no third, auto-resolving mode — see D4 for the full reasoning.
+  Two consequences survive as requirement details:
+  - A pinned step whose model violates the effective rate cap (R7) fails at
+    **save** time, not dispatch time.
+  - A pinned step whose model becomes unavailable fails per R14 — loudly,
+    naming the cause. It never silently re-resolves.
 - **Q3 — Budget-cap breach behavior.** Park or fail; resume or stay parked
   at period rollover; and what happens to a blueprint mid-flight.
 - **Q4 — Probe eagerness.** Eager on credential save (costs a little money
