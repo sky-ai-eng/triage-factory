@@ -43,6 +43,7 @@ const toolHostDialTimeout = 60 * time.Second
 // launch of the per-run network — is runtime-independent and already done by
 // the dispatcher.
 func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model, triggerType, creatorUserID string) {
+	model = nativeWireModel(model)
 	orgID := cfg.orgID
 	namespace := memoryNamespace(cfg.blueprintRunID, runID)
 	claudeCwd := cfg.wtPath
