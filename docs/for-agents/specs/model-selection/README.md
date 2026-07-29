@@ -99,6 +99,10 @@ differently, enforced at different times, and fail differently.
 - **R9.** Budget caps must be enforceable **before** the spend, not merely
   observed after. A pre-flight check refuses to start; an in-flight check
   parks. (`spendGuard` in the native loop is the existing hook.)
+  Enforcement points follow **settlement**, which is runtime-shaped — the
+  native runtime settles per provider call and can park mid-run; the SDK
+  runtime settles at run completion and enforces only at dispatch
+  boundaries. Estimates never enforce. Full statement in §7.1.
 
 ### 1.3 Providers and access
 
@@ -657,3 +661,65 @@ EOF
 Provenance for the snapshot itself is in
 `internal/inference/pricing_provenance.json` (upstream repo, pinned
 commit, fetch date, filter).
+
+---
+
+## 7. Mode split — one contract, two implementations
+
+Local mode keeps full frontend parity with the multi-mode model surface.
+The mechanism is the repo's existing precedent: like `db.Stores`, the model
+surface is **one API contract with two implementations**, and the frontend
+cannot tell which one it is talking to. "Mock" is not a UI branch; it is
+the second, simpler implementation of the same endpoint. Mode differences
+travel as **data** (an availability field, a filtered universe), never as
+`if (mode)` branches in components.
+
+Five layers, most-shared first:
+
+| layer | multi | local |
+|---|---|---|
+| vocabulary & storage | concrete model ids | **identical** — the SDK's `--model` accepts concrete ids, so no translation exists anywhere |
+| catalog & names | allowlist ⋈ datasheet, embedded | **identical** — it ships in the binary |
+| model universe | filtered by the org's configured providers | filtered by what the SDK can drive: the Claude family via Anthropic direct / Bedrock / Vertex. **Not a mock — a truth.** A GPT entry in a local picker would be a lie, because nothing local can execute it |
+| availability | `verified` via ListModels ∩ probe, save-gated (Q4) | always **`assumed`** — no bifrost, and the subscription case has no key to probe with. The test-connection button and the save gate key off the field and simply do not engage; failures surface at run time through the SDK's existing error path, the only place local can learn them |
+| caps & usage | full | shared ledger shape (`messages.cost_usd`); rate caps work identically (a picker filter against catalog prices); budget caps per §7.1 |
+
+Two deliberate asymmetries, written down so they are decisions rather than
+drift:
+
+- **Setup flow.** Multi requires the two model picks (R2, Q6) with no
+  shipped fallback. Local pre-fills both with the migration's concrete
+  equivalents of today's defaults, preserving the zero-friction first run.
+- **Opt-in local verification** (a local user with a real API key running
+  the 2-token probe) is deferred: it adds a third availability state's
+  worth of UI to the one mode where runtime failure is already
+  well-surfaced. The `availability` field leaves room; a future ticket
+  relaxes it by making local sometimes return `verified`, changing no
+  component.
+
+### 7.1 Budget caps: enforcement follows settlement
+
+A budget cap acts wherever a **settled** number exists, and never on an
+estimate. Settlement cadence is a property of the **runtime**, not the
+mode:
+
+- **Native runtime** settles per provider call — every message row carries
+  real usage — so in-flight enforcement (the Q3 park) is available mid-run.
+- **SDK runtime** settles at run completion (the full ReAct cycle, user
+  message → final assistant message). Enforcement points are **dispatch
+  boundaries**: a breach discovered at settle time gates the *next*
+  dispatch and never kills work in flight. Overshoot is bounded by what
+  was already running when the cap was crossed.
+- In-flight SDK estimates are display-only (R18's `~`), enforcing nothing.
+
+This is runtime-shaped on purpose: multi's SDK-driven surfaces (curator
+turns today) inherit the correct behavior — enforce at turn boundaries —
+with no special case, matching the `conversations.runtime` vocabulary the
+schema already speaks. And Q3.3's mid-flight blueprint halt works
+identically in both runtimes, because a step is a run and step boundaries
+are settle points in both.
+
+**Subscription runs:** the settled figure is API-equivalent, not money
+spent. TF never ships a budget gate on it, but a local user may configure
+one knowingly ("stop me before my weekly limit") — never default, and the
+cap UI states the basis is notional.
