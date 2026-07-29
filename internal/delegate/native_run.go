@@ -136,7 +136,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		Log: delegateLog,
 	}
 
-	result := engine.Run(ctx, agentloop.Spec{
+	result := engine.Run(ctx, agentloop.Params{
 		OrgID:          orgID,
 		ConversationID: runID,
 		Model:          model,
@@ -462,12 +462,12 @@ func (s *Spawner) recordNativeResult(
 	result agentloop.Result,
 	priorMemory *memoryFingerprint,
 ) {
-	switch result.Disposition {
-	case agentloop.DispositionCancelled:
+	switch result.Kind {
+	case agentloop.ResultCancelled:
 		s.handleCancelled(orgID, runID, startTime, cfg.wtPath, triggerType, creatorUserID)
 		return
 
-	case agentloop.DispositionFailed:
+	case agentloop.ResultFailed:
 		reason := "native agent loop failed"
 		if result.Err != nil {
 			reason = result.Err.Error()
@@ -475,7 +475,7 @@ func (s *Spawner) recordNativeResult(
 		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, reason, result.FailureKind)
 		return
 
-	case agentloop.DispositionParked:
+	case agentloop.ResultParked:
 		// A guard stopped the engagement before a call. The conversation is
 		// resumable, so the snapshot must exist by the time the status
 		// commits — parkRunOpen owns that ordering.

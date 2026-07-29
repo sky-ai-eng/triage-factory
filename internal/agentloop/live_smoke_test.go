@@ -81,7 +81,7 @@ func TestNativeLoop_LiveSmoke(t *testing.T) {
 		Tools: host,
 	}
 
-	got := engine.Run(ctx, Spec{
+	got := engine.Run(ctx, Params{
 		OrgID:          "live",
 		ConversationID: "live-conv",
 		Model:          model,
@@ -101,8 +101,8 @@ func TestNativeLoop_LiveSmoke(t *testing.T) {
 		MaxIterations: 10,
 	})
 
-	if got.Disposition != DispositionConcluded {
-		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Disposition, got.Err)
+	if got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Kind, got.Err)
 	}
 	if !strings.Contains(strings.ToLower(got.ResultSummary), "plum") {
 		t.Errorf("the model must have read the file; summary = %q", got.ResultSummary)

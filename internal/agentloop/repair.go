@@ -36,16 +36,16 @@ const executorChangedNotice = "<system-note>\n" +
 // There is deliberately no "is this a resume?" branch. A crash can land
 // anywhere, including places a resume flag would not be set, so the repair
 // that must be correct after any crash is the repair that always runs.
-func (e *Engine) repairTranscript(ctx context.Context, spec Spec) error {
-	rows, err := e.Transcript.ListForAssembly(ctx, spec.OrgID, spec.ConversationID)
+func (e *Engine) repairTranscript(ctx context.Context, params Params) error {
+	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 	if err != nil {
 		return err
 	}
 
-	if err := e.repairDanglingToolCalls(ctx, spec, rows); err != nil {
+	if err := e.repairDanglingToolCalls(ctx, params, rows); err != nil {
 		return err
 	}
-	return e.noticeExecutorChanged(ctx, spec, rows)
+	return e.noticeExecutorChanged(ctx, params, rows)
 }
 
 // repairDanglingToolCalls answers every tool call that has no persisted
@@ -56,7 +56,7 @@ func (e *Engine) repairTranscript(ctx context.Context, spec Spec) error {
 // already pushed a branch or opened a pull request; running it again would
 // duplicate an external side effect that the transcript cannot see and the
 // restored workspace may not record.
-func (e *Engine) repairDanglingToolCalls(ctx context.Context, spec Spec, rows []domain.Message) error {
+func (e *Engine) repairDanglingToolCalls(ctx context.Context, params Params, rows []domain.Message) error {
 	answered := make(map[string]struct{})
 	for _, r := range rows {
 		if r.Role == "tool" && r.ToolCallID != "" {
@@ -90,9 +90,9 @@ func (e *Engine) repairDanglingToolCalls(ctx context.Context, spec Spec, rows []
 	}
 
 	e.info("repairing interrupted tool calls on claim",
-		"conversation", spec.ConversationID, "count", len(missing))
+		"conversation", params.ConversationID, "count", len(missing))
 	for _, call := range missing {
-		if err := e.insertToolResult(ctx, spec, call, interruptedToolResult, true); err != nil {
+		if err := e.insertToolResult(ctx, params, call, interruptedToolResult, true); err != nil {
 			return fmt.Errorf("insert synthetic result for %s: %w", call.ID, err)
 		}
 	}
@@ -106,7 +106,7 @@ func (e *Engine) repairDanglingToolCalls(ctx context.Context, spec Spec, rows []
 // credential-parking retry or a requeue-before-start silent: those re-claims
 // changed nothing about the workspace the model has seen, so a notice would
 // be noise the model has to reason about.
-func (e *Engine) noticeExecutorChanged(ctx context.Context, spec Spec, rows []domain.Message) error {
+func (e *Engine) noticeExecutorChanged(ctx context.Context, params Params, rows []domain.Message) error {
 	priorWork := false
 	for _, r := range rows {
 		if r.Role == "assistant" {
@@ -124,7 +124,7 @@ func (e *Engine) noticeExecutorChanged(ctx context.Context, spec Spec, rows []do
 			return nil
 		}
 	}
-	return e.insertPending(ctx, spec, executorChangedNotice, domain.MessageSubtypeInjectionExecutorChanged)
+	return e.insertPending(ctx, params, executorChangedNotice, domain.MessageSubtypeInjectionExecutorChanged)
 }
 
 // isDelivered mirrors the schema default: nil means delivered, only an

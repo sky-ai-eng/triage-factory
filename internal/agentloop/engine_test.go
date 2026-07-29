@@ -16,10 +16,10 @@ func TestRun_ImplicitCompletionConcludesWithFinalText(t *testing.T) {
 	p := &scriptedProvider{turns: []scriptedTurn{{text: "Done: renamed the field."}}}
 	e := newTestEngine(tr, p, newScriptedToolHost())
 
-	got := e.Run(context.Background(), testSpec())
+	got := e.Run(context.Background(), testParams())
 
-	if got.Disposition != DispositionConcluded {
-		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Disposition, got.Err)
+	if got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Kind, got.Err)
 	}
 	// `continue`, not `finish`: stopping says "my part is done", and only
 	// decideBlueprintStep knows whether that ends the task. It resolves a
@@ -54,8 +54,8 @@ func TestRun_FirstDrainIsBareAndMidTurnDrainIsStamped(t *testing.T) {
 	}}
 	e := newTestEngine(tr, p, newScriptedToolHost())
 
-	if got := e.Run(context.Background(), testSpec()); got.Disposition != DispositionConcluded {
-		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Disposition, got.Err)
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Kind, got.Err)
 	}
 
 	opening := tr.find(func(m domain.Message) bool { return m.Content == "opening" })
@@ -90,7 +90,7 @@ func TestRun_DrainAfterNoToolCallTurnIsBare(t *testing.T) {
 	}}
 	e := newTestEngine(tr, p, newScriptedToolHost())
 
-	got := e.Run(context.Background(), testSpec())
+	got := e.Run(context.Background(), testParams())
 	if got.ResultSummary != "now really done" {
 		t.Fatalf("the late-arriving input must keep the run going: %+v", got)
 	}
@@ -114,8 +114,8 @@ func TestRun_RepairAnswersUnansweredToolCallsWithoutRedispatch(t *testing.T) {
 	p := &scriptedProvider{turns: []scriptedTurn{{text: "recovered"}}}
 	e := newTestEngine(tr, p, host)
 
-	if got := e.Run(context.Background(), testSpec()); got.Disposition != DispositionConcluded {
-		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Disposition, got.Err)
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Kind, got.Err)
 	}
 
 	if calls := host.calls(); len(calls) != 0 {
@@ -146,8 +146,8 @@ func TestRun_ExecutorChangedNoticeGatedOnPriorAssistantWork(t *testing.T) {
 		)
 		p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
-		if got := e.Run(context.Background(), testSpec()); got.Disposition != DispositionConcluded {
-			t.Fatalf("disposition = %v (err: %v)", got.Disposition, got.Err)
+		if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+			t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
 		}
 		notice := tr.find(func(m domain.Message) bool {
 			return m.Subtype == domain.MessageSubtypeInjectionExecutorChanged
@@ -164,8 +164,8 @@ func TestRun_ExecutorChangedNoticeGatedOnPriorAssistantWork(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
 		p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
-		if got := e.Run(context.Background(), testSpec()); got.Disposition != DispositionConcluded {
-			t.Fatalf("disposition = %v (err: %v)", got.Disposition, got.Err)
+		if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+			t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
 		}
 		if n := tr.find(func(m domain.Message) bool {
 			return m.Subtype == domain.MessageSubtypeInjectionExecutorChanged
@@ -184,8 +184,8 @@ func TestRun_RepairIsIdempotentAcrossClaims(t *testing.T) {
 	for i, text := range []string{"first", "second"} {
 		p := &scriptedProvider{turns: []scriptedTurn{{text: text}}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
-		if got := e.Run(context.Background(), testSpec()); got.Disposition != DispositionConcluded {
-			t.Fatalf("engagement %d: disposition = %v (err: %v)", i, got.Disposition, got.Err)
+		if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+			t.Fatalf("engagement %d: disposition = %v (err: %v)", i, got.Kind, got.Err)
 		}
 	}
 	var synthetic int
@@ -223,8 +223,8 @@ func TestRun_LengthStopErrorsEveryCallInTheBatchWithoutExecuting(t *testing.T) {
 	}}
 	e := newTestEngine(tr, p, host)
 
-	if got := e.Run(context.Background(), testSpec()); got.Disposition != DispositionConcluded {
-		t.Fatalf("disposition = %v (err: %v)", got.Disposition, got.Err)
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
 	}
 	if calls := host.calls(); len(calls) != 0 {
 		t.Fatalf("a length-truncated batch must not execute; the host saw %v", calls)
@@ -243,6 +243,59 @@ func TestRun_LengthStopErrorsEveryCallInTheBatchWithoutExecuting(t *testing.T) {
 	}
 }
 
+// TestRun_LengthStopStubsUnparseableArgs pins the common truncation shape: the
+// cut lands mid-arguments, so the final call's JSON does not parse at all.
+// Under a length stop that must cost one instructive turn, not the engagement;
+// under any other stop reason the same malformed JSON stays a hard failure,
+// because with no truncation to blame it is a provider bug.
+func TestRun_LengthStopStubsUnparseableArgs(t *testing.T) {
+	const cutArgs = `{"file_path": "/work/x.go", "old_string": "func ma`
+
+	t.Run("under a length stop the batch is answered and the run recovers", func(t *testing.T) {
+		tr := newMemTranscript(pendingUser("go"))
+		host := newScriptedToolHost()
+		p := &scriptedProvider{turns: []scriptedTurn{
+			{
+				calls:   []domain.ToolCall{{ID: "c1", Name: "write", Input: map[string]any{"file_path": "/work/a.go"}}, {ID: "c2", Name: "edit"}},
+				rawArgs: map[int]string{1: cutArgs},
+				finish:  "length",
+			},
+			{text: "recovered"},
+		}}
+		e := newTestEngine(tr, p, host)
+
+		if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+			t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+		}
+		if calls := host.calls(); len(calls) != 0 {
+			t.Fatalf("nothing in a truncated batch may execute; the host saw %v", calls)
+		}
+		if results := tr.toolResults(); len(results) != 2 {
+			t.Fatalf("every call in the truncated message needs a result, got %d", len(results))
+		}
+		assistant := tr.find(func(m domain.Message) bool { return m.Subtype == "tool_use" })
+		if assistant == nil {
+			t.Fatal("the truncated assistant message must still persist")
+		}
+		if got := assistant.ToolCalls[1].Input; len(got) != 0 {
+			t.Errorf("the cut call's arguments must be stubbed empty, got %v", got)
+		}
+	})
+
+	t.Run("without a length stop malformed arguments still fail loudly", func(t *testing.T) {
+		tr := newMemTranscript(pendingUser("go"))
+		p := &scriptedProvider{turns: []scriptedTurn{{
+			calls:   []domain.ToolCall{{ID: "c1", Name: "edit"}},
+			rawArgs: map[int]string{0: cutArgs},
+		}}}
+		e := newTestEngine(tr, p, newScriptedToolHost())
+
+		if got := e.Run(context.Background(), testParams()); got.Kind != ResultFailed {
+			t.Fatalf("disposition = %v, want failed — stubbing is licensed by truncation only", got.Kind)
+		}
+	})
+}
+
 func TestRun_ToolDispatchIsSerialAndInCallOrder(t *testing.T) {
 	tr := newMemTranscript(pendingUser("go"))
 	host := newScriptedToolHost()
@@ -252,8 +305,8 @@ func TestRun_ToolDispatchIsSerialAndInCallOrder(t *testing.T) {
 	}}
 	e := newTestEngine(tr, p, host)
 
-	if got := e.Run(context.Background(), testSpec()); got.Disposition != DispositionConcluded {
-		t.Fatalf("disposition = %v (err: %v)", got.Disposition, got.Err)
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
 	}
 	want := []string{"read", "grep", "bash"}
 	got := host.calls()
@@ -283,9 +336,9 @@ func TestRun_SurvivableProtocolErrorContinuesAndFatalOneFailsTheClaim(t *testing
 			{text: "understood"},
 		}}
 		e := newTestEngine(tr, p, host)
-		got := e.Run(context.Background(), testSpec())
-		if got.Disposition != DispositionConcluded {
-			t.Fatalf("a survivable protocol error must not end the run: %v (err: %v)", got.Disposition, got.Err)
+		got := e.Run(context.Background(), testParams())
+		if got.Kind != ResultConcluded {
+			t.Fatalf("a survivable protocol error must not end the run: %v (err: %v)", got.Kind, got.Err)
 		}
 		r := tr.toolResults()
 		if len(r) != 1 || !r[0].IsError {
@@ -301,9 +354,9 @@ func TestRun_SurvivableProtocolErrorContinuesAndFatalOneFailsTheClaim(t *testing
 			{calls: []domain.ToolCall{{ID: "c1", Name: "bash"}, {ID: "c2", Name: "read"}}},
 		}}
 		e := newTestEngine(tr, p, host)
-		got := e.Run(context.Background(), testSpec())
-		if got.Disposition != DispositionFailed {
-			t.Fatalf("a fatal protocol error must fail the claim: %v", got.Disposition)
+		got := e.Run(context.Background(), testParams())
+		if got.Kind != ResultFailed {
+			t.Fatalf("a fatal protocol error must fail the claim: %v", got.Kind)
 		}
 		results := tr.toolResults()
 		if len(results) != 2 {
@@ -332,8 +385,8 @@ func TestRun_BeforeToolCallGateDeniesInBand(t *testing.T) {
 		return ""
 	}
 
-	if got := e.Run(context.Background(), testSpec()); got.Disposition != DispositionConcluded {
-		t.Fatalf("a gate denial must not end the run: %v (err: %v)", got.Disposition, got.Err)
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("a gate denial must not end the run: %v (err: %v)", got.Kind, got.Err)
 	}
 	if calls := host.calls(); len(calls) != 0 {
 		t.Fatalf("a denied call must never reach the host: %v", calls)
@@ -345,19 +398,22 @@ func TestRun_BeforeToolCallGateDeniesInBand(t *testing.T) {
 }
 
 func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
-	t.Run("stop_blueprint alone terminates and takes the turn's prose as its summary", func(t *testing.T) {
+	t.Run("stop_blueprint alone terminates and its summary becomes the run's result", func(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
 		p := &scriptedProvider{turns: []scriptedTurn{{
-			text:  "Nothing to review here — the PR only touches generated files.",
-			calls: []domain.ToolCall{{ID: "c1", Name: ToolStopBlueprint, Input: map[string]any{"type": "finish", "reason": "no reviewable changes"}}},
+			text: "Wrapping up.",
+			calls: []domain.ToolCall{{ID: "c1", Name: ToolStopBlueprint, Input: map[string]any{
+				"type": "finish", "reason": "no reviewable changes",
+				"summary": "Checked the PR; it only touches generated files.",
+			}}},
 		}}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
-		got := e.Run(context.Background(), testSpec())
+		got := e.Run(context.Background(), testParams())
 		if got.Outcome != domain.RunOutcomeFinish || got.OutcomeReason != "no reviewable changes" {
 			t.Fatalf("finish must reach the outcome unchanged: %+v", got)
 		}
-		if got.ResultSummary != "Nothing to review here — the PR only touches generated files." {
-			t.Errorf("result summary = %q, want the accompanying prose — stop_blueprint carries no summary of its own", got.ResultSummary)
+		if got.ResultSummary != "Checked the PR; it only touches generated files." {
+			t.Errorf("result summary = %q, want the tool's summary argument, not the surrounding prose", got.ResultSummary)
 		}
 	})
 
@@ -367,12 +423,12 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 		p := &scriptedProvider{turns: []scriptedTurn{
 			{calls: []domain.ToolCall{
 				{ID: "c1", Name: "write"},
-				{ID: "c2", Name: ToolStopBlueprint, Input: map[string]any{"type": "abort", "reason": "r"}},
+				{ID: "c2", Name: ToolStopBlueprint, Input: map[string]any{"type": "abort", "reason": "r", "summary": "s"}},
 			}},
 			{text: "actually finished"},
 		}}
 		e := newTestEngine(tr, p, host)
-		got := e.Run(context.Background(), testSpec())
+		got := e.Run(context.Background(), testParams())
 		if got.Outcome != domain.RunOutcomeContinue {
 			t.Fatalf("a batch that also did real work must keep going: %+v", got)
 		}
@@ -385,12 +441,15 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
 		p := &scriptedProvider{turns: []scriptedTurn{
 			{calls: []domain.ToolCall{{ID: "c1", Name: ToolStopBlueprint, Input: map[string]any{"type": "abort"}}}},
-			{calls: []domain.ToolCall{{ID: "c2", Name: ToolStopBlueprint, Input: map[string]any{"type": "abort", "reason": "the branch is gone"}}}},
+			{calls: []domain.ToolCall{{ID: "c2", Name: ToolStopBlueprint, Input: map[string]any{"type": "abort", "reason": "the branch is gone", "summary": "could not rebase; upstream branch was deleted"}}}},
 		}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
-		got := e.Run(context.Background(), testSpec())
+		got := e.Run(context.Background(), testParams())
 		if got.Outcome != domain.RunOutcomeAbort || got.OutcomeReason != "the branch is gone" {
 			t.Fatalf("abort must carry its reason: %+v", got)
+		}
+		if got.ResultSummary != "could not rebase; upstream branch was deleted" {
+			t.Errorf("result summary = %q, want the corrected call's summary", got.ResultSummary)
 		}
 		first := tr.toolResults()[0]
 		if !first.IsError || !strings.Contains(first.Content, "requires a reason") {
@@ -405,7 +464,7 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 			{text: "handing off"},
 		}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
-		got := e.Run(context.Background(), testSpec())
+		got := e.Run(context.Background(), testParams())
 		// It ends as a continue anyway — but by stopping, which is the point:
 		// the tool never mints one, so the loop stays the only thing that
 		// decides what an ordinary ending means.
@@ -428,12 +487,12 @@ func TestRun_TurnBackstopParksWithNotice(t *testing.T) {
 		{calls: []domain.ToolCall{{ID: "c3", Name: "ls"}}},
 	}}
 	e := newTestEngine(tr, p, host)
-	spec := testSpec()
-	spec.MaxIterations = 2
+	params := testParams()
+	params.MaxIterations = 2
 
-	got := e.Run(context.Background(), spec)
-	if got.Disposition != DispositionParked {
-		t.Fatalf("the backstop must park, not fail: %v (err: %v)", got.Disposition, got.Err)
+	got := e.Run(context.Background(), params)
+	if got.Kind != ResultParked {
+		t.Fatalf("the backstop must park, not fail: %v (err: %v)", got.Kind, got.Err)
 	}
 	if !strings.Contains(got.ParkNotice, "2 model calls") {
 		t.Errorf("the notice must name the bound: %q", got.ParkNotice)
@@ -454,9 +513,9 @@ func TestRun_SpendGuardParksBeforeTheCall(t *testing.T) {
 		return "org at $50.00 of $50.00 today", nil
 	})}
 
-	got := e.Run(context.Background(), testSpec())
-	if got.Disposition != DispositionParked {
-		t.Fatalf("a spend breach must park, never fail: %v", got.Disposition)
+	got := e.Run(context.Background(), testParams())
+	if got.Kind != ResultParked {
+		t.Fatalf("a spend breach must park, never fail: %v", got.Kind)
 	}
 	if p.calls != 0 {
 		t.Errorf("the guard runs BEFORE the call; provider was called %d times", p.calls)
@@ -474,8 +533,8 @@ func TestRun_GuardReadFailureFailsOpen(t *testing.T) {
 		return "", errors.New("spend store unreachable")
 	})}
 
-	if got := e.Run(context.Background(), testSpec()); got.Disposition != DispositionConcluded {
-		t.Fatalf("a guard that cannot read its inputs must not wedge the run: %v", got.Disposition)
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("a guard that cannot read its inputs must not wedge the run: %v", got.Kind)
 	}
 }
 
@@ -498,8 +557,8 @@ func TestRun_WouldStopHookOwnsWhetherItRepeats(t *testing.T) {
 			return ""
 		}
 
-		got := e.Run(context.Background(), testSpec())
-		if got.Disposition != DispositionConcluded || got.ResultSummary != "second stop" {
+		got := e.Run(context.Background(), testParams())
+		if got.Kind != ResultConcluded || got.ResultSummary != "second stop" {
 			t.Fatalf("the conclusion the hook allows must stand: %+v", got)
 		}
 		if asked != 2 {
@@ -519,12 +578,12 @@ func TestRun_WouldStopHookOwnsWhetherItRepeats(t *testing.T) {
 		p := &scriptedProvider{repeat: &scriptedTurn{text: "still nothing to add"}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
 		e.Hooks.ShouldStopAfterTurn = func(context.Context, int, string) string { return "answer me" }
-		spec := testSpec()
-		spec.MaxIterations = 3
+		params := testParams()
+		params.MaxIterations = 3
 
-		got := e.Run(context.Background(), spec)
-		if got.Disposition != DispositionParked {
-			t.Fatalf("disposition = %v, want parked — the backstop is what stops a hook that never yields", got.Disposition)
+		got := e.Run(context.Background(), params)
+		if got.Kind != ResultParked {
+			t.Fatalf("disposition = %v, want parked — the backstop is what stops a hook that never yields", got.Kind)
 		}
 	})
 }
@@ -535,13 +594,13 @@ func TestRun_WouldStopHookOwnsWhetherItRepeats(t *testing.T) {
 // text describing it cannot disagree. Without one there is no flow control
 // at all.
 func TestRun_FlowControlIsRegisteredOnlyWithABlueprint(t *testing.T) {
-	toolsFor := func(t *testing.T, spec Spec) []string {
+	toolsFor := func(t *testing.T, params Params) []string {
 		t.Helper()
 		tr := newMemTranscript(pendingUser("go"))
 		p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
-		if got := e.Run(context.Background(), spec); got.Disposition != DispositionConcluded {
-			t.Fatalf("disposition = %v (err: %v)", got.Disposition, got.Err)
+		if got := e.Run(context.Background(), params); got.Kind != ResultConcluded {
+			t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
 		}
 		var names []string
 		for _, tool := range p.requests[0].Tools {
@@ -553,16 +612,16 @@ func TestRun_FlowControlIsRegisteredOnlyWithABlueprint(t *testing.T) {
 	}
 
 	t.Run("a blueprint gets the seven sandbox tools plus stop_blueprint", func(t *testing.T) {
-		names := toolsFor(t, testSpec())
+		names := toolsFor(t, testParams())
 		if len(names) != 8 || names[7] != ToolStopBlueprint {
 			t.Fatalf("tools = %v, want the seven sandbox tools then stop_blueprint", names)
 		}
 	})
 
 	t.Run("a taskless conversation gets the sandbox tools only", func(t *testing.T) {
-		spec := testSpec()
-		spec.HasBlueprint = false
-		names := toolsFor(t, spec)
+		params := testParams()
+		params.HasBlueprint = false
+		names := toolsFor(t, params)
 		if len(names) != 7 {
 			t.Fatalf("tools = %v, want the seven sandbox tools alone", names)
 		}
@@ -586,10 +645,10 @@ func TestRun_StopBlueprintIsInertWithoutABlueprint(t *testing.T) {
 		{text: "sorry, ignore that"},
 	}}
 	e := newTestEngine(tr, p, host)
-	spec := testSpec()
-	spec.HasBlueprint = false
+	params := testParams()
+	params.HasBlueprint = false
 
-	got := e.Run(context.Background(), spec)
+	got := e.Run(context.Background(), params)
 	if got.Outcome != domain.RunOutcomeContinue || got.ResultSummary != "sorry, ignore that" {
 		t.Fatalf("a hallucinated stop must not end the conversation: %+v", got)
 	}
@@ -607,9 +666,9 @@ func TestRun_RetryIsSameProviderSameModelAndExhaustionFails(t *testing.T) {
 	}}
 	e := newTestEngine(tr, p, newScriptedToolHost())
 
-	got := e.Run(context.Background(), testSpec())
-	if got.Disposition != DispositionConcluded {
-		t.Fatalf("transient errors must be retried: %v (err: %v)", got.Disposition, got.Err)
+	got := e.Run(context.Background(), testParams())
+	if got.Kind != ResultConcluded {
+		t.Fatalf("transient errors must be retried: %v (err: %v)", got.Kind, got.Err)
 	}
 	if len(p.requests) != 3 {
 		t.Fatalf("expected 3 attempts, got %d", len(p.requests))
@@ -631,9 +690,9 @@ func TestRun_RetryExhaustionFailsAndRecordsTheError(t *testing.T) {
 	e := newTestEngine(tr, p, newScriptedToolHost())
 	e.Retry = RetryPolicy{MaxAttempts: 3, Sleep: func(context.Context, time.Duration) error { return nil }}
 
-	got := e.Run(context.Background(), testSpec())
-	if got.Disposition != DispositionFailed {
-		t.Fatalf("exhaustion must fail the conversation: %v", got.Disposition)
+	got := e.Run(context.Background(), testParams())
+	if got.Kind != ResultFailed {
+		t.Fatalf("exhaustion must fail the conversation: %v", got.Kind)
 	}
 	if n := tr.find(func(m domain.Message) bool { return strings.Contains(m.Content, "could not be retried") }); n == nil {
 		t.Error("the failure's cause must be visible in the transcript")
@@ -645,8 +704,8 @@ func TestRun_PermanentErrorIsNotRetried(t *testing.T) {
 	p := &scriptedProvider{turns: []scriptedTurn{{err: errors.New("401 invalid api key")}}}
 	e := newTestEngine(tr, p, newScriptedToolHost())
 
-	if got := e.Run(context.Background(), testSpec()); got.Disposition != DispositionFailed {
-		t.Fatalf("disposition = %v, want failed", got.Disposition)
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultFailed {
+		t.Fatalf("disposition = %v, want failed", got.Kind)
 	}
 	if len(p.requests) != 1 {
 		t.Errorf("a permanent error must not burn the retry budget, attempts = %d", len(p.requests))
@@ -662,9 +721,9 @@ func TestRun_CancellationStopsWithoutFurtherRows(t *testing.T) {
 	}}
 	e := newTestEngine(tr, p, newScriptedToolHost())
 
-	got := e.Run(ctx, testSpec())
-	if got.Disposition != DispositionCancelled {
-		t.Fatalf("disposition = %v, want cancelled (err: %v)", got.Disposition, got.Err)
+	got := e.Run(ctx, testParams())
+	if got.Kind != ResultCancelled {
+		t.Fatalf("disposition = %v, want cancelled (err: %v)", got.Kind, got.Err)
 	}
 	if p.calls != 1 {
 		t.Errorf("no call may start after cancellation, calls = %d", p.calls)
@@ -680,8 +739,8 @@ func TestRun_CostIsStampedPerAssistantRowAndNullWhenUnpriceable(t *testing.T) {
 	}}}
 	e := newTestEngine(tr, p, newScriptedToolHost())
 
-	if got := e.Run(context.Background(), testSpec()); got.Disposition != DispositionConcluded {
-		t.Fatalf("disposition = %v (err: %v)", got.Disposition, got.Err)
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
 	}
 	row := tr.find(func(m domain.Message) bool { return m.Role == "assistant" })
 	if row == nil {
@@ -708,8 +767,8 @@ func TestRun_CredentialsResolvePerCall(t *testing.T) {
 	e := newTestEngine(tr, p, newScriptedToolHost())
 	e.Credentials = creds
 
-	if got := e.Run(context.Background(), testSpec()); got.Disposition != DispositionConcluded {
-		t.Fatalf("disposition = %v (err: %v)", got.Disposition, got.Err)
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
 	}
 	if creds.resolves != 2 {
 		t.Errorf("credentials must resolve per call (an STS triple expires mid-run), resolved %d times for 2 calls", creds.resolves)

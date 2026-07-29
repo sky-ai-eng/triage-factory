@@ -9,8 +9,8 @@ import (
 )
 
 // TestFlowControl_IsOneToolGatedOnHavingABlueprint pins the shape the prompts
-// are written against: a single tool with both arguments required, offered
-// only where there is something for it to stop.
+// are written against: a single tool with all three arguments required,
+// offered only where there is something for it to stop.
 func TestFlowControl_IsOneToolGatedOnHavingABlueprint(t *testing.T) {
 	if got := FlowControl(false); len(got) != 0 {
 		t.Fatalf("a conversation with no blueprint has nothing to stop: %+v", got)
@@ -22,8 +22,8 @@ func TestFlowControl_IsOneToolGatedOnHavingABlueprint(t *testing.T) {
 	if flow[0].Handler == nil {
 		t.Error("a flow-control tool must be answered loop-side, never dispatched into the jail")
 	}
-	if req := flow[0].Params.Required; len(req) != 2 || req[0] != "type" || req[1] != "reason" {
-		t.Fatalf("required = %v, want both type and reason — an unexplained stop is the thing being prevented", req)
+	if req := flow[0].Params.Required; len(req) != 3 || req[0] != "type" || req[1] != "reason" || req[2] != "summary" {
+		t.Fatalf("required = %v, want type, reason and summary — an unexplained stop with a blank result is the thing being prevented", req)
 	}
 
 	var enum []string
@@ -75,19 +75,22 @@ func TestStopBlueprint_Handler(t *testing.T) {
 		args         map[string]any
 		wantTerminal domain.RunOutcome
 		wantReason   string
+		wantSummary  string
 		wantError    bool
 		wantContent  string
 	}{
 		{
 			name:         "finish",
-			args:         map[string]any{"type": "finish", "reason": "nothing to review"},
+			args:         map[string]any{"type": "finish", "reason": "nothing to review", "summary": "checked the diff; no reviewable changes"},
 			wantTerminal: domain.RunOutcomeFinish, wantReason: "nothing to review",
+			wantSummary: "checked the diff; no reviewable changes",
 			wantContent: "nothing to review",
 		},
 		{
 			name:         "abort",
-			args:         map[string]any{"type": "abort", "reason": "the branch is gone"},
+			args:         map[string]any{"type": "abort", "reason": "the branch is gone", "summary": "tried to rebase; upstream deleted the branch"},
 			wantTerminal: domain.RunOutcomeAbort, wantReason: "the branch is gone",
+			wantSummary: "tried to rebase; upstream deleted the branch",
 			wantContent: "the branch is gone",
 		},
 		{
@@ -105,8 +108,15 @@ func TestStopBlueprint_Handler(t *testing.T) {
 		},
 		{
 			name:      "a reasonless stop is refused",
-			args:      map[string]any{"type": "abort"},
+			args:      map[string]any{"type": "abort", "summary": "s"},
 			wantError: true, wantContent: "requires a reason",
+		},
+		{
+			// Models routinely emit tool-call-only messages, so without this a
+			// completed run lands with a blank result and nothing to fall back on.
+			name:      "a summaryless stop is refused",
+			args:      map[string]any{"type": "finish", "reason": "r"},
+			wantError: true, wantContent: "requires a summary",
 		},
 	}
 	for _, tc := range tests {
@@ -120,6 +130,9 @@ func TestStopBlueprint_Handler(t *testing.T) {
 			}
 			if got.Reason != tc.wantReason {
 				t.Errorf("Reason = %q, want %q", got.Reason, tc.wantReason)
+			}
+			if got.Summary != tc.wantSummary {
+				t.Errorf("Summary = %q, want %q", got.Summary, tc.wantSummary)
 			}
 			if !strings.Contains(got.Content, tc.wantContent) {
 				t.Errorf("Content = %q, want it to mention %q", got.Content, tc.wantContent)
@@ -145,7 +158,7 @@ func TestChatTools_RenderTheDeclaredShape(t *testing.T) {
 		t.Fatalf("name/description lost in conversion: %+v", fn)
 	}
 	keys := fn.Parameters.Properties.Keys()
-	if len(keys) != 2 || keys[0] != "type" || keys[1] != "reason" {
+	if len(keys) != 3 || keys[0] != "type" || keys[1] != "reason" || keys[2] != "summary" {
 		t.Errorf("property order = %v, want declaration order — it is part of the cached prefix", keys)
 	}
 

@@ -143,6 +143,10 @@ type scriptedTurn struct {
 	usage  inference.Usage
 	model  string
 	err    error
+	// rawArgs overrides the rendered argument JSON for the call at that
+	// index — for truncation tests, where the wire carries a fragment no
+	// Input map can express.
+	rawArgs map[int]string
 	// onCall runs before the turn is returned, so a test can mutate the
 	// transcript mid-flight (input landing while a turn streams).
 	onCall func()
@@ -181,6 +185,9 @@ func (p *scriptedProvider) Stream(_ context.Context, req inference.Request) (*in
 			args := "{}"
 			if len(c.Input) > 0 {
 				args = mustJSON(c.Input)
+			}
+			if raw, ok := turn.rawArgs[i]; ok {
+				args = raw
 			}
 			fn := "function"
 			toolCalls[i] = schemas.ChatAssistantMessageToolCall{
@@ -275,10 +282,10 @@ func newTestEngine(t *memTranscript, p Provider, tools ToolHost) *Engine {
 	}
 }
 
-// testSpec is a delegation-shaped engagement: a conversation executing a
+// testParams is a delegation-shaped engagement: a conversation executing a
 // blueprint, which is the only shape the loop drives today.
-func testSpec() Spec {
-	return Spec{
+func testParams() Params {
+	return Params{
 		OrgID:          "org",
 		ConversationID: "conv",
 		Model:          "claude-sonnet-4-5",

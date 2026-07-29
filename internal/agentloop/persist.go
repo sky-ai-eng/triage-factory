@@ -15,13 +15,13 @@ import (
 // ones: the frontend reads one shape and never branches on
 // conversations.runtime, so a native row that skipped (say) token counts
 // would render as a degraded SDK row rather than an equivalent one.
-func (e *Engine) persistAssistant(ctx context.Context, spec Spec, completion *inference.Completion) (domain.Message, error) {
+func (e *Engine) persistAssistant(ctx context.Context, params Params, completion *inference.Completion) (domain.Message, error) {
 	row, err := inference.MessageToRow(completion.Message)
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("map completion to row: %w", err)
 	}
-	row.ConversationID = spec.ConversationID
-	row.Model = modelForRow(completion, spec)
+	row.ConversationID = params.ConversationID
+	row.Model = modelForRow(completion, params)
 	stampUsage(&row, completion.Usage)
 
 	// Cost settles per assistant row on this path — the ledger's stamp
@@ -33,7 +33,7 @@ func (e *Engine) persistAssistant(ctx context.Context, spec Spec, completion *in
 		row.CostUSD = &cost
 	}
 
-	id, err := e.Transcript.Insert(ctx, spec.OrgID, &row)
+	id, err := e.Transcript.Insert(ctx, params.OrgID, &row)
 	if err != nil {
 		return domain.Message{}, err
 	}
@@ -44,11 +44,11 @@ func (e *Engine) persistAssistant(ctx context.Context, spec Spec, completion *in
 // modelForRow prefers the model the provider reported serving over the one
 // requested: an inference profile or an alias can resolve to a concrete id,
 // and the ledger should record what was actually billed.
-func modelForRow(completion *inference.Completion, spec Spec) string {
+func modelForRow(completion *inference.Completion, params Params) string {
 	if completion.Model != "" {
 		return completion.Model
 	}
-	return spec.Model
+	return params.Model
 }
 
 func stampUsage(row *domain.Message, usage inference.Usage) {
@@ -64,16 +64,16 @@ func stampUsage(row *domain.Message, usage inference.Usage) {
 // transcript through here — a real dispatch, a synthetic repair, a gate
 // denial, a truncated batch — so a tool_use always has exactly one matching
 // row and its is_error flag is set the same way regardless of origin.
-func (e *Engine) insertToolResult(ctx context.Context, spec Spec, call domain.ToolCall, content string, isErr bool) error {
+func (e *Engine) insertToolResult(ctx context.Context, params Params, call domain.ToolCall, content string, isErr bool) error {
 	row := &domain.Message{
-		ConversationID: spec.ConversationID,
+		ConversationID: params.ConversationID,
 		Role:           "tool",
 		Subtype:        "tool",
 		ToolCallID:     call.ID,
 		Content:        content,
 		IsError:        isErr,
 	}
-	id, err := e.Transcript.Insert(ctx, spec.OrgID, row)
+	id, err := e.Transcript.Insert(ctx, params.OrgID, row)
 	if err != nil {
 		return fmt.Errorf("insert tool result for %s: %w", call.ID, err)
 	}
@@ -86,7 +86,7 @@ func (e *Engine) insertToolResult(ctx context.Context, spec Spec, call domain.To
 // Content column so the display path is unchanged, and the image rides
 // ContentBlocks, which is what the assembly bijection replays to the
 // provider.
-func (e *Engine) insertToolResultWithImages(ctx context.Context, spec Spec, call domain.ToolCall, content string, images []ToolImage) error {
+func (e *Engine) insertToolResultWithImages(ctx context.Context, params Params, call domain.ToolCall, content string, images []ToolImage) error {
 	blocks := make([]domain.ContentBlock, 0, len(images))
 	for _, img := range images {
 		blocks = append(blocks, domain.ContentBlock{
@@ -100,14 +100,14 @@ func (e *Engine) insertToolResultWithImages(ctx context.Context, spec Spec, call
 		})
 	}
 	row := &domain.Message{
-		ConversationID: spec.ConversationID,
+		ConversationID: params.ConversationID,
 		Role:           "tool",
 		Subtype:        "tool",
 		ToolCallID:     call.ID,
 		Content:        content,
 		ContentBlocks:  blocks,
 	}
-	id, err := e.Transcript.Insert(ctx, spec.OrgID, row)
+	id, err := e.Transcript.Insert(ctx, params.OrgID, row)
 	if err != nil {
 		return fmt.Errorf("insert tool result for %s: %w", call.ID, err)
 	}

@@ -26,8 +26,8 @@ import (
 // together. Doing it in two steps would leave a window in which a delivered
 // row had lost its provenance, and assembly would then render a steer as an
 // ordinary user turn.
-func (e *Engine) drain(ctx context.Context, spec Spec, bare bool) error {
-	rows, err := e.Transcript.ListForAssembly(ctx, spec.OrgID, spec.ConversationID)
+func (e *Engine) drain(ctx context.Context, params Params, bare bool) error {
+	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 	if err != nil {
 		return err
 	}
@@ -39,14 +39,14 @@ func (e *Engine) drain(ctx context.Context, spec Spec, bare bool) error {
 	if !bare {
 		subtype = domain.MessageSubtypeInjectionSteer
 	}
-	return e.Transcript.MarkDelivered(ctx, spec.OrgID, spec.ConversationID, ids, subtype)
+	return e.Transcript.MarkDelivered(ctx, params.OrgID, params.ConversationID, ids, subtype)
 }
 
 // hasPending reports whether any undelivered row is waiting — the would-stop
 // recheck, which catches input that landed while the concluding turn was
 // still streaming.
-func (e *Engine) hasPending(ctx context.Context, spec Spec) (bool, error) {
-	rows, err := e.Transcript.ListForAssembly(ctx, spec.OrgID, spec.ConversationID)
+func (e *Engine) hasPending(ctx context.Context, params Params) (bool, error) {
+	rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 	if err != nil {
 		return false, err
 	}
@@ -85,14 +85,14 @@ func pendingIDsInOrder(rows []domain.Message) []int {
 // injected input (the executor-changed notice, the turn-end nudge): it goes
 // through the same queue as user input rather than being spliced into an
 // assembly, so there is exactly one injection point and it is durable.
-func (e *Engine) insertPending(ctx context.Context, spec Spec, content, subtype string) error {
+func (e *Engine) insertPending(ctx context.Context, params Params, content, subtype string) error {
 	pending := false
 	if subtype == "" {
 		subtype = "text"
 	}
-	_, err := e.Transcript.Insert(ctx, spec.OrgID, &domain.Message{
-		ConversationID: spec.ConversationID,
-		UserID:         spec.UserID,
+	_, err := e.Transcript.Insert(ctx, params.OrgID, &domain.Message{
+		ConversationID: params.ConversationID,
+		UserID:         params.UserID,
 		Role:           "user",
 		Subtype:        subtype,
 		Content:        content,
@@ -106,13 +106,13 @@ func (e *Engine) insertPending(ctx context.Context, spec Spec, content, subtype 
 // (not pending) because it is a statement of fact about this engagement, not
 // input awaiting consumption: if the conversation is picked up later, the
 // notice is history the model reads in place, not a message to act on.
-func (e *Engine) insertNotice(ctx context.Context, spec Spec, content string) {
-	if _, err := e.Transcript.Insert(ctx, spec.OrgID, &domain.Message{
-		ConversationID: spec.ConversationID,
+func (e *Engine) insertNotice(ctx context.Context, params Params, content string) {
+	if _, err := e.Transcript.Insert(ctx, params.OrgID, &domain.Message{
+		ConversationID: params.ConversationID,
 		Role:           "user",
 		Subtype:        "text",
 		Content:        content,
 	}); err != nil {
-		e.warn("insert loop notice failed", "conversation", spec.ConversationID, "error", err)
+		e.warn("insert loop notice failed", "conversation", params.ConversationID, "error", err)
 	}
 }

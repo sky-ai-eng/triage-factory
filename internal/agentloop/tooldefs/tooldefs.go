@@ -58,8 +58,12 @@ type Outcome struct {
 	// an ordinary loop-side tool does.
 	Terminal domain.RunOutcome
 	// Reason accompanies Terminal and is persisted as the run's
-	// outcome_reason.
+	// outcome_reason: why the run stopped where it did.
 	Reason string
+	// Summary accompanies Terminal and is persisted as the run's
+	// result_summary: the account of the work itself, as distinct from the
+	// reason for stopping.
+	Summary string
 }
 
 // Schema is a JSON Schema node, carrying only what a tool argument needs.

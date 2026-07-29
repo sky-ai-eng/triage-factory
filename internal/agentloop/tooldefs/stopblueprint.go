@@ -38,7 +38,7 @@ var StopBlueprint = Tool{
 	Description: "End this run in a way other than simply finishing. You do NOT need this to complete your work normally — " +
 		"for that, reply with a message and no tool calls. Reach for this only to abort, or to end an entire " +
 		"multi-step workflow early.",
-	Params: obj([]string{"type", "reason"},
+	Params: obj([]string{"type", "reason", "summary"},
 		Field{Name: "type", Schema: Schema{
 			Type: "string",
 			Enum: []string{stopTypeFinish, stopTypeAbort},
@@ -46,20 +46,25 @@ var StopBlueprint = Tool{
 				`"abort" stops without completing it and leaves the task open for a human.`,
 		}},
 		str("reason", "Why you are stopping here, and what a human needs to know or do next."),
+		str("summary", "The account of the work: what you did, what you found, and what state things are in. "+
+			"This is shown as the run's result."),
 	),
 	Handler: stopBlueprint,
 }
 
 // stopBlueprint acknowledges the call, or tells the model what it was
-// missing. Both arguments are enforced here rather than by the schema alone
-// because a schema is advisory: a model can and does emit a call without one,
-// and an unenforced stop with no reason would land a terminal state carrying
-// no explanation for the human who inherits it.
+// missing. All three arguments are enforced here rather than by the schema
+// alone because a schema is advisory: a model can and does emit a call
+// without one. An unenforced stop with no reason lands a terminal state
+// carrying no explanation for the human who inherits it, and one with no
+// summary lands a completed run with a blank result — models routinely emit
+// tool-call-only messages, so there is no surrounding prose to fall back on.
 //
 // A correction is an ordinary error result, never a termination — the run
 // continues and the model gets to fix its call.
 func stopBlueprint(args map[string]any) Outcome {
 	reason := stringArg(args, "reason")
+	summary := stringArg(args, "summary")
 
 	var outcome domain.RunOutcome
 	switch stringArg(args, "type") {
@@ -85,10 +90,18 @@ func stopBlueprint(args map[string]any) Outcome {
 		}
 	}
 
-	if outcome == domain.RunOutcomeAbort {
-		return Outcome{Content: "Stopping this run. Recorded: " + reason, Terminal: outcome, Reason: reason}
+	if summary == "" {
+		return Outcome{
+			IsError: true,
+			Content: "stop_blueprint requires a summary. Call it again with an account of the work: what you did, " +
+				"what you found, and what state things are in — it is shown as the run's result.",
+		}
 	}
-	return Outcome{Content: "Ending the task here. Recorded: " + reason, Terminal: outcome, Reason: reason}
+
+	if outcome == domain.RunOutcomeAbort {
+		return Outcome{Content: "Stopping this run. Recorded: " + reason, Terminal: outcome, Reason: reason, Summary: summary}
+	}
+	return Outcome{Content: "Ending the task here. Recorded: " + reason, Terminal: outcome, Reason: reason, Summary: summary}
 }
 
 func stringArg(args map[string]any, key string) string {

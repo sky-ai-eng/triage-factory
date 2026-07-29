@@ -2,6 +2,7 @@ package agentloop
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -59,10 +60,6 @@ type Guard interface {
 // a registry: the user-facing extension taxonomy is a later ticket that
 // builds on these, and a registry now would fix an interface before there
 // is a consumer to shape it.
-//
-// There is deliberately NO context-transform hook. Assembly is a pure
-// function of rows; anything that wants to change what the model sees must
-// become a column, and window shaping happens at cold moments only.
 type Hooks struct {
 	// BeforeToolCall gates a call. A non-empty deny message becomes a
 	// synthetic is_error result in-band — the model sees the denial and the
@@ -85,17 +82,10 @@ type Hooks struct {
 	// "" is bounded by the turn backstop and the spend guard like any other
 	// work.
 	ShouldStopAfterTurn func(ctx context.Context, turn int, finalText string) (nudge string)
-
-	// PrepareNextTurn is RESERVED and never called. Compaction attaches
-	// here (P3): it is the one point at which a batched, cold-moment window
-	// pass may run without violating KV-cache discipline. Declared now so
-	// the seam's shape is settled before there is pressure to add one
-	// somewhere worse.
-	PrepareNextTurn func(ctx context.Context) error
 }
 
-// Spec is one engagement: everything the loop needs that isn't a dependency.
-type Spec struct {
+// Params is one engagement: everything the loop needs that isn't a dependency.
+type Params struct {
 	OrgID          string
 	ConversationID string
 
@@ -127,27 +117,30 @@ type Spec struct {
 	UserID string
 }
 
-// Disposition is how an engagement ended.
-type Disposition int
+// ResultKind is how an engagement ended.
+type ResultKind int
 
 const (
-	// DispositionConcluded — the model finished: an assistant message with
+	// ResultConcluded — the model finished: an assistant message with
 	// no tool calls, or a flow-control tool. Outcome carries which.
-	DispositionConcluded Disposition = iota
-	// DispositionParked — a guard tripped. The conversation is `open` with
+	ResultConcluded ResultKind = iota
+	// ResultParked — a guard tripped. The conversation is `open` with
 	// a notice row; the next claim continues it.
-	DispositionParked
-	// DispositionFailed — the engagement could not continue (retry
+	ResultParked
+	// ResultFailed — the engagement could not continue (retry
 	// exhaustion, a fatal tool-host error). The conversation fails.
-	DispositionFailed
-	// DispositionCancelled — the context was cancelled.
-	DispositionCancelled
+	ResultFailed
+	// ResultCancelled — the context was cancelled.
+	ResultCancelled
 )
 
-// Result is the engagement's terminal report, shaped so the caller can hand
-// it straight to the existing completion bookkeeping.
+// Result is the engagement's terminal report, returned to the in-process
+// caller that drove the engagement (the delegate layer's recordNativeResult).
+// It deliberately lives here and not in domain: the shared vocabulary it
+// carries (RunOutcome, RunFailureKind) is already domain's, and the rest is
+// the shape of one function's return value.
 type Result struct {
-	Disposition   Disposition
+	Kind          ResultKind
 	Outcome       domain.RunOutcome
 	OutcomeReason string
 	ResultSummary string
@@ -156,7 +149,7 @@ type Result struct {
 	DurationMs    int
 	// ParkNotice is the user-visible reason a guard parked the engagement.
 	ParkNotice string
-	// Err carries the underlying cause on DispositionFailed.
+	// Err carries the underlying cause on ResultFailed.
 	Err error
 }
 
@@ -197,9 +190,9 @@ type Logger interface {
 // contract: drain (the only door input enters through) → guards (before
 // every call, not every turn) → assemble → credentials → stream → persist →
 // stop-reason handling → tool dispatch → would-stop.
-func (e *Engine) Run(ctx context.Context, spec Spec) Result {
+func (e *Engine) Run(ctx context.Context, params Params) Result {
 	started := time.Now()
-	maxIter := spec.MaxIterations
+	maxIter := params.MaxIterations
 	if maxIter <= 0 {
 		maxIter = DefaultMaxIterations
 	}
@@ -207,7 +200,7 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 	// Setup: make the transcript legal and honest before anything reads it.
 	// Unconditional and idempotent — there is no resume branch, so the
 	// crash-recovery path is the path that runs every time and cannot rot.
-	if err := e.repairTranscript(ctx, spec); err != nil {
+	if err := e.repairTranscript(ctx, params); err != nil {
 		return e.failed(started, 0, fmt.Errorf("repair transcript: %w", err))
 	}
 
@@ -227,27 +220,27 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 		// 1. Drain. Every input — the delegation prompt itself, a user
 		// follow-up, a staged injection, a repair notice — enters here, so
 		// there is no special first-call case.
-		if err := e.drain(ctx, spec, bareDrain); err != nil {
+		if err := e.drain(ctx, params, bareDrain); err != nil {
 			return e.failed(started, turn, fmt.Errorf("drain pending input: %w", err))
 		}
 
 		// 2. Guards, before every call.
-		if notice := e.checkGuards(ctx, spec, turn, maxIter); notice != "" {
-			e.insertNotice(ctx, spec, notice)
+		if notice := e.checkGuards(ctx, params, turn, maxIter); notice != "" {
+			e.insertNotice(ctx, params, notice)
 			return Result{
-				Disposition: DispositionParked,
-				ParkNotice:  notice,
-				NumTurns:    turn,
-				DurationMs:  msSince(started),
+				Kind:       ResultParked,
+				ParkNotice: notice,
+				NumTurns:   turn,
+				DurationMs: msSince(started),
 			}
 		}
 
 		// 3. Assemble — rows only.
-		rows, err := e.Transcript.ListForAssembly(ctx, spec.OrgID, spec.ConversationID)
+		rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 		if err != nil {
 			return e.failed(started, turn, fmt.Errorf("list rows for assembly: %w", err))
 		}
-		tools := e.toolSchemas(spec)
+		tools := e.toolSchemas(params)
 
 		// 4. Credentials, per call.
 		provider, client, release, err := e.Credentials.ForCall(ctx)
@@ -258,12 +251,12 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 		// 5. Stream.
 		completion, err := e.streamWithRetry(ctx, client, inference.Request{
 			Provider:     provider,
-			Model:        spec.Model,
-			SystemPrompt: spec.SystemPrompt,
+			Model:        params.Model,
+			SystemPrompt: params.SystemPrompt,
 			Rows:         rows,
 			Tools:        tools,
-			Effort:       spec.Effort,
-			MaxTokens:    spec.MaxTokens,
+			Effort:       params.Effort,
+			MaxTokens:    params.MaxTokens,
 		})
 		if release != nil {
 			release()
@@ -276,13 +269,22 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 			// loses this message entirely, which is safe: its tool calls
 			// never ran. Record the error as a row so the failure has a
 			// visible cause in the transcript, then fail.
-			e.insertNotice(ctx, spec, "The model call failed and could not be retried: "+err.Error())
+			e.insertNotice(ctx, params, "The model call failed and could not be retried: "+err.Error())
 			return e.failed(started, turn, err)
 		}
 		turn++
 
-		// 6. Persist — one row, priced, display columns populated.
-		assistantRow, err := e.persistAssistant(ctx, spec, completion)
+		// 6. Persist — one row, priced, display columns populated. Under a
+		// `length` stop the cut usually lands mid-arguments, leaving the
+		// final tool call's JSON unparseable; stub those arguments empty —
+		// under that stop reason only — so the row persists and step 7 can
+		// answer the batch. Everywhere else malformed arguments stay a loud
+		// persist failure: with no truncation to blame they are a provider
+		// bug, not something to paper over.
+		if isLengthStop(completion.FinishReason) {
+			stubTruncatedToolArgs(completion)
+		}
+		assistantRow, err := e.persistAssistant(ctx, params, completion)
 		if err != nil {
 			return e.failed(started, turn, fmt.Errorf("persist assistant message: %w", err))
 		}
@@ -290,13 +292,14 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 		calls := assistantRow.ToolCalls
 
 		// 7. Stop-reason handling. A `length` stop with tool calls present
-		// is a truncated batch: streamed arguments are JSON-salvage-finalized
-		// on the way in, so a call can validate while silently missing
-		// arguments. Answer every call in that message with an instructive
-		// error instead of executing any of them.
+		// is a truncated batch. The cut call's arguments were stubbed above,
+		// and even a call whose JSON parsed may be silently missing the tail
+		// of what the model meant to write — so no call in the message is
+		// safe to run. Answer every one with an instructive error instead of
+		// executing any of them.
 		if isLengthStop(completion.FinishReason) && len(calls) > 0 {
 			for _, call := range calls {
-				if err := e.insertToolResult(ctx, spec, call, truncatedBatchNotice, true); err != nil {
+				if err := e.insertToolResult(ctx, params, call, truncatedBatchNotice, true); err != nil {
 					return e.failed(started, turn, err)
 				}
 			}
@@ -307,7 +310,7 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 		// 8/9. Dispatch. Flow-control calls resolve loop-side; everything
 		// else goes into the jail, serially, in call order.
 		if len(calls) > 0 {
-			outcome, terminated, err := e.dispatchBatch(ctx, spec, calls)
+			outcome, terminated, err := e.dispatchBatch(ctx, params, calls)
 			if err != nil {
 				// A cancellation observed mid-batch is a cancellation, not a
 				// failure: the user asked to stop, and the calls that did not
@@ -318,10 +321,12 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 				return e.failed(started, turn, err)
 			}
 			if terminated {
-				// stop_blueprint carries no summary of its own — the prose in the
-				// same assistant message is the account of the work, exactly
-				// as it is when the model concludes by stopping.
-				outcome.ResultSummary = lastText
+				// stop_blueprint's summary argument is the account of the
+				// work; the prose in the same assistant message backs it up
+				// should a terminal outcome ever arrive without one.
+				if outcome.ResultSummary == "" {
+					outcome.ResultSummary = lastText
+				}
 				outcome.NumTurns = turn
 				outcome.DurationMs = msSince(started)
 				return outcome
@@ -338,7 +343,7 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 		// Late-signal recheck: input that landed while this turn was
 		// streaming means the model has not seen the newest instruction, so
 		// concluding now would drop it.
-		pending, err := e.hasPending(ctx, spec)
+		pending, err := e.hasPending(ctx, params)
 		if err != nil {
 			return e.failed(started, turn, fmt.Errorf("recheck pending input: %w", err))
 		}
@@ -351,7 +356,7 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 		// keeps no state about whether it has fired.
 		if e.Hooks.ShouldStopAfterTurn != nil {
 			if nudge := e.Hooks.ShouldStopAfterTurn(ctx, turn, lastText); nudge != "" {
-				if err := e.insertPending(ctx, spec, nudge, ""); err != nil {
+				if err := e.insertPending(ctx, params, nudge, ""); err != nil {
 					return e.failed(started, turn, fmt.Errorf("insert turn-end nudge: %w", err))
 				}
 				continue
@@ -368,7 +373,7 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 		// unchanged; on a non-final step it hands off. Ending the whole task
 		// early is the deliberate act, and it goes through stop_blueprint.
 		return Result{
-			Disposition:   DispositionConcluded,
+			Kind:          ResultConcluded,
 			Outcome:       domain.RunOutcomeContinue,
 			ResultSummary: lastText,
 			NumTurns:      turn,
@@ -382,9 +387,9 @@ func (e *Engine) Run(ctx context.Context, spec Spec) Result {
 // immutable inputs so no mutation can leak between engagements. Within a
 // blueprint the list does not vary with the step's position — only the
 // system prompt does.
-func (e *Engine) toolSchemas(spec Spec) []schemas.ChatTool {
+func (e *Engine) toolSchemas(params Params) []schemas.ChatTool {
 	sandboxed := SandboxTools()
-	flow := flowControlTools(spec.HasBlueprint)
+	flow := flowControlTools(params.HasBlueprint)
 	out := make([]schemas.ChatTool, 0, len(sandboxed)+len(flow))
 	out = append(out, sandboxed...)
 	out = append(out, flow...)
@@ -393,8 +398,8 @@ func (e *Engine) toolSchemas(spec Spec) []schemas.ChatTool {
 
 // checkGuards runs the turn backstop and every configured guard, returning
 // the first notice that says stop. The backstop is checked here rather than
-// as a Guard so its bound travels with the spec.
-func (e *Engine) checkGuards(ctx context.Context, spec Spec, turn, maxIter int) string {
+// as a Guard so its bound travels with the params.
+func (e *Engine) checkGuards(ctx context.Context, params Params, turn, maxIter int) string {
 	if turn >= maxIter {
 		return fmt.Sprintf("This run reached its limit of %d model calls in a single engagement and has been paused. "+
 			"Nothing is lost — send a message to pick it back up.", maxIter)
@@ -405,7 +410,7 @@ func (e *Engine) checkGuards(ctx context.Context, spec Spec, turn, maxIter int) 
 			// Fail open, deliberately and consistently with the admission
 			// gate this mirrors: a guard that can't read its own inputs must
 			// not wedge every run in the fleet.
-			e.warn("agent loop guard check failed; proceeding", "conversation", spec.ConversationID, "error", err)
+			e.warn("agent loop guard check failed; proceeding", "conversation", params.ConversationID, "error", err)
 			continue
 		}
 		if notice != "" {
@@ -421,6 +426,26 @@ func isLengthStop(reason string) bool {
 	return reason == "length" || reason == "max_tokens"
 }
 
+// stubTruncatedToolArgs blanks any tool-call arguments in the completion that
+// do not parse as JSON. Licensed only under a length stop, where the provider
+// cut the stream mid-arguments and the concatenated fragments cannot form a
+// whole document; the strict parse stays in force on every other path. The
+// stubbed call still persists and is answered with truncatedBatchNotice, so
+// nothing runs on the partial input.
+func stubTruncatedToolArgs(completion *inference.Completion) {
+	assistant := completion.Message.ChatAssistantMessage
+	if assistant == nil {
+		return
+	}
+	for i := range assistant.ToolCalls {
+		args := assistant.ToolCalls[i].Function.Arguments
+		if args == "" || json.Valid([]byte(args)) {
+			continue
+		}
+		assistant.ToolCalls[i].Function.Arguments = "{}"
+	}
+}
+
 // truncatedBatchNotice is the instructive result every call in a
 // length-truncated assistant message receives. It names the cause and the
 // remedy, because the model cannot otherwise tell a truncated argument
@@ -431,7 +456,7 @@ const truncatedBatchNotice = "This tool call was not executed: the model's respo
 
 func (e *Engine) failed(started time.Time, turn int, err error) Result {
 	return Result{
-		Disposition: DispositionFailed,
+		Kind:        ResultFailed,
 		FailureKind: domain.RunFailureAgentError,
 		NumTurns:    turn,
 		DurationMs:  msSince(started),
@@ -441,10 +466,10 @@ func (e *Engine) failed(started time.Time, turn int, err error) Result {
 
 func (e *Engine) cancelled(started time.Time, turn int) Result {
 	return Result{
-		Disposition: DispositionCancelled,
-		NumTurns:    turn,
-		DurationMs:  msSince(started),
-		Err:         context.Canceled,
+		Kind:       ResultCancelled,
+		NumTurns:   turn,
+		DurationMs: msSince(started),
+		Err:        context.Canceled,
 	}
 }
 
