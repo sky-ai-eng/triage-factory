@@ -81,14 +81,28 @@ position, and a fifth arriving between two existing ones breaks it again.
 Conflating these produces a design that does neither well. They are stored
 differently, enforced at different times, and fail differently.
 
-- **R7. Rate cap** — "no model costing more than $X per million tokens."
-  Enforced at **selection** time; its effect is a smaller picker. Org sets
-  one; a team may set a stricter one. The effective cap is the tighter of
-  the two.
+- **R7. Rate cap** — "no model costing more than $X per million tokens"
+  (basis: **output price**, the headline axis — no blend). Enforced at
+  **selection** time; its effect is a smaller picker. Org sets one; a team
+  may set a stricter one. The effective cap is the tighter of the two.
   - When a team's default model exceeds the effective cap, **refuse and
     require an explicit choice**. Do not auto-clamp: with a single vendor
     clamping meant "drop a tier," but across vendors "the best model under
     $X" can silently change vendor, which R6 forbids.
+  - **Tightening a cap over existing selections resolves by blast
+    radius** — a cap that grandfathers everything is a lying control (the
+    admin believes spend is capped while existing pins burn indefinitely):
+    - *Defaults and the background-jobs knob*: the cap save is **refused**
+      until they are re-picked under the new cap. An over-cap team default
+      would break every unset step, and the admin tightening the cap is
+      the right person to re-pick, at that moment.
+    - *Step pins*: the cap save lists every affected pin and requires an
+      explicit confirm ("N pinned steps exceed this cap and will stop
+      dispatching until re-pinned"); after confirm, over-cap pins **fail
+      at dispatch**, loudly naming the cap — the same failure family as
+      R14, and a fail rather than a park, because no rollover fixes it
+      and only a human re-pin can. Over-cap pins are badged in the
+      blueprint editor. Nothing ever substitutes (R6).
 - **R8. Budget cap** — "no more than $Y per period," per provider and
   optionally per model. Enforced at **runtime**; its effect is that work
   stops. Breach behavior is settled (Q3): **park** — the workspace and the
@@ -485,6 +499,13 @@ after an upgrade.
 This is why `internal/agentprompt`'s `nativeMachinistBlocks` refuses any
 mode but multi. That refusal is load-bearing.
 
+The migration's one load-bearing assumption about this path is verified
+(2026-07-29, CLI 2.1.220, subscription OAuth with no API key present):
+`claude -p --model claude-sonnet-5` and `--model
+claude-haiku-4-5-20251001` both work — concrete ids, dated and undated,
+are CLI-valid on subscription auth — and an invalid id fails with a
+legible error naming the model, not a hang.
+
 `internal/systemllm` already has the split R11 needs: direct API calls in
 multi mode, SDK subprocess in local. Only the multi-mode half changes.
 
@@ -564,8 +585,10 @@ Not accepted.
   tenant-local allowed, since an Azure deployment alias is unavoidably so).
   There is no third, auto-resolving mode — see D4 for the full reasoning.
   Two consequences survive as requirement details:
-  - A pinned step whose model violates the effective rate cap (R7) fails at
-    **save** time, not dispatch time.
+  - A **new** pin that violates the effective rate cap fails at **save**
+    time; a pre-existing pin that a *tightened* cap strands follows R7's
+    blast-radius rule — confirmed by the admin at cap-save, then failing
+    at dispatch naming the cap.
   - A pinned step whose model becomes unavailable fails per R14 — loudly,
     naming the cause. It never silently re-resolves.
 - ~~**Q3 — Budget-cap breach behavior.**~~ **Answered: park, everything,
