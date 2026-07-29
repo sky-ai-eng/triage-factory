@@ -237,7 +237,16 @@ func buildSandboxEnv(extraEnv []string) []string {
 	// env vars in ExtraEnv would violate Property B — that's a
 	// caller bug, but the package's existing contract for ExtraEnv
 	// is "run-scoped non-credential variables" so we trust it.
-	out = append(out, extraEnv...)
+	// The sandbox marker is the one key ExtraEnv may not contribute. It is a
+	// fact this function asserts about the process, not a run-scoped setting,
+	// and its whole value to the reader is that the assembler is its sole
+	// writer: a caller-supplied copy would either duplicate the key (leaving
+	// which one the reader sees to platform-dependent duplicate resolution) or
+	// override the value outright, so the exact-match read stops meaning "the
+	// assembler put me in a jail". Dropped rather than rejected — a caller
+	// passing it is confused, not dangerous, and the base entry above is
+	// already the right answer.
+	out = append(out, filterEnv(extraEnv, []string{SandboxMarkerEnvVar})...)
 	return out
 }
 

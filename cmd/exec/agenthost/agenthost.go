@@ -111,8 +111,8 @@ var ErrDaemonUnreachable = errors.New("agenthost: /run/tf.sock exists but daemon
 // The wording is aimed at the agent that will read it in a tool result:
 // it names the file, names the owner of the problem, and rules out the two
 // things an agent would otherwise waste turns investigating — its own
-// command and the existence of its run. The loser contract is an ordinary
-// failed tool call: stderr plus a nonzero exit, no retry, no socket wait.
+// command and the existence of its run. Failure here is an ordinary failed
+// tool call: stderr plus a nonzero exit, no retry, no socket wait.
 var ErrSandboxSocketMissing = errors.New("agenthost socket " + DefaultSocketPath +
 	" is missing inside the sandbox; the exec verbs cannot run in this jail — " +
 	"this is a launch wiring bug, not a problem with your command or the run")
