@@ -96,8 +96,10 @@ differently, enforced at different times, and fail differently.
 - **R11.** The three system jobs — scorer, project classifier, repo
   profiler — are first-class model consumers. They are org-configurable and
   go through the same provider machinery. Today they are hardcoded to
-  Haiku and are invisible to every cap and every cost view, while
-  plausibly being the highest-volume model spend in the product.
+  Haiku; their spend **is** recorded (`system_llm_runs`) and reported in
+  usage as its own `system_overhead` category — what is missing is the
+  rest: they are outside every cap, not org-configurable, and absent from
+  the per-model/provider breakdown R15 requires.
 - **R12.** An org admin can restrict which of the org's providers a given
   team may spend against.
 - **R13.** The model picker shows only what the org's credential can
@@ -379,6 +381,24 @@ The payoff is still real: per-vendor id weirdness lands in one table
 instead of leaking into config, pricing, and the picker separately, and TF
 requests alias names uniformly at the call site.
 
+**`ResolveConfig` is a pure in-memory map lookup** — exact key first, then
+a case-insensitive scan; ~14 lines, no I/O of any kind. And the airgap
+question generalizes: **embedded bifrost core makes no runtime metadata
+fetches at all.** Verified against the pinned fork: no embedded datasheet,
+no `go:embed` anywhere, and the only HTTP outside the provider API calls
+themselves is `FetchAndEncodeURL` — inlining a remote image/document for
+providers whose surface only accepts bytes, invoked only when a request
+carries a remote URL, SSRF-hardened. The model-params cache
+(`providers/utils/modelparamscache.go`) has a *registerable* miss handler —
+the hook the standalone bifrost gateway presumably wires to its own
+datasheet service — but TF never registers one, so on a miss embedded core
+falls back to a compiled-in static table of Anthropic max-output values.
+Model metadata in TF comes from the committed datasheet snapshot and TF's
+own tables, full stop — nothing reaches out at runtime, which is the
+posture airgapped and security-sensitive deployments require. (The
+standalone bifrost *service* may well pull model config from upstream at
+runtime; TF embeds core, which does not.)
+
 **What bifrost reports back** (`bifrost.go`, the alias arm of the streaming
 request path): on a match it sets `resolvedModel = aliasConfig.ModelID` and
 calls `req.SetModel(resolvedModel)` — so **`ModelID` is what goes on the
@@ -436,9 +456,21 @@ multi mode, SDK subprocess in local. Only the multi-mode half changes.
   `internal/inference/cachecontrol.go` — buys nothing, and the same run
   costs several times more. This is not a gate, but the user must see it
   before choosing.
-- **Gemini explicit context caching** bills **storage per hour**, a
-  dimension `computeTextCost` has no slot for. Only relevant if TF ever
-  uses explicit caching.
+- **Gemini has two caching modes, and only one fits TF's shape.**
+  *Implicit* caching is the analog of what TF already relies on everywhere:
+  the provider notices a repeated prefix on its own, discounts the cached
+  tokens, reports them in usage — no management, no storage fee,
+  `computeTextCost` prices it through the normal cache-read rate.
+  *Explicit* caching is a different product: you create a cache object over
+  a chosen context with a TTL, pay a **per-token-per-hour storage fee** (a
+  dimension `computeTextCost` has no slot for), and reference the cache id
+  in each request. It exists for a large *static* corpus reused across many
+  independent requests. TF's cacheable prefix is per-conversation and
+  varies per run (mission, task context), which is exactly the shape
+  implicit caching serves — so explicit caching is **not wanted now**. It
+  would become interesting only if something like the curator's knowledge
+  base were ever held in-context wholesale across many turns; if that day
+  comes, it is new cost machinery, not a config flag.
 
 ---
 
@@ -461,7 +493,8 @@ Not accepted.
    - *Report in the PR body*: catalog entries passing every gate, under a
      provider TF supports, that TF has not named. That is the "GPT-5.2
      shipped" signal without the build going red because Azure added 40
-     SKUs.
+     SKUs. This should explicitly separate _new_ omissions vs _standing_
+     omissions that existed before the most recent pull as well.
 3. **No alias→id resolution layer.** The only reason one would exist is
    rows already in databases (§5), which is a one-time migration. A runtime
    alias map has drift built in: resolve `"sonnet"` at call time and every
@@ -478,22 +511,60 @@ Not accepted.
 
 ## 4. Open questions
 
-- **Q1 — May shipped blueprint seeds name a cost class?** (R4.)
-  `internal/promptseed` currently seeds `system-pr-review-aggregate` with
-  `Model: "haiku"`, and the seed goes to every org including ones with no
-  Anthropic access. What it is *actually* saying is "this step is cheap
-  aggregation, don't burn the default on it" — a **relative** statement,
-  and the only place in the product that needs one.
-  - *Yes* ⇒ a small vendor-neutral vocabulary survives, used only by seeds,
-    resolved against the catalog and the org's providers at provision time.
-  - *No* ⇒ seeds store `""` (inherit), the alias concept dies completely,
-    and the aggregate step costs more.
-- **Q2 — Does a blueprint step store a model or a provider-pinned entry?**
-  Storing the catalog entry is exact but breaks every step if an org
-  migrates Anthropic-direct → Bedrock. Storing something more abstract
-  needs resolution, which Q1's answer may already have introduced. Note
-  that for Azure this is forced: a deployment alias is tenant-local and
-  cannot be portable.
+- **Q1+Q2 — step configuration: direction adopted, design open.** A
+  blueprint step gets **two configuration modes**, expressing two different
+  user intents:
+  - **Pinned** — an explicit model, named against the org's aliases. "This
+    exact brain." Allowed to be tenant-local (an Azure deployment alias is,
+    unavoidably). Not portable across orgs, and that is fine — it is the
+    escape hatch for the step where the exact model is load-bearing.
+  - **Constrained** — a max spend ($/Mtok); the step auto-resolves at
+    dispatch against what the deployment actually has. "Any adequate brain
+    under $X." Portable by construction: the same step resolves against
+    Anthropic in one org and Bedrock in another.
+  - Unset stays unset — the team default (R1/R2).
+
+  This likely **dissolves both original questions**: shipped seeds ship in
+  constrained mode ("cheap aggregation" was always a spend statement, not a
+  model statement — `system-pr-review-aggregate`'s `Model: "haiku"` becomes
+  a spend ceiling), so no vendor-neutral tier vocabulary needs to exist;
+  and portability stops being a storage-format question because each mode
+  answers it differently on purpose.
+
+  What constrained mode deliberately trades away must be stated: **run-to-run
+  model stability.** A price drop or a new cheap model changes what
+  tomorrow's dispatch resolves to. Earlier in this design that was an
+  objection to $-as-the-key; as an *opt-in per-step semantic* it is the
+  feature — but only if visible: resolution happens **once, at dispatch,
+  and is recorded** (R6/R16), and mid-run fallback stays forbidden.
+  "Auto-fallback" means the *next* dispatch re-resolves when a model
+  disappears; it never means substitution inside a running engagement.
+
+  Open design work (the "deep thinking" item):
+  - **Q2a — the resolution rule.** "Auto-resolve under $X" needs an
+    ordering. Cheapest-under-cap yields the worst adequate model;
+    priciest-under-cap uses price as a capability proxy — an assumption
+    that should be named if adopted, because the catalog deliberately
+    carries no capability ranking and this reintroduces one through the
+    back door. An org-defined preference order over allowlist entries is
+    the explicit alternative. Whatever the rule, it must be deterministic
+    for a fixed (allowlist, prices, availability) so two dispatches in the
+    same hour do not diverge.
+  - **Q2b — stability options.** Re-resolve every dispatch, or sticky —
+    resolve once per blueprint (or per step) and re-resolve only when the
+    held model becomes unavailable or leaves the cap. Sticky trades
+    responsiveness to price drops for fewer surprises mid-blueprint; a
+    multi-step blueprint resolving different steps to different models on
+    different days is the case to design against.
+  - **Q2c — cap composition.** A constrained step's ceiling composes with
+    R7's org/team rate caps as min(step, effective cap); a *pinned* step
+    whose model violates the effective cap should fail at save time, not
+    dispatch time.
+  - **Q2d — the configuration surface.** The stated goal: maximize
+    cross-vendor / cross-model-version / cross-deployment standardization
+    without a sprawling UI. Two knobs (pin | ceiling) plus the team
+    default is the budget; anything the design adds beyond that needs to
+    earn its place.
 - **Q3 — Budget-cap breach behavior.** Park or fail; resume or stay parked
   at period rollover; and what happens to a blueprint mid-flight.
 - **Q4 — Probe eagerness.** Eager on credential save (costs a little money
