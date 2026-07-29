@@ -70,9 +70,10 @@ type usageDayBucket struct {
 }
 
 // usageDayModelBucket is one (UTC day, model) cell — the long-format series the
-// FE pivots into a stacked-by-model area over time. Curator rows (NULL model) are
-// excluded, same as by_model, so the stack covers model-attributed spend; the
-// per-day total (by_day) still includes the curator share.
+// FE pivots into a stacked-by-model area over time. Rows naming no model —
+// curator (NULL) and runtime-composed (domain.ModelSynthetic) — are excluded,
+// same as by_model, so the stack covers model-attributed spend; the per-day
+// total (by_day) still includes their share.
 type usageDayModelBucket struct {
 	Date  string  `json:"date"`
 	Model string  `json:"model"`
@@ -620,11 +621,14 @@ func spendByCategory(rows []domain.SpendRow) []usageCategoryBucket {
 // spendByModel sums cost per model, highest-cost-first (ties broken by model
 // name). Rows with a NULL model (curator turns) are excluded — by_model is a
 // per-model breakdown, not a total, so the curator share lives only in
-// by_category.
+// by_category. Runtime-composed rows (domain.ModelSynthetic) are excluded on
+// the same grounds: they name no model. Settlement no longer targets those
+// rows, so this covers rows stamped before that fix plus the last-resort
+// corner where a conversation has nothing else to settle on.
 func spendByModel(rows []domain.SpendRow) []usageModelBucket {
 	byModel := map[string]float64{}
 	for _, r := range rows {
-		if r.Model == nil {
+		if r.Model == nil || *r.Model == domain.ModelSynthetic {
 			continue
 		}
 		byModel[*r.Model] += r.TotalCostUSD
@@ -659,13 +663,14 @@ func spendByDay(rows []domain.SpendRow) []usageDayBucket {
 
 // spendByDayModel sums cost per (UTC calendar day, model) — the long-format
 // series the FE pivots into a stacked-by-model area. Rows with a NULL model
-// (curator) are excluded, matching by_model; their share still lands in by_day's
-// per-day total. Sorted by date then model for a stable response.
+// (curator) or a runtime-composed one (domain.ModelSynthetic) are excluded,
+// matching by_model; their share still lands in by_day's per-day total. Sorted
+// by date then model for a stable response.
 func spendByDayModel(rows []domain.SpendRow) []usageDayModelBucket {
 	type key struct{ date, model string }
 	byCell := map[key]float64{}
 	for _, r := range rows {
-		if r.Model == nil {
+		if r.Model == nil || *r.Model == domain.ModelSynthetic {
 			continue
 		}
 		byCell[key{r.OccurredAt.UTC().Format("2006-01-02"), *r.Model}] += r.TotalCostUSD

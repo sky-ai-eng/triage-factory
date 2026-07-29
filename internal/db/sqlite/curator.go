@@ -491,6 +491,17 @@ func (s *curatorStore) ReleaseActiveTurnSystem(ctx context.Context, orgID, conve
 	// the user row when nothing streamed (BeginTurn stamped it with this
 	// claim). Every terminal write stamps, cancel included, so a turn
 	// killed mid-stream still reports the spend it settled.
+	//
+	// Runtime-composed rows are skipped as targets: a turn that ended in an
+	// API error or an interrupt ends on one, and settling there would bill
+	// the turn to a model that never ran. There is always a non-synthetic
+	// row to land on — the claim's user row carries no model at all.
+	//
+	// Of the rest, a row naming a real model wins over one naming none
+	// however much newer the latter is (a turn cancelled mid-tool ends on a
+	// NULL-model tool row); only the first keeps the lump in the per-model
+	// breakdown. The nothing-streamed case still lands on the user row,
+	// which is then the only candidate.
 	released := false
 	err := inTx(ctx, s.q, func(q queryer) error {
 		var claimID string
@@ -512,8 +523,11 @@ func (s *curatorStore) ReleaseActiveTurnSystem(ctx context.Context, orgID, conve
 		}
 		if _, err := q.ExecContext(ctx, `
 			UPDATE messages SET cost_usd = ?
-			WHERE id = (SELECT MAX(id) FROM messages WHERE claim_id = ?)
-		`, costUSD, claimID); err != nil {
+			WHERE id = (SELECT id FROM messages
+			            WHERE claim_id = ? AND (model IS NULL OR model <> ?)
+			            ORDER BY (model IS NOT NULL AND model <> ?) DESC, id DESC
+			            LIMIT 1)
+		`, costUSD, claimID, domain.ModelSynthetic, domain.ModelSynthetic); err != nil {
 			return err
 		}
 		released = true
