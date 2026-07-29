@@ -152,6 +152,29 @@ func AgentVisibleBinary(hostBin string) string {
 	return hostBin
 }
 
+// SandboxMarkerEnvVar / SandboxMarkerEnvValue are the marker every
+// sandboxed agent process carries, set by buildSandboxEnv — the one env
+// assembly point every jail shape goes through. It answers exactly one
+// question for code running inside the jail: am I in a jail?
+//
+// It has to be an explicit marker rather than a heuristic over the rest of
+// the env. Every other variable a jailed process can observe — the proxy
+// pairs, the git-hooks bin, an unset TF_MODE — has a legitimate non-sandbox
+// configuration, so only a variable whose sole writer is this assembler can
+// be trusted as the answer. Read it by exact match against
+// SandboxMarkerEnvValue; anything else means "not in a jail".
+//
+// cmd/exec/agenthost is the reader: with the marker set, an absent exec-verb
+// socket is an outage rather than a signal that this is the local-mode CLI,
+// and AutoDetect fails closed. Non-credential by construction, so it belongs
+// in the Property B-safe base set. The direct (unsandboxed) path strips any
+// inherited copy — see newDirectCommand — so the marker can only ever mean
+// what the assembler meant by it.
+const (
+	SandboxMarkerEnvVar   = "TRIAGE_FACTORY_SANDBOXED"
+	SandboxMarkerEnvValue = "1"
+)
+
 // buildSandboxEnv constructs the *base* env exposed to the
 // sandboxed agent — the slice the sandbox's ConfigureProxies hook
 // then appends ANTHROPIC_BASE_URL / placeholder credentials onto
@@ -198,6 +221,11 @@ func buildSandboxEnv(extraEnv []string) []string {
 		// egress where this traffic legitimately completes, so it stays unset
 		// there (buildSandboxEnv feeds only the sandboxed subprocess).
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
+		// "I am inside the jail" — the marker in-jail code reads to tell an
+		// outage apart from a mode signal. Unconditional: both jail shapes
+		// assemble their env here, and a marker that is only sometimes set
+		// is worse than none.
+		SandboxMarkerEnvVar + "=" + SandboxMarkerEnvValue,
 	}
 	// Engine runtime tuning (JSC JIT off by default). Non-credential by
 	// construction, so it belongs in the Property B-safe base set.

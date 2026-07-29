@@ -28,6 +28,31 @@ func TestBuildSandboxEnv_NoGitConfig(t *testing.T) {
 	}
 }
 
+// TestBuildSandboxEnv_CarriesSandboxMarker pins the "I am inside the jail"
+// marker onto the base env, unconditionally and regardless of what the
+// caller passes as ExtraEnv. Both jail shapes assemble their env here, so
+// this is the single point that makes the marker's absence meaningful:
+// cmd/exec/agenthost reads it to tell a missing exec-verb socket (an
+// outage) apart from a local-mode CLI invocation (a mode signal), and a
+// marker that were only sometimes set would make that read a coin flip.
+func TestBuildSandboxEnv_CarriesSandboxMarker(t *testing.T) {
+	want := SandboxMarkerEnvVar + "=" + SandboxMarkerEnvValue
+	for _, extra := range [][]string{
+		nil,
+		{"TRIAGE_FACTORY_CONVERSATION_ID=r1"},
+	} {
+		found := 0
+		for _, kv := range buildSandboxEnv(extra) {
+			if kv == want {
+				found++
+			}
+		}
+		if found != 1 {
+			t.Errorf("buildSandboxEnv(%v) carries %d copies of %q, want exactly 1", extra, found, want)
+		}
+	}
+}
+
 // TestBuildSandboxEnv_JSCJITDefaultOff pins the engine runtime tuning:
 // the sandbox base env carries BUN_JSC_useJIT=0 by default (the memory
 // win) and drops it when the operator opts back into the JIT.

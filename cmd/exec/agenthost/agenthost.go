@@ -102,6 +102,21 @@ type RunInfo struct {
 // wrong identity in multi-mode).
 var ErrDaemonUnreachable = errors.New("agenthost: /run/tf.sock exists but daemon is not responding")
 
+// ErrSandboxSocketMissing is returned by AutoDetect when the process is
+// inside the sandbox (per agentproc.SandboxMarkerEnvVar) and /run/tf.sock
+// is absent or is not a socket. Inside a jail nothing else can serve the
+// exec verbs, so the absent socket is an outage rather than the "this is
+// the local-mode CLI" signal it means everywhere else.
+//
+// The wording is aimed at the agent that will read it in a tool result:
+// it names the file, names the owner of the problem, and rules out the two
+// things an agent would otherwise waste turns investigating — its own
+// command and the existence of its run. The loser contract is an ordinary
+// failed tool call: stderr plus a nonzero exit, no retry, no socket wait.
+var ErrSandboxSocketMissing = errors.New("agenthost socket " + DefaultSocketPath +
+	" is missing inside the sandbox; the exec verbs cannot run in this jail — " +
+	"this is a launch wiring bug, not a problem with your command or the run")
+
 // ErrUnknownMethod is returned by the daemon when a client requests
 // a method it doesn't know. Surfaces as a "TF binary / daemon version
 // mismatch" hint in subcommand stderr.

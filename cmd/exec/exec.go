@@ -64,10 +64,13 @@ func Handle(args []string) {
 		ctx := context.Background()
 		client, derr := agenthost.AutoDetect(ctx, stores)
 		if derr != nil {
-			// runident-derived errors (env unset, unknown run) get a
-			// clean stderr message rather than the wrapping AutoDetect
-			// would otherwise apply.
-			if errors.Is(derr, runident.ErrRunIdentityMissing) || errors.Is(derr, runident.ErrRunIdentityNotFound) {
+			// runident-derived errors (env unset, unknown run) and the
+			// missing-sandbox-socket error are already written for the
+			// reader; they get a clean stderr message rather than the
+			// wrapping AutoDetect would otherwise apply.
+			if errors.Is(derr, runident.ErrRunIdentityMissing) ||
+				errors.Is(derr, runident.ErrRunIdentityNotFound) ||
+				errors.Is(derr, agenthost.ErrSandboxSocketMissing) {
 				fmt.Fprintln(os.Stderr, derr.Error())
 			} else {
 				fmt.Fprintf(os.Stderr, "agenthost: %v\n", derr)

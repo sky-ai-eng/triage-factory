@@ -893,7 +893,13 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// documents for credentialEnvKeys), so a stale shell export could
 	// otherwise defeat either the default-off behavior or the
 	// TF_AGENT_JSC_JIT=1 opt-in, depending on direction and platform.
-	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey})
+	// The sandbox marker is stripped from the inherited env for a different
+	// reason: it is a fact about the process, not a setting, and this path is
+	// by definition not a jail. An operator who exported it in the shell that
+	// launched TF would otherwise hand the agent's `triagefactory exec`
+	// children a marker that makes them fail closed on an absent socket they
+	// were never supposed to have.
+	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, SandboxMarkerEnvVar})
 	hookEnv = append(append([]string(nil), hookEnv...), agentRuntimeEnv()...)
 	// The real-gh channel rides the same lane. It is appended last of the
 	// run-scoped entries so its PATH — which must lead with the TF-owned gh
