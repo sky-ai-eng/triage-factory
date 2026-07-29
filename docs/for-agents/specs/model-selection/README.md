@@ -349,14 +349,35 @@ type KeyAliases map[string]AliasConfig   // schemas.Key.Aliases
 Bedrock inference-profile id. `ModelName` is the canonical id *used for
 pricing* — the catalog key. Region and project are per-alias.
 
-**TF does not currently use it.** `buildKey` in
+**Ownership: bifrost resolves, TF supplies.** This is worth stating flatly,
+because "bifrost has an alias mechanism" is easy to hear as "bifrost
+maintains the aliases," and it does not.
+
+| bifrost provides | TF must provide |
+|---|---|
+| the `AliasConfig` shape and its per-provider sub-configs | the map itself, on `schemas.Key.Aliases` via `Account.GetKeysForProvider` |
+| `ResolveConfig` at request time, and wire substitution via `req.SetModel` | **discovery** — listing Azure deployments and Bedrock inference profiles. `ListModels` reports ids; nothing in bifrost authors an alias entry |
+| alias-aware `ListModels` (a listed model can surface under its alias key) | the canonical `ModelName` for each entry — i.e. the catalog join |
+| the resolved alias on the request context | persistence, and rebuilding the map on every call |
+
+Every `Aliases:` assignment in bifrost's source populates a
+`ListModelsPipeline` *from* `key.Aliases`. The map is read-only input.
+
+**TF does not currently supply one.** `buildKey` in
 `internal/inference/account.go` populates `ID / Name / Value / Models /
 Weight` and stops, never setting `Aliases`. Wiring it is the one plumbing
 gap on the inference side.
 
-The consequence is that per-vendor id weirdness need not leak into config,
-pricing, and the picker separately: each org gets an alias table, TF
-requests alias names uniformly, and bifrost resolves.
+Note the lifecycle constraint: `EnvCredentials.ForCall` rebuilds the
+account and client **on every provider call** — deliberately, so an
+expiring STS triple can never outlive the credential that minted it. So
+there is no bifrost-side registry that accumulates aliases across calls.
+The table is constructed fresh from TF's own storage each time, which is
+also why TF is the only durable holder of the alias→`ModelName` mapping.
+
+The payoff is still real: per-vendor id weirdness lands in one table
+instead of leaking into config, pricing, and the picker separately, and TF
+requests alias names uniformly at the call site.
 
 **What bifrost reports back** (`bifrost.go`, the alias arm of the streaming
 request path): on a match it sets `resolvedModel = aliasConfig.ModelID` and
