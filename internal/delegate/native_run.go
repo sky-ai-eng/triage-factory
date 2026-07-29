@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
@@ -94,6 +95,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		ExtraEnv:         s.nativeAgentEnv(ctx, orgID, runID, namespace, cfg, triggerType, creatorUserID),
 		PrebuiltNetwork:  cfg.execSandbox.runNetwork(),
 		PrebuiltProxyEnv: cfg.execSandbox.proxyEnv(),
+		AgentHostSocket:  agenthost.SocketMountFor(runID),
 		GHChannel:        cfg.execSandbox.ghChannel(runID),
 		SkillsSourcePath: cfg.skillsSourcePath,
 		MemorySourcePath: cfg.memorySourcePath,

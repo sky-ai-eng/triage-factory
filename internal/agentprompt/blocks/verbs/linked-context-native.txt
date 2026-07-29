@@ -7,5 +7,5 @@ and acceptance criteria a PR description omits, and acting without them is the m
 
 Follow only references that are actually written down; do not invent them.
 This is a one-time pass to gather context, not a loop — once you have what is reachable, start the work.
-Prefer existing Triage Factory (`tfac exec *`) commands to connected MCP servers when both do the same thing.
+Prefer existing Triage Factory (`tfac *`) commands to connected MCP servers when both do the same thing.
 </linked_context>

@@ -29,6 +29,35 @@ func destinations(mounts []sandbox.Mount) map[string]sandbox.Mount {
 	return byDest
 }
 
+// testAgentHostMount is the shape agenthost.SocketMountFor returns on Linux.
+// Built literally so this file needs no linux-only constant and stays in the
+// package's default build.
+func testAgentHostMount() sandbox.Mount {
+	return sandbox.Mount{Source: "/run/tf/run-1.sock", Destination: "/run/tf.sock"}
+}
+
+// TestToolHostMounts_CarryTheAgentHostSocket pins the exec-verb socket mount.
+// This is the third instance of the bug class this file exists for — the
+// runtimes build their mount sets independently — and the one a live dogfood
+// run hit: without this mount, every `tfac` verb inside the jail fell back to
+// a local client over a fresh in-jail database and reported the run itself as
+// nonexistent.
+func TestToolHostMounts_CarryTheAgentHostSocket(t *testing.T) {
+	stubToolHostBinary(t)
+
+	mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), nil, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := destinations(mounts)["/run/tf.sock"]
+	if !ok {
+		t.Fatal("no mount at /run/tf.sock; every exec verb in this jail is stranded on the local-client fallback")
+	}
+	if got.Source != "/run/tf/run-1.sock" {
+		t.Errorf("agenthost socket mount source = %q, want the per-run socket handed in", got.Source)
+	}
+}
+
 // TestToolHostMounts_CarryTheStagedStepSkill pins that a native jail mounts
 // this step's SKILL.md.
 //
@@ -40,7 +69,7 @@ func TestToolHostMounts_CarryTheStagedStepSkill(t *testing.T) {
 	stubToolHostBinary(t)
 	staged := t.TempDir()
 
-	mounts, err := toolHostMounts(t.TempDir(), nil, staged, "")
+	mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), nil, staged, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +100,7 @@ func TestToolHostMounts_SkillsAreOptional(t *testing.T) {
 		{"staging dir swept", filepath.Join(t.TempDir(), "gone")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			mounts, err := toolHostMounts(t.TempDir(), nil, tc.source, "")
+			mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), nil, tc.source, "")
 			if err != nil {
 				t.Fatalf("a missing skill must not fail the launch: %v", err)
 			}
@@ -91,7 +120,7 @@ func TestToolHostMounts_CarryTheStagedEntityMemory(t *testing.T) {
 	stubToolHostBinary(t)
 	staged := t.TempDir()
 
-	mounts, err := toolHostMounts(t.TempDir(), nil, "", staged)
+	mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), nil, "", staged)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +149,7 @@ func TestToolHostMounts_EntityMemoryIsOptional(t *testing.T) {
 		{"staging dir swept", filepath.Join(t.TempDir(), "gone")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			mounts, err := toolHostMounts(t.TempDir(), nil, "", tc.source)
+			mounts, err := toolHostMounts(t.TempDir(), testAgentHostMount(), nil, "", tc.source)
 			if err != nil {
 				t.Fatalf("missing prior memory must not fail the launch: %v", err)
 			}

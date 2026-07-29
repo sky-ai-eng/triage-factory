@@ -296,6 +296,41 @@ func TestRun_LengthStopStubsUnparseableArgs(t *testing.T) {
 	})
 }
 
+// TestRun_NULBytesAreStrippedBeforePersist pins the sanitization Postgres
+// forces: TEXT cannot hold a raw NUL and JSONB cannot hold its escaped form,
+// so a tool result carrying one (a bash call that catted a binary — the live
+// failure) must be cleaned at persist, not allowed to fail the engagement.
+func TestRun_NULBytesAreStrippedBeforePersist(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	host := newScriptedToolHost()
+	host.answers["bash"] = ToolOutcome{Content: "ELF\x00\x00garbage\x00"}
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{
+			text:  "inspecting\x00the binary",
+			calls: []domain.ToolCall{{ID: "c1", Name: "bash", Input: map[string]any{"command": "cat \x00/bin/thing"}}},
+		},
+		{text: "done"},
+	}}
+	e := newTestEngine(tr, p, host)
+
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("a NUL in tool output must not end the run: %v (err: %v)", got.Kind, got.Err)
+	}
+	for _, m := range tr.snapshot() {
+		if strings.ContainsRune(m.Content, 0) {
+			t.Errorf("row %d content carries NUL after persist: %q", m.ID, m.Content)
+		}
+		for _, call := range m.ToolCalls {
+			if cmd, _ := call.Input["command"].(string); strings.ContainsRune(cmd, 0) {
+				t.Errorf("row %d tool call input carries NUL after persist: %q", m.ID, cmd)
+			}
+		}
+	}
+	if r := tr.toolResults(); len(r) != 1 || r[0].Content != "ELFgarbage" {
+		t.Fatalf("tool result must survive minus the NULs: %+v", r)
+	}
+}
+
 func TestRun_ToolDispatchIsSerialAndInCallOrder(t *testing.T) {
 	tr := newMemTranscript(pendingUser("go"))
 	host := newScriptedToolHost()

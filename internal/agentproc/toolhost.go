@@ -56,6 +56,13 @@ type ToolHostOptions struct {
 	// bug, not a case to degrade through.
 	PrebuiltNetwork  *sandbox.RunNetwork
 	PrebuiltProxyEnv []string
+	// AgentHostSocket bind-mounts the per-run exec-verb socket (the sidecar
+	// hosts the server) at its fixed in-jail path, exactly as the SDK path's
+	// startAgentHost supplies it. Required, same reasoning as PrebuiltNetwork:
+	// without it every `tfac` verb inside the jail falls back to a local
+	// client reading a fresh in-jail database and reports the run as
+	// nonexistent — a wiring bug wearing a data-corruption costume.
+	AgentHostSocket sandbox.Mount
 	// GHChannel wires the real-gh credential injector, when the sidecar
 	// bound one.
 	GHChannel *GHChannelParams
@@ -171,6 +178,9 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (*ToolHostJail, e
 	if opts.PrebuiltNetwork == nil {
 		return nil, fmt.Errorf("agentproc: tool host launch requires a prebuilt run network — multi mode is always per-run-isolated")
 	}
+	if opts.AgentHostSocket.Source == "" || opts.AgentHostSocket.Destination == "" {
+		return nil, fmt.Errorf("agentproc: tool host launch requires the agenthost socket mount — without it every exec verb inside the jail is stranded")
+	}
 
 	sockDir, listener, err := prepareToolHostSocket(opts.RunID)
 	if err != nil {
@@ -187,7 +197,7 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (*ToolHostJail, e
 		return nil, fmt.Errorf("agentproc: chown worktree for tool host: %w", err)
 	}
 
-	mounts, err := toolHostMounts(sockDir, opts.GHChannel, opts.SkillsSourcePath, opts.MemorySourcePath)
+	mounts, err := toolHostMounts(sockDir, opts.AgentHostSocket, opts.GHChannel, opts.SkillsSourcePath, opts.MemorySourcePath)
 	if err != nil {
 		_ = jail.Close()
 		return nil, err
@@ -309,9 +319,10 @@ func prepareToolHostSocket(runID string) (string, net.Listener, error) {
 
 // toolHostMounts assembles the jail's bind mounts: the tool host binary and
 // the socket directory it needs, plus the same TF-side mounts an SDK jail
-// gets (the TF binary under both names, the git-hooks dir, the gh channel's
-// cert + pinned binary, and this step's staged skill).
-func toolHostMounts(sockDir string, gh *GHChannelParams, skillsSource, memorySource string) ([]sandbox.Mount, error) {
+// gets (the TF binary under both names, the agenthost exec-verb socket, the
+// git-hooks dir, the gh channel's cert + pinned binary, and this step's
+// staged skill).
+func toolHostMounts(sockDir string, agentHost sandbox.Mount, gh *GHChannelParams, skillsSource, memorySource string) ([]sandbox.Mount, error) {
 	if _, err := os.Stat(hostToolHostBinaryPath); err != nil {
 		return nil, fmt.Errorf("agentproc: tool host binary is not present at %s: %w", hostToolHostBinaryPath, err)
 	}
@@ -319,6 +330,12 @@ func toolHostMounts(sockDir string, gh *GHChannelParams, skillsSource, memorySou
 		{Source: hostToolHostBinaryPath, Destination: sandboxToolHostBinary, Options: []string{"ro"}},
 		// Read-write by necessity: the server binds its socket in here.
 		{Source: sockDir, Destination: sandboxToolHostSocketDir},
+		// Mounted unconditionally: the sidecar created the socket during
+		// bring-up, before any dispatch reached this launch, and the broker
+		// validates the source against its own per-run derivation. A missing
+		// file host-side fails the launch loudly there rather than launching
+		// a jail whose exec verbs would consult a fresh local database.
+		agentHost,
 	}
 	if selfBin, err := os.Executable(); err == nil && selfBin != "" {
 		mounts = append(mounts,

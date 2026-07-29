@@ -3,6 +3,7 @@ package agentloop
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
@@ -19,6 +20,10 @@ func (e *Engine) persistAssistant(ctx context.Context, params Params, completion
 	row, err := inference.MessageToRow(completion.Message)
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("map completion to row: %w", err)
+	}
+	row.Content = sanitizeForStore(row.Content)
+	for i := range row.ToolCalls {
+		sanitizeInputForStore(row.ToolCalls[i].Input)
 	}
 	row.ConversationID = params.ConversationID
 	row.Model = modelForRow(completion, params)
@@ -70,7 +75,7 @@ func (e *Engine) insertToolResult(ctx context.Context, params Params, call domai
 		Role:           "tool",
 		Subtype:        "tool",
 		ToolCallID:     call.ID,
-		Content:        content,
+		Content:        sanitizeForStore(content),
 		IsError:        isErr,
 	}
 	id, err := e.Transcript.Insert(ctx, params.OrgID, row)
@@ -104,7 +109,7 @@ func (e *Engine) insertToolResultWithImages(ctx context.Context, params Params, 
 		Role:           "tool",
 		Subtype:        "tool",
 		ToolCallID:     call.ID,
-		Content:        content,
+		Content:        sanitizeForStore(content),
 		ContentBlocks:  blocks,
 	}
 	id, err := e.Transcript.Insert(ctx, params.OrgID, row)
@@ -113,4 +118,46 @@ func (e *Engine) insertToolResultWithImages(ctx context.Context, params Params, 
 	}
 	row.ID = id
 	return nil
+}
+
+// sanitizeForStore strips NUL from text bound for the messages table.
+// Postgres cannot represent it — TEXT rejects the raw byte, JSONB rejects
+// the escaped form — so one NUL fails the whole row insert, which is how a
+// live engagement died when a bash call catted a binary. NUL is valid UTF-8,
+// so the jail's lossy decode passes it through untouched; representability
+// in the store is this layer's problem, not the decoder's.
+func sanitizeForStore(s string) string {
+	if !strings.ContainsRune(s, 0) {
+		return s
+	}
+	return strings.ReplaceAll(s, "\x00", "")
+}
+
+// sanitizeInputForStore applies sanitizeForStore to every string in a tool
+// call's decoded arguments, in place. The tool_calls column is JSON, so the
+// same NUL that kills a content insert kills the assistant row carrying the
+// call — and sanitizing at persist, before dispatch reads the same struct,
+// keeps what ran, what was stored, and what later assemblies replay
+// byte-identical.
+func sanitizeInputForStore(input map[string]any) {
+	for k, v := range input {
+		input[k] = sanitizeValueForStore(v)
+	}
+}
+
+func sanitizeValueForStore(v any) any {
+	switch t := v.(type) {
+	case string:
+		return sanitizeForStore(t)
+	case map[string]any:
+		sanitizeInputForStore(t)
+		return t
+	case []any:
+		for i := range t {
+			t[i] = sanitizeValueForStore(t[i])
+		}
+		return t
+	default:
+		return v
+	}
 }
