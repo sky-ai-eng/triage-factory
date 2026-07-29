@@ -5,10 +5,11 @@ Everything user-facing in Triage Factory speaks three words: `haiku`,
 provider can serve," with the spend controls a multi-tenant deployment
 needs.
 
-Status: **requirements draft — not an accepted design.** The requirements
-in §1 and the constraints in §2 are settled enough to build against. §3 is
-the shape the discussion converged on and is provisional. §4 is what is
-still open.
+Status: **requirements settled — design and ticketing next.** Every open
+question in §4 has been answered (struck through with its resolution
+inline; the reasoning is kept, not deleted). §1 and §2 are stable to build
+against; §3 records the shape the discussion converged on and remains
+provisional until the design pass.
 
 Scope note: multi-mode is where the new machinery lands. **Local mode stays
 SDK-bound** — see §2.6, which is a requirement, not an implementation
@@ -90,8 +91,11 @@ differently, enforced at different times, and fail differently.
     $X" can silently change vendor, which R6 forbids.
 - **R8. Budget cap** — "no more than $Y per period," per provider and
   optionally per model. Enforced at **runtime**; its effect is that work
-  stops. Needs a defined behavior on breach (park vs. fail) and on period
-  rollover (resume vs. stay parked).
+  stops. Breach behavior is settled (Q3): **park** — the workspace and the
+  step's transcript survive via the existing snapshot machinery; a
+  mid-flight blueprint halts entirely at the breach point; **no
+  auto-resume** at period rollover, waking parked work is a human action;
+  and the park names its cause.
 - **R9.** Budget caps must be enforceable **before** the spend, not merely
   observed after. A pre-flight check refuses to start; an in-flight check
   parks. (`spendGuard` in the native loop is the existing hook.)
@@ -102,11 +106,13 @@ differently, enforced at different times, and fail differently.
   one at a time.
 - **R11.** The three system jobs — scorer, project classifier, repo
   profiler — are first-class model consumers. They are org-configurable and
-  go through the same provider machinery. Today they are hardcoded to
-  Haiku; their spend **is** recorded (`system_llm_runs`) and reported in
-  usage as its own `system_overhead` category — what is missing is the
-  rest: they are outside every cap, not org-configurable, and absent from
-  the per-model/provider breakdown R15 requires.
+  go through the same provider machinery. Configuration granularity is
+  settled (Q6): **one knob** — a single org-level "background jobs model"
+  covering all three, chosen by the org admin during setup. Today they are
+  hardcoded to Haiku; their spend **is** recorded (`system_llm_runs`) and
+  reported in usage as its own `system_overhead` category — what is
+  missing is the rest: they are outside every cap, not org-configurable,
+  and absent from the per-model/provider breakdown R15 requires.
 - **R12.** An org admin can restrict which of the org's providers a given
   team may spend against.
 - **R13.** The model picker shows only what the org's credential can
@@ -355,13 +361,16 @@ every vendor instead of needing three integrations, and tests the exact id
 that will be invoked, which sidesteps the Bedrock profile mismatch
 entirely.
 
-Probe requirements: bound the candidate set to the allowlist ∩ `ListModels`;
-persist per `(org, provider, model)` with a TTL and an explicit re-check
-(the `repoprofile.Manager.Trigger(orgID, force)` pattern; `poll_readiness`
-is the precedent for a durable org-scoped readiness table); and
-**distinguish refusal from failure** — a 403 is entitlement and should be
-cached, a 500 or a timeout must not be, or one bad minute permanently hides
-a model.
+Probe requirements (semantics settled by Q4): bound the candidate set to
+the allowlist ∩ `ListModels`; persist per `(org, provider, model)`
+(`poll_readiness` is the precedent for a durable org-scoped readiness
+table); **once green, never re-probe automatically** — one successful
+connection in a row's history satisfies the check permanently, with a
+per-row "test connection" affordance for manual re-verification (no TTL;
+late drop-outs surface at dispatch per R14); and **distinguish refusal
+from failure** — a 403 is entitlement and counts as a red result, a 500
+or a timeout is neither green nor red, or one bad minute would block a
+save on a model that works.
 
 ### 2.5 bifrost already has the provider-shape indirection
 
@@ -555,18 +564,46 @@ Not accepted.
     **save** time, not dispatch time.
   - A pinned step whose model becomes unavailable fails per R14 — loudly,
     naming the cause. It never silently re-resolves.
-- **Q3 — Budget-cap breach behavior.** Park or fail; resume or stay parked
-  at period rollover; and what happens to a blueprint mid-flight.
-- **Q4 — Probe eagerness.** Eager on credential save (costs a little money
-  as a side effect of saving settings, but the picker is always honest)
-  versus lazy on first use (free, worse first-run experience).
+- ~~**Q3 — Budget-cap breach behavior.**~~ **Answered: park, everything,
+  no auto-resume.**
+  - Breach **parks** the engagement. The snapshot machinery already exists;
+    the blueprint's workspace survives, and the step's transcript survives
+    with it. Nothing is thrown away.
+  - **No auto-resume at period rollover.** Waking parked work is a human
+    action. The admin capped spend because spend was the problem; a pile of
+    agents silently springing back to life on the 1st is the opposite of
+    what they asked for.
+  - A blueprint mid-flight **halts entirely at the breach point** — the
+    parked step stays parked and later steps never start.
+  - The park must say why ("parked: org Bedrock budget reached"), or this
+    ships as "agents randomly freeze near month-end."
+- ~~**Q4 — Probe eagerness.**~~ **Answered: eager, sticky, and gated —
+  with explicit comms.**
+  - Probe on credential save, with UI copy that says plainly a tiny paid
+    test call (~2 tokens) is about to run. No silent spend, however small.
+  - **Once green, never re-probed automatically.** A single successful
+    connection in a row's history satisfies the check permanently.
+  - Every model row carries a **"test connection"** affordance for manual
+    re-verification.
+  - **Save is gated**: the settings field cannot be saved until every row
+    has at least one green in history. Pressing save with untested rows
+    pops the confirm dialog and runs the tests.
+  - Accepted limitation, stated deliberately: a historically green model
+    that later loses access is **not** caught eagerly — the alternative is
+    re-testing every model on every save, which is rejected. Late
+    drop-outs surface at dispatch per R14, loudly, naming the cause.
 - ~~**Q5 — Does bifrost report `ModelName` or `ModelID` on responses?**~~
   **Answered** (§2.5): neither. `ModelID` goes on the wire and lands in
   `ExtraFields.ResolvedModelUsed`; the alias name lands in
   `OriginalModelRequested`; `ModelName` populates no response field.
   Pricing joins off TF's own alias table, keyed by the requested alias.
-- **Q6 — Are system-job models org-configurable per job, or one "cheap
-  model" setting?** (R11.)
+- ~~**Q6 — Are system-job models org-configurable per job, or one "cheap
+  model" setting?**~~ **Answered: one knob.** A single org-level
+  "background jobs model" setting covering scorer, classifier, and
+  profiler alike, chosen by the org admin during setup — alongside the
+  R2 default-model choice, making the setup flow's model section exactly
+  two picks. Per-job knobs can be added later if a real need appears;
+  removing them later could not.
 
 ---
 
