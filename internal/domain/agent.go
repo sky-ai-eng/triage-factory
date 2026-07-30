@@ -524,3 +524,43 @@ type Claim struct {
 	NumTurns   *int      `json:"num_turns,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 }
+
+// ExecutorClaim is one engagement projected for the operator fleet console's
+// per-executor sandbox breakdown: the claim's identity and lifetime, its
+// measured sandbox cost, and the driven conversation's terminal state.
+//
+// A separate projection rather than fields on Claim, deliberately. Claim is a
+// wire type an org-scoped surface already serializes (the curator's claim
+// list); the measured cost is operator-only until a pricing model exists, and
+// hanging it off Claim would publish raw compute numbers to customers as a
+// side effect of a fleet feature.
+//
+// Every measurement is a pointer because NULL means "not measured", never
+// "measured zero" — a local-mode claim never had a sandbox, a pre-5.19 kernel
+// has no memory.peak, and a crashed teardown recorded neither. Consumers
+// render a dash, not a zero.
+type ExecutorClaim struct {
+	ID             string
+	OrgID          string
+	ConversationID string
+
+	// ClaimedAt/ReleasedAt bound the engagement. ReleasedAt nil = still live,
+	// which is also the only shape whose sandbox may still be growing.
+	ClaimedAt  time.Time
+	ReleasedAt *time.Time
+	// Outcome is how the engagement ended ("completed" | "failed" |
+	// "cancelled" | "requeued" | "parked" | "reaped"); empty while live.
+	Outcome string
+
+	// PeakMemMB / CPUUsec are the claim's end-state actuals, read from the
+	// jail's cgroup at teardown. These are the billing-grade record; a
+	// sampled series over the same run legitimately reads under them, and the
+	// two are never reconciled numerically.
+	PeakMemMB *int
+	CPUUsec   *int64
+
+	// Status / FailureKind come from the driven conversation (one join) — what
+	// the engagement was ultimately spent on succeeding or failing at.
+	Status      string
+	FailureKind string
+}

@@ -148,3 +148,61 @@ func TestGateHidesWhenUnlicensed(t *testing.T) {
 		t.Fatalf("unlicensed gate must 404 (non-disclosure), got %d", rec.Code)
 	}
 }
+
+func TestParseSandboxLimit(t *testing.T) {
+	at := func(q string) (int, bool) {
+		return parseSandboxLimit(httptest.NewRequest("GET", "/x"+q, nil))
+	}
+	if n, ok := at(""); !ok || n != defaultSandboxLimit {
+		t.Errorf("absent limit = (%d, %v), want (%d, true)", n, ok, defaultSandboxLimit)
+	}
+	if n, ok := at("?limit=10"); !ok || n != 10 {
+		t.Errorf("limit=10 = (%d, %v)", n, ok)
+	}
+	if n, ok := at("?limit=1000"); !ok || n != maxSandboxLimit {
+		t.Errorf("limit=1000 = (%d, %v), want capped to %d", n, ok, maxSandboxLimit)
+	}
+	// Rejected rather than defaulted: a caller bug must surface as a 400, not
+	// as plausible-looking data under a limit they never asked for.
+	for _, q := range []string{"?limit=abc", "?limit=0", "?limit=-1", "?limit=1.5"} {
+		if n, ok := at(q); ok {
+			t.Errorf("%s = (%d, true), want rejected", q, n)
+		}
+	}
+}
+
+func TestSandboxClaimDerivation(t *testing.T) {
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	claimed := now.Add(-5 * time.Minute)
+
+	// Released: the wall clock is claimed → released, not claimed → now.
+	released := claimed.Add(90 * time.Second)
+	got := sandboxClaim(domain.ExecutorClaim{
+		ID: "c1", ClaimedAt: claimed, ReleasedAt: &released,
+		PeakMemMB: ip(1024), Status: "completed",
+	}, now)
+	if got.Live {
+		t.Errorf("released claim reported live: %+v", got)
+	}
+	if got.DurationS != 90 {
+		t.Errorf("DurationS = %v, want 90 (claimed → released)", got.DurationS)
+	}
+	if got.CPUUsec != nil {
+		t.Errorf("unmeasured cpu must stay absent: %+v", got)
+	}
+
+	// Live: the wall clock runs to now, and the row still renders.
+	live := sandboxClaim(domain.ExecutorClaim{ID: "c2", ClaimedAt: claimed}, now)
+	if !live.Live || live.DurationS != 300 {
+		t.Errorf("live claim = (live %v, %v s), want (true, 300)", live.Live, live.DurationS)
+	}
+
+	// Clock skew between two pods can stamp a release before the claim. A
+	// negative duration would poison every rate derived from it, so it floors
+	// at zero rather than propagating.
+	backwards := claimed.Add(-time.Minute)
+	skewed := sandboxClaim(domain.ExecutorClaim{ID: "c3", ClaimedAt: claimed, ReleasedAt: &backwards}, now)
+	if skewed.DurationS != 0 {
+		t.Errorf("skewed release DurationS = %v, want 0", skewed.DurationS)
+	}
+}

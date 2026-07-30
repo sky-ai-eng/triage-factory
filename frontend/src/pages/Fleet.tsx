@@ -1,15 +1,20 @@
-import { useCallback, useEffect, useId, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useId, useMemo, useState } from 'react'
 import { Navigate } from 'react-router'
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { FeatureFleet, useEntitlements } from '../hooks/useEntitlements'
 import { readError } from '../lib/api'
+import { averageCores, coreMinutes, cpuRateSeries, memSeries } from '../lib/sandboxSeries'
+import type { SandboxPoint } from '../lib/sandboxSeries'
 import type {
   FleetInstance,
   FleetInstances,
   FleetOverview,
   FleetBacklog,
+  FleetSandboxClaim,
+  FleetSandboxes,
+  FleetSandboxSeries,
   FleetTimeseries,
 } from '../types'
 
@@ -309,16 +314,26 @@ function aggregateSeries(ts: FleetTimeseries | null): SeriesPoint[] {
     }))
 }
 
+// trace projects one field of the whole-host aggregate onto Trace's {t, v}.
+function trace(series: SeriesPoint[], field: Exclude<keyof SeriesPoint, 't'>): SandboxPoint[] {
+  return series.map((p) => ({ t: p.t, v: p[field] }))
+}
+
+// Trace draws one time-ordered series of {t, v}. Callers project whichever
+// field they want onto `v` rather than naming a key here: recharts types
+// dataKey against its own TypedDataKey, so a generic point type would have to
+// be cast at the chart anyway, and a fixed shape means there is no key to
+// mistype.
 function Trace({
   data,
-  dataKey,
   color,
   fmt,
+  height = 'h-24',
 }: {
-  data: SeriesPoint[]
-  dataKey: keyof SeriesPoint
+  data: SandboxPoint[]
   color: string
   fmt: (v: number) => string
+  height?: string
 }) {
   const gid = useId().replace(/:/g, '')
   if (data.length === 0) {
@@ -329,7 +344,7 @@ function Trace({
     )
   }
   return (
-    <div className="h-24 w-full">
+    <div className={`${height} w-full`} data-testid="trace">
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={data} margin={{ top: 4, right: 2, bottom: 0, left: 2 }}>
           <defs>
@@ -353,7 +368,7 @@ function Trace({
           />
           <Area
             type="monotone"
-            dataKey={dataKey}
+            dataKey="v"
             stroke={color}
             strokeWidth={1.5}
             fill={`url(#${gid})`}
@@ -520,10 +535,14 @@ function MachineCard({
   inst,
   onDrain,
   busy,
+  sandboxesOpen,
+  onToggleSandboxes,
 }: {
   inst: FleetInstance
   onDrain: (id: string, draining: boolean) => void
   busy: boolean
+  sandboxesOpen: boolean
+  onToggleSandboxes: () => void
 }) {
   const isExecutor = inst.role !== 'control'
   const active = inst.active_runs ?? 0
@@ -582,20 +601,252 @@ function MachineCard({
         />
       </div>
 
-      {isExecutor && (
+      <div className="mt-4 flex gap-2">
+        {/* Offered on every instance, not just executors: a control pod
+            expands to an empty table, which is the honest answer to "what did
+            this box run" rather than a missing affordance. */}
         <button
           type="button"
-          disabled={busy}
-          onClick={() => onDrain(inst.id, !inst.draining)}
-          className={`mt-4 w-full rounded-md border py-1.5 font-mono text-[10px] uppercase tracking-[0.15em] transition-colors disabled:opacity-40 ${
-            inst.draining
-              ? 'border-claim/40 text-claim hover:bg-claim/10'
-              : 'border-border-subtle text-text-tertiary hover:border-snooze/50 hover:text-snooze'
+          aria-expanded={sandboxesOpen}
+          aria-label={`sandboxes on ${inst.id}`}
+          onClick={onToggleSandboxes}
+          className={`flex-1 rounded-md border py-1.5 font-mono text-[10px] uppercase tracking-[0.15em] transition-colors ${
+            sandboxesOpen
+              ? 'border-accent/40 text-accent'
+              : 'border-border-subtle text-text-tertiary hover:border-accent/40 hover:text-accent'
           }`}
         >
-          {inst.draining ? 'resume claims' : 'drain'}
+          {sandboxesOpen ? 'hide sandboxes' : 'sandboxes'}
         </button>
+        {isExecutor && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onDrain(inst.id, !inst.draining)}
+            className={`flex-1 rounded-md border py-1.5 font-mono text-[10px] uppercase tracking-[0.15em] transition-colors disabled:opacity-40 ${
+              inst.draining
+                ? 'border-claim/40 text-claim hover:bg-claim/10'
+                : 'border-border-subtle text-text-tertiary hover:border-snooze/50 hover:text-snooze'
+            }`}
+          >
+            {inst.draining ? 'resume claims' : 'drain'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---------- per-sandbox breakdown ----------
+//
+// The operator answer to "which sandboxes are actually eating this box".
+// Whole-host instance_stats cannot answer it: a busy neighbour process is
+// indistinguishable there from a heavy run. These numbers are per-cgroup, read
+// from the claim that paid for them.
+//
+// Collapsed by default and fetched only while open — the components below are
+// unmounted when collapsed, so no request fires for a row nobody expanded.
+
+// Identifiers are DISPLAY-ONLY: this console spans orgs, and an app deep link
+// into another org's run view would not authorize for the operator viewing it.
+// Copyable is the useful affordance until an operator-context run view exists.
+function CopyId({ id, kind }: { id: string; kind: string }) {
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return
+    const handle = window.setTimeout(() => setCopied(false), 1200)
+    return () => window.clearTimeout(handle)
+  }, [copied])
+  return (
+    <button
+      type="button"
+      title={id}
+      aria-label={`copy ${kind} id ${id}`}
+      onClick={() => {
+        // Optional-chained: a non-secure context (or a test DOM) has no
+        // clipboard, and a failed copy must not break the table.
+        void navigator.clipboard?.writeText(id)
+        setCopied(true)
+      }}
+      className="text-text-tertiary transition-colors hover:text-text-secondary"
+    >
+      {copied ? 'copied' : shortId(id)}
+    </button>
+  )
+}
+
+const STATUS_TONE: Record<string, ChipTone> = {
+  completed: 'good',
+  failed: 'problem',
+  task_unsolvable: 'problem',
+  cancelled: 'neutral',
+  running: 'rust',
+  queued: 'attention',
+  open: 'attention',
+}
+
+function SandboxState({ claim }: { claim: FleetSandboxClaim }) {
+  const label = claim.failure_kind
+    ? `${claim.status ?? 'failed'} · ${claim.failure_kind.replace(/_/g, ' ')}`
+    : (claim.status ?? '—')
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <Chip tone={STATUS_TONE[claim.status ?? ''] ?? 'neutral'}>{label}</Chip>
+      {claim.live && <Chip tone="rust">live</Chip>}
+    </span>
+  )
+}
+
+// SandboxSeries is the second expand level: one sandbox's sampled shape. It is
+// fetched only when this component mounts, i.e. only when its row is open.
+function SandboxSeries({ claim }: { claim: FleetSandboxClaim }) {
+  const { data, error } = useFleetFetch<FleetSandboxSeries>(
+    `/api/fleet/claims/${encodeURIComponent(claim.id)}/series`,
+  )
+  const mem = useMemo(() => memSeries(data?.samples ?? []), [data])
+  const cpu = useMemo(() => cpuRateSeries(data?.samples ?? []), [data])
+
+  if (!data) {
+    return (
+      <p className="py-4 text-center font-mono text-[10px] uppercase tracking-wider text-text-tertiary/50">
+        {error ?? 'loading series…'}
+      </p>
+    )
+  }
+  // A real claim with no samples is ordinary, not an error: a sub-minute run
+  // never met a tick, and history predating the sampler never will.
+  if (data.samples.length === 0) {
+    return (
+      <p className="py-4 text-center font-mono text-[10px] uppercase tracking-wider text-text-tertiary/50">
+        no samples for this sandbox
+      </p>
+    )
+  }
+  return (
+    <div className="space-y-4 py-2">
+      <div className="grid grid-cols-1 gap-x-8 gap-y-4 md:grid-cols-2">
+        <Instrument label="Memory · sampled">
+          <Trace data={mem} color="var(--color-claim)" fmt={(v) => fmtMem(v)} height="h-20" />
+        </Instrument>
+        <Instrument label="CPU · derived from cumulative">
+          <Trace
+            data={cpu}
+            color="var(--color-accent)"
+            fmt={(v) => `${v.toFixed(2)} cores`}
+            height="h-20"
+          />
+        </Instrument>
+      </div>
+      {/* The two numbers disagree by design and must not be reconciled: the
+          sampler misses sub-minute spikes the kernel high-watermark catches,
+          so the peak column legitimately sits above the chart. */}
+      <p className="font-mono text-[9px] leading-relaxed text-text-tertiary/60">
+        chart is the sampled shape ({data.samples.length} samples). the peak and cpu columns are the
+        teardown snapshot — kernel truth, and higher than the chart whenever a spike fell between
+        ticks.
+      </p>
+    </div>
+  )
+}
+
+function SandboxRow({ claim }: { claim: FleetSandboxClaim }) {
+  const [open, setOpen] = useState(false)
+  const cores = claim.cpu_usec != null ? averageCores(claim.cpu_usec, claim.duration_seconds) : null
+  return (
+    <tbody className="border-t border-border-subtle/40">
+      <tr className="hover:bg-surface-raised/30">
+        <td className="py-1.5 pr-2 align-top">
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-label={`usage series for sandbox ${shortId(claim.id)}`}
+            onClick={() => setOpen((o) => !o)}
+            className="text-text-tertiary transition-colors hover:text-accent"
+          >
+            {open ? '▾' : '▸'}
+          </button>
+        </td>
+        <td className="py-1.5 pr-3 align-top">
+          <CopyId id={claim.conversation_id} kind="run" />
+        </td>
+        <td className="py-1.5 pr-3 align-top">
+          <CopyId id={claim.org_id} kind="org" />
+        </td>
+        <td className="py-1.5 pr-3 align-top">
+          <SandboxState claim={claim} />
+        </td>
+        <td className="py-1.5 pr-3 text-right align-top text-text-secondary">
+          {fmtDuration(claim.duration_seconds)}
+        </td>
+        <td className="py-1.5 pr-3 text-right align-top text-text-secondary">
+          {fmtMem(claim.peak_mem_mb)}
+        </td>
+        <td className="py-1.5 pr-3 text-right align-top text-text-secondary">
+          {claim.cpu_usec != null ? `${coreMinutes(claim.cpu_usec).toFixed(2)}` : '—'}
+        </td>
+        <td className="py-1.5 text-right align-top text-text-secondary">
+          {cores != null ? cores.toFixed(2) : '—'}
+        </td>
+      </tr>
+      {open && (
+        <tr>
+          <td colSpan={8} className="pb-3 pl-6 pr-2">
+            <SandboxSeries claim={claim} />
+          </td>
+        </tr>
       )}
+    </tbody>
+  )
+}
+
+function SandboxBreakdown({ instanceId }: { instanceId: string }) {
+  const { data, error } = useFleetFetch<FleetSandboxes>(
+    `/api/fleet/instances/${encodeURIComponent(instanceId)}/sandboxes`,
+  )
+  return (
+    <div className="rounded-lg border border-border-subtle/50 bg-surface-raised/20 p-4">
+      <Instrument
+        label={`Sandboxes · ${shortId(instanceId)}`}
+        aside={
+          data ? (
+            <span className="font-mono text-[9px] tabular-nums text-text-tertiary/60">
+              {data.sandboxes.length} most recent
+            </span>
+          ) : undefined
+        }
+      >
+        {!data ? (
+          <p className="py-4 text-center font-mono text-[10px] uppercase tracking-wider text-text-tertiary/50">
+            {error ?? 'loading sandboxes…'}
+          </p>
+        ) : data.sandboxes.length === 0 ? (
+          // A control pod never claims, and an executor that hasn't yet is a
+          // normal state — an empty table, never an error.
+          <p className="py-4 text-center font-mono text-[10px] uppercase tracking-wider text-text-tertiary/50">
+            no sandboxes on this instance
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse text-left font-mono text-[10px] tabular-nums">
+              <thead>
+                <tr className="text-[8px] uppercase tracking-wider text-text-tertiary/60">
+                  <th className="w-4 py-1 pr-2 font-normal" />
+                  <th className="py-1 pr-3 font-normal">run</th>
+                  <th className="py-1 pr-3 font-normal">org</th>
+                  <th className="py-1 pr-3 font-normal">state</th>
+                  <th className="py-1 pr-3 text-right font-normal">duration</th>
+                  <th className="py-1 pr-3 text-right font-normal">peak mem</th>
+                  <th className="py-1 pr-3 text-right font-normal">core-min</th>
+                  <th className="py-1 text-right font-normal">avg cores</th>
+                </tr>
+              </thead>
+              {data.sandboxes.map((s) => (
+                <SandboxRow key={s.id} claim={s} />
+              ))}
+            </table>
+          </div>
+        )}
+      </Instrument>
     </div>
   )
 }
@@ -674,6 +925,17 @@ export default function Fleet() {
   const [drainBusy, setDrainBusy] = useState<string | null>(null)
   // Bump to force a refetch after a drain toggle (append to the URL as a nonce).
   const [rev, setRev] = useState(0)
+  // Which machines have their sandbox breakdown open. A set rather than a
+  // single id so opening one box doesn't silently collapse another an operator
+  // is mid-comparison with.
+  const [openSandboxes, setOpenSandboxes] = useState<ReadonlySet<string>>(() => new Set())
+  const toggleSandboxes = useCallback((id: string) => {
+    setOpenSandboxes((prev) => {
+      const next = new Set(prev)
+      if (!next.delete(id)) next.add(id)
+      return next
+    })
+  }, [])
 
   const gated = entLoaded && !(operator && has(FeatureFleet))
 
@@ -755,12 +1017,24 @@ export default function Fleet() {
               ) : (
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
                   {instances.data.instances.map((inst) => (
-                    <MachineCard
-                      key={inst.id}
-                      inst={inst}
-                      onDrain={onDrain}
-                      busy={drainBusy === inst.id}
-                    />
+                    <Fragment key={inst.id}>
+                      <MachineCard
+                        inst={inst}
+                        onDrain={onDrain}
+                        busy={drainBusy === inst.id}
+                        sandboxesOpen={openSandboxes.has(inst.id)}
+                        onToggleSandboxes={() => toggleSandboxes(inst.id)}
+                      />
+                      {/* The breakdown spans the grid so a wide table isn't
+                          crushed into a third of the row; it is only mounted
+                          while open, which is what keeps a collapsed row from
+                          fetching anything. */}
+                      {openSandboxes.has(inst.id) && (
+                        <div className="md:col-span-2 lg:col-span-3">
+                          <SandboxBreakdown instanceId={inst.id} />
+                        </div>
+                      )}
+                    </Fragment>
                   ))}
                 </div>
               )
@@ -773,32 +1047,28 @@ export default function Fleet() {
             <div className="grid grid-cols-1 gap-x-10 gap-y-8 md:grid-cols-2">
               <Instrument label="Active runs">
                 <Trace
-                  data={series}
-                  dataKey="active"
+                  data={trace(series, 'active')}
                   color="var(--color-delegate)"
                   fmt={(v) => `${Math.round(v)} runs`}
                 />
               </Instrument>
               <Instrument label="Queue depth">
                 <Trace
-                  data={series}
-                  dataKey="queued"
+                  data={trace(series, 'queued')}
                   color="var(--color-snooze)"
                   fmt={(v) => `${Math.round(v)} waiting`}
                 />
               </Instrument>
               <Instrument label="CPU (avg)">
                 <Trace
-                  data={series}
-                  dataKey="cpu"
+                  data={trace(series, 'cpu')}
                   color="var(--color-accent)"
                   fmt={(v) => `${Math.round(v)}%`}
                 />
               </Instrument>
               <Instrument label="Memory free (total)">
                 <Trace
-                  data={series}
-                  dataKey="memGB"
+                  data={trace(series, 'memGB')}
                   color="var(--color-claim)"
                   fmt={(v) => `${v.toFixed(1)}GB`}
                 />

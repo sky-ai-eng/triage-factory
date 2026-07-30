@@ -369,6 +369,216 @@ func (h *handler) handleDrain(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"id": id, "draining": req.Draining})
 }
 
+// --- GET /api/fleet/instances/{id}/sandboxes ---
+//
+// The per-executor sandbox breakdown: which runs actually occupied this box,
+// and what each one cost. instance_stats samples the WHOLE HOST, so it
+// structurally cannot answer that — a busy neighbour process is
+// indistinguishable from a heavy run there. These numbers are per-cgroup.
+//
+// Cross-org by construction: an executor runs whatever the fleet placed on it,
+// so the claims listed here span orgs. That is the read-scoping standing rule's
+// operator-surface arm — the deployment-operator gate (gate.go) is the
+// authorization, and no org can be named to scope to. Identifiers render
+// display-only for the same reason: an app deep link into another org's run
+// view would not authorize for this viewer.
+
+const (
+	defaultSandboxLimit = 25
+	maxSandboxLimit     = 100
+)
+
+type sandboxClaimDTO struct {
+	ID             string     `json:"id"`
+	ConversationID string     `json:"conversation_id"`
+	OrgID          string     `json:"org_id"`
+	ClaimedAt      time.Time  `json:"claimed_at"`
+	ReleasedAt     *time.Time `json:"released_at,omitempty"`
+	// Live marks an unreleased claim — still holding a slot, and whatever
+	// series it has is still growing.
+	Live bool `json:"live"`
+	// DurationS is the engagement's wall clock: claimed → released, or
+	// claimed → now while live. Deliberately NOT the claim's runtime-reported
+	// duration_ms, which times the agent invocation inside a wider engagement
+	// (fetch, clone, sidecar bring-up) and would therefore be a denominator
+	// smaller than the interval the CPU counter actually accumulated over —
+	// inflating any derived average past what the box saw.
+	DurationS float64 `json:"duration_seconds"`
+	// PeakMemMB / CPUUsec are the teardown snapshot — the truth half of the
+	// honest-display contract. Absent means NOT MEASURED (an unsandboxed
+	// local claim, a pre-5.19 kernel with no memory.peak, a crashed
+	// teardown), never measured-zero; render a dash, not a 0.
+	PeakMemMB *int   `json:"peak_mem_mb,omitempty"`
+	CPUUsec   *int64 `json:"cpu_usec,omitempty"`
+	// Status / FailureKind / Outcome are what the engagement was spent on.
+	Status      string `json:"status,omitempty"`
+	FailureKind string `json:"failure_kind,omitempty"`
+	Outcome     string `json:"outcome,omitempty"`
+}
+
+type sandboxesDTO struct {
+	GeneratedAt time.Time         `json:"generated_at"`
+	InstanceID  string            `json:"instance_id"`
+	Limit       int               `json:"limit"`
+	Sandboxes   []sandboxClaimDTO `json:"sandboxes"`
+}
+
+// parseSandboxLimit reads ?limit= — default 25, capped at 100, and REJECTED
+// (not silently defaulted) when it is unparseable or below 1. Deliberately
+// stricter than parseWindow's clamp above: an out-of-range window is a
+// reasonable "show me as much as you can", whereas limit=abc is a caller bug
+// that a silent default would hide behind plausible-looking data.
+func parseSandboxLimit(r *http.Request) (int, bool) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return defaultSandboxLimit, true
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return 0, false
+	}
+	if n > maxSandboxLimit {
+		n = maxSandboxLimit
+	}
+	return n, true
+}
+
+func (h *handler) handleInstanceSandboxes(w http.ResponseWriter, r *http.Request) {
+	if h.gate(w, r) == nil {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpx.BadRequest(w, "instance id is required")
+		return
+	}
+	limit, ok := parseSandboxLimit(r)
+	if !ok {
+		httpx.BadRequest(w, "limit must be a positive integer")
+		return
+	}
+	ctx := r.Context()
+	now := time.Now().UTC()
+
+	// Resolve the instance first so an unknown id 404s with the same shape as
+	// handleDrain, rather than reading as a live executor that happens to be
+	// idle — those are different operator situations.
+	inst, err := h.stores.Instances.Get(ctx, id)
+	if err != nil {
+		httpx.InternalError(w, "fleet-sandboxes-instance", err)
+		return
+	}
+	if inst == nil {
+		httpx.NotFound(w, "instance")
+		return
+	}
+
+	claims, err := h.stores.RunQueue.RecentClaimsForExecutorSystem(ctx, id, limit)
+	if err != nil {
+		httpx.InternalError(w, "fleet-sandboxes", err)
+		return
+	}
+	out := make([]sandboxClaimDTO, 0, len(claims))
+	for _, c := range claims {
+		out = append(out, sandboxClaim(c, now))
+	}
+	httpx.WriteJSON(w, http.StatusOK, sandboxesDTO{
+		GeneratedAt: now, InstanceID: id, Limit: limit, Sandboxes: out,
+	})
+}
+
+func sandboxClaim(c domain.ExecutorClaim, now time.Time) sandboxClaimDTO {
+	d := sandboxClaimDTO{
+		ID: c.ID, ConversationID: c.ConversationID, OrgID: c.OrgID,
+		ClaimedAt: c.ClaimedAt, ReleasedAt: c.ReleasedAt, Live: c.ReleasedAt == nil,
+		PeakMemMB: c.PeakMemMB, CPUUsec: c.CPUUsec,
+		Status: c.Status, FailureKind: c.FailureKind, Outcome: c.Outcome,
+	}
+	end := now
+	if c.ReleasedAt != nil {
+		end = *c.ReleasedAt
+	}
+	// Clamp at zero: a released_at that precedes claimed_at can only come from
+	// clock skew between two pods, and a negative duration would poison every
+	// rate derived from it.
+	if s := end.Sub(c.ClaimedAt).Seconds(); s > 0 {
+		d.DurationS = s
+	}
+	return d
+}
+
+// --- GET /api/fleet/claims/{id}/series ---
+//
+// One sandbox's in-run resource series. CPU is served CUMULATIVE, exactly as
+// stored: the consumer differences consecutive samples into a rate, so a
+// dropped tick self-heals into a wider-but-correct interval instead of leaving
+// a gap that reads as an idle sandbox.
+//
+// The series and the claim's teardown snapshot disagree slightly BY DESIGN —
+// a periodic sampler misses the sub-minute spikes the kernel's high-watermark
+// catches, so a peak_mem_mb above the series' highest point is correct, not a
+// bug. The series is shape; the snapshot is truth. They are never reconciled
+// numerically, here or in the UI.
+
+type sandboxSampleDTO struct {
+	At           time.Time `json:"at"`
+	MemCurrentMB *int      `json:"mem_current_mb,omitempty"`
+	CPUUsecCum   *int64    `json:"cpu_usec_cum,omitempty"`
+}
+
+type sandboxSeriesDTO struct {
+	GeneratedAt time.Time          `json:"generated_at"`
+	ClaimID     string             `json:"claim_id"`
+	Samples     []sandboxSampleDTO `json:"samples"`
+}
+
+func (h *handler) handleClaimSeries(w http.ResponseWriter, r *http.Request) {
+	if h.gate(w, r) == nil {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpx.BadRequest(w, "claim id is required")
+		return
+	}
+	ctx := r.Context()
+	now := time.Now().UTC()
+
+	// The claim lookup is what separates "no such claim" (404) from "a real
+	// claim nobody ever sampled" (200 with an empty series — an ordinary
+	// sub-minute run, or one that predates the sampler). Without it every
+	// unsampled run would read as a missing one.
+	claim, err := h.stores.RunQueue.ClaimByIDSystem(ctx, id)
+	if err != nil {
+		httpx.InternalError(w, "fleet-series-claim", err)
+		return
+	}
+	if claim == nil {
+		httpx.NotFound(w, "claim")
+		return
+	}
+
+	out := []sandboxSampleDTO{}
+	// Tolerated nil for the same reason latestSamples tolerates it: the store
+	// bundle a community/limited build wires may omit the telemetry stores,
+	// and a chartless row beats a 500 on a garnish.
+	if h.stores.SandboxStats != nil {
+		samples, serr := h.stores.SandboxStats.ListForClaim(ctx, id)
+		if serr != nil {
+			httpx.InternalError(w, "fleet-series", serr)
+			return
+		}
+		for _, s := range samples {
+			out = append(out, sandboxSampleDTO{
+				At: s.At, MemCurrentMB: s.MemCurrentMB, CPUUsecCum: s.CPUUsecCum,
+			})
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, sandboxSeriesDTO{
+		GeneratedAt: now, ClaimID: id, Samples: out,
+	})
+}
+
 // --- GET /api/fleet/timeseries ---
 
 type sampleDTO struct {
