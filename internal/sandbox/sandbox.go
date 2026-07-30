@@ -202,6 +202,15 @@ type Sandbox struct {
 	// re-parsing it out of Subnet or HostIP.
 	SubnetIdx uint8
 
+	// ContainerID is the runsc container id Wrap minted for this launch —
+	// unique per live Wrap, and the name of the run's cgroup under tf-runs/.
+	// Exposed so a caller can OBSERVE the live jail (SampleRunCgroup) without
+	// re-deriving the id from RunID + SubnetIdx and silently drifting from
+	// whatever Wrap actually passed the broker. Observation only: the group's
+	// lifecycle and limits stay the cap-broker's monopoly. Empty on non-Linux,
+	// where Wrap launches nothing.
+	ContainerID string
+
 	// teardown holds the platform-specific cleanup state. On Linux
 	// it's a *teardownState (defined in sandbox_linux.go); on
 	// non-Linux it's always nil because Wrap returns early with
@@ -210,6 +219,29 @@ type Sandbox struct {
 	// non-Linux build. The unused-on-non-Linux lint warning is
 	// expected — only the Linux Close() reads this field.
 	teardown any //nolint:unused // used by sandbox_linux.go's Close
+}
+
+// RunActuals is what one sandboxed run actually consumed, read from its
+// jail's cgroup at exit. Kernel truth for the whole sandbox tree — the
+// gVisor sentry and gofer as well as everything the agent allocates through
+// the sentry — so the CPU figure deliberately includes systrap overhead:
+// this is TF's cost view of a run, not a quantity anyone is billed for.
+// Whole-host sampling (instance_stats) cannot substitute, because a
+// concurrent workload on the same box lands in its numbers and not in
+// these.
+//
+// Both fields are pointers so "not measured" stays distinguishable from any
+// measured value, a measured zero included. Absent means the kernel didn't
+// offer the number — memory.peak needs ≥ 5.19, and a teardown race can lose
+// either file — and the recorded actual then stays NULL rather than carrying
+// an understated figure that would read as real.
+type RunActuals struct {
+	// PeakMemMB is the run's high-water memory use in MiB (memory.peak),
+	// rounded up. nil when unmeasured.
+	PeakMemMB *int
+	// CPUUsec is cumulative CPU time in microseconds (cpu.stat's
+	// usage_usec), user + system across the whole jail. nil when unmeasured.
+	CPUUsec *int64
 }
 
 // LaunchedRun is a started (or startable) agent-runtime process — the
@@ -251,6 +283,11 @@ type LaunchedRun interface {
 	// OOM kill. Valid only after Wait (in-process it is read before the
 	// cgroup is torn down; brokered the broker reports it with the exit).
 	OOMKilled() bool
+
+	// Actuals reports what the run actually cost, measured at its jail's
+	// cgroup. Valid only after Wait — the read has to happen before the
+	// cgroup is removed, so it rides the same exit path OOMKilled does.
+	Actuals() RunActuals
 
 	// Pid is the runtime (runsc parent) process id, for observability such
 	// as walking the sandbox process tree. In-process it is the local

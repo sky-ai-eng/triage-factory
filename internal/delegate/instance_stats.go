@@ -66,6 +66,11 @@ func (s *Spawner) TakeSpawnP50MS() (int, bool) {
 // executor-only fields (active/queued/claims/spawn) stay NULL where
 // reportCapacity is off. Nil store, empty identity, or a cancelled ctx make it
 // a logged no-op / clean return, same discipline as RunInstanceHeartbeat.
+//
+// The per-sandbox resource series rides this same tick and the same reap (see
+// sandbox_stats.go) rather than running a loop of its own — one cadence and one
+// retention policy for the whole telemetry family. On a pod with no live jails
+// that extension costs nothing: no reads, no rows.
 func (s *Spawner) RunInstanceStatSampler(ctx context.Context, interval, retention time.Duration) {
 	if s.instanceStats == nil {
 		dispatchLog.Warn("instance stat sampler not started: no InstanceStatStore wired")
@@ -97,14 +102,22 @@ func (s *Spawner) RunInstanceStatSampler(ctx context.Context, interval, retentio
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// The per-sandbox series first: it is a couple of file reads per
+			// live jail, while the instance sample blocks for its CPU window,
+			// so sampling it first keeps the series' timestamps on the tick.
+			// The two writes are independent — either can fail without
+			// costing the other its sample.
+			s.sampleSandboxStatsOnce(ctx)
 			lastOOM = s.sampleInstanceStatsOnce(ctx, id, lastOOM)
 		case <-reap.C:
-			n, err := s.instanceStats.Reap(ctx, time.Now().Add(-retention))
+			cutoff := time.Now().Add(-retention)
+			n, err := s.instanceStats.Reap(ctx, cutoff)
 			if err != nil {
 				dispatchLog.Warn("instance stat reap failed", "error", err)
 			} else if n > 0 {
 				dispatchLog.Debug("instance stat reap", "deleted", n)
 			}
+			s.reapSandboxStats(ctx, cutoff)
 		}
 	}
 }

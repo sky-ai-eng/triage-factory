@@ -88,6 +88,11 @@ func TestLaunchSupervised_SocketPassthrough(t *testing.T) {
 	if oom {
 		t.Error("OOMKilled true with no memory limit configured")
 	}
+	// No memory limit → no per-run cgroup → nothing to measure. Absent, not
+	// zeroes: a run whose cost was never observed must not record one.
+	if actuals := sr.Actuals(); actuals.PeakMemMB != nil || actuals.CPUUsec != nil {
+		t.Errorf("actuals = %+v with no cgroup, want both absent", actuals)
+	}
 }
 
 // TestLaunchSupervised_Kill proves the broker can terminate a supervised

@@ -494,6 +494,11 @@ var orgScopedTables = []string{
 	// across tests sharing this container (the exact cross-subtest bleed the
 	// instance_stat/operator conformance suites hit otherwise).
 	"instance_stats", "operators",
+	// sandbox_stats: same posture again — the per-sandbox resource series is
+	// keyed on a bare claim_id uuid with deliberately no FK to claims, so
+	// CASCADE never reaches it and Reset would otherwise leak samples across
+	// tests sharing this container.
+	"sandbox_stats",
 	// users last — most other tables FK into it.
 	"users",
 	// NOT INCLUDED explicitly: events_catalog — it is a read-only system

@@ -88,17 +88,20 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	}
 
 	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
-		RunID:            runID,
-		MemoryNamespace:  namespace,
-		Worktree:         claudeCwd,
-		SDKDir:           paths.SDKDir(),
-		ExtraEnv:         s.nativeAgentEnv(ctx, orgID, runID, namespace, cfg, triggerType, creatorUserID),
-		PrebuiltNetwork:  cfg.execSandbox.runNetwork(),
-		PrebuiltProxyEnv: cfg.execSandbox.proxyEnv(),
-		AgentHostSocket:  agenthost.SocketMountFor(runID),
-		GHChannel:        cfg.execSandbox.ghChannel(runID),
-		SkillsSourcePath: cfg.skillsSourcePath,
-		MemorySourcePath: cfg.memorySourcePath,
+		RunID:                runID,
+		MemoryNamespace:      namespace,
+		Worktree:             claudeCwd,
+		SDKDir:               paths.SDKDir(),
+		ExtraEnv:             s.nativeAgentEnv(ctx, orgID, runID, namespace, cfg, triggerType, creatorUserID),
+		PrebuiltNetwork:      cfg.execSandbox.runNetwork(),
+		PrebuiltProxyEnv:     cfg.execSandbox.proxyEnv(),
+		AgentHostSocket:      agenthost.SocketMountFor(runID),
+		GHChannel:            cfg.execSandbox.ghChannel(runID),
+		SkillsSourcePath:     cfg.skillsSourcePath,
+		MemorySourcePath:     cfg.memorySourcePath,
+		OrgID:                orgID,
+		ClaimID:              cfg.claimID,
+		RecordSandboxActuals: s.recordSandboxActuals,
 	})
 	if err != nil {
 		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "launch tool host: "+err.Error(), domain.RunFailureUnclassified)

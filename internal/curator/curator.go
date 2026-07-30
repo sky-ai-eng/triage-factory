@@ -495,6 +495,15 @@ func (c *Curator) getSecrets() agentproc.SecretsReader {
 	return c.secrets
 }
 
+// recordSandboxActuals is the RunOptions.RecordSandboxActuals recorder for a
+// curator turn — the same write the delegate spawner does, since a turn is
+// an executor engagement with its own claim. agentproc calls it at teardown
+// on a detached context and swallows the error, so a lost stamp costs this
+// turn's accounting and nothing else.
+func (c *Curator) recordSandboxActuals(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error {
+	return c.stores.Conversations.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, actuals.PeakMemMB, actuals.CPUUsec)
+}
+
 // queueItem carries everything the per-project goroutine needs to
 // dispatch a turn under the requesting user's identity. orgID +
 // creatorUserID are captured at enqueue time (SendMessage's handler

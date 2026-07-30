@@ -164,10 +164,10 @@ func AgentVisibleBinary(hostBin string) string {
 // be trusted as the answer. Read it by exact match against
 // SandboxMarkerEnvValue; anything else means "not in a jail".
 //
-// cmd/exec/agenthost is the reader: with the marker set, an absent exec-verb
-// socket is an outage rather than a signal that this is the local-mode CLI,
-// and AutoDetect fails closed. Non-credential by construction, so it belongs
-// in the Property B-safe base set. The direct (unsandboxed) path strips any
+// main.go's boot-identity resolution is the reader: with the marker set, a CLI
+// invocation is the jailed CLI — a pure RPC client that opens no database and
+// fails closed when the exec-verb socket is absent. Non-credential by
+// construction, so it belongs in the Property B-safe base set. The direct (unsandboxed) path strips any
 // inherited copy — see newDirectCommand — so the marker can only ever mean
 // what the assembler meant by it.
 const (

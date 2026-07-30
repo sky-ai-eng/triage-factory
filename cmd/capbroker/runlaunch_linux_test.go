@@ -22,9 +22,17 @@ import (
 // real gVisor host. It wires the passed-through socket as the stand-in's
 // stdin+stdout, starts it, and closes its own fd copy — exactly the
 // no-read/close-after-Start property the real launcher has.
-type stubRuntime struct{ cmd *exec.Cmd }
+// It also stands in for the cgroup read the real launcher does at exit:
+// actuals is whatever the test wants Wait to report back through the
+// WaitRun result, so the wire path for the measured actuals is exercised
+// without a real cgroup (which needs CAP_SYS_ADMIN and a live jail).
+type stubRuntime struct {
+	cmd     *exec.Cmd
+	actuals sandbox.RunActuals
+}
 
-func (s *stubRuntime) Wait() (bool, error) { return false, s.cmd.Wait() }
+func (s *stubRuntime) Wait() (bool, error)         { return false, s.cmd.Wait() }
+func (s *stubRuntime) Actuals() sandbox.RunActuals { return s.actuals }
 func (s *stubRuntime) Kill() error {
 	if s.cmd.Process == nil {
 		return nil
@@ -40,8 +48,15 @@ func (s *stubRuntime) Kill() error {
 // socket-passthrough wiring are exercised.
 func withStubRuntime(t *testing.T, mkCmd func(ctx context.Context) *exec.Cmd) {
 	t.Helper()
+	withStubRuntimeActuals(t, mkCmd, sandbox.RunActuals{})
+}
+
+// withStubRuntimeActuals is withStubRuntime with the exit-time cgroup read
+// scripted, for the tests that follow the measured actuals across the RPC.
+func withStubRuntimeActuals(t *testing.T, mkCmd func(ctx context.Context) *exec.Cmd, actuals sandbox.RunActuals) {
+	t.Helper()
 	orig := launchRuntime
-	launchRuntime = func(ctx context.Context, _, _ string, _ int, stdio *os.File, stderr io.Writer) (supervisedRuntime, error) {
+	launchRuntime = func(ctx context.Context, _, _ string, _ int, stdio *os.File, stderr io.Writer) (jailedRuntime, error) {
 		cmd := mkCmd(ctx)
 		cmd.Stdin = stdio
 		cmd.Stdout = stdio
@@ -51,7 +66,7 @@ func withStubRuntime(t *testing.T, mkCmd func(ctx context.Context) *exec.Cmd) {
 		if err != nil {
 			return nil, err
 		}
-		return &stubRuntime{cmd: cmd}, nil
+		return &stubRuntime{cmd: cmd, actuals: actuals}, nil
 	}
 	t.Cleanup(func() { launchRuntime = orig })
 	withStubPrepareBundle(t)
@@ -144,6 +159,128 @@ func TestBrokerRun_RoundTripAndWait(t *testing.T) {
 	}
 	if run.OOMKilled() {
 		t.Error("OOMKilled true with no memory limit configured")
+	}
+	// No cgroup behind this stand-in → nothing measured. Absent, not zeroes:
+	// the claim must record NULL rather than a fabricated cost.
+	if a := run.Actuals(); a.PeakMemMB != nil || a.CPUUsec != nil {
+		t.Errorf("Actuals = %+v with no cgroup, want both absent", a)
+	}
+}
+
+// TestBrokerRun_ActualsCrossTheWire pins that what the broker read off the
+// run's cgroup at exit reaches the orchestrator through the WaitRun result —
+// the whole point of extending that result rather than having the
+// orchestrator sample /sys/fs/cgroup itself.
+func TestBrokerRun_ActualsCrossTheWire(t *testing.T) {
+	peak, cpu := 812, int64(4_250_000)
+	withStubRuntimeActuals(t,
+		func(ctx context.Context) *exec.Cmd { return exec.CommandContext(ctx, "cat") },
+		sandbox.RunActuals{PeakMemMB: &peak, CPUUsec: &cpu})
+	withTempStdioSocketDir(t)
+	client := serveTestBroker(t, &fakeOps{})
+
+	run, err := client.LaunchRun(context.Background(), validLaunchParams("c-actuals"))
+	if err != nil {
+		t.Fatalf("LaunchRun: %v", err)
+	}
+	defer run.Close()
+	if err := run.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := run.Stdin().Close(); err != nil {
+		t.Fatalf("close stdin: %v", err)
+	}
+	if err := run.Wait(); err != nil {
+		t.Errorf("Wait: %v", err)
+	}
+
+	got := run.Actuals()
+	if got.PeakMemMB == nil || *got.PeakMemMB != peak {
+		t.Errorf("PeakMemMB = %v, want %d", got.PeakMemMB, peak)
+	}
+	if got.CPUUsec == nil || *got.CPUUsec != cpu {
+		t.Errorf("CPUUsec = %v, want %d", got.CPUUsec, cpu)
+	}
+}
+
+// TestBrokerRun_ActualsOmitAbsentPeak pins the pre-5.19-kernel shape end to
+// end: cpu time crosses, the peak stays absent rather than arriving as a
+// zero that would record as a measured 0 MB peak.
+func TestBrokerRun_ActualsOmitAbsentPeak(t *testing.T) {
+	cpu := int64(9_001)
+	withStubRuntimeActuals(t,
+		func(ctx context.Context) *exec.Cmd { return exec.CommandContext(ctx, "cat") },
+		sandbox.RunActuals{CPUUsec: &cpu})
+	withTempStdioSocketDir(t)
+	client := serveTestBroker(t, &fakeOps{})
+
+	run, err := client.LaunchRun(context.Background(), validLaunchParams("c-nopeak"))
+	if err != nil {
+		t.Fatalf("LaunchRun: %v", err)
+	}
+	defer run.Close()
+	if err := run.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := run.Stdin().Close(); err != nil {
+		t.Fatalf("close stdin: %v", err)
+	}
+	if err := run.Wait(); err != nil {
+		t.Errorf("Wait: %v", err)
+	}
+
+	got := run.Actuals()
+	if got.PeakMemMB != nil {
+		t.Errorf("PeakMemMB = %d, want absent (no memory.peak on the host)", *got.PeakMemMB)
+	}
+	if got.CPUUsec == nil || *got.CPUUsec != cpu {
+		t.Errorf("CPUUsec = %v, want %d", got.CPUUsec, cpu)
+	}
+}
+
+// TestBrokerRun_ActualsCapturedOnKill pins that a killed run still reports
+// its cost: KillRun only signals, so the supervising goroutine's Wait is
+// still the reader, and it runs before the cgroup is removed. A cancelled
+// run consumed real memory and CPU, so its claim must carry them.
+func TestBrokerRun_ActualsCapturedOnKill(t *testing.T) {
+	peak, cpu := 64, int64(1_500)
+	withStubRuntimeActuals(t,
+		func(ctx context.Context) *exec.Cmd { return exec.CommandContext(ctx, "sleep", "60") },
+		sandbox.RunActuals{PeakMemMB: &peak, CPUUsec: &cpu})
+	withTempStdioSocketDir(t)
+	client := serveTestBroker(t, &fakeOps{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	run, err := client.LaunchRun(ctx, validLaunchParams("c-killactuals"))
+	if err != nil {
+		t.Fatalf("LaunchRun: %v", err)
+	}
+	defer run.Close()
+	if err := run.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Cancel → the watcher issues KillRun → the child dies → Wait reports the
+	// kill exit AND the actuals captured on the way out.
+	cancel()
+	done := make(chan error, 1)
+	go func() { done <- run.Wait() }()
+	select {
+	case werr := <-done:
+		if werr == nil {
+			t.Error("Wait returned nil after ctx-cancel kill; want a non-nil exit")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait did not return after ctx-cancel kill")
+	}
+
+	got := run.Actuals()
+	if got.PeakMemMB == nil || *got.PeakMemMB != peak {
+		t.Errorf("killed run PeakMemMB = %v, want %d", got.PeakMemMB, peak)
+	}
+	if got.CPUUsec == nil || *got.CPUUsec != cpu {
+		t.Errorf("killed run CPUUsec = %v, want %d", got.CPUUsec, cpu)
 	}
 }
 
@@ -337,7 +474,7 @@ func TestBrokerRun_InFlightCapQueues(t *testing.T) {
 // "the broker owns the command" true.
 func TestBrokerRun_SDKDirOverriddenByBroker(t *testing.T) {
 	origRT := launchRuntime
-	launchRuntime = func(ctx context.Context, _, _ string, _ int, stdio *os.File, stderr io.Writer) (supervisedRuntime, error) {
+	launchRuntime = func(ctx context.Context, _, _ string, _ int, stdio *os.File, stderr io.Writer) (jailedRuntime, error) {
 		cmd := exec.CommandContext(ctx, "cat")
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = stdio, stdio, stderr
 		err := cmd.Start()

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // RunQueueCredentialsFactory is what a per-backend test file hands to
@@ -54,7 +55,7 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		pubKey     = "dGVzdC1zaWRlY2FyLXB1YmtleQ=="
 	)
 
-	claim := func(t *testing.T, store db.RunQueueStore, runID string) {
+	claim := func(t *testing.T, store db.RunQueueStore, runID string) *domain.Conversation {
 		t.Helper()
 		got, err := store.ClaimNextRun(ctx, executorID, bootEpoch, db.ClaimPlacement{})
 		if err != nil {
@@ -63,7 +64,33 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		if got == nil || got.ID != runID {
 			t.Fatalf("ClaimNextRun = %+v, want run %s", got, runID)
 		}
+		return got
 	}
+
+	t.Run("ClaimNextRun_returns_the_minted_claim_id", func(t *testing.T) {
+		// The executor stamps the engagement's measured sandbox cost by claim
+		// id at teardown, after the claim is released — so the claim it just
+		// minted has to come back with the run, per engagement. A requeue and
+		// re-claim is a NEW engagement and must carry its own id, or the
+		// second run's actuals would land on the first one's row.
+		store, orgID, seed := mk(t)
+		runID := seed.EnqueueRun(t)
+
+		first := claim(t, store, runID)
+		if first.ClaimID == "" {
+			t.Fatal("ClaimNextRun returned no claim id; teardown has nothing to stamp")
+		}
+		if err := store.RequeueRun(ctx, orgID, runID, "transient"); err != nil {
+			t.Fatalf("RequeueRun: %v", err)
+		}
+		second := claim(t, store, runID)
+		if second.ClaimID == "" {
+			t.Fatal("re-claim returned no claim id")
+		}
+		if second.ClaimID == first.ClaimID {
+			t.Errorf("both engagements report claim %s; each claim is its own row", first.ClaimID)
+		}
+	})
 
 	t.Run("Mark_parks_claim_records_pubkey_and_reads_return_it", func(t *testing.T) {
 		store, orgID, seed := mk(t)

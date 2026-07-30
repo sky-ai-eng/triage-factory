@@ -174,6 +174,96 @@ func cgroupOOMKilled(dir string) bool {
 	return false
 }
 
+// peakUnsupportedOnce keeps the missing-memory.peak warning to one line
+// per process. The file's absence is a property of the kernel the box
+// boots (< 5.19), not of any single run, so warning per teardown would say
+// the same thing once per run forever.
+var peakUnsupportedOnce sync.Once
+
+// cgroupRunActuals reads the group's measured cost — peak memory and CPU
+// time — while the cgroup still exists. Every caller is on an exit path
+// immediately before removeRunCgroup, which is the only moment these
+// numbers are readable at all: rmdir takes them with it and nothing can
+// reconstruct them afterwards.
+//
+// Best-effort in both fields independently: an unreadable file yields an
+// absent value, never an error, so a teardown never fails over accounting.
+func cgroupRunActuals(dir string) RunActuals {
+	if dir == "" {
+		return RunActuals{}
+	}
+	return RunActuals{
+		PeakMemMB: cgroupPeakMemMB(dir),
+		CPUUsec:   cgroupCPUUsec(dir),
+	}
+}
+
+// cgroupPeakMemMB reports the group's high-water memory use in MiB from
+// memory.peak, which the kernel has only carried since 5.19. On an older
+// kernel the file is absent and this reports nothing — deliberately NOT a
+// memory.current sample, which at exit reads near zero and would record a
+// wildly understated peak as though it were measured. An honest NULL is
+// worth more than a number nobody can tell is wrong.
+//
+// Bytes round UP to MiB: a run that peaked under 1 MiB is still a run that
+// peaked, and truncating it to 0 would be indistinguishable from a
+// never-measured row. The ceiling can't overshoot the profile's budget
+// either — the peak is bounded by memory.max, which is a whole number of
+// MiB.
+func cgroupPeakMemMB(dir string) *int {
+	data, err := os.ReadFile(dir + "/memory.peak")
+	if err != nil {
+		if os.IsNotExist(err) {
+			peakUnsupportedOnce.Do(func() {
+				sandboxLog.Warn("cgroup memory.peak unavailable; recording no peak-memory actuals (needs kernel >= 5.19)")
+			})
+			return nil
+		}
+		sandboxLog.Warn("read cgroup memory.peak failed; recording no peak-memory actual", "cgroup", dir, "error", err)
+		return nil
+	}
+	peakBytes, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil || peakBytes <= 0 {
+		return nil
+	}
+	mb := int((peakBytes + 1024*1024 - 1) / (1024 * 1024))
+	return &mb
+}
+
+// cgroupCPUUsec reports the group's cumulative CPU time (user + system, the
+// whole jail) from cpu.stat's usage_usec. cgroup v2 exposes usage_usec on
+// every group regardless of whether the cpu controller is enabled on the
+// parent's subtree_control, so this needs no counterpart to the memory
+// controller's delegation dance in setupRunCgroups.
+func cgroupCPUUsec(dir string) *int64 {
+	data, err := os.ReadFile(dir + "/cpu.stat")
+	if err != nil {
+		sandboxLog.Warn("read cgroup cpu.stat failed; recording no cpu-time actual", "cgroup", dir, "error", err)
+		return nil
+	}
+	return parseCPUUsec(data)
+}
+
+// parseCPUUsec extracts usage_usec out of a cpu.stat body, reporting nothing
+// for a body that has no usage_usec line or an unparseable value. Split from
+// the read so the teardown read and the sampling read share one parse and
+// can't drift; the two differ only in whether an unreadable FILE warns
+// (teardown does, sampling must not) — a body that reads but doesn't parse is
+// silent on both paths.
+func parseCPUUsec(data []byte) *int64 {
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "usage_usec" {
+			usec, err := strconv.ParseInt(fields[1], 10, 64)
+			if err != nil {
+				return nil
+			}
+			return &usec
+		}
+	}
+	return nil
+}
+
 // removeRunCgroup tears the group down. rmdir requires the group to be
 // empty; the runsc tree is SIGKILLed before Close runs, but zombie
 // reaping can lag, so retry briefly rather than leak the dir (the

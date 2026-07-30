@@ -113,6 +113,27 @@ type RunOptions struct {
 	// uses its own message-group id.
 	TraceID string
 
+	// ClaimID is the executor engagement this launch belongs to — the claims
+	// row the dispatcher minted (or, for a curator turn, the one that claimed
+	// the queued message). It exists so the launch's measured sandbox cost can
+	// be stamped against the engagement that paid it; nothing else reads it.
+	// Empty for launches that belong to no engagement at all (the toolless
+	// system jobs — scorer, classifier, profiler), which record no actuals.
+	ClaimID string
+
+	// RecordSandboxActuals, when non-nil, persists what this launch actually
+	// consumed (peak memory, CPU time, measured at the jail's cgroup) against
+	// ClaimID once the runtime has exited. Callback indirection for the same
+	// reason LLMResolver is one: agentproc is a library on the seam between
+	// sandbox setup and the agent subprocess and holds no store handle.
+	//
+	// Called at teardown on a detached context — a cancelled run consumed
+	// real resources and its actuals are as valid as a completed one's — and
+	// strictly best-effort: a write failure is logged and never touches the
+	// run's disposition. Left nil by callers with no claim to attribute (the
+	// system jobs) and on the local/direct path, which measures nothing.
+	RecordSandboxActuals func(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error
+
 	// MemoryNamespace is the run's blueprint run id, passed to the sandbox as
 	// the second run-tree key its worktree pin accepts (a cold-rehydrated
 	// worktree lives at RunTreeRoot(memoryNamespace), not RunTreeRoot(TraceID)).
@@ -508,6 +529,10 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 
 	waitErr := proc.Wait()
 
+	// Wait has taken the cgroup read; stamp the engagement's actuals before
+	// any of the branching below returns.
+	recordSandboxActuals(ctx, opts, proc)
+
 	outcome := &Outcome{
 		Result:    result,
 		SessionID: stream.SessionID(),
@@ -566,14 +591,27 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	// runs the undos in LIFO order and is single-shot via once, so the error
 	// paths can invoke it eagerly and the caller can still defer it safely.
 	var (
-		scratchCwd string
-		ahCloser   io.Closer
-		sb         *sandbox.Sandbox
-		run        sandbox.LaunchedRun
-		once       sync.Once
+		scratchCwd  string
+		ahCloser    io.Closer
+		sb          *sandbox.Sandbox
+		run         sandbox.LaunchedRun
+		releaseJail = func() {}
+		once        sync.Once
 	)
 	cleanup := func() {
 		once.Do(func() {
+			// Drop the jail from the live registry before anything is torn
+			// down, so the resource sampler stops reading a cgroup that is
+			// about to disappear rather than after it already has.
+			//
+			// Ordering is load-bearing beyond that: container ids are
+			// tf-<runIDfrag>-<idx> and the subnet idx is RECYCLED, so a later
+			// run can legitimately mint this same id (some callers pass a
+			// fixed RunID — see Wrap). Deregistering here, ahead of the idx
+			// release in sb.Close() (or, on the executor path, in the
+			// delegate's even-later RunNetwork.Close), is what keeps a reused
+			// container id from ever being sampled against this claim.
+			releaseJail()
 			// The run process + its memory cgroup first: kill the runtime (or
 			// reclaim the cgroup on an abandoned bring-up) before its netns is
 			// torn down below.
@@ -836,6 +874,24 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	}
 	sb = sboxObj
 	run = sandboxRun
+
+	// Publish the jail so the executor's resource sampler can observe its
+	// cgroup for as long as it lives, attributed to the engagement paying for
+	// it. A launch with no claim (the toolless system jobs) registers nothing.
+	//
+	// This deliberately precedes Start, which is what actually execs runsc and
+	// makes the broker create the group — so for a moment the jail is
+	// registered and its cgroup does not exist yet. That is the correct start
+	// of the series, not a gap in it: nothing is running, so nothing has been
+	// consumed, and a sampler tick landing in the window reads no group and
+	// writes no row (the same read a torn-down jail gives). A row of zeroes
+	// there would claim a live sandbox using nothing, which in a chart is
+	// indistinguishable from a collapsed one. Registering after Start instead
+	// would move this to both callers and take the release out of the single
+	// cleanup chain below that guarantees it — a leaked registration makes the
+	// sampler read a dead cgroup forever, which is far worse than a skipped
+	// tick.
+	releaseJail = registerLiveJail(opts.ClaimID, sboxObj.ContainerID)
 
 	// The LaunchedRun satisfies runProc (Start/Stdin/Stdout/Stderr/Wait/
 	// OOMKilled); cleanup closes it (kill + cgroup). On the executor path the

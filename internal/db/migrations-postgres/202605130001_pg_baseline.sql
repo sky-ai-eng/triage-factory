@@ -7678,6 +7678,59 @@ REVOKE ALL ON public.instance_stats FROM PUBLIC;
 REVOKE ALL ON public.instance_stats FROM anon, authenticated, service_role;
 
 
+-- sandbox_stats: the per-sandbox resource series — one row per live jail per
+-- sampler tick, appended by the executor's existing instance-stat sampler and
+-- read by the per-run usage-over-time surface.
+--
+-- This is the SHAPE of a run's consumption while it runs, which the claim's
+-- end-state actuals (claims.peak_mem_mb / claims.cpu_usec, read once at
+-- teardown) cannot give. The two disagree slightly by design: a periodic
+-- sampler misses the sub-minute spikes the kernel high-watermark catches. The
+-- series is shape, the teardown snapshot is truth, and they are never
+-- reconciled numerically.
+--
+-- cpu_usec_cum is CUMULATIVE, not a rate: a consumer derives rate from the
+-- difference between two samples, so a dropped tick self-heals into a
+-- wider-but-correct interval instead of leaving a gap that reads as idle.
+--
+-- Both metric columns are nullable for the same reason instance_stats' are: a
+-- partial sample is still a useful row, so the sampler writes whatever it
+-- could read. A tick that read NOTHING for a jail (torn down between the
+-- registry snapshot and the file read) writes no row at all.
+--
+-- claim_id is a bare uuid with NO foreign key to claims, matching the
+-- instance_stats family convention: the write is a best-effort batch on a
+-- telemetry path that must never be rejected by referential integrity, and
+-- the table is bounded by its own age reaper — same ~30d retention, same
+-- hourly cadence as instance_stats. One family, one policy.
+--
+-- Admin-pool-only / system table, same posture as instance_stats: no org_id
+-- (executor telemetry isn't tenant content). RLS enabled with NO policy
+-- (deny-by-default to non-BYPASSRLS roles) + REVOKE ALL from PUBLIC + the app
+-- roles; the admin pool does all I/O.
+CREATE TABLE public.sandbox_stats (
+    claim_id        uuid NOT NULL,
+    at              timestamp with time zone NOT NULL,
+    mem_current_mb  integer,
+    cpu_usec_cum    bigint
+);
+
+-- The PK is also the per-claim series index (the read is "one claim, ordered
+-- by at"), and it makes a retried tick an idempotent no-op via ON CONFLICT DO
+-- NOTHING.
+ALTER TABLE ONLY public.sandbox_stats
+    ADD CONSTRAINT sandbox_stats_pkey PRIMARY KEY (claim_id, at);
+
+-- The reaper deletes by age alone, which the PK's leading claim_id can't
+-- serve — so a dedicated `at` index earns its keep, same as instance_stats.
+CREATE INDEX sandbox_stats_at_idx ON public.sandbox_stats USING btree (at);
+
+ALTER TABLE public.sandbox_stats ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.sandbox_stats FROM PUBLIC;
+REVOKE ALL ON public.sandbox_stats FROM anon, authenticated, service_role;
+
+
 -- operators: the deployment-operator identity — the CLI-managed flag that
 -- gates the fleet console (fleet administration is deployment-scoped, so an
 -- operator is org-less: it is not a member role). Managed only through
@@ -7921,6 +7974,24 @@ CREATE TABLE public.claims (
     -- live here — messages is the ledger.
     duration_ms integer,
     num_turns integer,
+    -- Measured sandbox cost: what this engagement's jail actually consumed,
+    -- read from its cgroup (memory.peak, cpu.stat's usage_usec) at teardown,
+    -- before the group is removed. Ground truth for margin analysis and
+    -- capacity planning, and unbackfillable — the cgroup is gone the instant
+    -- the run ends.
+    --
+    -- Distinct from the pre-allocated envelope (mem_budget_mb stays an
+    -- author-set profile config item; these are what the run then really
+    -- used) and from instance_stats, which samples the whole host and so
+    -- attributes a concurrent workload's memory to whatever run was live.
+    --
+    -- NULL means "not measured", never "measured zero": local mode has no
+    -- sandbox at all, a pre-5.19 kernel has no memory.peak (cpu_usec lands,
+    -- peak_mem_mb stays NULL), and a crashed teardown records neither. The
+    -- recorded CPU deliberately includes the gVisor sentry's systrap
+    -- overhead — it is TF's cost view of the run, not a billed quantity.
+    peak_mem_mb integer,
+    cpu_usec bigint,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 

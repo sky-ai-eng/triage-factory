@@ -166,6 +166,11 @@ type Spawner struct {
 	// writes (TFAC-589). Nil-safe: a nil store makes the sampler a logged no-op,
 	// same shape as instances on the heartbeat loop.
 	instanceStats db.InstanceStatStore
+	// sandboxStats is the per-sandbox resource series the same sampler tick
+	// appends a row to per live jail. Nil-safe: a nil store makes the
+	// extension a silent no-op, and the instance sample on that tick is
+	// unaffected either way.
+	sandboxStats db.SandboxStatStore
 	// pendingInput is the durable half of resume-by-enqueue (TFAC-585): the
 	// message recorded before a parked run's continuation is re-queued as
 	// ordinary claimable work. Wired unconditionally in NewSpawner — both
@@ -497,6 +502,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		teams:            stores.Teams,
 		instances:        stores.Instances,
 		instanceStats:    stores.InstanceStats,
+		sandboxStats:     stores.SandboxStats,
 		pendingInput:     stores.RunPendingInput,
 		pendingFirings:   stores.PendingFirings,
 		tx:               stores.Tx,

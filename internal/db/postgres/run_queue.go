@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -131,14 +132,17 @@ func (s *runQueueStore) notifyWake(ctx context.Context, orgID string) {
 const activeRunStatusesSQL = `'running'`
 
 // runQueueClaimReturning is the outer-SELECT projection of ClaimNextRun's
-// claimed CTE. The claim identity (executor/claimed_at/attempts) rides the
-// same statement: claimed_at from the freshly inserted claims row, attempts
-// as the prior-claim count + 1 (data-modifying CTEs share one snapshot, so
-// the count can't see the row the sibling CTE inserts).
+// claimed CTE. The claim identity (executor/claim id/claimed_at/attempts)
+// rides the same statement: the id + claimed_at come from the freshly
+// inserted claims row, attempts as the prior-claim count + 1 (data-modifying
+// CTEs share one snapshot, so the count can't see the row the sibling CTE
+// inserts). The claim id is returned because the executor needs to name this
+// engagement later — at teardown, once it has been released and can no
+// longer be found by looking for the conversation's active claim.
 const runQueueClaimReturning = `claimed.id::text, claimed.org_id::text, claimed.task_id::text, COALESCE(claimed.prompt_id, ''), claimed.status, COALESCE(claimed.model, ''), COALESCE(claimed.runtime, ''),
 	COALESCE(claimed.worktree_path, ''), COALESCE(claimed.sdk_session_id, ''), claimed.trigger_type, COALESCE(claimed.trigger_id::text, ''),
 	COALESCE(claimed.creator_user_id::text, ''), claimed.team_id::text, COALESCE(claimed.blueprint_run_id::text, ''), claimed.blueprint_step_index,
-	minted.claimed_at,
+	minted.id::text AS claim_id, minted.claimed_at,
 	(SELECT COUNT(*) + 1 FROM claims c2 WHERE c2.conversation_id = claimed.id)::int AS attempts`
 
 func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement) (*domain.Conversation, error) {
@@ -233,7 +237,7 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 		minted AS (
 			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at)
 			SELECT claimed.org_id, claimed.id, $1, $2::bigint, now() FROM claimed
-			RETURNING claims.conversation_id, claims.claimed_at
+			RETURNING claims.id, claims.conversation_id, claims.claimed_at
 		)
 		SELECT `+runQueueClaimReturning+`
 		FROM claimed JOIN minted ON minted.conversation_id = claimed.id
@@ -716,6 +720,81 @@ func (s *runQueueStore) RecentRunTimingsForOrgSystem(ctx context.Context, orgID 
 	return scanRunTimings(rows)
 }
 
+// executorClaimCols is the shared projection behind both operator claim reads,
+// so the per-executor list and the single-claim lookup can never drift into
+// disagreeing about the same row. LEFT JOIN on the conversation: the claim is
+// the subject here, and a claim whose conversation is gone must still report
+// its measured cost rather than vanishing from the box's occupancy.
+const executorClaimCols = `
+	SELECT c.id::text, c.org_id::text, c.conversation_id::text,
+	       c.claimed_at, c.released_at, COALESCE(c.outcome, ''),
+	       c.peak_mem_mb, c.cpu_usec,
+	       COALESCE(v.status, ''), COALESCE(v.failure_kind, '')
+	FROM claims c
+	LEFT JOIN conversations v ON v.id = c.conversation_id`
+
+func (s *runQueueStore) RecentClaimsForExecutorSystem(ctx context.Context, executorID string, limit int) ([]domain.ExecutorClaim, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	// Tie-break on id so a batch of claims minted in the same instant orders
+	// deterministically across repeated polls — the console refetches on a
+	// timer and a shuffling table reads as churn that isn't happening.
+	rows, err := s.conn.QueryContext(ctx, executorClaimCols+`
+		WHERE c.executor_id = $1
+		ORDER BY c.claimed_at DESC, c.id DESC
+		LIMIT $2
+	`, executorID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanExecutorClaims(rows)
+}
+
+func (s *runQueueStore) ClaimByIDSystem(ctx context.Context, claimID string) (*domain.ExecutorClaim, error) {
+	// A non-uuid id is a caller typo, not a server fault: Postgres would
+	// reject the bind with a 22P02 and the handler would 500 on what is
+	// really a miss. Report it as "no such claim" and let the caller 404.
+	if _, err := uuid.Parse(claimID); err != nil {
+		return nil, nil
+	}
+	rows, err := s.conn.QueryContext(ctx, executorClaimCols+` WHERE c.id = $1`, claimID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out, err := scanExecutorClaims(rows)
+	if err != nil || len(out) == 0 {
+		return nil, err
+	}
+	return &out[0], nil
+}
+
+func scanExecutorClaims(rows *sql.Rows) ([]domain.ExecutorClaim, error) {
+	var out []domain.ExecutorClaim
+	for rows.Next() {
+		var c domain.ExecutorClaim
+		var releasedAt sql.NullTime
+		var peakMem, cpuUsec sql.NullInt64
+		if err := rows.Scan(
+			&c.ID, &c.OrgID, &c.ConversationID,
+			&c.ClaimedAt, &releasedAt, &c.Outcome,
+			&peakMem, &cpuUsec, &c.Status, &c.FailureKind,
+		); err != nil {
+			return nil, err
+		}
+		if releasedAt.Valid {
+			v := releasedAt.Time
+			c.ReleasedAt = &v
+		}
+		c.PeakMemMB = intPtrFromNull(peakMem)
+		c.CPUUsec = int64PtrFromNull(cpuUsec)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 func scanRunTimings(rows *sql.Rows) ([]domain.RunTiming, error) {
 	var out []domain.RunTiming
 	for rows.Next() {
@@ -754,7 +833,7 @@ func scanPgClaimedRun(row *sql.Row) (*domain.Conversation, error) {
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.TaskID, &r.PromptID, &r.Status, &r.Model, &r.Runtime,
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
-		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx, &claimedAt, &r.Attempts)
+		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx, &r.ClaimID, &claimedAt, &r.Attempts)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

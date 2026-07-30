@@ -122,12 +122,18 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 		if err != nil || claimed == nil {
 			return err
 		}
+		// The claim id is minted here and handed back on the claimed run: the
+		// executor needs to name this engagement at teardown, when it has
+		// already been released and can no longer be found as the
+		// conversation's active claim.
+		claimID := uuid.New().String()
 		if _, err := q.ExecContext(ctx, `
 			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
 			VALUES (?, ?, ?, ?, ?, ?)
-		`, uuid.New().String(), claimed.OrgID, claimed.ID, executorID, bootEpoch, claimedAt); err != nil {
+		`, claimID, claimed.OrgID, claimed.ID, executorID, bootEpoch, claimedAt); err != nil {
 			return err
 		}
+		claimed.ClaimID = claimID
 		var attempts int
 		if err := q.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM claims WHERE conversation_id = ?
@@ -622,6 +628,79 @@ func (s *runQueueStore) RecentRunTimingsForOrgSystem(ctx context.Context, orgID 
 	}
 	defer rows.Close()
 	return scanSqliteRunTimings(rows)
+}
+
+// executorClaimCols is the shared projection behind both operator claim reads,
+// so the per-executor list and the single-claim lookup can never drift into
+// disagreeing about the same row. LEFT JOIN on the conversation: the claim is
+// the subject here, and a claim whose conversation is gone must still report
+// its measured cost rather than vanishing from the box's occupancy.
+//
+// No org predicate, and none is possible: this is the deployment-wide operator
+// read. SQLite is N=1, so the distinction is moot locally — the arm exists
+// because the store is one dual-dialect contract with one conformance suite.
+const executorClaimCols = `
+	SELECT c.id, c.org_id, c.conversation_id,
+	       c.claimed_at, c.released_at, COALESCE(c.outcome, ''),
+	       c.peak_mem_mb, c.cpu_usec,
+	       COALESCE(v.status, ''), COALESCE(v.failure_kind, '')
+	FROM claims c
+	LEFT JOIN conversations v ON v.id = c.conversation_id`
+
+func (s *runQueueStore) RecentClaimsForExecutorSystem(ctx context.Context, executorID string, limit int) ([]domain.ExecutorClaim, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	// Tie-break on id so a batch of claims minted in the same instant orders
+	// deterministically across repeated polls — the console refetches on a
+	// timer and a shuffling table reads as churn that isn't happening.
+	rows, err := s.conn.QueryContext(ctx, executorClaimCols+`
+		WHERE c.executor_id = ?
+		ORDER BY c.claimed_at DESC, c.id DESC
+		LIMIT ?
+	`, executorID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSqliteExecutorClaims(rows)
+}
+
+func (s *runQueueStore) ClaimByIDSystem(ctx context.Context, claimID string) (*domain.ExecutorClaim, error) {
+	rows, err := s.conn.QueryContext(ctx, executorClaimCols+` WHERE c.id = ?`, claimID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out, err := scanSqliteExecutorClaims(rows)
+	if err != nil || len(out) == 0 {
+		return nil, err
+	}
+	return &out[0], nil
+}
+
+func scanSqliteExecutorClaims(rows *sql.Rows) ([]domain.ExecutorClaim, error) {
+	var out []domain.ExecutorClaim
+	for rows.Next() {
+		var c domain.ExecutorClaim
+		var releasedAt sql.NullTime
+		var peakMem, cpuUsec sql.NullInt64
+		if err := rows.Scan(
+			&c.ID, &c.OrgID, &c.ConversationID,
+			&c.ClaimedAt, &releasedAt, &c.Outcome,
+			&peakMem, &cpuUsec, &c.Status, &c.FailureKind,
+		); err != nil {
+			return nil, err
+		}
+		if releasedAt.Valid {
+			v := releasedAt.Time
+			c.ReleasedAt = &v
+		}
+		c.PeakMemMB = intPtrFromNull(peakMem)
+		c.CPUUsec = int64PtrFromNull(cpuUsec)
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 func scanSqliteRunTimings(rows *sql.Rows) ([]domain.RunTiming, error) {

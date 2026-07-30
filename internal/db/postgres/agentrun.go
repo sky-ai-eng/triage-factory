@@ -405,6 +405,17 @@ func (s *agentRunStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID, ru
 	return err
 }
 
+// RecordClaimSandboxStatsSystem is keyed on the claim id alone (org bound as
+// defense in depth) with NO released_at predicate — the teardown that
+// measures these numbers runs after the claim is released.
+func (s *agentRunStore) RecordClaimSandboxStatsSystem(ctx context.Context, orgID, claimID string, peakMemMB *int, cpuUsec *int64) error {
+	_, err := s.admin.ExecContext(ctx, `
+		UPDATE claims SET peak_mem_mb = $1, cpu_usec = $2
+		WHERE org_id = $3 AND id = $4
+	`, nullIntPtr(peakMemMB), nullInt64Ptr(cpuUsec), orgID, claimID)
+	return err
+}
+
 func (s *agentRunStore) SetWorktreePath(ctx context.Context, orgID, runID, path string) error {
 	return setRunWorktreePath(ctx, s.q, orgID, runID, path)
 }
@@ -974,6 +985,13 @@ func nullableJSONB(b []byte) any {
 }
 
 func nullIntPtr(p *int) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func nullInt64Ptr(p *int64) any {
 	if p == nil {
 		return nil
 	}

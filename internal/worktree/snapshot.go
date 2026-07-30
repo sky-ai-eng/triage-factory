@@ -237,6 +237,18 @@ func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, err
 // the subtrees that re-materialize on the next run), and a linked worktree's
 // managed excludes live in the per-worktree gitdir while `add` consults the
 // common dir — so relying on them here would leak _tfac into the patch.
+//
+// Every diff below passes --no-ext-diff --no-textconv. `git diff` is porcelain,
+// so by default it execs whatever external diff program (`diff.external`, or a
+// `.gitattributes`-mapped `diff.<driver>.command`) and whatever
+// `diff.<driver>.textconv` the repo names — and in a run root the config and the
+// attributes are both the agent's to write. The flags are the guarantee, because
+// they outrank config; no value of `diff.external` is one, git having none that
+// means "disabled". They are equally a correctness requirement: textconv output
+// is explicitly not appliable, so a textconv-mapped path would otherwise
+// snapshot a patch that lies at restore time. A name-only diff invokes no driver
+// either way, but carries them so no diff here reads as license for a flag-less
+// one.
 func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 	idx, err := os.CreateTemp("", "tf-index-*")
 	if err != nil {
@@ -282,14 +294,14 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 	// treatment of a pathspec that matches neither the index nor HEAD is not a
 	// contract worth betting EVERY snapshot capture on. When the diff is empty the
 	// reset would be a no-op anyway, so the guard costs nothing but the read.
-	if changed, err := gitCapture(ctx, wtPath, env, "diff", "--cached", "--name-only", "HEAD", "--", ".claude/skills"); err != nil {
+	if changed, err := gitCapture(ctx, wtPath, env, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--name-only", "HEAD", "--", ".claude/skills"); err != nil {
 		return nil, fmt.Errorf("check .claude/skills in temp index: %w", err)
 	} else if len(bytes.TrimSpace(changed)) > 0 {
 		if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", ".claude/skills"); err != nil {
 			return nil, fmt.Errorf("drop .claude/skills from temp index: %w", err)
 		}
 	}
-	patch, err := gitCapture(ctx, wtPath, env, "diff", "--cached", "--binary", "HEAD")
+	patch, err := gitCapture(ctx, wtPath, env, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--binary", "HEAD")
 	if err != nil {
 		return nil, fmt.Errorf("diff temp index: %w", err)
 	}

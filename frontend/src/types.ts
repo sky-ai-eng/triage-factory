@@ -244,6 +244,12 @@ export interface Message {
   output_tokens?: number
   cache_read_tokens?: number
   cache_creation_tokens?: number
+  // cost_usd is the dollars settled at this row — absent when the row is not a
+  // settlement row, 0 when it is and cost nothing. A runtime that stamps as it
+  // streams turns these into a live spend signal: useRunDetail folds each
+  // stamped row into the displayed run total between refetches of the
+  // conversation's authoritative SUM.
+  cost_usd?: number
   created_at: string
   // reasoning/content_blocks mirror domain.MessageDTO's fields of the same
   // name — absent on messages that carry neither. reasoning rides the
@@ -1390,6 +1396,54 @@ export interface FleetBacklog {
   depth: number
   oldest_wait_seconds: number
   by_org: FleetBacklogOrgShare[]
+}
+
+// FleetSandboxClaim mirrors the EE console's
+// GET /api/fleet/instances/{id}/sandboxes — one executor engagement and what
+// its sandbox actually cost, the operator lens the whole-host instance_stats
+// samples structurally cannot give.
+//
+// Every measurement is optional because absent means NOT MEASURED, never
+// measured-zero: a local-mode claim had no sandbox, a pre-5.19 kernel has no
+// memory.peak, a crashed teardown recorded neither. Render a dash, not a 0.
+export interface FleetSandboxClaim {
+  id: string
+  conversation_id: string
+  org_id: string
+  claimed_at: string
+  released_at?: string
+  /** Unreleased — still holding a slot, and its series is still growing. */
+  live: boolean
+  /** Wall clock: claimed → released, or claimed → now while live. */
+  duration_seconds: number
+  peak_mem_mb?: number
+  cpu_usec?: number
+  status?: string
+  failure_kind?: string
+  outcome?: string
+}
+
+export interface FleetSandboxes {
+  generated_at: string
+  instance_id: string
+  limit: number
+  sandboxes: FleetSandboxClaim[]
+}
+
+// FleetSandboxSample is one tick of a single sandbox's in-run series
+// (GET /api/fleet/claims/{id}/series). CPU arrives CUMULATIVE: the consumer
+// differences consecutive samples into a rate, so a dropped tick self-heals
+// into a wider-but-correct interval instead of a gap that reads as idle.
+export interface FleetSandboxSample {
+  at: string
+  mem_current_mb?: number
+  cpu_usec_cum?: number
+}
+
+export interface FleetSandboxSeries {
+  generated_at: string
+  claim_id: string
+  samples: FleetSandboxSample[]
 }
 
 // UsageOrgOps — the org-scoped operations subset (TFAC-589): an org admin's own

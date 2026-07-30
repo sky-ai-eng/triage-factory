@@ -384,6 +384,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	}
 	cfg.orgID = orgID
 	cfg.teamID = run.TeamID
+	cfg.claimID = run.ClaimID
 	cfg.isBlueprintStep = true
 	cfg.blueprintRunID = br.ID
 	cfg.blueprintStep = stepIdx
@@ -648,6 +649,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		Namespace:         namespace,
 		TeamID:            run.TeamID,
 		execSandbox:       execSandbox,
+		claimID:           run.ClaimID,
 	}, "manual", userID)
 	if stepCtx.Err() != nil {
 		s.markCancelledAfterResume(orgID, run.ID, userID)

@@ -353,6 +353,12 @@ type Stores struct {
 	// member's telemetry isn't tenant data.
 	InstanceStats InstanceStatStore
 
+	// SandboxStats owns the sandbox_stats table — the per-sandbox resource
+	// series the executor's stat sampler appends while jails are live.
+	// Admin-pool-only, same posture as InstanceStats: executor telemetry,
+	// not tenant content.
+	SandboxStats SandboxStatStore
+
 	// Operators owns the operators table — the deployment-operator identity
 	// managed by the `triagefactory operator` CLI and read by the fleet gate
 	// (TFAC-589). Admin-pool-only, same posture as Instances: an operator is

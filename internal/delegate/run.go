@@ -488,6 +488,11 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		OrgID:           orgID,
 		Secrets:         s.getRunSecrets(),
 		LLMResolver:     s.llmResolverForRun(orgID, runID),
+		// Measured sandbox cost lands on the engagement that paid for it, at
+		// teardown. Empty claim id (a path with no claimed run in scope)
+		// records nothing.
+		ClaimID:              cfg.claimID,
+		RecordSandboxActuals: s.recordSandboxActuals,
 		// Multi mode: hand agentproc the prebuilt run network and the
 		// sidecar's proxy env so it launches into them and holds no
 		// credential — the sidecar owns the LLM/git/egress proxies + the

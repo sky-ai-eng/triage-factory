@@ -82,6 +82,17 @@ type ToolHostOptions struct {
 	MemorySourcePath string
 	// MemoryLimitMB caps the jail's cgroup. Zero uses the process default.
 	MemoryLimitMB int
+	// OrgID and ClaimID name the engagement this jail belongs to — the same
+	// pair RunOptions carries. ClaimID keys the live-jail registry entry the
+	// resource sampler iterates and the claim row the teardown actuals stamp
+	// lands on; empty leaves both unattributed (registration no-ops), which
+	// is the test-harness shape, never a production launch.
+	OrgID   string
+	ClaimID string
+	// RecordSandboxActuals mirrors RunOptions.RecordSandboxActuals: persists
+	// what the jail actually cost, measured at its cgroup, once the runtime
+	// has exited. Called from Close, best-effort.
+	RecordSandboxActuals func(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error
 }
 
 // ToolHostJail is a launched tool-host sandbox. The caller Accepts the
@@ -98,6 +109,19 @@ type ToolHostJail struct {
 	run      sandbox.LaunchedRun
 	sb       *sandbox.Sandbox
 	sockDir  string
+
+	// One watcher owns run.Wait for the jail's whole life: Accept selects on
+	// waitDone to fail fast when the jail dies before connecting, and Close
+	// waits on it because Actuals is only valid after Wait returns — two
+	// concurrent Wait calls on one LaunchedRun is not a contract anyone
+	// offers. waitErr is written before waitDone closes.
+	waitDone chan struct{}
+	waitErr  error
+
+	orgID           string
+	claimID         string
+	recordActuals   func(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error
+	releaseLiveJail func()
 }
 
 // Accept waits for the in-jail tool host to dial in and returns the resulting
@@ -119,17 +143,14 @@ func (j *ToolHostJail) Accept(ctx context.Context, timeout time.Duration) (net.C
 		conns <- accepted{c, err}
 	}()
 
-	exited := make(chan error, 1)
-	go func() { exited <- j.run.Wait() }()
-
 	select {
 	case a := <-conns:
 		if a.err != nil {
 			return nil, fmt.Errorf("agentproc: accept tool host connection: %w", a.err)
 		}
 		return a.conn, nil
-	case err := <-exited:
-		return nil, fmt.Errorf("agentproc: tool host exited before connecting (%v); stderr: %s", err, j.run.Stderr())
+	case <-j.waitDone:
+		return nil, fmt.Errorf("agentproc: tool host exited before connecting (%v); stderr: %s", j.waitErr, j.run.Stderr())
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-time.After(timeout):
@@ -137,9 +158,16 @@ func (j *ToolHostJail) Accept(ctx context.Context, timeout time.Duration) (net.C
 	}
 }
 
-// Close kills the jail, reclaims its cgroup, closes the listener and removes
-// the socket directory. The prebuilt network and sidecar are the caller's to
-// close, ordered after this.
+// toolHostWaitGrace bounds how long Close waits for the watcher's Wait to
+// return after the kill, which is also the window for reading actuals. A
+// killed runsc exits promptly; a jail that outlives this forfeits its
+// actuals rather than holding teardown hostage.
+const toolHostWaitGrace = 10 * time.Second
+
+// Close kills the jail, stamps the engagement's measured actuals, reclaims
+// the registry entry and cgroup, closes the listener and removes the socket
+// directory. The prebuilt network and sidecar are the caller's to close,
+// ordered after this.
 func (j *ToolHostJail) Close() error {
 	if j == nil {
 		return nil
@@ -149,6 +177,10 @@ func (j *ToolHostJail) Close() error {
 	}
 	if j.run != nil {
 		_ = j.run.Close()
+		j.recordActualsOnce()
+	}
+	if j.releaseLiveJail != nil {
+		j.releaseLiveJail()
 	}
 	if j.sb != nil {
 		_ = j.sb.Close()
@@ -157,6 +189,32 @@ func (j *ToolHostJail) Close() error {
 		_ = os.RemoveAll(j.sockDir)
 	}
 	return nil
+}
+
+// recordActualsOnce waits (briefly) for the watcher's Wait to return — the
+// point after which Actuals is valid — then stamps the claim. Best-effort at
+// every step, mirroring recordSandboxActuals on the SDK path: a jail that
+// measured nothing, a launch with no claim, or a recorder that fails costs a
+// warn line, never the teardown.
+func (j *ToolHostJail) recordActualsOnce() {
+	if j.recordActuals == nil || j.claimID == "" || j.waitDone == nil {
+		return
+	}
+	select {
+	case <-j.waitDone:
+	case <-time.After(toolHostWaitGrace):
+		agentprocLog.Warn("tool host did not exit within the teardown grace; skipping actuals stamp", "claim", j.claimID)
+		return
+	}
+	actuals := j.run.Actuals()
+	if actuals.PeakMemMB == nil && actuals.CPUUsec == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), recordActualsTimeout)
+	defer cancel()
+	if err := j.recordActuals(ctx, j.orgID, j.claimID, actuals); err != nil {
+		agentprocLog.Warn("record sandbox actuals for claim failed", "claim", j.claimID, "error", err)
+	}
 }
 
 // LaunchToolHost starts the resident tool host as the jail's main process
@@ -187,9 +245,12 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (*ToolHostJail, e
 		return nil, err
 	}
 	jail := &ToolHostJail{
-		SocketPath: filepath.Join(sockDir, toolHostSocketName),
-		listener:   listener,
-		sockDir:    sockDir,
+		SocketPath:    filepath.Join(sockDir, toolHostSocketName),
+		listener:      listener,
+		sockDir:       sockDir,
+		orgID:         opts.OrgID,
+		claimID:       opts.ClaimID,
+		recordActuals: opts.RecordSandboxActuals,
 	}
 
 	if err := chownWorktreeForSandbox(ctx, opts.Worktree); err != nil {
@@ -240,6 +301,16 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (*ToolHostJail, e
 		_ = jail.Close()
 		return nil, fmt.Errorf("agentproc: start tool host: %w", err)
 	}
+
+	// The single watcher that owns run.Wait (see the ToolHostJail fields),
+	// started only once the runtime is live, and the resource sampler's
+	// registry entry — both scoped to the running jail exactly.
+	jail.waitDone = make(chan struct{})
+	go func() {
+		jail.waitErr = run.Wait()
+		close(jail.waitDone)
+	}()
+	jail.releaseLiveJail = registerLiveJail(opts.ClaimID, sb.ContainerID)
 	return jail, nil
 }
 

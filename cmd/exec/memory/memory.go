@@ -63,7 +63,7 @@ const defaultLimit = 20
 
 // Handle dispatches memory subcommands. host is the agenthost.Client every
 // state access routes through (local SQLite or daemon IPC, chosen by
-// agenthost.AutoDetect at the top of cmd/exec/exec.go). host is nil on the help
+// boot identity at the top of cmd/exec/exec.go). host is nil on the help
 // route, which returns before any call.
 func Handle(ctx context.Context, host agenthost.Client, args []string) {
 	// Help at either depth — `memory --help` and `memory load --help` — since

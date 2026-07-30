@@ -4,9 +4,9 @@
 //
 //   - LocalClient: opens the same SQLite DB the binary already opens
 //     and applies the synthetic-claims / admin-pool routing the
-//     subcommands used to inline. This is the only path used when no
-//     /run/tf.sock is bind-mounted into the process — i.e. every local
-//     user today, and every test that doesn't spin up the IPC daemon.
+//     subcommands used to inline. This is the path the host CLI uses —
+//     i.e. every local user today, and every test that doesn't spin up
+//     the IPC daemon.
 //
 //   - IPCClient: dials a per-run unix socket bind-mounted by the
 //     spawner in the sandbox branch (see internal/agentproc.Run). The
@@ -16,14 +16,14 @@
 //     state mutation back through this socket is how it acts on behalf
 //     of its own run identity without ever holding tokens itself.
 //
-// AutoDetect is the single entry point. Subcommands call it once at
-// the top of their dispatch and forward the returned Client to the
-// action body. AutoDetect returns LocalClient when the socket is
-// absent (local mode and non-sandbox multi mode), and IPCClient when
-// the socket is present. It fails closed when the socket exists but
-// the daemon doesn't respond — silently downgrading to LocalClient
-// would route writes through the *binary's* identity-resolution path
-// instead of the daemon's, which in multi-mode means the wrong org.
+// There are two constructors, one per boot identity, and the caller
+// already knows which it is before it calls either (see main.go's
+// identity resolution): NewLocalFromEnv for the host CLI, DialSandbox
+// for the jailed CLI. Neither probes for the other's world. The pair
+// replaced a single detect-at-last-moment entry point, which was only
+// ever necessary because nothing upstream had declared what the process
+// was — and which had to guess from socket presence, a signal that
+// looks the same for "local CLI" and "jail whose daemon never came up".
 //
 // The interface intentionally mirrors the existing store-method surface
 // 1:1 rather than introducing higher-level operations. That keeps the
@@ -50,7 +50,7 @@ import (
 // per-run unix socket. The host side creates the listener at
 // /run/tf/<run_id>.sock (see internal/agentproc) and bind-mounts it
 // here; from the sandbox's perspective there's exactly one socket
-// and its path is fixed. AutoDetect probes this path.
+// and its path is fixed. DialSandbox is bound to this path.
 const DefaultSocketPath = "/run/tf.sock"
 
 // ProtocolVersion is the wire-format version. Bumped on any
@@ -95,18 +95,17 @@ type RunInfo struct {
 	PinnedRepos []string `json:"pinned_repos,omitempty"`
 }
 
-// ErrDaemonUnreachable is returned by AutoDetect when /run/tf.sock
+// ErrDaemonUnreachable is returned by DialSandbox when /run/tf.sock
 // exists but the daemon is dead or unresponsive. Surfaces as a clear
-// "sandbox daemon down" error in subcommand stderr rather than
-// silently falling back to LocalClient (which would route through the
-// wrong identity in multi-mode).
+// "sandbox daemon down" error rather than a local fallback (which
+// would route through the wrong identity in multi-mode).
 var ErrDaemonUnreachable = errors.New("agenthost: /run/tf.sock exists but daemon is not responding")
 
-// ErrSandboxSocketMissing is returned by AutoDetect when the process is
-// inside the sandbox (per agentproc.SandboxMarkerEnvVar) and /run/tf.sock
-// is absent or is not a socket. Inside a jail nothing else can serve the
-// exec verbs, so the absent socket is an outage rather than the "this is
-// the local-mode CLI" signal it means everywhere else.
+// ErrSandboxSocketMissing is returned by DialSandbox when /run/tf.sock is
+// absent or is not a socket. It is raised only on the jailed boot identity,
+// where nothing else can serve the exec verbs — so the absent socket is an
+// outage, never the "this is the host CLI" signal socket absence used to mean
+// back when the client was chosen by probing for it.
 //
 // The wording is aimed at the agent that will read it in a tool result:
 // it names the file, names the owner of the problem, and rules out the two

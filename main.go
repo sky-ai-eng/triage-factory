@@ -47,11 +47,23 @@ func main() {
 	}
 }
 
-// run is the real entrypoint. It initializes the runtime mode, dispatches
-// CLI subcommands, and otherwise boots the server — returning an error
-// instead of calling log.Fatal so deferred cleanup runs and the boot path
-// is testable.
+// run is the real entrypoint. It resolves this process's boot identity,
+// initializes the runtime mode, dispatches CLI subcommands, and otherwise
+// boots the server — returning an error instead of calling log.Fatal so
+// deferred cleanup runs and the boot path is testable.
 func run(ctx context.Context, args []string) error {
+	// What is this process? Answer that first, from argv plus the sandbox
+	// marker, and branch on the answer — rather than letting each layer below
+	// infer it from whichever ambient signal it happens to read (see
+	// bootident.go). The jailed CLI is a pure RPC client: it needs none of the
+	// boot spine that follows and must not run it, since every step of it
+	// writes host state — starting with a SQLite file that, under the jail's
+	// HOME, lands inside the agent's own worktree.
+	cliArgs := resolveCLIArgs(args)
+	if resolveBootIdentity(cliArgs, inRunSandbox()) == bootJailCLI {
+		return dispatchJailCLI(cliArgs)
+	}
+
 	// Initialize the runtime mode flag (TF_MODE env, default local) before
 	// anything touches a path or opens a DB.
 	if err := runmode.InitFromEnv(); err != nil {
@@ -91,8 +103,10 @@ func run(ctx context.Context, args []string) error {
 	// CLI subcommands short-circuit before any server wiring: exec/status
 	// are used by delegated Claude Code agents; install/uninstall/
 	// migrate/jwk-init are user-facing. argv0 selects the surface — see
-	// resolveCLIArgs for the `tfac` applet's implicit `exec`.
-	if handled, err := dispatchCLI(resolveCLIArgs(args)); handled {
+	// resolveCLIArgs for the `tfac` applet's implicit `exec`. A leading flag
+	// falls through to server mode, which is why the host-cli identity and the
+	// server identity share this whole boot sequence.
+	if handled, err := dispatchCLI(cliArgs); handled {
 		return err
 	}
 

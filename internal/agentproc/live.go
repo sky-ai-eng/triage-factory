@@ -217,7 +217,10 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		ready:   make(chan struct{}),
 	}
 
-	go l.readLoop(runCtx, proc, sink, perms, opts.OnResult, opts.TraceID)
+	// opts travels whole (rather than the two fields the loop used to take)
+	// because the teardown stamp at the end of the loop needs the run's claim
+	// + recorder as well.
+	go l.readLoop(runCtx, opts, proc, sink, perms)
 
 	// Send the initial prompt once the wrapper is ready. Done in its own
 	// goroutine so RunInteractive returns immediately; Send blocks on the
@@ -369,11 +372,11 @@ func (l *LiveRun) writeControl(v map[string]any) error {
 // readLoop is the single goroutine that owns the sink and the
 // subprocess lifecycle: it consumes the stream until EOF/ctx, waits on
 // the process, and records the terminal state.
-func (l *LiveRun) readLoop(runCtx context.Context, proc runProc, sink Sink, perms PermissionHandler, onResult func(*Result), traceID string) {
+func (l *LiveRun) readLoop(runCtx context.Context, opts RunOptions, proc runProc, sink Sink, perms PermissionHandler) {
 	defer close(l.done)
 
 	stream := NewStreamState()
-	result, streamErr := l.consumeStreamInteractive(proc.Stdout(), sink, stream, perms, onResult, traceID)
+	result, streamErr := l.consumeStreamInteractive(proc.Stdout(), sink, stream, perms, opts.OnResult, opts.TraceID)
 
 	// If the stream reader bailed before any terminal result, the
 	// subprocess may still be running with data to write — kill the
@@ -383,6 +386,11 @@ func (l *LiveRun) readLoop(runCtx context.Context, proc runProc, sink Sink, perm
 	}
 
 	waitErr := proc.Wait()
+
+	// Wait has taken the cgroup read, so the engagement's actuals are final
+	// here — for every disposition alike, including a cancelled run (whose
+	// ctx is already dead; the stamp detaches) and an idle hibernation.
+	recordSandboxActuals(runCtx, opts, proc)
 
 	l.mu.Lock()
 	l.result = result

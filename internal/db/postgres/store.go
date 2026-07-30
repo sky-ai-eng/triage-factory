@@ -367,7 +367,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// Instances: fleet telemetry + the deployment-operator identity, never
 		// read under a user's RLS context (TFAC-589).
 		InstanceStats: newInstanceStatStore(admin),
-		Operators:     newOperatorStore(admin),
+		// SandboxStats is admin-pool only for the same reason InstanceStats
+		// is: the per-sandbox resource series is executor telemetry the
+		// sampler writes with no request identity in hand.
+		SandboxStats: newSandboxStatStore(admin),
+		Operators:    newOperatorStore(admin),
 		// RunSignals is admin-pool only, same posture as Instances: the
 		// cross-pod run-control outbox (TFAC-585), never read under a
 		// user's RLS context.

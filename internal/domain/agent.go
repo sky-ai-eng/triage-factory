@@ -263,6 +263,14 @@ type Conversation struct {
 	// carry org in their call args.
 	OrgID string `json:"-"`
 
+	// ClaimID is the claims row minted for this engagement, populated only by
+	// RunQueueStore.ClaimNextRun (which returns the row it just reserved
+	// along with the claim it minted for it). The dispatcher threads it into
+	// the run config so teardown can stamp the engagement's measured sandbox
+	// cost by id — an active-claim lookup at that point would race the
+	// release. Empty on every read path that doesn't mint a claim.
+	ClaimID string `json:"-"`
+
 	// ExecutorID names the executor instance that owns this run's live
 	// process while it runs — stamped when the run goes live, NULL/empty
 	// otherwise. At N=1 it's a single per-process instance id; the
@@ -374,23 +382,29 @@ type Message struct {
 // cross the wire. ConversationID links the row to its owning conversation;
 // curator groups these into turns client-side over the same field.
 type MessageDTO struct {
-	ID                  int               `json:"id"`
-	ConversationID      string            `json:"conversation_id"`
-	Role                string            `json:"role"`
-	Subtype             string            `json:"subtype"`
-	Content             string            `json:"content"`
-	ToolCalls           []ToolCall        `json:"tool_calls,omitempty"`
-	ToolCallID          string            `json:"tool_call_id,omitempty"`
-	IsError             bool              `json:"is_error,omitempty"`
-	Metadata            map[string]any    `json:"metadata,omitempty"`
-	Model               string            `json:"model,omitempty"`
-	InputTokens         *int              `json:"input_tokens,omitempty"`
-	OutputTokens        *int              `json:"output_tokens,omitempty"`
-	CacheReadTokens     *int              `json:"cache_read_tokens,omitempty"`
-	CacheCreationTokens *int              `json:"cache_creation_tokens,omitempty"`
-	CreatedAt           time.Time         `json:"created_at"`
-	Reasoning           []ReasoningDetail `json:"reasoning,omitempty"`
-	ContentBlocks       []ContentBlock    `json:"content_blocks,omitempty"`
+	ID                  int            `json:"id"`
+	ConversationID      string         `json:"conversation_id"`
+	Role                string         `json:"role"`
+	Subtype             string         `json:"subtype"`
+	Content             string         `json:"content"`
+	ToolCalls           []ToolCall     `json:"tool_calls,omitempty"`
+	ToolCallID          string         `json:"tool_call_id,omitempty"`
+	IsError             bool           `json:"is_error,omitempty"`
+	Metadata            map[string]any `json:"metadata,omitempty"`
+	Model               string         `json:"model,omitempty"`
+	InputTokens         *int           `json:"input_tokens,omitempty"`
+	OutputTokens        *int           `json:"output_tokens,omitempty"`
+	CacheReadTokens     *int           `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens *int           `json:"cache_creation_tokens,omitempty"`
+	// CostUSD carries the row's settlement stamp (see Message.CostUSD): absent
+	// = not a settlement row, 0 = genuinely free. A runtime that stamps as it
+	// streams makes the wire rows an accumulating spend signal, which is how a
+	// live surface keeps a cost readout current between reads of the
+	// conversation's SUM.
+	CostUSD       *float64          `json:"cost_usd,omitempty"`
+	CreatedAt     time.Time         `json:"created_at"`
+	Reasoning     []ReasoningDetail `json:"reasoning,omitempty"`
+	ContentBlocks []ContentBlock    `json:"content_blocks,omitempty"`
 }
 
 // ToDTO projects a transcript row onto the shared snake_case wire shape.
@@ -410,6 +424,7 @@ func (m Message) ToDTO() MessageDTO {
 		OutputTokens:        m.OutputTokens,
 		CacheReadTokens:     m.CacheReadTokens,
 		CacheCreationTokens: m.CacheCreationTokens,
+		CostUSD:             m.CostUSD,
 		CreatedAt:           m.CreatedAt,
 		Reasoning:           m.Reasoning,
 		ContentBlocks:       m.ContentBlocks,
@@ -535,4 +550,44 @@ type Claim struct {
 	DurationMs *int      `json:"duration_ms,omitempty"`
 	NumTurns   *int      `json:"num_turns,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
+}
+
+// ExecutorClaim is one engagement projected for the operator fleet console's
+// per-executor sandbox breakdown: the claim's identity and lifetime, its
+// measured sandbox cost, and the driven conversation's terminal state.
+//
+// A separate projection rather than fields on Claim, deliberately. Claim is a
+// wire type an org-scoped surface already serializes (the curator's claim
+// list); the measured cost is operator-only until a pricing model exists, and
+// hanging it off Claim would publish raw compute numbers to customers as a
+// side effect of a fleet feature.
+//
+// Every measurement is a pointer because NULL means "not measured", never
+// "measured zero" — a local-mode claim never had a sandbox, a pre-5.19 kernel
+// has no memory.peak, and a crashed teardown recorded neither. Consumers
+// render a dash, not a zero.
+type ExecutorClaim struct {
+	ID             string
+	OrgID          string
+	ConversationID string
+
+	// ClaimedAt/ReleasedAt bound the engagement. ReleasedAt nil = still live,
+	// which is also the only shape whose sandbox may still be growing.
+	ClaimedAt  time.Time
+	ReleasedAt *time.Time
+	// Outcome is how the engagement ended ("completed" | "failed" |
+	// "cancelled" | "requeued" | "parked" | "reaped"); empty while live.
+	Outcome string
+
+	// PeakMemMB / CPUUsec are the claim's end-state actuals, read from the
+	// jail's cgroup at teardown. These are the billing-grade record; a
+	// sampled series over the same run legitimately reads under them, and the
+	// two are never reconciled numerically.
+	PeakMemMB *int
+	CPUUsec   *int64
+
+	// Status / FailureKind come from the driven conversation (one join) — what
+	// the engagement was ultimately spent on succeeding or failing at.
+	Status      string
+	FailureKind string
 }

@@ -280,6 +280,27 @@ func (s *agentRunStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID, ru
 	return err
 }
 
+// RecordClaimSandboxStatsSystem is keyed on the claim id alone, with NO
+// released_at predicate — the teardown that measures these numbers runs
+// after the claim is released.
+//
+// No production caller reaches this arm: local mode never sandboxes, so no
+// local run has a cgroup, and the executor-side teardown skips the write
+// entirely when there is nothing measured — a local claim's columns stay
+// NULL for their whole life. It exists because the store is one
+// dual-dialect contract (identical behavior, identical conformance
+// assertions), and because "not measured" has to be a value the local
+// schema can hold rather than a mode branch at every write.
+func (s *agentRunStore) RecordClaimSandboxStatsSystem(ctx context.Context, orgID, claimID string, peakMemMB *int, cpuUsec *int64) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE claims SET peak_mem_mb = ?, cpu_usec = ? WHERE id = ?
+	`, sqliteNullInt(peakMemMB), sqliteNullInt64(cpuUsec), claimID)
+	return err
+}
+
 func (s *agentRunStore) SetWorktreePath(ctx context.Context, orgID, runID, path string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
@@ -1300,4 +1321,11 @@ func sqliteNullInt(p *int) sql.NullInt64 {
 		return sql.NullInt64{}
 	}
 	return sql.NullInt64{Int64: int64(*p), Valid: true}
+}
+
+func sqliteNullInt64(p *int64) sql.NullInt64 {
+	if p == nil {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: *p, Valid: true}
 }

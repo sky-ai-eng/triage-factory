@@ -60,6 +60,21 @@ validated per-run uid (re-checking the `SidecarUID` band at the RPC boundary, so
 a compromised orchestrator can't ask for uid 0), the sidecar analog of the runsc
 launch.
 
+**Observation is not in the broker's monopoly.** The broker owns cgroup
+*lifecycle and mutation* — creating a run's group, setting its `memory.max`,
+destroying it — because each of those needs `CAP_SYS_ADMIN` on a delegated
+cgroup tree. Reading a group's stat files needs nothing: cgroup v2 exposes
+`memory.current` / `cpu.stat` / `memory.events` world-readable, so the
+zero-capability orchestrator reads them directly (that is how the resource
+sampler records a live run's usage series) and no RPC is involved. The
+exposure that buys is coarse resource observability to any host-local process,
+which leaks no data, credentials, or content and is the same posture
+`/proc/stat` and `/proc/meminfo` already have; the jailed agent cannot see the
+host cgroup filesystem at all through gVisor. If cross-tenant resource side
+channels ever enter the threat model, the lever is a `0750` per-run group
+directory with a group grant at creation — noted so the option is
+discoverable, deliberately not built.
+
 The per-run agenthost socket is granted to the sandbox with no capability at all:
 it is *chgrp'd* (not chowned) to the sandbox group — an owner-legal group grant,
 possible because the granting process is a member of `tf-sandbox` (gid 10000).
