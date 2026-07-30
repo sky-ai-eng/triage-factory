@@ -52,18 +52,32 @@ function message(over: Partial<Message>): Message {
 }
 
 // Route the four reads the mounted view makes; everything but the run row is
-// empty, so the only moving part is the cost readout.
-function mockFetch() {
+// empty, so the only moving part is the cost readout. `transcript` lets a test
+// hold the transcript read open — the run row lands first, so that read's
+// duration is the window in which the run's SUM is displayed without the ids
+// inside it being known yet.
+function mockFetch(transcript?: Promise<Message[]>) {
   const fetchMock = vi.fn((url: string) => {
-    const body = url.endsWith('/artifacts/refresh')
+    const body: unknown = url.endsWith('/artifacts/refresh')
       ? { updated: 0 }
-      : url.endsWith('/messages') || url.endsWith('/artifacts')
-        ? []
-        : serverRun
+      : url.endsWith('/messages')
+        ? (transcript ?? [])
+        : url.endsWith('/artifacts')
+          ? []
+          : serverRun
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) })
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
+}
+
+// A promise a test resolves by hand, to park one of the mocked reads.
+function deferred<T>() {
+  let settle!: (value: T) => void
+  const promise = new Promise<T>((resolve) => {
+    settle = resolve
+  })
+  return { promise, settle }
 }
 
 // Harness renders the station's instrument rail off the hook, so the assertions
@@ -137,6 +151,35 @@ describe('useRunDetail live cost accumulation', () => {
     // Nothing was recorded as counted, so the row's dollars are still foldable
     // rather than stranded — marking it would have lost them for the whole run.
     send({ type: 'message', conversation_id: RUN_ID, data: row })
+    expect(screen.getByText('$0.2500')).toBeInTheDocument()
+  })
+
+  it('does not re-count a row the just-fetched SUM already covers', async () => {
+    // The run row is read before the transcript, so for the length of that
+    // second read the displayed SUM's covered ids are unknown. A row inside it
+    // that gets replayed over the websocket in that window must not be folded —
+    // this is the mirror of the pre-run-row case above, and it over-reports.
+    const transcript = deferred<Message[]>()
+    mockFetch(transcript.promise)
+    render(<Harness />)
+    expect(await screen.findByText('$0.2000')).toBeInTheDocument()
+
+    const counted = message({ id: 11, cost_usd: 0.05 })
+    send({ type: 'message', conversation_id: RUN_ID, data: counted })
+    expect(screen.getByText('$0.2000')).toBeInTheDocument()
+
+    // Once the transcript lands, that row is the baseline — still not folded,
+    // and a later replay can't fold it either.
+    await act(async () => {
+      transcript.settle([counted])
+    })
+    expect(screen.getByText('$0.2000')).toBeInTheDocument()
+
+    send({ type: 'message', conversation_id: RUN_ID, data: counted })
+    expect(screen.getByText('$0.2000')).toBeInTheDocument()
+
+    // Folding resumes from that baseline for rows the SUM does not cover.
+    send({ type: 'message', conversation_id: RUN_ID, data: message({ id: 12, cost_usd: 0.05 }) })
     expect(screen.getByText('$0.2500')).toBeInTheDocument()
   })
 
