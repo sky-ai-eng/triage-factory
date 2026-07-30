@@ -77,15 +77,18 @@ func TestCgroupCPUUsecQuiet_SharesTeardownParse(t *testing.T) {
 	}
 }
 
-// TestSampleRunCgroup_MissingGroupIsUnobserved covers the sampler's routine
-// race: a jail that ended between being chosen for sampling and being read has
-// no cgroup left, so the sample must carry nothing at all — the caller keys
-// "write no row" off exactly that, and a zeroed sample would instead record a
-// finished run as idle.
+// TestSampleRunCgroup_MissingGroupIsUnobserved covers an absent group at both
+// ends of a run's life, which read identically and must both carry nothing at
+// all: a launch registered but not yet started (the group is created when the
+// runtime is exec'd) and a jail that ended between being chosen for sampling
+// and being read. The caller keys "write no row" off exactly this, and a zeroed
+// sample would instead record a not-yet-started or already-finished run as an
+// idle live one.
 func TestSampleRunCgroup_MissingGroupIsUnobserved(t *testing.T) {
 	for name, containerID := range map[string]string{
-		"no container id":    "",
-		"group already gone": "tf-nonexistent-run-250",
+		"no container id":         "",
+		"registered, not started": "tf-notyetstarted-9",
+		"group already gone":      "tf-nonexistent-run-250",
 	} {
 		if s := SampleRunCgroup(containerID); s.Observed() {
 			t.Errorf("%s: sample = %+v, want unobserved", name, s)

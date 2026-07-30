@@ -121,20 +121,26 @@ func TestSampleSandboxStatsOnce_IdleCostsNothing(t *testing.T) {
 	}
 }
 
-// TestSampleSandboxStatsOnce_TornDownJailProducesNoRow covers the sampler's
-// routine race: a jail that ended between the registry snapshot and its cgroup
-// read has no files left, so it contributes no row and no error — while its
-// still-live sibling is recorded normally. A zeroed row here would record a
-// finished run as an idle one.
-func TestSampleSandboxStatsOnce_TornDownJailProducesNoRow(t *testing.T) {
+// TestSampleSandboxStatsOnce_GrouplessJailProducesNoRow covers a registered
+// jail with no cgroup to read, at either end of a run's life: one registered
+// but not yet started (registration precedes the exec that creates the group)
+// and one torn down between the registry snapshot and the read. Both contribute
+// no row and no error while their live sibling records normally — a zeroed row
+// would report a run that has not started, or has already finished, as an idle
+// live one.
+func TestSampleSandboxStatsOnce_GrouplessJailProducesNoRow(t *testing.T) {
 	store := &fakeSandboxStatStore{}
 	s := &Spawner{sandboxStats: store}
 	stubJails(t, []agentproc.LiveJail{
-		{ClaimID: "claim-gone", ContainerID: "tf-run-gone-1"},
-		{ClaimID: "claim-live", ContainerID: "tf-run-live-2"},
+		{ClaimID: "claim-starting", ContainerID: "tf-run-starting-1"},
+		{ClaimID: "claim-gone", ContainerID: "tf-run-gone-2"},
+		{ClaimID: "claim-live", ContainerID: "tf-run-live-3"},
 	}, func(id string) sandbox.RunSample {
-		if id == "tf-run-gone-1" {
-			return sandbox.RunSample{} // cgroup removed mid-tick
+		switch id {
+		case "tf-run-starting-1": // cgroup not created yet (pre-Start)
+			return sandbox.RunSample{}
+		case "tf-run-gone-2": // cgroup removed mid-tick
+			return sandbox.RunSample{}
 		}
 		return sandbox.RunSample{MemCurrentMB: iptr(256), CPUUsecCum: i64ptr(4242)}
 	})

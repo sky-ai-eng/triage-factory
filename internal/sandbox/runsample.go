@@ -46,9 +46,14 @@ func (s RunSample) Observed() bool {
 // observation. Nothing here needs a capability or a broker round trip.
 //
 // Silent and total-best-effort by contract, because the caller is on a timer:
-// an unreadable or absent file yields an absent field with no log line, since
-// a jail that finished between the caller's snapshot and this read is the
-// normal case and logging it would emit noise once per teardown forever.
+// an unreadable or absent file yields an absent field with no log line. An
+// absent group is the routine case at BOTH ends of a run's life — the group is
+// created when the runtime is exec'd, so a launch that is registered but not
+// yet started has none, and a finished run's is destroyed with it. Neither is
+// worth a log line (one would fire once per launch and once per teardown
+// forever), and neither is worth a zero: a sandbox that has not started, and
+// one that has already stopped, have both consumed nothing the caller should
+// record as usage.
 //
 // Non-Linux (and an empty container id) returns an unobserved sample.
 func SampleRunCgroup(containerID string) RunSample {
