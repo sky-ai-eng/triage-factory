@@ -186,7 +186,7 @@ func TestDrainEndpoint_Integration(t *testing.T) {
 	}
 }
 
-// --- per-sandbox breakdown (TFAC-711) ---
+// --- per-sandbox breakdown ---
 
 // seedSandboxClaim stages one conversation and one claims row against it, in
 // whatever end state the case needs. Production accumulates these across a

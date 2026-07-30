@@ -1,8 +1,8 @@
 import type { FleetSandboxSample } from '../types'
 
-// Derivations over one sandbox's in-run series (TFAC-711/712), kept out of the
-// component so the arithmetic that matters — turning a cumulative CPU counter
-// into a rate across an irregular sampling cadence — is testable on its own.
+// Derivations over one sandbox's in-run series, kept out of the component so
+// the arithmetic that matters — turning a cumulative CPU counter into a rate
+// across an irregular sampling cadence — is testable on its own.
 //
 // The honest-display contract these feed: this series is SHAPE, sampled on a
 // timer; the claim's peak_mem_mb / cpu_usec columns are TRUTH, read from the
