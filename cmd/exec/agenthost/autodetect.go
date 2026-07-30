@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
@@ -18,6 +19,11 @@ import (
 //     LookupRun is performed eagerly so a dead-but-present socket
 //     fails here with ErrDaemonUnreachable instead of surfacing as a
 //     late mystery error inside a subcommand.
+//
+//   - Otherwise, if the process is inside a sandbox (the marker
+//     agentproc.SandboxMarkerEnvVar is set), the absent socket is an
+//     outage: return ErrSandboxSocketMissing. Nothing else in a jail
+//     can serve the exec verbs, so there is nothing to fall back to.
 //
 //   - Otherwise the binary is the local-mode CLI. Resolve the run
 //     identity from TRIAGE_FACTORY_CONVERSATION_ID, construct a LocalClient
@@ -35,10 +41,32 @@ import (
 // in every WHERE clause. Better to surface the daemon outage than
 // to corrupt data with the wrong tenant scope.
 func AutoDetect(ctx context.Context, stores db.Stores) (Client, error) {
-	if socketExists(DefaultSocketPath) {
-		return autoDetectIPC(ctx, DefaultSocketPath)
+	return autoDetect(ctx, stores, DefaultSocketPath, inSandbox())
+}
+
+// autoDetect is AutoDetect with the two ambient inputs — the socket path and
+// the sandbox marker — passed explicitly, so the four-way matrix is testable
+// without a writable /run or env that the rest of the suite would inherit.
+func autoDetect(ctx context.Context, stores db.Stores, socketPath string, sandboxed bool) (Client, error) {
+	if socketExists(socketPath) {
+		return autoDetectIPC(ctx, socketPath)
+	}
+	if sandboxed {
+		// Fail closed BEFORE stores is touched. The local branch below would
+		// otherwise open a database per TF_MODE — unset in a jail, so it
+		// defaults to local and mints a fresh empty SQLite file inside the
+		// sandbox — and then blame the run for not existing in it.
+		return nil, ErrSandboxSocketMissing
 	}
 	return autoDetectLocal(ctx, stores)
+}
+
+// inSandbox reports whether this process is running inside the agent jail,
+// per the marker agentproc's sandbox env assembler sets. Exact match: any
+// other value means the variable came from somewhere that isn't the
+// assembler, and the only safe reading of that is "not sandboxed".
+func inSandbox() bool {
+	return os.Getenv(agentproc.SandboxMarkerEnvVar) == agentproc.SandboxMarkerEnvValue
 }
 
 func socketExists(path string) bool {

@@ -18,7 +18,8 @@ import (
 )
 
 // dispatchCLI runs the argv-dispatched subcommands. args is the argument
-// slice with the program name stripped (os.Args[1:]). It returns
+// slice with the program name stripped (os.Args[1:], after the applet's
+// implicit `exec` prefix is applied — see resolveCLIArgs). It returns
 // handled=true when args named a subcommand — the caller should return err
 // and exit — and handled=false to fall through to server mode.
 //

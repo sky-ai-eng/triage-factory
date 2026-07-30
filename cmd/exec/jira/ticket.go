@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
@@ -70,7 +71,7 @@ func hasHelpFlag(args []string) bool {
 
 func handleTicket(host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: triagefactory exec jira ticket <action> [flags]")
+		exitErr("usage: " + prog.Prefix() + " jira ticket <action> [flags]")
 	}
 
 	action := args[0]
@@ -88,7 +89,7 @@ func handleTicket(host agenthost.Client, args []string) {
 	// interpret --help as an issue key / project / etc.).
 	if hasHelpFlag(flags) {
 		if h, ok := ticketHelp[action]; ok {
-			fmt.Printf("usage: triagefactory exec %s\n", h)
+			fmt.Printf("usage: %s %s\n", prog.Prefix(), h)
 			return
 		}
 		// Unknown action with --help — fall through to the unknown-action
@@ -126,9 +127,16 @@ func handleTicket(host agenthost.Client, args []string) {
 	case "set-priority":
 		ticketSetPriority(host, flags)
 	default:
-		exitErr(fmt.Sprintf("unknown ticket action: %s\nvalid actions: %s\nRun 'triagefactory exec jira ticket --help' for usage.",
-			action, strings.Join(ticketActions(), ", ")))
+		exitErr(unknownActionMessage(prog.Prefix(), action))
 	}
+}
+
+// unknownActionMessage is the mistyped-verb error: what was wrong, the valid
+// set, and the command that expands it — spelled under the prefix the caller
+// actually invoked, so the hint is copy-pasteable.
+func unknownActionMessage(prefix, action string) string {
+	return fmt.Sprintf("unknown ticket action: %s\nvalid actions: %s\nRun '%s jira ticket --help' for usage.",
+		action, strings.Join(ticketActions(), ", "), prefix)
 }
 
 // ticketActions lists the valid ticket verbs for the unknown-action error.

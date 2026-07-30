@@ -229,6 +229,26 @@ func TestConsumeStream_TrailingLineWithoutNewline(t *testing.T) {
 	}
 }
 
+// TestNewDirectCommand_NeverCarriesSandboxMarker pins the other half of the
+// sandbox marker's contract: the direct (local, unsandboxed) agent process
+// must never see it, because a process that sees it concludes it is inside
+// a jail and fails closed on an absent exec-verb socket it was never
+// supposed to have. Set in the parent env here, since inheritance is the
+// only way it could reach this path — nothing on the direct branch emits it.
+func TestNewDirectCommand_NeverCarriesSandboxMarker(t *testing.T) {
+	t.Setenv(SandboxMarkerEnvVar, SandboxMarkerEnvValue)
+
+	cmd, err := newDirectCommand(context.Background(), RunOptions{}, []string{"wrapper.mjs"})
+	if err != nil {
+		t.Fatalf("newDirectCommand: %v", err)
+	}
+	for _, kv := range cmd.Env {
+		if strings.HasPrefix(kv, SandboxMarkerEnvVar+"=") {
+			t.Errorf("direct agent env carries %q; the marker means \"inside the jail\" and this path is not one", kv)
+		}
+	}
+}
+
 // TestNewDirectCommand_FiltersInheritedJSCJITKey pins the fix for a
 // duplicate-key ambiguity: a pre-existing BUN_JSC_useJIT in the
 // inherited env used to ride into cmd.Env alongside the one

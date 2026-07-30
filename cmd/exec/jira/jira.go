@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
 // Handle dispatches jira subcommands. host is the agenthost.Client every
@@ -48,5 +49,10 @@ const HelpText = `Jira Ticket Commands:
   jira ticket list-priorities                                  List available priority levels`
 
 func printHelp() {
-	fmt.Printf("Usage: triagefactory exec jira <resource> <action> [flags]\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n", HelpText)
+	fmt.Print(helpText(prog.Prefix()))
+}
+
+// helpText renders the `jira` resource-level usage under the invoked prefix.
+func helpText(prefix string) string {
+	return fmt.Sprintf("Usage: %s jira <resource> <action> [flags]\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n", prefix, HelpText)
 }

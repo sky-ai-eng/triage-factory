@@ -18,6 +18,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -55,7 +56,7 @@ const (
 // (Get / DownloadArtifact) needs them for the host's credential resolution.
 func handleActions(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: triagefactory exec gh actions <action> [flags]")
+		exitErr("usage: " + prog.Prefix() + " gh actions <action> [flags]")
 	}
 
 	action := args[0]
@@ -75,15 +76,20 @@ func handleActions(ctx context.Context, host agenthost.Client, args []string) {
 		actionsListRuns(ctx, host, flags)
 	default:
 		exitErr(unknownVerbMessage("actions action", "actions", action,
-			[]string{"download-logs", "list-runs"}, "triagefactory exec gh actions --help"))
+			[]string{"download-logs", "list-runs"}, prog.Prefix()+" gh actions --help"))
 	}
 }
 
 // printActionsHelp prints the `gh actions` usage plus the shared
 // repo-resolution rules.
 func printActionsHelp() {
-	fmt.Printf("Usage: triagefactory exec gh actions <action> [flags]\n\n%s\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n",
-		ActionsHelpText, RepoResolutionHelpText)
+	fmt.Print(actionsHelpText(prog.Prefix()))
+}
+
+// actionsHelpText renders the `gh actions` usage under the invoked prefix.
+func actionsHelpText(prefix string) string {
+	return fmt.Sprintf("Usage: %s gh actions <action> [flags]\n\n%s\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n",
+		prefix, ActionsHelpText, RepoResolutionHelpText)
 }
 
 // maxListedRuns caps the per-request run list. Agents asking "what runs are
@@ -136,7 +142,7 @@ func actionsListRuns(ctx context.Context, host agenthost.Client, args []string) 
 	sha := flagVal(args, "--sha")
 
 	if (prStr == "") == (sha == "") {
-		exitErr("usage: triagefactory exec gh actions list-runs (--pr <N> | --sha <SHA>) [--repo owner/repo]")
+		exitErr("usage: " + prog.Prefix() + " gh actions list-runs (--pr <N> | --sha <SHA>) [--repo owner/repo]")
 	}
 
 	owner, repo, err := resolveRepo(args)
@@ -313,7 +319,7 @@ func actionsDownloadLogs(ctx context.Context, host agenthost.Client, args []stri
 	// over resolution errors.
 	runIDStr := firstPositional(args)
 	if runIDStr == "" {
-		exitErr("usage: triagefactory exec gh actions download-logs <run_id> [--repo owner/repo]")
+		exitErr("usage: " + prog.Prefix() + " gh actions download-logs <run_id> [--repo owner/repo]")
 	}
 	runID, err := strconv.ParseInt(runIDStr, 10, 64)
 	if err != nil || runID <= 0 {

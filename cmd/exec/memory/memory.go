@@ -25,6 +25,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
 // HelpText is the help block for `memory` commands, surfaced both from
@@ -142,7 +143,7 @@ func parseLoadArgs(args []string) (loadArgs, error) {
 func runLoad(ctx context.Context, host agenthost.Client, args []string) {
 	parsed, err := parseLoadArgs(args)
 	if err != nil {
-		exitErr(fmt.Sprintf("usage: triagefactory exec memory load --source <github|jira|slack> --id <source_id> [--limit N]\n%s", err))
+		exitErr(fmt.Sprintf("usage: %s memory load --source <github|jira|slack> --id <source_id> [--limit N]\n%s", prog.Prefix(), err))
 	}
 	res, err := host.MemoryLoad(ctx, parsed.source, parsed.sourceID, parsed.limit)
 	if err != nil {
@@ -152,7 +153,12 @@ func runLoad(ctx context.Context, host agenthost.Client, args []string) {
 }
 
 func printHelp() {
-	fmt.Printf("Usage: triagefactory exec memory <command> [args]\n\n%s\n", HelpText)
+	fmt.Print(helpText(prog.Prefix()))
+}
+
+// helpText renders the `memory` usage under the invoked prefix.
+func helpText(prefix string) string {
+	return fmt.Sprintf("Usage: %s memory <command> [args]\n\n%s\n", prefix, HelpText)
 }
 
 func printJSON(v any) {
