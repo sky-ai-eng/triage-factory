@@ -20,12 +20,13 @@ import (
 )
 
 // LocalClient is the in-process implementation of Client. Holds a
-// resolved RunInfo (set at construction by either AutoDetect's env
-// path or by the daemon's per-socket handler) and the db.Stores
-// bundle the binary is wired against. Every write branches on
-// info.IsEventTriggered to choose admin-pool `...System` calls vs
-// the synthetic-claims tx wrap — the same branch the pre-agenthost
-// subcommand bodies inlined verbatim, now hoisted up one level.
+// resolved RunInfo (set at construction by either the host CLI's
+// env-resolving constructor or the daemon's per-socket handler) and
+// the db.Stores bundle the binary is wired against. Every write
+// branches on info.IsEventTriggered to choose admin-pool `...System`
+// calls vs the synthetic-claims tx wrap — the same branch the
+// pre-agenthost subcommand bodies inlined verbatim, now hoisted up
+// one level.
 //
 // Concurrency: not safe for concurrent calls from independent
 // goroutines on a single instance. cmd/exec subcommands are single-
@@ -76,8 +77,8 @@ type LocalClient struct {
 
 // NewLocal builds a LocalClient bound to the given stores + identity, with an
 // in-process directRuntime over those stores. Callers that resolve identity
-// from env (AutoDetect's local branch) hand the resolved RunInfo here; the
-// daemon hands the per-socket run info here at request dispatch.
+// from env (NewLocalFromEnv) hand the resolved RunInfo here; the daemon
+// hands the per-socket run info here at request dispatch.
 func NewLocal(stores db.Stores, info RunInfo) *LocalClient {
 	return &LocalClient{
 		stores:    stores,
@@ -100,7 +101,7 @@ func (c *LocalClient) SetGitHubResolver(r ghclient.Resolver) {
 }
 
 func (c *LocalClient) LookupRun(_ context.Context) (RunInfo, error) {
-	// Empty RunID at this stage means AutoDetect's env probe was
+	// Empty RunID at this stage means the env-resolving constructor was
 	// bypassed (test seam) or the caller constructed a LocalClient
 	// directly with a zero-value RunInfo. Surface the same sentinel
 	// the runident path does so subcommand helpers can translate it

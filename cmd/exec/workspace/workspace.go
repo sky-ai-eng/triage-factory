@@ -63,7 +63,7 @@ var ValueFlags = map[string]bool{
 
 // Handle dispatches workspace subcommands. host is the agenthost.Client
 // every DB-touching path routes through (local SQLite or daemon IPC,
-// chosen by agenthost.AutoDetect at the top of cmd/exec/exec.go).
+// chosen once per boot identity at the top of cmd/exec/exec.go).
 func Handle(host agenthost.Client, args []string) {
 	// Help at either depth — `workspace --help` and `workspace add --help` —
 	// since both commands' usage lives in the one help block. Value-taking

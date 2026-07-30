@@ -42,12 +42,13 @@ The repo-root `.claude/settings.json` registers a `PostToolUse` hook that runs `
 
 Triage Factory is a **single Go binary** (HTTP server + pollers + delegated-agent spawner) with a **React SPA embedded via `go:embed`** (see `embed.go`). State lives entirely on the user's machine: SQLite at `~/.triagefactory/triagefactory.db` (user settings persist in the `settings` row — `internal/config` reads/writes via `config.Init(db)` at startup), credentials in the OS keychain (`internal/auth`).
 
-### The binary has two modes
+### The binary has three boot identities
 
-`main.go` dispatches on `os.Args[1]`:
+`main.go`'s `run()` resolves a **boot identity** first thing (`bootident.go`) and branches everything on it — the same discipline as `TF_MODE` / `TF_ROLE`: a resolved parameter, never a late ambient read. The inputs are argv (what the caller wants) and the sandbox marker `TRIAGE_FACTORY_SANDBOXED` (where the process is):
 
-- **Server mode** (default) — HTTP API + websocket hub + pollers + scorer + event router + delegation spawner.
-- **CLI mode** (`exec`, `status`) — invoked _by delegated Claude Code agents_ inside a worktree. `cmd/exec/` provides scoped GitHub/Jira subcommands the agent uses instead of calling those APIs directly, so credentials stay in the keychain and activity is auditable via `conversations` / `artifacts`.
+- **server** (no CLI args) — HTTP API + websocket hub + pollers + scorer + event router + delegation spawner.
+- **host-cli** (CLI args, no marker) — operator subcommands (`install`, `migrate`, …) plus the local-mode agent verbs. Owns local state: mode/role resolution, deployment secrets, the SQLite DB (opened eagerly, migrated per invocation). `cmd/exec/` provides scoped GitHub/Jira subcommands the agent uses instead of calling those APIs directly, so credentials stay in the keychain and activity is auditable via `conversations` / `artifacts`.
+- **jail-cli** (CLI args + marker) — the same `exec` verbs invoked _by a delegated agent inside its sandbox_, as a **pure RPC client**: no `runmode`/`TF_ROLE`/`secretenv` init, no `db.Stores` (structurally — `exec.HandleSandboxed` is handed a client and never the means to build one), and the agenthost client dialed against `/run/tf.sock` at boot, failing closed there if the socket is absent. Everything a verb touches, state and credentials alike, resolves daemon-side. Only exec verbs, `status`, and help dispatch here; every other subcommand is refused by name, because opening a DB under the jail's `HOME` would write junk state into the agent's own worktree.
 
 ### Core data model
 

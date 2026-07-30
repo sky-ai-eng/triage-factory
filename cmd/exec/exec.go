@@ -20,58 +20,36 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 )
 
-// Handle dispatches exec subcommands.
+// Handle dispatches exec subcommands for the HOST CLI boot identity: the
+// operator's own invocation and the local-mode delegated agent, both of which
+// serve every state access in-process against the local SQLite DB.
+//
+// The DB is opened eagerly, before the verb switch, because this identity
+// always needs it: the LocalClient reads it for run state and for credential
+// resolution, so there is nothing to gain from deferring it and one fewer
+// order-of-operations question by not.
 func Handle(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		printHelp()
 		return
 	}
 
-	// Open DB for local state (pending reviews, run worktrees, etc.). The
-	// open is unconditional even when the sandboxed agenthost path wins
-	// below, because the local-mode LocalClient that AutoDetect may return
-	// reads this DB for its state and host-side credential resolution. In
-	// the sandbox the IPC client ignores it — every state access and every
-	// GitHub/Jira credential resolves on the host daemon, not here. No exec
-	// subcommand loads a credential from the keychain anymore: gh and jira
-	// both route their API calls host-side (Property B — the jail never
-	// holds a token, never touches dbus).
-	conn, err := db.Open()
+	stores, closeDB, err := openLocalStores()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error opening database: %v\n", err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	defer conn.Close()
-	// Silence goose's per-invocation logging ("no migrations to run…")
-	// — exec runs on every delegated-agent tool call and the noise
-	// drowns out the actual command output. Migration errors still
-	// surface via the returned error.
-	goose.SetLogger(goose.NopLogger())
-	if err := db.Migrate(conn, "sqlite3"); err != nil {
-		fmt.Fprintf(os.Stderr, "error running migrations: %v\n", err)
-		os.Exit(1)
-	}
-	stores := sqlite.New(conn)
+	defer func() { _ = closeDB() }()
 
-	cmd := args[0]
-	cmdArgs := args[1:]
-
-	// AutoDetect returns the right state-access seam for the current
-	// process: IPCClient when /run/tf.sock is bind-mounted in (the
-	// sandboxed-agent path), LocalClient otherwise (the local-mode CLI
-	// and the local-mode delegated-agent path). Help routes skip this
-	// because the help output doesn't need run identity resolution.
-	buildAgentHost := func() agenthost.Client {
-		ctx := context.Background()
-		client, derr := agenthost.AutoDetect(ctx, stores)
+	// Help routes skip this because the help output doesn't need run identity.
+	dispatch(args, func() agenthost.Client {
+		client, derr := agenthost.NewLocalFromEnv(context.Background(), stores)
 		if derr != nil {
-			// runident-derived errors (env unset, unknown run) and the
-			// missing-sandbox-socket error are already written for the
-			// reader; they get a clean stderr message rather than the
-			// wrapping AutoDetect would otherwise apply.
+			// runident-derived errors (env unset, unknown run) are already
+			// written for the reader; they get a clean stderr message rather
+			// than the wrapping the constructor would otherwise apply.
 			if errors.Is(derr, runident.ErrRunIdentityMissing) ||
-				errors.Is(derr, runident.ErrRunIdentityNotFound) ||
-				errors.Is(derr, agenthost.ErrSandboxSocketMissing) {
+				errors.Is(derr, runident.ErrRunIdentityNotFound) {
 				fmt.Fprintln(os.Stderr, derr.Error())
 			} else {
 				fmt.Fprintf(os.Stderr, "agenthost: %v\n", derr)
@@ -79,21 +57,70 @@ func Handle(args []string) {
 			os.Exit(1)
 		}
 		return client
+	})
+}
+
+// HandleSandboxed dispatches exec subcommands for the JAILED CLI boot
+// identity, over a client the caller has already dialed. It is a pure RPC
+// front end: no database is opened here — not conditionally, not lazily —
+// because a jailed process has no local state to open. Everything a verb
+// touches, state and credentials alike, lives behind the socket.
+//
+// That is structural, not an optimization. Under the jail's HOME the local
+// opener would mint a fresh empty SQLite file inside the run worktree — junk
+// the agent can see, snapshot, and commit — and then answer every read from
+// it, which is how a live run got told its own conversation did not exist.
+//
+// The dispatcher closes the client on the paths that return normally, the same
+// way it closes one it built itself; the caller keeps its own deferred Close
+// (idempotent) for the paths that don't reach a verb at all.
+func HandleSandboxed(client agenthost.Client, args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		printHelp()
+		return
 	}
+	dispatch(args, func() agenthost.Client { return client })
+}
+
+// openLocalStores opens and migrates the host CLI's local SQLite state. A
+// package var so a test can substitute an opener that fails if it is ever
+// reached, which is how the jailed path's "never opens a database" property is
+// asserted rather than merely read.
+//
+// Migrations run before the first store read on every invocation. goose's
+// per-invocation logging ("no migrations to run…") is silenced — exec runs on
+// every delegated-agent tool call and the noise drowns out the actual command
+// output; migration errors still surface through the returned error.
+var openLocalStores = func() (db.Stores, func() error, error) {
+	conn, err := db.Open()
+	if err != nil {
+		return db.Stores{}, nil, fmt.Errorf("error opening database: %w", err)
+	}
+	goose.SetLogger(goose.NopLogger())
+	if err := db.Migrate(conn, "sqlite3"); err != nil {
+		_ = conn.Close()
+		return db.Stores{}, nil, fmt.Errorf("error running migrations: %w", err)
+	}
+	return sqlite.New(conn), conn.Close, nil
+}
+
+// dispatch is the verb switch both boot identities share, so a verb behaves
+// identically whichever client it was handed. buildAgentHost is called only by
+// the verbs that need a client — help routes return before it runs, which is
+// what makes `exec gh pr --help` work with no run in scope.
+func dispatch(args []string, buildAgentHost func() agenthost.Client) {
+	cmd := args[0]
+	cmdArgs := args[1:]
 
 	switch cmd {
 	case "gh":
-		// GitHub API calls route through the agenthost client. In the sandbox
-		// the IPC client ships each call to the host daemon, which resolves the
+		// GitHub API calls route through the agenthost client. In the jail the
+		// IPC client ships each call to the host daemon, which resolves the
 		// org's App-installation-or-PAT credential (github.Resolver.ClientForRepo)
 		// and makes the request; the jail never reads a token, the keychain, or
-		// dbus. In local mode AutoDetect returns the in-process LocalClient,
-		// which builds the same client directly on the user's machine — the
-		// unchanged local path. Like the jira branch, this never loads a
-		// credential here: it resolves host-side (or in-process via the
-		// LocalClient), so the DB opened at the top of Handle is consulted on
-		// the gh path only by the local-mode LocalClient; the sandbox IPC path
-		// ignores it.
+		// dbus. On the host CLI the in-process LocalClient builds the same
+		// client directly on the user's machine — the unchanged local path.
+		// Like the jira branch, this never loads a credential here.
 		// context.Background() is the deliberate root: exec is a short-lived
 		// per-tool-call CLI process with no parent ctx to inherit. It threads
 		// through gh.Handle into every GitHub API call so the surface is
@@ -108,18 +135,14 @@ func Handle(args []string) {
 		gh.Handle(context.Background(), host, cmdArgs)
 
 	case "jira":
-		// Jira API calls route through the agenthost client. In the sandbox
-		// the IPC client ships each call to the host daemon, which builds the
+		// Jira API calls route through the agenthost client. In the jail the
+		// IPC client ships each call to the host daemon, which builds the
 		// org's bot-attributed system client (ForSystem) and holds the
-		// credential; the jail never reads a token, the keychain, or dbus. In
-		// local mode AutoDetect returns the in-process LocalClient, which
-		// builds the same ForSystem client directly — the unchanged local
-		// path. Bot-authored writes by design; no per-user routing in the
-		// sandbox (user-attributed Jira writes are the server-side handlers).
-		// The credential resolves host-side (or in-process via the
-		// LocalClient), so the DB opened at the top of Handle is consulted
-		// here only by the local-mode LocalClient; the sandbox IPC path
-		// ignores it.
+		// credential; the jail never reads a token, the keychain, or dbus. On
+		// the host CLI the in-process LocalClient builds the same ForSystem
+		// client directly — the unchanged local path. Bot-authored writes by
+		// design; no per-user routing in the jail (user-attributed Jira writes
+		// are the server-side handlers).
 		if isHelp(cmdArgs, jiraexec.ValueFlags) {
 			jiraexec.Handle(nil, cmdArgs)
 			return
@@ -130,7 +153,7 @@ func Handle(args []string) {
 
 	case "workspace":
 		// No credentials needed — workspace acts on the agenthost client
-		// (DB + filesystem in local mode, IPC + filesystem in sandbox).
+		// (DB + filesystem on the host CLI, IPC + filesystem in the jail).
 		if isHelp(cmdArgs, workspace.ValueFlags) {
 			workspace.Handle(nil, cmdArgs)
 			return
@@ -141,7 +164,7 @@ func Handle(args []string) {
 
 	case "memory":
 		// `memory load` reads entity memory host-side through the agenthost
-		// client (DB in local mode, IPC in the sandbox where the read + the
+		// client (DB on the host CLI, IPC in the jail where the read + the
 		// best-effort touch land on the daemon). No credentials — like
 		// workspace. Mirrors the gh case's host lifecycle: help routes skip
 		// buildAgentHost() (no run identity needed), otherwise Close is deferred.

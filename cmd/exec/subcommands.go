@@ -8,7 +8,7 @@ import (
 
 // SubcommandRunner is a registered exec verb. args are everything after the
 // subcommand name; host is the run-scoped agenthost client (LocalClient or
-// IPCClient per AutoDetect). Returns a process exit code.
+// IPCClient, per the process's boot identity). Returns a process exit code.
 type SubcommandRunner func(ctx context.Context, args []string, host agenthost.Client) int
 
 // subcommandRegistry is the process-global map of registered exec verbs.

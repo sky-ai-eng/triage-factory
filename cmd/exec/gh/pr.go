@@ -26,8 +26,8 @@ import (
 // exitErr/os.Exit shape the rest of the file uses so the agent sees a
 // clear message and the subcommand exits non-zero.
 //
-// In local mode this resolves identity from TRIAGE_FACTORY_CONVERSATION_ID at
-// AutoDetect time; in sandbox mode the daemon's per-socket map
+// On the host CLI this resolves identity from TRIAGE_FACTORY_CONVERSATION_ID at
+// client-construction time; in the sandbox the daemon's per-socket map
 // determines identity and LookupRun just round-trips. Either way the
 // subcommand body reads the routing-relevant fields from a single
 // in-process value.

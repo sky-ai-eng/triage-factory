@@ -7,7 +7,7 @@ package agentproc
 // break the per-tool path check Claude Code applies before exec.
 //
 // The agenthost socket lives at /run/tf.sock; that constant is owned by
-// cmd/exec/agenthost (DefaultSocketPath) so the agent-side AutoDetect
+// cmd/exec/agenthost (DefaultSocketPath) so the agent-side client
 // and the spawner-side mount registration agree by construction. The
 // binary path is owned here because it's an agentproc-internal
 // concern — the allowlist patterns that name it are constructed in

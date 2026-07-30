@@ -14,9 +14,9 @@
 // subprocess, not an agent tool call, so it is unaffected by that allowlist).
 // They appear in no `--help` output for the same reason.
 //
-// Like the exec subcommands, the host-side work routes through agenthost
-// (the per-run IPC socket in the sandbox, an in-process LocalClient locally),
-// so RunInfo + Stores are in scope and credentials never enter the jail.
+// Like the exec subcommands, the work routes through agenthost — here always
+// the in-process LocalClient, since these verbs only ever fire on the host
+// (see buildHost) — so RunInfo + Stores are in scope.
 package hook
 
 import (
@@ -79,18 +79,20 @@ func Handle(args []string) {
 	}
 }
 
-// buildHost opens the local SQLite state, migrates it, and resolves the
-// agenthost client the same way cmd/exec does: AutoDetect returns the IPC
-// client when the per-run socket is bind-mounted (sandbox) and an in-process
-// LocalClient otherwise (local mode). Returns ok=false on any setup failure
-// with a warning on stderr — best-effort, never fatal to the push. The conn
-// is returned so the caller closes it after the verb runs (the LocalClient
-// reads it; the IPC client ignores it).
+// buildHost opens the local SQLite state, migrates it, and builds the
+// in-process agenthost client over it. Returns ok=false on any setup failure
+// with a warning on stderr — best-effort, never fatal to the push. The conn is
+// returned so the caller closes it after the verb runs.
 //
-// The stores are returned alongside for the verbs that read policy directly
-// rather than through a host round-trip (check-push). Those reads are
-// local-mode-only by construction: under a sandbox the pre-push hook stands
-// down before invoking any verb, and there is no DB in the jail to open.
+// These verbs are host-side only, and the local client is the only one they
+// can have: check-push reads policy from stores directly rather than through a
+// round-trip, so there is nothing for a jailed process to read. Nothing
+// invokes them from inside a jail either — under a sandbox every push transits
+// the git proxy, which owns both the policy gate and outcome capture, and the
+// pre-push hook stands down before invoking any verb. A jailed invocation that
+// somehow happened would be refused at boot as an unavailable subcommand,
+// which the calling hook treats as "allow" like every other non-refusal
+// status, so the fail-open contract survives that path too.
 func buildHost() (agenthost.Client, db.Stores, *sql.DB, bool) {
 	conn, err := db.Open()
 	if err != nil {
@@ -106,7 +108,7 @@ func buildHost() (agenthost.Client, db.Stores, *sql.DB, bool) {
 		return nil, db.Stores{}, nil, false
 	}
 	stores := sqlite.New(conn)
-	client, derr := agenthost.AutoDetect(context.Background(), stores)
+	client, derr := agenthost.NewLocalFromEnv(context.Background(), stores)
 	if derr != nil {
 		_ = conn.Close()
 		fmt.Fprintf(os.Stderr, "hook: agenthost: %v\n", derr)
