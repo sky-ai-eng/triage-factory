@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/capbroker"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	"github.com/sky-ai-eng/triage-factory/cmd/hook"
 	"github.com/sky-ai-eng/triage-factory/cmd/install"
 	"github.com/sky-ai-eng/triage-factory/cmd/instance"
@@ -17,11 +20,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/uninstall"
 )
 
-// dispatchCLI runs the argv-dispatched subcommands. args is the argument
-// slice with the program name stripped (os.Args[1:], after the applet's
-// implicit `exec` prefix is applied — see resolveCLIArgs). It returns
-// handled=true when args named a subcommand — the caller should return err
-// and exit — and handled=false to fall through to server mode.
+// dispatchCLI runs the argv-dispatched subcommands for a process on a real
+// host — the host-cli boot identity, plus the server identity's fall-through.
+// args is the argument slice with the program name stripped (os.Args[1:], after
+// the applet's implicit `exec` prefix is applied — see resolveCLIArgs). It
+// returns handled=true when args named a subcommand — the caller should return
+// err and exit — and handled=false to fall through to server mode.
+//
+// This is the full surface, including everything that needs local state or host
+// capabilities. A process inside a run sandbox never reaches it; see
+// dispatchJailCLI for the narrow surface that does apply there.
 //
 // The subcommands manage their own exit; they're listed here purely to
 // route the two audiences (delegated Claude Code agents vs. human users)
@@ -90,6 +98,53 @@ func dispatchCLI(args []string) (handled bool, err error) {
 		return true, fmt.Errorf("unknown subcommand %q; run 'triagefactory --help' for usage", args[0])
 	}
 	return true, nil
+}
+
+// dispatchJailCLI is the whole subcommand surface of the jail-cli boot
+// identity. It runs the exec verbs and prints help; every other subcommand is
+// refused, because none of them can work in a jail and each would fail in a
+// more confusing way than a refusal. install/uninstall/migrate/jwk-init/
+// instance/operator all reach for local state that isn't there (and would
+// create some by reaching), a leading flag means server mode, and the internal
+// namespaces — hook, snapshot-capture, cap-broker, run-sidecar — are all
+// host-side callbacks the jail never legitimately invokes.
+//
+// Refusing rather than attempting is what keeps the missing machinery
+// structural: nothing on this path can construct db.Stores, so a jailed
+// invocation cannot mint a state directory inside the agent's worktree no
+// matter which subcommand it names.
+//
+// The agenthost client is dialed HERE, at boot, before any subcommand logic
+// runs — a jail with no exec-verb socket has nothing that can serve a verb, so
+// the fail-closed error belongs at the door rather than several frames into a
+// verb body. The cost is that a verb's own `--help` also needs the socket in a
+// jail; help text is not worth pretending the CLI is functional when it isn't.
+func dispatchJailCLI(args []string) error {
+	switch args[0] {
+	case "exec":
+		// Fall through to the client below.
+	case "status":
+		// Needs no client (and no state) today.
+		exec.HandleStatus(args[1:])
+		return nil
+	case "-h", "--help", "help":
+		printTopLevelHelp()
+		return nil
+	case "-v", "--version", "version":
+		fmt.Println(Version)
+		return nil
+	default:
+		return fmt.Errorf("%s is not available inside a run sandbox; only the exec verbs are (run %q for the list)",
+			args[0], prog.Prefix()+" --help")
+	}
+
+	client, err := agenthost.DialSandbox(context.Background())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+	exec.HandleSandboxed(client, args[1:])
+	return nil
 }
 
 // printTopLevelHelp routes the two audiences (delegated Claude Code agents

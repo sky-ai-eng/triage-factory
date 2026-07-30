@@ -413,36 +413,6 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 	}
 }
 
-// TestAutoDetect_NoSocket_ReturnsLocalClient pins the local-mode
-// path: when /run/tf.sock is absent, AutoDetect resolves identity
-// from TRIAGE_FACTORY_CONVERSATION_ID and returns a LocalClient. The probe
-// here uses a non-default socket-path constant via env override so
-// the test doesn't depend on /run/tf.sock's actual absence.
-func TestAutoDetect_NoSocket_LocalClient(t *testing.T) {
-	stores, conn := newTestDB(t)
-	seedConversation(t, stores, conn, "run-3", runmode.LocalDefaultUserID, "manual")
-
-	// AutoDetect reads TRIAGE_FACTORY_CONVERSATION_ID at lookup time; set it
-	// to our seeded run.
-	t.Setenv("TRIAGE_FACTORY_CONVERSATION_ID", "run-3")
-
-	c, err := AutoDetect(context.Background(), stores)
-	if err != nil {
-		t.Fatalf("AutoDetect: %v", err)
-	}
-	defer c.Close()
-	if _, ok := c.(*LocalClient); !ok {
-		t.Errorf("expected *LocalClient (no socket), got %T", c)
-	}
-	got, err := c.LookupRun(context.Background())
-	if err != nil {
-		t.Fatalf("LookupRun: %v", err)
-	}
-	if got.RunID != "run-3" {
-		t.Errorf("RunID: got %q, want run-3", got.RunID)
-	}
-}
-
 // TestServer_GracefulShutdown_CompletesInFlight pins the daemon's
 // drain semantics: a mid-flight RPC continues to completion when
 // the listener stops accepting. The test sends a request, then

@@ -14,9 +14,10 @@
 // `...System` methods (no human identity exists).
 //
 // This helper backs cmd/exec/agenthost's LocalClient, which every
-// subcommand reaches through agenthost.AutoDetect rather than calling
-// here directly; the sandboxed-agent path talks to a host daemon over
-// IPC (agenthost.IPCClient) instead of reaching the DB directly.
+// subcommand reaches through agenthost.NewLocalFromEnv rather than
+// calling here directly. It is host-side only: the jailed CLI never
+// resolves identity itself — it talks to a host daemon over IPC
+// (agenthost.IPCClient), which owns identity and the DB.
 package runident
 
 import (
