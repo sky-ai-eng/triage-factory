@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
 // PRHelpText is the `gh pr` half of the help, printed on its own by
@@ -146,7 +147,7 @@ func Handle(ctx context.Context, host agenthost.Client, args []string) {
 		handleActions(ctx, host, cmdArgs)
 	default:
 		fmt.Fprintln(os.Stderr, unknownVerbMessage("gh resource", "gh resources", resource,
-			[]string{"pr", "actions"}, "triagefactory exec gh --help"))
+			[]string{"pr", "actions"}, prog.Prefix()+" gh --help"))
 		os.Exit(1)
 	}
 }
@@ -168,5 +169,10 @@ func unknownVerbMessage(kind, kindPlural, got string, valid []string, helpCmd st
 }
 
 func printHelp() {
-	fmt.Printf("Usage: triagefactory exec gh <resource> <action> [flags]\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n", HelpText)
+	fmt.Print(helpText(prog.Prefix()))
+}
+
+// helpText renders the `gh` resource-level usage under the invoked prefix.
+func helpText(prefix string) string {
+	return fmt.Sprintf("Usage: %s gh <resource> <action> [flags]\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n", prefix, HelpText)
 }

@@ -23,6 +23,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
 // HelpText is the help block for `workspace` commands, surfaced both
@@ -83,7 +84,12 @@ func Handle(host agenthost.Client, args []string) {
 }
 
 func printHelp() {
-	fmt.Printf("Usage: triagefactory exec workspace <command> [args]\n\n%s\n", HelpText)
+	fmt.Print(helpText(prog.Prefix()))
+}
+
+// helpText renders the `workspace` usage under the invoked prefix.
+func helpText(prefix string) string {
+	return fmt.Sprintf("Usage: %s workspace <command> [args]\n\n%s\n", prefix, HelpText)
 }
 
 func exitErr(msg string) {

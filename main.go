@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/sky-ai-eng/triage-factory/cmd/exec"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	"github.com/sky-ai-eng/triage-factory/ee"
 	"github.com/sky-ai-eng/triage-factory/internal/app"
 	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
@@ -92,7 +92,7 @@ func run(ctx context.Context, args []string) error {
 	// are used by delegated Claude Code agents; install/uninstall/
 	// migrate/jwk-init are user-facing. argv0 selects the surface — see
 	// resolveCLIArgs for the `tfac` applet's implicit `exec`.
-	if handled, err := dispatchCLI(args[0], resolveCLIArgs(args)); handled {
+	if handled, err := dispatchCLI(resolveCLIArgs(args)); handled {
 		return err
 	}
 
@@ -163,7 +163,7 @@ func run(ctx context.Context, args []string) error {
 // subcommand of that name exists — this reserves it.
 func resolveCLIArgs(args []string) []string {
 	userArgs := args[1:]
-	if filepath.Base(args[0]) != exec.AppletName {
+	if filepath.Base(args[0]) != prog.AppletName {
 		return userArgs
 	}
 	if len(userArgs) > 0 && userArgs[0] == "exec" {

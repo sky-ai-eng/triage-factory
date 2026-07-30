@@ -14,6 +14,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -82,7 +83,7 @@ var prHelp = map[string]string{
 
 func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: triagefactory exec gh pr <action> [flags]")
+		exitErr("usage: " + prog.Prefix() + " gh pr <action> [flags]")
 	}
 
 	action := args[0]
@@ -99,7 +100,7 @@ func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 	}
 	if execflags.HasHelpFlag(flags, ValueFlags) {
 		if h, ok := prHelp[action]; ok {
-			fmt.Printf("usage: triagefactory exec %s\n", h)
+			fmt.Printf("usage: %s %s\n", prog.Prefix(), h)
 			return
 		}
 		printPRHelp()
@@ -144,15 +145,20 @@ func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 		prCommentDelete(ctx, api, host, flags)
 	default:
 		exitErr(unknownVerbMessage("pr action", "pr actions", action, prActions,
-			"triagefactory exec gh pr --help"))
+			prog.Prefix()+" gh pr --help"))
 	}
 }
 
 // printPRHelp prints the `gh pr` usage — the PR verbs plus the repo-resolution
 // rules that apply to all of them.
 func printPRHelp() {
-	fmt.Printf("Usage: triagefactory exec gh pr <action> [flags]\n\n%s\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n",
-		PRHelpText, RepoResolutionHelpText)
+	fmt.Print(prHelpText(prog.Prefix()))
+}
+
+// prHelpText renders the `gh pr` usage under the invoked prefix.
+func prHelpText(prefix string) string {
+	return fmt.Sprintf("Usage: %s gh pr <action> [flags]\n\n%s\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n",
+		prefix, PRHelpText, RepoResolutionHelpText)
 }
 
 func prView(ctx context.Context, client ghAPI, args []string) {

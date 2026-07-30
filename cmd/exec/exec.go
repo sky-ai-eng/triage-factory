@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/pressly/goose/v3"
 
@@ -14,28 +13,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/gh"
 	jiraexec "github.com/sky-ai-eng/triage-factory/cmd/exec/jira"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/memory"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/workspace"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 )
 
-// AppletName is the additive argv0 this binary also answers to: under it a
-// bare `tfac <verb>` means `triagefactory exec <verb>`. Exported so the argv
-// dispatch and the usage text agree on one spelling.
-const AppletName = "tfac"
-
-// canonicalName is the command prefix printed in usage text when the binary
-// was invoked under its own name rather than the applet's.
-const canonicalName = "triagefactory exec"
-
-// Handle dispatches exec subcommands. argv0 is the name the process was
-// invoked under; it only selects how usage text and the unknown-command error
-// spell the command, never which subcommand runs.
-func Handle(argv0 string, args []string) {
-	name := usageName(argv0)
+// Handle dispatches exec subcommands.
+func Handle(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		printHelp(name)
+		printHelp()
 		return
 	}
 
@@ -177,7 +165,7 @@ func Handle(argv0 string, args []string) {
 			_ = host.Close()
 			os.Exit(code)
 		}
-		fmt.Fprint(os.Stderr, unknownCommandText(name, cmd))
+		fmt.Fprint(os.Stderr, unknownCommandText(prog.Prefix(), cmd))
 		os.Exit(1)
 	}
 }
@@ -201,18 +189,8 @@ func isHelp(args []string, valueFlags map[string]bool) bool {
 	return len(args) == 0 || execflags.HasHelpFlag(args, valueFlags)
 }
 
-// usageName resolves argv0 to the command prefix usage text should name. Under
-// the applet the `exec` word is implicit, so printing it would teach a spelling
-// that reads as a required prefix; under the canonical name it is required.
-func usageName(argv0 string) string {
-	if filepath.Base(argv0) == AppletName {
-		return AppletName
-	}
-	return canonicalName
-}
-
-func printHelp(name string) {
-	fmt.Print(helpText(name))
+func printHelp() {
+	fmt.Print(helpText(prog.Prefix()))
 }
 
 // helpText renders the top-level help. Only agent-facing verbs are listed. The
@@ -222,13 +200,14 @@ func printHelp(name string) {
 // scanning this help can neither see nor invoke it.
 //
 // The per-verb blocks name their verbs bare (`gh pr view`, not
-// `<prefix> gh pr view`), so the invoked name appears in the usage line alone.
-func helpText(name string) string {
-	return fmt.Sprintf("Usage: %s <command> [args]\n\n%s\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", name, gh.HelpText, jiraexec.HelpText, workspace.HelpText, memory.HelpText)
+// `<prefix> gh pr view`), so the invoked prefix appears in the usage line alone.
+func helpText(prefix string) string {
+	return fmt.Sprintf("Usage: %s <command> [args]\n\n%s\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", prefix, gh.HelpText, jiraexec.HelpText, workspace.HelpText, memory.HelpText)
 }
 
-// unknownCommandText is the loser path: an unrecognized verb under either name
-// exits 1 with this on stderr — nothing retries or falls through to server mode.
-func unknownCommandText(name, cmd string) string {
-	return fmt.Sprintf("unknown exec command: %s\nRun '%s --help' for usage.\n", cmd, name)
+// unknownCommandText is the loser path: an unrecognized verb under any invoked
+// name exits 1 with this on stderr — nothing retries or falls through to server
+// mode.
+func unknownCommandText(prefix, cmd string) string {
+	return fmt.Sprintf("unknown exec command: %s\nRun '%s --help' for usage.\n", cmd, prefix)
 }

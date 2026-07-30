@@ -3,67 +3,67 @@ package exec
 import (
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 )
 
-// TestUsageName pins the argv0 → printed-name mapping. Only the applet's own
-// basename switches the spelling; anything else (including a path that merely
-// contains it) keeps the canonical form.
-func TestUsageName(t *testing.T) {
+// TestHelpTextUsageLine golden-pins the top-level usage line under each invoked
+// form. The canonical one is byte-identical to what the binary has always
+// printed; the applet names `tfac` without the implicit `exec` word — printing
+// that word under the applet is what taught the doubled spelling.
+func TestHelpTextUsageLine(t *testing.T) {
 	tests := []struct {
-		argv0 string
-		want  string
+		prefix string
+		want   string
 	}{
-		{"tfac", "tfac"},
-		{"/opt/tf/bin/tfac", "tfac"},
-		{"triagefactory", "triagefactory exec"},
-		{"/usr/local/bin/triagefactory", "triagefactory exec"},
-		{"/opt/tfac/bin/triagefactory", "triagefactory exec"},
-		{"", "triagefactory exec"},
+		{"triagefactory exec", "Usage: triagefactory exec <command> [args]\n"},
+		{"tfac", "Usage: tfac <command> [args]\n"},
+		{"./triagefactory exec", "Usage: ./triagefactory exec <command> [args]\n"},
 	}
 	for _, tt := range tests {
-		if got := usageName(tt.argv0); got != tt.want {
-			t.Errorf("usageName(%q) = %q, want %q", tt.argv0, got, tt.want)
+		if got := helpText(tt.prefix); !strings.HasPrefix(got, tt.want) {
+			t.Errorf("helpText(%q) first line = %q, want %q", tt.prefix, firstLine(got), tt.want)
 		}
 	}
-}
 
-// TestHelpTextUsageLine golden-pins both usage lines: the canonical one is
-// byte-identical to what the binary has always printed, and the applet one
-// names `tfac` without the implicit `exec` word — printing that word under the
-// applet is what taught the doubled spelling in the first place.
-func TestHelpTextUsageLine(t *testing.T) {
-	const (
-		canonicalLine = "Usage: triagefactory exec <command> [args]\n"
-		appletLine    = "Usage: tfac <command> [args]\n"
-	)
-	canonical := helpText(canonicalName)
-	if !strings.HasPrefix(canonical, canonicalLine) {
-		t.Errorf("canonical help first line = %q, want %q", firstLine(canonical), canonicalLine)
-	}
-	applet := helpText(AppletName)
-	if !strings.HasPrefix(applet, appletLine) {
-		t.Errorf("applet help first line = %q, want %q", firstLine(applet), appletLine)
+	// Everything past the usage line is the shared verb documentation, which
+	// names its verbs bare — so the prefix appears in the usage line alone and
+	// the rest of the output is invariant.
+	canonical := strings.TrimPrefix(helpText("triagefactory exec"), tests[0].want)
+	applet := strings.TrimPrefix(helpText("tfac"), tests[1].want)
+	if canonical != applet {
+		t.Error("help bodies diverge between invoked forms; only the usage line may differ")
 	}
 	if strings.Contains(applet, "triagefactory exec") {
 		t.Error("applet help mentions 'triagefactory exec'; it teaches a prefix that is implicit under tfac")
 	}
-	// Everything past the usage line is the shared verb documentation, so the
-	// canonical output is unchanged apart from the name.
-	if body := strings.TrimPrefix(canonical, canonicalLine); body != strings.TrimPrefix(applet, appletLine) {
-		t.Error("help bodies diverge between the two names; only the usage line may differ")
+}
+
+// TestUnknownCommandText pins the loser path's wording: an unknown verb reports
+// the form the caller actually typed, so the hint is copy-pasteable.
+func TestUnknownCommandText(t *testing.T) {
+	tests := []struct {
+		prefix string
+		want   string
+	}{
+		{"triagefactory exec", "unknown exec command: bogus\nRun 'triagefactory exec --help' for usage.\n"},
+		{"tfac", "unknown exec command: bogus\nRun 'tfac --help' for usage.\n"},
+		{"/usr/local/bin/triagefactory exec", "unknown exec command: bogus\nRun '/usr/local/bin/triagefactory exec --help' for usage.\n"},
+	}
+	for _, tt := range tests {
+		if got := unknownCommandText(tt.prefix, "bogus"); got != tt.want {
+			t.Errorf("unknownCommandText(%q, \"bogus\") = %q, want %q", tt.prefix, got, tt.want)
+		}
 	}
 }
 
-// TestUnknownCommandText pins the loser path's wording under both names: an
-// unknown verb reports the form the caller actually typed.
-func TestUnknownCommandText(t *testing.T) {
-	if got, want := unknownCommandText(canonicalName, "bogus"),
-		"unknown exec command: bogus\nRun 'triagefactory exec --help' for usage.\n"; got != want {
-		t.Errorf("canonical = %q, want %q", got, want)
-	}
-	if got, want := unknownCommandText(AppletName, "bogus"),
-		"unknown exec command: bogus\nRun 'tfac --help' for usage.\n"; got != want {
-		t.Errorf("applet = %q, want %q", got, want)
+// TestHelpIsWiredToArgv0 pins that the live help route reads the resolved
+// prefix rather than any baked-in name: under `go test` argv0 is the test
+// binary, so its own path is what must appear.
+func TestHelpIsWiredToArgv0(t *testing.T) {
+	out := helpText(prog.Prefix())
+	if !strings.HasPrefix(out, "Usage: "+prog.Prefix()+" <command> [args]") {
+		t.Errorf("usage line does not name the invoked prefix %q:\n%s", prog.Prefix(), firstLine(out))
 	}
 }
 
