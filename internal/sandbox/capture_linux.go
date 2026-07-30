@@ -152,9 +152,8 @@ func (t *tailBuffer) String() string {
 // if that ever changes, this capture must resolve the commondir's ownership
 // too. The child receives a deliberately minimal environment: never this
 // process's env (the orchestrator's carries DB and service credentials; the
-// broker's carries its flags), plus config overrides that neuter the two
-// attribute-free exec vectors (core.fsmonitor, diff.external) as defense in
-// depth on top of the uid drop.
+// broker's carries its flags), plus the config overrides CaptureChildEnv
+// documents — defense in depth on top of the uid drop, never the boundary.
 //
 // Returns a bounded tail of the child's stderr (diagnostics, never run
 // data) regardless of outcome, plus the run's error if any.
@@ -175,7 +174,7 @@ func CaptureRunDeltaTo(ctx context.Context, worktree, sessionID string, stdout *
 		return "", err
 	}
 	cmd.Dir = "/" // a neutral cwd; the child is passed the worktree path explicitly
-	cmd.Env = captureChildEnv()
+	cmd.Env = CaptureChildEnv()
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{
 			Uid: uint32(WorktreeUID),
@@ -241,34 +240,6 @@ func (hostOps) CaptureRunDelta(ctx context.Context, worktree, sessionID string) 
 		return nil, fmt.Errorf("isolated capture: %w", res.err)
 	}
 	return res.buf, nil
-}
-
-// captureChildEnv is the minimal environment for the capture child. It
-// deliberately does NOT inherit this process's env — the orchestrator's holds
-// DB passwords and service tokens the child (running attacker-influenceable
-// git) must never see. It carries only what git needs to run locally.
-//
-// It also refuses to read any user/global/system git config: GIT_CONFIG_GLOBAL
-// and GIT_CONFIG_SYSTEM point at /dev/null so git ignores ~/.gitconfig, the XDG
-// global config, and /etc/gitconfig, and HOME is a non-existent path so nothing
-// resolves through it either. Without this, HOME pointing at a shared writable
-// directory (/tmp) would let anyone plant /tmp/.gitconfig — a filter, an
-// include.path — and make the capture attacker-influenceable and
-// non-deterministic across runs. Only the run root's own repo config is read.
-// On top of that, config overrides neuter the two attribute-free code-exec keys
-// (core.fsmonitor, diff.external) as defense in depth; the uid drop, not these,
-// is the actual boundary.
-func captureChildEnv() []string {
-	return []string{
-		"PATH=" + os.Getenv("PATH"), // locate the git binary
-		"HOME=/nonexistent",         // no user config from a shared/writable HOME
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_CONFIG_COUNT=2",
-		"GIT_CONFIG_KEY_0=core.fsmonitor", "GIT_CONFIG_VALUE_0=",
-		"GIT_CONFIG_KEY_1=diff.external", "GIT_CONFIG_VALUE_1=",
-	}
 }
 
 // hasSysAdmin reports whether this process's own effective capability set
