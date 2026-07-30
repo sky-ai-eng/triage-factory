@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/gh"
 	jiraexec "github.com/sky-ai-eng/triage-factory/cmd/exec/jira"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/memory"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/workspace"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -167,7 +168,7 @@ func Handle(args []string) {
 			_ = host.Close()
 			os.Exit(code)
 		}
-		fmt.Fprintf(os.Stderr, "unknown exec command: %s\nRun 'triagefactory exec --help' for usage.\n", cmd)
+		fmt.Fprint(os.Stderr, unknownCommandText(prog.Prefix(), cmd))
 		os.Exit(1)
 	}
 }
@@ -192,10 +193,24 @@ func isHelp(args []string, valueFlags map[string]bool) bool {
 }
 
 func printHelp() {
-	// Only agent-facing verbs are listed. The pre-push hook's branch-capture
-	// callback is deliberately NOT an exec subcommand — it lives under the
-	// internal `triagefactory hook` namespace (see cmd/hook), off the agent's
-	// `Bash(<bin> exec *)` allowlist, so a stuck agent scanning this help can
-	// neither see nor invoke it.
-	fmt.Printf("Usage: triagefactory exec <command> [args]\n\n%s\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", gh.HelpText, jiraexec.HelpText, workspace.HelpText, memory.HelpText)
+	fmt.Print(helpText(prog.Prefix()))
+}
+
+// helpText renders the top-level help. Only agent-facing verbs are listed. The
+// pre-push hook's branch-capture callback is deliberately NOT an exec
+// subcommand — it lives under the internal `triagefactory hook` namespace (see
+// cmd/hook), off the agent's `Bash(<bin> exec *)` allowlist, so a stuck agent
+// scanning this help can neither see nor invoke it.
+//
+// The per-verb blocks name their verbs bare (`gh pr view`, not
+// `<prefix> gh pr view`), so the invoked prefix appears in the usage line alone.
+func helpText(prefix string) string {
+	return fmt.Sprintf("Usage: %s <command> [args]\n\n%s\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", prefix, gh.HelpText, jiraexec.HelpText, workspace.HelpText, memory.HelpText)
+}
+
+// unknownCommandText is the loser path: an unrecognized verb under any invoked
+// name exits 1 with this on stderr — nothing retries or falls through to server
+// mode.
+func unknownCommandText(prefix, cmd string) string {
+	return fmt.Sprintf("unknown exec command: %s\nRun '%s --help' for usage.\n", cmd, prefix)
 }

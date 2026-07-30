@@ -94,13 +94,16 @@ func TestValueFlagsCoversFirstPositional(t *testing.T) {
 // available on the native path and withheld on the SDK one, and exec cannot
 // tell which is driving — so a message claiming either is wrong half the time.
 func TestUnknownVerbMessageRoutes(t *testing.T) {
+	// The hint is pinned under the applet spelling: the call site composes it
+	// from prog.Prefix(), so the taught name is whatever the process was
+	// invoked as.
 	msg := unknownVerbMessage("pr action", "pr actions", "add-review-commnt", prActions,
-		"triagefactory exec gh pr --help")
+		"tfac gh pr --help")
 	for _, want := range []string{
 		"unknown pr action: add-review-commnt",
 		"add-review-comment", // the verb they meant, in the valid list
 		"start-review",       // and the rest of the review lifecycle
-		"gh pr --help",       // where to read the usage
+		"tfac gh pr --help",  // where to read the usage, under the invoked name
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message missing %q:\n%s", want, msg)
