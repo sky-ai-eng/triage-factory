@@ -188,6 +188,11 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	// allocator gives a fresh idx for every live Wrap. Pair them so the ID
 	// stays grep-friendly while being uniquely distinguishable.
 	containerID := fmt.Sprintf("tf-%s-%d", truncate(cfg.RunID, 11), idx)
+	// Published on the Sandbox before the launch so an observer (the resource
+	// sampler) reads the id this launch actually used rather than re-deriving
+	// it. Set even if the launch below fails: the group may already exist and
+	// the caller's teardown is what reclaims it.
+	sb.ContainerID = containerID
 	run, err := runLauncher.LaunchRun(ctx, LaunchParams{
 		RunID:           cfg.RunID,
 		MemoryNamespace: cfg.MemoryNamespace,
