@@ -123,6 +123,23 @@ describe('useRunDetail live cost accumulation', () => {
     expect(await screen.findByText('$2.64')).toBeInTheDocument()
   })
 
+  it('does not strand a stamp that streams in before the run row lands', async () => {
+    render(<Harness />)
+
+    // The hook registers its websocket handler on the first render, so a row can
+    // stream in while the run fetch is still in flight — with no run object to
+    // fold into. The readout settling on the server's SUM (rather than on
+    // 0.20 + 0.05) is what pins that this event landed in that window.
+    const row = message({ id: 11, cost_usd: 0.05 })
+    send({ type: 'message', conversation_id: RUN_ID, data: row })
+    expect(await screen.findByText('$0.2000')).toBeInTheDocument()
+
+    // Nothing was recorded as counted, so the row's dollars are still foldable
+    // rather than stranded — marking it would have lost them for the whole run.
+    send({ type: 'message', conversation_id: RUN_ID, data: row })
+    expect(screen.getByText('$0.2500')).toBeInTheDocument()
+  })
+
   it('leaves the readout alone for rows that carry no stamp (SDK runtime)', async () => {
     render(<Harness />)
     await screen.findByText('$0.2000')

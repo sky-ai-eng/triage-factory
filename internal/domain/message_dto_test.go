@@ -2,9 +2,23 @@ package domain
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 )
+
+// wireKeys round-trips a DTO through JSON so the assertions below read the
+// decoded document rather than the encoder's formatting of a float.
+func wireKeys(t *testing.T, dto MessageDTO) map[string]any {
+	t.Helper()
+	b, err := json.Marshal(dto)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return wire
+}
 
 // A live surface accumulates a run's spend from the streamed rows between reads
 // of the conversation's SUM, so the per-row stamp has to survive the wire —
@@ -17,31 +31,27 @@ func TestMessageDTOCostStamp(t *testing.T) {
 		if dto.CostUSD == nil || *dto.CostUSD != cost {
 			t.Fatalf("CostUSD = %v, want %v", dto.CostUSD, cost)
 		}
-		b, err := json.Marshal(dto)
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
+		got, ok := wireKeys(t, dto)["cost_usd"]
+		if !ok {
+			t.Fatal("wire shape missing cost_usd")
 		}
-		if !strings.Contains(string(b), `"cost_usd":0.0412`) {
-			t.Errorf("wire shape missing the stamp: %s", b)
+		if got != cost {
+			t.Errorf("wire cost_usd = %v, want %v", got, cost)
 		}
 	})
 
 	t.Run("a free settlement row is not the same as an unstamped one", func(t *testing.T) {
 		zero := 0.0
-		b, err := json.Marshal(Message{ID: 7, CostUSD: &zero}.ToDTO())
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
+		got, ok := wireKeys(t, Message{ID: 7, CostUSD: &zero}.ToDTO())["cost_usd"]
+		if !ok {
+			t.Fatal("a zero stamp must stay on the wire")
 		}
-		if !strings.Contains(string(b), `"cost_usd":0`) {
-			t.Errorf("a zero stamp must stay on the wire, got: %s", b)
+		if got != zero {
+			t.Errorf("wire cost_usd = %v, want 0", got)
 		}
 
-		b, err = json.Marshal(Message{ID: 7}.ToDTO())
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
-		}
-		if strings.Contains(string(b), "cost_usd") {
-			t.Errorf("an unstamped row must omit the key, got: %s", b)
+		if _, ok := wireKeys(t, Message{ID: 7}.ToDTO())["cost_usd"]; ok {
+			t.Error("an unstamped row must omit the key")
 		}
 	})
 }

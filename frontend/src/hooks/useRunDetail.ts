@@ -81,12 +81,21 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   // authoritative SUM, so drift self-corrects rather than compounding. Rows with
   // no stamp — every SDK-runtime row until it settles at terminal time — are
   // no-ops, leaving that path exactly as it was.
-  const foldMessageCost = useCallback((msg: Message) => {
-    const cost = msg.cost_usd
-    if (cost == null || costedMessageIDs.current.has(msg.id)) return
-    costedMessageIDs.current.add(msg.id)
-    setRun((prev) => (prev ? { ...prev, TotalCostUSD: (prev.TotalCostUSD ?? 0) + cost } : prev))
-  }, [])
+  //
+  // Nothing is recorded before the run row lands: with no object to fold into,
+  // marking the id would strand its dollars for good (already counted, never
+  // added). Leaving it unmarked means the worst case is under-reporting until
+  // the next read — the same bounded drift every other arm accepts.
+  const runLoaded = run !== null
+  const foldMessageCost = useCallback(
+    (msg: Message) => {
+      const cost = msg.cost_usd
+      if (cost == null || !runLoaded || costedMessageIDs.current.has(msg.id)) return
+      costedMessageIDs.current.add(msg.id)
+      setRun((prev) => (prev ? { ...prev, TotalCostUSD: (prev.TotalCostUSD ?? 0) + cost } : prev))
+    },
+    [runLoaded],
+  )
 
   // Pull the run's artifact set fresh. Shared by the initial load, the WS
   // handlers, and the reconcile poll so an approve/dismiss anywhere (this tab or
