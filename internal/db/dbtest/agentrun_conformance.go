@@ -263,6 +263,65 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	deref := func(f *float64) any {
+		if f == nil {
+			return "<nil>"
+		}
+		return *f
+	}
+
+	t.Run("Complete_ZeroLumpPreservesPerRowStamps", func(t *testing.T) {
+		// The native runtime settles spend per assistant row as it goes, and
+		// its terminal Complete reports zero — there is nothing left to
+		// settle. A zero lump must therefore stamp NOTHING: the first live
+		// native run lost its final row's stamp to the unconditional
+		// overwrite, and the run's total under-reported by exactly that row.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-zero", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		// Exactly representable in float4: the postgres column is `real`, and
+		// a value that widens on the round trip would fail the equality below
+		// for the wrong reason.
+		stamped := 0.25
+		msgID, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: runID, Role: "assistant", Subtype: "text",
+			Content: "final turn", Model: "claude-sonnet-5", CostUSD: &stamped,
+		})
+		if err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, runID, "completed", 0, 4000, 3, "", "done", "continue", "", ""); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		for i := range msgs {
+			if msgs[i].ID != int(msgID) {
+				continue
+			}
+			if c := msgs[i].CostUSD; c == nil || *c != stamped {
+				t.Errorf("per-row stamp = %v, want %v preserved — a zero lump settles nothing", deref(c), stamped)
+			}
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v, got=%v", err, got)
+		}
+		if got.Status != "completed" {
+			t.Errorf("status = %q, want completed — skipping the lump must not skip the terminal write", got.Status)
+		}
+		if got.TotalCostUSD == nil || *got.TotalCostUSD != stamped {
+			t.Errorf("total_cost_usd = %v, want %v (the ledger SUM over per-row stamps)", deref(got.TotalCostUSD), stamped)
+		}
+	})
+
 	t.Run("Complete_SettlesOnEngagementRow_SkipsForeignNewerRow", func(t *testing.T) {
 		// The lump must land on the settling engagement's own newest row —
 		// NOT on the conversation's newest row when that row belongs to a

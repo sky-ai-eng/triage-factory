@@ -136,7 +136,13 @@ func completeRun(ctx context.Context, q queryer, orgID, runID, status string, co
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if claimID != "" {
+	// A zero lump settles nothing, in either arm. Zero means the runtime had
+	// nothing to report at terminal time: the native loop settles spend per
+	// assistant row as it goes, and overwriting its newest stamp with 0 would
+	// erase real recorded dollars. An SDK invocation that reports zero leaves
+	// its rows NULL — price unknown — rather than asserting the run was
+	// genuinely free.
+	if claimID != "" && costUSD != 0 {
 		// Overwrite, not add: the engagement's newest claim-attributed row
 		// is its own fresh row, and the lump is that invocation's whole
 		// total. Runtime-composed rows are skipped as targets — an errored

@@ -388,8 +388,15 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	// caller's org (RLS), so a missing / cross-org run is a 404 before SendMessage
 	// reaches the registry; an existing run gets the user message persisted (with
 	// the row id carried back onto msg.ID for the broadcast's client dedup).
+	//
+	// SDK runs only. A native conversation's one input door is the messages
+	// table itself: SendMessage's native branch queues the row (pending) and
+	// broadcasts it, so an optimistic insert here would put the same words in
+	// front of the model twice — once as a bare user turn, once in the steer
+	// envelope. The SDK path keeps the optimistic row because its live steer
+	// injects into the process without writing one.
 	msg := &domain.Message{ConversationID: conversationID, Role: "user", Subtype: "text", Content: body.Text}
-	var runExists bool
+	var runExists, nativeRun bool
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		run, e := tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
@@ -399,6 +406,10 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 		runExists = true
+		nativeRun = run.Runtime == domain.ConversationRuntimeNative
+		if nativeRun {
+			return nil
+		}
 		id, e := tx.Conversations.InsertMessage(r.Context(), orgID, msg)
 		if e != nil {
 			return e
@@ -413,12 +424,14 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "run")
 		return
 	}
-	ag.ws.Broadcast(websocket.Event{
-		Type:           "message",
-		OrgID:          orgID,
-		ConversationID: conversationID,
-		Data:           msg.ToDTO(),
-	})
+	if !nativeRun {
+		ag.ws.Broadcast(websocket.Event{
+			Type:           "message",
+			OrgID:          orgID,
+			ConversationID: conversationID,
+			Data:           msg.ToDTO(),
+		})
+	}
 
 	if err := spawner.SendMessage(r.Context(), orgID, conversationID, userID, body.Text); err != nil {
 		writeJSON(w, steerErrorStatus(err), map[string]string{"error": err.Error()})
