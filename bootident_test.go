@@ -81,28 +81,38 @@ func TestInRunSandbox_ExactMatch(t *testing.T) {
 // these either needs local state the jail hasn't got or would create some by
 // reaching for it, which is exactly the failure this identity exists to
 // prevent — so each must be turned away by name, not attempted.
+//
+// The empty-args case is here for a different reason: it is unreachable through
+// the resolver today, so what it pins is that the function answers for its whole
+// input domain rather than panicking on a future caller's shape.
 func TestDispatchJailCLI_RefusesHostSubcommands(t *testing.T) {
-	for _, args := range [][]string{
-		{"install"},
-		{"uninstall", "--yes"},
-		{"migrate", "up"},
-		{"jwk-init"},
-		{"instance", "list"},
-		{"operator", "list"},
-		{"hook", "record-push"},
-		{"snapshot-capture", "/work"},
-		{"cap-broker"},
-		{"run-sidecar"},
-		{"--port", "8080"}, // server mode
-		{"bogus"},
-	} {
-		t.Run(args[0], func(t *testing.T) {
-			err := dispatchJailCLI(args)
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"install", []string{"install"}},
+		{"uninstall", []string{"uninstall", "--yes"}},
+		{"migrate", []string{"migrate", "up"}},
+		{"jwk-init", []string{"jwk-init"}},
+		{"instance", []string{"instance", "list"}},
+		{"operator", []string{"operator", "list"}},
+		{"hook", []string{"hook", "record-push"}},
+		{"snapshot-capture", []string{"snapshot-capture", "/work"}},
+		{"cap-broker", []string{"cap-broker"}},
+		{"run-sidecar", []string{"run-sidecar"}},
+		{"server flag", []string{"--port", "8080"}},
+		{"unknown subcommand", []string{"bogus"}},
+		{"no subcommand", nil},
+		{"empty subcommand list", []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := dispatchJailCLI(tt.args)
 			if err == nil {
-				t.Fatalf("dispatchJailCLI(%q) = nil; want a refusal", args)
+				t.Fatalf("dispatchJailCLI(%q) = nil; want a refusal", tt.args)
 			}
 			if !strings.Contains(err.Error(), "not available inside a run sandbox") {
-				t.Errorf("dispatchJailCLI(%q) error = %q; want the sandbox refusal", args, err)
+				t.Errorf("dispatchJailCLI(%q) error = %q; want the sandbox refusal", tt.args, err)
 			}
 		})
 	}

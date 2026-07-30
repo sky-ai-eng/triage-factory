@@ -120,6 +120,15 @@ func dispatchCLI(args []string) (handled bool, err error) {
 // verb body. The cost is that a verb's own `--help` also needs the socket in a
 // jail; help text is not worth pretending the CLI is functional when it isn't.
 func dispatchJailCLI(args []string) error {
+	// No subcommand at all means server mode, which is the one thing a jail
+	// must least be able to boot. Identity resolution never routes that shape
+	// here today (it resolves to the server identity), so this is the same kind
+	// of guard dispatchCLI's own empty check is: the function must answer for
+	// its whole input domain, not for what its current caller happens to pass.
+	if len(args) == 0 {
+		return errNotAvailableInSandbox("server mode")
+	}
+
 	switch args[0] {
 	case "exec":
 		// Fall through to the client below.
@@ -134,8 +143,7 @@ func dispatchJailCLI(args []string) error {
 		fmt.Println(Version)
 		return nil
 	default:
-		return fmt.Errorf("%s is not available inside a run sandbox; only the exec verbs are (run %q for the list)",
-			args[0], prog.Prefix()+" --help")
+		return errNotAvailableInSandbox(args[0])
 	}
 
 	client, err := agenthost.DialSandbox(context.Background())
@@ -145,6 +153,15 @@ func dispatchJailCLI(args []string) error {
 	defer func() { _ = client.Close() }()
 	exec.HandleSandboxed(client, args[1:])
 	return nil
+}
+
+// errNotAvailableInSandbox is the jailed CLI's refusal. It names what was asked
+// for and then the one command that lists what CAN be run, under the prefix
+// this process was actually invoked as — a reader who hits this has already
+// guessed wrong once, and a refusal that only says no costs another turn.
+func errNotAvailableInSandbox(what string) error {
+	return fmt.Errorf("%s is not available inside a run sandbox; only the exec verbs are (run %q for the list)",
+		what, prog.Prefix()+" --help")
 }
 
 // printTopLevelHelp routes the two audiences (delegated Claude Code agents
