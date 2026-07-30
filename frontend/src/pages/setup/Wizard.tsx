@@ -24,7 +24,7 @@
 // buttons, an aria-live region announces step changes, and prefers-reduced-
 // motion swaps the recede animation for an instant collapse.
 
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Check } from 'lucide-react'
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
@@ -102,12 +102,36 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
 
   const wiz = useWizard(WIZARD_STEPS, identity, initialWizardState, onFinish)
 
+  const { back, advance, goTo, activeIndex, busy, canGoBack, steps, activeLoadFailed } = wiz
+
+  // Every route between steps goes through these three, so `navigated` can't
+  // miss one. It records that the user has moved — an event, not something to
+  // re-derive in an effect — and that is what tells a newly mounted step body
+  // whether to animate open (every step the user opens) or simply be there (the
+  // step the wizard resumes on at first paint). Setting it true when it already
+  // is bails out of the render, so it costs one extra render, once.
+  const [navigated, setNavigated] = useState(false)
+  const goBack = useCallback(() => {
+    setNavigated(true)
+    back()
+  }, [back])
+  const goNext = useCallback(() => {
+    setNavigated(true)
+    advance()
+  }, [advance])
+  const goToStep = useCallback(
+    (index: number) => {
+      setNavigated(true)
+      goTo(index)
+    },
+    [goTo],
+  )
+
   // Keyboard mirrors of the footer buttons. Esc re-expands the previous step
   // (gated on canGoBack so it stays in lockstep with the Back button). Enter
   // triggers Continue, but only on a step that opts in (advanceOnEnter) and only
   // from a text input — so pressing it in the URL field probes + advances, while
   // it never hijacks the access steps' own Connect / Register buttons.
-  const { back, advance, activeIndex, busy, canGoBack, steps, activeLoadFailed } = wiz
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // Mirror the Continue button's disabled condition (busy || activeLoadFailed)
@@ -116,7 +140,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       if (busy || activeLoadFailed) return
       if (e.key === 'Escape' && canGoBack) {
         e.preventDefault()
-        back()
+        goBack()
         return
       }
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
@@ -126,13 +150,13 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
           target instanceof HTMLInputElement && target.type !== 'button' && target.type !== 'submit'
         if (step?.advanceOnEnter && inTextInput) {
           e.preventDefault()
-          advance()
+          goNext()
         }
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [back, advance, canGoBack, busy, activeLoadFailed, steps, activeIndex])
+  }, [goBack, goNext, canGoBack, busy, activeLoadFailed, steps, activeIndex])
 
   const headingRef = useRef<HTMLHeadingElement | null>(null)
   // The active step's Back / Continue row — what the page positions itself
@@ -180,9 +204,24 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       const headingTop = heading.getBoundingClientRect().top + window.scrollY
       top = Math.min(top, headingTop - HEADING_GAP)
     }
-    window.scrollTo({ top: Math.max(0, top), behavior: reduce ? 'auto' : 'smooth' })
-  }, [reduce])
+    // Instant, never smooth. The bodies' height animation is what carries the
+    // motion between steps; a smooth scroll on top of it is a second easing
+    // curve chasing the first, and the row visibly lags the line for the length
+    // of the transition instead of resting on it. Re-anchoring each frame
+    // instead pins the row and lets the content melt around it.
+    window.scrollTo({ top: Math.max(0, top), behavior: 'auto' })
+  }, [])
 
+  // Whether the stack has painted once. This is what AnimatePresence's `initial`
+  // wants: false for the resumed step on first paint (it should already be open,
+  // not animate in from nothing), true for every step opened afterwards. It
+  // cannot be the constant `false` it used to be — each step's AnimatePresence
+  // lives inside that step's <li>, and forward navigation mounts that <li>
+  // fresh, so its body is present on its own AnimatePresence's first render,
+  // which is exactly the case a constant false suppresses. The result was an
+  // expand that played going Back and never going forward: the arriving step
+  // appeared at full height in one frame and the outgoing one drained out from
+  // under it.
   // As a step becomes active, move focus to its heading and bring its actions to
   // the line. preventScroll matters: focus() scrolls on its own, and that scroll
   // would race the settle immediately after it.
@@ -344,11 +383,11 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                               title={step.title}
                               summary={step.collapsedSummary(wiz.state)}
                               complete={complete}
-                              onEdit={() => wiz.goTo(index)}
+                              onEdit={() => goToStep(index)}
                             />
                           )}
 
-                          <AnimatePresence initial={false}>
+                          <AnimatePresence initial={navigated}>
                             {isActive && (
                               <motion.div
                                 key="body"
@@ -356,11 +395,12 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                   reduce ? false : { height: 0, opacity: 0, filter: 'blur(10px)' }
                                 }
                                 animate={{ height: 'auto', opacity: 1, filter: 'blur(0px)' }}
-                                exit={
-                                  reduce
-                                    ? { opacity: 0 }
-                                    : { height: 0, opacity: 0, filter: 'blur(6px)' }
-                                }
+                                // No blur on the way out. It buys nothing on
+                                // content that is already collapsing and fading,
+                                // and blurring a layer whose height changes every
+                                // frame repaints it every frame — the same cost
+                                // the ambient backdrop is careful to avoid.
+                                exit={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }}
                                 transition={reduce ? { duration: 0 } : bodyEase}
                                 className="-mx-1.5 px-1.5"
                                 style={{ overflow: 'hidden' }}
@@ -386,7 +426,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                       state: wiz.state,
                                       patch: wiz.patch,
                                       error: wiz.error,
-                                      advance,
+                                      advance: goNext,
                                     })
                                   )}
 
@@ -410,7 +450,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                             >
                               <button
                                 type="button"
-                                onClick={back}
+                                onClick={goBack}
                                 disabled={!canGoBack || busy}
                                 className="rounded-xl px-3 py-2 text-[13px] font-medium text-text-tertiary transition-colors hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40"
                               >
@@ -421,7 +461,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                               {!step.selfAdvancing && (
                                 <button
                                   type="button"
-                                  onClick={advance}
+                                  onClick={goNext}
                                   disabled={busy || wiz.activeLoadFailed}
                                   className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 hover:shadow-[0_12px_32px_-8px_var(--color-accent)] disabled:opacity-40 disabled:shadow-none"
                                 >
