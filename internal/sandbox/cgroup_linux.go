@@ -244,9 +244,12 @@ func cgroupCPUUsec(dir string) *int64 {
 	return parseCPUUsec(data)
 }
 
-// parseCPUUsec extracts usage_usec out of a cpu.stat body. Split from the read
-// so the teardown read (which warns on failure) and the sampling read (which
-// must not) share one parse and can't drift.
+// parseCPUUsec extracts usage_usec out of a cpu.stat body, reporting nothing
+// for a body that has no usage_usec line or an unparseable value. Split from
+// the read so the teardown read and the sampling read share one parse and
+// can't drift; the two differ only in whether an unreadable FILE warns
+// (teardown does, sampling must not) — a body that reads but doesn't parse is
+// silent on both paths.
 func parseCPUUsec(data []byte) *int64 {
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)

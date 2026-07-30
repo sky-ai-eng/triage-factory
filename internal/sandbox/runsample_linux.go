@@ -43,11 +43,13 @@ func cgroupCurrentMemMB(dir string) *int {
 	return &mb
 }
 
-// cgroupCPUUsecQuiet is cgroupCPUUsec without the warning — the sampling
-// counterpart of the teardown read. A teardown that can't read cpu.stat has
-// lost a number nothing can reconstruct and says so; a sampler tick that
-// can't has simply raced a run that ended, and one warn per finished run is
-// noise, not signal. The parse is shared so the two can't drift.
+// cgroupCPUUsecQuiet is cgroupCPUUsec without its unreadable-file warning —
+// the sampling counterpart of the teardown read, and the only way the two
+// differ. A teardown that can't open cpu.stat has lost a number nothing can
+// reconstruct and says so; a sampler tick that can't has simply raced a run
+// that ended, and one warn per finished run is noise, not signal. The parse is
+// shared, so a body that reads but yields no usage_usec is silently absent on
+// both paths.
 func cgroupCPUUsecQuiet(dir string) *int64 {
 	data, err := os.ReadFile(dir + "/cpu.stat")
 	if err != nil {

@@ -40,18 +40,40 @@ func TestCgroupCurrentMemMB_Parsing(t *testing.T) {
 }
 
 // TestCgroupCPUUsecQuiet_SharesTeardownParse pins that the sampling read and
-// the teardown read agree on the same cpu.stat body. They differ only in
-// logging, and a divergent parse would make the series and the recorded
+// the teardown read agree on every cpu.stat body — the readable ones and the
+// ones that parse to nothing alike. They diverge only on whether an unreadable
+// FILE warns; a divergent parse would make the series and the recorded
 // end-state disagree for a reason that isn't the sampling cadence.
 func TestCgroupCPUUsecQuiet_SharesTeardownParse(t *testing.T) {
-	dir := t.TempDir()
-	body := "usage_usec 918273\nuser_usec 600000\nsystem_usec 318273\n"
-	if err := os.WriteFile(filepath.Join(dir, "cpu.stat"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name string
+		body string
+		want *int64
+	}{
+		{"full stat", "usage_usec 918273\nuser_usec 600000\nsystem_usec 318273\n", ptr(int64(918273))},
+		{"measured zero", "usage_usec 0\n", ptr(int64(0))},
+		// Both readers are silently absent here: the parse is shared, so
+		// neither the missing line nor the bad value is a logged event on
+		// either path.
+		{"no usage_usec line", "user_usec 600000\n", nil},
+		{"unparseable value", "usage_usec twelve\n", nil},
+		{"empty body", "", nil},
 	}
-	quiet, loud := cgroupCPUUsecQuiet(dir), cgroupCPUUsec(dir)
-	if quiet == nil || loud == nil || *quiet != *loud || *quiet != 918273 {
-		t.Fatalf("quiet = %v, teardown = %v, want both 918273", deref(quiet), deref(loud))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "cpu.stat"), []byte(tt.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			quiet, teardown := cgroupCPUUsecQuiet(dir), cgroupCPUUsec(dir)
+			if (quiet == nil) != (tt.want == nil) || (quiet != nil && *quiet != *tt.want) {
+				t.Errorf("sampling read = %v, want %v for %q", deref(quiet), deref(tt.want), tt.body)
+			}
+			if (quiet == nil) != (teardown == nil) || (quiet != nil && *quiet != *teardown) {
+				t.Errorf("readers disagree on %q: sampling = %v, teardown = %v",
+					tt.body, deref(quiet), deref(teardown))
+			}
+		})
 	}
 }
 
