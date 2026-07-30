@@ -374,6 +374,23 @@ type ConversationStore interface {
 	// when the conversation has no active claim — a released claim's phase
 	// is inert history and must not be rewritten.
 	SetActiveClaimPhaseSystem(ctx context.Context, orgID, conversationID, phase string) error
+
+	// RecordClaimSandboxStatsSystem stamps one claim's measured sandbox cost
+	// — peak memory (MiB) and CPU time (µs), read from the run's cgroup at
+	// teardown. Keyed on the CLAIM ID, and deliberately valid on an
+	// already-released row: teardown runs after the completion bookkeeping
+	// releases the claim, so resolving "the active claim" here would race the
+	// release and usually find nothing. The engagement that paid for the
+	// resources is named by the caller, not inferred from live state.
+	//
+	// nil for either value writes NULL — "not measured" (local mode has no
+	// sandbox; a pre-5.19 kernel has no memory.peak; a crashed teardown
+	// reports neither) as distinct from a measured zero, which is why these
+	// are pointers rather than zero-valued ints. A stamp for an unknown claim
+	// id is a no-op, not an error: the caller is on a best-effort teardown
+	// path where a missing row means the accounting is simply lost.
+	RecordClaimSandboxStatsSystem(ctx context.Context, orgID, claimID string, peakMemMB *int, cpuUsec *int64) error
+
 	SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error
 	MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
 	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID, failureKind string) (bool, error)

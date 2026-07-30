@@ -34,6 +34,12 @@ func setupAndCreateRunCgroup(name string, limitMB int) (dir string, f *os.File, 
 type SupervisedRuntime struct {
 	cmd       *exec.Cmd
 	cgroupDir string
+
+	// actuals is captured by Wait, in the instant between the child's exit
+	// and the cgroup's removal, and read by Actuals afterwards. Written and
+	// read on the broker's single supervising goroutine, so the
+	// Wait-then-Actuals ordering is the whole synchronization.
+	actuals RunActuals
 }
 
 // LaunchSupervised is the cap-broker's runtime launcher. It builds the
@@ -92,15 +98,33 @@ func LaunchSupervised(ctx context.Context, bundleDir, containerID string, memory
 }
 
 // Wait blocks until the runtime exits, then reports whether it was
-// OOM-killed and removes the per-run cgroup. The exit error mirrors
-// exec.Cmd.Wait (nil on clean exit). Read the OOM state before removing
-// the group so the attribution sees live memory.events.
+// OOM-killed, captures what the run actually cost (see Actuals), and removes
+// the per-run cgroup. The exit error mirrors exec.Cmd.Wait (nil on clean
+// exit).
+//
+// Every cgroup read happens before the group is removed — the OOM
+// attribution needs live memory.events, the actuals need memory.peak /
+// cpu.stat — because rmdir destroys all of it and nothing downstream can
+// reconstruct the numbers. This process owns the cgroup lifecycle, so it is
+// also the only one that can read them race-free.
 func (s *SupervisedRuntime) Wait() (oomKilled bool, err error) {
 	err = s.cmd.Wait()
 	oomKilled = cgroupOOMKilled(s.cgroupDir)
+	s.actuals = cgroupRunActuals(s.cgroupDir)
 	_ = removeRunCgroup(s.cgroupDir)
 	return oomKilled, err
 }
+
+// Actuals reports what the run consumed, as captured by Wait. Valid only
+// after Wait; the zero value (both fields absent) before it, and equally
+// when the run had no cgroup to measure or the host's kernel offered
+// nothing to read.
+//
+// A separate accessor rather than extra Wait returns because the sidecar
+// runtime the broker supervises through the same registry is an ordinary
+// host process with no cgroup — it has no actuals to report, and shouldn't
+// have to pretend otherwise.
+func (s *SupervisedRuntime) Actuals() RunActuals { return s.actuals }
 
 // Kill SIGKILLs the runtime (the runsc parent); gVisor propagates the
 // signal into the sandboxed init. Idempotent — a no-op once the process

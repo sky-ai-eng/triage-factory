@@ -541,6 +541,12 @@ func (s *projectSession) dispatch(item queueItem) {
 		OrgID:       item.orgID,
 		Secrets:     s.curator.getSecrets(),
 		LLMResolver: s.curator.getLLMResolver(),
+		// A curator turn is an executor engagement like any delegated run, so
+		// its jail's measured cost lands on its own claim at teardown — the
+		// same channel, keyed by the id minted above rather than by looking
+		// for the conversation's active claim (by then this one is released).
+		ClaimID:              claimID,
+		RecordSandboxActuals: s.curator.recordSandboxActuals,
 		// PrebuiltNetwork/PrebuiltProxyEnv are set only on the executor path;
 		// agentproc.Run skips in-process credential resolution whenever
 		// PrebuiltNetwork is non-nil, so Secrets/LLMResolver above are inert

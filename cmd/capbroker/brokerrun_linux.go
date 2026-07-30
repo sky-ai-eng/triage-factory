@@ -67,7 +67,8 @@ type brokerRun struct {
 	watchCancel context.CancelFunc
 	started     bool
 
-	oom       bool // set by Wait, read by OOMKilled (same goroutine)
+	oom       bool               // set by Wait, read by OOMKilled (same goroutine)
+	actuals   sandbox.RunActuals // set by Wait, read by Actuals (same goroutine)
 	closeOnce sync.Once
 }
 
@@ -145,6 +146,7 @@ func (r *brokerRun) Wait() error {
 	// runsc child hasn't finished exiting after emitting its terminal result.
 	err := r.client.callWithCap(context.Background(), methodWaitRun, waitRunArgs{ContainerID: r.params.ContainerID}, &res, 0)
 	r.oom = res.OOMKilled
+	r.actuals = sandbox.RunActuals{PeakMemMB: res.PeakMemMB, CPUUsec: res.CPUUsec}
 	r.stopWatcher()
 	if r.conn != nil {
 		_ = r.conn.Close()
@@ -161,6 +163,12 @@ func (r *brokerRun) Wait() error {
 // OOMKilled reports the broker's OOM attribution captured by Wait. Valid
 // after Wait.
 func (r *brokerRun) OOMKilled() bool { return r.oom }
+
+// Actuals reports the run's measured cost as the broker read it off the
+// cgroup at exit. Valid after Wait; both fields absent when the run never
+// reached the broker's wait (an abandoned bring-up torn down via Close) or
+// when the host's kernel offered nothing to read.
+func (r *brokerRun) Actuals() sandbox.RunActuals { return r.actuals }
 
 // Close tears the run down. If Start ran, it kills the broker's child (so
 // the broker reaps it and removes its cgroup); otherwise it just releases

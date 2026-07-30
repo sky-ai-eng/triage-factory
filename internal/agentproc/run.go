@@ -113,6 +113,27 @@ type RunOptions struct {
 	// uses its own message-group id.
 	TraceID string
 
+	// ClaimID is the executor engagement this launch belongs to — the claims
+	// row the dispatcher minted (or, for a curator turn, the one that claimed
+	// the queued message). It exists so the launch's measured sandbox cost can
+	// be stamped against the engagement that paid it; nothing else reads it.
+	// Empty for launches that belong to no engagement at all (the toolless
+	// system jobs — scorer, classifier, profiler), which record no actuals.
+	ClaimID string
+
+	// RecordSandboxActuals, when non-nil, persists what this launch actually
+	// consumed (peak memory, CPU time, measured at the jail's cgroup) against
+	// ClaimID once the runtime has exited. Callback indirection for the same
+	// reason LLMResolver is one: agentproc is a library on the seam between
+	// sandbox setup and the agent subprocess and holds no store handle.
+	//
+	// Called at teardown on a detached context — a cancelled run consumed
+	// real resources and its actuals are as valid as a completed one's — and
+	// strictly best-effort: a write failure is logged and never touches the
+	// run's disposition. Left nil by callers with no claim to attribute (the
+	// system jobs) and on the local/direct path, which measures nothing.
+	RecordSandboxActuals func(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error
+
 	// MemoryNamespace is the run's blueprint run id, passed to the sandbox as
 	// the second run-tree key its worktree pin accepts (a cold-rehydrated
 	// worktree lives at RunTreeRoot(memoryNamespace), not RunTreeRoot(TraceID)).
@@ -507,6 +528,10 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	}
 
 	waitErr := proc.Wait()
+
+	// Wait has taken the cgroup read; stamp the engagement's actuals before
+	// any of the branching below returns.
+	recordSandboxActuals(ctx, opts, proc)
 
 	outcome := &Outcome{
 		Result:    result,

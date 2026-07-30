@@ -291,6 +291,24 @@ func (s *Spawner) stampExecutor(orgID, runID string) {
 	}
 }
 
+// recordSandboxActuals is the RunOptions.RecordSandboxActuals recorder every
+// delegated launch wires: it stamps what the launch's jail actually consumed
+// (peak memory, CPU time — kernel truth from its cgroup) onto the claim that
+// paid for it. agentproc calls it at teardown on a detached context and
+// swallows the error, so this is a plain write with no retry: a lost stamp
+// costs one run's accounting, and the alternative — failing a finished run
+// over it — is strictly worse.
+//
+// Keyed on the claim id the dispatcher threaded through, never on "the
+// conversation's active claim": by teardown the completion bookkeeping has
+// already released it.
+func (s *Spawner) recordSandboxActuals(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error {
+	if s.agentRuns == nil {
+		return nil
+	}
+	return s.agentRuns.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, actuals.PeakMemMB, actuals.CPUUsec)
+}
+
 // SetExecutorID overrides this spawner's executor identity with the
 // persistent instance-registry id + boot epoch main resolved at startup,
 // replacing the constructor's random per-boot uuid fallback. Call once at

@@ -118,12 +118,18 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 		if err != nil || claimed == nil {
 			return err
 		}
+		// The claim id is minted here and handed back on the claimed run: the
+		// executor needs to name this engagement at teardown, when it has
+		// already been released and can no longer be found as the
+		// conversation's active claim.
+		claimID := uuid.New().String()
 		if _, err := q.ExecContext(ctx, `
 			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
 			VALUES (?, ?, ?, ?, ?, ?)
-		`, uuid.New().String(), claimed.OrgID, claimed.ID, executorID, bootEpoch, claimedAt); err != nil {
+		`, claimID, claimed.OrgID, claimed.ID, executorID, bootEpoch, claimedAt); err != nil {
 			return err
 		}
+		claimed.ClaimID = claimID
 		var attempts int
 		if err := q.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM claims WHERE conversation_id = ?

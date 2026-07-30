@@ -75,7 +75,8 @@ type inProcessLaunch struct {
 
 	rt        *SupervisedRuntime
 	oom       bool
-	oomOnce   sync.Once
+	actuals   RunActuals
+	exitOnce  sync.Once
 	started   bool
 	closeOnce sync.Once
 }
@@ -98,11 +99,15 @@ func (l *inProcessLaunch) Pid() int              { return 0 }
 
 func (l *inProcessLaunch) Wait() error {
 	oom, err := l.rt.Wait()
-	l.oomOnce.Do(func() { l.oom = oom })
+	// First Wait wins for both exit facts: only that call saw the cgroup
+	// before it was removed, so a second Wait must not overwrite them with
+	// what a torn-down group reads as.
+	l.exitOnce.Do(func() { l.oom, l.actuals = oom, l.rt.Actuals() })
 	return err
 }
 
-func (l *inProcessLaunch) OOMKilled() bool { return l.oom }
+func (l *inProcessLaunch) OOMKilled() bool     { return l.oom }
+func (l *inProcessLaunch) Actuals() RunActuals { return l.actuals }
 
 func (l *inProcessLaunch) Close() error {
 	l.closeOnce.Do(func() {

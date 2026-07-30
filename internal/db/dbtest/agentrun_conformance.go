@@ -36,6 +36,13 @@ type ClaimRow struct {
 	Phase      string
 	Released   bool
 	Outcome    string
+	// PeakMemMB / CPUUsec are the engagement's measured sandbox cost, nil
+	// when the columns are NULL ("not measured"). Projected here rather than
+	// onto domain.Claim because nothing reads them yet — the seeder is the
+	// only reader, so the suite can assert the write without putting an
+	// unconsumed field on a wire type.
+	PeakMemMB *int
+	CPUUsec   *int64
 }
 
 // ConversationSeeder is a bag of callbacks the conformance suite uses
@@ -1122,6 +1129,79 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// coalesce only reads the ACTIVE claim.
 		if got, _ := store.Get(ctx, orgID, runID); got.Status != "completed" {
 			t.Errorf("Status = %q, want completed (a released claim's phase is inert history)", got.Status)
+		}
+	})
+
+	t.Run("RecordClaimSandboxStatsSystem_StampsByIDIncludingReleasedClaims", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-actuals", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 {
+			t.Fatalf("claims = %+v, want 1", claims)
+		}
+		claimID := claims[0].ID
+
+		// A fresh claim has measured nothing: NULL, not zero.
+		if claims[0].PeakMemMB != nil || claims[0].CPUUsec != nil {
+			t.Fatalf("new claim = %+v, want both actuals NULL", claims[0])
+		}
+
+		// The live-claim stamp (the shape a hibernating run hits — its claim
+		// is parked, not yet released).
+		peak, cpu := 731, int64(12_500_000)
+		if err := store.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, &peak, &cpu); err != nil {
+			t.Fatalf("RecordClaimSandboxStatsSystem live: %v", err)
+		}
+		claims = seed.ClaimRows(t, runID)
+		if len(claims) != 1 || claims[0].PeakMemMB == nil || *claims[0].PeakMemMB != peak ||
+			claims[0].CPUUsec == nil || *claims[0].CPUUsec != cpu {
+			t.Fatalf("claims after live stamp = %+v, want peak=%d cpu=%d", claims, peak, cpu)
+		}
+
+		// The load-bearing case: teardown runs AFTER the completion
+		// bookkeeping releases the claim, so the stamp must land on a
+		// released row. An active-claim predicate here would silently drop
+		// every run's actuals.
+		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		peak2, cpu2 := 998, int64(20_000_000)
+		if err := store.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, &peak2, &cpu2); err != nil {
+			t.Fatalf("RecordClaimSandboxStatsSystem released: %v", err)
+		}
+		claims = seed.ClaimRows(t, runID)
+		if len(claims) != 1 || !claims[0].Released {
+			t.Fatalf("claims = %+v, want one released claim", claims)
+		}
+		if claims[0].PeakMemMB == nil || *claims[0].PeakMemMB != peak2 ||
+			claims[0].CPUUsec == nil || *claims[0].CPUUsec != cpu2 {
+			t.Errorf("released claim actuals = %+v, want peak=%d cpu=%d", claims[0], peak2, cpu2)
+		}
+
+		// Partial measurement (a kernel with no memory.peak): the CPU time
+		// records and the peak goes back to NULL rather than to a zero that
+		// would read as a measured 0 MB run.
+		if err := store.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, nil, &cpu2); err != nil {
+			t.Fatalf("RecordClaimSandboxStatsSystem partial: %v", err)
+		}
+		claims = seed.ClaimRows(t, runID)
+		if claims[0].PeakMemMB != nil {
+			t.Errorf("peak = %d after an unmeasured peak, want NULL", *claims[0].PeakMemMB)
+		}
+		if claims[0].CPUUsec == nil || *claims[0].CPUUsec != cpu2 {
+			t.Errorf("cpu = %v after a partial stamp, want %d", claims[0].CPUUsec, cpu2)
+		}
+
+		// An unknown claim id is a no-op, not an error — the caller is on a
+		// best-effort teardown path and must never fail a finished run over
+		// accounting.
+		if err := store.RecordClaimSandboxStatsSystem(ctx, orgID, uuid.New().String(), &peak, &cpu); err != nil {
+			t.Errorf("RecordClaimSandboxStatsSystem unknown claim: %v, want a silent no-op", err)
 		}
 	})
 

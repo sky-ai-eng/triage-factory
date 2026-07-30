@@ -125,14 +125,17 @@ func (s *runQueueStore) notifyWake(ctx context.Context, orgID string) {
 const activeRunStatusesSQL = `'running'`
 
 // runQueueClaimReturning is the outer-SELECT projection of ClaimNextRun's
-// claimed CTE. The claim identity (executor/claimed_at/attempts) rides the
-// same statement: claimed_at from the freshly inserted claims row, attempts
-// as the prior-claim count + 1 (data-modifying CTEs share one snapshot, so
-// the count can't see the row the sibling CTE inserts).
+// claimed CTE. The claim identity (executor/claim id/claimed_at/attempts)
+// rides the same statement: the id + claimed_at come from the freshly
+// inserted claims row, attempts as the prior-claim count + 1 (data-modifying
+// CTEs share one snapshot, so the count can't see the row the sibling CTE
+// inserts). The claim id is returned because the executor needs to name this
+// engagement later — at teardown, once it has been released and can no
+// longer be found by looking for the conversation's active claim.
 const runQueueClaimReturning = `claimed.id::text, claimed.org_id::text, claimed.task_id::text, COALESCE(claimed.prompt_id, ''), claimed.status, COALESCE(claimed.model, ''),
 	COALESCE(claimed.worktree_path, ''), COALESCE(claimed.sdk_session_id, ''), claimed.trigger_type, COALESCE(claimed.trigger_id::text, ''),
 	COALESCE(claimed.creator_user_id::text, ''), claimed.team_id::text, COALESCE(claimed.blueprint_run_id::text, ''), claimed.blueprint_step_index,
-	minted.claimed_at,
+	minted.id::text AS claim_id, minted.claimed_at,
 	(SELECT COUNT(*) + 1 FROM claims c2 WHERE c2.conversation_id = claimed.id)::int AS attempts`
 
 func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement) (*domain.Conversation, error) {
@@ -227,7 +230,7 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 		minted AS (
 			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at)
 			SELECT claimed.org_id, claimed.id, $1, $2::bigint, now() FROM claimed
-			RETURNING claims.conversation_id, claims.claimed_at
+			RETURNING claims.id, claims.conversation_id, claims.claimed_at
 		)
 		SELECT `+runQueueClaimReturning+`
 		FROM claimed JOIN minted ON minted.conversation_id = claimed.id
@@ -748,7 +751,7 @@ func scanPgClaimedRun(row *sql.Row) (*domain.Conversation, error) {
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.TaskID, &r.PromptID, &r.Status, &r.Model,
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
-		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx, &claimedAt, &r.Attempts)
+		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx, &r.ClaimID, &claimedAt, &r.Attempts)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
