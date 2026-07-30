@@ -247,6 +247,10 @@ var allowedSandboxEnvKeys = map[string]struct{}{
 	// (telemetry / error reporting / auto-updater / feature gates) it can't
 	// reach through the fail-closed egress allowlist anyway. Non-credential.
 	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": {},
+	// The "I am inside the jail" marker (agentproc.SandboxMarkerEnvVar).
+	// Non-credential; in-jail code reads it to tell a missing exec-verb
+	// socket apart from a local-mode CLI invocation.
+	"TRIAGE_FACTORY_SANDBOXED": {},
 
 	// Run-scoped metadata (delegate/resume ExtraEnv + the git-hooks bin).
 	"TRIAGE_FACTORY_CONVERSATION_ID":      {},
