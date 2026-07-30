@@ -159,9 +159,24 @@ type waitRunArgs struct {
 // waitRunResult reports how a supervised run ended. ExitError is the
 // runsc exit error rendered to a string (empty on clean exit); OOMKilled
 // mirrors the pre-split cgroupOOMKilled read the orchestrator did itself.
+//
+// PeakMemMB / CPUUsec are the run's measured actuals, read from the same
+// cgroup on the same exit path as the OOM attribution. They ride this
+// result because the broker is the only process that can read them
+// race-free — it owns the cgroup lifecycle, and the orchestrator never
+// touches /sys/fs/cgroup. Absent (nil) whenever the kernel didn't offer the
+// number: memory.peak needs ≥ 5.19, and a run that never had a cgroup (no
+// memory limit) has nothing to measure — as is always true of the sidecar
+// wait, which reuses this shape for an ordinary host process. Both are
+// additive optional fields,
+// so a version-skewed pairing across this change degrades to unrecorded
+// actuals rather than a misread frame — which is why they did not need a
+// ProtocolVersion bump.
 type waitRunResult struct {
 	ExitError string `json:"exit_error,omitempty"`
 	OOMKilled bool   `json:"oom_killed,omitempty"`
+	PeakMemMB *int   `json:"peak_mem_mb,omitempty"`
+	CPUUsec   *int64 `json:"cpu_usec,omitempty"`
 }
 
 type killRunArgs struct {

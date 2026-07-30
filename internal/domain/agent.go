@@ -236,6 +236,14 @@ type Conversation struct {
 	// carry org in their call args.
 	OrgID string `json:"-"`
 
+	// ClaimID is the claims row minted for this engagement, populated only by
+	// RunQueueStore.ClaimNextRun (which returns the row it just reserved
+	// along with the claim it minted for it). The dispatcher threads it into
+	// the run config so teardown can stamp the engagement's measured sandbox
+	// cost by id — an active-claim lookup at that point would race the
+	// release. Empty on every read path that doesn't mint a claim.
+	ClaimID string `json:"-"`
+
 	// ExecutorID names the executor instance that owns this run's live
 	// process while it runs — stamped when the run goes live, NULL/empty
 	// otherwise. At N=1 it's a single per-process instance id; the

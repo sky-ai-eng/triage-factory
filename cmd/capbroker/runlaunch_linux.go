@@ -19,14 +19,28 @@ import (
 // so a broker goroutine fails fast instead of blocking forever.
 const dialStdioTimeout = 5 * time.Second
 
-// supervisedRuntime is the broker's handle on one started runsc child:
-// block for its exit (with OOM attribution) and SIGKILL it. sandbox's
-// *SupervisedRuntime satisfies this; tests substitute a stand-in via
-// launchRuntime so the RPC + registry + socket-passthrough wiring can be
-// exercised without a real gVisor host.
+// supervisedRuntime is the broker's handle on one started child: block for
+// its exit (with OOM attribution) and SIGKILL it. Both occupants of the run
+// registry satisfy it — the runsc child and a run's credential sidecar —
+// which is why the shared wait/kill handlers need no per-kind logic.
 type supervisedRuntime interface {
 	Wait() (oomKilled bool, err error)
 	Kill() error
+}
+
+// jailedRuntime is a supervisedRuntime that also reports what its run cost:
+// the runsc child, which the broker starts inside a per-run cgroup. Actuals
+// is valid only after Wait, for the same reason the OOM attribution is —
+// both are read off the cgroup in the instant before it is removed.
+//
+// Separate from supervisedRuntime because the registry's other occupant, the
+// credential sidecar, is an ordinary host process with no cgroup and nothing
+// to measure. Typing the run launcher's seam as this (rather than asserting
+// at the read) keeps a stand-in runtime that forgets the actuals a compile
+// error instead of a silently unrecorded run.
+type jailedRuntime interface {
+	supervisedRuntime
+	Actuals() sandbox.RunActuals
 }
 
 // launchRuntime is the seam the broker execs the runtime through. The
@@ -35,7 +49,7 @@ type supervisedRuntime interface {
 // enter this process. A var so tests can swap in a stand-in runtime. It
 // takes the broker-built bundle dir (from prepareBundle), never a
 // caller-supplied one.
-var launchRuntime = func(ctx context.Context, bundleDir, containerID string, memoryLimitMB int, stdio *os.File, stderr io.Writer) (supervisedRuntime, error) {
+var launchRuntime = func(ctx context.Context, bundleDir, containerID string, memoryLimitMB int, stdio *os.File, stderr io.Writer) (jailedRuntime, error) {
 	return sandbox.LaunchSupervised(ctx, bundleDir, containerID, memoryLimitMB, stdio, stderr)
 }
 
@@ -48,13 +62,14 @@ var launchRuntime = func(ctx context.Context, bundleDir, containerID string, mem
 var prepareBundle = sandbox.PrepareBundle
 
 // runEntry is one in-flight supervised run. done is closed once the
-// supervising goroutine has reaped the child; oom/waitErr are written
-// before that close and read only after it, so no further lock is needed
-// to observe them.
+// supervising goroutine has reaped the child; oom/actuals/waitErr are
+// written before that close and read only after it, so no further lock is
+// needed to observe them.
 type runEntry struct {
 	rt      supervisedRuntime
 	done    chan struct{}
 	oom     bool
+	actuals sandbox.RunActuals
 	waitErr error
 }
 
@@ -183,9 +198,16 @@ func (s *Server) launchRun(ctx context.Context, a launchRunArgs) (any, error) {
 	// RPC connections, and Shutdown must not block on the whole run. On
 	// Shutdown baseCtx is canceled, which SIGKILLs runsc (cmd.Cancel), so
 	// this goroutine unwinds on its own.
+	//
+	// This goroutine is also where the run's actuals are captured, because
+	// rt.Wait() is the single point every exit funnels through — a natural
+	// exit, a KillRun (which only signals; this Wait still reaps and reads),
+	// and a broker Shutdown alike. So a killed run's cost is measured before
+	// its cgroup is removed just as a completed one's is.
 	go func() {
 		oom, werr := rt.Wait()
 		entry.oom = oom
+		entry.actuals = rt.Actuals()
 		entry.waitErr = werr
 		_ = sandbox.RemoveBundle(bundleDir)
 		s.releaseLaunchSlot()
@@ -196,10 +218,10 @@ func (s *Server) launchRun(ctx context.Context, a launchRunArgs) (any, error) {
 }
 
 // waitRun blocks until the run's supervising goroutine has reaped the
-// child, then returns its exit status + OOM attribution and drops the
-// registry entry. In practice the orchestrator only calls this after it
-// has seen its stdio socket EOF (the runtime exited), so done is already
-// closed or about to be.
+// child, then returns its exit status + OOM attribution + measured actuals
+// and drops the registry entry. In practice the orchestrator only calls
+// this after it has seen its stdio socket EOF (the runtime exited), so done
+// is already closed or about to be.
 func (s *Server) waitRun(ctx context.Context, a waitRunArgs) (any, error) {
 	s.runsMu.Lock()
 	entry := s.runs[a.ContainerID]
@@ -218,7 +240,11 @@ func (s *Server) waitRun(ctx context.Context, a waitRunArgs) (any, error) {
 	delete(s.runs, a.ContainerID)
 	s.runsMu.Unlock()
 
-	res := waitRunResult{OOMKilled: entry.oom}
+	res := waitRunResult{
+		OOMKilled: entry.oom,
+		PeakMemMB: entry.actuals.PeakMemMB,
+		CPUUsec:   entry.actuals.CPUUsec,
+	}
 	if entry.waitErr != nil {
 		res.ExitError = entry.waitErr.Error()
 	}

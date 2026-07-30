@@ -147,7 +147,8 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 		ClaimRows: func(t *testing.T, conversationID string) []dbtest.ClaimRow {
 			t.Helper()
 			rows, err := conn.Query(`
-				SELECT id::text, executor_id, boot_epoch, COALESCE(phase, ''), released_at IS NOT NULL, COALESCE(outcome, '')
+				SELECT id::text, executor_id, boot_epoch, COALESCE(phase, ''), released_at IS NOT NULL, COALESCE(outcome, ''),
+				       peak_mem_mb, cpu_usec
 				FROM claims WHERE conversation_id = $1 ORDER BY claimed_at ASC, created_at ASC
 			`, conversationID)
 			if err != nil {
@@ -157,8 +158,19 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 			var out []dbtest.ClaimRow
 			for rows.Next() {
 				var c dbtest.ClaimRow
-				if err := rows.Scan(&c.ID, &c.ExecutorID, &c.BootEpoch, &c.Phase, &c.Released, &c.Outcome); err != nil {
+				// Nullable: the measured actuals stay NULL for anything that
+				// was never sandboxed.
+				var peak, cpu sql.NullInt64
+				if err := rows.Scan(&c.ID, &c.ExecutorID, &c.BootEpoch, &c.Phase, &c.Released, &c.Outcome, &peak, &cpu); err != nil {
 					t.Fatalf("scan claim: %v", err)
+				}
+				if peak.Valid {
+					mb := int(peak.Int64)
+					c.PeakMemMB = &mb
+				}
+				if cpu.Valid {
+					usec := cpu.Int64
+					c.CPUUsec = &usec
 				}
 				out = append(out, c)
 			}

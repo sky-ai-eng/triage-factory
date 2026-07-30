@@ -285,6 +285,12 @@ type ResumeOptions struct {
 	// ResumeWithMessage threads it into agentproc.RunOptions and the agenthost;
 	// the dispatcher owns its teardown. nil on all/local.
 	execSandbox *executorSandbox
+
+	// claimID is the engagement driving this resume — its own claims row, not
+	// the one the run was originally claimed under (a resume is a fresh
+	// engagement, and its cost belongs to it). Threaded so teardown can stamp
+	// the turn's measured sandbox cost by id; empty records nothing.
+	claimID string
 }
 
 // ResumeOutcome bundles what ResumeWithMessage returns: the raw
@@ -424,6 +430,9 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		OrgID:           orgID,
 		Secrets:         s.getRunSecrets(),
 		LLMResolver:     s.llmResolverForRun(orgID, runID),
+		// This turn's own engagement pays for this turn's jail.
+		ClaimID:              opts.claimID,
+		RecordSandboxActuals: s.recordSandboxActuals,
 		// Multi mode: launch into the prebuilt network + the sidecar's proxy
 		// env; the sidecar holds the credentials. nil in local (no sandbox).
 		PrebuiltNetwork:  opts.execSandbox.runNetwork(),
