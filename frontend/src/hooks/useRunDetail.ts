@@ -64,6 +64,30 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   // after navigation and overwrite the new run's state.
   const lastRunIDRef = useRef<string | undefined>(runID)
 
+  // Message ids whose cost stamp is already inside the displayed total —
+  // either folded from a websocket row (foldMessageCost) or seeded from a
+  // fetched transcript, whose stamps the run's SUM already counted. A row
+  // enters the set only once a non-null stamp has been seen for it, so a row
+  // that streamed unstamped can still be folded if a stamp arrives later.
+  const costedMessageIDs = useRef<Set<number>>(new Set())
+
+  // foldMessageCost accumulates a streamed row's settled cost into the held
+  // run's total. The run row is re-read only on a status flip or an artifact
+  // transition, so on a long engagement with neither, the cost readout would
+  // otherwise sit at whatever the SUM was when the page loaded — a runtime that
+  // stamps every assistant row as it streams reads badly low for most of the
+  // run. Each id is folded at most once (a refetch/websocket race replays
+  // rows), and the next run refetch replaces the accumulation with the server's
+  // authoritative SUM, so drift self-corrects rather than compounding. Rows with
+  // no stamp — every SDK-runtime row until it settles at terminal time — are
+  // no-ops, leaving that path exactly as it was.
+  const foldMessageCost = useCallback((msg: Message) => {
+    const cost = msg.cost_usd
+    if (cost == null || costedMessageIDs.current.has(msg.id)) return
+    costedMessageIDs.current.add(msg.id)
+    setRun((prev) => (prev ? { ...prev, TotalCostUSD: (prev.TotalCostUSD ?? 0) + cost } : prev))
+  }, [])
+
   // Pull the run's artifact set fresh. Shared by the initial load, the WS
   // handlers, and the reconcile poll so an approve/dismiss anywhere (this tab or
   // another) repaints the approval list. Best-effort: a transient failure leaves
@@ -120,6 +144,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
       setTask(null)
       setMessages([])
       setArtifacts([])
+      costedMessageIDs.current = new Set()
       // A new run starts with no prompts; drop the prior run's queue + timers.
       if (prevRunID) dropRun(prevRunID)
     }
@@ -163,6 +188,12 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
         if (msgsRes.ok) {
           const msgs = (await msgsRes.json()) as Message[]
           if (!cancelled) {
+            // Every stamped row in the fetched transcript is already inside the
+            // run row's SUM, so record them before any of them can be replayed
+            // over the websocket and folded in a second time.
+            for (const m of msgs) {
+              if (m.cost_usd != null) costedMessageIDs.current.add(m.id)
+            }
             // Merge by id rather than replacing. If a websocket
             // `message` event arrived between the run fetch starting and
             // the messages fetch resolving, a wholesale replace would
@@ -232,10 +263,12 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
     }
   }, [runID, refetchArtifacts])
 
-  // Live updates. A `message` event appends; `conversation_update` refetches
-  // the conversation row so status/duration/cost flip without a full reload.
-  // Permission prompts route into the shared queue (ingest on request, forget
-  // on a resolved-elsewhere / timeout broadcast).
+  // Live updates. A `message` event appends, and folds any cost the row carries
+  // into the held run's total so the spend readout tracks a long engagement;
+  // `conversation_update` refetches the conversation row so status/duration and
+  // the authoritative cost SUM flip without a full reload. Permission prompts
+  // route into the shared queue (ingest on request, forget on a
+  // resolved-elsewhere / timeout broadcast).
   useWebSocket(
     useCallback(
       (event: WSEvent) => {
@@ -248,6 +281,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
             if (prev.some((m) => m.id === event.data.id)) return prev
             return [...prev, event.data]
           })
+          foldMessageCost(event.data)
         }
         if (event.type === 'conversation_update' && event.conversation_id === runID) {
           // A run that left the running state can't act on a parked prompt —
@@ -290,7 +324,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           forget(event)
         }
       },
-      [runID, ingest, forget, dropRun, refetchArtifacts],
+      [runID, ingest, forget, dropRun, refetchArtifacts, foldMessageCost],
     ),
   )
 
