@@ -591,14 +591,19 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	// runs the undos in LIFO order and is single-shot via once, so the error
 	// paths can invoke it eagerly and the caller can still defer it safely.
 	var (
-		scratchCwd string
-		ahCloser   io.Closer
-		sb         *sandbox.Sandbox
-		run        sandbox.LaunchedRun
-		once       sync.Once
+		scratchCwd  string
+		ahCloser    io.Closer
+		sb          *sandbox.Sandbox
+		run         sandbox.LaunchedRun
+		releaseJail = func() {}
+		once        sync.Once
 	)
 	cleanup := func() {
 		once.Do(func() {
+			// Drop the jail from the live registry before anything is torn
+			// down, so the resource sampler stops reading a cgroup that is
+			// about to disappear rather than after it already has.
+			releaseJail()
 			// The run process + its memory cgroup first: kill the runtime (or
 			// reclaim the cgroup on an abandoned bring-up) before its netns is
 			// torn down below.
@@ -861,6 +866,11 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	}
 	sb = sboxObj
 	run = sandboxRun
+
+	// Publish the jail so the executor's resource sampler can observe its
+	// cgroup for as long as it lives, attributed to the engagement paying for
+	// it. A launch with no claim (the toolless system jobs) registers nothing.
+	releaseJail = registerLiveJail(opts.ClaimID, sboxObj.ContainerID)
 
 	// The LaunchedRun satisfies runProc (Start/Stdin/Stdout/Stderr/Wait/
 	// OOMKilled); cleanup closes it (kill + cgroup). On the executor path the

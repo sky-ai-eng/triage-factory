@@ -147,7 +147,12 @@ func New(conn *sql.DB) db.Stores {
 		// sampler still writes stats; operators is effectively unused (the
 		// single local user is implicitly the operator). See TFAC-589.
 		InstanceStats: newInstanceStatStore(conn),
-		Operators:     newOperatorStore(conn),
+		// SandboxStats records nothing in practice here: local mode never
+		// sandboxes, so no jail exists to sample. Wired so the bundle is
+		// complete and the dual-dialect contract holds in one conformance
+		// suite, not because a local run has a cgroup.
+		SandboxStats: newSandboxStatStore(conn),
+		Operators:    newOperatorStore(conn),
 		// RunSignals is Postgres-only (TFAC-585): this is a stub returning
 		// ErrNotApplicableInLocal from every method — local mode is always
 		// its own run's owner, so no code path may reach it.

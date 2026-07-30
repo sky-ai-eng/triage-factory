@@ -241,6 +241,13 @@ func cgroupCPUUsec(dir string) *int64 {
 		sandboxLog.Warn("read cgroup cpu.stat failed; recording no cpu-time actual", "cgroup", dir, "error", err)
 		return nil
 	}
+	return parseCPUUsec(data)
+}
+
+// parseCPUUsec extracts usage_usec out of a cpu.stat body. Split from the read
+// so the teardown read (which warns on failure) and the sampling read (which
+// must not) share one parse and can't drift.
+func parseCPUUsec(data []byte) *int64 {
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 2 && fields[0] == "usage_usec" {

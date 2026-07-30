@@ -202,6 +202,15 @@ type Sandbox struct {
 	// re-parsing it out of Subnet or HostIP.
 	SubnetIdx uint8
 
+	// ContainerID is the runsc container id Wrap minted for this launch —
+	// unique per live Wrap, and the name of the run's cgroup under tf-runs/.
+	// Exposed so a caller can OBSERVE the live jail (SampleRunCgroup) without
+	// re-deriving the id from RunID + SubnetIdx and silently drifting from
+	// whatever Wrap actually passed the broker. Observation only: the group's
+	// lifecycle and limits stay the cap-broker's monopoly. Empty on non-Linux,
+	// where Wrap launches nothing.
+	ContainerID string
+
 	// teardown holds the platform-specific cleanup state. On Linux
 	// it's a *teardownState (defined in sandbox_linux.go); on
 	// non-Linux it's always nil because Wrap returns early with
