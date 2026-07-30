@@ -244,6 +244,12 @@ export interface Message {
   output_tokens?: number
   cache_read_tokens?: number
   cache_creation_tokens?: number
+  // cost_usd is the dollars settled at this row — absent when the row is not a
+  // settlement row, 0 when it is and cost nothing. A runtime that stamps as it
+  // streams turns these into a live spend signal: useRunDetail folds each
+  // stamped row into the displayed run total between refetches of the
+  // conversation's authoritative SUM.
+  cost_usd?: number
   created_at: string
   // reasoning/content_blocks mirror domain.MessageDTO's fields of the same
   // name — absent on messages that carry neither. reasoning rides the

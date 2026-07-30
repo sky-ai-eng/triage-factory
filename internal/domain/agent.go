@@ -347,23 +347,29 @@ type Message struct {
 // cross the wire. ConversationID links the row to its owning conversation;
 // curator groups these into turns client-side over the same field.
 type MessageDTO struct {
-	ID                  int               `json:"id"`
-	ConversationID      string            `json:"conversation_id"`
-	Role                string            `json:"role"`
-	Subtype             string            `json:"subtype"`
-	Content             string            `json:"content"`
-	ToolCalls           []ToolCall        `json:"tool_calls,omitempty"`
-	ToolCallID          string            `json:"tool_call_id,omitempty"`
-	IsError             bool              `json:"is_error,omitempty"`
-	Metadata            map[string]any    `json:"metadata,omitempty"`
-	Model               string            `json:"model,omitempty"`
-	InputTokens         *int              `json:"input_tokens,omitempty"`
-	OutputTokens        *int              `json:"output_tokens,omitempty"`
-	CacheReadTokens     *int              `json:"cache_read_tokens,omitempty"`
-	CacheCreationTokens *int              `json:"cache_creation_tokens,omitempty"`
-	CreatedAt           time.Time         `json:"created_at"`
-	Reasoning           []ReasoningDetail `json:"reasoning,omitempty"`
-	ContentBlocks       []ContentBlock    `json:"content_blocks,omitempty"`
+	ID                  int            `json:"id"`
+	ConversationID      string         `json:"conversation_id"`
+	Role                string         `json:"role"`
+	Subtype             string         `json:"subtype"`
+	Content             string         `json:"content"`
+	ToolCalls           []ToolCall     `json:"tool_calls,omitempty"`
+	ToolCallID          string         `json:"tool_call_id,omitempty"`
+	IsError             bool           `json:"is_error,omitempty"`
+	Metadata            map[string]any `json:"metadata,omitempty"`
+	Model               string         `json:"model,omitempty"`
+	InputTokens         *int           `json:"input_tokens,omitempty"`
+	OutputTokens        *int           `json:"output_tokens,omitempty"`
+	CacheReadTokens     *int           `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens *int           `json:"cache_creation_tokens,omitempty"`
+	// CostUSD carries the row's settlement stamp (see Message.CostUSD): absent
+	// = not a settlement row, 0 = genuinely free. A runtime that stamps as it
+	// streams makes the wire rows an accumulating spend signal, which is how a
+	// live surface keeps a cost readout current between reads of the
+	// conversation's SUM.
+	CostUSD       *float64          `json:"cost_usd,omitempty"`
+	CreatedAt     time.Time         `json:"created_at"`
+	Reasoning     []ReasoningDetail `json:"reasoning,omitempty"`
+	ContentBlocks []ContentBlock    `json:"content_blocks,omitempty"`
 }
 
 // ToDTO projects a transcript row onto the shared snake_case wire shape.
@@ -383,6 +389,7 @@ func (m Message) ToDTO() MessageDTO {
 		OutputTokens:        m.OutputTokens,
 		CacheReadTokens:     m.CacheReadTokens,
 		CacheCreationTokens: m.CacheCreationTokens,
+		CostUSD:             m.CostUSD,
 		CreatedAt:           m.CreatedAt,
 		Reasoning:           m.Reasoning,
 		ContentBlocks:       m.ContentBlocks,
