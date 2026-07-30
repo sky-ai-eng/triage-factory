@@ -781,3 +781,68 @@ func TestRunQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 		})
 	}
 }
+
+// TestRunQueueStore_Postgres_ExecutorClaims runs the shared operator
+// claim-projection conformance against the Postgres impl (admin pool, matching
+// production wiring — the read is deployment-wide and RLS-bypassing by
+// design). Each factory call resets the harness so subtests don't share state.
+func TestRunQueueStore_Postgres_ExecutorClaims(t *testing.T) {
+	h := pgtest.Shared(t)
+	ctx := context.Background()
+
+	dbtest.RunExecutorClaimsConformance(t, func(t *testing.T) (db.RunQueueStore, dbtest.ExecutorClaimsSeeder) {
+		t.Helper()
+		h.Reset(t)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+		orgID, userID := seedPgOrgForBlueprints(t, h)
+		brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+
+		nextStep := 0
+		seed := dbtest.ExecutorClaimsSeeder{
+			Run: func(t *testing.T, status, failureKind string) string {
+				t.Helper()
+				idx := nextStep
+				nextStep++
+				runID := uuid.New().String()
+				if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
+					ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
+					TriggerType: "manual", CreatorUserID: userID,
+					BlueprintRunID: brID, BlueprintStepIndex: &idx,
+				}); err != nil {
+					t.Fatalf("EnqueueRun: %v", err)
+				}
+				if _, err := h.AdminDB.Exec(`
+					UPDATE conversations SET status = $1, failure_kind = NULLIF($2, '') WHERE id = $3
+				`, status, failureKind, runID); err != nil {
+					t.Fatalf("force terminal state: %v", err)
+				}
+				return runID
+			},
+			Claim: func(t *testing.T, row dbtest.ExecutorClaimRow) string {
+				t.Helper()
+				claimID := uuid.New().String()
+				var released any
+				if row.ReleasedAt != nil {
+					released = row.ReleasedAt.UTC()
+				}
+				var peak, cpu any
+				if row.PeakMemMB != nil {
+					peak = *row.PeakMemMB
+				}
+				if row.CPUUsec != nil {
+					cpu = *row.CPUUsec
+				}
+				if _, err := h.AdminDB.Exec(`
+					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
+					                    claimed_at, released_at, outcome, peak_mem_mb, cpu_usec)
+					VALUES ($1, $2, $3, $4, 1, $5, $6, NULLIF($7, ''), $8, $9)
+				`, claimID, orgID, row.RunID, row.ExecutorID, row.ClaimedAt.UTC(), released,
+					row.Outcome, peak, cpu); err != nil {
+					t.Fatalf("insert claim: %v", err)
+				}
+				return claimID
+			},
+		}
+		return stores.RunQueue, seed
+	})
+}

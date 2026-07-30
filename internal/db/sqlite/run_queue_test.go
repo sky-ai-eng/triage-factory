@@ -683,3 +683,79 @@ func TestRunQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
 		t.Fatalf("ExecutorID = %q after requeue, want empty (a queued row has no active claim)", requeued.ExecutorID)
 	}
 }
+
+// TestRunQueueStore_SQLite_ExecutorClaims runs the shared operator
+// claim-projection conformance against the SQLite impl. The read is
+// deployment-wide by construction; SQLite is N=1, so the arm proves the SQL
+// and the scan rather than any cross-org behavior.
+func TestRunQueueStore_SQLite_ExecutorClaims(t *testing.T) {
+	dbtest.RunExecutorClaimsConformance(t, func(t *testing.T) (db.RunQueueStore, dbtest.ExecutorClaimsSeeder) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		ctx := context.Background()
+		org := runmode.LocalDefaultOrgID
+
+		task := seedEntityEventTask(t, conn, "rq-exclaims")
+		insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqec-p0", Name: "Step 0", Body: "b", Source: "user"})
+		insertBlueprintForTest(t, conn, "rqec-bp", "RQ ExecClaims Blueprint")
+		if err := stores.Blueprints.ReplaceSteps(ctx, org, "rqec-bp", []string{"rqec-p0"}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+			ID: "rqec-br", BlueprintID: "rqec-bp", TaskID: task.ID,
+			TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+			WorktreePath: "/tmp/wt-rqec",
+		})
+		if err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+
+		nextStep := 0
+		seed := dbtest.ExecutorClaimsSeeder{
+			Run: func(t *testing.T, status, failureKind string) string {
+				t.Helper()
+				idx := nextStep
+				nextStep++
+				runID := uuid.New().String()
+				if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
+					ID: runID, TaskID: task.ID, PromptID: "rqec-p0", Model: "m",
+					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &idx,
+				}); err != nil {
+					t.Fatalf("EnqueueRun: %v", err)
+				}
+				if _, err := conn.Exec(`
+					UPDATE conversations SET status = ?, failure_kind = NULLIF(?, '') WHERE id = ?
+				`, status, failureKind, runID); err != nil {
+					t.Fatalf("force terminal state: %v", err)
+				}
+				return runID
+			},
+			Claim: func(t *testing.T, row dbtest.ExecutorClaimRow) string {
+				t.Helper()
+				claimID := uuid.New().String()
+				var released any
+				if row.ReleasedAt != nil {
+					released = row.ReleasedAt.UTC()
+				}
+				var peak, cpu any
+				if row.PeakMemMB != nil {
+					peak = *row.PeakMemMB
+				}
+				if row.CPUUsec != nil {
+					cpu = *row.CPUUsec
+				}
+				if _, err := conn.Exec(`
+					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
+					                    claimed_at, released_at, outcome, peak_mem_mb, cpu_usec)
+					VALUES (?, ?, ?, ?, 1, ?, ?, NULLIF(?, ''), ?, ?)
+				`, claimID, org, row.RunID, row.ExecutorID, row.ClaimedAt.UTC(), released,
+					row.Outcome, peak, cpu); err != nil {
+					t.Fatalf("insert claim: %v", err)
+				}
+				return claimID
+			},
+		}
+		return stores.RunQueue, seed
+	})
+}

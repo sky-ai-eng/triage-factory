@@ -247,6 +247,33 @@ type RunQueueStore interface {
 	// QueuedRunAgesForOrgSystem is QueuedRunAgesSystem narrowed to one org —
 	// the org-scoped queue depth + oldest wait for the /usage ops subset.
 	QueuedRunAgesForOrgSystem(ctx context.Context, orgID string) ([]domain.QueuedRun, error)
+
+	// RecentClaimsForExecutorSystem returns the `limit` most recently claimed
+	// engagements one executor drove, newest first, joined to their
+	// conversation's terminal state — the fleet console's per-executor
+	// sandbox breakdown, the operator answer to "which sandboxes are eating
+	// this box" that whole-host instance_stats structurally cannot give.
+	//
+	// Deliberately NOT filtered to claims that carry measured actuals: a
+	// released claim with NULL columns is a real engagement whose measurement
+	// is missing (unsandboxed, an old kernel, a crashed teardown), and hiding
+	// it would misreport the box's occupancy as sparser than it was. The
+	// caller renders NULL as a dash.
+	//
+	// CROSS-ORG SYSTEM READ, admin pool — no org_id filter at all. Per the
+	// read-scoping standing rule this is the operator-surface arm: the only
+	// caller is the deployment-operator-gated fleet console (ee/fleet), which
+	// is authorized for a deployment-wide view by construction and cannot
+	// name an org to scope to. Any org-facing caller must scope instead.
+	RecentClaimsForExecutorSystem(ctx context.Context, executorID string, limit int) ([]domain.ExecutorClaim, error)
+
+	// ClaimByIDSystem returns one claim in the same projection, or (nil, nil)
+	// when no such claim exists. It exists so a per-claim operator surface can
+	// tell "unknown claim" (404) from "known claim that was never sampled"
+	// (an empty series, which is ordinary — a sub-minute run or pre-sampler
+	// history). Same cross-org operator-surface posture as
+	// RecentClaimsForExecutorSystem.
+	ClaimByIDSystem(ctx context.Context, claimID string) (*domain.ExecutorClaim, error)
 }
 
 // OrgQueueShare is one org's run-queue occupancy from FleetQueueShares — the
