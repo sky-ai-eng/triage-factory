@@ -36,7 +36,7 @@ import { useWizard } from './useWizard'
 import { isStepVisible } from './resume'
 import { CollapsedStepBar, SectionDivider } from './parts'
 import { GlassBackdrop } from './glass'
-import { bodyEase } from './glassStyle'
+import { bodyDurationMs, bodyEase } from './glassStyle'
 
 // Where the active step's action row comes to rest, as a fraction of viewport
 // height measured to the row's bottom edge. The two spacers rendered around the
@@ -54,6 +54,17 @@ const ACTIONS_REST = 0.78
 // to honour the line — past this the step would open already scrolled past its
 // own title.
 const HEADING_GAP = 16
+// How far a step body is offset along its direction of travel as it enters, and
+// the reverse as it leaves. Small on purpose — it is a direction cue, not a
+// slide; anything larger reads as the content being thrown around.
+const BODY_TRAVEL = 8
+// Frames past the end of the body animation to keep re-anchoring, covering the
+// last layout the browser settles after the final animated frame.
+const SETTLE_TAIL_MS = 80
+// Fallback window for closing the self-scroll bracket when `scrollend` never
+// arrives — an older browser, or a scrollTo that lands on the current offset and
+// so fires nothing at all.
+const SELF_SCROLL_MS = 150
 
 function Loading() {
   return (
@@ -111,20 +122,38 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // step the wizard resumes on at first paint). Setting it true when it already
   // is bails out of the render, so it costs one extra render, once.
   const [navigated, setNavigated] = useState(false)
+  // Which way the user is travelling, so a body can enter from the side it is
+  // coming from — rising into place going forward, settling down from above
+  // going back. Without it both directions play the identical expand and Back
+  // reads as another step forward.
+  const [travel, setTravel] = useState<'forward' | 'back'>('forward')
+  // The step being left behind on a backward move. Steps render up to
+  // `activeIndex`, so without this the departing <li> — and the AnimatePresence
+  // inside it that owns the exit — unmount in the same frame, cutting the old
+  // step instead of collapsing it. Held until its body has finished exiting.
+  const [departing, setDeparting] = useState<number | null>(null)
+
   const goBack = useCallback(() => {
     setNavigated(true)
+    setTravel('back')
+    setDeparting(activeIndex)
     back()
-  }, [back])
+  }, [back, activeIndex])
   const goNext = useCallback(() => {
     setNavigated(true)
+    setTravel('forward')
+    setDeparting(null)
     advance()
   }, [advance])
   const goToStep = useCallback(
     (index: number) => {
       setNavigated(true)
+      const backwards = index < activeIndex
+      setTravel(backwards ? 'back' : 'forward')
+      setDeparting(backwards ? activeIndex : null)
       goTo(index)
     },
-    [goTo],
+    [goTo, activeIndex],
   )
 
   // Keyboard mirrors of the footer buttons. Esc re-expands the previous step
@@ -165,15 +194,19 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   const actionsRef = useRef<HTMLDivElement | null>(null)
   const leadRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
-  // Set by a real scroll gesture, cleared when the step changes: once the user
-  // has taken over, the re-settle below stops firing for this step. Yanking the
+  // Set once the user has taken the scroll over, cleared when the step changes:
+  // from then on the re-anchoring below stops for this step, because yanking the
   // page out from under someone mid-read is worse than a slightly off line.
-  // Read off gesture events rather than the `scroll` event, because our own
-  // smooth scrolls emit `scroll` too and would look identical.
   const userScrolledRef = useRef(false)
-  const takeOverScroll = useCallback(() => {
-    userScrolledRef.current = true
-  }, [])
+  // How that is detected: bracket OUR scrolls rather than trying to enumerate
+  // the user's. Every window.scrollTo below raises this flag, and any `scroll`
+  // event arriving while it is down came from someone else. Listing input
+  // devices instead would answer the wrong question — it catches wheel and
+  // touch, and misses PageDown, space, Home/End, a scrollbar drag, and a screen
+  // reader moving the viewport, all of which are exactly the reader this is
+  // meant to protect.
+  const selfScrollingRef = useRef(false)
+  const selfScrollTimer = useRef(0)
 
   // Bring the action row to the line, sizing the lead spacer first so the line
   // is reachable. The spacer is zeroed before measuring, so what we read is the
@@ -204,6 +237,15 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       const headingTop = heading.getBoundingClientRect().top + window.scrollY
       top = Math.min(top, headingTop - HEADING_GAP)
     }
+    // Raise the self-scroll flag before moving, so the `scroll` this produces
+    // isn't mistaken for the user's. `scrollend` lowers it; the timer is the
+    // fallback for browsers without it, and for a scrollTo that lands on the
+    // current offset and so fires no event at all.
+    selfScrollingRef.current = true
+    window.clearTimeout(selfScrollTimer.current)
+    selfScrollTimer.current = window.setTimeout(() => {
+      selfScrollingRef.current = false
+    }, SELF_SCROLL_MS)
     // Instant, never smooth. The bodies' height animation is what carries the
     // motion between steps; a smooth scroll on top of it is a second easing
     // curve chasing the first, and the row visibly lags the line for the length
@@ -225,11 +267,28 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // As a step becomes active, move focus to its heading and bring its actions to
   // the line. preventScroll matters: focus() scrolls on its own, and that scroll
   // would race the settle immediately after it.
+  // Then hold it there for the length of the transition. A size observer alone
+  // cannot do this: through a step change the two bodies' curves cancel, so the
+  // document height barely moves while the row slides the full height of the
+  // expanding body — most visibly on a backward move, where the step that grows
+  // is ABOVE the row and the one that shrinks is below it, so nothing the
+  // observer watches changes size at all. Re-anchoring every frame is what
+  // actually pins the row; forward moves only looked right because their
+  // geometry happened to cancel.
   useEffect(() => {
     if (wiz.phase !== 'ready') return
     userScrolledRef.current = false
     headingRef.current?.focus({ preventScroll: true })
-    settle()
+
+    let frame = 0
+    const until = performance.now() + bodyDurationMs + SETTLE_TAIL_MS
+    const tick = () => {
+      if (userScrolledRef.current) return
+      settle()
+      if (performance.now() < until) frame = requestAnimationFrame(tick)
+    }
+    tick()
+    return () => cancelAnimationFrame(frame)
   }, [wiz.phase, activeIndex, settle])
 
   // Re-settle for as long as the flow's height is still moving: the outgoing
@@ -255,16 +314,50 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     }
   }, [wiz.phase, settle])
 
-  // Gesture listeners are on the window because the page itself scrolls — the
-  // flow is not inside a scroll container.
+  // Any scroll we did not cause is the user taking over — whatever moved it.
+  // `scrollend` closes our bracket as soon as the browser reports the scroll
+  // finished; the timer in settle() covers browsers that don't fire it. The
+  // listeners are on the window because the page itself scrolls; the flow is
+  // not inside a scroll container.
   useEffect(() => {
-    window.addEventListener('wheel', takeOverScroll, { passive: true })
-    window.addEventListener('touchmove', takeOverScroll, { passive: true })
-    return () => {
-      window.removeEventListener('wheel', takeOverScroll)
-      window.removeEventListener('touchmove', takeOverScroll)
+    const onScroll = () => {
+      if (!selfScrollingRef.current) userScrolledRef.current = true
     }
-  }, [takeOverScroll])
+    const onScrollEnd = () => {
+      selfScrollingRef.current = false
+    }
+    window.addEventListener('scroll', onScroll, { passive: true })
+    window.addEventListener('scrollend', onScrollEnd, { passive: true })
+    return () => {
+      window.removeEventListener('scroll', onScroll)
+      window.removeEventListener('scrollend', onScrollEnd)
+    }
+  }, [])
+
+  // A viewport change moves the line itself — it is a fraction of viewport
+  // height — so the row has to be re-anchored against the new one. Without this
+  // a phone rotated mid-step, or a window resized, holds the row against a line
+  // that no longer exists until the next step change. Unlike the content-driven
+  // re-anchors this one ignores the takeover flag and clears it: a resize
+  // reflows the page out from under any reading position anyway, so putting the
+  // row back on the line is the more useful answer than preserving an offset
+  // that no longer means anything.
+  useEffect(() => {
+    if (wiz.phase !== 'ready') return
+    let frame = 0
+    const onResize = () => {
+      userScrolledRef.current = false
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(settle)
+    }
+    window.addEventListener('resize', onResize)
+    window.visualViewport?.addEventListener('resize', onResize)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('resize', onResize)
+      window.visualViewport?.removeEventListener('resize', onResize)
+    }
+  }, [wiz.phase, settle])
 
   if (wiz.phase === 'loading') return <Loading />
 
@@ -279,6 +372,14 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   const announcement = activeStep
     ? `Step ${displayNumber(activeStep)} of ${total}: ${activeStep.title}${wiz.canFinish ? ' (all steps complete)' : ''}`
     : ''
+  // How far down the stack to render. Normally the active step; on a backward
+  // move it also covers the step being left, so that step stays mounted long
+  // enough to collapse rather than being cut.
+  const renderThrough = Math.max(activeIndex, departing ?? -1)
+  // How far a body is offset when it enters, and the opposite on the way out —
+  // the cue that makes Back read as Back. Content rises into place when moving
+  // forward and settles down from above when moving back.
+  const enterOffset = travel === 'back' ? -BODY_TRAVEL : BODY_TRAVEL
 
   return (
     <div className="relative min-h-screen px-4 py-16">
@@ -305,8 +406,10 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
             {WIZARD_SECTIONS.map((section) => {
               // Only steps up to and including the active one render — the active
               // card plus the completed bars that have receded above it. Nothing
-              // below the active step is shown (no "road ahead"), and because this
-              // keys on activeIndex, going Back re-hides the forward steps too. A
+              // below the active step is shown (no "road ahead"), so going Back
+              // re-hides the forward steps. The one exception is the step being
+              // left on a backward move, which renderThrough keeps mounted until
+              // it has collapsed; dropping it on the same frame cut it instead. A
               // section with no reached steps yet (the team section while still in
               // org config) collapses away entirely.
               const entries = wiz.steps
@@ -314,7 +417,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                 .filter(
                   ({ step, index }) =>
                     step.section === section.id &&
-                    index <= activeIndex &&
+                    index <= renderThrough &&
                     isStepVisible(step, wiz.state),
                 )
               if (entries.length === 0) return null
@@ -387,20 +490,34 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                             />
                           )}
 
-                          <AnimatePresence initial={navigated}>
+                          <AnimatePresence
+                            initial={navigated}
+                            onExitComplete={() => setDeparting(null)}
+                          >
                             {isActive && (
                               <motion.div
                                 key="body"
                                 initial={
-                                  reduce ? false : { height: 0, opacity: 0, filter: 'blur(10px)' }
+                                  reduce
+                                    ? false
+                                    : {
+                                        height: 0,
+                                        opacity: 0,
+                                        filter: 'blur(10px)',
+                                        y: enterOffset,
+                                      }
                                 }
-                                animate={{ height: 'auto', opacity: 1, filter: 'blur(0px)' }}
+                                animate={{ height: 'auto', opacity: 1, filter: 'blur(0px)', y: 0 }}
                                 // No blur on the way out. It buys nothing on
                                 // content that is already collapsing and fading,
                                 // and blurring a layer whose height changes every
                                 // frame repaints it every frame — the same cost
                                 // the ambient backdrop is careful to avoid.
-                                exit={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }}
+                                exit={
+                                  reduce
+                                    ? { opacity: 0 }
+                                    : { height: 0, opacity: 0, y: -enterOffset }
+                                }
                                 transition={reduce ? { duration: 0 } : bodyEase}
                                 className="-mx-1.5 px-1.5"
                                 style={{ overflow: 'hidden' }}
