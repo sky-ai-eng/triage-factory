@@ -10,6 +10,15 @@
 // per-step completion client-side from the GETs it already makes and resumes
 // on the first incomplete step — no setup_step widening needed.
 //
+// The step owns its own Back / Continue — they are part of the card, not a
+// toolbar bolted to the viewport. What holds still is where they LAND: the page
+// scrolls itself so the active step's action row rests on the same line every
+// time (ACTIONS_REST below), and the content flows around that. Left to itself
+// the row walks down the page as you progress — the header, every collapsed bar
+// that has receded above the active step, and the body's own height all stack
+// up in front of it — until it is off the bottom of the viewport and you have
+// to go looking for it.
+//
 // Accessibility is first-class, not a follow-up: Esc goes back, focus follows
 // the active step as it expands, the collapsed stack stays a navigable list of
 // buttons, an aria-live region announces step changes, and prefers-reduced-
@@ -28,6 +37,23 @@ import { isStepVisible } from './resume'
 import { CollapsedStepBar, SectionDivider } from './parts'
 import { GlassBackdrop } from './glass'
 import { bodyEase } from './glassStyle'
+
+// Where the active step's action row comes to rest, as a fraction of viewport
+// height measured to the row's bottom edge. The two spacers rendered around the
+// flow exist purely so this line is reachable at both ends: an early step can't
+// scroll UP to the line without room above it, and the last step can't scroll
+// DOWN to it without room below.
+//
+// The value is a trade, not a taste: raising the line means a short window
+// scrolls less to reach it (scrolling is what pushes the page header out of
+// view on the first step) and a tall window needs more lead room above the
+// flow. 0.78 keeps the row clear of the bottom edge while holding the first
+// step's scroll to a few dozen pixels at laptop heights.
+const ACTIONS_REST = 0.78
+// How much of the active step's heading is protected when its body is too tall
+// to honour the line — past this the step would open already scrolled past its
+// own title.
+const HEADING_GAP = 16
 
 function Loading() {
   return (
@@ -108,15 +134,98 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [back, advance, canGoBack, busy, activeLoadFailed, steps, activeIndex])
 
-  // As a step becomes active, move focus to its heading and bring the card to
-  // center. scrollIntoView honors reduced motion (instant vs. smooth).
   const headingRef = useRef<HTMLHeadingElement | null>(null)
-  const cardRef = useRef<HTMLLIElement | null>(null)
+  // The active step's Back / Continue row — what the page positions itself
+  // around — and the lead spacer that buys room above the flow when the stack
+  // is still too short to reach the line by scrolling alone.
+  const actionsRef = useRef<HTMLDivElement | null>(null)
+  const leadRef = useRef<HTMLDivElement | null>(null)
+  const contentRef = useRef<HTMLDivElement | null>(null)
+  // Set by a real scroll gesture, cleared when the step changes: once the user
+  // has taken over, the re-settle below stops firing for this step. Yanking the
+  // page out from under someone mid-read is worse than a slightly off line.
+  // Read off gesture events rather than the `scroll` event, because our own
+  // smooth scrolls emit `scroll` too and would look identical.
+  const userScrolledRef = useRef(false)
+  const takeOverScroll = useCallback(() => {
+    userScrolledRef.current = true
+  }, [])
+
+  // Bring the action row to the line, sizing the lead spacer first so the line
+  // is reachable. The spacer is zeroed before measuring, so what we read is the
+  // flow's natural position rather than the position the last pass produced —
+  // that is what keeps this idempotent instead of creeping down the page on
+  // every re-settle.
+  const settle = useCallback(() => {
+    const actions = actionsRef.current
+    const lead = leadRef.current
+    if (!actions) return
+    const view = window.innerHeight
+    const line = view * ACTIONS_REST
+
+    if (lead) lead.style.height = '0px'
+    const naturalBottom = actions.getBoundingClientRect().bottom + window.scrollY
+    // Only the early steps need this: until enough completed bars have stacked
+    // up, the row sits above the line with nothing above it to scroll away.
+    const lead0 = Math.max(0, line - naturalBottom)
+    if (lead) lead.style.height = `${lead0}px`
+
+    let top = naturalBottom + lead0 - line
+    // A step too tall to honour the line would otherwise open already scrolled
+    // past its own heading. Showing the heading wins; the row sits low and the
+    // user scrolls the last stretch, which is the honest outcome for a step
+    // that cannot fit.
+    const heading = headingRef.current
+    if (heading) {
+      const headingTop = heading.getBoundingClientRect().top + window.scrollY
+      top = Math.min(top, headingTop - HEADING_GAP)
+    }
+    window.scrollTo({ top: Math.max(0, top), behavior: reduce ? 'auto' : 'smooth' })
+  }, [reduce])
+
+  // As a step becomes active, move focus to its heading and bring its actions to
+  // the line. preventScroll matters: focus() scrolls on its own, and that scroll
+  // would race the settle immediately after it.
   useEffect(() => {
     if (wiz.phase !== 'ready') return
-    headingRef.current?.focus()
-    cardRef.current?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'center' })
-  }, [wiz.phase, activeIndex, reduce])
+    userScrolledRef.current = false
+    headingRef.current?.focus({ preventScroll: true })
+    settle()
+  }, [wiz.phase, activeIndex, settle])
+
+  // Re-settle for as long as the flow's height is still moving: the outgoing
+  // body collapsing, the incoming one expanding, and content that lands after
+  // the fact (a repo list, an App install status, an error line). The one-shot
+  // settle above necessarily measures a card that hasn't finished growing.
+  // Observes the content only — the spacers are siblings, so resizing them
+  // can't feed back in. Coalesced through rAF, so a burst of callbacks costs
+  // one retarget.
+  useEffect(() => {
+    const content = contentRef.current
+    if (wiz.phase !== 'ready' || !content) return
+    let frame = 0
+    const observer = new ResizeObserver(() => {
+      if (userScrolledRef.current) return
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(settle)
+    })
+    observer.observe(content)
+    return () => {
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+    }
+  }, [wiz.phase, settle])
+
+  // Gesture listeners are on the window because the page itself scrolls — the
+  // flow is not inside a scroll container.
+  useEffect(() => {
+    window.addEventListener('wheel', takeOverScroll, { passive: true })
+    window.addEventListener('touchmove', takeOverScroll, { passive: true })
+    return () => {
+      window.removeEventListener('wheel', takeOverScroll)
+      window.removeEventListener('touchmove', takeOverScroll)
+    }
+  }, [takeOverScroll])
 
   if (wiz.phase === 'loading') return <Loading />
 
@@ -136,192 +245,204 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     <div className="relative min-h-screen px-4 py-16">
       <GlassBackdrop />
       <div className="mx-auto max-w-xl">
-        <header className="mb-10 space-y-2">
-          <h1 className="text-[27px] font-semibold tracking-tight text-text-primary">
-            Set up Triage Factory
-          </h1>
-          <p className="text-[14px] leading-relaxed text-text-tertiary">
-            A few steps to get your workspace ready. Each one saves as you go.
-          </p>
-        </header>
+        {/* Lead spacer — height is owned by settle(), not by CSS. Zero once the
+            stack is tall enough to reach the line by scrolling. */}
+        <div aria-hidden ref={leadRef} />
+        <div ref={contentRef}>
+          <header className="mb-10 space-y-2">
+            <h1 className="text-[27px] font-semibold tracking-tight text-text-primary">
+              Set up Triage Factory
+            </h1>
+            <p className="text-[14px] leading-relaxed text-text-tertiary">
+              A few steps to get your workspace ready. Each one saves as you go.
+            </p>
+          </header>
 
-        <div aria-live="polite" className="sr-only">
-          {announcement}
-        </div>
+          <div aria-live="polite" className="sr-only">
+            {announcement}
+          </div>
 
-        <div className="space-y-6">
-          {WIZARD_SECTIONS.map((section) => {
-            // Only steps up to and including the active one render — the active
-            // card plus the completed bars that have receded above it. Nothing
-            // below the active step is shown (no "road ahead"), and because this
-            // keys on activeIndex, going Back re-hides the forward steps too. A
-            // section with no reached steps yet (the team section while still in
-            // org config) collapses away entirely.
-            const entries = wiz.steps
-              .map((step, index) => ({ step, index }))
-              .filter(
-                ({ step, index }) =>
-                  step.section === section.id &&
-                  index <= activeIndex &&
-                  isStepVisible(step, wiz.state),
-              )
-            if (entries.length === 0) return null
-            return (
-              <section key={section.id} aria-labelledby={`setup-section-${section.id}`}>
-                <SectionDivider id={`setup-section-${section.id}`} title={section.title} />
-                <ol className="relative space-y-5 pl-9">
-                  {/* The faint thread the steps flow down; markers sit on it.
+          <div className="space-y-6">
+            {WIZARD_SECTIONS.map((section) => {
+              // Only steps up to and including the active one render — the active
+              // card plus the completed bars that have receded above it. Nothing
+              // below the active step is shown (no "road ahead"), and because this
+              // keys on activeIndex, going Back re-hides the forward steps too. A
+              // section with no reached steps yet (the team section while still in
+              // org config) collapses away entirely.
+              const entries = wiz.steps
+                .map((step, index) => ({ step, index }))
+                .filter(
+                  ({ step, index }) =>
+                    step.section === section.id &&
+                    index <= activeIndex &&
+                    isStepVisible(step, wiz.state),
+                )
+              if (entries.length === 0) return null
+              return (
+                <section key={section.id} aria-labelledby={`setup-section-${section.id}`}>
+                  <SectionDivider id={`setup-section-${section.id}`} title={section.title} />
+                  <ol className="relative space-y-5 pl-9">
+                    {/* The faint thread the steps flow down; markers sit on it.
                       An aria-hidden, list-none <li> so the <ol> keeps only <li>
                       children (valid list semantics) while staying decorative. */}
-                  <li
-                    aria-hidden
-                    className="pointer-events-none absolute bottom-3 left-[10px] top-2 w-px list-none bg-[var(--color-border-subtle)]"
-                  />
-                  {entries.map(({ step, index }) => {
-                    const isActive = index === activeIndex
-                    const complete = wiz.isStepComplete(index)
-                    const n = String(displayNumber(step)).padStart(2, '0')
+                    <li
+                      aria-hidden
+                      className="pointer-events-none absolute bottom-3 left-[10px] top-2 w-px list-none bg-[var(--color-border-subtle)]"
+                    />
+                    {entries.map(({ step, index }) => {
+                      const isActive = index === activeIndex
+                      const complete = wiz.isStepComplete(index)
+                      const n = String(displayNumber(step)).padStart(2, '0')
 
-                    // One <li> per step, persisting across the active↔collapsed
-                    // transition so the always-mounted AnimatePresence can play
-                    // the body's recede (exit) and expand (enter). The header
-                    // swaps between the active heading and the collapsed bar; the
-                    // body only mounts while active. Actions live OUTSIDE the
-                    // height-animated body so the Continue glow is never clipped;
-                    // the body can't move its inputs out, so instead it pads
-                    // horizontally (px-1.5) and cancels the pad with -mx-1.5 — the
-                    // fields stay aligned while their focus ring clears the
-                    // overflow-hidden clip edge the height animation requires.
-                    return (
-                      <li key={step.id} ref={isActive ? cardRef : undefined} className="relative">
-                        {/* Marker on the thread, in the left gutter (bg masks the
+                      // One <li> per step, persisting across the active↔collapsed
+                      // transition so the always-mounted AnimatePresence can play
+                      // the body's recede (exit) and expand (enter). The header
+                      // swaps between the active heading and the collapsed bar; the
+                      // body only mounts while active. Actions live OUTSIDE the
+                      // height-animated body so the Continue glow is never clipped;
+                      // the body can't move its inputs out, so instead it pads
+                      // horizontally (px-1.5) and cancels the pad with -mx-1.5 — the
+                      // fields stay aligned while their focus ring clears the
+                      // overflow-hidden clip edge the height animation requires.
+                      return (
+                        <li key={step.id} className="relative">
+                          {/* Marker on the thread, in the left gutter (bg masks the
                             line behind the glyph). */}
-                        <span
-                          aria-hidden
-                          className="absolute -left-9 top-px flex h-5 w-[21px] items-center justify-center bg-surface"
-                        >
-                          {complete && !isActive ? (
-                            <Check
-                              size={13}
-                              strokeWidth={3}
-                              className="text-[var(--color-claim)]"
-                            />
-                          ) : (
-                            <span
-                              className={`text-[11px] font-semibold tabular-nums ${
-                                isActive ? 'text-accent' : 'text-text-tertiary'
-                              }`}
-                            >
-                              {n}
-                            </span>
-                          )}
-                        </span>
-
-                        {isActive ? (
-                          <h3
-                            ref={headingRef}
-                            tabIndex={-1}
-                            aria-current="step"
-                            className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary outline-none"
+                          <span
+                            aria-hidden
+                            className="absolute -left-9 top-px flex h-5 w-[21px] items-center justify-center bg-surface"
                           >
-                            {step.title}
-                          </h3>
-                        ) : (
-                          <CollapsedStepBar
-                            title={step.title}
-                            summary={step.collapsedSummary(wiz.state)}
-                            complete={complete}
-                            onEdit={() => wiz.goTo(index)}
-                          />
-                        )}
+                            {complete && !isActive ? (
+                              <Check
+                                size={13}
+                                strokeWidth={3}
+                                className="text-[var(--color-claim)]"
+                              />
+                            ) : (
+                              <span
+                                className={`text-[11px] font-semibold tabular-nums ${
+                                  isActive ? 'text-accent' : 'text-text-tertiary'
+                                }`}
+                              >
+                                {n}
+                              </span>
+                            )}
+                          </span>
 
-                        <AnimatePresence initial={false}>
-                          {isActive && (
-                            <motion.div
-                              key="body"
-                              initial={
-                                reduce ? false : { height: 0, opacity: 0, filter: 'blur(10px)' }
-                              }
-                              animate={{ height: 'auto', opacity: 1, filter: 'blur(0px)' }}
-                              exit={
-                                reduce
-                                  ? { opacity: 0 }
-                                  : { height: 0, opacity: 0, filter: 'blur(6px)' }
-                              }
-                              transition={reduce ? { duration: 0 } : bodyEase}
-                              className="-mx-1.5 px-1.5"
-                              style={{ overflow: 'hidden' }}
+                          {isActive ? (
+                            <h3
+                              ref={headingRef}
+                              tabIndex={-1}
+                              aria-current="step"
+                              className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary outline-none"
                             >
-                              <div className="space-y-6 pt-4">
-                                {wiz.activeLoadFailed ? (
-                                  <div className="space-y-3">
-                                    <p className="text-[13px] text-text-secondary">
-                                      We couldn&rsquo;t load your current settings for this step.
-                                      Retry before saving so nothing is overwritten.
-                                    </p>
-                                    <button
-                                      type="button"
-                                      onClick={wiz.retry}
-                                      className="rounded-lg border border-border-subtle bg-white/50 px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:bg-white/80"
-                                    >
-                                      Retry
-                                    </button>
-                                  </div>
-                                ) : (
-                                  step.render({
-                                    ...identity,
-                                    state: wiz.state,
-                                    patch: wiz.patch,
-                                    error: wiz.error,
-                                    advance,
-                                  })
-                                )}
-
-                                {wiz.error && (
-                                  <p
-                                    role="alert"
-                                    className="text-[12px] text-[var(--color-dismiss)]"
-                                  >
-                                    {wiz.error}
-                                  </p>
-                                )}
-                              </div>
-                            </motion.div>
+                              {step.title}
+                            </h3>
+                          ) : (
+                            <CollapsedStepBar
+                              title={step.title}
+                              summary={step.collapsedSummary(wiz.state)}
+                              complete={complete}
+                              onEdit={() => wiz.goTo(index)}
+                            />
                           )}
-                        </AnimatePresence>
 
-                        {isActive && (
-                          <div className="flex items-center justify-between gap-3 pt-5">
-                            <button
-                              type="button"
-                              onClick={back}
-                              disabled={!canGoBack || busy}
-                              className="rounded-xl px-3 py-2 text-[13px] font-medium text-text-tertiary transition-colors hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                          <AnimatePresence initial={false}>
+                            {isActive && (
+                              <motion.div
+                                key="body"
+                                initial={
+                                  reduce ? false : { height: 0, opacity: 0, filter: 'blur(10px)' }
+                                }
+                                animate={{ height: 'auto', opacity: 1, filter: 'blur(0px)' }}
+                                exit={
+                                  reduce
+                                    ? { opacity: 0 }
+                                    : { height: 0, opacity: 0, filter: 'blur(6px)' }
+                                }
+                                transition={reduce ? { duration: 0 } : bodyEase}
+                                className="-mx-1.5 px-1.5"
+                                style={{ overflow: 'hidden' }}
+                              >
+                                <div className="space-y-6 pt-4">
+                                  {wiz.activeLoadFailed ? (
+                                    <div className="space-y-3">
+                                      <p className="text-[13px] text-text-secondary">
+                                        We couldn&rsquo;t load your current settings for this step.
+                                        Retry before saving so nothing is overwritten.
+                                      </p>
+                                      <button
+                                        type="button"
+                                        onClick={wiz.retry}
+                                        className="rounded-lg border border-border-subtle bg-white/50 px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:bg-white/80"
+                                      >
+                                        Retry
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    step.render({
+                                      ...identity,
+                                      state: wiz.state,
+                                      patch: wiz.patch,
+                                      error: wiz.error,
+                                      advance,
+                                    })
+                                  )}
+
+                                  {wiz.error && (
+                                    <p
+                                      role="alert"
+                                      className="text-[12px] text-[var(--color-dismiss)]"
+                                    >
+                                      {wiz.error}
+                                    </p>
+                                  )}
+                                </div>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
+
+                          {isActive && (
+                            <div
+                              ref={actionsRef}
+                              className="flex items-center justify-between gap-3 pt-5"
                             >
-                              Back
-                            </button>
-                            {/* A self-advancing step (the mode picker) advances
-                                from its own in-body action — no Continue. */}
-                            {!step.selfAdvancing && (
                               <button
                                 type="button"
-                                onClick={advance}
-                                disabled={busy || wiz.activeLoadFailed}
-                                className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 hover:shadow-[0_12px_32px_-8px_var(--color-accent)] disabled:opacity-40 disabled:shadow-none"
+                                onClick={back}
+                                disabled={!canGoBack || busy}
+                                className="rounded-xl px-3 py-2 text-[13px] font-medium text-text-tertiary transition-colors hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40"
                               >
-                                {busy ? 'Saving…' : wiz.isLastStep ? 'Finish setup' : 'Continue'}
+                                Back
                               </button>
-                            )}
-                          </div>
-                        )}
-                      </li>
-                    )
-                  })}
-                </ol>
-              </section>
-            )
-          })}
+                              {/* A self-advancing step (the mode picker) advances
+                                from its own in-body action — no Continue. */}
+                              {!step.selfAdvancing && (
+                                <button
+                                  type="button"
+                                  onClick={advance}
+                                  disabled={busy || wiz.activeLoadFailed}
+                                  className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 hover:shadow-[0_12px_32px_-8px_var(--color-accent)] disabled:opacity-40 disabled:shadow-none"
+                                >
+                                  {busy ? 'Saving…' : wiz.isLastStep ? 'Finish setup' : 'Continue'}
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </li>
+                      )
+                    })}
+                  </ol>
+                </section>
+              )
+            })}
+          </div>
         </div>
+        {/* Trailing spacer — the room the last step needs to scroll its action
+            row up to the line. Sized as the slice of viewport that sits below
+            the line, so it exactly covers the deepest scroll settle() asks for. */}
+        <div aria-hidden style={{ height: `${Math.round((1 - ACTIONS_REST) * 100)}dvh` }} />
       </div>
     </div>
   )
