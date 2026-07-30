@@ -8,8 +8,9 @@ import "os"
 // git) must never see. It carries only what git needs to run locally.
 //
 // It also refuses to read any user/global/system git config: GIT_CONFIG_GLOBAL
-// and GIT_CONFIG_SYSTEM point at /dev/null so git ignores ~/.gitconfig, the XDG
-// global config, and /etc/gitconfig, and HOME is a non-existent path so nothing
+// and GIT_CONFIG_SYSTEM point at the null device (os.DevNull — /dev/null on the
+// platforms this builds for) so git ignores ~/.gitconfig, the XDG global config,
+// and /etc/gitconfig, and HOME is a non-existent path so nothing
 // resolves through it either. Without this, HOME pointing at a shared writable
 // directory (/tmp) would let anyone plant /tmp/.gitconfig — a filter, an
 // include.path — and make the capture attacker-influenceable and
@@ -28,8 +29,8 @@ func CaptureChildEnv() []string {
 	return []string{
 		"PATH=" + os.Getenv("PATH"), // locate the git binary
 		"HOME=/nonexistent",         // no user config from a shared/writable HOME
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_CONFIG_GLOBAL=" + os.DevNull,
+		"GIT_CONFIG_SYSTEM=" + os.DevNull,
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_CONFIG_COUNT=2",
 		"GIT_CONFIG_KEY_0=core.fsmonitor", "GIT_CONFIG_VALUE_0=",
