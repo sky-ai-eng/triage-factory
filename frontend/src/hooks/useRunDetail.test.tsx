@@ -61,6 +61,9 @@ let serverMessages: Message[]
 // while the repair request is in flight. null = answer from serverMessages.
 let pendingSince: Promise<Message[]> | null
 
+// Makes since_id reads answer 500, for the transient-failure paths.
+let failSinceReads: boolean
+
 // Route the reads the mounted view makes; everything but the run row and the
 // transcript is empty. `transcript` lets a test hold the initial transcript
 // read open — the run row lands first, so that read's duration is the window
@@ -69,6 +72,9 @@ function mockFetch(transcript?: Promise<Message[]>) {
   const fetchMock = vi.fn((url: string) => {
     const [path, query] = url.split('?')
     const sinceID = query ? Number(new URLSearchParams(query).get('since_id')) : null
+    if (sinceID !== null && failSinceReads) {
+      return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve(null) })
+    }
     const body: unknown = path.endsWith('/artifacts/refresh')
       ? { updated: 0 }
       : path.endsWith('/messages')
@@ -120,6 +126,7 @@ describe('useRunDetail live cost accumulation', () => {
     serverRun = conversation({ TotalCostUSD: 0.2 })
     serverMessages = []
     pendingSince = null
+    failSinceReads = false
     mockFetch()
   })
   afterEach(() => vi.unstubAllGlobals())
@@ -227,12 +234,21 @@ function TranscriptHarness() {
     <>
       <div data-testid="transcript">{messages.map((m) => m.content).join('|')}</div>
       <div data-testid="cost">{run ? String(run.TotalCostUSD ?? '') : ''}</div>
+      <div data-testid="status">{run?.Status ?? ''}</div>
     </>
   )
 }
 
 function transcript(): string {
   return screen.getByTestId('transcript').textContent ?? ''
+}
+
+// Settle the run and wait for the refetch it triggers to actually land, so a
+// following tick sees the settled row rather than racing it.
+async function settleRun() {
+  serverRun = conversation({ Status: 'completed', TotalCostUSD: 0.2 })
+  send({ type: 'conversation_update', conversation_id: RUN_ID, data: { status: 'completed' } })
+  await waitFor(() => expect(screen.getByTestId('status').textContent).toBe('completed'))
 }
 
 // One turn of the 5s reconcile tick, with the fetches it starts settled.
@@ -251,6 +267,7 @@ describe('useRunDetail transcript reconciliation', () => {
     serverRun = conversation({ TotalCostUSD: 0.2 })
     serverMessages = [message({ id: 11, content: 'first' })]
     pendingSince = null
+    failSinceReads = false
     mockFetch()
   })
   afterEach(() => {
@@ -355,14 +372,15 @@ describe('useRunDetail transcript reconciliation', () => {
     expect(screen.getByTestId('cost').textContent).toBe('0.25')
   })
 
-  it('issues no repair reads once the run has settled', async () => {
+  it('issues no repair reads for a run already settled when the station opened', async () => {
     serverRun = conversation({ Status: 'completed', TotalCostUSD: 0.2 })
     const fetchMock = mockFetch()
     render(<TranscriptHarness />)
     await waitFor(() => expect(transcript()).toBe('first'))
     fetchMock.mockClear()
 
-    // A settled run streams nothing, so there is nothing to repair.
+    // The load read the whole transcript and nothing more will be written to
+    // it, so there is nothing a repair could find.
     serverMessages.push(message({ id: 12, content: 'second' }))
     await tick()
     expect(sinceRequests(fetchMock)).toEqual([])
@@ -372,5 +390,63 @@ describe('useRunDetail transcript reconciliation', () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/artifacts/refresh'))).toBe(
       true,
     )
+  })
+
+  it('repairs the last row when the frame carrying it is dropped as the run settles', async () => {
+    // Status and transcript arrive as separate frames, so the hub can drop the
+    // final `message` and still deliver the `conversation_update` that settles
+    // the run. Gating on "live right now" would shut the repair off over a
+    // transcript still missing its last row.
+    render(<TranscriptHarness />)
+    await waitFor(() => expect(transcript()).toBe('first'))
+
+    serverMessages.push(message({ id: 12, content: 'last' }))
+    await settleRun()
+
+    await tick()
+    expect(transcript()).toBe('first|last')
+  })
+
+  it('closes a settled transcript out with one read, then stops', async () => {
+    const fetchMock = mockFetch()
+    render(<TranscriptHarness />)
+    await waitFor(() => expect(transcript()).toBe('first'))
+
+    await settleRun()
+
+    // The run is settled, so its transcript is final: one read closes it out.
+    await tick()
+    expect(sinceRequests(fetchMock)).toHaveLength(1)
+
+    // And no tick after that asks again — a settled run left open on screen
+    // must not poll forever.
+    await tick()
+    await tick()
+    expect(sinceRequests(fetchMock)).toHaveLength(1)
+  })
+
+  it('retries the closing read when it fails rather than dropping it', async () => {
+    const fetchMock = mockFetch()
+    render(<TranscriptHarness />)
+    await waitFor(() => expect(transcript()).toBe('first'))
+
+    await settleRun()
+
+    // A transient failure has not closed the transcript out, so the flag has
+    // to stay up — otherwise one bad response costs the last row for good.
+    serverMessages.push(message({ id: 12, content: 'last' }))
+    failSinceReads = true
+    await tick()
+    expect(sinceRequests(fetchMock)).toHaveLength(1)
+    expect(transcript()).toBe('first')
+
+    failSinceReads = false
+    await tick()
+    expect(sinceRequests(fetchMock)).toHaveLength(2)
+    expect(transcript()).toBe('first|last')
+
+    // Now it is closed out, so the asking stops.
+    await tick()
+    expect(sinceRequests(fetchMock)).toHaveLength(2)
   })
 })

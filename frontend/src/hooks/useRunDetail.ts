@@ -91,8 +91,21 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   // tick fires they hold what the view is showing.
   const runRef = useRef<Conversation | null>(null)
   const messagesRef = useRef<Message[]>([])
+
+  // Whether this run has been seen live since the last repair, which is what
+  // buys the settled run one closing read instead of none.
+  //
+  // Gating the repair on "live right now" leaves the last row of a run
+  // unreachable: status and transcript arrive as separate frames, so the hub
+  // can drop the final `message` and deliver the `conversation_update` that
+  // settles the run, and by the next tick the gate is shut on a transcript
+  // that is still missing a row. Set here rather than at tick time so it
+  // reflects every run row observed — a run that settles between two ticks
+  // still leaves the flag up for the tick that follows.
+  const sawActiveRef = useRef(false)
   useEffect(() => {
     runRef.current = run
+    if (run && isActiveRun(run)) sawActiveRef.current = true
   }, [run])
   useEffect(() => {
     messagesRef.current = messages
@@ -212,9 +225,11 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
       setMessages([])
       setArtifacts([])
       // Nothing has been read for this run yet, so it is complete through
-      // nothing — the load below re-establishes the watermark.
+      // nothing — the load below re-establishes the watermark, and the run
+      // row it fetches decides whether this one is owed any repair at all.
       completeThroughRef.current = 0
       messagesRef.current = []
+      sawActiveRef.current = false
       // A new run starts with no prompts; drop the prior run's queue + timers.
       if (prevRunID) dropRun(prevRunID)
     }
@@ -318,19 +333,31 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   // with nothing on screen to say so. Re-reading from the watermark turns the
   // frame back into what it should be: a hint that arrives faster than the
   // poll, rather than the sole path to the row. Bounded by construction — one
-  // request per tick, answering with the rows written since the last one, and
-  // only while the run is live, since a settled one streams nothing.
+  // request per tick while the run is live, answering with the rows written
+  // since the last one, plus a single closing read once it settles.
   useEffect(() => {
     if (!runID) return
     let cancelled = false
     const reconcileMessages = () => {
       const current = runRef.current
-      if (!current || !isActiveRun(current)) return
+      if (!current) return
+      // A live run is repaired every tick. A settled one is repaired once —
+      // its transcript is final, so a single read closes it out and there is
+      // never a reason to ask again. A run already settled when the station
+      // opened never asks at all: the load read it whole.
+      const settled = !isActiveRun(current)
+      if (settled && !sawActiveRef.current) return
       const sinceID = completeThroughRef.current
       fetch(`/api/agent/conversations/${runID}/messages?since_id=${sinceID}`)
         .then((r) => (r.ok ? r.json() : null))
         .then((rows: Message[] | null) => {
-          if (cancelled || !rows?.length || runID !== lastRunIDRef.current) return
+          if (cancelled || rows === null || runID !== lastRunIDRef.current) return
+          // The closing read landed, so stop asking. Only a real response
+          // counts — a failed one leaves the flag up so the next tick retries,
+          // which is the difference between closing the transcript out and
+          // merely having tried to.
+          if (settled) sawActiveRef.current = false
+          if (rows.length === 0) return
           // Another whole read landed, so the watermark moves up to its last
           // row — but only forward, since a response that raced a fresher one
           // (or a refetch) would otherwise walk it back over rows already
