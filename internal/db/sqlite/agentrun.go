@@ -751,15 +751,17 @@ func (s *agentRunStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, or
 
 // SetClaimPhaseSystem keeps the released_at filter its active-claim sibling
 // has always had: a released claim's phase is inert history either way, so a
-// call naming one stays the no-op it is today rather than rewriting it.
-func (s *agentRunStore) SetClaimPhaseSystem(ctx context.Context, orgID, claimID, phase string) error {
+// call naming one stays the no-op it is today rather than rewriting it. The
+// conversation binds too — it costs nothing and keeps the row this writes
+// from drifting away from the one the caller named.
+func (s *agentRunStore) SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE claims SET phase = NULLIF(?, '')
-		WHERE id = ? AND released_at IS NULL
-	`, phase, claimID)
+		WHERE id = ? AND conversation_id = ? AND released_at IS NULL
+	`, phase, claimID, conversationID)
 	return err
 }
 

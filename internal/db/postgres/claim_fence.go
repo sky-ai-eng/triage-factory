@@ -30,28 +30,37 @@ import (
 // A plain EXISTS check narrows the window to microseconds and leaves it open,
 // which is the same thing as not having a fence.
 //
-// The org binds as defense in depth alongside the claim id, matching every
-// other statement in these stores. A claim id that does not resolve — wrong
-// org, released, or never existed — is one answer to the only question being
-// asked: is this caller still the owner. It is not.
-func assertClaimActive(ctx context.Context, q queryer, orgID, claimID string) error {
+// The claim must be live AND own conversationID. Liveness alone would answer
+// a weaker question than the one being asked — "does this caller hold some
+// claim somewhere in the org" rather than "does this caller own THIS
+// conversation" — and every fenced write names its target separately from its
+// claim, so a mis-threaded pair is a wiring mistake the fence is exactly the
+// right place to catch. The org binds too, as defense in depth alongside RLS
+// like every other statement in these stores.
+//
+// Every way the row can fail to resolve — released, wrong org, wrong
+// conversation, never existed — is one answer: this caller is not the owner.
+func assertClaimActive(ctx context.Context, q queryer, orgID, conversationID, claimID string) error {
 	if claimID == "" {
 		return fmt.Errorf("%w: no claim id supplied", db.ErrClaimReleased)
 	}
+	// id and conversation_id are uuid columns; a malformed value would fail
+	// Postgres parsing (22P02) rather than the ownership test it is standing
+	// in for. Same answer either way — this caller owns nothing.
 	if !isValidUUID(claimID) {
-		// claim_id is a uuid column; a malformed id would fail Postgres
-		// parsing (22P02) rather than the ownership test it is standing in
-		// for. Same answer either way — this caller owns nothing.
 		return fmt.Errorf("%w: claim %q is not a valid id", db.ErrClaimReleased, claimID)
+	}
+	if !isValidUUID(conversationID) {
+		return fmt.Errorf("%w: conversation %q is not a valid id", db.ErrClaimReleased, conversationID)
 	}
 	var one int
 	err := q.QueryRowContext(ctx, `
 		SELECT 1 FROM claims
-		WHERE id = $1 AND org_id = $2 AND released_at IS NULL
+		WHERE id = $1 AND org_id = $2 AND conversation_id = $3 AND released_at IS NULL
 		FOR SHARE
-	`, claimID, orgID).Scan(&one)
+	`, claimID, orgID, conversationID).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: claim %s", db.ErrClaimReleased, claimID)
+		return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
 	}
 	return err
 }

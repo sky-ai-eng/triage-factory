@@ -402,11 +402,17 @@ type ConversationStore interface {
 	// conversation: the transcript it streams, the terminal status it
 	// records, the setup sub-state it reports. Each names its own claim id
 	// rather than letting the server resolve "the conversation's active
-	// claim", and each refuses with ErrClaimReleased when that claim is no
-	// longer live. Naming the claim is the assertion of ownership; the
-	// refusal is what makes a fencing failure a rejected write instead of
-	// silent corruption. See ErrClaimReleased for the full contract and for
-	// what a caller must do when it trips.
+	// claim", and each refuses with ErrClaimReleased unless that claim is
+	// both live and the one holding the conversation being written. Naming
+	// the claim is the assertion of ownership; the refusal is what makes a
+	// fencing failure a rejected write instead of silent corruption. See
+	// ErrClaimReleased for the full contract and for what a caller must do
+	// when it trips.
+	//
+	// Every method takes the conversation and the claim separately, and the
+	// fence requires them to agree — a live claim on some other conversation
+	// is refused exactly like a released one. Liveness alone would let a
+	// mis-threaded pair write wherever the caller pointed it.
 	//
 	// The server-side active-claim fallback stays for writers that are not
 	// engagements — a user's message typed into a conversation belongs to
@@ -448,8 +454,10 @@ type ConversationStore interface {
 
 	// SetClaimPhaseSystem writes claims.phase on one named claim — the
 	// claim-keyed sibling of SetActiveClaimPhaseSystem, for the engagement
-	// reporting its own setup progress. Empty phase clears to NULL.
-	SetClaimPhaseSystem(ctx context.Context, orgID, claimID, phase string) error
+	// reporting its own setup progress. Empty phase clears to NULL. The
+	// conversation is bound as well as the claim: the phase a run reports
+	// must not be able to land on an engagement driving a different one.
+	SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) error
 
 	// LastAgentActivityAtSystem returns the created_at of the run's most
 	// recent non-user messages row (role <> 'user') — the "agent last

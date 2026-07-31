@@ -112,7 +112,7 @@ func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status
 // claimID, since only one claim per conversation can be unreleased at a time.
 func (s *agentRunStore) CompleteForClaimSystem(ctx context.Context, orgID, runID, claimID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
 	return inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, runID, claimID); err != nil {
 			return err
 		}
 		if err := completeRun(ctx, q, orgID, runID, status, costUSD, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
@@ -421,15 +421,15 @@ func (s *agentRunStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID, ru
 // the fence a zombie's stale phase would land on whatever claim happened to
 // be active — the successor's — and surface as its setup sub-state on every
 // display read.
-func (s *agentRunStore) SetClaimPhaseSystem(ctx context.Context, orgID, claimID, phase string) error {
+func (s *agentRunStore) SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) error {
 	return inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		_, err := q.ExecContext(ctx, `
 			UPDATE claims SET phase = NULLIF($1, '')
-			WHERE org_id = $2 AND id = $3
-		`, phase, orgID, claimID)
+			WHERE org_id = $2 AND id = $3 AND conversation_id = $4
+		`, phase, orgID, claimID, conversationID)
 		return err
 	})
 }
@@ -491,7 +491,7 @@ func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, run
 func (s *agentRunStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, failureKind string) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, runID, claimID); err != nil {
 			return err
 		}
 		var err error
@@ -916,7 +916,9 @@ func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, m
 func (s *agentRunStore) InsertMessageForClaimSystem(ctx context.Context, orgID, claimID string, msg *domain.Message) (int64, error) {
 	var id int64
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, claimID); err != nil {
+		// The row's own conversation is what the claim must own — the fence
+		// and the INSERT below must not be able to name different ones.
+		if err := assertClaimActive(ctx, q, orgID, msg.ConversationID, claimID); err != nil {
 			return err
 		}
 		msg.ClaimID = claimID
@@ -1256,7 +1258,7 @@ func (s *agentRunStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, 
 		return nil
 	}
 	return inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, claimID); err != nil {
+		if err := assertClaimActive(ctx, q, orgID, runID, claimID); err != nil {
 			return err
 		}
 		_, err := q.ExecContext(ctx, `

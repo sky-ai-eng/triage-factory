@@ -1152,7 +1152,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		claimID := claims[0].ID
 
-		if err := store.SetClaimPhaseSystem(ctx, orgID, claimID, "cloning"); err != nil {
+		if err := store.SetClaimPhaseSystem(ctx, orgID, runID, claimID, "cloning"); err != nil {
 			t.Fatalf("SetClaimPhaseSystem: %v", err)
 		}
 		if got := seed.ClaimRows(t, runID); len(got) != 1 || got[0].Phase != "cloning" {

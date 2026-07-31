@@ -1082,7 +1082,7 @@ func (s *Spawner) getRunSecrets() agentproc.SecretsReader {
 func (s *Spawner) updatePhase(orgID, runID, claimID, phase string) {
 	var err error
 	if claimID != "" {
-		err = s.agentRuns.SetClaimPhaseSystem(context.Background(), orgID, claimID, phase)
+		err = s.agentRuns.SetClaimPhaseSystem(context.Background(), orgID, runID, claimID, phase)
 	} else {
 		err = s.agentRuns.SetActiveClaimPhaseSystem(context.Background(), orgID, runID, phase)
 	}

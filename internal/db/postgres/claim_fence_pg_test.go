@@ -25,11 +25,12 @@ import (
 
 // fenceFixture is one seeded conversation with one live claim on it.
 type fenceFixture struct {
-	store   db.ConversationStore
-	orgID   string
-	runID   string
-	claimID string
-	seed    dbtest.ConversationSeeder
+	store    db.ConversationStore
+	orgID    string
+	runID    string
+	claimID  string
+	promptID string
+	seed     dbtest.ConversationSeeder
 }
 
 func newFenceFixture(t *testing.T, h *pgtest.Harness, executorID string) fenceFixture {
@@ -55,7 +56,20 @@ func newFenceFixture(t *testing.T, h *pgtest.Harness, executorID string) fenceFi
 	if len(claims) != 1 {
 		t.Fatalf("claims = %+v, want exactly the one minted engagement", claims)
 	}
-	return fenceFixture{store: store, orgID: orgID, runID: runID, claimID: claims[0].ID, seed: seed}
+	return fenceFixture{store: store, orgID: orgID, runID: runID, claimID: claims[0].ID, promptID: promptID, seed: seed}
+}
+
+// seedSecondConversation adds another running conversation in the same org,
+// so a claim can be pointed at a conversation that is not its own.
+func seedSecondConversation(t *testing.T, fx fenceFixture) string {
+	t.Helper()
+	ent := fx.seed.Entity(t, "fence-other")
+	ev := fx.seed.Event(t, ent, domain.EventGitHubPROpened)
+	taskID := fx.seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+	return fx.seed.Run(t, domain.Conversation{
+		TaskID: taskID, PromptID: fx.promptID, Status: "running", Model: "m",
+		BlueprintRunID: fx.seed.BlueprintRun(t, taskID),
+	})
 }
 
 // reap is the fleet reaper's release, from a connection of its own.
@@ -172,16 +186,64 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 
 	t.Run("SetPhase", func(t *testing.T) {
 		fx := newFenceFixture(t, h, "exec-fence-phase")
-		if err := fx.store.SetClaimPhaseSystem(ctx, fx.orgID, fx.claimID, "cloning"); err != nil {
+		if err := fx.store.SetClaimPhaseSystem(ctx, fx.orgID, fx.runID, fx.claimID, "cloning"); err != nil {
 			t.Fatalf("phase while claimed: %v", err)
 		}
 		reap(t, h.AdminDB, fx.orgID, fx.runID)
 
-		if err := fx.store.SetClaimPhaseSystem(ctx, fx.orgID, fx.claimID, "agent_starting"); !errors.Is(err, db.ErrClaimReleased) {
+		if err := fx.store.SetClaimPhaseSystem(ctx, fx.orgID, fx.runID, fx.claimID, "agent_starting"); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("phase after reap = %v, want ErrClaimReleased", err)
 		}
 		if claims := fx.seed.ClaimRows(t, fx.runID); claims[0].Phase != "cloning" {
 			t.Errorf("phase = %q, want cloning (the refused write must not land)", claims[0].Phase)
+		}
+	})
+
+	t.Run("LiveClaimOnAnotherConversationIsRefused", func(t *testing.T) {
+		// Liveness is not ownership. An engagement legitimately driving one
+		// conversation must not be able to write to a different one just
+		// because its own claim is unreleased — which is what a fence that
+		// only checked released_at would allow the moment a caller
+		// mis-threaded its (conversation, claim) pair.
+		fx := newFenceFixture(t, h, "exec-fence-crossconv")
+		other := seedSecondConversation(t, fx)
+
+		_, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
+			ConversationID: other, Role: "assistant", Subtype: "text", Content: "wrong conversation",
+		})
+		if !errors.Is(err, db.ErrClaimReleased) {
+			t.Fatalf("insert onto another conversation = %v, want ErrClaimReleased", err)
+		}
+		if err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, other, fx.claimID, "completed", 0, 0, 0, "ok", "", "finish", "", ""); !errors.Is(err, db.ErrClaimReleased) {
+			t.Fatalf("complete on another conversation = %v, want ErrClaimReleased", err)
+		}
+		if _, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, other, fx.claimID, string(domain.RunFailureCrash)); !errors.Is(err, db.ErrClaimReleased) {
+			t.Fatalf("mark-failed on another conversation = %v, want ErrClaimReleased", err)
+		}
+		if err := fx.store.SetClaimPhaseSystem(ctx, fx.orgID, other, fx.claimID, "cloning"); !errors.Is(err, db.ErrClaimReleased) {
+			t.Fatalf("phase on another conversation = %v, want ErrClaimReleased", err)
+		}
+
+		got, err := fx.store.Get(ctx, fx.orgID, other)
+		if err != nil || got == nil {
+			t.Fatalf("Get other: err=%v got=%v", err, got)
+		}
+		if got.Status != "running" {
+			t.Errorf("other conversation status = %q, want running (untouched)", got.Status)
+		}
+		msgs, err := fx.store.Messages(ctx, fx.orgID, other)
+		if err != nil {
+			t.Fatalf("Messages other: %v", err)
+		}
+		if len(msgs) != 0 {
+			t.Fatalf("other conversation transcript = %+v, want nothing written by a claim that does not own it", msgs)
+		}
+		// The engagement's own conversation is unaffected — this refuses
+		// misdirected writes, not the caller.
+		if _, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
+			ConversationID: fx.runID, Role: "assistant", Subtype: "text", Content: "own conversation",
+		}); err != nil {
+			t.Fatalf("insert onto its own conversation: %v", err)
 		}
 	})
 

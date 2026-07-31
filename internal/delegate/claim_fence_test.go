@@ -191,7 +191,7 @@ type phaseFencedStore struct {
 	byConversation int
 }
 
-func (p *phaseFencedStore) SetClaimPhaseSystem(context.Context, string, string, string) error {
+func (p *phaseFencedStore) SetClaimPhaseSystem(context.Context, string, string, string, string) error {
 	p.byClaim++
 	return db.ErrClaimReleased
 }
