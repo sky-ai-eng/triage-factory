@@ -251,6 +251,15 @@ export interface Message {
   // conversation's authoritative SUM.
   cost_usd?: number
   created_at: string
+  // duration_ms is how long THIS row's own work took — an assistant row from
+  // the request going out to the message completing (reasoning included, so
+  // "thought for Ns" comes off the row that did the thinking), a tool row from
+  // dispatch to result. Absent means nobody measured it (every row written
+  // before the runtime stamped timing, and every non-agent role), which is not
+  // the same as 0 — so read it with `!= null`, never `?? 0`. Never derive a
+  // duration by subtracting a neighbour's created_at: streaming, paging, and
+  // compaction each break that in their own way.
+  duration_ms?: number
   // reasoning/content_blocks mirror domain.MessageDTO's fields of the same
   // name — absent on messages that carry neither. reasoning rides the
   // assistant message it belongs to rather than arriving as a separate

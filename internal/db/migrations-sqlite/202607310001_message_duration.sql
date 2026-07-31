@@ -1,0 +1,32 @@
+-- +goose Up
+-- duration_ms: wall-clock milliseconds of the work THIS row represents, so
+-- timing is a property of the row rather than a fact living between two of
+-- them. Subtracting a neighbour's created_at cannot be made correct: an
+-- appended row has no predecessor while it streams, a paged read is missing
+-- one, compaction inserts rows at a fractional seq so "the previous row"
+-- stops meaning "the previous event", and an elided partner is gone for good.
+--
+--   role='assistant' — request issued → message complete. Includes reasoning
+--                      time, which is what makes a "thought for Ns" readout
+--                      derivable from the row that did the thinking.
+--   role='tool'      — dispatch → result.
+--   anything else    — NULL.
+--
+-- Nullable, no default, no backfill: historical rows carry no timing and
+-- every consumer must render without it. NULL is "not measured", never
+-- "took no time" — a runtime that measured a sub-millisecond step writes 0.
+--
+-- A real column rather than a metadata key because it is a display field on
+-- nearly every row, typed and sortable, and the same kind of per-row
+-- measurement as the input_tokens / output_tokens / cost_usd it sits beside.
+--
+-- Known limitation on the SDK runtime: a permission-gated tool's duration
+-- includes the time the human took to approve it, because the only marks that
+-- path has are the assistant message and the tool_result. Local-mode only —
+-- multi has no permission gate — and excluding the gate window would mean
+-- plumbing both moments out of the permission handler for a number nobody is
+-- yet reading that precisely.
+ALTER TABLE messages ADD COLUMN duration_ms INTEGER;
+
+-- +goose Down
+SELECT 'down not supported';

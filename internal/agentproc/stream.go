@@ -10,6 +10,8 @@ package agentproc
 import (
 	"encoding/json"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -18,6 +20,11 @@ import (
 // across multiple NDJSON lines (thinking → text → tool_use all share
 // one msg ID). Thinking rides the same message as reasoning entries
 // rather than flushing as its own row.
+//
+// It also holds the timing marks each row's duration_ms is measured from.
+// This process watches a live stream, so both ends of every interval are
+// moments it observed directly — no row ever gets its duration by
+// subtracting a neighbour's created_at.
 type StreamState struct {
 	currentMsgID string
 	current      *domain.Message
@@ -30,11 +37,63 @@ type StreamState struct {
 	// or a non-text block, matching the single-text-block message's
 	// existing flat-Content-only shape.
 	currentBlocks []domain.ContentBlock
+
+	// now is the wall clock the marks below are read from.
+	now func() time.Time
+
+	// requestAt is when the request producing the next assistant message
+	// went out: stream start, the end of the previous assistant message, the
+	// arrival of the tool results that unblocked the model, or a user
+	// message sent into a live run. Mutex-guarded because MarkRequest is
+	// called from the caller's send goroutine while ParseLine reads it on
+	// the reader goroutine; a time.Time (not unix nanos) so the interval
+	// keeps its monotonic reading.
+	markMu    sync.Mutex
+	requestAt time.Time
+
+	// toolDispatchedAt is when each pending tool_use was handed to the
+	// harness, keyed by tool_use id and consumed by the matching result. A
+	// call that never resolves (an interrupted turn) leaves its mark behind;
+	// the map is bounded by the tool calls of one process's stream.
+	toolDispatchedAt map[string]time.Time
 }
 
-// NewStreamState returns a fresh state ready for ParseLine.
+// NewStreamState returns a fresh state ready for ParseLine, with the
+// first request mark set to now — for the one-shot path that is the
+// prompt going out with the subprocess's argv, and for a live run the
+// first Send re-marks it more precisely.
 func NewStreamState() *StreamState {
-	return &StreamState{}
+	s := &StreamState{
+		now:              time.Now,
+		toolDispatchedAt: map[string]time.Time{},
+	}
+	s.MarkRequest()
+	return s
+}
+
+// MarkRequest records that a request to the model has just gone out, so
+// the assistant message answering it is measured from here. The live path
+// calls this when it sends a user message: without it a follow-up's first
+// assistant row would count the whole parked wait as thinking time.
+func (s *StreamState) MarkRequest() {
+	at := s.now()
+	s.markMu.Lock()
+	defer s.markMu.Unlock()
+	s.requestAt = at
+}
+
+// sinceRequest returns the milliseconds elapsed since the last request
+// mark, or nil when there is no mark to measure from — nil is "not
+// measured", which every consumer must render as absent rather than zero.
+func (s *StreamState) sinceRequest() *int {
+	s.markMu.Lock()
+	at := s.requestAt
+	s.markMu.Unlock()
+	if at.IsZero() {
+		return nil
+	}
+	ms := int(s.now().Sub(at).Milliseconds())
+	return &ms
 }
 
 // SessionID returns the Claude Code session_id captured from the stream's
@@ -44,6 +103,8 @@ func NewStreamState() *StreamState {
 func (s *StreamState) SessionID() string { return s.sessionID }
 
 // flush returns the accumulated assistant message (if any) and resets state.
+// A flushed message ends its own interval, so the next one is measured from
+// here rather than from the same mark all over again.
 func (s *StreamState) flush() *domain.Message {
 	msg := s.current
 	if msg != nil && len(s.currentBlocks) > 0 {
@@ -55,6 +116,9 @@ func (s *StreamState) flush() *domain.Message {
 	s.current = nil
 	s.currentMsgID = ""
 	s.currentBlocks = nil
+	if msg != nil {
+		s.MarkRequest()
+	}
 	return msg
 }
 
@@ -97,7 +161,9 @@ func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.Message,
 		if flushed := s.flush(); flushed != nil {
 			out = append(out, flushed)
 		}
-		out = append(out, parseToolResult(raw, traceID)...)
+		out = append(out, s.parseToolResult(raw, traceID)...)
+		// Results going back is the next request going out.
+		s.MarkRequest()
 		return out, nil
 
 	case "result":
@@ -191,8 +257,17 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 				Name:  toolName,
 				Input: toolInput,
 			})
+			// The harness runs the call as soon as the block lands, so this
+			// is the dispatch its result is measured against.
+			if toolID != "" {
+				s.toolDispatchedAt[toolID] = s.now()
+			}
 		}
 	}
+
+	// Re-stamped on every line of the same message so the value settles on
+	// the arrival of its last one.
+	s.current.DurationMs = s.sinceRequest()
 
 	if stopReason, _ := msgObj["stop_reason"].(string); stopReason != "" {
 		if msg := s.flush(); msg != nil {
@@ -209,7 +284,12 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 // block. Each block's own content is walked in turn: text sub-blocks flatten
 // into the display Content string, non-text sub-blocks (images) land in
 // ContentBlocks so they aren't silently dropped.
-func parseToolResult(raw map[string]any, traceID string) []*domain.Message {
+//
+// Each result is timed against its own dispatch mark, so parallel calls
+// resolving in one line still get the durations they individually earned.
+// A result whose dispatch this process never saw (a resumed session's
+// in-flight call) carries no duration rather than a made-up one.
+func (s *StreamState) parseToolResult(raw map[string]any, traceID string) []*domain.Message {
 	msgObj, ok := raw["message"].(map[string]any)
 	if !ok {
 		return nil
@@ -240,6 +320,13 @@ func parseToolResult(raw map[string]any, traceID string) []*domain.Message {
 			}
 		}
 
+		var durationMs *int
+		if at, ok := s.toolDispatchedAt[toolUseID]; ok {
+			ms := int(s.now().Sub(at).Milliseconds())
+			durationMs = &ms
+			delete(s.toolDispatchedAt, toolUseID)
+		}
+
 		out = append(out, &domain.Message{
 			ConversationID: traceID,
 			Role:           "tool",
@@ -248,6 +335,7 @@ func parseToolResult(raw map[string]any, traceID string) []*domain.Message {
 			ToolCallID:     toolUseID,
 			IsError:        isError,
 			ContentBlocks:  blocks,
+			DurationMs:     durationMs,
 		})
 	}
 	return out

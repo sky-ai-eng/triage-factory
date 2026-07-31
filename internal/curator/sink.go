@@ -146,6 +146,7 @@ func (s *turnSink) OnMessage(msg *domain.Message) error {
 		CacheReadTokens:     msg.CacheReadTokens,
 		CacheCreationTokens: msg.CacheCreationTokens,
 		CreatedAt:           msg.CreatedAt,
+		DurationMs:          msg.DurationMs,
 		Reasoning:           msg.Reasoning,
 		ContentBlocks:       msg.ContentBlocks,
 	}

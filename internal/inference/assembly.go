@@ -149,9 +149,10 @@ func assistantPayload(r domain.Message) *schemas.ChatAssistantMessage {
 // MessageToRow is the exact inverse of rowToMessage: one bifrost ChatMessage
 // to one domain row, carrying the same content/reasoning/tool-call/is_error
 // facts back. It populates only the assembly-relevant fields — the caller
-// stamps identity (conversation, claim, user), the model, token usage and
-// cost. Subtype is re-derived from the message shape, matching what the SDK
-// stream parser records, so the row↔message round trip is exact.
+// stamps identity (conversation, claim, user), the model, token usage, cost,
+// and duration — all measurements of the exchange rather than facts the
+// message carries. Subtype is re-derived from the message shape, matching
+// what the SDK stream parser records, so the row↔message round trip is exact.
 func MessageToRow(msg schemas.ChatMessage) (domain.Message, error) {
 	content, blocks := contentToRow(msg.Content)
 

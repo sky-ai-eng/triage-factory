@@ -935,11 +935,11 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 		INSERT INTO messages (conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id,
 		                      is_error, metadata, model,
 		                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
-		                      reasoning, content_blocks, delivered, window_state, seq)
+		                      reasoning, content_blocks, delivered, window_state, seq, duration_ms)
 		VALUES (?, ?,
 		        COALESCE(?, (SELECT id FROM claims
 		                     WHERE conversation_id = ? AND released_at IS NULL)),
-		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		msg.ConversationID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID), msg.ConversationID,
 		msg.Role, msg.Content, msg.Subtype,
@@ -948,6 +948,7 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 		sqliteNullInt(msg.CacheReadTokens), sqliteNullInt(msg.CacheCreationTokens),
 		sqliteNullFloat(msg.CostUSD), msg.CreatedAt,
 		reasoningJSON, contentBlocksJSON, delivered, string(windowState), sqliteNullFloat(msg.Seq),
+		sqliteNullInt(msg.DurationMs),
 	)
 	if err != nil {
 		return 0, err
@@ -957,7 +958,7 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 
 const sqliteMessageColumns = `id, conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
 	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
-	reasoning, content_blocks, delivered, window_state, seq`
+	reasoning, content_blocks, delivered, window_state, seq, duration_ms`
 
 // scanMessageRows drains a messages result set selecting
 // sqliteMessageColumns into domain.Message values. Shared by the
@@ -974,12 +975,13 @@ func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 		var delivered bool
 		var windowState string
 		var seq sql.NullFloat64
+		var durationMs sql.NullInt64
 
 		if err := rows.Scan(
 			&m.ID, &m.ConversationID, &userID, &claimID, &m.Role, &content, &subtype, &toolCallsStr,
 			&toolCallID, &m.IsError, &metadataStr, &model,
 			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
-			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq,
+			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs,
 		); err != nil {
 			return nil, err
 		}
@@ -1041,6 +1043,10 @@ func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 		if seq.Valid {
 			v := seq.Float64
 			m.Seq = &v
+		}
+		if durationMs.Valid {
+			v := int(durationMs.Int64)
+			m.DurationMs = &v
 		}
 
 		messages = append(messages, m)

@@ -165,6 +165,7 @@ func TestLiveRun_StampsActualsAtTeardown(t *testing.T) {
 		cancel: func() {},
 		done:   make(chan struct{}),
 		ready:  make(chan struct{}),
+		stream: NewStreamState(),
 	}
 	go l.readLoop(context.Background(), opts, &fakeProc{actuals: measured()}, NoopSink{}, nil)
 
