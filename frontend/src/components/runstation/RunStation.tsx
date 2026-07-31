@@ -41,11 +41,21 @@ export interface StationActions {
   interruptPending?: boolean
 }
 
-// A blueprint chain segment: its lifecycle state, plus the run page to open when
-// the step has actually run (null for a not-yet-spawned step, or for the run
-// you're already viewing).
+// What a chain segment is called: the step prompt's name, with the step's brief
+// as the secondary line. A run whose blueprint plan predates named steps (or
+// that fell back to the live steps) has neither, and the track degrades to
+// "step N".
+export interface ChainStepLabel {
+  name: string
+  brief: string
+}
+
+// A blueprint chain segment: its lifecycle state, what to call it, plus the run
+// page to open when the step has actually run (null for a not-yet-spawned step,
+// or for the run you're already viewing).
 interface ChainStep {
   state: StepState
+  label: ChainStepLabel | null
   href: string | null
 }
 
@@ -55,6 +65,9 @@ interface Props {
   messages: Message[]
   now: number
   chainSteps?: Conversation[] | null
+  /** Per-step names/briefs, index-aligned with chainSteps. Optional: the track
+   *  falls back to "step N" for any index it doesn't cover. */
+  chainStepLabels?: ChainStepLabel[] | null
   actions: StationActions
   /** Unanswered tool-permission prompts, head-first. The dock renders the head
    *  with priority and surfaces an "N more" affordance for the rest. */
@@ -72,6 +85,7 @@ export default function RunStation({
   messages,
   now,
   chainSteps,
+  chainStepLabels,
   actions,
   pendingPermissions,
 }: Props) {
@@ -104,12 +118,14 @@ export default function RunStation({
       // A synthetic placeholder (step not spawned yet) or the run you're already
       // viewing isn't a navigable trace.
       const navigable = !s.ID.startsWith('__pending-') && s.ID !== run.ID
+      const label = chainStepLabels?.[i]
       return {
         state: stepStateOf(s, i, run.ID, currentStep),
+        label: label?.name || label?.brief ? label! : null,
         href: navigable ? orgHref(`/runs/${s.ID}`) : null,
       }
     })
-  }, [chainSteps, run.ID, run.blueprint_step_index, orgHref])
+  }, [chainSteps, chainStepLabels, run.ID, run.blueprint_step_index, orgHref])
 
   return (
     <motion.div
@@ -333,41 +349,65 @@ function PlateDivider() {
 // edge (done/active/current/pending). Each already-run step links to that step's
 // full trace (/runs/{id}); the current step and not-yet-spawned steps aren't
 // navigable. A generous invisible hit area sits around each 3px bar. No "step N
-// of M" text.
+// of M" text — the caption under the bar names the step in play instead, so the
+// track says *which* step is running rather than just how far along it is.
 function ChainTrack({ steps }: { steps: ChainStep[] }) {
+  const here = steps.find((s) => s.state === 'active') ?? steps.find((s) => s.state === 'current')
   return (
-    <div className="mt-2.5 flex items-center gap-1">
-      {steps.map((s, i) => {
-        const bar = (
-          <span
-            className={`block h-[3px] w-full rounded-full transition-[filter] ${
-              s.state === 'active' ? 'hmi-anim' : ''
-            } ${s.href ? 'group-hover/step:brightness-125' : ''}`}
-            style={{
-              background: STEP_VAR[s.state],
-              opacity: s.state === 'pending' ? 0.3 : 1,
-              animation: s.state === 'active' ? 'hmi-breathe 1.8s ease-in-out infinite' : undefined,
-            }}
-          />
-        )
-        return s.href ? (
-          <Link
-            key={i}
-            to={s.href}
-            className="group/step flex-1 py-1.5"
-            title="Open this step's run"
-            aria-label={`Open blueprint step ${i + 1}`}
-          >
-            {bar}
-          </Link>
-        ) : (
-          <span key={i} aria-hidden className="flex-1 py-1.5">
-            {bar}
+    <div className="mt-2.5">
+      <div className="flex items-center gap-1">
+        {steps.map((s, i) => {
+          const bar = (
+            <span
+              className={`block h-[3px] w-full rounded-full transition-[filter] ${
+                s.state === 'active' ? 'hmi-anim' : ''
+              } ${s.href ? 'group-hover/step:brightness-125' : ''}`}
+              style={{
+                background: STEP_VAR[s.state],
+                opacity: s.state === 'pending' ? 0.3 : 1,
+                animation:
+                  s.state === 'active' ? 'hmi-breathe 1.8s ease-in-out infinite' : undefined,
+              }}
+            />
+          )
+          const named = stepTitle(s, i)
+          return s.href ? (
+            <Link
+              key={i}
+              to={s.href}
+              className="group/step flex-1 py-1.5"
+              title={`Open ${named}`}
+              aria-label={`Open ${named}`}
+            >
+              {bar}
+            </Link>
+          ) : (
+            <span key={i} aria-hidden className="flex-1 py-1.5" title={named}>
+              {bar}
+            </span>
+          )
+        })}
+      </div>
+      {here?.label && (
+        <div className="mt-0.5 flex min-w-0 items-baseline gap-2">
+          <span className="truncate text-[11px] font-medium text-text-secondary">
+            {here.label.name || here.label.brief}
           </span>
-        )
-      })}
+          {here.label.name && here.label.brief && (
+            <span className="truncate text-[11px] text-text-tertiary/80">{here.label.brief}</span>
+          )}
+        </div>
+      )}
     </div>
   )
+}
+
+// stepTitle names a chain segment for its tooltip: the step's name when the run
+// carries one, its brief otherwise, and the bare ordinal when it carries
+// neither (a run projected from live steps, which hold no name).
+function stepTitle(s: ChainStep, i: number): string {
+  const named = s.label?.name || s.label?.brief
+  return named ? `step ${i + 1}: ${named}` : `step ${i + 1}`
 }
 
 // ── Conveyor lane ──────────────────────────────────────────────────────────
