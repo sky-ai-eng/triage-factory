@@ -493,6 +493,12 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                       const isActive = index === activeIndex
                       const complete = wiz.isStepComplete(index)
                       const n = String(displayNumber(step)).padStart(2, '0')
+                      // Rendered past the active step, so this is the step being
+                      // left on a backward move — on its way out, not staying as
+                      // a bar. Its whole row goes with the body rather than
+                      // bottoming out at the height of its own title and then
+                      // being unmounted out from under the eye.
+                      const isLeaving = index > activeIndex
 
                       // One <li> per step, persisting across the active↔collapsed
                       // transition so the always-mounted AnimatePresence can play
@@ -505,7 +511,17 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                       // fields stay aligned while their focus ring clears the
                       // overflow-hidden clip edge the height animation requires.
                       return (
-                        <li key={step.id} className="relative">
+                        <motion.li
+                          key={step.id}
+                          className="relative"
+                          initial={false}
+                          // Fading the <li> takes the gutter marker with it, which
+                          // sits outside the flow and so cannot be collapsed; the
+                          // margin goes too, or the stack's own spacing would be
+                          // left behind to pop at unmount.
+                          animate={isLeaving ? { opacity: 0, marginTop: 0 } : {}}
+                          transition={reduce ? { duration: 0 } : bodyEase}
+                        >
                           {/* Marker on the thread, in the left gutter (bg masks the
                             line behind the glyph). */}
                           <span
@@ -529,23 +545,41 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                             )}
                           </span>
 
-                          {isActive ? (
-                            <h3
-                              ref={headingRef}
-                              tabIndex={-1}
-                              aria-current="step"
-                              className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary outline-none"
-                            >
-                              {step.title}
-                            </h3>
-                          ) : (
-                            <CollapsedStepBar
-                              title={step.title}
-                              summary={step.collapsedSummary(wiz.state)}
-                              complete={complete}
-                              onEdit={() => goToStep(index)}
-                            />
-                          )}
+                          {/* The title collapses with the body rather than
+                              outliving it. Going back that is what stops the
+                              departing step bottoming out at the height of its
+                              own name; going forward it means the arriving step
+                              unfolds whole, title and all, instead of the title
+                              appearing a beat before its content. Pads and
+                              cancels horizontally like the body, so the bar's
+                              focus ring clears the clip the height needs. */}
+                          <motion.div
+                            initial={navigated && !reduce ? { height: 0, opacity: 0 } : false}
+                            animate={
+                              isLeaving ? { height: 0, opacity: 0 } : { height: 'auto', opacity: 1 }
+                            }
+                            transition={reduce ? { duration: 0 } : bodyEase}
+                            className="-mx-1.5 px-1.5"
+                            style={{ overflow: 'hidden' }}
+                          >
+                            {isActive ? (
+                              <h3
+                                ref={headingRef}
+                                tabIndex={-1}
+                                aria-current="step"
+                                className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary outline-none"
+                              >
+                                {step.title}
+                              </h3>
+                            ) : (
+                              <CollapsedStepBar
+                                title={step.title}
+                                summary={step.collapsedSummary(wiz.state)}
+                                complete={complete}
+                                onEdit={() => goToStep(index)}
+                              />
+                            )}
+                          </motion.div>
 
                           <AnimatePresence
                             initial={navigated}
@@ -644,7 +678,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                               )}
                             </div>
                           )}
-                        </li>
+                        </motion.li>
                       )
                     })}
                   </ol>
