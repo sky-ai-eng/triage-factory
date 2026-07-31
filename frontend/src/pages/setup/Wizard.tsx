@@ -701,7 +701,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                             aria-hidden
                             className="absolute -left-9 top-px flex h-5 w-[21px] items-center justify-center bg-surface"
                           >
-                            {complete && !isActive ? (
+                            {complete && !isActive && !isLeaving ? (
                               <Check
                                 size={13}
                                 strokeWidth={3}
@@ -735,11 +735,18 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                             className="-mx-1.5 px-1.5"
                             style={{ overflow: 'hidden' }}
                           >
-                            {isActive ? (
+                            {isActive || isLeaving ? (
+                              // A leaving step folds away as the step it was: the
+                              // plain heading, its gutter number, no bar. The
+                              // collapsed bar (check, configured-value summary)
+                              // belongs to steps that recede upward and STAY —
+                              // swapping it in for the fold's duration made every
+                              // Back flash the just-left step as a freshly
+                              // checked-off item before it vanished.
                               <h3
-                                ref={keepHeading}
-                                tabIndex={-1}
-                                aria-current="step"
+                                ref={isActive ? keepHeading : undefined}
+                                tabIndex={isActive ? -1 : undefined}
+                                aria-current={isActive ? 'step' : undefined}
                                 className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary outline-none"
                               >
                                 {step.title}
