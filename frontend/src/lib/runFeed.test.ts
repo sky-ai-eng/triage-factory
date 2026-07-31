@@ -21,14 +21,14 @@ function msg(over: Partial<Message>): Message {
 describe('appendToFeed', () => {
   it('returns the SAME reference for a display-no-op message (the WS handler skips the state write on identity)', () => {
     const feed = appendToFeed(undefined, msg({ content: 'hello', output_tokens: 5 }))
-    // A tool-result row: no ticker line, no tokens, no comment delta.
+    // A tool-result row: no ticker line, no tokens.
     const after = appendToFeed(feed, msg({ role: 'tool', tool_call_id: 'tc-1', content: 'ok' }))
     expect(after).toBe(feed)
     // Same contract from an empty start: base EMPTY_FEED comes back untouched.
     expect(appendToFeed(undefined, msg({ role: 'tool', tool_call_id: 'tc-2' }))).toBe(EMPTY_FEED)
   })
 
-  it('accumulates tokens, comments, and ticker lines', () => {
+  it('accumulates tokens and ticker lines', () => {
     let feed = appendToFeed(
       undefined,
       msg({ content: 'planning', input_tokens: 100, output_tokens: 10 }),
@@ -48,7 +48,6 @@ describe('appendToFeed', () => {
       }),
     )
     expect(feed.tokens).toBe(160)
-    expect(feed.comments).toBe(1)
     expect(feed.lines.map((l) => l.text)).toEqual(['planning', 'Adding comment'])
   })
 

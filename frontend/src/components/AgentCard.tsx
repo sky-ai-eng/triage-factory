@@ -261,15 +261,22 @@ export default function AgentCard({
         {/* Footer */}
         <div className="flex items-center justify-between pb-3.5 pl-4 pr-4">
           <div className="flex items-center gap-3 font-mono text-[11px] tabular-nums tracking-wide text-text-tertiary/80">
-            {run.actor_agent_name && (
-              <span title="The bot that executed this run">Ran as {run.actor_agent_name}</span>
+            {/* Who executed this run, shown only once that diverges from who
+                holds the task. The header's assignee chip already names the bot
+                while it still holds the claim; once the claim moves off it — a
+                takeover, a reassign, or a requeue that clears it outright — the
+                run's actor stays frozen, and this line becomes the only record
+                of who actually did the work. */}
+            {run.actor_agent_name && run.actor_agent_id !== task.claimed_by_agent_id && (
+              <span title="The bot that executed this run; the task is no longer claimed by it">
+                Ran as {run.actor_agent_name}
+              </span>
             )}
             {!isQueued && dwellMs != null && dwellMs >= QUEUE_DWELL_VISIBLE_MS && (
               <span title="Time this run waited in the queue for a free slot before starting">
                 queued {formatDurationMs(dwellMs)}
               </span>
             )}
-            {stats.comments > 0 && <span>{stats.comments} comments</span>}
             {stats.tokens > 0 && <span>{compactNum(stats.tokens)} tokens</span>}
             {run.TotalCostUSD != null && run.TotalCostUSD > 0 && (
               <span>${run.TotalCostUSD.toFixed(3)}</span>
