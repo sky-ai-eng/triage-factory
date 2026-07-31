@@ -356,7 +356,14 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     let frame = 0
     const tick = () => {
       if (userScrolledRef.current) {
+        // The user has taken the scroll over, so stop moving it — but the step
+        // still has to end up in a usable state. Leaving these set would strand
+        // the flow mid-transition: the action row invisible and unclickable for
+        // good, and the body's height frozen at a measured pixel value.
         transitioningRef.current = false
+        setBackPhase(null)
+        setActionsHidden(false)
+        setOpenHeight('auto')
         return
       }
       const elapsed = performance.now() - t0
@@ -380,6 +387,12 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       } else if (backward) {
         // Beat two. The room is already made; holding the scroll is what lets
         // the row descend into it rather than the page sliding out from under.
+        // Re-applied rather than simply left alone: holding still is an action
+        // here, because it keeps the self-scroll bracket alive. Without it the
+        // bracket lapses mid-beat and the scroll events the expanding body
+        // provokes get read as the user taking over — which stops the loop and
+        // strands the row hidden.
+        applyAnchor(window.scrollY, leadRef.current?.offsetHeight ?? 0)
         // Setting the same value bails out of the render, so calling this every
         // frame of the beat costs one.
         setBackPhase('expand')
