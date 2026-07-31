@@ -854,7 +854,7 @@ asynchronous [Request–Reply](https://www.enterpriseintegrationpatterns.com/pat
 with a [Correlation Identifier](https://www.enterpriseintegrationpatterns.com/patterns/messaging/CorrelationIdentifier.html)
 (Hohpe & Woolf, *Enterprise Integration Patterns*) carried over
 pub/sub — the same shape as CI approval gates, Temporal signals, and
-multi-server websocket backplanes. The permission `request_id` and
+multi-server websocket backplanes. The permission `tool_call_id` and
 `run_signals.id` are the correlation identifiers.
 
 **Parked/open runs stop being a control-plane special case entirely**:

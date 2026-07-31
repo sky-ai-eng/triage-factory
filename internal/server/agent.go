@@ -488,9 +488,10 @@ func steerErrorStatus(err error) int {
 
 // handleAgentPermission answers a pending tool-permission prompt a run surfaced
 // via a `permission_request` WS event. Body: {"behavior":"allow"|"deny",
-// "message"?:string,"updated_input"?:object}. The run is authorized under the
+// "message"?:string,"updated_input"?:object}. The path's tool call id is the
+// tool_use id the prompt was raised for. The run is authorized under the
 // caller's org (RLS) first — like the message/interrupt endpoints — so a run not
-// visible to this org is 404; a request that isn't pending (already answered,
+// visible to this org is 404; a prompt that isn't pending (already answered,
 // timed out, or never existed) is also 404.
 func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
@@ -499,7 +500,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	conversationID := r.PathValue("conversationID")
-	requestID := r.PathValue("requestID")
+	toolCallID := r.PathValue("toolCallID")
 
 	var body struct {
 		Behavior     string         `json:"behavior"`
@@ -532,7 +533,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	err = spawner.ResolvePermission(orgID, conversationID, requestID, agentproc.PermissionDecision{
+	err = spawner.ResolvePermission(orgID, conversationID, toolCallID, agentproc.PermissionDecision{
 		Behavior:     body.Behavior,
 		Message:      body.Message,
 		UpdatedInput: body.UpdatedInput,

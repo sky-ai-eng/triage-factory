@@ -37,7 +37,7 @@ export interface StationActions {
   /** Answer a pending tool-permission prompt. The promise settles when the
    *  resolve POST finishes — PermissionPrompt awaits it to hold its
    *  single-flight guard. */
-  onResolvePermission?: (requestID: string, decision: PermissionDecisionInput) => Promise<void>
+  onResolvePermission?: (toolCallID: string, decision: PermissionDecisionInput) => Promise<void>
   interruptPending?: boolean
 }
 
@@ -483,7 +483,7 @@ function IntakeDock({
       {/* Permission prompt — priority: it's blocking the agent's turn. */}
       {hasPrompt && (
         <PermissionPrompt
-          key={pending[0].request_id}
+          key={pending[0].tool_call_id}
           prompt={pending[0]}
           remaining={pending.length - 1}
           worktree={run.WorktreePath}

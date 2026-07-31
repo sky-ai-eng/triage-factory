@@ -3,8 +3,8 @@
 // surfaced to the browser as a `permission_request` WS event and the agent's
 // turn is parked until the user answers via ResolvePermission (the
 // POST .../permissions/{id} endpoint) — or a bounded timeout denies it. The
-// broker (s.permPending) is in-memory only and keyed by the SDK-generated
-// request id.
+// broker (s.permPending) is in-memory only and keyed by the tool_use id of the
+// call being gated, so a prompt names the same call the transcript does.
 //
 // Both runLiveAndDrive call sites (the initial run and the resume) drive
 // through this same streaming-input path — local direct runs and multi-mode
@@ -105,7 +105,7 @@ func countOf(n int, unit string) string {
 const defaultPresencePollInterval = time.Second
 
 // ErrNoPendingPermission is returned by ResolvePermission when no in-flight
-// request matches (orgID, runID, requestID) — it was already answered, timed
+// request matches (orgID, runID, toolCallID) — it was already answered, timed
 // out, or never existed. The permission endpoint maps it to 404.
 var ErrNoPendingPermission = errors.New("no pending permission request")
 
@@ -118,13 +118,13 @@ type pendingPermission struct {
 	orgID string
 }
 
-// permKey is the broker key for a pending prompt. The wrapper's request_id is
-// only unique within a single run process (`perm-N` from a per-process
-// counter), so two concurrent runs can collide on the same id — keying by
-// (runID, requestID) keeps each run's prompts isolated. The NUL separator can't
-// appear in a run uuid or a `perm-N` id, so the composite is unambiguous.
-func permKey(runID, requestID string) string {
-	return runID + "\x00" + requestID
+// permKey is the broker key for a pending prompt. The identifier is the SDK's
+// tool_use id for the gated call, which is unique in practice — but the
+// composite costs nothing and keeps each run's prompts isolated rather than
+// resting on that being true across runs. The NUL separator can't appear in a
+// run uuid or a tool_use id, so the composite is unambiguous.
+func permKey(runID, toolCallID string) string {
+	return runID + "\x00" + toolCallID
 }
 
 // permTimeout is how long a surfaced prompt waits for an answer before denying.
@@ -224,7 +224,7 @@ func clampGrace(grace, full time.Duration) time.Duration {
 // permTimeout() and a 200-acknowledged decision is never dropped.
 func (s *Spawner) BrowserPermissionHandler(orgID, runID string, absent AbsentAutoDeny) agentproc.PermissionHandler {
 	return func(req agentproc.PermissionRequest) agentproc.PermissionDecision {
-		key := permKey(runID, req.RequestID)
+		key := permKey(runID, req.ToolCallID)
 		ch := make(chan agentproc.PermissionDecision, 1)
 		s.mu.Lock()
 		s.permPending[key] = &pendingPermission{ch: ch, orgID: orgID}
@@ -244,16 +244,29 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID string, absent AbsentAut
 		// is a backstop, and an absent-deny eagerly broadcasts
 		// permission_resolved to drop the card the moment it fires.
 		full := s.permTimeout()
+		data := map[string]any{
+			"tool_call_id": req.ToolCallID,
+			"tool_name":    req.ToolName,
+			"input":        req.Input,
+			"timeout_ms":   full.Milliseconds(),
+		}
+		// The SDK's own prompt copy, when it rendered any. Omitted rather
+		// than sent empty so "present" means "better than what the client
+		// would reconstruct from tool_name + input".
+		if req.Title != "" {
+			data["title"] = req.Title
+		}
+		if req.DisplayName != "" {
+			data["display_name"] = req.DisplayName
+		}
+		if req.Description != "" {
+			data["description"] = req.Description
+		}
 		s.wsHub.Broadcast(websocket.Event{
 			Type:           "permission_request",
 			OrgID:          orgID,
 			ConversationID: runID,
-			Data: map[string]any{
-				"request_id": req.RequestID,
-				"tool_name":  req.ToolName,
-				"input":      req.Input,
-				"timeout_ms": full.Milliseconds(),
-			},
+			Data:           data,
 		})
 
 		decision, got, reason := s.awaitPermission(ch, orgID, runID, full, absent)
@@ -277,7 +290,7 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID string, absent AbsentAut
 			// The prompt is no longer answerable, so tell every surface showing
 			// it to drop it now instead of waiting out its own client TTL
 			// (ResolvePermission already broadcasts for the user-answered case).
-			s.broadcastPermissionResolved(orgID, runID, req.RequestID)
+			s.broadcastPermissionResolved(orgID, runID, req.ToolCallID)
 			return agentproc.PermissionDecision{Behavior: "deny", Message: reason}
 		}
 	}
@@ -425,13 +438,13 @@ func (s *Spawner) SetPresencePollInterval(d time.Duration) {
 // the board card and the run-detail dock, or two board tabs — drops it promptly
 // instead of waiting out its own client-side TTL. The client TTL stays as a
 // backstop for a dropped/missed event. Hub.Broadcast is nil-receiver-safe.
-func (s *Spawner) broadcastPermissionResolved(orgID, runID, requestID string) {
+func (s *Spawner) broadcastPermissionResolved(orgID, runID, toolCallID string) {
 	s.wsHub.Broadcast(websocket.Event{
 		Type:           "permission_resolved",
 		OrgID:          orgID,
 		ConversationID: runID,
 		Data: map[string]any{
-			"request_id": requestID,
+			"tool_call_id": toolCallID,
 		},
 	})
 }
@@ -453,7 +466,7 @@ func (s *Spawner) broadcastPermissionResolved(orgID, runID, requestID string) {
 // run.go/resume.go.
 func (s *Spawner) AutoApprovePermissionHandler(runID string) agentproc.PermissionHandler {
 	return func(req agentproc.PermissionRequest) agentproc.PermissionDecision {
-		delegateLog.Info("off-allowlist tool auto-approved in sandboxed run", "run", runID, "request_id", req.RequestID, "tool", req.ToolName)
+		delegateLog.Info("off-allowlist tool auto-approved in sandboxed run", "run", runID, "tool_call_id", req.ToolCallID, "tool", req.ToolName)
 		return agentproc.PermissionDecision{Behavior: "allow"}
 	}
 }
@@ -477,12 +490,12 @@ func (s *Spawner) AutoApprovePermissionHandler(runID string) agentproc.Permissio
 // the broker entry; on a local miss where this process also holds no live
 // handle for the run at all (getProc), it resolves a live remote owner and
 // signals it, waiting up to DefaultPermissionAckTimeout. A local miss
-// where THIS process DOES own the run's live process (the request_id
+// where THIS process DOES own the run's live process (the tool_call_id
 // itself just isn't/no-longer pending — already answered, timed out, or
 // never existed) is genuinely stale/not-found, never a routing question,
 // so it short-circuits before ever trying remote.
-func (s *Spawner) ResolvePermission(orgID, runID, requestID string, d agentproc.PermissionDecision) error {
-	err := s.resolvePermissionLocal(orgID, runID, requestID, d)
+func (s *Spawner) ResolvePermission(orgID, runID, toolCallID string, d agentproc.PermissionDecision) error {
+	err := s.resolvePermissionLocal(orgID, runID, toolCallID, d)
 	if err == nil || !errors.Is(err, ErrNoPendingPermission) {
 		return err
 	}
@@ -495,14 +508,14 @@ func (s *Spawner) ResolvePermission(orgID, runID, requestID string, d agentproc.
 	if runSignals == nil {
 		return ErrNoPendingPermission
 	}
-	return s.routePermission(orgID, runID, requestID, d)
+	return s.routePermission(orgID, runID, toolCallID, d)
 }
 
 // resolvePermissionLocal is ResolvePermission's original N=1 body: resolve
 // the in-memory broker entry and buffer the decision.
-func (s *Spawner) resolvePermissionLocal(orgID, runID, requestID string, d agentproc.PermissionDecision) error {
+func (s *Spawner) resolvePermissionLocal(orgID, runID, toolCallID string, d agentproc.PermissionDecision) error {
 	s.mu.Lock()
-	p, ok := s.permPending[permKey(runID, requestID)]
+	p, ok := s.permPending[permKey(runID, toolCallID)]
 	if !ok || p.orgID != orgID {
 		s.mu.Unlock()
 		return ErrNoPendingPermission
@@ -513,7 +526,7 @@ func (s *Spawner) resolvePermissionLocal(orgID, runID, requestID string, d agent
 		// The decision is buffered (a real 200 promise). Tell other surfaces
 		// showing this prompt to drop it now — broadcast outside s.mu so the
 		// hub's own locking never nests under the broker mutex.
-		s.broadcastPermissionResolved(orgID, runID, requestID)
+		s.broadcastPermissionResolved(orgID, runID, toolCallID)
 		return nil
 	default:
 		// Slot already filled by a racing resolve — treat as no-longer-pending.
@@ -529,10 +542,10 @@ func (s *Spawner) resolvePermissionLocal(orgID, runID, requestID string, d agent
 // blocked on this response). A "gone" or "stale" ack both map to
 // ErrNoPendingPermission: gone means no live process to answer (the same
 // user-facing outcome as never having been pending), stale means the
-// request_id was already resolved on the owner.
-func (s *Spawner) routePermission(orgID, runID, requestID string, d agentproc.PermissionDecision) error {
+// tool_call_id was already resolved on the owner.
+func (s *Spawner) routePermission(orgID, runID, toolCallID string, d agentproc.PermissionDecision) error {
 	payload, err := json.Marshal(permissionPayload{
-		RequestID:    requestID,
+		ToolCallID:   toolCallID,
 		Behavior:     d.Behavior,
 		Message:      d.Message,
 		UpdatedInput: d.UpdatedInput,

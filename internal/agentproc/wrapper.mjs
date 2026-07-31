@@ -195,7 +195,6 @@ function userMessage(text) {
 async function runStreamingInput(options, permissionPrompts) {
   const input = createInputStream()
   const pendingPerms = new Map()
-  let permCounter = 0
   let closing = false
 
   // Deny + clear every parked permission promise. Called on end/EOF (and
@@ -224,26 +223,37 @@ async function runStreamingInput(options, permissionPrompts) {
   if (permissionPrompts) {
     options.canUseTool = async (toolName, toolInput, opts = {}) => {
       if (closing) return { behavior: "deny", message: "run ending" }
-      const requestId = `perm-${++permCounter}`
+      // toolUseID identifies the tool_use block being gated — the same id
+      // that lands in the assistant message's tool_calls[] and on the tool
+      // result that follows it. Passing it through verbatim is what lets a
+      // decision be tied back to the call it authorized, and names the call
+      // the way the native loop's own gate does.
+      const toolCallID = opts.toolUseID
       emit({
         type: "control",
         subtype: "permission_request",
-        request_id: requestId,
+        tool_call_id: toolCallID,
         tool_name: toolName,
         input: toolInput,
+        // Prompt copy the SDK already rendered. Optional in sdk.d.ts, and
+        // JSON.stringify drops undefined keys, so an absent field just means
+        // the consumer falls back to reconstructing from tool_name + input.
+        title: opts.title,
+        display_name: opts.displayName,
+        description: opts.description,
       })
       return new Promise((resolve) => {
         let done = false
         const settle = (decision) => {
           if (done) return
           done = true
-          pendingPerms.delete(requestId)
+          pendingPerms.delete(toolCallID)
           resolve(decision)
         }
         // Stash the original input alongside the settle: an allow
         // response that doesn't override the input must echo it back
         // as updatedInput (see the permission_response handler).
-        pendingPerms.set(requestId, { settle, toolInput })
+        pendingPerms.set(toolCallID, { settle, toolInput })
         // If the turn is interrupted, the SDK aborts this signal — resolve
         // as a deny so the pending promise never strands the query.
         const signal = opts.signal
@@ -308,9 +318,9 @@ async function runStreamingInput(options, permissionPrompts) {
         break
 
       case "permission_response": {
-        const pending = pendingPerms.get(ctl.request_id)
+        const pending = pendingPerms.get(ctl.tool_call_id)
         if (!pending) {
-          process.stderr.write(`wrapper: no pending permission ${ctl.request_id}\n`)
+          process.stderr.write(`wrapper: no pending permission ${ctl.tool_call_id}\n`)
           break
         }
         if (ctl.behavior === "allow") {

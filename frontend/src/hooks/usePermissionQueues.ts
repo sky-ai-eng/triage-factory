@@ -26,35 +26,34 @@ export interface PermissionQueues {
   forget: (event: PermissionResolvedEvent) => void
   /** Answer a prompt; drops it from the queue on a definitive response (200
    *  resolved / 404 already-resolved). A transient failure keeps it up + toasts. */
-  resolve: (runID: string, requestID: string, decision: PermissionDecisionInput) => Promise<void>
+  resolve: (runID: string, toolCallID: string, decision: PermissionDecisionInput) => Promise<void>
   /** Drop a whole run's queue (its run finished or left the board). */
   dropRun: (runID: string) => void
 }
 
-// timerKey scopes a TTL timer by (runID, requestID). A wrapper's request_id is
-// only unique within one run process (`perm-N`), so two concurrent runs can
-// collide on the same id — keying by both keeps each run's timers isolated. The
-// NUL separator can't appear in a run uuid or a `perm-N` id (mirrors the
-// backend's permKey).
-function timerKey(runID: string, requestID: string): string {
-  return `${runID}\x00${requestID}`
+// timerKey scopes a TTL timer by (runID, toolCallID). A tool_use id is unique
+// in practice, but keying by both makes two runs raising the same id a
+// non-event rather than a collision. The NUL separator can't appear in a run
+// uuid or a tool_use id (mirrors the backend's permKey).
+function timerKey(runID: string, toolCallID: string): string {
+  return `${runID}\x00${toolCallID}`
 }
 
 // usePermissionQueues manages permission prompts for many runs at once: a
-// runID→queue map plus per-(runID,requestID) TTL timers (dedupe, arm-once,
+// runID→queue map plus per-(runID,toolCallID) TTL timers (dedupe, arm-once,
 // clear-on-resolve/drop/unmount). It's the single implementation behind both the
 // board (all visible runs) and useRunDetail (filtered to one run), so the TTL
 // behavior can't diverge between the two surfaces.
 export function usePermissionQueues(): PermissionQueues {
   const [queues, setQueues] = useState<Record<string, PendingPermission[]>>({})
 
-  // TTL timers keyed by timerKey(runID, requestID). The ref object is stable, so
+  // TTL timers keyed by timerKey(runID, toolCallID). The ref object is stable, so
   // the unmount cleanup below captures it once; entries are cleared on resolve,
   // drop, and unmount so a fired timer never touches a stale queue.
   const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
-  const clearTimer = useCallback((runID: string, requestID: string) => {
-    const key = timerKey(runID, requestID)
+  const clearTimer = useCallback((runID: string, toolCallID: string) => {
+    const key = timerKey(runID, toolCallID)
     const t = timers.current.get(key)
     if (t) {
       clearTimeout(t)
@@ -67,12 +66,12 @@ export function usePermissionQueues(): PermissionQueues {
   // only ever holds runs with live prompts (and `runID in queues` reads true
   // exactly when a card should light up).
   const dropPermission = useCallback(
-    (runID: string, requestID: string) => {
-      clearTimer(runID, requestID)
+    (runID: string, toolCallID: string) => {
+      clearTimer(runID, toolCallID)
       setQueues((prev) => {
         const q = prev[runID]
         if (!q) return prev
-        const next = q.filter((p) => p.request_id !== requestID)
+        const next = q.filter((p) => p.tool_call_id !== toolCallID)
         if (next.length === q.length) return prev
         const out = { ...prev }
         if (next.length === 0) delete out[runID]
@@ -107,18 +106,18 @@ export function usePermissionQueues(): PermissionQueues {
       const req = event.data
       setQueues((prev) => {
         const q = prev[runID] ?? []
-        // Dedup: a request id is unique within a run process, so a replayed
-        // event (e.g. a reconnect) must not double-queue the same prompt.
-        if (q.some((p) => p.request_id === req.request_id)) return prev
+        // Dedup: one prompt per gated tool call, so a replayed event (e.g. a
+        // reconnect) must not double-queue the same prompt.
+        if (q.some((p) => p.tool_call_id === req.tool_call_id)) return prev
         return { ...prev, [runID]: [...q, req] }
       })
       // Arm the client-side TTL once per (run, request) — a backstop for the
       // backend's silent timeout-deny, derived from the payload's deadline.
-      const key = timerKey(runID, req.request_id)
+      const key = timerKey(runID, req.tool_call_id)
       if (!timers.current.has(key)) {
         timers.current.set(
           key,
-          setTimeout(() => dropPermission(runID, req.request_id), ttlForPrompt(req)),
+          setTimeout(() => dropPermission(runID, req.tool_call_id), ttlForPrompt(req)),
         )
       }
     },
@@ -127,16 +126,16 @@ export function usePermissionQueues(): PermissionQueues {
 
   const forget = useCallback(
     (event: PermissionResolvedEvent) => {
-      dropPermission(event.conversation_id, event.data.request_id)
+      dropPermission(event.conversation_id, event.data.tool_call_id)
     },
     [dropPermission],
   )
 
   const resolve = useCallback(
-    async (runID: string, requestID: string, decision: PermissionDecisionInput) => {
-      const res = await postResolvePermission(runID, requestID, decision)
+    async (runID: string, toolCallID: string, decision: PermissionDecisionInput) => {
+      const res = await postResolvePermission(runID, toolCallID, decision)
       if (res.kind === 'resolved' || res.kind === 'gone') {
-        dropPermission(runID, requestID)
+        dropPermission(runID, toolCallID)
         return
       }
       toast.error(res.message)

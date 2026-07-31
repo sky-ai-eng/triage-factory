@@ -174,7 +174,7 @@ type steerPayload struct {
 
 // permissionPayload is the conversation_signals.payload shape for kind=permission.
 type permissionPayload struct {
-	RequestID    string         `json:"request_id"`
+	ToolCallID   string         `json:"tool_call_id"`
 	Behavior     string         `json:"behavior"`
 	Message      string         `json:"message"`
 	UpdatedInput map[string]any `json:"updated_input"`
@@ -650,7 +650,7 @@ func ackResultForControlErr(err error) string {
 
 // deliverPermissionSignal resolves a cross-pod permission decision through
 // this process's own permission broker and returns the ack result. A
-// stale/no-longer-pending request (already answered, timed out, or never
+// stale/no-longer-pending prompt (already answered, timed out, or never
 // existed here) returns 'stale' — the idempotency contract for a duplicate
 // permission answer.
 func (s *Spawner) deliverPermissionSignal(sig domain.RunSignal) string {
@@ -659,7 +659,7 @@ func (s *Spawner) deliverPermissionSignal(sig domain.RunSignal) string {
 		delegateLog.Warn("apply permission signal: malformed payload", "signal_id", sig.ID, "error", err)
 		return domain.RunSignalAckStale
 	}
-	err := s.resolvePermissionLocal(sig.OrgID, sig.RunID, p.RequestID, agentproc.PermissionDecision{
+	err := s.resolvePermissionLocal(sig.OrgID, sig.RunID, p.ToolCallID, agentproc.PermissionDecision{
 		Behavior:     p.Behavior,
 		Message:      p.Message,
 		UpdatedInput: p.UpdatedInput,

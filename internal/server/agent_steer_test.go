@@ -110,7 +110,7 @@ func TestHandleAgentInterrupt_UnknownRunNotFound(t *testing.T) {
 }
 
 // TestHandleAgentPermission_NotPendingNotFound: with a visible run but no
-// pending prompt for the request id, the broker miss is a 404. The run is seeded
+// pending prompt for the tool call id, the broker miss is a 404. The run is seeded
 // so the request clears the run-authz gate and actually reaches the broker
 // (otherwise this would test the run-not-found 404 instead).
 func TestHandleAgentPermission_NotPendingNotFound(t *testing.T) {
@@ -162,7 +162,7 @@ func TestHandleAgentPermission_ResolvesLiveRequest(t *testing.T) {
 	// then the handler blocks until resolved (or it times out).
 	got := make(chan agentproc.PermissionDecision, 1)
 	h := spawner.BrowserPermissionHandler(runmode.LocalDefaultOrgID, runID, delegate.AbsentAutoDeny{})
-	go func() { got <- h(agentproc.PermissionRequest{RequestID: "req-1", ToolName: "Bash"}) }()
+	go func() { got <- h(agentproc.PermissionRequest{ToolCallID: "req-1", ToolName: "Bash"}) }()
 
 	// Registration races the POST, so retry until the broker has the entry (404
 	// until then), bounded.

@@ -1003,7 +1003,7 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/cancel", ag.handleAgentCancel)
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/message", ag.handleMessage)
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/interrupt", ag.handleAgentInterrupt)
-	s.apiMutating("POST /api/agent/conversations/{conversationID}/permissions/{requestID}", ag.handleAgentPermission)
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/permissions/{toolCallID}", ag.handleAgentPermission)
 	// Tier-2 run-scoped artifact reconcile (TFAC-464): the run view polls this
 	// while open to refresh that run's non-terminal artifacts against GitHub.
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/artifacts/refresh", ag.handleArtifactRefresh)
