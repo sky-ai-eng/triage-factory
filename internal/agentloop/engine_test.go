@@ -816,3 +816,225 @@ type guardFunc func(context.Context, int) (string, error)
 func (f guardFunc) Check(ctx context.Context, turn int) (string, error) { return f(ctx, turn) }
 
 func boolPtr(b bool) *bool { return &b }
+
+// TestRun_TurnBudgetDerivesFromTranscriptAcrossClaims pins the budget's
+// durability: assistant turns from an earlier engagement count against the
+// bound, so a crash or re-claim cannot buy a fresh block of calls. With the
+// budget one short of the bound at claim time, the engagement's single call
+// is the wrap-up turn.
+func TestRun_TurnBudgetDerivesFromTranscriptAcrossClaims(t *testing.T) {
+	tr := newMemTranscript(
+		domain.Message{Role: "user", Subtype: "text", Content: "mission"},
+		domain.Message{Role: "assistant", Content: "turn one"},
+		domain.Message{Role: "assistant", Content: "turn two"},
+	)
+	p := &scriptedProvider{turns: []scriptedTurn{{text: "wrap-up: did X, branch is clean"}}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+	params := testParams()
+	params.MaxIterations = 3
+
+	got := e.Run(context.Background(), params)
+	if got.Kind != ResultParked {
+		t.Fatalf("a budget-exhausted wrap-up must park, not conclude: %v (err: %v)", got.Kind, got.Err)
+	}
+	if got.ResultSummary != "wrap-up: did X, branch is clean" {
+		t.Errorf("the wrap-up text must ride out as the summary: %q", got.ResultSummary)
+	}
+	if p.calls != 1 {
+		t.Errorf("2 prior turns + 1 wrap-up call = the bound of 3; provider was called %d times", p.calls)
+	}
+	if got.NumTurns != 1 {
+		t.Errorf("claim telemetry stays per-engagement: NumTurns = %d, want 1", got.NumTurns)
+	}
+	wrap := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionWrapUp })
+	if wrap == nil {
+		t.Fatal("the wrap-up ask must be a durable transcript row")
+	}
+	if wrap.Delivered != nil && !*wrap.Delivered {
+		t.Error("the wrap-up ask must have been drained before the final call")
+	}
+}
+
+// TestRun_HumanInputResetsTheTurnBudget pins the renewal rule: a human
+// message grants a fresh budget, so a transcript already past the bound
+// runs normally once the user speaks.
+func TestRun_HumanInputResetsTheTurnBudget(t *testing.T) {
+	tr := newMemTranscript(
+		domain.Message{Role: "user", Subtype: "text", Content: "mission"},
+		domain.Message{Role: "assistant", Content: "t1"},
+		domain.Message{Role: "assistant", Content: "t2"},
+		domain.Message{Role: "assistant", Content: "t3"},
+		pendingUser("keep going please"),
+	)
+	p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+	params := testParams()
+	params.MaxIterations = 3
+
+	got := e.Run(context.Background(), params)
+	if got.Kind != ResultConcluded {
+		t.Fatalf("a fresh human message renews the budget; got %v (err: %v)", got.Kind, got.Err)
+	}
+	if p.calls != 1 {
+		t.Errorf("provider calls = %d, want 1", p.calls)
+	}
+}
+
+// TestRun_SystemInjectionsDoNotRenewTheBudget pins the other half of the
+// renewal rule: a staged system note landing on an exhausted conversation
+// re-parks it without a model call — only a human buys more work.
+func TestRun_SystemInjectionsDoNotRenewTheBudget(t *testing.T) {
+	pending := false
+	tr := newMemTranscript(
+		domain.Message{Role: "user", Subtype: "text", Content: "mission"},
+		domain.Message{Role: "assistant", Content: "t1"},
+		domain.Message{Role: "assistant", Content: "t2"},
+		domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionWrapUp, Content: wrapUpNotice},
+		domain.Message{Role: "assistant", Content: "the wrap-up"},
+		domain.Message{Role: "user", Subtype: "injection:system-note", Content: "<system-note>new CI failure</system-note>", Delivered: &pending},
+	)
+	p := &scriptedProvider{}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+	params := testParams()
+	params.MaxIterations = 3
+
+	got := e.Run(context.Background(), params)
+	if got.Kind != ResultParked {
+		t.Fatalf("a system note must not renew the budget: %v (err: %v)", got.Kind, got.Err)
+	}
+	if p.calls != 0 {
+		t.Errorf("no model call may happen on an exhausted budget; provider was called %d times", p.calls)
+	}
+}
+
+// TestRun_WrapUpIsRequestedOncePerBudget pins the ask's idempotence across
+// claims: the durable row is the memory, so a re-claim at the same budget
+// position does not ask twice.
+func TestRun_WrapUpIsRequestedOncePerBudget(t *testing.T) {
+	tr := newMemTranscript(
+		domain.Message{Role: "user", Subtype: "text", Content: "mission"},
+		domain.Message{Role: "assistant", Content: "t1"},
+		domain.Message{Role: "assistant", Content: "t2"},
+		domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionWrapUp, Content: wrapUpNotice},
+	)
+	p := &scriptedProvider{turns: []scriptedTurn{{text: "the wrap-up"}}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+	params := testParams()
+	params.MaxIterations = 3
+
+	if got := e.Run(context.Background(), params); got.Kind != ResultParked {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+	}
+	count := 0
+	for _, r := range tr.snapshot() {
+		if r.Subtype == domain.MessageSubtypeInjectionWrapUp {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("wrap-up rows = %d, want exactly 1", count)
+	}
+}
+
+// TestRun_WrapUpTurnSkipsTheWouldStopHook pins that an exhausted budget is
+// not a would-stop: nudging more work out of it would contradict the
+// wrap-up ask one turn earlier.
+func TestRun_WrapUpTurnSkipsTheWouldStopHook(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{calls: []domain.ToolCall{{ID: "c1", Name: "ls"}}},
+		{text: "the wrap-up"},
+	}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+	hookAsked := 0
+	e.Hooks.ShouldStopAfterTurn = func(context.Context, int, string) string {
+		hookAsked++
+		return "produce an artifact"
+	}
+	params := testParams()
+	params.MaxIterations = 2
+
+	got := e.Run(context.Background(), params)
+	if got.Kind != ResultParked {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+	}
+	if hookAsked != 0 {
+		t.Errorf("the hook must not be consulted on a wrap-up turn; consulted %d times", hookAsked)
+	}
+	if got.ResultSummary != "the wrap-up" {
+		t.Errorf("summary = %q", got.ResultSummary)
+	}
+	if n := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeStopNote }); n == nil {
+		t.Error("the park must leave a stop-note recording why")
+	}
+}
+
+// TestRun_MidWorkDrainStampsOnlyHumanRows pins the flush partition: a steer
+// stamp on a system injection would both mislabel it and make it read as
+// human input to the budget derivation.
+func TestRun_MidWorkDrainStampsOnlyHumanRows(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	pendingFlag := false
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{calls: []domain.ToolCall{{ID: "c1", Name: "ls"}}, onCall: func() {
+			_, _ = tr.Insert(context.Background(), "org", &domain.Message{
+				Role: "user", Subtype: "text", Content: "human steer", Delivered: &pendingFlag,
+			})
+			_, _ = tr.Insert(context.Background(), "org", &domain.Message{
+				Role: "user", Subtype: "injection:system-note", Content: "<system-note>event</system-note>", Delivered: &pendingFlag,
+			})
+		}},
+		{text: "done"},
+	}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+	}
+	steer := tr.find(func(m domain.Message) bool { return m.Content == "human steer" })
+	if steer == nil || steer.Subtype != domain.MessageSubtypeInjectionSteer {
+		t.Errorf("the human row must carry the steer stamp, got %+v", steer)
+	}
+	note := tr.find(func(m domain.Message) bool { return m.Content == "<system-note>event</system-note>" })
+	if note == nil || note.Subtype != "injection:system-note" {
+		t.Errorf("the system note must keep its own subtype through a mid-work flush, got %+v", note)
+	}
+	if note != nil && (note.Delivered == nil || !*note.Delivered) {
+		t.Error("the system note must still be flushed")
+	}
+}
+
+// TestRun_ParkNoticeWrittenOncePerBudgetWindow pins the stop-note dedupe: a
+// re-claim of a still-exhausted conversation re-parks silently instead of
+// stacking identical notices.
+func TestRun_ParkNoticeWrittenOncePerBudgetWindow(t *testing.T) {
+	notice := limitParkNotice(2)
+	tr := newMemTranscript(
+		domain.Message{Role: "user", Subtype: "text", Content: "mission"},
+		domain.Message{Role: "assistant", Content: "t1"},
+		domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionWrapUp, Content: wrapUpNotice},
+		domain.Message{Role: "assistant", Content: "the wrap-up"},
+		domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: notice},
+	)
+	p := &scriptedProvider{}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+	params := testParams()
+	params.MaxIterations = 2
+
+	got := e.Run(context.Background(), params)
+	if got.Kind != ResultParked || got.ParkNotice != notice {
+		t.Fatalf("disposition = %v, notice = %q (err: %v)", got.Kind, got.ParkNotice, got.Err)
+	}
+	count := 0
+	for _, r := range tr.snapshot() {
+		if r.Subtype == domain.MessageSubtypeStopNote {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("stop-note rows = %d, want exactly 1 — a re-claim must not stack notices", count)
+	}
+	if p.calls != 0 {
+		t.Errorf("provider calls = %d, want 0", p.calls)
+	}
+}

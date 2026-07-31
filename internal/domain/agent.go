@@ -104,7 +104,10 @@ const (
 // InjectionSubtype values discriminate a `role=user` row the system wrote
 // on the agent's behalf from one a human typed. Assembly reads them (a
 // steer row renders inside a keep-working envelope); display reads them to
-// label the row.
+// label the row; the native loop's turn budget reads them to tell genuine
+// user input apart from its own insertions — only a human row renews the
+// budget, so every loop-authored row must carry a subtype outside the
+// human set ("", "text", the steer stamp).
 const (
 	// MessageSubtypeInjectionSteer marks input that was drained between
 	// turns — the model was mid-work when it arrived.
@@ -113,6 +116,18 @@ const (
 	// that the workspace was restored from its last snapshot, so work done
 	// during an interrupted engagement may be absent.
 	MessageSubtypeInjectionExecutorChanged = "injection:executor-changed"
+	// MessageSubtypeInjectionNudge marks a would-stop nudge the loop
+	// inserted on a hook's behalf (the artifact contract, today).
+	MessageSubtypeInjectionNudge = "injection:nudge"
+	// MessageSubtypeInjectionWrapUp marks the one-call-left notice asking
+	// the model to write a wrap-up summary before the turn budget pauses
+	// the run.
+	MessageSubtypeInjectionWrapUp = "injection:wrap-up"
+	// MessageSubtypeStopNote marks a delivered row recording why an
+	// engagement stopped — a guard park, an unrecoverable provider error.
+	// A statement of fact written into history, not input awaiting
+	// consumption, which is why it carries no injection: prefix.
+	MessageSubtypeStopNote = "stop-note"
 )
 
 // Conversation is the durable agent-context row: one row per transcript,

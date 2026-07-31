@@ -19,10 +19,14 @@ import (
 // model is not mid-work (the engagement's first call, or a call following a
 // no-tool-call assistant message): the rows keep whatever subtype they were
 // written with and read as ordinary input. Every other drain happens between
-// turns, while the model is working, and is stamped `injection:steer` — the
-// column assembly reads to wrap the row in the keep-working envelope.
+// turns, while the model is working, and stamps `injection:steer` — the
+// column assembly reads to wrap the row in the keep-working envelope — onto
+// the human rows only. A row already carrying a system subtype (a staged
+// system note, the loop's own wrap-up) keeps it: overwriting would both
+// mislabel the row for display and make it read as fresh user input to the
+// turn-budget derivation.
 //
-// Flush is one statement that marks delivered and stamps the subtype
+// Each flush is one statement that marks delivered and stamps the subtype
 // together. Doing it in two steps would leave a window in which a delivered
 // row had lost its provenance, and assembly would then render a steer as an
 // ordinary user turn.
@@ -31,15 +35,40 @@ func (e *Engine) drain(ctx context.Context, params Params, bare bool) error {
 	if err != nil {
 		return err
 	}
-	ids := pendingIDsInOrder(rows)
-	if len(ids) == 0 {
+	pending := pendingInOrder(rows)
+	if len(pending) == 0 {
 		return nil
 	}
-	subtype := ""
-	if !bare {
-		subtype = domain.MessageSubtypeInjectionSteer
+	if bare {
+		return e.Transcript.MarkDelivered(ctx, params.OrgID, params.ConversationID, idsOf(pending), "")
 	}
-	return e.Transcript.MarkDelivered(ctx, params.OrgID, params.ConversationID, ids, subtype)
+	var human, injected []int
+	for _, r := range pending {
+		if isHumanInput(r) {
+			human = append(human, r.ID)
+		} else {
+			injected = append(injected, r.ID)
+		}
+	}
+	if len(injected) > 0 {
+		if err := e.Transcript.MarkDelivered(ctx, params.OrgID, params.ConversationID, injected, ""); err != nil {
+			return err
+		}
+	}
+	if len(human) > 0 {
+		return e.Transcript.MarkDelivered(ctx, params.OrgID, params.ConversationID, human, domain.MessageSubtypeInjectionSteer)
+	}
+	return nil
+}
+
+// isHumanInput reports whether a role=user row is genuine user input rather
+// than something the system inserted on the agent's behalf. The human set is
+// closed: an unstamped or plain-text row (the mission prompt, an API
+// follow-up) and the mid-work steer stamp those same rows receive at flush.
+// Everything system-authored carries a subtype outside this set — see the
+// InjectionSubtype constants.
+func isHumanInput(r domain.Message) bool {
+	return r.Subtype == "" || r.Subtype == "text" || r.Subtype == domain.MessageSubtypeInjectionSteer
 }
 
 // hasPending reports whether any undelivered row is waiting — the would-stop
@@ -50,46 +79,49 @@ func (e *Engine) hasPending(ctx context.Context, params Params) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return len(pendingIDsInOrder(rows)) > 0, nil
+	return len(pendingInOrder(rows)) > 0, nil
 }
 
-// pendingIDsInOrder returns the undelivered rows' ids in assembly order
+// pendingInOrder returns the undelivered rows in assembly order
 // (COALESCE(seq, id)). The store already returns that order, but sorting
-// here keeps the flush independent of that guarantee — the ids are what the
-// engine reasons about, and their order is what a steer stamp applies to.
-func pendingIDsInOrder(rows []domain.Message) []int {
-	type keyed struct {
-		id  int
-		key float64
-	}
-	var pending []keyed
+// here keeps the flush independent of that guarantee — these rows are what
+// the engine reasons about, and their order is what a steer stamp applies
+// to.
+func pendingInOrder(rows []domain.Message) []domain.Message {
+	var pending []domain.Message
 	for _, r := range rows {
 		if isDelivered(r) {
 			continue
 		}
-		key := float64(r.ID)
-		if r.Seq != nil {
-			key = *r.Seq
-		}
-		pending = append(pending, keyed{id: r.ID, key: key})
+		pending = append(pending, r)
 	}
-	sort.SliceStable(pending, func(i, j int) bool { return pending[i].key < pending[j].key })
-	ids := make([]int, 0, len(pending))
-	for _, p := range pending {
-		ids = append(ids, p.id)
+	sort.SliceStable(pending, func(i, j int) bool { return assemblyKey(pending[i]) < assemblyKey(pending[j]) })
+	return pending
+}
+
+func assemblyKey(r domain.Message) float64 {
+	if r.Seq != nil {
+		return *r.Seq
+	}
+	return float64(r.ID)
+}
+
+func idsOf(rows []domain.Message) []int {
+	ids := make([]int, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
 	}
 	return ids
 }
 
 // insertPending queues a row for the next drain. Used for the loop's own
-// injected input (the executor-changed notice, the turn-end nudge): it goes
-// through the same queue as user input rather than being spliced into an
-// assembly, so there is exactly one injection point and it is durable.
+// injected input (the executor-changed notice, the turn-end nudge, the
+// wrap-up ask): it goes through the same queue as user input rather than
+// being spliced into an assembly, so there is exactly one injection point
+// and it is durable. Every caller passes an explicit injection subtype —
+// the loop never mints a row that could read as human input.
 func (e *Engine) insertPending(ctx context.Context, params Params, content, subtype string) error {
 	pending := false
-	if subtype == "" {
-		subtype = "text"
-	}
 	_, err := e.Transcript.Insert(ctx, params.OrgID, &domain.Message{
 		ConversationID: params.ConversationID,
 		UserID:         params.UserID,
@@ -110,9 +142,29 @@ func (e *Engine) insertNotice(ctx context.Context, params Params, content string
 	if _, err := e.Transcript.Insert(ctx, params.OrgID, &domain.Message{
 		ConversationID: params.ConversationID,
 		Role:           "user",
-		Subtype:        "text",
+		Subtype:        domain.MessageSubtypeStopNote,
 		Content:        content,
 	}); err != nil {
 		e.warn("insert loop notice failed", "conversation", params.ConversationID, "error", err)
 	}
+}
+
+// hasNoticeSince reports whether an identical notice row already exists
+// after the last human input — the guard a re-claimed, still-parked
+// conversation needs so its park notice is written once, not once per
+// claim.
+func hasNoticeSince(rows []domain.Message, content string) bool {
+	for i := len(rows) - 1; i >= 0; i-- {
+		r := rows[i]
+		if r.Role != "user" {
+			continue
+		}
+		if isHumanInput(r) {
+			return false
+		}
+		if r.Subtype == domain.MessageSubtypeStopNote && r.Content == content {
+			return true
+		}
+	}
+	return false
 }
