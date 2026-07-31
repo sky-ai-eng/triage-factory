@@ -27,7 +27,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Check } from 'lucide-react'
-import { AnimatePresence, cubicBezier, motion, useReducedMotion } from 'motion/react'
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useActiveOrgId } from '../../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID } from '../../lib/githubApp'
 import { WIZARD_SECTIONS, type WizardState } from './types'
@@ -36,7 +36,7 @@ import { useWizard } from './useWizard'
 import { isStepVisible } from './resume'
 import { CollapsedStepBar, SectionDivider } from './parts'
 import { GlassBackdrop } from './glass'
-import { bodyDurationMs, bodyEase, bodyEasePoints } from './glassStyle'
+import { bodyDurationMs, bodyEase } from './glassStyle'
 
 // Where the active step's action row comes to rest, as a fraction of viewport
 // height measured to the row's bottom edge. The two spacers rendered around the
@@ -65,9 +65,6 @@ const SETTLE_TAIL_MS = 80
 // arrives — an older browser, or a scrollTo that lands on the current offset and
 // so fires nothing at all.
 const SELF_SCROLL_MS = 150
-// The body animation's curve, for the scroll that runs alongside it. Same points
-// as bodyEase, so the two finish on the same frame.
-const anchorEase = cubicBezier(...bodyEasePoints)
 
 function Loading() {
   return (
@@ -299,16 +296,15 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     userScrolledRef.current = false
     headingRef.current?.focus({ preventScroll: true })
 
-    // Where the flow is as the step changes. The new step's action row is a
-    // different element in a different place — going back it starts well ABOVE
-    // the line, because the step being left is still at full height beneath it
-    // — so applying the anchor outright shoves the whole flow into position in
-    // one frame, before any of the collapse has played. Interpolating from here
-    // to the anchor on the body's own curve means the scroll and the two bodies
-    // arrive together and nothing teleports. Forward barely notices: its new row
-    // starts near the line already, so the blend is a few pixels.
-    const startY = window.scrollY
-    const startLead = leadRef.current?.offsetHeight ?? 0
+    // Applied outright, in both directions. The arriving row is at its final
+    // position from the first frame either way: going forward the step being
+    // left is above it and collapsing, and going back the step being left is
+    // BELOW it — folding away beneath the line without ever moving it. So the
+    // anchor has nowhere to travel, and putting the row on the line immediately
+    // is what lets the fold happen in view. Interpolating instead holds the
+    // scroll behind while the document briefly carries both bodies at full
+    // height, and the departing step sweeps through the viewport on its way
+    // past — the flash this replaced.
     const t0 = performance.now()
     transitioningRef.current = true
 
@@ -318,24 +314,8 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
         transitioningRef.current = false
         return
       }
-      const elapsed = performance.now() - t0
-      // Re-measured every frame rather than solved once: the bodies are still
-      // animating, so the anchor this is heading for is itself moving.
-      const anchor = measureAnchor()
-      if (anchor) {
-        // Only a backward move interpolates. Going forward the arriving row is
-        // already close to the line — the step it is leaving is above it and
-        // collapsing, so the anchor barely shifts — and applying it outright
-        // holds the row exactly on the line for the whole transition. Easing
-        // that case would introduce travel where there is currently none.
-        const eased =
-          reduce || travel === 'forward' ? 1 : anchorEase(Math.min(1, elapsed / bodyDurationMs))
-        applyAnchor(
-          startY + (anchor.top - startY) * eased,
-          startLead + (anchor.leadHeight - startLead) * eased,
-        )
-      }
-      if (elapsed < bodyDurationMs + SETTLE_TAIL_MS) {
+      settle()
+      if (performance.now() - t0 < bodyDurationMs + SETTLE_TAIL_MS) {
         frame = requestAnimationFrame(tick)
       } else {
         transitioningRef.current = false
@@ -346,7 +326,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       cancelAnimationFrame(frame)
       transitioningRef.current = false
     }
-  }, [wiz.phase, activeIndex, measureAnchor, applyAnchor, reduce, travel])
+  }, [wiz.phase, activeIndex, settle])
 
   // Re-settle for as long as the flow's height is still moving: the outgoing
   // body collapsing, the incoming one expanding, and content that lands after
