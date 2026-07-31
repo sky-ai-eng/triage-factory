@@ -588,8 +588,14 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                             {isActive && (
                               <motion.div
                                 key="body"
+                                // Going back, the step is simply revealed —
+                                // already open, the way it was left. The only
+                                // motion is the newer step folding away above
+                                // it. Unfolding it again would animate it as
+                                // though it were being reached for the first
+                                // time, when the move is a return to it.
                                 initial={
-                                  reduce
+                                  reduce || travel === 'back'
                                     ? false
                                     : {
                                         height: 0,
