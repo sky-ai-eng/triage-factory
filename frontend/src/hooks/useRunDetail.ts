@@ -324,10 +324,23 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
         if (msgsRes.ok) {
           const msgs = (await msgsRes.json()) as Message[]
           if (!cancelled) {
-            // Every stamped row in the fetched transcript is already inside the
-            // run row's SUMs, so they become the baselines the fold counts from
-            // — a websocket replay of any of them can't be folded in a second
-            // time, and folding resumes from here.
+            // The fetched transcript's stamped rows become the baselines the
+            // fold counts from: a websocket replay of any of them can't be
+            // folded in a second time, and folding resumes from here.
+            //
+            // Treating the whole transcript as already covered is an
+            // approximation, not an identity. The run row is read first and the
+            // transcript second, so a row written between the two reads is in
+            // the transcript but outside the SUM the run row carries — seeding
+            // it here means its figures are never folded, and the readouts sit
+            // that row low until the next run refetch replaces them with a
+            // fresh SUM. That is the deliberate direction: reading the
+            // transcript first would invert the race into a row the SUM covers
+            // but the baseline doesn't, and a replay of it would fold dollars
+            // and tokens that are already counted. Under-reporting for one
+            // round trip self-corrects on the next read; over-reporting
+            // compounds. Closing it properly needs the run row to say which
+            // message id its SUM runs through, which the wire doesn't carry.
             const seededCost = new Set<number>()
             const seededTokens = new Set<number>()
             for (const m of msgs) {

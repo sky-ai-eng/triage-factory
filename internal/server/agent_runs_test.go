@@ -281,8 +281,13 @@ func TestRunResponse_TokenSums(t *testing.T) {
 		t.Fatalf("decode bare: %v; body=%s", err, rec.Body.String())
 	}
 	for _, key := range []string{"input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"} {
-		if v, ok := got[key]; !ok || v.(float64) != 0 {
-			t.Errorf("bare run %s = %v (present=%v), want 0", key, v, ok)
+		v, ok := got[key]
+		if !ok {
+			t.Errorf("bare run missing %q", key)
+			continue
+		}
+		if n, isNum := v.(float64); !isNum || n != 0 {
+			t.Errorf("bare run %s = %v, want 0", key, v)
 		}
 	}
 }
