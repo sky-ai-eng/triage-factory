@@ -3,8 +3,8 @@ import type { Message } from '../types'
 // runFeed — the bounded per-run projection the board's AgentCards render from.
 //
 // The board used to hold every run's FULL message array in top-level state and
-// hand it to each card, which then derived a token/comment tally and the last
-// five ticker lines on every render. That meant unbounded memory growth per
+// hand it to each card, which then derived a token tally and the last five
+// ticker lines on every render. That meant unbounded memory growth per
 // live run AND a whole-board re-render doing O(all messages) work for every
 // streamed `message` event. The card only ever displays aggregates + the tail,
 // so this module keeps exactly that: running stats plus the last few feed
@@ -20,17 +20,13 @@ export interface FeedLine {
 }
 
 export interface RunCardFeed {
-  /** Count of review/PR comments the agent has posted (same heuristic the old
-   *  card-level computeStats used: first tool call's command mentions
-   *  add-review-comment / add-comment). */
-  comments: number
   /** Total tokens (input + output) across every message seen. */
   tokens: number
   /** The most recent ticker lines, oldest-first, capped at FEED_LINE_CAP. */
   lines: FeedLine[]
 }
 
-export const EMPTY_FEED: RunCardFeed = { comments: 0, tokens: 0, lines: [] }
+export const EMPTY_FEED: RunCardFeed = { tokens: 0, lines: [] }
 
 // The card's LiveFeed shows the last 5 lines; keep a small buffer beyond that
 // so the cap never changes what's displayed.
@@ -45,30 +41,20 @@ export function feedFromMessages(messages: Message[]): RunCardFeed {
 
 /**
  * Fold one streamed message into a feed. Returns the SAME reference when the
- * message changes nothing the card displays — no ticker lines, no token
- * delta, no comment delta (tool-result rows are the common case: roughly half
- * a live transcript). Callers rely on that identity to skip the state write
- * entirely, so a display-no-op message doesn't re-render the board.
+ * message changes nothing the card displays — no ticker lines, no token delta
+ * (tool-result rows are the common case: roughly half a live transcript).
+ * Callers rely on that identity to skip the state write entirely, so a
+ * display-no-op message doesn't re-render the board.
  */
 export function appendToFeed(prev: RunCardFeed | undefined, msg: Message): RunCardFeed {
   const base = prev ?? EMPTY_FEED
   const lines = linesForMessage(msg)
-  const comments = commentsForMessage(msg)
   const tokens = (msg.output_tokens ?? 0) + (msg.input_tokens ?? 0)
-  if (lines.length === 0 && comments === 0 && tokens === 0) return base
+  if (lines.length === 0 && tokens === 0) return base
   return {
-    comments: base.comments + comments,
     tokens: base.tokens + tokens,
     lines: lines.length === 0 ? base.lines : [...base.lines, ...lines].slice(-FEED_LINE_CAP),
   }
-}
-
-function commentsForMessage(msg: Message): number {
-  if (msg.role === 'assistant' && msg.subtype === 'tool_use' && msg.tool_calls?.length) {
-    const cmd = String(msg.tool_calls[0].input?.command || '')
-    if (cmd.includes('add-review-comment') || cmd.includes('add-comment')) return 1
-  }
-  return 0
 }
 
 // linesForMessage flattens one message into compact one-liners — the agent's
