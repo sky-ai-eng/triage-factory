@@ -269,6 +269,7 @@ export function GitHubAppStep({
       showHeading={false}
       bare
       ownerType={state.githubAppOwnerType}
+      initialStatus={state.githubAppStatus ?? undefined}
       returnTo={returnTo}
     />
   ) : (

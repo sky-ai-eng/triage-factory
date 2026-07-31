@@ -36,6 +36,7 @@ export default function GitHubAppPanel({
   showHeading = true,
   bare = false,
   ownerType: ownerTypeProp,
+  initialStatus,
   returnTo,
 }: {
   orgId: string | null
@@ -51,6 +52,14 @@ export default function GitHubAppPanel({
   // in its own prior step. Absent (Settings) ⇒ the toggle is shown and the
   // choice is internal.
   ownerType?: 'user' | 'org'
+  // A status the caller already has, so the panel renders its final content on
+  // the first paint instead of a loading line. The setup wizard fetches this in
+  // the step's load(), alongside every other step's, long before the step is
+  // opened — which matters because the step animates open, and a body that
+  // changes height mid-animation is a body that gets clipped. Absent
+  // (Settings) ⇒ the panel loads it itself as before. The focus-refetch still
+  // runs either way, so this is a head start, not a cache.
+  initialStatus?: GitHubAppStatus
   // Where the post-registration callback should land the browser: 'setup' (the
   // wizard resumes on the install step) or 'settings' (back to this panel).
   // Required so every render site is explicit — a wizard reuse that forgot it
@@ -63,7 +72,7 @@ export default function GitHubAppPanel({
   // registration form.
   const [ghAppState, setGhAppState] = useState<
     { kind: 'loading' } | { kind: 'error' } | { kind: 'loaded'; status: GitHubAppStatus }
-  >({ kind: 'loading' })
+  >(initialStatus ? { kind: 'loaded', status: initialStatus } : { kind: 'loading' })
   const [ghReloadKey, setGhReloadKey] = useState(0)
   // Owner type is controlled when ownerTypeProp is set (the wizard's account-type
   // step), else internal (Settings shows the toggle).

@@ -197,6 +197,15 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   const actionsRef = useRef<HTMLDivElement | null>(null)
   // The step on its way out during a backward move; null the rest of the time.
   const leavingRef = useRef<HTMLLIElement | null>(null)
+  // The active body's content, measured so the open animation has a target that
+  // stays true. `height: 'auto'` is resolved to pixels ONCE, when the animation
+  // starts, so content that lands during those few hundred milliseconds — a
+  // status fetch returning, a list arriving — is not in the number the wrapper
+  // is animating to, and overflow:hidden cuts it off until the animation ends
+  // and height reverts to auto. Feeding a measured height instead re-targets
+  // the animation in flight, so late content is simply included.
+  const bodyInnerRef = useRef<HTMLDivElement | null>(null)
+  const [openHeight, setOpenHeight] = useState<number | 'auto'>('auto')
   const leadRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
   // Set once the user has taken the scroll over, cleared when the step changes:
@@ -336,6 +345,11 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
         return
       }
       const elapsed = performance.now() - t0
+      // Re-measured every frame. Costs nothing when nothing changes — the inner
+      // content is not itself animating, so this settles to one value and React
+      // bails out on the rest.
+      const inner = bodyInnerRef.current?.offsetHeight
+      if (inner) setOpenHeight(inner)
       // Re-measured every frame: the bodies are still animating, so the point
       // being tracked is still settling.
       const anchor = measureAnchor()
@@ -351,6 +365,9 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
         frame = requestAnimationFrame(tick)
       } else {
         transitioningRef.current = false
+        // Done animating — hand the height back to the browser so ordinary
+        // reflows need no JS at all.
+        setOpenHeight('auto')
       }
     }
     tick()
@@ -611,7 +628,12 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                         y: enterOffset,
                                       }
                                 }
-                                animate={{ height: 'auto', opacity: 1, filter: 'blur(0px)', y: 0 }}
+                                animate={{
+                                  height: openHeight,
+                                  opacity: 1,
+                                  filter: 'blur(0px)',
+                                  y: 0,
+                                }}
                                 // No blur on the way out. It buys nothing on
                                 // content that is already collapsing and fading,
                                 // and blurring a layer whose height changes every
@@ -626,7 +648,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                 className="-mx-1.5 px-1.5"
                                 style={{ overflow: 'hidden' }}
                               >
-                                <div className="space-y-6 pt-4">
+                                <div ref={bodyInnerRef} className="space-y-6 pt-4">
                                   {wiz.activeLoadFailed ? (
                                     <div className="space-y-3">
                                       <p className="text-[13px] text-text-secondary">
