@@ -384,6 +384,11 @@ export interface BlueprintStep {
   blueprint_id: string
   step_index: number
   step_prompt_id: string
+  // Optional: the step prompt's name. Only a blueprint run's frozen step_plan
+  // snapshots it — the live blueprint_steps row the /steps editor reads holds a
+  // prompt id and no name — so render it when present and fall back to the
+  // brief.
+  name?: string
   brief: string
   // Optional: a step rebuilt from a blueprint run's frozen step_plan has no
   // live blueprint_steps row, so the run projection omits created_at (the

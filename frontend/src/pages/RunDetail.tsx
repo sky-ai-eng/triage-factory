@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
-import type { Conversation } from '../types'
+import type { BlueprintStep, Conversation } from '../types'
 import { setPresenceView } from '../hooks/useWebSocket'
 import { useRunDetail } from '../hooks/useRunDetail'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { isActiveRun } from '../lib/runStatus'
 import { approvalCounts, hasUnresolvedArtifacts, unresolvedArtifacts } from '../lib/approval'
-import RunStation, { type StationActions } from '../components/runstation/RunStation'
+import RunStation, {
+  type ChainStepLabel,
+  type StationActions,
+} from '../components/runstation/RunStation'
 import ReviewOverlay from '../components/ReviewOverlay'
 import PendingPROverlay from '../components/PendingPROverlay'
 import ApprovalList from '../components/ApprovalList'
@@ -37,6 +40,10 @@ export default function RunDetail() {
   } = useRunDetail(runID)
 
   const [chainSteps, setChainSteps] = useState<Conversation[] | null>(null)
+  // Per-step labels for the chain track, index-aligned with chainSteps. Kept
+  // beside them rather than folded in because the track's segments are runs,
+  // and a not-yet-spawned step has a name but no run.
+  const [chainStepLabels, setChainStepLabels] = useState<ChainStepLabel[] | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [interruptPending, setInterruptPending] = useState(false)
   // Approval is derived now, not a stored run status: the run's unresolved
@@ -96,6 +103,7 @@ export default function RunDetail() {
   useEffect(() => {
     if (!run?.blueprint_run_id) {
       setChainSteps(null)
+      setChainStepLabels(null)
       return
     }
     let cancelled = false
@@ -104,10 +112,13 @@ export default function RunDetail() {
       .then(
         (
           data: {
-            steps?: Array<{ step: { step_index: number }; run?: Conversation | null }>
+            steps?: Array<{ step: BlueprintStep; run?: Conversation | null }>
           } | null,
         ) => {
           if (cancelled || !data?.steps) return
+          setChainStepLabels(
+            data.steps.map((s) => ({ name: s.step?.name ?? '', brief: s.step?.brief ?? '' })),
+          )
           const padded: Conversation[] = data.steps.map((s, i) => {
             if (s.run) return s.run
             return {
@@ -320,6 +331,7 @@ export default function RunDetail() {
         messages={messages}
         now={now}
         chainSteps={chainSteps}
+        chainStepLabels={chainStepLabels}
         actions={actions}
         pendingPermissions={pendingPermissions}
       />
