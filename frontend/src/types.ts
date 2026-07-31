@@ -1031,16 +1031,22 @@ export type WSEvent =
   | {
       // P3 steering: a conversation surfaced a tool-permission prompt
       // (canUseTool), answered via
-      // POST /api/agent/conversations/{conversationID}/permissions/{requestID}.
-      // timeout_ms is the prompt's server-side deadline (relative); the dock
-      // derives its dismiss TTL from it.
+      // POST /api/agent/conversations/{conversationID}/permissions/{toolCallID}.
+      // tool_call_id is the tool_use id of the gated call — the same id the
+      // assistant row's tool_calls and the tool result carry. timeout_ms is the
+      // prompt's server-side deadline (relative); the dock derives its dismiss
+      // TTL from it. title/display_name/description are the SDK's own prompt
+      // copy, present only when it rendered any.
       type: 'permission_request'
       conversation_id: string
       data: {
-        request_id: string
+        tool_call_id: string
         tool_name: string
         input: Record<string, unknown>
         timeout_ms?: number
+        title?: string
+        display_name?: string
+        description?: string
       }
     }
   | {
@@ -1050,7 +1056,7 @@ export type WSEvent =
       // its own client TTL. The client TTL stays as a backstop.
       type: 'permission_resolved'
       conversation_id: string
-      data: { request_id: string }
+      data: { tool_call_id: string }
     }
   | {
       // The executor syncer (multi mode) always carries a `pending` field: the

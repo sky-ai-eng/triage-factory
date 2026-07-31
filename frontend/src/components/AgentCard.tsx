@@ -40,7 +40,7 @@ interface Props {
   // Unanswered tool-permission prompts for this run, head-first. When non-empty
   // the card renders an inline Allow/Deny control and takes the attention tone.
   pendingPermissions?: PendingPermission[]
-  onResolvePermission?: (requestID: string, decision: PermissionDecisionInput) => Promise<void>
+  onResolvePermission?: (toolCallID: string, decision: PermissionDecisionInput) => Promise<void>
   onRequeue?: () => void
   onReview?: () => void
   // Open a PR/review artifact's approval overlay by id, from the footer's
@@ -236,7 +236,7 @@ export default function AgentCard({
         {hasPending && (
           <div className="mx-4 mb-2">
             <PermissionPrompt
-              key={pending[0].request_id}
+              key={pending[0].tool_call_id}
               prompt={pending[0]}
               remaining={pending.length - 1}
               worktree={run.WorktreePath}

@@ -19,25 +19,25 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// waitForPending blocks until the broker has registered (runID, requestID). The
+// waitForPending blocks until the broker has registered (runID, toolCallID). The
 // handler registers synchronously on entry and then parks, so a test can resolve
 // it without racing the handler goroutine. Only safe when permTimeout is far
 // longer than a poll interval — the entry must still be pending when the poll
 // runs. Tests that shrink permTimeout near the poll interval must use
 // waitForPendingOrDone instead.
-func waitForPending(t *testing.T, s *Spawner, runID, requestID string) {
+func waitForPending(t *testing.T, s *Spawner, runID, toolCallID string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
-		_, ok := s.permPending[permKey(runID, requestID)]
+		_, ok := s.permPending[permKey(runID, toolCallID)]
 		s.mu.Unlock()
 		if ok {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("permission request %q (run %q) never registered", requestID, runID)
+	t.Fatalf("permission request %q (run %q) never registered", toolCallID, runID)
 }
 
 // waitForPendingOrDone polls until the prompt is observably pending (false) or
@@ -46,12 +46,12 @@ func waitForPending(t *testing.T, s *Spawner, runID, requestID string) {
 // between two polls on a starved runner — registration, timeout, deregistration
 // all inside one oversleep — so "handler already finished" must be a navigable
 // outcome, not a missed observation that fails the test.
-func waitForPendingOrDone(t *testing.T, s *Spawner, runID, requestID string, got <-chan agentproc.PermissionDecision, d *agentproc.PermissionDecision) bool {
+func waitForPendingOrDone(t *testing.T, s *Spawner, runID, toolCallID string, got <-chan agentproc.PermissionDecision, d *agentproc.PermissionDecision) bool {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
-		_, pending := s.permPending[permKey(runID, requestID)]
+		_, pending := s.permPending[permKey(runID, toolCallID)]
 		s.mu.Unlock()
 		if pending {
 			return false
@@ -63,7 +63,7 @@ func waitForPendingOrDone(t *testing.T, s *Spawner, runID, requestID string, got
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("permission request %q (run %q) neither registered nor returned", requestID, runID)
+	t.Fatalf("permission request %q (run %q) neither registered nor returned", toolCallID, runID)
 	return false
 }
 
@@ -76,7 +76,7 @@ func TestAutoApprovePermissionHandler_AlwaysAllows(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	h := s.AutoApprovePermissionHandler("run-1")
 
-	d := h(agentproc.PermissionRequest{RequestID: "req-1", ToolName: "Bash", Input: map[string]any{"command": "curl example.com"}})
+	d := h(agentproc.PermissionRequest{ToolCallID: "req-1", ToolName: "Bash", Input: map[string]any{"command": "curl example.com"}})
 	if d.Behavior != "allow" {
 		t.Errorf("behavior = %q, want allow", d.Behavior)
 	}
@@ -100,7 +100,7 @@ func TestBrowserPermissionHandler_ResolveAllow(t *testing.T) {
 
 	got := make(chan agentproc.PermissionDecision, 1)
 	go func() {
-		got <- h(agentproc.PermissionRequest{RequestID: "req-1", ToolName: "Bash", Input: map[string]any{"command": "ls"}})
+		got <- h(agentproc.PermissionRequest{ToolCallID: "req-1", ToolName: "Bash", Input: map[string]any{"command": "ls"}})
 	}()
 
 	waitForPending(t, s, "run-1", "req-1")
@@ -124,7 +124,7 @@ func TestBrowserPermissionHandler_TimeoutDenies(t *testing.T) {
 	s.SetIdleHibernateTimeout(10 * time.Millisecond) // permTimeout = 5ms
 	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrgID, "run-1", AbsentAutoDeny{})
 
-	d := h(agentproc.PermissionRequest{RequestID: "req-timeout", ToolName: "Bash"})
+	d := h(agentproc.PermissionRequest{ToolCallID: "req-timeout", ToolName: "Bash"})
 	if d.Behavior != "deny" {
 		t.Errorf("behavior = %q, want deny on timeout", d.Behavior)
 	}
@@ -170,7 +170,7 @@ func TestResolvePermission_AcknowledgedResolveNeverDropped(t *testing.T) {
 		reqID := fmt.Sprintf("req-%d", i)
 		got := make(chan agentproc.PermissionDecision, 1)
 		go func() {
-			got <- h(agentproc.PermissionRequest{RequestID: reqID})
+			got <- h(agentproc.PermissionRequest{ToolCallID: reqID})
 		}()
 
 		// On a starved runner the 2ms pending window can elapse entirely
@@ -221,7 +221,7 @@ func TestResolvePermission_WrongRun(t *testing.T) {
 	s.SetIdleHibernateTimeout(2 * time.Second) // bound the goroutine if cleanup is missed
 	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrgID, "run-A", AbsentAutoDeny{})
 	done := make(chan agentproc.PermissionDecision, 1)
-	go func() { done <- h(agentproc.PermissionRequest{RequestID: "req-x"}) }()
+	go func() { done <- h(agentproc.PermissionRequest{ToolCallID: "req-x"}) }()
 	waitForPending(t, s, "run-A", "req-x")
 
 	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-B", "req-x", agentproc.PermissionDecision{Behavior: "allow"}); !errors.Is(err, ErrNoPendingPermission) {
@@ -235,27 +235,26 @@ func TestResolvePermission_WrongRun(t *testing.T) {
 	<-done
 }
 
-// TestBrowserPermissionHandler_ConcurrentRunsSameRequestID guards the broker
-// key: the wrapper's request_id is only unique within a run process, so two
-// concurrent runs can both raise "perm-1". Keying by (runID, requestID) keeps
-// them isolated — each registers without clobbering the other and each resolves
-// to its own decision.
-func TestBrowserPermissionHandler_ConcurrentRunsSameRequestID(t *testing.T) {
+// TestBrowserPermissionHandler_ConcurrentRunsSameToolCallID guards the broker
+// key: tool_use ids are unique in practice, but the composite key is what makes
+// two runs raising the same id a non-event rather than a collision. Each
+// registers without clobbering the other and each resolves to its own decision.
+func TestBrowserPermissionHandler_ConcurrentRunsSameToolCallID(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	hA := s.BrowserPermissionHandler(runmode.LocalDefaultOrgID, "run-A", AbsentAutoDeny{})
 	hB := s.BrowserPermissionHandler(runmode.LocalDefaultOrgID, "run-B", AbsentAutoDeny{})
 
 	gotA := make(chan agentproc.PermissionDecision, 1)
 	gotB := make(chan agentproc.PermissionDecision, 1)
-	go func() { gotA <- hA(agentproc.PermissionRequest{RequestID: "perm-1"}) }()
-	go func() { gotB <- hB(agentproc.PermissionRequest{RequestID: "perm-1"}) }()
-	waitForPending(t, s, "run-A", "perm-1")
-	waitForPending(t, s, "run-B", "perm-1")
+	go func() { gotA <- hA(agentproc.PermissionRequest{ToolCallID: "toolu_dup"}) }()
+	go func() { gotB <- hB(agentproc.PermissionRequest{ToolCallID: "toolu_dup"}) }()
+	waitForPending(t, s, "run-A", "toolu_dup")
+	waitForPending(t, s, "run-B", "toolu_dup")
 
-	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-A", "perm-1", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
+	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-A", "toolu_dup", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
 		t.Fatalf("resolve run-A: %v", err)
 	}
-	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-B", "perm-1", agentproc.PermissionDecision{Behavior: "deny"}); err != nil {
+	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-B", "toolu_dup", agentproc.PermissionDecision{Behavior: "deny"}); err != nil {
 		t.Fatalf("resolve run-B: %v", err)
 	}
 	if d := <-gotA; d.Behavior != "allow" {
@@ -347,7 +346,7 @@ func TestBrowserPermissionHandler_AbsentDeniesAfterGrace(t *testing.T) {
 	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", AbsentAutoDeny{enabled: true, grace: grace})
 
 	start := time.Now()
-	d := h(agentproc.PermissionRequest{RequestID: "req-absent", ToolName: "Bash"})
+	d := h(agentproc.PermissionRequest{ToolCallID: "req-absent", ToolName: "Bash"})
 	elapsed := time.Since(start)
 
 	if d.Behavior != "deny" {
@@ -381,7 +380,7 @@ func TestBrowserPermissionHandler_PresentWaitsFullTimeout(t *testing.T) {
 	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", AbsentAutoDeny{enabled: true, grace: 40 * time.Millisecond})
 	got := make(chan agentproc.PermissionDecision, 1)
 	go func() {
-		got <- h(agentproc.PermissionRequest{RequestID: "req-present", ToolName: "Bash"})
+		got <- h(agentproc.PermissionRequest{ToolCallID: "req-present", ToolName: "Bash"})
 	}()
 
 	// Well past the grace, the prompt must still be pending (not fast-denied).
@@ -422,7 +421,7 @@ func TestBrowserPermissionHandler_PresenceDuringGraceExtends(t *testing.T) {
 	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", AbsentAutoDeny{enabled: true, grace: 250 * time.Millisecond})
 	got := make(chan agentproc.PermissionDecision, 1)
 	go func() {
-		got <- h(agentproc.PermissionRequest{RequestID: "req-extend", ToolName: "Bash"})
+		got <- h(agentproc.PermissionRequest{ToolCallID: "req-extend", ToolName: "Bash"})
 	}()
 
 	// Focus a board tab partway through the grace.
@@ -465,7 +464,7 @@ func TestBrowserPermissionHandler_PresentThenAbsentDeniesAfterGrace(t *testing.T
 	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", AbsentAutoDeny{enabled: true, grace: grace})
 	got := make(chan agentproc.PermissionDecision, 1)
 	go func() {
-		got <- h(agentproc.PermissionRequest{RequestID: "req-leave", ToolName: "Bash"})
+		got <- h(agentproc.PermissionRequest{ToolCallID: "req-leave", ToolName: "Bash"})
 	}()
 
 	// The operator leaves: present→absent restarts the grace clock from now.
@@ -506,7 +505,7 @@ func TestBrowserPermissionHandler_PresentOtherOrgDenies(t *testing.T) {
 	const grace = 40 * time.Millisecond
 	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", AbsentAutoDeny{enabled: true, grace: grace})
 	start := time.Now()
-	d := h(agentproc.PermissionRequest{RequestID: "req-otherorg", ToolName: "Bash"})
+	d := h(agentproc.PermissionRequest{ToolCallID: "req-otherorg", ToolName: "Bash"})
 	if d.Behavior != "deny" || d.Message != permDenyNoOperator(grace) {
 		t.Errorf("decision = %q/%q, want deny/%q", d.Behavior, d.Message, permDenyNoOperator(grace))
 	}
@@ -526,7 +525,7 @@ func TestBrowserPermissionHandler_ToggleOffIgnoresPresence(t *testing.T) {
 	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", AbsentAutoDeny{}) // disabled
 
 	start := time.Now()
-	d := h(agentproc.PermissionRequest{RequestID: "req-off", ToolName: "Bash"})
+	d := h(agentproc.PermissionRequest{ToolCallID: "req-off", ToolName: "Bash"})
 	elapsed := time.Since(start)
 
 	if want := permDenyTimedOut(s.permTimeout()); d.Behavior != "deny" || d.Message != want {
@@ -619,9 +618,9 @@ func TestHumanWait(t *testing.T) {
 
 // readPermissionResolved reads frames until a permission_resolved event arrives
 // (skipping the permission_request the handler emits on registration), and
-// returns its run_id + request_id. A bounded read deadline turns a missing
+// returns its run_id + tool_call_id. A bounded read deadline turns a missing
 // broadcast into a clean failure instead of a hang.
-func readPermissionResolved(t *testing.T, conn *ws.Conn) (runID, requestID string) {
+func readPermissionResolved(t *testing.T, conn *ws.Conn) (runID, toolCallID string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -634,14 +633,14 @@ func readPermissionResolved(t *testing.T, conn *ws.Conn) (runID, requestID strin
 			Type           string `json:"type"`
 			ConversationID string `json:"conversation_id"`
 			Data           struct {
-				RequestID string `json:"request_id"`
+				ToolCallID string `json:"tool_call_id"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(data, &evt); err != nil {
 			t.Fatalf("decode frame: %v (raw=%q)", err, data)
 		}
 		if evt.Type == "permission_resolved" {
-			return evt.ConversationID, evt.Data.RequestID
+			return evt.ConversationID, evt.Data.ToolCallID
 		}
 	}
 }
@@ -659,7 +658,7 @@ func TestBrowserPermissionHandler_ResolveBroadcastsResolved(t *testing.T) {
 
 	got := make(chan agentproc.PermissionDecision, 1)
 	go func() {
-		got <- h(agentproc.PermissionRequest{RequestID: "req-1", ToolName: "Bash", Input: map[string]any{"command": "ls"}})
+		got <- h(agentproc.PermissionRequest{ToolCallID: "req-1", ToolName: "Bash", Input: map[string]any{"command": "ls"}})
 	}()
 
 	waitForPending(t, s, "run-1", "req-1")
@@ -668,9 +667,9 @@ func TestBrowserPermissionHandler_ResolveBroadcastsResolved(t *testing.T) {
 	}
 	<-got // handler unblocked
 
-	runID, requestID := readPermissionResolved(t, conn)
-	if runID != "run-1" || requestID != "req-1" {
-		t.Errorf("permission_resolved = (run %q, req %q), want (run-1, req-1)", runID, requestID)
+	runID, toolCallID := readPermissionResolved(t, conn)
+	if runID != "run-1" || toolCallID != "req-1" {
+		t.Errorf("permission_resolved = (run %q, req %q), want (run-1, req-1)", runID, toolCallID)
 	}
 }
 
@@ -686,13 +685,13 @@ func TestBrowserPermissionHandler_TimeoutBroadcastsResolved(t *testing.T) {
 	s.SetIdleHibernateTimeout(100 * time.Millisecond) // permTimeout = 50ms
 
 	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrgID, "run-1", AbsentAutoDeny{})
-	d := h(agentproc.PermissionRequest{RequestID: "req-timeout", ToolName: "Bash"})
+	d := h(agentproc.PermissionRequest{ToolCallID: "req-timeout", ToolName: "Bash"})
 	if d.Behavior != "deny" {
 		t.Fatalf("behavior = %q, want deny on timeout", d.Behavior)
 	}
 
-	runID, requestID := readPermissionResolved(t, conn)
-	if runID != "run-1" || requestID != "req-timeout" {
-		t.Errorf("permission_resolved = (run %q, req %q), want (run-1, req-timeout)", runID, requestID)
+	runID, toolCallID := readPermissionResolved(t, conn)
+	if runID != "run-1" || toolCallID != "req-timeout" {
+		t.Errorf("permission_resolved = (run %q, req %q), want (run-1, req-timeout)", runID, toolCallID)
 	}
 }

@@ -32,7 +32,7 @@ export interface RunDetailState {
    *  response (200 resolved, or 404 already-resolved / timed-out). The
    *  promise settles when the POST round-trip finishes — callers may await
    *  it (e.g. to disable buttons) or fire-and-forget. */
-  resolvePermission: (requestID: string, decision: PermissionDecisionInput) => Promise<void>
+  resolvePermission: (toolCallID: string, decision: PermissionDecisionInput) => Promise<void>
   /** Silently re-pull the run row + its artifact set (no loading flash, unlike
    *  refetch). Used after a per-item approve/dismiss so the derived approval
    *  surface (has_unresolved_artifacts + the list) updates in place without
@@ -142,9 +142,9 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   // which drops it on a definitive response (200/404) and toasts a transient
   // failure (prompt stays up to retry).
   const resolvePermission = useCallback(
-    (requestID: string, decision: PermissionDecisionInput) => {
+    (toolCallID: string, decision: PermissionDecisionInput) => {
       if (!runID) return Promise.resolve()
-      return resolve(runID, requestID, decision)
+      return resolve(runID, toolCallID, decision)
     },
     [runID, resolve],
   )

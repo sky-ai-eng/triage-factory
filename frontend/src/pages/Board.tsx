@@ -1487,7 +1487,7 @@ function ColumnContents({
   permQueues: Record<string, PendingPermission[]>
   onResolvePermission: (
     runID: string,
-    requestID: string,
+    toolCallID: string,
     decision: PermissionDecisionInput,
   ) => Promise<void>
   delegateFailures: Record<string, string>
@@ -1654,7 +1654,7 @@ const SortableAgentCard = memo(function SortableAgentCard({
   pendingPermissions?: PendingPermission[]
   onResolvePermission: (
     runID: string,
-    requestID: string,
+    toolCallID: string,
     decision: PermissionDecisionInput,
   ) => Promise<void>
   onRequeue: (taskID: string) => void
@@ -1702,8 +1702,8 @@ const SortableAgentCard = memo(function SortableAgentCard({
         chainSteps={chainSteps}
         feed={feed}
         pendingPermissions={pendingPermissions}
-        onResolvePermission={(requestID, decision) =>
-          onResolvePermission(run.ID, requestID, decision)
+        onResolvePermission={(toolCallID, decision) =>
+          onResolvePermission(run.ID, toolCallID, decision)
         }
         onRequeue={() => onRequeue(task.id)}
         onReview={() => {

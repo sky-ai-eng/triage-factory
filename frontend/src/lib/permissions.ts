@@ -1,7 +1,7 @@
 // Shared core for delegated-run tool-permission prompts (the `canUseTool`
 // round-trip). When a run hits an off-allowlist tool the backend broadcasts a
 // `permission_request` WS event and parks the agent's turn until the user
-// answers via POST .../permissions/{requestID} or a server-side timeout denies
+// answers via POST .../permissions/{toolCallID} or a server-side timeout denies
 // it. Both the run-detail page (one run) and the board (many runs at once)
 // surface that prompt, so the queue/TTL/resolve logic lives here once —
 // `usePermissionQueues` builds on it; `useRunDetail` consumes that hook filtered
@@ -10,15 +10,24 @@
 import { readError } from './api'
 
 // PendingPermission is one in-flight tool-approval prompt surfaced by a run
-// (the `permission_request` WS payload). Parallel tool calls can yield more
-// than one at a time, so callers keep a queue keyed by request_id.
-// timeout_ms is the prompt's server-side deadline (relative), used to derive
-// the client dismiss TTL; older payloads may lack it.
+// (the `permission_request` WS payload). tool_call_id is the tool_use id of the
+// call being gated — the same id the transcript carries — so parallel tool
+// calls in one assistant message each get their own independently answerable
+// prompt. timeout_ms is the prompt's server-side deadline (relative), used to
+// derive the client dismiss TTL; older payloads may lack it.
+//
+// title / display_name / description are the prompt copy the SDK already
+// rendered, absent when it rendered none. Only title is displayed: description
+// is a bridge subtitle that can restate the agent's own words for the call, and
+// what the user approves must be the real input (see PermissionPrompt).
 export interface PendingPermission {
-  request_id: string
+  tool_call_id: string
   tool_name: string
   input: Record<string, unknown>
   timeout_ms?: number
+  title?: string
+  display_name?: string
+  description?: string
 }
 
 // PermissionDecisionInput is the user's answer to a prompt — the body the
@@ -66,11 +75,11 @@ export type PermissionResolveResult =
 // is definitive; anything else is a transient error the caller surfaces.
 export async function resolvePermission(
   runID: string,
-  requestID: string,
+  toolCallID: string,
   decision: PermissionDecisionInput,
 ): Promise<PermissionResolveResult> {
   try {
-    const res = await fetch(`/api/agent/conversations/${runID}/permissions/${requestID}`, {
+    const res = await fetch(`/api/agent/conversations/${runID}/permissions/${toolCallID}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(decision),
