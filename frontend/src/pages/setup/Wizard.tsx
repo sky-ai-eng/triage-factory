@@ -538,11 +538,21 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       })
     })
     observer.observe(content)
+    // The inner content div must be watched DIRECTLY. At rest the body wrapper
+    // holds a fixed pixel height with overflow hidden, so content growing
+    // inside it — a validation error appearing under the fields, an async
+    // status landing — changes nothing about the outer container's size: the
+    // wrapper is the thing refusing to grow, and it clips the new content out
+    // of view. Watching only the outer div made that a closed loop (the error
+    // was rendered, measured, and invisible); watching the inner is what lets
+    // the wrapper learn it has to grow. Re-established per navigation (the
+    // activeIndex dep) because each step mounts its own inner div.
+    if (bodyInnerRef.current) observer.observe(bodyInnerRef.current)
     return () => {
       cancelAnimationFrame(frame)
       observer.disconnect()
     }
-  }, [wiz.phase, settle])
+  }, [wiz.phase, settle, activeIndex])
 
   // Any scroll we did not cause is the user taking over — whatever moved it.
   // `scrollend` closes our bracket as soon as the browser reports the scroll
