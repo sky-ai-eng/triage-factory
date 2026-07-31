@@ -27,7 +27,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Check } from 'lucide-react'
-import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
+import { AnimatePresence, cubicBezier, motion, useReducedMotion } from 'motion/react'
 import { useActiveOrgId } from '../../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID } from '../../lib/githubApp'
 import { WIZARD_SECTIONS, type WizardState } from './types'
@@ -36,7 +36,7 @@ import { useWizard } from './useWizard'
 import { isStepVisible } from './resume'
 import { CollapsedStepBar, SectionDivider } from './parts'
 import { GlassBackdrop } from './glass'
-import { bodyDurationMs, bodyEase } from './glassStyle'
+import { bodyDurationMs, bodyEase, bodyEasePoints } from './glassStyle'
 
 // Where the active step's action row comes to rest, as a fraction of viewport
 // height measured to the row's bottom edge. The two spacers rendered around the
@@ -65,6 +65,9 @@ const SETTLE_TAIL_MS = 80
 // arrives — an older browser, or a scrollTo that lands on the current offset and
 // so fires nothing at all.
 const SELF_SCROLL_MS = 150
+// The body animation's curve, for the scroll that tracks it on a backward move.
+// Same points as bodyEase, so the two finish on the same frame.
+const anchorEase = cubicBezier(...bodyEasePoints)
 
 function Loading() {
   return (
@@ -192,6 +195,8 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // around — and the lead spacer that buys room above the flow when the stack
   // is still too short to reach the line by scrolling alone.
   const actionsRef = useRef<HTMLDivElement | null>(null)
+  // The step on its way out during a backward move; null the rest of the time.
+  const leavingRef = useRef<HTMLLIElement | null>(null)
   const leadRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
   // Set once the user has taken the scroll over, cleared when the step changes:
@@ -219,16 +224,30 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // natural position rather than the position the last pass produced — that is
   // what keeps this idempotent instead of creeping down the page.
   const measureAnchor = useCallback(() => {
-    const actions = actionsRef.current
     const lead = leadRef.current
-    if (!actions) return null
+    // Whichever step is last in the flow — normally the active one, whose action
+    // row IS its bottom edge, and during a backward move the step on its way
+    // out. That switch is what makes Back the mirror of Forward rather than a
+    // different animation.
+    //
+    // Forward, the row we pin sits below BOTH animating bodies: the step being
+    // left shrinks above it and the arriving step grows above it, near-equal and
+    // opposite, so their sum holds still and the row has nothing to move for.
+    // Back, the arriving row sits BETWEEN them — its own body grows above it
+    // while the departing body shrinks below it, cancelling nothing — so pinning
+    // it means absorbing the whole growth. Pinning the bottom of the departing
+    // step instead puts the anchor below both bodies again, restoring the same
+    // cancellation, and it converges onto the arriving row's resting place as
+    // that step collapses to nothing.
+    const bottomOf = leavingRef.current ?? actionsRef.current
+    if (!bottomOf) return null
     const line = window.innerHeight * ACTIONS_REST
 
     const held = lead?.style.height ?? '0px'
     if (lead) lead.style.height = '0px'
     // Both reads happen inside the zeroed window so they share one frame of
     // reference; zeroing can clamp scrollY, and rect + scrollY cancel that out.
-    const naturalBottom = actions.getBoundingClientRect().bottom + window.scrollY
+    const naturalBottom = bottomOf.getBoundingClientRect().bottom + window.scrollY
     const naturalHeadingTop = headingRef.current
       ? headingRef.current.getBoundingClientRect().top + window.scrollY
       : null
@@ -296,15 +315,17 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     userScrolledRef.current = false
     headingRef.current?.focus({ preventScroll: true })
 
-    // Applied outright, in both directions. The arriving row is at its final
-    // position from the first frame either way: going forward the step being
-    // left is above it and collapsing, and going back the step being left is
-    // BELOW it — folding away beneath the line without ever moving it. So the
-    // anchor has nowhere to travel, and putting the row on the line immediately
-    // is what lets the fold happen in view. Interpolating instead holds the
-    // scroll behind while the document briefly carries both bodies at full
-    // height, and the departing step sweeps through the viewport on its way
-    // past — the flash this replaced.
+    // Forward applies the anchor outright: the row is already where it belongs,
+    // so there is nothing to ease and easing would only add travel.
+    //
+    // Back tracks the departing step's bottom edge, which very nearly holds
+    // still — but not exactly, because the arriving step's action row appears
+    // above it in the same frame it becomes active, and the departing step's own
+    // bar and margin collapse away underneath. Blending from wherever the flow
+    // is absorbs that: the anchor is continuous across the click, and lands on
+    // the true one by the time the bodies finish.
+    const startY = window.scrollY
+    const startLead = leadRef.current?.offsetHeight ?? 0
     const t0 = performance.now()
     transitioningRef.current = true
 
@@ -314,8 +335,19 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
         transitioningRef.current = false
         return
       }
-      settle()
-      if (performance.now() - t0 < bodyDurationMs + SETTLE_TAIL_MS) {
+      const elapsed = performance.now() - t0
+      // Re-measured every frame: the bodies are still animating, so the point
+      // being tracked is still settling.
+      const anchor = measureAnchor()
+      if (anchor) {
+        const eased =
+          reduce || travel === 'forward' ? 1 : anchorEase(Math.min(1, elapsed / bodyDurationMs))
+        applyAnchor(
+          startY + (anchor.top - startY) * eased,
+          startLead + (anchor.leadHeight - startLead) * eased,
+        )
+      }
+      if (elapsed < bodyDurationMs + SETTLE_TAIL_MS) {
         frame = requestAnimationFrame(tick)
       } else {
         transitioningRef.current = false
@@ -326,7 +358,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       cancelAnimationFrame(frame)
       transitioningRef.current = false
     }
-  }, [wiz.phase, activeIndex, settle])
+  }, [wiz.phase, activeIndex, measureAnchor, applyAnchor, reduce, travel])
 
   // Re-settle for as long as the flow's height is still moving: the outgoing
   // body collapsing, the incoming one expanding, and content that lands after
@@ -493,6 +525,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                       return (
                         <motion.li
                           key={step.id}
+                          ref={isLeaving ? leavingRef : undefined}
                           className="relative"
                           initial={false}
                           // Fading the <li> takes the gutter marker with it, which
@@ -568,14 +601,8 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                             {isActive && (
                               <motion.div
                                 key="body"
-                                // Going back, the step is simply revealed —
-                                // already open, the way it was left. The only
-                                // motion is the newer step folding away above
-                                // it. Unfolding it again would animate it as
-                                // though it were being reached for the first
-                                // time, when the move is a return to it.
                                 initial={
-                                  reduce || travel === 'back'
+                                  reduce
                                     ? false
                                     : {
                                         height: 0,
