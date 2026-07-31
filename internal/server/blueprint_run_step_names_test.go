@@ -52,8 +52,12 @@ func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 		t.Fatalf("planned run steps = %d, want 2", len(steps))
 	}
 	for i, want := range []string{"Reproduce", "Patch"} {
-		if steps[i].Step.Name != want {
-			t.Errorf("step %d name = %q, want %q", i, steps[i].Step.Name, want)
+		if steps[i].Step.Name == nil {
+			t.Errorf("step %d name omitted, want %q", i, want)
+			continue
+		}
+		if *steps[i].Step.Name != want {
+			t.Errorf("step %d name = %q, want %q", i, *steps[i].Step.Name, want)
 		}
 	}
 	// The name is additive: the brief still rides along as the secondary line.
@@ -83,21 +87,25 @@ func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 	if len(fallback) != 2 {
 		t.Fatalf("unplanned run steps = %d, want 2 (the live blueprint's steps)", len(fallback))
 	}
+	// omitempty means the key is absent, not present-and-empty (a *string stays
+	// nil on an absent key, but holds "" if an empty name leaks into the JSON).
 	for i, st := range fallback {
-		if st.Step.Name != "" {
-			t.Errorf("fallback step %d name = %q, want omitted", i, st.Step.Name)
+		if st.Step.Name != nil {
+			t.Errorf("fallback step %d name = %q, want omitted", i, *st.Step.Name)
 		}
 	}
 }
 
 // blueprintRunStepJSON is the decode target for the run projection's step list —
-// only the fields these assertions read.
+// only the fields these assertions read. Name is a *string so an omitted key is
+// distinguishable from one present but empty: the fallback path's contract is
+// that the key is absent, and a plain string would read "" either way.
 type blueprintRunStepJSON struct {
 	Step struct {
-		StepIndex    int    `json:"step_index"`
-		StepPromptID string `json:"step_prompt_id"`
-		Name         string `json:"name"`
-		Brief        string `json:"brief"`
+		StepIndex    int     `json:"step_index"`
+		StepPromptID string  `json:"step_prompt_id"`
+		Name         *string `json:"name"`
+		Brief        string  `json:"brief"`
 	} `json:"step"`
 }
 
