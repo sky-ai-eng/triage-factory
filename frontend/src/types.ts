@@ -161,6 +161,17 @@ export interface Conversation {
   actor_agent_name?: string
   blueprint_run_id?: string
   blueprint_step_index?: number | null
+  // Token rollups: the SUM over this conversation's messages, derived by the
+  // same run read that carries TotalCostUSD / DurationMs / NumTurns. The
+  // authoritative numbers — the same ones the usage dashboard reports — so a
+  // surface reads them here rather than walking the transcript. 0 for a run
+  // that never streamed a usage-bearing message; useRunDetail folds live
+  // per-message deltas on top between refetches of the run row, exactly as it
+  // does for cost.
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_tokens?: number
+  cache_creation_tokens?: number
 }
 
 // ArtifactKind is the closed set of artifact discriminators the backend emits

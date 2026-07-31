@@ -216,3 +216,73 @@ func TestHandleMessages_SinceID(t *testing.T) {
 	// reaching the store as `id > -N`.
 	eq("negative since_id", contents("?since_id=-5"), whole)
 }
+
+// TestRunResponse_TokenSums pins the four token rollups onto the run wire
+// shape: the read already SUMs them per conversation, so the run station's
+// telemetry rail reads the same authoritative numbers the usage dashboard
+// does instead of re-summing the transcript client-side. Emitted as plain
+// snake_case ints — a run with no usage-bearing message reads 0, never absent.
+func TestRunResponse_TokenSums(t *testing.T) {
+	s := newTestServer(t)
+	runID := seedSteerRun(t, s.db, "tok", "running")
+
+	store := sqlitestore.New(s.db)
+	usage := func(in, out, cacheRead, cacheWrite int) {
+		t.Helper()
+		if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+			ConversationID: runID, Role: "assistant", Content: "working", Subtype: "text",
+			InputTokens: &in, OutputTokens: &out, CacheReadTokens: &cacheRead, CacheCreationTokens: &cacheWrite,
+		}); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+	}
+	usage(10, 1, 100, 7)
+	usage(20, 2, 200, 0)
+	// A row with no usage at all (a user message / tool result) contributes
+	// nothing rather than breaking the SUM.
+	if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+		ConversationID: runID, Role: "user", Content: "carry on", Subtype: "text",
+	}); err != nil {
+		t.Fatalf("InsertMessage(no usage): %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	for key, want := range map[string]float64{
+		"input_tokens":          30,
+		"output_tokens":         3,
+		"cache_read_tokens":     300,
+		"cache_creation_tokens": 7,
+	} {
+		v, ok := got[key]
+		if !ok {
+			t.Errorf("run response missing %q", key)
+			continue
+		}
+		if n, isNum := v.(float64); !isNum || n != want {
+			t.Errorf("%s = %v, want %v", key, v, want)
+		}
+	}
+
+	// A run that never streamed a usage-bearing message reads 0 on all four.
+	bare := seedSteerRun(t, s.db, "tokbare", "queued")
+	rec = doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+bare, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET bare conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	got = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode bare: %v; body=%s", err, rec.Body.String())
+	}
+	for _, key := range []string{"input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"} {
+		if v, ok := got[key]; !ok || v.(float64) != 0 {
+			t.Errorf("bare run %s = %v (present=%v), want 0", key, v, ok)
+		}
+	}
+}

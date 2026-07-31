@@ -7,7 +7,7 @@ import {
   queueDwellMs,
   workStartedAt,
 } from '../../lib/runStatus'
-import { compactNum, tokenTotals, tint, type StationState } from './stationStyle'
+import { compactNum, tint, type StationState } from './stationStyle'
 import ArtifactList from '../ArtifactList'
 
 interface Props {
@@ -25,10 +25,17 @@ interface Props {
 // quiet, all monospace readouts and thin gauges. It carries only data the run
 // actually has — no faked context meter (that arrives with P4's telemetry).
 export function TelemetryRail({ run, messages, state, now, onOpenArtifact }: Props) {
-  // Both scans are O(all messages), and the rail re-renders every second for
-  // the elapsed readout (`now`) — memoize so the walk only happens when the
-  // transcript actually grew.
-  const tok = useMemo(() => tokenTotals(messages), [messages])
+  // The token rollups ride the run row (the run read SUMs them per
+  // conversation), so the rail shows the same authoritative numbers the usage
+  // dashboard does rather than re-summing the transcript — useRunDetail keeps
+  // them advancing mid-engagement by folding each streamed row's usage on top.
+  const inputTokens = run.input_tokens ?? 0
+  const outputTokens = run.output_tokens ?? 0
+  const cacheRead = run.cache_read_tokens ?? 0
+  const cacheWrite = run.cache_creation_tokens ?? 0
+  // The context scan does walk the transcript — it wants the last
+  // usage-bearing row, not a sum — and the rail re-renders every second for
+  // the elapsed readout (`now`), so memoize it on the message array.
   const contextUsed = useMemo(() => latestContextSize(messages), [messages])
   // Working time and queue dwell are separate gauges: elapsed/running tick
   // from the claim stamp (queue time never inflates them), the queued readout
@@ -48,11 +55,11 @@ export function TelemetryRail({ run, messages, state, now, onOpenArtifact }: Pro
     <aside className="hidden w-[256px] shrink-0 overflow-y-auto border-l border-border-subtle bg-black/[0.012] px-4 py-4 lg:block">
       {/* Output gauge — the work product, the headline readout. */}
       <Section label="Output">
-        <TokenGauge input={tok.input} output={tok.output} light={state.light} />
-        {(tok.cacheRead > 0 || tok.cacheWrite > 0) && (
+        <TokenGauge input={inputTokens} output={outputTokens} light={state.light} />
+        {(cacheRead > 0 || cacheWrite > 0) && (
           <div className="mt-2 flex items-center gap-3 font-mono text-[10px] tabular-nums text-text-tertiary/70">
-            {tok.cacheRead > 0 && <span>cache·r {compactNum(tok.cacheRead)}</span>}
-            {tok.cacheWrite > 0 && <span>cache·w {compactNum(tok.cacheWrite)}</span>}
+            {cacheRead > 0 && <span>cache·r {compactNum(cacheRead)}</span>}
+            {cacheWrite > 0 && <span>cache·w {compactNum(cacheWrite)}</span>}
           </div>
         )}
       </Section>

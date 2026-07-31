@@ -1,4 +1,4 @@
-import type { Message, Conversation } from '../../types'
+import type { Conversation } from '../../types'
 import { isActiveRun } from '../../lib/runStatus'
 import { hasUnresolvedArtifacts } from '../../lib/approval'
 
@@ -155,28 +155,6 @@ export function stationState(run: Conversation): StationState {
 // board's color-mix idiom so the state light reads as glow, not fill.
 export function tint(color: string, pct: number): string {
   return `color-mix(in srgb, ${color} ${pct}%, transparent)`
-}
-
-export interface TokenTotals {
-  input: number
-  output: number
-  cacheRead: number
-  cacheWrite: number
-  total: number
-}
-
-export function tokenTotals(messages: Message[]): TokenTotals {
-  let input = 0
-  let output = 0
-  let cacheRead = 0
-  let cacheWrite = 0
-  for (const m of messages) {
-    input += m.input_tokens ?? 0
-    output += m.output_tokens ?? 0
-    cacheRead += m.cache_read_tokens ?? 0
-    cacheWrite += m.cache_creation_tokens ?? 0
-  }
-  return { input, output, cacheRead, cacheWrite, total: input + output }
 }
 
 // liveHeat — vent-heat 0..1 for a live run: idles at the state's base heat and

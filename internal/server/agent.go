@@ -282,6 +282,15 @@ func runResponse(run *domain.Conversation, artifactCount int, arts []domain.Arti
 		"blueprint_run_id":     run.BlueprintRunID,
 		"blueprint_step_index": run.BlueprintStepIndex,
 		"artifact_count":       artifactCount,
+		// The token rollups the run read already SUMs, alongside the cost /
+		// duration / turns ones above. snake_case like every key added since
+		// the legacy PascalCase set froze. Plain ints — 0 for a run that never
+		// streamed a usage-bearing message — so a consumer never has to
+		// distinguish absent from none.
+		"input_tokens":          run.InputTokens,
+		"output_tokens":         run.OutputTokens,
+		"cache_read_tokens":     run.CacheReadTokens,
+		"cache_creation_tokens": run.CacheCreationTokens,
 	}
 	if artifactCount == 0 || len(arts) > 0 {
 		prCount, reviewCount := domain.UnresolvedArtifactCounts(arts)

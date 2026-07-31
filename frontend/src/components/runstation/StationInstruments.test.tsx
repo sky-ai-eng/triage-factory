@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react'
 import { TelemetryRail } from './StationInstruments'
 import { stationState } from './stationStyle'
 import { QUEUE_DWELL_VISIBLE_MS } from '../../lib/runStatus'
-import type { Conversation } from '../../types'
+import type { Conversation, Message } from '../../types'
 
 const T0 = new Date('2026-06-25T00:00:00Z').getTime()
 const iso = (offsetMs: number) => new Date(T0 + offsetMs).toISOString()
@@ -48,5 +48,50 @@ describe('TelemetryRail queued readout', () => {
     renderRail({ Status: 'queued', QueuedAt: iso(0) }, T0 + 2000)
     expect(screen.getByText('queued')).toBeInTheDocument()
     expect(screen.getByText('2s')).toBeInTheDocument()
+  })
+})
+
+// The token readouts come off the run row — the SUM the run read already
+// computes, the same numbers the usage dashboard reports — rather than a walk
+// of the held transcript. The transcript here carries different counts on
+// purpose: a rail that still summed it would show those instead.
+describe('TelemetryRail token readouts', () => {
+  const held: Message[] = [
+    {
+      id: 1,
+      conversation_id: 'r1',
+      role: 'assistant',
+      content: 'working',
+      subtype: 'text',
+      created_at: iso(0),
+      input_tokens: 7,
+      output_tokens: 7,
+      cache_read_tokens: 7,
+      cache_creation_tokens: 7,
+    },
+  ]
+
+  function renderTokens(over: Partial<Conversation>) {
+    const r = run(over)
+    render(<TelemetryRail run={r} messages={held} state={stationState(r)} now={T0 + 60_000} />)
+  }
+
+  it('reads the run row’s sums', () => {
+    renderTokens({
+      input_tokens: 12_300,
+      output_tokens: 450,
+      cache_read_tokens: 98_000,
+      cache_creation_tokens: 2100,
+    })
+    expect(screen.getByText('12.3k')).toBeInTheDocument()
+    expect(screen.getByText('450')).toBeInTheDocument()
+    expect(screen.getByText('cache·r 98k')).toBeInTheDocument()
+    expect(screen.getByText('cache·w 2.1k')).toBeInTheDocument()
+  })
+
+  it('shows zeros for a run that never streamed usage, and hides the cache line', () => {
+    renderTokens({ input_tokens: 0, output_tokens: 0 })
+    expect(screen.getAllByText('0')).toHaveLength(2)
+    expect(screen.queryByText(/cache·/)).not.toBeInTheDocument()
   })
 })
