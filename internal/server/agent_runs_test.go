@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -153,4 +154,65 @@ func TestHandleConversations_BatchedCap(t *testing.T) {
 	if got := runsFor(tail); len(got[taskID]) != 0 {
 		t.Errorf("tail beyond cap: task should be truncated out, got %d runs", len(got[taskID]))
 	}
+}
+
+// TestHandleMessages_SinceID pins the transcript read's optional watermark: the
+// run station polls with it to repair rows whose websocket frame was dropped,
+// and every other caller — which passes nothing — must keep getting the whole
+// transcript. An unparseable value reads as no watermark rather than a 400: it
+// describes what the caller already holds, not what it is asking for.
+func TestHandleMessages_SinceID(t *testing.T) {
+	s := newTestServer(t)
+	runID := seedSteerRun(t, s.db, "since", "running")
+
+	store := sqlitestore.New(s.db)
+	ids := map[string]int{}
+	for _, content := range []string{"first", "second", "third"} {
+		id, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+			ConversationID: runID, Role: "assistant", Content: content, Subtype: "text",
+		})
+		if err != nil {
+			t.Fatalf("InsertMessage(%s): %v", content, err)
+		}
+		ids[content] = int(id)
+	}
+
+	contents := func(query string) []string {
+		t.Helper()
+		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/messages"+query, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET messages%s = %d; body=%s", query, rec.Code, rec.Body.String())
+		}
+		var msgs []map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &msgs); err != nil {
+			t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+		}
+		out := make([]string, 0, len(msgs))
+		for _, m := range msgs {
+			out = append(out, fmt.Sprint(m["content"]))
+		}
+		return out
+	}
+	eq := func(desc string, got, want []string) {
+		t.Helper()
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("%s = %v, want %v", desc, got, want)
+		}
+	}
+
+	whole := []string{"first", "second", "third"}
+	eq("no since_id", contents(""), whole)
+	eq("since_id=0", contents("?since_id=0"), whole)
+	eq("since_id=first", contents(fmt.Sprintf("?since_id=%d", ids["first"])), []string{"second", "third"})
+	eq("since_id=third", contents(fmt.Sprintf("?since_id=%d", ids["third"])), nil)
+	eq("unparseable since_id", contents("?since_id=nonsense"), whole)
+
+	// Whitespace is trimmed before parsing, so a padded watermark is still a
+	// watermark — treating it as unparseable would quietly turn a repair read
+	// into a full transcript read on every tick.
+	eq("padded since_id", contents(fmt.Sprintf("?since_id=%%20%d%%20", ids["first"])), []string{"second", "third"})
+
+	// A negative watermark means nothing, so it normalizes to 0 rather than
+	// reaching the store as `id > -N`.
+	eq("negative since_id", contents("?since_id=-5"), whole)
 }

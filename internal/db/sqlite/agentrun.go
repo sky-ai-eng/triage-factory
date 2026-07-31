@@ -1048,7 +1048,15 @@ func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 	return messages, rows.Err()
 }
 
+// Messages is the whole-transcript display read — MessagesSince from the
+// bottom. id is AUTOINCREMENT, so no row can be at or below 0 and the
+// watermark drops out: routing both through one query is what makes the
+// two reads' visibility filter identical rather than merely matching.
 func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
+	return s.MessagesSince(ctx, orgID, runID, 0)
+}
+
+func (s *agentRunStore) MessagesSince(ctx context.Context, orgID, runID string, sinceID int) ([]domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -1060,9 +1068,10 @@ func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]do
 		SELECT `+sqliteMessageColumns+`
 		FROM messages
 		WHERE conversation_id = ?
+		  AND id > ?
 		  AND NOT (delivered = 0 AND window_state = 'inactive')
 		ORDER BY id ASC
-	`, runID)
+	`, runID, sinceID)
 	if err != nil {
 		return nil, err
 	}

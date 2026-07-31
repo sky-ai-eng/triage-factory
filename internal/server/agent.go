@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -303,10 +304,29 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	conversationID := r.PathValue("conversationID")
+	// since_id is an optional watermark: the caller already holds every row up
+	// to it and wants only what came after. A client repairing a transcript it
+	// built from websocket frames polls with it.
+	//
+	// Anything that isn't a usable watermark normalizes to 0 — the whole
+	// transcript, which is what every other caller asks for — rather than a
+	// 400, since a watermark describes what the caller already has, not a
+	// selector it can get wrong in a way worth failing a read over. That
+	// covers three cases, and each is normalized here rather than passed down:
+	// absent, unparseable, and negative. A negative one would reach the store
+	// as `id > -N`, which happens to select the whole transcript today only
+	// because ids start at 1 — a coincidence, not a contract, so the store is
+	// never handed a watermark that means nothing. Surrounding whitespace is
+	// trimmed first (the convention for query params here); without that, a
+	// stray space would silently demote a real watermark to a full read.
+	sinceID, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("since_id")))
+	if err != nil || sinceID < 0 {
+		sinceID = 0
+	}
 	var messages []domain.Message
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		messages, e = tx.Conversations.Messages(r.Context(), orgID, conversationID)
+		messages, e = tx.Conversations.MessagesSince(r.Context(), orgID, conversationID, sinceID)
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)

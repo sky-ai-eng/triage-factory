@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Message, Conversation, Artifact, Task, WSEvent } from '../types'
 import { readError } from '../lib/api'
-import { isPermissionTerminalStatus } from '../lib/runStatus'
+import { isActiveRun, isPermissionTerminalStatus } from '../lib/runStatus'
 import { useWebSocket } from './useWebSocket'
 import { usePermissionQueues } from './usePermissionQueues'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
@@ -40,6 +40,25 @@ export interface RunDetailState {
   softRefresh: () => void
 }
 
+// mergeMessages folds rows into the held transcript, keeping it ordered by id
+// and dropping any id already present — the held copy wins, since it may carry
+// a stamp the incoming one lacks. Every path that adds rows goes through it
+// (the initial fetch, the websocket append, the reconcile poll), so a row
+// delivered twice — a refetch racing a frame, or a repair of a frame that
+// turned out not to have been dropped — can never render twice.
+function mergeMessages(prev: Message[], incoming: Message[]): Message[] {
+  if (prev.length === 0) return incoming
+  const held = new Set(prev.map((m) => m.id))
+  const fresh = incoming.filter((m) => !held.has(m.id))
+  if (fresh.length === 0) return prev
+  return [...prev, ...fresh].sort((a, b) => a.id - b.id)
+}
+
+// maxMessageID is the last id in a read, or 0 for an empty one.
+function maxMessageID(msgs: Message[]): number {
+  return msgs.reduce((max, m) => (m.id > max ? m.id : max), 0)
+}
+
 // useRunDetail loads a single agent run, its messages, and the parent
 // task, then subscribes to live websocket updates so the page stays
 // fresh while the agent works. We fetch the task separately because
@@ -63,6 +82,54 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   // gates the async setters below so a fetch for the previous run can't land
   // after navigation and overwrite the new run's state.
   const lastRunIDRef = useRef<string | undefined>(runID)
+
+  // Mirrors of the two states the reconcile tick reads. That interval is
+  // created once per run, so it cannot close over `run` / `messages` directly:
+  // a dep on either would tear the timer down and rebuild it on every streamed
+  // row (foldMessageCost writes `run` per stamped message), and on a busy run
+  // the 5s tick would never come due. Written after commit, so by the time a
+  // tick fires they hold what the view is showing.
+  const runRef = useRef<Conversation | null>(null)
+  const messagesRef = useRef<Message[]>([])
+
+  // Whether this run has been seen live since the last repair, which is what
+  // buys the settled run one closing read instead of none.
+  //
+  // Gating the repair on "live right now" leaves the last row of a run
+  // unreachable: status and transcript arrive as separate frames, so the hub
+  // can drop the final `message` and deliver the `conversation_update` that
+  // settles the run, and by the next tick the gate is shut on a transcript
+  // that is still missing a row. Set here rather than at tick time so it
+  // reflects every run row observed — a run that settles between two ticks
+  // still leaves the flag up for the tick that follows.
+  const sawActiveRef = useRef(false)
+  useEffect(() => {
+    runRef.current = run
+    if (run && isActiveRun(run)) sawActiveRef.current = true
+  }, [run])
+  useEffect(() => {
+    messagesRef.current = messages
+  }, [messages])
+
+  // The id through which the held transcript is known complete, and the
+  // watermark every repair reads from. It is the high-water mark of a *whole*
+  // read — the initial fetch, or a repair response — and never of a websocket
+  // append. That distinction is the whole of the repair.
+  //
+  // The tempting version, "highest id held", is unsound: ids come from one
+  // table shared by every conversation and the display read hides withdrawn
+  // rows, so a gap in what the client holds is indistinguishable from the
+  // ordinary spacing between two ids and there is nothing to detect it with.
+  // Frames go missing with the socket still up (the hub drops for a slow
+  // client rather than disconnecting), so a row that lands above a gap is the
+  // expected case, not a corner one — and a watermark taken from it steps
+  // over the dropped rows permanently, which is the bug rather than the fix.
+  //
+  // The price of the sound watermark is that a repair re-sends whatever the
+  // socket delivered since the previous one, so an open station on a live run
+  // carries each row twice. That is what verifying instead of assuming costs,
+  // and it is bounded by a single tick of streaming.
+  const completeThroughRef = useRef(0)
 
   // The ids whose cost stamp the displayed total already counts: seeded from the
   // fetched transcript (those stamps are inside the run row's SUM) and extended
@@ -157,6 +224,12 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
       setTask(null)
       setMessages([])
       setArtifacts([])
+      // Nothing has been read for this run yet, so it is complete through
+      // nothing — the load below re-establishes the watermark, and the run
+      // row it fetches decides whether this one is owed any repair at all.
+      completeThroughRef.current = 0
+      messagesRef.current = []
+      sawActiveRef.current = false
       // A new run starts with no prompts; drop the prior run's queue + timers.
       if (prevRunID) dropRun(prevRunID)
     }
@@ -214,17 +287,14 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
               if (m.cost_usd != null) seeded.add(m.id)
             }
             costBaseline.current = seeded
+            // A whole read: the transcript is complete through its last row,
+            // so repairs start asking from there.
+            completeThroughRef.current = maxMessageID(msgs)
             // Merge by id rather than replacing. If a websocket
             // `message` event arrived between the run fetch starting and
             // the messages fetch resolving, a wholesale replace would
             // erase that newer row until the next refetch.
-            setMessages((prev) => {
-              if (prev.length === 0) return msgs
-              const byID = new Map<number, Message>()
-              for (const m of msgs) byID.set(m.id, m)
-              for (const m of prev) byID.set(m.id, m)
-              return Array.from(byID.values()).sort((a, b) => a.id - b.id)
-            })
+            setMessages((prev) => mergeMessages(prev, msgs))
           }
         } else if (!cancelled) {
           setError(await readError(msgsRes, 'Failed to load messages'))
@@ -255,10 +325,58 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   // terminal — and broadcasts any transition as artifact_updated, which the
   // websocket handler below turns into a run refetch. On a dropped frame the
   // {updated} count drives a defensive refetch so the view can't go stale.
+  //
+  // The same tick also repairs the transcript. A `message` frame is the only
+  // thing that appends a row between page loads, so anything emitted while the
+  // socket was down — a reconnect, a suspended tab, a control-plane restart, or
+  // a hub drop with the socket still up — would be missing until a full reload,
+  // with nothing on screen to say so. Re-reading from the watermark turns the
+  // frame back into what it should be: a hint that arrives faster than the
+  // poll, rather than the sole path to the row. Bounded by construction — one
+  // request per tick while the run is live, answering with the rows written
+  // since the last one, plus a single closing read once it settles.
   useEffect(() => {
     if (!runID) return
     let cancelled = false
+    const reconcileMessages = () => {
+      const current = runRef.current
+      if (!current) return
+      // A live run is repaired every tick. A settled one is repaired once —
+      // its transcript is final, so a single read closes it out and there is
+      // never a reason to ask again. A run already settled when the station
+      // opened never asks at all: the load read it whole.
+      const settled = !isActiveRun(current)
+      if (settled && !sawActiveRef.current) return
+      const sinceID = completeThroughRef.current
+      fetch(`/api/agent/conversations/${runID}/messages?since_id=${sinceID}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((rows: Message[] | null) => {
+          if (cancelled || rows === null || runID !== lastRunIDRef.current) return
+          // The closing read landed, so stop asking. Only a real response
+          // counts — a failed one leaves the flag up so the next tick retries,
+          // which is the difference between closing the transcript out and
+          // merely having tried to.
+          if (settled) sawActiveRef.current = false
+          if (rows.length === 0) return
+          // Another whole read landed, so the watermark moves up to its last
+          // row — but only forward, since a response that raced a fresher one
+          // (or a refetch) would otherwise walk it back over rows already
+          // reconciled and re-ask for them every tick from then on.
+          completeThroughRef.current = Math.max(completeThroughRef.current, maxMessageID(rows))
+          // Most of what comes back is already held — the socket delivered it
+          // in the seconds since the last repair. What is left is what the
+          // socket lost, and it folds its cost exactly as the frame that
+          // never arrived would have.
+          const seen = new Set(messagesRef.current.map((m) => m.id))
+          const repaired = rows.filter((m) => !seen.has(m.id))
+          if (repaired.length === 0) return
+          setMessages((prev) => mergeMessages(prev, repaired))
+          for (const m of repaired) foldMessageCost(m)
+        })
+        .catch(() => {})
+    }
     const poll = () => {
+      reconcileMessages()
       fetch(`/api/agent/conversations/${runID}/artifacts/refresh`, { method: 'POST' })
         .then((r) => (r.ok ? r.json() : null))
         .then((data: { updated?: number } | null) => {
@@ -281,7 +399,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
       cancelled = true
       clearInterval(id)
     }
-  }, [runID, refetchArtifacts])
+  }, [runID, refetchArtifacts, foldMessageCost])
 
   // Live updates. A `message` event appends, and folds any cost the row carries
   // into the held run's total so the spend readout tracks a long engagement;
@@ -294,13 +412,9 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
       (event: WSEvent) => {
         if (!runID) return
         if (event.type === 'message' && event.conversation_id === runID) {
-          setMessages((prev) => {
-            // Dedup: a refetch + ws race can replay the same row. Match
-            // on id, which is set server-side by the time the row hits
-            // the wire.
-            if (prev.some((m) => m.id === event.data.id)) return prev
-            return [...prev, event.data]
-          })
+          // Dedup by id (set server-side by the time the row hits the wire):
+          // a refetch, or the reconcile poll, can replay the same row.
+          setMessages((prev) => mergeMessages(prev, [event.data]))
           foldMessageCost(event.data)
         }
         if (event.type === 'conversation_update' && event.conversation_id === runID) {

@@ -2131,6 +2131,15 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		assertContents("MessagesForRuns", batched)
 
+		// The incremental read is the same display read from a watermark, so
+		// an unbounded one has to answer exactly what Messages does — a client
+		// repairing a transcript must not be shown a row the full read hides.
+		sinceZero, err := store.MessagesSince(ctx, orgID, runID, 0)
+		if err != nil {
+			t.Fatalf("MessagesSince: %v", err)
+		}
+		assertContents("MessagesSince(0)", sinceZero)
+
 		// Assembly excludes every inactive row — withdrawn AND compacted.
 		asm, err := store.ListForAssembly(ctx, orgID, runID)
 		if err != nil {
@@ -2144,6 +2153,78 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if len(asmContents) != len(wantAsm) || asmContents[0] != wantAsm[0] || asmContents[1] != wantAsm[1] {
 			t.Errorf("ListForAssembly = %v, want %v", asmContents, wantAsm)
 		}
+	})
+
+	t.Run("MessagesSince_ReturnsOnlyRowsAboveTheWatermark", func(t *testing.T) {
+		// Backs the run station's transcript repair: the client holds every
+		// row up to the watermark and asks for what it missed while its
+		// websocket was down.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+		otherID := seedConversationForTest(t, orgID, seed, "running")
+
+		insert := func(conversationID, content string) int {
+			t.Helper()
+			id, err := store.InsertMessage(ctx, orgID, &domain.Message{
+				ConversationID: conversationID, Role: "assistant", Subtype: "text", Content: content,
+			})
+			if err != nil {
+				t.Fatalf("InsertMessage %q: %v", content, err)
+			}
+			return int(id)
+		}
+		first := insert(runID, "first")
+		second := insert(runID, "second")
+		insert(otherID, "other-run")
+		third := insert(runID, "third")
+
+		contents := func(desc string, sinceID int) []string {
+			t.Helper()
+			msgs, err := store.MessagesSince(ctx, orgID, runID, sinceID)
+			if err != nil {
+				t.Fatalf("MessagesSince(%s): %v", desc, err)
+			}
+			var out []string
+			for _, m := range msgs {
+				out = append(out, m.Content)
+			}
+			return out
+		}
+		eq := func(desc string, got, want []string) {
+			t.Helper()
+			if len(got) != len(want) {
+				t.Fatalf("MessagesSince(%s) = %v, want %v", desc, got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Errorf("MessagesSince(%s)[%d] = %q, want %q", desc, i, got[i], want[i])
+				}
+			}
+		}
+
+		// Below every id: the whole transcript, in id order — and only this
+		// conversation's rows, so a shared watermark can't leak a sibling run.
+		eq("0", contents("0", 0), []string{"first", "second", "third"})
+		// Strictly greater than: the row at the watermark is the last one the
+		// caller already holds, so re-sending it would be a duplicate.
+		eq("first", contents("first", first), []string{"second", "third"})
+		eq("second", contents("second", second), []string{"third"})
+		// Caught up — the common answer once no frames are being dropped.
+		eq("third", contents("third", third), nil)
+
+		// A withdrawn-pending row above the watermark stays hidden: the
+		// incremental read is not a back door around the display filter.
+		undelivered := false
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: runID, Role: "user", Subtype: "injection:system-note", Content: "withdrawn",
+			Delivered: &undelivered, WindowState: domain.MessageWindowInactive,
+		}); err != nil {
+			t.Fatalf("InsertMessage withdrawn: %v", err)
+		}
+		visible := insert(runID, "fourth")
+		eq("third, after a withdrawn row", contents("third", third), []string{"fourth"})
+		eq("fourth", contents("fourth", visible), nil)
 	})
 
 	t.Run("MarkDelivered_FlipsOnlyGivenIDsScopedToRun", func(t *testing.T) {

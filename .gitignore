@@ -3,7 +3,10 @@
 triagefactory
 
 # Frontend
-frontend/node_modules/
+# Unanchored, so a stray install or tool cache anywhere in the tree (a
+# root-level node_modules from running npx outside frontend/, say) is ignored
+# rather than sitting there waiting to be swept into a commit.
+node_modules/
 frontend/dist/
 
 # IDE
