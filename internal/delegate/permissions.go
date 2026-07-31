@@ -1,10 +1,22 @@
 // The browser tool-permission round-trip. When a run is spawned with the
 // handler this file builds, every canUseTool prompt the agent raises is
-// surfaced to the browser as a `permission_request` WS event and the agent's
-// turn is parked until the user answers via ResolvePermission (the
+// recorded, surfaced to the browser as a `permission_request` WS event, and the
+// agent's turn is parked until the user answers via ResolvePermission (the
 // POST .../permissions/{id} endpoint) — or a bounded timeout denies it. The
 // broker (s.permPending) is in-memory only and keyed by the tool_use id of the
 // call being gated, so a prompt names the same call the transcript does.
+//
+// Two halves, and the split is load-bearing. The BROKER is the mechanism: the
+// parked goroutine, the 1-buffered channel, the deregister-then-drain ordering
+// and the timers are what actually unblock the agent, and nothing here drives
+// it off a table. The conversation_permissions ROW is the record: it gives a
+// live prompt an address (GET .../permissions, so a refresh, a second tab, or a
+// cold board load can reconstruct what a fire-once frame told exactly one
+// listener) and gives every resolution an audit trail with a machine-readable
+// reason — an approve used to leave no trace at all, and a deny survived only as
+// prose in a tool_result, where "a human refused this" and "nobody was watching"
+// look the same. Every write here is best-effort: failing to record a prompt
+// must never become a reason to fail to ask it.
 //
 // Both runLiveAndDrive call sites (the initial run and the resume) drive
 // through this same streaming-input path — local direct runs and multi-mode
@@ -214,7 +226,13 @@ func clampGrace(grace, full time.Duration) time.Duration {
 // canUseTool prompt to the browser and parks the agent's turn until the user
 // answers (ResolvePermission) or the bounded wait denies it. Safe to call from
 // the agentproc reader goroutine: it registers a 1-buffered channel keyed by the
-// request id, broadcasts a `permission_request`, waits, and always deregisters.
+// request id, records the prompt, broadcasts a `permission_request`, waits, and
+// always deregisters.
+//
+// claimID is the engagement raising the prompt. It scopes the durable row so a
+// prompt outliving its own process reads as gone (ListPending derives pending
+// against the conversation's ACTIVE claim), which is what makes the read
+// correct after a crash that ran no cleanup at all.
 //
 // absent is the presence-gated fast-deny policy (TFAC-392). With it disabled the
 // wait is exactly the legacy full-permTimeout() select; with it enabled an
@@ -222,7 +240,7 @@ func clampGrace(grace, full time.Duration) time.Duration {
 // reason (permDenyNoOperator), while a present, focused board/run tab extends
 // the wait to the full window. Either way the total wait never exceeds
 // permTimeout() and a 200-acknowledged decision is never dropped.
-func (s *Spawner) BrowserPermissionHandler(orgID, runID string, absent AbsentAutoDeny) agentproc.PermissionHandler {
+func (s *Spawner) BrowserPermissionHandler(orgID, runID, claimID string, absent AbsentAutoDeny) agentproc.PermissionHandler {
 	return func(req agentproc.PermissionRequest) agentproc.PermissionDecision {
 		key := permKey(runID, req.ToolCallID)
 		ch := make(chan agentproc.PermissionDecision, 1)
@@ -235,41 +253,33 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID string, absent AbsentAut
 			s.mu.Unlock()
 		}()
 
-		// Hub.Broadcast is nil-receiver-safe, so no guard is needed for the
-		// hub-less test spawner. timeout_ms is the prompt's server-side
-		// deadline, sent relative so the client derives its dismiss TTL from
-		// the payload instead of mirroring this Go constant (and so clock
-		// skew between server and browser doesn't matter). It stays the FULL
-		// window even when absent-deny may fire sooner: the card's client TTL
-		// is a backstop, and an absent-deny eagerly broadcasts
-		// permission_resolved to drop the card the moment it fires.
+		// full is the prompt's server-side deadline. It stays the FULL window
+		// even when absent-deny may fire sooner: the card's client TTL is a
+		// backstop, and an absent-deny eagerly broadcasts permission_resolved
+		// to drop the card the moment it fires.
 		full := s.permTimeout()
-		data := map[string]any{
-			"tool_call_id": req.ToolCallID,
-			"tool_name":    req.ToolName,
-			"input":        req.Input,
-			"timeout_ms":   full.Milliseconds(),
-		}
-		// The SDK's own prompt copy, when it rendered any. Omitted rather
-		// than sent empty so "present" means "better than what the client
-		// would reconstruct from tool_name + input".
-		if req.Title != "" {
-			data["title"] = req.Title
-		}
-		if req.DisplayName != "" {
-			data["display_name"] = req.DisplayName
-		}
-		if req.Description != "" {
-			data["description"] = req.Description
-		}
+
+		// Record BEFORE broadcasting, so the frame is a hint pointing at
+		// something that already exists: a client that refetches the instant it
+		// arrives finds the prompt, and a client that never saw the frame at
+		// all (refresh, second tab, cold load) finds it too.
+		s.recordPermissionRequest(orgID, runID, claimID, full, req)
+
+		// Hub.Broadcast is nil-receiver-safe, so no guard is needed for the
+		// hub-less test spawner. The payload is deliberately just the id: the
+		// prompt itself is read from
+		// GET /api/agent/conversations/{id}/permissions, so the socket is a
+		// refetch trigger like artifact_updated rather than the sole carrier of
+		// state no other path can reach. That costs one round-trip before a
+		// prompt renders, which is nothing against a human-paced, rare event.
 		s.wsHub.Broadcast(websocket.Event{
 			Type:           "permission_request",
 			OrgID:          orgID,
 			ConversationID: runID,
-			Data:           data,
+			Data:           map[string]any{"tool_call_id": req.ToolCallID},
 		})
 
-		decision, got, reason := s.awaitPermission(ch, orgID, runID, full, absent)
+		decision, got, reason, why := s.awaitPermission(ch, orgID, runID, full, absent)
 		if got {
 			return decision
 		}
@@ -285,21 +295,94 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID string, absent AbsentAut
 		s.mu.Unlock()
 		select {
 		case d := <-ch:
+			// Buffered under s.mu while the entry was live, so the row was
+			// already stamped by the resolver that acknowledged it.
 			return d
 		default:
-			// The prompt is no longer answerable, so tell every surface showing
-			// it to drop it now instead of waiting out its own client TTL
-			// (ResolvePermission already broadcasts for the user-answered case).
+			// The prompt is no longer answerable. Stamp the row with WHY —
+			// 'timeout' and 'absent' are the whole reason this column exists,
+			// since the agent-facing prose below says the same thing in
+			// English that is free to be reworded — then tell every surface
+			// showing it to drop it now instead of waiting out its own client
+			// TTL (ResolvePermission already broadcasts for the answered case).
+			s.resolvePermissionRow(orgID, runID, req.ToolCallID, domain.PermissionStateDenied, why, "")
 			s.broadcastPermissionResolved(orgID, runID, req.ToolCallID)
 			return agentproc.PermissionDecision{Behavior: "deny", Message: reason}
 		}
 	}
 }
 
+// recordPermissionRequest writes the durable 'pending' row for a freshly
+// surfaced prompt. Best-effort by construction: a store that isn't wired, or a
+// write that fails, costs the prompt its address (a refresh won't rebuild it)
+// but must never cost the agent its question — the broker has already parked
+// and the browser is about to be told, so returning early here would strand the
+// run for the full window over a bookkeeping failure.
+func (s *Spawner) recordPermissionRequest(orgID, runID, claimID string, full time.Duration, req agentproc.PermissionRequest) {
+	if s.permissions == nil {
+		return
+	}
+	now := time.Now().UTC()
+	expires := now.Add(full)
+	err := s.permissions.Create(context.Background(), orgID, &domain.ConversationPermission{
+		ConversationID: runID,
+		ClaimID:        claimID,
+		ToolCallID:     req.ToolCallID,
+		ToolName:       req.ToolName,
+		Input:          req.Input,
+		Title:          req.Title,
+		State:          domain.PermissionStatePending,
+		RequestedAt:    now,
+		ExpiresAt:      &expires,
+	})
+	if err != nil {
+		delegateLog.Warn("record pending tool permission failed; prompt is live but not reloadable",
+			"run", runID, "tool_call_id", req.ToolCallID, "error", err)
+	}
+}
+
+// resolvePermissionRow stamps a prompt's terminal on its durable row. Same
+// best-effort posture as the insert: the broker has already decided and the
+// agent is already unblocked by the time this runs, so a failure loses an audit
+// row rather than changing what happened. decidedBy is set only for a human
+// answer.
+func (s *Spawner) resolvePermissionRow(orgID, runID, toolCallID, state, reason, decidedBy string) {
+	if s.permissions == nil {
+		return
+	}
+	if err := s.permissions.Resolve(context.Background(), orgID, runID, toolCallID, state, reason, decidedBy); err != nil {
+		delegateLog.Warn("record tool permission resolution failed",
+			"run", runID, "tool_call_id", toolCallID, "state", state, "reason", reason, "error", err)
+	}
+}
+
+// ExpirePermissionsForClaim marks an engagement's still-open prompts expired
+// when it releases its claim, so the audit history reads as settled rather than
+// leaving questions that look live forever.
+//
+// Best-effort on purpose, and NOTHING depends on it landing: ListPending
+// derives pending against the conversation's active claim, so a released
+// claim's prompts stop being pending whether or not this ever ran. That is
+// exactly what makes the arrangement survive the crash it exists for — a
+// process that dies mid-prompt runs no cleanup by definition.
+func (s *Spawner) ExpirePermissionsForClaim(orgID, claimID string) {
+	if s.permissions == nil || claimID == "" {
+		return
+	}
+	if err := s.permissions.ExpireForClaim(context.Background(), orgID, claimID); err != nil {
+		delegateLog.Warn("expire pending tool permissions for released claim failed",
+			"claim_id", claimID, "error", err)
+	}
+}
+
 // awaitPermission blocks until the prompt is answered or a deadline fires. It
-// returns (decision, true, "") when a decision arrives on ch — the caller
-// returns it verbatim — and (zero, false, reason) when a deadline elapses, where
-// reason is the deny message the caller uses after its deregister-then-drain.
+// returns (answer, true, "", "") when a decision arrives on ch — the caller
+// returns its decision verbatim — and (zero, false, reason, why) when a
+// deadline elapses, where reason is the agent-facing deny message the caller
+// uses after its deregister-then-drain and why is the machine-readable
+// domain.PermissionReason* for the audit row. The two are deliberately
+// separate: the prose is written for an agent and free to be reworded, the
+// reason is a stored enum nothing should have to parse English to recover.
 //
 // With absent.enabled false this is the exact legacy select: ch vs the full
 // window. With it enabled the wait polls presence on a short ticker and tracks
@@ -309,13 +392,13 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID string, absent AbsentAut
 // to the full window (clears absentSince), and flipping back resets the grace
 // clock. The grace deadline never exceeds the full window (clampGrace), so the
 // total wait is bounded by permTimeout() in every branch.
-func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, runID string, full time.Duration, absent AbsentAutoDeny) (agentproc.PermissionDecision, bool, string) {
+func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, runID string, full time.Duration, absent AbsentAutoDeny) (agentproc.PermissionDecision, bool, string, string) {
 	if !absent.enabled {
 		select {
 		case d := <-ch:
-			return d, true, ""
+			return d, true, "", ""
 		case <-time.After(full):
-			return agentproc.PermissionDecision{}, false, permDenyTimedOut(full)
+			return agentproc.PermissionDecision{}, false, permDenyTimedOut(full), domain.PermissionReasonTimeout
 		}
 	}
 
@@ -345,17 +428,17 @@ func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, r
 	for {
 		select {
 		case d := <-ch:
-			return d, true, ""
+			return d, true, "", ""
 		case <-fullTimer.C:
 			// Watched-but-unanswered for the whole window (or grace never fired
 			// because presence kept re-arming) — the legacy timeout.
-			return agentproc.PermissionDecision{}, false, permDenyTimedOut(full)
+			return agentproc.PermissionDecision{}, false, permDenyTimedOut(full), domain.PermissionReasonTimeout
 		case <-graceTimer.C:
 			// Only armed while unattended, so reaching it means genuinely nobody
 			// could answer within the grace. The reported wait is the grace
 			// window, which is measured from the moment the last operator left,
 			// not from when the prompt was raised.
-			return agentproc.PermissionDecision{}, false, permDenyNoOperator(absent.grace)
+			return agentproc.PermissionDecision{}, false, permDenyNoOperator(absent.grace), domain.PermissionReasonAbsent
 		case <-ticker.C:
 			now := s.presentFor(orgID, runID)
 			switch {
@@ -494,8 +577,10 @@ func (s *Spawner) AutoApprovePermissionHandler(runID string) agentproc.Permissio
 // itself just isn't/no-longer pending — already answered, timed out, or
 // never existed) is genuinely stale/not-found, never a routing question,
 // so it short-circuits before ever trying remote.
-func (s *Spawner) ResolvePermission(orgID, runID, toolCallID string, d agentproc.PermissionDecision) error {
-	err := s.resolvePermissionLocal(orgID, runID, toolCallID, d)
+// decidedBy is the answering user, stamped onto the audit row so an approval
+// names who granted it — the fact the old arrangement recorded nowhere at all.
+func (s *Spawner) ResolvePermission(orgID, runID, toolCallID, decidedBy string, d agentproc.PermissionDecision) error {
+	err := s.resolvePermissionLocal(orgID, runID, toolCallID, decidedBy, d)
 	if err == nil || !errors.Is(err, ErrNoPendingPermission) {
 		return err
 	}
@@ -508,12 +593,12 @@ func (s *Spawner) ResolvePermission(orgID, runID, toolCallID string, d agentproc
 	if runSignals == nil {
 		return ErrNoPendingPermission
 	}
-	return s.routePermission(orgID, runID, toolCallID, d)
+	return s.routePermission(orgID, runID, toolCallID, decidedBy, d)
 }
 
 // resolvePermissionLocal is ResolvePermission's original N=1 body: resolve
 // the in-memory broker entry and buffer the decision.
-func (s *Spawner) resolvePermissionLocal(orgID, runID, toolCallID string, d agentproc.PermissionDecision) error {
+func (s *Spawner) resolvePermissionLocal(orgID, runID, toolCallID, decidedBy string, d agentproc.PermissionDecision) error {
 	s.mu.Lock()
 	p, ok := s.permPending[permKey(runID, toolCallID)]
 	if !ok || p.orgID != orgID {
@@ -523,9 +608,19 @@ func (s *Spawner) resolvePermissionLocal(orgID, runID, toolCallID string, d agen
 	select {
 	case p.ch <- d:
 		s.mu.Unlock()
-		// The decision is buffered (a real 200 promise). Tell other surfaces
-		// showing this prompt to drop it now — broadcast outside s.mu so the
-		// hub's own locking never nests under the broker mutex.
+		// The decision is buffered (a real 200 promise), so this is the moment
+		// the answer became true — stamp the row here rather than on the parked
+		// goroutine, and stamp it BEFORE the broadcast: the frame is a refetch
+		// trigger, so a sibling tab that reacts instantly must find the prompt
+		// already gone rather than racing a write it can't see.
+		state := domain.PermissionStateDenied
+		if d.Behavior == "allow" {
+			state = domain.PermissionStateAllowed
+		}
+		s.resolvePermissionRow(orgID, runID, toolCallID, state, domain.PermissionReasonUser, decidedBy)
+		// Tell other surfaces showing this prompt to drop it now — broadcast
+		// outside s.mu so the hub's own locking never nests under the broker
+		// mutex.
 		s.broadcastPermissionResolved(orgID, runID, toolCallID)
 		return nil
 	default:
@@ -543,12 +638,13 @@ func (s *Spawner) resolvePermissionLocal(orgID, runID, toolCallID string, d agen
 // ErrNoPendingPermission: gone means no live process to answer (the same
 // user-facing outcome as never having been pending), stale means the
 // tool_call_id was already resolved on the owner.
-func (s *Spawner) routePermission(orgID, runID, toolCallID string, d agentproc.PermissionDecision) error {
+func (s *Spawner) routePermission(orgID, runID, toolCallID, decidedBy string, d agentproc.PermissionDecision) error {
 	payload, err := json.Marshal(permissionPayload{
 		ToolCallID:   toolCallID,
 		Behavior:     d.Behavior,
 		Message:      d.Message,
 		UpdatedInput: d.UpdatedInput,
+		DecidedBy:    decidedBy,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal permission payload: %w", err)

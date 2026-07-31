@@ -382,6 +382,12 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// (TxStores.RunPendingInput, see tx.go) so the resume write commits
 		// atomically with the status flip.
 		RunPendingInput: newRunPendingInputStore(admin),
+		// Permissions is split-pool like Artifacts: the pending read runs on
+		// the app pool under RLS (the policy composes through the
+		// conversation, mirroring claims), every write on the admin pool —
+		// tf_app holds no write grant and the writers are delegate goroutines
+		// with no JWT-claims context.
+		Permissions: newPermissionStore(app, admin),
 		// PollReadiness is admin-pool only: callers already hold an
 		// authorized orgID (session claims or system context) by the time
 		// they reach it, same admin-only shape as Instances. Org-scoped

@@ -246,9 +246,18 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
 
   // Permission prompts run through the shared queue core (the same one the
   // board uses), filtered to this single run so the two surfaces can't diverge
-  // on TTL/dedup behavior. A run with no prompts is absent from the map.
-  const { queues, ingest, forget, resolve, dropRun } = usePermissionQueues()
+  // on fetch/TTL behavior. A run with no prompts is absent from the map.
+  const { queues, refresh: refreshPermissions, resolve, dropRun } = usePermissionQueues()
   const pendingPermissions = runID ? (queues[runID] ?? []) : []
+
+  // Read the pending set on mount and on every navigation to a different run.
+  // This is the case a fire-once frame structurally could not serve: open (or
+  // reload) a run whose agent is already parked on a prompt and the prompt
+  // renders, instead of the page looking idle until the server-side timeout
+  // silently denied it.
+  useEffect(() => {
+    if (runID) refreshPermissions(runID)
+  }, [runID, refreshPermissions])
 
   // resolvePermission answers a prompt for this run via the shared resolver,
   // which drops it on a definitive response (200/404) and toasts a transient
@@ -514,14 +523,17 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
             .catch(() => {})
           refetchArtifacts(runID)
         }
-        if (event.type === 'permission_request' && event.conversation_id === runID) {
-          ingest(event)
-        }
-        if (event.type === 'permission_resolved' && event.conversation_id === runID) {
-          forget(event)
+        // Both permission frames are refetch triggers, matching artifact_updated
+        // above: the socket says this run's pending set changed, the endpoint
+        // says what it changed to.
+        if (
+          (event.type === 'permission_request' || event.type === 'permission_resolved') &&
+          event.conversation_id === runID
+        ) {
+          refreshPermissions(runID)
         }
       },
-      [runID, ingest, forget, dropRun, refetchArtifacts, foldMessageUsage],
+      [runID, refreshPermissions, dropRun, refetchArtifacts, foldMessageUsage],
     ),
   )
 

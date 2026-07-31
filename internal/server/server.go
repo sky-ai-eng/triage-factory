@@ -1003,6 +1003,10 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/cancel", ag.handleAgentCancel)
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/message", ag.handleMessage)
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/interrupt", ag.handleAgentInterrupt)
+	// The pending set behind the demoted `permission_request` frame: the frame
+	// carries only the tool_call_id and every surface reads the prompt from
+	// here, so a refresh / second tab / cold load reconstructs it.
+	s.api("GET /api/agent/conversations/{conversationID}/permissions", ag.handleAgentPermissions)
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/permissions/{toolCallID}", ag.handleAgentPermission)
 	// Tier-2 run-scoped artifact reconcile (TFAC-464): the run view polls this
 	// while open to refresh that run's non-terminal artifacts against GitHub.

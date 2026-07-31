@@ -1,33 +1,42 @@
 // Shared core for delegated-run tool-permission prompts (the `canUseTool`
-// round-trip). When a run hits an off-allowlist tool the backend broadcasts a
-// `permission_request` WS event and parks the agent's turn until the user
-// answers via POST .../permissions/{toolCallID} or a server-side timeout denies
-// it. Both the run-detail page (one run) and the board (many runs at once)
-// surface that prompt, so the queue/TTL/resolve logic lives here once —
+// round-trip). When a run hits an off-allowlist tool the backend records the
+// prompt, broadcasts a `permission_request` WS event carrying only its
+// tool_call_id, and parks the agent's turn until the user answers via
+// POST .../permissions/{toolCallID} or a server-side timeout denies it.
+//
+// The frame is a hint, never the carrier: every surface reads the prompt itself
+// from GET /api/agent/conversations/{id}/permissions. That costs one round-trip
+// before a prompt renders — nothing, for a rare human-paced event — and buys
+// the three cases a fire-once frame could never serve: a refresh, a second tab,
+// and a board loaded cold while an agent was already parked.
+//
+// Both the run-detail page (one run) and the board (many runs at once) surface
+// prompts, so the queue/TTL/fetch/resolve logic lives here once —
 // `usePermissionQueues` builds on it; `useRunDetail` consumes that hook filtered
 // to its single run. The UI lives in components/permissions/PermissionPrompt.
 
 import { readError } from './api'
 
-// PendingPermission is one in-flight tool-approval prompt surfaced by a run
-// (the `permission_request` WS payload). tool_call_id is the tool_use id of the
-// call being gated — the same id the transcript carries — so parallel tool
-// calls in one assistant message each get their own independently answerable
-// prompt. timeout_ms is the prompt's server-side deadline (relative), used to
-// derive the client dismiss TTL; older payloads may lack it.
+// PendingPermission is one in-flight tool-approval prompt, as the pending-set
+// endpoint returns it. tool_call_id is the tool_use id of the call being gated
+// — the same id the transcript carries — so parallel tool calls in one
+// assistant message each get their own independently answerable prompt.
 //
-// title / display_name / description are the prompt copy the SDK already
-// rendered, absent when it rendered none. Only title is displayed: description
-// is a bridge subtitle that can restate the agent's own words for the call, and
-// what the user approves must be the real input (see PermissionPrompt).
+// timeout_ms is the deadline REMAINING (relative), not the window the prompt
+// was granted, so a prompt reconstructed after a refresh gets the time it
+// actually has left. 0 / absent means the server stored no expiry and the
+// client falls back to its own default.
+//
+// title is the prompt copy the SDK already rendered, absent when it rendered
+// none — what the user approves is the real input, never a restatement of it
+// (see PermissionPrompt).
 export interface PendingPermission {
   tool_call_id: string
   tool_name: string
   input: Record<string, unknown>
   timeout_ms?: number
   title?: string
-  display_name?: string
-  description?: string
+  requested_at?: string
 }
 
 // PermissionDecisionInput is the user's answer to a prompt — the body the
@@ -58,6 +67,35 @@ export function ttlForPrompt(prompt: PendingPermission): number {
       ? prompt.timeout_ms
       : PERMISSION_TTL_FALLBACK_MS
   return base + PERMISSION_TTL_GRACE_MS
+}
+
+// fetchPendingPermissions reads a run's currently-open prompts. Pending is
+// derived server-side against the run's active claim, so a prompt left behind
+// by a process that no longer exists is already absent here — the client never
+// has to reason about whether a parked agent is still parked.
+//
+// null means "couldn't ask" (non-2xx, network failure, or a body that isn't the
+// expected array) and is deliberately NOT the same value as []. An empty array
+// is the server stating this run has nothing outstanding, which the caller acts
+// on by clearing the queue; treating a failed read the same way would blank a
+// live prompt off every surface on one transient 500 and leave it invisible
+// until some later frame happened to arrive — reintroducing exactly the
+// reachability hole this endpoint exists to close.
+export async function fetchPendingPermissions(runID: string): Promise<PendingPermission[] | null> {
+  try {
+    const res = await fetch(`/api/agent/conversations/${runID}/permissions`)
+    if (!res.ok) return null
+    const data = await res.json()
+    if (!Array.isArray(data)) return null
+    // Normalize at the boundary rather than trusting the cast: `input` is what
+    // the user is actually approving, and PermissionPrompt indexes it directly,
+    // so a payload that somehow omits it would throw during render instead of
+    // degrading. An empty object renders as a prompt with no summary — visibly
+    // thin, but answerable and not a crash.
+    return (data as PendingPermission[]).map((p) => ({ ...p, input: p.input ?? {} }))
+  } catch {
+    return null
+  }
 }
 
 // PermissionResolveResult is the discriminated outcome of a resolve POST.

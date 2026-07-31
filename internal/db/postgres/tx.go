@@ -270,6 +270,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// visibility. Consume (claim time) runs system-side off the top-level
 		// store, never this tx-bound handle.
 		RunPendingInput: newRunPendingInputStore(tx),
+		// Permissions: the app half is the tx, so the pending read runs under
+		// the caller's claims in the same transaction that authorized the
+		// conversation. The admin half stays pinned to s.admin — every write
+		// is a delegate goroutine's, never a request's, and tf_app holds no
+		// write grant on the table anyway.
+		Permissions: newPermissionStore(tx, s.admin),
 		// Opaque extension bundles (the Enterprise Edition SSO stores) built
 		// from the same (app=tx, admin=s.admin) handles, so their app/admin
 		// pool split is identical to core's own stores — the login-time reads

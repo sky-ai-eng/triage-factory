@@ -306,8 +306,19 @@ type Spawner struct {
 	// in-flight canUseTool prompt registers a pending entry here keyed by the
 	// tool_use id of the call being gated; the WS POST resolves it and the
 	// parked handler goroutine receives the decision (or a bounded timeout
-	// denies it). In-memory only (no schema); guarded by s.mu.
+	// denies it). In-memory only; guarded by s.mu. This is still the whole
+	// mechanism — the durable rows below are a record kept alongside it, never
+	// the transport, and nothing drives the agent off them.
 	permPending map[string]*pendingPermission
+	// permissions is the durable record of every prompt the broker above
+	// surfaces: one row per gated call, resolved by whichever path answered it
+	// (a human, the full-window timeout, the presence-gated absent deny). It
+	// gives a live pending prompt an address — a refresh, a second tab, or a
+	// cold load reconstructs it from here — and gives every decision an audit
+	// row, which a fire-once websocket frame could do neither of. Nil-safe:
+	// every write logs and moves on, because failing to record a prompt must
+	// never be a reason to fail to ASK it.
+	permissions db.PermissionStore
 	// executorID is this spawner instance's executor identity, stamped onto
 	// runs.executor_id at claim and resume. Empty at construction —
 	// production wires the persistent instance-registry id via
@@ -504,6 +515,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		sandboxStats:     stores.SandboxStats,
 		pendingInput:     stores.RunPendingInput,
 		pendingFirings:   stores.PendingFirings,
+		permissions:      stores.Permissions,
 		tx:               stores.Tx,
 		ghClient:         ghClient,
 		wsHub:            wsHub,

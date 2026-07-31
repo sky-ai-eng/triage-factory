@@ -144,6 +144,13 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 // belongs to whoever owns the conversation now.
 func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string, priorSessionID string) (fenced bool) {
 	orgID := cfg.orgID
+
+	// This engagement's questions die with it: once it lets go, any prompt
+	// still open was asked by a process that no longer exists. Best-effort
+	// tidy for audit reads only — ListPending derives the same answer from the
+	// claim, so a crash that never reaches this defer costs nothing.
+	defer s.ExpirePermissionsForClaim(orgID, cfg.claimID)
+
 	// parked is set true when this run ends dormant rather than terminating:
 	// idle hibernation flips it to `open` (runAgent, below). The per-run cleanup
 	// defers below read it to KEEP the worktree and session JSONL on disk as the
@@ -564,7 +571,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	if agentproc.WillSandbox() {
 		perms = s.AutoApprovePermissionHandler(runID)
 	} else {
-		perms = s.BrowserPermissionHandler(orgID, runID, s.resolveAbsentAutoDeny(ctx, teamID))
+		perms = s.BrowserPermissionHandler(orgID, runID, cfg.claimID, s.resolveAbsentAutoDeny(ctx, teamID))
 	}
 
 	// Execute as a long-lived LiveRun — both local direct runs and multi-mode
