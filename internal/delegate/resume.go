@@ -447,7 +447,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		// reads the same handoff it started with rather than a freshly rendered one.
 		MemorySourcePath: stagedEntityMemorySource(runID),
 	}
-	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
+	sink := newRunSink(s, orgID, runID, opts.claimID, triggerType, creatorUserID)
 
 	// Off-allowlist tool calls route the same way the initial run does:
 	// gVisor-sandboxed delegated runs auto-approve (the sandbox + the static

@@ -105,6 +105,23 @@ func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status
 	})
 }
 
+// CompleteForClaimSystem is CompleteSystem with the fence in front of it, in
+// the same transaction as both the status flip and the release. The claim it
+// releases is resolved the same way CompleteSystem resolves it (the
+// conversation's active claim) — which the fence has just proven to be
+// claimID, since only one claim per conversation can be unreleased at a time.
+func (s *agentRunStore) CompleteForClaimSystem(ctx context.Context, orgID, runID, claimID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, claimID); err != nil {
+			return err
+		}
+		if err := completeRun(ctx, q, orgID, runID, status, costUSD, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+			return err
+		}
+		return releaseActiveClaimWithTelemetry(ctx, q, orgID, runID, claimOutcomeForStatus(status), durationMs, numTurns)
+	})
+}
+
 func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
 	// The conversation carries no accounting cache — cost settles as one
 	// lump on the invocation's last message row (the ledger) below. A
@@ -399,6 +416,24 @@ func (s *agentRunStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID, ru
 	return err
 }
 
+// SetClaimPhaseSystem is the claim-keyed phase write, fenced: an engagement
+// reporting its own setup progress must still own the conversation. Without
+// the fence a zombie's stale phase would land on whatever claim happened to
+// be active — the successor's — and surface as its setup sub-state on every
+// display read.
+func (s *agentRunStore) SetClaimPhaseSystem(ctx context.Context, orgID, claimID, phase string) error {
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, claimID); err != nil {
+			return err
+		}
+		_, err := q.ExecContext(ctx, `
+			UPDATE claims SET phase = NULLIF($1, '')
+			WHERE org_id = $2 AND id = $3
+		`, phase, orgID, claimID)
+		return err
+	})
+}
+
 // RecordClaimSandboxStatsSystem is keyed on the claim id alone (org bound as
 // defense in depth) with NO released_at predicate — the teardown that
 // measures these numbers runs after the claim is released.
@@ -447,6 +482,29 @@ func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, run
 		return releaseActiveClaim(ctx, q, orgID, runID, "failed")
 	})
 	return flipped, err
+}
+
+// MarkFailedIfActiveForClaimSystem is MarkFailedIfActiveSystem behind the
+// fence. The two negative answers stay distinct: ok=false is the guarded
+// flip's own "somebody else reached the terminal first", ErrClaimReleased is
+// "you are not the one who gets to decide".
+func (s *agentRunStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, failureKind string) (bool, error) {
+	var flipped bool
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, claimID); err != nil {
+			return err
+		}
+		var err error
+		flipped, err = markFailedIfActive(ctx, q, orgID, runID, failureKind)
+		if err != nil || !flipped {
+			return err
+		}
+		return releaseActiveClaim(ctx, q, orgID, runID, "failed")
+	})
+	if err != nil {
+		return false, err
+	}
+	return flipped, nil
 }
 
 func markFailedIfActive(ctx context.Context, q queryer, orgID, runID, failureKind string) (bool, error) {
@@ -849,6 +907,29 @@ func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, m
 	return insertRunMessage(ctx, s.admin, orgID, msg)
 }
 
+// InsertMessageForClaimSystem is the transcript write an engagement makes
+// while it is streaming: the row is attributed to claimID, and claimID has to
+// still be live for it to land at all. The explicit argument overwrites
+// msg.ClaimID so the row that persists and the claim the fence validated are
+// the same one — a row attributed to a claim the writer does not hold is the
+// misattribution this whole path exists to prevent.
+func (s *agentRunStore) InsertMessageForClaimSystem(ctx context.Context, orgID, claimID string, msg *domain.Message) (int64, error) {
+	var id int64
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, claimID); err != nil {
+			return err
+		}
+		msg.ClaimID = claimID
+		var err error
+		id, err = insertRunMessage(ctx, q, orgID, msg)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
 // LastAgentActivityAtSystem returns the created_at of the run's newest non-user
 // message (the artifact-change ledger watermark). Ordered by id DESC
 // (the monotonic sequence) so the watermark is the genuinely last-inserted agent
@@ -1161,6 +1242,29 @@ func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, 
 		WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3)
 	`, orgID, runID, pgIntArray(ids))
 	return err
+}
+
+// MarkDeliveredForClaimSystem is MarkDelivered behind the fence. Consuming a
+// pending row is a claim on it: the rows an engagement folds into its
+// assembly must not be marked spent by an engagement that has been fenced
+// out, or the successor's own assembly silently loses them.
+func (s *agentRunStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, runID, claimID string, ids []int) error {
+	if len(ids) == 0 {
+		// Nothing to consume, so nothing to fence: an empty batch writes no
+		// rows on any path, and refusing it would make the caller handle a
+		// fence trip that could not have corrupted anything.
+		return nil
+	}
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, claimID); err != nil {
+			return err
+		}
+		_, err := q.ExecContext(ctx, `
+			UPDATE messages SET delivered = true
+			WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3)
+		`, orgID, runID, pgIntArray(ids))
+		return err
+	})
 }
 
 // SetWindowState is the elision/compaction primitive: a batched range flip of

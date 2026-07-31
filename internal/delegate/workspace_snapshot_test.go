@@ -472,7 +472,7 @@ func TestFailRun_DiscardsWorkspaceSnapshot(t *testing.T) {
 
 	// triggerType "event" so failRun routes through the admin-pool System
 	// methods (no synthetic-claims tx needed in the fixture).
-	s.failRun(runmode.LocalDefaultOrgID, runID, taskID, "event", "", "boom", domain.RunFailureUnclassified)
+	s.failRun(runmode.LocalDefaultOrgID, runID, taskID, "", "event", "", "boom", domain.RunFailureUnclassified)
 
 	if ok, _ := blobs.Exists(ctx, key); ok {
 		t.Error("failRun did not discard the workspace snapshot — blob orphaned on failure")

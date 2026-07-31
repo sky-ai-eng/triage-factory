@@ -137,7 +137,12 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 // alongside the warm worktree, the agent resumes that session instead of
 // starting fresh, so a restart continues the run rather than re-running it
 // from scratch.
-func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string, priorSessionID string) {
+//
+// Returns fenced: true when the DB refused this engagement's writes because
+// its claim was released out from under it. Nothing was recorded and nothing
+// may be — the caller must stop too, rather than reacting to a terminal that
+// belongs to whoever owns the conversation now.
+func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string, priorSessionID string) (fenced bool) {
 	orgID := cfg.orgID
 	// parked is set true when this run ends dormant rather than terminating:
 	// idle hibernation flips it to `open` (runAgent, below). The per-run cleanup
@@ -147,6 +152,20 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// return. A completed run never parks anymore: a queued artifact is
 	// a sidecar, not a reason to hold the run open.
 	var parked bool
+
+	// fail records this run's infra-failure terminal and folds a fence trip
+	// into the same disposition every other fenced exit takes: nothing
+	// written, and the workspace left on disk for whoever owns the
+	// conversation now (see the mid-stream trip below for why deleting it is
+	// the worse mistake). Returns what runAgent returns.
+	fail := func(msg string, kind domain.RunFailureKind) bool {
+		if !s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, msg, kind) {
+			return false
+		}
+		parked = true
+		return true
+	}
+
 	if cfg.hasWT {
 		// GitHub PR cleanup. Best-effort cleanup on return; the worktree ID is unique per run
 		// so a failed remove just leaves a dangling directory under _worktrees.
@@ -336,8 +355,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	selfBin, err := os.Executable()
 	if err != nil {
-		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "failed to resolve own binary path: "+err.Error(), domain.RunFailureUnclassified)
-		return
+		return fail("failed to resolve own binary path: "+err.Error(), domain.RunFailureUnclassified)
 	}
 
 	// Load the primary event's metadata so buildPrompt can flatten its
@@ -369,7 +387,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	runURL := s.runURLFor(orgID, runID)
 	prompt := buildPrompt(task, metadataJSON, cfg.prSkeleton, mission, cfg.scope, cfg.toolsRef, agentBin, runID, agentRunRoot, namespace, branchTemplate, runURL)
 
-	s.updatePhase(orgID, runID, "agent_starting")
+	s.updatePhase(orgID, runID, cfg.claimID, "agent_starting")
 	if ctx.Err() != nil {
 		s.handleCancelled(orgID, runID, startTime, cfg.wtPath, triggerType, creatorUserID)
 		return
@@ -409,7 +427,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		extraEnv = append(extraEnv, "TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER="+commitIdentity.CoAuthorTrailer)
 	}
 
-	s.updatePhase(orgID, runID, "")
+	s.updatePhase(orgID, runID, cfg.claimID, "")
 
 	// StartAgentHost is invoked from inside agentproc.Run's sandbox branch —
 	// which only a multi-mode dispatch reaches, and every multi dispatch
@@ -517,7 +535,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		GitUserName:  commitIdentity.Name,
 		GitUserEmail: commitIdentity.Email,
 	}
-	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
+	sink := newRunSink(s, orgID, runID, cfg.claimID, triggerType, creatorUserID)
 
 	// Off-allowlist tool calls route to one of two dispositions, chosen once
 	// per run:
@@ -565,6 +583,21 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		out = s.runOneShot(ctx, baseOpts, sink)
 	}
 
+	// Fenced out mid-stream: the claim this engagement holds was released and
+	// a successor is driving the conversation. Every branch below records
+	// something about the run — a terminal, a cancellation, a failure — and
+	// none of it is this engagement's to record anymore. The agent is already
+	// dead (the sink killed it), so the only thing left is to leave.
+	//
+	// parked=true is what keeps the workspace on disk. Ownership is gone, so
+	// whether the successor is rehydrating into this very worktree is no
+	// longer knowable from here; a leaked directory is reclaimed by the next
+	// startup sweep, a deleted one that turned out to be in use is not.
+	if sink.fenceTripped() {
+		parked = true
+		return true
+	}
+
 	// Idle hibernation parked the run (status `open`, snapshot written) — a
 	// dormant disposition, so keep the warm worktree as the fast resume path.
 	if out.hibernated {
@@ -573,8 +606,8 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 
 	if out.result != nil {
-		parked = s.processCompletion(ctx, orgID, runID, cfg.blueprintRunID, task, out.result, claudeCwd, priorMemory, out.sessionID, triggerType, creatorUserID)
-		return
+		parked, fenced = s.processCompletion(ctx, orgID, runID, cfg.blueprintRunID, cfg.claimID, task, out.result, claudeCwd, priorMemory, out.sessionID, triggerType, creatorUserID)
+		return fenced
 	}
 
 	if out.err != nil {
@@ -582,11 +615,10 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			s.handleCancelled(orgID, runID, startTime, cfg.wtPath, triggerType, creatorUserID)
 			return
 		}
-		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, fmt.Sprintf("%v\nstderr: %s", out.err, out.stderr), classifyFailureKind(out.err))
-		return
+		return fail(fmt.Sprintf("%v\nstderr: %s", out.err, out.stderr), classifyFailureKind(out.err))
 	}
 
-	s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "agent runtime exited cleanly without producing a result event", domain.RunFailureNoResult)
+	return fail("agent runtime exited cleanly without producing a result event", domain.RunFailureNoResult)
 }
 
 // processCompletion is the single disposition authority for a result, whatever
@@ -626,15 +658,24 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 // warm resume cache. A terminal completion (including one that produced a draft
 // PR / pending review) returns false — the artifact is a resolvable sidecar, not
 // a reason to park.
+//
+// claimID names the engagement that produced this result, so its terminal
+// write goes through the claim fence. Empty on paths with no claimed run in
+// scope, which keeps the unfenced write.
+//
+// Returns fenced: true when that terminal was refused because the claim is
+// released. Nothing was recorded, and the caller must not react to the run's
+// state either — a successor owns its disposition. parked comes back true
+// alongside it so the workspace survives (see runAgent).
 func (s *Spawner) processCompletion(
 	ctx context.Context,
-	orgID, runID, blueprintRunID string,
+	orgID, runID, blueprintRunID, claimID string,
 	task domain.Task,
 	completion *agentproc.Result,
 	claudeCwd string,
 	priorMemory *memoryFingerprint,
 	sessionID, triggerType, creatorUserID string,
-) (parked bool) {
+) (parked, fenced bool) {
 	// The namespace keys this run's workspace (tree + snapshot) among its
 	// blueprint siblings. Derived from the caller-supplied blueprint_run_id —
 	// no DB fetch, so it can't silently fall back to the wrong key on a
@@ -657,7 +698,7 @@ func (s *Spawner) processCompletion(
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
 		}, sessionID)
-		return true
+		return true, false
 	}
 
 	// Unconditional upsert of the conversation_memory row at termination: row presence
@@ -740,14 +781,30 @@ func (s *Spawner) processCompletion(
 	// finish terminates) per decideBlueprintStep, and the approval state is
 	// derived downstream from the unresolved-artifact set (has_unresolved_artifacts).
 
-	if triggerType == "manual" {
-		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
+	var completeErr error
+	switch {
+	case claimID != "":
+		completeErr = s.agentRuns.CompleteForClaimSystem(bgCtx, orgID, runID, claimID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind))
+	case triggerType == "manual":
+		completeErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
 			return ts.Conversations.Complete(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind))
-		}); err != nil {
-			delegateLog.Warn("record completion for run failed", "run", runID, "error", err)
-		}
-	} else if err := s.agentRuns.CompleteSystem(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind)); err != nil {
-		delegateLog.Warn("record completion for run failed", "run", runID, "error", err)
+		})
+	default:
+		completeErr = s.agentRuns.CompleteSystem(bgCtx, orgID, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary, outcome, outcomeReason, string(failureKind))
+	}
+	if errors.Is(completeErr, db.ErrClaimReleased) {
+		// A successor owns the conversation, so this result is not the run's
+		// disposition — it is the output of an engagement that lost its
+		// claim. Recording it would overwrite live work with a stale
+		// terminal, and every step below (breaker, snapshot, board, toast,
+		// broadcast) reports on that same overwritten row. Stop here, and
+		// park so the successor's workspace is left alone.
+		delegateLog.Error("claim fence refused the completion terminal — a successor owns this conversation; recording nothing",
+			"run", runID, "claim_id", claimID, "org_id", orgID, "error", completeErr)
+		return true, true
+	}
+	if completeErr != nil {
+		delegateLog.Warn("record completion for run failed", "run", runID, "error", completeErr)
 	}
 
 	s.updateBreakerCounter(task.ID, triggerType, status)
@@ -800,5 +857,5 @@ func (s *Spawner) processCompletion(
 	// blueprint_run_id (the shared workspace's key) — every run is a blueprint
 	// step now, so there is no standalone run_id-keyed snapshot to drop here. A
 	// parked run keeps its snapshot for the eventual resume.
-	return parked
+	return parked, false
 }

@@ -396,6 +396,61 @@ type ConversationStore interface {
 	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID, failureKind string) (bool, error)
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.Message) (int64, error)
 
+	// --- Claim-fenced engagement writes ---
+	//
+	// The writes an executor makes *as* the engagement driving a
+	// conversation: the transcript it streams, the terminal status it
+	// records, the setup sub-state it reports. Each names its own claim id
+	// rather than letting the server resolve "the conversation's active
+	// claim", and each refuses with ErrClaimReleased when that claim is no
+	// longer live. Naming the claim is the assertion of ownership; the
+	// refusal is what makes a fencing failure a rejected write instead of
+	// silent corruption. See ErrClaimReleased for the full contract and for
+	// what a caller must do when it trips.
+	//
+	// The server-side active-claim fallback stays for writers that are not
+	// engagements — a user's message typed into a conversation belongs to
+	// whatever claim happens to be driving it, which is exactly what the
+	// fallback resolves.
+	//
+	// Admin pool in Postgres, always: the fence's locking read and the write
+	// it guards have to share one transaction, and claims is a
+	// system-written table that the app pool holds no UPDATE grant on (and
+	// therefore cannot lock). These are system writes on a server-derived
+	// conversation id, so the ownership check the fence performs stands in
+	// for the RLS check the app pool would have made.
+
+	// InsertMessageForClaimSystem inserts a transcript row attributed to
+	// claimID, which must still be live. Same insert semantics as
+	// InsertMessage in every other respect, except that msg.ClaimID is
+	// overwritten with the explicit argument — the claim the fence validated
+	// and the claim the row records are the same one by construction.
+	InsertMessageForClaimSystem(ctx context.Context, orgID, claimID string, msg *domain.Message) (int64, error)
+
+	// MarkDeliveredForClaimSystem is MarkDelivered for an engagement: the
+	// pending rows it folded into an assembly are only its to consume while
+	// it still owns the conversation.
+	MarkDeliveredForClaimSystem(ctx context.Context, orgID, runID, claimID string, ids []int) error
+
+	// CompleteForClaimSystem is Complete driven by the engagement that ran
+	// the invocation: same status flip, cost settlement, and claim release,
+	// refused outright when claimID is already released. The claim it
+	// releases is its own by construction — a fenced call can only reach the
+	// release with the claim it validated.
+	CompleteForClaimSystem(ctx context.Context, orgID, runID, claimID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
+
+	// MarkFailedIfActiveForClaimSystem is MarkFailedIfActive driven by the
+	// engagement: the infra-failure terminal, refused once the engagement
+	// has been fenced out. ok=false keeps its existing meaning (the row was
+	// already terminal); a fenced-out caller gets ErrClaimReleased instead,
+	// which is a different thing and must not be treated as a lost race.
+	MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, failureKind string) (bool, error)
+
+	// SetClaimPhaseSystem writes claims.phase on one named claim — the
+	// claim-keyed sibling of SetActiveClaimPhaseSystem, for the engagement
+	// reporting its own setup progress. Empty phase clears to NULL.
+	SetClaimPhaseSystem(ctx context.Context, orgID, claimID, phase string) error
+
 	// LastAgentActivityAtSystem returns the created_at of the run's most
 	// recent non-user messages row (role <> 'user') — the "agent last
 	// ran" watermark the artifact-change feedback ledger derives

@@ -571,6 +571,21 @@ claim → execute); three additions to the claim:
   partitioned executor can't write `run_messages` or heartbeats
   anyway — and without it, a requeued run and a zombie sandbox could
   both finish and double their external writes.
+- **The DB refuses a slipped zombie's writes.** The self-fence above is
+  process-level and clock-based, so the failure modes that void it (a
+  stalled process, a clock bug) would otherwise leave nothing between a
+  zombie and a conversation it no longer owns. Every executor engagement
+  write — transcript rows, the terminal status flip, `claims.phase` —
+  therefore names its own claim id and validates it with a locking read
+  (`FOR SHARE`) in the same transaction, which conflicts with the
+  reaper's release: a concurrent release either waits for the write to
+  commit or the write is refused with `db.ErrClaimReleased`. An
+  engagement that sees that refusal kills its sandbox and writes
+  nothing more — no terminal, no result, no release — because the
+  successor owns the conversation's disposition. Postgres only; local
+  is single-process and has no such race. A refusal in production means
+  the self-fence failed and is logged at error level as an incident
+  signal.
 - **Graceful drain** (deploys, scale-down): set `draining=true` → the
   executor stops claiming; live runs finish or hibernate-on-idle
   (TFAC-305) — the fleet's natural quiesce; when `active_runs=0` the

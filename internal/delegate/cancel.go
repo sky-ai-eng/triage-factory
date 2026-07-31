@@ -179,26 +179,23 @@ func classifyFailureKind(err error) domain.RunFailureKind {
 	return domain.RunFailureCrash
 }
 
-func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errMsg string, kind domain.RunFailureKind) {
+// failRun records the infra-failure terminal for a run: guarded status flip,
+// a failure row on the transcript, breaker + broadcast + snapshot cleanup.
+//
+// claimID names the engagement doing the failing, when there is one in scope
+// — every path that reached the agent has it. The terminal then goes through
+// the claim fence, so an executor that was reaped mid-run cannot bury a
+// successor's live conversation under its own failure. Empty claimID keeps
+// the unfenced behavior for the paths that have no engagement to speak for
+// (cleanup and orchestration entries that never claimed the row).
+//
+// Returns fenced: true when the terminal was refused because the claim is
+// released. Nothing was written, and the caller must not go on to react to
+// the run's state either — the row it would read belongs to the successor.
+func (s *Spawner) failRun(orgID, runID, taskID, claimID, triggerType, creatorUserID, errMsg string, kind domain.RunFailureKind) (fenced bool) {
 	delegateLog.Error("run failed", "run_id", runID, "error", errMsg, "failure_kind", string(kind))
 
 	bgCtx := context.Background()
-
-	// Guarded — if a terminal racing path (cancel, natural completion)
-	// reached the row first, leave its status in place rather than
-	// clobbering.
-	var markErr error
-	if triggerType == "manual" {
-		markErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			_, mErr := ts.Conversations.MarkFailedIfActive(bgCtx, orgID, runID, string(kind))
-			return mErr
-		})
-	} else {
-		_, markErr = s.agentRuns.MarkFailedIfActiveSystem(bgCtx, orgID, runID, string(kind))
-	}
-	if markErr != nil {
-		delegateLog.Warn("failed to mark run as failed", "run_id", runID, "error", markErr)
-	}
 
 	failMsg := &domain.Message{
 		ConversationID: runID,
@@ -207,17 +204,64 @@ func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errM
 		Content:        "Error: " + errMsg,
 		IsError:        true,
 	}
+	// The failure row goes in BEFORE the status flip, because the flip
+	// releases the claim: on the fenced path an insert afterwards would name
+	// a claim this call had just retired and be refused as if by a zombie.
+	// Ordering it first also makes the fence's answer arrive before anything
+	// irreversible happens — the flip below only runs for an engagement that
+	// still owns the row.
 	var insertErr error
-	if triggerType == "manual" {
+	switch {
+	case claimID != "":
+		_, insertErr = s.agentRuns.InsertMessageForClaimSystem(bgCtx, orgID, claimID, failMsg)
+	case triggerType == "manual":
 		insertErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
 			_, ierr := ts.Conversations.InsertMessage(bgCtx, orgID, failMsg)
 			return ierr
 		})
-	} else {
+	default:
 		_, insertErr = s.agentRuns.InsertMessageSystem(bgCtx, orgID, failMsg)
+	}
+	if errors.Is(insertErr, db.ErrClaimReleased) {
+		// Not this engagement's run to fail anymore. Everything below writes
+		// or broadcasts about a conversation a successor is driving, so the
+		// whole tail is skipped — including the breaker tick and the snapshot
+		// discard, which would delete the workspace that successor resumes
+		// from.
+		delegateLog.Error("claim fence refused the failure terminal — a successor owns this conversation; recording nothing",
+			"run_id", runID, "claim_id", claimID, "org_id", orgID, "error", insertErr)
+		return true
 	}
 	if insertErr != nil {
 		delegateLog.Warn("failed to record failure message", "run_id", runID, "error", insertErr)
+	}
+
+	// Guarded — if a terminal racing path (cancel, natural completion)
+	// reached the row first, leave its status in place rather than
+	// clobbering.
+	var markErr error
+	switch {
+	case claimID != "":
+		_, markErr = s.agentRuns.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, runID, claimID, string(kind))
+	case triggerType == "manual":
+		markErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
+			_, mErr := ts.Conversations.MarkFailedIfActive(bgCtx, orgID, runID, string(kind))
+			return mErr
+		})
+	default:
+		_, markErr = s.agentRuns.MarkFailedIfActiveSystem(bgCtx, orgID, runID, string(kind))
+	}
+	if errors.Is(markErr, db.ErrClaimReleased) {
+		// The release landed between the two writes. Same answer, same tail
+		// to skip; the failure row already on the transcript is the one
+		// artifact of this engagement that stands, and it is attributed to
+		// this claim rather than the successor's.
+		delegateLog.Error("claim fence refused the failure terminal — a successor owns this conversation; recording nothing further",
+			"run_id", runID, "claim_id", claimID, "org_id", orgID, "error", markErr)
+		return true
+	}
+	if markErr != nil {
+		delegateLog.Warn("failed to mark run as failed", "run_id", runID, "error", markErr)
 	}
 
 	s.updateBreakerCounter(taskID, triggerType, "failed")
@@ -244,6 +288,7 @@ func (s *Spawner) failRun(orgID, runID, taskID, triggerType, creatorUserID, errM
 	} else {
 		toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s failed: %s", shortRunID(runID), truncateToastMsg(errMsg, 160)))
 	}
+	return false
 }
 
 // truncateToastMsg caps an error message at maxLen runes with an ellipsis.

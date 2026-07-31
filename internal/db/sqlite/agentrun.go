@@ -717,6 +717,52 @@ func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, m
 	return s.InsertMessage(ctx, orgID, msg)
 }
 
+// --- Claim-fenced engagement writes ---
+//
+// Unfenced here, and deliberately so. The fence guards one race: a zombie
+// executor writing into a conversation a successor has been handed. Local
+// mode is a single process that claims its own work, with no fleet reaper to
+// hand anything over and no second executor to hand it to — the losing side
+// of that race has no way to exist. These wrappers therefore do exactly what
+// their unfenced counterparts do, with the claim id used as the attribution
+// it is on both dialects.
+//
+// This is not a dialect fork of shared semantics: the write set, the
+// attribution, and the resulting rows are identical. What differs is a
+// refusal that has nothing to refuse. Postgres carries the enforcement and
+// the conformance suite asserts it there.
+
+func (s *agentRunStore) InsertMessageForClaimSystem(ctx context.Context, orgID, claimID string, msg *domain.Message) (int64, error) {
+	msg.ClaimID = claimID
+	return s.InsertMessage(ctx, orgID, msg)
+}
+
+func (s *agentRunStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, runID, claimID string, ids []int) error {
+	return s.MarkDelivered(ctx, orgID, runID, ids)
+}
+
+func (s *agentRunStore) CompleteForClaimSystem(ctx context.Context, orgID, runID, claimID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+	return s.Complete(ctx, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind)
+}
+
+func (s *agentRunStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, failureKind string) (bool, error) {
+	return s.MarkFailedIfActive(ctx, orgID, runID, failureKind)
+}
+
+// SetClaimPhaseSystem keeps the released_at filter its active-claim sibling
+// has always had: a released claim's phase is inert history either way, so a
+// call naming one stays the no-op it is today rather than rewriting it.
+func (s *agentRunStore) SetClaimPhaseSystem(ctx context.Context, orgID, claimID, phase string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE claims SET phase = NULLIF(?, '')
+		WHERE id = ? AND released_at IS NULL
+	`, phase, claimID)
+	return err
+}
+
 // LastAgentActivityAtSystem returns the created_at of the run's newest non-user
 // message (the artifact-change ledger watermark). Ordered by id DESC —
 // the monotonic insertion order — rather than MAX(created_at), so the watermark

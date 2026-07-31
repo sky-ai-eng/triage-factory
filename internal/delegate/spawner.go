@@ -11,6 +11,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -1064,14 +1065,31 @@ func (s *Spawner) getRunSecrets() agentproc.SecretsReader {
 	return s.runSecrets
 }
 
-// updatePhase records the live engagement's setup sub-state on its active
-// claim (phase "" clears it — the agent process is live) and broadcasts the
-// display status: the phase itself, or "running" on a clear, so the wire
-// sequence the frontend chips key on is unchanged. Goroutine-internal, no
-// JWT claims in scope, so admin pool; no guard needed — the caller knows
-// the engagement is live.
-func (s *Spawner) updatePhase(orgID, runID, phase string) {
-	if err := s.agentRuns.SetActiveClaimPhaseSystem(context.Background(), orgID, runID, phase); err != nil {
+// updatePhase records the live engagement's setup sub-state on its own claim
+// (phase "" clears it — the agent process is live) and broadcasts the display
+// status: the phase itself, or "running" on a clear, so the wire sequence the
+// frontend chips key on is unchanged. Goroutine-internal, no JWT claims in
+// scope, so admin pool.
+//
+// claimID names the engagement reporting the progress; empty falls back to
+// whichever claim is active on the conversation, for the paths with no
+// claimed run in scope. A fence trip here is loud but not fatal: the write is
+// refused, so nothing lands on the successor's claim, and the engagement
+// carries on into the launch it was setting up — where its first transcript
+// write meets the same fence and abandons the run properly. Aborting from
+// here instead would mean a terminal write on a conversation this executor no
+// longer owns, which is the one thing a fenced-out engagement must not do.
+func (s *Spawner) updatePhase(orgID, runID, claimID, phase string) {
+	var err error
+	if claimID != "" {
+		err = s.agentRuns.SetClaimPhaseSystem(context.Background(), orgID, claimID, phase)
+	} else {
+		err = s.agentRuns.SetActiveClaimPhaseSystem(context.Background(), orgID, runID, phase)
+	}
+	if errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Error("claim fence refused a phase write — this executor no longer owns the conversation",
+			"run", runID, "claim_id", claimID, "org_id", orgID, "phase", phase, "error", err)
+	} else if err != nil {
 		delegateLog.Warn("update phase for run failed", "run", runID, "error", err)
 	}
 	display := phase

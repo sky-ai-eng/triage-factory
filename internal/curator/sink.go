@@ -2,8 +2,10 @@ package curator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -45,9 +47,19 @@ type turnSink struct {
 	sessionOnce  sync.Once
 	sessionErr   error
 	sessionErrMu sync.Mutex
+
+	// cancelTurn kills this turn's subprocess. Fired when the DB refuses a
+	// write because the turn's claim was released — the only way to stop an
+	// agent whose output no longer has anywhere to go.
+	cancelTurn context.CancelFunc
+
+	// fenced records that refusal, for the dispatch loop to read once
+	// agentproc returns: it must then release nothing and revert nothing,
+	// because a successor engagement owns the conversation.
+	fenced atomic.Bool
 }
 
-func newTurnSink(c *Curator, projectID, conversationID, requestID, claimID, orgID, creatorUserID string) *turnSink {
+func newTurnSink(c *Curator, projectID, conversationID, requestID, claimID, orgID, creatorUserID string, cancelTurn context.CancelFunc) *turnSink {
 	return &turnSink{
 		curator:        c,
 		projectID:      projectID,
@@ -56,8 +68,29 @@ func newTurnSink(c *Curator, projectID, conversationID, requestID, claimID, orgI
 		claimID:        claimID,
 		orgID:          orgID,
 		creatorUserID:  creatorUserID,
+		cancelTurn:     cancelTurn,
 	}
 }
+
+// tripFence reacts to a refused write: kill the turn and record that this
+// engagement is out. Nothing else — the successor owns the conversation's
+// disposition, so this turn releases no claim and reverts no context.
+//
+// Error level on purpose: a fence trip means the cooperative self-fence
+// failed to stop this executor in time, which is a fleet incident.
+func (s *turnSink) tripFence(err error) {
+	if s.fenced.Swap(true) {
+		return
+	}
+	curatorLog.Error("claim fence tripped — this executor no longer owns the curator conversation; abandoning the turn without writing",
+		"request", s.requestID, "conversation", s.conversationID, "claim_id", s.claimID, "org_id", s.orgID, "error", err)
+	if s.cancelTurn != nil {
+		s.cancelTurn()
+	}
+}
+
+// fenceTripped reports whether this turn was fenced out mid-stream.
+func (s *turnSink) fenceTripped() bool { return s.fenced.Load() }
 
 // OnSession persists the captured session_id on the conversation the
 // first time it's observed in the turn's lifetime. Subsequent resumes
@@ -116,19 +149,18 @@ func (s *turnSink) OnMessage(msg *domain.Message) error {
 		Reasoning:           msg.Reasoning,
 		ContentBlocks:       msg.ContentBlocks,
 	}
-	// Per-message synthetic-claims wrap — each row attributes to the
-	// requesting user. Short-lived tx (one INSERT) so the long-running
-	// claude subprocess never holds a tx open.
+	// A curator turn is an executor engagement like any delegated run, so its
+	// transcript writes name their own claim and are refused once that claim
+	// is released — a turn whose executor was reaped must not keep writing
+	// into a conversation the successor has picked up. The row still carries
+	// the requesting user for turn attribution; what changed is that
+	// ownership, not RLS, is what authorizes the write.
 	ctx := context.Background()
-	var id int64
-	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, s.orgID, s.creatorUserID, func(ts db.TxStores) error {
-		got, err := ts.Conversations.InsertMessage(ctx, s.orgID, row)
-		if err != nil {
-			return err
+	id, err := s.curator.stores.Conversations.InsertMessageForClaimSystem(ctx, s.orgID, s.claimID, row)
+	if err != nil {
+		if errors.Is(err, db.ErrClaimReleased) {
+			s.tripFence(err)
 		}
-		id = got
-		return nil
-	}); err != nil {
 		return fmt.Errorf("insert curator message: %w", err)
 	}
 	row.ID = int(id)

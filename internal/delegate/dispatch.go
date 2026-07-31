@@ -461,12 +461,23 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// agent start, so resume/cancel claims don't skew it.
 	s.recordSpawnMS(time.Since(startTime))
 
-	s.runAgent(stepCtx, run.ID, *task, mission, cfg, time.Now(), run.Model, run.TriggerType, run.CreatorUserID, run.SessionID)
+	fenced := s.runAgent(stepCtx, run.ID, *task, mission, cfg, time.Now(), run.Model, run.TriggerType, run.CreatorUserID, run.SessionID)
 
 	s.mu.Lock()
 	delete(s.cancels, run.ID)
 	s.mu.Unlock()
 	stepCancel()
+
+	// Fenced out: this executor's claim was released mid-run and a successor
+	// is driving the conversation. The reactor below would read the row's
+	// CURRENT state — the successor's, not this engagement's — and advance,
+	// terminate, or close a task on the strength of it. Nothing was written,
+	// nothing is reacted to, and the staged skill + memory dirs stay for
+	// whoever holds the claim now.
+	if fenced {
+		stepParked = true
+		return
+	}
 
 	// Re-read the step run for its terminal status, then react. Detached ctx on
 	// purpose: the agent has run, so we must read its terminal and advance/finalize
@@ -510,6 +521,11 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	// cover — mirrors the retired in-process goroutine's own
 	// disposed/defer pair exactly (see git history), just relocated to
 	// the claim path.
+	//
+	// The failure exits below assign it from failRun's fenced result, which
+	// is the second reason to skip the re-finalize and a stronger one: a
+	// refused terminal means a successor engagement owns this conversation,
+	// so finalizing its blueprint would terminate work that is still running.
 	var disposed bool
 	defer func() {
 		// An early exit (missing fields / workspace failure / cancel
@@ -528,7 +544,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	}()
 
 	if run.SessionID == "" || run.WorktreePath == "" || run.Model == "" {
-		s.failRun(orgID, run.ID, task.ID, "manual", userID, "resume: claimed run missing session/worktree/model", domain.RunFailureUnclassified)
+		disposed = s.failRun(orgID, run.ID, task.ID, run.ClaimID, "manual", userID, "resume: claimed run missing session/worktree/model", domain.RunFailureUnclassified)
 		return
 	}
 
@@ -578,7 +594,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		}
 	}
 	if werr != nil {
-		s.failRun(orgID, run.ID, task.ID, "manual", userID, "ensure workspace before resume failed: "+werr.Error(), domain.RunFailureUnclassified)
+		disposed = s.failRun(orgID, run.ID, task.ID, run.ClaimID, "manual", userID, "ensure workspace before resume failed: "+werr.Error(), domain.RunFailureUnclassified)
 		return
 	}
 
@@ -594,7 +610,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	// line would confuse the agent (or re-do already-done work) worse than a
 	// clear "start over" would.
 	if !sessionTranscriptExists(resumeCwd, run.SessionID) {
-		s.failRun(orgID, run.ID, task.ID, "manual", userID,
+		disposed = s.failRun(orgID, run.ID, task.ID, run.ClaimID, "manual", userID,
 			"This run's chat session could not be restored (its transcript did not survive — most often the executor was restarted or rebuilt), so the conversation can't be resumed. Start a new request to continue this work.",
 			domain.RunFailureSessionLost)
 		return
@@ -606,7 +622,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	// nil on all/local. Torn down after the resume turn returns.
 	execSandbox, esErr := s.bringUpExecutorSandbox(stepCtx, orgID, run, *task)
 	if esErr != nil {
-		s.failRun(orgID, run.ID, task.ID, "manual", userID, "bring up credential sidecar for resume failed: "+esErr.Error(), domain.RunFailureUnclassified)
+		disposed = s.failRun(orgID, run.ID, task.ID, run.ClaimID, "manual", userID, "bring up credential sidecar for resume failed: "+esErr.Error(), domain.RunFailureUnclassified)
 		return
 	}
 	defer execSandbox.Close()
@@ -636,17 +652,25 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		return
 	}
 	if rerr != nil {
-		s.failRun(orgID, run.ID, task.ID, "manual", userID, "resume failed: "+rerr.Error(), classifyFailureKind(rerr))
+		disposed = s.failRun(orgID, run.ID, task.ID, run.ClaimID, "manual", userID, "resume failed: "+rerr.Error(), classifyFailureKind(rerr))
 		return
 	}
 	if outcome.Completion == nil {
-		s.failRun(orgID, run.ID, task.ID, "manual", userID, "resume produced no completion", domain.RunFailureNoResult)
+		disposed = s.failRun(orgID, run.ID, task.ID, run.ClaimID, "manual", userID, "resume produced no completion", domain.RunFailureNoResult)
 		return
 	}
 
 	// No inherited-memory fingerprint: a resume continues this run's own
 	// conversation in its own tree, so the file at the fixed path is its work.
-	parked := s.processCompletion(stepCtx, orgID, run.ID, blueprintRunID, *task, outcome.Completion, resumeCwd, nil, run.SessionID, "manual", userID)
+	parked, fenced := s.processCompletion(stepCtx, orgID, run.ID, blueprintRunID, run.ClaimID, *task, outcome.Completion, resumeCwd, nil, run.SessionID, "manual", userID)
+	if fenced {
+		// A successor owns the conversation. Finalizing the blueprint off
+		// this turn's result would terminate a run someone else is driving,
+		// so the defer's re-finalize is suppressed along with everything
+		// else.
+		disposed = true
+		return
+	}
 	// The resumed step reached a terminal state (it didn't go open again)
 	// → hand back to the blueprint orchestrator to finalize.
 	if !parked {
@@ -857,7 +881,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// per-run identity for the worktree_path / conversation_worktrees records.
 		switch task.EntitySource {
 		case "github":
-			cfg, err = s.setupGitHub(ctx, orgID, run.ID, br.ID, task, gh, execSandbox)
+			cfg, err = s.setupGitHub(ctx, orgID, run.ID, run.ClaimID, br.ID, task, gh, execSandbox)
 		case "jira":
 			cfg, err = s.setupJira(ctx, orgID, run.ID, br.ID, task, gh)
 		case "slack":
