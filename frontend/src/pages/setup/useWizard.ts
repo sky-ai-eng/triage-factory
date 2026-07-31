@@ -41,11 +41,21 @@ export interface WizardController {
   // enabled-but-dead Back button (back() is a no-op with no prior visible step).
   canGoBack: boolean
   // validate → persist the active step, then advance (or finish on the last).
-  advance: () => void
-  // Re-expand the previous step (the Back / Esc affordance).
-  back: () => void
-  // Reopen an already-done (or earlier) step to edit it.
-  goTo: (index: number) => void
+  // onWillNavigate fires right before the index changes — after the step's
+  // validate and persist gates have both passed — in the same batch as the
+  // change, so the host starts its transition presentation exactly when a
+  // transition is guaranteed to follow. A refused advance (mid-save, a
+  // validation error, a failed persist, an unreadable load) never fires it:
+  // the step stays put and should look untouched.
+  advance: (onWillNavigate?: () => void) => void
+  // Re-expand the previous step (the Back / Esc affordance). Returns whether
+  // navigation actually happened, for the same reason advance takes a
+  // callback: presentation keyed to a click rather than to a navigation
+  // strands the host's transition state when the click turns out to be a no-op.
+  back: () => boolean
+  // Reopen an already-done (or earlier) step to edit it. Returns whether
+  // navigation actually happened.
+  goTo: (index: number) => boolean
   // Re-run loads after a failure.
   retry: () => void
 }
@@ -134,81 +144,90 @@ export function useWizard(
     }
   }, [steps, makeInitialState, orgId, teamId, isLocal, reloadNonce])
 
-  const advance = useCallback(() => {
-    const step = steps[activeIndex]
-    if (!step || busyRef.current) return
-    // Don't persist a step whose existing state we failed to read.
-    if (loadStatus[step.id] === 'error') return
-    // Read off stateRef, not the render-bound `state` closure: a selfAdvancing
-    // step calls patch() then advance() in the same handler, so `state` here is
-    // still pre-patch while stateRef.current already carries the choice. (For a
-    // Continue-driven step the two are identical — stateRef is never staler.)
-    const validationError = step.validate?.(stateRef.current) ?? null
-    if (validationError) {
-      setError(validationError)
-      return
-    }
-    busyRef.current = true
-    setBusy(true)
-    setError(null)
-    void (async () => {
-      try {
-        await step.persist({ orgId, teamId, isLocal, state: stateRef.current, patch })
-        // Advance to the next step that applies; an omitted step (e.g. Jira
-        // projects without a Jira tracker) is skipped. No visible step after
-        // this one ⇒ this was the last step, so finish. Read visibility (and
-        // the finish state below) off stateRef, which patch() keeps in sync
-        // synchronously, so a persist that patched visibility- or finish-
-        // affecting state (e.g. jiraConnected) is reflected here — the closure
-        // `state` and a not-yet-flushed render would both still be stale.
-        const next = nextVisibleIndex(steps, stateRef.current, activeIndex)
-        if (next === -1) {
-          // Pass the fresh ref so onFinish's finish branch (the local Jira
-          // carry-over hand-off) sees the same post-persist state.
-          onFinish(stateRef.current)
-          return
-        }
-        setActiveIndex(next)
-      } catch (e) {
-        setError((e as Error)?.message || 'Could not save. Please try again.')
-      } finally {
-        busyRef.current = false
-        setBusy(false)
+  const advance = useCallback(
+    (onWillNavigate?: () => void) => {
+      const step = steps[activeIndex]
+      if (!step || busyRef.current) return
+      // Don't persist a step whose existing state we failed to read.
+      if (loadStatus[step.id] === 'error') return
+      // Read off stateRef, not the render-bound `state` closure: a selfAdvancing
+      // step calls patch() then advance() in the same handler, so `state` here is
+      // still pre-patch while stateRef.current already carries the choice. (For a
+      // Continue-driven step the two are identical — stateRef is never staler.)
+      const validationError = step.validate?.(stateRef.current) ?? null
+      if (validationError) {
+        setError(validationError)
+        return
       }
-    })()
-    // advance reads stateRef.current (kept in sync on every render + in patch),
-    // not the `state` closure, so it needn't recreate on every keystroke.
-  }, [steps, activeIndex, loadStatus, orgId, teamId, isLocal, patch, onFinish])
+      busyRef.current = true
+      setBusy(true)
+      setError(null)
+      void (async () => {
+        try {
+          await step.persist({ orgId, teamId, isLocal, state: stateRef.current, patch })
+          // Advance to the next step that applies; an omitted step (e.g. Jira
+          // projects without a Jira tracker) is skipped. No visible step after
+          // this one ⇒ this was the last step, so finish. Read visibility (and
+          // the finish state below) off stateRef, which patch() keeps in sync
+          // synchronously, so a persist that patched visibility- or finish-
+          // affecting state (e.g. jiraConnected) is reflected here — the closure
+          // `state` and a not-yet-flushed render would both still be stale.
+          const next = nextVisibleIndex(steps, stateRef.current, activeIndex)
+          if (next === -1) {
+            // Pass the fresh ref so onFinish's finish branch (the local Jira
+            // carry-over hand-off) sees the same post-persist state.
+            onFinish(stateRef.current)
+            return
+          }
+          // Batched with the index change (one commit), so the host's
+          // transition presentation and the navigation are indivisible.
+          onWillNavigate?.()
+          setActiveIndex(next)
+        } catch (e) {
+          setError((e as Error)?.message || 'Could not save. Please try again.')
+        } finally {
+          busyRef.current = false
+          setBusy(false)
+        }
+      })()
+      // advance reads stateRef.current (kept in sync on every render + in patch),
+      // not the `state` closure, so it needn't recreate on every keystroke.
+    },
+    [steps, activeIndex, loadStatus, orgId, teamId, isLocal, patch, onFinish],
+  )
 
   const back = useCallback(() => {
     // No navigating away from a step whose save is in flight.
-    if (busyRef.current) return
-    setError(null)
+    if (busyRef.current) return false
     // Re-expand the previous step that applies, skipping any omitted one.
-    setActiveIndex((i) => {
-      const prev = prevVisibleIndex(steps, stateRef.current, i)
-      return prev === -1 ? i : prev
-    })
-  }, [steps])
+    // Computed synchronously rather than in a setState updater so the refusal
+    // is observable: the caller keys its transition presentation on the
+    // return value, and a no-op that looked like a navigation would leave
+    // that presentation waiting on a transition that never comes.
+    const prev = prevVisibleIndex(steps, stateRef.current, activeIndex)
+    if (prev === -1) return false
+    setError(null)
+    setActiveIndex(prev)
+    return true
+  }, [steps, activeIndex])
 
   const goTo = useCallback(
     (i: number) => {
       // No navigating away from a step whose save is in flight.
-      if (busyRef.current) return
-      if (i < 0 || i >= steps.length) return
+      if (busyRef.current) return false
+      if (i < 0 || i >= steps.length) return false
       // An omitted step has no collapsed bar to click, but guard anyway so a
       // stale index can never land on one.
-      if (!isStepVisible(steps[i], stateRef.current)) return
+      if (!isStepVisible(steps[i], stateRef.current)) return false
+      if (i === activeIndex) return false
+      // Edit a step you've already reached (before the frontier) or one
+      // that's complete; never skip ahead to an unfinished future step.
+      if (i > activeIndex && !steps[i]?.isComplete(stateRef.current)) return false
       setError(null)
-      setActiveIndex((cur) => {
-        if (i === cur) return cur
-        // Edit a step you've already reached (before the frontier) or one
-        // that's complete; never skip ahead to an unfinished future step.
-        if (i < cur) return i
-        return steps[i]?.isComplete(stateRef.current) ? i : cur
-      })
+      setActiveIndex(i)
+      return true
     },
-    [steps],
+    [steps, activeIndex],
   )
 
   const retry = useCallback(() => setReloadNonce((n) => n + 1), [])

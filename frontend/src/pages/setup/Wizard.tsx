@@ -163,34 +163,49 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // refreshes it, so the effect never sees a stale capture.
   const [navStartY, setNavStartY] = useState<number | null>(null)
 
+  // All of this presentation state is keyed to a NAVIGATION, never to a click.
+  // back()/goTo() report whether anything moved, and advance() calls through
+  // only once its validate and persist gates have passed — so a Continue that
+  // gets refused (a failing URL probe, a validation error, a save already in
+  // flight) leaves the step looking untouched, buttons in place. Setting these
+  // optimistically on the click was a strand: hiding the action row is only
+  // undone by the transition effect running to completion, and a refused
+  // navigation changes nothing that effect depends on — first press it
+  // happened to recover (the scroll capture differed, re-running the effect
+  // against the same step: a phantom fade-out-and-back), and the next press
+  // from the same resting scroll changed nothing at all, leaving the row
+  // hidden for good.
   const goBack = useCallback(() => {
+    const y = window.scrollY
+    if (!back()) return
     setNavigated(true)
     setTravel('back')
     setDeparting(activeIndex)
     setBackPhase('collapse')
     setActionsHidden(true)
-    setNavStartY(window.scrollY)
-    back()
+    setNavStartY(y)
   }, [back, activeIndex])
   const goNext = useCallback(() => {
-    setNavigated(true)
-    setTravel('forward')
-    setDeparting(null)
-    setBackPhase(null)
-    setActionsHidden(true)
-    setNavStartY(window.scrollY)
-    advance()
+    advance(() => {
+      setNavigated(true)
+      setTravel('forward')
+      setDeparting(null)
+      setBackPhase(null)
+      setActionsHidden(true)
+      setNavStartY(window.scrollY)
+    })
   }, [advance])
   const goToStep = useCallback(
     (index: number) => {
-      setNavigated(true)
+      const y = window.scrollY
       const backwards = index < activeIndex
+      if (!goTo(index)) return
+      setNavigated(true)
       setTravel(backwards ? 'back' : 'forward')
       setDeparting(backwards ? activeIndex : null)
       setBackPhase(backwards ? 'collapse' : null)
       setActionsHidden(true)
-      setNavStartY(window.scrollY)
-      goTo(index)
+      setNavStartY(y)
     },
     [goTo, activeIndex],
   )
