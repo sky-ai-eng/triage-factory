@@ -59,6 +59,27 @@ function maxMessageID(msgs: Message[]): number {
   return msgs.reduce((max, m) => (m.id > max ? m.id : max), 0)
 }
 
+interface TokenDelta {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+// tokenDelta reads a row's usage, or null when it carries none — the token
+// analogue of an unstamped cost row, and the same no-op. Unlike the cost stamp
+// (a lump settled onto an existing row at completion), usage is written when
+// the row is inserted, so a streamed row carries its own turn's counts and a
+// fold needs nothing more than the frame.
+function tokenDelta(msg: Message): TokenDelta | null {
+  const input = msg.input_tokens ?? 0
+  const output = msg.output_tokens ?? 0
+  const cacheRead = msg.cache_read_tokens ?? 0
+  const cacheWrite = msg.cache_creation_tokens ?? 0
+  if (input === 0 && output === 0 && cacheRead === 0 && cacheWrite === 0) return null
+  return { input, output, cacheRead, cacheWrite }
+}
+
 // useRunDetail loads a single agent run, its messages, and the parent
 // task, then subscribes to live websocket updates so the page stays
 // fresh while the agent works. We fetch the task separately because
@@ -86,7 +107,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   // Mirrors of the two states the reconcile tick reads. That interval is
   // created once per run, so it cannot close over `run` / `messages` directly:
   // a dep on either would tear the timer down and rebuild it on every streamed
-  // row (foldMessageCost writes `run` per stamped message), and on a busy run
+  // row (foldMessageUsage writes `run` per stamped message), and on a busy run
   // the 5s tick would never come due. Written after commit, so by the time a
   // tick fires they hold what the view is showing.
   const runRef = useRef<Conversation | null>(null)
@@ -133,7 +154,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
 
   // The ids whose cost stamp the displayed total already counts: seeded from the
   // fetched transcript (those stamps are inside the run row's SUM) and extended
-  // by every row foldMessageCost adds. An id enters it only once a non-null
+  // by every row foldMessageUsage adds. An id enters it only once a non-null
   // stamp has been seen for it, so a row that streamed unstamped can still be
   // folded if a stamp arrives later.
   //
@@ -141,31 +162,55 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
   // displayed SUM covers — and nothing may be folded against it.
   const costBaseline = useRef<Set<number> | null>(null)
 
-  // foldMessageCost accumulates a streamed row's settled cost into the held
-  // run's total. The run row is re-read only on a status flip or an artifact
-  // transition, so on a long engagement with neither, the cost readout would
-  // otherwise sit at whatever the SUM was when the page loaded — a runtime that
-  // stamps every assistant row as it streams reads badly low for most of the
-  // run. Each id is folded at most once (a refetch/websocket race replays
-  // rows), and the next run refetch replaces the accumulation with the server's
-  // authoritative SUM, so drift self-corrects rather than compounding. Rows with
-  // no stamp — every SDK-runtime row until it settles at terminal time — are
-  // no-ops, leaving that path exactly as it was.
+  // The same baseline for the token rollups, kept as its own set rather than
+  // shared with cost: the two stamps land on different rows. Usage rides nearly
+  // every assistant row as it streams, while cost settles as a single lump at
+  // the end of an engagement — so one set gated on either would either strand
+  // most token deltas or re-count them.
+  const tokenBaseline = useRef<Set<number> | null>(null)
+
+  // foldMessageUsage accumulates a streamed row's settled cost and its token
+  // usage into the held run's rollups. The run row is re-read only on a status
+  // flip or an artifact transition, so on a long engagement with neither, both
+  // readouts would otherwise sit at whatever the SUMs were when the page loaded
+  // — a runtime that stamps every assistant row as it streams reads badly low
+  // for most of the run. Each id is folded at most once per rollup (a
+  // refetch/websocket race replays rows), and the next run refetch replaces the
+  // accumulation with the server's authoritative SUMs, so drift self-corrects
+  // rather than compounding. A row carrying neither figure — every SDK-runtime
+  // row's cost until it settles at terminal time — is a no-op for that rollup.
   //
   // A fold needs both halves of the baseline in hand — the run row's SUM and the
   // ids inside it — so it holds while a load is in flight. Both windows are one
   // round trip wide and each fails a different way: before the run row lands
   // there is no object to fold into, and marking the id anyway would strand its
-  // dollars for good (counted, never added); between the run row and the
+  // figures for good (counted, never added); between the run row and the
   // transcript the ids inside the SUM aren't known yet, so a row already counted
   // there would be folded a second time. Holding costs at worst under-reporting
   // until the next read, which is the bounded drift the rest of this accepts.
-  const foldMessageCost = useCallback((msg: Message) => {
+  const foldMessageUsage = useCallback((msg: Message) => {
     const cost = msg.cost_usd
-    const baseline = costBaseline.current
-    if (cost == null || baseline === null || baseline.has(msg.id)) return
-    baseline.add(msg.id)
-    setRun((prev) => (prev ? { ...prev, TotalCostUSD: (prev.TotalCostUSD ?? 0) + cost } : prev))
+    const costSeen = costBaseline.current
+    if (cost != null && costSeen !== null && !costSeen.has(msg.id)) {
+      costSeen.add(msg.id)
+      setRun((prev) => (prev ? { ...prev, TotalCostUSD: (prev.TotalCostUSD ?? 0) + cost } : prev))
+    }
+    const usage = tokenDelta(msg)
+    const tokensSeen = tokenBaseline.current
+    if (usage !== null && tokensSeen !== null && !tokensSeen.has(msg.id)) {
+      tokensSeen.add(msg.id)
+      setRun((prev) =>
+        prev
+          ? {
+              ...prev,
+              input_tokens: (prev.input_tokens ?? 0) + usage.input,
+              output_tokens: (prev.output_tokens ?? 0) + usage.output,
+              cache_read_tokens: (prev.cache_read_tokens ?? 0) + usage.cacheRead,
+              cache_creation_tokens: (prev.cache_creation_tokens ?? 0) + usage.cacheWrite,
+            }
+          : prev,
+      )
+    }
   }, [])
 
   // Pull the run's artifact set fresh. Shared by the initial load, the WS
@@ -233,11 +278,12 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
       // A new run starts with no prompts; drop the prior run's queue + timers.
       if (prevRunID) dropRun(prevRunID)
     }
-    // A load in flight invalidates the cost baseline until the seed below
-    // re-establishes it — for a same-run refetch as much as a navigation, since
-    // either way the total is about to be replaced by a SUM whose covered ids
-    // aren't known yet.
+    // A load in flight invalidates both baselines until the seed below
+    // re-establishes them — for a same-run refetch as much as a navigation,
+    // since either way the totals are about to be replaced by SUMs whose
+    // covered ids aren't known yet.
     costBaseline.current = null
+    tokenBaseline.current = null
     if (!runID) {
       setLoading(false)
       setNotFound(true)
@@ -278,15 +324,31 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
         if (msgsRes.ok) {
           const msgs = (await msgsRes.json()) as Message[]
           if (!cancelled) {
-            // Every stamped row in the fetched transcript is already inside the
-            // run row's SUM, so they become the baseline the fold counts from —
-            // a websocket replay of any of them can't be folded in a second
-            // time, and folding resumes from here.
-            const seeded = new Set<number>()
+            // The fetched transcript's stamped rows become the baselines the
+            // fold counts from: a websocket replay of any of them can't be
+            // folded in a second time, and folding resumes from here.
+            //
+            // Treating the whole transcript as already covered is an
+            // approximation, not an identity. The run row is read first and the
+            // transcript second, so a row written between the two reads is in
+            // the transcript but outside the SUM the run row carries — seeding
+            // it here means its figures are never folded, and the readouts sit
+            // that row low until the next run refetch replaces them with a
+            // fresh SUM. That is the deliberate direction: reading the
+            // transcript first would invert the race into a row the SUM covers
+            // but the baseline doesn't, and a replay of it would fold dollars
+            // and tokens that are already counted. Under-reporting for one
+            // round trip self-corrects on the next read; over-reporting
+            // compounds. Closing it properly needs the run row to say which
+            // message id its SUM runs through, which the wire doesn't carry.
+            const seededCost = new Set<number>()
+            const seededTokens = new Set<number>()
             for (const m of msgs) {
-              if (m.cost_usd != null) seeded.add(m.id)
+              if (m.cost_usd != null) seededCost.add(m.id)
+              if (tokenDelta(m) !== null) seededTokens.add(m.id)
             }
-            costBaseline.current = seeded
+            costBaseline.current = seededCost
+            tokenBaseline.current = seededTokens
             // A whole read: the transcript is complete through its last row,
             // so repairs start asking from there.
             completeThroughRef.current = maxMessageID(msgs)
@@ -371,7 +433,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           const repaired = rows.filter((m) => !seen.has(m.id))
           if (repaired.length === 0) return
           setMessages((prev) => mergeMessages(prev, repaired))
-          for (const m of repaired) foldMessageCost(m)
+          for (const m of repaired) foldMessageUsage(m)
         })
         .catch(() => {})
     }
@@ -399,12 +461,13 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
       cancelled = true
       clearInterval(id)
     }
-  }, [runID, refetchArtifacts, foldMessageCost])
+  }, [runID, refetchArtifacts, foldMessageUsage])
 
-  // Live updates. A `message` event appends, and folds any cost the row carries
-  // into the held run's total so the spend readout tracks a long engagement;
-  // `conversation_update` refetches the conversation row so status/duration and
-  // the authoritative cost SUM flip without a full reload. Permission prompts
+  // Live updates. A `message` event appends, and folds whatever cost and token
+  // usage the row carries into the held run's rollups so the spend and token
+  // readouts track a long engagement; `conversation_update` refetches the
+  // conversation row so status/duration and the authoritative SUMs flip
+  // without a full reload. Permission prompts
   // route into the shared queue (ingest on request, forget on a
   // resolved-elsewhere / timeout broadcast).
   useWebSocket(
@@ -415,7 +478,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           // Dedup by id (set server-side by the time the row hits the wire):
           // a refetch, or the reconcile poll, can replay the same row.
           setMessages((prev) => mergeMessages(prev, [event.data]))
-          foldMessageCost(event.data)
+          foldMessageUsage(event.data)
         }
         if (event.type === 'conversation_update' && event.conversation_id === runID) {
           // A run that left the running state can't act on a parked prompt —
@@ -458,7 +521,7 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           forget(event)
         }
       },
-      [runID, ingest, forget, dropRun, refetchArtifacts, foldMessageCost],
+      [runID, ingest, forget, dropRun, refetchArtifacts, foldMessageUsage],
     ),
   )
 

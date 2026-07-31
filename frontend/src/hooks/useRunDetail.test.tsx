@@ -226,6 +226,127 @@ describe('useRunDetail live cost accumulation', () => {
   })
 })
 
+// The token rollups ride the same mechanism as cost: the run row's SUMs are the
+// authority, and each streamed row's usage folds on top so a live engagement's
+// readouts advance between conversation_update refetches. They keep their own
+// baseline, since usage lands on nearly every assistant row while the cost
+// stamp settles once at the end.
+describe('useRunDetail live token accumulation', () => {
+  beforeEach(() => {
+    dispatch = null
+    serverRun = conversation({
+      input_tokens: 1000,
+      output_tokens: 100,
+      cache_read_tokens: 5000,
+      cache_creation_tokens: 200,
+    })
+    serverMessages = []
+    pendingSince = null
+    failSinceReads = false
+    mockFetch()
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('shows the server’s sums rather than a walk of the transcript', async () => {
+    // The transcript's own counts are deliberately not the run row's: the SUM
+    // covers every row ever written, including any the client never held.
+    serverMessages = [message({ id: 11, input_tokens: 7, output_tokens: 7 })]
+    render(<Harness />)
+    expect(await screen.findByText('1k')).toBeInTheDocument()
+    expect(screen.getByText('100')).toBeInTheDocument()
+    expect(screen.getByText('cache·r 5k')).toBeInTheDocument()
+    expect(screen.getByText('cache·w 200')).toBeInTheDocument()
+  })
+
+  it('folds a streamed row’s usage into the readouts with no conversation_update', async () => {
+    render(<Harness />)
+    await screen.findByText('1k')
+
+    send({
+      type: 'message',
+      conversation_id: RUN_ID,
+      data: message({ id: 11, input_tokens: 500, output_tokens: 50, cache_read_tokens: 1000 }),
+    })
+    expect(screen.getByText('1.5k')).toBeInTheDocument()
+    expect(screen.getByText('150')).toBeInTheDocument()
+    expect(screen.getByText('cache·r 6k')).toBeInTheDocument()
+    // Untouched by a row that reported no cache write.
+    expect(screen.getByText('cache·w 200')).toBeInTheDocument()
+  })
+
+  it('does not double-count a replayed row', async () => {
+    render(<Harness />)
+    await screen.findByText('1k')
+
+    const row = message({ id: 11, input_tokens: 500, output_tokens: 50 })
+    send({ type: 'message', conversation_id: RUN_ID, data: row })
+    send({ type: 'message', conversation_id: RUN_ID, data: row })
+    expect(screen.getByText('1.5k')).toBeInTheDocument()
+    expect(screen.getByText('150')).toBeInTheDocument()
+  })
+
+  it('does not re-count a row the just-fetched SUM already covers', async () => {
+    // Same window as the cost path: between the run row landing and the
+    // transcript landing, the ids inside the displayed SUM aren't known, so a
+    // websocket replay of one of them must not fold.
+    const transcriptRead = deferred<Message[]>()
+    mockFetch(transcriptRead.promise)
+    render(<Harness />)
+    await screen.findByText('1k')
+
+    const counted = message({ id: 11, input_tokens: 500, output_tokens: 50 })
+    send({ type: 'message', conversation_id: RUN_ID, data: counted })
+    expect(screen.getByText('1k')).toBeInTheDocument()
+
+    await act(async () => {
+      transcriptRead.settle([counted])
+    })
+    send({ type: 'message', conversation_id: RUN_ID, data: counted })
+    expect(screen.getByText('1k')).toBeInTheDocument()
+
+    // Folding resumes from that baseline for rows the SUM does not cover.
+    send({
+      type: 'message',
+      conversation_id: RUN_ID,
+      data: message({ id: 12, input_tokens: 500, output_tokens: 50 }),
+    })
+    expect(screen.getByText('1.5k')).toBeInTheDocument()
+  })
+
+  it('lets a conversation_update refetch overwrite the accumulated counts', async () => {
+    render(<Harness />)
+    await screen.findByText('1k')
+
+    send({
+      type: 'message',
+      conversation_id: RUN_ID,
+      data: message({ id: 11, input_tokens: 500, output_tokens: 50 }),
+    })
+    expect(screen.getByText('1.5k')).toBeInTheDocument()
+
+    serverRun = conversation({
+      Status: 'completed',
+      input_tokens: 9000,
+      output_tokens: 800,
+      cache_read_tokens: 5000,
+      cache_creation_tokens: 200,
+    })
+    send({ type: 'conversation_update', conversation_id: RUN_ID, data: { status: 'completed' } })
+    expect(await screen.findByText('9k')).toBeInTheDocument()
+    expect(screen.getByText('800')).toBeInTheDocument()
+  })
+
+  it('leaves the readouts alone for a row that carries no usage', async () => {
+    render(<Harness />)
+    await screen.findByText('1k')
+
+    send({ type: 'message', conversation_id: RUN_ID, data: message({ id: 11 }) })
+    send({ type: 'message', conversation_id: RUN_ID, data: message({ id: 12, cost_usd: 0.05 }) })
+    expect(screen.getByText('1k')).toBeInTheDocument()
+    expect(screen.getByText('100')).toBeInTheDocument()
+  })
+})
+
 // TranscriptHarness renders the held transcript as a joined string plus the
 // cost readout, so a repaired row shows up both as content and as dollars.
 function TranscriptHarness() {
