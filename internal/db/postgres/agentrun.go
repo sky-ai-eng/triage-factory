@@ -105,6 +105,23 @@ func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status
 	})
 }
 
+// CompleteForClaimSystem is CompleteSystem with the fence in front of it, in
+// the same transaction as both the status flip and the release. The claim it
+// releases is resolved the same way CompleteSystem resolves it (the
+// conversation's active claim) — which the fence has just proven to be
+// claimID, since only one claim per conversation can be unreleased at a time.
+func (s *agentRunStore) CompleteForClaimSystem(ctx context.Context, orgID, runID, claimID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, runID, claimID); err != nil {
+			return err
+		}
+		if err := completeRun(ctx, q, orgID, runID, status, costUSD, stopReason, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+			return err
+		}
+		return releaseActiveClaimWithTelemetry(ctx, q, orgID, runID, claimOutcomeForStatus(status), durationMs, numTurns)
+	})
+}
+
 func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
 	// The conversation carries no accounting cache — cost settles as one
 	// lump on the invocation's last message row (the ledger) below. A
@@ -405,6 +422,24 @@ func (s *agentRunStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID, ru
 	return err
 }
 
+// SetClaimPhaseSystem is the claim-keyed phase write, fenced: an engagement
+// reporting its own setup progress must still own the conversation. Without
+// the fence a zombie's stale phase would land on whatever claim happened to
+// be active — the successor's — and surface as its setup sub-state on every
+// display read.
+func (s *agentRunStore) SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) error {
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		_, err := q.ExecContext(ctx, `
+			UPDATE claims SET phase = NULLIF($1, '')
+			WHERE org_id = $2 AND id = $3 AND conversation_id = $4
+		`, phase, orgID, claimID, conversationID)
+		return err
+	})
+}
+
 // RecordClaimSandboxStatsSystem is keyed on the claim id alone (org bound as
 // defense in depth) with NO released_at predicate — the teardown that
 // measures these numbers runs after the claim is released.
@@ -455,6 +490,29 @@ func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, run
 	return flipped, err
 }
 
+// MarkFailedIfActiveForClaimSystem is MarkFailedIfActiveSystem behind the
+// fence. The two negative answers stay distinct: ok=false is the guarded
+// flip's own "somebody else reached the terminal first", ErrClaimReleased is
+// "you are not the one who gets to decide".
+func (s *agentRunStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, failureKind string) (bool, error) {
+	var flipped bool
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, runID, claimID); err != nil {
+			return err
+		}
+		var err error
+		flipped, err = markFailedIfActive(ctx, q, orgID, runID, failureKind)
+		if err != nil || !flipped {
+			return err
+		}
+		return releaseActiveClaim(ctx, q, orgID, runID, "failed")
+	})
+	if err != nil {
+		return false, err
+	}
+	return flipped, nil
+}
+
 func markFailedIfActive(ctx context.Context, q queryer, orgID, runID, failureKind string) (bool, error) {
 	// 'open' is deliberately failable here (unlike 'pending_approval') — see
 	// ConversationStore.MarkFailedIfActive: a warm 'open' run has no durable
@@ -495,6 +553,29 @@ func (s *agentRunStore) MarkCancelledIfActiveSystem(ctx context.Context, orgID, 
 		return releaseActiveClaim(ctx, q, orgID, runID, "cancelled")
 	})
 	return flipped, err
+}
+
+// MarkCancelledIfActiveForClaimSystem is MarkCancelledIfActiveSystem behind
+// the fence — the self-cancel an executor writes when its own run's ctx is
+// killed. Its unfenced twin above serves the user-initiated cancel, which is
+// deliberately not gated on ownership.
+func (s *agentRunStore) MarkCancelledIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, stopReason, summary string) (bool, error) {
+	var flipped bool
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, runID, claimID); err != nil {
+			return err
+		}
+		var err error
+		flipped, err = markCancelledIfActive(ctx, q, orgID, runID, stopReason, summary)
+		if err != nil || !flipped {
+			return err
+		}
+		return releaseActiveClaim(ctx, q, orgID, runID, "cancelled")
+	})
+	if err != nil {
+		return false, err
+	}
+	return flipped, nil
 }
 
 func markCancelledIfActive(ctx context.Context, q queryer, orgID, runID, stopReason, summary string) (bool, error) {
@@ -855,6 +936,31 @@ func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, m
 	return insertRunMessage(ctx, s.admin, orgID, msg)
 }
 
+// InsertMessageForClaimSystem is the transcript write an engagement makes
+// while it is streaming: the row is attributed to claimID, and claimID has to
+// still be live for it to land at all. The explicit argument overwrites
+// msg.ClaimID so the row that persists and the claim the fence validated are
+// the same one — a row attributed to a claim the writer does not hold is the
+// misattribution this whole path exists to prevent.
+func (s *agentRunStore) InsertMessageForClaimSystem(ctx context.Context, orgID, claimID string, msg *domain.Message) (int64, error) {
+	var id int64
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		// The row's own conversation is what the claim must own — the fence
+		// and the INSERT below must not be able to name different ones.
+		if err := assertClaimActive(ctx, q, orgID, msg.ConversationID, claimID); err != nil {
+			return err
+		}
+		msg.ClaimID = claimID
+		var err error
+		id, err = insertRunMessage(ctx, q, orgID, msg)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
 // LastAgentActivityAtSystem returns the created_at of the run's newest non-user
 // message (the artifact-change ledger watermark). Ordered by id DESC
 // (the monotonic sequence) so the watermark is the genuinely last-inserted agent
@@ -943,12 +1049,12 @@ func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.
 		                      tool_call_id, is_error, metadata, model,
 		                      input_tokens, output_tokens,
 		                      cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
-		                      reasoning, content_blocks, delivered, window_state, seq)
+		                      reasoning, content_blocks, delivered, window_state, seq, duration_ms)
 		VALUES ($1, $2, $3,
 		        COALESCE($4, (SELECT id FROM claims
 		                      WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL)),
 		        $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-		        $16, $17, $18, $19, $20, $21, $22, $23)
+		        $16, $17, $18, $19, $20, $21, $22, $23, $24)
 		RETURNING id
 	`,
 		orgID, msg.ConversationID, nullIfEmpty(msg.UserID), nullIfEmpty(msg.ClaimID),
@@ -959,7 +1065,7 @@ func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.
 		nullIntPtr(msg.CacheReadTokens), nullIntPtr(msg.CacheCreationTokens),
 		nullFloatPtr(msg.CostUSD), msg.CreatedAt,
 		nullableJSONB(reasoningJSON), nullableJSONB(contentBlocksJSON), delivered,
-		string(windowState), nullFloatPtr(msg.Seq),
+		string(windowState), nullFloatPtr(msg.Seq), nullIntPtr(msg.DurationMs),
 	).Scan(&id)
 	if err != nil {
 		return 0, err
@@ -1001,7 +1107,7 @@ func nullInt64Ptr(p *int64) any {
 const pgMessageColumns = `id, conversation_id, COALESCE(user_id::text, ''), COALESCE(claim_id::text, ''),
 	role, content, subtype, tool_calls::text, tool_call_id, is_error, metadata::text,
 	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
-	reasoning::text, content_blocks::text, delivered, window_state, seq`
+	reasoning::text, content_blocks::text, delivered, window_state, seq, duration_ms`
 
 // scanMessageRows drains a messages result set selecting
 // pgMessageColumns into domain.Message values. Shared by the
@@ -1017,12 +1123,13 @@ func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 		var delivered bool
 		var windowState string
 		var seq sql.NullFloat64
+		var durationMs sql.NullInt64
 
 		if err := rows.Scan(
 			&m.ID, &m.ConversationID, &m.UserID, &m.ClaimID, &m.Role, &content, &subtype, &toolCallsStr,
 			&toolCallID, &m.IsError, &metadataStr, &model,
 			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
-			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq,
+			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs,
 		); err != nil {
 			return nil, err
 		}
@@ -1083,24 +1190,42 @@ func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 			v := seq.Float64
 			m.Seq = &v
 		}
+		if durationMs.Valid {
+			v := int(durationMs.Int64)
+			m.DurationMs = &v
+		}
 
 		messages = append(messages, m)
 	}
 	return messages, rows.Err()
 }
 
+// Messages is the whole-transcript display read — MessagesSince from the
+// bottom. id is a bigserial, so no row can be at or below 0 and the watermark
+// drops out: routing both through one query is what makes the two reads'
+// visibility filter identical rather than merely matching.
 func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
+	return s.MessagesSince(ctx, orgID, runID, 0)
+}
+
+func (s *agentRunStore) MessagesSince(ctx context.Context, orgID, runID string, sinceID int) ([]domain.Message, error) {
 	// Withdrawn-pending rows (undelivered + inactive — a staged injection
 	// that was withdrawn before any flush) never happened, so the display
 	// read hides them. delivered + inactive stays visible: that is compacted
 	// history, still part of the rendered transcript.
+	//
+	// Ordered by the same effective assembly key ListForAssembly uses, so a
+	// row placed out of insertion order renders where the model read it. The
+	// watermark stays on id: it answers "which rows has this client not seen
+	// yet", which is an insertion question, not a placement one.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
 		FROM messages
 		WHERE org_id = $1 AND conversation_id = $2
+		  AND id > $3
 		  AND NOT (delivered = false AND window_state = 'inactive')
-		ORDER BY id ASC
-	`, orgID, runID)
+		ORDER BY COALESCE(seq, (id)::double precision) ASC
+	`, orgID, runID, sinceID)
 	if err != nil {
 		return nil, err
 	}
@@ -1119,15 +1244,16 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 	}
 	// App pool (RLS-active): conversation_id is a uuid column, so the slice
 	// binds as a uuid[] literal through one $N (pgUUIDArray), mirroring
-	// artifactStore.ListByRuns. ORDER BY (conversation_id, id) so the caller
-	// groups by RunID with each run's messages in insertion order.
+	// artifactStore.ListByRuns. Ordering on (conversation_id, the effective
+	// assembly key) so the caller groups by RunID with each run's messages in
+	// the same order the single-run display read gives them.
 	// Withdrawn-pending rows are hidden, same as Messages.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
 		FROM messages
 		WHERE org_id = $1 AND conversation_id = ANY($2)
 		  AND NOT (delivered = false AND window_state = 'inactive')
-		ORDER BY conversation_id ASC, id ASC
+		ORDER BY conversation_id ASC, COALESCE(seq, (id)::double precision) ASC
 	`, orgID, pgUUIDArray(runIDs))
 	if err != nil {
 		return nil, err
@@ -1163,23 +1289,33 @@ func (s *agentRunStore) ListForAssemblySystem(ctx context.Context, orgID, runID 
 	return scanMessageRows(rows)
 }
 
-// MarkDeliveredSystem flips delivered=true on the given message ids, scoped to
-// runID, stamping subtype in the same statement when non-empty. ids outside
-// the run or already delivered are silently unaffected.
+// MarkDeliveredForClaimSystem is the engagement's drain flush, behind the
+// fence. Consuming a pending row is a claim on it: the rows an engagement
+// folds into its assembly must not be marked spent by an engagement that has
+// been fenced out, or the successor's own assembly silently loses them.
 //
-// Admin pool for the same reason as ListForAssemblySystem: the native loop is
-// the only caller and holds no request identity.
-func (s *agentRunStore) MarkDeliveredSystem(ctx context.Context, orgID, runID string, ids []int, subtype string) error {
+// A non-empty subtype is stamped in the same statement — the flush is the
+// moment a mid-work drain marks human input as a steer, and doing it in two
+// steps would leave a window in which a delivered row had lost its
+// provenance. NULLIF keeps the stamp optional without forking the statement:
+// an empty subtype leaves each row's own value in place.
+func (s *agentRunStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, runID, claimID string, ids []int, subtype string) error {
 	if len(ids) == 0 {
+		// Nothing to consume, so nothing to fence: an empty batch writes no
+		// rows on any path, and refusing it would make the caller handle a
+		// fence trip that could not have corrupted anything.
 		return nil
 	}
-	// NULLIF keeps the stamp optional without forking the statement: an
-	// empty subtype leaves each row's own value in place.
-	_, err := s.admin.ExecContext(ctx, `
-		UPDATE messages SET delivered = true, subtype = COALESCE(NULLIF($4, ''), subtype)
-		WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3)
-	`, orgID, runID, pgIntArray(ids), subtype)
-	return err
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, runID, claimID); err != nil {
+			return err
+		}
+		_, err := q.ExecContext(ctx, `
+			UPDATE messages SET delivered = true, subtype = COALESCE(NULLIF($4, ''), subtype)
+			WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3)
+		`, orgID, runID, pgIntArray(ids), subtype)
+		return err
+	})
 }
 
 // SetWindowStateSystem is the elision/compaction primitive: a batched range

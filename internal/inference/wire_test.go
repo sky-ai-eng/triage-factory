@@ -35,7 +35,7 @@ func toAnthropic(t *testing.T, req Request) *anthropic.AnthropicMessageRequest {
 func toolConversationRows() []domain.Message {
 	return []domain.Message{
 		{ID: 1, Role: "user", Content: "check the two files"},
-		{ID: 2, Role: "assistant", Subtype: "tool_use", Content: "I'll read both.",
+		{ID: 2, Role: "assistant", Content: "I'll read both.",
 			Reasoning: []domain.ReasoningDetail{{
 				Index: 0, Type: "reasoning.text",
 				Text: "Read them in parallel.", Signature: "c2lnLTE=",
@@ -45,9 +45,9 @@ func toolConversationRows() []domain.Message {
 				{ID: "toolu_b", Name: "Read", Input: map[string]any{"path": "/b"}},
 			},
 		},
-		{ID: 3, Role: "tool", Subtype: "tool", ToolCallID: "toolu_a", Content: "contents of a"},
-		{ID: 4, Role: "tool", Subtype: "tool", ToolCallID: "toolu_b", Content: "no such file", IsError: true},
-		{ID: 5, Role: "assistant", Subtype: "text", Content: "One file was missing."},
+		{ID: 3, Role: "tool", ToolCallID: "toolu_a", Content: "contents of a"},
+		{ID: 4, Role: "tool", ToolCallID: "toolu_b", Content: "no such file", IsError: true},
+		{ID: 5, Role: "assistant", Content: "One file was missing."},
 	}
 }
 

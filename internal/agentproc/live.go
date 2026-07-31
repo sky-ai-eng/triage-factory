@@ -18,7 +18,7 @@ import (
 //	{"kind":"user_message","text":"..."}
 //	{"kind":"interrupt"}
 //	{"kind":"set_mode","mode":"default|acceptEdits|plan|bypassPermissions|dontAsk|auto"}
-//	{"kind":"permission_response","request_id":"<id>","behavior":"allow"|"deny","message":"...","updated_input":{...}}
+//	{"kind":"permission_response","tool_call_id":"<id>","behavior":"allow"|"deny","message":"...","updated_input":{...}}
 //	{"kind":"end"}
 //
 // On an allow, updated_input optionally overrides the tool input; when
@@ -31,16 +31,27 @@ import (
 // lines this reader intercepts:
 //
 //	{"type":"control","subtype":"ready"}
-//	{"type":"control","subtype":"permission_request","request_id":"<id>","tool_name":"...","input":{...}}
+//	{"type":"control","subtype":"permission_request","tool_call_id":"<id>","tool_name":"...","input":{...},"title":"...","display_name":"...","description":"..."}
 //	{"type":"control","subtype":"interrupted"}
 
 // PermissionRequest is one canUseTool round-trip surfaced from the
 // wrapper. The handler decides allow/deny; the reader writes the
 // matching permission_response back to the wrapper.
+//
+// ToolCallID is the SDK's toolUseID for the gated call — the same id that
+// appears in the assistant message's tool_calls and on the tool result that
+// follows, and the same identity the native loop's gate seam names as
+// domain.ToolCall.ID. Title/DisplayName/Description are the prompt copy the
+// SDK already rendered ("Claude wants to read foo.txt" / "Read file" / a
+// subtitle); all three are optional and empty when the SDK omits them, so a
+// consumer must still be able to reconstruct from ToolName + Input.
 type PermissionRequest struct {
-	RequestID string
-	ToolName  string
-	Input     map[string]any
+	ToolCallID  string
+	ToolName    string
+	Input       map[string]any
+	Title       string
+	DisplayName string
+	Description string
 }
 
 // PermissionDecision is the handler's answer. Behavior is "allow" or
@@ -99,6 +110,12 @@ type LiveRun struct {
 	done      chan struct{} // closed when the reader loop exits
 	ready     chan struct{} // closed when the wrapper emits control/ready
 	readyOnce sync.Once
+
+	// stream is the reader loop's parser, constructed here rather than
+	// inside the loop so Send can mark when a user message goes out. A run
+	// parked between turns would otherwise bill the whole wait to the first
+	// assistant message of the next one.
+	stream *StreamState
 
 	// Close phase bounds; zero falls back to the package consts. Fields
 	// (not just consts) so tests can drive the timeout paths quickly.
@@ -215,6 +232,7 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		cleanup: cleanup,
 		done:    make(chan struct{}),
 		ready:   make(chan struct{}),
+		stream:  NewStreamState(),
 	}
 
 	// opts travels whole (rather than the two fields the loop used to take)
@@ -246,7 +264,11 @@ func (l *LiveRun) Send(ctx context.Context, text string) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	return l.writeControl(map[string]any{"kind": "user_message", "text": text})
+	if err := l.writeControl(map[string]any{"kind": "user_message", "text": text}); err != nil {
+		return err
+	}
+	l.stream.MarkRequest()
+	return nil
 }
 
 // Interrupt stops the agent's current turn. The wrapper acknowledges
@@ -375,7 +397,7 @@ func (l *LiveRun) writeControl(v map[string]any) error {
 func (l *LiveRun) readLoop(runCtx context.Context, opts RunOptions, proc runProc, sink Sink, perms PermissionHandler) {
 	defer close(l.done)
 
-	stream := NewStreamState()
+	stream := l.stream
 	result, streamErr := l.consumeStreamInteractive(proc.Stdout(), sink, stream, perms, opts.OnResult, opts.TraceID)
 
 	// If the stream reader bailed before any terminal result, the
@@ -469,7 +491,13 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 					// error_during_execution subtype.
 					interruptPending = true
 				case "permission_request":
+					// The handler parks this goroutine for as long as the
+					// human takes, so the marks are held still across it —
+					// the wait belongs to the approval, not to the tool that
+					// runs once it clears.
+					gateAt := stream.Now()
 					l.handlePermission(ctl, perms)
+					stream.DiscountGate(gateAt)
 				}
 				// Control lines are not sink content.
 			} else {
@@ -544,9 +572,12 @@ func (l *LiveRun) handlePermission(ctl controlLine, perms PermissionHandler) {
 	var decision PermissionDecision
 	if perms != nil {
 		decision = perms(PermissionRequest{
-			RequestID: ctl.RequestID,
-			ToolName:  ctl.ToolName,
-			Input:     ctl.Input,
+			ToolCallID:  ctl.ToolCallID,
+			ToolName:    ctl.ToolName,
+			Input:       ctl.Input,
+			Title:       ctl.Title,
+			DisplayName: ctl.DisplayName,
+			Description: ctl.Description,
 		})
 	} else {
 		decision = PermissionDecision{Behavior: "deny", Message: "no permission handler configured"}
@@ -556,9 +587,9 @@ func (l *LiveRun) handlePermission(ctl controlLine, perms PermissionHandler) {
 	}
 
 	resp := map[string]any{
-		"kind":       "permission_response",
-		"request_id": ctl.RequestID,
-		"behavior":   decision.Behavior,
+		"kind":         "permission_response",
+		"tool_call_id": ctl.ToolCallID,
+		"behavior":     decision.Behavior,
 	}
 	if decision.Message != "" {
 		resp["message"] = decision.Message
@@ -573,10 +604,13 @@ func (l *LiveRun) handlePermission(ctl controlLine, perms PermissionHandler) {
 
 // controlLine is the decoded shape of a `type:"control"` stdout line.
 type controlLine struct {
-	Subtype   string
-	RequestID string
-	ToolName  string
-	Input     map[string]any
+	Subtype     string
+	ToolCallID  string
+	ToolName    string
+	Input       map[string]any
+	Title       string
+	DisplayName string
+	Description string
 }
 
 // parseControlLine reports whether line is a control envelope and, if
@@ -584,11 +618,14 @@ type controlLine struct {
 // return ok=false so the caller falls back to the SDK-envelope parser.
 func parseControlLine(line []byte) (controlLine, bool) {
 	var raw struct {
-		Type      string         `json:"type"`
-		Subtype   string         `json:"subtype"`
-		RequestID string         `json:"request_id"`
-		ToolName  string         `json:"tool_name"`
-		Input     map[string]any `json:"input"`
+		Type        string         `json:"type"`
+		Subtype     string         `json:"subtype"`
+		ToolCallID  string         `json:"tool_call_id"`
+		ToolName    string         `json:"tool_name"`
+		Input       map[string]any `json:"input"`
+		Title       string         `json:"title"`
+		DisplayName string         `json:"display_name"`
+		Description string         `json:"description"`
 	}
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return controlLine{}, false
@@ -597,10 +634,13 @@ func parseControlLine(line []byte) (controlLine, bool) {
 		return controlLine{}, false
 	}
 	return controlLine{
-		Subtype:   raw.Subtype,
-		RequestID: raw.RequestID,
-		ToolName:  raw.ToolName,
-		Input:     raw.Input,
+		Subtype:     raw.Subtype,
+		ToolCallID:  raw.ToolCallID,
+		ToolName:    raw.ToolName,
+		Input:       raw.Input,
+		Title:       raw.Title,
+		DisplayName: raw.DisplayName,
+		Description: raw.Description,
 	}, true
 }
 

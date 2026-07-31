@@ -10,6 +10,7 @@ package delegate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -43,7 +44,7 @@ const toolHostDialTimeout = 60 * time.Second
 // unseal into the sidecar, the workspace build-or-rehydrate, the cap-broker
 // launch of the per-run network — is runtime-independent and already done by
 // the dispatcher.
-func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model, triggerType, creatorUserID string) {
+func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model, triggerType, creatorUserID string) (fenced bool) {
 	model = nativeWireModel(model)
 	orgID := cfg.orgID
 	namespace := memoryNamespace(cfg.blueprintRunID, runID)
@@ -77,14 +78,12 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 
 	systemPrompt, err := s.buildNativeSystemPrompt(ctx, task, mission, cfg, runID, namespace)
 	if err != nil {
-		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "compose system prompt: "+err.Error(), domain.RunFailureUnclassified)
-		return
+		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "compose system prompt: "+err.Error(), domain.RunFailureUnclassified)
 	}
 
-	s.updatePhase(orgID, runID, "agent_starting")
+	s.updatePhase(orgID, runID, cfg.claimID, "agent_starting")
 	if ctx.Err() != nil {
-		s.handleCancelled(orgID, runID, startTime, cfg.wtPath, triggerType, creatorUserID)
-		return
+		return s.handleCancelled(orgID, runID, startTime, cfg.wtPath, cfg.claimID, triggerType, creatorUserID)
 	}
 
 	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
@@ -104,30 +103,30 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		RecordSandboxActuals: s.recordSandboxActuals,
 	})
 	if err != nil {
-		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "launch tool host: "+err.Error(), domain.RunFailureUnclassified)
-		return
+		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "launch tool host: "+err.Error(), domain.RunFailureUnclassified)
 	}
 	defer func() { _ = jail.Close() }()
 
 	conn, err := jail.Accept(ctx, toolHostDialTimeout)
 	if err != nil {
 		if ctx.Err() != nil {
-			s.handleCancelled(orgID, runID, startTime, cfg.wtPath, triggerType, creatorUserID)
-			return
+			return s.handleCancelled(orgID, runID, startTime, cfg.wtPath, cfg.claimID, triggerType, creatorUserID)
 		}
-		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "connect to tool host: "+err.Error(), domain.RunFailureUnclassified)
-		return
+		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "connect to tool host: "+err.Error(), domain.RunFailureUnclassified)
 	}
 	tools := agentloop.NewToolHost(conn, 0)
 	defer func() { _ = tools.Close() }()
 
-	s.updatePhase(orgID, runID, "")
+	s.updatePhase(orgID, runID, cfg.claimID, "")
 	delegateLog.Info("native agent loop starting", "run", runID, "cwd", claudeCwd, "model", model)
 
-	transcript := newNativeTranscript(s, orgID, runID, triggerType, creatorUserID)
+	transcript := newNativeTranscript(s, orgID, runID, cfg.claimID)
 	if err := s.mintOpeningTurn(ctx, transcript, orgID, runID, creatorUserID); err != nil {
-		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, "mint opening turn: "+err.Error(), domain.RunFailureUnclassified)
-		return
+		if errors.Is(err, db.ErrClaimReleased) {
+			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "run", runID, "claim", cfg.claimID)
+			return true
+		}
+		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "mint opening turn: "+err.Error(), domain.RunFailureUnclassified)
 	}
 
 	engine := &agentloop.Engine{
@@ -151,7 +150,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		UserID:         creatorUserID,
 	})
 
-	s.recordNativeResult(ctx, orgID, runID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, priorMemory)
+	return s.recordNativeResult(ctx, orgID, runID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, priorMemory)
 }
 
 // openingTurn is the delegation's first user message. The mission itself
@@ -457,6 +456,10 @@ func nativeMaxIterations() int {
 // SDK path does at its own dormancy points, which is what keeps the
 // crash-loss window bounded to the current engagement and lets the next
 // claim cold-rehydrate on another executor.
+//
+// Returns fenced: true when the engagement's writes were refused because its
+// claim is released. Nothing further is recorded and nothing is reacted to —
+// a successor owns the conversation's disposition now.
 func (s *Spawner) recordNativeResult(
 	ctx context.Context,
 	orgID, runID string,
@@ -466,19 +469,27 @@ func (s *Spawner) recordNativeResult(
 	startTime time.Time,
 	result agentloop.Result,
 	priorMemory *memoryFingerprint,
-) {
+) (fenced bool) {
+	// A fence trip inside the loop (a transcript insert, a drain flush)
+	// surfaces as the engagement's failure. It is not a failure to record:
+	// the refusal IS the record, and writing a terminal here is exactly what
+	// the fence exists to prevent.
+	if result.Err != nil && errors.Is(result.Err, db.ErrClaimReleased) {
+		delegateLog.Error("engagement fenced out mid-run; a successor owns the conversation",
+			"run", runID, "claim", cfg.claimID, "error", result.Err)
+		return true
+	}
+
 	switch result.Kind {
 	case agentloop.ResultCancelled:
-		s.handleCancelled(orgID, runID, startTime, cfg.wtPath, triggerType, creatorUserID)
-		return
+		return s.handleCancelled(orgID, runID, startTime, cfg.wtPath, cfg.claimID, triggerType, creatorUserID)
 
 	case agentloop.ResultFailed:
 		reason := "native agent loop failed"
 		if result.Err != nil {
 			reason = result.Err.Error()
 		}
-		s.failRun(orgID, runID, task.ID, triggerType, creatorUserID, reason, result.FailureKind)
-		return
+		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, reason, result.FailureKind)
 
 	case agentloop.ResultParked:
 		// A guard stopped the engagement before a call. The conversation is
@@ -493,7 +504,7 @@ func (s *Spawner) recordNativeResult(
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
 		}, "")
-		return
+		return false
 	}
 
 	// Concluded. Record the run's memory exactly as processCompletion does —
@@ -521,23 +532,26 @@ func (s *Spawner) recordNativeResult(
 	outcome := string(result.Outcome)
 	outcomeReason := result.OutcomeReason
 
-	bgCtx := context.Background()
-	if triggerType == "manual" {
-		if err := s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.Conversations.Complete(bgCtx, orgID, runID, "completed", 0, result.DurationMs, result.NumTurns, "", result.ResultSummary, outcome, outcomeReason, "")
-		}); err != nil {
-			delegateLog.Warn("record completion for run failed", "run", runID, "error", err)
-		}
-	} else if err := s.agentRuns.CompleteSystem(bgCtx, orgID, runID, "completed", 0, result.DurationMs, result.NumTurns, "", result.ResultSummary, outcome, outcomeReason, ""); err != nil {
-		delegateLog.Warn("record completion for run failed", "run", runID, "error", err)
-	}
-
+	// One fenced write for both trigger types — the fence's ownership check
+	// stands in for the RLS pass the former synthetic-claims route provided,
+	// the same trade the SDK completion path makes.
+	//
 	// costUSD is zero here on purpose, and it is not a gap: the native
 	// runtime settles cost per assistant row at call time, so the ledger is
 	// already complete. Passing a lump would double-count.
+	bgCtx := context.Background()
+	if err := s.agentRuns.CompleteForClaimSystem(bgCtx, orgID, runID, cfg.claimID, "completed", 0, result.DurationMs, result.NumTurns, "", result.ResultSummary, outcome, outcomeReason, ""); err != nil {
+		if errors.Is(err, db.ErrClaimReleased) {
+			delegateLog.Error("engagement fenced out at conclusion; a successor owns the conversation",
+				"run", runID, "claim", cfg.claimID)
+			return true
+		}
+		delegateLog.Warn("record completion for run failed", "run", runID, "error", err)
+	}
 
 	s.updateBreakerCounter(task.ID, triggerType, "completed")
 	s.broadcastRunUpdate(orgID, runID, "completed")
 	s.recomputeTaskBoardColumn(orgID, task.ID)
 	toast.Success(s.wsHub, orgID, fmt.Sprintf("Run %s completed", shortRunID(runID)))
+	return false
 }

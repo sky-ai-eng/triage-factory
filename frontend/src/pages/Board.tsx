@@ -187,8 +187,7 @@ export default function Board() {
   // not-yet-seeded run).
   const {
     queues: permQueueMap,
-    ingest: ingestPermission,
-    forget: forgetPermission,
+    refresh: refreshPermissions,
     resolve: resolvePermission,
     dropRun: dropPermissionRun,
   } = usePermissionQueues()
@@ -725,25 +724,36 @@ export default function Board() {
           // scoring_completed; we only need completed since the
           // priority_score it writes is what drives ordering here.
           scheduleFetchTasks()
-        } else if (event.type === 'permission_request') {
-          // A run hit an off-allowlist tool — surface its Allow/Deny prompt on
-          // the matching card. The queue core dedups + arms the dismiss TTL.
-          ingestPermission(event)
-        } else if (event.type === 'permission_resolved') {
-          // The prompt was answered (here or elsewhere) or timed out — drop it
-          // so a sibling tab's card clears without waiting for its own TTL.
-          forgetPermission(event)
+        } else if (event.type === 'permission_request' || event.type === 'permission_resolved') {
+          // A run raised an Allow/Deny prompt, or one it had was answered
+          // (here or in another tab) / timed out. Either way the frame is only
+          // a hint that this run's pending set moved — re-read it, so the card
+          // lights up or clears from the server's view rather than from
+          // whichever frames this tab happened to be around for.
+          refreshPermissions(event.conversation_id)
         }
       },
-      [
-        scheduleFetchTasks,
-        seedChainStepRuns,
-        ingestPermission,
-        forgetPermission,
-        dropPermissionRun,
-      ],
+      [scheduleFetchTasks, seedChainStepRuns, refreshPermissions, dropPermissionRun],
     ),
   )
+
+  // Cold-load reconstruction: a board opened after a prompt was raised never
+  // saw its frame, so ask for each live run's pending set the first time that
+  // run appears. Without this, a run parked on a human is indistinguishable
+  // from a run that is simply working, until it times out.
+  //
+  // Bounded to non-terminal runs (a finished run can't be waiting on anyone)
+  // and asked once per run per mount, so a board that refetches its columns on
+  // every event doesn't turn into a request per card per event.
+  const permissionsAskedRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    for (const run of Object.values(agentRuns)) {
+      if (!run?.ID || isPermissionTerminalStatus(run.Status)) continue
+      if (permissionsAskedRef.current.has(run.ID)) continue
+      permissionsAskedRef.current.add(run.ID)
+      refreshPermissions(run.ID)
+    }
+  }, [agentRuns, refreshPermissions])
 
   // Drop a run's queue when the run leaves the board (its agentRuns entry was
   // replaced — e.g. a chain advanced to a new step, or a task got re-delegated).
@@ -1487,7 +1497,7 @@ function ColumnContents({
   permQueues: Record<string, PendingPermission[]>
   onResolvePermission: (
     runID: string,
-    requestID: string,
+    toolCallID: string,
     decision: PermissionDecisionInput,
   ) => Promise<void>
   delegateFailures: Record<string, string>
@@ -1654,7 +1664,7 @@ const SortableAgentCard = memo(function SortableAgentCard({
   pendingPermissions?: PendingPermission[]
   onResolvePermission: (
     runID: string,
-    requestID: string,
+    toolCallID: string,
     decision: PermissionDecisionInput,
   ) => Promise<void>
   onRequeue: (taskID: string) => void
@@ -1702,8 +1712,8 @@ const SortableAgentCard = memo(function SortableAgentCard({
         chainSteps={chainSteps}
         feed={feed}
         pendingPermissions={pendingPermissions}
-        onResolvePermission={(requestID, decision) =>
-          onResolvePermission(run.ID, requestID, decision)
+        onResolvePermission={(toolCallID, decision) =>
+          onResolvePermission(run.ID, toolCallID, decision)
         }
         onRequeue={() => onRequeue(task.id)}
         onReview={() => {

@@ -24,6 +24,7 @@
 // transparently falls back to the user's local Claude Code OAuth login
 // when nothing is set, billing against their Pro/Max subscription.
 import { query } from "@anthropic-ai/claude-agent-sdk"
+import { randomUUID } from "node:crypto"
 import { createInterface } from "node:readline"
 import { createRequire } from "node:module"
 import { existsSync } from "node:fs"
@@ -195,7 +196,6 @@ function userMessage(text) {
 async function runStreamingInput(options, permissionPrompts) {
   const input = createInputStream()
   const pendingPerms = new Map()
-  let permCounter = 0
   let closing = false
 
   // Deny + clear every parked permission promise. Called on end/EOF (and
@@ -224,26 +224,54 @@ async function runStreamingInput(options, permissionPrompts) {
   if (permissionPrompts) {
     options.canUseTool = async (toolName, toolInput, opts = {}) => {
       if (closing) return { behavior: "deny", message: "run ending" }
-      const requestId = `perm-${++permCounter}`
+      // toolUseID identifies the tool_use block being gated — the same id
+      // that lands in the assistant message's tool_calls[] and on the tool
+      // result that follows it. Passing it through verbatim is what lets a
+      // decision be tied back to the call it authorized, and names the call
+      // the way the native loop's own gate does.
+      //
+      // sdk.d.ts declares it non-optional, so the fallback below should be
+      // unreachable. It exists because the failure mode without it is a
+      // wedged run rather than a missing field: an absent id parks the
+      // promise under the key `undefined`, JSON.stringify drops the key on
+      // the way out, and the reply comes back carrying the empty string — a
+      // key that matches nothing, so the promise never settles and the turn
+      // hangs until the run ends. Parallel gated calls would also collapse
+      // onto that one key and strand each other. A uuid keeps the prompt
+      // answerable end to end; the prefix keeps it honest, since a synthetic
+      // id matches nothing in the transcript.
+      let toolCallID = opts.toolUseID
+      if (typeof toolCallID !== "string" || toolCallID === "") {
+        toolCallID = `synthetic-${randomUUID()}`
+        process.stderr.write(
+          `wrapper: permission request for ${toolName} carried no toolUseID; keyed as ${toolCallID}\n`,
+        )
+      }
       emit({
         type: "control",
         subtype: "permission_request",
-        request_id: requestId,
+        tool_call_id: toolCallID,
         tool_name: toolName,
         input: toolInput,
+        // Prompt copy the SDK already rendered. Optional in sdk.d.ts, and
+        // JSON.stringify drops undefined keys, so an absent field just means
+        // the consumer falls back to reconstructing from tool_name + input.
+        title: opts.title,
+        display_name: opts.displayName,
+        description: opts.description,
       })
       return new Promise((resolve) => {
         let done = false
         const settle = (decision) => {
           if (done) return
           done = true
-          pendingPerms.delete(requestId)
+          pendingPerms.delete(toolCallID)
           resolve(decision)
         }
         // Stash the original input alongside the settle: an allow
         // response that doesn't override the input must echo it back
         // as updatedInput (see the permission_response handler).
-        pendingPerms.set(requestId, { settle, toolInput })
+        pendingPerms.set(toolCallID, { settle, toolInput })
         // If the turn is interrupted, the SDK aborts this signal — resolve
         // as a deny so the pending promise never strands the query.
         const signal = opts.signal
@@ -308,9 +336,9 @@ async function runStreamingInput(options, permissionPrompts) {
         break
 
       case "permission_response": {
-        const pending = pendingPerms.get(ctl.request_id)
+        const pending = pendingPerms.get(ctl.tool_call_id)
         if (!pending) {
-          process.stderr.write(`wrapper: no pending permission ${ctl.request_id}\n`)
+          process.stderr.write(`wrapper: no pending permission ${ctl.tool_call_id}\n`)
           break
         }
         if (ctl.behavior === "allow") {

@@ -1191,6 +1191,142 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// The claim-fenced engagement writes, driven with a LIVE claim. What
+	// every backend must agree on is that naming your own claim changes
+	// nothing about the write itself: same row, same attribution, same
+	// terminal, same phase. The refusal half of the contract is Postgres-only
+	// (local is single-process and has no zombie to refuse) and is asserted
+	// in the Postgres backend test file.
+	t.Run("ClaimFencedWrites_ActiveClaimWritesExactlyLikeTheUnfencedPath", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-fenced", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 {
+			t.Fatalf("claims = %+v, want the one minted engagement", claims)
+		}
+		claimID := claims[0].ID
+
+		if err := store.SetClaimPhaseSystem(ctx, orgID, runID, claimID, "cloning"); err != nil {
+			t.Fatalf("SetClaimPhaseSystem: %v", err)
+		}
+		if got := seed.ClaimRows(t, runID); len(got) != 1 || got[0].Phase != "cloning" {
+			t.Fatalf("claims after phase write = %+v, want phase cloning on the named claim", got)
+		}
+
+		pending := false
+		msgID, err := store.InsertMessageForClaimSystem(ctx, orgID, claimID, &domain.Message{
+			ConversationID: runID, Role: "assistant", Content: "streamed",
+			Delivered: &pending,
+		})
+		if err != nil {
+			t.Fatalf("InsertMessageForClaimSystem: %v", err)
+		}
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil || len(msgs) != 1 {
+			t.Fatalf("Messages = %v (err %v), want the one streamed row", msgs, err)
+		}
+		if msgs[0].ClaimID != claimID {
+			t.Errorf("row claim_id = %q, want %q (the engagement that wrote it)", msgs[0].ClaimID, claimID)
+		}
+
+		if err := store.MarkDeliveredForClaimSystem(ctx, orgID, runID, claimID, []int{int(msgID)}, ""); err != nil {
+			t.Fatalf("MarkDeliveredForClaimSystem: %v", err)
+		}
+		msgs, err = store.Messages(ctx, orgID, runID)
+		if err != nil || len(msgs) != 1 {
+			t.Fatalf("Messages after deliver = %v (err %v)", msgs, err)
+		}
+		if msgs[0].Delivered == nil || !*msgs[0].Delivered {
+			t.Errorf("row delivered = %v, want true", msgs[0].Delivered)
+		}
+
+		if err := store.CompleteForClaimSystem(ctx, orgID, runID, claimID, "completed", 0.5, 1500, 2, "ok", "done", "finish", "", ""); err != nil {
+			t.Fatalf("CompleteForClaimSystem: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.Status != "completed" {
+			t.Errorf("status = %q, want completed", got.Status)
+		}
+		if got.TotalCostUSD == nil || *got.TotalCostUSD != 0.5 {
+			t.Errorf("total_cost_usd = %v, want 0.5 settled on the engagement's own row", got.TotalCostUSD)
+		}
+		if got.DurationMs == nil || *got.DurationMs != 1500 {
+			t.Errorf("duration_ms = %v, want 1500 stamped on the released claim", got.DurationMs)
+		}
+		after := seed.ClaimRows(t, runID)
+		if len(after) != 1 || !after[0].Released || after[0].Outcome != "completed" {
+			t.Fatalf("claims after complete = %+v, want the engagement released as completed", after)
+		}
+	})
+
+	t.Run("MarkCancelledIfActiveForClaimSystem_FlipsAndReleasesLikeItsUnfencedTwin", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-fenced-cancel", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, runID)[0].ID
+
+		ok, err := store.MarkCancelledIfActiveForClaimSystem(ctx, orgID, runID, claimID, "user_cancelled", "Run cancelled by user")
+		if err != nil {
+			t.Fatalf("MarkCancelledIfActiveForClaimSystem: %v", err)
+		}
+		if !ok {
+			t.Fatal("MarkCancelledIfActiveForClaimSystem reported no flip on a running run")
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.Status != "cancelled" || got.StopReason != "user_cancelled" {
+			t.Errorf("run = (%q, %q), want (cancelled, user_cancelled)", got.Status, got.StopReason)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 || !claims[0].Released || claims[0].Outcome != "cancelled" {
+			t.Fatalf("claims = %+v, want the engagement released as cancelled", claims)
+		}
+	})
+
+	t.Run("MarkFailedIfActiveForClaimSystem_FlipsAndReleasesLikeItsUnfencedTwin", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-fenced-fail", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, runID)[0].ID
+
+		ok, err := store.MarkFailedIfActiveForClaimSystem(ctx, orgID, runID, claimID, string(domain.RunFailureCrash))
+		if err != nil {
+			t.Fatalf("MarkFailedIfActiveForClaimSystem: %v", err)
+		}
+		if !ok {
+			t.Fatal("MarkFailedIfActiveForClaimSystem reported no flip on a running run")
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.Status != "failed" || got.FailureKind != domain.RunFailureCrash {
+			t.Errorf("run = (%q, %q), want (failed, %s)", got.Status, got.FailureKind, domain.RunFailureCrash)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 || !claims[0].Released || claims[0].Outcome != "failed" {
+			t.Fatalf("claims = %+v, want the engagement released as failed", claims)
+		}
+	})
+
 	t.Run("RecordClaimSandboxStatsSystem_StampsByIDIncludingReleasedClaims", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -1905,6 +2041,48 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	t.Run("Messages_RoundTripsDurationMs", func(t *testing.T) {
+		// duration_ms has three distinct states the transcript renders
+		// differently, and the store must keep them apart: a measured value, a
+		// measured zero (fast enough to round to nothing — still a
+		// measurement), and unmeasured (every row written before the runtime
+		// stamped timing, and every non-agent role).
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+		measured := 4312
+		instant := 0
+		for _, m := range []*domain.Message{
+			{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "thought", DurationMs: &measured},
+			{ConversationID: runID, Role: "tool", Subtype: "tool", Content: "ok", ToolCallID: "t1", DurationMs: &instant},
+			{ConversationID: runID, Role: "user", Subtype: "text", Content: "no timing on a user row"},
+		} {
+			if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
+				t.Fatalf("InsertMessage: %v", err)
+			}
+		}
+
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		if len(msgs) != 3 {
+			t.Fatalf("len = %d, want 3", len(msgs))
+		}
+		if msgs[0].DurationMs == nil || *msgs[0].DurationMs != measured {
+			t.Errorf("assistant DurationMs = %v, want %d", msgs[0].DurationMs, measured)
+		}
+		if msgs[1].DurationMs == nil || *msgs[1].DurationMs != 0 {
+			t.Errorf("tool DurationMs = %v, want a measured 0 (not nil)", msgs[1].DurationMs)
+		}
+		if msgs[2].DurationMs != nil {
+			t.Errorf("unstamped DurationMs = %v, want nil (not measured)", *msgs[2].DurationMs)
+		}
+		if dto := msgs[2].ToDTO(); dto.DurationMs != nil {
+			t.Errorf("unstamped row's DTO carries duration %v; the wire must omit the key entirely", *dto.DurationMs)
+		}
+	})
+
 	t.Run("Messages_SurfacesReasoningDecodeError", func(t *testing.T) {
 		// reasoning/content_blocks are canonical replay context (read via
 		// ListForAssembly by a future native loop) — a decode failure must
@@ -2054,6 +2232,15 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		assertContents("MessagesForRuns", batched)
 
+		// The incremental read is the same display read from a watermark, so
+		// an unbounded one has to answer exactly what Messages does — a client
+		// repairing a transcript must not be shown a row the full read hides.
+		sinceZero, err := store.MessagesSince(ctx, orgID, runID, 0)
+		if err != nil {
+			t.Fatalf("MessagesSince: %v", err)
+		}
+		assertContents("MessagesSince(0)", sinceZero)
+
 		// Assembly excludes every inactive row — withdrawn AND compacted.
 		asm, err := store.ListForAssemblySystem(ctx, orgID, runID)
 		if err != nil {
@@ -2069,11 +2256,162 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	t.Run("Messages_OrderBySeqMatchesAssembly", func(t *testing.T) {
+		// seq is the placement override: a row carrying one belongs where seq
+		// puts it, not where it was inserted. The display reads and the
+		// assembly read must agree about that, or the transcript renders a
+		// different conversation than the one the agent had.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		idA, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "a"})
+		if err != nil {
+			t.Fatalf("InsertMessage a: %v", err)
+		}
+		idB, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "b"})
+		if err != nil {
+			t.Fatalf("InsertMessage b: %v", err)
+		}
+		// Written last, placed between a and b — the compaction-result shape.
+		seqMid := float64(idA) + (float64(idB)-float64(idA))/2
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: runID, Role: "user", Subtype: "injection:compaction-result", Content: "mid", Seq: &seqMid,
+		}); err != nil {
+			t.Fatalf("InsertMessage mid: %v", err)
+		}
+		// A later NULL-seq row still lands last: COALESCE falls back to its id,
+		// which is above both seq keys.
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "c"}); err != nil {
+			t.Fatalf("InsertMessage c: %v", err)
+		}
+
+		want := []string{"a", "mid", "b", "c"}
+		eqContents := func(desc string, msgs []domain.Message) {
+			t.Helper()
+			var got []string
+			for _, m := range msgs {
+				got = append(got, m.Content)
+			}
+			if len(got) != len(want) {
+				t.Fatalf("%s = %v, want %v", desc, got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Errorf("%s[%d] = %q, want %q — full: %v", desc, i, got[i], want[i], got)
+				}
+			}
+		}
+
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		eqContents("Messages", msgs)
+
+		sinceZero, err := store.MessagesSince(ctx, orgID, runID, 0)
+		if err != nil {
+			t.Fatalf("MessagesSince: %v", err)
+		}
+		eqContents("MessagesSince(0)", sinceZero)
+
+		batched, err := store.MessagesForRuns(ctx, orgID, []string{runID})
+		if err != nil {
+			t.Fatalf("MessagesForRuns: %v", err)
+		}
+		eqContents("MessagesForRuns", batched)
+
+		// Same rows, same order as what the model reads — every row here is
+		// active and delivered, so the two reads' visibility filters coincide
+		// and only the ordering is under test.
+		asm, err := store.ListForAssemblySystem(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("ListForAssembly: %v", err)
+		}
+		eqContents("ListForAssembly", asm)
+	})
+
+	t.Run("MessagesSince_ReturnsOnlyRowsAboveTheWatermark", func(t *testing.T) {
+		// Backs the run station's transcript repair: the client holds every
+		// row up to the watermark and asks for what it missed while its
+		// websocket was down.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+		otherID := seedConversationForTest(t, orgID, seed, "running")
+
+		insert := func(conversationID, content string) int {
+			t.Helper()
+			id, err := store.InsertMessage(ctx, orgID, &domain.Message{
+				ConversationID: conversationID, Role: "assistant", Subtype: "text", Content: content,
+			})
+			if err != nil {
+				t.Fatalf("InsertMessage %q: %v", content, err)
+			}
+			return int(id)
+		}
+		first := insert(runID, "first")
+		second := insert(runID, "second")
+		insert(otherID, "other-run")
+		third := insert(runID, "third")
+
+		contents := func(desc string, sinceID int) []string {
+			t.Helper()
+			msgs, err := store.MessagesSince(ctx, orgID, runID, sinceID)
+			if err != nil {
+				t.Fatalf("MessagesSince(%s): %v", desc, err)
+			}
+			var out []string
+			for _, m := range msgs {
+				out = append(out, m.Content)
+			}
+			return out
+		}
+		eq := func(desc string, got, want []string) {
+			t.Helper()
+			if len(got) != len(want) {
+				t.Fatalf("MessagesSince(%s) = %v, want %v", desc, got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Errorf("MessagesSince(%s)[%d] = %q, want %q", desc, i, got[i], want[i])
+				}
+			}
+		}
+
+		// Below every id: the whole transcript, in id order — and only this
+		// conversation's rows, so a shared watermark can't leak a sibling run.
+		eq("0", contents("0", 0), []string{"first", "second", "third"})
+		// Strictly greater than: the row at the watermark is the last one the
+		// caller already holds, so re-sending it would be a duplicate.
+		eq("first", contents("first", first), []string{"second", "third"})
+		eq("second", contents("second", second), []string{"third"})
+		// Caught up — the common answer once no frames are being dropped.
+		eq("third", contents("third", third), nil)
+
+		// A withdrawn-pending row above the watermark stays hidden: the
+		// incremental read is not a back door around the display filter.
+		undelivered := false
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: runID, Role: "user", Subtype: "injection:system-note", Content: "withdrawn",
+			Delivered: &undelivered, WindowState: domain.MessageWindowInactive,
+		}); err != nil {
+			t.Fatalf("InsertMessage withdrawn: %v", err)
+		}
+		visible := insert(runID, "fourth")
+		eq("third, after a withdrawn row", contents("third", third), []string{"fourth"})
+		eq("fourth", contents("fourth", visible), nil)
+	})
+
 	t.Run("MarkDelivered_FlipsOnlyGivenIDsScopedToRun", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		runID := seedConversationForTest(t, orgID, seed, "running")
 		otherRunID := seedConversationForTest(t, orgID, seed, "running")
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-scope", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, runID)[0].ID
 
 		delivered := false
 		id1, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "user", Subtype: "injection:steer", Content: "1", Delivered: &delivered})
@@ -2091,7 +2429,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Ask to flip id1 (belongs to runID) and idOther (belongs to a
 		// DIFFERENT run) via a call scoped to runID — idOther must NOT flip.
-		if err := store.MarkDeliveredSystem(ctx, orgID, runID, []int{int(id1), int(idOther)}, ""); err != nil {
+		if err := store.MarkDeliveredForClaimSystem(ctx, orgID, runID, claimID, []int{int(id1), int(idOther)}, ""); err != nil {
 			t.Fatalf("MarkDelivered: %v", err)
 		}
 
@@ -2123,6 +2461,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		runID := seedConversationForTest(t, orgID, seed, "running")
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-stamp", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, runID)[0].ID
 
 		delivered := false
 		steered, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "user", Content: "mid-turn", Delivered: &delivered})
@@ -2135,11 +2477,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 
 		// A steer drain flushes and stamps in one call.
-		if err := store.MarkDeliveredSystem(ctx, orgID, runID, []int{int(steered)}, "injection:steer"); err != nil {
+		if err := store.MarkDeliveredForClaimSystem(ctx, orgID, runID, claimID, []int{int(steered)}, "injection:steer"); err != nil {
 			t.Fatalf("MarkDelivered(steer): %v", err)
 		}
 		// A bare drain flushes without touching the row's own subtype.
-		if err := store.MarkDeliveredSystem(ctx, orgID, runID, []int{int(bare)}, ""); err != nil {
+		if err := store.MarkDeliveredForClaimSystem(ctx, orgID, runID, claimID, []int{int(bare)}, ""); err != nil {
 			t.Fatalf("MarkDelivered(bare): %v", err)
 		}
 

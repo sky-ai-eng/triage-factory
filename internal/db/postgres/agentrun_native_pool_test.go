@@ -55,10 +55,21 @@ func TestConversationStore_NativeLoopReadsNeedNoRequestIdentity(t *testing.T) {
 	// an executor that has no request identity to authenticate as.
 	ctx := context.Background()
 
+	// The fenced flush needs an engagement to fence against; SetExecutorSystem
+	// mints the claim exactly as the dispatcher does.
+	if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-pool", 1); err != nil {
+		t.Fatalf("SetExecutorSystem: %v", err)
+	}
+	var claimID string
+	if err := h.AdminDB.QueryRow(
+		`SELECT id::text FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, runID,
+	).Scan(&claimID); err != nil {
+		t.Fatalf("read minted claim: %v", err)
+	}
+
 	id, err := store.InsertMessageSystem(ctx, orgID, &domain.Message{
 		ConversationID: runID,
 		Role:           "user",
-		Subtype:        "text",
 		Content:        "begin",
 	})
 	if err != nil {
@@ -73,8 +84,8 @@ func TestConversationStore_NativeLoopReadsNeedNoRequestIdentity(t *testing.T) {
 		t.Fatalf("ListForAssemblySystem returned %d rows, want 1", len(rows))
 	}
 
-	if err := store.MarkDeliveredSystem(ctx, orgID, runID, []int{int(id)}, "text"); err != nil {
-		t.Fatalf("MarkDeliveredSystem: %v — the loop cannot retire a pending input", err)
+	if err := store.MarkDeliveredForClaimSystem(ctx, orgID, runID, claimID, []int{int(id)}, "injection:steer"); err != nil {
+		t.Fatalf("MarkDeliveredForClaimSystem: %v — the loop cannot retire a pending input", err)
 	}
 
 	if _, err := store.SetWindowStateSystem(ctx, orgID, runID, 1e9, domain.MessageWindowActive, domain.MessageWindowInactive); err != nil {

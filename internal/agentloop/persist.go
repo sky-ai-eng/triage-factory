@@ -16,7 +16,7 @@ import (
 // ones: the frontend reads one shape and never branches on
 // conversations.runtime, so a native row that skipped (say) token counts
 // would render as a degraded SDK row rather than an equivalent one.
-func (e *Engine) persistAssistant(ctx context.Context, params Params, completion *inference.Completion) (domain.Message, error) {
+func (e *Engine) persistAssistant(ctx context.Context, params Params, completion *inference.Completion, durationMs int) (domain.Message, error) {
 	row, err := inference.MessageToRow(completion.Message)
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("map completion to row: %w", err)
@@ -28,6 +28,11 @@ func (e *Engine) persistAssistant(ctx context.Context, params Params, completion
 	row.ConversationID = params.ConversationID
 	row.Model = modelForRow(completion, params)
 	stampUsage(&row, completion.Usage)
+	// Wall time from request to complete message, retries included — the
+	// same request-to-row span the SDK parser stamps.
+	if durationMs > 0 {
+		row.DurationMs = &durationMs
+	}
 
 	// Cost settles per assistant row on this path — the ledger's stamp
 	// density is the only thing that differs between runtimes, and

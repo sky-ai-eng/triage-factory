@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -14,63 +13,50 @@ import (
 // writes lands through here and fans out to the websocket, so a native
 // conversation streams to the UI in the same shapes an SDK one does.
 //
-// Pool routing mirrors runSink exactly — a manual run's writes go through
-// synthetic claims so they pass RLS under tf_app, an event run's through the
-// admin pool. The loop is a long-lived goroutine, so each write is its own
-// short transaction rather than one that spans the engagement.
+// Every write is a claim-fenced engagement write, for both trigger types —
+// the fence's ownership check stands in for the RLS pass the former
+// synthetic-claims route provided, exactly as the SDK sink's writes do. The
+// loop is a long-lived goroutine, so each write is its own short transaction
+// rather than one that spans the engagement; a write refused with
+// db.ErrClaimReleased surfaces through the engine as the engagement's
+// failure, and recordNativeResult recognizes it as a fence-out.
 type nativeTranscript struct {
-	spawner       *Spawner
-	orgID         string
-	conversation  string
-	triggerType   string
-	creatorUserID string
+	spawner      *Spawner
+	orgID        string
+	conversation string
+	claimID      string
 }
 
 var _ agentloop.Transcript = (*nativeTranscript)(nil)
 
-func newNativeTranscript(s *Spawner, orgID, conversationID, triggerType, creatorUserID string) *nativeTranscript {
+func newNativeTranscript(s *Spawner, orgID, conversationID, claimID string) *nativeTranscript {
 	return &nativeTranscript{
-		spawner:       s,
-		orgID:         orgID,
-		conversation:  conversationID,
-		triggerType:   triggerType,
-		creatorUserID: creatorUserID,
+		spawner:      s,
+		orgID:        orgID,
+		conversation: conversationID,
+		claimID:      claimID,
 	}
 }
 
 // ListForAssembly reads the assembly window. The admin pool is the right
 // door for both trigger types: it is a system read on a detached goroutine,
 // and org_id + conversation_id are bound as defense in depth regardless.
+// Reads are deliberately unfenced — a stale read corrupts nothing, and the
+// write fence is what protects the transcript.
 func (t *nativeTranscript) ListForAssembly(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
 	return t.spawner.agentRuns.ListForAssemblySystem(ctx, orgID, conversationID)
 }
 
 func (t *nativeTranscript) MarkDelivered(ctx context.Context, orgID, conversationID string, ids []int, subtype string) error {
-	return t.spawner.agentRuns.MarkDeliveredSystem(ctx, orgID, conversationID, ids, subtype)
+	return t.spawner.agentRuns.MarkDeliveredForClaimSystem(ctx, orgID, conversationID, t.claimID, ids, subtype)
 }
 
-// Insert appends a row and broadcasts it. Claim attribution is stamped
-// server-side by the store (the conversation's active claim), so the loop
-// never has to know which claim it is.
+// Insert appends a row and broadcasts it. The row is attributed to this
+// engagement's claim by the same call that fences the write.
 func (t *nativeTranscript) Insert(ctx context.Context, orgID string, msg *domain.Message) (int, error) {
-	var id int64
-	if t.triggerType == "manual" {
-		if err := t.spawner.tx.SyntheticClaimsWithTx(ctx, orgID, t.creatorUserID, func(ts db.TxStores) error {
-			i, ierr := ts.Conversations.InsertMessage(ctx, orgID, msg)
-			if ierr != nil {
-				return ierr
-			}
-			id = i
-			return nil
-		}); err != nil {
-			return 0, fmt.Errorf("insert message: %w", err)
-		}
-	} else {
-		i, ierr := t.spawner.agentRuns.InsertMessageSystem(ctx, orgID, msg)
-		if ierr != nil {
-			return 0, fmt.Errorf("insert message: %w", ierr)
-		}
-		id = i
+	id, err := t.spawner.agentRuns.InsertMessageForClaimSystem(ctx, orgID, t.claimID, msg)
+	if err != nil {
+		return 0, fmt.Errorf("insert message: %w", err)
 	}
 	msg.ID = int(id)
 	// An undelivered row is pending input, not transcript: broadcasting it

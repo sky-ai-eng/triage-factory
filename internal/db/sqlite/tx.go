@@ -89,6 +89,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Spend:            newSpendStore(tx),
 		Marketplace:      newMarketplaceStore(tx, tx),
 		RunPendingInput:  newRunPendingInputStore(tx),
+		Permissions:      newPermissionStore(tx),
 		Ext:              db.BuildStoreExtensions("sqlite", tx, tx),
 	}
 	if err := fn(txStores); err != nil {

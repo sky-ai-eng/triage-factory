@@ -1103,10 +1103,17 @@ type blueprintRunStepView struct {
 // source a timestamp from — omits the field instead of serializing a zero
 // "0001-01-01" created_at (TFAC-313). The live-steps fallback path still
 // carries the real value.
+//
+// Name is the step prompt's human-readable name, so a rendered step can say
+// which step it is rather than showing a bare pip. Only the frozen-plan
+// projection can fill it — the plan snapshots the name, while the live
+// blueprint_steps row behind domain.BlueprintStep holds a prompt id and no
+// name — so it is omitted on the fallback path.
 type blueprintStepView struct {
 	BlueprintID  string     `json:"blueprint_id"`
 	StepIndex    int        `json:"step_index"`
 	StepPromptID string     `json:"step_prompt_id"`
+	Name         string     `json:"name,omitempty"`
 	Brief        string     `json:"brief"`
 	CreatedAt    *time.Time `json:"created_at,omitempty"`
 }
@@ -1125,6 +1132,21 @@ func newBlueprintStepView(s domain.BlueprintStep) blueprintStepView {
 		v.CreatedAt = &s.CreatedAt
 	}
 	return v
+}
+
+// newBlueprintStepViewFromPlan projects a frozen plan step into the API view.
+// It exists so the plan path doesn't round-trip through domain.BlueprintStep,
+// which mirrors the live blueprint_steps table and would drop the prompt name.
+// blueprintID is the owning run's blueprint_id. A plan step has no live row, so
+// created_at stays omitted.
+func newBlueprintStepViewFromPlan(ps domain.BlueprintPlanStep, blueprintID string) blueprintStepView {
+	return blueprintStepView{
+		BlueprintID:  blueprintID,
+		StepIndex:    ps.StepIndex,
+		StepPromptID: ps.PromptID,
+		Name:         ps.PromptName,
+		Brief:        ps.Brief,
+	}
 }
 
 // handleBlueprintRunGet returns a blueprint run with its per-step views. The
@@ -1175,12 +1197,19 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 	}
 
 	// Reconstruct the step list from the frozen plan; fall back to the live
-	// steps only when the plan is absent.
-	steps := fallbackSteps
+	// steps only when the plan is absent. The plan projects straight to the
+	// view: a plan step carries the prompt's name, which domain.BlueprintStep
+	// has nowhere to hold.
+	var steps []blueprintStepView
 	if len(br.StepPlan) > 0 {
-		steps = make([]domain.BlueprintStep, len(br.StepPlan))
+		steps = make([]blueprintStepView, len(br.StepPlan))
 		for i, ps := range br.StepPlan {
-			steps[i] = ps.Step(br.BlueprintID)
+			steps[i] = newBlueprintStepViewFromPlan(ps, br.BlueprintID)
+		}
+	} else {
+		steps = make([]blueprintStepView, len(fallbackSteps))
+		for i, s := range fallbackSteps {
+			steps[i] = newBlueprintStepView(s)
 		}
 	}
 
@@ -1193,7 +1222,7 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 
 	views := make([]blueprintRunStepView, 0, len(steps))
 	for _, step := range steps {
-		view := blueprintRunStepView{Step: newBlueprintStepView(step)}
+		view := blueprintRunStepView{Step: step}
 		if run, ok := runByStep[step.StepIndex]; ok {
 			view.Run = run
 		}

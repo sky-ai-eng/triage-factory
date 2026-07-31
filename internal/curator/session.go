@@ -430,15 +430,20 @@ func (s *projectSession) dispatch(item queueItem) {
 			Content:        contextNote,
 		}
 		auditCtx := context.WithoutCancel(msgCtx)
-		if auditErr := s.curator.stores.Tx.SyntheticClaimsWithTx(auditCtx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
-			id, err := ts.Conversations.InsertMessage(auditCtx, item.orgID, auditMsg)
-			if err != nil {
-				return err
-			}
-			auditMessageID = id
-			return nil
-		}); auditErr != nil {
+		id, auditErr := s.curator.stores.Conversations.InsertMessageForClaimSystem(auditCtx, item.orgID, claimID, auditMsg)
+		switch {
+		case errors.Is(auditErr, db.ErrClaimReleased):
+			// This turn's claim was released between the mint above and here,
+			// so a successor engagement owns the conversation. Abandon the
+			// turn without releasing or reverting anything — both would act
+			// on the successor's turn, not this one.
+			curatorLog.Error("claim fence refused this turn's first write — a successor owns the conversation; abandoning the turn without writing",
+				"request", requestID, "conversation", item.conversationID, "claim_id", claimID, "error", auditErr)
+			return
+		case auditErr != nil:
 			curatorLog.Warn("insert context_change audit row failed", "request", requestID, "error", auditErr)
+		default:
+			auditMessageID = id
 		}
 	}
 
@@ -525,6 +530,11 @@ func (s *projectSession) dispatch(item queueItem) {
 		ghChannel = turnSandbox.GHChannel(item.conversationID)
 	}
 
+	// msgCancel is the sink's kill switch for a fence trip: a turn whose
+	// writes are being refused has to stop producing output, and cancelling
+	// the message ctx is the same SIGKILL path a user cancel takes.
+	sink := newTurnSink(s.curator, s.projectID, item.conversationID, requestID, claimID, item.orgID, item.creatorUserID, msgCancel)
+
 	outcome, runErr := s.curator.runAgent(msgCtx, agentproc.RunOptions{
 		Cwd:          cwd,
 		Model:        model,
@@ -557,7 +567,17 @@ func (s *projectSession) dispatch(item queueItem) {
 		GHChannel:          ghChannel,
 		StartAgentHost:     startAgentHost,
 		ReadOnlyRepoMounts: roRepoMounts,
-	}, newTurnSink(s.curator, s.projectID, item.conversationID, requestID, claimID, item.orgID, item.creatorUserID))
+	}, sink)
+
+	// Fenced out mid-turn: the claim was released and a successor engagement
+	// is driving the conversation. Checked before the cancellation branch
+	// because the fence is what fired that cancellation — falling through
+	// would release the successor's claim as "user cancelled" and revert the
+	// context rows its turn is working from. Nothing is written here, by
+	// design; the successor owns the turn's disposition now.
+	if sink.fenceTripped() {
+		return
+	}
 
 	// Cancellation observed → release the claim cancelled. Distinguish
 	// between turn-level cancellation and broader session/project

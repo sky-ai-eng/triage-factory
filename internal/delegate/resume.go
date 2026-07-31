@@ -216,14 +216,32 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *d
 // registered s.cancels handle's Cancel() doesn't touch the DB itself; the
 // delivering claim owns the terminal write any time it observes its ctx
 // cancelled.
-func (s *Spawner) markCancelledAfterResume(orgID, runID, userID string) {
+// claimID names the delivering engagement, so the terminal goes through the
+// claim fence: a resume whose executor was reaped mid-turn must not cancel
+// the conversation its successor has picked up. Empty keeps the unfenced
+// write. Returns fenced: true when the terminal was refused, in which case
+// nothing was written, broadcast, or discarded.
+func (s *Spawner) markCancelledAfterResume(orgID, runID, claimID, userID string) (fenced bool) {
 	cancelCtx := context.Background()
 	var ok bool
-	_ = s.tx.SyntheticClaimsWithTx(cancelCtx, orgID, userID, func(ts db.TxStores) error {
-		f, mErr := ts.Conversations.MarkCancelledIfActive(cancelCtx, orgID, runID, "user_cancelled", "Run cancelled by user")
-		ok = f
-		return mErr
-	})
+	var mErr error
+	if claimID != "" {
+		ok, mErr = s.agentRuns.MarkCancelledIfActiveForClaimSystem(cancelCtx, orgID, runID, claimID, "user_cancelled", "Run cancelled by user")
+	} else {
+		mErr = s.tx.SyntheticClaimsWithTx(cancelCtx, orgID, userID, func(ts db.TxStores) error {
+			f, err := ts.Conversations.MarkCancelledIfActive(cancelCtx, orgID, runID, "user_cancelled", "Run cancelled by user")
+			ok = f
+			return err
+		})
+	}
+	if errors.Is(mErr, db.ErrClaimReleased) {
+		// A successor owns the conversation. Its snapshot is the workspace
+		// that successor resumes from, so the discard below is skipped along
+		// with the terminal itself.
+		delegateLog.Error("claim fence refused the resume cancellation — a successor owns this conversation; recording nothing",
+			"run", runID, "claim_id", claimID, "org_id", orgID, "error", mErr)
+		return true
+	}
 	if ok {
 		s.broadcastRunUpdate(orgID, runID, "cancelled")
 		// Cancelled mid-resume: the run won't continue, so drop the
@@ -232,6 +250,7 @@ func (s *Spawner) markCancelledAfterResume(orgID, runID, userID string) {
 		// which terminateBlueprint cleans by blueprint_run_id).
 		s.discardWorkspaceSnapshot(cancelCtx, orgID, runID)
 	}
+	return false
 }
 
 // ResumeOptions configures a ResumeWithMessage invocation. Callers
@@ -345,6 +364,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	}
 	model := opts.Model
 
+	// This engagement's questions die with it: once it lets go, any prompt
+	// still open was asked by a process that no longer exists. Best-effort
+	// tidy for audit reads only — ListPending derives the same answer from the
+	// claim, so a crash that never reaches this defer costs nothing.
+	defer s.ExpirePermissionsForClaim(orgID, opts.claimID)
+
 	selfBin, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("resolve own binary path: %w", err)
@@ -447,7 +472,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		// reads the same handoff it started with rather than a freshly rendered one.
 		MemorySourcePath: stagedEntityMemorySource(runID),
 	}
-	sink := newRunSink(s, orgID, runID, triggerType, creatorUserID)
+	sink := newRunSink(s, orgID, runID, opts.claimID, triggerType, creatorUserID)
 
 	// Off-allowlist tool calls route the same way the initial run does:
 	// gVisor-sandboxed delegated runs auto-approve (the sandbox + the static
@@ -459,7 +484,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	if agentproc.WillSandbox() {
 		perms = s.AutoApprovePermissionHandler(runID)
 	} else {
-		perms = s.BrowserPermissionHandler(orgID, runID, s.resolveAbsentAutoDeny(ctx, opts.TeamID))
+		perms = s.BrowserPermissionHandler(orgID, runID, opts.claimID, s.resolveAbsentAutoDeny(ctx, opts.TeamID))
 	}
 
 	// Resume executes as a LiveRun (re-registered in procs, so a resumed run

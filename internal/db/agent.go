@@ -263,10 +263,11 @@ type ConversationStore interface {
 	// InsertMessage/InsertMessageSystem/Messages/MessagesForRuns below serve
 	// today's readers (the SDK runtime's live stream, the UI transcript
 	// endpoints, spend sums) and are unchanged in observable behavior.
-	// ListForAssemblySystem/MarkDeliveredSystem/SetWindowStateSystem exist for the native
-	// loop (P1+): assembly is a pure function of messages rows and nothing
-	// else — no run-level or process-level side-state may influence what a
-	// loop reconstructs from these three methods, only the rows themselves.
+	// ListForAssemblySystem/MarkDeliveredForClaimSystem/SetWindowStateSystem
+	// exist for the native loop (P1+): assembly is a pure function of
+	// messages rows and nothing else — no run-level or process-level
+	// side-state may influence what a loop reconstructs from these methods,
+	// only the rows themselves.
 
 	// InsertMessage inserts a messages row and returns its
 	// auto-assigned id. If msg.CreatedAt is zero, it is stamped
@@ -292,21 +293,50 @@ type ConversationStore interface {
 	// what it always wrote (delivered=true, window_state='active').
 	InsertMessage(ctx context.Context, orgID string, msg *domain.Message) (int64, error)
 
-	// Messages returns the run's messages for display, ordered by id.
+	// Messages returns the run's messages for display, ordered by the same
+	// effective assembly key ListForAssembly uses (COALESCE(seq, id)) rather
+	// than by insertion id. A transcript that ordered on id alone would show
+	// a row placed by seq — a compaction summary written between two existing
+	// rows — somewhere other than where the model read it, which is the one
+	// thing a transcript must never do. Every seq is NULL today, so the two
+	// keys coincide; that they agree is the point, not a coincidence to rely
+	// on.
+	//
 	// Withdrawn-pending rows (delivered=false AND window_state='inactive' —
 	// a staged injection withdrawn before any flush) are excluded: withdrawn
 	// means "never happened", so it must not render as transcript history.
 	// Delivered inactive rows (compacted history) stay visible.
 	Messages(ctx context.Context, orgID, runID string) ([]domain.Message, error)
 
+	// MessagesSince is Messages restricted to rows above a watermark: the
+	// same display read with `id > sinceID`. It exists so a client holding a
+	// partial transcript can repair it — a websocket frame is a hint, never
+	// the only path to a row, and the run station's transcript is otherwise
+	// append-only from page load.
+	//
+	// Visibility is identical to Messages by construction (Messages is this
+	// method at sinceID 0, which every real id clears), so the two reads can
+	// never disagree about which rows a client is entitled to see.
+	//
+	// sinceID 0 means "from the beginning". Callers normalize anything that
+	// isn't a real id to 0 rather than relying on a negative one selecting
+	// everything — that it does is an artifact of ids starting at 1.
+	//
+	// The watermark is an id and the ordering is COALESCE(seq, id): those are
+	// deliberately different keys. "Which rows has this client not seen yet"
+	// is a question about insertion; "where does each row belong" is a
+	// question about placement. Once anything writes seq, a returned row may
+	// sort before a row the client already holds — merging it is the caller's
+	// problem, not this read's.
+	MessagesSince(ctx context.Context, orgID, runID string, sinceID int) ([]domain.Message, error)
+
 	// MessagesForRuns is the batched form of Messages: every message
 	// for any of the given run IDs as one flat slice, with the same
-	// withdrawn-pending exclusion. Each run's
-	// messages are contiguous and in insertion order (id ASC), so the
-	// caller groups by RunID with per-run order preserved; order across
-	// distinct runs is unspecified (the SQLite read chunks its IN-list).
-	// Backs the Board's aggregated include=messages read. Empty runIDs
-	// returns nil.
+	// withdrawn-pending exclusion and the same COALESCE(seq, id) ordering.
+	// Each run's messages are contiguous, so the caller groups by RunID with
+	// per-run order preserved; order across distinct runs is unspecified (the
+	// SQLite read chunks its IN-list). Backs the Board's aggregated
+	// include=messages read. Empty runIDs returns nil.
 	MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Message, error)
 
 	// ListForAssemblySystem returns every row a native loop needs to rebuild this
@@ -326,20 +356,9 @@ type ConversationStore interface {
 	// standing rule.
 	ListForAssemblySystem(ctx context.Context, orgID, runID string) ([]domain.Message, error)
 
-	// MarkDeliveredSystem flips delivered=true on the given message ids — the
-	// batch primitive a native loop calls once it has folded a run of
-	// pending rows into an assembly. ids outside runID, already delivered,
-	// or nonexistent are silently skipped (no error, no-op).
-	//
-	// subtype, when non-empty, is stamped onto the same rows in the same
-	// statement. The loop's mid-turn drain flushes with
-	// "injection:steer" so the row records — durably, in the column
-	// assembly reads — that the input arrived while the model was working;
-	// a bare drain passes "" and leaves each row's own subtype alone. One
-	// statement rather than flush-then-stamp because a crash between the
-	// two would leave a delivered row whose provenance was lost, and
-	// assembly would then render it as an ordinary user turn.
-	MarkDeliveredSystem(ctx context.Context, orgID, runID string, ids []int, subtype string) error
+	// The delivered flush lives on MarkDeliveredForClaimSystem below:
+	// consuming pending rows is an engagement write, so it goes through the
+	// claim fence like every other write the loop makes.
 
 	// SetWindowState is the elision/compaction primitive: a batched range
 	// flip of window_state from `from` to `to`, restricted to rows currently
@@ -407,6 +426,91 @@ type ConversationStore interface {
 	MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
 	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID, failureKind string) (bool, error)
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.Message) (int64, error)
+
+	// --- Claim-fenced engagement writes ---
+	//
+	// The writes an executor makes *as* the engagement driving a
+	// conversation: the transcript it streams, the terminal status it
+	// records, the setup sub-state it reports. Each names its own claim id
+	// rather than letting the server resolve "the conversation's active
+	// claim", and each refuses with ErrClaimReleased unless that claim is
+	// both live and the one holding the conversation being written. Naming
+	// the claim is the assertion of ownership; the refusal is what makes a
+	// fencing failure a rejected write instead of silent corruption. See
+	// ErrClaimReleased for the full contract and for what a caller must do
+	// when it trips.
+	//
+	// Every method takes the conversation and the claim separately, and the
+	// fence requires them to agree — a live claim on some other conversation
+	// is refused exactly like a released one. Liveness alone would let a
+	// mis-threaded pair write wherever the caller pointed it.
+	//
+	// The server-side active-claim fallback stays for writers that are not
+	// engagements — a user's message typed into a conversation belongs to
+	// whatever claim happens to be driving it, which is exactly what the
+	// fallback resolves.
+	//
+	// Admin pool in Postgres, always: the fence's locking read and the write
+	// it guards have to share one transaction, and claims is a
+	// system-written table that the app pool holds no UPDATE grant on (and
+	// therefore cannot lock). These are system writes on a server-derived
+	// conversation id, so the ownership check the fence performs stands in
+	// for the RLS check the app pool would have made.
+
+	// InsertMessageForClaimSystem inserts a transcript row attributed to
+	// claimID, which must still be live. Same insert semantics as
+	// InsertMessage in every other respect, except that msg.ClaimID is
+	// overwritten with the explicit argument — the claim the fence validated
+	// and the claim the row records are the same one by construction.
+	InsertMessageForClaimSystem(ctx context.Context, orgID, claimID string, msg *domain.Message) (int64, error)
+
+	// MarkDeliveredForClaimSystem is the engagement's drain flush: the
+	// pending rows it folded into an assembly are only its to consume while
+	// it still owns the conversation.
+	//
+	// subtype, when non-empty, is stamped onto the same rows in the same
+	// statement. The loop's mid-turn drain flushes human input with
+	// "injection:steer" so the row records — durably, in the column
+	// assembly reads — that it arrived while the model was working; a bare
+	// drain passes "" and leaves each row's own subtype alone. One
+	// statement rather than flush-then-stamp because a crash between the
+	// two would leave a delivered row whose provenance was lost, and
+	// assembly would then render it as an ordinary user turn.
+	MarkDeliveredForClaimSystem(ctx context.Context, orgID, runID, claimID string, ids []int, subtype string) error
+
+	// CompleteForClaimSystem is Complete driven by the engagement that ran
+	// the invocation: same status flip, cost settlement, and claim release,
+	// refused outright when claimID is already released. The claim it
+	// releases is its own by construction — a fenced call can only reach the
+	// release with the claim it validated.
+	CompleteForClaimSystem(ctx context.Context, orgID, runID, claimID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
+
+	// MarkFailedIfActiveForClaimSystem is MarkFailedIfActive driven by the
+	// engagement: the infra-failure terminal, refused once the engagement
+	// has been fenced out. ok=false keeps its existing meaning (the row was
+	// already terminal); a fenced-out caller gets ErrClaimReleased instead,
+	// which is a different thing and must not be treated as a lost race.
+	MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, failureKind string) (bool, error)
+
+	// MarkCancelledIfActiveForClaimSystem is MarkCancelledIfActive driven by
+	// the engagement: the terminal an executor writes when its own run's
+	// context is cancelled, refused once it has been fenced out.
+	//
+	// The unfenced twin stays, and is what a USER-initiated cancel uses. That
+	// distinction is the whole reason both exist: a person cancelling a run
+	// is deliberately overriding whichever executor holds it, so their write
+	// must not be gated on ownership, while an executor cancelling itself is
+	// only entitled to end a run it still owns. Reaching for the unfenced
+	// version from an engagement path is how the cancel route around this
+	// fence gets rebuilt.
+	MarkCancelledIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, stopReason, summary string) (bool, error)
+
+	// SetClaimPhaseSystem writes claims.phase on one named claim — the
+	// claim-keyed sibling of SetActiveClaimPhaseSystem, for the engagement
+	// reporting its own setup progress. Empty phase clears to NULL. The
+	// conversation is bound as well as the claim: the phase a run reports
+	// must not be able to land on an engagement driving a different one.
+	SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) error
 
 	// LastAgentActivityAtSystem returns the created_at of the run's most
 	// recent non-user messages row (role <> 'user') — the "agent last

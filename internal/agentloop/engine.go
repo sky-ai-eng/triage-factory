@@ -320,6 +320,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		}
 
 		// 6. Stream.
+		callStarted := time.Now()
 		completion, err := e.streamWithRetry(ctx, client, inference.Request{
 			Provider:     provider,
 			Model:        params.Model,
@@ -355,7 +356,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		if isLengthStop(completion.FinishReason) {
 			stubTruncatedToolArgs(completion)
 		}
-		assistantRow, err := e.persistAssistant(ctx, params, completion)
+		assistantRow, err := e.persistAssistant(ctx, params, completion, msSince(callStarted))
 		if err != nil {
 			return e.failed(started, turn, fmt.Errorf("persist assistant message: %w", err))
 		}

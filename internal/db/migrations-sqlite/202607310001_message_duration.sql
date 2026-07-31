@@ -1,0 +1,31 @@
+-- +goose Up
+-- duration_ms: wall-clock milliseconds of the work THIS row represents, so
+-- timing is a property of the row rather than a fact living between two of
+-- them. Subtracting a neighbour's created_at cannot be made correct: an
+-- appended row has no predecessor while it streams, a paged read is missing
+-- one, compaction inserts rows at a fractional seq so "the previous row"
+-- stops meaning "the previous event", and an elided partner is gone for good.
+--
+--   role='assistant' — request issued → message complete. Includes reasoning
+--                      time, which is what makes a "thought for Ns" readout
+--                      derivable from the row that did the thinking.
+--   role='tool'      — dispatch → result.
+--   anything else    — NULL.
+--
+-- Nullable, no default, no backfill: historical rows carry no timing and
+-- every consumer must render without it. NULL is "not measured", never
+-- "took no time" — a runtime that measured a sub-millisecond step writes 0.
+--
+-- A real column rather than a metadata key because it is a display field on
+-- nearly every row, typed and sortable, and the same kind of per-row
+-- measurement as the input_tokens / output_tokens / cost_usd it sits beside.
+--
+-- Human time is never in here. A permission-gated call parks the runtime
+-- until someone answers, and the runtime holds its marks still across that
+-- window, so a gated Bash call reads as the seconds it ran rather than the
+-- minutes it waited to be allowed to run. How long a prompt stood, and who
+-- answered it, is the permission record's business, not this column's.
+ALTER TABLE messages ADD COLUMN duration_ms INTEGER;
+
+-- +goose Down
+SELECT 'down not supported';

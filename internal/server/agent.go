@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -281,6 +282,15 @@ func runResponse(run *domain.Conversation, artifactCount int, arts []domain.Arti
 		"blueprint_run_id":     run.BlueprintRunID,
 		"blueprint_step_index": run.BlueprintStepIndex,
 		"artifact_count":       artifactCount,
+		// The token rollups the run read already SUMs, alongside the cost /
+		// duration / turns ones above. snake_case like every key added since
+		// the legacy PascalCase set froze. Plain ints — 0 for a run that never
+		// streamed a usage-bearing message — so a consumer never has to
+		// distinguish absent from none.
+		"input_tokens":          run.InputTokens,
+		"output_tokens":         run.OutputTokens,
+		"cache_read_tokens":     run.CacheReadTokens,
+		"cache_creation_tokens": run.CacheCreationTokens,
 	}
 	if artifactCount == 0 || len(arts) > 0 {
 		prCount, reviewCount := domain.UnresolvedArtifactCounts(arts)
@@ -303,10 +313,29 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	conversationID := r.PathValue("conversationID")
+	// since_id is an optional watermark: the caller already holds every row up
+	// to it and wants only what came after. A client repairing a transcript it
+	// built from websocket frames polls with it.
+	//
+	// Anything that isn't a usable watermark normalizes to 0 — the whole
+	// transcript, which is what every other caller asks for — rather than a
+	// 400, since a watermark describes what the caller already has, not a
+	// selector it can get wrong in a way worth failing a read over. That
+	// covers three cases, and each is normalized here rather than passed down:
+	// absent, unparseable, and negative. A negative one would reach the store
+	// as `id > -N`, which happens to select the whole transcript today only
+	// because ids start at 1 — a coincidence, not a contract, so the store is
+	// never handed a watermark that means nothing. Surrounding whitespace is
+	// trimmed first (the convention for query params here); without that, a
+	// stray space would silently demote a real watermark to a full read.
+	sinceID, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("since_id")))
+	if err != nil || sinceID < 0 {
+		sinceID = 0
+	}
 	var messages []domain.Message
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		messages, e = tx.Conversations.Messages(r.Context(), orgID, conversationID)
+		messages, e = tx.Conversations.MessagesSince(r.Context(), orgID, conversationID, sinceID)
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -501,9 +530,10 @@ func steerErrorStatus(err error) int {
 
 // handleAgentPermission answers a pending tool-permission prompt a run surfaced
 // via a `permission_request` WS event. Body: {"behavior":"allow"|"deny",
-// "message"?:string,"updated_input"?:object}. The run is authorized under the
+// "message"?:string,"updated_input"?:object}. The path's tool call id is the
+// tool_use id the prompt was raised for. The run is authorized under the
 // caller's org (RLS) first — like the message/interrupt endpoints — so a run not
-// visible to this org is 404; a request that isn't pending (already answered,
+// visible to this org is 404; a prompt that isn't pending (already answered,
 // timed out, or never existed) is also 404.
 func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
@@ -512,7 +542,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	conversationID := r.PathValue("conversationID")
-	requestID := r.PathValue("requestID")
+	toolCallID := r.PathValue("toolCallID")
 
 	var body struct {
 		Behavior     string         `json:"behavior"`
@@ -545,7 +575,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	err = spawner.ResolvePermission(orgID, conversationID, requestID, agentproc.PermissionDecision{
+	err = spawner.ResolvePermission(orgID, conversationID, toolCallID, userID, agentproc.PermissionDecision{
 		Behavior:     body.Behavior,
 		Message:      body.Message,
 		UpdatedInput: body.UpdatedInput,
@@ -560,6 +590,51 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "resolved"})
 	}
+}
+
+// handleAgentPermissions lists the tool-approval prompts a conversation is
+// currently waiting on. This is the address a pending prompt didn't have: the
+// `permission_request` websocket frame is fire-once, so a refresh, a second
+// tab, or a cold board load could never learn that a healthy, parked agent was
+// waiting on a human — the prompt just sat until the server-side timeout denied
+// it. The frame is now a hint that points here, matching every other event type.
+//
+// Pending only. A history read is for the audit UI, which doesn't exist yet;
+// an ?include=all now would be a filter with no caller.
+//
+// Authorized exactly like handleAgentPermission: runVisible under the caller's
+// org before touching anything, so a conversation this org can't see is 404
+// rather than an empty list (which would confirm the id exists).
+func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	conversationID := r.PathValue("conversationID")
+
+	var pending []domain.ConversationPermission
+	var exists bool
+	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		run, e := tx.Conversations.Get(r.Context(), orgID, conversationID)
+		if e != nil {
+			return e
+		}
+		if run == nil {
+			return nil
+		}
+		exists = true
+		pending, e = tx.Permissions.ListPending(r.Context(), orgID, conversationID)
+		return e
+	}); err != nil {
+		internalError(w, "agent", err)
+		return
+	}
+	if !exists {
+		notFound(w, "run")
+		return
+	}
+	writeJSON(w, http.StatusOK, domain.PendingPermissionDTOs(pending, time.Now().UTC()))
 }
 
 // enrichRuns projects runs onto the wire shape, augmenting each with a batched

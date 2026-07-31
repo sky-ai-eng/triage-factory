@@ -723,6 +723,58 @@ func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, m
 	return s.InsertMessage(ctx, orgID, msg)
 }
 
+// --- Claim-fenced engagement writes ---
+//
+// Unfenced here, and deliberately so. The fence guards one race: a zombie
+// executor writing into a conversation a successor has been handed. Local
+// mode is a single process that claims its own work, with no fleet reaper to
+// hand anything over and no second executor to hand it to — the losing side
+// of that race has no way to exist. These wrappers therefore do exactly what
+// their unfenced counterparts do, with the claim id used as the attribution
+// it is on both dialects.
+//
+// This is not a dialect fork of shared semantics: the write set, the
+// attribution, and the resulting rows are identical. What differs is a
+// refusal that has nothing to refuse. Postgres carries the enforcement and
+// the conformance suite asserts it there.
+
+func (s *agentRunStore) InsertMessageForClaimSystem(ctx context.Context, orgID, claimID string, msg *domain.Message) (int64, error) {
+	msg.ClaimID = claimID
+	return s.InsertMessage(ctx, orgID, msg)
+}
+
+func (s *agentRunStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, runID, claimID string, ids []int, subtype string) error {
+	return s.markDelivered(ctx, orgID, runID, ids, subtype)
+}
+
+func (s *agentRunStore) CompleteForClaimSystem(ctx context.Context, orgID, runID, claimID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
+	return s.Complete(ctx, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary, outcome, outcomeReason, failureKind)
+}
+
+func (s *agentRunStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, failureKind string) (bool, error) {
+	return s.MarkFailedIfActive(ctx, orgID, runID, failureKind)
+}
+
+func (s *agentRunStore) MarkCancelledIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, stopReason, summary string) (bool, error) {
+	return s.MarkCancelledIfActive(ctx, orgID, runID, stopReason, summary)
+}
+
+// SetClaimPhaseSystem keeps the released_at filter its active-claim sibling
+// has always had: a released claim's phase is inert history either way, so a
+// call naming one stays the no-op it is today rather than rewriting it. The
+// conversation binds too — it costs nothing and keeps the row this writes
+// from drifting away from the one the caller named.
+func (s *agentRunStore) SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE claims SET phase = NULLIF(?, '')
+		WHERE id = ? AND conversation_id = ? AND released_at IS NULL
+	`, phase, claimID, conversationID)
+	return err
+}
+
 // LastAgentActivityAtSystem returns the created_at of the run's newest non-user
 // message (the artifact-change ledger watermark). Ordered by id DESC —
 // the monotonic insertion order — rather than MAX(created_at), so the watermark
@@ -889,11 +941,11 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 		INSERT INTO messages (conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id,
 		                      is_error, metadata, model,
 		                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
-		                      reasoning, content_blocks, delivered, window_state, seq)
+		                      reasoning, content_blocks, delivered, window_state, seq, duration_ms)
 		VALUES (?, ?,
 		        COALESCE(?, (SELECT id FROM claims
 		                     WHERE conversation_id = ? AND released_at IS NULL)),
-		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		msg.ConversationID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID), msg.ConversationID,
 		msg.Role, msg.Content, msg.Subtype,
@@ -902,6 +954,7 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 		sqliteNullInt(msg.CacheReadTokens), sqliteNullInt(msg.CacheCreationTokens),
 		sqliteNullFloat(msg.CostUSD), msg.CreatedAt,
 		reasoningJSON, contentBlocksJSON, delivered, string(windowState), sqliteNullFloat(msg.Seq),
+		sqliteNullInt(msg.DurationMs),
 	)
 	if err != nil {
 		return 0, err
@@ -911,7 +964,7 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 
 const sqliteMessageColumns = `id, conversation_id, user_id, claim_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
 	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
-	reasoning, content_blocks, delivered, window_state, seq`
+	reasoning, content_blocks, delivered, window_state, seq, duration_ms`
 
 // scanMessageRows drains a messages result set selecting
 // sqliteMessageColumns into domain.Message values. Shared by the
@@ -928,12 +981,13 @@ func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 		var delivered bool
 		var windowState string
 		var seq sql.NullFloat64
+		var durationMs sql.NullInt64
 
 		if err := rows.Scan(
 			&m.ID, &m.ConversationID, &userID, &claimID, &m.Role, &content, &subtype, &toolCallsStr,
 			&toolCallID, &m.IsError, &metadataStr, &model,
 			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
-			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq,
+			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs,
 		); err != nil {
 			return nil, err
 		}
@@ -996,13 +1050,25 @@ func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 			v := seq.Float64
 			m.Seq = &v
 		}
+		if durationMs.Valid {
+			v := int(durationMs.Int64)
+			m.DurationMs = &v
+		}
 
 		messages = append(messages, m)
 	}
 	return messages, rows.Err()
 }
 
+// Messages is the whole-transcript display read — MessagesSince from the
+// bottom. id is AUTOINCREMENT, so no row can be at or below 0 and the
+// watermark drops out: routing both through one query is what makes the
+// two reads' visibility filter identical rather than merely matching.
 func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
+	return s.MessagesSince(ctx, orgID, runID, 0)
+}
+
+func (s *agentRunStore) MessagesSince(ctx context.Context, orgID, runID string, sinceID int) ([]domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -1010,13 +1076,19 @@ func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]do
 	// that was withdrawn before any flush) never happened, so the display
 	// read hides them. delivered + inactive stays visible: that is compacted
 	// history, still part of the rendered transcript.
+	//
+	// Ordered by the same effective assembly key ListForAssembly uses, so a
+	// row placed out of insertion order renders where the model read it. The
+	// watermark stays on id: it answers "which rows has this client not seen
+	// yet", which is an insertion question, not a placement one.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+sqliteMessageColumns+`
 		FROM messages
 		WHERE conversation_id = ?
+		  AND id > ?
 		  AND NOT (delivered = 0 AND window_state = 'inactive')
-		ORDER BY id ASC
-	`, runID)
+		ORDER BY COALESCE(seq, id) ASC
+	`, runID, sinceID)
 	if err != nil {
 		return nil, err
 	}
@@ -1034,8 +1106,9 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 	// ?-placeholder IN list (SQLite has no array bind), mirroring
 	// artifactStore.ListByRuns, chunked to stay inside SQLite's variable
 	// limit (chunkIDs). A conversation_id falls in exactly one chunk, so
-	// ORDER BY (conversation_id, id) keeps each run's messages contiguous
-	// and in insertion order within the merged slice; the caller groups by
+	// ordering on (conversation_id, the effective assembly key) keeps each
+	// run's messages contiguous within the merged slice and in the same
+	// order the single-run display read gives them; the caller groups by
 	// RunID.
 	var messages []domain.Message
 	for _, chunk := range chunkIDs(runIDs) {
@@ -1051,7 +1124,7 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 			FROM messages
 			WHERE conversation_id IN (`+strings.Join(placeholders, ", ")+`)
 			  AND NOT (delivered = 0 AND window_state = 'inactive')
-			ORDER BY conversation_id ASC, id ASC
+			ORDER BY conversation_id ASC, COALESCE(seq, id) ASC
 		`, args...)
 		if err != nil {
 			return nil, err
@@ -1089,10 +1162,12 @@ func (s *agentRunStore) ListForAssemblySystem(ctx context.Context, orgID, runID 
 	return scanMessageRows(rows)
 }
 
-// MarkDeliveredSystem flips delivered=true on the given message ids, scoped to
+// markDelivered flips delivered=true on the given message ids, scoped to
 // runID, stamping subtype in the same statement when non-empty. ids outside
-// the run or already delivered are silently unaffected.
-func (s *agentRunStore) MarkDeliveredSystem(ctx context.Context, orgID, runID string, ids []int, subtype string) error {
+// the run or already delivered are silently unaffected. Reached through
+// MarkDeliveredForClaimSystem — the flush is an engagement write, unfenced
+// on this dialect (see the claim-fence block above).
+func (s *agentRunStore) markDelivered(ctx context.Context, orgID, runID string, ids []int, subtype string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}

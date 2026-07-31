@@ -26,7 +26,7 @@ func TestProcessCompletion_DraftPRWritesNoSnapshot(t *testing.T) {
 	seedDraftPRArtifact(t, s, runID)
 
 	task := loadTask(t, s, taskID)
-	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
+	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
 		res(`{"outcome":"continue","summary":"opened a PR"}`), t.TempDir(), nil, "", "event", "")
 
 	if parked {
@@ -49,7 +49,7 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 	bpr := blueprintRunIDForRun(t, database, runID)
 
 	task := loadTask(t, s, taskID)
-	parked := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
+	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
 		res(`{"outcome":"abort","summary":"looked into it","reason":"needs a human to rotate the token"}`),
 		t.TempDir(), nil, "", "event", "")
 
@@ -71,7 +71,7 @@ func TestProcessCompletion_FinishNoPendingWritesNoSnapshot(t *testing.T) {
 	bpr := blueprintRunIDForRun(t, database, runID)
 
 	task := loadTask(t, s, taskID)
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
 		res(`{"outcome":"finish","summary":"shipped it"}`), t.TempDir(), nil, "", "event", "")
 
 	assertSnapshotPresent(t, s, bpr, false)

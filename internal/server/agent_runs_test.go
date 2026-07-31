@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -152,5 +153,141 @@ func TestHandleConversations_BatchedCap(t *testing.T) {
 	tail := append(pad(maxBatchTaskIDs), taskID)
 	if got := runsFor(tail); len(got[taskID]) != 0 {
 		t.Errorf("tail beyond cap: task should be truncated out, got %d runs", len(got[taskID]))
+	}
+}
+
+// TestHandleMessages_SinceID pins the transcript read's optional watermark: the
+// run station polls with it to repair rows whose websocket frame was dropped,
+// and every other caller — which passes nothing — must keep getting the whole
+// transcript. An unparseable value reads as no watermark rather than a 400: it
+// describes what the caller already holds, not what it is asking for.
+func TestHandleMessages_SinceID(t *testing.T) {
+	s := newTestServer(t)
+	runID := seedSteerRun(t, s.db, "since", "running")
+
+	store := sqlitestore.New(s.db)
+	ids := map[string]int{}
+	for _, content := range []string{"first", "second", "third"} {
+		id, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+			ConversationID: runID, Role: "assistant", Content: content,
+		})
+		if err != nil {
+			t.Fatalf("InsertMessage(%s): %v", content, err)
+		}
+		ids[content] = int(id)
+	}
+
+	contents := func(query string) []string {
+		t.Helper()
+		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/messages"+query, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET messages%s = %d; body=%s", query, rec.Code, rec.Body.String())
+		}
+		var msgs []map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &msgs); err != nil {
+			t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+		}
+		out := make([]string, 0, len(msgs))
+		for _, m := range msgs {
+			out = append(out, fmt.Sprint(m["content"]))
+		}
+		return out
+	}
+	eq := func(desc string, got, want []string) {
+		t.Helper()
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("%s = %v, want %v", desc, got, want)
+		}
+	}
+
+	whole := []string{"first", "second", "third"}
+	eq("no since_id", contents(""), whole)
+	eq("since_id=0", contents("?since_id=0"), whole)
+	eq("since_id=first", contents(fmt.Sprintf("?since_id=%d", ids["first"])), []string{"second", "third"})
+	eq("since_id=third", contents(fmt.Sprintf("?since_id=%d", ids["third"])), nil)
+	eq("unparseable since_id", contents("?since_id=nonsense"), whole)
+
+	// Whitespace is trimmed before parsing, so a padded watermark is still a
+	// watermark — treating it as unparseable would quietly turn a repair read
+	// into a full transcript read on every tick.
+	eq("padded since_id", contents(fmt.Sprintf("?since_id=%%20%d%%20", ids["first"])), []string{"second", "third"})
+
+	// A negative watermark means nothing, so it normalizes to 0 rather than
+	// reaching the store as `id > -N`.
+	eq("negative since_id", contents("?since_id=-5"), whole)
+}
+
+// TestRunResponse_TokenSums pins the four token rollups onto the run wire
+// shape: the read already SUMs them per conversation, so the run station's
+// telemetry rail reads the same authoritative numbers the usage dashboard
+// does instead of re-summing the transcript client-side. Emitted as plain
+// snake_case ints — a run with no usage-bearing message reads 0, never absent.
+func TestRunResponse_TokenSums(t *testing.T) {
+	s := newTestServer(t)
+	runID := seedSteerRun(t, s.db, "tok", "running")
+
+	store := sqlitestore.New(s.db)
+	usage := func(in, out, cacheRead, cacheWrite int) {
+		t.Helper()
+		if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+			ConversationID: runID, Role: "assistant", Content: "working",
+			InputTokens: &in, OutputTokens: &out, CacheReadTokens: &cacheRead, CacheCreationTokens: &cacheWrite,
+		}); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+	}
+	usage(10, 1, 100, 7)
+	usage(20, 2, 200, 0)
+	// A row with no usage at all (a user message / tool result) contributes
+	// nothing rather than breaking the SUM.
+	if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+		ConversationID: runID, Role: "user", Content: "carry on",
+	}); err != nil {
+		t.Fatalf("InsertMessage(no usage): %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	for key, want := range map[string]float64{
+		"input_tokens":          30,
+		"output_tokens":         3,
+		"cache_read_tokens":     300,
+		"cache_creation_tokens": 7,
+	} {
+		v, ok := got[key]
+		if !ok {
+			t.Errorf("run response missing %q", key)
+			continue
+		}
+		if n, isNum := v.(float64); !isNum || n != want {
+			t.Errorf("%s = %v, want %v", key, v, want)
+		}
+	}
+
+	// A run that never streamed a usage-bearing message reads 0 on all four.
+	bare := seedSteerRun(t, s.db, "tokbare", "queued")
+	rec = doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+bare, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET bare conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	got = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode bare: %v; body=%s", err, rec.Body.String())
+	}
+	for _, key := range []string{"input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"} {
+		v, ok := got[key]
+		if !ok {
+			t.Errorf("bare run missing %q", key)
+			continue
+		}
+		if n, isNum := v.(float64); !isNum || n != 0 {
+			t.Errorf("bare run %s = %v, want 0", key, v)
+		}
 	}
 }

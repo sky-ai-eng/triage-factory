@@ -161,6 +161,17 @@ export interface Conversation {
   actor_agent_name?: string
   blueprint_run_id?: string
   blueprint_step_index?: number | null
+  // Token rollups: the SUM over this conversation's messages, derived by the
+  // same run read that carries TotalCostUSD / DurationMs / NumTurns. The
+  // authoritative numbers — the same ones the usage dashboard reports — so a
+  // surface reads them here rather than walking the transcript. 0 for a run
+  // that never streamed a usage-bearing message; useRunDetail folds live
+  // per-message deltas on top between refetches of the run row, exactly as it
+  // does for cost.
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_tokens?: number
+  cache_creation_tokens?: number
 }
 
 // ArtifactKind is the closed set of artifact discriminators the backend emits
@@ -251,6 +262,17 @@ export interface Message {
   // conversation's authoritative SUM.
   cost_usd?: number
   created_at: string
+  // duration_ms is how long THIS row's own work took — an assistant row from
+  // the request going out to the message completing (reasoning included, so
+  // "thought for Ns" comes off the row that did the thinking), a tool row from
+  // dispatch to result. Work only: a permission-gated call reads as the time
+  // it ran, never the time it stood waiting for someone to approve it.
+  // Absent means nobody measured it (every row written
+  // before the runtime stamped timing, and every non-agent role), which is not
+  // the same as 0 — so read it with `!= null`, never `?? 0`. Never derive a
+  // duration by subtracting a neighbour's created_at: streaming, paging, and
+  // compaction each break that in their own way.
+  duration_ms?: number
   // reasoning/content_blocks mirror domain.MessageDTO's fields of the same
   // name — absent on messages that carry neither. reasoning rides the
   // assistant message it belongs to rather than arriving as a separate
@@ -384,6 +406,11 @@ export interface BlueprintStep {
   blueprint_id: string
   step_index: number
   step_prompt_id: string
+  // Optional: the step prompt's name. Only a blueprint run's frozen step_plan
+  // snapshots it — the live blueprint_steps row the /steps editor reads holds a
+  // prompt id and no name — so render it when present and fall back to the
+  // brief.
+  name?: string
   brief: string
   // Optional: a step rebuilt from a blueprint run's frozen step_plan has no
   // live blueprint_steps row, so the run projection omits created_at (the
@@ -1031,17 +1058,20 @@ export type WSEvent =
   | {
       // P3 steering: a conversation surfaced a tool-permission prompt
       // (canUseTool), answered via
-      // POST /api/agent/conversations/{conversationID}/permissions/{requestID}.
-      // timeout_ms is the prompt's server-side deadline (relative); the dock
-      // derives its dismiss TTL from it.
+      // POST /api/agent/conversations/{conversationID}/permissions/{toolCallID}.
+      // tool_call_id is the tool_use id of the gated call — the same id the
+      // assistant row's tool_calls and the tool result carry. timeout_ms is the
+      // prompt's server-side deadline (relative); the dock derives its dismiss
+      // TTL from it. title/display_name/description are the SDK's own prompt
+      // copy, present only when it rendered any.
       type: 'permission_request'
       conversation_id: string
-      data: {
-        request_id: string
-        tool_name: string
-        input: Record<string, unknown>
-        timeout_ms?: number
-      }
+      // Just the id: the prompt itself is read from
+      // GET /api/agent/conversations/{id}/permissions, so this frame is a
+      // refetch trigger like artifact_updated rather than the only path to the
+      // state. That is what makes a refresh, a second tab, and a cold load able
+      // to reconstruct a prompt the frame fired once for and never repeated.
+      data: { tool_call_id: string }
     }
   | {
       // A pending permission prompt reached a terminal resolution (answered by
@@ -1050,7 +1080,7 @@ export type WSEvent =
       // its own client TTL. The client TTL stays as a backstop.
       type: 'permission_resolved'
       conversation_id: string
-      data: { request_id: string }
+      data: { tool_call_id: string }
     }
   | {
       // The executor syncer (multi mode) always carries a `pending` field: the

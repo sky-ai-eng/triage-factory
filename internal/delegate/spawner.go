@@ -11,6 +11,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -302,13 +303,22 @@ type Spawner struct {
 	// executor. Set once in NewSpawner.
 	controller RunController
 	// permPending brokers the browser tool-permission round-trip: each
-	// in-flight canUseTool prompt registers a pending entry here keyed by its
-	// SDK request_id; the WS POST resolves it and the parked handler goroutine
-	// receives the decision (or a bounded timeout denies it). In-memory only
-	// (no schema); guarded by s.mu. The runLiveAndDrive call sites still pass
-	// perms:nil, so the broker is dormant until a follow-up wires the handler
-	// in alongside the browser prompt UI.
+	// in-flight canUseTool prompt registers a pending entry here keyed by the
+	// tool_use id of the call being gated; the WS POST resolves it and the
+	// parked handler goroutine receives the decision (or a bounded timeout
+	// denies it). In-memory only; guarded by s.mu. This is still the whole
+	// mechanism — the durable rows below are a record kept alongside it, never
+	// the transport, and nothing drives the agent off them.
 	permPending map[string]*pendingPermission
+	// permissions is the durable record of every prompt the broker above
+	// surfaces: one row per gated call, resolved by whichever path answered it
+	// (a human, the full-window timeout, the presence-gated absent deny). It
+	// gives a live pending prompt an address — a refresh, a second tab, or a
+	// cold load reconstructs it from here — and gives every decision an audit
+	// row, which a fire-once websocket frame could do neither of. Nil-safe:
+	// every write logs and moves on, because failing to record a prompt must
+	// never be a reason to fail to ASK it.
+	permissions db.PermissionStore
 	// executorID is this spawner instance's executor identity, stamped onto
 	// runs.executor_id at claim and resume. Empty at construction —
 	// production wires the persistent instance-registry id via
@@ -505,6 +515,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		sandboxStats:     stores.SandboxStats,
 		pendingInput:     stores.RunPendingInput,
 		pendingFirings:   stores.PendingFirings,
+		permissions:      stores.Permissions,
 		tx:               stores.Tx,
 		ghClient:         ghClient,
 		wsHub:            wsHub,
@@ -1064,14 +1075,31 @@ func (s *Spawner) getRunSecrets() agentproc.SecretsReader {
 	return s.runSecrets
 }
 
-// updatePhase records the live engagement's setup sub-state on its active
-// claim (phase "" clears it — the agent process is live) and broadcasts the
-// display status: the phase itself, or "running" on a clear, so the wire
-// sequence the frontend chips key on is unchanged. Goroutine-internal, no
-// JWT claims in scope, so admin pool; no guard needed — the caller knows
-// the engagement is live.
-func (s *Spawner) updatePhase(orgID, runID, phase string) {
-	if err := s.agentRuns.SetActiveClaimPhaseSystem(context.Background(), orgID, runID, phase); err != nil {
+// updatePhase records the live engagement's setup sub-state on its own claim
+// (phase "" clears it — the agent process is live) and broadcasts the display
+// status: the phase itself, or "running" on a clear, so the wire sequence the
+// frontend chips key on is unchanged. Goroutine-internal, no JWT claims in
+// scope, so admin pool.
+//
+// claimID names the engagement reporting the progress; empty falls back to
+// whichever claim is active on the conversation, for the paths with no
+// claimed run in scope. A fence trip here is loud but not fatal: the write is
+// refused, so nothing lands on the successor's claim, and the engagement
+// carries on into the launch it was setting up — where its first transcript
+// write meets the same fence and abandons the run properly. Aborting from
+// here instead would mean a terminal write on a conversation this executor no
+// longer owns, which is the one thing a fenced-out engagement must not do.
+func (s *Spawner) updatePhase(orgID, runID, claimID, phase string) {
+	var err error
+	if claimID != "" {
+		err = s.agentRuns.SetClaimPhaseSystem(context.Background(), orgID, runID, claimID, phase)
+	} else {
+		err = s.agentRuns.SetActiveClaimPhaseSystem(context.Background(), orgID, runID, phase)
+	}
+	if errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Error("claim fence refused a phase write — this executor no longer owns the conversation",
+			"run", runID, "claim_id", claimID, "org_id", orgID, "phase", phase, "error", err)
+	} else if err != nil {
 		delegateLog.Warn("update phase for run failed", "run", runID, "error", err)
 	}
 	display := phase
