@@ -65,6 +65,10 @@ const SETTLE_TAIL_MS = 80
 // arrives — an older browser, or a scrollTo that lands on the current offset and
 // so fires nothing at all.
 const SELF_SCROLL_MS = 150
+// How long the action row takes to fade. Short: it leads the collapse out and
+// follows the expand in, so it should be gone before the fold is underway and
+// back promptly once everything has settled.
+const ACTIONS_FADE_MS = 160
 // The body animation's curve, for the scroll that tracks it on a backward move.
 // Same points as bodyEase, so the two finish on the same frame.
 const anchorEase = cubicBezier(...bodyEasePoints)
@@ -140,12 +144,19 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // once it is open; 'expand' then opens it into the room already made. Null
   // outside a backward move, and once both beats are done.
   const [backPhase, setBackPhase] = useState<'collapse' | 'expand' | null>(null)
+  // The action row belongs to the step at rest, not to the move between steps.
+  // Raised by the navigation handlers so it leads the fold out, and lowered when
+  // the transition loop finishes so it follows the expand back in. Opacity only:
+  // the row's box is what the anchor measures against, so it has to keep its
+  // place in the layout even while invisible.
+  const [actionsHidden, setActionsHidden] = useState(false)
 
   const goBack = useCallback(() => {
     setNavigated(true)
     setTravel('back')
     setDeparting(activeIndex)
     setBackPhase('collapse')
+    setActionsHidden(true)
     back()
   }, [back, activeIndex])
   const goNext = useCallback(() => {
@@ -153,6 +164,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     setTravel('forward')
     setDeparting(null)
     setBackPhase(null)
+    setActionsHidden(true)
     advance()
   }, [advance])
   const goToStep = useCallback(
@@ -162,6 +174,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       setTravel(backwards ? 'back' : 'forward')
       setDeparting(backwards ? activeIndex : null)
       setBackPhase(backwards ? 'collapse' : null)
+      setActionsHidden(true)
       goTo(index)
     },
     [goTo, activeIndex],
@@ -381,6 +394,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       } else {
         transitioningRef.current = false
         setBackPhase(null)
+        setActionsHidden(false)
         // Correct any drift once everything has come to rest.
         settle()
         // Done animating — hand the height back to the browser so ordinary
@@ -717,8 +731,18 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                           </AnimatePresence>
 
                           {isActive && (
-                            <div
+                            <motion.div
                               ref={actionsRef}
+                              initial={false}
+                              animate={{ opacity: actionsHidden ? 0 : 1 }}
+                              transition={
+                                reduce ? { duration: 0 } : { duration: ACTIONS_FADE_MS / 1000 }
+                              }
+                              // Invisible must also mean unclickable. The row
+                              // keeps its box either way — that box is what the
+                              // anchor measures against.
+                              style={{ pointerEvents: actionsHidden ? 'none' : 'auto' }}
+                              aria-hidden={actionsHidden || undefined}
                               className="flex items-center justify-between gap-3 pt-5"
                             >
                               <button
@@ -741,7 +765,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                   {busy ? 'Saving…' : wiz.isLastStep ? 'Finish setup' : 'Continue'}
                                 </button>
                               )}
-                            </div>
+                            </motion.div>
                           )}
                         </motion.li>
                       )
