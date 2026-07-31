@@ -14,6 +14,7 @@ import type { ReactNode } from 'react'
 import type { OrgConfigForm } from '../settings/orgConfig'
 import type { JiraDeployment } from '../settings/jiraConnect'
 import type { TeamConfigForm } from '../settings/teamConfig'
+import type { GitHubAppStatus } from '../../lib/githubApp'
 
 // The three divider sections the stack groups steps under, in order:
 // org-wide config, then the first team's settings, then the signed-in user's
@@ -128,6 +129,13 @@ export interface WizardState {
   // The registered App's slug, for the mode-card status line ("Registered
   // (slug) — …"). Empty when no App is registered. Default ''.
   githubAppSlug: string
+  // The App status the panel would otherwise fetch for itself on mount. Seeded
+  // by the App step's load(), with every other step's, so the panel renders its
+  // final content on first paint. It matters here because the step animates
+  // open: a body whose height changes partway through that is a body the
+  // animation clips. Null until loaded, or if the fetch failed — the panel just
+  // loads it itself in that case, as it does in Settings.
+  githubAppStatus: GitHubAppStatus | null
   // Whether the org's registered App is installed on ≥1 GitHub account — the
   // gate for the "Install the App" step, distinct from githubReady (which
   // registration alone satisfies). Seeded from the installation mirror on load

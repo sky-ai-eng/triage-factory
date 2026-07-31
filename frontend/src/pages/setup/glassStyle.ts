@@ -13,4 +13,14 @@ import type { Transition } from 'motion/react'
 
 // bodyEase is the active step body's reveal easing — a soft, confident
 // ease-out (de-blur + rise). Reduced-motion callers swap an instant transition.
-export const bodyEase: Transition = { duration: 0.34, ease: [0.22, 1, 0.36, 1] }
+// The duration is exported alongside because the wizard has to know how long
+// the flow keeps moving after a step change: it re-anchors the action row every
+// frame for exactly that long. Kept as one constant so the two can't drift.
+export const bodyDurationMs = 340
+// Exported as points too, so the wizard can build the identical curve for the
+// scroll it runs alongside the body on a backward move.
+export const bodyEasePoints = [0.22, 1, 0.36, 1] as const
+export const bodyEase: Transition = {
+  duration: bodyDurationMs / 1000,
+  ease: [...bodyEasePoints],
+}

@@ -111,6 +111,7 @@ export const initialWizardState = (): WizardState => ({
   githubAppRegistered: false,
   githubAppStaged: false,
   githubAppSlug: '',
+  githubAppStatus: null,
   githubAppInstalled: false,
   githubAppInstallCount: 0,
   isLocal: false,
@@ -468,6 +469,15 @@ const githubAppStep: WizardStep = {
   section: 'org',
   title: 'GitHub App',
   visible: (s) => s.githubAccessTab === 'app' && s.githubAppSource !== 'existing',
+  // Fetch the App status up front, with every other step's load, so the panel
+  // has it before the step is ever opened. Best-effort: a failure just leaves
+  // the panel to load it itself, exactly as it does in Settings.
+  load: async ({ orgId }) =>
+    orgId
+      ? getGitHubAppStatus(orgId)
+          .then((githubAppStatus) => ({ githubAppStatus }))
+          .catch(() => ({}))
+      : {},
   isComplete: (s) => s.githubReady,
   validate: (s) => (s.githubReady ? null : 'Register your GitHub App to continue.'),
   persist: async () => {},
