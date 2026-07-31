@@ -337,7 +337,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		// conversation's own transcript now.
 		MustExec(t, h.AdminDB, `
 			INSERT INTO messages (conversation_id, org_id, user_id, role, content, subtype, delivered)
-			VALUES ($1, $2, $3, 'user', 'resume this', 'text', false)
+			VALUES ($1, $2, $3, 'user', 'resume this', '', false)
 		`, runID, orgID, userID)
 		msg, _, ok, err := stores.RunPendingInput.Peek(ctx, orgID, runID)
 		if err != nil || !ok || msg == "" {

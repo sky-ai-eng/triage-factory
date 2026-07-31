@@ -145,10 +145,10 @@ func TestNativeLoop_LiveSmoke(t *testing.T) {
 // depends on. It needs no provider.
 func TestLiveAssemblyRoundTrip(t *testing.T) {
 	rows := []domain.Message{
-		{ID: 1, Role: "user", Subtype: "text", Content: "go"},
-		{ID: 2, Role: "assistant", Subtype: "tool_use", Content: "reading",
+		{ID: 1, Role: "user", Content: "go"},
+		{ID: 2, Role: "assistant", Content: "reading",
 			ToolCalls: []domain.ToolCall{{ID: "t1", Name: "read", Input: map[string]any{"path": "x"}}}},
-		{ID: 3, Role: "tool", Subtype: "tool", ToolCallID: "t1", Content: "contents"},
+		{ID: 3, Role: "tool", ToolCallID: "t1", Content: "contents"},
 		{ID: 4, Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "also check y"},
 	}
 	msgs, err := inference.RowsToMessages(rows, inference.AssemblyOptions{})

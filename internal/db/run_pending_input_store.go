@@ -7,7 +7,7 @@ import "context"
 // is re-queued as ordinary claimable work, so a crash between "message
 // recorded" and "process spawned" is recoverable by the standard boot
 // sweep rather than an ad-hoc path. Stored as an undelivered messages row
-// (role='user', subtype='text', delivered=false) — the pending input IS the
+// (role='user', blank subtype, delivered=false) — the pending input IS the
 // user's next transcript message, awaiting delivery. See
 // docs/for-agents/specs/horizontal-scaling/README.md §5.2.
 //

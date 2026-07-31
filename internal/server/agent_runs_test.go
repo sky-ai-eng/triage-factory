@@ -34,7 +34,7 @@ func TestHandleConversations_Batched(t *testing.T) {
 	store := sqlitestore.New(s.db)
 	seedMsg := func(runID, content string) {
 		if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Content: content, Subtype: "text",
+			ConversationID: runID, Role: "assistant", Content: content,
 		}); err != nil {
 			t.Fatalf("InsertMessage(%s): %v", runID, err)
 		}

@@ -73,7 +73,7 @@ func completeCuratorTurn(t *testing.T, srv *Server, projectID, convID string, ms
 		}
 		_, err := ts.Conversations.InsertMessage(t.Context(), org, &domain.Message{
 			ConversationID: convID, UserID: user, ClaimID: claimID,
-			Role: "assistant", Subtype: "text", Content: reply,
+			Role: "assistant", Content: reply,
 		})
 		return err
 	}); err != nil {

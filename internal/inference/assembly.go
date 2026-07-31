@@ -227,8 +227,8 @@ func assistantPayload(r domain.Message) *schemas.ChatAssistantMessage {
 // to one domain row, carrying the same content/reasoning/tool-call/is_error
 // facts back. It populates only the assembly-relevant fields — the caller
 // stamps identity (conversation, claim, user), the model, token usage and
-// cost. Subtype is re-derived from the message shape, matching what the SDK
-// stream parser records, so the row↔message round trip is exact.
+// cost. Subtype stays blank: every shape here is normal behavior for its
+// role, already fully described by the role and tool-call columns.
 func MessageToRow(msg schemas.ChatMessage) (domain.Message, error) {
 	content, blocks := contentToRow(msg.Content)
 
@@ -240,17 +240,14 @@ func MessageToRow(msg schemas.ChatMessage) (domain.Message, error) {
 
 	switch msg.Role {
 	case schemas.ChatMessageRoleUser:
-		row.Subtype = "text"
 
 	case schemas.ChatMessageRoleTool:
-		row.Subtype = "tool"
 		if msg.ChatToolMessage != nil {
 			row.ToolCallID = derefStr(msg.ToolCallID)
 			row.IsError = derefBool(msg.IsError)
 		}
 
 	case schemas.ChatMessageRoleAssistant:
-		row.Subtype = "text"
 		if msg.ChatAssistantMessage != nil {
 			row.Reasoning = reasoningToDomain(msg.ReasoningDetails)
 			calls, err := toolCallsToDomain(msg.ToolCalls)
@@ -258,9 +255,6 @@ func MessageToRow(msg schemas.ChatMessage) (domain.Message, error) {
 				return domain.Message{}, err
 			}
 			row.ToolCalls = calls
-			if len(calls) > 0 {
-				row.Subtype = "tool_use"
-			}
 		}
 
 	default:

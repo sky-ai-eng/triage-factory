@@ -1186,12 +1186,14 @@ CREATE TABLE public.messages (
     -- user message, a pending injection). Never read by assembly.
     claim_id uuid,
     -- role is app-validated, not CHECK-constrained: 'assistant' | 'tool' |
-    -- 'user'. Reserved 'user' subtypes minted by later phases:
-    -- 'injection:compaction-request', 'injection:compaction-result',
-    -- 'injection:steer', 'injection:system-note', 'injection:context'.
+    -- 'user'. A blank subtype is a normal row for its role; only rows that
+    -- deviate from normal role behavior carry one. System-minted 'user'
+    -- subtypes: 'injection:compaction-request', 'injection:compaction-result',
+    -- 'injection:steer', 'injection:system-note', 'injection:context',
+    -- 'injection:nudge', 'injection:wrap-up', 'stop-note'.
     role text NOT NULL,
     content text,
-    subtype text DEFAULT 'text'::text,
+    subtype text DEFAULT ''::text,
     tool_calls jsonb,
     tool_call_id text,
     is_error boolean DEFAULT false NOT NULL,

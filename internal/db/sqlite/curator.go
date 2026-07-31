@@ -108,7 +108,7 @@ func (s *curatorStore) EnqueueUserMessage(ctx context.Context, orgID, conversati
 	}
 	res, err := s.q.ExecContext(ctx, `
 		INSERT INTO messages (org_id, conversation_id, user_id, role, content, subtype, delivered, created_at)
-		VALUES (?, ?, ?, 'user', ?, 'text', 0, ?)
+		VALUES (?, ?, ?, 'user', ?, '', 0, ?)
 	`, orgID, conversationID, userID, content, time.Now().UTC())
 	if err != nil {
 		return 0, err
@@ -179,7 +179,7 @@ func (s *curatorStore) InFlightTurn(ctx context.Context, orgID, projectID, creat
 		var msgID int64
 		err := s.q.QueryRowContext(ctx, `
 			SELECT id FROM messages
-			WHERE conversation_id = ? AND role = 'user' AND subtype = 'text' AND delivered = 1
+			WHERE conversation_id = ? AND role = 'user' AND subtype = '' AND delivered = 1
 			ORDER BY id DESC LIMIT 1
 		`, conv.ID).Scan(&msgID)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -193,7 +193,7 @@ func (s *curatorStore) InFlightTurn(ctx context.Context, orgID, projectID, creat
 	var msgID int64
 	err = s.q.QueryRowContext(ctx, `
 		SELECT id FROM messages
-		WHERE conversation_id = ? AND role = 'user' AND subtype = 'text' AND delivered = 0
+		WHERE conversation_id = ? AND role = 'user' AND subtype = '' AND delivered = 0
 		ORDER BY id ASC LIMIT 1
 	`, conv.ID).Scan(&msgID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -211,7 +211,7 @@ func (s *curatorStore) DeleteQueuedTurn(ctx context.Context, orgID, conversation
 	}
 	res, err := s.q.ExecContext(ctx, `
 		DELETE FROM messages
-		WHERE conversation_id = ? AND id = ? AND role = 'user' AND subtype = 'text' AND delivered = 0
+		WHERE conversation_id = ? AND id = ? AND role = 'user' AND subtype = '' AND delivered = 0
 	`, conversationID, messageID)
 	if err != nil {
 		return false, err
@@ -276,7 +276,7 @@ func (s *curatorStore) ClaimTurnSystem(ctx context.Context, orgID, conversationI
 		SELECT ?, ?, ?, m.id, ?, ?, ?
 		FROM messages m
 		WHERE m.conversation_id = ? AND m.id = ?
-		  AND m.role = 'user' AND m.subtype = 'text' AND m.delivered = 0
+		  AND m.role = 'user' AND m.subtype = '' AND m.delivered = 0
 		ON CONFLICT (conversation_id) WHERE released_at IS NULL DO NOTHING
 	`, id, orgID, conversationID, executorID, bootEpoch, time.Now().UTC(), conversationID, messageID)
 	if err != nil {
@@ -309,7 +309,7 @@ func (s *curatorStore) BeginTurn(ctx context.Context, orgID, projectID, conversa
 			UPDATE messages SET delivered = 1,
 			       claim_id = (SELECT id FROM claims
 			                   WHERE conversation_id = ? AND released_at IS NULL)
-			WHERE conversation_id = ? AND id = ? AND role = 'user' AND subtype = 'text' AND delivered = 0
+			WHERE conversation_id = ? AND id = ? AND role = 'user' AND subtype = '' AND delivered = 0
 		`, conversationID, conversationID, messageID)
 		if err != nil {
 			return err
@@ -445,7 +445,7 @@ func (s *curatorStore) DeadLetterTurnSystem(ctx context.Context, orgID, conversa
 		res, err := q.ExecContext(ctx, `
 			UPDATE messages SET delivered = 1, window_state = 'inactive'
 			WHERE conversation_id = ? AND id = ?
-			  AND role = 'user' AND subtype = 'text' AND delivered = 0
+			  AND role = 'user' AND subtype = '' AND delivered = 0
 		`, conversationID, messageID)
 		if err != nil {
 			return err
@@ -595,12 +595,12 @@ func (s *curatorStore) ListClaimableTurnsForHomeSystem(ctx context.Context, home
 		JOIN conversations c ON c.id = m.conversation_id
 		JOIN curator_homes h ON h.org_id = c.org_id AND h.project_id = c.project_id
 		WHERE c.type = 'curator' AND c.archived_at IS NULL
-		  AND m.role = 'user' AND m.subtype = 'text' AND m.delivered = 0
+		  AND m.role = 'user' AND m.subtype = '' AND m.delivered = 0
 		  AND h.home_instance_id = ?
 		  AND NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = c.id AND cl.released_at IS NULL)
 		  AND m.id = (SELECT MIN(m2.id) FROM messages m2
 		              WHERE m2.conversation_id = c.id AND m2.role = 'user'
-		                AND m2.subtype = 'text' AND m2.delivered = 0)
+		                AND m2.subtype = '' AND m2.delivered = 0)
 		ORDER BY m.id ASC
 	`, homeInstanceID)
 	if err != nil {
@@ -659,7 +659,7 @@ func (s *curatorStore) DeleteQueuedTurnsForProjectSystem(ctx context.Context, or
 	// surviving archived project) keeps.
 	res, err := s.q.ExecContext(ctx, `
 		DELETE FROM messages
-		WHERE delivered = 0 AND role = 'user' AND subtype = 'text'
+		WHERE delivered = 0 AND role = 'user' AND subtype = ''
 		  AND conversation_id IN (SELECT id FROM conversations
 		                          WHERE org_id = ? AND project_id = ? AND type = 'curator')
 	`, orgID, projectID)

@@ -10,7 +10,7 @@ import (
 
 // runPendingInputStore is the Postgres impl of db.RunPendingInputStore —
 // the durable half of resume-by-enqueue (TFAC-585), stored as an
-// undelivered plain user message (role='user', subtype='text',
+// undelivered plain user message (role='user', blank subtype,
 // delivered=false) on the conversation's own transcript. Reachable two
 // ways: the resume flip binds it to the claims tx so Store commits
 // atomically with the status flip under the resuming user's claims (the
@@ -29,7 +29,7 @@ var _ db.RunPendingInputStore = (*runPendingInputStore)(nil)
 // store owns: the conversation's undelivered plain user message. The
 // subtype filter keeps it disjoint from the staged-injection notes, which
 // are also undelivered user rows.
-const pendingInputPredicate = `org_id = $1::uuid AND conversation_id = $2::uuid AND role = 'user' AND subtype = 'text' AND delivered = false`
+const pendingInputPredicate = `org_id = $1::uuid AND conversation_id = $2::uuid AND role = 'user' AND subtype = '' AND delivered = false`
 
 func (s *runPendingInputStore) Store(ctx context.Context, orgID, runID, userID, message string) error {
 	// Delete-then-insert preserves the replace contract the former
@@ -43,7 +43,7 @@ func (s *runPendingInputStore) Store(ctx context.Context, orgID, runID, userID, 
 		}
 		_, err := q.ExecContext(ctx, `
 			INSERT INTO messages (org_id, conversation_id, user_id, role, content, subtype, delivered)
-			VALUES ($1::uuid, $2::uuid, NULLIF($3, '')::uuid, 'user', $4, 'text', false)
+			VALUES ($1::uuid, $2::uuid, NULLIF($3, '')::uuid, 'user', $4, '', false)
 		`, orgID, runID, userID, message)
 		return err
 	})

@@ -35,13 +35,13 @@ func projectContent(m domain.Message) domain.Message {
 func bijectionCorpus() map[string]domain.Message {
 	return map[string]domain.Message{
 		"user text": {
-			Role: "user", Subtype: "text", Content: "please fix the failing test",
+			Role: "user", Content: "please fix the failing test",
 		},
 		"assistant text only": {
-			Role: "assistant", Subtype: "text", Content: "On it.",
+			Role: "assistant", Content: "On it.",
 		},
 		"assistant reasoning with signature": {
-			Role: "assistant", Subtype: "text", Content: "The bug is a nil deref.",
+			Role: "assistant", Content: "The bug is a nil deref.",
 			Reasoning: []domain.ReasoningDetail{{
 				Index:     0,
 				Type:      "reasoning.text",
@@ -50,7 +50,7 @@ func bijectionCorpus() map[string]domain.Message {
 			}},
 		},
 		"assistant redacted reasoning": {
-			Role: "assistant", Subtype: "text", Content: "Reasoning withheld.",
+			Role: "assistant", Content: "Reasoning withheld.",
 			Reasoning: []domain.ReasoningDetail{{
 				Index: 0,
 				Type:  "reasoning.encrypted",
@@ -58,7 +58,7 @@ func bijectionCorpus() map[string]domain.Message {
 			}},
 		},
 		"assistant tool call": {
-			Role: "assistant", Subtype: "tool_use",
+			Role: "assistant",
 			ToolCalls: []domain.ToolCall{{
 				ID:    "toolu_01",
 				Name:  "Read",
@@ -66,7 +66,7 @@ func bijectionCorpus() map[string]domain.Message {
 			}},
 		},
 		"assistant reasoning plus tool call plus text": {
-			Role: "assistant", Subtype: "tool_use", Content: "Reading the file first.",
+			Role: "assistant", Content: "Reading the file first.",
 			Reasoning: []domain.ReasoningDetail{{
 				Index:     0,
 				Type:      "reasoning.text",
@@ -80,15 +80,15 @@ func bijectionCorpus() map[string]domain.Message {
 			}},
 		},
 		"tool result success": {
-			Role: "tool", Subtype: "tool", ToolCallID: "toolu_01",
+			Role: "tool", ToolCallID: "toolu_01",
 			Content: "127.0.0.1 localhost",
 		},
 		"tool result error": {
-			Role: "tool", Subtype: "tool", ToolCallID: "toolu_03",
+			Role: "tool", ToolCallID: "toolu_03",
 			Content: "exit status 1: file not found", IsError: true,
 		},
 		"tool result multi-block with image": {
-			Role: "tool", Subtype: "tool", ToolCallID: "toolu_04",
+			Role: "tool", ToolCallID: "toolu_04",
 			Content: "screenshot captured",
 			ContentBlocks: []domain.ContentBlock{{
 				Type:     domain.ContentBlockImage,
@@ -96,7 +96,7 @@ func bijectionCorpus() map[string]domain.Message {
 			}},
 		},
 		"tool result image only": {
-			Role: "tool", Subtype: "tool", ToolCallID: "toolu_05",
+			Role: "tool", ToolCallID: "toolu_05",
 			ContentBlocks: []domain.ContentBlock{{
 				Type:     domain.ContentBlockImage,
 				ImageURL: &domain.ContentImageURL{URL: "data:image/png;base64,AAAA", Detail: "high"},

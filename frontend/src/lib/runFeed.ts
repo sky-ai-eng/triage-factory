@@ -64,7 +64,7 @@ export function appendToFeed(prev: RunCardFeed | undefined, msg: Message): RunCa
 }
 
 function commentsForMessage(msg: Message): number {
-  if (msg.role === 'assistant' && msg.subtype === 'tool_use' && msg.tool_calls?.length) {
+  if (msg.role === 'assistant' && msg.tool_calls?.length) {
     const cmd = String(msg.tool_calls[0].input?.command || '')
     if (cmd.includes('add-review-comment') || cmd.includes('add-comment')) return 1
   }

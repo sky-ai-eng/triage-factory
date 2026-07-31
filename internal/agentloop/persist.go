@@ -73,7 +73,6 @@ func (e *Engine) insertToolResult(ctx context.Context, params Params, call domai
 	row := &domain.Message{
 		ConversationID: params.ConversationID,
 		Role:           "tool",
-		Subtype:        "tool",
 		ToolCallID:     call.ID,
 		Content:        sanitizeForStore(content),
 		IsError:        isErr,
@@ -107,7 +106,6 @@ func (e *Engine) insertToolResultWithImages(ctx context.Context, params Params, 
 	row := &domain.Message{
 		ConversationID: params.ConversationID,
 		Role:           "tool",
-		Subtype:        "tool",
 		ToolCallID:     call.ID,
 		Content:        sanitizeForStore(content),
 		ContentBlocks:  blocks,

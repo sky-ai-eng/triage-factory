@@ -45,7 +45,7 @@ func TestRun_FirstDrainIsBareAndMidTurnDrainIsStamped(t *testing.T) {
 			calls: []domain.ToolCall{{ID: "c1", Name: "ls"}},
 			onCall: func() {
 				_, _ = tr.Insert(context.Background(), "org", &domain.Message{
-					ConversationID: "conv", Role: "user", Subtype: "text",
+					ConversationID: "conv", Role: "user",
 					Content: "also check the tests", Delivered: boolPtr(false),
 				})
 			},
@@ -59,7 +59,7 @@ func TestRun_FirstDrainIsBareAndMidTurnDrainIsStamped(t *testing.T) {
 	}
 
 	opening := tr.find(func(m domain.Message) bool { return m.Content == "opening" })
-	if opening == nil || opening.Subtype != "text" {
+	if opening == nil || opening.Subtype != "" {
 		t.Fatalf("the engagement's first drain must deliver bare, leaving the row's own subtype: %+v", opening)
 	}
 	steer := tr.find(func(m domain.Message) bool { return m.Content == "also check the tests" })
@@ -81,7 +81,7 @@ func TestRun_DrainAfterNoToolCallTurnIsBare(t *testing.T) {
 			text: "I think I'm done",
 			onCall: func() {
 				_, _ = tr.Insert(context.Background(), "org", &domain.Message{
-					ConversationID: "conv", Role: "user", Subtype: "text",
+					ConversationID: "conv", Role: "user",
 					Content: "one more thing", Delivered: boolPtr(false),
 				})
 			},
@@ -95,7 +95,7 @@ func TestRun_DrainAfterNoToolCallTurnIsBare(t *testing.T) {
 		t.Fatalf("the late-arriving input must keep the run going: %+v", got)
 	}
 	late := tr.find(func(m domain.Message) bool { return m.Content == "one more thing" })
-	if late == nil || late.Subtype != "text" {
+	if late == nil || late.Subtype != "" {
 		t.Fatalf("a drain following a no-tool-call turn must deliver bare: %+v", late)
 	}
 }
@@ -104,11 +104,11 @@ func TestRun_RepairAnswersUnansweredToolCallsWithoutRedispatch(t *testing.T) {
 	// A crash left an assistant message whose two tool calls were only half
 	// answered — the exact partial-batch shape the repair pass diffs.
 	tr := newMemTranscript(
-		domain.Message{ConversationID: "conv", Role: "user", Subtype: "text", Content: "go"},
-		domain.Message{ConversationID: "conv", Role: "assistant", Subtype: "tool_use", ToolCalls: []domain.ToolCall{
+		domain.Message{ConversationID: "conv", Role: "user", Content: "go"},
+		domain.Message{ConversationID: "conv", Role: "assistant", ToolCalls: []domain.ToolCall{
 			{ID: "c1", Name: "bash"}, {ID: "c2", Name: "write"},
 		}},
-		domain.Message{ConversationID: "conv", Role: "tool", Subtype: "tool", ToolCallID: "c1", Content: "already recorded"},
+		domain.Message{ConversationID: "conv", Role: "tool", ToolCallID: "c1", Content: "already recorded"},
 	)
 	host := newScriptedToolHost()
 	p := &scriptedProvider{turns: []scriptedTurn{{text: "recovered"}}}
@@ -141,8 +141,8 @@ func TestRun_RepairAnswersUnansweredToolCallsWithoutRedispatch(t *testing.T) {
 func TestRun_ExecutorChangedNoticeGatedOnPriorAssistantWork(t *testing.T) {
 	t.Run("prior work queues the notice", func(t *testing.T) {
 		tr := newMemTranscript(
-			domain.Message{ConversationID: "conv", Role: "user", Subtype: "text", Content: "go"},
-			domain.Message{ConversationID: "conv", Role: "assistant", Subtype: "text", Content: "working"},
+			domain.Message{ConversationID: "conv", Role: "user", Content: "go"},
+			domain.Message{ConversationID: "conv", Role: "assistant", Content: "working"},
 		)
 		p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
@@ -177,8 +177,8 @@ func TestRun_ExecutorChangedNoticeGatedOnPriorAssistantWork(t *testing.T) {
 
 func TestRun_RepairIsIdempotentAcrossClaims(t *testing.T) {
 	tr := newMemTranscript(
-		domain.Message{ConversationID: "conv", Role: "user", Subtype: "text", Content: "go"},
-		domain.Message{ConversationID: "conv", Role: "assistant", Subtype: "tool_use", ToolCalls: []domain.ToolCall{{ID: "c1", Name: "bash"}}},
+		domain.Message{ConversationID: "conv", Role: "user", Content: "go"},
+		domain.Message{ConversationID: "conv", Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "c1", Name: "bash"}}},
 	)
 	// Two engagements back to back, as a crash-then-reclaim produces.
 	for i, text := range []string{"first", "second"} {
@@ -273,7 +273,7 @@ func TestRun_LengthStopStubsUnparseableArgs(t *testing.T) {
 		if results := tr.toolResults(); len(results) != 2 {
 			t.Fatalf("every call in the truncated message needs a result, got %d", len(results))
 		}
-		assistant := tr.find(func(m domain.Message) bool { return m.Subtype == "tool_use" })
+		assistant := tr.find(func(m domain.Message) bool { return m.Role == "assistant" && len(m.ToolCalls) > 0 })
 		if assistant == nil {
 			t.Fatal("the truncated assistant message must still persist")
 		}
@@ -824,7 +824,7 @@ func boolPtr(b bool) *bool { return &b }
 // is the wrap-up turn.
 func TestRun_TurnBudgetDerivesFromTranscriptAcrossClaims(t *testing.T) {
 	tr := newMemTranscript(
-		domain.Message{Role: "user", Subtype: "text", Content: "mission"},
+		domain.Message{Role: "user", Content: "mission"},
 		domain.Message{Role: "assistant", Content: "turn one"},
 		domain.Message{Role: "assistant", Content: "turn two"},
 	)
@@ -859,12 +859,15 @@ func TestRun_TurnBudgetDerivesFromTranscriptAcrossClaims(t *testing.T) {
 // message grants a fresh budget, so a transcript already past the bound
 // runs normally once the user speaks.
 func TestRun_HumanInputResetsTheTurnBudget(t *testing.T) {
+	pending := false
 	tr := newMemTranscript(
-		domain.Message{Role: "user", Subtype: "text", Content: "mission"},
+		domain.Message{Role: "user", Content: "mission"},
 		domain.Message{Role: "assistant", Content: "t1"},
 		domain.Message{Role: "assistant", Content: "t2"},
 		domain.Message{Role: "assistant", Content: "t3"},
-		pendingUser("keep going please"),
+		// The legacy "text" spelling of a normal user row must still read
+		// as human — rows written before the blank-subtype vocabulary.
+		domain.Message{Role: "user", Subtype: "text", Content: "keep going please", Delivered: &pending},
 	)
 	p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
 	e := newTestEngine(tr, p, newScriptedToolHost())
@@ -886,7 +889,7 @@ func TestRun_HumanInputResetsTheTurnBudget(t *testing.T) {
 func TestRun_SystemInjectionsDoNotRenewTheBudget(t *testing.T) {
 	pending := false
 	tr := newMemTranscript(
-		domain.Message{Role: "user", Subtype: "text", Content: "mission"},
+		domain.Message{Role: "user", Content: "mission"},
 		domain.Message{Role: "assistant", Content: "t1"},
 		domain.Message{Role: "assistant", Content: "t2"},
 		domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionWrapUp, Content: wrapUpNotice},
@@ -912,7 +915,7 @@ func TestRun_SystemInjectionsDoNotRenewTheBudget(t *testing.T) {
 // position does not ask twice.
 func TestRun_WrapUpIsRequestedOncePerBudget(t *testing.T) {
 	tr := newMemTranscript(
-		domain.Message{Role: "user", Subtype: "text", Content: "mission"},
+		domain.Message{Role: "user", Content: "mission"},
 		domain.Message{Role: "assistant", Content: "t1"},
 		domain.Message{Role: "assistant", Content: "t2"},
 		domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionWrapUp, Content: wrapUpNotice},
@@ -978,7 +981,7 @@ func TestRun_MidWorkDrainStampsOnlyHumanRows(t *testing.T) {
 	p := &scriptedProvider{turns: []scriptedTurn{
 		{calls: []domain.ToolCall{{ID: "c1", Name: "ls"}}, onCall: func() {
 			_, _ = tr.Insert(context.Background(), "org", &domain.Message{
-				Role: "user", Subtype: "text", Content: "human steer", Delivered: &pendingFlag,
+				Role: "user", Content: "human steer", Delivered: &pendingFlag,
 			})
 			_, _ = tr.Insert(context.Background(), "org", &domain.Message{
 				Role: "user", Subtype: "injection:system-note", Content: "<system-note>event</system-note>", Delivered: &pendingFlag,
@@ -1010,7 +1013,7 @@ func TestRun_MidWorkDrainStampsOnlyHumanRows(t *testing.T) {
 func TestRun_ParkNoticeWrittenOncePerBudgetWindow(t *testing.T) {
 	notice := limitParkNotice(2)
 	tr := newMemTranscript(
-		domain.Message{Role: "user", Subtype: "text", Content: "mission"},
+		domain.Message{Role: "user", Content: "mission"},
 		domain.Message{Role: "assistant", Content: "t1"},
 		domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionWrapUp, Content: wrapUpNotice},
 		domain.Message{Role: "assistant", Content: "the wrap-up"},

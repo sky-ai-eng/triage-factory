@@ -395,7 +395,7 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	// front of the model twice — once as a bare user turn, once in the steer
 	// envelope. The SDK path keeps the optimistic row because its live steer
 	// injects into the process without writing one.
-	msg := &domain.Message{ConversationID: conversationID, Role: "user", Subtype: "text", Content: body.Text}
+	msg := &domain.Message{ConversationID: conversationID, Role: "user", Content: body.Text}
 	var runExists, nativeRun bool
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		run, e := tx.Conversations.Get(r.Context(), orgID, conversationID)

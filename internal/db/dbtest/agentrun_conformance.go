@@ -190,7 +190,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-cost", 1); err != nil {
 			t.Fatalf("SetExecutorSystem 1: %v", err)
 		}
-		msg1, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "turn 1"})
+		msg1, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "turn 1"})
 		if err != nil {
 			t.Fatalf("InsertMessage 1: %v", err)
 		}
@@ -216,7 +216,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-cost", 2); err != nil {
 			t.Fatalf("SetExecutorSystem 2: %v", err)
 		}
-		msg2, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "turn 2"})
+		msg2, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "turn 2"})
 		if err != nil {
 			t.Fatalf("InsertMessage 2: %v", err)
 		}
@@ -295,7 +295,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// for the wrong reason.
 		stamped := 0.25
 		msgID, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Subtype: "text",
+			ConversationID: runID, Role: "assistant",
 			Content: "final turn", Model: "claude-sonnet-5", CostUSD: &stamped,
 		})
 		if err != nil {
@@ -346,7 +346,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("claims = %+v, want 1", claims)
 		}
 		claim1 := claims[0].ID
-		msgA, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "a"})
+		msgA, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "a"})
 		if err != nil {
 			t.Fatalf("InsertMessage a: %v", err)
 		}
@@ -359,11 +359,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-b", 2); err != nil {
 			t.Fatalf("SetExecutorSystem 2: %v", err)
 		}
-		msgB, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "b"})
+		msgB, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "b"})
 		if err != nil {
 			t.Fatalf("InsertMessage b: %v", err)
 		}
-		msgC, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "c", ClaimID: claim1})
+		msgC, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "c", ClaimID: claim1})
 		if err != nil {
 			t.Fatalf("InsertMessage c: %v", err)
 		}
@@ -406,11 +406,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		runID := seedConversationForTest(t, orgID, seed, "running")
-		msg1, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "older"})
+		msg1, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "older"})
 		if err != nil {
 			t.Fatalf("InsertMessage 1: %v", err)
 		}
-		msg2, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "newest"})
+		msg2, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "newest"})
 		if err != nil {
 			t.Fatalf("InsertMessage 2: %v", err)
 		}
@@ -462,7 +462,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		real1, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Subtype: "text", Content: "real turn", Model: "claude-opus-5",
+			ConversationID: runID, Role: "assistant", Content: "real turn", Model: "claude-opus-5",
 		})
 		if err != nil {
 			t.Fatalf("InsertMessage real: %v", err)
@@ -471,13 +471,13 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// and not synthetic, so a filter-only settle would land here and drop
 		// the lump out of the per-model breakdown just as surely.
 		toolRow, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: runID, Role: "tool", Subtype: "tool", Content: "tool result",
+			ConversationID: runID, Role: "tool", Content: "tool result",
 		})
 		if err != nil {
 			t.Fatalf("InsertMessage tool: %v", err)
 		}
 		synth1, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Subtype: "text",
+			ConversationID: runID, Role: "assistant",
 			Content: "API Error: overloaded", Model: domain.ModelSynthetic,
 		})
 		if err != nil {
@@ -512,7 +512,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("SetExecutorSystem only-synth: %v", err)
 		}
 		onlySynth, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: onlySynthID, Role: "assistant", Subtype: "text",
+			ConversationID: onlySynthID, Role: "assistant",
 			Content: "API Error: overloaded", Model: domain.ModelSynthetic,
 		})
 		if err != nil {
@@ -551,13 +551,13 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// the no-model row that follows it.
 		runID := seedConversationForTest(t, orgID, seed, "running")
 		realRow, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Subtype: "text", Content: "real", Model: "claude-opus-5",
+			ConversationID: runID, Role: "assistant", Content: "real", Model: "claude-opus-5",
 		})
 		if err != nil {
 			t.Fatalf("InsertMessage real: %v", err)
 		}
 		newerNull, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: runID, Role: "tool", Subtype: "tool", Content: "tool result",
+			ConversationID: runID, Role: "tool", Content: "tool result",
 		})
 		if err != nil {
 			t.Fatalf("InsertMessage tool: %v", err)
@@ -585,13 +585,13 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// the no-model row still wins over the synthetic row after it.
 		noRealID := seedConversationForTest(t, orgID, seed, "running")
 		nullRow, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: noRealID, Role: "user", Subtype: "text", Content: "go",
+			ConversationID: noRealID, Role: "user", Content: "go",
 		})
 		if err != nil {
 			t.Fatalf("InsertMessage user: %v", err)
 		}
 		newerSynth, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: noRealID, Role: "assistant", Subtype: "text",
+			ConversationID: noRealID, Role: "assistant",
 			Content: "API Error: overloaded", Model: domain.ModelSynthetic,
 		})
 		if err != nil {
@@ -660,9 +660,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// double them. Two assistant rows so the SUM is non-trivial.
 		ptr := func(n int) *int { return &n }
 		for _, m := range []*domain.Message{
-			{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "a",
+			{ConversationID: runID, Role: "assistant", Content: "a",
 				InputTokens: ptr(100), OutputTokens: ptr(20), CacheReadTokens: ptr(1000), CacheCreationTokens: ptr(7)},
-			{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "b",
+			{ConversationID: runID, Role: "assistant", Content: "b",
 				InputTokens: ptr(50), OutputTokens: ptr(5), CacheReadTokens: ptr(500), CacheCreationTokens: ptr(3)},
 		} {
 			if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
@@ -702,9 +702,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			ctx := context.Background()
 			runID := seedConversationForTest(t, orgID, seed, "running")
 			for _, m := range []*domain.Message{
-				{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "a",
+				{ConversationID: runID, Role: "assistant", Content: "a",
 					InputTokens: ptr(100), OutputTokens: ptr(20), CacheReadTokens: ptr(1000), CacheCreationTokens: ptr(7)},
-				{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "b",
+				{ConversationID: runID, Role: "assistant", Content: "b",
 					InputTokens: ptr(50), OutputTokens: ptr(5), CacheReadTokens: ptr(500), CacheCreationTokens: ptr(3)},
 			} {
 				if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
@@ -1666,7 +1666,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		runID := seedConversationForTest(t, orgID, seed, "running")
 		explicit := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 		msg := &domain.Message{
-			ConversationID: runID, Role: "assistant", Content: "x", Subtype: "text",
+			ConversationID: runID, Role: "assistant", Content: "x",
 			CreatedAt: explicit,
 		}
 		if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
@@ -1727,7 +1727,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		claimID := claims[0].ID
 
 		attributed := &domain.Message{
-			ConversationID: runID, Role: "user", Subtype: "text", Content: "steer",
+			ConversationID: runID, Role: "user", Content: "steer",
 			UserID: userID, ClaimID: claimID,
 		}
 		if _, err := store.InsertMessage(ctx, orgID, attributed); err != nil {
@@ -1739,7 +1739,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("SetExecutorSystem release: %v", err)
 		}
 		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Subtype: "text", Content: "reply",
+			ConversationID: runID, Role: "assistant", Content: "reply",
 		}); err != nil {
 			t.Fatalf("InsertMessage system: %v", err)
 		}
@@ -1769,7 +1769,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		runID := seedConversationForTest(t, orgID, seed, "running")
 
 		// Before any engagement: no active claim to attribute to.
-		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "pre"}); err != nil {
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "pre"}); err != nil {
 			t.Fatalf("InsertMessage pre-claim: %v", err)
 		}
 
@@ -1782,7 +1782,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		claim1 := claims[0].ID
 
-		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "during"}); err != nil {
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "during"}); err != nil {
 			t.Fatalf("InsertMessage during claim: %v", err)
 		}
 
@@ -1790,7 +1790,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err := store.SetExecutorSystem(ctx, orgID, runID, "", 0); err != nil {
 			t.Fatalf("SetExecutorSystem release: %v", err)
 		}
-		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "post"}); err != nil {
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "post"}); err != nil {
 			t.Fatalf("InsertMessage post-release: %v", err)
 		}
 
@@ -1800,7 +1800,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-stamp", 2); err != nil {
 			t.Fatalf("SetExecutorSystem 2: %v", err)
 		}
-		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "explicit", ClaimID: claim1}); err != nil {
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "explicit", ClaimID: claim1}); err != nil {
 			t.Fatalf("InsertMessage explicit: %v", err)
 		}
 
@@ -1832,7 +1832,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		runID := seedConversationForTest(t, orgID, seed, "running")
-		msg := &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "hi"}
+		msg := &domain.Message{ConversationID: runID, Role: "assistant", Content: "hi"}
 		if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
 			t.Fatalf("InsertMessage: %v", err)
 		}
@@ -1940,11 +1940,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		runID := seedConversationForTest(t, orgID, seed, "running")
 
-		idA, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "a"})
+		idA, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "a"})
 		if err != nil {
 			t.Fatalf("InsertMessage a: %v", err)
 		}
-		idB, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "b"})
+		idB, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "b"})
 		if err != nil {
 			t.Fatalf("InsertMessage b: %v", err)
 		}
@@ -1963,12 +1963,12 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("InsertMessage pending: %v", err)
 		}
 		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Subtype: "text", Content: "elided", WindowState: domain.MessageWindowElided,
+			ConversationID: runID, Role: "assistant", Content: "elided", WindowState: domain.MessageWindowElided,
 		}); err != nil {
 			t.Fatalf("InsertMessage elided: %v", err)
 		}
 		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Subtype: "text", Content: "inactive", WindowState: domain.MessageWindowInactive,
+			ConversationID: runID, Role: "assistant", Content: "inactive", WindowState: domain.MessageWindowInactive,
 		}); err != nil {
 			t.Fatalf("InsertMessage inactive: %v", err)
 		}
@@ -2006,14 +2006,14 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		undelivered := false
 		inserts := []*domain.Message{
-			{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "plain"},
+			{ConversationID: runID, Role: "assistant", Content: "plain"},
 			// Withdrawn-pending: staged, then withdrawn before any flush —
 			// "never happened", so the display reads must hide it.
 			{ConversationID: runID, Role: "user", Subtype: "injection:system-note", Content: "withdrawn",
 				Delivered: &undelivered, WindowState: domain.MessageWindowInactive},
 			// Delivered + inactive is compacted history: retired from
 			// assembly but still part of the rendered transcript.
-			{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "compacted",
+			{ConversationID: runID, Role: "assistant", Content: "compacted",
 				WindowState: domain.MessageWindowInactive},
 			// A still-pending active row stays visible (it will happen).
 			{ConversationID: runID, Role: "user", Subtype: "injection:system-note", Content: "pending",
@@ -2125,11 +2125,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		runID := seedConversationForTest(t, orgID, seed, "running")
 
 		delivered := false
-		steered, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "user", Subtype: "text", Content: "mid-turn", Delivered: &delivered})
+		steered, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "user", Content: "mid-turn", Delivered: &delivered})
 		if err != nil {
 			t.Fatalf("InsertMessage steered: %v", err)
 		}
-		bare, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "user", Subtype: "text", Content: "bare", Delivered: &delivered})
+		bare, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "user", Subtype: "injection:system-note", Content: "bare", Delivered: &delivered})
 		if err != nil {
 			t.Fatalf("InsertMessage bare: %v", err)
 		}
@@ -2156,8 +2156,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		} else if got.Delivered == nil || !*got.Delivered {
 			t.Errorf("steered row Delivered = %v, want true", got.Delivered)
 		}
-		if got := byID[int(bare)]; got == nil || got.Subtype != "text" {
-			t.Errorf("bare row subtype = %+v, want the row's own \"text\" preserved", got)
+		if got := byID[int(bare)]; got == nil || got.Subtype != "injection:system-note" {
+			t.Errorf("bare row subtype = %+v, want the row's own subtype preserved", got)
 		} else if got.Delivered == nil || !*got.Delivered {
 			t.Errorf("bare row Delivered = %v, want true", got.Delivered)
 		}
@@ -2170,7 +2170,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		var ids []int64
 		for _, c := range []string{"m1", "m2", "m3", "m4"} {
-			id, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: c})
+			id, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: c})
 			if err != nil {
 				t.Fatalf("InsertMessage %s: %v", c, err)
 			}
@@ -2229,13 +2229,13 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		runB := seedConversationForTest(t, orgID, seed, "running")
 		for _, c := range []string{"a-first", "a-second"} {
 			if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
-				ConversationID: runA, Role: "assistant", Content: c, Subtype: "text",
+				ConversationID: runA, Role: "assistant", Content: c,
 			}); err != nil {
 				t.Fatalf("InsertMessage A: %v", err)
 			}
 		}
 		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: runB, Role: "assistant", Content: "b-only", Subtype: "text",
+			ConversationID: runB, Role: "assistant", Content: "b-only",
 		}); err != nil {
 			t.Fatalf("InsertMessage B: %v", err)
 		}
@@ -2277,7 +2277,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		} {
 			in, out := tup.input, tup.output
 			msg := &domain.Message{
-				ConversationID: runID, Role: tup.role, Content: "x", Subtype: "text",
+				ConversationID: runID, Role: tup.role, Content: "x",
 				InputTokens: &in, OutputTokens: &out,
 				Model: "claude-test",
 			}
@@ -2317,8 +2317,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// user row (inserted last, newest id) would win a naive ORDER BY id query.
 		agentAt := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
 		for _, m := range []*domain.Message{
-			{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "agent turn", CreatedAt: agentAt},
-			{ConversationID: runID, Role: "user", Subtype: "text", Content: "resume message", CreatedAt: agentAt.Add(time.Hour)},
+			{ConversationID: runID, Role: "assistant", Content: "agent turn", CreatedAt: agentAt},
+			{ConversationID: runID, Role: "user", Content: "resume message", CreatedAt: agentAt.Add(time.Hour)},
 		} {
 			if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
 				t.Fatalf("InsertMessage(%s): %v", m.Role, err)
@@ -2335,7 +2335,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// A newer agent (tool) message advances the watermark.
 		toolAt := agentAt.Add(2 * time.Hour)
 		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
-			ConversationID: runID, Role: "tool", Subtype: "tool", Content: "tool result", CreatedAt: toolAt,
+			ConversationID: runID, Role: "tool", Content: "tool result", CreatedAt: toolAt,
 		}); err != nil {
 			t.Fatalf("InsertMessage(tool): %v", err)
 		}
@@ -2371,7 +2371,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// sibling sum reads the ledger, not any run-level column.
 		settle := func(stepID string, cost float64) {
 			t.Helper()
-			if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: stepID, Role: "assistant", Subtype: "text", Content: "work"}); err != nil {
+			if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: stepID, Role: "assistant", Content: "work"}); err != nil {
 				t.Fatalf("InsertMessage %s: %v", stepID, err)
 			}
 			if err := store.Complete(ctx, orgID, stepID, "completed", cost, 1000, 1, "ok", "", "finish", "", ""); err != nil {

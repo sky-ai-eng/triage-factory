@@ -296,7 +296,7 @@ func testParams() Params {
 
 func pendingUser(content string) domain.Message {
 	pending := false
-	return domain.Message{Role: "user", Subtype: "text", Content: content, Delivered: &pending}
+	return domain.Message{Role: "user", Content: content, Delivered: &pending}
 }
 
 func mustJSON(v map[string]any) string {

@@ -79,7 +79,7 @@ type CuratorStore interface {
 	GetLiveConversation(ctx context.Context, orgID, projectID, creatorUserID string) (*domain.Conversation, error)
 
 	// EnqueueUserMessage inserts the turn's user message UNDELIVERED
-	// (delivered=false, role='user', subtype='text', user_id=userID) and
+	// (delivered=false, role='user', blank subtype, user_id=userID) and
 	// returns its id — the turn id on the wire (rendered decimal). The
 	// undelivered row IS the durable queued turn; delivery happens at
 	// BeginTurn.
