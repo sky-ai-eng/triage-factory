@@ -319,3 +319,40 @@ func TestBrowserPermissionHandler_RecordFailureStillAsksTheQuestion(t *testing.T
 		t.Fatal("handler never unparked without a store")
 	}
 }
+
+// TestBrowserPermissionHandler_NoClaimRecordsNothingAndStillAsks pins the
+// degradation for a handler built without a claim in scope. Every production
+// call site threads one, but the coupling is invisible at the call site and a
+// wiring slip would otherwise write a row that is invisible to ListPending AND
+// untouched by ExpireForClaim — stuck at 'pending' forever with nothing able to
+// surface or settle it. The store refuses instead, so the cost is one logged
+// write failure and a prompt that isn't reloadable, never a broken run.
+func TestBrowserPermissionHandler_NoClaimRecordsNothingAndStillAsks(t *testing.T) {
+	f := newPermRecordFixture(t)
+	h := f.spawner.BrowserPermissionHandler(runmode.LocalDefaultOrgID, f.conversationID, "", AbsentAutoDeny{})
+
+	got := make(chan agentproc.PermissionDecision, 1)
+	go func() { got <- h(agentproc.PermissionRequest{ToolCallID: "toolu_noclaim", ToolName: "Bash"}) }()
+	waitForPending(t, f.spawner, f.conversationID, "toolu_noclaim")
+
+	if _, found := f.row(t, "toolu_noclaim"); found {
+		t.Fatal("a claimless prompt must not be recorded — the row could never be read or settled")
+	}
+	if pending := f.listPending(t); len(pending) != 0 {
+		t.Fatalf("nothing should be pending: %+v", pending)
+	}
+
+	// The agent's question still stands, and answering it still works.
+	if err := f.spawner.ResolvePermission(runmode.LocalDefaultOrgID, f.conversationID, "toolu_noclaim", f.userID,
+		agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
+		t.Fatalf("ResolvePermission: %v", err)
+	}
+	select {
+	case d := <-got:
+		if d.Behavior != "allow" {
+			t.Fatalf("behavior = %q, want allow", d.Behavior)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never unparked")
+	}
+}

@@ -24,6 +24,11 @@ type ConversationPermission struct {
 	// PermissionStore.ListPending), so a prompt left behind by a process that
 	// no longer exists reads as not-pending whether or not anything ever wrote
 	// its expiry.
+	//
+	// Required when creating a pending prompt — a row with no claim is
+	// invisible to ListPending and untouched by ExpireForClaim, so it would sit
+	// at 'pending' forever with nothing able to surface or settle it. The store
+	// refuses the write rather than accepting one.
 	ClaimID string `json:"-"`
 
 	// MessageID is the assistant row carrying the gated tool_use block, or nil

@@ -407,6 +407,31 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		}
 	})
 
+	t.Run("create_refuses_a_prompt_with_no_claim", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		conversationID := seed.Conversation(t)
+		seed.Claim(t, conversationID)
+
+		// A row with no claim is the worst shape this table can hold: invisible
+		// to ListPending (which matches on the active claim, and NULL matches
+		// nothing) and untouched by ExpireForClaim (which keys on claim_id), so
+		// it would sit at 'pending' forever with nothing able to surface it or
+		// settle it. Refusing the write is strictly better than accepting one —
+		// the caller records nothing, logs, and still asks the question.
+		err := store.Create(ctx, orgID, &domain.ConversationPermission{
+			ConversationID: conversationID,
+			ToolCallID:     "toolu_unclaimed",
+			ToolName:       "Bash",
+			State:          domain.PermissionStatePending,
+		})
+		if err == nil {
+			t.Fatal("Create must refuse a pending prompt with no claim — it would be permanently unreadable and unsettleable")
+		}
+		if got, err := store.ListPending(ctx, orgID, conversationID); err != nil || len(got) != 0 {
+			t.Fatalf("nothing should have been written: %+v (err %v)", got, err)
+		}
+	})
+
 	t.Run("resolve_refuses_values_outside_the_vocabulary", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		conversationID, _ := newPending(t, store, orgID, seed, "toolu_vocab", time.Now().UTC())

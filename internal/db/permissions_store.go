@@ -28,6 +28,14 @@ type PermissionStore interface {
 	// defaults to now, so the caller's clock is the one both timestamps and the
 	// derived wait are measured against.
 	//
+	// p.ClaimID is REQUIRED, enforced here rather than by the schema (the
+	// column stays nullable so an old row survives its claim being deleted).
+	// It is what ListPending derives pending against and what ExpireForClaim
+	// keys on, so a prompt with no claim would be unreadable by every surface
+	// AND unsettleable by every path — a row stuck at 'pending' forever that
+	// no one can answer. Failing the write is strictly better: the caller
+	// records nothing, logs, and still asks the question.
+	//
 	// A second insert for the same (conversation_id, tool_call_id) is refused by
 	// the unique index rather than silently duplicating the prompt — one row per
 	// gated call is what lets a decision tie back to the call it authorized.

@@ -46,6 +46,9 @@ func (s *permissionStore) Create(ctx context.Context, orgID string, p *domain.Co
 	if p.ConversationID == "" || p.ToolCallID == "" || p.ToolName == "" {
 		return errors.New("sqlite permissions Create: conversation_id, tool_call_id and tool_name are required")
 	}
+	if p.ClaimID == "" {
+		return errors.New("sqlite permissions Create: claim_id is required on a pending prompt — ListPending derives pending against the conversation's active claim, so a NULL claim would be permanently unreachable (and ExpireForClaim keys on it too, so nothing would ever settle it)")
+	}
 	if p.ID == "" {
 		p.ID = uuid.New().String()
 	}
