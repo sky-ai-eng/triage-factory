@@ -1055,15 +1055,12 @@ export type WSEvent =
       // copy, present only when it rendered any.
       type: 'permission_request'
       conversation_id: string
-      data: {
-        tool_call_id: string
-        tool_name: string
-        input: Record<string, unknown>
-        timeout_ms?: number
-        title?: string
-        display_name?: string
-        description?: string
-      }
+      // Just the id: the prompt itself is read from
+      // GET /api/agent/conversations/{id}/permissions, so this frame is a
+      // refetch trigger like artifact_updated rather than the only path to the
+      // state. That is what makes a refresh, a second tab, and a cold load able
+      // to reconstruct a prompt the frame fired once for and never repeated.
+      data: { tool_call_id: string }
     }
   | {
       // A pending permission prompt reached a terminal resolution (answered by

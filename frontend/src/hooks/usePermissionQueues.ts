@@ -1,29 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { WSEvent } from '../types'
-import { toast } from '../components/Toast/toastStore'
 import {
+  fetchPendingPermissions,
   resolvePermission as postResolvePermission,
   ttlForPrompt,
   type PendingPermission,
   type PermissionDecisionInput,
 } from '../lib/permissions'
-
-// permission_request / permission_resolved are the two run-scoped WS events the
-// queue reacts to. Narrowing here keeps `ingest`/`forget` honest about their
-// payloads without re-walking the WSEvent union at every call site.
-type PermissionRequestEvent = Extract<WSEvent, { type: 'permission_request' }>
-type PermissionResolvedEvent = Extract<WSEvent, { type: 'permission_resolved' }>
+import { toast } from '../components/Toast/toastStore'
 
 export interface PermissionQueues {
   /** runID → its unanswered prompts, head-first. A run with no prompts is
    *  absent from the map (not an empty array), so `queues[runID] ?? []` is the
    *  canonical read. */
   queues: Record<string, PendingPermission[]>
-  /** Enqueue a prompt from a `permission_request` event (dedup + arm-once TTL). */
-  ingest: (event: PermissionRequestEvent) => void
-  /** Drop a prompt a `permission_resolved` event reports answered elsewhere /
-   *  timed out, so sibling surfaces clear it before their client TTL fires. */
-  forget: (event: PermissionResolvedEvent) => void
+  /** Re-read a run's pending set from the server and replace its queue with it.
+   *  The single entry point for both WS triggers and cold load — a
+   *  `permission_request` / `permission_resolved` frame is a hint that this
+   *  run's set changed, never the set itself. */
+  refresh: (runID: string) => void
   /** Answer a prompt; drops it from the queue on a definitive response (200
    *  resolved / 404 already-resolved). A transient failure keeps it up + toasts. */
   resolve: (runID: string, toolCallID: string, decision: PermissionDecisionInput) => Promise<void>
@@ -40,10 +34,17 @@ function timerKey(runID: string, toolCallID: string): string {
 }
 
 // usePermissionQueues manages permission prompts for many runs at once: a
-// runID→queue map plus per-(runID,toolCallID) TTL timers (dedupe, arm-once,
-// clear-on-resolve/drop/unmount). It's the single implementation behind both the
-// board (all visible runs) and useRunDetail (filtered to one run), so the TTL
-// behavior can't diverge between the two surfaces.
+// runID→queue map sourced from the server, plus per-(runID,toolCallID) TTL
+// timers (arm-once, clear-on-resolve/drop/unmount). It's the single
+// implementation behind both the board (all visible runs) and useRunDetail
+// (filtered to one run), so neither the fetch nor the TTL behavior can diverge
+// between the two surfaces.
+//
+// The queue is a projection of the pending-set endpoint, not an accumulation of
+// websocket frames. That inversion is the whole point: a frame is fire-once, so
+// anything that reconstructs state from frames alone is blind after a refresh,
+// in a second tab, and on a cold load. The client-side TTL stays on as a
+// backstop for a dropped trigger.
 export function usePermissionQueues(): PermissionQueues {
   const [queues, setQueues] = useState<Record<string, PendingPermission[]>>({})
 
@@ -51,6 +52,17 @@ export function usePermissionQueues(): PermissionQueues {
   // the unmount cleanup below captures it once; entries are cleared on resolve,
   // drop, and unmount so a fired timer never touches a stale queue.
   const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  // Per-run refresh generation. Every local drop and every new fetch bumps it,
+  // and only the newest fetch is allowed to write — so an in-flight refetch
+  // that resolves late can never resurrect a prompt the user just answered or a
+  // run that just left the board.
+  const refreshSeq = useRef<Map<string, number>>(new Map())
+  const bumpRefreshSeq = useCallback((runID: string) => {
+    const next = (refreshSeq.current.get(runID) ?? 0) + 1
+    refreshSeq.current.set(runID, next)
+    return next
+  }, [])
 
   const clearTimer = useCallback((runID: string, toolCallID: string) => {
     const key = timerKey(runID, toolCallID)
@@ -68,6 +80,7 @@ export function usePermissionQueues(): PermissionQueues {
   const dropPermission = useCallback(
     (runID: string, toolCallID: string) => {
       clearTimer(runID, toolCallID)
+      bumpRefreshSeq(runID)
       setQueues((prev) => {
         const q = prev[runID]
         if (!q) return prev
@@ -79,56 +92,76 @@ export function usePermissionQueues(): PermissionQueues {
         return out
       })
     },
-    [clearTimer],
+    [clearTimer, bumpRefreshSeq],
   )
 
-  const dropRun = useCallback((runID: string) => {
-    // Cancel every timer for the run. Deleting the current entry mid-iteration
-    // is safe for a Map.
-    const prefix = `${runID}\x00`
-    for (const [key, t] of timers.current) {
-      if (key.startsWith(prefix)) {
-        clearTimeout(t)
-        timers.current.delete(key)
+  const dropRun = useCallback(
+    (runID: string) => {
+      // Cancel every timer for the run. Deleting the current entry mid-iteration
+      // is safe for a Map.
+      const prefix = `${runID}\x00`
+      for (const [key, t] of timers.current) {
+        if (key.startsWith(prefix)) {
+          clearTimeout(t)
+          timers.current.delete(key)
+        }
       }
-    }
-    setQueues((prev) => {
-      if (!(runID in prev)) return prev
-      const out = { ...prev }
-      delete out[runID]
-      return out
-    })
-  }, [])
-
-  const ingest = useCallback(
-    (event: PermissionRequestEvent) => {
-      const runID = event.conversation_id
-      const req = event.data
+      bumpRefreshSeq(runID)
       setQueues((prev) => {
-        const q = prev[runID] ?? []
-        // Dedup: one prompt per gated tool call, so a replayed event (e.g. a
-        // reconnect) must not double-queue the same prompt.
-        if (q.some((p) => p.tool_call_id === req.tool_call_id)) return prev
-        return { ...prev, [runID]: [...q, req] }
+        if (!(runID in prev)) return prev
+        const out = { ...prev }
+        delete out[runID]
+        return out
       })
-      // Arm the client-side TTL once per (run, request) — a backstop for the
-      // backend's silent timeout-deny, derived from the payload's deadline.
-      const key = timerKey(runID, req.tool_call_id)
-      if (!timers.current.has(key)) {
-        timers.current.set(
-          key,
-          setTimeout(() => dropPermission(runID, req.tool_call_id), ttlForPrompt(req)),
-        )
-      }
     },
-    [dropPermission],
+    [bumpRefreshSeq],
   )
 
-  const forget = useCallback(
-    (event: PermissionResolvedEvent) => {
-      dropPermission(event.conversation_id, event.data.tool_call_id)
+  const refresh = useCallback(
+    (runID: string) => {
+      if (!runID) return
+      const seq = bumpRefreshSeq(runID)
+      void fetchPendingPermissions(runID).then((pending) => {
+        if (refreshSeq.current.get(runID) !== seq) return
+        setQueues((prev) => {
+          const before = prev[runID] ?? []
+          // Skip the state write when nothing moved, so an unchanged refetch
+          // doesn't repaint every card that renders a queue.
+          if (
+            before.length === pending.length &&
+            before.every((p, i) => p.tool_call_id === pending[i].tool_call_id)
+          ) {
+            return prev
+          }
+          const out = { ...prev }
+          if (pending.length === 0) delete out[runID]
+          else out[runID] = pending
+          return out
+        })
+        // Cancel timers for prompts the server no longer lists, and arm one
+        // per newly-seen prompt. The TTL is a backstop for a missed trigger,
+        // so it is derived from the deadline the server says is REMAINING —
+        // which is what makes a prompt reconstructed mid-window expire on
+        // time rather than getting a fresh full one.
+        const live = new Set(pending.map((p) => p.tool_call_id))
+        const prefix = `${runID}\x00`
+        for (const [key, t] of timers.current) {
+          if (key.startsWith(prefix) && !live.has(key.slice(prefix.length))) {
+            clearTimeout(t)
+            timers.current.delete(key)
+          }
+        }
+        for (const p of pending) {
+          const key = timerKey(runID, p.tool_call_id)
+          if (timers.current.has(key)) continue
+          timers.current.set(
+            key,
+            setTimeout(() => dropPermission(runID, p.tool_call_id), ttlForPrompt(p)),
+          )
+        }
+      })
     },
-    [dropPermission],
+    [dropPermission, bumpRefreshSeq],
   )
 
   const resolve = useCallback(
@@ -153,5 +186,5 @@ export function usePermissionQueues(): PermissionQueues {
     }
   }, [])
 
-  return { queues, ingest, forget, resolve, dropRun }
+  return { queues, refresh, resolve, dropRun }
 }

@@ -364,6 +364,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	}
 	model := opts.Model
 
+	// This engagement's questions die with it: once it lets go, any prompt
+	// still open was asked by a process that no longer exists. Best-effort
+	// tidy for audit reads only — ListPending derives the same answer from the
+	// claim, so a crash that never reaches this defer costs nothing.
+	defer s.ExpirePermissionsForClaim(orgID, opts.claimID)
+
 	selfBin, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("resolve own binary path: %w", err)
@@ -478,7 +484,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	if agentproc.WillSandbox() {
 		perms = s.AutoApprovePermissionHandler(runID)
 	} else {
-		perms = s.BrowserPermissionHandler(orgID, runID, s.resolveAbsentAutoDeny(ctx, opts.TeamID))
+		perms = s.BrowserPermissionHandler(orgID, runID, opts.claimID, s.resolveAbsentAutoDeny(ctx, opts.TeamID))
 	}
 
 	// Resume executes as a LiveRun (re-registered in procs, so a resumed run

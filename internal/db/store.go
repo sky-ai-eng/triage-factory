@@ -379,6 +379,15 @@ type Stores struct {
 	// claims its own resumed runs through the identical queue path.
 	RunPendingInput RunPendingInputStore
 
+	// Permissions owns the conversation_permissions table — the durable
+	// record of every tool-approval prompt a conversation raised and how it
+	// was answered. Split-pool in Postgres like Artifacts: the pending read
+	// is app-pool under RLS (the policy composes through the conversation,
+	// mirroring claims), every write is admin-pool (the writers are delegate
+	// goroutines with no JWT-claims context, and tf_app holds no write
+	// grant).
+	Permissions PermissionStore
+
 	// PollReadiness owns the poll_readiness table — the org-scoped
 	// readiness gate for /api/jira/stock and the one-shot "config took
 	// effect" announce toast (TFAC-583). Admin-pool-only, same shape as
@@ -473,6 +482,7 @@ type TxStores struct {
 	Marketplace      MarketplaceStore
 	Instances        InstanceStore
 	RunPendingInput  RunPendingInputStore
+	Permissions      PermissionStore
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go), tx-bound to the same

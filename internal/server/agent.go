@@ -562,7 +562,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	err = spawner.ResolvePermission(orgID, conversationID, toolCallID, agentproc.PermissionDecision{
+	err = spawner.ResolvePermission(orgID, conversationID, toolCallID, userID, agentproc.PermissionDecision{
 		Behavior:     body.Behavior,
 		Message:      body.Message,
 		UpdatedInput: body.UpdatedInput,
@@ -577,6 +577,51 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 	default:
 		writeJSON(w, http.StatusOK, map[string]string{"status": "resolved"})
 	}
+}
+
+// handleAgentPermissions lists the tool-approval prompts a conversation is
+// currently waiting on. This is the address a pending prompt didn't have: the
+// `permission_request` websocket frame is fire-once, so a refresh, a second
+// tab, or a cold board load could never learn that a healthy, parked agent was
+// waiting on a human — the prompt just sat until the server-side timeout denied
+// it. The frame is now a hint that points here, matching every other event type.
+//
+// Pending only. A history read is for the audit UI, which doesn't exist yet;
+// an ?include=all now would be a filter with no caller.
+//
+// Authorized exactly like handleAgentPermission: runVisible under the caller's
+// org before touching anything, so a conversation this org can't see is 404
+// rather than an empty list (which would confirm the id exists).
+func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	conversationID := r.PathValue("conversationID")
+
+	var pending []domain.ConversationPermission
+	var exists bool
+	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		run, e := tx.Conversations.Get(r.Context(), orgID, conversationID)
+		if e != nil {
+			return e
+		}
+		if run == nil {
+			return nil
+		}
+		exists = true
+		pending, e = tx.Permissions.ListPending(r.Context(), orgID, conversationID)
+		return e
+	}); err != nil {
+		internalError(w, "agent", err)
+		return
+	}
+	if !exists {
+		notFound(w, "run")
+		return
+	}
+	writeJSON(w, http.StatusOK, domain.PendingPermissionDTOs(pending, time.Now().UTC()))
 }
 
 // enrichRuns projects runs onto the wire shape, augmenting each with a batched

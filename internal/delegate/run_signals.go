@@ -178,6 +178,11 @@ type permissionPayload struct {
 	Behavior     string         `json:"behavior"`
 	Message      string         `json:"message"`
 	UpdatedInput map[string]any `json:"updated_input"`
+	// DecidedBy carries the answering user across the hop so the owner — the
+	// only process that writes the prompt's audit row — can attribute the
+	// decision to the human who actually made it rather than to "somebody on
+	// another pod".
+	DecidedBy string `json:"decided_by,omitempty"`
 }
 
 // injectPayload is the conversation_signals.payload shape for kind=inject. The
@@ -659,7 +664,7 @@ func (s *Spawner) deliverPermissionSignal(sig domain.RunSignal) string {
 		delegateLog.Warn("apply permission signal: malformed payload", "signal_id", sig.ID, "error", err)
 		return domain.RunSignalAckStale
 	}
-	err := s.resolvePermissionLocal(sig.OrgID, sig.RunID, p.ToolCallID, agentproc.PermissionDecision{
+	err := s.resolvePermissionLocal(sig.OrgID, sig.RunID, p.ToolCallID, p.DecidedBy, agentproc.PermissionDecision{
 		Behavior:     p.Behavior,
 		Message:      p.Message,
 		UpdatedInput: p.UpdatedInput,
