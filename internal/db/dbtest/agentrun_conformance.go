@@ -2155,6 +2155,81 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	t.Run("Messages_OrderBySeqMatchesAssembly", func(t *testing.T) {
+		// seq is the placement override: a row carrying one belongs where seq
+		// puts it, not where it was inserted. The display reads and the
+		// assembly read must agree about that, or the transcript renders a
+		// different conversation than the one the agent had.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		idA, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "a"})
+		if err != nil {
+			t.Fatalf("InsertMessage a: %v", err)
+		}
+		idB, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "b"})
+		if err != nil {
+			t.Fatalf("InsertMessage b: %v", err)
+		}
+		// Written last, placed between a and b — the compaction-result shape.
+		seqMid := float64(idA) + (float64(idB)-float64(idA))/2
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
+			ConversationID: runID, Role: "user", Subtype: "injection:compaction-result", Content: "mid", Seq: &seqMid,
+		}); err != nil {
+			t.Fatalf("InsertMessage mid: %v", err)
+		}
+		// A later NULL-seq row still lands last: COALESCE falls back to its id,
+		// which is above both seq keys.
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "c"}); err != nil {
+			t.Fatalf("InsertMessage c: %v", err)
+		}
+
+		want := []string{"a", "mid", "b", "c"}
+		eqContents := func(desc string, msgs []domain.Message) {
+			t.Helper()
+			var got []string
+			for _, m := range msgs {
+				got = append(got, m.Content)
+			}
+			if len(got) != len(want) {
+				t.Fatalf("%s = %v, want %v", desc, got, want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Errorf("%s[%d] = %q, want %q — full: %v", desc, i, got[i], want[i], got)
+				}
+			}
+		}
+
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		eqContents("Messages", msgs)
+
+		sinceZero, err := store.MessagesSince(ctx, orgID, runID, 0)
+		if err != nil {
+			t.Fatalf("MessagesSince: %v", err)
+		}
+		eqContents("MessagesSince(0)", sinceZero)
+
+		batched, err := store.MessagesForRuns(ctx, orgID, []string{runID})
+		if err != nil {
+			t.Fatalf("MessagesForRuns: %v", err)
+		}
+		eqContents("MessagesForRuns", batched)
+
+		// Same rows, same order as what the model reads — every row here is
+		// active and delivered, so the two reads' visibility filters coincide
+		// and only the ordering is under test.
+		asm, err := store.ListForAssembly(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("ListForAssembly: %v", err)
+		}
+		eqContents("ListForAssembly", asm)
+	})
+
 	t.Run("MessagesSince_ReturnsOnlyRowsAboveTheWatermark", func(t *testing.T) {
 		// Backs the run station's transcript repair: the client holds every
 		// row up to the watermark and asks for what it missed while its

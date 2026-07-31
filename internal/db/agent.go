@@ -289,7 +289,15 @@ type ConversationStore interface {
 	// what it always wrote (delivered=true, window_state='active').
 	InsertMessage(ctx context.Context, orgID string, msg *domain.Message) (int64, error)
 
-	// Messages returns the run's messages for display, ordered by id.
+	// Messages returns the run's messages for display, ordered by the same
+	// effective assembly key ListForAssembly uses (COALESCE(seq, id)) rather
+	// than by insertion id. A transcript that ordered on id alone would show
+	// a row placed by seq — a compaction summary written between two existing
+	// rows — somewhere other than where the model read it, which is the one
+	// thing a transcript must never do. Every seq is NULL today, so the two
+	// keys coincide; that they agree is the point, not a coincidence to rely
+	// on.
+	//
 	// Withdrawn-pending rows (delivered=false AND window_state='inactive' —
 	// a staged injection withdrawn before any flush) are excluded: withdrawn
 	// means "never happened", so it must not render as transcript history.
@@ -309,16 +317,22 @@ type ConversationStore interface {
 	// sinceID 0 means "from the beginning". Callers normalize anything that
 	// isn't a real id to 0 rather than relying on a negative one selecting
 	// everything — that it does is an artifact of ids starting at 1.
+	//
+	// The watermark is an id and the ordering is COALESCE(seq, id): those are
+	// deliberately different keys. "Which rows has this client not seen yet"
+	// is a question about insertion; "where does each row belong" is a
+	// question about placement. Once anything writes seq, a returned row may
+	// sort before a row the client already holds — merging it is the caller's
+	// problem, not this read's.
 	MessagesSince(ctx context.Context, orgID, runID string, sinceID int) ([]domain.Message, error)
 
 	// MessagesForRuns is the batched form of Messages: every message
 	// for any of the given run IDs as one flat slice, with the same
-	// withdrawn-pending exclusion. Each run's
-	// messages are contiguous and in insertion order (id ASC), so the
-	// caller groups by RunID with per-run order preserved; order across
-	// distinct runs is unspecified (the SQLite read chunks its IN-list).
-	// Backs the Board's aggregated include=messages read. Empty runIDs
-	// returns nil.
+	// withdrawn-pending exclusion and the same COALESCE(seq, id) ordering.
+	// Each run's messages are contiguous, so the caller groups by RunID with
+	// per-run order preserved; order across distinct runs is unspecified (the
+	// SQLite read chunks its IN-list). Backs the Board's aggregated
+	// include=messages read. Empty runIDs returns nil.
 	MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Message, error)
 
 	// ListForAssembly returns every row a native loop needs to rebuild this

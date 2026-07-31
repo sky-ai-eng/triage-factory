@@ -1202,13 +1202,18 @@ func (s *agentRunStore) MessagesSince(ctx context.Context, orgID, runID string, 
 	// that was withdrawn before any flush) never happened, so the display
 	// read hides them. delivered + inactive stays visible: that is compacted
 	// history, still part of the rendered transcript.
+	//
+	// Ordered by the same effective assembly key ListForAssembly uses, so a
+	// row placed out of insertion order renders where the model read it. The
+	// watermark stays on id: it answers "which rows has this client not seen
+	// yet", which is an insertion question, not a placement one.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
 		FROM messages
 		WHERE org_id = $1 AND conversation_id = $2
 		  AND id > $3
 		  AND NOT (delivered = false AND window_state = 'inactive')
-		ORDER BY id ASC
+		ORDER BY COALESCE(seq, (id)::double precision) ASC
 	`, orgID, runID, sinceID)
 	if err != nil {
 		return nil, err
@@ -1228,15 +1233,16 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 	}
 	// App pool (RLS-active): conversation_id is a uuid column, so the slice
 	// binds as a uuid[] literal through one $N (pgUUIDArray), mirroring
-	// artifactStore.ListByRuns. ORDER BY (conversation_id, id) so the caller
-	// groups by RunID with each run's messages in insertion order.
+	// artifactStore.ListByRuns. Ordering on (conversation_id, the effective
+	// assembly key) so the caller groups by RunID with each run's messages in
+	// the same order the single-run display read gives them.
 	// Withdrawn-pending rows are hidden, same as Messages.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
 		FROM messages
 		WHERE org_id = $1 AND conversation_id = ANY($2)
 		  AND NOT (delivered = false AND window_state = 'inactive')
-		ORDER BY conversation_id ASC, id ASC
+		ORDER BY conversation_id ASC, COALESCE(seq, (id)::double precision) ASC
 	`, orgID, pgUUIDArray(runIDs))
 	if err != nil {
 		return nil, err
