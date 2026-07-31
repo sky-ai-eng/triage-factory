@@ -27,7 +27,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Check } from 'lucide-react'
-import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
+import { AnimatePresence, cubicBezier, motion, useReducedMotion } from 'motion/react'
 import { useActiveOrgId } from '../../contexts/OrgContext'
 import { LOCAL_DEFAULT_ORG_ID } from '../../lib/githubApp'
 import { WIZARD_SECTIONS, type WizardState } from './types'
@@ -36,7 +36,7 @@ import { useWizard } from './useWizard'
 import { isStepVisible } from './resume'
 import { CollapsedStepBar, SectionDivider } from './parts'
 import { GlassBackdrop } from './glass'
-import { bodyDurationMs, bodyEase } from './glassStyle'
+import { bodyDurationMs, bodyEase, bodyEasePoints } from './glassStyle'
 
 // Where the active step's action row comes to rest, as a fraction of viewport
 // height measured to the row's bottom edge. The two spacers rendered around the
@@ -65,6 +65,9 @@ const SETTLE_TAIL_MS = 80
 // arrives — an older browser, or a scrollTo that lands on the current offset and
 // so fires nothing at all.
 const SELF_SCROLL_MS = 150
+// The body animation's curve, for the scroll that runs alongside it. Same points
+// as bodyEase, so the two finish on the same frame.
+const anchorEase = cubicBezier(...bodyEasePoints)
 
 function Loading() {
   return (
@@ -207,36 +210,49 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // meant to protect.
   const selfScrollingRef = useRef(false)
   const selfScrollTimer = useRef(0)
+  // True while a step change is interpolating the anchor. The content observer
+  // stands down for the duration: it applies the anchor outright, which would
+  // jump the flow to the destination the interpolation is still travelling to.
+  const transitioningRef = useRef(false)
 
-  // Bring the action row to the line, sizing the lead spacer first so the line
-  // is reachable. The spacer is zeroed before measuring, so what we read is the
-  // flow's natural position rather than the position the last pass produced —
-  // that is what keeps this idempotent instead of creeping down the page on
-  // every re-settle.
-  const settle = useCallback(() => {
+  // Where the flow wants to be right now: the lead spacer's height, and the
+  // scroll offset that puts the action row on the line. Measuring is separate
+  // from applying because a step change eases into this rather than snapping to
+  // it. The spacer is zeroed for the measurement, so what we read is the flow's
+  // natural position rather than the position the last pass produced — that is
+  // what keeps this idempotent instead of creeping down the page.
+  const measureAnchor = useCallback(() => {
     const actions = actionsRef.current
     const lead = leadRef.current
-    if (!actions) return
-    const view = window.innerHeight
-    const line = view * ACTIONS_REST
+    if (!actions) return null
+    const line = window.innerHeight * ACTIONS_REST
 
+    const held = lead?.style.height ?? '0px'
     if (lead) lead.style.height = '0px'
+    // Both reads happen inside the zeroed window so they share one frame of
+    // reference; zeroing can clamp scrollY, and rect + scrollY cancel that out.
     const naturalBottom = actions.getBoundingClientRect().bottom + window.scrollY
-    // Only the early steps need this: until enough completed bars have stacked
-    // up, the row sits above the line with nothing above it to scroll away.
-    const lead0 = Math.max(0, line - naturalBottom)
-    if (lead) lead.style.height = `${lead0}px`
+    const naturalHeadingTop = headingRef.current
+      ? headingRef.current.getBoundingClientRect().top + window.scrollY
+      : null
+    if (lead) lead.style.height = held
 
-    let top = naturalBottom + lead0 - line
+    // Only the early steps need lead: until enough completed bars have stacked
+    // up, the row sits above the line with nothing above it to scroll away.
+    const leadHeight = Math.max(0, line - naturalBottom)
+    let top = naturalBottom + leadHeight - line
     // A step too tall to honour the line would otherwise open already scrolled
     // past its own heading. Showing the heading wins; the row sits low and the
     // user scrolls the last stretch, which is the honest outcome for a step
     // that cannot fit.
-    const heading = headingRef.current
-    if (heading) {
-      const headingTop = heading.getBoundingClientRect().top + window.scrollY
-      top = Math.min(top, headingTop - HEADING_GAP)
+    if (naturalHeadingTop !== null) {
+      top = Math.min(top, naturalHeadingTop + leadHeight - HEADING_GAP)
     }
+    return { top: Math.max(0, top), leadHeight }
+  }, [])
+
+  const applyAnchor = useCallback((top: number, leadHeight: number) => {
+    if (leadRef.current) leadRef.current.style.height = `${leadHeight}px`
     // Raise the self-scroll flag before moving, so the `scroll` this produces
     // isn't mistaken for the user's. `scrollend` lowers it; the timer is the
     // fallback for browsers without it, and for a scrollTo that lands on the
@@ -246,13 +262,16 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     selfScrollTimer.current = window.setTimeout(() => {
       selfScrollingRef.current = false
     }, SELF_SCROLL_MS)
-    // Instant, never smooth. The bodies' height animation is what carries the
-    // motion between steps; a smooth scroll on top of it is a second easing
-    // curve chasing the first, and the row visibly lags the line for the length
-    // of the transition instead of resting on it. Re-anchoring each frame
-    // instead pins the row and lets the content melt around it.
+    // Instant. Every caller either wants the flow put right immediately
+    // (content arrived, viewport changed) or is already interpolating this
+    // itself, frame by frame, against the body animation.
     window.scrollTo({ top: Math.max(0, top), behavior: 'auto' })
   }, [])
+
+  const settle = useCallback(() => {
+    const anchor = measureAnchor()
+    if (anchor) applyAnchor(anchor.top, anchor.leadHeight)
+  }, [measureAnchor, applyAnchor])
 
   // Whether the stack has painted once. This is what AnimatePresence's `initial`
   // wants: false for the resumed step on first paint (it should already be open,
@@ -280,16 +299,54 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     userScrolledRef.current = false
     headingRef.current?.focus({ preventScroll: true })
 
+    // Where the flow is as the step changes. The new step's action row is a
+    // different element in a different place — going back it starts well ABOVE
+    // the line, because the step being left is still at full height beneath it
+    // — so applying the anchor outright shoves the whole flow into position in
+    // one frame, before any of the collapse has played. Interpolating from here
+    // to the anchor on the body's own curve means the scroll and the two bodies
+    // arrive together and nothing teleports. Forward barely notices: its new row
+    // starts near the line already, so the blend is a few pixels.
+    const startY = window.scrollY
+    const startLead = leadRef.current?.offsetHeight ?? 0
+    const t0 = performance.now()
+    transitioningRef.current = true
+
     let frame = 0
-    const until = performance.now() + bodyDurationMs + SETTLE_TAIL_MS
     const tick = () => {
-      if (userScrolledRef.current) return
-      settle()
-      if (performance.now() < until) frame = requestAnimationFrame(tick)
+      if (userScrolledRef.current) {
+        transitioningRef.current = false
+        return
+      }
+      const elapsed = performance.now() - t0
+      // Re-measured every frame rather than solved once: the bodies are still
+      // animating, so the anchor this is heading for is itself moving.
+      const anchor = measureAnchor()
+      if (anchor) {
+        // Only a backward move interpolates. Going forward the arriving row is
+        // already close to the line — the step it is leaving is above it and
+        // collapsing, so the anchor barely shifts — and applying it outright
+        // holds the row exactly on the line for the whole transition. Easing
+        // that case would introduce travel where there is currently none.
+        const eased =
+          reduce || travel === 'forward' ? 1 : anchorEase(Math.min(1, elapsed / bodyDurationMs))
+        applyAnchor(
+          startY + (anchor.top - startY) * eased,
+          startLead + (anchor.leadHeight - startLead) * eased,
+        )
+      }
+      if (elapsed < bodyDurationMs + SETTLE_TAIL_MS) {
+        frame = requestAnimationFrame(tick)
+      } else {
+        transitioningRef.current = false
+      }
     }
     tick()
-    return () => cancelAnimationFrame(frame)
-  }, [wiz.phase, activeIndex, settle])
+    return () => {
+      cancelAnimationFrame(frame)
+      transitioningRef.current = false
+    }
+  }, [wiz.phase, activeIndex, measureAnchor, applyAnchor, reduce, travel])
 
   // Re-settle for as long as the flow's height is still moving: the outgoing
   // body collapsing, the incoming one expanding, and content that lands after
@@ -303,7 +360,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     if (wiz.phase !== 'ready' || !content) return
     let frame = 0
     const observer = new ResizeObserver(() => {
-      if (userScrolledRef.current) return
+      if (userScrolledRef.current || transitioningRef.current) return
       cancelAnimationFrame(frame)
       frame = requestAnimationFrame(settle)
     })
