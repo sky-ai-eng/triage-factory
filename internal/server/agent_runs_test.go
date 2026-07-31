@@ -206,4 +206,13 @@ func TestHandleMessages_SinceID(t *testing.T) {
 	eq("since_id=first", contents(fmt.Sprintf("?since_id=%d", ids["first"])), []string{"second", "third"})
 	eq("since_id=third", contents(fmt.Sprintf("?since_id=%d", ids["third"])), nil)
 	eq("unparseable since_id", contents("?since_id=nonsense"), whole)
+
+	// Whitespace is trimmed before parsing, so a padded watermark is still a
+	// watermark — treating it as unparseable would quietly turn a repair read
+	// into a full transcript read on every tick.
+	eq("padded since_id", contents(fmt.Sprintf("?since_id=%%20%d%%20", ids["first"])), []string{"second", "third"})
+
+	// A negative watermark means nothing, so it normalizes to 0 rather than
+	// reaching the store as `id > -N`.
+	eq("negative since_id", contents("?since_id=-5"), whole)
 }

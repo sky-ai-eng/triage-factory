@@ -305,6 +305,10 @@ type ConversationStore interface {
 	// Visibility is identical to Messages by construction (Messages is this
 	// method at sinceID 0, which every real id clears), so the two reads can
 	// never disagree about which rows a client is entitled to see.
+	//
+	// sinceID 0 means "from the beginning". Callers normalize anything that
+	// isn't a real id to 0 rather than relying on a negative one selecting
+	// everything — that it does is an artifact of ids starting at 1.
 	MessagesSince(ctx context.Context, orgID, runID string, sinceID int) ([]domain.Message, error)
 
 	// MessagesForRuns is the batched form of Messages: every message
