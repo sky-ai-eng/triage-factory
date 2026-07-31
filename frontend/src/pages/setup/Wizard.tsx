@@ -850,41 +850,65 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                           </AnimatePresence>
 
                           {isActive && (
-                            <motion.div
-                              ref={keepActions}
-                              initial={false}
-                              animate={{ opacity: actionsHidden ? 0 : 1 }}
-                              transition={
-                                reduce ? { duration: 0 } : { duration: ACTIONS_FADE_MS / 1000 }
+                            // While the newer step folds (beat one of a backward
+                            // move) the row's box is clipped OUT OF THE FLOW.
+                            // Mounting it in-flow at the commit shoved everything
+                            // below — the departing step, mid-fade — a row-height
+                            // down the page in a single frame. Clipping the
+                            // wrapper rather than the row keeps the anchor honest:
+                            // a child of a zero-height overflow-hidden box is laid
+                            // out at full size in the same place, so the rect
+                            // measureAnchor reads is identical — the box just
+                            // stops displacing what is beneath it. It rejoins the
+                            // flow at beat two, under the expanding body, where
+                            // the only thing below is the folded remnant.
+                            <div
+                              style={
+                                backPhase === 'collapse'
+                                  ? { height: 0, overflow: 'hidden' }
+                                  : undefined
                               }
-                              // Invisible must also mean unclickable. The row
-                              // keeps its box either way — that box is what the
-                              // anchor measures against.
-                              style={{ pointerEvents: actionsHidden ? 'none' : 'auto' }}
-                              aria-hidden={actionsHidden || undefined}
-                              className="flex items-center justify-between gap-3 pt-5"
                             >
-                              <button
-                                type="button"
-                                onClick={goBack}
-                                disabled={!canGoBack || busy}
-                                className="rounded-xl px-3 py-2 text-[13px] font-medium text-text-tertiary transition-colors hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                              <motion.div
+                                ref={keepActions}
+                                initial={false}
+                                animate={{ opacity: actionsHidden ? 0 : 1 }}
+                                transition={
+                                  reduce ? { duration: 0 } : { duration: ACTIONS_FADE_MS / 1000 }
+                                }
+                                // Invisible must also mean unclickable. The row
+                                // keeps its box either way — that box is what the
+                                // anchor measures against.
+                                style={{ pointerEvents: actionsHidden ? 'none' : 'auto' }}
+                                aria-hidden={actionsHidden || undefined}
+                                className="flex items-center justify-between gap-3 pt-5"
                               >
-                                Back
-                              </button>
-                              {/* A self-advancing step (the mode picker) advances
-                                from its own in-body action — no Continue. */}
-                              {!step.selfAdvancing && (
                                 <button
                                   type="button"
-                                  onClick={goNext}
-                                  disabled={busy || wiz.activeLoadFailed}
-                                  className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 hover:shadow-[0_12px_32px_-8px_var(--color-accent)] disabled:opacity-40 disabled:shadow-none"
+                                  onClick={goBack}
+                                  disabled={!canGoBack || busy}
+                                  className="rounded-xl px-3 py-2 text-[13px] font-medium text-text-tertiary transition-colors hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40"
                                 >
-                                  {busy ? 'Saving…' : wiz.isLastStep ? 'Finish setup' : 'Continue'}
+                                  Back
                                 </button>
-                              )}
-                            </motion.div>
+                                {/* A self-advancing step (the mode picker) advances
+                                from its own in-body action — no Continue. */}
+                                {!step.selfAdvancing && (
+                                  <button
+                                    type="button"
+                                    onClick={goNext}
+                                    disabled={busy || wiz.activeLoadFailed}
+                                    className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 hover:shadow-[0_12px_32px_-8px_var(--color-accent)] disabled:opacity-40 disabled:shadow-none"
+                                  >
+                                    {busy
+                                      ? 'Saving…'
+                                      : wiz.isLastStep
+                                        ? 'Finish setup'
+                                        : 'Continue'}
+                                  </button>
+                                )}
+                              </motion.div>
+                            </div>
                           )}
                         </motion.li>
                       )
