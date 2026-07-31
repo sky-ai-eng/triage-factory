@@ -263,11 +263,12 @@ export default function AgentCard({
           <div className="flex items-center gap-3 font-mono text-[11px] tabular-nums tracking-wide text-text-tertiary/80">
             {/* Who executed this run, shown only once that diverges from who
                 holds the task. The header's assignee chip already names the bot
-                while it still holds the claim; after a takeover or a reassign
-                the claim moves to a human but the run's actor is frozen, and
-                this line becomes the only record of who actually did the work. */}
+                while it still holds the claim; once the claim moves off it — a
+                takeover, a reassign, or a requeue that clears it outright — the
+                run's actor stays frozen, and this line becomes the only record
+                of who actually did the work. */}
             {run.actor_agent_name && run.actor_agent_id !== task.claimed_by_agent_id && (
-              <span title="The bot that executed this run; the task has since moved to a different assignee">
+              <span title="The bot that executed this run; the task is no longer claimed by it">
                 Ran as {run.actor_agent_name}
               </span>
             )}
