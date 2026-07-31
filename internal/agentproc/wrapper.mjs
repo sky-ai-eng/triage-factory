@@ -24,6 +24,7 @@
 // transparently falls back to the user's local Claude Code OAuth login
 // when nothing is set, billing against their Pro/Max subscription.
 import { query } from "@anthropic-ai/claude-agent-sdk"
+import { randomUUID } from "node:crypto"
 import { createInterface } from "node:readline"
 import { createRequire } from "node:module"
 import { existsSync } from "node:fs"
@@ -228,7 +229,24 @@ async function runStreamingInput(options, permissionPrompts) {
       // result that follows it. Passing it through verbatim is what lets a
       // decision be tied back to the call it authorized, and names the call
       // the way the native loop's own gate does.
-      const toolCallID = opts.toolUseID
+      //
+      // sdk.d.ts declares it non-optional, so the fallback below should be
+      // unreachable. It exists because the failure mode without it is a
+      // wedged run rather than a missing field: an absent id parks the
+      // promise under the key `undefined`, JSON.stringify drops the key on
+      // the way out, and the reply comes back carrying the empty string — a
+      // key that matches nothing, so the promise never settles and the turn
+      // hangs until the run ends. Parallel gated calls would also collapse
+      // onto that one key and strand each other. A uuid keeps the prompt
+      // answerable end to end; the prefix keeps it honest, since a synthetic
+      // id matches nothing in the transcript.
+      let toolCallID = opts.toolUseID
+      if (typeof toolCallID !== "string" || toolCallID === "") {
+        toolCallID = `synthetic-${randomUUID()}`
+        process.stderr.write(
+          `wrapper: permission request for ${toolName} carried no toolUseID; keyed as ${toolCallID}\n`,
+        )
+      }
       emit({
         type: "control",
         subtype: "permission_request",

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,61 +51,8 @@ func TestWrapperPermissionRequestUsesToolUseID(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed")
 	}
-
-	dir := t.TempDir()
-	pkgDir := filepath.Join(dir, "node_modules", "@anthropic-ai", "claude-agent-sdk")
-	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
-		t.Fatalf("mkdir stub sdk: %v", err)
-	}
-	writeFile(t, filepath.Join(pkgDir, "package.json"),
-		`{"name":"@anthropic-ai/claude-agent-sdk","version":"0.0.0-stub","type":"module","main":"index.mjs"}`)
-	writeFile(t, filepath.Join(pkgDir, "index.mjs"), permissionStubSDK)
-	// The shipped wrapper, not a copy of the source file, so the test pins what
-	// the binary actually installs.
-	wrapper := filepath.Join(dir, "wrapper.mjs")
-	writeFile(t, wrapper, string(wrapperJS))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, node, wrapper, "--input-format", "stream-json", "--permission-prompts")
-	cmd.Dir = dir
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatalf("stdin pipe: %v", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("stdout pipe: %v", err)
-	}
-	stderr := newSyncBuffer()
-	cmd.Stderr = stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start wrapper: %v", err)
-	}
-	defer func() {
-		_ = stdin.Close()
-		_ = cmd.Wait()
-	}()
-
-	lines := bufio.NewScanner(stdout)
-	lines.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	next := func() map[string]any {
-		t.Helper()
-		for lines.Scan() {
-			var m map[string]any
-			if err := json.Unmarshal(lines.Bytes(), &m); err != nil {
-				t.Fatalf("non-JSON wrapper output %q (stderr: %s)", lines.Text(), stderr.String())
-			}
-			if m["subtype"] == "ready" {
-				continue // the wrapper's start signal, not content
-			}
-			return m
-		}
-		t.Fatalf("wrapper output ended early (stderr: %s)", stderr.String())
-		return nil
-	}
-
-	req := next()
+	w := startWrapper(t, node, permissionStubSDK)
+	req := w.next()
 	if req["type"] != "control" || req["subtype"] != "permission_request" {
 		t.Fatalf("first non-ready line = %v, want a permission_request", req)
 	}
@@ -129,13 +77,11 @@ func TestWrapperPermissionRequestUsesToolUseID(t *testing.T) {
 
 	// Answer the prompt by its tool_call_id. An allow with no override must come
 	// back to the SDK carrying the original input.
-	if _, err := stdin.Write([]byte(`{"kind":"permission_response","tool_call_id":"toolu_01FIXTUREID","behavior":"allow"}` + "\n")); err != nil {
-		t.Fatalf("write permission_response: %v", err)
-	}
+	w.answer(t, "toolu_01FIXTUREID")
 
-	answered := next()
+	answered := w.next()
 	if answered["type"] != "stub_decision" {
-		t.Fatalf("expected the stub's decision echo, got %v (stderr: %s)", answered, stderr.String())
+		t.Fatalf("expected the stub's decision echo, got %v (stderr: %s)", answered, w.stderr.String())
 	}
 	decision, _ := answered["decision"].(map[string]any)
 	if decision["behavior"] != "allow" {
@@ -214,6 +160,168 @@ func TestHandlePermission_RepliesKeyedByToolCallID(t *testing.T) {
 	}
 	if _, ok := resp["request_id"]; ok {
 		t.Error("permission_response still carries a request_id; the wrapper matches on tool_call_id")
+	}
+}
+
+// missingToolUseIDStubSDK is the contract-violating case sdk.d.ts says cannot
+// happen: canUseTool invoked with no toolUseID at all. It gates two calls
+// concurrently, because collapsing both onto one absent key is how a missing id
+// strands a turn rather than merely mislabeling it.
+const missingToolUseIDStubSDK = `
+export function query({ options }) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const decisions = await Promise.all([
+        options.canUseTool("Read", { file_path: "/tmp/a.txt" }, {}),
+        options.canUseTool("Read", { file_path: "/tmp/b.txt" }, {}),
+      ])
+      yield { type: "stub_decision", decisions }
+    },
+    async interrupt() {},
+    async setPermissionMode() {},
+  }
+}
+`
+
+// TestWrapperPermissionRequestSynthesizesMissingToolUseID pins the fallback: an
+// absent toolUseID must still produce a prompt that can be answered. Without a
+// synthesized key the promise parks under `undefined`, the reply arrives keyed
+// by the empty string (JSON drops an undefined field), nothing matches, and the
+// agent's turn hangs until the run ends — and two parallel calls collapse onto
+// that one key and strand each other.
+func TestWrapperPermissionRequestSynthesizesMissingToolUseID(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	w := startWrapper(t, node, missingToolUseIDStubSDK)
+
+	ids := make([]string, 0, 2)
+	for i := 0; i < 2; i++ {
+		req := w.next()
+		if req["subtype"] != "permission_request" {
+			t.Fatalf("line %d = %v, want a permission_request", i, req)
+		}
+		id, _ := req["tool_call_id"].(string)
+		if id == "" {
+			t.Fatalf("tool_call_id = %v, want a synthesized non-empty id", req["tool_call_id"])
+		}
+		if !strings.HasPrefix(id, "synthetic-") {
+			t.Errorf("tool_call_id = %q, want the synthetic- prefix so it is not mistaken for a tool_use id", id)
+		}
+		ids = append(ids, id)
+	}
+	if ids[0] == ids[1] {
+		t.Fatalf("both prompts keyed by %q; parallel calls would strand each other", ids[0])
+	}
+
+	// Each prompt is independently answerable by the id it was announced with —
+	// the property the missing id would otherwise cost.
+	for _, id := range ids {
+		w.answer(t, id)
+	}
+	answered := w.next()
+	if answered["type"] != "stub_decision" {
+		t.Fatalf("expected the stub's decision echo, got %v (stderr: %s)", answered, w.stderr.String())
+	}
+	decisions, _ := answered["decisions"].([]any)
+	if len(decisions) != 2 {
+		t.Fatalf("decisions = %v, want both calls resolved", answered["decisions"])
+	}
+	for i, d := range decisions {
+		decision, _ := d.(map[string]any)
+		if decision["behavior"] != "allow" {
+			t.Errorf("decision %d = %v, want allow", i, decision)
+		}
+	}
+}
+
+// wrapperProc is a running wrapper.mjs speaking the control protocol over
+// stdio, with a stub SDK resolvable from its directory.
+type wrapperProc struct {
+	stdin  io.WriteCloser
+	stderr *syncBuffer
+	lines  *bufio.Scanner
+	t      *testing.T
+}
+
+// startWrapper materializes the SHIPPED wrapper (not a copy of the source file,
+// so the test pins what the binary installs) next to a stub
+// @anthropic-ai/claude-agent-sdk, and runs it in streaming-input mode with
+// permission prompts on. The process is killed and reaped at test end.
+func startWrapper(t *testing.T, node, stubSDK string) *wrapperProc {
+	t.Helper()
+	dir := t.TempDir()
+	pkgDir := filepath.Join(dir, "node_modules", "@anthropic-ai", "claude-agent-sdk")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatalf("mkdir stub sdk: %v", err)
+	}
+	writeFile(t, filepath.Join(pkgDir, "package.json"),
+		`{"name":"@anthropic-ai/claude-agent-sdk","version":"0.0.0-stub","type":"module","main":"index.mjs"}`)
+	writeFile(t, filepath.Join(pkgDir, "index.mjs"), stubSDK)
+	wrapper := filepath.Join(dir, "wrapper.mjs")
+	writeFile(t, wrapper, string(wrapperJS))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, node, wrapper, "--input-format", "stream-json", "--permission-prompts")
+	cmd.Dir = dir
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	stderr := newSyncBuffer()
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start wrapper: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = cmd.Wait()
+	})
+
+	lines := bufio.NewScanner(stdout)
+	lines.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	return &wrapperProc{stdin: stdin, stderr: stderr, lines: lines, t: t}
+}
+
+// next returns the wrapper's next stdout line as a decoded object, skipping the
+// ready signal. A closed stream before one arrives fails the test rather than
+// blocking (the process is under a ctx deadline).
+func (w *wrapperProc) next() map[string]any {
+	w.t.Helper()
+	for w.lines.Scan() {
+		var m map[string]any
+		if err := json.Unmarshal(w.lines.Bytes(), &m); err != nil {
+			w.t.Fatalf("non-JSON wrapper output %q (stderr: %s)", w.lines.Text(), w.stderr.String())
+		}
+		if m["subtype"] == "ready" {
+			continue // the wrapper's start signal, not content
+		}
+		return m
+	}
+	w.t.Fatalf("wrapper output ended early (stderr: %s)", w.stderr.String())
+	return nil
+}
+
+// answer allows the prompt keyed by toolCallID, with no input override — so the
+// wrapper must echo the original input back as updatedInput.
+func (w *wrapperProc) answer(t *testing.T, toolCallID string) {
+	t.Helper()
+	line, err := json.Marshal(map[string]any{
+		"kind":         "permission_response",
+		"tool_call_id": toolCallID,
+		"behavior":     "allow",
+	})
+	if err != nil {
+		t.Fatalf("marshal permission_response: %v", err)
+	}
+	if _, err := w.stdin.Write(append(line, '\n')); err != nil {
+		t.Fatalf("write permission_response: %v", err)
 	}
 }
 
