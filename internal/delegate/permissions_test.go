@@ -337,13 +337,14 @@ const presenceTestOrg = "00000000-0000-0000-0000-0000000000aa"
 
 // TestBrowserPermissionHandler_AbsentDeniesAfterGrace: with absent-auto-deny on
 // and no answer-capable, focused tab present, an off-allowlist prompt denies
-// after ~the grace with the distinct "no operator available" reason — not after
+// after ~the grace with the distinct nobody-was-watching reason — not after
 // the full permTimeout().
 func TestBrowserPermissionHandler_AbsentDeniesAfterGrace(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetIdleHibernateTimeout(30 * time.Second) // permTimeout = 15s (the full ceiling)
 	s.SetPresencePollInterval(5 * time.Millisecond)
-	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", AbsentAutoDeny{enabled: true, grace: 40 * time.Millisecond})
+	const grace = 40 * time.Millisecond
+	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", AbsentAutoDeny{enabled: true, grace: grace})
 
 	start := time.Now()
 	d := h(agentproc.PermissionRequest{RequestID: "req-absent", ToolName: "Bash"})
@@ -352,8 +353,8 @@ func TestBrowserPermissionHandler_AbsentDeniesAfterGrace(t *testing.T) {
 	if d.Behavior != "deny" {
 		t.Fatalf("behavior = %q, want deny", d.Behavior)
 	}
-	if d.Message != msgNoOperator {
-		t.Errorf("message = %q, want %q", d.Message, msgNoOperator)
+	if d.Message != permDenyNoOperator(grace) {
+		t.Errorf("message = %q, want %q", d.Message, permDenyNoOperator(grace))
 	}
 	// Denied on the grace clock, nowhere near the 15s full window.
 	if elapsed > 2*time.Second {
@@ -460,7 +461,8 @@ func TestBrowserPermissionHandler_PresentThenAbsentDeniesAfterGrace(t *testing.T
 	// Present at prompt time, so only the full window is armed.
 	sendPresence(t, conn, hub, presenceTestOrg, "run-1", "board", true, true)
 
-	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", AbsentAutoDeny{enabled: true, grace: 100 * time.Millisecond})
+	const grace = 100 * time.Millisecond
+	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", AbsentAutoDeny{enabled: true, grace: grace})
 	got := make(chan agentproc.PermissionDecision, 1)
 	go func() {
 		got <- h(agentproc.PermissionRequest{RequestID: "req-leave", ToolName: "Bash"})
@@ -473,8 +475,8 @@ func TestBrowserPermissionHandler_PresentThenAbsentDeniesAfterGrace(t *testing.T
 	// The grace fires and denies — nowhere near the 15s full window.
 	select {
 	case d := <-got:
-		if d.Behavior != "deny" || d.Message != msgNoOperator {
-			t.Errorf("decision = %q/%q, want deny/%q", d.Behavior, d.Message, msgNoOperator)
+		if d.Behavior != "deny" || d.Message != permDenyNoOperator(grace) {
+			t.Errorf("decision = %q/%q, want deny/%q", d.Behavior, d.Message, permDenyNoOperator(grace))
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("prompt not denied after presence left and the grace elapsed")
@@ -501,11 +503,12 @@ func TestBrowserPermissionHandler_PresentOtherOrgDenies(t *testing.T) {
 		t.Fatal("a present tab in another org satisfied PresentFor for this org")
 	}
 
-	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", AbsentAutoDeny{enabled: true, grace: 40 * time.Millisecond})
+	const grace = 40 * time.Millisecond
+	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", AbsentAutoDeny{enabled: true, grace: grace})
 	start := time.Now()
 	d := h(agentproc.PermissionRequest{RequestID: "req-otherorg", ToolName: "Bash"})
-	if d.Behavior != "deny" || d.Message != msgNoOperator {
-		t.Errorf("decision = %q/%q, want deny/%q", d.Behavior, d.Message, msgNoOperator)
+	if d.Behavior != "deny" || d.Message != permDenyNoOperator(grace) {
+		t.Errorf("decision = %q/%q, want deny/%q", d.Behavior, d.Message, permDenyNoOperator(grace))
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Error("a cross-org present tab delayed the absent deny to the full window")
@@ -515,7 +518,7 @@ func TestBrowserPermissionHandler_PresentOtherOrgDenies(t *testing.T) {
 // TestBrowserPermissionHandler_ToggleOffIgnoresPresence: with absent-auto-deny
 // off the wait is the legacy full-permTimeout() select regardless of presence —
 // even with nobody present it does not fast-deny, and when the full window
-// elapses it denies with the legacy "permission request timed out" reason.
+// elapses it denies with the surfaced-but-unanswered reason.
 func TestBrowserPermissionHandler_ToggleOffIgnoresPresence(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetIdleHibernateTimeout(120 * time.Millisecond) // permTimeout = 60ms
@@ -526,8 +529,8 @@ func TestBrowserPermissionHandler_ToggleOffIgnoresPresence(t *testing.T) {
 	d := h(agentproc.PermissionRequest{RequestID: "req-off", ToolName: "Bash"})
 	elapsed := time.Since(start)
 
-	if d.Behavior != "deny" || d.Message != msgPermTimedOut {
-		t.Errorf("decision = %q/%q, want deny/%q", d.Behavior, d.Message, msgPermTimedOut)
+	if want := permDenyTimedOut(s.permTimeout()); d.Behavior != "deny" || d.Message != want {
+		t.Errorf("decision = %q/%q, want deny/%q", d.Behavior, d.Message, want)
 	}
 	// It waited the full ~60ms window, not an instant absent deny.
 	if elapsed < 50*time.Millisecond {
@@ -551,6 +554,66 @@ func TestClampGrace(t *testing.T) {
 	// A pathologically short full still yields a positive, strictly-smaller grace.
 	if g := clampGrace(time.Second, 4*time.Millisecond); g <= 0 || g >= 4*time.Millisecond {
 		t.Errorf("clampGrace(short full) = %v, want (0, 4ms)", g)
+	}
+}
+
+// TestPermDenyMessages pins what the agent actually reads when a prompt
+// resolves without a human: the two paths stay distinguishable, each states
+// how long it waited, and each tells the agent to stop retrying and find
+// another route. A bare reason code reads as a transient tool error and gets
+// retried until the run is spent.
+func TestPermDenyMessages(t *testing.T) {
+	absent := permDenyNoOperator(15 * time.Second)
+	timedOut := permDenyTimedOut(2 * time.Minute)
+
+	if absent == timedOut {
+		t.Fatal("the unattended and unanswered denials must stay distinguishable")
+	}
+	if !strings.Contains(absent, "15 seconds") {
+		t.Errorf("unattended denial does not report its wait: %q", absent)
+	}
+	if !strings.Contains(timedOut, "2 minutes") {
+		t.Errorf("unanswered denial does not report its wait: %q", timedOut)
+	}
+	// Only the unattended path may claim nobody was watching — the timeout path
+	// fires with someone present but silent.
+	if !strings.Contains(absent, "nobody is watching") {
+		t.Errorf("unattended denial does not explain that nobody was present: %q", absent)
+	}
+	for _, m := range []string{absent, timedOut} {
+		if !strings.Contains(m, "required permission") {
+			t.Errorf("denial does not name the cause as a permission gate: %q", m)
+		}
+		if !strings.Contains(m, "not a failure of the tool") {
+			t.Errorf("denial does not disclaim a tool fault: %q", m)
+		}
+		if !strings.Contains(m, "another way") {
+			t.Errorf("denial does not point at an alternative: %q", m)
+		}
+	}
+}
+
+// TestHumanWait covers the wording of the wait window, including the
+// sub-second windows only tests inject (which must not round away to "0
+// seconds") and the singular forms.
+func TestHumanWait(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want string
+	}{
+		{40 * time.Millisecond, "40ms"},
+		{time.Second, "1 second"},
+		{15 * time.Second, "15 seconds"},
+		{time.Minute, "1 minute"},
+		{2 * time.Minute, "2 minutes"},
+		{90 * time.Second, "1 minute 30 seconds"},
+		{61 * time.Second, "1 minute 1 second"},
+		{2500 * time.Millisecond, "3 seconds"},
+	}
+	for _, c := range cases {
+		if got := humanWait(c.in); got != c.want {
+			t.Errorf("humanWait(%v) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 

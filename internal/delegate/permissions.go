@@ -33,11 +33,69 @@ import (
 // The two terminal deny messages a surfaced prompt can resolve to without a
 // user answer. They're kept distinct so the absent path (nobody could answer)
 // is separable from the present-but-unanswered path (someone was watching but
-// never clicked) in run transcripts and downstream tooling (TFAC-392).
-const (
-	msgPermTimedOut = "permission request timed out"
-	msgNoOperator   = "no operator available"
-)
+// never clicked) in run transcripts and downstream tooling.
+//
+// The text is written for the agent, which reads it as the tool result and has
+// no other information about why the call failed. A bare "no operator
+// available" reads like a transient service error, so agents retry the same
+// call — and burn the rest of the run doing it. Each message therefore says
+// what happened (a human gate, not a tool fault), how long it waited, that
+// retrying is futile, and what to do instead.
+
+// permDenyNoOperator is the deny reason for a prompt nobody could have
+// answered: no answer-capable, focused tab was open in the run's org for the
+// whole grace window.
+func permDenyNoOperator(grace time.Duration) string {
+	return "This tool call required permission from a human, but nobody is watching this run — " +
+		"there was no operator on the board or the run's page to approve it. " +
+		"The request waited " + humanWait(grace) + " for someone to appear and was then denied automatically. " +
+		"This is not a failure of the tool, and retrying it will be denied the same way for as long as the run is unattended. " +
+		"Find another way to make progress with the tools you already have. " +
+		"If there is genuinely no alternative, stop and state plainly what you needed permission for and why, " +
+		"so a human can approve it and resume the run."
+}
+
+// permDenyTimedOut is the deny reason for a prompt that was surfaced and left
+// unanswered for the full permission window — either someone was present the
+// whole time and never clicked, or presence kept re-arming the wait.
+func permDenyTimedOut(full time.Duration) string {
+	return "This tool call required permission from a human. The request was surfaced for approval but " +
+		"nobody answered within " + humanWait(full) + ", so it was denied automatically. " +
+		"This is not a failure of the tool, and retrying it will most likely time out the same way. " +
+		"Find another way to make progress with the tools you already have. " +
+		"If there is genuinely no alternative, stop and state plainly what you needed permission for and why, " +
+		"so a human can approve it and resume the run."
+}
+
+// humanWait renders a wait window for those agent-facing messages in words
+// rather than as a Go duration ("2 minutes 30 seconds", not "2m30s"). Whole
+// seconds are enough resolution for a bound that is minutes long in
+// production; sub-second windows are only reachable from tests' injected
+// timeouts, so they fall back to the Duration's own string rather than
+// rounding away to "0 seconds".
+func humanWait(d time.Duration) string {
+	if d < time.Second {
+		return d.String()
+	}
+	d = d.Round(time.Second)
+	mins := int(d / time.Minute)
+	secs := int((d % time.Minute) / time.Second)
+	switch {
+	case mins == 0:
+		return countOf(secs, "second")
+	case secs == 0:
+		return countOf(mins, "minute")
+	default:
+		return countOf(mins, "minute") + " " + countOf(secs, "second")
+	}
+}
+
+func countOf(n int, unit string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, unit)
+	}
+	return fmt.Sprintf("%d %ss", n, unit)
+}
 
 // defaultPresencePollInterval is how often the presence-gated wait re-checks
 // whether an answer-capable, focused tab is present in the run's org. 1s is
@@ -160,10 +218,10 @@ func clampGrace(grace, full time.Duration) time.Duration {
 //
 // absent is the presence-gated fast-deny policy (TFAC-392). With it disabled the
 // wait is exactly the legacy full-permTimeout() select; with it enabled an
-// unattended prompt denies after the grace window with reason "no operator
-// available", while a present, focused board/run tab extends the wait to the
-// full window. Either way the total wait never exceeds permTimeout() and a
-// 200-acknowledged decision is never dropped.
+// unattended prompt denies after the grace window with the nobody-was-watching
+// reason (permDenyNoOperator), while a present, focused board/run tab extends
+// the wait to the full window. Either way the total wait never exceeds
+// permTimeout() and a 200-acknowledged decision is never dropped.
 func (s *Spawner) BrowserPermissionHandler(orgID, runID string, absent AbsentAutoDeny) agentproc.PermissionHandler {
 	return func(req agentproc.PermissionRequest) agentproc.PermissionDecision {
 		key := permKey(runID, req.RequestID)
@@ -244,7 +302,7 @@ func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, r
 		case d := <-ch:
 			return d, true, ""
 		case <-time.After(full):
-			return agentproc.PermissionDecision{}, false, msgPermTimedOut
+			return agentproc.PermissionDecision{}, false, permDenyTimedOut(full)
 		}
 	}
 
@@ -278,11 +336,13 @@ func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, r
 		case <-fullTimer.C:
 			// Watched-but-unanswered for the whole window (or grace never fired
 			// because presence kept re-arming) — the legacy timeout.
-			return agentproc.PermissionDecision{}, false, msgPermTimedOut
+			return agentproc.PermissionDecision{}, false, permDenyTimedOut(full)
 		case <-graceTimer.C:
 			// Only armed while unattended, so reaching it means genuinely nobody
-			// could answer within the grace.
-			return agentproc.PermissionDecision{}, false, msgNoOperator
+			// could answer within the grace. The reported wait is the grace
+			// window, which is measured from the moment the last operator left,
+			// not from when the prompt was raised.
+			return agentproc.PermissionDecision{}, false, permDenyNoOperator(absent.grace)
 		case <-ticker.C:
 			now := s.presentFor(orgID, runID)
 			switch {
