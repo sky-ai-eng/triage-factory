@@ -315,6 +315,20 @@ type Message struct {
 	CostUSD   *float64
 	CreatedAt time.Time
 
+	// DurationMs is the wall-clock milliseconds of the work this row
+	// represents: for an assistant row, request issued → message complete
+	// (reasoning included); for a tool row, dispatch → result; nil for every
+	// other role and for any row written before the runtime measured it.
+	// Always a measured value the writer held both marks for — never a
+	// subtraction of two rows' CreatedAt, which streaming, paging, and
+	// compaction each break in their own way. nil is "not measured", 0 is
+	// "measured, and it was that fast".
+	//
+	// It measures work, so time spent waiting on a human never lands in it:
+	// a permission-gated call reads as the time it ran, not the time it
+	// stood at the prompt.
+	DurationMs *int
+
 	// Reasoning is the model's persisted chain-of-thought for this message —
 	// nil when the message carries none. Reference-only (see ReasoningDetail):
 	// never reconstructed or reordered, only replayed verbatim.
@@ -374,8 +388,14 @@ type MessageDTO struct {
 	// streams makes the wire rows an accumulating spend signal, which is how a
 	// live surface keeps a cost readout current between reads of the
 	// conversation's SUM.
-	CostUSD       *float64          `json:"cost_usd,omitempty"`
-	CreatedAt     time.Time         `json:"created_at"`
+	CostUSD   *float64  `json:"cost_usd,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	// DurationMs is how long this row's own work took (see
+	// Message.DurationMs). Pointer + omitempty so an unmeasured row is absent
+	// from the JSON rather than zero: a consumer has to be able to tell "took
+	// 0ms" from "nobody measured", and every row written before the runtime
+	// stamped timing is the latter.
+	DurationMs    *int              `json:"duration_ms,omitempty"`
 	Reasoning     []ReasoningDetail `json:"reasoning,omitempty"`
 	ContentBlocks []ContentBlock    `json:"content_blocks,omitempty"`
 }
@@ -399,6 +419,7 @@ func (m Message) ToDTO() MessageDTO {
 		CacheCreationTokens: m.CacheCreationTokens,
 		CostUSD:             m.CostUSD,
 		CreatedAt:           m.CreatedAt,
+		DurationMs:          m.DurationMs,
 		Reasoning:           m.Reasoning,
 		ContentBlocks:       m.ContentBlocks,
 	}

@@ -1982,6 +1982,48 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	t.Run("Messages_RoundTripsDurationMs", func(t *testing.T) {
+		// duration_ms has three distinct states the transcript renders
+		// differently, and the store must keep them apart: a measured value, a
+		// measured zero (fast enough to round to nothing — still a
+		// measurement), and unmeasured (every row written before the runtime
+		// stamped timing, and every non-agent role).
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+		measured := 4312
+		instant := 0
+		for _, m := range []*domain.Message{
+			{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "thought", DurationMs: &measured},
+			{ConversationID: runID, Role: "tool", Subtype: "tool", Content: "ok", ToolCallID: "t1", DurationMs: &instant},
+			{ConversationID: runID, Role: "user", Subtype: "text", Content: "no timing on a user row"},
+		} {
+			if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
+				t.Fatalf("InsertMessage: %v", err)
+			}
+		}
+
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		if len(msgs) != 3 {
+			t.Fatalf("len = %d, want 3", len(msgs))
+		}
+		if msgs[0].DurationMs == nil || *msgs[0].DurationMs != measured {
+			t.Errorf("assistant DurationMs = %v, want %d", msgs[0].DurationMs, measured)
+		}
+		if msgs[1].DurationMs == nil || *msgs[1].DurationMs != 0 {
+			t.Errorf("tool DurationMs = %v, want a measured 0 (not nil)", msgs[1].DurationMs)
+		}
+		if msgs[2].DurationMs != nil {
+			t.Errorf("unstamped DurationMs = %v, want nil (not measured)", *msgs[2].DurationMs)
+		}
+		if dto := msgs[2].ToDTO(); dto.DurationMs != nil {
+			t.Errorf("unstamped row's DTO carries duration %v; the wire must omit the key entirely", *dto.DurationMs)
+		}
+	})
+
 	t.Run("Messages_SurfacesReasoningDecodeError", func(t *testing.T) {
 		// reasoning/content_blocks are canonical replay context (read via
 		// ListForAssembly by a future native loop) — a decode failure must

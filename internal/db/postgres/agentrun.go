@@ -1043,12 +1043,12 @@ func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.
 		                      tool_call_id, is_error, metadata, model,
 		                      input_tokens, output_tokens,
 		                      cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
-		                      reasoning, content_blocks, delivered, window_state, seq)
+		                      reasoning, content_blocks, delivered, window_state, seq, duration_ms)
 		VALUES ($1, $2, $3,
 		        COALESCE($4, (SELECT id FROM claims
 		                      WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL)),
 		        $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-		        $16, $17, $18, $19, $20, $21, $22, $23)
+		        $16, $17, $18, $19, $20, $21, $22, $23, $24)
 		RETURNING id
 	`,
 		orgID, msg.ConversationID, nullIfEmpty(msg.UserID), nullIfEmpty(msg.ClaimID),
@@ -1059,7 +1059,7 @@ func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.
 		nullIntPtr(msg.CacheReadTokens), nullIntPtr(msg.CacheCreationTokens),
 		nullFloatPtr(msg.CostUSD), msg.CreatedAt,
 		nullableJSONB(reasoningJSON), nullableJSONB(contentBlocksJSON), delivered,
-		string(windowState), nullFloatPtr(msg.Seq),
+		string(windowState), nullFloatPtr(msg.Seq), nullIntPtr(msg.DurationMs),
 	).Scan(&id)
 	if err != nil {
 		return 0, err
@@ -1101,7 +1101,7 @@ func nullInt64Ptr(p *int64) any {
 const pgMessageColumns = `id, conversation_id, COALESCE(user_id::text, ''), COALESCE(claim_id::text, ''),
 	role, content, subtype, tool_calls::text, tool_call_id, is_error, metadata::text,
 	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at,
-	reasoning::text, content_blocks::text, delivered, window_state, seq`
+	reasoning::text, content_blocks::text, delivered, window_state, seq, duration_ms`
 
 // scanMessageRows drains a messages result set selecting
 // pgMessageColumns into domain.Message values. Shared by the
@@ -1117,12 +1117,13 @@ func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 		var delivered bool
 		var windowState string
 		var seq sql.NullFloat64
+		var durationMs sql.NullInt64
 
 		if err := rows.Scan(
 			&m.ID, &m.ConversationID, &m.UserID, &m.ClaimID, &m.Role, &content, &subtype, &toolCallsStr,
 			&toolCallID, &m.IsError, &metadataStr, &model,
 			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
-			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq,
+			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs,
 		); err != nil {
 			return nil, err
 		}
@@ -1182,6 +1183,10 @@ func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 		if seq.Valid {
 			v := seq.Float64
 			m.Seq = &v
+		}
+		if durationMs.Valid {
+			v := int(durationMs.Int64)
+			m.DurationMs = &v
 		}
 
 		messages = append(messages, m)

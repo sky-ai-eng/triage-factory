@@ -111,6 +111,12 @@ type LiveRun struct {
 	ready     chan struct{} // closed when the wrapper emits control/ready
 	readyOnce sync.Once
 
+	// stream is the reader loop's parser, constructed here rather than
+	// inside the loop so Send can mark when a user message goes out. A run
+	// parked between turns would otherwise bill the whole wait to the first
+	// assistant message of the next one.
+	stream *StreamState
+
 	// Close phase bounds; zero falls back to the package consts. Fields
 	// (not just consts) so tests can drive the timeout paths quickly.
 	drainTimeout time.Duration
@@ -226,6 +232,7 @@ func RunInteractive(ctx context.Context, opts RunOptions, sink Sink, perms Permi
 		cleanup: cleanup,
 		done:    make(chan struct{}),
 		ready:   make(chan struct{}),
+		stream:  NewStreamState(),
 	}
 
 	// opts travels whole (rather than the two fields the loop used to take)
@@ -257,7 +264,11 @@ func (l *LiveRun) Send(ctx context.Context, text string) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	return l.writeControl(map[string]any{"kind": "user_message", "text": text})
+	if err := l.writeControl(map[string]any{"kind": "user_message", "text": text}); err != nil {
+		return err
+	}
+	l.stream.MarkRequest()
+	return nil
 }
 
 // Interrupt stops the agent's current turn. The wrapper acknowledges
@@ -386,7 +397,7 @@ func (l *LiveRun) writeControl(v map[string]any) error {
 func (l *LiveRun) readLoop(runCtx context.Context, opts RunOptions, proc runProc, sink Sink, perms PermissionHandler) {
 	defer close(l.done)
 
-	stream := NewStreamState()
+	stream := l.stream
 	result, streamErr := l.consumeStreamInteractive(proc.Stdout(), sink, stream, perms, opts.OnResult, opts.TraceID)
 
 	// If the stream reader bailed before any terminal result, the
@@ -480,7 +491,13 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 					// error_during_execution subtype.
 					interruptPending = true
 				case "permission_request":
+					// The handler parks this goroutine for as long as the
+					// human takes, so the marks are held still across it —
+					// the wait belongs to the approval, not to the tool that
+					// runs once it clears.
+					gateAt := stream.Now()
 					l.handlePermission(ctl, perms)
+					stream.DiscountGate(gateAt)
 				}
 				// Control lines are not sink content.
 			} else {

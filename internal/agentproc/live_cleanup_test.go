@@ -68,6 +68,7 @@ func TestLiveRun_CleanupRunsOncePerExitPath(t *testing.T) {
 				cleanup: func() { atomic.AddInt32(&calls, 1) },
 				done:    make(chan struct{}),
 				ready:   make(chan struct{}),
+				stream:  NewStreamState(),
 			}
 
 			if err := proc.Start(); err != nil {

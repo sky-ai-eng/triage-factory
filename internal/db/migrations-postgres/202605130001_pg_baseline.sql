@@ -1235,7 +1235,22 @@ CREATE TABLE public.messages (
     -- seq is the assembly-order override: the effective sort key is
     -- COALESCE(seq, id). NULL for every normally-appended row; only a
     -- synthetic insertion (a compaction result) sets a fractional value.
-    seq double precision
+    seq double precision,
+    -- duration_ms is the wall-clock milliseconds of the work THIS row
+    -- represents — assistant: request issued → message complete (reasoning
+    -- included, which is what makes a "thought for Ns" readout derivable);
+    -- tool: dispatch → result; any other role: NULL. Timing lives ON the row
+    -- because the pairwise alternative cannot be made correct: a streaming
+    -- append has no predecessor, a paged read is missing one, compaction
+    -- inserts at a fractional seq so "the previous row" stops meaning "the
+    -- previous event", and an elided partner is gone. NULL is "not measured",
+    -- never "took no time" — a measured sub-millisecond step writes 0.
+    --
+    -- Human time is never in here: a permission-gated call parks the runtime
+    -- until someone answers, and the runtime holds its marks still across
+    -- that window, so a gated call reads as the seconds it ran rather than
+    -- the minutes it waited to be allowed to run.
+    duration_ms integer
 );
 
 
