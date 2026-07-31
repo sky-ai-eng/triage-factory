@@ -91,16 +91,30 @@ const (
 	// answer-capable, focused tab was open in the run's org — nobody COULD
 	// have answered.
 	PermissionReasonAbsent = "absent"
-	// PermissionReasonClosing: the run ended underneath the prompt. Reserved:
-	// the close-time deny lives in the SDK wrapper today (it settles its own
-	// parked promises on drain) and never reaches the Go broker, so nothing
-	// stamps this yet. Named here so the vocabulary is complete when a
-	// Go-side close path exists rather than being retrofitted around it.
+	// PermissionReasonClosing: the run ended underneath the prompt — an
+	// orderly teardown, settled by the process that asked, on its way out.
+	//
+	// Unproduced today, and not for want of the event happening: on the SDK
+	// path the close-time deny happens inside the wrapper, which settles its
+	// own parked promises on drain and never tells the Go broker, so a torn-
+	// down run's prompt sits out the rest of its window and records a
+	// timeout it didn't really have. A gate TF owns end to end is what gives
+	// this a producer — there the parked wait is our goroutine on our channel
+	// under our context, so a cancelled or draining run cancels it and that
+	// branch IS this reason.
+	//
+	// Kept distinct from ClaimLost rather than folded into it: this is the
+	// asker answering its own question as it shuts down, ClaimLost is a later
+	// pass finding a question nobody ever answered. "We tear runs down
+	// mid-prompt" and "we lose prompts on the way down" are different
+	// problems with different fixes, and one reason column that can tell them
+	// apart is cheaper than reconstructing the difference from timestamps.
 	PermissionReasonClosing = "closing"
 	// PermissionReasonClaimLost: the engagement that asked released its claim
 	// with the prompt still open. Written best-effort by ExpireForClaim —
 	// ListPending derives the same conclusion without it, so nothing depends
-	// on it landing.
+	// on it landing. Only ever stamped on a row still 'pending', so an
+	// orderly Closing above wins the race with it by construction.
 	PermissionReasonClaimLost = "claim_lost"
 )
 
