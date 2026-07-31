@@ -1132,6 +1132,142 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// The claim-fenced engagement writes, driven with a LIVE claim. What
+	// every backend must agree on is that naming your own claim changes
+	// nothing about the write itself: same row, same attribution, same
+	// terminal, same phase. The refusal half of the contract is Postgres-only
+	// (local is single-process and has no zombie to refuse) and is asserted
+	// in the Postgres backend test file.
+	t.Run("ClaimFencedWrites_ActiveClaimWritesExactlyLikeTheUnfencedPath", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-fenced", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 {
+			t.Fatalf("claims = %+v, want the one minted engagement", claims)
+		}
+		claimID := claims[0].ID
+
+		if err := store.SetClaimPhaseSystem(ctx, orgID, runID, claimID, "cloning"); err != nil {
+			t.Fatalf("SetClaimPhaseSystem: %v", err)
+		}
+		if got := seed.ClaimRows(t, runID); len(got) != 1 || got[0].Phase != "cloning" {
+			t.Fatalf("claims after phase write = %+v, want phase cloning on the named claim", got)
+		}
+
+		pending := false
+		msgID, err := store.InsertMessageForClaimSystem(ctx, orgID, claimID, &domain.Message{
+			ConversationID: runID, Role: "assistant", Subtype: "text", Content: "streamed",
+			Delivered: &pending,
+		})
+		if err != nil {
+			t.Fatalf("InsertMessageForClaimSystem: %v", err)
+		}
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil || len(msgs) != 1 {
+			t.Fatalf("Messages = %v (err %v), want the one streamed row", msgs, err)
+		}
+		if msgs[0].ClaimID != claimID {
+			t.Errorf("row claim_id = %q, want %q (the engagement that wrote it)", msgs[0].ClaimID, claimID)
+		}
+
+		if err := store.MarkDeliveredForClaimSystem(ctx, orgID, runID, claimID, []int{int(msgID)}); err != nil {
+			t.Fatalf("MarkDeliveredForClaimSystem: %v", err)
+		}
+		msgs, err = store.Messages(ctx, orgID, runID)
+		if err != nil || len(msgs) != 1 {
+			t.Fatalf("Messages after deliver = %v (err %v)", msgs, err)
+		}
+		if msgs[0].Delivered == nil || !*msgs[0].Delivered {
+			t.Errorf("row delivered = %v, want true", msgs[0].Delivered)
+		}
+
+		if err := store.CompleteForClaimSystem(ctx, orgID, runID, claimID, "completed", 0.5, 1500, 2, "ok", "done", "finish", "", ""); err != nil {
+			t.Fatalf("CompleteForClaimSystem: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.Status != "completed" {
+			t.Errorf("status = %q, want completed", got.Status)
+		}
+		if got.TotalCostUSD == nil || *got.TotalCostUSD != 0.5 {
+			t.Errorf("total_cost_usd = %v, want 0.5 settled on the engagement's own row", got.TotalCostUSD)
+		}
+		if got.DurationMs == nil || *got.DurationMs != 1500 {
+			t.Errorf("duration_ms = %v, want 1500 stamped on the released claim", got.DurationMs)
+		}
+		after := seed.ClaimRows(t, runID)
+		if len(after) != 1 || !after[0].Released || after[0].Outcome != "completed" {
+			t.Fatalf("claims after complete = %+v, want the engagement released as completed", after)
+		}
+	})
+
+	t.Run("MarkCancelledIfActiveForClaimSystem_FlipsAndReleasesLikeItsUnfencedTwin", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-fenced-cancel", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, runID)[0].ID
+
+		ok, err := store.MarkCancelledIfActiveForClaimSystem(ctx, orgID, runID, claimID, "user_cancelled", "Run cancelled by user")
+		if err != nil {
+			t.Fatalf("MarkCancelledIfActiveForClaimSystem: %v", err)
+		}
+		if !ok {
+			t.Fatal("MarkCancelledIfActiveForClaimSystem reported no flip on a running run")
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.Status != "cancelled" || got.StopReason != "user_cancelled" {
+			t.Errorf("run = (%q, %q), want (cancelled, user_cancelled)", got.Status, got.StopReason)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 || !claims[0].Released || claims[0].Outcome != "cancelled" {
+			t.Fatalf("claims = %+v, want the engagement released as cancelled", claims)
+		}
+	})
+
+	t.Run("MarkFailedIfActiveForClaimSystem_FlipsAndReleasesLikeItsUnfencedTwin", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-fenced-fail", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, runID)[0].ID
+
+		ok, err := store.MarkFailedIfActiveForClaimSystem(ctx, orgID, runID, claimID, string(domain.RunFailureCrash))
+		if err != nil {
+			t.Fatalf("MarkFailedIfActiveForClaimSystem: %v", err)
+		}
+		if !ok {
+			t.Fatal("MarkFailedIfActiveForClaimSystem reported no flip on a running run")
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.Status != "failed" || got.FailureKind != domain.RunFailureCrash {
+			t.Errorf("run = (%q, %q), want (failed, %s)", got.Status, got.FailureKind, domain.RunFailureCrash)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 || !claims[0].Released || claims[0].Outcome != "failed" {
+			t.Fatalf("claims = %+v, want the engagement released as failed", claims)
+		}
+	})
+
 	t.Run("RecordClaimSandboxStatsSystem_StampsByIDIncludingReleasedClaims", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

@@ -2,7 +2,9 @@ package delegate
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -31,8 +33,15 @@ type runSink struct {
 	spawner       *Spawner
 	orgID         string
 	runID         string
+	claimID       string
 	triggerType   string
 	creatorUserID string
+
+	// fenced records that the DB refused a transcript write because this
+	// engagement's claim is no longer live — a successor owns the
+	// conversation. Read by runAgent, which then abandons the run without
+	// writing a terminal, so the flag has to outlive the stream that set it.
+	fenced atomic.Bool
 
 	// sessionDelivered suppresses repeated OnSession handling within
 	// this runSink instance. Some streams can emit system/init more
@@ -44,11 +53,12 @@ type runSink struct {
 	sessionDelivered bool
 }
 
-func newRunSink(s *Spawner, orgID, runID, triggerType, creatorUserID string) *runSink {
+func newRunSink(s *Spawner, orgID, runID, claimID, triggerType, creatorUserID string) *runSink {
 	return &runSink{
 		spawner:       s,
 		orgID:         orgID,
 		runID:         runID,
+		claimID:       claimID,
 		triggerType:   triggerType,
 		creatorUserID: creatorUserID,
 	}
@@ -82,10 +92,28 @@ func (k *runSink) OnSession(sessionID string) error {
 // messages and pushes it onto the websocket. Per-row failures
 // are returned to agentproc, which logs and continues — losing one
 // row is preferable to abandoning the run.
+//
+// The one failure that is not per-row is the fence: a refused write means
+// this engagement no longer owns the conversation, and every row after it
+// would interleave with a successor's. That one abandons the run.
 func (k *runSink) OnMessage(msg *domain.Message) error {
 	bgCtx := context.Background()
 	var id int64
-	if k.triggerType == "manual" {
+	switch {
+	case k.claimID != "":
+		// The engagement writes as itself. Manual and event-triggered runs
+		// converge here: attribution rides on the claim, not on which pool
+		// the statement runs through.
+		i, ierr := k.spawner.agentRuns.InsertMessageForClaimSystem(bgCtx, k.orgID, k.claimID, msg)
+		if ierr != nil {
+			if errors.Is(ierr, db.ErrClaimReleased) {
+				k.tripFence(ierr)
+				return ierr
+			}
+			return fmt.Errorf("insert message: %w", ierr)
+		}
+		id = i
+	case k.triggerType == "manual":
 		if err := k.spawner.tx.SyntheticClaimsWithTx(bgCtx, k.orgID, k.creatorUserID, func(ts db.TxStores) error {
 			i, ierr := ts.Conversations.InsertMessage(bgCtx, k.orgID, msg)
 			if ierr != nil {
@@ -96,7 +124,7 @@ func (k *runSink) OnMessage(msg *domain.Message) error {
 		}); err != nil {
 			return fmt.Errorf("insert message: %w", err)
 		}
-	} else {
+	default:
 		i, ierr := k.spawner.agentRuns.InsertMessageSystem(bgCtx, k.orgID, msg)
 		if ierr != nil {
 			return fmt.Errorf("insert message: %w", ierr)
@@ -107,6 +135,30 @@ func (k *runSink) OnMessage(msg *domain.Message) error {
 	k.spawner.broadcastMessage(k.orgID, k.runID, msg)
 	return nil
 }
+
+// tripFence reacts to a refused write: kill the agent, and leave the
+// conversation entirely alone. The successor is mid-flight on it, so there is
+// nothing this engagement may still say about it — no terminal status, no
+// failure row, no claim release. Killing the process is the only action left,
+// and stopping the stream is what keeps the rest of this turn's output from
+// piling up behind an insert that will never succeed.
+//
+// Logged at error level on purpose: reaching here means the cooperative
+// self-fence did not stop this executor in time, which is a fleet incident
+// worth waking someone for, not a per-row hiccup.
+func (k *runSink) tripFence(err error) {
+	if k.fenced.Swap(true) {
+		return
+	}
+	delegateLog.Error("claim fence tripped — this executor no longer owns the conversation; abandoning the run without writing",
+		"run_id", k.runID, "claim_id", k.claimID, "org_id", k.orgID, "error", err)
+	// Best-effort: no live handle means the process is already gone, which
+	// is the outcome this call was after.
+	k.spawner.getController().Cancel(k.runID)
+}
+
+// fenceTripped reports whether this engagement was fenced out mid-stream.
+func (k *runSink) fenceTripped() bool { return k.fenced.Load() }
 
 // Compile-time check that runSink satisfies the agentproc.Sink
 // contract.

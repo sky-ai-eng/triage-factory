@@ -447,7 +447,7 @@ func cloneHostBase(cloneURL string) string {
 // the sidecar's GitHub-REST proxy, the clone through its git proxy — so the
 // orchestrator holds no GitHub credential for either. Elsewhere (all/local)
 // ghClient is the resolver-built client and the clone injects a real token.
-func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, rootKey string, task domain.Task, ghClient *ghclient.Client, execSandbox *executorSandbox) (runConfig, error) {
+func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client, execSandbox *executorSandbox) (runConfig, error) {
 	ghClient = prReadClient(ghClient, execSandbox)
 	if ghClient == nil {
 		return runConfig{}, fmt.Errorf("GitHub credentials not configured")
@@ -471,7 +471,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, rootKey string,
 		return runConfig{}, fmt.Errorf("invalid PR number from task.EntitySourceID: %q", task.EntitySourceID)
 	}
 
-	s.updatePhase(orgID, runID, "fetching")
+	s.updatePhase(orgID, runID, claimID, "fetching")
 	pr, err := ghClient.GetPR(ctx, owner, repo, prNumber, false)
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to fetch PR: %w", err)
@@ -521,7 +521,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, rootKey string,
 		return runConfig{}, fmt.Errorf("PR #%d on %s/%s: GitHub did not return a usable upstream URL; cannot create worktree", prNumber, owner, repo)
 	}
 
-	s.updatePhase(orgID, runID, "cloning")
+	s.updatePhase(orgID, runID, claimID, "cloning")
 	// Resolve the host-side clone credential. In multi mode the clone routes
 	// through the sidecar's git proxy (CloneAuthViaGitProxy): git is
 	// rewritten from the upstream host to the proxy URL and presents only the

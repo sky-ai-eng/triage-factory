@@ -451,6 +451,10 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	// No live subprocess: a queued-not-started step (cancels with zero work) or a
 	// parked step. Mark every still-active step run cancelled so nothing lingers
 	// in the queue, then finalize the blueprint ourselves.
+	//
+	// Unfenced, deliberately: a user cancelling their blueprint overrides
+	// whoever holds its steps, and this process holds a claim on none of them
+	// (that is the branch condition). Same category as Spawner.Cancel.
 	for _, runID := range stepIDs {
 		if _, mErr := s.agentRuns.MarkCancelledIfActiveSystem(context.Background(), orgID, runID, "user_cancelled", "Blueprint cancelled by user"); mErr != nil {
 			blueprintLog.Warn("mark step run cancelled failed", "step_run", runID, "error", mErr)
