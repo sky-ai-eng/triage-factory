@@ -135,17 +135,24 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // inside it that owns the exit — unmount in the same frame, cutting the old
   // step instead of collapsing it. Held until its body has finished exiting.
   const [departing, setDeparting] = useState<number | null>(null)
+  // A backward move runs in two beats rather than one. 'collapse' folds the
+  // newer step away and brings the flow to where the returning step will sit
+  // once it is open; 'expand' then opens it into the room already made. Null
+  // outside a backward move, and once both beats are done.
+  const [backPhase, setBackPhase] = useState<'collapse' | 'expand' | null>(null)
 
   const goBack = useCallback(() => {
     setNavigated(true)
     setTravel('back')
     setDeparting(activeIndex)
+    setBackPhase('collapse')
     back()
   }, [back, activeIndex])
   const goNext = useCallback(() => {
     setNavigated(true)
     setTravel('forward')
     setDeparting(null)
+    setBackPhase(null)
     advance()
   }, [advance])
   const goToStep = useCallback(
@@ -154,6 +161,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       const backwards = index < activeIndex
       setTravel(backwards ? 'back' : 'forward')
       setDeparting(backwards ? activeIndex : null)
+      setBackPhase(backwards ? 'collapse' : null)
       goTo(index)
     },
     [goTo, activeIndex],
@@ -195,8 +203,6 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // around — and the lead spacer that buys room above the flow when the stack
   // is still too short to reach the line by scrolling alone.
   const actionsRef = useRef<HTMLDivElement | null>(null)
-  // The step on its way out during a backward move; null the rest of the time.
-  const leavingRef = useRef<HTMLLIElement | null>(null)
   // The active body's content, measured so the open animation has a target that
   // stays true. `height: 'auto'` is resolved to pixels ONCE, when the animation
   // starts, so content that lands during those few hundred milliseconds — a
@@ -232,25 +238,19 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // it. The spacer is zeroed for the measurement, so what we read is the flow's
   // natural position rather than the position the last pass produced — that is
   // what keeps this idempotent instead of creeping down the page.
-  const measureAnchor = useCallback(() => {
+  const measureAnchor = useCallback((lineShift = 0) => {
     const lead = leadRef.current
-    // Whichever step is last in the flow — normally the active one, whose action
-    // row IS its bottom edge, and during a backward move the step on its way
-    // out. That switch is what makes Back the mirror of Forward rather than a
-    // different animation.
-    //
-    // Forward, the row we pin sits below BOTH animating bodies: the step being
-    // left shrinks above it and the arriving step grows above it, near-equal and
-    // opposite, so their sum holds still and the row has nothing to move for.
-    // Back, the arriving row sits BETWEEN them — its own body grows above it
-    // while the departing body shrinks below it, cancelling nothing — so pinning
-    // it means absorbing the whole growth. Pinning the bottom of the departing
-    // step instead puts the anchor below both bodies again, restoring the same
-    // cancellation, and it converges onto the arriving row's resting place as
-    // that step collapses to nothing.
-    const bottomOf = leavingRef.current ?? actionsRef.current
+    // Always the active step's action row. Splitting a backward move into two
+    // beats is what makes that work in both directions: nothing else is growing
+    // while the newer step folds away, so there is no competing motion for the
+    // anchor to cancel.
+    const bottomOf = actionsRef.current
     if (!bottomOf) return null
-    const line = window.innerHeight * ACTIONS_REST
+    // lineShift is the room a not-yet-opened body will take. Aiming the row at
+    // the line MINUS that room leaves exactly enough space below it for the
+    // body to grow into, so the expand needs no scrolling of its own and the
+    // row arrives on the line by itself.
+    const line = window.innerHeight * ACTIONS_REST - lineShift
 
     const held = lead?.style.height ?? '0px'
     if (lead) lead.style.height = '0px'
@@ -327,12 +327,14 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     // Forward applies the anchor outright: the row is already where it belongs,
     // so there is nothing to ease and easing would only add travel.
     //
-    // Back tracks the departing step's bottom edge, which very nearly holds
-    // still — but not exactly, because the arriving step's action row appears
-    // above it in the same frame it becomes active, and the departing step's own
-    // bar and margin collapse away underneath. Blending from wherever the flow
-    // is absorbs that: the anchor is continuous across the click, and lands on
-    // the true one by the time the bodies finish.
+    // Back runs in two beats. The first folds the newer step away while easing
+    // the flow to where the returning step's row will land once open — aimed at
+    // the line minus the room its body still needs. The second lets the body
+    // expand into exactly that room, with the scroll held still, so the row
+    // descends onto the line under its own steam. Nothing has to be cancelled
+    // against anything else, which is what made the single-beat version so
+    // difficult to settle.
+    const backward = travel === 'back'
     const startY = window.scrollY
     const startLead = leadRef.current?.offsetHeight ?? 0
     const t0 = performance.now()
@@ -348,23 +350,39 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       // Re-measured every frame. Costs nothing when nothing changes — the inner
       // content is not itself animating, so this settles to one value and React
       // bails out on the rest.
-      const inner = bodyInnerRef.current?.offsetHeight
+      const inner = bodyInnerRef.current?.offsetHeight ?? 0
       if (inner) setOpenHeight(inner)
-      // Re-measured every frame: the bodies are still animating, so the point
-      // being tracked is still settling.
-      const anchor = measureAnchor()
-      if (anchor) {
-        const eased =
-          reduce || travel === 'forward' ? 1 : anchorEase(Math.min(1, elapsed / bodyDurationMs))
-        applyAnchor(
-          startY + (anchor.top - startY) * eased,
-          startLead + (anchor.leadHeight - startLead) * eased,
-        )
+
+      const folding = backward && elapsed < bodyDurationMs
+      if (folding) {
+        // Beat one. Aim past the closed row by the room its body will need.
+        const anchor = measureAnchor(inner)
+        if (anchor) {
+          const eased = reduce ? 1 : anchorEase(Math.min(1, elapsed / bodyDurationMs))
+          applyAnchor(
+            startY + (anchor.top - startY) * eased,
+            startLead + (anchor.leadHeight - startLead) * eased,
+          )
+        }
+      } else if (backward) {
+        // Beat two. The room is already made; holding the scroll is what lets
+        // the row descend into it rather than the page sliding out from under.
+        // Setting the same value bails out of the render, so calling this every
+        // frame of the beat costs one.
+        setBackPhase('expand')
+      } else {
+        const anchor = measureAnchor()
+        if (anchor) applyAnchor(anchor.top, anchor.leadHeight)
       }
-      if (elapsed < bodyDurationMs + SETTLE_TAIL_MS) {
+
+      const total = backward ? bodyDurationMs * 2 : bodyDurationMs
+      if (elapsed < total + SETTLE_TAIL_MS) {
         frame = requestAnimationFrame(tick)
       } else {
         transitioningRef.current = false
+        setBackPhase(null)
+        // Correct any drift once everything has come to rest.
+        settle()
         // Done animating — hand the height back to the browser so ordinary
         // reflows need no JS at all.
         setOpenHeight('auto')
@@ -375,7 +393,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       cancelAnimationFrame(frame)
       transitioningRef.current = false
     }
-  }, [wiz.phase, activeIndex, measureAnchor, applyAnchor, reduce, travel])
+  }, [wiz.phase, activeIndex, measureAnchor, applyAnchor, settle, reduce, travel])
 
   // Re-settle for as long as the flow's height is still moving: the outgoing
   // body collapsing, the incoming one expanding, and content that lands after
@@ -542,7 +560,6 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                       return (
                         <motion.li
                           key={step.id}
-                          ref={isLeaving ? leavingRef : undefined}
                           className="relative"
                           initial={false}
                           // Fading the <li> takes the gutter marker with it, which
@@ -628,12 +645,25 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                         y: enterOffset,
                                       }
                                 }
-                                animate={{
-                                  height: openHeight,
-                                  opacity: 1,
-                                  filter: 'blur(0px)',
-                                  y: 0,
-                                }}
+                                // Shut for the first beat of a backward move —
+                                // the newer step is still folding away and the
+                                // flow is still travelling to meet this one.
+                                // Opens on the second, into room already made.
+                                animate={
+                                  backPhase === 'collapse'
+                                    ? {
+                                        height: 0,
+                                        opacity: 0,
+                                        filter: 'blur(10px)',
+                                        y: enterOffset,
+                                      }
+                                    : {
+                                        height: openHeight,
+                                        opacity: 1,
+                                        filter: 'blur(0px)',
+                                        y: 0,
+                                      }
+                                }
                                 // No blur on the way out. It buys nothing on
                                 // content that is already collapsing and fading,
                                 // and blurring a layer whose height changes every
