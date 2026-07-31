@@ -72,6 +72,7 @@ const SELF_SCROLL_MS = 150
 const ACTIONS_FADE_MS = 160
 // The body animation's curve, for the scroll that tracks it on a backward move.
 // Same points as bodyEase, so the two finish on the same frame.
+// The body animation's curve, for the scroll that tracks it on a backward move.
 const anchorEase = cubicBezier(...bodyEasePoints)
 
 function Loading() {
@@ -225,6 +226,25 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // and height reverts to auto. Feeding a measured height instead re-targets
   // the animation in flight, so late content is simply included.
   const bodyInnerRef = useRef<HTMLDivElement | null>(null)
+  // Ref callbacks that ignore detachment. Through a transition two step bodies
+  // are mounted at once — the arriving one and the one AnimatePresence is still
+  // playing out — and both carry these refs. React sets the arriving node, then
+  // later, when the outgoing body finally unmounts, hands the SAME ref a null.
+  // That null lands on a ref which by then describes the live step, so the
+  // measurements built on it collapse: a body height of 0 makes the anchor aim a
+  // whole body-height too high, the browser clamps the result to whatever scroll
+  // the document allows, and the flow snaps there and eases back. Keeping the
+  // last attached node is correct because a replacement is always mounted before
+  // its predecessor leaves.
+  const keepHeading = useCallback((el: HTMLHeadingElement | null) => {
+    if (el) headingRef.current = el
+  }, [])
+  const keepBodyInner = useCallback((el: HTMLDivElement | null) => {
+    if (el) bodyInnerRef.current = el
+  }, [])
+  const keepActions = useCallback((el: HTMLDivElement | null) => {
+    if (el) actionsRef.current = el
+  }, [])
   const [openHeight, setOpenHeight] = useState<number | 'auto'>('auto')
   const leadRef = useRef<HTMLDivElement | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
@@ -266,15 +286,22 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     // row arrives on the line by itself.
     const line = window.innerHeight * ACTIONS_REST - lineShift
 
-    const held = lead?.style.height ?? '0px'
-    if (lead) lead.style.height = '0px'
-    // Both reads happen inside the zeroed window so they share one frame of
-    // reference; zeroing can clamp scrollY, and rect + scrollY cancel that out.
-    const naturalBottom = bottomOf.getBoundingClientRect().bottom + window.scrollY
+    // Measured by arithmetic, not by moving anything. The spacer sits above the
+    // whole flow, so subtracting its current height gives the same lead-free
+    // position that zeroing it would — without the zeroing.
+    //
+    // That mattered: this used to set the spacer to 0, read, and put it back.
+    // Several callers reach here — the transition loop every frame, the content
+    // observer, the viewport listener — and they interleave, so one caller's
+    // transient zero became another's measurement. The document thrashed by the
+    // spacer's height between consecutive frames and the scroll went with it,
+    // which is the flash seen on a second Back, when two moves overlap enough
+    // for the callers to trip over each other.
+    const leadNow = lead?.offsetHeight ?? 0
+    const naturalBottom = bottomOf.getBoundingClientRect().bottom + window.scrollY - leadNow
     const naturalHeadingTop = headingRef.current
-      ? headingRef.current.getBoundingClientRect().top + window.scrollY
+      ? headingRef.current.getBoundingClientRect().top + window.scrollY - leadNow
       : null
-    if (lead) lead.style.height = held
 
     // Only the early steps need lead: until enough completed bars have stacked
     // up, the row sits above the line with nothing above it to scroll away.
@@ -353,9 +380,22 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     const startLead = leadRef.current?.offsetHeight ?? 0
     const t0 = performance.now()
     transitioningRef.current = true
+    // The active step's action row, as a means of recognising this loop's own
+    // step later. Each step renders its own row node, so once the row is a
+    // different element the loop has been superseded. Nothing else can tell it
+    // that in time: cleanup does not run until after the next render has been
+    // committed and painted, so a queued frame of the OLD loop still fires
+    // against the NEW layout in between. When that frame happened to be the
+    // loop's last, it stamped its end-state over the move just starting —
+    // settling the scroll against a step that was already leaving,
+    // un-collapsing the arriving body, and putting the action row back
+    // mid-move.
+    const ownRow = actionsRef.current
 
     let frame = 0
     const tick = () => {
+      // Superseded by a newer move — leave everything to that one.
+      if (actionsRef.current !== ownRow) return
       if (userScrolledRef.current) {
         // The user has taken the scroll over, so stop moving it — but the step
         // still has to end up in a usable state. Leaving these set would strand
@@ -439,9 +479,18 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     if (wiz.phase !== 'ready' || !content) return
     let frame = 0
     const observer = new ResizeObserver(() => {
-      if (userScrolledRef.current || transitioningRef.current) return
       cancelAnimationFrame(frame)
-      frame = requestAnimationFrame(settle)
+      // Both conditions are re-checked inside the frame, not out here. A
+      // navigation commits its DOM before React runs the effect that marks a
+      // transition in flight, so an observer callback landing in that gap sees
+      // no transition and settles the anchor against a layout that is halfway
+      // between two steps — a scroll jump, and then the transition easing back
+      // out of it. One frame later the flag is set and this correctly stands
+      // down.
+      frame = requestAnimationFrame(() => {
+        if (userScrolledRef.current || transitioningRef.current) return
+        settle()
+      })
     })
     observer.observe(content)
     return () => {
@@ -643,7 +692,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                           >
                             {isActive ? (
                               <h3
-                                ref={headingRef}
+                                ref={keepHeading}
                                 tabIndex={-1}
                                 aria-current="step"
                                 className="text-[12px] font-medium uppercase tracking-[0.12em] text-text-tertiary outline-none"
@@ -710,7 +759,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                                 className="-mx-1.5 px-1.5"
                                 style={{ overflow: 'hidden' }}
                               >
-                                <div ref={bodyInnerRef} className="space-y-6 pt-4">
+                                <div ref={keepBodyInner} className="space-y-6 pt-4">
                                   {wiz.activeLoadFailed ? (
                                     <div className="space-y-3">
                                       <p className="text-[13px] text-text-secondary">
@@ -750,7 +799,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
 
                           {isActive && (
                             <motion.div
-                              ref={actionsRef}
+                              ref={keepActions}
                               initial={false}
                               animate={{ opacity: actionsHidden ? 0 : 1 }}
                               transition={
