@@ -676,12 +676,19 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                       const isActive = index === activeIndex
                       const complete = wiz.isStepComplete(index)
                       const n = String(displayNumber(step)).padStart(2, '0')
-                      // Rendered past the active step, so this is the step being
+                      // Rendered past the active step, so this is a step being
                       // left on a backward move — on its way out, not staying as
                       // a bar. Its whole row goes with the body rather than
                       // bottoming out at the height of its own title and then
                       // being unmounted out from under the eye.
                       const isLeaving = index > activeIndex
+                      // Of the leaving steps, only ONE was actually open when
+                      // the move began. A far jump (a collapsed bar's Edit,
+                      // several steps back) leaves with a whole range: the open
+                      // step plus every settled bar between it and the target.
+                      // Each folds as what it WAS — the open step as a plain
+                      // heading, the bars as bars, checks and summaries intact.
+                      const wasOpen = index === departing
 
                       // One <li> per step, persisting across the active↔collapsed
                       // transition so the always-mounted AnimatePresence can play
@@ -704,6 +711,11 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                           // left behind to pop at unmount.
                           animate={isLeaving ? { opacity: 0, marginTop: 0 } : {}}
                           transition={reduce ? { duration: 0 } : bodyEase}
+                          // A folding step keeps live targets to the end — a
+                          // bar's Edit button, the open step's fields. Half a
+                          // click on something mid-fold navigates from a state
+                          // that no longer exists.
+                          style={{ pointerEvents: isLeaving ? 'none' : undefined }}
                         >
                           {/* Marker on the thread, in the left gutter (bg masks the
                             line behind the glyph). */}
@@ -711,7 +723,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                             aria-hidden
                             className="absolute -left-9 top-px flex h-5 w-[21px] items-center justify-center bg-surface"
                           >
-                            {complete && !isActive && !isLeaving ? (
+                            {complete && !isActive && !wasOpen ? (
                               <Check
                                 size={13}
                                 strokeWidth={3}
@@ -745,14 +757,17 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
                             className="-mx-1.5 px-1.5"
                             style={{ overflow: 'hidden' }}
                           >
-                            {isActive || isLeaving ? (
-                              // A leaving step folds away as the step it was: the
+                            {isActive || wasOpen ? (
+                              // The open step folds away as the step it was: the
                               // plain heading, its gutter number, no bar. The
                               // collapsed bar (check, configured-value summary)
-                              // belongs to steps that recede upward and STAY —
-                              // swapping it in for the fold's duration made every
-                              // Back flash the just-left step as a freshly
-                              // checked-off item before it vanished.
+                              // belongs to steps that have settled — swapping it
+                              // in for the fold's duration made every Back flash
+                              // the just-left step as a freshly checked-off item
+                              // before it vanished. Leaving bars are the mirror
+                              // case: they ARE settled, so they fold as bars —
+                              // flipping them to headings replays the same swap
+                              // in the other direction.
                               <h3
                                 ref={isActive ? keepHeading : undefined}
                                 tabIndex={isActive ? -1 : undefined}
