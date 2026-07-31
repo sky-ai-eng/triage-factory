@@ -1064,13 +1064,18 @@ func (s *agentRunStore) MessagesSince(ctx context.Context, orgID, runID string, 
 	// that was withdrawn before any flush) never happened, so the display
 	// read hides them. delivered + inactive stays visible: that is compacted
 	// history, still part of the rendered transcript.
+	//
+	// Ordered by the same effective assembly key ListForAssembly uses, so a
+	// row placed out of insertion order renders where the model read it. The
+	// watermark stays on id: it answers "which rows has this client not seen
+	// yet", which is an insertion question, not a placement one.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+sqliteMessageColumns+`
 		FROM messages
 		WHERE conversation_id = ?
 		  AND id > ?
 		  AND NOT (delivered = 0 AND window_state = 'inactive')
-		ORDER BY id ASC
+		ORDER BY COALESCE(seq, id) ASC
 	`, runID, sinceID)
 	if err != nil {
 		return nil, err
@@ -1089,8 +1094,9 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 	// ?-placeholder IN list (SQLite has no array bind), mirroring
 	// artifactStore.ListByRuns, chunked to stay inside SQLite's variable
 	// limit (chunkIDs). A conversation_id falls in exactly one chunk, so
-	// ORDER BY (conversation_id, id) keeps each run's messages contiguous
-	// and in insertion order within the merged slice; the caller groups by
+	// ordering on (conversation_id, the effective assembly key) keeps each
+	// run's messages contiguous within the merged slice and in the same
+	// order the single-run display read gives them; the caller groups by
 	// RunID.
 	var messages []domain.Message
 	for _, chunk := range chunkIDs(runIDs) {
@@ -1106,7 +1112,7 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 			FROM messages
 			WHERE conversation_id IN (`+strings.Join(placeholders, ", ")+`)
 			  AND NOT (delivered = 0 AND window_state = 'inactive')
-			ORDER BY conversation_id ASC, id ASC
+			ORDER BY conversation_id ASC, COALESCE(seq, id) ASC
 		`, args...)
 		if err != nil {
 			return nil, err
