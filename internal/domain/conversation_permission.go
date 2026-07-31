@@ -144,10 +144,13 @@ func ValidPermissionReason(r string) bool {
 // took) stay off this shape — they exist for a history read, and a pending row
 // has none of them by definition.
 type PendingPermissionDTO struct {
-	ToolCallID string         `json:"tool_call_id"`
-	ToolName   string         `json:"tool_name"`
-	Input      map[string]any `json:"input,omitempty"`
-	Title      string         `json:"title,omitempty"`
+	ToolCallID string `json:"tool_call_id"`
+	ToolName   string `json:"tool_name"`
+	// Input is always present, never omitted and never null — a client renders
+	// the prompt by indexing it, so an absent key would be a render crash
+	// rather than a thinner prompt. Unknown input is an empty object.
+	Input map[string]any `json:"input"`
+	Title string         `json:"title,omitempty"`
 	// TimeoutMs is the deadline REMAINING, not the window the prompt was
 	// granted. Sent relative for the reason the websocket frame sent it
 	// relative — the client derives its dismiss TTL from the payload rather
@@ -165,10 +168,16 @@ type PendingPermissionDTO struct {
 func PendingPermissionDTOs(ps []ConversationPermission, now time.Time) []PendingPermissionDTO {
 	out := make([]PendingPermissionDTO, 0, len(ps))
 	for _, p := range ps {
+		input := p.Input
+		if input == nil {
+			// A nil map marshals to null, which a client indexing into would
+			// throw on. Send an object it can safely read nothing out of.
+			input = map[string]any{}
+		}
 		dto := PendingPermissionDTO{
 			ToolCallID:  p.ToolCallID,
 			ToolName:    p.ToolName,
-			Input:       p.Input,
+			Input:       input,
 			Title:       p.Title,
 			RequestedAt: p.RequestedAt,
 		}

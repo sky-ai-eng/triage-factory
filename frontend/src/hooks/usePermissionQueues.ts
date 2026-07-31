@@ -123,6 +123,12 @@ export function usePermissionQueues(): PermissionQueues {
       const seq = bumpRefreshSeq(runID)
       void fetchPendingPermissions(runID).then((pending) => {
         if (refreshSeq.current.get(runID) !== seq) return
+        // null = the read failed, which says nothing about what is pending.
+        // Leave the queue and its timers exactly as they are: the existing
+        // prompts plus their client TTL are a correct-enough view until the
+        // next trigger, whereas clearing here would hide a live prompt on a
+        // transient error.
+        if (pending === null) return
         setQueues((prev) => {
           const before = prev[runID] ?? []
           // Skip the state write when nothing moved, so an unchanged refetch

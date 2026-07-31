@@ -54,8 +54,18 @@ func (s *permissionStore) Create(ctx context.Context, orgID string, p *domain.Co
 	}
 	// The input is stored as the JSON the agent asked to run with, so a
 	// reconstructed prompt shows the real call rather than the SDK's rendered
-	// sentence. A blob that won't marshal is not a reason to lose the row: the
-	// prompt is still answerable from tool_name alone.
+	// sentence.
+	//
+	// A blob that won't marshal fails the insert rather than storing NULL and
+	// keeping the row, and the direction is deliberate. The input IS what the
+	// user approves — a prompt that renders "Allow Bash?" with no command
+	// invites a blind yes — so refusing to write a row we can't describe means
+	// the prompt never surfaces and the agent takes the timeout deny instead.
+	// That fails closed: the tool doesn't run. Storing the half-row fails open.
+	// The branch is unreachable in practice either way (Input is decoded from
+	// the wrapper's own JSON, so it is marshalable by construction), which is
+	// exactly why it should take the conservative side rather than earn a
+	// degradation path.
 	var inputJSON any
 	if len(p.Input) > 0 {
 		raw, err := json.Marshal(p.Input)
@@ -228,9 +238,14 @@ func scanPermissions(rows *sql.Rows) ([]domain.ConversationPermission, error) {
 			p.MessageID = &v
 		}
 		if inputJSON.Valid && inputJSON.String != "" {
-			// A blob that won't unmarshal loses the input, not the prompt: the
-			// surface still has tool_name to render and the id to answer with.
+			// Unlike the write side, an unreadable blob HERE keeps the row: the
+			// prompt already exists and is parking an agent, so hiding it is the
+			// failure this table exists to prevent. It can only happen if the
+			// column was corrupted or written by something other than Create, so
+			// it's logged rather than swallowed.
 			if err := json.Unmarshal([]byte(inputJSON.String), &p.Input); err != nil {
+				dbLog.Warn("permission input_json unreadable; surfacing the prompt without its input",
+					"conversation", p.ConversationID, "tool_call_id", p.ToolCallID, "error", err)
 				p.Input = nil
 			}
 		}

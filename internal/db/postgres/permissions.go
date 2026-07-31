@@ -59,6 +59,10 @@ func (s *permissionStore) Create(ctx context.Context, orgID string, p *domain.Co
 	if p.RequestedAt.IsZero() {
 		p.RequestedAt = time.Now().UTC()
 	}
+	// A blob that won't marshal fails the insert rather than storing NULL and
+	// keeping the row — see the SQLite twin for why that direction is the
+	// conservative one (the input IS what the user approves, so no row and a
+	// timeout deny beats a row that renders "Allow Bash?" with no command).
 	var inputJSON any
 	if len(p.Input) > 0 {
 		raw, err := json.Marshal(p.Input)
@@ -168,9 +172,14 @@ func scanPGPermissions(rows *sql.Rows) ([]domain.ConversationPermission, error) 
 			p.MessageID = &v
 		}
 		if inputJSON.Valid && inputJSON.String != "" {
-			// A blob that won't unmarshal loses the input, not the prompt: the
-			// surface still has tool_name to render and the id to answer with.
+			// Unlike the write side, an unreadable blob HERE keeps the row: the
+			// prompt already exists and is parking an agent, so hiding it is the
+			// failure this table exists to prevent. Logged rather than swallowed
+			// — it means the column was corrupted or written by something other
+			// than Create.
 			if err := json.Unmarshal([]byte(inputJSON.String), &p.Input); err != nil {
+				dbPgLog.Warn("permission input_json unreadable; surfacing the prompt without its input",
+					"conversation", p.ConversationID, "tool_call_id", p.ToolCallID, "error", err)
 				p.Input = nil
 			}
 		}

@@ -74,18 +74,27 @@ export function ttlForPrompt(prompt: PendingPermission): number {
 // by a process that no longer exists is already absent here — the client never
 // has to reason about whether a parked agent is still parked.
 //
-// A failed read yields an empty list rather than throwing: this is a
-// reconciliation against the server's view, and the caller's existing queue
-// plus its client-side TTL remain a correct-enough fallback until the next
-// trigger.
-export async function fetchPendingPermissions(runID: string): Promise<PendingPermission[]> {
+// null means "couldn't ask" (non-2xx, network failure, or a body that isn't the
+// expected array) and is deliberately NOT the same value as []. An empty array
+// is the server stating this run has nothing outstanding, which the caller acts
+// on by clearing the queue; treating a failed read the same way would blank a
+// live prompt off every surface on one transient 500 and leave it invisible
+// until some later frame happened to arrive — reintroducing exactly the
+// reachability hole this endpoint exists to close.
+export async function fetchPendingPermissions(runID: string): Promise<PendingPermission[] | null> {
   try {
     const res = await fetch(`/api/agent/conversations/${runID}/permissions`)
-    if (!res.ok) return []
+    if (!res.ok) return null
     const data = await res.json()
-    return Array.isArray(data) ? (data as PendingPermission[]) : []
+    if (!Array.isArray(data)) return null
+    // Normalize at the boundary rather than trusting the cast: `input` is what
+    // the user is actually approving, and PermissionPrompt indexes it directly,
+    // so a payload that somehow omits it would throw during render instead of
+    // degrading. An empty object renders as a prompt with no summary — visibly
+    // thin, but answerable and not a crash.
+    return (data as PendingPermission[]).map((p) => ({ ...p, input: p.input ?? {} }))
   } catch {
-    return []
+    return null
   }
 }
 
