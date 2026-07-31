@@ -82,6 +82,47 @@ func (s *StreamState) MarkRequest() {
 	s.requestAt = at
 }
 
+// Now reads the stream's clock. Exposed so a caller timing a window that
+// parks the reader measures it on the same clock the marks below use.
+func (s *StreamState) Now() time.Time { return s.now() }
+
+// DiscountGate rolls every live mark forward by the time spent since `at`,
+// which the caller takes immediately before parking on something that is not
+// the agent's work — today, a human answering a permission prompt.
+//
+// Nothing measurable happens while the reader is parked: the wrapper's
+// stdout backs up in the pipe, so every line written during the window is
+// read late and every interval open across it would otherwise absorb the
+// whole wait. Freezing the clock for the window is what keeps a tool row's
+// duration the time the tool ran and an assistant row's the time the model
+// took. It is deliberately indifferent to which of the two arrived first —
+// the gated tool_use line may have been parsed before the prompt or still be
+// sitting unread behind it, and the SDK does not order them.
+//
+// It rolls every mark, including those of tools already running when the
+// prompt arrived. Their real overlap with the window is unknowable from here —
+// their results sat in the backed-up pipe too, so the arrival that would time
+// them is itself late — and of the two available errors, under-reporting a
+// concurrent tool by the overlap is the one that cannot put a human's minutes
+// on an agent's row.
+//
+// Local mode only in practice: a sandboxed run auto-approves, so the window
+// it measures is nil.
+func (s *StreamState) DiscountGate(at time.Time) {
+	waited := s.now().Sub(at)
+	if waited <= 0 {
+		return
+	}
+	s.markMu.Lock()
+	if !s.requestAt.IsZero() {
+		s.requestAt = s.requestAt.Add(waited)
+	}
+	s.markMu.Unlock()
+	for id, dispatched := range s.toolDispatchedAt {
+		s.toolDispatchedAt[id] = dispatched.Add(waited)
+	}
+}
+
 // sinceRequest returns the milliseconds elapsed since the last request
 // mark, or nil when there is no mark to measure from — nil is "not
 // measured", which every consumer must render as absent rather than zero.

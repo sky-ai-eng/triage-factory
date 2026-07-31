@@ -323,6 +323,10 @@ type Message struct {
 	// subtraction of two rows' CreatedAt, which streaming, paging, and
 	// compaction each break in their own way. nil is "not measured", 0 is
 	// "measured, and it was that fast".
+	//
+	// It measures work, so time spent waiting on a human never lands in it:
+	// a permission-gated call reads as the time it ran, not the time it
+	// stood at the prompt.
 	DurationMs *int
 
 	// Reasoning is the model's persisted chain-of-thought for this message —

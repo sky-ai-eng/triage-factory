@@ -491,7 +491,13 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 					// error_during_execution subtype.
 					interruptPending = true
 				case "permission_request":
+					// The handler parks this goroutine for as long as the
+					// human takes, so the marks are held still across it —
+					// the wait belongs to the approval, not to the tool that
+					// runs once it clears.
+					gateAt := stream.Now()
 					l.handlePermission(ctl, perms)
+					stream.DiscountGate(gateAt)
 				}
 				// Control lines are not sink content.
 			} else {

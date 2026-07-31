@@ -254,7 +254,9 @@ export interface Message {
   // duration_ms is how long THIS row's own work took — an assistant row from
   // the request going out to the message completing (reasoning included, so
   // "thought for Ns" comes off the row that did the thinking), a tool row from
-  // dispatch to result. Absent means nobody measured it (every row written
+  // dispatch to result. Work only: a permission-gated call reads as the time
+  // it ran, never the time it stood waiting for someone to approve it.
+  // Absent means nobody measured it (every row written
   // before the runtime stamped timing, and every non-agent role), which is not
   // the same as 0 — so read it with `!= null`, never `?? 0`. Never derive a
   // duration by subtracting a neighbour's created_at: streaming, paging, and

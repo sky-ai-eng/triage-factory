@@ -20,12 +20,11 @@
 -- nearly every row, typed and sortable, and the same kind of per-row
 -- measurement as the input_tokens / output_tokens / cost_usd it sits beside.
 --
--- Known limitation on the SDK runtime: a permission-gated tool's duration
--- includes the time the human took to approve it, because the only marks that
--- path has are the assistant message and the tool_result. Local-mode only —
--- multi has no permission gate — and excluding the gate window would mean
--- plumbing both moments out of the permission handler for a number nobody is
--- yet reading that precisely.
+-- Human time is never in here. A permission-gated call parks the runtime
+-- until someone answers, and the runtime holds its marks still across that
+-- window, so a gated Bash call reads as the seconds it ran rather than the
+-- minutes it waited to be allowed to run. How long a prompt stood, and who
+-- answered it, is the permission record's business, not this column's.
 ALTER TABLE messages ADD COLUMN duration_ms INTEGER;
 
 -- +goose Down

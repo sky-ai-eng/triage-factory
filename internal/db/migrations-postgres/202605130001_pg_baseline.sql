@@ -1246,10 +1246,10 @@ CREATE TABLE public.messages (
     -- previous event", and an elided partner is gone. NULL is "not measured",
     -- never "took no time" — a measured sub-millisecond step writes 0.
     --
-    -- Known limitation on the SDK runtime: a permission-gated tool's duration
-    -- includes the human approval wait, since that path's only marks are the
-    -- assistant message and the tool_result. Local-mode only; multi has no
-    -- permission gate.
+    -- Human time is never in here: a permission-gated call parks the runtime
+    -- until someone answers, and the runtime holds its marks still across
+    -- that window, so a gated call reads as the seconds it ran rather than
+    -- the minutes it waited to be allowed to run.
     duration_ms integer
 );
 
