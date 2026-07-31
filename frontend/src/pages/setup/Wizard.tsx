@@ -153,12 +153,23 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // place in the layout even while invisible.
   const [actionsHidden, setActionsHidden] = useState(false)
 
+  // The scroll position as it stood when the user asked to move — read in the
+  // handler, not in the transition effect. Between the click and that effect
+  // sit a React commit and a motion keyframe-resolution pass, either of which
+  // can leave the scroll somewhere neither the user nor we put it; a blend
+  // that reads scrollY after them adopts that foreign position as its origin
+  // and visibly eases back out of it. State rather than a ref so the render-
+  // created closures that call these handlers stay ref-free; every navigation
+  // refreshes it, so the effect never sees a stale capture.
+  const [navStartY, setNavStartY] = useState<number | null>(null)
+
   const goBack = useCallback(() => {
     setNavigated(true)
     setTravel('back')
     setDeparting(activeIndex)
     setBackPhase('collapse')
     setActionsHidden(true)
+    setNavStartY(window.scrollY)
     back()
   }, [back, activeIndex])
   const goNext = useCallback(() => {
@@ -167,6 +178,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     setDeparting(null)
     setBackPhase(null)
     setActionsHidden(true)
+    setNavStartY(window.scrollY)
     advance()
   }, [advance])
   const goToStep = useCallback(
@@ -177,6 +189,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       setDeparting(backwards ? activeIndex : null)
       setBackPhase(backwards ? 'collapse' : null)
       setActionsHidden(true)
+      setNavStartY(window.scrollY)
       goTo(index)
     },
     [goTo, activeIndex],
@@ -376,7 +389,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     // against anything else, which is what made the single-beat version so
     // difficult to settle.
     const backward = travel === 'back'
-    const startY = window.scrollY
+    const startY = navStartY ?? window.scrollY
     const startLead = leadRef.current?.offsetHeight ?? 0
     const t0 = performance.now()
     transitioningRef.current = true
@@ -393,18 +406,23 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
     const ownRow = actionsRef.current
 
     let frame = 0
+    // Where beat one has brought the scroll so far, and so where beat two holds
+    // it. Tracked rather than read back from window.scrollY each frame: reading
+    // back would adopt any position something else moved the scroll to — and
+    // holding a foreign position is indistinguishable from having chosen it.
+    let holdY: number | null = null
     const tick = () => {
       // Superseded by a newer move — leave everything to that one.
       if (actionsRef.current !== ownRow) return
       if (userScrolledRef.current) {
         // The user has taken the scroll over, so stop moving it — but the step
-        // still has to end up in a usable state. Leaving these set would strand
-        // the flow mid-transition: the action row invisible and unclickable for
-        // good, and the body's height frozen at a measured pixel value.
+        // still has to end up in a usable state: the action row visible and
+        // clickable, the body finishing its ease to the measured height. The
+        // height stays numeric (as everywhere — see the loop's end) and the
+        // content observer keeps it true from here.
         transitioningRef.current = false
         setBackPhase(null)
         setActionsHidden(false)
-        setOpenHeight('auto')
         return
       }
       const elapsed = performance.now() - t0
@@ -420,10 +438,8 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
         const anchor = measureAnchor(inner)
         if (anchor) {
           const eased = reduce ? 1 : anchorEase(Math.min(1, elapsed / bodyDurationMs))
-          applyAnchor(
-            startY + (anchor.top - startY) * eased,
-            startLead + (anchor.leadHeight - startLead) * eased,
-          )
+          holdY = Math.max(0, startY + (anchor.top - startY) * eased)
+          applyAnchor(holdY, startLead + (anchor.leadHeight - startLead) * eased)
         }
       } else if (backward) {
         // Beat two. The room is already made; holding the scroll is what lets
@@ -433,7 +449,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
         // bracket lapses mid-beat and the scroll events the expanding body
         // provokes get read as the user taking over — which stops the loop and
         // strands the row hidden.
-        applyAnchor(window.scrollY, leadRef.current?.offsetHeight ?? 0)
+        applyAnchor(holdY ?? window.scrollY, leadRef.current?.offsetHeight ?? 0)
         // Setting the same value bails out of the render, so calling this every
         // frame of the beat costs one.
         setBackPhase('expand')
@@ -453,11 +469,16 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
         transitioningRef.current = false
         setBackPhase(null)
         setActionsHidden(false)
-        // Correct any drift once everything has come to rest.
+        // Correct any drift once everything has come to rest. The height stays
+        // at the measured pixel value rather than being handed back to 'auto':
+        // a px→auto animation is one motion cannot resolve without measuring,
+        // and its measurement pass re-renders elements at their target frames
+        // and then restores a scroll position it captured beforehand — captured
+        // mid-move if another transition has started, which is exactly the
+        // double-Back flash. All-numeric keyframes keep the resolver out of
+        // the loop entirely; the content observer below owns keeping the pixel
+        // value true as content reflows at rest.
         settle()
-        // Done animating — hand the height back to the browser so ordinary
-        // reflows need no JS at all.
-        setOpenHeight('auto')
       }
     }
     tick()
@@ -465,7 +486,7 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       cancelAnimationFrame(frame)
       transitioningRef.current = false
     }
-  }, [wiz.phase, activeIndex, measureAnchor, applyAnchor, settle, reduce, travel])
+  }, [wiz.phase, activeIndex, measureAnchor, applyAnchor, settle, reduce, travel, navStartY])
 
   // Re-settle for as long as the flow's height is still moving: the outgoing
   // body collapsing, the incoming one expanding, and content that lands after
@@ -474,13 +495,19 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
   // Observes the content only — the spacers are siblings, so resizing them
   // can't feed back in. Coalesced through rAF, so a burst of callbacks costs
   // one retarget.
+  //
+  // This is also what keeps the body's pixel height honest at rest, now that
+  // the transition loop no longer hands it back to 'auto' (see the loop's
+  // end): content that reflows re-measures the inner and re-targets the
+  // wrapper. Unlike the scroll below, the height update ignores the takeover
+  // flag — the user owning the scroll is no reason to clip their content.
   useEffect(() => {
     const content = contentRef.current
     if (wiz.phase !== 'ready' || !content) return
     let frame = 0
     const observer = new ResizeObserver(() => {
       cancelAnimationFrame(frame)
-      // Both conditions are re-checked inside the frame, not out here. A
+      // The conditions are re-checked inside the frame, not out here. A
       // navigation commits its DOM before React runs the effect that marks a
       // transition in flight, so an observer callback landing in that gap sees
       // no transition and settles the anchor against a layout that is halfway
@@ -488,7 +515,10 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       // out of it. One frame later the flag is set and this correctly stands
       // down.
       frame = requestAnimationFrame(() => {
-        if (userScrolledRef.current || transitioningRef.current) return
+        if (transitioningRef.current) return
+        const inner = bodyInnerRef.current?.offsetHeight
+        if (inner) setOpenHeight(inner)
+        if (userScrolledRef.current) return
         settle()
       })
     })
