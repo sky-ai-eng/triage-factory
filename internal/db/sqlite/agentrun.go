@@ -749,6 +749,10 @@ func (s *agentRunStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, or
 	return s.MarkFailedIfActive(ctx, orgID, runID, failureKind)
 }
 
+func (s *agentRunStore) MarkCancelledIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, stopReason, summary string) (bool, error) {
+	return s.MarkCancelledIfActive(ctx, orgID, runID, stopReason, summary)
+}
+
 // SetClaimPhaseSystem keeps the released_at filter its active-claim sibling
 // has always had: a released claim's phase is inert history either way, so a
 // call naming one stays the no-op it is today rather than rewriting it. The

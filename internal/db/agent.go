@@ -452,6 +452,19 @@ type ConversationStore interface {
 	// which is a different thing and must not be treated as a lost race.
 	MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, failureKind string) (bool, error)
 
+	// MarkCancelledIfActiveForClaimSystem is MarkCancelledIfActive driven by
+	// the engagement: the terminal an executor writes when its own run's
+	// context is cancelled, refused once it has been fenced out.
+	//
+	// The unfenced twin stays, and is what a USER-initiated cancel uses. That
+	// distinction is the whole reason both exist: a person cancelling a run
+	// is deliberately overriding whichever executor holds it, so their write
+	// must not be gated on ownership, while an executor cancelling itself is
+	// only entitled to end a run it still owns. Reaching for the unfenced
+	// version from an engagement path is how the cancel route around this
+	// fence gets rebuilt.
+	MarkCancelledIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, stopReason, summary string) (bool, error)
+
 	// SetClaimPhaseSystem writes claims.phase on one named claim — the
 	// claim-keyed sibling of SetActiveClaimPhaseSystem, for the engagement
 	// reporting its own setup progress. Empty phase clears to NULL. The

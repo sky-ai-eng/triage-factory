@@ -3,7 +3,10 @@ package delegate
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -26,6 +29,7 @@ type fencedConversationStore struct {
 	db.ConversationStore
 	inserts   int
 	completes int
+	cancels   int
 }
 
 func (f *fencedConversationStore) InsertMessageForClaimSystem(context.Context, string, string, *domain.Message) (int64, error) {
@@ -39,6 +43,11 @@ func (f *fencedConversationStore) CompleteForClaimSystem(context.Context, string
 }
 
 func (f *fencedConversationStore) MarkFailedIfActiveForClaimSystem(context.Context, string, string, string, string) (bool, error) {
+	return false, db.ErrClaimReleased
+}
+
+func (f *fencedConversationStore) MarkCancelledIfActiveForClaimSystem(context.Context, string, string, string, string, string) (bool, error) {
+	f.cancels++
 	return false, db.ErrClaimReleased
 }
 
@@ -199,4 +208,67 @@ func (p *phaseFencedStore) SetClaimPhaseSystem(context.Context, string, string, 
 func (p *phaseFencedStore) SetActiveClaimPhaseSystem(context.Context, string, string, string) error {
 	p.byConversation++
 	return nil
+}
+
+// TestHandleCancelled_FenceTripRecordsNothing: the path a partition
+// self-fence trip drives every live run down. Killing the sandboxes cancels
+// each run's ctx, and each goroutine then arrives here to record its own
+// cancellation — so if the self-fence fired late, this is the write that
+// would bury a successor's live conversation. It must be refused, and
+// nothing around it may happen either.
+func TestHandleCancelled_FenceTripRecordsNothing(t *testing.T) {
+	s, database, runID, _ := setupAdvanceFixture(t, "fence-cancelled")
+	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
+	s.agentRuns = stub
+
+	// A worktree dir the unfenced path would delete on its way out.
+	wt := t.TempDir()
+	marker := filepath.Join(wt, "keep-me")
+	if err := os.WriteFile(marker, []byte("successor's workspace"), 0o600); err != nil {
+		t.Fatalf("seed worktree marker: %v", err)
+	}
+
+	fenced := s.handleCancelled(runmode.LocalDefaultOrgID, runID, time.Now(), wt, "claim-1", "event", "")
+	if !fenced {
+		t.Fatal("handleCancelled did not report the fence trip; runAgent would fall through to the unfenced disposition")
+	}
+	if stub.completes != 1 {
+		t.Errorf("fenced cancellation terminal attempted %d times, want 1", stub.completes)
+	}
+
+	var status string
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&status); err != nil {
+		t.Fatalf("read run status: %v", err)
+	}
+	if status != "running" {
+		t.Errorf("run status = %q, want running (a refused cancellation must leave the row alone)", status)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("worktree removed after a fence trip (%v); it may be the workspace the successor is running in", err)
+	}
+}
+
+// TestMarkCancelledAfterResume_FenceTripRecordsNothing: the resume path's
+// own self-cancel, same contract — and the workspace snapshot the successor
+// resumes from survives.
+func TestMarkCancelledAfterResume_FenceTripRecordsNothing(t *testing.T) {
+	s, database, runID, _ := setupAdvanceFixture(t, "fence-resume-cancel")
+	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
+	s.agentRuns = stub
+
+	fenced := s.markCancelledAfterResume(runmode.LocalDefaultOrgID, runID, "claim-1", "")
+	if !fenced {
+		t.Fatal("markCancelledAfterResume did not report the fence trip; the blueprint would be finalized off a successor's run")
+	}
+	if stub.cancels != 1 {
+		t.Errorf("fenced cancellation attempted %d times, want 1", stub.cancels)
+	}
+
+	var status string
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&status); err != nil {
+		t.Fatalf("read run status: %v", err)
+	}
+	if status != "running" {
+		t.Errorf("run status = %q, want running (a refused cancellation must leave the row alone)", status)
+	}
 }

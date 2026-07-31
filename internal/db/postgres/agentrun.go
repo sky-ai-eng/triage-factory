@@ -549,6 +549,29 @@ func (s *agentRunStore) MarkCancelledIfActiveSystem(ctx context.Context, orgID, 
 	return flipped, err
 }
 
+// MarkCancelledIfActiveForClaimSystem is MarkCancelledIfActiveSystem behind
+// the fence — the self-cancel an executor writes when its own run's ctx is
+// killed. Its unfenced twin above serves the user-initiated cancel, which is
+// deliberately not gated on ownership.
+func (s *agentRunStore) MarkCancelledIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, stopReason, summary string) (bool, error) {
+	var flipped bool
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, runID, claimID); err != nil {
+			return err
+		}
+		var err error
+		flipped, err = markCancelledIfActive(ctx, q, orgID, runID, stopReason, summary)
+		if err != nil || !flipped {
+			return err
+		}
+		return releaseActiveClaim(ctx, q, orgID, runID, "cancelled")
+	})
+	if err != nil {
+		return false, err
+	}
+	return flipped, nil
+}
+
 func markCancelledIfActive(ctx context.Context, q queryer, orgID, runID, stopReason, summary string) (bool, error) {
 	now := time.Now()
 	res, err := q.ExecContext(ctx, `

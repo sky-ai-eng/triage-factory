@@ -1208,6 +1208,36 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	t.Run("MarkCancelledIfActiveForClaimSystem_FlipsAndReleasesLikeItsUnfencedTwin", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-fenced-cancel", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, runID)[0].ID
+
+		ok, err := store.MarkCancelledIfActiveForClaimSystem(ctx, orgID, runID, claimID, "user_cancelled", "Run cancelled by user")
+		if err != nil {
+			t.Fatalf("MarkCancelledIfActiveForClaimSystem: %v", err)
+		}
+		if !ok {
+			t.Fatal("MarkCancelledIfActiveForClaimSystem reported no flip on a running run")
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.Status != "cancelled" || got.StopReason != "user_cancelled" {
+			t.Errorf("run = (%q, %q), want (cancelled, user_cancelled)", got.Status, got.StopReason)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 || !claims[0].Released || claims[0].Outcome != "cancelled" {
+			t.Fatalf("claims = %+v, want the engagement released as cancelled", claims)
+		}
+	})
+
 	t.Run("MarkFailedIfActiveForClaimSystem_FlipsAndReleasesLikeItsUnfencedTwin", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

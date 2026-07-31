@@ -166,6 +166,17 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		return true
 	}
 
+	// cancelled records this run's cancelled terminal, folding a fence trip
+	// the same way. This is the path a partition self-fence trip drives every
+	// live run down, so a late self-fence lands here first.
+	cancelled := func() bool {
+		if !s.handleCancelled(orgID, runID, startTime, cfg.wtPath, cfg.claimID, triggerType, creatorUserID) {
+			return false
+		}
+		parked = true
+		return true
+	}
+
 	if cfg.hasWT {
 		// GitHub PR cleanup. Best-effort cleanup on return; the worktree ID is unique per run
 		// so a failed remove just leaves a dangling directory under _worktrees.
@@ -389,8 +400,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	s.updatePhase(orgID, runID, cfg.claimID, "agent_starting")
 	if ctx.Err() != nil {
-		s.handleCancelled(orgID, runID, startTime, cfg.wtPath, triggerType, creatorUserID)
-		return
+		return cancelled()
 	}
 
 	extraEnv := []string{
@@ -612,8 +622,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	if out.err != nil {
 		if ctx.Err() != nil {
-			s.handleCancelled(orgID, runID, startTime, cfg.wtPath, triggerType, creatorUserID)
-			return
+			return cancelled()
 		}
 		return fail(fmt.Sprintf("%v\nstderr: %s", out.err, out.stderr), classifyFailureKind(out.err))
 	}

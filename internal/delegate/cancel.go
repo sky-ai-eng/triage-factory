@@ -106,6 +106,14 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 	// sweeps): admin pool, no user attribution. Detached context —
 	// the request that triggered Cancel can be gone but the
 	// terminal write still needs to land.
+	//
+	// Unfenced, deliberately: this is an outside actor ending a run, not an
+	// engagement ending itself. The whole point of a cancel is to override
+	// whichever executor holds the run — it even signals the remote owner
+	// best-effort above — so gating it on claim ownership would break the
+	// feature. The claim-fenced variants exist for the executor's own
+	// self-cancel (handleCancelled, markCancelledAfterResume); do not route
+	// this path through them.
 	var (
 		flipped bool
 		err     error
@@ -147,16 +155,37 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 // deferred cleanup so the bare-repo registration is pruned even if the
 // goroutine returns through one of the early paths that doesn't reach
 // the defer (e.g., setupErr before the defer is installed).
-func (s *Spawner) handleCancelled(orgID, runID string, startTime time.Time, wtPath, triggerType, creatorUserID string) {
+// claimID names the engagement writing this terminal. It matters more here
+// than anywhere else in the fenced set: killing every live sandbox is exactly
+// what a partition self-fence trip does, and each killed run's goroutine then
+// arrives here to record its own cancellation. If the self-fence fired late —
+// the failure this whole layer exists to backstop — that write would land on
+// a conversation the reaper has already handed to a successor. Empty claimID
+// keeps the unfenced write for paths with no claimed run in scope.
+//
+// Returns fenced: true when the terminal was refused. Nothing was recorded,
+// nothing was broadcast, and the worktree was left alone.
+func (s *Spawner) handleCancelled(orgID, runID string, startTime time.Time, wtPath, claimID, triggerType, creatorUserID string) (fenced bool) {
 	elapsed := int(time.Since(startTime).Milliseconds())
 	bgCtx := context.Background()
 	var completeErr error
-	if triggerType == "manual" {
+	switch {
+	case claimID != "":
+		completeErr = s.agentRuns.CompleteForClaimSystem(bgCtx, orgID, runID, claimID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "", "")
+	case triggerType == "manual":
 		completeErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
 			return ts.Conversations.Complete(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "", "")
 		})
-	} else {
+	default:
 		completeErr = s.agentRuns.CompleteSystem(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "", "")
+	}
+	if errors.Is(completeErr, db.ErrClaimReleased) {
+		// A successor owns the conversation, so this run's cancellation is
+		// not its state to report. The worktree stays too — it may be the
+		// workspace that successor is running in.
+		delegateLog.Error("claim fence refused the cancellation terminal — a successor owns this conversation; recording nothing",
+			"run_id", runID, "claim_id", claimID, "org_id", orgID, "error", completeErr)
+		return true
 	}
 	if completeErr != nil {
 		delegateLog.Warn("failed to record cancellation", "run_id", runID, "error", completeErr)
@@ -166,6 +195,7 @@ func (s *Spawner) handleCancelled(orgID, runID string, startTime time.Time, wtPa
 		// Best-effort cleanup; same rationale as the defer in runAgent.
 		_ = worktree.RemoveAt(wtPath, runID)
 	}
+	return false
 }
 
 // classifyFailureKind maps a runtime error from the agent process to

@@ -14,6 +14,7 @@ package delegate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -273,7 +274,15 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// finalize the blueprint if it's still running. Detached writes — this is a
 	// terminal disposition, not abortable by shutdown.
 	if br.Status != domain.BlueprintRunStatusRunning || br.CancelRequested {
-		if _, mErr := s.agentRuns.MarkCancelledIfActiveSystem(context.Background(), orgID, run.ID, "user_cancelled", "Blueprint cancelled by user"); mErr != nil {
+		if _, mErr := s.agentRuns.MarkCancelledIfActiveForClaimSystem(context.Background(), orgID, run.ID, run.ClaimID, "user_cancelled", "Blueprint cancelled by user"); errors.Is(mErr, db.ErrClaimReleased) {
+			// This claim was released before it disposed of its own step, so
+			// a successor holds the run now. Everything below acts on it —
+			// consuming its pending input, broadcasting its state, finalizing
+			// its blueprint — so none of it runs.
+			dispatchLog.Error("claim fence refused the raced-cancel terminal — a successor owns this conversation; recording nothing",
+				"run", run.ID, "claim_id", run.ClaimID, "org_id", orgID, "error", mErr)
+			return
+		} else if mErr != nil {
 			dispatchLog.Warn("mark raced-cancel step cancelled failed", "run", run.ID, "error", mErr)
 		}
 		// This claim won't run the agent, so a resume message staged for it
@@ -575,7 +584,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		stepCancel()
 	}()
 	if stepCtx.Err() != nil {
-		s.markCancelledAfterResume(orgID, run.ID, userID)
+		disposed = s.markCancelledAfterResume(orgID, run.ID, run.ClaimID, userID)
 		return
 	}
 
@@ -648,7 +657,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		claimID:           run.ClaimID,
 	}, "manual", userID)
 	if stepCtx.Err() != nil {
-		s.markCancelledAfterResume(orgID, run.ID, userID)
+		disposed = s.markCancelledAfterResume(orgID, run.ID, run.ClaimID, userID)
 		return
 	}
 	if rerr != nil {
@@ -1028,10 +1037,18 @@ func (s *Spawner) handleStepSetupError(orgID string, br *domain.BlueprintRun, ru
 }
 
 // failClaimedRun marks an orphaned claimed run failed (its blueprint_run
-// vanished, so there is nothing to drive). Best-effort.
+// vanished, so there is nothing to drive). Best-effort, and fenced on this
+// claim like every other terminal an engagement writes: if the claim is gone,
+// a successor holds the run and reaches this same branch itself.
 func (s *Spawner) failClaimedRun(orgID string, run *domain.Conversation, reason string) {
 	dispatchLog.Error("marking run failed", "run", run.ID, "reason", reason)
-	if _, err := s.agentRuns.MarkFailedIfActiveSystem(context.Background(), orgID, run.ID, ""); err != nil {
+	_, err := s.agentRuns.MarkFailedIfActiveForClaimSystem(context.Background(), orgID, run.ID, run.ClaimID, "")
+	if errors.Is(err, db.ErrClaimReleased) {
+		dispatchLog.Error("claim fence refused the orphaned-run terminal — a successor owns this conversation; recording nothing",
+			"run", run.ID, "claim_id", run.ClaimID, "org_id", orgID, "error", err)
+		return
+	}
+	if err != nil {
 		dispatchLog.Warn("mark orphaned run failed", "run", run.ID, "error", err)
 	}
 }
