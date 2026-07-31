@@ -65,9 +65,10 @@ const SETTLE_TAIL_MS = 80
 // arrives — an older browser, or a scrollTo that lands on the current offset and
 // so fires nothing at all.
 const SELF_SCROLL_MS = 150
-// How long the action row takes to fade. Short: it leads the collapse out and
-// follows the expand in, so it should be gone before the fold is underway and
-// back promptly once everything has settled.
+// How long the action row takes to fade. Short, and — for the way back in —
+// started early enough that it FINISHES as the bodies do. Waiting for them to
+// stop and only then beginning to fade reads as a separate, later event; the
+// row is meant to arrive with the step, not after it.
 const ACTIONS_FADE_MS = 160
 // The body animation's curve, for the scroll that tracks it on a backward move.
 // Same points as bodyEase, so the two finish on the same frame.
@@ -402,6 +403,10 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
       }
 
       const total = backward ? bodyDurationMs * 2 : bodyDurationMs
+      // Start the row back in one fade-length before the end, so it lands at
+      // full opacity on the same frame the bodies come to rest. Setting the
+      // same value bails out of the render, so repeating it is free.
+      if (elapsed >= total - ACTIONS_FADE_MS) setActionsHidden(false)
       if (elapsed < total + SETTLE_TAIL_MS) {
         frame = requestAnimationFrame(tick)
       } else {
