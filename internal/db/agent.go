@@ -296,6 +296,17 @@ type ConversationStore interface {
 	// Delivered inactive rows (compacted history) stay visible.
 	Messages(ctx context.Context, orgID, runID string) ([]domain.Message, error)
 
+	// MessagesSince is Messages restricted to rows above a watermark: the
+	// same display read with `id > sinceID`. It exists so a client holding a
+	// partial transcript can repair it — a websocket frame is a hint, never
+	// the only path to a row, and the run station's transcript is otherwise
+	// append-only from page load.
+	//
+	// Visibility is identical to Messages by construction (Messages is this
+	// method at sinceID 0, which every real id clears), so the two reads can
+	// never disagree about which rows a client is entitled to see.
+	MessagesSince(ctx context.Context, orgID, runID string, sinceID int) ([]domain.Message, error)
+
 	// MessagesForRuns is the batched form of Messages: every message
 	// for any of the given run IDs as one flat slice, with the same
 	// withdrawn-pending exclusion. Each run's

@@ -1189,7 +1189,15 @@ func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 	return messages, rows.Err()
 }
 
+// Messages is the whole-transcript display read — MessagesSince from the
+// bottom. id is a bigserial, so no row can be at or below 0 and the watermark
+// drops out: routing both through one query is what makes the two reads'
+// visibility filter identical rather than merely matching.
 func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
+	return s.MessagesSince(ctx, orgID, runID, 0)
+}
+
+func (s *agentRunStore) MessagesSince(ctx context.Context, orgID, runID string, sinceID int) ([]domain.Message, error) {
 	// Withdrawn-pending rows (undelivered + inactive — a staged injection
 	// that was withdrawn before any flush) never happened, so the display
 	// read hides them. delivered + inactive stays visible: that is compacted
@@ -1198,9 +1206,10 @@ func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]do
 		SELECT `+pgMessageColumns+`
 		FROM messages
 		WHERE org_id = $1 AND conversation_id = $2
+		  AND id > $3
 		  AND NOT (delivered = false AND window_state = 'inactive')
 		ORDER BY id ASC
-	`, orgID, runID)
+	`, orgID, runID, sinceID)
 	if err != nil {
 		return nil, err
 	}

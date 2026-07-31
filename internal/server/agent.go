@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -303,10 +304,18 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	conversationID := r.PathValue("conversationID")
+	// since_id is an optional watermark: the caller already holds every row up
+	// to it and wants only what came after. A client repairing a transcript it
+	// built from websocket frames polls with it, so the common (nothing
+	// dropped) answer is an empty list. Absent or unparseable reads as 0 — the
+	// whole transcript, which is what every other caller asks for — rather than
+	// a 400, since a watermark is a hint about what the caller has, not a
+	// selector it can get wrong in a way worth failing the read over.
+	sinceID, _ := strconv.Atoi(r.URL.Query().Get("since_id"))
 	var messages []domain.Message
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		messages, e = tx.Conversations.Messages(r.Context(), orgID, conversationID)
+		messages, e = tx.Conversations.MessagesSince(r.Context(), orgID, conversationID, sinceID)
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
