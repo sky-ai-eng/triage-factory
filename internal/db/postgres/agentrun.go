@@ -153,7 +153,13 @@ func completeRun(ctx context.Context, q queryer, orgID, runID, status string, co
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if claimID != "" {
+	// A zero lump settles nothing, in either arm. Zero means the runtime had
+	// nothing to report at terminal time: the native loop settles spend per
+	// assistant row as it goes, and overwriting its newest stamp with 0 would
+	// erase real recorded dollars. An SDK invocation that reports zero leaves
+	// its rows NULL — price unknown — rather than asserting the run was
+	// genuinely free.
+	if claimID != "" && costUSD != 0 {
 		// Overwrite, not add: the engagement's newest claim-attributed row
 		// is its own fresh row, and the lump is that invocation's whole
 		// total. Runtime-composed rows are skipped as targets — an errored
@@ -605,7 +611,7 @@ func markCancelledIfActive(ctx context.Context, q queryer, orgID, runID, stopRea
 // through the field the wire has always carried; predicates elsewhere keep
 // using the stored column.
 const pgRunColumns = `
-	r.id, COALESCE(r.task_id::text, ''), COALESCE(cl.phase, r.status, ''), COALESCE(r.model, ''), r.started_at, r.queued_at, cl.claimed_at, r.completed_at,
+	r.id, COALESCE(r.task_id::text, ''), COALESCE(r.runtime, ''), COALESCE(cl.phase, r.status, ''), COALESCE(r.model, ''), r.started_at, r.queued_at, cl.claimed_at, r.completed_at,
 	msum.total_cost_usd, cl.duration_ms, cl.num_turns,
 	COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
 	COALESCE(r.result_summary, ''),
@@ -1256,14 +1262,21 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 	return scanMessageRows(rows)
 }
 
-// ListForAssembly returns every row a native loop needs to rebuild this run's
-// exact LLM context, ordered by the effective assembly key COALESCE(seq,
+// ListForAssemblySystem returns every row a native loop needs to rebuild this
+// run's exact LLM context, ordered by the effective assembly key COALESCE(seq,
 // id). window_state='inactive' rows are excluded (superseded by
 // compaction); 'elided' and undelivered rows are included — see the
 // interface doc for the full contract. Pure read over messages; no
 // other table or in-process state feeds in.
-func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
-	rows, err := s.q.QueryContext(ctx, `
+//
+// Admin pool, org bound by argument: the only caller is the native loop, which
+// drives a claimed conversation on an executor with no request identity to
+// authenticate as. On the app pool this is an RLS read, and RLS evaluation
+// calls current_user_id() — which a JWT-less background job has no permission
+// to execute, so every assembly would fail at the database rather than return
+// an empty window.
+func (s *agentRunStore) ListForAssemblySystem(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
+	rows, err := s.admin.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
 		FROM messages
 		WHERE org_id = $1 AND conversation_id = $2 AND window_state <> 'inactive'
@@ -1276,24 +1289,17 @@ func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string
 	return scanMessageRows(rows)
 }
 
-// MarkDelivered flips delivered=true on the given message ids, scoped to
-// runID. ids outside the run or already delivered are silently unaffected.
-func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, ids []int) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE messages SET delivered = true
-		WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3)
-	`, orgID, runID, pgIntArray(ids))
-	return err
-}
-
-// MarkDeliveredForClaimSystem is MarkDelivered behind the fence. Consuming a
-// pending row is a claim on it: the rows an engagement folds into its
-// assembly must not be marked spent by an engagement that has been fenced
-// out, or the successor's own assembly silently loses them.
-func (s *agentRunStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, runID, claimID string, ids []int) error {
+// MarkDeliveredForClaimSystem is the engagement's drain flush, behind the
+// fence. Consuming a pending row is a claim on it: the rows an engagement
+// folds into its assembly must not be marked spent by an engagement that has
+// been fenced out, or the successor's own assembly silently loses them.
+//
+// A non-empty subtype is stamped in the same statement — the flush is the
+// moment a mid-work drain marks human input as a steer, and doing it in two
+// steps would leave a window in which a delivered row had lost its
+// provenance. NULLIF keeps the stamp optional without forking the statement:
+// an empty subtype leaves each row's own value in place.
+func (s *agentRunStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, runID, claimID string, ids []int, subtype string) error {
 	if len(ids) == 0 {
 		// Nothing to consume, so nothing to fence: an empty batch writes no
 		// rows on any path, and refusing it would make the caller handle a
@@ -1305,19 +1311,22 @@ func (s *agentRunStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, 
 			return err
 		}
 		_, err := q.ExecContext(ctx, `
-			UPDATE messages SET delivered = true
+			UPDATE messages SET delivered = true, subtype = COALESCE(NULLIF($4, ''), subtype)
 			WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3)
-		`, orgID, runID, pgIntArray(ids))
+		`, orgID, runID, pgIntArray(ids), subtype)
 		return err
 	})
 }
 
-// SetWindowState is the elision/compaction primitive: a batched range flip of
-// window_state from `from` to `to`, restricted to rows currently in state
-// `from` whose effective assembly key (COALESCE(seq, id)) is strictly less
-// than beforeSeq. Returns the number of rows flipped.
-func (s *agentRunStore) SetWindowState(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error) {
-	result, err := s.q.ExecContext(ctx, `
+// SetWindowStateSystem is the elision/compaction primitive: a batched range
+// flip of window_state from `from` to `to`, restricted to rows currently in
+// state `from` whose effective assembly key (COALESCE(seq, id)) is strictly
+// less than beforeSeq. Returns the number of rows flipped.
+//
+// Admin pool for the same reason as ListForAssemblySystem: the native loop is
+// the only caller and holds no request identity.
+func (s *agentRunStore) SetWindowStateSystem(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error) {
+	result, err := s.admin.ExecContext(ctx, `
 		UPDATE messages
 		SET window_state = $1
 		WHERE org_id = $2 AND conversation_id = $3 AND window_state = $4
@@ -1390,7 +1399,7 @@ func scanConversation(row *sql.Row, r *domain.Conversation) error {
 	var failureKind string
 
 	if err := row.Scan(
-		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
@@ -1411,7 +1420,7 @@ func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
 	var failureKind string
 
 	if err := rows.Scan(
-		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &r.Model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,

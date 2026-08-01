@@ -5,6 +5,9 @@ import (
 	"path"
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 func machinistSpec(mode Mode) Spec {
@@ -19,11 +22,38 @@ func allSpecs() []Spec {
 	var out []Spec
 	for _, mode := range []Mode{ModeLocal, ModeMulti} {
 		for _, rt := range []Runtime{RuntimeSDK, RuntimeNative} {
+			// Native is sandboxed by construction, so it has no local arm —
+			// see nativeMachinistBlocks, and TestBuild_NativeRequiresMulti
+			// below, which pins that this gap is deliberate.
+			if rt == RuntimeNative && mode == ModeLocal {
+				continue
+			}
 			out = append(out, Spec{Surface: SurfaceMachinist, Runtime: rt, Family: FamilyClaude, Mode: mode})
 		}
 		out = append(out, Spec{Surface: SurfaceCurator, Runtime: RuntimeSDK, Family: FamilyClaude, Mode: mode})
 	}
 	return out
+}
+
+// TestBuild_NativeRequiresMulti pins the one combination the manifest refuses.
+//
+// A native engagement's tools run inside a jail whose launch hard-requires a
+// prebuilt per-run network, which exists only in multi mode — so its blocks
+// name concrete in-jail paths (`/work/_tfac/...`) that would be wrong anywhere
+// else. Refusing is what keeps a native-in-local run from silently composing a
+// prompt whose every path is a lie; the launch would fail moments later
+// regardless, and failing here says why.
+func TestBuild_NativeRequiresMulti(t *testing.T) {
+	spec := Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeLocal}
+	if _, err := manifest(spec); err == nil {
+		t.Fatal("a native local-mode Spec composed a prompt; its paths only exist inside the jail")
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("Build did not panic on a Spec the manifest refuses")
+		}
+	}()
+	_ = Build(spec, Parts{})
 }
 
 // TestBuild_StableForSpec is the cacheable-prefix property (rule 3): a fixed
@@ -97,17 +127,22 @@ func TestBuild_NativeAppendsParts(t *testing.T) {
 	}
 }
 
-// TestNonTerminalCompletion_RuntimeArms: the SDK carries the handoff addendum
-// on --append-system-prompt; the native arm has no block yet and must return
-// empty rather than the SDK's JSON-envelope framing.
+// TestNonTerminalCompletion_RuntimeArms pins that each runtime gets its own
+// handoff addendum, because the two describe incompatible ways to end a step.
+// The SDK's step emits a JSON envelope carrying a "continue" outcome; the
+// native loop's just stops, and stopping IS the handoff. Handing either text
+// to the other runtime instructs the model to use a mechanism it does not have.
 func TestNonTerminalCompletion_RuntimeArms(t *testing.T) {
 	sdk := NonTerminalCompletion(machinistSpec(ModeMulti))
 	if !strings.Contains(sdk, `"outcome": "continue"`) {
 		t.Error("SDK non-terminal addendum does not offer the continue outcome")
 	}
 	native := NonTerminalCompletion(Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti})
-	if native != "" {
-		t.Errorf("native non-terminal addendum should be empty until the native loop engine lands; got %q", native)
+	if native == "" {
+		t.Fatal("native non-terminal addendum is empty; a native step would be told nothing about handing off")
+	}
+	if strings.Contains(native, `"outcome"`) {
+		t.Error("the native addendum describes the SDK's JSON envelope, which this runtime never emits")
 	}
 }
 
@@ -211,4 +246,81 @@ func walkBlocks(t *testing.T) []string {
 		t.Fatal("no blocks embedded")
 	}
 	return out
+}
+
+// TestBuild_NativeSectionOrder pins the one ordering that is load-bearing
+// rather than stylistic.
+//
+// The handoff addendum has to fall after the composed prefix and before the
+// per-run sections: it amends the completion contract, so it must be read
+// after it, and it must sit outside the cached region or the prefix forks into
+// terminal and non-terminal variants. The mission comes last so the
+// authoritative instruction is the most recent thing in the window, after the
+// externally-authored task context rather than before it.
+func TestBuild_NativeSectionOrder(t *testing.T) {
+	spec := Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti}
+	got := Build(spec, Parts{
+		RunContext:      "RUN-CTX",
+		TaskContext:     "TASK-CTX",
+		Mission:         "MISSION",
+		NonTerminalStep: true,
+	})
+
+	identity := block(blockIdentityMachinistNv)
+	completion := block(blockCompletionNative)
+	addendum := strings.TrimSpace(block(blockCompletionNativeNT))
+
+	prev := -1
+	for _, section := range []string{identity, completion, addendum, "RUN-CTX", "TASK-CTX", "MISSION"} {
+		at := strings.Index(got, section)
+		if at < 0 {
+			t.Fatalf("composed prompt is missing a section: %.40q", section)
+		}
+		if at < prev {
+			t.Fatalf("section %.40q is out of order", section)
+		}
+		prev = at
+	}
+
+	// A terminal step must not carry the addendum at all; the two shapes differ
+	// only here, which is what lets them share one cached prefix.
+	terminal := Build(spec, Parts{Mission: "MISSION"})
+	if strings.Contains(terminal, addendum) {
+		t.Error("a terminal step carries the handoff addendum")
+	}
+}
+
+// TestNativeBlocks_NameTheRealPaths ties the absolute paths the native blocks
+// spell out to the constants that produce them.
+//
+// They are written literally because the blocks must stay placeholder-free to
+// be cacheable, which trades interpolation for a drift risk: move the sandbox
+// work root or rename the scratch dir, and every native run is told to write
+// its handoff somewhere that does not exist, with nothing else failing.
+//
+// Every mention must also be reached from the fixed root. A bare relative
+// `_tfac/` resolves against whatever repo the agent last changed into, which
+// is the wrong tree and a file nobody finds again.
+func TestNativeBlocks_NameTheRealPaths(t *testing.T) {
+	root := agentproc.SandboxWorkRoot + "/" + worktree.ScratchDir
+	spec := Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti}
+	paths, err := manifest(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths = append(paths, blockCompletionNativeNT)
+
+	for _, p := range paths {
+		body := block(p)
+		if bare, rooted := strings.Count(body, worktree.ScratchDir), strings.Count(body, root); bare != rooted {
+			t.Errorf("%s names %q %d times but only %d are under the fixed %q root", p, worktree.ScratchDir, bare, rooted, root)
+		}
+	}
+
+	// The memory write path is the whole contract with the orchestrator: it
+	// reads back exactly this file, so a block naming another one loses the
+	// run's memory silently.
+	if want := root + "/memory.md"; !strings.Contains(block(blockVerbMemoryNv), want) {
+		t.Errorf("the native memory block does not name the write path %q", want)
+	}
 }

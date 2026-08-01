@@ -86,6 +86,19 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 		return ErrRunNotSteerable
 	}
 	switch {
+	case run.Runtime == domain.ConversationRuntimeNative:
+		// A native conversation has one input door, and it is the messages
+		// table: the loop drains every undelivered row before each call, so
+		// queueing the message IS delivering it — no process to signal, no
+		// resume to schedule, no routing that depends on which executor holds
+		// the work or whether it is running at all.
+		//
+		// A running conversation picks it up on its next drain (stamped as a
+		// steer, since the model is mid-work); a parked one still needs the
+		// requeue below to get an executor driving it again, which
+		// queueNativeMessage handles.
+		return s.queueNativeMessage(ctx, orgID, *run, userID, text)
+
 	case domain.IsActiveRunStatus(run.Status):
 		// In flight on an executor (claimed, setting up or running). s.Steer routes
 		// through the controller: it retries THIS pod's registry — covering the

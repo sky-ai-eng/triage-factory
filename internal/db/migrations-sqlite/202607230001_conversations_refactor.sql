@@ -309,7 +309,7 @@ CREATE TABLE messages (
     claim_id              TEXT REFERENCES claims(id) ON DELETE SET NULL,
     role                  TEXT NOT NULL,
     content               TEXT,
-    subtype               TEXT DEFAULT 'text',
+    subtype               TEXT DEFAULT '',
     tool_calls            TEXT,
     tool_call_id          TEXT,
     is_error              BOOLEAN DEFAULT 0,
@@ -447,7 +447,7 @@ FROM (
   SELECT cr.org_id AS org_id, conv.id AS conversation_id,
          cr.creator_user_id AS user_id,
          CASE WHEN cr.status <> 'queued' THEN cr.id END AS claim_id,
-         'user' AS role, cr.user_input AS content, 'text' AS subtype,
+         'user' AS role, cr.user_input AS content, '' AS subtype,
          NULL AS tool_calls, NULL AS tool_call_id, 0 AS is_error,
          NULL AS metadata, NULL AS model, NULL AS input_tokens,
          NULL AS output_tokens, NULL AS cache_read_tokens,
@@ -539,6 +539,13 @@ JOIN conversations conv
  AND conv.type = 'curator'
 WHERE cpc.consumed_at IS NULL
 ORDER BY cpc.created_at, cpc.id;
+
+-- Legacy display stamps said nothing the role and tool_calls columns don't
+-- already say; the vocabulary reserves subtype for rows that deviate from
+-- normal role behavior, with blank as normal. Normalized here so predicates
+-- match one spelling ('thinking' rows keep theirs — display skips them).
+UPDATE messages SET subtype = ''
+WHERE subtype IS NULL OR subtype IN ('text', 'tool', 'tool_use');
 
 -- ---------------------------------------------------------------------------
 -- 7. Drop everything the model dissolved.

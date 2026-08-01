@@ -102,7 +102,13 @@ func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status strin
 			return err
 		}
 		settled := false
-		if claimID != "" {
+		// A zero lump settles nothing, in either arm. Zero means the runtime
+		// had nothing to report at terminal time: the native loop settles
+		// spend per assistant row as it goes, and overwriting its newest
+		// stamp with 0 would erase real recorded dollars. An SDK invocation
+		// that reports zero leaves its rows NULL — price unknown — rather
+		// than asserting the run was genuinely free.
+		if claimID != "" && costUSD != 0 {
 			// Overwrite, not add: the engagement's newest claim-attributed
 			// row is its own fresh row, and the lump is that invocation's
 			// whole total. Runtime-composed rows are skipped as targets —
@@ -415,7 +421,7 @@ func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID,
 // engagement's setup sub-state surfaces through the field the wire has
 // always carried; predicates elsewhere keep using the stored column.
 const sqliteRunColumns = `
-	r.id, COALESCE(r.task_id, ''),
+	r.id, COALESCE(r.task_id, ''), COALESCE(r.runtime, ''),
 	COALESCE((SELECT cl.phase FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL),
 	         r.status, ''),
 	r.model, r.started_at, r.queued_at,
@@ -737,8 +743,8 @@ func (s *agentRunStore) InsertMessageForClaimSystem(ctx context.Context, orgID, 
 	return s.InsertMessage(ctx, orgID, msg)
 }
 
-func (s *agentRunStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, runID, claimID string, ids []int) error {
-	return s.MarkDelivered(ctx, orgID, runID, ids)
+func (s *agentRunStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, runID, claimID string, ids []int, subtype string) error {
+	return s.markDelivered(ctx, orgID, runID, ids, subtype)
 }
 
 func (s *agentRunStore) CompleteForClaimSystem(ctx context.Context, orgID, runID, claimID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error {
@@ -1133,13 +1139,13 @@ func (s *agentRunStore) MessagesForRuns(ctx context.Context, orgID string, runID
 	return messages, nil
 }
 
-// ListForAssembly returns every row a native loop needs to rebuild this run's
+// ListForAssemblySystem returns every row a native loop needs to rebuild this run's
 // exact LLM context, ordered by the effective assembly key COALESCE(seq, id).
 // window_state='inactive' rows are excluded (superseded by compaction);
 // 'elided' and undelivered rows are included — see the interface doc for the
 // full contract. Pure read over messages; no other table or in-process
 // state feeds in.
-func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
+func (s *agentRunStore) ListForAssemblySystem(ctx context.Context, orgID, runID string) ([]domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -1156,15 +1162,20 @@ func (s *agentRunStore) ListForAssembly(ctx context.Context, orgID, runID string
 	return scanMessageRows(rows)
 }
 
-// MarkDelivered flips delivered=true on the given message ids, scoped to
-// runID. ids outside the run or already delivered are silently unaffected.
-func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, ids []int) error {
+// markDelivered flips delivered=true on the given message ids, scoped to
+// runID, stamping subtype in the same statement when non-empty. ids outside
+// the run or already delivered are silently unaffected. Reached through
+// MarkDeliveredForClaimSystem — the flush is an engagement write, unfenced
+// on this dialect (see the claim-fence block above).
+func (s *agentRunStore) markDelivered(ctx context.Context, orgID, runID string, ids []int, subtype string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
 	if len(ids) == 0 {
 		return nil
 	}
+	// NULLIF keeps the stamp optional without forking the statement: an
+	// empty subtype leaves each row's own value in place.
 	for start := 0; start < len(ids); start += inListChunkSize {
 		end := start + inListChunkSize
 		if end > len(ids) {
@@ -1172,14 +1183,14 @@ func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, 
 		}
 		chunk := ids[start:end]
 		placeholders := make([]string, len(chunk))
-		args := make([]any, 0, len(chunk)+1)
-		args = append(args, runID)
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, subtype, runID)
 		for i, id := range chunk {
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
 		if _, err := s.q.ExecContext(ctx, `
-			UPDATE messages SET delivered = 1
+			UPDATE messages SET delivered = 1, subtype = COALESCE(NULLIF(?, ''), subtype)
 			WHERE conversation_id = ? AND id IN (`+strings.Join(placeholders, ",")+`)
 		`, args...); err != nil {
 			return err
@@ -1188,11 +1199,11 @@ func (s *agentRunStore) MarkDelivered(ctx context.Context, orgID, runID string, 
 	return nil
 }
 
-// SetWindowState is the elision/compaction primitive: a batched range flip of
+// SetWindowStateSystem is the elision/compaction primitive: a batched range flip of
 // window_state from `from` to `to`, restricted to rows currently in state
 // `from` whose effective assembly key (COALESCE(seq, id)) is strictly less
 // than beforeSeq. Returns the number of rows flipped.
-func (s *agentRunStore) SetWindowState(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error) {
+func (s *agentRunStore) SetWindowStateSystem(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}
@@ -1274,7 +1285,7 @@ func scanConversation(row *sql.Row, r *domain.Conversation) error {
 	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
 	if err := row.Scan(
-		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
@@ -1294,7 +1305,7 @@ func scanConversationRows(rows *sql.Rows, r *domain.Conversation) error {
 	var stopReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
 
 	if err := rows.Scan(
-		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
+		&r.ID, &r.TaskID, &r.Runtime, &r.Status, &model, &r.StartedAt, &queuedAt, &claimedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,

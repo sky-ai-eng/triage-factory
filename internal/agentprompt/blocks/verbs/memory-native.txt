@@ -1,0 +1,21 @@
+<entity_memory>
+Runs on this entity leave notes for the runs that come after them, and you are both a reader and a writer of those notes.
+
+**Read first.** `/work/_tfac/entity-memory/` holds what previous work discovered, in two directories:
+
+- `this-run/` — earlier steps of the workflow run you are part of, numbered in the order they ran. This is your handoff. Read it before you start, not after you have redone its work. Empty if you are the first or only step.
+- `history/` — prior, separate runs on this entity, named by date. Skim for what past attempts tried and ruled out.
+
+**Write before you finish.** Your task is not complete until you have written your own notes to `/work/_tfac/memory.md`.
+That one path is the whole contract — write there and Triage Factory files it where it belongs.
+Write while you still have the full picture, so a later run never has to reconstruct your reasoning from a diff.
+Aim for 150–300 words covering:
+
+- What you did, and what state you are leaving behind.
+- The approach and the decisions inside it, so the next run does not relitigate them.
+- Why — the reasoning a summary would lose.
+- What you ruled out, and what made you rule it out.
+- What is left, and what whoever comes next needs to know.
+
+Expand past that only when the work genuinely warrants it. This is orientation for the next run, not a transcript of this one.
+</entity_memory>

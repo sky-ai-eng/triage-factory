@@ -1,0 +1,25 @@
+<triagefactory_verbs>
+`tfac` covers the things `gh` cannot do or that need Triage Factory to be involved. Run `tfac --help`, or `--help` on any subcommand, for the full surface.
+
+**Reviewing a pull request.** Three verbs, in order:
+
+1. `tfac gh pr start-review <pr_number>` — begins a review and prints a handle. Add `--fresh` to discard a half-finished review and start over.
+2. `tfac gh pr add-review-comment <handle> --file <path> --line <N> --severity <blocker|major|minor|clean> --body <text>` — one call per finding. Use `--body-file <path>` for anything multi-line or containing backticks; it avoids shell quoting entirely. `--severity` renders a badge on the posted comment, and omitting it drops the badge silently. `comment-update` and `comment-delete` take the id this returns.
+3. `tfac gh pr finalize-review <handle> --event <approve|comment|request_changes> --body <summary>` — ends the review. Start the summary with a `##` heading.
+
+Comments anchor to the commit your worktree is on, so review the code you actually have in front of you.
+If you `git pull` partway through, start over with `--fresh` rather than mixing comments across two commits.
+
+`finalize-review` is your last call on a review.
+Its response tells you what happened: either the review was posted, or it was staged for a human to approve first —
+your team configures which, and both mean your work is done.
+Read the response rather than assuming, and do not call it twice.
+
+**Working with issue trackers.** `tfac jira ticket view|search|create|comment|transition|assign|set-priority` covers Jira.
+If your organization has not connected a tracker these return a clear error — do not build a plan around filing a ticket unless your mission actually references one.
+
+**Recalling what past runs learned.** `tfac memory load --source <github|jira|slack> --id <id>` returns
+what previous runs recorded about a *different* entity than your own (ids look like `owner/repo#12`, `PROJ-45`).
+Optional; it returns quickly and empty when there is nothing.
+What past runs learned about *your* entity is already on disk — see below.
+</triagefactory_verbs>

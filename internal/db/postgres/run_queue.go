@@ -41,6 +41,12 @@ var _ db.RunQueueStore = (*runQueueStore)(nil)
 // (open/pending_approval) to this set keep their own list.
 const runTerminalStatusesSQL = `'completed','failed','cancelled','task_unsolvable'`
 
+// EnqueueRun mints a queued delegation conversation. runtime is stamped
+// 'native' here and 'sdk' in the SQLite sibling: the dialect IS the mode
+// (Postgres is multi-only, SQLite is local-only), so the split lands where
+// the row is written rather than as a caller-passed knob. The stamp is a
+// one-way ratchet — a conversation already carrying 'sdk' keeps running
+// through the SDK path regardless of what new rows mint.
 func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain.Conversation) error {
 	triggerType := run.TriggerType
 	if triggerType == "" {
@@ -64,7 +70,7 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 			                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
 			                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id,
 			                  queued_at)
-			VALUES ($1, $2, 'delegation', 'sdk', $3, $4, $5, $6, $7, 'event', $8,
+			VALUES ($1, $2, 'delegation', 'native', $3, $4, $5, $6, $7, 'event', $8,
 			        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
 			        'team', NULL, $9, $10, $11, NULLIF($12, ''), now())
 		`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), status, run.Model, run.WorktreePath,
@@ -89,7 +95,7 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 		                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
 		                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id,
 		                  queued_at)
-		VALUES ($1, $2, 'delegation', 'sdk', $3, $4, $5, $6, $7, 'manual', $8,
+		VALUES ($1, $2, 'delegation', 'native', $3, $4, $5, $6, $7, 'manual', $8,
 		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
 		        'team',
 		        COALESCE(NULLIF($9, '')::uuid, (SELECT owner_user_id FROM orgs WHERE id = $2)),
@@ -133,7 +139,7 @@ const activeRunStatusesSQL = `'running'`
 // inserts). The claim id is returned because the executor needs to name this
 // engagement later — at teardown, once it has been released and can no
 // longer be found by looking for the conversation's active claim.
-const runQueueClaimReturning = `claimed.id::text, claimed.org_id::text, claimed.task_id::text, COALESCE(claimed.prompt_id, ''), claimed.status, COALESCE(claimed.model, ''),
+const runQueueClaimReturning = `claimed.id::text, claimed.org_id::text, claimed.task_id::text, COALESCE(claimed.prompt_id, ''), claimed.status, COALESCE(claimed.model, ''), COALESCE(claimed.runtime, ''),
 	COALESCE(claimed.worktree_path, ''), COALESCE(claimed.sdk_session_id, ''), claimed.trigger_type, COALESCE(claimed.trigger_id::text, ''),
 	COALESCE(claimed.creator_user_id::text, ''), claimed.team_id::text, COALESCE(claimed.blueprint_run_id::text, ''), claimed.blueprint_step_index,
 	minted.id::text AS claim_id, minted.claimed_at,
@@ -825,7 +831,7 @@ func scanPgClaimedRun(row *sql.Row) (*domain.Conversation, error) {
 		stepIdx   sql.NullInt64
 		claimedAt time.Time
 	)
-	err := row.Scan(&r.ID, &r.OrgID, &r.TaskID, &r.PromptID, &r.Status, &r.Model,
+	err := row.Scan(&r.ID, &r.OrgID, &r.TaskID, &r.PromptID, &r.Status, &r.Model, &r.Runtime,
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
 		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx, &r.ClaimID, &claimedAt, &r.Attempts)
 	if err == sql.ErrNoRows {

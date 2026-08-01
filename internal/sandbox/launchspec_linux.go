@@ -94,6 +94,47 @@ func TrustedGHInjectorCertPath(runID string) string {
 	return filepath.Join(trustedAgentHostSocketRoot, sanitizeRunIDForSocket(runID)+"-gh-injector.crt")
 }
 
+// TrustedToolHostBinaryDestination is the fixed in-sandbox path the
+// compiled tool host is bind-mounted at, and the first element of the
+// native runtime's pinned argv. Its source is a fixed image path, validated
+// like the pinned gh binary rather than resolved from the RPC.
+const TrustedToolHostBinaryDestination = "/opt/tf/bin/tf-harness-tools"
+
+// toolHostServeVerb is the second element of the native runtime's pinned
+// argv. Pinning the verb as well as the program is what keeps the tool
+// host's other modes (the one-shot CLI, --definitions) off the launch path:
+// only the resident server can be started as a jail's main process.
+const toolHostServeVerb = "serve"
+
+// trustedToolHostBinaryPath is the executor-host path the compiled tool
+// host is baked at (docker/Dockerfile). A var for the same reason as
+// trustedGHBinaryPath: this package's own tests point it at a stub a
+// non-root `go test` user can create. Production never reassigns it.
+var trustedToolHostBinaryPath = "/opt/tf/bin/tf-harness-tools"
+
+// TrustedToolHostBinaryPath returns the broker-trusted source for the tool
+// host mount.
+func TrustedToolHostBinaryPath() string { return trustedToolHostBinaryPath }
+
+// TrustedToolHostSocketDirDestination is the fixed in-sandbox directory the
+// per-run tool-host socket directory is bind-mounted at (read-write — the
+// in-jail server binds its socket inside it).
+//
+// A directory rather than a socket file, unlike the agenthost mount, because
+// the listener is on the far side here: the agenthost socket exists
+// host-side before launch and is mounted as a file, while the tool host's
+// socket does not exist until the jailed process binds it, so what crosses
+// the boundary is the directory it appears in.
+const TrustedToolHostSocketDirDestination = "/run/tf-tools"
+
+// TrustedToolHostSocketDir is the broker's derivation of "this run's own
+// tool-host socket directory" host-side path. Like the agenthost socket, the
+// broker does not create it — the orchestrator does, before the launch RPC —
+// so the broker VALIDATES a launch's mount source against this derivation.
+func TrustedToolHostSocketDir(runID string) string {
+	return filepath.Join(trustedAgentHostSocketRoot, sanitizeRunIDForSocket(runID)+"-tools")
+}
+
 // TrustedAgentHostSocketDestination mirrors cmd/exec/agenthost's exported
 // DefaultSocketPath — the fixed in-sandbox path the per-run agenthost
 // socket is bind-mounted at. Duplicated as a literal for the same cycle
@@ -472,17 +513,31 @@ func validateNetnsPath(runID, p string) error {
 	return nil
 }
 
-// validateArgv enforces the pinned entrypoint: the first two argv elements
-// must be exactly the node binary + wrapper. Everything after is the
-// wrapper's own arguments, which only steer the unprivileged agent.
+// validateArgv enforces a pinned entrypoint. Two are permitted, one per
+// runtime, and the orchestrator may vary only the arguments after it:
+//
+//   - the SDK runtime's node binary + wrapper, whose remaining arguments
+//     steer the unprivileged agent;
+//   - the native runtime's resident tool host + its `serve` verb, whose
+//     remaining arguments name the socket path and working directory.
+//
+// Both entrypoints are programs the broker itself resolves the source of
+// (TrustedSDKDir, TrustedToolHostBinaryPath), which is what "the broker owns
+// the command" means: adding a second pin adds a second broker-owned
+// program, not a caller-chosen one.
 func validateArgv(argv []string) error {
+	if len(argv) >= 2 && argv[0] == sandboxNodeBinary && argv[1] == sandboxWrapperEntry {
+		return nil
+	}
+	if len(argv) >= 2 && argv[0] == TrustedToolHostBinaryDestination && argv[1] == toolHostServeVerb {
+		return nil
+	}
 	if len(argv) < 2 {
-		return fmt.Errorf("sandbox: argv must start with the pinned entrypoint %s %s", sandboxNodeBinary, sandboxWrapperEntry)
+		return fmt.Errorf("sandbox: argv must start with a pinned entrypoint (%s %s, or %s %s)",
+			sandboxNodeBinary, sandboxWrapperEntry, TrustedToolHostBinaryDestination, toolHostServeVerb)
 	}
-	if argv[0] != sandboxNodeBinary || argv[1] != sandboxWrapperEntry {
-		return fmt.Errorf("sandbox: argv entrypoint %q %q is not the pinned %q %q; the broker owns the command", argv[0], argv[1], sandboxNodeBinary, sandboxWrapperEntry)
-	}
-	return nil
+	return fmt.Errorf("sandbox: argv entrypoint %q %q is not a pinned entrypoint (%q %q, or %q %q); the broker owns the command",
+		argv[0], argv[1], sandboxNodeBinary, sandboxWrapperEntry, TrustedToolHostBinaryDestination, toolHostServeVerb)
 }
 
 // ValidateLaunchParams is the broker's RPC-boundary gate. It runs before
@@ -885,6 +940,29 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 			trusted := filepath.Join(realBase, runID)
 			if realSource != trusted {
 				return fmt.Errorf("sandbox: mount %q source %q is not this run's own step-skill staging dir (want %q)", m.Destination, m.Source, trusted)
+			}
+		case TrustedToolHostBinaryDestination:
+			// Read-only is REQUIRED: an rw bind of a privileged entrypoint
+			// binary would let the jail rewrite the program the broker's
+			// pinned-argv check trusts by path.
+			if err := requireReadOnlyMount(m); err != nil {
+				return err
+			}
+			realTrusted, rErr := realPath(TrustedToolHostBinaryPath())
+			if rErr != nil {
+				return fmt.Errorf("sandbox: resolve trusted tool host binary path: %w", rErr)
+			}
+			if realSource != realTrusted {
+				return fmt.Errorf("sandbox: mount %q source %q is not the broker-resolved tool host binary path %q", m.Destination, m.Source, TrustedToolHostBinaryPath())
+			}
+		case TrustedToolHostSocketDirDestination:
+			trusted := TrustedToolHostSocketDir(runID)
+			realTrusted, rErr := realPath(trusted)
+			if rErr != nil {
+				return fmt.Errorf("sandbox: resolve this run's tool-host socket dir: %w", rErr)
+			}
+			if realSource != realTrusted {
+				return fmt.Errorf("sandbox: mount %q source %q is not this run's own tool-host socket dir (want %q)", m.Destination, m.Source, trusted)
 			}
 		case TrustedMemoryDestination:
 			// This launch's own materialized entity-memory tree (optional — absent

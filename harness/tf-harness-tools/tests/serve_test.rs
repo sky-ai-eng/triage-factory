@@ -1,7 +1,8 @@
 //! Soak + robustness suite for `tf-harness-tools serve`.
 //!
 //! These drive a real `serve` process over a real unix socket — the same
-//! bytes the out-of-process agent loop will exchange — and assert the protocol
+//! bytes, and the same connection direction, the out-of-process agent loop
+//! uses: the harness binds and `serve` dials in. They assert the protocol
 //! holds under stress and hostile input: rapid sequential calls, oversized
 //! (truncated) output, a client that dies mid-request, a server that dies
 //! mid-request, an unknown tool, and malformed frames. The server must answer
@@ -14,8 +15,8 @@
 //! (`parity/parity.ts --mode socket`).
 
 use std::io::{self, Read, Write};
-use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -26,24 +27,33 @@ const BIN: &str = env!("CARGO_BIN_EXE_tf-harness-tools");
 
 // ------------------------------------------------------------------ harness
 
-/// A running `serve` process with its socket and a scratch working directory.
+/// A running `serve` process with the listener it dialed into and a scratch
+/// working directory.
 struct ServeProc {
     child: Child,
     _sockdir: TempDir,
-    sock: PathBuf,
+    listener: UnixListener,
     work: TempDir,
 }
 
 impl ServeProc {
-    /// Spawn `serve --socket <sock> --cwd <work>`. The socket lives in its own
-    /// directory so it never shows up in `ls`/`find` over the work dir.
+    /// Bind the socket, then spawn `serve --connect <sock> --cwd <work>`.
+    ///
+    /// The harness owns the listener because the jail cannot bind one — see the
+    /// `serve` module header. Binding BEFORE the spawn also removes the race
+    /// the old direction had to retry around: the child's connect either
+    /// succeeds immediately or fails loudly, with nothing to poll for.
+    ///
+    /// The socket lives in its own directory so it never shows up in
+    /// `ls`/`find` over the work dir.
     fn start() -> ServeProc {
         let sockdir = TempDir::new().unwrap();
         let work = TempDir::new().unwrap();
         let sock = sockdir.path().join("toolhost.sock");
+        let listener = UnixListener::bind(&sock).expect("bind toolhost socket");
         let child = Command::new(BIN)
             .arg("serve")
-            .arg("--socket")
+            .arg("--connect")
             .arg(&sock)
             .arg("--cwd")
             .arg(work.path())
@@ -55,7 +65,7 @@ impl ServeProc {
         ServeProc {
             child,
             _sockdir: sockdir,
-            sock,
+            listener,
             work,
         }
     }
@@ -64,13 +74,16 @@ impl ServeProc {
         self.work.path().to_str().unwrap()
     }
 
-    /// Connect once the socket is listening, with a bounded retry so we don't
-    /// race the bind.
-    fn connect(&self) -> UnixStream {
+    /// Accept the connection `serve` dials in, bounded so a child that never
+    /// dials fails the test instead of hanging it.
+    fn accept(&self) -> UnixStream {
+        self.listener.set_nonblocking(true).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            match UnixStream::connect(&self.sock) {
-                Ok(stream) => {
+            match self.listener.accept() {
+                Ok((stream, _)) => {
+                    self.listener.set_nonblocking(false).unwrap();
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(20)))
                         .unwrap();
@@ -79,10 +92,13 @@ impl ServeProc {
                         .unwrap();
                     return stream;
                 }
-                Err(_) if Instant::now() < deadline => {
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        panic!("serve never dialed in");
+                    }
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                Err(e) => panic!("serve never became connectable: {e}"),
+                Err(e) => panic!("accepting serve's connection failed: {e}"),
             }
         }
     }
@@ -189,7 +205,7 @@ fn rapid_sequential_calls_stay_paired_and_alive() {
     let proc = ServeProc::start();
     let cwd = proc.work_path().to_string();
     write_file(&cwd, "seed.txt", "hello\nworld\n");
-    let mut stream = proc.connect();
+    let mut stream = proc.accept();
 
     // Many back-to-back requests on one connection; each response must carry
     // its own echoed id and the connection must survive the whole run.
@@ -228,7 +244,7 @@ fn oversized_read_output_is_byte_identical_to_direct() {
         .join("\n");
     write_file(&cwd, "big.txt", &big);
 
-    let mut stream = proc.connect();
+    let mut stream = proc.accept();
     let resp = call(
         &mut stream,
         &json!({ "id": "r", "tool": "read", "args": { "path": "big.txt" } }),
@@ -246,7 +262,7 @@ fn oversized_read_output_is_byte_identical_to_direct() {
 fn oversized_bash_output_truncates_like_direct() {
     let proc = ServeProc::start();
     let cwd = proc.work_path().to_string();
-    let mut stream = proc.connect();
+    let mut stream = proc.accept();
 
     // `seq 3000` blows the line budget and spills to a temp file. The spill
     // path is random per call, so compare with it normalized away — everything
@@ -275,7 +291,7 @@ fn oversized_bash_output_truncates_like_direct() {
 #[test]
 fn unknown_tool_is_a_structured_protocol_error() {
     let proc = ServeProc::start();
-    let mut stream = proc.connect();
+    let mut stream = proc.accept();
     let resp = call(
         &mut stream,
         &json!({ "id": 9, "tool": "frobnicate", "args": {} }),
@@ -294,7 +310,7 @@ fn unknown_tool_is_a_structured_protocol_error() {
 #[test]
 fn malformed_frames_never_crash_the_server() {
     let proc = ServeProc::start();
-    let mut stream = proc.connect();
+    let mut stream = proc.accept();
 
     // (1) A body that is not JSON at all.
     let resp = call(&mut stream, &json!(null)); // sends the JSON `null` — valid JSON, not an object
@@ -335,7 +351,7 @@ fn malformed_frames_never_crash_the_server() {
 #[test]
 fn oversized_length_prefix_is_refused_and_closes() {
     let proc = ServeProc::start();
-    let mut stream = proc.connect();
+    let mut stream = proc.accept();
 
     // A 4-byte header claiming a ~4 GiB body, and no body — the classic hostile
     // prefix. The server must refuse it without allocating, answer a protocol
@@ -367,7 +383,7 @@ fn oversized_length_prefix_is_refused_and_closes() {
 #[test]
 fn client_death_mid_request_exits_the_server_cleanly() {
     let proc = ServeProc::start();
-    let mut stream = proc.connect();
+    let mut stream = proc.accept();
 
     // Fire a request that takes a beat, then vanish without reading the reply.
     // The server finishes the tool, its response write fails (or buffers), it
@@ -396,7 +412,7 @@ fn client_death_mid_request_exits_the_server_cleanly() {
 #[test]
 fn server_death_mid_request_fails_the_client_read() {
     let mut proc = ServeProc::start();
-    let mut stream = proc.connect();
+    let mut stream = proc.accept();
 
     // In-flight request, then hard-kill the server. The response never arrives;
     // the client's frame read fails on EOF (the loser contract).

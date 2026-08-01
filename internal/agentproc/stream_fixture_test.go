@@ -53,7 +53,7 @@ func TestParseLine_FixtureStream(t *testing.T) {
 	// single text block is flat Content with no ContentBlocks promotion,
 	// and both tool_use calls landed on ToolCalls in order.
 	asst1 := all[0]
-	if asst1.Role != "assistant" || asst1.ConversationID != "run-1" || asst1.Subtype != "tool_use" {
+	if asst1.Role != "assistant" || asst1.ConversationID != "run-1" || asst1.Subtype != "" {
 		t.Errorf("asst1 shape wrong: %+v", asst1)
 	}
 	if asst1.Content != "I'll check both files." {
@@ -105,7 +105,7 @@ func TestParseLine_FixtureStream(t *testing.T) {
 	// Message 3: the second assistant turn — plain text, no reasoning, no
 	// tool calls, no content blocks.
 	asst2 := all[3]
-	if asst2.Role != "assistant" || asst2.Subtype != "text" || asst2.Content != "Done." {
+	if asst2.Role != "assistant" || asst2.Subtype != "" || asst2.Content != "Done." {
 		t.Errorf("asst2 wrong: %+v", asst2)
 	}
 	if asst2.Reasoning != nil || asst2.ContentBlocks != nil || asst2.ToolCalls != nil {

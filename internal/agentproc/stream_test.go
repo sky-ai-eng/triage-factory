@@ -157,7 +157,7 @@ func TestParseLine_ToolUseAndToolResult(t *testing.T) {
 	s.ParseLine([]byte(`{"type":"system","subtype":"init","session_id":"s"}`), "t")
 	s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"/x"}}]}}`), "t")
 	flushed, _ := s.ParseLine([]byte(`{"type":"assistant","message":{"id":"m1","stop_reason":"tool_use","content":[]}}`), "t")
-	if len(flushed) != 1 || flushed[0].Subtype != "tool_use" || len(flushed[0].ToolCalls) != 1 {
+	if len(flushed) != 1 || flushed[0].Subtype != "" || len(flushed[0].ToolCalls) != 1 {
 		t.Fatalf("expected flushed assistant tool_use; got %+v", flushed)
 	}
 	if flushed[0].ToolCalls[0].Name != "Read" {

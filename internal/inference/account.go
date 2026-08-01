@@ -50,6 +50,19 @@ type ProviderCredentials struct {
 	// AssumeRole config). Nil for a direct Anthropic key.
 	Bedrock *BedrockCredentials
 
+	// AllowPrivateNetwork lifts bifrost's refusal to dial an RFC 1918 address.
+	//
+	// That refusal is an SSRF guard, and it is aimed at a base URL an attacker
+	// can influence — the classic "make the server fetch an internal service
+	// for me". Off by default here for exactly that reason: a caller has to
+	// state that its endpoint is not attacker-influenced.
+	//
+	// Link-local (169.254.0.0/16, fe80::/10) stays blocked either way, inside
+	// bifrost, with no opt-out — so the cloud instance-metadata endpoint, which
+	// is the prize this class of guard exists to protect, is out of reach
+	// regardless of what this field says.
+	AllowPrivateNetwork bool
+
 	// Concurrency / BufferSize override the modest defaults for this provider's
 	// worker pool and queue. Zero uses the defaults.
 	Concurrency int
@@ -171,8 +184,9 @@ func buildProviderConfig(c ProviderCredentials) *schemas.ProviderConfig {
 	}
 	cfg := &schemas.ProviderConfig{
 		NetworkConfig: schemas.NetworkConfig{
-			BaseURL:      c.BaseURL,
-			ExtraHeaders: c.ExtraHeaders,
+			BaseURL:             c.BaseURL,
+			ExtraHeaders:        c.ExtraHeaders,
+			AllowPrivateNetwork: c.AllowPrivateNetwork,
 		},
 		ConcurrencyAndBufferSize: schemas.ConcurrencyAndBufferSize{
 			Concurrency: concurrency,

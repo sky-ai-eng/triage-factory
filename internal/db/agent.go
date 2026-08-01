@@ -253,17 +253,21 @@ type ConversationStore interface {
 	// messages.role is app-validated (no CHECK): "assistant" | "tool" |
 	// "user". "user" covers both a human's free-form message and the native
 	// loop's injected input; subtype further discriminates the latter via
-	// the reserved (not yet minted by any code in this repo) subtypes
-	// "injection:compaction-request", "injection:compaction-result", and
-	// "injection:steer".
+	// the "injection:*" subtypes. "injection:steer" (input drained between
+	// turns, while the model was mid-work) and "injection:executor-changed"
+	// (the claim-time notice that the workspace was restored from its last
+	// snapshot) are minted by the native loop;
+	// "injection:compaction-request" and "injection:compaction-result" are
+	// reserved and not yet minted by any code in this repo.
 	//
 	// InsertMessage/InsertMessageSystem/Messages/MessagesForRuns below serve
 	// today's readers (the SDK runtime's live stream, the UI transcript
 	// endpoints, spend sums) and are unchanged in observable behavior.
-	// ListForAssembly/MarkDelivered/SetWindowState exist for the native
-	// loop (P1+): assembly is a pure function of messages rows and nothing
-	// else — no run-level or process-level side-state may influence what a
-	// loop reconstructs from these three methods, only the rows themselves.
+	// ListForAssemblySystem/MarkDeliveredForClaimSystem/SetWindowStateSystem
+	// exist for the native loop (P1+): assembly is a pure function of
+	// messages rows and nothing else — no run-level or process-level
+	// side-state may influence what a loop reconstructs from these methods,
+	// only the rows themselves.
 
 	// InsertMessage inserts a messages row and returns its
 	// auto-assigned id. If msg.CreatedAt is zero, it is stamped
@@ -335,7 +339,7 @@ type ConversationStore interface {
 	// include=messages read. Empty runIDs returns nil.
 	MessagesForRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Message, error)
 
-	// ListForAssembly returns every row a native loop needs to rebuild this
+	// ListForAssemblySystem returns every row a native loop needs to rebuild this
 	// run's exact LLM context, ordered by the effective assembly key
 	// COALESCE(seq, id). window_state='inactive' rows are excluded
 	// (superseded by compaction, permanently out of the window);
@@ -350,13 +354,11 @@ type ConversationStore interface {
 	// process-level state — if a future rule needs to change what gets
 	// assembled, it must become a column on this table, per the epic's
 	// standing rule.
-	ListForAssembly(ctx context.Context, orgID, runID string) ([]domain.Message, error)
+	ListForAssemblySystem(ctx context.Context, orgID, runID string) ([]domain.Message, error)
 
-	// MarkDelivered flips delivered=true on the given message ids — the
-	// batch primitive a native loop calls once it has folded a run of
-	// pending rows into an assembly. ids outside runID, already delivered,
-	// or nonexistent are silently skipped (no error, no-op).
-	MarkDelivered(ctx context.Context, orgID, runID string, ids []int) error
+	// The delivered flush lives on MarkDeliveredForClaimSystem below:
+	// consuming pending rows is an engagement write, so it goes through the
+	// claim fence like every other write the loop makes.
 
 	// SetWindowState is the elision/compaction primitive: a batched range
 	// flip of window_state from `from` to `to`, restricted to rows currently
@@ -365,7 +367,7 @@ type ConversationStore interface {
 	// Called only from a batched cold-moment pass (elision) or compaction —
 	// never per-step — per the epic's KV-cache discipline; no production
 	// caller exists yet (this ships the primitive, not the policy — P3).
-	SetWindowState(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error)
+	SetWindowStateSystem(ctx context.Context, orgID, runID string, beforeSeq float64, from, to domain.MessageWindowState) (int, error)
 
 	// --- Admin-pool variants (`...System`) ---
 	//
@@ -462,10 +464,19 @@ type ConversationStore interface {
 	// and the claim the row records are the same one by construction.
 	InsertMessageForClaimSystem(ctx context.Context, orgID, claimID string, msg *domain.Message) (int64, error)
 
-	// MarkDeliveredForClaimSystem is MarkDelivered for an engagement: the
+	// MarkDeliveredForClaimSystem is the engagement's drain flush: the
 	// pending rows it folded into an assembly are only its to consume while
 	// it still owns the conversation.
-	MarkDeliveredForClaimSystem(ctx context.Context, orgID, runID, claimID string, ids []int) error
+	//
+	// subtype, when non-empty, is stamped onto the same rows in the same
+	// statement. The loop's mid-turn drain flushes human input with
+	// "injection:steer" so the row records — durably, in the column
+	// assembly reads — that it arrived while the model was working; a bare
+	// drain passes "" and leaves each row's own subtype alone. One
+	// statement rather than flush-then-stamp because a crash between the
+	// two would leave a delivered row whose provenance was lost, and
+	// assembly would then render it as an ordinary user turn.
+	MarkDeliveredForClaimSystem(ctx context.Context, orgID, runID, claimID string, ids []int, subtype string) error
 
 	// CompleteForClaimSystem is Complete driven by the engagement that ran
 	// the invocation: same status flip, cost settlement, and claim release,

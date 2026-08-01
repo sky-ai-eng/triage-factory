@@ -822,7 +822,7 @@ func TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages(t *testing.T) {
 		}
 	}
 	assertUndelivered("pending follow-up",
-		`SELECT COUNT(*) FROM messages WHERE conversation_id='r1' AND role='user' AND content='resume me' AND user_id='u1' AND delivered=0 AND subtype='text'`, 1)
+		`SELECT COUNT(*) FROM messages WHERE conversation_id='r1' AND role='user' AND content='resume me' AND user_id='u1' AND delivered=0 AND subtype=''`, 1)
 	assertUndelivered("staged injection",
 		`SELECT COUNT(*) FROM messages WHERE conversation_id='r1' AND subtype='injection:system-note' AND content='PR gained commits' AND delivered=0 AND json_extract(metadata,'$.producer')='new_commits'`, 1)
 	assertUndelivered("queued curator turn",

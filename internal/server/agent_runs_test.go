@@ -35,7 +35,7 @@ func TestHandleConversations_Batched(t *testing.T) {
 	store := sqlitestore.New(s.db)
 	seedMsg := func(runID, content string) {
 		if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Content: content, Subtype: "text",
+			ConversationID: runID, Role: "assistant", Content: content,
 		}); err != nil {
 			t.Fatalf("InsertMessage(%s): %v", runID, err)
 		}
@@ -169,7 +169,7 @@ func TestHandleMessages_SinceID(t *testing.T) {
 	ids := map[string]int{}
 	for _, content := range []string{"first", "second", "third"} {
 		id, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Content: content, Subtype: "text",
+			ConversationID: runID, Role: "assistant", Content: content,
 		})
 		if err != nil {
 			t.Fatalf("InsertMessage(%s): %v", content, err)
@@ -230,7 +230,7 @@ func TestRunResponse_TokenSums(t *testing.T) {
 	usage := func(in, out, cacheRead, cacheWrite int) {
 		t.Helper()
 		if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Content: "working", Subtype: "text",
+			ConversationID: runID, Role: "assistant", Content: "working",
 			InputTokens: &in, OutputTokens: &out, CacheReadTokens: &cacheRead, CacheCreationTokens: &cacheWrite,
 		}); err != nil {
 			t.Fatalf("InsertMessage: %v", err)
@@ -241,7 +241,7 @@ func TestRunResponse_TokenSums(t *testing.T) {
 	// A row with no usage at all (a user message / tool result) contributes
 	// nothing rather than breaking the SUM.
 	if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-		ConversationID: runID, Role: "user", Content: "carry on", Subtype: "text",
+		ConversationID: runID, Role: "user", Content: "carry on",
 	}); err != nil {
 		t.Fatalf("InsertMessage(no usage): %v", err)
 	}

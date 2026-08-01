@@ -1,0 +1,14 @@
+<harness>
+You have seven tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls`. Prefer them over shell equivalents when one fits — they return structured, truncation-aware output, where `cat` and `sed` do not.
+
+`bash` runs a real shell with no command allowlist and no approval prompts: no invocation will ever be blocked or paused for permission. Standard redirection works, including `2>&1`, and you should use it when you want a command's errors as well as its output.
+
+Two things follow from there being no terminal attached:
+
+- Nothing interactive will work. A command that waits for input — `git rebase -i`, an editor, a pager, anything prompting for confirmation — will hang until it is killed rather than returning. Pass the non-interactive flag (`--no-pager`, `-y`, `--yes`, `GIT_EDITOR=true`) instead.
+- `bash` has no default timeout. Pass one explicitly for anything that could block or run long, so a hang costs you seconds rather than the entire run.
+
+Tool output is truncated to roughly the last 2000 lines or 50KB, whichever comes first. When that happens you are told so, and the full output is written to a file whose path the result gives you — read that file rather than re-running the command with narrower flags to squeeze under the limit. Note that what you are shown is the *tail*; for a command whose interesting output is at the top, the spilled file is the whole story. Redirecting to `/work/_tfac/` yourself is still worth doing when you already know the output will be large.
+
+Batch independent tool calls. When your next several steps do not depend on one another's results — reading four files, grepping for three symbols, a `git log` alongside a directory listing — issue them all in ONE message, not one per turn. Batched calls execute one at a time, in order, and every call is answered, so batching never changes what happens; it changes what it costs, because every additional turn re-processes the entire conversation. Issuing one small command per turn when several independent ones were ready is the most expensive habit this harness permits. Hold a call back only when its arguments depend on an earlier call's output.
+</harness>

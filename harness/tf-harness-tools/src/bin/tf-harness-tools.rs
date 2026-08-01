@@ -3,16 +3,17 @@
 //!
 //! Usage:
 //!   tf-harness-tools <tool> [--cwd DIR] [ARGS_JSON]
-//!   tf-harness-tools serve --socket PATH [--cwd DIR]
+//!   tf-harness-tools serve --connect PATH [--cwd DIR]
 //!   tf-harness-tools --definitions
 //!
 //! Args JSON comes from the positional argument or stdin. Output is a JSON
 //! envelope on stdout: {"ok":true,"result":{...}} or
 //! {"ok":false,"error":"..."} (exit 1).
 //!
-//! `serve` is the resident tool-host: it listens on a unix stream socket and
-//! answers length-prefixed JSON tool-call frames for an out-of-process agent
-//! loop. See `tf_harness_tools::serve` for the protocol.
+//! `serve` is the resident tool-host: it connects to a unix stream socket the
+//! loop has already bound and answers length-prefixed JSON tool-call frames on
+//! it. See `tf_harness_tools::serve` for the protocol and for why this side
+//! dials rather than listens.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -35,7 +36,7 @@ fn main() {
     }
 
     let Some(tool) = argv.get(1) else {
-        eprintln!("usage: tf-harness-tools <tool> [--cwd DIR] [ARGS_JSON] | tf-harness-tools serve --socket PATH [--cwd DIR] | tf-harness-tools --definitions");
+        eprintln!("usage: tf-harness-tools <tool> [--cwd DIR] [ARGS_JSON] | tf-harness-tools serve --connect PATH [--cwd DIR] | tf-harness-tools --definitions");
         std::process::exit(2);
     };
 
@@ -99,16 +100,21 @@ fn main() {
     }
 }
 
-/// `serve --socket PATH [--cwd DIR]`: bind the socket and serve one engagement.
-/// `--cwd` defaults to the process working directory, matching the one-shot
-/// path.
+/// `serve --connect PATH [--cwd DIR]`: dial the peer's socket and serve one
+/// engagement over it. `--cwd` defaults to the process working directory,
+/// matching the one-shot path.
+///
+/// The flag names the direction because the direction is the surprising part:
+/// the peer binds and this process connects. See the `serve` module header —
+/// a listener in here would need gVisor's `--host-uds=create`, which the jail
+/// deliberately does not get.
 fn run_serve(args: &[String]) {
     let mut socket: Option<PathBuf> = None;
     let mut cwd: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--socket" => {
+            "--connect" => {
                 socket = args.get(i + 1).map(PathBuf::from);
                 i += 2;
             }
@@ -124,7 +130,7 @@ fn run_serve(args: &[String]) {
     }
 
     let Some(socket) = socket else {
-        eprintln!("serve: --socket PATH is required");
+        eprintln!("serve: --connect PATH is required");
         std::process::exit(2);
     };
 
@@ -134,7 +140,7 @@ fn run_serve(args: &[String]) {
             .unwrap_or_else(|_| "/".to_string())
     });
 
-    if let Err(err) = tf_harness_tools::serve::serve(&socket, &cwd) {
+    if let Err(err) = tf_harness_tools::serve::connect_and_serve(&socket, &cwd) {
         eprintln!("serve: {err}");
         std::process::exit(1);
     }

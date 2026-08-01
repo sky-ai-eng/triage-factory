@@ -135,7 +135,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	}
 	if _, err := stores.Conversations.InsertMessage(ctx, org, &domain.Message{
 		ConversationID: conv.ID, UserID: user, ClaimID: claimID,
-		Role: "assistant", Subtype: "text", Content: "done", CreatedAt: time.Now().UTC(),
+		Role: "assistant", Content: "done", CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("insert curator message: %v", err)
 	}
@@ -341,7 +341,7 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	var userTurns, replies, pendingInjections int
 	for _, m := range msgs {
 		switch {
-		case m.Role == "user" && m.Subtype == "text":
+		case m.Role == "user" && m.Subtype == "":
 			userTurns++
 		case m.Role == "assistant":
 			replies++

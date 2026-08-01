@@ -160,7 +160,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		withClaims(t, h, func(ts db.TxStores) error {
 			_, err := ts.Conversations.InsertMessage(ctx, h.OrgID, &domain.Message{
 				ConversationID: convID, UserID: h.UserID, ClaimID: claimID,
-				Role: "assistant", Subtype: "text", Content: "ack",
+				Role: "assistant", Content: "ack",
 				InputTokens: ip(11), OutputTokens: ip(22), CacheReadTokens: ip(33), CacheCreationTokens: ip(44),
 			})
 			return err
@@ -279,7 +279,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		withClaims(t, h, func(ts db.TxStores) error {
 			if _, err := ts.Conversations.InsertMessage(ctx, h.OrgID, &domain.Message{
 				ConversationID: convID, UserID: h.UserID, ClaimID: claimID,
-				Role: "assistant", Subtype: "text", Content: "real turn", Model: "claude-opus-5",
+				Role: "assistant", Content: "real turn", Model: "claude-opus-5",
 			}); err != nil {
 				return err
 			}
@@ -288,13 +288,13 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			// it and inside the per-model breakdown.
 			if _, err := ts.Conversations.InsertMessage(ctx, h.OrgID, &domain.Message{
 				ConversationID: convID, UserID: h.UserID, ClaimID: claimID,
-				Role: "tool", Subtype: "tool", Content: "tool result",
+				Role: "tool", Content: "tool result",
 			}); err != nil {
 				return err
 			}
 			_, err := ts.Conversations.InsertMessage(ctx, h.OrgID, &domain.Message{
 				ConversationID: convID, UserID: h.UserID, ClaimID: claimID,
-				Role: "assistant", Subtype: "text", Content: "API Error: overloaded",
+				Role: "assistant", Content: "API Error: overloaded",
 				Model: domain.ModelSynthetic,
 			})
 			return err
@@ -983,13 +983,13 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		delivered := true
 		seq := 1.5
 		msgs := []domain.Message{
-			{ConversationID: conv.ID, UserID: h.UserID, Role: "user", Subtype: "text", Content: "imported turn", Delivered: &delivered},
-			{ConversationID: conv.ID, UserID: h.UserID, ClaimID: claim.ID, Role: "assistant", Subtype: "text", Content: "imported ack",
+			{ConversationID: conv.ID, UserID: h.UserID, Role: "user", Content: "imported turn", Delivered: &delivered},
+			{ConversationID: conv.ID, UserID: h.UserID, ClaimID: claim.ID, Role: "assistant", Content: "imported ack",
 				InputTokens: &tokens, CostUSD: &cost},
 			// A compacted row: retired from the active window with a
 			// fractional assembly override. Both fields must survive the
 			// round-trip or the row reappears active after an import.
-			{ConversationID: conv.ID, UserID: h.UserID, Role: "assistant", Subtype: "text", Content: "imported compaction",
+			{ConversationID: conv.ID, UserID: h.UserID, Role: "assistant", Content: "imported compaction",
 				Delivered: &delivered, WindowState: domain.MessageWindowInactive, Seq: &seq},
 		}
 		if err := h.Stores.Curator.ImportConversationStateSystem(ctx, h.OrgID, conv, []domain.Claim{claim}, msgs); err != nil {

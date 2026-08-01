@@ -240,7 +240,6 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 		s.current = &domain.Message{
 			ConversationID: traceID,
 			Role:           "assistant",
-			Subtype:        "text",
 			Model:          model,
 		}
 	}
@@ -292,7 +291,6 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 			toolName, _ := b["name"].(string)
 			toolID, _ := b["id"].(string)
 			toolInput, _ := b["input"].(map[string]any)
-			s.current.Subtype = "tool_use"
 			s.current.ToolCalls = append(s.current.ToolCalls, domain.ToolCall{
 				ID:    toolID,
 				Name:  toolName,
@@ -371,7 +369,6 @@ func (s *StreamState) parseToolResult(raw map[string]any, traceID string) []*dom
 		out = append(out, &domain.Message{
 			ConversationID: traceID,
 			Role:           "tool",
-			Subtype:        "tool",
 			Content:        content,
 			ToolCallID:     toolUseID,
 			IsError:        isError,

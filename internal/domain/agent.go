@@ -88,6 +88,48 @@ const (
 	RunFailureSessionLost RunFailureKind = "session_lost"
 )
 
+// The conversations.runtime vocabulary — which engine drives a
+// conversation's transcript. It is a one-way ratchet stamped at mint: a
+// transcript that ran under the native loop can never be continued by the
+// SDK, whose session-file state the native rows do not reconstruct.
+const (
+	// ConversationRuntimeSDK drives the transcript through the Claude Code
+	// SDK subprocess (internal/agentproc).
+	ConversationRuntimeSDK = "sdk"
+	// ConversationRuntimeNative drives the transcript through the in-process
+	// Go agent loop (internal/agentloop), dispatching tools into the jail.
+	ConversationRuntimeNative = "native"
+)
+
+// InjectionSubtype values discriminate a `role=user` row the system wrote
+// on the agent's behalf from one a human typed. Assembly reads them (a
+// steer row renders inside a keep-working envelope); display reads them to
+// label the row; the native loop's turn budget reads them to tell genuine
+// user input apart from its own insertions — only a human row renews the
+// budget, so every loop-authored row must carry a subtype outside the
+// human set ("", "text", the steer stamp).
+const (
+	// MessageSubtypeInjectionSteer marks input that was drained between
+	// turns — the model was mid-work when it arrived.
+	MessageSubtypeInjectionSteer = "injection:steer"
+	// MessageSubtypeInjectionExecutorChanged marks the claim-time notice
+	// that the workspace was restored from its last snapshot, so work done
+	// during an interrupted engagement may be absent.
+	MessageSubtypeInjectionExecutorChanged = "injection:executor-changed"
+	// MessageSubtypeInjectionNudge marks a would-stop nudge the loop
+	// inserted on a hook's behalf (the artifact contract, today).
+	MessageSubtypeInjectionNudge = "injection:nudge"
+	// MessageSubtypeInjectionWrapUp marks the one-call-left notice asking
+	// the model to write a wrap-up summary before the turn budget pauses
+	// the run.
+	MessageSubtypeInjectionWrapUp = "injection:wrap-up"
+	// MessageSubtypeStopNote marks a delivered row recording why an
+	// engagement stopped — a guard park, an unrecoverable provider error.
+	// A statement of fact written into history, not input awaiting
+	// consumption, which is why it carries no injection: prefix.
+	MessageSubtypeStopNote = "stop-note"
+)
+
 // Conversation is the durable agent-context row: one row per transcript,
 // regardless of surface (a delegated task run, a curator chat, a future
 // interactive session or subagent). Per-engagement execution state lives on
@@ -98,9 +140,9 @@ type Conversation struct {
 	// "interactive" (reserved) | namespaced "subagent:<kind>" (reserved).
 	// Empty on legacy hydration paths that don't select it.
 	Type string `json:"type,omitempty"`
-	// Runtime is the executing engine: "sdk" | "native" — a one-way
-	// ratchet per conversation (the SDK can never continue a transcript
-	// that ran native).
+	// Runtime is the executing engine: ConversationRuntimeSDK |
+	// ConversationRuntimeNative — a one-way ratchet per conversation (the
+	// SDK can never continue a transcript that ran native).
 	Runtime string `json:"runtime,omitempty"`
 	// Visibility mirrors conversations.visibility ("private" | "team" |
 	// "org"). Curator conversations mint "private" — creator-scoped by the

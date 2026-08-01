@@ -228,7 +228,7 @@ func synthesizeCuratorTurns(projectID string, messages []domain.Message, claims 
 			accumulate(&m)
 			continue
 		}
-		if m.Role == "user" && m.Subtype == "text" {
+		if m.Role == "user" && m.Subtype == "" {
 			flush()
 			cur = &curatorRequestJSON{
 				CuratorRequest: domain.CuratorRequest{

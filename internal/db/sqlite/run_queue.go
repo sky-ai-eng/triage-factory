@@ -41,10 +41,14 @@ const runTerminalStatusesSQL = `'completed','failed','cancelled','task_unsolvabl
 // the owning team for the capture writers. The claim identity fields
 // (ExecutorID/ClaimedAt/Attempts) are hydrated from the freshly minted
 // claims row, not this projection.
-const runQueueClaimCols = `id, org_id, task_id, COALESCE(prompt_id, ''), status, COALESCE(model, ''),
+const runQueueClaimCols = `id, org_id, task_id, COALESCE(prompt_id, ''), status, COALESCE(model, ''), COALESCE(runtime, ''),
 	COALESCE(worktree_path, ''), COALESCE(sdk_session_id, ''), trigger_type, COALESCE(trigger_id, ''),
 	COALESCE(creator_user_id, ''), team_id, COALESCE(blueprint_run_id, ''), blueprint_step_index`
 
+// EnqueueRun mints a queued delegation conversation. runtime is stamped
+// 'sdk': SQLite is local mode, which keeps the Claude Code SDK runtime.
+// The Postgres sibling stamps 'native' — the dialect IS the mode, so the
+// split lands where the row is written rather than as a caller-passed knob.
 func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain.Conversation) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
@@ -741,7 +745,7 @@ func scanSqliteClaimedRun(row *sql.Row) (*domain.Conversation, error) {
 		r       domain.Conversation
 		stepIdx sql.NullInt64
 	)
-	err := row.Scan(&r.ID, &r.OrgID, &r.TaskID, &r.PromptID, &r.Status, &r.Model,
+	err := row.Scan(&r.ID, &r.OrgID, &r.TaskID, &r.PromptID, &r.Status, &r.Model, &r.Runtime,
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
 		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx)
 	if err == sql.ErrNoRows {

@@ -131,12 +131,12 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		}
 		reap(t, h.AdminDB, fx.orgID, fx.runID)
 
-		if err := fx.store.MarkDeliveredForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, []int{int(id)}); !errors.Is(err, db.ErrClaimReleased) {
+		if err := fx.store.MarkDeliveredForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, []int{int(id)}, ""); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("mark-delivered after reap = %v, want ErrClaimReleased", err)
 		}
 		// The row is still pending, so the successor's assembly still sees it
 		// — which is the corruption the refusal prevented.
-		msgs, err := fx.store.ListForAssembly(ctx, fx.orgID, fx.runID)
+		msgs, err := fx.store.ListForAssemblySystem(ctx, fx.orgID, fx.runID)
 		if err != nil || len(msgs) != 1 {
 			t.Fatalf("ListForAssembly = %+v (err %v)", msgs, err)
 		}

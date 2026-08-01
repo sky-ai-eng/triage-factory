@@ -10,7 +10,7 @@ import (
 
 // runPendingInputStore is the SQLite impl of db.RunPendingInputStore — the
 // durable half of resume-by-enqueue (TFAC-585), stored as an undelivered
-// plain user message (role='user', subtype='text', delivered=0) on the
+// plain user message (role='user', blank subtype, delivered=0) on the
 // conversation's own transcript. SQLite is N=1, no RLS; org_id exists for
 // parity with the Postgres baseline and every caller passes
 // LocalDefaultOrgID (asserted at each entry).
@@ -26,7 +26,7 @@ var _ db.RunPendingInputStore = (*runPendingInputStore)(nil)
 // store owns: the conversation's undelivered plain user message. The
 // subtype filter keeps it disjoint from the staged-injection notes, which
 // are also undelivered user rows.
-const pendingInputPredicate = `org_id = ? AND conversation_id = ? AND role = 'user' AND subtype = 'text' AND delivered = 0`
+const pendingInputPredicate = `org_id = ? AND conversation_id = ? AND role = 'user' AND subtype = '' AND delivered = 0`
 
 func (s *runPendingInputStore) Store(ctx context.Context, orgID, runID, userID, message string) error {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -43,7 +43,7 @@ func (s *runPendingInputStore) Store(ctx context.Context, orgID, runID, userID, 
 		}
 		_, err := q.ExecContext(ctx, `
 			INSERT INTO messages (org_id, conversation_id, user_id, role, content, subtype, delivered)
-			VALUES (?, ?, ?, 'user', ?, 'text', 0)
+			VALUES (?, ?, ?, 'user', ?, '', 0)
 		`, orgID, runID, sqliteNullStr(userID), message)
 		return err
 	})

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lint + format check for both Go and frontend.
+# Lint + format check for Go, the Rust harness, and the frontend.
 # Usage:
 #   ./scripts/lint.sh           # check only, exit non-zero on issues
 #   ./scripts/lint.sh --fix     # auto-fix where possible
@@ -131,6 +131,32 @@ else
   else
     green "ee import boundary guard OK"
   fi
+fi
+
+# --- Rust (harness/) ---------------------------------------------------------
+# The in-sandbox tool binaries. CI gates on fmt + clippy-as-errors, and until
+# this section existed there was no local equivalent — so a warning-clean Go
+# and frontend tree still read as "all checks passed" while CI failed on an
+# unused import. A missing toolchain is a hard failure for the same reason
+# golangci-lint's is: a skip silently downgrades this script's contract from
+# "CI will pass" to "the parts I could check will pass".
+blue "cargo fmt + clippy"
+CARGO="${CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}"
+if [[ ! -x "$CARGO" ]]; then
+  red "cargo not found — install rust (https://rustup.rs) or set CARGO=/path/to/cargo"
+  fail=1
+else
+  pushd harness >/dev/null
+  if (( FIX )); then
+    "$CARGO" fmt || fail=1
+    green "cargo fmt applied"
+  else
+    "$CARGO" fmt --check || fail=1
+  fi
+  # Check-only even under --fix: `clippy --fix` rewrites source and wants a
+  # clean tree, which is a bigger promise than the rest of --fix makes.
+  "$CARGO" clippy --all-targets -- -D warnings || fail=1
+  popd >/dev/null
 fi
 
 # --- Frontend ---------------------------------------------------------------
