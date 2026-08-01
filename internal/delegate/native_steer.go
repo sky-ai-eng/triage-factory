@@ -46,7 +46,6 @@ func (s *Spawner) queueNativeMessage(ctx context.Context, orgID string, run doma
 		ConversationID: run.ID,
 		UserID:         userID,
 		Role:           "user",
-		Subtype:        "text",
 		Content:        text,
 		Delivered:      &pending,
 	}
