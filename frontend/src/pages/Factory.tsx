@@ -26,6 +26,7 @@ import {
   teamFilterQuery,
 } from '../hooks/useTeams'
 import type { Conversation, FactoryEntity, FactorySnapshot, Task } from '../types'
+import { isActiveStatus } from '../lib/runStatus'
 
 // Production factory page — Babylon scene driven by /api/factory/snapshot.
 // The page itself does almost nothing visual: it fetches the snapshot,
@@ -841,19 +842,16 @@ function entityLabel(e: FactoryEntity): string {
 // Status-keyed colors for the run-row indicator dot and the inline
 // status label. Pulled from the project palette tokens so the trays
 // feel cohesive with the rest of the app: claim/sage for active,
-// snooze/amber for pending, dismiss/rose for failed, neutral tertiary
+// snooze/amber for parked, dismiss/rose for failed, neutral tertiary
 // for cancelled.
+//
+// The active arm is the shared predicate rather than a list of names, so
+// every claim phase — including a run parked awaiting its credential
+// bundle — reads as working instead of falling through to the inert grey.
 function runStatusColor(status: string): string {
+  if (isActiveStatus(status)) return '#3f6b4d' // --color-claim (sage)
   switch (status) {
-    case 'initializing':
-    case 'cloning':
-    case 'fetching':
-    case 'worktree_created':
-    case 'agent_starting':
-    case 'running':
-      return '#3f6b4d' // --color-claim (sage)
     case 'open':
-    case 'pending_approval':
       return '#8a6e1f' // --color-snooze (warm amber)
     case 'failed':
       return '#a84545' // --color-dismiss (warm rose)
@@ -864,16 +862,14 @@ function runStatusColor(status: string): string {
   }
 }
 
+// Shorter copy for the statuses whose raw name reads badly in a tray row;
+// everything else renders as itself.
 function runStatusLabel(status: string): string {
   switch (status) {
-    case 'pending_approval':
-      return 'pending'
-    case 'open':
-      return 'open'
     case 'agent_starting':
       return 'starting'
-    case 'worktree_created':
-      return 'preparing'
+    case 'awaiting_credentials':
+      return 'awaiting credentials'
     default:
       return status
   }

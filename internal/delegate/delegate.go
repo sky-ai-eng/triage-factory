@@ -471,7 +471,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 		return runConfig{}, fmt.Errorf("invalid PR number from task.EntitySourceID: %q", task.EntitySourceID)
 	}
 
-	s.updatePhase(orgID, runID, claimID, "fetching")
+	s.updatePhase(orgID, runID, claimID, domain.ClaimPhaseFetching)
 	pr, err := ghClient.GetPR(ctx, owner, repo, prNumber, false)
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to fetch PR: %w", err)
@@ -521,7 +521,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 		return runConfig{}, fmt.Errorf("PR #%d on %s/%s: GitHub did not return a usable upstream URL; cannot create worktree", prNumber, owner, repo)
 	}
 
-	s.updatePhase(orgID, runID, claimID, "cloning")
+	s.updatePhase(orgID, runID, claimID, domain.ClaimPhaseCloning)
 	// Resolve the host-side clone credential. In multi mode the clone routes
 	// through the sidecar's git proxy (CloneAuthViaGitProxy): git is
 	// rewritten from the upstream host to the proxy URL and presents only the

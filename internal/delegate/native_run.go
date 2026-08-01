@@ -82,7 +82,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "compose system prompt: "+err.Error(), domain.RunFailureUnclassified)
 	}
 
-	s.updatePhase(orgID, runID, cfg.claimID, "agent_starting")
+	s.updatePhase(orgID, runID, cfg.claimID, domain.ClaimPhaseAgentStarting)
 	if ctx.Err() != nil {
 		return s.handleCancelled(orgID, runID, startTime, cfg.wtPath, cfg.claimID, triggerType, creatorUserID)
 	}

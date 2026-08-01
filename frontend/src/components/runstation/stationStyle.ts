@@ -44,9 +44,9 @@ export interface StationState {
 // light from the factory's LED perimeter, toned for the warm field.
 export const HMI_CYAN = 'var(--hmi-cyan)'
 
-// stationState collapses the run lifecycle into the machine's lit state. Active
-// sub-statuses (initializing…running) all read as one thing: a turn is
-// executing, so the machine is hot and scanning.
+// stationState collapses the run lifecycle into the machine's lit state. Every
+// active status — each setup phase and running alike — reads as one thing: the
+// machine is hot and scanning.
 export function stationState(run: Conversation): StationState {
   if (isActiveRun(run)) {
     return {

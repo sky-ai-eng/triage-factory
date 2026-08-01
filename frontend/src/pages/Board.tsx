@@ -1,4 +1,5 @@
 import { memo, useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react'
+import { TERMINAL_RUN_STATUSES } from '../types'
 import type {
   Task,
   Conversation,
@@ -10,7 +11,12 @@ import type {
 } from '../types'
 import { useWebSocket, setPresenceView } from '../hooks/useWebSocket'
 import { usePermissionQueues } from '../hooks/usePermissionQueues'
-import { isActiveRun, isPermissionTerminalStatus } from '../lib/runStatus'
+import {
+  isActiveRun,
+  isActiveStatus,
+  isPermissionTerminalStatus,
+  isTerminalStatus,
+} from '../lib/runStatus'
 import { approvalCounts, hasUnresolvedArtifacts } from '../lib/approval'
 import { appendToFeed, feedFromMessages, EMPTY_FEED, type RunCardFeed } from '../lib/runFeed'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
@@ -458,16 +464,7 @@ export default function Board() {
             .filter((r) => r.blueprint_run_id === chainRunID)
             .sort((a, b) => (a.blueprint_step_index ?? 0) - (b.blueprint_step_index ?? 0))
           const activeStep =
-            stepRuns.find((r) =>
-              [
-                'running',
-                'cloning',
-                'fetching',
-                'worktree_created',
-                'agent_starting',
-                'initializing',
-              ].includes(r.Status),
-            ) ?? stepRuns[stepRuns.length - 1]
+            stepRuns.find((r) => isActiveStatus(r.Status)) ?? stepRuns[stepRuns.length - 1]
           nextRuns[task.id] = activeStep
           // messagesByRun is keyed by each task's PRIMARY (newest-started) run.
           // For a sequential chain the most recently started step IS the active
@@ -647,15 +644,7 @@ export default function Board() {
               }
             }
             if (isChainStep) {
-              if (
-                [
-                  'completed',
-                  'failed',
-                  'cancelled',
-                  'task_unsolvable',
-                  'pending_approval',
-                ].includes(status)
-              ) {
+              if (isTerminalStatus(status)) {
                 scheduleFetchTasks()
               }
             } else {
@@ -1218,10 +1207,15 @@ export default function Board() {
           if (runID) {
             setAgentRuns((prev) => ({
               ...prev,
+              // Optimistic row for the conversation the delegate call just
+              // minted, standing in until the first WS status lands. `queued`
+              // is what the backend's display ladder reports for a fresh
+              // mint — nobody has claimed it yet — so the card shows its
+              // queue wait instead of pretending an agent is already working.
               [task.id]: {
                 ID: runID,
                 TaskID: task.id,
-                Status: 'initializing',
+                Status: 'queued',
                 Model: '',
                 StartedAt: new Date().toISOString(),
                 ResultSummary: '',
@@ -1640,11 +1634,11 @@ const SortableTaskCard = memo(function SortableTaskCard({
   )
 })
 
-// Run statuses where the AgentCard is safe to drag between columns.
-// Active states (running, cloning, etc.) stay anchored — the cancel
-// button is the right intent there, and dragging mid-run would race
-// with the spawner's status transitions.
-const draggableRunStatuses = new Set(['failed', 'cancelled', 'completed', 'task_unsolvable'])
+// Run statuses where the AgentCard is safe to drag between columns: the
+// terminals, and nothing else. A run still setting up or executing stays
+// anchored — the cancel button is the right intent there, and dragging
+// mid-run would race with the spawner's status transitions.
+const draggableRunStatuses: ReadonlySet<string> = new Set(TERMINAL_RUN_STATUSES)
 
 const SortableAgentCard = memo(function SortableAgentCard({
   task,

@@ -216,7 +216,10 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 					t.Errorf("claimed conversation displays %q, want running", st)
 				}
 				// Every setup transient surfaces through the same field.
-				for _, phase := range []string{"fetching", "cloning", "agent_starting", "awaiting_credentials"} {
+				// Coverage is derived from the canonical vocabulary, not a
+				// copy of it: a phase added in Go and never taught to a store
+				// fails here, on both dialects.
+				for _, phase := range domain.AllClaimPhases() {
 					if err := h.Stores.Conversations.SetActiveClaimPhaseSystem(ctx, h.OrgID, convID, phase); err != nil {
 						t.Fatalf("set phase %s: %v", phase, err)
 					}

@@ -405,7 +405,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	runURL := s.runURLFor(orgID, runID)
 	prompt := buildPrompt(task, metadataJSON, cfg.prSkeleton, mission, cfg.scope, cfg.toolsRef, agentBin, runID, agentRunRoot, namespace, branchTemplate, runURL)
 
-	s.updatePhase(orgID, runID, cfg.claimID, "agent_starting")
+	s.updatePhase(orgID, runID, cfg.claimID, domain.ClaimPhaseAgentStarting)
 	if ctx.Err() != nil {
 		return cancelled()
 	}

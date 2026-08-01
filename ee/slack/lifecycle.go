@@ -374,16 +374,13 @@ type runEntry struct {
 // awaiting-input "open" state — both stop the worker and clear the
 // indicator; only "failed" additionally posts the failure reply.
 func isTerminalRunStatus(status string) bool {
-	switch status {
-	case "completed", "failed", "cancelled", "task_unsolvable", "open":
-		return true
-	}
-	return false
+	return domain.IsTerminalRunStatus(status) || status == domain.StatusOpen
 }
 
 // handleRunStatus resolves (and caches) the run's Slack context on first
 // sight, then drives the per-run worker off the status value: a
-// pre-"running" progress status (queued/fetching/cloning/agent_starting)
+// pre-"running" progress status (queued, or any claim phase — see
+// preRunIndicatorText, which owns that set)
 // starts the worker with that phase's text — or retexts a live one — so the
 // thread shows setup progress before the agent exists; "running" starts the
 // worker if setup never emitted (or swaps a setup-phase text for the generic
@@ -632,22 +629,30 @@ var initialIndicatorText = indicatorText{
 }
 
 // preRunIndicatorText maps the pre-"running" progress statuses a run walks
-// through (queue dwell, source-context fetch, worktree build, process spawn)
-// to indicator texts, so the thread shows real progress from the moment the
-// dispatcher touches the run instead of nothing until the agent is live.
+// through (queue dwell, credential handoff, source-context fetch, worktree
+// build, process spawn) to indicator texts, so the thread shows real progress
+// from the moment the dispatcher touches the run instead of nothing until the
+// agent is live. Arms are in lifecycle order.
+//
 // Copy is deliberately mode-neutral — local mode has no sandbox, so the
-// spawn phase says "starting the agent", not "starting the sandbox".
+// spawn phase says "starting the agent", not "starting the sandbox". The
+// credential arm is the one status that cannot occur in local mode at all
+// (there is no per-run sidecar to seal a bundle for), so it names the wait
+// without naming the machinery behind it.
+//
 // ok=false for any unknown status: future lifecycle states stay invisible
 // here rather than rendering guessed copy.
 func preRunIndicatorText(status string) (indicatorText, bool) {
 	switch status {
-	case "queued":
+	case domain.StatusQueued:
 		return indicatorText{status: "is queued…", loading: "Waiting for a free agent slot…"}, true
-	case "fetching":
+	case domain.ClaimPhaseAwaitingCredentials:
+		return indicatorText{status: "is receiving credentials…", loading: "Receiving credentials…"}, true
+	case domain.ClaimPhaseFetching:
 		return indicatorText{status: "is gathering task context…", loading: "Gathering task context…"}, true
-	case "cloning":
+	case domain.ClaimPhaseCloning:
 		return indicatorText{status: "is preparing a workspace…", loading: "Preparing a workspace…"}, true
-	case "agent_starting":
+	case domain.ClaimPhaseAgentStarting:
 		return indicatorText{status: "is starting the agent…", loading: "Starting the agent…"}, true
 	}
 	return indicatorText{}, false
