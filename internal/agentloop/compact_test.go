@@ -597,3 +597,62 @@ func TestIsTransient_OverflowIsNeverRetried(t *testing.T) {
 		t.Fatal("a context overflow classified as transient")
 	}
 }
+
+// TestCompaction_SanitizesModelTextForStore: a summary that quotes binary
+// command output carries NUL bytes Postgres cannot store, and both
+// compaction rows are built from raw model text (the warm summary is
+// extracted from the unsanitized completion; the forced arguments come
+// straight from JSON). One NUL inside the fenced commit would fail the
+// whole compaction — including in the reactive arm, where compaction is the
+// rescue path.
+func TestCompaction_SanitizesModelTextForStore(t *testing.T) {
+	assertNoNUL := func(t *testing.T, tr *memTranscript) {
+		t.Helper()
+		for _, m := range tr.snapshot() {
+			if strings.ContainsRune(m.Content, 0) {
+				t.Fatalf("row %d content carries a NUL byte: %q", m.ID, m.Content)
+			}
+		}
+	}
+
+	t.Run("warm summary", func(t *testing.T) {
+		tr := newMemTranscript(
+			domain.Message{Role: "user", Content: "the mission"},
+			usedAssistant("worked", overThreshold, time.Now().UTC()),
+		)
+		provider := &scriptedProvider{turns: []scriptedTurn{
+			summaryReply("binary output was \x00\x00 here"),
+			{text: "done"},
+		}}
+		engine := newTestEngine(tr, provider, newScriptedToolHost())
+		if result := engine.Run(context.Background(), testParams()); result.Kind != ResultConcluded {
+			t.Fatalf("result = %+v, want concluded", result)
+		}
+		resultRow := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionResult })
+		if !strings.Contains(resultRow.Content, "binary output was") {
+			t.Fatalf("result row lost the summary: %q", resultRow.Content)
+		}
+		assertNoNUL(t, tr)
+	})
+
+	t.Run("forced-shape arguments", func(t *testing.T) {
+		old := time.Now().UTC().Add(-time.Hour)
+		tr := newMemTranscript(
+			domain.Message{Role: "user", Content: "the mission", CreatedAt: old},
+			usedAssistant("worked", overThreshold, old),
+		)
+		provider := &scriptedProvider{turns: []scriptedTurn{
+			forcedReply("saw \x00 bytes", "kept \x00 going"),
+			{text: "done"},
+		}}
+		engine := newTestEngine(tr, provider, newScriptedToolHost())
+		if result := engine.Run(context.Background(), testParams()); result.Kind != ResultConcluded {
+			t.Fatalf("result = %+v, want concluded", result)
+		}
+		reply := tr.find(func(m domain.Message) bool { return strings.Contains(m.Content, "saw") && m.Role == "assistant" })
+		if reply == nil {
+			t.Fatal("reconstructed reply row missing")
+		}
+		assertNoNUL(t, tr)
+	})
+}

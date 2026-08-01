@@ -289,8 +289,13 @@ func (e *Engine) compactCold(ctx context.Context, params Params) error {
 	// exists. Cost lands on the row carrying the call's output.
 	durationMs := msSince(callStarted)
 	replyRow := &domain.Message{
+		// Sanitized like every persisted model text: the analysis and
+		// summary arrive raw from the tool-call arguments, and a summary
+		// that quotes command output can carry the NUL bytes Postgres
+		// cannot store — inside the fenced commit, one would fail the
+		// whole compaction.
+		Content:  sanitizeForStore(canonicalCompactionArtifact(analysis, summary)),
 		Role:     "assistant",
-		Content:  canonicalCompactionArtifact(analysis, summary),
 		Model:    coldModelForRow(completion, model),
 		Metadata: map[string]any{"compaction_path": "forced"},
 	}
@@ -423,7 +428,11 @@ func composeResultRow(params Params, rows []domain.Message, summary string) *dom
 		ConversationID: params.ConversationID,
 		Role:           "user",
 		Subtype:        domain.MessageSubtypeInjectionCompactionResult,
-		Content:        b.String(),
+		// Sanitized here rather than upstream: the warm summary is extracted
+		// from the raw completion (persistAssistant sanitizes its own copy,
+		// not this one), and a summary quoting binary command output would
+		// otherwise fail the fenced commit's insert on Postgres.
+		Content: sanitizeForStore(b.String()),
 	}
 }
 
