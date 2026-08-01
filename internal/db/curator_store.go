@@ -251,15 +251,16 @@ type CuratorStore interface {
 
 	// --- Per-turn credentials (multi only; admin pool) ---
 
-	// PublishTurnCredPubKeySystem records the per-turn credential sidecar's
-	// pubkey on the conversation's ACTIVE claim and — Postgres only — fires
-	// the tf_ctl curator_cred_request doorbell (payload keyed by the
-	// conversation id) so the brain seals this turn's bundle without waiting
-	// for the backstop sweep. The claim-stamp mirror of
-	// RunQueueStore.MarkAwaitingCredentials; guarded on "active AND no key
-	// yet" so a late/duplicate publish can't touch a finished turn or
-	// overwrite a key the brain may already be sealing to. matched=false
-	// when the guard didn't hold.
+	// PublishTurnCredPubKeySystem parks the conversation's ACTIVE claim in
+	// phase='awaiting_credentials' with the per-turn credential sidecar's
+	// pubkey — the same park RunQueueStore.MarkAwaitingCredentials writes for
+	// a delegated run, which is what lets ONE brain-side scan
+	// (ListAwaitingCredentials) serve both surfaces. Postgres also fires the
+	// tf_ctl curator_cred_request doorbell (payload keyed by the conversation
+	// id) so the brain seals this turn's bundle without waiting for that
+	// sweep. Guarded on "active AND no key yet" so a late/duplicate publish
+	// can't touch a finished turn or overwrite a key the brain may already be
+	// sealing to. matched=false when the guard didn't hold.
 	PublishTurnCredPubKeySystem(ctx context.Context, orgID, conversationID, pubkey string) (matched bool, err error)
 
 	// GetTurnProvisionInfoSystem reads the credential-provisioning
@@ -268,15 +269,6 @@ type CuratorStore interface {
 	// the turn finished or was never claimed, so there is nothing to seal
 	// for.
 	GetTurnProvisionInfoSystem(ctx context.Context, orgID, conversationID string) (*domain.CuratorTurnProvision, bool, error)
-
-	// ListAwaitingCredentialTurnsSystem returns every active curator claim
-	// that has published a sidecar pubkey but has no fresh sealed bundle
-	// yet — no claim_credentials row, or one sealed under an older
-	// boot_epoch than the home executor's current one (a home restart). The
-	// backstop-sweep input for a dropped curator_cred_request notification
-	// (the relay is lossy by design). Postgres-only in substance; the SQLite
-	// impl returns an empty list (local mode never provisions bundles).
-	ListAwaitingCredentialTurnsSystem(ctx context.Context) ([]domain.CuratorTurnProvision, error)
 
 	// --- Project bundle import (admin pool) ---
 

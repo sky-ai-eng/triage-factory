@@ -455,7 +455,7 @@ func (s *runQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, runI
 // conversation joined to its active (unreleased) claim, with the claim's
 // executor/boot/pubkey and claimed_at falling back to started_at for a
 // never-claimed row.
-const awaitingCredentialsCols = `r.id::text, r.org_id::text, COALESCE(r.team_id::text, ''), COALESCE(r.task_id::text, ''),
+const awaitingCredentialsCols = `r.id::text, r.org_id::text, COALESCE(r.type, ''), COALESCE(r.team_id::text, ''), COALESCE(r.task_id::text, ''),
 	COALESCE(cl.executor_id, ''), COALESCE(cl.boot_epoch, 0), COALESCE(cl.claimed_at, r.started_at), COALESCE(cl.cred_pubkey, '')`
 
 func (s *runQueueStore) GetClaim(ctx context.Context, orgID, runID string) (db.AwaitingCredentialsRun, bool, error) {
@@ -465,7 +465,7 @@ func (s *runQueueStore) GetClaim(ctx context.Context, orgID, runID string) (db.A
 		FROM conversations r
 		LEFT JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 		WHERE r.org_id = $1 AND r.id = $2
-	`, orgID, runID).Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey)
+	`, orgID, runID).Scan(&r.RunID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.AwaitingCredentialsRun{}, false, nil
 	}
@@ -513,12 +513,16 @@ func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, r
 func (s *runQueueStore) ListAwaitingCredentials(ctx context.Context) ([]db.AwaitingCredentialsRun, error) {
 	// The parked set is keyed off the active claim's phase (served by the
 	// idx_claims_active_phase partial index); an inner join is right here —
-	// a parked run by definition has the claim.
+	// a parked claim by definition exists. No type filter: parking is a
+	// property of the engagement, not the surface, so this one scan is the
+	// whole provisioner's input and the caller routes on the type it
+	// returns.
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT `+awaitingCredentialsCols+`
 		FROM conversations r
 		JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 		WHERE cl.phase = 'awaiting_credentials'
+		ORDER BY cl.claimed_at ASC, cl.id ASC
 	`)
 	if err != nil {
 		return nil, err
@@ -552,7 +556,7 @@ func scanAwaitingCredentialsRuns(rows *sql.Rows) ([]db.AwaitingCredentialsRun, e
 	var out []db.AwaitingCredentialsRun
 	for rows.Next() {
 		var r db.AwaitingCredentialsRun
-		if err := rows.Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey); err != nil {
+		if err := rows.Scan(&r.RunID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &r.ClaimedAt, &r.CredPubKey); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

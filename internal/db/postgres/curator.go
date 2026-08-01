@@ -695,7 +695,7 @@ func (s *curatorStore) QueueContextChangeSystem(ctx context.Context, orgID, proj
 
 func (s *curatorStore) PublishTurnCredPubKeySystem(ctx context.Context, orgID, conversationID, pubkey string) (bool, error) {
 	res, err := s.admin.ExecContext(ctx, `
-		UPDATE claims SET cred_pubkey = $1
+		UPDATE claims SET cred_pubkey = $1, phase = 'awaiting_credentials'
 		WHERE org_id = $2 AND conversation_id = $3 AND released_at IS NULL
 		  AND (cred_pubkey IS NULL OR cred_pubkey = '')
 	`, pubkey, orgID, conversationID)
@@ -732,34 +732,6 @@ func (s *curatorStore) GetTurnProvisionInfoSystem(ctx context.Context, orgID, co
 		return nil, false, err
 	}
 	return &p, true, nil
-}
-
-func (s *curatorStore) ListAwaitingCredentialTurnsSystem(ctx context.Context) ([]domain.CuratorTurnProvision, error) {
-	rows, err := s.admin.QueryContext(ctx, `
-		SELECT cl.conversation_id, c.org_id, COALESCE(c.project_id::text, ''),
-		       COALESCE(c.team_id::text, ''), cl.executor_id, COALESCE(cl.cred_pubkey, '')
-		FROM claims cl
-		JOIN conversations c ON c.id = cl.conversation_id
-		LEFT JOIN claim_credentials cc ON cc.claim_id = cl.id
-		LEFT JOIN instances i ON i.id = cl.executor_id
-		WHERE c.type = 'curator' AND cl.released_at IS NULL
-		  AND cl.cred_pubkey IS NOT NULL AND cl.cred_pubkey <> ''
-		  AND (cc.claim_id IS NULL OR (i.id IS NOT NULL AND cc.boot_epoch < i.boot_epoch))
-		ORDER BY cl.claimed_at ASC, cl.id ASC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []domain.CuratorTurnProvision
-	for rows.Next() {
-		var p domain.CuratorTurnProvision
-		if err := rows.Scan(&p.ConversationID, &p.OrgID, &p.ProjectID, &p.TeamID, &p.HomeInstanceID, &p.CredPubKey); err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	return out, rows.Err()
 }
 
 // --- Project bundle import ---

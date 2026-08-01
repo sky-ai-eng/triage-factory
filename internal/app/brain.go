@@ -118,11 +118,11 @@ func (a *App) startBrain(term int64) {
 	// a.credProvisioner there) — RunAwaitingSweep/RunRefreshSweep are
 	// themselves nil-safe no-ops too, matching every other brain-unit
 	// member's defensive shape.
+	//
+	// One sweep, both surfaces: a curator turn parks its claim in the same
+	// phase a delegated run does, so the single scan finds both and the
+	// conversation type on each row selects the resolution.
 	go credprovision.RunAwaitingSweep(brainCtx, a.credProvisioner, credprovision.DefaultAwaitingSweepInterval)
-	// The curator-turn analog: the backstop for a dropped
-	// curator_cred_request notification, same interval (it gates turn-start
-	// latency) and same nil-safe brain-unit shape as RunAwaitingSweep.
-	go credprovision.RunCuratorAwaitingSweep(brainCtx, a.credProvisioner, credprovision.DefaultAwaitingSweepInterval)
 	// Refresh cadence goes expiry-aware for role-mode Bedrock orgs (TFAC-616):
 	// short-lived STS session creds must be re-minted before they expire, so
 	// the interval + age threshold shrink with the LLM-credential TTL. At the

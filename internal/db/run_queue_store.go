@@ -160,11 +160,15 @@ type RunQueueStore interface {
 	// reaped in the meantime).
 	RequeueAwaitingCredentials(ctx context.Context, orgID, runID string) (matched bool, err error)
 
-	// ListAwaitingCredentials returns every run whose active claim is
-	// currently parked in phase='awaiting_credentials' — the brain-side
-	// provisioner's backstop-sweep input. Primary provisioning happens
-	// synchronously off the executor's cred_request tf_ctl notification;
-	// this recovers any run whose notification the lossy relay dropped.
+	// ListAwaitingCredentials returns every conversation — of EVERY surface
+	// — whose active claim is currently parked in
+	// phase='awaiting_credentials'. One scan serves the whole provisioner:
+	// a curator turn parks its claim exactly like a delegated run does, so
+	// the phase column is the substrate and ConversationType is how the
+	// caller routes. The brain-side backstop sweep's input; primary
+	// provisioning happens synchronously off the executor's cred_request
+	// tf_ctl notification, and this recovers whatever the lossy relay
+	// dropped.
 	ListAwaitingCredentials(ctx context.Context) ([]AwaitingCredentialsRun, error)
 
 	// ListActiveNeedingCredentialRefresh returns every actively-running
@@ -303,13 +307,17 @@ type OrgQueueShare struct {
 // (via TeamID), and the key to seal to (CredPubKey, with the claiming
 // executor's published instance pubkey reachable via ExecutorID).
 type AwaitingCredentialsRun struct {
-	RunID      string
-	OrgID      string
-	TeamID     string
-	TaskID     string
-	ExecutorID string
-	BootEpoch  int64
-	ClaimedAt  time.Time
+	RunID string
+	OrgID string
+	// ConversationType is the owning surface ('delegation' | 'curator' | …)
+	// — what the unified provisioner sweep routes on, since the two
+	// surfaces resolve different credential sets for the same parked claim.
+	ConversationType string
+	TeamID           string
+	TaskID           string
+	ExecutorID       string
+	BootEpoch        int64
+	ClaimedAt        time.Time
 	// CredPubKey is the per-run sidecar public key recorded by
 	// MarkAwaitingCredentials; empty when the run was parked without one.
 	CredPubKey string

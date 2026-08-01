@@ -281,7 +281,7 @@ func (s *runQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, runI
 // claimed_at/started_at are selected bare and coalesced in Go: wrapping
 // them in COALESCE strips the declared column type the driver needs to
 // hand back a time.Time, so the scan would see a raw string.
-const awaitingCredentialsCols = `r.id, r.org_id, COALESCE(r.team_id, ''), COALESCE(r.task_id, ''),
+const awaitingCredentialsCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.team_id, ''), COALESCE(r.task_id, ''),
 	COALESCE(cl.executor_id, ''), COALESCE(cl.boot_epoch, 0), cl.claimed_at, r.started_at,
 	COALESCE(cl.cred_pubkey, '')`
 
@@ -299,7 +299,7 @@ func (s *runQueueStore) GetClaim(ctx context.Context, orgID, runID string) (db.A
 		FROM conversations r
 		LEFT JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 		WHERE r.org_id = ? AND r.id = ?
-	`, orgID, runID).Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey)
+	`, orgID, runID).Scan(&r.RunID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey)
 	if err == sql.ErrNoRows {
 		return db.AwaitingCredentialsRun{}, false, nil
 	}
@@ -352,12 +352,14 @@ func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, r
 func (s *runQueueStore) ListAwaitingCredentials(ctx context.Context) ([]db.AwaitingCredentialsRun, error) {
 	// The parked set is keyed off the active claim's phase (served by the
 	// idx_claims_active_phase partial index); an inner join is right here —
-	// a parked run by definition has the claim.
+	// a parked claim by definition exists. No type filter: parking is a
+	// property of the engagement, not the surface.
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT `+awaitingCredentialsCols+`
 		FROM conversations r
 		JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 		WHERE cl.phase = 'awaiting_credentials'
+		ORDER BY cl.claimed_at ASC, cl.id ASC
 	`)
 	if err != nil {
 		return nil, err
@@ -383,7 +385,7 @@ func scanAwaitingCredentialsRuns(rows *sql.Rows) ([]db.AwaitingCredentialsRun, e
 			claimedAt sql.NullTime
 			startedAt time.Time
 		)
-		if err := rows.Scan(&r.RunID, &r.OrgID, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey); err != nil {
+		if err := rows.Scan(&r.RunID, &r.OrgID, &r.ConversationType, &r.TeamID, &r.TaskID, &r.ExecutorID, &r.BootEpoch, &claimedAt, &startedAt, &r.CredPubKey); err != nil {
 			return nil, err
 		}
 		r.ClaimedAt = startedAt

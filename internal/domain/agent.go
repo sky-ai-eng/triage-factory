@@ -101,6 +101,21 @@ const (
 	ConversationRuntimeNative = "native"
 )
 
+// The conversations.type vocabulary — which surface owns a conversation.
+// App-validated (no schema CHECK, the house pattern for open vocabularies).
+// One claim loop drives every one of them; the type is what selects the
+// execution arm once a claim is minted.
+const (
+	// ConversationTypeDelegation is a task run — every blueprint step today.
+	ConversationTypeDelegation = "delegation"
+	// ConversationTypeCurator is a per-(project, creator) chat.
+	ConversationTypeCurator = "curator"
+	// ConversationTypeInteractive is reserved: the taskless "pick repos and
+	// type" surface. The claim predicate already admits it; nothing mints
+	// one yet.
+	ConversationTypeInteractive = "interactive"
+)
+
 // InjectionSubtype values discriminate a `role=user` row the system wrote
 // on the agent's behalf from one a human typed. Assembly reads them (a
 // steer row renders inside a keep-working envelope); display reads them to

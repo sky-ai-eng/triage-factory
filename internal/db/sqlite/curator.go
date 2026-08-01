@@ -756,7 +756,7 @@ func (s *curatorStore) PublishTurnCredPubKeySystem(ctx context.Context, orgID, c
 		return false, err
 	}
 	res, err := s.q.ExecContext(ctx, `
-		UPDATE claims SET cred_pubkey = ?
+		UPDATE claims SET cred_pubkey = ?, phase = 'awaiting_credentials'
 		WHERE org_id = ? AND conversation_id = ? AND released_at IS NULL
 		  AND (cred_pubkey IS NULL OR cred_pubkey = '')
 	`, pubkey, orgID, conversationID)
@@ -791,12 +791,6 @@ func (s *curatorStore) GetTurnProvisionInfoSystem(ctx context.Context, orgID, co
 	return &p, true, nil
 }
 
-// ListAwaitingCredentialTurnsSystem returns an empty list: the sealed-bundle
-// channel is Postgres-only in substance (the SQLite schema carries no
-// claim_credentials table), and local mode never runs the backstop sweep.
-func (s *curatorStore) ListAwaitingCredentialTurnsSystem(ctx context.Context) ([]domain.CuratorTurnProvision, error) {
-	return nil, nil
-}
 
 // --- Project bundle import ---
 

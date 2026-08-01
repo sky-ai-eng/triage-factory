@@ -3,6 +3,8 @@ package credprovision
 import (
 	"context"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // minRefreshSweepInterval floors the derived sweep cadence so a
@@ -36,11 +38,12 @@ func RefreshCadenceForTTL(llmTTL time.Duration) (interval, refreshAfter time.Dur
 	return interval, refreshAfter
 }
 
-// RunAwaitingSweep is the backstop for runs whose active claim is parked
-// in phase='awaiting_credentials' but whose cred_request tf_ctl notification the lossy
-// relay dropped (TFAC-614) — leader-gated, started/stopped alongside the
-// rest of the brain exactly like reaper.RunReaper. mgr nil is a no-op (the
-// same nil-checked shape every other brain-unit member uses).
+// RunAwaitingSweep is the backstop for every conversation whose active claim
+// is parked in phase='awaiting_credentials' but whose cred_request tf_ctl
+// notification the lossy relay dropped — leader-gated, started/stopped
+// alongside the rest of the brain exactly like reaper.RunReaper. One sweep
+// serves both surfaces (see sweepAwaiting). mgr nil is a no-op (the same
+// nil-checked shape every other brain-unit member uses).
 func RunAwaitingSweep(ctx context.Context, mgr *Manager, interval time.Duration) {
 	if mgr == nil {
 		return
@@ -57,48 +60,27 @@ func RunAwaitingSweep(ctx context.Context, mgr *Manager, interval time.Duration)
 	}
 }
 
+// sweepAwaiting drives ONE scan for every surface: parking a claim in
+// phase='awaiting_credentials' is a property of the engagement, not of the
+// conversation type, so both a delegated run's sidecar bring-up and a
+// curator turn's land in the same list. Only the resolution differs, and the
+// conversation type on each row is what selects it.
 func sweepAwaiting(ctx context.Context, mgr *Manager) {
-	runs, err := mgr.stores.RunQueue.ListAwaitingCredentials(ctx)
+	parked, err := mgr.stores.RunQueue.ListAwaitingCredentials(ctx)
 	if err != nil {
-		log.Warn("list awaiting-credentials runs failed; retrying next tick", "error", err)
+		log.Warn("list awaiting-credentials claims failed; retrying next tick", "error", err)
 		return
 	}
-	for _, r := range runs {
-		if err := mgr.ProvisionForRun(ctx, r.OrgID, r.RunID); err != nil {
-			log.Warn("backstop-sweep provision failed", "run", r.RunID, "error", err)
+	for _, p := range parked {
+		var perr error
+		if p.ConversationType == domain.ConversationTypeCurator {
+			perr = mgr.ProvisionForCuratorTurn(ctx, p.OrgID, p.RunID)
+		} else {
+			perr = mgr.ProvisionForRun(ctx, p.OrgID, p.RunID)
 		}
-	}
-}
-
-// RunCuratorAwaitingSweep is the backstop for homed curator turns whose
-// curator_cred_request tf_ctl notification the lossy relay dropped —
-// the curator-turn analog of RunAwaitingSweep, started/stopped alongside it in
-// the brain. mgr nil is a no-op.
-func RunCuratorAwaitingSweep(ctx context.Context, mgr *Manager, interval time.Duration) {
-	if mgr == nil {
-		return
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			sweepCuratorAwaiting(ctx, mgr)
-		}
-	}
-}
-
-func sweepCuratorAwaiting(ctx context.Context, mgr *Manager) {
-	turns, err := mgr.stores.Curator.ListAwaitingCredentialTurnsSystem(ctx)
-	if err != nil {
-		log.Warn("list awaiting-credentials curator turns failed; retrying next tick", "error", err)
-		return
-	}
-	for _, turn := range turns {
-		if err := mgr.ProvisionForCuratorTurn(ctx, turn.OrgID, turn.ConversationID); err != nil {
-			log.Warn("backstop-sweep curator provision failed", "conversation", turn.ConversationID, "error", err)
+		if perr != nil {
+			log.Warn("backstop-sweep provision failed",
+				"conversation", p.RunID, "type", p.ConversationType, "error", perr)
 		}
 	}
 }
