@@ -142,6 +142,17 @@ COPY harness ./harness
 # arm64 machine would bake an unrunnable binary — and the failure mode is
 # silent: the jail's main process dies at exec and the launch just never
 # produces a connection.
+#
+# When TARGETARCH is foreign to the builder, the final link cannot go through
+# the host gcc: its ld rejects the other architecture's objects outright
+# ("Relocations in generic ELF"). The toolchain's bundled rust-lld links the
+# foreign target from its self-contained CRT and libc instead — nothing in
+# the dependency graph compiles C, so that is the whole cross story (Alpine
+# packages no cross C toolchain for Linux targets anyway). The linker
+# override must apply ONLY to the cross case: the env var keys on the target
+# triple, which for a native build is also the host's, where it would reroute
+# proc-macro dylib links into a bare rust-lld that lacks the system library
+# search paths.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/harness/target \
     case "${TARGETARCH}" in \
@@ -149,9 +160,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       arm64) RUST_TARGET=aarch64-unknown-linux-musl ;; \
       *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac && \
+    LINKER_ENV="" && \
+    if [ "${RUST_TARGET}" != "$(rustc -vV | sed -n 's/^host: //p')" ]; then \
+      LINKER_ENV="CARGO_TARGET_$(echo "${RUST_TARGET}" | tr 'a-z-' 'A-Z_')_LINKER=rust-lld"; \
+    fi && \
     rustup target add "${RUST_TARGET}" && \
     cd harness/tf-harness-tools && \
-    cargo build --release --locked --target "${RUST_TARGET}" --bin tf-harness-tools && \
+    env ${LINKER_ENV} cargo build --release --locked --target "${RUST_TARGET}" --bin tf-harness-tools && \
     mkdir -p /out && \
     cp "/src/harness/target/${RUST_TARGET}/release/tf-harness-tools" /out/tf-harness-tools
 
