@@ -23,8 +23,10 @@ type Client struct {
 	bf *bifrost.Bifrost
 	// endpoints is the configured base URL per provider, captured at
 	// construction so a failed call can say which host it was talking to.
-	// A provider absent from the map (or mapped to "") was left on its
-	// built-in endpoint.
+	// A provider mapped to "" was enumerable but left on its built-in
+	// endpoint; a provider absent from the map entirely was never
+	// enumerable (endpointsOf's best-effort read failed for it), so
+	// annotateEndpoint adds nothing rather than guessing which case it is.
 	endpoints map[schemas.ModelProvider]string
 	closed    atomic.Bool
 }
