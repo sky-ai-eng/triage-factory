@@ -35,12 +35,13 @@ func newRunQueueStore(conn *sql.DB) db.RunQueueStore {
 var _ db.RunQueueStore = (*runQueueStore)(nil)
 
 // runTerminalStatusesSQL is the canonical set of terminal conversation
-// status values as a SQL IN-list body. The reconcile sweep and the
-// orphaned-child cancel (blueprints.go) interpolate it instead of
-// re-spelling the literal, so the "non-terminal child" predicate has one
-// definition. Other queries that add dormant statuses
-// (open/pending_approval) to this set keep their own list.
-const runTerminalStatusesSQL = `'completed','failed','cancelled','task_unsolvable'`
+// status values as a SQL IN-list body — two names, one owner each: the agent
+// concluded, or the infrastructure died. The reconcile sweep and the
+// orphaned-child park (blueprints.go) interpolate it instead of re-spelling
+// the literal, so the "non-terminal child" predicate has one definition.
+// Other queries that add dormant statuses (open/pending_approval) to this set
+// keep their own list.
+const runTerminalStatusesSQL = `'completed','failed'`
 
 // EnqueueRun mints a delegation conversation with NO status — the absence of
 // an outcome is what makes it claimable, so the mint writes nothing to the
@@ -636,19 +637,27 @@ func (s *runQueueStore) FleetQueueShares(ctx context.Context) ([]db.OrgQueueShar
 func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) {
 	// Boot self-heal — see RunQueueStore.ReconcileOrphanedRuns and the
 	// SQLite mirror. Admin pool (BYPASSRLS): a cross-org system sweep with no
-	// per-user identity, the same posture as ResetProcessingRuns. Any active
-	// claim on a cancelled row releases as 'cancelled' in the same statement.
+	// per-user identity, the same posture as ResetProcessingRuns.
+	//
+	// `open`, not a terminal: nothing about an orphan failed, and nothing
+	// about it concluded either. Read the park as "stopped without
+	// concluding", NOT as "resumable" — its blueprint is terminal, so the
+	// claim gate refuses it and no resume path will wake it. The scope is
+	// status IS NULL alone (mid-flight is exactly what "still looks live"
+	// means); an already-parked orphan is already in the state this writes.
+	// Any active claim on a parked row releases as 'cancelled' in the same
+	// statement — the engagement was ended from outside.
 	var total int
 	err := inTx(ctx, s.conn, func(q queryer) error {
-		var cancelled int
+		var parked int
 		if err := q.QueryRowContext(ctx, `
-			WITH cancelled AS (
+			WITH parked AS (
 				UPDATE conversations
-				SET status = 'cancelled',
-				    completed_at = COALESCE(completed_at, now()),
+				SET status = 'open',
+				    parked_at = COALESCE(parked_at, now()),
 				    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
 				    result_summary = COALESCE(NULLIF(result_summary, ''), $1)
-				WHERE (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
+				WHERE status IS NULL
 				  AND blueprint_run_id IN (
 				      SELECT id FROM blueprint_runs
 				      WHERE status IN ('completed','aborted','failed','cancelled')
@@ -657,22 +666,22 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 			),
 			rel AS (
 				UPDATE claims SET released_at = now(), outcome = 'cancelled'
-				FROM cancelled
-				WHERE claims.conversation_id = cancelled.id AND claims.released_at IS NULL
+				FROM parked
+				WHERE claims.conversation_id = parked.id AND claims.released_at IS NULL
 				RETURNING claims.id
 			)
-			SELECT count(*) FROM cancelled
-		`, "Cancelled: owning blueprint run reached a terminal state").Scan(&cancelled); err != nil {
+			SELECT count(*) FROM parked
+		`, "Stopped: owning blueprint run reached a terminal state").Scan(&parked); err != nil {
 			return err
 		}
 
-		// Claim-desync janitor arm (after the blueprint-terminal cancel, so
-		// a row it just cancelled reads terminal here and is never touched).
+		// Claim-desync janitor arm (after the blueprint-terminal park, whose
+		// own claim release it therefore never has to redo).
 		released, err := healClaimDesyncs(ctx, q)
 		if err != nil {
 			return err
 		}
-		total = cancelled + released
+		total = parked + released
 		return nil
 	})
 	if err != nil {
@@ -687,9 +696,8 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 // conversation flip and the claim release commit independently (tf_app holds
 // no claims UPDATE grant, so one atomic tx is structurally unavailable) and
 // the flip can land without the release. Release the claim, outcome mapped
-// from the status the same way the terminal writes map it (task_unsolvable →
-// failed). Idempotent, and safe to run concurrently with healthy terminal
-// writes.
+// from the status the same way the terminal writes map it. Idempotent, and
+// safe to run concurrently with healthy terminal writes.
 //
 // The former second arm — an in-flight conversation whose claim released but
 // whose status flip rolled back, requeued by writing 'queued' — no longer
@@ -701,7 +709,6 @@ func healClaimDesyncs(ctx context.Context, q queryer) (released int, err error) 
 		UPDATE claims SET released_at = now(),
 		    outcome = CASE c.status
 		        WHEN 'completed' THEN 'completed'
-		        WHEN 'cancelled' THEN 'cancelled'
 		        ELSE 'failed'
 		    END
 		FROM conversations c

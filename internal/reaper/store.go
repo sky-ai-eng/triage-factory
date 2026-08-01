@@ -116,7 +116,7 @@ const reapCandidateJoin = `
 // releaseReapedClaimsSQL releases the active claims of a just-swept
 // conversation set. The claim-level outcome is always 'reaped' — the
 // engagement ended because its executor died — while the conversation-level
-// status carries the user-facing disposition (cancelled/failed/queued).
+// status carries the user-facing disposition (parked/failed/queued).
 const releaseReapedClaimsSQL = `
 	UPDATE claims SET released_at = now(), outcome = 'reaped'
 	WHERE released_at IS NULL AND conversation_id = ANY($1)
@@ -132,14 +132,21 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	staleSecs := staleThreshold.Seconds()
 	var out Counts
 
-	// 1. Cancel-requested candidates: finalize cancelled instead of
-	// requeuing — "cancel-requested rows go through the existing cancel
-	// finalization instead of requeue" (spec §4.3). No live owner to
-	// signal, so this IS the finalization: a dead executor can't apply a
-	// cancel signal to a process that no longer exists.
-	cancelledBlueprintIDs, cancelledIDs, err := reapUpdateRuns(ctx, tx, staleSecs, nil, `
-		UPDATE conversations SET status = 'cancelled', completed_at = now(), stop_reason = 'cancelled',
-			result_summary = 'Cancelled: owning blueprint run was cancel-requested under a dead executor (reaper)'
+	// 1. Cancel-requested candidates: finalize instead of requeuing —
+	// "cancel-requested rows go through the existing cancel finalization
+	// instead of requeue" (spec §4.3). No live owner to signal, so this IS the
+	// finalization: a dead executor can't apply a cancel signal to a process
+	// that no longer exists.
+	//
+	// The conversation PARKS `open` while its blueprint below takes the
+	// 'cancelled' terminal — the split every cancel path uses. Read the park as
+	// "stopped without concluding", NOT as "resumable": the blueprint is
+	// terminal, so the claim gate refuses the row. What it buys is the
+	// workspace, which the retention TTL collects on its own schedule instead
+	// of a reaper throwing it away the instant a host went quiet.
+	parkedBlueprintIDs, parkedIDs, err := reapUpdateRuns(ctx, tx, staleSecs, nil, `
+		UPDATE conversations SET status = 'open', parked_at = COALESCE(parked_at, now()), stop_reason = 'cancelled',
+			result_summary = 'Stopped: owning blueprint run was cancel-requested under a dead executor (reaper)'
 		WHERE id IN (
 			SELECT r.id `+reapCandidateJoin+`
 			  AND br.cancel_requested = true
@@ -149,15 +156,15 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	if err != nil {
 		return Counts{}, err
 	}
-	out.Cancelled = len(cancelledBlueprintIDs)
-	if len(cancelledBlueprintIDs) > 0 {
+	out.Cancelled = len(parkedBlueprintIDs)
+	if len(parkedBlueprintIDs) > 0 {
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE blueprint_runs SET status = 'cancelled', completed_at = now()
 			WHERE id = ANY($1) AND status = 'running'
-		`, pgUUIDArray(cancelledBlueprintIDs)); err != nil {
+		`, pgUUIDArray(parkedBlueprintIDs)); err != nil {
 			return Counts{}, err
 		}
-		if _, err := tx.ExecContext(ctx, releaseReapedClaimsSQL, pgUUIDArray(cancelledIDs)); err != nil {
+		if _, err := tx.ExecContext(ctx, releaseReapedClaimsSQL, pgUUIDArray(parkedIDs)); err != nil {
 			return Counts{}, err
 		}
 	}
@@ -273,12 +280,11 @@ func (s *pgStore) HealClaimDesyncs(ctx context.Context) (int, error) {
 		UPDATE claims SET released_at = now(),
 		    outcome = CASE c.status
 		        WHEN 'completed' THEN 'completed'
-		        WHEN 'cancelled' THEN 'cancelled'
 		        ELSE 'failed'
 		    END
 		FROM conversations c
 		WHERE claims.conversation_id = c.id AND claims.released_at IS NULL
-		  AND c.status IN ('completed','failed','cancelled','task_unsolvable')
+		  AND c.status IN ('completed','failed')
 	`)
 	if err != nil {
 		return 0, err

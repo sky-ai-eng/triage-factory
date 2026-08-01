@@ -34,6 +34,11 @@ func (s *Spawner) queueNativeMessage(ctx context.Context, orgID string, run doma
 	if !parked && !domain.IsActiveRunStatus(run.Status) && run.Status != "queued" {
 		return ErrRunNotSteerable
 	}
+	// A parked conversation nothing will claim can't be woken — refuse before
+	// writing the message rather than queue a row that sits forever.
+	if parked && !s.blueprintDrivableForResume(ctx, orgID, &run) {
+		return ErrRunNotSteerable
+	}
 	// A parked conversation whose workspace is gone for good can't be woken;
 	// refuse before writing anything so the caller sees the same 410 the SDK
 	// path returns rather than a row that dies at claim time.
@@ -68,10 +73,12 @@ func (s *Spawner) queueNativeMessage(ctx context.Context, orgID string, run doma
 // isTerminalForSteer reports whether a conversation has reached a state no
 // message can reopen. A `completed` conversation whose outcome was an abort
 // is deliberately NOT terminal — the agent chose to stop, and a follow-up
-// picks the work back up.
+// picks the work back up. A cancelled conversation isn't terminal either: it
+// parks `open`, and whether it can actually be woken is the blueprint's
+// answer to give (blueprintDrivableForResume), not this switch's.
 func isTerminalForSteer(run domain.Conversation) bool {
 	switch run.Status {
-	case "failed", "cancelled", "task_unsolvable":
+	case "failed":
 		return true
 	case "completed":
 		return domain.RunOutcome(run.Outcome) != domain.RunOutcomeAbort

@@ -96,6 +96,10 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 	if !resumableState(run.Status, run.Outcome) {
 		return ErrRunNotResumable
 	}
+	// …and something has to be willing to claim it once it's queued.
+	if !s.blueprintDrivableForResume(ctx, orgID, run) {
+		return ErrRunNotResumable
+	}
 	if run.SessionID == "" {
 		return fmt.Errorf("run has no session id; cannot resume")
 	}
@@ -209,46 +213,46 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *d
 	return ok
 }
 
-// markCancelledAfterResume writes the terminal cancelled status for a
-// run being resumed off the claim path (Spawner.dispatchResumeClaim) iff
-// the run is still non-terminal — the resume-by-enqueue counterpart of
-// the retired in-process goroutine's own markCancelled closure. A
-// registered s.cancels handle's Cancel() doesn't touch the DB itself; the
-// delivering claim owns the terminal write any time it observes its ctx
-// cancelled.
-// claimID names the delivering engagement, so the terminal goes through the
-// claim fence: a resume whose executor was reaped mid-turn must not cancel
-// the conversation its successor has picked up. Empty keeps the unfenced
-// write. Returns fenced: true when the terminal was refused, in which case
-// nothing was written, broadcast, or discarded.
-func (s *Spawner) markCancelledAfterResume(orgID, runID, claimID, userID string) (fenced bool) {
+// parkCancelledAfterResume parks a run being resumed off the claim path
+// (Spawner.dispatchResumeClaim) back to `open` iff it is still non-terminal —
+// the resume-by-enqueue counterpart of the retired in-process goroutine's own
+// markCancelled closure. A registered s.cancels handle's Cancel() doesn't
+// touch the DB itself; the delivering claim owns the disposition any time it
+// observes its ctx cancelled.
+//
+// The snapshot the run parked with is deliberately kept. This is the same
+// workspace the resume was about to rehydrate into, and a cancel arriving mid-
+// resume is not a reason to destroy it — the blueprint's cancel terminal is
+// what records that the work stopped, and the retention TTL is what collects
+// the blob.
+//
+// claimID names the delivering engagement, so the write goes through the
+// claim fence: a resume whose executor was reaped mid-turn must not park the
+// conversation its successor has picked up. Empty keeps the unfenced write.
+// Returns fenced: true when the write was refused, in which case nothing was
+// written or broadcast.
+func (s *Spawner) parkCancelledAfterResume(orgID, runID, claimID, userID string) (fenced bool) {
 	cancelCtx := context.Background()
 	var ok bool
 	var mErr error
 	if claimID != "" {
-		ok, mErr = s.agentRuns.MarkCancelledIfActiveForClaimSystem(cancelCtx, orgID, runID, claimID, "user_cancelled", "Run cancelled by user")
+		ok, mErr = s.agentRuns.ParkCancelledIfActiveForClaimSystem(cancelCtx, orgID, runID, claimID, "user_cancelled", "Run cancelled by user")
 	} else {
 		mErr = s.tx.SyntheticClaimsWithTx(cancelCtx, orgID, userID, func(ts db.TxStores) error {
-			f, err := ts.Conversations.MarkCancelledIfActive(cancelCtx, orgID, runID, "user_cancelled", "Run cancelled by user")
+			f, err := ts.Conversations.ParkCancelledIfActive(cancelCtx, orgID, runID, "user_cancelled", "Run cancelled by user")
 			ok = f
 			return err
 		})
 	}
 	if errors.Is(mErr, db.ErrClaimReleased) {
-		// A successor owns the conversation. Its snapshot is the workspace
-		// that successor resumes from, so the discard below is skipped along
-		// with the terminal itself.
+		// A successor owns the conversation, so its disposition is not this
+		// engagement's to write.
 		delegateLog.Error("claim fence refused the resume cancellation — a successor owns this conversation; recording nothing",
 			"run", runID, "claim_id", claimID, "org_id", orgID, "error", mErr)
 		return true
 	}
 	if ok {
-		s.broadcastRunUpdate(orgID, runID, "cancelled")
-		// Cancelled mid-resume: the run won't continue, so drop the
-		// snapshot taken when it parked. Same key/no-op semantics as
-		// failRun's discard (runID-keyed; harmless for a blueprint step,
-		// which terminateBlueprint cleans by blueprint_run_id).
-		s.discardWorkspaceSnapshot(cancelCtx, orgID, runID)
+		s.broadcastRunUpdate(orgID, runID, "open")
 	}
 	return false
 }

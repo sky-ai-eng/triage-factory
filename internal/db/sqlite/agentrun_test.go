@@ -300,8 +300,8 @@ func TestConversationStore_SQLite_RuntimeDefaultsToSDK(t *testing.T) {
 
 // TestConversationStore_SQLite_ActiveIDsForTeamSystem pins the team-archive
 // force-stop enumeration: runs on the team in the active set
-// (NOT completed/failed/cancelled/task_unsolvable/pending_approval) are
-// returned; terminal and pending_approval runs are excluded. SQLite hardcodes
+// (NOT completed/failed/pending_approval) are returned; terminal and
+// pending_approval runs are excluded. SQLite hardcodes
 // conversations.team_id to the local sentinel, so the cross-team negative case
 // lives in the Postgres tests; here we pin the status predicate + team scoping.
 func TestConversationStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
@@ -324,7 +324,7 @@ func TestConversationStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
 	running := mk("running")
 	open := mk("open")
 	mk("completed")
-	mk("cancelled")
+	mk("failed")
 	mk("pending_approval")
 
 	ids, err := store.ActiveIDsForTeamSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID)

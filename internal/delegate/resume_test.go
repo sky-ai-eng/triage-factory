@@ -73,6 +73,36 @@ func TestResumeOpenRun_NotResumable(t *testing.T) {
 	}
 }
 
+// TestResumeOpenRun_ParkedUnderFinishedBlueprintRefused: a run parked `open`
+// under a blueprint that already finished is not resumable, however resumable
+// its own row reads. ClaimNextRun only drives rows under a running blueprint,
+// so waking it would flip it mid-flight and leave it there forever — claimed
+// by nobody, counted as queue depth by every counter.
+//
+// This is the reachable shape a cancel now produces: the conversation parks
+// and the blueprint takes the 'cancelled' terminal. Widening the gate to a
+// finished blueprint's final conversation is the resume work this epic builds
+// toward, not a gap.
+func TestResumeOpenRun_ParkedUnderFinishedBlueprintRefused(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-cancelled-bp", "sess", "/tmp/wt")
+	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-cancelled-bp'`); err != nil {
+		t.Fatalf("park: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status='cancelled' WHERE id='seedbpr-r-cancelled-bp'`); err != nil {
+		t.Fatalf("cancel blueprint: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+
+	err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-cancelled-bp", "msg", runmode.LocalDefaultUserID)
+	if !errors.Is(err, ErrRunNotResumable) {
+		t.Errorf("err = %v, want ErrRunNotResumable", err)
+	}
+	if st := storedStatus(t, database, "r-cancelled-bp"); st != "open" {
+		t.Errorf("stored status = %q, want open — a refused wake must leave the row parked, not queued", st)
+	}
+}
+
 // TestResumeOpenRun_EnqueuesRatherThanSpawning is resume-by-enqueue's core
 // contract (TFAC-585, decision log #7): ResumeOpenRun records the message
 // durably and flips the run's SAME row back to `queued` — no in-process

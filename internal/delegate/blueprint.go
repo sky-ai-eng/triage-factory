@@ -175,15 +175,25 @@ func (s *Spawner) terminateBlueprint(
 	s.reclaimBlueprintStepStaging(bgCtx, orgID, blueprintRunID)
 
 	// Drop the durable workspace snapshot now the blueprint is terminal so the
-	// blob store doesn't orphan it — EXCEPT an aborted terminal, whose
-	// completed+abort step run stays message-resumable. An abort snapshot is
-	// retained for the resume path (the worktree above was cleaned, so a resume
-	// cold-rehydrates from this blob) and reaped by the retention TTL sweep once
-	// it ages out; discarding it here would defeat resume. Keyed by
+	// blob store doesn't orphan it — EXCEPT the two terminals whose final step
+	// run is left in a state a human may want to pick back up:
+	//
+	//   - aborted: the completed+abort step run is message-resumable, and the
+	//     worktree above was cleaned, so this blob IS the resume path.
+	//   - cancelled: someone stopped this work, and the step parked `open`
+	//     rather than being torn down. Throwing the workspace away at exactly
+	//     the moment a user is most likely to want it back is the behavior this
+	//     retention exists to stop.
+	//
+	// Both are reaped by the retention TTL sweep once they age out (it already
+	// enumerates `open` and completed+abort runs), so the cost of a cancel is a
+	// blob that expires rather than a workspace that is gone. Keyed by
 	// blueprint_run_id (the shared workspace's key); idempotent, so the discard
-	// is a no-op for a blueprint that never snapshotted. Covers the non-abort
-	// terminals: clean finish, fail, cancel.
-	if status != domain.BlueprintRunStatusAborted {
+	// is a no-op for a blueprint that never snapshotted. Covers the rest: clean
+	// finish and fail.
+	switch status {
+	case domain.BlueprintRunStatusAborted, domain.BlueprintRunStatusCancelled:
+	default:
 		s.discardWorkspaceSnapshot(bgCtx, orgID, blueprintRunID)
 	}
 
@@ -381,6 +391,24 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 	return b.String()
 }
 
+// requestBlueprintCancel raises the blueprint layer's durable cancel signal for
+// a run's owning blueprint. It is the one place cancellation is spelled: from
+// here the claim gate stops handing out this blueprint's steps, and whichever
+// path disposes of the running step finalizes the blueprint 'cancelled'
+// (reactToStepTerminal for a live step, ResumeBlueprintAfterResume for a
+// resumed one, finalizeParkedBlueprintOnCancel for one that had already
+// parked). Best-effort: a failure here leaves the blueprint running with a
+// parked step, which the boot reconcile and the retention sweep both tolerate,
+// so it logs rather than failing the cancel.
+func (s *Spawner) requestBlueprintCancel(ctx context.Context, orgID, blueprintRunID string) {
+	if s.blueprints == nil || blueprintRunID == "" {
+		return
+	}
+	if _, err := s.blueprints.RequestRunCancelSystem(ctx, orgID, blueprintRunID); err != nil {
+		blueprintLog.Warn("raise cancel signal failed", "blueprint_run", blueprintRunID, "error", err)
+	}
+}
+
 // CancelBlueprint cancels every step inside a blueprint run, marks the blueprint
 // row cancelled, and lets the active step's runAgent return naturally.
 // Safe to call when the blueprint is already terminal.
@@ -408,9 +436,7 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	// reactor finalizes the blueprint 'cancelled' instead of enqueuing the next
 	// step. This is the durable half of the cancel; the in-memory subprocess kill
 	// below is the active half.
-	if _, err := s.blueprints.RequestRunCancelSystem(context.Background(), orgID, blueprintRunID); err != nil {
-		blueprintLog.Warn("raise cancel signal failed", "blueprint_run", blueprintRunID, "error", err)
-	}
+	s.requestBlueprintCancel(context.Background(), orgID, blueprintRunID)
 
 	// Kill the active step's subprocess, if one is running. The dispatcher
 	// registers a per-step cancel under the step run_id; sweep every active step
@@ -449,15 +475,16 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	}
 
 	// No live subprocess: a queued-not-started step (cancels with zero work) or a
-	// parked step. Mark every still-active step run cancelled so nothing lingers
-	// in the queue, then finalize the blueprint ourselves.
+	// parked step. Park every still-active step run so nothing lingers in the
+	// queue, then finalize the blueprint ourselves. The park keeps each step's
+	// workspace; the blueprint terminal below is what records the cancellation.
 	//
 	// Unfenced, deliberately: a user cancelling their blueprint overrides
 	// whoever holds its steps, and this process holds a claim on none of them
 	// (that is the branch condition). Same category as Spawner.Cancel.
 	for _, runID := range stepIDs {
-		if _, mErr := s.agentRuns.MarkCancelledIfActiveSystem(context.Background(), orgID, runID, "user_cancelled", "Blueprint cancelled by user"); mErr != nil {
-			blueprintLog.Warn("mark step run cancelled failed", "step_run", runID, "error", mErr)
+		if _, mErr := s.agentRuns.ParkCancelledIfActiveSystem(context.Background(), orgID, runID, "user_cancelled", "Blueprint cancelled by user"); mErr != nil {
+			blueprintLog.Warn("park cancelled step run failed", "step_run", runID, "error", mErr)
 		}
 	}
 
@@ -534,7 +561,8 @@ func (s *Spawner) finalizeParkedBlueprintOnCancel(ctx context.Context, orgID str
 		}
 		s.runBlueprintWorktreeCleanup(cr.ID, cfg)
 	}
-	s.discardWorkspaceSnapshot(ctx, orgID, run.BlueprintRunID)
+	// The snapshot deliberately survives: it is the parked workspace the cancel
+	// just retained, and the retention TTL is what collects it.
 }
 
 // markBlueprintRunStatusAsUser writes a blueprint_run status transition under
@@ -581,8 +609,11 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
 		return
 	}
 	// Still dormant after the resume (went open again) → the blueprint stays
-	// running; the next resume drives finalization.
-	if stepRun.Status == "open" {
+	// running; the next resume drives finalization. Unless a cancel is behind
+	// the park: a cancelled resume parks `open` rather than writing a terminal
+	// of its own, so cancel_requested is what tells the two apart — the same
+	// ordering reactToStepTerminal uses, and for the same reason.
+	if stepRun.Status == "open" && !cr.CancelRequested {
 		return
 	}
 
@@ -595,6 +626,16 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
 	cfg := runConfig{orgID: orgID, wtPath: cr.WorktreePath}
 	if task.EntitySource == "github" {
 		cfg.hasWT = true
+	}
+
+	// A cancel raised against this blueprint decides its terminal regardless of
+	// how the resumed step ended — including the `open` park a cancelled resume
+	// leaves behind, which the mapping below would otherwise read as an
+	// unexpected status and fail the blueprint over.
+	if cr.CancelRequested {
+		s.terminateBlueprint(orgID, cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
+			domain.BlueprintRunStatusCancelled, "cancelled", stepIdx, false)
+		return
 	}
 
 	// isFinal = this is the last step (and therefore the only step for N=1).
@@ -633,10 +674,8 @@ func blueprintTerminalForResumedStep(stepRun *domain.Conversation, isFinal bool)
 		default: // blueprintStepAdvance — mid-blueprint resume not implemented
 			return domain.BlueprintRunStatusAborted, "multi_step_resume_not_implemented"
 		}
-	case "failed", "task_unsolvable":
+	case "failed":
 		return domain.BlueprintRunStatusFailed, "step " + stepRun.Status
-	case "cancelled":
-		return domain.BlueprintRunStatusCancelled, "step cancelled"
 	default:
 		return domain.BlueprintRunStatusFailed, "step ended with status " + stepRun.Status
 	}

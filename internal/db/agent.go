@@ -50,10 +50,9 @@ type ConversationStore interface {
 	// Complete finalizes a conversation (status + terminal narrative
 	// fields only — the conversation carries no accounting cache) and
 	// releases the conversation's active claim (if one exists) with an
-	// outcome mapped from status ('failed'/'task_unsolvable' release as
-	// 'failed', 'cancelled' as 'cancelled', anything else as 'completed'),
-	// stamping the invocation's reported duration/turns telemetry onto the
-	// released claim.
+	// outcome mapped from status ('failed' releases as 'failed', anything
+	// else as 'completed'), stamping the invocation's reported
+	// duration/turns telemetry onto the released claim.
 	//
 	// costUSD is the invocation's reported total, settled as ONE lump on
 	// the engagement's own newest message row — the newest row attributed
@@ -99,6 +98,14 @@ type ConversationStore interface {
 	// ok=false means the run is no longer resumable (a concurrent
 	// resume/cancel/claim already moved it) — the caller maps the miss to
 	// 409.
+	//
+	// The blueprint half of "resumable" is NOT checked here: ClaimNextRun
+	// only drives rows whose blueprint is still running, so waking one under
+	// a finished blueprint would strand it mid-flight forever. That gate
+	// lives in the caller (delegate.blueprintDrivableForResume), because it
+	// needs an admin-pool read — blueprint_runs RLS hides another user's
+	// manual blueprint, and a teammate resuming a run must not be refused
+	// for a row they merely cannot see.
 	MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error)
 
 	// SetSession stores the Claude Code session id captured from
@@ -126,11 +133,23 @@ type ConversationStore interface {
 	// run-root creation).
 	SetWorktreePath(ctx context.Context, orgID, runID, path string) error
 
-	// MarkCancelledIfActive marks a run cancelled with the given
-	// stop_reason / summary, but only if the row hasn't already
-	// reached a terminal state. Releases the active claim (if any) with
-	// outcome 'cancelled'. Used by the user-cancel path.
-	MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
+	// ParkCancelledIfActive stops a run at the user's request: it PARKS the
+	// conversation `open` with the given stop_reason / summary, iff the row
+	// hasn't already reached a terminal state, and releases the active claim
+	// (if any) with outcome 'cancelled'. Used by the user-cancel path.
+	//
+	// A park, not a terminal, and deliberately so: `cancelled` was a third
+	// spelling of a concept the task layer (return-to-queue, drag-to-done) and
+	// the blueprint layer (cancel_requested / BlueprintRunStatusCancelled)
+	// already own, and it was the spelling that threw the workspace away at
+	// the moment a user is most likely to want the work back. What is
+	// recorded here is that the run stopped without concluding; the claim
+	// outcome is what records that it was cancelled rather than left idle.
+	//
+	// parked_at is stamped only if unset, so cancelling an already-parked run
+	// doesn't restart the snapshot-retention clock on a workspace that went
+	// dormant earlier.
+	ParkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
 
 	// MarkFailedIfActive flips a run to 'failed' iff it hasn't
 	// already reached a terminal state, releasing the active claim (if
@@ -229,16 +248,15 @@ type ConversationStore interface {
 
 	// ActiveIDsForTeamSystem returns the IDs of every active run owned by the
 	// team (conversations.team_id = teamID), using the same active set as
-	// ActiveIDsForTask: status NOT IN ('completed','failed','cancelled',
-	// 'task_unsolvable','pending_approval'). This is the team-archive force-stop
-	// cascade's enumeration, the team-scoped sibling of
-	// ActiveIDsForTaskSystem — each returned id is passed to
-	// spawner.Cancel(orgID, runID, ""), which hard-kills a live process or marks
-	// a parked `open` run cancelled. pending_approval is deliberately excluded:
-	// the agent process already exited with a prepared artifact (no live work to
-	// stop), spawner.Cancel can't flip it (MarkCancelledIfActive's filter omits
-	// it), and leaving it inert means a later restore can still surface the
-	// pending review. Admin pool / org-scoped: archive runs from an org-admin
+	// ActiveIDsForTask: status NOT IN ('completed','failed','pending_approval').
+	// This is the team-archive force-stop cascade's enumeration, the
+	// team-scoped sibling of ActiveIDsForTaskSystem — each returned id is
+	// passed to spawner.Cancel(orgID, runID, ""), which hard-kills a live
+	// process or parks a run that has none. pending_approval is deliberately
+	// excluded: the agent process already exited with a prepared artifact (no
+	// live work to stop), spawner.Cancel can't flip it
+	// (ParkCancelledIfActive's filter omits it), and leaving it inert means a
+	// later restore can still surface the pending review. Admin pool / org-scoped: archive runs from an org-admin
 	// handler whose caller may not be a member of the team, so the team-visibility
 	// RLS would hide the rows on the app pool.
 	ActiveIDsForTeamSystem(ctx context.Context, orgID, teamID string) ([]string, error)
@@ -423,7 +441,7 @@ type ConversationStore interface {
 	RecordClaimSandboxStatsSystem(ctx context.Context, orgID, claimID string, peakMemMB *int, cpuUsec *int64) error
 
 	SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error
-	MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
+	ParkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
 	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID, failureKind string) (bool, error)
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.Message) (int64, error)
 
@@ -523,9 +541,9 @@ type ConversationStore interface {
 	// which is a different thing and must not be treated as a lost race.
 	MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, failureKind string) (bool, error)
 
-	// MarkCancelledIfActiveForClaimSystem is MarkCancelledIfActive driven by
-	// the engagement: the terminal an executor writes when its own run's
-	// context is cancelled, refused once it has been fenced out.
+	// ParkCancelledIfActiveForClaimSystem is ParkCancelledIfActive driven by
+	// the engagement: the park an executor writes when its own run's context
+	// is cancelled, refused once it has been fenced out.
 	//
 	// The unfenced twin stays, and is what a USER-initiated cancel uses. That
 	// distinction is the whole reason both exist: a person cancelling a run
@@ -534,7 +552,7 @@ type ConversationStore interface {
 	// only entitled to end a run it still owns. Reaching for the unfenced
 	// version from an engagement path is how the cancel route around this
 	// fence gets rebuilt.
-	MarkCancelledIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, stopReason, summary string) (bool, error)
+	ParkCancelledIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, stopReason, summary string) (bool, error)
 
 	// SetClaimPhaseSystem writes claims.phase on one named claim — the
 	// claim-keyed sibling of SetActiveClaimPhaseSystem, for the engagement

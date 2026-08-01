@@ -21,12 +21,12 @@ func childRunStatusDB(t *testing.T, conn *sql.DB, id string) string {
 	return s.String
 }
 
-// TestMarkRunStatus_CancelsOrphanedChild_OnTerminal pins the atomic
-// guarantee: flipping a blueprint_run to a terminal status must cancel any
-// still-active child run in the same call, so a cancel that raced the
-// dispatcher can't strand a child 'running' (which keeps the dispatcher on
+// TestMarkRunStatus_ParksOrphanedChild_OnTerminal pins the atomic
+// guarantee: flipping a blueprint_run to a terminal status must park any
+// still-mid-flight child run in the same call, so a cancel that raced the
+// dispatcher can't strand a child mid-flight (which keeps the dispatcher on
 // phantom work and pins its feature branch in a worktree, requeuing forever).
-func TestMarkRunStatus_CancelsOrphanedChild_OnTerminal(t *testing.T) {
+func TestMarkRunStatus_ParksOrphanedChild_OnTerminal(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -71,15 +71,15 @@ func TestMarkRunStatus_CancelsOrphanedChild_OnTerminal(t *testing.T) {
 		t.Fatal("MarkRunStatus reported no change")
 	}
 
-	if got := childRunStatusDB(t, conn, "oa-child"); got != "cancelled" {
-		t.Errorf("child run status = %q, want cancelled (must not strand a child under a terminal parent)", got)
+	if got := childRunStatusDB(t, conn, "oa-child"); got != "open" {
+		t.Errorf("child run status = %q, want open (must not strand a child under a terminal parent)", got)
 	}
-	var completedAt any
-	if err := conn.QueryRow(`SELECT completed_at FROM conversations WHERE id = 'oa-child'`).Scan(&completedAt); err != nil {
-		t.Fatalf("read completed_at: %v", err)
+	var parkedAt any
+	if err := conn.QueryRow(`SELECT parked_at FROM conversations WHERE id = 'oa-child'`).Scan(&parkedAt); err != nil {
+		t.Fatalf("read parked_at: %v", err)
 	}
-	if completedAt == nil {
-		t.Error("cancelled child run has NULL completed_at; want a stamp")
+	if parkedAt == nil {
+		t.Error("parked child run has NULL parked_at; the retention sweep keys off it")
 	}
 	var releasedAt any
 	var outcome string
@@ -87,7 +87,7 @@ func TestMarkRunStatus_CancelsOrphanedChild_OnTerminal(t *testing.T) {
 		t.Fatalf("read oa-claim: %v", err)
 	}
 	if releasedAt == nil || outcome != "cancelled" {
-		t.Errorf("cancelled child's claim = (released=%v, outcome=%q), want (released, cancelled)", releasedAt != nil, outcome)
+		t.Errorf("parked child's claim = (released=%v, outcome=%q), want (released, cancelled)", releasedAt != nil, outcome)
 	}
 }
 
@@ -185,13 +185,17 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 		t.Fatalf("seed ra-child messages: %v", err)
 	}
 
-	// A second orphan that never started: queued child under the same terminal
-	// parent (the parent went terminal before the step was claimed). Must also be
-	// cancelled — a queued step under a non-running parent is never claimable.
+	// A second orphan that never started: a mid-flight child under the same
+	// terminal parent that no claim ever picked up (the parent went terminal
+	// first). Must also be parked — a claimable step under a non-running parent
+	// is never actually claimed, so it would sit in the queue forever.
 	insertConversationForTest(t, conn, domain.Conversation{
-		ID: "ra-child-queued", TaskID: taskA.ID, PromptID: "ra-p0", Status: "queued",
+		ID: "ra-child-queued", TaskID: taskA.ID, PromptID: "ra-p0", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brA, BlueprintStepIndex: &step0,
 	})
+	if _, err := conn.Exec(`UPDATE conversations SET status = NULL WHERE id = 'ra-child-queued'`); err != nil {
+		t.Fatalf("set queued orphan mid-flight: %v", err)
+	}
 
 	// Healthy: running blueprint_run, child running — must be left alone.
 	taskB := seedEntityEventTask(t, conn, "recon-b")
@@ -228,13 +232,13 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 		t.Fatalf("ReconcileOrphanedRuns: %v", err)
 	}
 	if n != 2 {
-		t.Errorf("reconciled count = %d, want 2 (running + queued orphans under the terminal parent)", n)
+		t.Errorf("reconciled count = %d, want 2 (both mid-flight orphans under the terminal parent)", n)
 	}
-	if got := childRunStatusDB(t, conn, "ra-child"); got != "cancelled" {
-		t.Errorf("orphan child status = %q, want cancelled", got)
+	if got := childRunStatusDB(t, conn, "ra-child"); got != "open" {
+		t.Errorf("orphan child status = %q, want open", got)
 	}
-	if got := childRunStatusDB(t, conn, "ra-child-queued"); got != "cancelled" {
-		t.Errorf("queued orphan child status = %q, want cancelled", got)
+	if got := childRunStatusDB(t, conn, "ra-child-queued"); got != "open" {
+		t.Errorf("unclaimed orphan child status = %q, want open", got)
 	}
 	// The running orphan's streamed tokens still read through the ledger —
 	// the sweep is a status flip only, nothing to roll up or lose.
@@ -309,8 +313,8 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	// Dangling claims on terminal rows (the crash-after-flip shape).
 	seedChild("ds-done", "completed")
 	activeClaim("ds-done-cl", "ds-done")
-	seedChild("ds-unsolvable", "task_unsolvable")
-	activeClaim("ds-unsolvable-cl", "ds-unsolvable")
+	seedChild("ds-failed", "failed")
+	activeClaim("ds-failed-cl", "ds-failed")
 	// Mid-flight row with no claim: under the derived model this is simply
 	// a claimable conversation, so the sweep must leave it (and its stale
 	// placement stamp, which the next claim re-earns) alone.
@@ -342,8 +346,8 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	if rel, out := claimState("ds-done-cl"); !rel || out != "completed" {
 		t.Errorf("completed row's claim = (released=%v, outcome=%q), want (true, completed)", rel, out)
 	}
-	if rel, out := claimState("ds-unsolvable-cl"); !rel || out != "failed" {
-		t.Errorf("task_unsolvable row's claim = (released=%v, outcome=%q), want (true, failed)", rel, out)
+	if rel, out := claimState("ds-failed-cl"); !rel || out != "failed" {
+		t.Errorf("failed row's claim = (released=%v, outcome=%q), want (true, failed)", rel, out)
 	}
 	if got := childRunStatusDB(t, conn, "ds-stranded"); got != "" {
 		t.Errorf("mid-flight claimless row status = %q, want no stored status (already claimable)", got)

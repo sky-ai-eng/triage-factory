@@ -248,7 +248,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				}
 
 				// Terminals render verbatim.
-				for _, term := range []string{"completed", "failed", "cancelled", "task_unsolvable"} {
+				for _, term := range domain.AllTerminalRunStatuses() {
 					h.SetStoredStatus(t, convID, term)
 					if st := h.DisplayStatus(t, convID); st != term {
 						t.Errorf("terminal %s displays %q", term, st)

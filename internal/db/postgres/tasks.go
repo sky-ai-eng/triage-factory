@@ -1052,7 +1052,7 @@ func countConsecutiveFailedRuns(ctx context.Context, q queryer, orgID, entityID,
 		)
 		SELECT COUNT(*)
 		FROM dedup
-		WHERE status IN ('failed', 'task_unsolvable', 'aborted')
+		WHERE status IN ('failed', 'aborted')
 			AND started_at > (
 				SELECT COALESCE(MAX(started_at), TIMESTAMPTZ '1970-01-01')
 				FROM dedup WHERE status = 'completed'

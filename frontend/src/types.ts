@@ -110,13 +110,11 @@ export const CLAIM_PHASES = [
 ] as const
 export type ClaimPhase = (typeof CLAIM_PHASES)[number]
 
-// TERMINAL_RUN_STATUSES are the states a conversation never leaves.
-export const TERMINAL_RUN_STATUSES = [
-  'completed',
-  'failed',
-  'cancelled',
-  'task_unsolvable',
-] as const
+// TERMINAL_RUN_STATUSES are the states a conversation never leaves: the agent
+// concluded, or the infrastructure died. Stopping a run without concluding it
+// parks it `open` instead — cancellation is spelled at the task and blueprint
+// layers, never as a conversation status.
+export const TERMINAL_RUN_STATUSES = ['completed', 'failed'] as const
 export type TerminalRunStatus = (typeof TERMINAL_RUN_STATUSES)[number]
 
 // RUN_STATUSES is the full display union: the two derived states (queued and

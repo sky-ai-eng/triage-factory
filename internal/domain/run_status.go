@@ -14,7 +14,14 @@ package domain
 //
 //	queued | fetching | cloning | agent_starting |
 //	awaiting_credentials | running | open            (non-terminal)
-//	completed | failed | cancelled | task_unsolvable (terminal)
+//	completed | failed                               (terminal)
+//
+// The terminal half is deliberately two names with one owner each: the agent
+// concluded, or the infrastructure died. Stopping a run without concluding it
+// is a park (`open`), not a third terminal — a park that is never resumed IS
+// the cancellation, and cancellation itself is already spelled at the task
+// layer (return-to-queue, drag-to-done) and the blueprint layer
+// (`cancel_requested` / BlueprintRunStatusCancelled).
 //
 // Keeping the sets here means "is this run active?" / "is this a phase?" has
 // ONE definition, not a copy per handler that can drift from the model.
@@ -60,10 +67,10 @@ const (
 	// not concluded, resumed through its own path rather than the dispatcher.
 	StatusOpen = "open"
 
-	StatusCompleted      = "completed"
-	StatusFailed         = "failed"
-	StatusCancelled      = "cancelled"
-	StatusTaskUnsolvable = "task_unsolvable"
+	// StatusCompleted — the agent reached a conclusion.
+	StatusCompleted = "completed"
+	// StatusFailed — the infrastructure under the agent died.
+	StatusFailed = "failed"
 )
 
 // AllClaimPhases returns the claim `phase` vocabulary. Adding an entry here is
@@ -91,7 +98,7 @@ func IsClaimPhase(status string) bool {
 
 // AllTerminalRunStatuses returns the terminal display statuses.
 func AllTerminalRunStatuses() []string {
-	return []string{StatusCompleted, StatusFailed, StatusCancelled, StatusTaskUnsolvable}
+	return []string{StatusCompleted, StatusFailed}
 }
 
 // AllRunStatuses returns every value a displayed Conversation.Status may
@@ -109,7 +116,7 @@ func AllRunStatuses() []string {
 // failure count keys on status=="failed", never on a non-empty failure_kind.
 func IsTerminalRunStatus(status string) bool {
 	switch status {
-	case StatusCompleted, StatusFailed, StatusCancelled, StatusTaskUnsolvable:
+	case StatusCompleted, StatusFailed:
 		return true
 	}
 	return false

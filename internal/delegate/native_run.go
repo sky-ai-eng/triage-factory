@@ -84,7 +84,15 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 
 	s.updatePhase(orgID, runID, cfg.claimID, domain.ClaimPhaseAgentStarting)
 	if ctx.Err() != nil {
-		return s.handleCancelled(orgID, runID, startTime, cfg.wtPath, cfg.claimID, triggerType, creatorUserID)
+		return s.handleCancelled(liveParkContext{
+			orgID:         orgID,
+			runID:         runID,
+			taskID:        task.ID,
+			namespace:     namespace,
+			claudeCwd:     claudeCwd,
+			triggerType:   triggerType,
+			creatorUserID: creatorUserID,
+		}, cfg.claimID, "")
 	}
 
 	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
@@ -111,7 +119,15 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	conn, err := jail.Accept(ctx, toolHostDialTimeout)
 	if err != nil {
 		if ctx.Err() != nil {
-			return s.handleCancelled(orgID, runID, startTime, cfg.wtPath, cfg.claimID, triggerType, creatorUserID)
+			return s.handleCancelled(liveParkContext{
+				orgID:         orgID,
+				runID:         runID,
+				taskID:        task.ID,
+				namespace:     namespace,
+				claudeCwd:     claudeCwd,
+				triggerType:   triggerType,
+				creatorUserID: creatorUserID,
+			}, cfg.claimID, "")
 		}
 		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "connect to tool host: "+err.Error(), domain.RunFailureUnclassified)
 	}
@@ -504,7 +520,15 @@ func (s *Spawner) recordNativeResult(
 
 	switch result.Kind {
 	case agentloop.ResultCancelled:
-		return s.handleCancelled(orgID, runID, startTime, cfg.wtPath, cfg.claimID, triggerType, creatorUserID)
+		return s.handleCancelled(liveParkContext{
+			orgID:         orgID,
+			runID:         runID,
+			taskID:        task.ID,
+			namespace:     namespace,
+			claudeCwd:     claudeCwd,
+			triggerType:   triggerType,
+			creatorUserID: creatorUserID,
+		}, cfg.claimID, "")
 
 	case agentloop.ResultFailed:
 		reason := "native agent loop failed"

@@ -234,7 +234,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		}
 	})
 
-	t.Run("MarkCancelled", func(t *testing.T) {
+	t.Run("ParkCancelled", func(t *testing.T) {
 		// The self-cancel an executor writes when its own run's ctx is killed
 		// — which is precisely what a partition self-fence trip does to every
 		// live run it owns. A late self-fence must not cancel a successor's
@@ -242,24 +242,24 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		fx := newFenceFixture(t, h, "exec-fence-cancel")
 		reap(t, h.AdminDB, fx.orgID, fx.runID)
 
-		ok, err := fx.store.MarkCancelledIfActiveForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, "user_cancelled", "Run cancelled by user")
+		ok, err := fx.store.ParkCancelledIfActiveForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, "user_cancelled", "Run cancelled by user")
 		if !errors.Is(err, db.ErrClaimReleased) {
-			t.Fatalf("mark-cancelled after reap = (%v, %v), want ErrClaimReleased", ok, err)
+			t.Fatalf("park-cancelled after reap = (%v, %v), want ErrClaimReleased", ok, err)
 		}
 		if ok {
-			t.Error("mark-cancelled after reap reported a flip")
+			t.Error("park-cancelled after reap reported a flip")
 		}
 		if got, _ := fx.store.Get(ctx, fx.orgID, fx.runID); got.Status != "running" {
-			t.Errorf("status = %q, want running (the refused terminal must not land)", got.Status)
+			t.Errorf("status = %q, want running (the refused write must not land)", got.Status)
 		}
 		// The unfenced twin is what a user's cancel uses, and it still works
 		// on the same row — the fence gates the executor, not the person.
-		flipped, err := fx.store.MarkCancelledIfActiveSystem(ctx, fx.orgID, fx.runID, "user_cancelled", "Run cancelled by user")
+		flipped, err := fx.store.ParkCancelledIfActiveSystem(ctx, fx.orgID, fx.runID, "user_cancelled", "Run cancelled by user")
 		if err != nil || !flipped {
 			t.Fatalf("unfenced user cancel = (%v, %v), want it to flip", flipped, err)
 		}
-		if got, _ := fx.store.Get(ctx, fx.orgID, fx.runID); got.Status != "cancelled" {
-			t.Errorf("status = %q, want cancelled", got.Status)
+		if got, _ := fx.store.Get(ctx, fx.orgID, fx.runID); got.Status != "open" {
+			t.Errorf("status = %q, want open (a cancel parks; it never writes a terminal of its own)", got.Status)
 		}
 	})
 
@@ -299,8 +299,8 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		if _, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, other, fx.claimID, string(domain.RunFailureCrash)); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("mark-failed on another conversation = %v, want ErrClaimReleased", err)
 		}
-		if _, err := fx.store.MarkCancelledIfActiveForClaimSystem(ctx, fx.orgID, other, fx.claimID, "user_cancelled", "Run cancelled by user"); !errors.Is(err, db.ErrClaimReleased) {
-			t.Fatalf("mark-cancelled on another conversation = %v, want ErrClaimReleased", err)
+		if _, err := fx.store.ParkCancelledIfActiveForClaimSystem(ctx, fx.orgID, other, fx.claimID, "user_cancelled", "Run cancelled by user"); !errors.Is(err, db.ErrClaimReleased) {
+			t.Fatalf("park-cancelled on another conversation = %v, want ErrClaimReleased", err)
 		}
 		if err := fx.store.SetClaimPhaseSystem(ctx, fx.orgID, other, fx.claimID, "cloning"); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("phase on another conversation = %v, want ErrClaimReleased", err)

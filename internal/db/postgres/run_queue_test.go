@@ -303,8 +303,9 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, orphanID); err != nil {
 		t.Fatalf("set orphan running: %v", err)
 	}
-	// A queued orphan under the same terminal parent (never claimed) must also
-	// be cancelled — a queued step under a non-running parent is never claimable.
+	// A second mid-flight orphan under the same terminal parent that no claim
+	// ever picked up must also be parked — a claimable step under a non-running
+	// parent is never actually claimed, so it would sit in the queue forever.
 	queuedOrphanID := uuid.New().String()
 	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID: queuedOrphanID, TaskID: taskA, PromptID: promptA, Model: "m",
@@ -342,11 +343,11 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	if err != nil || n != 2 {
 		t.Fatalf("ReconcileOrphanedRuns = (%d, %v), want (2, nil)", n, err)
 	}
-	if st, completed := pgRunStatus(t, h, orphanID); st != "cancelled" || !completed {
-		t.Errorf("orphan = (%q, completed=%v), want (cancelled, true)", st, completed)
+	if st, parked := pgRunParked(t, h, orphanID); st != "open" || !parked {
+		t.Errorf("orphan = (%q, parked=%v), want (open, true)", st, parked)
 	}
-	if st, completed := pgRunStatus(t, h, queuedOrphanID); st != "cancelled" || !completed {
-		t.Errorf("queued orphan = (%q, completed=%v), want (cancelled, true)", st, completed)
+	if st, parked := pgRunParked(t, h, queuedOrphanID); st != "open" || !parked {
+		t.Errorf("unclaimed orphan = (%q, parked=%v), want (open, true)", st, parked)
 	}
 	if st, _ := pgRunStatus(t, h, healthyID); st != "" {
 		t.Errorf("healthy run status = %q, want none (must not touch a mid-flight child under a running parent)", st)
@@ -361,7 +362,7 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 // TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs pins the janitor arms
 // for the two shapes the non-atomic app-pool terminal writes can strand: a
 // terminal conversation with a dangling active claim gets the claim released
-// (outcome mapped from status, task_unsolvable → failed), and an in-flight
+// (outcome mapped from status), and an in-flight
 // delegation conversation with no active claim under a running parent goes
 // back to 'queued' with its placement stamp cleared — while a running row
 // with a live claim and a claimless queued row are untouched.
@@ -402,8 +403,8 @@ func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 	// Dangling claims on terminal rows (the crash-after-flip shape).
 	doneID := seedChild("completed")
 	doneClaim := activeClaim(doneID)
-	unsolvableID := seedChild("task_unsolvable")
-	unsolvableClaim := activeClaim(unsolvableID)
+	failedID := seedChild("failed")
+	failedClaim := activeClaim(failedID)
 	// Mid-flight row with no claim: under the derived model this is simply
 	// a claimable conversation, so the sweep must leave it (and its stale
 	// placement stamp, which the next claim re-earns) alone.
@@ -434,8 +435,8 @@ func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 	if rel, out := claimState(doneClaim); !rel || out != "completed" {
 		t.Errorf("completed row's claim = (released=%v, outcome=%q), want (true, completed)", rel, out)
 	}
-	if rel, out := claimState(unsolvableClaim); !rel || out != "failed" {
-		t.Errorf("task_unsolvable row's claim = (released=%v, outcome=%q), want (true, failed)", rel, out)
+	if rel, out := claimState(failedClaim); !rel || out != "failed" {
+		t.Errorf("failed row's claim = (released=%v, outcome=%q), want (true, failed)", rel, out)
 	}
 	var strandedStatus sql.NullString
 	var pref any
@@ -657,6 +658,20 @@ func pgRunStatus(t *testing.T, h *pgtest.Harness, runID string) (status string, 
 		t.Fatalf("read run %s: %v", runID, err)
 	}
 	return stored.String, completedAt != nil
+}
+
+// pgRunParked is pgRunStatus's park-side sibling: the stored status plus
+// whether parked_at is stamped, which is what the snapshot-retention sweep
+// keys a parked run off.
+func pgRunParked(t *testing.T, h *pgtest.Harness, runID string) (status string, parked bool) {
+	t.Helper()
+	var stored sql.NullString
+	var parkedAt *string
+	if err := h.AdminDB.QueryRow(`SELECT status, parked_at::text FROM conversations WHERE id = $1`, runID).
+		Scan(&stored, &parkedAt); err != nil {
+		t.Fatalf("read run %s: %v", runID, err)
+	}
+	return stored.String, parkedAt != nil
 }
 
 // seedPgRunQueueFixture mints a prompt + blueprint + a running blueprint_run on

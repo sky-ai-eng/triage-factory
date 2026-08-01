@@ -28,12 +28,13 @@ func newRunQueueStore(conn *sql.DB) db.RunQueueStore {
 var _ db.RunQueueStore = (*runQueueStore)(nil)
 
 // runTerminalStatusesSQL is the canonical set of terminal conversation
-// status values as a SQL IN-list body. The reconcile sweep and the
-// orphaned-child cancel (blueprints.go) interpolate it instead of
-// re-spelling the literal, so the "non-terminal child" predicate has one
-// definition. Other queries that add dormant statuses
-// (open/pending_approval) to this set keep their own list.
-const runTerminalStatusesSQL = `'completed','failed','cancelled','task_unsolvable'`
+// status values as a SQL IN-list body — two names, one owner each: the agent
+// concluded, or the infrastructure died. The reconcile sweep and the
+// orphaned-child park (blueprints.go) interpolate it instead of re-spelling
+// the literal, so the "non-terminal child" predicate has one definition.
+// Other queries that add dormant statuses (open/pending_approval) to this set
+// keep their own list.
+const runTerminalStatusesSQL = `'completed','failed'`
 
 // --- The needs-driving predicate ---------------------------------------
 //
@@ -511,28 +512,39 @@ func (s *runQueueStore) FleetQueueShares(ctx context.Context) ([]db.OrgQueueShar
 }
 
 func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) {
-	// Boot self-heal: cancel child runs left non-terminal under a
-	// blueprint_run that is already terminal. This is the mirror of
-	// ResetProcessingRuns (which requeues active runs under a *running* parent):
-	// a child alive under a terminal parent will never be claimed (ClaimNextRun
-	// gates on a running parent) nor reset, so without this it sits 'running'
-	// forever — the dispatcher treats it as live work and its worktree pins the
-	// feature branch, requeuing any sibling fetch into a forever-failing loop.
-	// Any active claim on a cancelled row releases as 'cancelled' with it.
+	// Boot self-heal: park child runs left mid-flight under a blueprint_run
+	// that is already terminal. This is the mirror of ResetProcessingRuns
+	// (which requeues active runs under a *running* parent): a child alive
+	// under a terminal parent will never be claimed (ClaimNextRun gates on a
+	// running parent) nor reset, so without this it sits mid-flight forever —
+	// the dispatcher treats it as live work and its worktree pins the feature
+	// branch, requeuing any sibling fetch into a forever-failing loop.
+	//
+	// `open`, not a terminal: nothing about an orphan failed, and nothing
+	// about it concluded either. Read the park as "stopped without
+	// concluding", NOT as "resumable" — its blueprint is terminal, so the
+	// claim gate refuses it and no resume path will wake it. The scope is
+	// status IS NULL alone (mid-flight is exactly what "still looks live"
+	// means); an already-parked orphan is already in the state this writes,
+	// and re-stamping it every boot would just churn the row and its
+	// snapshot-retention clock.
+	// Any active claim on a parked row releases as 'cancelled' with it — the
+	// engagement was ended from outside, which is what the claim outcome
+	// vocabulary calls a cancellation.
 	var count int
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations
-			SET status = 'cancelled',
-			    completed_at = COALESCE(completed_at, ?),
+			SET status = 'open',
+			    parked_at = COALESCE(parked_at, ?),
 			    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
 			    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
-			WHERE (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
+			WHERE status IS NULL
 			  AND blueprint_run_id IN (
 			      SELECT id FROM blueprint_runs
 			      WHERE status IN ('completed','aborted','failed','cancelled')
 			  )
-		`, time.Now().UTC(), "Cancelled: owning blueprint run reached a terminal state")
+		`, time.Now().UTC(), "Stopped: owning blueprint run reached a terminal state")
 		if err != nil {
 			return err
 		}
@@ -549,7 +561,7 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 			WHERE released_at IS NULL
 			  AND conversation_id IN (
 			      SELECT id FROM conversations
-			      WHERE status = 'cancelled'
+			      WHERE status = 'open'
 			        AND blueprint_run_id IN (
 			            SELECT id FROM blueprint_runs
 			            WHERE status IN ('completed','aborted','failed','cancelled')
@@ -567,14 +579,13 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 	// stranded shape that survives the derived model). SQLite's single
 	// connection makes the non-System terminal writes atomic, so this is
 	// conformance symmetry here rather than a live hazard; it runs after the
-	// blueprint-terminal cancel above so a just-cancelled row reads terminal
-	// and its claim releases with the right outcome.
+	// blueprint-terminal park above, whose own claim release it therefore
+	// never has to redo.
 	err = inTx(ctx, s.conn, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
 			UPDATE claims SET released_at = ?,
 			    outcome = CASE (SELECT c.status FROM conversations c WHERE c.id = claims.conversation_id)
 			        WHEN 'completed' THEN 'completed'
-			        WHEN 'cancelled' THEN 'cancelled'
 			        ELSE 'failed'
 			    END
 			WHERE released_at IS NULL

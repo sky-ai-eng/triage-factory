@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -46,7 +45,7 @@ func (f *fencedConversationStore) MarkFailedIfActiveForClaimSystem(context.Conte
 	return false, db.ErrClaimReleased
 }
 
-func (f *fencedConversationStore) MarkCancelledIfActiveForClaimSystem(context.Context, string, string, string, string, string) (bool, error) {
+func (f *fencedConversationStore) ParkCancelledIfActiveForClaimSystem(context.Context, string, string, string, string, string) (bool, error) {
 	f.cancels++
 	return false, db.ErrClaimReleased
 }
@@ -228,12 +227,17 @@ func TestHandleCancelled_FenceTripRecordsNothing(t *testing.T) {
 		t.Fatalf("seed worktree marker: %v", err)
 	}
 
-	fenced := s.handleCancelled(runmode.LocalDefaultOrgID, runID, time.Now(), wt, "claim-1", "event", "")
+	fenced := s.handleCancelled(liveParkContext{
+		orgID:       runmode.LocalDefaultOrgID,
+		runID:       runID,
+		claudeCwd:   wt,
+		triggerType: "event",
+	}, "claim-1", "")
 	if !fenced {
 		t.Fatal("handleCancelled did not report the fence trip; runAgent would fall through to the unfenced disposition")
 	}
-	if stub.completes != 1 {
-		t.Errorf("fenced cancellation terminal attempted %d times, want 1", stub.completes)
+	if stub.cancels != 1 {
+		t.Errorf("fenced cancellation park attempted %d times, want 1", stub.cancels)
 	}
 
 	var status string
@@ -248,17 +252,17 @@ func TestHandleCancelled_FenceTripRecordsNothing(t *testing.T) {
 	}
 }
 
-// TestMarkCancelledAfterResume_FenceTripRecordsNothing: the resume path's
+// TestParkCancelledAfterResume_FenceTripRecordsNothing: the resume path's
 // own self-cancel, same contract — and the workspace snapshot the successor
 // resumes from survives.
-func TestMarkCancelledAfterResume_FenceTripRecordsNothing(t *testing.T) {
+func TestParkCancelledAfterResume_FenceTripRecordsNothing(t *testing.T) {
 	s, database, runID, _ := setupAdvanceFixture(t, "fence-resume-cancel")
 	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
 	s.agentRuns = stub
 
-	fenced := s.markCancelledAfterResume(runmode.LocalDefaultOrgID, runID, "claim-1", "")
+	fenced := s.parkCancelledAfterResume(runmode.LocalDefaultOrgID, runID, "claim-1", "")
 	if !fenced {
-		t.Fatal("markCancelledAfterResume did not report the fence trip; the blueprint would be finalized off a successor's run")
+		t.Fatal("parkCancelledAfterResume did not report the fence trip; the blueprint would be finalized off a successor's run")
 	}
 	if stub.cancels != 1 {
 		t.Errorf("fenced cancellation attempted %d times, want 1", stub.cancels)

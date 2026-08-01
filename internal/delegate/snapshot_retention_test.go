@@ -93,6 +93,24 @@ func TestTerminateBlueprint_AbortRetainsSnapshot(t *testing.T) {
 	assertSnapshotPresent(t, s, bpr, true)
 }
 
+// TestTerminateBlueprint_CancelRetainsSnapshot: a cancelled blueprint keeps its
+// workspace snapshot too. Its final step parked `open` rather than being torn
+// down, and throwing the workspace away at exactly the moment a user killed a
+// wedged run is the behavior this retention exists to stop — the TTL sweep is
+// what collects it instead.
+func TestTerminateBlueprint_CancelRetainsSnapshot(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	s, database, runID, taskID := setupAdvanceFixture(t, "term-cancel-keep")
+	wireBlobStore(t, s)
+	bpr := blueprintRunIDForRun(t, database, runID)
+	putTestSnapshot(t, s, bpr)
+
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
+		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCancelled, "cancelled", nil, true)
+
+	assertSnapshotPresent(t, s, bpr, true)
+}
+
 // TestTerminateBlueprint_FinishDiscardsSnapshot: a clean finish is not resumable,
 // so terminateBlueprint drops its snapshot immediately.
 func TestTerminateBlueprint_FinishDiscardsSnapshot(t *testing.T) {

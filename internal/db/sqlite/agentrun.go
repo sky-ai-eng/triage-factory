@@ -39,15 +39,14 @@ var _ db.ConversationStore = (*agentRunStore)(nil)
 // --- Lifecycle ---
 
 // claimOutcomeForStatus maps a conversation's terminal status onto the
-// claims outcome vocabulary: the engagement that produced a failed (or
-// unsolvable) conversation failed, a cancelled one was cancelled, and
-// everything else completed.
+// claims outcome vocabulary: the engagement that produced a failed
+// conversation failed, and everything else completed. The stored terminal
+// vocabulary is two names, so this is a two-way map; a cancelled engagement
+// releases with outcome 'cancelled' from the park path, which names the
+// outcome directly rather than deriving it from a status.
 func claimOutcomeForStatus(status string) string {
-	switch status {
-	case "failed", "task_unsolvable":
+	if status == "failed" {
 		return "failed"
-	case "cancelled":
-		return "cancelled"
 	}
 	return "completed"
 }
@@ -208,8 +207,7 @@ func (s *agentRunStore) MarkOpen(ctx context.Context, orgID, runID string) (bool
 			SET status = 'open', parked_at = ?
 			WHERE id = ?
 			  AND (status IS NULL
-			       OR status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-			                         'pending_approval', 'open'))
+			       OR status NOT IN ('completed', 'failed', 'pending_approval', 'open'))
 		`, time.Now().UTC(), runID)
 		if err != nil {
 			return err
@@ -362,8 +360,7 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID, fa
 			    failure_kind = ?
 			WHERE id = ?
 			  AND (status IS NULL
-			       OR status NOT IN ('completed','failed','cancelled','task_unsolvable',
-			                         'pending_approval'))
+			       OR status NOT IN ('completed','failed','pending_approval'))
 		`, time.Now().UTC(), nullIfEmpty(failureKind), runID)
 		if err != nil {
 			return err
@@ -381,20 +378,26 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID, fa
 	return flipped, err
 }
 
-func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
+func (s *agentRunStore) ParkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	var flipped bool
 	err := inTx(ctx, s.q, func(q queryer) error {
+		// A park, not a terminal — see ConversationStore.ParkCancelledIfActive.
+		// `open` is deliberately IN the flippable set: cancelling an
+		// already-parked run must still report a flip so the caller finalizes
+		// its blueprint, and re-stamping stop_reason records why it stopped.
+		// parked_at only fills when unset, so that re-stamp doesn't restart the
+		// snapshot-retention clock.
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations
-			SET status = 'cancelled', completed_at = ?, stop_reason = ?, result_summary = ?
+			SET status = 'open', parked_at = COALESCE(parked_at, ?),
+			    stop_reason = ?, result_summary = ?
 			WHERE id = ?
 			  AND (status IS NULL
-			       OR status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-			                         'pending_approval'))
+			       OR status NOT IN ('completed', 'failed', 'pending_approval'))
 		`, now, stopReason, summary, runID)
 		if err != nil {
 			return err
@@ -580,8 +583,7 @@ func (s *agentRunStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, en
 		WHERE t.entity_id = ?
 		  AND r.trigger_type = 'event'
 		  AND (r.status IS NULL
-		       OR r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                           'pending_approval'))
+		       OR r.status NOT IN ('completed', 'failed', 'pending_approval'))
 	`, entityID).Scan(&count)
 	return count > 0, err
 }
@@ -594,8 +596,7 @@ func (s *agentRunStore) ActiveIDsForTask(ctx context.Context, orgID, taskID stri
 		SELECT id FROM conversations
 		WHERE task_id = ?
 		  AND (status IS NULL
-		       OR status NOT IN ('completed', 'failed', 'cancelled',
-		                         'task_unsolvable', 'pending_approval'))
+		       OR status NOT IN ('completed', 'failed', 'pending_approval'))
 	`, taskID)
 	if err != nil {
 		return nil, err
@@ -639,8 +640,7 @@ func (s *agentRunStore) ActiveAutoRunIDForEntitySystem(ctx context.Context, orgI
 		WHERE t.entity_id = ?
 		  AND r.trigger_type = 'event'
 		  AND (r.status IS NULL
-		       OR r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                           'pending_approval'))
+		       OR r.status NOT IN ('completed', 'failed', 'pending_approval'))
 		ORDER BY r.started_at DESC
 		LIMIT 1
 	`, entityID).Scan(&id, &taskID)
@@ -658,8 +658,7 @@ func (s *agentRunStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, teamI
 		SELECT id FROM conversations
 		WHERE team_id = ?
 		  AND (status IS NULL
-		       OR status NOT IN ('completed', 'failed', 'cancelled',
-		                         'task_unsolvable', 'pending_approval'))
+		       OR status NOT IN ('completed', 'failed', 'pending_approval'))
 	`, teamID)
 	if err != nil {
 		return nil, err
@@ -707,13 +706,24 @@ func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cuto
 	// normalizes the mixed on-disk timestamp formats (CURRENT_TIMESTAMP text vs
 	// Go-bound values) so the MAX is consistent; the cutoff binds as a canonical
 	// UTC string.
+	//
+	// The substr is what makes that normalization actually work on a Go-bound
+	// value. The driver stores a time.Time as Go's own rendering —
+	// "2006-01-02 15:04:05.999999999 +0000 UTC" — which datetime() cannot parse
+	// at all: it returns NULL, the MAX goes NULL, the comparison goes NULL, and
+	// the row silently never reaps. Every parked_at and completed_at written
+	// from Go (MarkOpen, the cancel park, Complete) is in that form, so without
+	// this the retention sweep only ever saw rows whose timestamps happened to
+	// be written as SQL text. The first 19 characters are the seconds-precision
+	// prefix of every format in play — Go's, CURRENT_TIMESTAMP's, and ISO-8601's
+	// — and datetime() parses all three of those.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT org_id, blueprint_run_id
 		FROM conversations
 		WHERE status = 'open'
 		   OR (status = 'completed' AND outcome = 'abort')
 		GROUP BY org_id, blueprint_run_id
-		HAVING MAX(datetime(COALESCE(parked_at, completed_at, started_at))) < datetime(?)
+		HAVING MAX(datetime(substr(COALESCE(parked_at, completed_at, started_at), 1, 19))) < datetime(?)
 	`, cutoff.UTC().Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, err
@@ -742,8 +752,8 @@ func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, run
 	return s.MarkFailedIfActive(ctx, orgID, runID, failureKind)
 }
 
-func (s *agentRunStore) MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
-	return s.MarkCancelledIfActive(ctx, orgID, runID, stopReason, summary)
+func (s *agentRunStore) ParkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
+	return s.ParkCancelledIfActive(ctx, orgID, runID, stopReason, summary)
 }
 
 func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, msg *domain.Message) (int64, error) {
@@ -782,8 +792,8 @@ func (s *agentRunStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, or
 	return s.MarkFailedIfActive(ctx, orgID, runID, failureKind)
 }
 
-func (s *agentRunStore) MarkCancelledIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, stopReason, summary string) (bool, error) {
-	return s.MarkCancelledIfActive(ctx, orgID, runID, stopReason, summary)
+func (s *agentRunStore) ParkCancelledIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, stopReason, summary string) (bool, error) {
+	return s.ParkCancelledIfActive(ctx, orgID, runID, stopReason, summary)
 }
 
 // SetClaimPhaseSystem keeps the released_at filter its active-claim sibling

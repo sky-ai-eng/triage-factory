@@ -725,12 +725,12 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 		}
 
-		t.Run("MarkCancelledIfActive", func(t *testing.T) {
+		t.Run("ParkCancelledIfActive", func(t *testing.T) {
 			store, orgID, _, seed := mk(t)
 			runID := seedRunningWithTokens(t, store, orgID, seed)
-			ok, err := store.MarkCancelledIfActive(context.Background(), orgID, runID, "user_cancelled", "cancelled")
+			ok, err := store.ParkCancelledIfActive(context.Background(), orgID, runID, "user_cancelled", "cancelled")
 			if err != nil || !ok {
-				t.Fatalf("MarkCancelledIfActive: ok=%v err=%v", ok, err)
+				t.Fatalf("ParkCancelledIfActive: ok=%v err=%v", ok, err)
 			}
 			assertRolledUp(t, store, orgID, runID)
 		})
@@ -930,22 +930,45 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("MarkCancelledIfActive_FlipsActive_RefusesTerminal", func(t *testing.T) {
+	// A cancel PARKS the conversation `open` and keeps the workspace; the
+	// cancellation itself is recorded by the blueprint layer and by the claim's
+	// outcome. `cancelled` is not a status either dialect can produce.
+	t.Run("ParkCancelledIfActive_ParksActive_RefusesTerminal", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		runID := seedConversationForTest(t, orgID, seed, "running")
-		ok, err := store.MarkCancelledIfActive(ctx, orgID, runID, "manual", "user cancelled")
+		ok, err := store.ParkCancelledIfActive(ctx, orgID, runID, "manual", "user cancelled")
 		if err != nil || !ok {
 			t.Fatalf("cancel active: ok=%v err=%v", ok, err)
 		}
 		got, _ := store.Get(ctx, orgID, runID)
-		if got.Status != "cancelled" || got.StopReason != "manual" {
-			t.Errorf("after cancel: status=%q stop_reason=%q", got.Status, got.StopReason)
+		if got.Status != "open" || got.StopReason != "manual" {
+			t.Errorf("after cancel: status=%q stop_reason=%q, want (open, manual)", got.Status, got.StopReason)
 		}
-		// Already terminal → refused.
-		ok, err = store.MarkCancelledIfActive(ctx, orgID, runID, "manual", "")
-		if err != nil || ok {
-			t.Errorf("re-cancel: ok=%v err=%v, want false/nil", ok, err)
+		// The workspace is retained and the retention TTL is what collects it,
+		// so the parked row must enumerate as a reapable snapshot key. That is
+		// also the parked_at assertion: the sweep keys off it.
+		keys, err := store.ListReapableSnapshotKeysSystem(ctx, time.Now().Add(time.Hour))
+		if err != nil {
+			t.Fatalf("ListReapableSnapshotKeysSystem: %v", err)
+		}
+		found := false
+		for _, k := range keys {
+			if k.BlueprintRunID == got.BlueprintRunID {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("cancel-parked run's snapshot key %q is not reapable; its workspace blob would leak forever", got.BlueprintRunID)
+		}
+		// A parked run cancels again (the gesture still has to finalize the
+		// blueprint), but a terminal one is refused.
+		if ok, err := store.ParkCancelledIfActive(ctx, orgID, runID, "manual", ""); err != nil || !ok {
+			t.Errorf("re-cancel a parked run: ok=%v err=%v, want true/nil", ok, err)
+		}
+		doneRun := seedConversationForTest(t, orgID, seed, "completed")
+		if ok, err := store.ParkCancelledIfActive(ctx, orgID, doneRun, "manual", ""); err != nil || ok {
+			t.Errorf("cancel a completed run: ok=%v err=%v, want false/nil", ok, err)
 		}
 	})
 
@@ -1058,10 +1081,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 			assertReleased(t, runID, "failed")
 		})
-		t.Run("MarkCancelledIfActive", func(t *testing.T) {
+		t.Run("ParkCancelledIfActive", func(t *testing.T) {
 			runID := stage(t)
-			if ok, err := store.MarkCancelledIfActive(ctx, orgID, runID, "manual", ""); err != nil || !ok {
-				t.Fatalf("MarkCancelledIfActive: ok=%v err=%v", ok, err)
+			if ok, err := store.ParkCancelledIfActive(ctx, orgID, runID, "manual", ""); err != nil || !ok {
+				t.Fatalf("ParkCancelledIfActive: ok=%v err=%v", ok, err)
 			}
 			assertReleased(t, runID, "cancelled")
 		})
@@ -1422,7 +1445,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("MarkCancelledIfActiveForClaimSystem_FlipsAndReleasesLikeItsUnfencedTwin", func(t *testing.T) {
+	t.Run("ParkCancelledIfActiveForClaimSystem_ParksAndReleasesLikeItsUnfencedTwin", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		runID := seedConversationForTest(t, orgID, seed, "running")
@@ -1432,19 +1455,19 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		claimID := seed.ClaimRows(t, runID)[0].ID
 
-		ok, err := store.MarkCancelledIfActiveForClaimSystem(ctx, orgID, runID, claimID, "user_cancelled", "Run cancelled by user")
+		ok, err := store.ParkCancelledIfActiveForClaimSystem(ctx, orgID, runID, claimID, "user_cancelled", "Run cancelled by user")
 		if err != nil {
-			t.Fatalf("MarkCancelledIfActiveForClaimSystem: %v", err)
+			t.Fatalf("ParkCancelledIfActiveForClaimSystem: %v", err)
 		}
 		if !ok {
-			t.Fatal("MarkCancelledIfActiveForClaimSystem reported no flip on a running run")
+			t.Fatal("ParkCancelledIfActiveForClaimSystem reported no flip on a running run")
 		}
 		got, err := store.Get(ctx, orgID, runID)
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v got=%v", err, got)
 		}
-		if got.Status != "cancelled" || got.StopReason != "user_cancelled" {
-			t.Errorf("run = (%q, %q), want (cancelled, user_cancelled)", got.Status, got.StopReason)
+		if got.Status != "open" || got.StopReason != "user_cancelled" {
+			t.Errorf("run = (%q, %q), want (open, user_cancelled)", got.Status, got.StopReason)
 		}
 		claims := seed.ClaimRows(t, runID)
 		if len(claims) != 1 || !claims[0].Released || claims[0].Outcome != "cancelled" {
