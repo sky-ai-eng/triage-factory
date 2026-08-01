@@ -22,13 +22,17 @@ import (
 func withStubSidecarProcess(t *testing.T, mkCmd func(ctx context.Context) *exec.Cmd) {
 	t.Helper()
 	orig := launchSidecarProcess
-	launchSidecarProcess = func(ctx context.Context, containerID string, uid, gid int, stdio *os.File, stderr io.Writer) (supervisedRuntime, error) {
+	launchSidecarProcess = func(ctx context.Context, containerID string, uid, gid int, stdio *os.File, extra []*os.File, stderr io.Writer) (supervisedRuntime, error) {
 		cmd := mkCmd(ctx)
 		cmd.Stdin = stdio
 		cmd.Stdout = stdio
 		cmd.Stderr = stderr
+		cmd.ExtraFiles = extra
 		err := cmd.Start()
 		_ = stdio.Close()
+		for _, f := range extra {
+			_ = f.Close()
+		}
 		if err != nil {
 			return nil, err
 		}

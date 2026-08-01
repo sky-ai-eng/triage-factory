@@ -60,6 +60,22 @@ validated per-run uid (re-checking the `SidecarUID` band at the RPC boundary, so
 a compromised orchestrator can't ask for uid 0), the sidecar analog of the runsc
 launch.
 
+That sidecar launch carries one more privileged grant: the broker binds the run's
+**shared-origin listener** — port 443 on the run's own host-side veth IP — and
+passes the descriptor down as the sidecar's one extra fd. That listener is the
+run's fake-GHE origin, serving the GitHub API and git smart-HTTP on one address so
+the agent's `gh` can resolve a repository from its worktree's remote (`gh` drops
+the port when matching a remote against `GH_HOST`, so the origin has to be on the
+https default, and 443 is privileged). The sidecar is capless and cannot bind it.
+This does **not** put the broker in the traffic path: it binds, hands over its only
+copy, and never accepts a connection or reads a byte through it — the same kind of
+grant as creating the run's veth. The address is derived from the launch's subnet
+index, never named by the caller, and `ValidateSidecarLaunchParams` requires that
+index to be the one the sidecar's uid was derived from, so a compromised
+orchestrator cannot occupy one run's sidecar slot while pointing the bind at a
+sibling run's veth. A bind that fails costs the run `gh`'s repo inference and
+nothing else — the sidecar falls back to an ephemeral port of its own.
+
 **Observation is not in the broker's monopoly.** The broker owns cgroup
 *lifecycle and mutation* — creating a run's group, setting its `memory.max`,
 destroying it — because each of those needs `CAP_SYS_ADMIN` on a delegated

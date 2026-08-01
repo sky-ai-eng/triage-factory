@@ -47,6 +47,31 @@ func IsSidecarUID(uid int) bool {
 	return uid >= SidecarUIDBase && uid < SidecarUIDBase+MaxSandboxes
 }
 
+// SharedOriginPort is the port the run's single fake-GHE origin answers on —
+// the address GH_HOST names, serving the GitHub REST/GraphQL surface and git
+// smart-HTTP alike, exactly as a real GHE host does.
+//
+// It is 443, and it has to be, because gh drops the port when it matches a git
+// remote against GH_HOST: a remote on "10.42.7.1:34567" reads back as host
+// "10.42.7.1", which no ported GH_HOST can ever equal, and every repo-contextual
+// gh command run from a worktree fails inference. A portless GH_HOST means
+// https default, means 443.
+//
+// 443 is privileged and the sidecar is capless by construction (its setuid
+// transition clears the caps that would let it bind one), so the broker binds it
+// and passes the fd — SharedOriginListenerFD.
+const SharedOriginPort = 443
+
+// SharedOriginListenerFD is the file descriptor the broker hands the sidecar the
+// pre-bound shared-origin listener on. Descriptor 3: the sidecar's 0/1/2 are the
+// supervision socket and the broker's stderr, and this is the first (and only)
+// entry in the launch's ExtraFiles.
+//
+// A sidecar that finds nothing there degrades to binding an ephemeral port
+// itself — the gh channel still works for explicit -R and `gh api`, only
+// inference is lost — rather than failing the run.
+const SharedOriginListenerFD = 3
+
 // SidecarCommName is the kernel-visible process name (procname.SetTitle's
 // target, /proc/<pid>/comm) every run-sidecar process sets at startup.
 // Defined once here, exported, so cmd/runsidecar (which sets it) and this

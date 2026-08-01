@@ -44,6 +44,13 @@ const sandboxGHBinary = "/opt/tf/bin/gh"
 // sandbox.TrustedGHInjectorCertDestination.
 const sandboxGHInjectorCert = "/run/tf-gh-injector.crt"
 
+// SandboxGHInjectorCertPath is sandboxGHInjectorCert's exported face, for the
+// sidecar: git needs the same trust file named in its own config
+// (GitProxyConfig.SharedOriginCAPath) because it resolves TLS trust from git
+// config, not from the process-global SSL_CERT_FILE gh reads. Same file, same
+// mount, two consumers that look for it in different places.
+const SandboxGHInjectorCertPath = sandboxGHInjectorCert
+
 // hostGHBinaryPath is the executor-host path the pinned gh binary is baked at
 // (docker/Dockerfile installs it here); it is both the mount source and the
 // jail destination. A var, not a const, so tests can point it at a stub or an

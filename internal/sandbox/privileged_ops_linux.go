@@ -108,6 +108,19 @@ type SidecarLaunchParams struct {
 	// needs, with no implicit "gid mirrors uid" the broker has to assume.
 	UID, GID int
 
+	// SubnetIdx is the run's subnet index — the same one that named its netns
+	// and veth pair. The broker derives the shared-origin bind address from it
+	// (HostVethIP(SubnetIdx):SharedOriginPort) and passes the resulting listener
+	// down to the sidecar, which cannot bind a privileged port itself.
+	//
+	// It is not an independent input: ValidateSidecarLaunchParams requires
+	// UID == SidecarUID(SubnetIdx), so the index the broker binds against is the
+	// same one the uid it execs at was derived from. That is what keeps this
+	// from becoming a second, unvalidated way to name an address — a caller can
+	// only ask the broker to bind the veth IP of the subnet whose sidecar slot
+	// it is already asking to occupy.
+	SubnetIdx uint8
+
 	// StdioSocketPath is the per-run unix socket the orchestrator listens
 	// on and the broker dials to hand the sidecar its stdio — the same
 	// fd-passthrough pattern LaunchRun's StdioSocketPath uses, so the

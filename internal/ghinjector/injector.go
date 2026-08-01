@@ -45,6 +45,27 @@
 // to the REST upstream and /api/graphql to the sibling GraphQL endpoint derived
 // from it, mirroring internal/github's own derivation.
 //
+// # The shared origin: git on the same listener
+//
+// A real GHE host serves the API and git smart-HTTP on one address, and so does
+// this listener when Config.GitHandler is set: git paths are routed to the run's
+// gitproxy handler, everything else takes the injection path above. Routing is by
+// path and happens before the caller-auth gate, because the two halves
+// authenticate differently — git presents the git proxy's per-run Basic password,
+// gh presents GH_ENTERPRISE_TOKEN — and each half checks its own.
+//
+// That arrangement is what makes gh's repo inference work inside the jail. gh
+// resolves a repository by matching the worktree's git remotes against GH_HOST;
+// while git was routed at a separate proxy address, no remote could ever match,
+// and every repo-contextual command needed an explicit -R. Pointing both at one
+// origin is the fix, and it is why the run's listener lives on port 443: gh
+// strips the port from a remote's host before comparing, so a ported GH_HOST is
+// unmatchable no matter what the remote says.
+//
+// Nothing about the git half is reimplemented here. It is gitproxy's own
+// handler — its ref gate, its base-branch push policy, its per-repo authorize
+// and audit — served behind a second front door.
+//
 // # Observation
 //
 // Exec-verb self-reporting doesn't exist on this channel, so the injector emits
@@ -102,6 +123,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 )
 
 // restPrefix is the GHE REST path prefix gh emits; graphqlPath is the GraphQL
@@ -205,6 +228,20 @@ type Config struct {
 	// sandbox reaches). Loopback-only by default, exactly like the sibling
 	// proxies.
 	AllowNonLoopback bool
+
+	// GitHandler, when non-nil, serves the git smart-HTTP paths on this same
+	// listener — the run's single fake-GHE origin, mirroring a real GHE host
+	// where the API and git share one address. Production wires it to the run's
+	// gitproxy handler, so the ref gate, the base-branch push policy, and the
+	// credential injection are the ones that package already owns: this is a
+	// front door in front of that handler, not a second implementation of it.
+	//
+	// Requests are routed by path (gitproxy.IsGitSmartHTTPPath) BEFORE the API
+	// caller-auth gate below, because the two halves authenticate differently —
+	// git presents the git proxy's per-run Basic password, gh presents
+	// GH_ENTERPRISE_TOKEN — and each half validates its own. nil keeps this
+	// listener API-only, which is what local mode and every existing test get.
+	GitHandler http.Handler
 }
 
 // Server is one per-run injector instance.
@@ -297,6 +334,13 @@ type authCtxKey struct{}
 // TLS; tests can drive it via httptest.NewUnstartedServer + StartTLS).
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Git first, and before the API caller-auth gate: a git request carries
+		// the git proxy's credential, not gh's placeholder, so checking it here
+		// would 401 every fetch. The git handler runs its own equivalent gate.
+		if s.routesToGit(r) {
+			s.cfg.GitHandler.ServeHTTP(w, r)
+			return
+		}
 		if !s.callerAuthorized(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -311,6 +355,31 @@ func (s *Server) Handler() http.Handler {
 		r = r.WithContext(context.WithValue(r.Context(), authCtxKey{}, tok))
 		s.proxy.ServeHTTP(w, r)
 	})
+}
+
+// routesToGit decides which half of the shared origin owns this request.
+//
+// The two API prefixes gh emits win outright, ahead of any git shape: they are
+// this listener's other half, they are matched by prefix (not by suffix, as the
+// git shapes must be), and a git-looking tail under one of them —
+// /api/v3/…/info/refs — is an API path with an odd name, not a git request. No
+// real GHE serves a repository at "api/v3", so nothing legitimate is lost by
+// letting the prefix decide.
+//
+// Everything else that looks like git smart-HTTP routes to the git handler,
+// well-formed or not: see gitproxy.IsGitSmartHTTPPath for why a malformed git
+// path must reach the git gate's refusal rather than fall through to the API
+// credential path.
+func (s *Server) routesToGit(r *http.Request) bool {
+	if s.cfg.GitHandler == nil {
+		return false
+	}
+	p := r.URL.Path
+	if p == graphqlPath || strings.HasPrefix(p, graphqlPath+"/") ||
+		p == restPrefix || strings.HasPrefix(p, restPrefix+"/") {
+		return false
+	}
+	return gitproxy.IsGitSmartHTTPPath(r.Method, p)
 }
 
 // callerAuthorized reports whether the request presents the per-run placeholder.
@@ -693,6 +762,25 @@ func (s *Server) Start(addr string) (string, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return "", fmt.Errorf("ghinjector: listen on %s: %w", addr, err)
+	}
+	return s.Serve(ln)
+}
+
+// Serve takes ownership of an ALREADY-BOUND listener and serves TLS on it until
+// Shutdown, returning its "host:port". It exists because the run's shared origin
+// must answer on port 443 — gh drops the port when it matches a git remote
+// against GH_HOST, so a ported GH_HOST can never resolve a repo from the tree —
+// and the process that runs this injector is capless by construction and cannot
+// bind a privileged port. The cap-broker binds it and passes the fd down.
+//
+// Ownership transfers: Shutdown closes the listener. The AllowNonLoopback check
+// Start applies is the binder's to make here — it already chose the address.
+func (s *Server) Serve(ln net.Listener) (string, error) {
+	if s.httpSrv != nil {
+		return "", errors.New("ghinjector: already started; create a new Server per run")
+	}
+	if ln == nil {
+		return "", errors.New("ghinjector: Serve requires a bound listener")
 	}
 	s.listener = ln
 	s.serveErr = make(chan error, 1)

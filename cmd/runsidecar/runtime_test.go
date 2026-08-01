@@ -396,7 +396,7 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 		t.Fatalf("GenerateCert: %v", err)
 	}
 	const placeholder = "per-run-placeholder"
-	srv, err := ghinjector.New(rt.ghInjectorConfig(upstream.URL, cert, placeholder))
+	srv, err := ghinjector.New(rt.ghInjectorConfig(upstream.URL, cert, placeholder, nil))
 	if err != nil {
 		t.Fatalf("construct injector: %v", err)
 	}

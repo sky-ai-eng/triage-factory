@@ -5,14 +5,17 @@ package agentproc
 import (
 	"context"
 	"io"
+	stdnet "net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
+	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
@@ -203,5 +206,156 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 				t.Errorf("deny-repo failure did not surface GitHub's 404 masking: %s", out)
 			}
 		})
+	}
+}
+
+// TestIntegration_GHInjector_SharedOriginRepoInference closes the residual this
+// harness could not previously reach: a repo-contextual `gh` command run from a
+// worktree, with no -R, resolving the repository from the tree's own remote.
+//
+// That only works when the address gh is pointed at and the address the worktree
+// resolves its remote to are the SAME host — which is what the shared origin is.
+// It also requires that host to be portless, because gh strips the port from a
+// remote before comparing it to GH_HOST; hence the listener on 443, which this
+// test can bind because it already requires root.
+func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
+	token, repo, _ := requireGHInjectorLive(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	const runID = "itest-gh-shared-origin"
+	net, err := sandbox.SetupRunNetwork(ctx, runID)
+	if err != nil {
+		t.Fatalf("SetupRunNetwork: %v", err)
+	}
+	t.Cleanup(func() { _ = net.Close() })
+
+	cert, certPEM, err := ghinjector.GenerateCert(net.HostIP)
+	if err != nil {
+		t.Fatalf("GenerateCert: %v", err)
+	}
+	certPath := sandbox.TrustedGHInjectorCertPath(runID)
+	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
+		t.Fatalf("mkdir cert root: %v", err)
+	}
+	if err := os.WriteFile(certPath, ghinjector.TrustBundlePEM(certPEM), 0o640); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.Chown(certPath, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {
+		t.Fatalf("chown cert to sandbox uid: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(certPath) })
+
+	// The run's git proxy, mounted behind the injector exactly as the sidecar
+	// mounts it — same handler, same gate.
+	gp, err := gitproxy.New(gitproxy.Config{
+		Upstream:         defaultGitUpstream,
+		AllowNonLoopback: true,
+		TokenSource: func(context.Context, string, string) (gitproxy.Token, error) {
+			return gitproxy.Token{Value: token}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("gitproxy.New: %v", err)
+	}
+
+	const placeholder = "run-placeholder-token"
+	inj, err := ghinjector.New(ghinjector.Config{
+		Upstream:         "https://api.github.com",
+		IncomingToken:    placeholder,
+		Cert:             cert,
+		AllowNonLoopback: true,
+		GitHandler:       gp.Handler(),
+		TokenSource:      func(context.Context) (string, error) { return token, nil },
+	})
+	if err != nil {
+		t.Fatalf("ghinjector.New: %v", err)
+	}
+	// The production port, bound directly here because this test already runs as
+	// root; in production the cap-broker binds it and passes the fd down.
+	addr, err := inj.Start(stdnet.JoinHostPort(net.HostIP, strconv.Itoa(sandbox.SharedOriginPort)))
+	if err != nil {
+		t.Fatalf("injector Start on the shared-origin port: %v", err)
+	}
+	t.Cleanup(func() {
+		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)
+		defer c()
+		_ = inj.Shutdown(sctx)
+	})
+	t.Logf("shared origin listening on %s", addr)
+
+	// A worktree whose origin is the shared origin — what the sandbox's git
+	// config produces via insteadOf, materialized directly here so this test
+	// needs no clone.
+	worktree := t.TempDir()
+	for _, args := range [][]string{
+		{"init", "--initial-branch=main"},
+		{"remote", "add", "origin", "https://" + net.HostIP + "/" + repo + ".git"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = worktree
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := filepath.WalkDir(worktree, func(p string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Lchown(p, sandbox.WorktreeUID, sandbox.WorktreeGID)
+	}); err != nil {
+		t.Skipf("can't chown worktree to UID %d: %v", sandbox.WorktreeUID, err)
+	}
+
+	env := []string{
+		"PATH=/opt/tf/bin:/usr/local/bin:/usr/bin:/bin",
+		"HOME=/work",
+		// Portless: the whole point.
+		"GH_HOST=" + net.HostIP,
+		"GH_ENTERPRISE_TOKEN=" + placeholder,
+		"SSL_CERT_FILE=" + sandboxGHInjectorCert,
+		"GH_PROMPT_DISABLED=1",
+		"GH_NO_UPDATE_NOTIFIER=1",
+	}
+	for _, kv := range env {
+		if strings.Contains(kv, token) {
+			t.Fatalf("real token leaked into sandbox env entry %q — Property B violated", kv)
+		}
+	}
+
+	lr, _, werr := sandbox.Wrap(ctx, sandbox.Config{
+		RunID:    runID,
+		Worktree: worktree,
+		SDKDir:   t.TempDir(),
+		// No -R: the repository has to come from the tree's own remote.
+		Argv: []string{sandboxGHBinary, "pr", "list", "--limit", "1"},
+		Env:  env,
+		ExtraMounts: []sandbox.Mount{
+			{Source: certPath, Destination: sandboxGHInjectorCert, Options: []string{"ro"}},
+			{Source: hostGHBinaryPath, Destination: sandboxGHBinary, Options: []string{"ro"}},
+		},
+		Network: net,
+	})
+	if werr != nil {
+		t.Fatalf("sandbox.Wrap: %v", werr)
+	}
+	defer func() { _ = lr.Close() }()
+	if err := lr.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	out, _ := io.ReadAll(lr.Stdout())
+	combined := string(out) + lr.Stderr()
+	waitErr := lr.Wait()
+	t.Logf("gh pr list (no -R) output: %s", combined)
+
+	if strings.Contains(combined, "correspond to the GH_HOST environment variable") {
+		t.Fatal("gh could not infer the repo from the worktree — the shared origin and GH_HOST do not agree")
+	}
+	if waitErr != nil {
+		t.Fatalf("gh pr list with no -R failed: %v (out: %s)", waitErr, combined)
+	}
+	if inj.RequestCount() == 0 {
+		t.Error("injector observed zero requests — the jail did not route gh through the shared origin")
 	}
 }

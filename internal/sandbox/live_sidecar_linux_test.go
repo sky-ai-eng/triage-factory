@@ -68,7 +68,12 @@ func (inProcessSidecarLauncher) LaunchSidecar(ctx context.Context, p SidecarLaun
 	}
 
 	var stderr testSyncBuf
-	rt, err := LaunchSidecarProcess(ctx, p.ContainerID, p.UID, p.GID, childFile, &stderr)
+	// No extra descriptors: production's broker also binds the run's
+	// shared-origin listener and passes it here, but that is a grant for the gh
+	// channel, not part of the sidecar lifecycle this harness exercises. A
+	// sidecar handed none falls back to an ephemeral port for its injector, so
+	// omitting it changes nothing about what is under test.
+	rt, err := LaunchSidecarProcess(ctx, p.ContainerID, p.UID, p.GID, childFile, nil, &stderr)
 	// LaunchSidecarProcess closed its own copy of childFile.
 	if err != nil {
 		_ = conn.Close()

@@ -56,14 +56,30 @@ type SidecarRuntime struct {
 // reachable escalation today; matching the orchestrator's stronger
 // bounding-set guarantee is a hardening-phase improvement, not a
 // correctness requirement for this harness.
-func LaunchSidecarProcess(ctx context.Context, containerID string, uid, gid int, stdio *os.File, stderr io.Writer) (*SidecarRuntime, error) {
+//
+// extra are additional descriptors handed to the child past its stdio, landing
+// at fd 3 upward in order. Today that is exactly one: the run's shared-origin
+// listener, bound by the broker on a privileged port the capless sidecar cannot
+// bind itself (see SharedOriginListenerFD). They get the same treatment stdio
+// does — the child inherits a dup and this function closes its own copies right
+// after Start, whether or not Start succeeded.
+func LaunchSidecarProcess(ctx context.Context, containerID string, uid, gid int, stdio *os.File, extra []*os.File, stderr io.Writer) (*SidecarRuntime, error) {
+	closeExtra := func() {
+		for _, f := range extra {
+			if f != nil {
+				_ = f.Close()
+			}
+		}
+	}
 	binPath, err := sidecarBinaryPath()
 	if err != nil {
 		_ = stdio.Close()
+		closeExtra()
 		return nil, fmt.Errorf("sandbox: resolve sidecar binary: %w", err)
 	}
 
 	cmd := exec.CommandContext(ctx, binPath, sidecarSubcommand, "--container-id", containerID)
+	cmd.ExtraFiles = extra
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		// The per-run uid/gid, PLUS the sandbox group as a supplementary group:
 		// the relocated exec-verb socket server the sidecar hosts must chgrp its
@@ -95,6 +111,7 @@ func LaunchSidecarProcess(ctx context.Context, containerID string, uid, gid int,
 	// Hand-off complete (or failed): drop this process's copy of the fd
 	// either way, matching LaunchSupervised's unconditional stdio.Close().
 	_ = stdio.Close()
+	closeExtra()
 	if startErr != nil {
 		return nil, fmt.Errorf("sandbox: start sidecar: %w", startErr)
 	}

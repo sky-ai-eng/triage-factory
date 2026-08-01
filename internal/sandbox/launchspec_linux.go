@@ -588,6 +588,14 @@ func ValidateSidecarLaunchParams(p SidecarLaunchParams) error {
 	if !IsSidecarUID(p.UID) {
 		return fmt.Errorf("sandbox: sidecar uid %d outside the reserved band [%d, %d)", p.UID, SidecarUIDBase, SidecarUIDBase+MaxSandboxes)
 	}
+	// The subnet index the broker binds the shared-origin listener against must
+	// be the one this uid was derived from. Without the tie the index would be a
+	// second, independent way to name a bind address — a caller could occupy one
+	// run's sidecar slot while asking the broker to bind another run's veth IP,
+	// and stand a listener in front of a sibling's traffic.
+	if p.UID != SidecarUID(p.SubnetIdx) {
+		return fmt.Errorf("sandbox: sidecar uid %d does not match subnet index %d (want uid %d)", p.UID, p.SubnetIdx, SidecarUID(p.SubnetIdx))
+	}
 	return nil
 }
 
