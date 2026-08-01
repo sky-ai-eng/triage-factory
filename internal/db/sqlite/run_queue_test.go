@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/google/uuid"
@@ -67,8 +68,17 @@ func TestRunQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	if got == nil {
 		t.Fatal("ClaimNextRun returned nil for a queued run")
 	}
-	if got.ID != "rq-run-0" || got.BlueprintRunID != brID || got.Status != "running" {
+	if got.ID != "rq-run-0" || got.BlueprintRunID != brID {
 		t.Fatalf("claimed run = %+v", got)
+	}
+	// The claim writes no status: mid-flight is the absence of an outcome,
+	// and the claim row itself is the ownership.
+	var stored sql.NullString
+	if err := conn.QueryRow(`SELECT status FROM conversations WHERE id = 'rq-run-0'`).Scan(&stored); err != nil {
+		t.Fatalf("read stored status: %v", err)
+	}
+	if stored.Valid {
+		t.Fatalf("stored status after claim = %q, want NULL", stored.String)
 	}
 	if got.SessionID != "rq-sess" {
 		t.Fatalf("claimed session_id = %q, want rq-sess (resume-on-reclaim plumbing)", got.SessionID)
@@ -511,11 +521,11 @@ func TestRunQueueStore_SQLite_Credentials(t *testing.T) {
 			},
 			RunStatus: func(t *testing.T, runID string) string {
 				t.Helper()
-				var status string
+				var status sql.NullString
 				if err := conn.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&status); err != nil {
 					t.Fatalf("read status: %v", err)
 				}
-				return status
+				return status.String
 			},
 			SetActivePhase: func(t *testing.T, runID, phase string) {
 				t.Helper()

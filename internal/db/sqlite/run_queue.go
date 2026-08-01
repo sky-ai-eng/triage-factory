@@ -35,17 +35,77 @@ var _ db.RunQueueStore = (*runQueueStore)(nil)
 // (open/pending_approval) to this set keep their own list.
 const runTerminalStatusesSQL = `'completed','failed','cancelled','task_unsolvable'`
 
+// --- The needs-driving predicate ---------------------------------------
+//
+// The SQLite mirror of the Postgres fragments — see
+// internal/db/postgres/run_queue.go for the model. Stored conversation
+// status is outcome-or-nothing ('open' | a terminal | NULL); "queued" and
+// "running" are derived from the claim table and these predicates, never
+// stored. Every fragment is written against the conversation alias `r`.
+
+// activeClaimExistsSQL is the derived "running": an unreleased claim is the
+// engagement driving this conversation. Served by idx_claims_one_active.
+const activeClaimExistsSQL = `EXISTS (
+		SELECT 1 FROM claims cl_a
+		WHERE cl_a.conversation_id = r.id AND cl_a.released_at IS NULL)`
+
+// undeliveredInputExistsSQL matches drivable input: a plain user message
+// still awaiting delivery. Injections ride whatever engagement runs next and
+// never wake one on their own; a withdrawn row (undelivered + window_state
+// 'inactive') never happened. Nothing here reads `seq`, which compaction
+// re-writes to fractional values. Served by idx_messages_undelivered.
+const undeliveredInputExistsSQL = `EXISTS (
+		SELECT 1 FROM messages m_i
+		WHERE m_i.conversation_id = r.id AND m_i.delivered = 0
+		  AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active')`
+
+// needsDrivingSQL is the eligibility predicate, identical for every surface:
+// nobody is driving it, it has not been retired, and it is either mid-flight
+// (fresh mint, or a claim that released without writing an outcome) or
+// parked and woken by new input. A terminal conversation is never eligible.
+const needsDrivingSQL = `r.archived_at IS NULL
+	  AND NOT ` + activeClaimExistsSQL + `
+	  AND (r.status IS NULL OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `))`
+
+// curatorNeedsTurnSQL is the curator type-conditional gate: a curator
+// conversation's only unit of work is a user turn, so "mid-flight with
+// nothing queued" is a finished transcript waiting for its next message.
+const curatorNeedsTurnSQL = `(r.type <> 'curator' OR ` + undeliveredInputExistsSQL + `)`
+
+// eligibleForDrivingSQL is the surface-agnostic "waiting to be driven" —
+// what the queue-depth counters and the display projection's derived
+// `queued` rung read.
+const eligibleForDrivingSQL = needsDrivingSQL + ` AND ` + curatorNeedsTurnSQL
+
+// blueprintDrivableSQL is the delegation arm's gate, applied over a LEFT
+// JOIN so a conversation with no blueprint parent (curator today,
+// interactive tomorrow) is not filtered out by the join itself.
+const blueprintDrivableSQL = `(r.blueprint_run_id IS NULL
+	    OR (br.cancel_requested = 0 AND br.status = 'running'))`
+
+// curatorTurnMessageSQL is the queued turn a curator claim is minted to
+// drive — the conversation's oldest undelivered plain user row, stamped as
+// the claim's mint intent. NULL for every other type.
+const curatorTurnMessageSQL = `(SELECT MIN(m_t.id) FROM messages m_t
+		WHERE m_t.conversation_id = r.id AND m_t.delivered = 0
+		  AND m_t.role = 'user' AND m_t.subtype = '' AND m_t.window_state = 'active')`
+
 // runQueueClaimCols is the column list ClaimNextRun returns, shared with the
 // scan helper. visibility is left at its row default on enqueue; team_id is
 // surfaced so the construction-path RunInfo built off a claimed run carries
 // the owning team for the capture writers. The claim identity fields
 // (ExecutorID/ClaimedAt/Attempts) are hydrated from the freshly minted
 // claims row, not this projection.
-const runQueueClaimCols = `id, org_id, task_id, COALESCE(prompt_id, ''), status, COALESCE(model, ''), COALESCE(runtime, ''),
-	COALESCE(worktree_path, ''), COALESCE(sdk_session_id, ''), trigger_type, COALESCE(trigger_id, ''),
-	COALESCE(creator_user_id, ''), team_id, COALESCE(blueprint_run_id, ''), blueprint_step_index`
+const runQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.task_id, ''), COALESCE(r.prompt_id, ''),
+	COALESCE(r.model, ''), COALESCE(r.runtime, ''),
+	COALESCE(r.worktree_path, ''), COALESCE(r.sdk_session_id, ''), r.trigger_type, COALESCE(r.trigger_id, ''),
+	COALESCE(r.creator_user_id, ''), COALESCE(r.team_id, ''), COALESCE(r.project_id, ''),
+	COALESCE(r.blueprint_run_id, ''), r.blueprint_step_index,
+	` + curatorTurnMessageSQL
 
-// EnqueueRun mints a queued delegation conversation. runtime is stamped
+// EnqueueRun mints a delegation conversation with NO status — the absence of
+// an outcome is what makes it claimable, so the mint writes nothing to the
+// column and queued_at carries the enqueue moment. runtime is stamped
 // 'sdk': SQLite is local mode, which keeps the Claude Code SDK runtime.
 // The Postgres sibling stamps 'native' — the dialect IS the mode, so the
 // split lands where the row is written rather than as a caller-passed knob.
@@ -60,21 +120,17 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 	if triggerType == "manual" && run.CreatorUserID == "" {
 		run.CreatorUserID = runmode.LocalDefaultUserID
 	}
-	status := run.Status
-	if status == "" {
-		status = "queued"
-	}
 	var stepIdx any
 	if run.BlueprintStepIndex != nil {
 		stepIdx = *run.BlueprintStepIndex
 	}
 	_, err := s.conn.ExecContext(ctx, `
-		INSERT INTO conversations (id, type, runtime, task_id, prompt_id, status, model, worktree_path,
+		INSERT INTO conversations (id, type, runtime, task_id, prompt_id, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility,
 		                  creator_user_id, actor_agent_id, blueprint_run_id, blueprint_step_index,
 		                  preferred_executor_id, queued_at)
-		VALUES (?, 'delegation', 'sdk', ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?, NULLIF(?, ''), CURRENT_TIMESTAMP)
-	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), status, run.Model, run.WorktreePath,
+		VALUES (?, 'delegation', 'sdk', ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?, NULLIF(?, ''), CURRENT_TIMESTAMP)
+	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Model, run.WorktreePath,
 		triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID,
 		nullIfEmpty(run.CreatorUserID), nullIfEmpty(run.ActorAgentID),
 		nullIfEmpty(run.BlueprintRunID), stepIdx, run.PreferredExecutorID)
@@ -82,12 +138,17 @@ func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain
 }
 
 func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, _ db.ClaimPlacement) (*domain.Conversation, error) {
-	// Flip the oldest claimable queued run to 'running' and mint the claims
-	// row that records this engagement's ownership, inside one short
-	// transaction. Claimable = its owning blueprint_run is still 'running'
-	// and not cancel-requested (a sequence-cancelled blueprint's queued step
-	// is never claimed). A NULL subquery (nothing claimable) matches no row,
-	// RETURNING yields nothing, and the scan reports ErrNoRows -> (nil, nil).
+	// One scan, every surface: pick the oldest conversation matching the
+	// needs-driving predicate (plus the type-conditional blueprint gate — a
+	// sequence-cancelled blueprint's step is never claimed) and mint the
+	// claims row that records this engagement's ownership, inside one short
+	// transaction. Nothing on the conversation row changes: the claim IS the
+	// ownership. No candidate means no row scanned, which the scan helper
+	// reports as (nil, nil).
+	//
+	// The curator home gate the Postgres sibling applies is absent: local
+	// mode is one process, so there is nothing to home a project to and
+	// curator_homes is never populated.
 	//
 	// The ClaimPlacement arg is ignored: SQLite is N=1 (local mode, always
 	// role=all), so there is exactly one executor and the two-tier claim is
@@ -106,18 +167,13 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 	claimedAt := time.Now().UTC()
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		row := q.QueryRowContext(ctx, `
-			UPDATE conversations
-			SET status = 'running'
-			WHERE id = (
-				SELECT r.id FROM conversations r
-				JOIN blueprint_runs br ON br.id = r.blueprint_run_id
-				WHERE r.status = 'queued'
-				  AND br.cancel_requested = 0
-				  AND br.status = 'running'
-				ORDER BY r.started_at, r.id
-				LIMIT 1
-			)
-			RETURNING `+runQueueClaimCols)
+			SELECT `+runQueueClaimCols+`
+			FROM conversations r
+			LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
+			WHERE `+eligibleForDrivingSQL+`
+			  AND `+blueprintDrivableSQL+`
+			ORDER BY r.started_at, r.id
+			LIMIT 1`)
 		claimed, err := scanSqliteClaimedRun(row)
 		if err != nil || claimed == nil {
 			return err
@@ -126,11 +182,25 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 		// executor needs to name this engagement at teardown, when it has
 		// already been released and can no longer be found as the
 		// conversation's active claim.
-		claimID := uuid.New().String()
+		// Un-park: a claim taken on the `open` arm of the predicate ends the
+		// park by definition, so the row goes back to mid-flight (NULL).
+		// That keeps "parked" and "an engagement is driving this" disjoint at
+		// every instant, which is what every recovery guard downstream reads.
 		if _, err := q.ExecContext(ctx, `
-			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, claimID, claimed.OrgID, claimed.ID, executorID, bootEpoch, claimedAt); err != nil {
+			UPDATE conversations SET status = NULL, parked_at = NULL
+			WHERE id = ? AND status IS NOT NULL
+		`, claimed.ID); err != nil {
+			return err
+		}
+		claimID := uuid.New().String()
+		var msgID any
+		if claimed.ClaimMessageID != 0 {
+			msgID = claimed.ClaimMessageID
+		}
+		if _, err := q.ExecContext(ctx, `
+			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, message_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, claimID, claimed.OrgID, claimed.ID, executorID, bootEpoch, claimedAt, msgID); err != nil {
 			return err
 		}
 		claimed.ClaimID = claimID
@@ -156,17 +226,19 @@ func (s *runQueueStore) RequeueRun(ctx context.Context, orgID, runID, lastErr st
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	// Guarded on 'running' — the one status a claimed run holds from claim
-	// until terminal/park, whatever setup phase its claim is in — matching
-	// the Postgres impl, so a stale requeue can't resurrect a
-	// terminal/parked/queued row. The active claim releases as 'requeued'
-	// (the claim already counted this try — Attempts is the claim count),
-	// and the placement stamp clears: a queued row has no owner.
+	// Releasing the claim IS the requeue: the conversation stays mid-flight
+	// (status NULL), so the moment its last claim releases it matches the
+	// needs-driving predicate again. Guarded on NULL status, matching the
+	// Postgres impl, so a stale requeue can't resurrect a terminal or parked
+	// row. The claim releases as 'requeued' (it already counted this try —
+	// Attempts is the claim count), and the placement stamp clears: an
+	// unclaimed row has no owner.
 	return inTx(ctx, s.conn, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
-			UPDATE conversations SET status = 'queued', queued_at = CURRENT_TIMESTAMP, result_summary = ?,
-				preferred_executor_id = NULL
-			WHERE id = ? AND status = 'running'
+			UPDATE conversations SET result_summary = ?, preferred_executor_id = NULL
+			WHERE id = ? AND status IS NULL
+			  AND EXISTS (SELECT 1 FROM claims cl
+			              WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL)
 		`, lastErr, runID)
 		if err != nil {
 			return err
@@ -241,11 +313,12 @@ func (s *runQueueStore) GetClaim(ctx context.Context, orgID, runID string) (db.A
 	return r, true, nil
 }
 
-// RequeueAwaitingCredentials mirrors the Postgres impl: releases a run
-// whose active claim is parked in phase='awaiting_credentials' back to
-// 'queued', releasing that claim. Never reached in practice — local mode is
-// always role=all, which never parks a run awaiting credentials — but
-// implemented for store-interface + conformance-test symmetry.
+// RequeueAwaitingCredentials mirrors the Postgres impl: releases the claim
+// of a run parked in phase='awaiting_credentials', which leaves the
+// (still mid-flight) conversation claimable again. Never reached in
+// practice — local mode is always role=all, which never parks a run
+// awaiting credentials — but implemented for store-interface +
+// conformance-test symmetry.
 func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, runID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -253,8 +326,7 @@ func (s *runQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, r
 	var matched bool
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
-			UPDATE conversations SET status = 'queued', queued_at = CURRENT_TIMESTAMP,
-				preferred_executor_id = NULL
+			UPDATE conversations SET preferred_executor_id = NULL
 			WHERE id = ? AND EXISTS (
 			    SELECT 1 FROM claims cl
 			    WHERE cl.conversation_id = conversations.id
@@ -326,15 +398,12 @@ func scanAwaitingCredentialsRuns(rows *sql.Rows) ([]db.AwaitingCredentialsRun, e
 func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
 	// The boot self-sweep, ownership-scoped through claims: only ACTIVE
 	// claims this instance itself holds (executor_id = ?) from a strictly
-	// earlier boot (boot_epoch < ?) on 'running' conversations (claimed —
-	// mid-setup or executing; setup progress is claim phase, never status)
-	// are released ('reaped'), and their conversations flipped back to
-	// 'queued' for re-claim. Terminal + dormant (open/pending_approval) +
-	// already-queued conversations are not 'running' and stay untouched —
-	// dormant runs resume through their own
-	// paths, not the queue. SQLite is N=1, so there is never a live sibling
-	// to protect, but the same predicate keeps the two backends' semantics
-	// identical.
+	// earlier boot (boot_epoch < ?) on mid-flight conversations (status NULL
+	// — nothing wrote an outcome, so the engagement was cut off) are
+	// released ('reaped'). The release IS the requeue. Parked (`open`) and
+	// terminal conversations are not mid-flight and stay untouched. SQLite is
+	// N=1, so there is never a live sibling to protect, but the same
+	// predicate keeps the two backends' semantics identical.
 	var count int
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		rows, err := q.QueryContext(ctx, `
@@ -344,7 +413,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID stri
 			WHERE cl.released_at IS NULL
 			  AND cl.executor_id = ?
 			  AND cl.boot_epoch < ?
-			  AND r.status = 'running'
+			  AND r.status IS NULL
 			  AND r.blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
 		`, executorID, bootEpoch)
 		if err != nil {
@@ -376,9 +445,7 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID stri
 				return err
 			}
 			if _, err := q.ExecContext(ctx, `
-				UPDATE conversations SET status = 'queued', queued_at = CURRENT_TIMESTAMP,
-					preferred_executor_id = NULL
-				WHERE id = ?
+				UPDATE conversations SET preferred_executor_id = NULL WHERE id = ?
 			`, convIDs[i]); err != nil {
 				return err
 			}
@@ -391,17 +458,19 @@ func (s *runQueueStore) ResetProcessingRuns(ctx context.Context, executorID stri
 
 func (s *runQueueStore) FleetQueueShares(ctx context.Context) ([]db.OrgQueueShare, error) {
 	// SQLite is N=1 — at most the one local org has any rows — but the shape
-	// mirrors the Postgres impl so the conformance suite runs identically. No
-	// FILTER (portability); SUM(CASE ...) is the equivalent. A NULL or
-	// non-positive max_concurrent_runs maps to a nil cap (unlimited).
+	// mirrors the Postgres impl so the conformance suite runs identically:
+	// active is the org's unreleased claims, queued its conversations
+	// matching the needs-driving predicate. A NULL or non-positive
+	// max_concurrent_runs maps to a nil cap (unlimited).
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT counts.org_id, counts.active, counts.queued, os.max_concurrent_runs
 		FROM (
-			SELECT org_id,
-			       SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS active,
-			       SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END)  AS queued
-			FROM conversations
-			WHERE status IN ('running', 'queued')
+			SELECT org_id, SUM(active) AS active, SUM(queued) AS queued
+			FROM (
+				SELECT org_id, 1 AS active, 0 AS queued FROM claims WHERE released_at IS NULL
+				UNION ALL
+				SELECT r.org_id, 0, 1 FROM conversations r WHERE `+eligibleForDrivingSQL+`
+			)
 			GROUP BY org_id
 		) counts
 		LEFT JOIN org_settings os ON os.org_id = counts.org_id
@@ -446,7 +515,7 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 			    completed_at = COALESCE(completed_at, ?),
 			    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
 			    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
-			WHERE status NOT IN (`+runTerminalStatusesSQL+`)
+			WHERE (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
 			  AND blueprint_run_id IN (
 			      SELECT id FROM blueprint_runs
 			      WHERE status IN ('completed','aborted','failed','cancelled')
@@ -481,13 +550,13 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 		return 0, err
 	}
 
-	// Claim-desync janitor arms — the SQLite mirror of the Postgres twin's
-	// healClaimDesyncs (see internal/db/postgres/run_queue.go for the two
-	// stranded shapes and why they exist). SQLite's single connection makes
-	// the non-System terminal writes atomic, so these arms are conformance
-	// symmetry here rather than a live hazard; runs after the
+	// Claim-desync janitor arm — the SQLite mirror of the Postgres twin's
+	// healClaimDesyncs (see internal/db/postgres/run_queue.go for the one
+	// stranded shape that survives the derived model). SQLite's single
+	// connection makes the non-System terminal writes atomic, so this is
+	// conformance symmetry here rather than a live hazard; it runs after the
 	// blueprint-terminal cancel above so a just-cancelled row reads terminal
-	// and is never requeued.
+	// and its claim releases with the right outcome.
 	err = inTx(ctx, s.conn, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
 			UPDATE claims SET released_at = ?,
@@ -510,25 +579,6 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 		}
 		count += int(n)
 
-		res, err = q.ExecContext(ctx, `
-			UPDATE conversations SET status = 'queued', queued_at = CURRENT_TIMESTAMP,
-			    preferred_executor_id = NULL
-			WHERE type = 'delegation'
-			  AND status = 'running'
-			  AND NOT EXISTS (
-			      SELECT 1 FROM claims cl
-			      WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL
-			  )
-			  AND blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
-		`)
-		if err != nil {
-			return err
-		}
-		n, err = res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		count += int(n)
 		return nil
 	})
 	return count, err
@@ -536,7 +586,8 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 
 func (s *runQueueStore) CountQueuedSystem(ctx context.Context) (int, error) {
 	var n int
-	err := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversations WHERE status = 'queued'`).Scan(&n)
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM conversations r WHERE `+eligibleForDrivingSQL).Scan(&n)
 	if err != nil {
 		return 0, err
 	}
@@ -552,12 +603,20 @@ const runTimingClaimCols = `
 	(SELECT cl.executor_id FROM claims cl WHERE cl.conversation_id = conversations.id ORDER BY cl.claimed_at DESC, cl.rowid DESC LIMIT 1),
 	(SELECT MAX(cl.claimed_at) FROM claims cl WHERE cl.conversation_id = conversations.id)`
 
+// runTimingStatusSQL is the timing projection's status: the stored outcome
+// when there is one, else the derived in-flight state. The percentile read
+// buckets by failure kind, so a mid-flight row must still name itself
+// rather than scan as NULL.
+const runTimingStatusSQL = `COALESCE(status, CASE WHEN EXISTS (
+		SELECT 1 FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL)
+	THEN 'running' ELSE 'queued' END)`
+
 func (s *runQueueStore) RecentRunTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.RunTiming, error) {
 	if limit <= 0 {
 		limit = 5000
 	}
 	rows, err := s.conn.QueryContext(ctx, `
-		SELECT org_id, status, COALESCE(failure_kind, ''),
+		SELECT org_id, `+runTimingStatusSQL+`, COALESCE(failure_kind, ''),
 		       started_at, completed_at, `+runTimingClaimCols+`
 		FROM conversations
 		WHERE type = 'delegation' AND started_at >= ?
@@ -580,14 +639,14 @@ func (s *runQueueStore) QueuedRunAgesForOrgSystem(ctx context.Context, orgID str
 }
 
 func (s *runQueueStore) queuedRunAges(ctx context.Context, orgID string) ([]domain.QueuedRun, error) {
-	q := `SELECT org_id, started_at, COALESCE(preferred_executor_id, '')
-	      FROM conversations WHERE status = 'queued'`
+	q := `SELECT r.org_id, r.started_at, COALESCE(r.preferred_executor_id, '')
+	      FROM conversations r WHERE ` + eligibleForDrivingSQL
 	args := []any{}
 	if orgID != "" {
-		q += ` AND org_id = ?`
+		q += ` AND r.org_id = ?`
 		args = append(args, orgID)
 	}
-	q += ` ORDER BY started_at ASC`
+	q += ` ORDER BY r.started_at ASC`
 	rows, err := s.conn.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -612,7 +671,7 @@ func (s *runQueueStore) RecentRunTimingsForOrgSystem(ctx context.Context, orgID 
 	// Raw string comparison on started_at — the house convention for the
 	// conversations table (ClaimNextRun orders/filters started_at raw); both
 	// the stored CURRENT_TIMESTAMP value and the bound serialize sortably.
-	q := `SELECT org_id, status, COALESCE(failure_kind, ''),
+	q := `SELECT org_id, ` + runTimingStatusSQL + `, COALESCE(failure_kind, ''),
 	             started_at, completed_at, ` + runTimingClaimCols + `
 	      FROM conversations WHERE type = 'delegation' AND org_id = ? AND started_at >= ?`
 	args := []any{orgID, since.UTC()}
@@ -643,7 +702,8 @@ const executorClaimCols = `
 	SELECT c.id, c.org_id, c.conversation_id,
 	       c.claimed_at, c.released_at, COALESCE(c.outcome, ''),
 	       c.peak_mem_mb, c.cpu_usec,
-	       COALESCE(v.status, ''), COALESCE(v.failure_kind, '')
+	       COALESCE(v.status, CASE WHEN c.released_at IS NULL THEN 'running' ELSE 'queued' END, ''),
+	       COALESCE(v.failure_kind, '')
 	FROM claims c
 	LEFT JOIN conversations v ON v.id = c.conversation_id`
 
@@ -737,17 +797,20 @@ func scanSqliteRunTimings(rows *sql.Rows) ([]domain.RunTiming, error) {
 	return out, rows.Err()
 }
 
-// scanSqliteClaimedRun scans a claimed conversations row into
+// scanSqliteClaimedRun scans a claim candidate row into
 // *domain.Conversation. (nil, nil) on sql.ErrNoRows so callers treat "nothing
-// claimable" as a non-error empty result.
+// claimable" as a non-error empty result. Status is deliberately left empty:
+// a claimable conversation's stored status is NULL by construction, and the
+// dispatcher branches on Type and Runtime, never on it.
 func scanSqliteClaimedRun(row *sql.Row) (*domain.Conversation, error) {
 	var (
-		r       domain.Conversation
-		stepIdx sql.NullInt64
+		r         domain.Conversation
+		stepIdx   sql.NullInt64
+		turnMsgID sql.NullInt64
 	)
-	err := row.Scan(&r.ID, &r.OrgID, &r.TaskID, &r.PromptID, &r.Status, &r.Model, &r.Runtime,
+	err := row.Scan(&r.ID, &r.OrgID, &r.Type, &r.TaskID, &r.PromptID, &r.Model, &r.Runtime,
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
-		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx)
+		&r.CreatorUserID, &r.TeamID, &r.ProjectID, &r.BlueprintRunID, &stepIdx, &turnMsgID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -758,5 +821,6 @@ func scanSqliteClaimedRun(row *sql.Row) (*domain.Conversation, error) {
 		v := int(stepIdx.Int64)
 		r.BlueprintStepIndex = &v
 	}
+	r.ClaimMessageID = turnMsgID.Int64
 	return &r, nil
 }

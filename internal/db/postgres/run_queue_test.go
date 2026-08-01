@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"database/sql"
 	"sync"
 	"testing"
 
@@ -51,8 +52,13 @@ func TestRunQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("ClaimNextRun: (%v, %v)", got, err)
 	}
-	if got.ID != runID || got.Status != "running" || got.Attempts != 1 {
+	if got.ID != runID || got.Attempts != 1 {
 		t.Fatalf("claimed = %+v", got)
+	}
+	// The claim writes no status: mid-flight is the absence of an outcome,
+	// and the claim row itself is the ownership.
+	if st, _ := pgRunStatus(t, h, runID); st != "" {
+		t.Fatalf("stored status after claim = %q, want none", st)
 	}
 	// team_id rides back on the claim (TFAC-458) and matches the value
 	// EnqueueRun derived from the parent task — this is the construction-path
@@ -120,8 +126,11 @@ func TestRunQueueStore_Postgres_ResetProcessingRuns_ScopedToOwner(t *testing.T) 
 	if n != 0 {
 		t.Errorf("process-b's boot reset %d rows, want 0 (must not touch process-a's live claim)", n)
 	}
-	if st, _ := pgRunStatus(t, h, runID); st != "running" {
-		t.Errorf("run status = %q, want running (untouched by process-b's boot reset)", st)
+	if st, _ := pgRunStatus(t, h, runID); st != "" {
+		t.Errorf("run status = %q, want none (untouched by process-b's boot reset)", st)
+	}
+	if !pgHasActiveClaim(t, h, runID) {
+		t.Error("process-b's boot reset released process-a's live claim")
 	}
 
 	// A itself restarting (a later boot epoch of the SAME executor_id) DOES
@@ -133,8 +142,11 @@ func TestRunQueueStore_Postgres_ResetProcessingRuns_ScopedToOwner(t *testing.T) 
 	if n2 != 1 {
 		t.Errorf("process-a's restart reset %d rows, want 1 (its own prior-boot orphan)", n2)
 	}
-	if st, _ := pgRunStatus(t, h, runID); st != "queued" {
-		t.Errorf("run status = %q, want queued after process-a's own restart swept it", st)
+	if st, _ := pgRunStatus(t, h, runID); st != "" {
+		t.Errorf("run status = %q, want none after process-a's own restart swept it", st)
+	}
+	if pgHasActiveClaim(t, h, runID) {
+		t.Error("process-a's restart left its own prior-boot claim active")
 	}
 }
 
@@ -169,8 +181,8 @@ func TestRunQueueStore_Postgres_ResetProcessingRuns_NeverResetsCurrentEpoch(t *t
 	} else if n != 0 {
 		t.Errorf("ResetProcessingRuns at the SAME epoch reset %d rows, want 0", n)
 	}
-	if st, _ := pgRunStatus(t, h, runID); st != "running" {
-		t.Errorf("run status = %q, want running (untouched by a same-epoch reset)", st)
+	if !pgHasActiveClaim(t, h, runID) {
+		t.Error("a same-epoch reset released the live claim")
 	}
 }
 
@@ -372,7 +384,7 @@ func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("EnqueueRun: %v", err)
 		}
-		if status != "queued" {
+		if status != "" {
 			pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = $2 WHERE id = $1`, id, status)
 		}
 		return id
@@ -392,21 +404,22 @@ func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 	doneClaim := activeClaim(doneID)
 	unsolvableID := seedChild("task_unsolvable")
 	unsolvableClaim := activeClaim(unsolvableID)
-	// Claimless running row (the rolled-back-flip shape) with a stale
-	// placement stamp the requeue must clear.
-	strandedID := seedChild("running")
+	// Mid-flight row with no claim: under the derived model this is simply
+	// a claimable conversation, so the sweep must leave it (and its stale
+	// placement stamp, which the next claim re-earns) alone.
+	strandedID := seedChild("")
 	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = 'exec-dead' WHERE id = $1`, strandedID)
 	// Healthy shapes.
-	healthyID := seedChild("running")
+	healthyID := seedChild("")
 	healthyClaim := activeClaim(healthyID)
-	queuedID := seedChild("queued")
+	queuedID := seedChild("")
 
 	n, err := stores.RunQueue.ReconcileOrphanedRuns(ctx)
 	if err != nil {
 		t.Fatalf("ReconcileOrphanedRuns: %v", err)
 	}
-	if n != 3 {
-		t.Errorf("healed count = %d, want 3 (two released claims + one requeue)", n)
+	if n != 2 {
+		t.Errorf("healed count = %d, want 2 (two released claims)", n)
 	}
 
 	claimState := func(id string) (released bool, outcome string) {
@@ -424,24 +437,24 @@ func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 	if rel, out := claimState(unsolvableClaim); !rel || out != "failed" {
 		t.Errorf("task_unsolvable row's claim = (released=%v, outcome=%q), want (true, failed)", rel, out)
 	}
-	var strandedStatus string
+	var strandedStatus sql.NullString
 	var pref any
 	if err := h.AdminDB.QueryRow(
 		`SELECT status, preferred_executor_id FROM conversations WHERE id = $1`, strandedID,
 	).Scan(&strandedStatus, &pref); err != nil {
 		t.Fatalf("read stranded row: %v", err)
 	}
-	if strandedStatus != "queued" || pref != nil {
-		t.Errorf("stranded row = (status=%q, preferred=%v), want (queued, cleared)", strandedStatus, pref)
+	if strandedStatus.Valid {
+		t.Errorf("mid-flight claimless row status = %q, want none (already claimable)", strandedStatus.String)
 	}
 	if rel, _ := claimState(healthyClaim); rel {
-		t.Error("healthy running row's live claim was released")
+		t.Error("healthy engaged row's live claim was released")
 	}
-	if st, _ := pgRunStatus(t, h, healthyID); st != "running" {
-		t.Errorf("healthy running row status = %q, want running", st)
+	if st, _ := pgRunStatus(t, h, healthyID); st != "" {
+		t.Errorf("healthy engaged row status = %q, want none", st)
 	}
-	if st, _ := pgRunStatus(t, h, queuedID); st != "queued" {
-		t.Errorf("claimless queued row status = %q, want queued (already claimable, nothing to heal)", st)
+	if st, _ := pgRunStatus(t, h, queuedID); st != "" {
+		t.Errorf("claimless row status = %q, want none (already claimable, nothing to heal)", st)
 	}
 
 	// Idempotent: a second sweep finds nothing.
@@ -564,11 +577,11 @@ func TestRunQueueStore_Postgres_Credentials(t *testing.T) {
 			},
 			RunStatus: func(t *testing.T, runID string) string {
 				t.Helper()
-				var status string
+				var status sql.NullString
 				if err := h.AdminDB.QueryRow(`SELECT status FROM conversations WHERE id = $1`, runID).Scan(&status); err != nil {
 					t.Fatalf("read status: %v", err)
 				}
-				return status
+				return status.String
 			},
 			SetActivePhase: func(t *testing.T, runID, phase string) {
 				t.Helper()
@@ -633,15 +646,17 @@ func TestRunQueueStore_Postgres_FleetQueueShares(t *testing.T) {
 	})
 }
 
-// pgRunStatus reads a run's status and whether completed_at is stamped.
+// pgRunStatus reads a run's STORED status (SQL NULL — the mid-flight state
+// — as "") and whether completed_at is stamped.
 func pgRunStatus(t *testing.T, h *pgtest.Harness, runID string) (status string, completed bool) {
 	t.Helper()
+	var stored sql.NullString
 	var completedAt *string
 	if err := h.AdminDB.QueryRow(`SELECT status, completed_at::text FROM conversations WHERE id = $1`, runID).
-		Scan(&status, &completedAt); err != nil {
+		Scan(&stored, &completedAt); err != nil {
 		t.Fatalf("read run %s: %v", runID, err)
 	}
-	return status, completedAt != nil
+	return stored.String, completedAt != nil
 }
 
 // seedPgRunQueueFixture mints a prompt + blueprint + a running blueprint_run on
@@ -845,4 +860,17 @@ func TestRunQueueStore_Postgres_ExecutorClaims(t *testing.T) {
 		}
 		return stores.RunQueue, seed
 	})
+}
+
+// pgHasActiveClaim reports whether the conversation currently holds an
+// unreleased claim — the derived "an engagement is driving this".
+func pgHasActiveClaim(t *testing.T, h *pgtest.Harness, convID string) bool {
+	t.Helper()
+	var live bool
+	if err := h.AdminDB.QueryRow(
+		`SELECT EXISTS (SELECT 1 FROM claims WHERE conversation_id = $1 AND released_at IS NULL)`, convID,
+	).Scan(&live); err != nil {
+		t.Fatalf("read active claim for %s: %v", convID, err)
+	}
+	return live
 }

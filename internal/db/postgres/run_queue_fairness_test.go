@@ -55,9 +55,16 @@ func setPgOrgCap(t *testing.T, h *pgtest.Harness, orgID string, cap *int) {
 	`, orgID, cap)
 }
 
+// forcePgRunning makes a run occupy a slot the way the real system does —
+// by minting an unreleased claim on it. "Active" is an engagement now, not a
+// stored status, so this is both what the fairness CTE counts and what makes
+// the run un-claimable.
 func forcePgRunning(t *testing.T, h *pgtest.Harness, runID string) {
 	t.Helper()
-	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = 'running' WHERE id = $1`, runID)
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
+		SELECT $1, org_id, id, 'fairness-fixture-executor', 1, now() FROM conversations WHERE id = $2
+	`, uuid.New().String(), runID)
 }
 
 // TestClaimFairness_BurstDoesNotStarveOtherOrg is the headline acceptance: org

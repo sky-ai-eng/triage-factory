@@ -874,14 +874,14 @@ func TestMigrate_CollapsesSetupTransientOntoClaimPhase(t *testing.T) {
 		t.Fatalf("goose Up: %v", err)
 	}
 
-	var status string
+	var status sql.NullString
 	if err := database.QueryRow(
 		`SELECT status FROM conversations WHERE id = 'r-mid'`,
 	).Scan(&status); err != nil {
 		t.Fatalf("read conversation: %v", err)
 	}
-	if status != "running" {
-		t.Errorf("conversation status = %q, want running (setup transients collapse)", status)
+	if status.Valid {
+		t.Errorf("conversation status = %q, want no stored status (a mid-setup run is mid-flight, and mid-flight is the absence of an outcome)", status.String)
 	}
 
 	var (

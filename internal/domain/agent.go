@@ -288,6 +288,14 @@ type Conversation struct {
 	// carry org in their call args.
 	OrgID string `json:"-"`
 
+	// ClaimMessageID is the queued input row the claim was minted to drive —
+	// the claim's mint intent, so a pickup that fails before attaching any
+	// message stays attributable to its exact turn. Populated by
+	// RunQueueStore.ClaimNextRun for surfaces whose work unit is one queued
+	// message (curator today); 0 for a delegation conversation, whose work
+	// unit is the conversation itself.
+	ClaimMessageID int64 `json:"-"`
+
 	// ClaimID is the claims row minted for this engagement, populated only by
 	// RunQueueStore.ClaimNextRun (which returns the row it just reserved
 	// along with the claim it minted for it). The dispatcher threads it into

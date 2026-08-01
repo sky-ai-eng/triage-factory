@@ -28,16 +28,13 @@ func newFactoryReadStore(q queryer) db.FactoryReadStore { return &factoryReadSto
 
 var _ db.FactoryReadStore = (*factoryReadStore)(nil)
 
-// pgFactoryActiveRunStatuses is the set of stored run.status values treated
-// as "in flight" for the factory view. Matches the X-button window in
-// AgentCard — every state before a terminal transition (setup sub-states
-// live on the active claim's phase, under stored 'running');
-// pending_approval stays defensively for legacy rows. Duplicated in
-// sqlite/factory.go; intentional per-backend copy.
-var pgFactoryActiveRunStatuses = []string{
-	"running",
-	"pending_approval",
-}
+// pgFactoryInFlightSQL selects the conversations treated as "in flight" for
+// the factory view. Matches the X-button window in AgentCard: an engagement
+// is actually driving the conversation (an unreleased claim — setup
+// sub-states ride that claim's phase), plus the legacy pending_approval
+// rows, which are paused waiting for user input rather than done.
+// Duplicated in sqlite/factory.go; intentional per-backend copy.
+const pgFactoryInFlightSQL = `(` + activeClaimExistsSQL + ` OR r.status = 'pending_approval')`
 
 func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error) {
 	// Scoped to the viewer's teams by the same tracked-set semi-join the
@@ -147,9 +144,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 	query := `
 		SELECT
 			r.id, r.task_id, r.prompt_id,
-			COALESCE((SELECT cl.phase FROM claims cl
-			          WHERE cl.conversation_id = r.id AND cl.released_at IS NULL),
-			         r.status),
+			`+pgDisplayStatusSQL+`,
 			COALESCE(r.model, ''), r.started_at, r.completed_at,
 			(SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id AND m.org_id = r.org_id),
 			(SELECT SUM(cl.duration_ms)::bigint FROM claims cl WHERE cl.conversation_id = r.id),
@@ -167,11 +162,11 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		JOIN tasks t ON r.task_id = t.id AND t.org_id = r.org_id
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-		WHERE r.org_id = $1 AND r.status = ANY($2)
+		WHERE r.org_id = $1 AND `+pgFactoryInFlightSQL+`
 		ORDER BY r.started_at DESC
 	`
 
-	rows, err := s.q.QueryContext(ctx, query, orgID, pgFactoryActiveRunStatuses)
+	rows, err := s.q.QueryContext(ctx, query, orgID)
 	if err != nil {
 		return nil, err
 	}

@@ -188,13 +188,27 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				t.Fatalf("seed blueprint_run: %v", err)
 			}
 			id := uuid.New().String()
+			// "running" is an engagement, not a stored value — mint the
+			// claim the real claim path would and leave the column NULL.
+			stored := any(status)
+			if status == "running" {
+				stored = nil
+			}
 			if _, err := conn.Exec(`
 				INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id)
 				VALUES ($1, $2, $3,
 				        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 				        'team', $4, $5, 'manual', $6, $7)
-			`, id, orgID, userID, taskID, promptID, status, brID); err != nil {
+			`, id, orgID, userID, taskID, promptID, stored, brID); err != nil {
 				t.Fatalf("seed run: %v", err)
+			}
+			if status == "running" {
+				if _, err := conn.Exec(`
+					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
+					VALUES ($1, $2, $3, 'factory-seed-executor', 1, now())
+				`, uuid.New().String(), orgID, id); err != nil {
+					t.Fatalf("seed claim: %v", err)
+				}
 			}
 			return id
 		},

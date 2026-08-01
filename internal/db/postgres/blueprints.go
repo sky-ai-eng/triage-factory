@@ -1029,7 +1029,7 @@ func cancelOrphanedChildRunsWithClaims(ctx context.Context, q queryer, orgID, bl
 			    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
 			    result_summary = COALESCE(NULLIF(result_summary, ''), $3)
 			WHERE org_id = $1 AND blueprint_run_id = $2
-			  AND status NOT IN (`+runTerminalStatusesSQL+`)
+			  AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
 			RETURNING id
 		)
 		UPDATE claims SET released_at = now(), outcome = 'cancelled'
@@ -1050,7 +1050,7 @@ func cancelOrphanedChildRuns(ctx context.Context, q queryer, orgID, blueprintRun
 		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
 		    result_summary = COALESCE(NULLIF(result_summary, ''), $3)
 		WHERE org_id = $1 AND blueprint_run_id = $2
-		  AND status NOT IN (`+runTerminalStatusesSQL+`)
+		  AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
 		RETURNING id
 	`, orgID, blueprintRunID, "Cancelled: owning blueprint run reached a terminal state")
 	if err != nil {
@@ -1150,8 +1150,9 @@ func blueprintActiveStepRunIDs(ctx context.Context, q queryer, orgID, blueprintR
 	rows, err := q.QueryContext(ctx, `
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND blueprint_run_id = $2
-		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
-		                     'pending_approval','open')
+		  AND (status IS NULL
+		       OR status NOT IN ('completed','failed','cancelled','task_unsolvable',
+		                         'pending_approval','open'))
 	`, orgID, blueprintRunID)
 	if err != nil {
 		return nil, err
@@ -1172,23 +1173,21 @@ func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID stri
 	if !isValidUUID(blueprintRunID) {
 		return nil, nil
 	}
-	// Status coalesces the active claim's phase over the stored status —
-	// the same display contract as the ConversationStore projections.
+	// Status is the derived display ladder — the same contract as every
+	// other ConversationStore projection.
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, task_id, prompt_id,
-		       COALESCE((SELECT cl.phase FROM claims cl
-		                 WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL),
-		                status),
-		       model, started_at, completed_at,
-		       (SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = conversations.id AND m.org_id = conversations.org_id),
-		       (SELECT SUM(cl.duration_ms)::bigint FROM claims cl WHERE cl.conversation_id = conversations.id),
-		       (SELECT SUM(cl.num_turns)::bigint FROM claims cl WHERE cl.conversation_id = conversations.id),
-		       stop_reason, worktree_path,
-		       result_summary, sdk_session_id, outcome, outcome_reason,
-		       blueprint_run_id, blueprint_step_index
-		FROM conversations
-		WHERE org_id = $1 AND blueprint_run_id = $2
-		ORDER BY blueprint_step_index ASC, started_at ASC
+		SELECT r.id, r.task_id, r.prompt_id,
+		       `+pgDisplayStatusSQL+`,
+		       r.model, r.started_at, r.completed_at,
+		       (SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id AND m.org_id = r.org_id),
+		       (SELECT SUM(cl.duration_ms)::bigint FROM claims cl WHERE cl.conversation_id = r.id),
+		       (SELECT SUM(cl.num_turns)::bigint FROM claims cl WHERE cl.conversation_id = r.id),
+		       r.stop_reason, r.worktree_path,
+		       r.result_summary, r.sdk_session_id, r.outcome, r.outcome_reason,
+		       r.blueprint_run_id, r.blueprint_step_index
+		FROM conversations r
+		WHERE r.org_id = $1 AND r.blueprint_run_id = $2
+		ORDER BY r.blueprint_step_index ASC, r.started_at ASC
 	`, orgID, blueprintRunID)
 	if err != nil {
 		return nil, err

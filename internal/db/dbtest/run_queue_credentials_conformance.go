@@ -23,9 +23,11 @@ type RunQueueCredentialsSeeder struct {
 	// blueprint_run) and returns its id.
 	EnqueueRun func(t *testing.T) (runID string)
 
-	// RunStatus reads the run's stored conversations.status directly, so
-	// the suite can assert the phase park never touches the conversation
-	// row.
+	// RunStatus reads the run's STORED conversations.status directly (SQL
+	// NULL as ""), so the suite can assert what the column does and does not
+	// carry: the phase park never touches the conversation row, and neither
+	// a claim nor a requeue writes a status onto it — mid-flight is the
+	// absence of an outcome, not a value.
 	RunStatus func(t *testing.T, runID string) string
 
 	// SetActivePhase rewrites the run's active claim's phase directly,
@@ -42,9 +44,9 @@ type RunQueueCredentialsSeeder struct {
 // write while the conversation row stays 'running', GetClaim / the sweep
 // reads return the key, the phase-IS-NULL guard never overwrites a key
 // already recorded, RequeueAwaitingCredentials only fires on a parked claim,
-// and every path that releases a claim back to 'queued' clears the key with
-// the rest of the ownership stamp — a queued row has no owner and no key, so
-// the brain can never seal a fresh claim's bundle to a stale sidecar.
+// and every path that releases a claim clears the key with the rest of the
+// ownership stamp — a claimless row has no owner and no key, so the brain
+// can never seal a fresh claim's bundle to a stale sidecar.
 func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -101,10 +103,11 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		if err != nil || !matched {
 			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
 		}
-		// The park is claim-side only: the conversation row keeps its
-		// claimed status.
-		if st := seed.RunStatus(t, runID); st != "running" {
-			t.Errorf("conversation status after park = %q, want running", st)
+		// The park is claim-side only: the conversation row is untouched,
+		// which under the derived model means it carries no stored status
+		// at all.
+		if st := seed.RunStatus(t, runID); st != "" {
+			t.Errorf("conversation status after park = %q, want no stored status", st)
 		}
 
 		got, ok, err := store.GetClaim(ctx, orgID, runID)
@@ -193,8 +196,8 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		if matched, err := store.RequeueAwaitingCredentials(ctx, orgID, runID); err != nil || matched {
 			t.Fatalf("RequeueAwaitingCredentials before park = (%v, %v), want (false, nil)", matched, err)
 		}
-		if st := seed.RunStatus(t, runID); st != "running" {
-			t.Errorf("status after refused requeue = %q, want running", st)
+		if st := seed.RunStatus(t, runID); st != "" {
+			t.Errorf("status after refused requeue = %q, want no stored status", st)
 		}
 
 		if matched, err := store.MarkAwaitingCredentials(ctx, orgID, runID, pubKey); err != nil || !matched {
@@ -204,8 +207,10 @@ func RunRunQueueCredentialsConformance(t *testing.T, mk RunQueueCredentialsFacto
 		if err != nil || !matched {
 			t.Fatalf("RequeueAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
 		}
-		if st := seed.RunStatus(t, runID); st != "queued" {
-			t.Errorf("status after requeue = %q, want queued", st)
+		// Releasing the claim IS the requeue: the row stays mid-flight and
+		// nothing writes a status.
+		if st := seed.RunStatus(t, runID); st != "" {
+			t.Errorf("status after requeue = %q, want no stored status", st)
 		}
 		got, ok, err := store.GetClaim(ctx, orgID, runID)
 		if err != nil || !ok {

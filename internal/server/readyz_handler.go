@@ -248,15 +248,25 @@ func checkLabel(ok bool) string {
 }
 
 // countActiveRuns is the indexed COUNT backing the active_runs soft
-// signal: runs.status has idx_runs_status (plus a partial index on
-// status='queued'), so this is an index scan, not a table scan. Reads
-// s.db directly (the admin/system pool in multi mode, RLS-exempt)
+// signal. Both halves are derived, so both are index-backed: a delegation
+// conversation with no stored outcome is waiting or working (the partial
+// index on status IS NULL), and any conversation with an unreleased claim
+// has an engagement on it right now (idx_claims_one_active) — which is what
+// puts an in-flight curator turn in the count too. Dialect-neutral SQL: the
+// handler holds one *sql.DB and does not know which backend it is.
+//
+// Reads s.db directly (the admin/system pool in multi mode, RLS-exempt)
 // rather than a team-scoped store — /readyz is pre-auth with no session
 // to scope a team from, and a bare count discloses no tenant data, so
 // this is the "explicitly annotated org-wide system job" category in
 // CLAUDE.md's multi-mode read-scoping rule, not a cross-team leak.
 func (s *Server) countActiveRuns(ctx context.Context) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversations WHERE status IN ('queued', 'running')`).Scan(&n)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM conversations c
+		WHERE (c.type = 'delegation' AND c.status IS NULL)
+		   OR EXISTS (SELECT 1 FROM claims cl
+		              WHERE cl.conversation_id = c.id AND cl.released_at IS NULL)
+	`).Scan(&n)
 	return n, err
 }

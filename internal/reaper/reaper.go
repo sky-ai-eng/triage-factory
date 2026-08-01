@@ -106,13 +106,13 @@ func RunReaper(ctx context.Context, store Store, interval time.Duration, staleTh
 			} else if n > 0 {
 				reaperLog.Info("cancelled curator turns stranded on a dead home", "count", n)
 			}
-			// Claim-desync janitor: heal the two shapes the app-pool terminal
+			// Claim-desync janitor: heal the shape the app-pool terminal
 			// writes can strand (see Store.HealClaimDesyncs). Periodic here so
 			// a desync's lifetime is bounded by a tick, not the next restart.
-			if requeued, released, herr := store.HealClaimDesyncs(ctx); herr != nil {
+			if released, herr := store.HealClaimDesyncs(ctx); herr != nil {
 				reaperLog.Warn("claim-desync sweep failed; retrying next tick", "error", herr)
-			} else if requeued > 0 || released > 0 {
-				reaperLog.Info("healed run↔claim desyncs", "requeued", requeued, "released_claims", released)
+			} else if released > 0 {
+				reaperLog.Info("healed run↔claim desyncs", "released_claims", released)
 			}
 		}
 	}

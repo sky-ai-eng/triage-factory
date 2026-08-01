@@ -910,7 +910,7 @@ func cancelOrphanedChildRuns(ctx context.Context, q queryer, blueprintRunID stri
 		  AND conversation_id IN (
 		      SELECT id FROM conversations
 		      WHERE blueprint_run_id = ?
-		        AND status NOT IN (`+runTerminalStatusesSQL+`))
+		        AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`)))
 	`, time.Now().UTC(), blueprintRunID); err != nil {
 		return err
 	}
@@ -921,7 +921,7 @@ func cancelOrphanedChildRuns(ctx context.Context, q queryer, blueprintRunID stri
 		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
 		    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
 		WHERE blueprint_run_id = ?
-		  AND status NOT IN (`+runTerminalStatusesSQL+`)
+		  AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
 	`, time.Now().UTC(), "Cancelled: owning blueprint run reached a terminal state", blueprintRunID)
 	return err
 }
@@ -977,23 +977,21 @@ func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintR
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	// Status coalesces the active claim's phase over the stored status —
-	// the same display contract as the ConversationStore projections.
+	// Status is the derived display ladder — the same contract as every
+	// other ConversationStore projection.
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, task_id, prompt_id,
-		       COALESCE((SELECT cl.phase FROM claims cl
-		                 WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL),
-		                status),
-		       model, started_at, completed_at,
-		       (SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = conversations.id),
-		       (SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = conversations.id),
-		       (SELECT SUM(cl.num_turns) FROM claims cl WHERE cl.conversation_id = conversations.id),
-		       stop_reason, worktree_path,
-		       result_summary, sdk_session_id, outcome, outcome_reason,
-		       blueprint_run_id, blueprint_step_index
-		FROM conversations
-		WHERE blueprint_run_id = ?
-		ORDER BY blueprint_step_index ASC, started_at ASC
+		SELECT r.id, r.task_id, r.prompt_id,
+		       `+sqliteDisplayStatusSQL+`,
+		       r.model, r.started_at, r.completed_at,
+		       (SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id),
+		       (SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = r.id),
+		       (SELECT SUM(cl.num_turns) FROM claims cl WHERE cl.conversation_id = r.id),
+		       r.stop_reason, r.worktree_path,
+		       r.result_summary, r.sdk_session_id, r.outcome, r.outcome_reason,
+		       r.blueprint_run_id, r.blueprint_step_index
+		FROM conversations r
+		WHERE r.blueprint_run_id = ?
+		ORDER BY r.blueprint_step_index ASC, r.started_at ASC
 	`, blueprintRunID)
 	if err != nil {
 		return nil, err
@@ -1065,8 +1063,9 @@ func (s *blueprintStore) ActiveStepRunIDs(ctx context.Context, orgID, blueprintR
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id FROM conversations
 		WHERE blueprint_run_id = ?
-		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
-		                     'pending_approval','open')
+		  AND (status IS NULL
+		       OR status NOT IN ('completed','failed','cancelled','task_unsolvable',
+		                         'pending_approval','open'))
 	`, blueprintRunID)
 	if err != nil {
 		return nil, err

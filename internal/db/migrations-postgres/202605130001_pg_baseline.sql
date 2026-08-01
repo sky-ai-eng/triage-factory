@@ -1340,15 +1340,18 @@ CREATE TABLE public.conversations (
     -- carry reasoning/content_blocks on its messages for display, but they
     -- are never read back for replay — sdk_session_id is truth for resume.
     runtime text DEFAULT 'sdk'::text NOT NULL,
-    -- status is the work lifecycle for delegation (queued / running /
-    -- open / completed / failed / cancelled / task_unsolvable) and for
-    -- future interactive/subagent kinds. Engagement sub-state (fetching /
-    -- cloning / agent_starting / awaiting_credentials) lives on the live
-    -- claim's phase, coalesced over this column on display reads — a
-    -- retry or re-claim never rewrites the conversation row. NULL for
-    -- curator conversations, whose turn state is derived from messages +
-    -- claims; the delegation CHECK below pins it NOT NULL where it is
-    -- load-bearing.
+    -- status is OUTCOME-OR-NOTHING: 'open' (a deliberate park), a terminal
+    -- ('completed' / 'failed' / 'cancelled' / 'task_unsolvable'), or NULL.
+    -- NULL is not "unknown" — it is the mid-flight state: either an active
+    -- claim is driving the conversation right now, or its last claim
+    -- released without an outcome and nobody has picked it up yet. "Queued"
+    -- and "running" are DERIVED (from the claim table plus the
+    -- needs-driving predicate) and never stored. Engagement sub-state
+    -- (fetching / cloning / agent_starting / awaiting_credentials) lives on
+    -- the live claim's phase, coalesced over this column on display reads —
+    -- a retry or re-claim never rewrites the conversation row. Mint writes
+    -- nothing here; parks write 'open'; terminals write their terminal;
+    -- nothing else touches it.
     status text,
     model text,
     -- sdk_session_id is the SDK-runtime resume handle — the union of the
@@ -1387,9 +1390,11 @@ CREATE TABLE public.conversations (
     blueprint_run_id uuid,
     blueprint_step_index integer,
     triggering_event_id uuid,
-    -- queued_at is when the conversation last entered the claim queue;
-    -- re-stamped on every flip to status='queued' (claimed_at lives on the
-    -- claim row; claim.claimed_at − queued_at is the latest queue dwell).
+    -- queued_at is when the conversation entered the claim queue, stamped
+    -- once at enqueue and never bumped again (there is no requeue write left
+    -- to bump it on — releasing a claim is the requeue). Display-only: the
+    -- scheduler orders by started_at. claimed_at lives on the claim row, so
+    -- claim.claimed_at − queued_at is the first queue dwell.
     queued_at timestamp with time zone,
     -- preferred_executor_id is the placement affinity stamp: the
     -- capacity-weighted rendezvous winner for this conversation's
@@ -1402,10 +1407,7 @@ CREATE TABLE public.conversations (
     CONSTRAINT conversations_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
     -- A 'blueprint'-origin conversation carries its full parentage
     -- (blueprint_run + task + prompt), preserving the runs-era invariant.
-    CONSTRAINT conversations_origin_requires_parents CHECK (((origin = 'blueprint'::text AND blueprint_run_id IS NOT NULL AND task_id IS NOT NULL AND prompt_id IS NOT NULL) OR (origin <> 'blueprint'::text))),
-    -- status is nullable only because curator conversations have no work
-    -- lifecycle; a delegation conversation always has one.
-    CONSTRAINT conversations_delegation_has_status CHECK (((type <> 'delegation'::text) OR (status IS NOT NULL)))
+    CONSTRAINT conversations_origin_requires_parents CHECK (((origin = 'blueprint'::text AND blueprint_run_id IS NOT NULL AND task_id IS NOT NULL AND prompt_id IS NOT NULL) OR (origin <> 'blueprint'::text)))
 );
 
 
@@ -5574,29 +5576,30 @@ CREATE INDEX idx_blueprint_runs_status ON public.blueprint_runs (status) WHERE (
 CREATE INDEX idx_blueprint_runs_actor_agent ON public.blueprint_runs (actor_agent_id) WHERE (actor_agent_id IS NOT NULL);
 CREATE INDEX idx_conversations_blueprint        ON public.conversations (blueprint_run_id, blueprint_step_index);
 -- Claim index for the run queue: the dispatcher claims the globally-oldest
--- 'queued' run (FIFO by started_at, id) under FOR UPDATE SKIP LOCKED. Partial so
--- it only spans unclaimed work, mirroring idx_event_queue_pending.
-CREATE INDEX idx_conversations_queued ON public.conversations (started_at, id) WHERE (status = 'queued'::text);
+-- eligible conversation (FIFO by started_at, id) under FOR UPDATE SKIP LOCKED.
+-- Partial on the NULL arm of the needs-driving predicate — the mid-flight set,
+-- which is where every fresh mint and every released-without-outcome claim
+-- lands — so it spans only work that could need driving, mirroring
+-- idx_event_queue_pending. The predicate's other arm (a parked 'open'
+-- conversation woken by input) is served by idx_messages_undelivered.
+CREATE INDEX idx_conversations_needs_driving ON public.conversations (started_at, id) WHERE (status IS NULL);
 -- Placement tier-1 claim index: the two-tier claim's hot path is an executor
 -- pulling its OWN preferred queued runs (preferred_executor_id = me), ordered
 -- by started_at, id. This partial index makes that an indexed equality — the
 -- point of stamping the rendezvous winner at enqueue instead of re-evaluating
 -- the hash per claim — and lets the ORDER BY (preferred = me) DESC, started_at,
 -- id resolve a tier-1 row without scanning the whole queued set. Same partial
--- WHERE status='queued' as idx_conversations_queued, so it too spans only unclaimed
--- work. Global-oldest (placement disabled) still uses idx_conversations_queued.
-CREATE INDEX idx_conversations_queued_preferred ON public.conversations (preferred_executor_id, started_at, id) WHERE (status = 'queued'::text);
--- Per-org fairness/cap claim index: the claim computes each org's active-run
--- count (status='running' — a claimed run holds that one status from claim
--- to terminal/park; setup progress is the claim's phase) once per statement
--- to both filter orgs at their max_concurrent_runs cap and order claimable
--- rows fewest-active first. This partial index spans ONLY active rows —
--- bounded by fleet capacity (hundreds), not the whole runs history — so
--- that GROUP BY org_id is an index-only scan over the small live set rather
--- than a seq scan. The planner uses this partial index when the claim's
--- active-count WHERE provably IMPLIES this predicate; keep the claim's
--- active-run status set in sync with the one here so that implication holds.
-CREATE INDEX idx_conversations_active_by_org ON public.conversations (org_id) WHERE (status = 'running'::text);
+-- WHERE status IS NULL as idx_conversations_needs_driving, so it too spans only
+-- mid-flight work. Global-oldest (placement disabled) still uses
+-- idx_conversations_needs_driving.
+CREATE INDEX idx_conversations_queued_preferred ON public.conversations (preferred_executor_id, started_at, id) WHERE (status IS NULL);
+-- Per-org fairness/cap: the claim computes each org's active-engagement count
+-- once per statement to both filter orgs at their max_concurrent_runs cap and
+-- order claimable rows fewest-active first. "Active" is now an unreleased
+-- claim, so that GROUP BY reads claims directly and is served by
+-- idx_claims_one_active (partial on released_at IS NULL, bounded by fleet
+-- capacity) — there is no conversation-side status to index for it any more.
+-- idx_conversations_org_status still covers the org-scoped outcome reads.
 -- Replay fence (relocated from runs): one event firing one trigger materializes
 -- at most one blueprint_run. Partial WHERE triggering_event_id IS NOT NULL so
 -- manual blueprint runs (NULL) never participate.

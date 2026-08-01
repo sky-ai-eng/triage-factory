@@ -30,13 +30,13 @@ type FleetQueueSharesSeeder struct {
 }
 
 // RunFleetQueueSharesConformance covers the per-backend FleetQueueShares
-// contract: it counts an org's active (slot-occupying: status='running',
-// whatever phase the claim is in) and queued runs, excludes terminal and
-// hibernated (open/pending_approval) runs from both, and reports the
-// configured cap — nil for an unset or non-positive value. Multi-org
-// fairness ordering is a Postgres-only concern exercised in that backend's
-// own tests; this suite runs single-org against both dialects (SQLite is
-// N=1).
+// contract: it counts an org's active (slot-occupying: an unreleased claim,
+// whatever phase that claim is in) and queued (needs-driving) runs, excludes
+// terminal and hibernated (open/pending_approval) runs from both, and
+// reports the configured cap — nil for an unset or non-positive value.
+// Multi-org fairness ordering is a Postgres-only concern exercised in that
+// backend's own tests; this suite runs single-org against both dialects
+// (SQLite is N=1).
 func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -65,11 +65,22 @@ func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 			t.Fatalf("empty queue reported a share %+v, want the org omitted", s)
 		}
 
-		// 2 active + 1 still queued.
-		r1, r2, r3 := seed.EnqueueRun(t), seed.EnqueueRun(t), seed.EnqueueRun(t)
-		seed.ForceStatus(t, r1, "running")
-		seed.ForceStatus(t, r2, "running")
-		_ = r3 // left queued
+		// 2 active + 1 still queued. Active is an engagement now, so the two
+		// active runs are made active by actually claiming them — which is
+		// also the only way to reach the state, the conversation row itself
+		// carrying no "running" any more.
+		seed.EnqueueRun(t)
+		seed.EnqueueRun(t)
+		seed.EnqueueRun(t)
+		for i := 0; i < 2; i++ {
+			claimed, err := store.ClaimNextRun(ctx, "fleet-share-executor", 1, db.ClaimPlacement{})
+			if err != nil {
+				t.Fatalf("ClaimNextRun: %v", err)
+			}
+			if claimed == nil {
+				t.Fatalf("ClaimNextRun returned nothing on claim %d of 2", i+1)
+			}
+		}
 
 		s, found := shareFor(t, store, orgID)
 		if !found {
