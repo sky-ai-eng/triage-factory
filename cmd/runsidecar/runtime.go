@@ -315,7 +315,7 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 		return b.ProviderCreds(namespace)
 	}
 	srv := agenthost.NewServerWithRuntime(agenthost.NewRelayRuntime(r.conn, info, providerCreds), proxyCreds)
-	hd, _, err := agenthost.StartWithServer(srv, info.RunID)
+	hd, _, err := startAgentHostSocket(srv, info.RunID)
 	if err != nil {
 		return fmt.Errorf("runsidecar: start agenthost: %w", err)
 	}
@@ -323,11 +323,20 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 	return nil
 }
 
-// writeInjectorCert publishes the run's injector certificate to the per-run path
-// the orchestrator bind-mounts into the jail. A var so a test can drive the
-// injector wiring without the privileged /run/tf root the real write lands under
-// — the same seam shape the broker's own launch path uses.
-var writeInjectorCert = agenthost.WriteInjectorCert
+// The two privileged filesystem effects startProxies has, behind vars so a test
+// can drive the wiring around them. Both land under the root-only per-run socket
+// root (/run/tf) — one writes the injector's certificate there, the other binds
+// the exec-verb socket — so an unprivileged test process cannot take either path,
+// and a test that needs the surrounding logic has to stand in for them.
+//
+// The seams live here, in the consumer, deliberately: cmd/exec/agenthost resolves
+// those paths as constants and is the privileged side of this boundary. Making
+// its path resolution mutable so another package's test can retarget it would
+// trade a real invariant for test convenience.
+var (
+	writeInjectorCert    = agenthost.WriteInjectorCert
+	startAgentHostSocket = agenthost.StartWithServer
+)
 
 // ghChannelWanted reports whether this request gets a gh injector. It needs the
 // run's identity for the per-run cert path (the orchestrator mounts the same

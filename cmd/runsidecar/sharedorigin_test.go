@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
@@ -77,7 +79,7 @@ func TestRuntime_StartProxiesRoutesGitAtTheSharedOrigin(t *testing.T) {
 		t.Fatalf("relay bundle: %v", err)
 	}
 
-	stubInjectorCertWrite(t)
+	stubPrivilegedSideEffects(t)
 
 	var res sidecarproto.StartProxiesResult
 	if err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{
@@ -189,16 +191,27 @@ func TestGHChannelWanted(t *testing.T) {
 	}
 }
 
-// stubInjectorCertWrite redirects the injector's per-run cert publish off the
-// privileged /run/tf root, so a test can drive the real startGHInjector path.
-func stubInjectorCertWrite(t *testing.T) {
+// stubPrivilegedSideEffects redirects the two things startProxies does under the
+// root-only /run/tf socket root — publishing the injector's certificate and
+// binding the exec-verb socket — into a temp dir and a no-op.
+//
+// Both are required together for any test that passes an AgentHost, which a gh
+// channel needs for the run identity behind its cert path. Neither is what such a
+// test is about, and a CI runner is unprivileged: without these the test does not
+// assert something weaker, it fails outright on a bind it was never exercising.
+func stubPrivilegedSideEffects(t *testing.T) {
 	t.Helper()
-	orig := writeInjectorCert
+	origWrite, origStart := writeInjectorCert, startAgentHostSocket
 	dir := t.TempDir()
 	writeInjectorCert = func(runID string, pem []byte) error {
 		return os.WriteFile(filepath.Join(dir, runID+".crt"), pem, 0o600)
 	}
-	t.Cleanup(func() { writeInjectorCert = orig })
+	startAgentHostSocket = func(*agenthost.Server, string) (*agenthost.HostDaemon, sandbox.Mount, error) {
+		return nil, sandbox.Mount{}, nil
+	}
+	t.Cleanup(func() {
+		writeInjectorCert, startAgentHostSocket = origWrite, origStart
+	})
 }
 
 // gitConfigFromEnv decodes git's indexed env-config form back into a map, so a
