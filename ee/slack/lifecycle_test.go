@@ -210,3 +210,31 @@ func TestHandleRunStatus_CacheHit_RefreshesLRUStamp(t *testing.T) {
 		t.Errorf("cachedAt = %v, want the touch time %v (refreshed on cache hit)", got, touchedAt)
 	}
 }
+
+// TestPreRunIndicatorText_CoversEveryClaimPhase pins the setup indicator's
+// coverage to the canonical phase vocabulary. The ok=false fallthrough is
+// deliberate for a status this build has never heard of, but a phase that
+// exists TODAY and reaches no arm is a silent gap: the thread either sits on
+// the previous phase's copy or shows nothing at all, with no error anywhere.
+// That is exactly how awaiting_credentials went unrendered. Deriving the
+// coverage from domain.AllClaimPhases means a phase added in Go fails here
+// rather than quietly rendering nothing.
+func TestPreRunIndicatorText_CoversEveryClaimPhase(t *testing.T) {
+	for _, phase := range append(domain.AllClaimPhases(), domain.StatusQueued) {
+		text, ok := preRunIndicatorText(phase)
+		if !ok {
+			t.Errorf("preRunIndicatorText(%q) = ok:false — every pre-running status needs indicator copy", phase)
+			continue
+		}
+		if text.status == "" || text.loading == "" {
+			t.Errorf("preRunIndicatorText(%q) = %+v, want both the status line and the loading text set", phase, text)
+		}
+	}
+
+	// Everything else stays invisible rather than rendering guessed copy.
+	for _, status := range []string{domain.StatusRunning, domain.StatusOpen, domain.StatusCompleted, "", "some_future_state"} {
+		if _, ok := preRunIndicatorText(status); ok {
+			t.Errorf("preRunIndicatorText(%q) = ok:true, want no setup copy for a non-setup status", status)
+		}
+	}
+}
