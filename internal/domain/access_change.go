@@ -20,8 +20,7 @@ import (
 // invite-accept the actor is the invitee, with the invite id carried in
 // DetailJSON. Target/Team/DetailJSON are likewise optional (empty → NULL).
 // OrgID + ID + CreatedAt are populated on read; Record takes orgID as a
-// separate argument and lets the column DEFAULTs stamp id + created_at. See
-// TFAC-471.
+// separate argument and lets the column DEFAULTs stamp id + created_at.
 type AccessChange struct {
 	ID    string `json:"id"`
 	OrgID string `json:"org_id"`
@@ -46,7 +45,6 @@ type AccessChange struct {
 }
 
 // Access-change action discriminators (text, extensible — no CHECK constraint).
-// See TFAC-471 §2.
 const (
 	AccessActionOrgMemberGranted        = "org_member_granted"
 	AccessActionOrgRoleChanged          = "org_role_changed"
@@ -89,7 +87,7 @@ const (
 // interactive invite-accept. The viewer uses it to render "joined via SSO"
 // instead of the plain "joined" an invite-accept shows; an empty source (the
 // invite-accept case) keeps the generic phrasing. SCIM (future) grafts onto the
-// same grantOrgMembership seam and records its own source. See TFAC-486.
+// same grantOrgMembership seam and records its own source.
 const (
 	AccessSourceSSOJIT = "sso_jit"
 )
@@ -122,8 +120,8 @@ const (
 	CredentialKindSlackWorkspace = "slack_workspace"
 )
 
-// AccessChangeListOpts bounds a ListByOrg read for the audit viewer (TFAC-484).
-// Rows come back newest-first (matching the (org_id, created_at DESC) index).
+// AccessChangeListOpts bounds a ListByOrg read for the audit viewer. Rows come
+// back newest-first (matching the (org_id, created_at DESC) index).
 type AccessChangeListOpts struct {
 	// Limit is the page size. A value ≤ 0 falls back to the store impls' own
 	// internal default (100) — but the HTTP viewer resolves a concrete page size
@@ -140,7 +138,7 @@ type AccessChangeListOpts struct {
 	Category string
 }
 
-// Access-change filter categories for the audit viewer (TFAC-484). The viewer
+// Access-change filter categories for the audit viewer. The viewer
 // groups the action discriminators into buckets so an org admin can narrow the
 // log to membership/role/ownership changes vs credential binds/rotations vs
 // org-wide access policy.

@@ -1525,7 +1525,7 @@ function fmtAccessTime(iso: string): string {
 // is the scan an admin actually does down this log.
 // The SSO policy rows follow the same rule, on what the change did to the
 // org's reach rather than to one member: disabling the connection, dropping a
-// verified domain, and pulling a break-glass exemption each take a way in away.
+// verified domain, and pulling a break-glass exemption each remove a way in.
 // Requiring SSO is deliberately NOT here — it tightens the org, but the tone
 // tracks access removed, and no principal loses standing by it.
 const ACCESS_REVOCATIONS = new Set([
