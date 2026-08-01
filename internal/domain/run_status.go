@@ -3,11 +3,13 @@ package domain
 // Run-status classification shared by every surface that aggregates runs by
 // lifecycle (the fleet console, the org-ops usage subset). These classify
 // DISPLAYED statuses — the value Conversation.Status carries after the read
-// projections coalesce the active claim's phase over the stored column — so
-// alongside the stored vocabulary (queued | running | open | the terminals,
-// documented on Conversation.Status in agent.go) the phase names (fetching |
-// cloning | agent_starting | awaiting_credentials) and legacy transients
-// still classify here:
+// projections coalesce the active claim's phase over the stored column. That
+// distinction is load-bearing: `queued` and `running` are DERIVED and never
+// stored (the stored column is `open` | a terminal | NULL — see
+// Conversation.Status in agent.go), so these helpers are meaningful only on a
+// value that came through the display ladder, never on a raw column read.
+// Alongside those two, the phase names (fetching | cloning | agent_starting |
+// awaiting_credentials) and legacy transients still classify here:
 //
 //	queued | initializing | cloning | fetching | worktree_created |
 //	agent_starting | running | awaiting_credentials | open   (non-terminal)

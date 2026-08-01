@@ -1,6 +1,7 @@
 // The run-queue dispatcher + the blueprint state-machine reactor — the
 // queue-driven replacement for the in-memory runBlueprint for-loop. A blueprint
-// step is enqueued as a runs row in status='queued'; the dispatcher claims it,
+// step is enqueued as a conversations row with no status at all — needing a
+// driver is derived, not stored; the dispatcher claims it,
 // rehydrates the shared workspace, runs the agent, and on terminal the reactor
 // advances the blueprint_run (enqueue the next step / finalize / leave parked).
 // Sequencing lives on blueprint_runs (current_step_index + cancel_requested), so
@@ -124,8 +125,8 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 	// Mirror sweep for the opposite desync — child runs left
 	// non-terminal under an already-terminal blueprint_run. ResetProcessingRuns
 	// above only requeues under a *running* parent, so these orphans are
-	// invisible to it; left alone, a 'running' orphan keeps the dispatcher on
-	// phantom work and pins its feature branch in a worktree, requeuing any
+	// invisible to it; left alone, an orphan still reading as claimable keeps
+	// the dispatcher on phantom work and pins its feature branch in a worktree, requeuing any
 	// sibling fetch forever. Cancel them so the row stops looking live (the
 	// worktree.Cleanup sweep already reclaimed the on-disk dir for non-parked
 	// runs). The atomic cancel in MarkRunStatus prevents new desyncs; this heals
@@ -143,8 +144,8 @@ func (s *Spawner) reconcileRunQueue(ctx context.Context) {
 // drainRunQueue claims queued runs and hands each to a goroutine, bounded by
 // the process-wide concurrency semaphore, until the queue is empty (or ctx is
 // cancelled). It acquires a slot BEFORE each claim, so at capacity it blocks on
-// a free slot rather than reserving a run it can't yet run (no claimed-but-idle
-// 'running' rows). Each claimed run executes — setup, agent, reactor — off the
+// a free slot rather than reserving a run it can't yet run (no claim held over
+// idle work). Each claimed run executes — setup, agent, reactor — off the
 // dispatcher, so the loop keeps claiming the next run (up to the cap) without
 // waiting for the previous one to finish. The claim is FOR UPDATE SKIP LOCKED,
 // so this is the same mechanism a future N-worker dispatcher uses; the
@@ -890,7 +891,6 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 		ID:                  runID,
 		TaskID:              task.ID,
 		PromptID:            step.StepPromptID,
-		Status:              "queued",
 		Model:               model,
 		TriggerType:         triggerType,
 		TriggerID:           triggerID,
