@@ -8,12 +8,20 @@ package domain
 // stored (the stored column is `open` | a terminal | NULL — see
 // Conversation.Status in agent.go), so these helpers are meaningful only on a
 // value that came through the display ladder, never on a raw column read.
-// Alongside those two, the phase names (fetching | cloning | agent_starting |
-// awaiting_credentials) and legacy transients still classify here:
+// Alongside those two, the live claim's phase names classify here, since a
+// conversation setting up is as much in flight as one calling the model:
 //
-//	queued | initializing | cloning | fetching | worktree_created |
-//	agent_starting | running | awaiting_credentials | open   (non-terminal)
-//	completed | failed | cancelled | task_unsolvable          (terminal)
+//	queued | fetching | cloning | agent_starting |
+//	awaiting_credentials | running | open            (non-terminal)
+//	completed | failed | cancelled | task_unsolvable (terminal)
+//
+// IsActiveRunStatus is open-world by construction — anything that is not
+// queued, open, or terminal counts as in flight — which is why each new claim
+// phase has classified correctly without editing this file. The cost is that
+// an unrecognized value is indistinguishable from a phase and reads as
+// active. Closing that world means giving the phase vocabulary one Go home to
+// test against; it is spelled as bare literals across delegate, credprovision
+// and the stores today.
 //
 // Keeping the sets here means "is this run active?" / "is this run terminal?"
 // has ONE definition, not a copy per handler that can drift from the model.
