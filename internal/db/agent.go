@@ -478,6 +478,37 @@ type ConversationStore interface {
 	// assembly would then render it as an ordinary user turn.
 	MarkDeliveredForClaimSystem(ctx context.Context, orgID, runID, claimID string, ids []int, subtype string) error
 
+	// CompactForClaimSystem commits one compaction atomically: optionally
+	// insert the reconstructed reply row (forced inactive — it is history the
+	// moment it exists, never part of any assembly), insert the result row,
+	// flip inactiveIDs to window_state='inactive', and re-seq every
+	// undelivered row whose effective assembly key precedes the result row to
+	// fractional positions strictly between the result row's id and id+1,
+	// preserving their existing relative order. The re-seq is the
+	// queued-input ordering contract: a message queued at any time before the
+	// compaction commits lands after the summary, in assembly and in display,
+	// and a row queued after the commit sorts after those fractions by its
+	// integer id alone.
+	//
+	// One transaction because a partial compaction is transcript corruption
+	// in every direction: a result row without its flips doubles the history,
+	// flips without a result row erase it. replyRow may be nil (the warm
+	// path's reply persisted through the normal insert; only the forced-shape
+	// path reconstructs one here). Both row pointers get their assigned IDs
+	// written back. Refused with ErrClaimReleased when claimID no longer
+	// holds the conversation — zombie executors don't compact.
+	CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error
+
+	// SettleCompactionRequestForClaimSystem records a discarded warm
+	// compaction attempt on the request row that asked for it: the failed
+	// call's token usage and cost (the reply itself is never inserted — a
+	// botched summarize attempt is not a conversation event, but its dollars
+	// are real and the ledger is SUM(messages.cost_usd) over messages alone),
+	// plus a machine-readable reason merged into the row's metadata under
+	// "compaction_failure". costUSD nil leaves the column NULL (unpriceable
+	// model), never 0.
+	SettleCompactionRequestForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) error
+
 	// CompleteForClaimSystem is Complete driven by the engagement that ran
 	// the invocation: same status flip, cost settlement, and claim release,
 	// refused outright when claimID is already released. The claim it

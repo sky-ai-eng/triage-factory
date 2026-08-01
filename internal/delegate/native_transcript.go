@@ -67,6 +67,26 @@ func (t *nativeTranscript) Insert(ctx context.Context, orgID string, msg *domain
 	return int(id), nil
 }
 
+// Compact maps to the fenced store commit and broadcasts what it inserted —
+// the result row always, the reconstructed reply row when the forced-shape
+// path produced one (delivered + inactive is compacted history, which the
+// display keeps).
+func (t *nativeTranscript) Compact(ctx context.Context, orgID, conversationID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+	if err := t.spawner.agentRuns.CompactForClaimSystem(ctx, orgID, conversationID, t.claimID, replyRow, resultRow, inactiveIDs); err != nil {
+		return err
+	}
+	if replyRow != nil {
+		t.spawner.broadcastMessage(orgID, t.conversation, replyRow)
+	}
+	t.spawner.broadcastMessage(orgID, t.conversation, resultRow)
+	return nil
+}
+
+func (t *nativeTranscript) SettleCompactionRequest(ctx context.Context, orgID, conversationID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) error {
+	return t.spawner.agentRuns.SettleCompactionRequestForClaimSystem(ctx, orgID, conversationID, t.claimID,
+		requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUSD, reason)
+}
+
 // spendGuard is the native loop's pre-call spend arm. It reuses the
 // admission gate's own checks — the same org and team daily caps, read off
 // the same messages-backed ledger, with the same fail-open behavior and the

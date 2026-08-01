@@ -132,6 +132,14 @@ func isTransient(err error) bool {
 	if err == nil {
 		return false
 	}
+	// A context overflow is permanent by definition — the same request can
+	// never succeed — and it must be excluded before the marker matching
+	// below: an overflow message quotes token counts ("prompt is too long:
+	// 429 tokens > 200 maximum"), and a count that happens to spell a
+	// retryable status code would otherwise buy a retry.
+	if errors.Is(err, inference.ErrContextOverflow) {
+		return false
+	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true

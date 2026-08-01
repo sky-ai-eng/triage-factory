@@ -240,3 +240,27 @@ func TestUsageFromBifrost(t *testing.T) {
 		t.Fatal("nil usage must project to zero Usage")
 	}
 }
+
+func TestModelWindow(t *testing.T) {
+	cases := []struct {
+		model string
+		want  int
+		ok    bool
+	}{
+		// The Claude family the native loop drives today.
+		{"claude-sonnet-4-5", 200000, true},
+		{"claude-haiku-4-5", 200000, true},
+		// Bedrock region-prefix strip, same rule as pricing lookup.
+		{"us.anthropic.claude-sonnet-4-5-20250929-v1:0", 200000, true},
+		// Unknown model: the caller must not guess a window.
+		{"some-model-nobody-heard-of", 0, false},
+		// A datasheet entry that carries no max_input_tokens.
+		{"azure/container", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := ModelWindow(c.model)
+		if ok != c.ok || got != c.want {
+			t.Errorf("ModelWindow(%q) = (%d, %v), want (%d, %v)", c.model, got, ok, c.want, c.ok)
+		}
+	}
+}

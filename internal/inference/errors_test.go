@@ -122,3 +122,46 @@ func TestEndpointsOf(t *testing.T) {
 		t.Fatalf("endpoint = %q", got)
 	}
 }
+
+// TestBifrostError_ClassifiesContextOverflow pins the overflow class across
+// the real provider spellings, and pins what must NOT classify: a non-400
+// status (a 500 whose body happens to echo a marker) and a plain 400 with no
+// marker (a genuinely invalid request).
+func TestBifrostError_ClassifiesContextOverflow(t *testing.T) {
+	status400, status500 := 400, 500
+	cases := []struct {
+		name     string
+		status   *int
+		message  string
+		overflow bool
+	}{
+		{"anthropic prompt too long", &status400,
+			"prompt is too long: 213462 tokens > 200000 maximum", true},
+		{"anthropic max_tokens combo", &status400,
+			"input length and `max_tokens` exceed context limit: 195422 + 8192 > 200000", true},
+		{"openai code", &status400,
+			"context_length_exceeded", true},
+		{"openai prose", &status400,
+			"This model's maximum context length is 128000 tokens.", true},
+		{"mid-stream chunk without a status", nil,
+			"prompt is too long: 201000 tokens > 200000 maximum", true},
+		{"a 500 echoing a marker is not overflow", &status500,
+			"internal server error while handling: prompt is too long", false},
+		{"a plain invalid request is not overflow", &status400,
+			"messages: text content blocks must be non-empty", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := bifrostError(&schemas.BifrostError{
+				StatusCode: c.status,
+				Error:      &schemas.ErrorField{Message: c.message},
+			})
+			if got := errors.Is(err, ErrContextOverflow); got != c.overflow {
+				t.Fatalf("errors.Is(%q, ErrContextOverflow) = %v, want %v", err, got, c.overflow)
+			}
+			if !strings.Contains(err.Error(), c.message) {
+				t.Fatalf("classification dropped the provider message: %q", err)
+			}
+		})
+	}
+}

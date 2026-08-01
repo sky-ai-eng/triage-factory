@@ -145,6 +145,56 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		}
 	})
 
+	t.Run("Compact", func(t *testing.T) {
+		fx := newFenceFixture(t, h, "exec-fence-compact")
+		spanID, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
+			ConversationID: fx.runID, Role: "assistant", Content: "history",
+		})
+		if err != nil {
+			t.Fatalf("insert span row: %v", err)
+		}
+		reap(t, h.AdminDB, fx.orgID, fx.runID)
+
+		resultRow := &domain.Message{Role: "user",
+			Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "summary"}
+		err = fx.store.CompactForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, nil, resultRow, []int{int(spanID)})
+		if !errors.Is(err, db.ErrClaimReleased) {
+			t.Fatalf("compact after reap = %v, want ErrClaimReleased", err)
+		}
+		// Nothing landed: the span is still active and no result row exists —
+		// a zombie must not rewrite the successor's window.
+		msgs, err := fx.store.ListForAssemblySystem(ctx, fx.orgID, fx.runID)
+		if err != nil || len(msgs) != 1 || msgs[0].ID != int(spanID) {
+			t.Fatalf("assembly after refused compact = %+v (err %v), want the untouched span row", msgs, err)
+		}
+	})
+
+	t.Run("SettleCompactionRequest", func(t *testing.T) {
+		fx := newFenceFixture(t, h, "exec-fence-settle")
+		reqID, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
+			ConversationID: fx.runID, Role: "user",
+			Subtype: domain.MessageSubtypeInjectionCompactionRequest, Content: "please compact",
+		})
+		if err != nil {
+			t.Fatalf("insert request row: %v", err)
+		}
+		reap(t, h.AdminDB, fx.orgID, fx.runID)
+
+		cost := 0.1
+		err = fx.store.SettleCompactionRequestForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID,
+			int(reqID), 1000, 10, 0, 0, &cost, "no-parseable-summary")
+		if !errors.Is(err, db.ErrClaimReleased) {
+			t.Fatalf("settle after reap = %v, want ErrClaimReleased", err)
+		}
+		msgs, err := fx.store.Messages(ctx, fx.orgID, fx.runID)
+		if err != nil || len(msgs) != 1 {
+			t.Fatalf("Messages = %+v (err %v)", msgs, err)
+		}
+		if msgs[0].CostUSD != nil || msgs[0].Metadata["compaction_failure"] != nil {
+			t.Errorf("refused settle landed anyway: cost=%v metadata=%v", msgs[0].CostUSD, msgs[0].Metadata)
+		}
+	})
+
 	t.Run("Complete", func(t *testing.T) {
 		fx := newFenceFixture(t, h, "exec-fence-complete")
 		reap(t, h.AdminDB, fx.orgID, fx.runID)

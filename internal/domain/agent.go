@@ -123,6 +123,16 @@ const (
 	// the model to write a wrap-up summary before the turn budget pauses
 	// the run.
 	MessageSubtypeInjectionWrapUp = "injection:wrap-up"
+	// MessageSubtypeInjectionCompactionRequest marks the loop's ask that the
+	// model summarize the conversation so the history can be replaced. It
+	// renders bare on the wire — the subtype is provenance, not an envelope —
+	// and flips inactive with the span it asked to compact.
+	MessageSubtypeInjectionCompactionRequest = "injection:compaction-request"
+	// MessageSubtypeInjectionCompactionResult marks the machine-composed row
+	// that replaces a compacted span: the preamble, the re-injected original
+	// request (unanchored conversations), and the summary. The only
+	// compaction text that stays in the active window.
+	MessageSubtypeInjectionCompactionResult = "injection:compaction-result"
 	// MessageSubtypeStopNote marks a delivered row recording why an
 	// engagement stopped — a guard park, an unrecoverable provider error.
 	// A statement of fact written into history, not input awaiting

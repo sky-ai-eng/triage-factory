@@ -65,6 +65,15 @@ type modelPrice struct {
 	// formula.
 	Mode string `json:"mode"`
 
+	// MaxInputTokens is the model's context window (input side), read by
+	// ModelWindow rather than the cost formula. It rides the same snapshot
+	// because the datasheet is already the vendored source of per-model facts
+	// and a second table would drift from this one. A float, not an int:
+	// upstream serializes some windows as "2000000.0", and an int-typed field
+	// fails the WHOLE datasheet unmarshal — which would silently zero every
+	// price, not just this accessor.
+	MaxInputTokens *float64 `json:"max_input_tokens"`
+
 	InputCostPerToken  *float64 `json:"input_cost_per_token"`
 	OutputCostPerToken *float64 `json:"output_cost_per_token"`
 
@@ -140,6 +149,23 @@ func CostForUsage(model string, usage Usage) (float64, bool) {
 		return 0, false
 	}
 	return computeTextCost(price, usage), true
+}
+
+// ModelWindow returns the model's maximum input-token window from the vendored
+// datasheet, with the same lookup rules as pricing (exact id, then a single
+// Bedrock region-prefix strip). ok is false for a model the snapshot doesn't
+// carry or one with no recorded window — the caller must treat that as "no
+// proactive compaction trip", never guess a number.
+func ModelWindow(model string) (int, bool) {
+	table, err := loadPricing()
+	if err != nil || table == nil {
+		return 0, false
+	}
+	price, ok := lookupPrice(table, model)
+	if !ok || price.MaxInputTokens == nil || *price.MaxInputTokens <= 0 {
+		return 0, false
+	}
+	return int(*price.MaxInputTokens), true
 }
 
 // isPriceableMode reports whether a model's modality is one the text-cost path

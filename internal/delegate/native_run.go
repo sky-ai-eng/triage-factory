@@ -149,6 +149,9 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		HasBlueprint:   true,
 		MaxIterations:  nativeMaxIterations(),
 		UserID:         creatorUserID,
+		// A delegation's opening turn is the control-plane-minted mission:
+		// compaction pins it instead of re-injecting the first message.
+		MissionAnchored: true,
 	})
 
 	return s.recordNativeResult(ctx, orgID, runID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, priorMemory)
@@ -336,8 +339,11 @@ func (s *Spawner) nativeCredentials(cfg runConfig, model string) agentloop.Crede
 		Resolve: func(context.Context) (map[string]string, error) { return env, nil },
 		// The whitelist must name the model actually requested: bifrost reads
 		// an empty whitelist as "no models", and a wildcard would let a
-		// mis-stamped model id reach the provider unremarked.
-		Models: []string{model},
+		// mis-stamped model id reach the provider unremarked. The forced-shape
+		// compaction model rides alongside — the same credentials serve both
+		// calls, and a whitelist that omitted it would fail every cold
+		// compaction at the account layer.
+		Models: []string{model, agentloop.DefaultColdCompactionModel},
 	}
 }
 
