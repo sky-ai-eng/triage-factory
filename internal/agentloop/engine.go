@@ -197,6 +197,10 @@ type turnBudget struct {
 func deriveBudget(rows []domain.Message) turnBudget {
 	var b turnBudget
 	for _, r := range rows {
+		// Case order matters: a wrap-up row is a user row that is never
+		// human input (isHumanInput excludes it by construction), so the
+		// wrapUpRequested case only reaches rows the isHumanInput case above
+		// it already declined to reset the budget on.
 		switch {
 		case r.Role == "assistant":
 			b.turns++

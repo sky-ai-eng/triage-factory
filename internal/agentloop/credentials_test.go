@@ -138,6 +138,8 @@ func TestIsTransient(t *testing.T) {
 		"dial tcp: i/o timeout",
 		"connection reset by peer",
 		"overloaded_error",
+		"unexpected EOF",
+		"EOF",
 	}
 	for _, msg := range transient {
 		if !isTransient(errors.New(msg)) {
@@ -148,6 +150,11 @@ func TestIsTransient(t *testing.T) {
 		"inference: provider error: 401 invalid api key",
 		"inference: provider error: model not found",
 		"inference: request has no model",
+		// eofPattern must not match "eof" embedded in a longer token: a
+		// field name or a base64 fragment that happens to contain it is not
+		// evidence of a truncated stream.
+		"invalid geofence parameter",
+		"inference: provider error: bad request field 'eof_marker'",
 	}
 	for _, msg := range permanent {
 		if isTransient(errors.New(msg)) {

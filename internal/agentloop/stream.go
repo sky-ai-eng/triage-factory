@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"regexp"
 	"strings"
 	"time"
 
@@ -114,8 +115,15 @@ var transientMarkers = []string{
 	"timed out",
 	"connection reset",
 	"connection refused",
-	"eof",
 }
+
+// eofPattern matches a standalone "eof" token (io.EOF renders as "EOF",
+// io.ErrUnexpectedEOF as "unexpected EOF") without matching it embedded in a
+// longer run of characters — a base64 blob or a path fragment that happens to
+// contain "eof" has word characters on at least one side, so \b excludes it.
+// Kept out of transientMarkers because that list is plain substring
+// matching; this one needs the boundary check.
+var eofPattern = regexp.MustCompile(`\beof\b`)
 
 func isTransient(err error) bool {
 	if err == nil {
@@ -126,6 +134,9 @@ func isTransient(err error) bool {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
+	if eofPattern.MatchString(msg) {
+		return true
+	}
 	for _, m := range transientMarkers {
 		if strings.Contains(msg, m) {
 			return true
