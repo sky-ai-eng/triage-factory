@@ -289,20 +289,20 @@ func TestFleet_Drain_DrainedInstanceStopsClaimingSurvivorDoesNot(t *testing.T) {
 	}
 
 	sA.drainRunQueue(ctx)
-	var status string
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM conversations WHERE id = $1`, fx.runID).Scan(&status); err != nil {
+	var claims int
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM claims WHERE conversation_id = $1`, fx.runID).Scan(&claims); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
-	if status != "queued" {
-		t.Fatalf("status = %q after A's (drained) drainRunQueue, want queued — A must not claim", status)
+	if claims != 0 {
+		t.Fatalf("claims = %d after A's (drained) drainRunQueue, want 0 — A must not claim", claims)
 	}
 
 	// B was never drained and claims normally.
 	sB.drainRunQueue(ctx)
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM conversations WHERE id = $1`, fx.runID).Scan(&status); err != nil {
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM claims WHERE conversation_id = $1`, fx.runID).Scan(&claims); err != nil {
 		t.Fatalf("read back run after B's drainRunQueue: %v", err)
 	}
-	if status != "running" {
-		t.Fatalf("status = %q after B's drainRunQueue, want running — an undrained sibling must claim normally", status)
+	if claims != 1 {
+		t.Fatalf("claims = %d after B's drainRunQueue, want 1 — an undrained sibling must claim normally", claims)
 	}
 }

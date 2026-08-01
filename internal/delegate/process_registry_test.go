@@ -331,7 +331,7 @@ func TestNoteCapSaturationTransitions(t *testing.T) {
 		t.Error("blocked acquire with an empty queue must not open a saturation episode")
 	}
 
-	if _, err := database.Exec(`UPDATE conversations SET status = 'queued' WHERE id = ?`, run0); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, run0); err != nil {
 		t.Fatalf("force queued: %v", err)
 	}
 	s.noteCapAcquireBlocked(ctx, 4)

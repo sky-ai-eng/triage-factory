@@ -91,12 +91,8 @@ func TestSendMessage_NativeParkedQueuesAndRequeues(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-parked'`).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status != "queued" {
-		t.Errorf("status = %q, want queued — a parked conversation needs a driver again", status)
+	if st := storedStatus(t, database, "r-parked"); st != "" {
+		t.Errorf("stored status = %q, want none — a parked conversation woken by input goes back to mid-flight, which is what makes it claimable again", st)
 	}
 	pending := pendingRows(t, s, "r-parked")
 	if len(pending) != 1 || pending[0].Content != "pick it back up" {
@@ -150,11 +146,7 @@ func TestSendMessage_NativeCompletedAbortIsResumable(t *testing.T) {
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-abort", runmode.LocalDefaultUserID, "try again"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-abort'`).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status != "queued" {
-		t.Errorf("status = %q, want queued", status)
+	if st := storedStatus(t, database, "r-abort"); st != "" {
+		t.Errorf("stored status = %q, want none (the un-terminal write clears the outcome)", st)
 	}
 }

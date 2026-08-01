@@ -125,3 +125,15 @@ func seedJiraRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath 
 		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
 	})
 }
+
+// storedStatus reads a conversation's STORED status, with SQL NULL — the
+// mid-flight state, which is what "queued" and "running" both are now — as
+// the empty string.
+func storedStatus(t *testing.T, database *sql.DB, convID string) string {
+	t.Helper()
+	var status sql.NullString
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, convID).Scan(&status); err != nil {
+		t.Fatalf("read stored status for %s: %v", convID, err)
+	}
+	return status.String
+}

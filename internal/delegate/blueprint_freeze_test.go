@@ -131,7 +131,7 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 		nextIdx      int
 	)
 	if err := database.QueryRow(
-		`SELECT prompt_id, blueprint_step_index FROM conversations WHERE blueprint_run_id = ? AND status = 'queued'`, brID,
+		`SELECT prompt_id, blueprint_step_index FROM conversations WHERE blueprint_run_id = ? AND status IS NULL`, brID,
 	).Scan(&nextPromptID, &nextIdx); err != nil {
 		t.Fatalf("read queued step-1 run: %v", err)
 	}
