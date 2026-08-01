@@ -942,6 +942,12 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 				return fmt.Errorf("sandbox: mount %q source %q is not this run's own step-skill staging dir (want %q)", m.Destination, m.Source, trusted)
 			}
 		case TrustedToolHostBinaryDestination:
+			// Read-only is REQUIRED: an rw bind of a privileged entrypoint
+			// binary would let the jail rewrite the program the broker's
+			// pinned-argv check trusts by path.
+			if err := requireReadOnlyMount(m); err != nil {
+				return err
+			}
 			realTrusted, rErr := realPath(TrustedToolHostBinaryPath())
 			if rErr != nil {
 				return fmt.Errorf("sandbox: resolve trusted tool host binary path: %w", rErr)

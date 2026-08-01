@@ -99,14 +99,9 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // as permanent and fails the run rather than burning the retry budget on
 // something that will never succeed (a bad key, an unknown model).
 var transientMarkers = []string{
-	"429",
 	"rate limit",
 	"rate_limit",
 	"overloaded",
-	"500",
-	"502",
-	"503",
-	"504",
 	"internal server error",
 	"bad gateway",
 	"service unavailable",
@@ -125,6 +120,14 @@ var transientMarkers = []string{
 // matching; this one needs the boundary check.
 var eofPattern = regexp.MustCompile(`\beof\b`)
 
+// numericTransientMarkers are the retryable HTTP status codes, matched as
+// standalone numeric tokens rather than raw substrings — the same
+// embedded-token hazard the eof pattern guards against, in digit form: a
+// request or trace id in a permanent error's text can coincidentally
+// contain "500", and a spurious retry on a permanent error burns the whole
+// backoff budget on something that will never succeed.
+var numericTransientMarkers = []string{"429", "500", "502", "503", "504"}
+
 func isTransient(err error) bool {
 	if err == nil {
 		return false
@@ -142,5 +145,34 @@ func isTransient(err error) bool {
 			return true
 		}
 	}
+	for _, code := range numericTransientMarkers {
+		if containsNumericToken(msg, code) {
+			return true
+		}
+	}
 	return false
+}
+
+// containsNumericToken reports whether code occurs in msg with no letter or
+// digit on either side — "HTTP 500" and "(500)" match, "req_a5003b" and
+// "15000ms" do not.
+func containsNumericToken(msg, code string) bool {
+	for i := 0; ; {
+		j := strings.Index(msg[i:], code)
+		if j < 0 {
+			return false
+		}
+		j += i
+		end := j + len(code)
+		beforeOK := j == 0 || !isAlnumByte(msg[j-1])
+		afterOK := end >= len(msg) || !isAlnumByte(msg[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		i = j + 1
+	}
+}
+
+func isAlnumByte(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z'
 }

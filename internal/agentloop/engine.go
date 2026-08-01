@@ -205,7 +205,7 @@ func deriveBudget(rows []domain.Message) turnBudget {
 		case r.Role == "assistant":
 			b.turns++
 		case r.Role != "user":
-		case isHumanInput(r):
+		case IsHumanInput(r):
 			b = turnBudget{}
 		case r.Subtype == domain.MessageSubtypeInjectionWrapUp:
 			b.wrapUpRequested = true

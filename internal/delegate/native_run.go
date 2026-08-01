@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -182,7 +183,6 @@ func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Tran
 		ConversationID: runID,
 		UserID:         creatorUserID,
 		Role:           "user",
-		Subtype:        "text",
 		Content:        openingTurn,
 		Delivered:      &pending,
 	})
@@ -417,18 +417,24 @@ func (s *Spawner) artifactContractNudge(orgID, runID string, task domain.Task, c
 //
 // Walking back from the newest row to the first one that speaks for someone:
 // the nudge itself means the question stands answered and nothing has
-// happened to change it. Any other user row means a person spoke afterwards,
-// so the run is working on something the question was never asked about. The
-// loop's own crash notice speaks for no one and is skipped.
+// happened to change it; genuine human input means a person spoke
+// afterwards, so the run is working on something the question was never
+// asked about. Everything else the system wrote on the agent's behalf — a
+// park's stop-note, a staged event note, the wrap-up ask, the crash notice —
+// speaks for no one and is skipped, using the same closed human set the
+// engine's drain and turn budget key on. The nudge check comes first because
+// the nudge row itself is system-authored: the human filter would skip it.
 func askedAboutArtifactAlready(rows []domain.Message) bool {
 	for i := len(rows) - 1; i >= 0; i-- {
 		if rows[i].Role != "user" {
 			continue
 		}
-		if rows[i].Subtype == domain.MessageSubtypeInjectionExecutorChanged {
-			continue
+		if strings.Contains(rows[i].Content, artifactNudgeTag) {
+			return true
 		}
-		return strings.Contains(rows[i].Content, artifactNudgeTag)
+		if agentloop.IsHumanInput(rows[i]) {
+			return false
+		}
 	}
 	return false
 }
@@ -442,8 +448,8 @@ func nativeMaxIterations() int {
 	if raw == "" {
 		return 0 // the engine's default
 	}
-	var n int
-	if _, err := fmt.Sscanf(raw, "%d", &n); err != nil || n <= 0 {
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
 		delegateLog.Warn("invalid TF_AGENT_MAX_ITERATIONS; using the default", "value", raw)
 		return 0
 	}

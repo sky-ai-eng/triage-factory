@@ -19,11 +19,14 @@ import (
 // engagement that inherits a conversation behaves exactly like the one that
 // started it — a crash cannot buy a second nudge, and cannot lose one.
 func TestAskedAboutArtifactAlready(t *testing.T) {
-	nudge := domain.Message{Role: "user", Subtype: "text", Content: artifactNudgeNote}
+	nudge := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionNudge, Content: artifactNudgeNote}
 	assistant := domain.Message{Role: "assistant", Content: "nothing to publish"}
-	human := domain.Message{Role: "user", Subtype: "text", Content: "actually, open the PR"}
+	human := domain.Message{Role: "user", Content: "actually, open the PR"}
 	steered := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "also check the tests"}
 	crashNotice := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionExecutorChanged, Content: "your executor changed"}
+	stopNote := domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "This run reached its spend cap and has been paused."}
+	stagedNote := domain.Message{Role: "user", Subtype: "injection:system-note", Content: "<system-note>PR gained commits</system-note>"}
+	wrapUp := domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionWrapUp, Content: "<system-note>wrap up</system-note>"}
 
 	tests := []struct {
 		name string
@@ -55,6 +58,23 @@ func TestAskedAboutArtifactAlready(t *testing.T) {
 			// buy the run a second nudge.
 			name: "an executor-changed notice does not re-arm",
 			rows: []domain.Message{human, assistant, nudge, crashNotice, assistant},
+			want: true,
+		},
+		{
+			// A guard park between the nudge and the resumed engagement's
+			// would-stop: the park's record speaks for nobody either.
+			name: "a stop-note from a guard park does not re-arm",
+			rows: []domain.Message{human, assistant, nudge, assistant, stopNote, crashNotice, assistant},
+			want: true,
+		},
+		{
+			name: "a staged system note does not re-arm",
+			rows: []domain.Message{human, assistant, nudge, stagedNote, assistant},
+			want: true,
+		},
+		{
+			name: "the wrap-up ask does not re-arm",
+			rows: []domain.Message{human, assistant, nudge, wrapUp, assistant},
 			want: true,
 		},
 		{

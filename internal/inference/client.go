@@ -176,6 +176,9 @@ func (c *Client) annotateEndpoint(provider schemas.ModelProvider, err error) err
 // redactURL strips userinfo and query from a base URL before it goes into an
 // error string. A customer gateway URL is operator-supplied and may carry a
 // token in either position; scheme + host + path is what identifies the hop.
+// The path is deliberately kept: nothing in the provider-base-URL vocabulary
+// puts a secret there, and a gateway's route prefix is often the one detail
+// that distinguishes two hops on the same host.
 func redactURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {

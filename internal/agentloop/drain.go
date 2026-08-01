@@ -44,7 +44,7 @@ func (e *Engine) drain(ctx context.Context, params Params, bare bool) error {
 	}
 	var human, injected []int
 	for _, r := range pending {
-		if isHumanInput(r) {
+		if IsHumanInput(r) {
 			human = append(human, r.ID)
 		} else {
 			injected = append(injected, r.ID)
@@ -61,13 +61,13 @@ func (e *Engine) drain(ctx context.Context, params Params, bare bool) error {
 	return nil
 }
 
-// isHumanInput reports whether a role=user row is genuine user input rather
+// IsHumanInput reports whether a role=user row is genuine user input rather
 // than something the system inserted on the agent's behalf. The human set is
 // closed: a blank subtype (the normal spelling — the mission prompt, an API
 // follow-up), "text" (the legacy spelling of the same), and the mid-work
 // steer stamp those rows receive at flush. Everything system-authored
 // carries a subtype outside this set — see the InjectionSubtype constants.
-func isHumanInput(r domain.Message) bool {
+func IsHumanInput(r domain.Message) bool {
 	return r.Subtype == "" || r.Subtype == "text" || r.Subtype == domain.MessageSubtypeInjectionSteer
 }
 
@@ -159,7 +159,7 @@ func hasNoticeSince(rows []domain.Message, content string) bool {
 		if r.Role != "user" {
 			continue
 		}
-		if isHumanInput(r) {
+		if IsHumanInput(r) {
 			return false
 		}
 		if r.Subtype == domain.MessageSubtypeStopNote && r.Content == content {
