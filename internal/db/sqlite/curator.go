@@ -707,7 +707,6 @@ func (s *curatorStore) GetTurnProvisionInfoSystem(ctx context.Context, orgID, co
 	return &p, true, nil
 }
 
-
 // --- Project bundle import ---
 
 func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID string, conv domain.Conversation, claims []domain.Claim, msgs []domain.Message) error {

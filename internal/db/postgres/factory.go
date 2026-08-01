@@ -144,7 +144,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 	query := `
 		SELECT
 			r.id, r.task_id, r.prompt_id,
-			`+pgDisplayStatusSQL+`,
+			` + pgDisplayStatusSQL + `,
 			COALESCE(r.model, ''), r.started_at, r.completed_at,
 			(SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id AND m.org_id = r.org_id),
 			(SELECT SUM(cl.duration_ms)::bigint FROM claims cl WHERE cl.conversation_id = r.id),
@@ -162,7 +162,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		JOIN tasks t ON r.task_id = t.id AND t.org_id = r.org_id
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-		WHERE r.org_id = $1 AND `+pgFactoryInFlightSQL+`
+		WHERE r.org_id = $1 AND ` + pgFactoryInFlightSQL + `
 		ORDER BY r.started_at DESC
 	`
 

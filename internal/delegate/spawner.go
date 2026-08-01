@@ -281,7 +281,7 @@ type Spawner struct {
 	// by mu like the credential seam it sits beside.
 	blobs storage.Storage
 
-	cancels               map[string]context.CancelFunc                     // runID → cancel the entire run
+	cancels map[string]context.CancelFunc // runID → cancel the entire run
 	// curatorTurnDriver is the claim loop's curator execution arm (see
 	// SetCuratorTurnDriver). nil where no curator runtime is built.
 	curatorTurnDriver CuratorTurnDriver

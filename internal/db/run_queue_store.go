@@ -7,14 +7,20 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// RunQueueStore owns the run queue — the work list the dispatcher drains to
-// drive blueprints through their steps. It is the sibling of EventQueueStore:
-// where the event queue feeds the router, the run queue feeds the delegation
-// dispatcher. A blueprint step that needs to run is enqueued as a runs row in
-// status='queued'; a worker claims it (Postgres: FOR UPDATE SKIP LOCKED,
-// mirroring event_queue.go; SQLite: a plain single-statement claim — N=1, no
-// contention), runs the agent, and on terminal the reactor advances the owning
-// blueprint_run.
+// RunQueueStore owns the claim loop — the ONE scan that finds conversations
+// needing to be driven, on every surface. It is the sibling of
+// EventQueueStore: where the event queue feeds the router, this feeds the
+// dispatcher.
+//
+// There is no "queued" column. A conversation needs driving when nobody is
+// driving it and it is either mid-flight (no outcome written — a fresh mint,
+// or a claim that released without concluding) or parked and woken by new
+// input. A worker claims it (Postgres: FOR UPDATE SKIP LOCKED over that
+// predicate, with idx_claims_one_active as the actual mutual exclusion;
+// SQLite: a plain single-statement claim — N=1, no contention), drives it,
+// and releases the claim. Type-conditional gates ride alongside the shared
+// predicate: a delegation conversation's blueprint parent must still be
+// running, a curator conversation must hold a queued turn and be homed here.
 //
 // This is a system-service store: the dispatcher runs as a background worker
 // with no per-user identity, so the Postgres impl wires against the admin pool
@@ -55,8 +61,10 @@ type ClaimPlacement struct {
 }
 
 type RunQueueStore interface {
-	// EnqueueRun inserts a runs row in status='queued' for a blueprint step.
-	// It is the work-list write the dispatcher later claims. run carries the
+	// EnqueueRun mints a delegation conversation for a blueprint step with
+	// NO stored status — the absence of an outcome is what makes it
+	// claimable. It is the work-list write the dispatcher later claims. run
+	// carries the
 	// step's identity: ID, TaskID, PromptID, Model, TriggerType,
 	// CreatorUserID, TriggerID, BlueprintRunID (required), BlueprintStepIndex.
 	// PreferredExecutorID (TFAC-587) is the rendezvous placement stamp, empty
@@ -67,10 +75,18 @@ type RunQueueStore interface {
 	// trigger_type with creator_user_id nullability is the caller's contract.
 	EnqueueRun(ctx context.Context, orgID string, run domain.Conversation) error
 
-	// ClaimNextRun claims a queued run whose owning blueprint_run is still
-	// 'running' and not cancel-requested, flips it queued -> running, stamps
-	// claimed_at + executor_id + boot_epoch, increments attempts, and returns
-	// it. Returns (nil, nil) when nothing is claimable.
+	// ClaimNextRun claims the next conversation that needs driving, of ANY
+	// surface, and mints the claim that records the engagement (executor id,
+	// boot epoch, claimed_at, and — where the surface's unit of work is one
+	// queued message — the message id it was minted to drive). Returns
+	// (nil, nil) when nothing is claimable. The caller branches on the
+	// returned conversation's Type to pick the execution arm.
+	//
+	// Eligibility is the needs-driving predicate (see the type doc) plus the
+	// type-conditional gates. Nothing on the conversation row changes except
+	// the un-park: a claim taken on the parked-and-woken arm ends the park by
+	// definition, so the row goes back to mid-flight and "parked" and "being
+	// driven" stay disjoint at every instant.
 	//
 	// placement (TFAC-587) selects the claim discipline. Disabled (the zero
 	// value): the globally-oldest claimable run, ORDER BY started_at, id — the
@@ -100,22 +116,24 @@ type RunQueueStore interface {
 	// (decision: a queued-not-started step cancels with zero work).
 	ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement ClaimPlacement) (*domain.Conversation, error)
 
-	// RequeueRun returns a claimed run to status='queued' after a transient
+	// RequeueRun hands a claimed conversation back after a transient
 	// dispatcher failure (e.g. workspace setup hiccup), recording lastErr for
-	// visibility. attempts is left as-is (the claim already counted it), so the
-	// dispatcher can fail the run out once attempts crosses its budget. Guarded
-	// by status='running' so a stale call can't resurrect a terminal row.
+	// visibility. Releasing the claim IS the requeue — the conversation is
+	// mid-flight, so the moment it has no claim it matches the needs-driving
+	// predicate again. attempts is left as-is (the claim already counted it),
+	// so the dispatcher can fail the run out once attempts crosses its
+	// budget. Guarded on a mid-flight conversation with a live claim, so a
+	// stale call can't act on a terminal or parked row.
 	RequeueRun(ctx context.Context, orgID, runID, lastErr string) error
 
-	// ResetProcessingRuns is the boot reconcile sweep: every run left
-	// mid-flight by a crash (status='running' — claimed, whether mid-setup
-	// or executing; setup progress is claim phase, not status) is flipped
-	// back to 'queued' so the dispatcher re-claims and re-runs it. Dormant
-	// runs (open, pending_approval) are intentionally left parked — they
-	// resume through their own paths, not the queue. attempts is retained
-	// (mirrors
-	// EventQueue.ResetProcessing) so a run that keeps hard-crashing the process
-	// eventually fails out rather than crash-looping the boot.
+	// ResetProcessingRuns is the boot reconcile sweep: every conversation
+	// left mid-flight by a crash (no outcome written, a claim still live) has
+	// that claim released, which is all it takes for the dispatcher to
+	// re-claim and re-drive it. Parked (`open`) and terminal conversations
+	// are not mid-flight and stay put — they resume through their own paths.
+	// attempts is retained (mirrors EventQueue.ResetProcessing) so a run that
+	// keeps hard-crashing the process eventually fails out rather than
+	// crash-looping the boot.
 	//
 	// Ownership-scoped (TFAC-578): only rows stamped executor_id = executorID
 	// AND boot_epoch < bootEpoch are reset — i.e. this instance's own orphans
@@ -127,7 +145,7 @@ type RunQueueStore interface {
 	ResetProcessingRuns(ctx context.Context, executorID string, bootEpoch int64) (int, error)
 
 	// MarkAwaitingCredentials parks a freshly-claimed run's ACTIVE claim in
-	// phase='awaiting_credentials' (the conversation stays status='running')
+	// phase='awaiting_credentials' (the conversation row is untouched)
 	// and — Postgres only — fires the tf_ctl cred_request doorbell so the
 	// brain's credential provisioner (internal/credprovision) resolves and
 	// seals this run's bundle without waiting for the backstop sweep.
@@ -136,7 +154,7 @@ type RunQueueStore interface {
 	// the phase stamp, so the provisioner never sees a parked run without
 	// the key it needs; empty stores NULL (a caller that has no sidecar
 	// key yet). Guarded on phase IS NULL, which gives the same protection
-	// window the former status='running' guard did: a stale/duplicate call
+	// window the former stored-status guard did: a stale/duplicate call
 	// can't re-park a claim that is already parked or mid-setup, so a late
 	// duplicate never overwrites the key the brain may already have sealed
 	// to. matched is false when the guard didn't hold (no active claim, or
@@ -151,13 +169,12 @@ type RunQueueStore interface {
 	// the time it's handled. Returns ok=false when runID is unknown.
 	GetClaim(ctx context.Context, orgID, runID string) (claim AwaitingCredentialsRun, ok bool, err error)
 
-	// RequeueAwaitingCredentials releases a run whose active claim is
-	// parked in phase='awaiting_credentials' back to 'queued', clearing
-	// ownership — the executor-side timeout path. Guarded on that parked
-	// claim so a stale/duplicate timeout can't resurrect a row that
-	// already moved on. Returns matched=false when the guard didn't hold
-	// (bundle arrived just after the deadline check, or the run was
-	// reaped in the meantime).
+	// RequeueAwaitingCredentials releases a run whose active claim is parked
+	// in phase='awaiting_credentials', clearing ownership — the executor-side
+	// timeout path. The release is the requeue. Guarded on that parked claim
+	// so a stale/duplicate timeout can't act on a row that already moved on.
+	// Returns matched=false when the guard didn't hold (bundle arrived just
+	// after the deadline check, or the run was reaped in the meantime).
 	RequeueAwaitingCredentials(ctx context.Context, orgID, runID string) (matched bool, err error)
 
 	// ListAwaitingCredentials returns every conversation — of EVERY surface
@@ -171,8 +188,8 @@ type RunQueueStore interface {
 	// dropped.
 	ListAwaitingCredentials(ctx context.Context) ([]AwaitingCredentialsRun, error)
 
-	// ListActiveNeedingCredentialRefresh returns every actively-running
-	// run (status='running', active claim not parked in
+	// ListActiveNeedingCredentialRefresh returns every conversation with a
+	// live engagement (an unreleased claim not parked in
 	// phase='awaiting_credentials') whose sealed bundle is older than
 	// olderThan — the brain-side refresh sweep's input: GitHub
 	// installation tokens are hour-lived, runs aren't, so a long-running
@@ -182,45 +199,43 @@ type RunQueueStore interface {
 	// FleetQueueShares returns the run-queue occupancy of every org with any
 	// active or queued work, newest-pressure first — the per-org shares the
 	// operator fleet queue view (GET /api/fleet/queue) surfaces and
-	// the claim's fairness ordering acts on. Active counts runs occupying a
-	// live executor slot (status='running'); Queued counts
-	// runs still waiting to be claimed; MaxConcurrentRuns is the org's
+	// the claim's fairness ordering acts on. Active counts unreleased claims
+	// (an engagement IS the occupied slot); Queued counts conversations
+	// matching the needs-driving predicate; MaxConcurrentRuns is the org's
 	// configured cap (nil = unlimited, also nil for a non-positive value). An
 	// org with neither active nor queued runs is omitted. Admin-pool,
 	// cross-org: this is a fleet/operator read with no per-user identity, the
 	// same posture as ClaimNextRun (SQLite is N=1 — at most the one local org).
 	FleetQueueShares(ctx context.Context) ([]OrgQueueShare, error)
 
-	// ReconcileOrphanedRuns is the boot self-heal mirror of ResetProcessingRuns:
-	// every child run left non-terminal (queued/claimed/running/
-	// open/pending_approval/...) under a blueprint_run that is already terminal
-	// (completed/aborted/failed/cancelled) is flipped to 'cancelled' with a
-	// completed_at stamp. Such a child is unreachable by the dispatcher —
-	// ClaimNextRun only claims under a running parent, and ResetProcessingRuns
-	// only requeues under a running parent — so it would otherwise sit 'running'
-	// forever, keeping the dispatcher on phantom work and pinning its feature
-	// branch in a worktree (any sibling fetch then requeues forever). The atomic
-	// cancel in BlueprintStore.MarkRunStatus prevents the desync going forward;
-	// this heals rows already broken at boot.
+	// ReconcileOrphanedRuns is the boot self-heal mirror of
+	// ResetProcessingRuns: every child conversation left non-terminal under a
+	// blueprint_run that is already terminal (completed/aborted/failed/
+	// cancelled) is flipped to 'cancelled' with a completed_at stamp. Such a
+	// child is unreachable by the dispatcher — the claim only takes rows
+	// under a running parent, and so does ResetProcessingRuns — so it would
+	// otherwise sit mid-flight forever, keeping the dispatcher on phantom
+	// work and pinning its feature branch in a worktree (any sibling fetch
+	// then requeues forever). The atomic cancel in
+	// BlueprintStore.MarkRunStatus prevents the desync going forward; this
+	// heals rows already broken at boot.
 	//
-	// It also runs the two claim-desync janitor arms (Postgres:
-	// healClaimDesyncs; SQLite mirrors them) for the shapes the app-pool
-	// terminal writes can strand — a terminal conversation with a dangling
-	// active claim is released (outcome mapped from status), and an in-flight
-	// delegation conversation with no active claim under a running parent
-	// goes back to 'queued' for re-claim. The leader reaper repeats the same
-	// two arms periodically; here they run at boot in both modes.
+	// It also runs the claim-desync janitor arm (Postgres: healClaimDesyncs;
+	// SQLite mirrors it) for the one shape the app-pool terminal writes can
+	// still strand — a terminal conversation with a dangling active claim,
+	// released with the outcome mapped from its status. The leader reaper
+	// repeats it periodically; here it runs at boot in both modes.
 	//
 	// Cross-org system sweep; returns the total count of rows healed across
 	// all arms.
 	ReconcileOrphanedRuns(ctx context.Context) (int, error)
 
-	// CountQueuedSystem returns how many runs are currently in status='queued'
-	// across the whole deployment — the fleet-wide backlog the sampler records
-	// as instance_stats.queued_visible (the depth any executor could claim).
-	// A count, not a placement-eligibility filter: placement is advisory, so
-	// the global queued depth is the honest "work waiting" number. Cross-org
-	// system read on the admin pool.
+	// CountQueuedSystem returns how many conversations currently match the
+	// needs-driving predicate across the whole deployment — the fleet-wide
+	// backlog the sampler records as instance_stats.queued_visible (the depth
+	// any executor could claim). A count, not a placement-eligibility filter:
+	// placement is advisory, so the global depth is the honest "work waiting"
+	// number. Cross-org system read on the admin pool.
 	CountQueuedSystem(ctx context.Context) (int, error)
 
 	// RecentRunTimingsSystem returns the timing projection of every run started
@@ -231,10 +246,11 @@ type RunQueueStore interface {
 	// so this returns rows, not aggregates. Cross-org system read.
 	RecentRunTimingsSystem(ctx context.Context, since time.Time, limit int) ([]domain.RunTiming, error)
 
-	// QueuedRunAgesSystem returns every currently-queued run's org + enqueue
-	// time (+ any placement preference), for the fleet queue view's
-	// oldest-waiting age and per-org share. Unwindowed on purpose — a run that
-	// has waited a long time is the one worth surfacing. Cross-org system read.
+	// QueuedRunAgesSystem returns every conversation currently matching the
+	// needs-driving predicate: its org + enqueue time (+ any placement
+	// preference), for the fleet queue view's oldest-waiting age and per-org
+	// share. Unwindowed on purpose — work that has waited a long time is what
+	// is worth surfacing. Cross-org system read.
 	QueuedRunAgesSystem(ctx context.Context) ([]domain.QueuedRun, error)
 
 	// RecentRunTimingsForOrgSystem is RecentRunTimingsSystem narrowed to one
@@ -286,12 +302,12 @@ type RunQueueStore interface {
 // returned.
 type OrgQueueShare struct {
 	OrgID string
-	// Active is the org's runs currently occupying a live executor slot
-	// (status='running' — a claim parked awaiting credentials still holds
-	// its slot) — the value the per-org cap and the fairness ordering
-	// compare against.
+	// Active is the org's unreleased claims — every engagement occupying a
+	// live executor slot (a claim parked awaiting credentials still holds
+	// its slot). The value the per-org cap and the fairness ordering compare
+	// against.
 	Active int
-	// Queued is the org's runs still waiting to be claimed.
+	// Queued is the org's conversations still waiting to be claimed.
 	Queued int
 	// MaxConcurrentRuns is the org's configured concurrency cap, nil when
 	// unlimited (a NULL or non-positive max_concurrent_runs). When non-nil and

@@ -432,7 +432,7 @@ func (s *runQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, runI
 	// the phase park, so the provisioner never sees a parked run without
 	// the key it needs; the conversation row is untouched (it stays
 	// 'running'). Guarded on phase IS NULL — the same protection window
-	// the former status='running' guard gave: a duplicate can't re-park or
+	// the former stored-status guard gave: a duplicate can't re-park or
 	// overwrite the pubkey while the claim is parked or mid-setup.
 	res, err := s.conn.ExecContext(ctx, `
 		UPDATE claims SET phase = 'awaiting_credentials', cred_pubkey = NULLIF($1, '')

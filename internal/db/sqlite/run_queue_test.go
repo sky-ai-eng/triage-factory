@@ -769,3 +769,97 @@ func TestRunQueueStore_SQLite_ExecutorClaims(t *testing.T) {
 		return stores.RunQueue, seed
 	})
 }
+
+// TestClaimPredicate_SQLite runs the shared needs-driving-predicate +
+// display-ladder conformance against the SQLite impl. Each factory call opens
+// a fresh in-memory DB so subtests don't share state.
+func TestClaimPredicate_SQLite(t *testing.T) {
+	dbtest.RunClaimPredicateConformance(t, func(t *testing.T) dbtest.ClaimPredicateHarness {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		ctx := context.Background()
+		org := runmode.LocalDefaultOrgID
+
+		task := seedEntityEventTask(t, conn, "rq-pred")
+		insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqpr-p0", Name: "Step 0", Body: "b", Source: "user"})
+		insertBlueprintForTest(t, conn, "rqpr-bp", "RQ Predicate Blueprint")
+		if err := stores.Blueprints.ReplaceSteps(ctx, org, "rqpr-bp", []string{"rqpr-p0"}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+			ID: "rqpr-br", BlueprintID: "rqpr-bp", TaskID: task.ID,
+			TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+			WorktreePath: "/tmp/wt-rqpr",
+		})
+		if err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+
+		nextStep := 0
+		return dbtest.ClaimPredicateHarness{
+			Stores: stores,
+			OrgID:  org,
+			UserID: runmode.LocalDefaultUserID,
+			EnqueueDelegation: func(t *testing.T, runtime string) string {
+				t.Helper()
+				idx := nextStep
+				nextStep++
+				convID := uuid.New().String()
+				if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
+					ID: convID, TaskID: task.ID, PromptID: "rqpr-p0", Model: "m",
+					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &idx,
+				}); err != nil {
+					t.Fatalf("EnqueueRun: %v", err)
+				}
+				// The dialect stamps its own runtime at mint; rewrite it so
+				// one backend covers both engines.
+				if _, err := conn.Exec(`UPDATE conversations SET runtime = ? WHERE id = ?`, runtime, convID); err != nil {
+					t.Fatalf("set runtime: %v", err)
+				}
+				return convID
+			},
+			SetStoredStatus: func(t *testing.T, convID, status string) {
+				t.Helper()
+				var stored any
+				if status != "" {
+					stored = status
+				}
+				if _, err := conn.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, stored, convID); err != nil {
+					t.Fatalf("set stored status: %v", err)
+				}
+			},
+			StoredStatus: func(t *testing.T, convID string) string {
+				t.Helper()
+				var status sql.NullString
+				if err := conn.QueryRow(`SELECT status FROM conversations WHERE id = ?`, convID).Scan(&status); err != nil {
+					t.Fatalf("read stored status: %v", err)
+				}
+				return status.String
+			},
+			InsertRow: func(t *testing.T, convID string, msg domain.Message) int64 {
+				t.Helper()
+				msg.ConversationID = convID
+				id, err := stores.Conversations.InsertMessageSystem(ctx, org, &msg)
+				if err != nil {
+					t.Fatalf("insert message: %v", err)
+				}
+				return id
+			},
+			SetSeq: func(t *testing.T, msgID int64, seq float64) {
+				t.Helper()
+				if _, err := conn.Exec(`UPDATE messages SET seq = ? WHERE id = ?`, seq, msgID); err != nil {
+					t.Fatalf("set seq: %v", err)
+				}
+			},
+			DisplayStatus: func(t *testing.T, convID string) string {
+				t.Helper()
+				got, err := stores.Conversations.Get(ctx, org, convID)
+				if err != nil || got == nil {
+					t.Fatalf("Conversations.Get = (%v, %v)", got, err)
+				}
+				return got.Status
+			},
+		}
+	})
+}

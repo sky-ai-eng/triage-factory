@@ -42,9 +42,7 @@ func pendingRows(t *testing.T, s *Spawner, runID string) []domain.Message {
 func TestSendMessage_NativeRunningQueuesWithoutSteering(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-native", "", "/tmp/wt-native")
-	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-native'`); err != nil {
-		t.Fatalf("running: %v", err)
-	}
+	markEngaged(t, database, "r-native")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	markNative(t, database, "r-native")
 	fc := &fakeController{}
@@ -64,13 +62,13 @@ func TestSendMessage_NativeRunningQueuesWithoutSteering(t *testing.T) {
 		t.Errorf("role = %q, want user", pending[0].Role)
 	}
 
-	// Status is untouched: a running conversation already has a driver.
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-native'`).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
+	// The engagement is untouched: a running conversation already has a
+	// driver, so queueing is delivery and there is nothing to re-queue.
+	if !hasActiveClaim(t, database, "r-native") {
+		t.Error("the live engagement was released by a steer that should only have queued a row")
 	}
-	if status != "running" {
-		t.Errorf("status = %q, want running (queueing is delivery; there is nothing to re-queue)", status)
+	if st := storedStatus(t, database, "r-native"); st != "" {
+		t.Errorf("stored status = %q, want none", st)
 	}
 }
 

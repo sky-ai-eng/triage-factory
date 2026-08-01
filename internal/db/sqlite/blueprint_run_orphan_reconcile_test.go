@@ -51,7 +51,7 @@ func TestMarkRunStatus_CancelsOrphanedChild_OnTerminal(t *testing.T) {
 		ID: "oa-child", TaskID: task.ID, PromptID: "oa-p0", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	})
-	if _, err := conn.Exec(`UPDATE conversations SET status = 'running' WHERE id = 'oa-child'`); err != nil {
+	if _, err := conn.Exec(`UPDATE conversations SET status = NULL WHERE id = 'oa-child'`); err != nil {
 		t.Fatalf("set child running: %v", err)
 	}
 	// The racing dispatcher already claimed the child; the cancel must
@@ -169,7 +169,7 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	})
 	// Force the desync directly (bypassing MarkRunStatus's atomic cancel) to
 	// mimic a DB broken before the fix landed.
-	if _, err := conn.Exec(`UPDATE conversations SET status = 'running' WHERE id = 'ra-child'`); err != nil {
+	if _, err := conn.Exec(`UPDATE conversations SET status = NULL WHERE id = 'ra-child'`); err != nil {
 		t.Fatalf("set child A running: %v", err)
 	}
 	if _, err := conn.Exec(`UPDATE blueprint_runs SET status = 'cancelled', cancel_requested = 0 WHERE id = 'ra-br'`); err != nil {
@@ -211,7 +211,7 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 		ID: "rb-child", TaskID: taskB.ID, PromptID: "rb-p0", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brB, BlueprintStepIndex: &step0,
 	})
-	if _, err := conn.Exec(`UPDATE conversations SET status = 'running' WHERE id = 'rb-child'`); err != nil {
+	if _, err := conn.Exec(`UPDATE conversations SET status = NULL WHERE id = 'rb-child'`); err != nil {
 		t.Fatalf("set child B running: %v", err)
 	}
 	// A genuinely running child holds an active claim (ClaimNextRun mints
@@ -251,8 +251,8 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 			t.Errorf("orphan child ledger tokens = (%d,%d,%d,%d), want (150,25,1500,10)", in, out, cr, cc)
 		}
 	}
-	if got := childRunStatusDB(t, conn, "rb-child"); got != "running" {
-		t.Errorf("healthy child status = %q, want running (must not touch children under a running parent)", got)
+	if got := childRunStatusDB(t, conn, "rb-child"); got != "" {
+		t.Errorf("healthy child status = %q, want none (must not touch mid-flight children under a running parent)", got)
 	}
 
 	// Idempotent: a second sweep finds nothing.

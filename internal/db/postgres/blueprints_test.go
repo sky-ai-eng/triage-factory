@@ -219,7 +219,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_CancelsOrphanedChild(t *testing.T
 		t.Fatalf("CreateRun: %v", err)
 	}
 	childID := seedPgRun(t, h, orgID, userID, taskID, stepPromptID, brID, 0)
-	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = 'running' WHERE id = $1`, childID); err != nil {
+	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, childID); err != nil {
 		t.Fatalf("set child running: %v", err)
 	}
 	// The racing dispatcher already claimed the child; the cancel must
@@ -273,7 +273,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_CancelsOrphanedChild(t *testing.T
 		t.Fatalf("CreateRun 2: %v", err)
 	}
 	childID2 := seedPgRun(t, h, orgID, userID, taskID, stepPromptID, brID2, 0)
-	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = 'running' WHERE id = $1`, childID2); err != nil {
+	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, childID2); err != nil {
 		t.Fatalf("set child 2 running: %v", err)
 	}
 	seedChildClaim(childID2, "exec-oc2")

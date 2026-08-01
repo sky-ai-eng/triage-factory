@@ -143,10 +143,7 @@ func TestCurator_CancelProject_KillsActiveSession(t *testing.T) {
 	}
 	// Wait for the loop to actually start the session, then tear it down.
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if c.HasLiveSession(projectID) {
-			break
-		}
+	for !c.HasLiveSession(projectID) {
 		if time.Now().After(deadline) {
 			t.Fatal("the claim loop never started a session for the project")
 		}

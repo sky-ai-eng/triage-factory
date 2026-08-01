@@ -300,7 +300,7 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("EnqueueRun orphan: %v", err)
 	}
-	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = 'running' WHERE id = $1`, orphanID); err != nil {
+	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, orphanID); err != nil {
 		t.Fatalf("set orphan running: %v", err)
 	}
 	// A queued orphan under the same terminal parent (never claimed) must also
@@ -325,7 +325,7 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("EnqueueRun healthy: %v", err)
 	}
-	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = 'running' WHERE id = $1`, healthyID); err != nil {
+	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, healthyID); err != nil {
 		t.Fatalf("set healthy running: %v", err)
 	}
 	// A genuinely running child holds an active claim (ClaimNextRun mints
@@ -348,8 +348,8 @@ func TestRunQueueStore_Postgres_ReconcileOrphanedRuns(t *testing.T) {
 	if st, completed := pgRunStatus(t, h, queuedOrphanID); st != "cancelled" || !completed {
 		t.Errorf("queued orphan = (%q, completed=%v), want (cancelled, true)", st, completed)
 	}
-	if st, _ := pgRunStatus(t, h, healthyID); st != "running" {
-		t.Errorf("healthy run status = %q, want running (must not touch a child under a running parent)", st)
+	if st, _ := pgRunStatus(t, h, healthyID); st != "" {
+		t.Errorf("healthy run status = %q, want none (must not touch a mid-flight child under a running parent)", st)
 	}
 
 	// Idempotent: a second sweep finds nothing.
@@ -873,4 +873,81 @@ func pgHasActiveClaim(t *testing.T, h *pgtest.Harness, convID string) bool {
 		t.Fatalf("read active claim for %s: %v", convID, err)
 	}
 	return live
+}
+
+// TestClaimPredicate_Postgres runs the shared needs-driving-predicate +
+// display-ladder conformance against the Postgres impl (admin pool, matching
+// production wiring). Each factory call resets the harness so subtests don't
+// share state.
+func TestClaimPredicate_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	ctx := context.Background()
+
+	dbtest.RunClaimPredicateConformance(t, func(t *testing.T) dbtest.ClaimPredicateHarness {
+		t.Helper()
+		h.Reset(t)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+		orgID, userID := seedPgOrgForBlueprints(t, h)
+		brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+
+		nextStep := 0
+		return dbtest.ClaimPredicateHarness{
+			Stores: stores,
+			OrgID:  orgID,
+			UserID: userID,
+			EnqueueDelegation: func(t *testing.T, runtime string) string {
+				t.Helper()
+				idx := nextStep
+				nextStep++
+				convID := uuid.New().String()
+				if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
+					ID: convID, TaskID: taskID, PromptID: promptID, Model: "m",
+					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
+				}); err != nil {
+					t.Fatalf("EnqueueRun: %v", err)
+				}
+				// The dialect stamps its own runtime at mint; rewrite it so
+				// one backend covers both engines.
+				pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET runtime = $2 WHERE id = $1`, convID, runtime)
+				return convID
+			},
+			SetStoredStatus: func(t *testing.T, convID, status string) {
+				t.Helper()
+				var stored any
+				if status != "" {
+					stored = status
+				}
+				pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = $2 WHERE id = $1`, convID, stored)
+			},
+			StoredStatus: func(t *testing.T, convID string) string {
+				t.Helper()
+				var status sql.NullString
+				if err := h.AdminDB.QueryRow(`SELECT status FROM conversations WHERE id = $1`, convID).Scan(&status); err != nil {
+					t.Fatalf("read stored status: %v", err)
+				}
+				return status.String
+			},
+			InsertRow: func(t *testing.T, convID string, msg domain.Message) int64 {
+				t.Helper()
+				msg.ConversationID = convID
+				id, err := stores.Conversations.InsertMessageSystem(ctx, orgID, &msg)
+				if err != nil {
+					t.Fatalf("insert message: %v", err)
+				}
+				return id
+			},
+			SetSeq: func(t *testing.T, msgID int64, seq float64) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB, `UPDATE messages SET seq = $2 WHERE id = $1`, msgID, seq)
+			},
+			DisplayStatus: func(t *testing.T, convID string) string {
+				t.Helper()
+				got, err := stores.Conversations.GetSystem(ctx, orgID, convID)
+				if err != nil || got == nil {
+					t.Fatalf("Conversations.GetSystem = (%v, %v)", got, err)
+				}
+				return got.Status
+			},
+		}
+	})
 }

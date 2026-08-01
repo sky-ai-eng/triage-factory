@@ -456,7 +456,7 @@ const sqliteRunColumns = `
 // conversation matching the needs-driving predicate — mid-flight and
 // unclaimed, or parked and woken by input — is 'queued'; and finally the
 // stored column carries the deliberate park and the terminals. The trailing
-// '' is unreachable by construction and exists so NULL can never reach the
+// ” is unreachable by construction and exists so NULL can never reach the
 // wire. Requires the conversation alias `r`.
 const sqliteDisplayStatusSQL = `COALESCE(
 		(SELECT cl_d.phase FROM claims cl_d WHERE cl_d.conversation_id = r.id AND cl_d.released_at IS NULL),

@@ -622,30 +622,6 @@ func (s *projectSession) dispatch(item queueItem) {
 	s.curator.broadcastRequestUpdate(item.orgID, s.projectID, requestID, status)
 }
 
-// cancelQueued cancels a turn that never entered context: its undelivered
-// user message is deleted (the queued-cancel semantic — there is no claim to
-// release). Broadcasts cancelled only when this call actually removed the
-// row, so a handler-side cancel that raced ahead isn't double-announced.
-func (s *projectSession) cancelQueued(item queueItem) {
-	ctx := context.WithoutCancel(s.ctx)
-	var deleted bool
-	err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
-		d, err := ts.Curator.DeleteQueuedTurn(ctx, item.orgID, item.conversationID, item.messageID)
-		if err != nil {
-			return err
-		}
-		deleted = d
-		return nil
-	})
-	if err != nil {
-		curatorLog.Warn("cancel queued turn failed", "request", item.requestID, "error", err)
-		return
-	}
-	if deleted {
-		s.curator.broadcastRequestUpdate(item.orgID, s.projectID, item.requestID, "cancelled")
-	}
-}
-
 // releaseForRedrive releases a claimed-but-undelivered turn's engagement
 // without a user-visible terminal: the message stays queued, so the
 // conversation is claimable again the instant the claim is gone and whoever

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -136,4 +138,33 @@ func storedStatus(t *testing.T, database *sql.DB, convID string) string {
 		t.Fatalf("read stored status for %s: %v", convID, err)
 	}
 	return status.String
+}
+
+// markEngaged puts a seeded conversation into the state a claimed one is
+// really in: no stored outcome, one unreleased claim. "Running" is an
+// engagement now, not a column value.
+func markEngaged(t *testing.T, database *sql.DB, convID string) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, convID); err != nil {
+		t.Fatalf("clear stored status for %s: %v", convID, err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
+		VALUES (?, ?, ?, 'test-engagement', 1, CURRENT_TIMESTAMP)
+	`, uuid.New().String(), runmode.LocalDefaultOrgID, convID); err != nil {
+		t.Fatalf("mint claim for %s: %v", convID, err)
+	}
+}
+
+// hasActiveClaim reports whether the conversation currently holds an
+// unreleased claim — the derived "an engagement is driving this".
+func hasActiveClaim(t *testing.T, database *sql.DB, convID string) bool {
+	t.Helper()
+	var live bool
+	if err := database.QueryRow(
+		`SELECT EXISTS (SELECT 1 FROM claims WHERE conversation_id = ? AND released_at IS NULL)`, convID,
+	).Scan(&live); err != nil {
+		t.Fatalf("read active claim for %s: %v", convID, err)
+	}
+	return live
 }
