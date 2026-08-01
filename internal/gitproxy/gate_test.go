@@ -66,6 +66,62 @@ func TestParseGitPath(t *testing.T) {
 	}
 }
 
+// TestIsGitSmartHTTPPath_SupersetOfParseGitPath is the drift guard between the
+// routing predicate and the admission one. The front door that serves this
+// proxy alongside the gh credential injector on one listener routes with
+// IsGitSmartHTTPPath; if that predicate ever missed a shape parseGitPath
+// admits, a legitimate git request would be routed to the API injector and
+// forwarded to GitHub under a real token. So every path parseGitPath accepts
+// must route here — and the reverse must NOT hold, since routing a malformed
+// git path to the git gate (which 403s it) is the whole point.
+func TestIsGitSmartHTTPPath_SupersetOfParseGitPath(t *testing.T) {
+	admitted := []struct{ method, path string }{
+		{http.MethodGet, "/octo/repo/info/refs"},
+		{http.MethodGet, "/octo/repo.git/info/refs"},
+		{http.MethodPost, "/octo/repo/git-upload-pack"},
+		{http.MethodPost, "/octo/repo.git/git-receive-pack"},
+	}
+	for _, c := range admitted {
+		if _, _, _, ok := parseGitPath(c.method, c.path); !ok {
+			t.Fatalf("fixture drift: parseGitPath(%s %s) no longer admits this shape", c.method, c.path)
+		}
+		if !IsGitSmartHTTPPath(c.method, c.path) {
+			t.Errorf("IsGitSmartHTTPPath(%s %s) = false; a path the gate admits must route to it", c.method, c.path)
+		}
+	}
+
+	// Malformed git paths route to the gate (which refuses them) rather than
+	// falling through to whatever else shares the listener.
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/oc%2fto/repo/info/refs"},
+		{http.MethodPost, "/octo/re@po/git-receive-pack"},
+		{http.MethodGet, "/info/refs"},
+	} {
+		if _, _, _, ok := parseGitPath(c.method, c.path); ok {
+			t.Fatalf("fixture drift: parseGitPath(%s %s) now admits this shape", c.method, c.path)
+		}
+		if !IsGitSmartHTTPPath(c.method, c.path) {
+			t.Errorf("IsGitSmartHTTPPath(%s %s) = false; a git-shaped path must reach the gate's refusal, not the API path", c.method, c.path)
+		}
+	}
+
+	// Non-git shapes must NOT route here — most importantly the GHES API
+	// prefix, which is the other half of the shared listener.
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v3/repos/octo/repo"},
+		{http.MethodPost, "/api/graphql"},
+		{http.MethodPost, "/octo/repo.git/info/lfs/objects/batch"},
+		{http.MethodGet, "/octo/repo/settings"},
+		{http.MethodPost, "/octo/repo/info/refs"},
+		{http.MethodGet, "/octo/repo/git-upload-pack"},
+		{http.MethodGet, "/"},
+	} {
+		if IsGitSmartHTTPPath(c.method, c.path) {
+			t.Errorf("IsGitSmartHTTPPath(%s %s) = true; want false", c.method, c.path)
+		}
+	}
+}
+
 // TestParseGateCommands covers the enforcement parser that — unlike the
 // observe-only parseReceivePackCommands — keeps delete commands so the gate
 // can reject them.

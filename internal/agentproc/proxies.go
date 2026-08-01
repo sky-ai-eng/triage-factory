@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -202,6 +203,26 @@ type GitProxyConfig struct {
 	// (gitproxy.Config.RecordDenial). Best-effort; never blocks a request.
 	RecordDenial func(ctx context.Context, denied gitproxy.DeniedGitOp)
 
+	// SharedOriginHost, when non-empty, is the host of the run's single fake-GHE
+	// origin — the address GH_HOST names, whose listener serves the GitHub API
+	// and git smart-HTTP alike. Set it and the sandbox's git is routed at that
+	// host instead of the git proxy's own address, which is what makes `gh`'s
+	// repo inference work from a worktree: gh matches git remotes against
+	// GH_HOST, and until both name the same host no repo-contextual gh command
+	// can resolve without an explicit -R.
+	//
+	// Empty keeps the pre-existing routing (straight at the git proxy's own
+	// http:// address) — the shape a run with no gh channel, or one whose shared
+	// origin could not be bound, still gets.
+	SharedOriginHost string
+
+	// SharedOriginCAPath is the in-sandbox path of the shared origin's trust
+	// file. Required alongside SharedOriginHost: that listener serves TLS with a
+	// per-run self-signed cert, and git — unlike gh, which reads the
+	// process-global SSL_CERT_FILE — needs the CA named in its own config for
+	// the host it is talking to.
+	SharedOriginCAPath string
+
 	// ProbeCredentials, when non-nil, is the run-start credential check: it
 	// resolves whether the org has ANY usable GitHub credential, returning
 	// ErrNoSandboxGitCredentials if not, so a no-credential org surfaces a
@@ -238,6 +259,24 @@ func (h *RunProxyHandle) GitProxy() (url, token string) {
 		return "", ""
 	}
 	return h.p.gitProxyURL, h.p.gitProxyToken
+}
+
+// GitHandler returns the git proxy's own http.Handler, or nil when this run
+// started no git proxy. The sidecar mounts it behind the gh injector's TLS
+// listener so one address — the run's shared fake-GHE origin — serves both the
+// API and git, the way a real GHE host does.
+//
+// It is the SAME handler the standalone git-proxy listener serves, deliberately:
+// the ref gate, the base-branch push policy, the per-repo authorize relay, and
+// the push capture are gitproxy's, and re-homing the handler behind a second
+// front door must not fork any of them. Nothing about the credential changes
+// either — the real token is still resolved inside the proxy on the upstream
+// hop, whichever door the request came through.
+func (h *RunProxyHandle) GitHandler() http.Handler {
+	if h == nil || h.p == nil || h.p.git == nil {
+		return nil
+	}
+	return h.p.git.Handler()
 }
 
 // StartRunProxies is the sidecar-callable entry to the same per-run proxy
@@ -504,7 +543,7 @@ func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitPro
 	// in the proxy's TokenSource. The host reaches the veth IP too, so one proxy
 	// serves both the in-jail agent and the pre-sandbox clone.
 	proxyURL := "http://" + addr
-	return sandboxGitProxyPairs(proxyURL, upstream, incoming), proxyURL, incoming, srv, nil
+	return sandboxGitProxyPairs(proxyURL, upstream, incoming, git.SharedOriginHost, git.SharedOriginCAPath), proxyURL, incoming, srv, nil
 }
 
 // startEgressProxyForSandbox mints a per-run secret, starts the gating
@@ -553,12 +592,13 @@ func startEgressProxyForSandbox(hostVethIP string, recordDenial func(ctx context
 // forms, Go and npm read either, and tools disagree just enough that
 // setting all four is the only portable choice.
 //
-// NO_PROXY is load-bearing, not cosmetic: the git proxy routes via
-// url.<http://gateway:port>/.insteadOf rewrites and git (libcurl)
-// honors http_proxy for http:// URLs — without the gateway-IP
-// exemption every sandbox git fetch/push would try to CONNECT through
-// the egress proxy (non-443 port → 403) and multi-mode git would
-// break. The same exemption keeps ANTHROPIC_BASE_URL traffic direct
+// NO_PROXY is load-bearing, not cosmetic: the sandbox's git is routed at the
+// gateway by url.<base>/.insteadOf rewrites — the run's shared origin, or the
+// git proxy's own address — and git (libcurl) honors http_proxy/https_proxy for
+// both schemes. Without the gateway-IP exemption every sandbox git fetch/push
+// would try to CONNECT through the egress proxy and be refused, and multi-mode
+// git would break. The exemption is by HOST, so it covers whichever port the
+// gateway's listeners land on. It also keeps ANTHROPIC_BASE_URL traffic direct
 // should the SDK ever grow proxy support.
 //
 // Property B: the only secret-shaped value is the per-run token, a
@@ -762,14 +802,24 @@ const gitProxyBasicUser = "x-run"
 // route the in-sandbox git through the per-run git proxy. Two settings,
 // both host-side (the agent never sees the real GitHub credential):
 //
-//   - url.<proxyURL>/.insteadOf=<upstream>/ rewrites every git URL the
+//   - url.<base>/.insteadOf=<upstream>/ rewrites every git URL the
 //     sandbox resolves under the upstream host to the proxy's address,
 //     so native git push/fetch transit the proxy instead of trying (and
 //     failing, under the egress allowlist) to reach the host directly.
-//   - http.<proxyURL>/.extraHeader carries the per-run token as the
+//   - http.<base>/.extraHeader carries the per-run token as the
 //     Basic password — the value the proxy authenticates against before
 //     swapping in the real credential. Mirrors the base64("user:"+token)
 //     encoding internal/worktree uses for the host-side clone.
+//
+// <base> is the run's SHARED ORIGIN when it has one — the single fake-GHE
+// address GH_HOST also names — and the git proxy's own http:// address
+// otherwise. That choice is what repoints the agent's `origin`: git applies
+// insteadOf when it resolves a remote, so `git remote -v` (which is what gh
+// reads) reports the rewritten URL, and pointing it at the shared origin is
+// what lets gh's inference match GH_HOST from inside a worktree. On the shared
+// origin the listener is TLS with a per-run self-signed cert, so a third pair
+// names the CA: gh finds it through the process-global SSL_CERT_FILE, but git
+// resolves TLS trust from its own config.
 //
 // The caller folds these into the single GIT_CONFIG_* block (with
 // core.hooksPath) via encodeGitConfigEnv. Delivered via env-config
@@ -782,19 +832,33 @@ const gitProxyBasicUser = "x-run"
 //
 // Property B: the only secret-shaped value is the per-run token, a
 // capability scoped to this run's own proxy — never the real GitHub
-// credential, which stays in the proxy on the host.
-func sandboxGitProxyPairs(proxyURL, upstream, incomingToken string) [][2]string {
+// credential, which stays in the proxy on the host. Both routings reach the
+// same gitproxy handler, so the ref gate and the base-branch push policy are
+// identical either way.
+func sandboxGitProxyPairs(proxyURL, upstream, incomingToken, sharedOriginHost, sharedOriginCAPath string) [][2]string {
 	// Trailing slash on both the rewritten base and the matched prefix
-	// so "<upstream>/owner/repo" maps cleanly to "<proxy>/owner/repo".
-	proxyBase := strings.TrimRight(proxyURL, "/") + "/"
+	// so "<upstream>/owner/repo" maps cleanly to "<base>/owner/repo".
+	base := strings.TrimRight(proxyURL, "/") + "/"
 	upstreamPrefix := strings.TrimRight(upstream, "/") + "/"
 
 	creds := gitProxyBasicUser + ":" + incomingToken
 	extraHeader := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(creds))
 
+	// The shared origin needs both halves to be usable — an address with no CA
+	// would route git at a TLS listener it cannot verify, which is worse than
+	// not routing it there at all. Both-or-neither, so a half-wired caller
+	// degrades to the proxy's own address rather than to a broken remote.
+	if sharedOriginHost == "" || sharedOriginCAPath == "" {
+		return [][2]string{
+			{"url." + base + ".insteadOf", upstreamPrefix},
+			{"http." + base + ".extraHeader", extraHeader},
+		}
+	}
+	base = "https://" + sharedOriginHost + "/"
 	return [][2]string{
-		{"url." + proxyBase + ".insteadOf", upstreamPrefix},
-		{"http." + proxyBase + ".extraHeader", extraHeader},
+		{"url." + base + ".insteadOf", upstreamPrefix},
+		{"http." + base + ".extraHeader", extraHeader},
+		{"http." + base + ".sslCAInfo", sharedOriginCAPath},
 	}
 }
 

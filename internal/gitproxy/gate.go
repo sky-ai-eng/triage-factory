@@ -51,6 +51,33 @@ func parseGitPath(method, path string) (owner, repo, op string, ok bool) {
 	return "", "", "", false
 }
 
+// IsGitSmartHTTPPath reports whether (method, path) has the SHAPE of a git
+// smart-HTTP request — the routing question, deliberately weaker than
+// parseGitPath's admission question.
+//
+// It exists for a front door that serves this proxy's handler alongside
+// something else on one listener (the run's fake-GHE origin, where git and the
+// REST API share a host as they do on real GHE): the router has to decide which
+// half a request belongs to before either half has looked at it. Keying that
+// decision on the suffix + method alone — never on whether the owner/repo
+// segments are well-formed — is what keeps a malformed git path from falling
+// through to the OTHER half. A "/…/info/refs" with a junk owner is a git request
+// that gitproxy will refuse; it is not an API request, and routing it to an API
+// credential injector would forward it to GitHub under a real token.
+//
+// So: every path parseGitPath admits is matched here, and some it rejects are
+// too. Those land on the Handler, which 403s them exactly as it does today —
+// this predicate widens what reaches the git gate, never what passes it.
+func IsGitSmartHTTPPath(method, path string) bool {
+	switch method {
+	case http.MethodGet:
+		return strings.HasSuffix(path, "/info/refs")
+	case http.MethodPost:
+		return strings.HasSuffix(path, "/git-upload-pack") || strings.HasSuffix(path, "/git-receive-pack")
+	}
+	return false
+}
+
 // validRepoSeg accepts a single owner/repo path segment: non-empty, drawn from
 // the GitHub owner/repo alphabet [A-Za-z0-9._-], and free of "..". Restricting
 // the charset is defense-in-depth for the allowlist — it rejects a surviving

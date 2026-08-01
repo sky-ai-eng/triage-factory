@@ -621,11 +621,26 @@ func TestValidateSidecarLaunchParams_AcceptsValid(t *testing.T) {
 	if err := ValidateSidecarLaunchParams(validSidecarParams()); err != nil {
 		t.Fatalf("ValidateSidecarLaunchParams rejected valid params: %v", err)
 	}
-	// The top of the band (SidecarUIDBase + MaxSandboxes - 1) must also pass.
+	// The top of the band (SidecarUIDBase + MaxSandboxes - 1) must also pass,
+	// with the subnet index it derives from.
 	p := validSidecarParams()
-	p.UID, p.GID = SidecarUIDBase+MaxSandboxes-1, SidecarUIDBase+MaxSandboxes-1
+	p.SubnetIdx = MaxSandboxes - 1
+	p.UID, p.GID = SidecarUID(p.SubnetIdx), SidecarUID(p.SubnetIdx)
 	if err := ValidateSidecarLaunchParams(p); err != nil {
 		t.Errorf("top-of-band uid rejected: %v", err)
+	}
+}
+
+// TestValidateSidecarLaunchParams_RejectsUIDSubnetMismatch pins the tie between
+// the uid the broker execs at and the subnet index it binds the run's
+// shared-origin listener against. Without it a caller could take one run's
+// sidecar slot while pointing the bind at a sibling's veth IP.
+func TestValidateSidecarLaunchParams_RejectsUIDSubnetMismatch(t *testing.T) {
+	p := validSidecarParams()
+	p.SubnetIdx = 7
+	p.UID, p.GID = SidecarUID(3), SidecarUID(3)
+	if err := ValidateSidecarLaunchParams(p); err == nil {
+		t.Error("ValidateSidecarLaunchParams accepted a uid derived from a different subnet index than the one it binds against")
 	}
 }
 

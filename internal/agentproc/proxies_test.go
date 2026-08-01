@@ -932,7 +932,7 @@ func gitProxyTokenFromEnv(t *testing.T, env []string) string {
 // core.hooksPath) by startProxiesForSandbox; here we assert the pairs
 // themselves.
 func TestSandboxGitProxyPairs_Shape(t *testing.T) {
-	pairs := sandboxGitProxyPairs("http://10.42.7.1:5123", "https://github.com", "per-run-secret")
+	pairs := sandboxGitProxyPairs("http://10.42.7.1:5123", "https://github.com", "per-run-secret", "", "")
 	got := map[string]string{}
 	for _, p := range pairs {
 		got[p[0]] = p[1]
@@ -950,13 +950,62 @@ func TestSandboxGitProxyPairs_Shape(t *testing.T) {
 	}
 }
 
+// TestSandboxGitProxyPairs_SharedOrigin pins the routing that makes gh's repo
+// inference work: with a shared origin the sandbox's git resolves every upstream
+// URL onto https://<GH_HOST>/, so `git remote -v` — which is what gh reads —
+// reports a remote on the very host GH_HOST names. The per-run Basic placeholder
+// is unchanged (same proxy, same credential discipline) and the TLS trust file
+// is named explicitly, because git resolves CA trust from its own config rather
+// than the process-global SSL_CERT_FILE gh reads.
+func TestSandboxGitProxyPairs_SharedOrigin(t *testing.T) {
+	pairs := sandboxGitProxyPairs("http://10.42.7.1:5123", "https://github.com", "per-run-secret", "10.42.7.1", "/run/tf-gh-injector.crt")
+	got := map[string]string{}
+	for _, p := range pairs {
+		got[p[0]] = p[1]
+	}
+
+	if len(pairs) != 3 {
+		t.Fatalf("len(pairs) = %d, want 3 (insteadOf + extraHeader + sslCAInfo)", len(pairs))
+	}
+	if v := got["url.https://10.42.7.1/.insteadOf"]; v != "https://github.com/" {
+		t.Errorf("insteadOf value = %q, want https://github.com/ rewritten onto the shared origin", v)
+	}
+	wantHeader := "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("x-run:per-run-secret"))
+	if v := got["http.https://10.42.7.1/.extraHeader"]; v != wantHeader {
+		t.Errorf("extraHeader value = %q, want %q", v, wantHeader)
+	}
+	if v := got["http.https://10.42.7.1/.sslCAInfo"]; v != "/run/tf-gh-injector.crt" {
+		t.Errorf("sslCAInfo value = %q, want the mounted trust file", v)
+	}
+	// The shared origin carries no port: gh drops it when matching a remote
+	// against GH_HOST, so a ported rewrite target would leave inference broken
+	// exactly as the git proxy's own address does.
+	for _, p := range pairs {
+		if strings.Contains(p[0], "10.42.7.1:") {
+			t.Errorf("pair key %q names a port; the shared origin must be portless or gh's inference cannot match GH_HOST", p[0])
+		}
+	}
+
+	// Half-wired degrades to the git proxy's own address rather than routing git
+	// at a TLS listener whose CA it was never told about.
+	for _, c := range []struct{ host, ca string }{
+		{"10.42.7.1", ""},
+		{"", "/run/tf-gh-injector.crt"},
+	} {
+		half := sandboxGitProxyPairs("http://10.42.7.1:5123", "https://github.com", "per-run-secret", c.host, c.ca)
+		if len(half) != 2 || half[0][0] != "url.http://10.42.7.1:5123/.insteadOf" {
+			t.Errorf("half-wired shared origin (host=%q ca=%q) produced %v; want the git proxy's own routing", c.host, c.ca, half)
+		}
+	}
+}
+
 // TestEncodeGitConfigEnv_HooksAlwaysPresent pins that the consolidated
 // GIT_CONFIG_* block always carries core.hooksPath at index 0 (F2,
 // TFAC-456) and a single coherent GIT_CONFIG_COUNT covering it plus any
 // proxy pairs layered after it.
 func TestEncodeGitConfigEnv_HooksAlwaysPresent(t *testing.T) {
 	pairs := append([][2]string{{githooks.ConfigKey, githooks.SandboxDir}},
-		sandboxGitProxyPairs("http://10.42.7.1:5123", "https://github.com", "tok")...)
+		sandboxGitProxyPairs("http://10.42.7.1:5123", "https://github.com", "tok", "", "")...)
 	env := encodeGitConfigEnv(pairs)
 
 	if got := envValue(env, "GIT_CONFIG_COUNT"); got != "3" {

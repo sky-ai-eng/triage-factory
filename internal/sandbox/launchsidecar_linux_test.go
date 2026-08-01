@@ -74,7 +74,7 @@ func TestLaunchSidecarProcess_DropsToRequestedUID(t *testing.T) {
 
 	const testUID = SidecarUIDBase + 1
 	var stderr bytes.Buffer
-	rt, err := LaunchSidecarProcess(context.Background(), "test-sc", testUID, testUID, child, &stderr)
+	rt, err := LaunchSidecarProcess(context.Background(), "test-sc", testUID, testUID, child, nil, &stderr)
 	if err != nil {
 		t.Fatalf("LaunchSidecarProcess: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestLaunchSidecarProcess_KillTerminatesAndWaitReturns(t *testing.T) {
 	defer parent.Close()
 
 	uid := os.Getuid()
-	rt, err := LaunchSidecarProcess(context.Background(), "test-sc-kill", uid, uid, child, io.Discard)
+	rt, err := LaunchSidecarProcess(context.Background(), "test-sc-kill", uid, uid, child, nil, io.Discard)
 	if err != nil {
 		t.Fatalf("LaunchSidecarProcess: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestLaunchSidecarProcess_KillOnAlreadyExitedIsSafe(t *testing.T) {
 	defer parent.Close()
 
 	uid := os.Getuid()
-	rt, err := LaunchSidecarProcess(context.Background(), "test-sc-exit", uid, uid, child, io.Discard)
+	rt, err := LaunchSidecarProcess(context.Background(), "test-sc-exit", uid, uid, child, nil, io.Discard)
 	if err != nil {
 		t.Fatalf("LaunchSidecarProcess: %v", err)
 	}
