@@ -174,6 +174,63 @@ func TestAccessChangeLabel(t *testing.T) {
 			target: "Alice",
 			want:   "future_action",
 		},
+		{
+			name:   "slack workspace credential names the workspace",
+			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: domain.AccessDetailSlackWorkspace("Acme Corp", "T01", "A01")},
+			want:   "set the Slack workspace Acme Corp",
+		},
+		{
+			name:   "slack workspace removal",
+			change: domain.AccessChange{Action: domain.AccessActionCredentialRemoved, DetailJSON: domain.AccessDetailSlackWorkspace("Acme Corp", "T01", "A01")},
+			want:   "removed the Slack workspace Acme Corp",
+		},
+		{
+			name:   "sso_connection_created",
+			change: domain.AccessChange{Action: domain.AccessActionSSOConnectionCreated, DetailJSON: domain.AccessDetailSSOConnection("p-1")},
+			want:   "registered an SSO connection",
+		},
+		{
+			name:   "sso_connection_disabled",
+			change: domain.AccessChange{Action: domain.AccessActionSSOConnectionDisabled},
+			want:   "disabled SSO",
+		},
+		{
+			name:   "sso_enforcement_enabled",
+			change: domain.AccessChange{Action: domain.AccessActionSSOEnforcementEnabled},
+			want:   "started requiring SSO for this org",
+		},
+		{
+			name:   "sso_enforcement_disabled",
+			change: domain.AccessChange{Action: domain.AccessActionSSOEnforcementDisabled},
+			want:   "stopped requiring SSO for this org",
+		},
+		{
+			name:   "sso_domain_claimed names the domain",
+			change: domain.AccessChange{Action: domain.AccessActionSSODomainClaimed, DetailJSON: domain.AccessDetailSSODomain("corp.example")},
+			want:   "claimed the domain corp.example for SSO",
+		},
+		{
+			name:   "sso_domain_verified names the domain",
+			change: domain.AccessChange{Action: domain.AccessActionSSODomainVerified, DetailJSON: domain.AccessDetailSSODomain("corp.example")},
+			want:   "verified the domain corp.example",
+		},
+		{
+			name:   "sso_domain_removed with no detail still reads as English",
+			change: domain.AccessChange{Action: domain.AccessActionSSODomainRemoved},
+			want:   "removed a domain",
+		},
+		{
+			name:   "sso_break_glass_added names the exempted principal",
+			change: domain.AccessChange{Action: domain.AccessActionSSOBreakGlassAdded, TargetUserID: "u2"},
+			target: "Alice",
+			want:   "added Alice as an SSO break-glass principal",
+		},
+		{
+			name:   "sso_break_glass_removed",
+			change: domain.AccessChange{Action: domain.AccessActionSSOBreakGlassRemoved, TargetUserID: "u2"},
+			target: "Alice",
+			want:   "removed Alice from the SSO break-glass principals",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -430,6 +487,56 @@ func seedAccessLogLocal(t *testing.T, s *Server) {
 	row("acl-2", domain.AccessActionOrgRoleChanged, "u-alice", "", `{"old_role":"member","new_role":"admin"}`, "2026-06-20 11:00:00")
 	row("acl-3", domain.AccessActionTeamMemberAdded, "u-bob", team, `{"new_role":"member"}`, "2026-06-20 12:00:00")
 	row("acl-4", domain.AccessActionOrgMemberRevoked, "u-bob", "", "", "2026-06-20 13:00:00")
+}
+
+// TestUsageAccessLog_PolicyCategory_Local covers the policy bucket end to end:
+// the SSO rows ee/sso writes are core-renderable and reachable through the
+// category filter. Its own server + seed rather than an extra row in
+// seedAccessLogLocal, whose subtests assert on exact row counts.
+func TestUsageAccessLog_PolicyCategory_Local(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
+	t.Cleanup(entitlements.Reset)
+
+	s := newUsageTestServer(t)
+	org := runmode.LocalDefaultOrgID
+	actor := runmode.LocalDefaultUserID
+	if _, err := s.db.Exec(`INSERT INTO users (id, display_name) VALUES ('u-alice', 'Alice')`); err != nil {
+		t.Fatalf("seed users: %v", err)
+	}
+	row := func(id, action, target, detail, when string) {
+		t.Helper()
+		if _, err := s.db.Exec(`INSERT INTO access_change_log (id, org_id, actor_user_id, action, target_user_id, detail_json, created_at)
+		      VALUES (?, ?, ?, ?, ?, ?, ?)`, id, org, actor, action, nullable(target), nullable(detail), when); err != nil {
+			t.Fatalf("seed access row: %v", err)
+		}
+	}
+	row("pol-1", domain.AccessActionOrgMemberRevoked, "u-alice", "", "2026-06-20 10:00:00")
+	row("pol-2", domain.AccessActionSSOEnforcementEnabled, "", domain.AccessDetailSSOConnection("p-1"), "2026-06-20 11:00:00")
+	row("pol-3", domain.AccessActionSSODomainVerified, "", domain.AccessDetailSSODomain("corp.example"), "2026-06-20 12:00:00")
+	row("pol-4", domain.AccessActionSSOBreakGlassAdded, "u-alice", "", "2026-06-20 13:00:00")
+
+	var resp accessLogResponse
+	doUsage(t, s, "/api/usage/org/access-log?category=policy", &resp)
+	if len(resp.Items) != 3 {
+		t.Fatalf("category=policy items = %d, want 3 (the SSO rows only): %+v", len(resp.Items), resp.Items)
+	}
+	labels := map[string]bool{}
+	for _, it := range resp.Items {
+		if it.Action == domain.AccessActionOrgMemberRevoked {
+			t.Errorf("policy filter leaked a membership row: %+v", it)
+		}
+		labels[it.ActionLabel] = true
+	}
+	for _, want := range []string{
+		"started requiring SSO for this org",
+		"verified the domain corp.example",
+		"added Alice as an SSO break-glass principal",
+	} {
+		if !labels[want] {
+			t.Errorf("missing rendered label %q in %v", want, labels)
+		}
+	}
 }
 
 // nullable maps "" to a nil arg (SQL NULL) so the optional columns store NULL

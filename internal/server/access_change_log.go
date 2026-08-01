@@ -73,13 +73,10 @@ func accessDetailCredential(kind, host string) string {
 // secret: a GitHub App's slug, the @login a per-user identity binds to. It's
 // what lets the viewer say WHICH App was registered or torn down rather than
 // just "a GitHub App", which is the whole question an admin is asking of the log.
+//
+// Delegates so core and the ee write-points emit one shape, not two that drift.
 func accessDetailCredentialNamed(kind, host, name string) string {
-	b, _ := json.Marshal(struct {
-		Kind string `json:"kind"`
-		Host string `json:"host,omitempty"`
-		Name string `json:"name,omitempty"`
-	}{Kind: kind, Host: host, Name: name})
-	return string(b)
+	return domain.AccessDetailCredential(kind, host, name)
 }
 
 // configuredLLMCredentialKinds names the org-level LLM credentials the settings

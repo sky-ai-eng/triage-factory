@@ -24,6 +24,7 @@ import (
 
 	ssostore "github.com/sky-ai-eng/triage-factory/ee/sso/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
@@ -269,6 +270,13 @@ func (h *ssoConnectionHandler) handleSSOConnectionCreate(w http.ResponseWriter, 
 		if e != nil {
 			return e
 		}
+		if e := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionSSOConnectionCreated,
+			DetailJSON:  domain.AccessDetailSSOConnection(providerID),
+		}); e != nil {
+			return fmt.Errorf("audit sso connection create: %w", e)
+		}
 		created, e = ssostore.FromTx(tx).Connections.GetByID(r.Context(), orgID, id)
 		return e
 	}); err != nil {
@@ -326,15 +334,44 @@ func (h *ssoConnectionHandler) handleSSOConnectionUpdate(w http.ResponseWriter, 
 
 	var updated *ssostore.SSOConnection
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := ssostore.FromTx(tx).Connections.Update(r.Context(), orgID, existing.ID, ssostore.UpdateSSOConnectionParams{
+		sso := ssostore.FromTx(tx)
+		// Re-read inside the tx: the audit row turns on whether this call
+		// actually flipped the switch, and the check must see the same snapshot
+		// the Update writes against. The PATCH is idempotent, so an admin
+		// re-saving an already-enabled connection must not read back as a
+		// second enablement.
+		before, e := sso.Connections.GetByID(r.Context(), orgID, existing.ID)
+		if e != nil {
+			return e
+		}
+		if before == nil {
+			return errNoConnection
+		}
+		if e := sso.Connections.Update(r.Context(), orgID, existing.ID, ssostore.UpdateSSOConnectionParams{
 			Enabled: *body.Enabled,
 		}); e != nil {
 			return e
 		}
-		var e error
-		updated, e = ssostore.FromTx(tx).Connections.GetByID(r.Context(), orgID, existing.ID)
+		if before.Enabled != *body.Enabled {
+			action := domain.AccessActionSSOConnectionDisabled
+			if *body.Enabled {
+				action = domain.AccessActionSSOConnectionEnabled
+			}
+			if e := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+				ActorUserID: userID,
+				Action:      action,
+				DetailJSON:  domain.AccessDetailSSOConnection(before.ProviderID),
+			}); e != nil {
+				return fmt.Errorf("audit sso connection update: %w", e)
+			}
+		}
+		updated, e = sso.Connections.GetByID(r.Context(), orgID, existing.ID)
 		return e
 	}); err != nil {
+		if errors.Is(err, errNoConnection) {
+			http.NotFound(w, r)
+			return
+		}
 		httpx.InternalError(w, "sso", err)
 		return
 	}
@@ -382,16 +419,19 @@ func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter,
 	var updated *ssostore.SSOConnection
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		sso := ssostore.FromTx(tx)
+		// Re-read state inside the tx so the gate checks can't race a
+		// concurrent disable/un-verify. Hoisted out of the enforce-ON branch
+		// because the audit row below needs the prior enforced value on BOTH
+		// directions, and it has to come from this same snapshot.
+		conn, e := sso.Connections.GetByID(r.Context(), orgID, existing.ID)
+		if e != nil {
+			return e
+		}
+		if conn == nil {
+			return errNoConnection
+		}
 		if *body.Enforced {
-			// Gate ON only behind a proven-working connection. Re-read state
-			// inside the tx so the checks can't race a concurrent disable/un-verify.
-			conn, e := sso.Connections.GetByID(r.Context(), orgID, existing.ID)
-			if e != nil {
-				return e
-			}
-			if conn == nil {
-				return errEnforceNoConnection
-			}
+			// Gate ON only behind a proven-working connection.
 			if !conn.Enabled {
 				return errEnforceNotEnabled
 			}
@@ -412,7 +452,23 @@ func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter,
 		if e := sso.Connections.SetEnforced(r.Context(), orgID, existing.ID, *body.Enforced); e != nil {
 			return e
 		}
-		var e error
+		// Requiring SSO is the single widest-reaching access change this
+		// surface makes — it decides whether a password/GitHub login still
+		// works for the whole org — so it records in both directions, but only
+		// when the value actually moved.
+		if conn.Enforced != *body.Enforced {
+			action := domain.AccessActionSSOEnforcementDisabled
+			if *body.Enforced {
+				action = domain.AccessActionSSOEnforcementEnabled
+			}
+			if e := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+				ActorUserID: userID,
+				Action:      action,
+				DetailJSON:  domain.AccessDetailSSOConnection(conn.ProviderID),
+			}); e != nil {
+				return fmt.Errorf("audit sso enforcement: %w", e)
+			}
+		}
 		updated, e = sso.Connections.GetByID(r.Context(), orgID, existing.ID)
 		return e
 	}); err != nil {
@@ -429,7 +485,7 @@ func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter,
 			httpx.WriteJSON(w, http.StatusConflict, map[string]string{
 				"error": "verify a domain before requiring SSO",
 			})
-		case errors.Is(err, errEnforceNoConnection):
+		case errors.Is(err, errNoConnection):
 			http.NotFound(w, r)
 		default:
 			httpx.InternalError(w, "sso", err)
@@ -445,7 +501,10 @@ func (h *ssoConnectionHandler) handleSSOEnforcementUpdate(w http.ResponseWriter,
 }
 
 var (
-	errEnforceNoConnection     = errors.New("sso: no connection to enforce")
+	// errNoConnection: the connection vanished between a handler's pre-read and
+	// its transaction. Shared by the enable/disable and enforce paths, which
+	// both re-read inside the tx and both answer 404.
+	errNoConnection            = errors.New("sso: no connection")
 	errEnforceNotEnabled       = errors.New("sso: connection not enabled")
 	errEnforceNotTested        = errors.New("sso: connection not tested")
 	errEnforceNoVerifiedDomain = errors.New("sso: no verified domain")

@@ -18,11 +18,21 @@ var allAccessActions = []string{
 	AccessActionInviteRevoked,
 	AccessActionCredentialSet,
 	AccessActionCredentialRemoved,
+	AccessActionSSOConnectionCreated,
+	AccessActionSSOConnectionEnabled,
+	AccessActionSSOConnectionDisabled,
+	AccessActionSSOEnforcementEnabled,
+	AccessActionSSOEnforcementDisabled,
+	AccessActionSSODomainClaimed,
+	AccessActionSSODomainVerified,
+	AccessActionSSODomainRemoved,
+	AccessActionSSOBreakGlassAdded,
+	AccessActionSSOBreakGlassRemoved,
 }
 
 func TestAccessActionsInCategory_PartitionsEveryAction(t *testing.T) {
 	seen := map[string]int{}
-	for _, cat := range []string{AccessCategoryMembership, AccessCategoryCredential} {
+	for _, cat := range []string{AccessCategoryMembership, AccessCategoryCredential, AccessCategoryPolicy} {
 		for _, a := range AccessActionsInCategory(cat) {
 			seen[a]++
 		}

@@ -10,6 +10,7 @@ import (
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -297,6 +298,19 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 		if err := bundle.Workspaces.Upsert(r.Context(), ws); err != nil {
 			return err
 		}
+		// Unconditional, including on a re-connect: the bot token is always
+		// re-submitted and re-Put above (there is no keep-current path for it),
+		// so every successful connect really is a bind or a rotation. The
+		// signing secret and app token may have been kept, but they are part of
+		// the same workspace credential — the row records the workspace, not
+		// which of its three secrets moved.
+		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialSet,
+			DetailJSON:  domain.AccessDetailSlackWorkspace(result.Team, result.TeamID, apiAppID),
+		}); err != nil {
+			return fmt.Errorf("audit slack connect: %w", err)
+		}
 		persisted, e = bundle.Workspaces.Get(r.Context(), orgID, result.TeamID, apiAppID)
 		return e
 	}); err != nil {
@@ -362,6 +376,18 @@ func (h *workspacesHandler) handleDelete(w http.ResponseWriter, r *http.Request)
 		existed = true
 		if e := bundle.Workspaces.Delete(r.Context(), orgID, workspaceID, apiAppID); e != nil {
 			return fmt.Errorf("delete workspace row: %w", e)
+		}
+		// Named from the row we just read, not from the path params: the
+		// workspace name is what the log is read for, and after this tx there
+		// is nothing left to resolve it from. Guarded by the ws == nil return
+		// above, so a delete of an absent workspace records no phantom
+		// revocation.
+		if e := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialRemoved,
+			DetailJSON:  domain.AccessDetailSlackWorkspace(ws.WorkspaceName, workspaceID, apiAppID),
+		}); e != nil {
+			return fmt.Errorf("audit slack disconnect: %w", e)
 		}
 		// Sweep the full keyset regardless of which refs this (workspace,
 		// app) pair actually populated — deleting an absent key is a

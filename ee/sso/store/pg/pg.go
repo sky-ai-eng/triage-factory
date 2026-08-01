@@ -385,23 +385,35 @@ func (s *ssoBreakGlassStore) List(ctx context.Context, orgID string) ([]ssostore
 	return out, rows.Err()
 }
 
-func (s *ssoBreakGlassStore) Add(ctx context.Context, orgID, userID string) error {
-	if _, err := s.app.ExecContext(ctx, `
+func (s *ssoBreakGlassStore) Add(ctx context.Context, orgID, userID string) (bool, error) {
+	// RETURNING yields no row on the DO NOTHING path, so sql.ErrNoRows IS the
+	// "already a principal" answer — the insert's own outcome, not a separate
+	// read that a concurrent Add could slip past.
+	var added bool
+	err := s.app.QueryRowContext(ctx, `
 		INSERT INTO sso_break_glass (org_id, user_id) VALUES ($1, $2)
 		ON CONFLICT (org_id, user_id) DO NOTHING
-	`, orgID, userID); err != nil {
-		return fmt.Errorf("add sso_break_glass: %w", err)
+		RETURNING true
+	`, orgID, userID).Scan(&added)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
 	}
-	return nil
+	if err != nil {
+		return false, fmt.Errorf("add sso_break_glass: %w", err)
+	}
+	return added, nil
 }
 
-func (s *ssoBreakGlassStore) RemoveGuarded(ctx context.Context, orgID, userID string) (blockedLast bool, err error) {
+func (s *ssoBreakGlassStore) RemoveGuarded(ctx context.Context, orgID, userID string) (removed, blockedLast bool, err error) {
 	// One statement so the enforced-check, count, presence, and delete all
 	// read a SINGLE snapshot — the lockout-safety invariant ("never
 	// enforced with zero break-glass") can't be raced. The DELETE fires
 	// UNLESS the org has an enforced connection AND this would drop the last
-	// principal. blocked_last is true exactly when the row was present but
-	// the guard prevented its removal. App pool — RLS-gated to org-admin.
+	// principal. removed is true exactly when a row went away; blocked_last is
+	// true exactly when the row was present but the guard prevented its
+	// removal. Both false is the no-such-principal case, which the caller must
+	// distinguish so it records no phantom revocation. App pool — RLS-gated to
+	// org-admin.
 	if err := s.app.QueryRowContext(ctx, `
 		WITH del AS (
 			DELETE FROM sso_break_glass
@@ -412,12 +424,13 @@ func (s *ssoBreakGlassStore) RemoveGuarded(ctx context.Context, orgID, userID st
 			  )
 			RETURNING 1
 		)
-		SELECT NOT EXISTS (SELECT 1 FROM del)
+		SELECT EXISTS (SELECT 1 FROM del),
+		       NOT EXISTS (SELECT 1 FROM del)
 		   AND EXISTS (SELECT 1 FROM sso_break_glass WHERE org_id = $1 AND user_id = $2)
-	`, orgID, userID).Scan(&blockedLast); err != nil {
-		return false, fmt.Errorf("remove sso_break_glass (guarded): %w", err)
+	`, orgID, userID).Scan(&removed, &blockedLast); err != nil {
+		return false, false, fmt.Errorf("remove sso_break_glass (guarded): %w", err)
 	}
-	return blockedLast, nil
+	return removed, blockedLast, nil
 }
 
 func (s *ssoBreakGlassStore) SeedOwnerIfEmpty(ctx context.Context, orgID string) error {

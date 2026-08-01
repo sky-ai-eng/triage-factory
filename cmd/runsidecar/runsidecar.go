@@ -22,6 +22,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -68,6 +69,15 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("mint per-run keypair: %w", err)
 	}
+
+	// The run's shared fake-GHE origin listener, bound by the broker on a
+	// privileged port this capless process cannot bind itself and passed down as
+	// an extra descriptor. Adopted here rather than in startProxies so its
+	// address is known before the proxies build their git config: the sandbox's
+	// git has to be routed at this very host for gh's repo inference to resolve.
+	// Absent (an older broker, or a bind that failed) leaves the gh channel on an
+	// ephemeral port of its own, which costs inference and nothing else.
+	rt.setSharedOriginListener(adoptSharedOriginListener())
 
 	// The supervision channel: the broker wired this process's stdin+stdout
 	// to a single duplex socket whose other end the orchestrator holds. Serve
@@ -116,6 +126,37 @@ type stdioChannel struct{}
 func (stdioChannel) Read(p []byte) (int, error)  { return os.Stdin.Read(p) }
 func (stdioChannel) Write(p []byte) (int, error) { return os.Stdout.Write(p) }
 func (stdioChannel) Close() error                { return nil }
+
+// adoptSharedOriginListener turns the descriptor the broker passed at
+// sandbox.SharedOriginListenerFD into a listener this process owns. Returns nil
+// when nothing was passed there, which is the only signal available — an unused
+// fd number is simply closed in the child, so the FileListener call is the test.
+//
+// Nil is a supported outcome, not an error: without the shared origin the gh
+// channel still works for `gh api` and any explicitly-scoped command, so a run
+// degrades to the pre-shared-origin behaviour rather than failing.
+func adoptSharedOriginListener() net.Listener {
+	// Confirm the descriptor is a socket BEFORE constructing an os.File over it.
+	// When the broker passed nothing, fd 3 is not merely empty — it is whatever
+	// the Go runtime allocated next (its netpoll epoll instance is the likely
+	// occupant, since stdio takes 0-2), and wrapping that in an os.File we then
+	// Close would tear out the runtime's own poller. fstat only reads.
+	var st syscall.Stat_t
+	if err := syscall.Fstat(sandbox.SharedOriginListenerFD, &st); err != nil ||
+		st.Mode&syscall.S_IFMT != syscall.S_IFSOCK {
+		sidecarLog.Info("no shared-origin listener passed; the gh channel will bind an ephemeral port and repo inference will not resolve")
+		return nil
+	}
+	f := os.NewFile(uintptr(sandbox.SharedOriginListenerFD), "shared-origin-listener")
+	ln, err := net.FileListener(f)
+	// FileListener dups the descriptor, so this copy is finished with either way.
+	_ = f.Close()
+	if err != nil {
+		sidecarLog.Warn("shared-origin descriptor is not a usable listener; the gh channel will bind an ephemeral port and repo inference will not resolve", "error", err)
+		return nil
+	}
+	return ln
+}
 
 // logBootLine emits one legibility boot line, the same shape cap-broker and
 // the orchestrator each log at startup: this process's uid and effective

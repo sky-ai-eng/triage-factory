@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -41,6 +42,13 @@ type credRuntime struct {
 	// conn is constructed (the conn needs this runtime as its Handler first).
 	conn *sidecarproto.Conn
 
+	// sharedOrigin is the run's fake-GHE origin listener, bound by the broker on
+	// a privileged port and handed down at launch. nil when none was passed, in
+	// which case the gh injector binds an ephemeral port itself and the sandbox's
+	// git keeps routing at the git proxy's own address. Set once at startup,
+	// before any request is served.
+	sharedOrigin net.Listener
+
 	mu         sync.Mutex
 	bundle     *credbundle.Bundle // newest unsealed bundle; nil until first seal
 	proxies    *agentproc.RunProxyHandle
@@ -67,6 +75,30 @@ func newCredRuntime() (*credRuntime, error) {
 // with this runtime as its Handler, so the runtime can't be handed the conn
 // at construction time).
 func (r *credRuntime) setConn(c *sidecarproto.Conn) { r.conn = c }
+
+// setSharedOriginListener adopts the broker-bound shared-origin listener (nil is
+// fine — see the field's doc). Called once at startup, before the supervision
+// channel serves anything.
+func (r *credRuntime) setSharedOriginListener(ln net.Listener) { r.sharedOrigin = ln }
+
+// sharedOriginHost is the host half of the shared origin's address — the value
+// GH_HOST is set to, and the host the sandbox's git is routed at. Empty when no
+// shared origin was passed.
+//
+// The PORT IS DROPPED, and that is the whole point: gh resolves a remote's host
+// with url.Hostname(), which strips the port, then compares it to GH_HOST
+// verbatim. Any port in GH_HOST makes that comparison unsatisfiable, so the
+// shared origin lives on 443 and names itself without one.
+func (r *credRuntime) sharedOriginHost() string {
+	if r.sharedOrigin == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(r.sharedOrigin.Addr().String())
+	if err != nil {
+		return ""
+	}
+	return host
+}
 
 // helloBody is the sidecar's opening announcement: its per-run public key,
 // base64-encoded, for the orchestrator to publish upward.
@@ -142,9 +174,21 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	}
 	r.mu.Unlock()
 
+	// The shared fake-GHE origin, when the broker bound one and this run is
+	// actually getting an injector on it. Resolved first because the git config
+	// the sandbox gets is decided inside StartRunProxies — and gated on the exact
+	// same condition the injector start below is, so the sandbox's git is never
+	// routed at a listener nothing ends up serving.
+	sharedOriginHost := ""
+	if ghChannelWanted(req) {
+		sharedOriginHost = r.sharedOriginHost()
+	}
+
 	var git *agentproc.GitProxyConfig
 	if req.GitEnabled {
 		git = r.gitProxyConfig(req.GitUpstream)
+		git.SharedOriginHost = sharedOriginHost
+		git.SharedOriginCAPath = agentproc.SandboxGHInjectorCertPath
 	}
 
 	handle, env, err := agentproc.StartRunProxies(ctx, req.HostVethIP, bundle.LLM, git, r.recordEgressDenial, r.llmSource, req.IdentityConfigPairs...)
@@ -187,11 +231,10 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 
 	// The real-gh credential-injector proxy: the TLS listener the sandboxed gh
 	// reaches via GH_HOST, injecting the team-set-scoped token upstream while the
-	// jail holds only a placeholder. Needs the run's identity for the per-run
-	// cert path (the orchestrator mounts the same path), so it rides AgentHost's
-	// RunID — a gh channel without a run identity is skipped rather than guessed.
-	if req.GHChannelEnabled && req.AgentHost != nil && req.AgentHost.RunID != "" {
-		host, token, gerr := r.startGHInjector(req.HostVethIP, req.GHChannelUpstream, req.AgentHost.RunID)
+	// jail holds only a placeholder — and, when the broker handed one down, the
+	// shared origin the sandbox's git was just routed at (see ghChannelWanted).
+	if ghChannelWanted(req) {
+		host, token, gerr := r.startGHInjector(req.HostVethIP, req.GHChannelUpstream, req.AgentHost.RunID, handle.GitHandler())
 		if gerr != nil {
 			_ = handle.Shutdown(ctx)
 			if r.githubAPI != nil {
@@ -272,7 +315,7 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 		return b.ProviderCreds(namespace)
 	}
 	srv := agenthost.NewServerWithRuntime(agenthost.NewRelayRuntime(r.conn, info, providerCreds), proxyCreds)
-	hd, _, err := agenthost.StartWithServer(srv, info.RunID)
+	hd, _, err := startAgentHostSocket(srv, info.RunID)
 	if err != nil {
 		return fmt.Errorf("runsidecar: start agenthost: %w", err)
 	}
@@ -280,15 +323,51 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 	return nil
 }
 
-// startGHInjector binds the real-gh credential-injector proxy on the veth IP:
-// generates the per-run self-signed TLS cert (private key stays here), writes
-// the public cert to the per-run path the orchestrator bind-mounts into the jail
+// The two privileged filesystem effects startProxies has, behind vars so a test
+// can drive the wiring around them. Both land under the root-only per-run socket
+// root (/run/tf) — one writes the injector's certificate there, the other binds
+// the exec-verb socket — so an unprivileged test process cannot take either path,
+// and a test that needs the surrounding logic has to stand in for them.
+//
+// The seams live here, in the consumer, deliberately: cmd/exec/agenthost resolves
+// those paths as constants and is the privileged side of this boundary. Making
+// its path resolution mutable so another package's test can retarget it would
+// trade a real invariant for test convenience.
+var (
+	writeInjectorCert    = agenthost.WriteInjectorCert
+	startAgentHostSocket = agenthost.StartWithServer
+)
+
+// ghChannelWanted reports whether this request gets a gh injector. It needs the
+// run's identity for the per-run cert path (the orchestrator mounts the same
+// path), so a gh channel without one is skipped rather than guessed.
+//
+// One predicate, two readers: the injector start and the git routing that has to
+// be decided before it. Splitting them would let the sandbox's git be pointed at
+// a shared origin no injector ever serves.
+func ghChannelWanted(req sidecarproto.StartProxiesBody) bool {
+	return req.GHChannelEnabled && req.AgentHost != nil && req.AgentHost.RunID != ""
+}
+
+// startGHInjector stands up the real-gh credential-injector proxy: generates the
+// per-run self-signed TLS cert (private key stays here), writes the public cert
+// to the per-run path the orchestrator bind-mounts into the jail
 // (agenthost.WriteInjectorCert), and serves TLS. The injector's TokenSource
 // reads the held bundle's single team-set-scoped CLIToken live, so a mid-run
 // re-seal is picked up; the observation callback relays the two artifact-bearing
-// mutations to the orchestrator (which writes the artifact row). Returns the
-// bound host:port (GH_HOST) and the per-run placeholder (GH_ENTERPRISE_TOKEN).
-func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string) (string, string, error) {
+// mutations to the orchestrator (which writes the artifact row).
+//
+// gitHandler is the run's git proxy handler, mounted behind the same listener so
+// one address serves the API and git smart-HTTP the way a real GHE host does.
+// nil (a run with no git proxy) leaves the listener API-only.
+//
+// Where it serves decides what GH_HOST can be. On the broker-bound shared origin
+// it takes that listener and reports the bare host, which is what lets gh match
+// a git remote against GH_HOST and infer the repo from a worktree. With no
+// shared origin it binds an ephemeral port of its own and reports host:port —
+// the channel still works for `gh api` and explicitly-scoped commands, and
+// inference stays broken exactly as it was.
+func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string, gitHandler http.Handler) (string, string, error) {
 	if upstream == "" {
 		upstream = "https://api.github.com"
 	}
@@ -301,16 +380,24 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string) (strin
 	// before that launch, so writing here is early enough. It carries the host's
 	// system roots plus this run's leaf, because SSL_CERT_FILE is process-global
 	// in the jail — see ghinjector.TrustBundlePEM for why that widens nothing.
-	if err := agenthost.WriteInjectorCert(runID, ghinjector.TrustBundlePEM(certPEM)); err != nil {
+	if err := writeInjectorCert(runID, ghinjector.TrustBundlePEM(certPEM)); err != nil {
 		return "", "", fmt.Errorf("runsidecar: write gh-injector cert: %w", err)
 	}
 	token, err := randomToken()
 	if err != nil {
 		return "", "", err
 	}
-	srv, err := ghinjector.New(r.ghInjectorConfig(upstream, cert, token))
+	srv, err := ghinjector.New(r.ghInjectorConfig(upstream, cert, token, gitHandler))
 	if err != nil {
 		return "", "", fmt.Errorf("runsidecar: construct gh injector: %w", err)
+	}
+	if ln := r.sharedOrigin; ln != nil {
+		if _, err := srv.Serve(ln); err != nil {
+			return "", "", fmt.Errorf("runsidecar: serve gh injector on the shared origin: %w", err)
+		}
+		r.ghInjector = srv
+		// The bare host, no port — see sharedOriginHost.
+		return r.sharedOriginHost(), token, nil
 	}
 	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
 	if err != nil {
@@ -325,15 +412,19 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string) (strin
 // team-set-scoped CLIToken live (so a mid-run re-seal is picked up), and the
 // two fire-and-forget callbacks relay to the orchestrator, which holds the DB.
 //
-// Split from startGHInjector because that function's cert write lands under the
-// privileged per-run socket root — so the wiring is only reachable to a test
-// through this seam.
-func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, token string) ghinjector.Config {
+// Split from startGHInjector so a test can assert on the wiring alone, without
+// the listener bring-up around it.
+func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, token string, gitHandler http.Handler) ghinjector.Config {
 	return ghinjector.Config{
 		Upstream:         upstream,
 		IncomingToken:    token,
 		Cert:             cert,
 		AllowNonLoopback: true,
+		// The run's git proxy, re-homed behind this listener so the API and git
+		// share one origin. Same handler as the standalone git-proxy listener:
+		// the ref gate and the base-branch push policy are unchanged, and the
+		// jail holds only the per-run placeholder on both halves.
+		GitHandler: gitHandler,
 		TokenSource: func(context.Context) (string, error) {
 			bundle := r.currentBundle()
 			if bundle == nil || bundle.GitHub == nil || bundle.GitHub.CLIToken == nil || bundle.GitHub.CLIToken.Token == "" {
@@ -587,5 +678,10 @@ func (r *credRuntime) shutdown(ctx context.Context) {
 	}
 	if ghInjector != nil {
 		_ = ghInjector.Shutdown(ctx)
+	} else if r.sharedOrigin != nil {
+		// Nothing ever served on the handed-down listener (this run wanted no gh
+		// channel), so its Shutdown never ran. Close it here rather than leaving
+		// the run's port held until the process exits.
+		_ = r.sharedOrigin.Close()
 	}
 }

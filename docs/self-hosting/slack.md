@@ -38,3 +38,20 @@ install — and subscribes the bot to these events:
   which back **engaged-thread follow-ups**: replies in a thread the bot already
   owns, with no re-@-mention required.
 
+
+## Auditing workspace connects
+
+Connecting or disconnecting a workspace is an org-credential change, so it lands
+in `access_change_log` and shows up under **Credential** in the Usage page's
+"Access & credential changes" band (org admin + the `governance` entitlement):
+
+- **Connect** → one `credential_set` row of kind `slack_workspace`, naming the
+  workspace and carrying its `workspace_id` / `api_app_id`. A re-connect records
+  again — the bot token has no keep-current path, so every successful connect is
+  a genuine bind or rotation.
+- **Disconnect** → one `credential_removed` row of the same kind.
+
+A connect binds up to three secrets (bot token, signing secret, app-level token),
+but they are acquired and swept as a unit, so they record as **one** row for the
+workspace rather than three. The row is written in the same transaction as the
+credential itself, so the log can't drift from what's actually stored.

@@ -26,6 +26,7 @@ func launchSidecar(ctx context.Context, cfg SidecarConfig) (LaunchedSidecar, err
 		ContainerID: containerID,
 		UID:         uid,
 		GID:         uid,
+		SubnetIdx:   cfg.SubnetIdx,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: %w", err)

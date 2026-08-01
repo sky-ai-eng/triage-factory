@@ -1301,7 +1301,8 @@ export interface AccessChangeRow {
 /** GET /api/usage/org/access-log — one page of the org-admin EE audit viewer
  *  (org admin + governance entitlement; 404 unlicensed). Newest-first; paginate
  *  via limit/offset and `has_more`. The `category` query narrows to membership vs
- *  credential changes. */
+ *  credential vs policy (SSO connection, enforcement, domains, break-glass)
+ *  changes. */
 export interface AccessLogResponse {
   items: AccessChangeRow[]
   limit: number

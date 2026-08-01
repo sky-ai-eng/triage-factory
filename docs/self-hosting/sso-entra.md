@@ -364,6 +364,26 @@ Still in progress (not configured here yet):
   uniqueness as the cross-org isolation guarantee.
 - **A "Configure SSO" admin UI** for the steps in Part 2.
 
+## Auditing SSO changes
+
+Every admin action on this surface is recorded to `access_change_log` and shows
+up under **Policy** in the Usage page's "Access & credential changes" band (org
+admin + the `governance` entitlement):
+
+| Action                          | Recorded as                                          |
+| ------------------------------- | ---------------------------------------------------- |
+| Register a connection           | `sso_connection_created`                             |
+| Enable / disable the connection | `sso_connection_enabled` / `sso_connection_disabled` |
+| Start / stop requiring SSO      | `sso_enforcement_enabled` / `sso_enforcement_disabled` |
+| Claim / verify / remove a domain | `sso_domain_claimed` / `_verified` / `_removed`      |
+| Add / remove a break-glass principal | `sso_break_glass_added` / `sso_break_glass_removed` |
+
+Each row is written in the same transaction as the change it describes, so the
+log can't drift from reality — the same contract JIT provisioning follows above.
+A save that changes nothing (re-enabling an already-enabled connection, a
+re-claim of a domain you already hold) writes no row, so the log counts real
+transitions rather than button presses.
+
 ## Troubleshooting
 
 - **`POST /api/sso/connection` returns 503 "SSO admin token not configured".**

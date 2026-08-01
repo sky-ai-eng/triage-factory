@@ -181,8 +181,18 @@ type SSOConnectionStore interface {
 // IsBreakGlass, email resolution).
 type SSOBreakGlassStore interface {
 	List(ctx context.Context, orgID string) ([]SSOBreakGlassPrincipal, error)
-	Add(ctx context.Context, orgID, userID string) error
-	RemoveGuarded(ctx context.Context, orgID, userID string) (blockedLast bool, err error)
+	// Add grants the exemption, reporting whether this call is what created it.
+	// Both mutations report what they actually changed because each composes
+	// with an access_change_log write in the caller's tx, and an audit row for
+	// a no-op is a phantom grant or revocation. The flags come from the
+	// statement itself rather than a read-then-write, so two concurrent calls
+	// can't both claim the change.
+	Add(ctx context.Context, orgID, userID string) (added bool, err error)
+	// RemoveGuarded drops the exemption unless doing so would leave an
+	// SSO-enforced org with none. removed is true only when a row was actually
+	// deleted; blockedLast is true when the row was present but the guard held
+	// it. Both false means there was nothing to remove.
+	RemoveGuarded(ctx context.Context, orgID, userID string) (removed, blockedLast bool, err error)
 	SeedOwnerIfEmpty(ctx context.Context, orgID string) error
 	IsBreakGlass(ctx context.Context, orgID, userID string) (bool, error)
 	ResolveVerifiedEmailMember(ctx context.Context, orgID, email string) (string, error)

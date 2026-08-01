@@ -94,6 +94,14 @@ func hostIP(idx uint8) string {
 	return fmt.Sprintf("%s.%d.1", subnetBase, idx)
 }
 
+// HostVethIP is hostIP's exported face, for the one caller outside this
+// package that has to derive the same address independently: the cap-broker,
+// which binds the run's shared-origin listener on it (see SharedOriginPort). It
+// derives rather than accepts an address for the same reason every other
+// broker-side value is derived — a bind address the orchestrator could name is
+// a bind address a compromised orchestrator could aim elsewhere.
+func HostVethIP(idx uint8) string { return hostIP(idx) }
+
 // sandboxIP returns the sandbox-side veth IP for index N — e.g. "10.42.7.2".
 func sandboxIP(idx uint8) string {
 	return fmt.Sprintf("%s.%d.2", subnetBase, idx)

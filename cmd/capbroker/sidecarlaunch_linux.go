@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
@@ -18,8 +19,58 @@ import (
 // the sidecar's stdin+stdout and closes the broker's copy, exactly like
 // launchRuntime does for runsc. A var so tests can substitute a stand-in
 // process instead of re-execing the real binary as a real setuid target.
-var launchSidecarProcess = func(ctx context.Context, containerID string, uid, gid int, stdio *os.File, stderr io.Writer) (supervisedRuntime, error) {
-	return sandbox.LaunchSidecarProcess(ctx, containerID, uid, gid, stdio, stderr)
+var launchSidecarProcess = func(ctx context.Context, containerID string, uid, gid int, stdio *os.File, extra []*os.File, stderr io.Writer) (supervisedRuntime, error) {
+	return sandbox.LaunchSidecarProcess(ctx, containerID, uid, gid, stdio, extra, stderr)
+}
+
+// sharedOriginListenAddr is the address the broker binds a run's shared origin
+// on: the host side of that run's veth, on the fixed shared-origin port. Derived
+// from the subnet index the launch params carry (and which
+// ValidateSidecarLaunchParams has already tied to the uid), never named by the
+// caller.
+//
+// A var only so a test can retarget it to loopback — binding a real veth IP
+// needs the run's network to exist and the port needs root, neither of which a
+// unit test has.
+var sharedOriginListenAddr = func(subnetIdx uint8) string {
+	return net.JoinHostPort(sandbox.HostVethIP(subnetIdx), strconv.Itoa(sandbox.SharedOriginPort))
+}
+
+// bindSharedOrigin binds the run's fake-GHE origin listener on
+// HostVethIP(subnetIdx):SharedOriginPort and returns it as a file to hand the
+// sidecar. The broker does this because 443 is privileged and the sidecar is
+// capless — the same reason the broker owns the netns and the veth themselves.
+// It is a *grant*, not a traffic role: the broker never accepts a connection on
+// this listener, never reads a byte through it, and hands over its only copy.
+//
+// The address is derived from the validated subnet index, never named by the
+// caller. Best-effort: a bind failure returns nil and the sidecar falls back to
+// an ephemeral port of its own, which costs gh's repo inference and nothing
+// else — never the run.
+func bindSharedOrigin(subnetIdx uint8) *os.File {
+	addr := sharedOriginListenAddr(subnetIdx)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		brokerLog.Warn("bind shared-origin listener failed; the run's gh channel will use an ephemeral port and lose repo inference",
+			"addr", addr, "error", err)
+		return nil
+	}
+	// File() dups the descriptor, so closing the listener afterwards leaves the
+	// socket alive on the dup we pass down — and leaves the broker holding
+	// nothing that could accept on it.
+	tcp, ok := ln.(*net.TCPListener)
+	if !ok {
+		_ = ln.Close()
+		return nil
+	}
+	f, err := tcp.File()
+	_ = tcp.Close()
+	if err != nil {
+		brokerLog.Warn("take shared-origin listener fd failed; the run's gh channel will use an ephemeral port and lose repo inference",
+			"addr", addr, "error", err)
+		return nil
+	}
+	return f
 }
 
 // launchSidecar is the broker's spec-owning launch for one run's
@@ -74,7 +125,15 @@ func (s *Server) launchSidecar(ctx context.Context, a launchSidecarArgs) (any, e
 		return nil, fmt.Errorf("capbroker: take sidecar stdio fd: %w", err)
 	}
 
-	rt, err := launchSidecarProcess(s.baseCtx, p.ContainerID, p.UID, p.GID, f, os.Stderr)
+	// The run's shared-origin listener, bound here because only this process
+	// can. nil when the bind failed — LaunchSidecarProcess takes an empty
+	// ExtraFiles and the sidecar falls back on its own ephemeral port.
+	var extra []*os.File
+	if origin := bindSharedOrigin(p.SubnetIdx); origin != nil {
+		extra = append(extra, origin)
+	}
+
+	rt, err := launchSidecarProcess(s.baseCtx, p.ContainerID, p.UID, p.GID, f, extra, os.Stderr)
 	_ = conn.Close()
 	if err != nil {
 		return nil, fmt.Errorf("capbroker: launch sidecar: %w", err)
