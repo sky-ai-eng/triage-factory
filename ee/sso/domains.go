@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/ee/sso/dnsoverride"
 	ssostore "github.com/sky-ai-eng/triage-factory/ee/sso/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
@@ -140,6 +142,15 @@ func (h *ssoDomainsHandler) handleDomainClaim(w http.ResponseWriter, r *http.Req
 		})
 		if e != nil {
 			return e
+		}
+		// Guarded by the existing-claim early return above, so re-claiming a
+		// domain the org already holds records nothing.
+		if e := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionSSODomainClaimed,
+			DetailJSON:  domain.AccessDetailSSODomain(domainName),
+		}); e != nil {
+			return fmt.Errorf("audit sso domain claim: %w", e)
 		}
 		created = true
 		resp = ssoDomainJSON{
@@ -280,6 +291,17 @@ func (h *ssoDomainsHandler) handleDomainVerify(w http.ResponseWriter, r *http.Re
 		if e := sso.Domains.SetVerified(r.Context(), orgID, id); e != nil {
 			return e
 		}
+		// Verification is the step that arms a domain for JIT provisioning —
+		// anyone with an address at it can auto-join from here — so it records
+		// separately from the claim. Guarded by the already-verified early
+		// return above, so a re-verify is silent.
+		if e := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionSSODomainVerified,
+			DetailJSON:  domain.AccessDetailSSODomain(claim.Domain),
+		}); e != nil {
+			return fmt.Errorf("audit sso domain verify: %w", e)
+		}
 		var e error
 		verified, e = sso.Domains.GetByID(r.Context(), orgID, id)
 		return e
@@ -324,7 +346,17 @@ func (h *ssoDomainsHandler) handleDomainDelete(w http.ResponseWriter, r *http.Re
 			return nil
 		}
 		existed = true
-		return sso.Domains.Delete(r.Context(), orgID, id)
+		if e := sso.Domains.Delete(r.Context(), orgID, id); e != nil {
+			return e
+		}
+		// Named from the row read above — after the delete there is nothing
+		// left to resolve the domain from, and the id alone would make the log
+		// unreadable.
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionSSODomainRemoved,
+			DetailJSON:  domain.AccessDetailSSODomain(claim.Domain),
+		})
 	}); err != nil {
 		httpx.InternalError(w, "sso", err)
 		return

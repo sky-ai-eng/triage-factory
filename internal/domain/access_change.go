@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // AccessChange is one row in access_change_log — a governance action that has
 // no external entity: org/team membership & role grants/changes/revokes, the
@@ -58,6 +61,29 @@ const (
 	AccessActionCredentialRemoved       = "credential_removed"
 )
 
+// SSO policy action discriminators. Declared here, in core, even though every
+// write-point lives in ee/sso — the same split as EventSlackMessage: an
+// out-of-core surface produces the rows, but core's audit viewer must render
+// them, and the open-core boundary points inward (core can never import ee). The
+// constants are the contract the two halves meet on.
+//
+// Enable/disable and enforce/unenforce get their own discriminators rather than
+// one action with a boolean in the detail, because the direction is the whole
+// point of the row: an admin scanning this log is looking for the moment access
+// widened, and the viewer tones a row on its action alone.
+const (
+	AccessActionSSOConnectionCreated   = "sso_connection_created"
+	AccessActionSSOConnectionEnabled   = "sso_connection_enabled"
+	AccessActionSSOConnectionDisabled  = "sso_connection_disabled"
+	AccessActionSSOEnforcementEnabled  = "sso_enforcement_enabled"
+	AccessActionSSOEnforcementDisabled = "sso_enforcement_disabled"
+	AccessActionSSODomainClaimed       = "sso_domain_claimed"
+	AccessActionSSODomainVerified      = "sso_domain_verified"
+	AccessActionSSODomainRemoved       = "sso_domain_removed"
+	AccessActionSSOBreakGlassAdded     = "sso_break_glass_added"
+	AccessActionSSOBreakGlassRemoved   = "sso_break_glass_removed"
+)
+
 // Access-change "source" values carried in an org_member_granted action's
 // DetailJSON {"source":...} when the grant was AUTOMATED rather than an
 // interactive invite-accept. The viewer uses it to render "joined via SSO"
@@ -78,6 +104,12 @@ const (
 // OAuth flow). No token is retained for it — the binding itself is the access
 // fact an admin audits ("this TF user acts as @login"), so it shares the
 // credential category rather than getting a third one.
+//
+// SlackWorkspace is the whole connected workspace, not one token: a Slack
+// connect binds a bot token and (per transport) a signing secret and app-level
+// token, and a disconnect sweeps all three together. They are acquired,
+// rotated, and destroyed as a unit from a single admin action, so they record
+// as one row — three rows per connect would be noise in a log an admin scans.
 const (
 	CredentialKindGitHubPAT      = "github_pat"
 	CredentialKindGitHubApp      = "github_app"
@@ -87,6 +119,7 @@ const (
 	CredentialKindJiraOAuthApp   = "jira_oauth_app"
 	CredentialKindAnthropicKey   = "anthropic_key"
 	CredentialKindBedrock        = "bedrock"
+	CredentialKindSlackWorkspace = "slack_workspace"
 )
 
 // AccessChangeListOpts bounds a ListByOrg read for the audit viewer (TFAC-484).
@@ -108,11 +141,20 @@ type AccessChangeListOpts struct {
 }
 
 // Access-change filter categories for the audit viewer (TFAC-484). The viewer
-// groups the action discriminators into two buckets so an org admin can narrow
-// the log to membership/role/ownership changes vs credential binds/rotations.
+// groups the action discriminators into buckets so an org admin can narrow the
+// log to membership/role/ownership changes vs credential binds/rotations vs
+// org-wide access policy.
+//
+// Policy is the bucket for changes that gate access without naming a member or
+// storing a secret — today the SSO connection lifecycle, its enforcement
+// switch, the verified domains that decide who auto-provisions, and the
+// break-glass exemptions from enforcement. Break-glass names a target user but
+// grants no membership: it exempts an existing member from the SSO requirement,
+// which is a property of the policy, not of their standing in the org.
 const (
 	AccessCategoryMembership = "membership"
 	AccessCategoryCredential = "credential"
+	AccessCategoryPolicy     = "policy"
 )
 
 // AccessActionsInCategory returns the action discriminators that make up a
@@ -138,7 +180,83 @@ func AccessActionsInCategory(category string) []string {
 		}
 	case AccessCategoryCredential:
 		return []string{AccessActionCredentialSet, AccessActionCredentialRemoved}
+	case AccessCategoryPolicy:
+		return []string{
+			AccessActionSSOConnectionCreated,
+			AccessActionSSOConnectionEnabled,
+			AccessActionSSOConnectionDisabled,
+			AccessActionSSOEnforcementEnabled,
+			AccessActionSSOEnforcementDisabled,
+			AccessActionSSODomainClaimed,
+			AccessActionSSODomainVerified,
+			AccessActionSSODomainRemoved,
+			AccessActionSSOBreakGlassAdded,
+			AccessActionSSOBreakGlassRemoved,
+		}
 	default:
 		return nil
 	}
+}
+
+// --- detail_json builders shared across the open-core boundary ---
+//
+// The audit row's detail payload is a contract between whoever writes the row
+// and the viewer that renders it. Where those two sit in different halves of
+// the open-core split — every ee write-point — the shape has to live somewhere
+// both can import, which is here. Core-only payloads (role changes, the invite
+// lifecycle, the SSO JIT grant) stay next to their write-points in the server
+// package; only the shapes ee produces are exported.
+
+// AccessDetailCredential builds the {kind, host?, name?} payload every
+// credential_set / credential_removed row carries. host and name are omitted
+// when empty — a host-less credential (an API key) and an unnamed one are both
+// ordinary.
+func AccessDetailCredential(kind, host, name string) string {
+	b, _ := json.Marshal(struct {
+		Kind string `json:"kind"`
+		Host string `json:"host,omitempty"`
+		Name string `json:"name,omitempty"`
+	}{Kind: kind, Host: host, Name: name})
+	return string(b)
+}
+
+// AccessDetailSlackWorkspace builds the credential payload for a Slack
+// workspace connect/disconnect. The workspace name is the handle an admin
+// recognizes, so it rides as the row's name; the two ids ride alongside because
+// the name is a Slack-side display string that can change (and two workspaces
+// may share one), while (workspace_id, api_app_id) is what actually identifies
+// the connection.
+func AccessDetailSlackWorkspace(name, workspaceID, apiAppID string) string {
+	b, _ := json.Marshal(struct {
+		Kind        string `json:"kind"`
+		Name        string `json:"name,omitempty"`
+		WorkspaceID string `json:"workspace_id,omitempty"`
+		APIAppID    string `json:"api_app_id,omitempty"`
+	}{
+		Kind:        CredentialKindSlackWorkspace,
+		Name:        name,
+		WorkspaceID: workspaceID,
+		APIAppID:    apiAppID,
+	})
+	return string(b)
+}
+
+// AccessDetailSSOConnection builds the payload for the SSO connection lifecycle
+// rows. The GoTrue provider id is the only durable handle on the connection —
+// the sso_connections row may be gone by the time the log is read.
+func AccessDetailSSOConnection(providerID string) string {
+	b, _ := json.Marshal(struct {
+		ProviderID string `json:"provider_id,omitempty"`
+	}{ProviderID: providerID})
+	return string(b)
+}
+
+// AccessDetailSSODomain builds the payload for the domain claim/verify/remove
+// rows. The domain itself is the fact being audited, and the row outlives the
+// sso_domains row it describes, so it is captured rather than referenced by id.
+func AccessDetailSSODomain(domain string) string {
+	b, _ := json.Marshal(struct {
+		Domain string `json:"domain,omitempty"`
+	}{Domain: domain})
+	return string(b)
 }

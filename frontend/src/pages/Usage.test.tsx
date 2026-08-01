@@ -742,4 +742,24 @@ describe('Usage access & credential change-log (EE governance)', () => {
       expect(fullUrls(fetchMock).some((u) => u.includes('category=credential'))).toBe(true),
     )
   })
+
+  it('offers the policy filter for the SSO governance rows', async () => {
+    roleMock.isAdmin = true
+    teamsMock.teams = []
+    entMock.governance = true
+    const fetchMock = stubUsageFetch({
+      '/api/usage/me': ME,
+      '/api/usage/org': ORG,
+      '/api/usage/org/access-log': ACCESS_LOG,
+    })
+
+    render(<Usage />)
+
+    expect(await screen.findByText('Access & credential changes')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Policy' }))
+
+    await waitFor(() =>
+      expect(fullUrls(fetchMock).some((u) => u.includes('category=policy'))).toBe(true),
+    )
+  })
 })

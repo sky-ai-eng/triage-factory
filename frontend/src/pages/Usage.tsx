@@ -1495,12 +1495,13 @@ function OrgSection({ since, days, gov }: { since: string; days: number; gov: bo
 
 const ACCESS_LOG_PAGE = 50
 
-type AccessCategory = '' | 'membership' | 'credential'
+type AccessCategory = '' | 'membership' | 'credential' | 'policy'
 
 const ACCESS_CATEGORIES: { key: AccessCategory; label: string }[] = [
   { key: '', label: 'All' },
   { key: 'membership', label: 'Membership' },
   { key: 'credential', label: 'Credential' },
+  { key: 'policy', label: 'Policy' },
 ]
 
 // fmtAccessTime renders an audit row's timestamp as a compact local date + time;
@@ -1522,11 +1523,19 @@ function fmtAccessTime(iso: string): string {
 // membership/role/ownership grants in the rust accent. Reuses the console's
 // semantic palette so a revocation reads apart from a grant at a glance, which
 // is the scan an admin actually does down this log.
+// The SSO policy rows follow the same rule, on what the change did to the
+// org's reach rather than to one member: disabling the connection, dropping a
+// verified domain, and pulling a break-glass exemption each take a way in away.
+// Requiring SSO is deliberately NOT here — it tightens the org, but the tone
+// tracks access removed, and no principal loses standing by it.
 const ACCESS_REVOCATIONS = new Set([
   'credential_removed',
   'org_member_revoked',
   'team_member_removed',
   'invite_revoked',
+  'sso_connection_disabled',
+  'sso_domain_removed',
+  'sso_break_glass_removed',
 ])
 
 function accessTone(action: string): string {
@@ -1535,7 +1544,7 @@ function accessTone(action: string): string {
   return 'var(--color-accent)'
 }
 
-// AccessCategoryFilter is the membership/credential toggle, styled like the
+// AccessCategoryFilter is the membership/credential/policy toggle, styled like the
 // window Channel (bare mono labels with a rust underline-tick on the active one)
 // — the Board's filter affordance at section scale.
 function AccessCategoryFilter({

@@ -236,6 +236,11 @@ type accessDetail struct {
 	// both builders write a "role" key, not "new_role".
 	Source string `json:"source"`
 	Role   string `json:"role"`
+	// Domain is the claimed/verified/removed domain on the sso_domain_* rows.
+	// The SSO connection rows' provider_id and the Slack credential row's ids
+	// are captured for the raw passthrough but not read here — no label needs
+	// them, and an opaque uuid would only make the line harder to scan.
+	Domain string `json:"domain"`
 }
 
 // accessChangeLabel renders one row's action + detail_json into the human
@@ -292,6 +297,26 @@ func accessChangeLabel(e domain.AccessChange, targetName, teamName string) strin
 		return credentialActionLabel("set the ", d)
 	case domain.AccessActionCredentialRemoved:
 		return credentialActionLabel("removed the ", d)
+	case domain.AccessActionSSOConnectionCreated:
+		return "registered an SSO connection"
+	case domain.AccessActionSSOConnectionEnabled:
+		return "enabled SSO"
+	case domain.AccessActionSSOConnectionDisabled:
+		return "disabled SSO"
+	case domain.AccessActionSSOEnforcementEnabled:
+		return "started requiring SSO for this org"
+	case domain.AccessActionSSOEnforcementDisabled:
+		return "stopped requiring SSO for this org"
+	case domain.AccessActionSSODomainClaimed:
+		return "claimed " + ssoDomainPhrase(d) + " for SSO"
+	case domain.AccessActionSSODomainVerified:
+		return "verified " + ssoDomainPhrase(d)
+	case domain.AccessActionSSODomainRemoved:
+		return "removed " + ssoDomainPhrase(d)
+	case domain.AccessActionSSOBreakGlassAdded:
+		return "added " + target + " as an SSO break-glass principal"
+	case domain.AccessActionSSOBreakGlassRemoved:
+		return "removed " + target + " from the SSO break-glass principals"
 	default:
 		// An unrecognized discriminator (forward-compat: the column has no CHECK)
 		// shows raw so the row still renders meaningfully.
@@ -308,6 +333,17 @@ func parseAccessDetail(raw string) accessDetail {
 	}
 	_ = json.Unmarshal([]byte(raw), &d)
 	return d
+}
+
+// ssoDomainPhrase names the domain an sso_domain_* row is about, degrading to a
+// bare noun when the detail didn't survive. Written as a whole phrase rather
+// than a fallback word so the generic case still reads as English ("removed a
+// domain", not "removed the domain a domain").
+func ssoDomainPhrase(d accessDetail) string {
+	if d.Domain == "" {
+		return "a domain"
+	}
+	return "the domain " + d.Domain
 }
 
 // credentialActionLabel renders a credential_set / credential_removed predicate
@@ -345,6 +381,8 @@ func credentialKindLabel(kind string) string {
 		return "Anthropic API key"
 	case domain.CredentialKindBedrock:
 		return "Bedrock credentials"
+	case domain.CredentialKindSlackWorkspace:
+		return "Slack workspace"
 	default:
 		return "credential"
 	}
