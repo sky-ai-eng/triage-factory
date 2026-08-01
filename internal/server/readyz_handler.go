@@ -247,13 +247,24 @@ func checkLabel(ok bool) string {
 	return "failed"
 }
 
-// countActiveRuns is the indexed COUNT backing the active_runs soft
-// signal. Both halves are derived, so both are index-backed: a delegation
-// conversation with no stored outcome is waiting or working (the partial
-// index on status IS NULL), and any conversation with an unreleased claim
-// has an engagement on it right now (idx_claims_one_active) — which is what
-// puts an in-flight curator turn in the count too. Dialect-neutral SQL: the
-// handler holds one *sql.DB and does not know which backend it is.
+// countActiveRuns is the indexed COUNT backing the active_runs soft signal:
+// work being driven, plus work waiting to be. Both halves are derived, so
+// both are index-backed.
+//
+// "Being driven" is an unreleased claim (idx_claims_one_active), on any
+// surface — which is what puts an in-flight curator turn in the count too.
+// "Waiting" is the needs-driving predicate, narrowed to delegation the way
+// this counter always was, and it must be spelled in FULL: a delegation
+// conversation parked at `open` that a follow-up message has woken is
+// claimable and displays as queued, so counting only the mid-flight (NULL)
+// arm would undercount exactly the runs an operator is watching for. This
+// query and internal/db's claim predicate have to agree about what "waiting"
+// means; they are two spellings of one definition, which is why the arms are
+// written out here rather than abbreviated.
+//
+// Dialect-neutral SQL: the handler holds one *sql.DB and does not know which
+// backend it is. `delivered = false` is the portable spelling (a boolean
+// column in Postgres, 0/1 under SQLite's BOOLEAN affinity).
 //
 // Reads s.db directly (the admin/system pool in multi mode, RLS-exempt)
 // rather than a team-scoped store — /readyz is pre-auth with no session
@@ -264,9 +275,17 @@ func (s *Server) countActiveRuns(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM conversations c
-		WHERE (c.type = 'delegation' AND c.status IS NULL)
-		   OR EXISTS (SELECT 1 FROM claims cl
+		WHERE EXISTS (SELECT 1 FROM claims cl
 		              WHERE cl.conversation_id = c.id AND cl.released_at IS NULL)
+		   OR (c.type = 'delegation'
+		       AND c.archived_at IS NULL
+		       AND (c.status IS NULL
+		            OR (c.status = 'open'
+		                AND EXISTS (SELECT 1 FROM messages m
+		                            WHERE m.conversation_id = c.id
+		                              AND m.delivered = false
+		                              AND m.role = 'user' AND m.subtype = ''
+		                              AND m.window_state = 'active'))))
 	`).Scan(&n)
 	return n, err
 }
