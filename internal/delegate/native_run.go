@@ -84,7 +84,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 
 	s.updatePhase(orgID, runID, cfg.claimID, domain.ClaimPhaseAgentStarting)
 	if ctx.Err() != nil {
-		return s.handleCancelled(liveParkContext{
+		return s.parkRunOpen(liveParkContext{
 			orgID:         orgID,
 			runID:         runID,
 			taskID:        task.ID,
@@ -92,7 +92,9 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 			claudeCwd:     claudeCwd,
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
-		}, cfg.claimID, "")
+			claimID:       cfg.claimID,
+			reason:        db.ParkStopped("user_cancelled", "Cancelled by user"),
+		}, "")
 	}
 
 	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
@@ -119,7 +121,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	conn, err := jail.Accept(ctx, toolHostDialTimeout)
 	if err != nil {
 		if ctx.Err() != nil {
-			return s.handleCancelled(liveParkContext{
+			return s.parkRunOpen(liveParkContext{
 				orgID:         orgID,
 				runID:         runID,
 				taskID:        task.ID,
@@ -127,7 +129,9 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 				claudeCwd:     claudeCwd,
 				triggerType:   triggerType,
 				creatorUserID: creatorUserID,
-			}, cfg.claimID, "")
+				claimID:       cfg.claimID,
+				reason:        db.ParkStopped("user_cancelled", "Cancelled by user"),
+			}, "")
 		}
 		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "connect to tool host: "+err.Error(), domain.RunFailureUnclassified)
 	}
@@ -520,7 +524,7 @@ func (s *Spawner) recordNativeResult(
 
 	switch result.Kind {
 	case agentloop.ResultCancelled:
-		return s.handleCancelled(liveParkContext{
+		return s.parkRunOpen(liveParkContext{
 			orgID:         orgID,
 			runID:         runID,
 			taskID:        task.ID,
@@ -528,7 +532,9 @@ func (s *Spawner) recordNativeResult(
 			claudeCwd:     claudeCwd,
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
-		}, cfg.claimID, "")
+			claimID:       cfg.claimID,
+			reason:        db.ParkStopped("user_cancelled", "Cancelled by user"),
+		}, "")
 
 	case agentloop.ResultFailed:
 		reason := "native agent loop failed"
@@ -541,7 +547,7 @@ func (s *Spawner) recordNativeResult(
 		// A guard stopped the engagement before a call. The conversation is
 		// resumable, so the snapshot must exist by the time the status
 		// commits — parkRunOpen owns that ordering.
-		s.parkRunOpen(liveParkContext{
+		_ = s.parkRunOpen(liveParkContext{
 			orgID:         orgID,
 			runID:         runID,
 			taskID:        task.ID,
@@ -549,6 +555,7 @@ func (s *Spawner) recordNativeResult(
 			claudeCwd:     claudeCwd,
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
+			reason:        db.ParkIdle(),
 		}, "")
 		return false
 	}

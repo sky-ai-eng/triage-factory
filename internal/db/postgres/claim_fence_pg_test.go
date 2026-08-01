@@ -242,7 +242,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		fx := newFenceFixture(t, h, "exec-fence-cancel")
 		reap(t, h.AdminDB, fx.orgID, fx.runID)
 
-		ok, err := fx.store.ParkCancelledIfActiveForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, "user_cancelled", "Run cancelled by user")
+		ok, err := fx.store.ParkOpenForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, db.ParkStopped("user_cancelled", "Run cancelled by user"))
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("park-cancelled after reap = (%v, %v), want ErrClaimReleased", ok, err)
 		}
@@ -254,7 +254,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		}
 		// The unfenced twin is what a user's cancel uses, and it still works
 		// on the same row — the fence gates the executor, not the person.
-		flipped, err := fx.store.ParkCancelledIfActiveSystem(ctx, fx.orgID, fx.runID, "user_cancelled", "Run cancelled by user")
+		flipped, err := fx.store.ParkOpenSystem(ctx, fx.orgID, fx.runID, db.ParkStopped("user_cancelled", "Run cancelled by user"))
 		if err != nil || !flipped {
 			t.Fatalf("unfenced user cancel = (%v, %v), want it to flip", flipped, err)
 		}
@@ -299,7 +299,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		if _, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, other, fx.claimID, string(domain.RunFailureCrash)); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("mark-failed on another conversation = %v, want ErrClaimReleased", err)
 		}
-		if _, err := fx.store.ParkCancelledIfActiveForClaimSystem(ctx, fx.orgID, other, fx.claimID, "user_cancelled", "Run cancelled by user"); !errors.Is(err, db.ErrClaimReleased) {
+		if _, err := fx.store.ParkOpenForClaimSystem(ctx, fx.orgID, other, fx.claimID, db.ParkStopped("user_cancelled", "Run cancelled by user")); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("park-cancelled on another conversation = %v, want ErrClaimReleased", err)
 		}
 		if err := fx.store.SetClaimPhaseSystem(ctx, fx.orgID, other, fx.claimID, "cloning"); !errors.Is(err, db.ErrClaimReleased) {

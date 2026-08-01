@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
@@ -192,14 +193,14 @@ func TestCancel_OpenStep_FinalizesBlueprintRun(t *testing.T) {
 	}
 }
 
-// TestHandleCancelled_ParksAndKeepsTheWorkspace is the cancel-costs-disk
+// TestParkRunOpen_StoppedKeepsTheWorkspace is the cancel-costs-disk
 // trade, pinned. The old cancel terminal removed the worktree on its way out,
 // which threw the workspace away at exactly the moment a user who just killed
 // a wedged run is most likely to want it back. Now the run parks `open`, the
 // snapshot is written BEFORE the flip (so a resume that lands without the warm
 // worktree can still rebuild it), and the warm tree is left for the
 // blueprint's own cleanup.
-func TestHandleCancelled_ParksAndKeepsTheWorkspace(t *testing.T) {
+func TestParkRunOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
 	s, database, runID, taskID := setupAdvanceFixture(t, "cancel-park")
@@ -214,15 +215,16 @@ func TestHandleCancelled_ParksAndKeepsTheWorkspace(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "work in progress")
 	namespace := blueprintRunIDForRun(t, database, runID)
 
-	if fenced := s.handleCancelled(liveParkContext{
+	if fenced := s.parkRunOpen(liveParkContext{
 		orgID:       runmode.LocalDefaultOrgID,
 		runID:       runID,
 		taskID:      taskID,
 		namespace:   namespace,
 		claudeCwd:   wtPath,
 		triggerType: "event",
-	}, "", ""); fenced {
-		t.Fatal("handleCancelled reported a fence trip on an unfenced store")
+		reason:      db.ParkStopped("system_cancelled", "Cancelled by system"),
+	}, ""); fenced {
+		t.Fatal("parkRunOpen reported a fence trip on an unfenced store")
 	}
 
 	var status, stopReason string
@@ -277,5 +279,45 @@ func TestCancel_AlreadyTerminal_LeavesBlueprintAlone(t *testing.T) {
 	}
 	if status != "running" || cancelRequested {
 		t.Errorf("blueprint = (%q, cancel_requested=%v), want (running, false) — a stale cancel must not stop the next step", status, cancelRequested)
+	}
+}
+
+// TestCancel_RetiredTerminal_LeavesRowAndBlueprintAlone is the upgraded-database
+// case of the stale-cancel guard. A row an older build cancelled is still
+// finished, so a cancel aimed at it must do nothing at all — not re-park the
+// row (an `open` row with input is claimable, so that would hand a long-dead
+// conversation back to the dispatcher), and not raise cancel_requested on a
+// blueprint that has since moved on.
+func TestCancel_RetiredTerminal_LeavesRowAndBlueprintAlone(t *testing.T) {
+	for _, retired := range []string{"cancelled", "task_unsolvable"} {
+		t.Run(retired, func(t *testing.T) {
+			database := newDelegateTestDB(t)
+			seedRun(t, database, "r-legacy", "sess-legacy", "/tmp/wt-legacy")
+			if _, err := database.Exec(`UPDATE conversations SET status = ? WHERE id = 'r-legacy'`, retired); err != nil {
+				t.Fatalf("seed legacy terminal: %v", err)
+			}
+			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+
+			if err := s.Cancel(runmode.LocalDefaultOrgID, "r-legacy", runmode.LocalDefaultUserID); err == nil {
+				t.Fatalf("expected 'no active run' on a %s row", retired)
+			}
+
+			var status, bpStatus string
+			var cancelRequested bool
+			if err := database.QueryRow(`SELECT status FROM conversations WHERE id = 'r-legacy'`).Scan(&status); err != nil {
+				t.Fatalf("read run: %v", err)
+			}
+			if status != retired {
+				t.Errorf("status = %q, want %q left untouched", status, retired)
+			}
+			if err := database.QueryRow(
+				`SELECT status, cancel_requested FROM blueprint_runs WHERE id = 'seedbpr-r-legacy'`,
+			).Scan(&bpStatus, &cancelRequested); err != nil {
+				t.Fatalf("read blueprint_run: %v", err)
+			}
+			if bpStatus != "running" || cancelRequested {
+				t.Errorf("blueprint = (%q, cancel_requested=%v), want (running, false)", bpStatus, cancelRequested)
+			}
+		})
 	}
 }

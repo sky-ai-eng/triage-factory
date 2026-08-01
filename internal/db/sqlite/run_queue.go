@@ -27,14 +27,31 @@ func newRunQueueStore(conn *sql.DB) db.RunQueueStore {
 
 var _ db.RunQueueStore = (*runQueueStore)(nil)
 
-// runTerminalStatusesSQL is the canonical set of terminal conversation
-// status values as a SQL IN-list body — two names, one owner each: the agent
-// concluded, or the infrastructure died. The reconcile sweep and the
-// orphaned-child park (blueprints.go) interpolate it instead of re-spelling
-// the literal, so the "non-terminal child" predicate has one definition.
-// Other queries that add dormant statuses (open/pending_approval) to this set
-// keep their own list.
-const runTerminalStatusesSQL = `'completed','failed'`
+// runTerminalStatusesSQL is every STORED conversation status that means the
+// run is over, as a SQL IN-list body. Two of the four are retired — this build
+// writes only 'completed' and 'failed' (domain.AllTerminalRunStatuses) — but
+// a database provisioned by an earlier build still holds rows carrying the
+// other two, and a predicate over existing rows has to recognize them or it
+// treats finished work as live.
+//
+// The direction of the mistake is what makes this worth a constant. Every
+// guard below is an exclusion (`status NOT IN (…)`), so a terminal left out of
+// the list doesn't fail closed — it silently readmits a run that ended months
+// ago to parking, cancelling, or the active-work counters. Mirrors
+// domain.AllStoredTerminalRunStatuses; the Go-side classifier that agrees with
+// it is domain.IsTerminalRunStatus.
+const runTerminalStatusesSQL = `'completed','failed','cancelled','task_unsolvable'`
+
+// runSettledStatusesSQL is runTerminalStatusesSQL plus 'pending_approval' —
+// the stored statuses no guard may disturb. pending_approval is retired too
+// (runs no longer park for approval), and it is here for exactly the same
+// reason: the rows exist, the agent process behind them exited long ago, and a
+// later restore can still surface their pending review.
+//
+// This is the "not live work" set. Every exclusion predicate in this package
+// interpolates it rather than re-spelling four-to-five literals, which is what
+// let the set drift a value at a time.
+const runSettledStatusesSQL = runTerminalStatusesSQL + `,'pending_approval'`
 
 // --- The needs-driving predicate ---------------------------------------
 //
@@ -586,6 +603,7 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 			UPDATE claims SET released_at = ?,
 			    outcome = CASE (SELECT c.status FROM conversations c WHERE c.id = claims.conversation_id)
 			        WHEN 'completed' THEN 'completed'
+			        WHEN 'cancelled' THEN 'cancelled'
 			        ELSE 'failed'
 			    END
 			WHERE released_at IS NULL

@@ -381,8 +381,8 @@ func keepJiraReassign(_ domain.Event, ctx closeContext, t domain.Task) bool {
 // Errors are logged and swallowed. "no active run" from the spawner is expected
 // when a run races us to natural completion between the DB lookup and the
 // cancel call — the run ends up terminal either way and the task close still
-// lands. Cancellation is fire-and-forget; handleCancelled writes the cancelled
-// status asynchronously.
+// lands. Cancellation is fire-and-forget; the run's own goroutine parks it
+// asynchronously.
 func (r *Router) cancelActiveRunsForTask(orgID, taskID string) {
 	if r.spawner == nil {
 		return

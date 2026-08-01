@@ -315,6 +315,12 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	activeClaim("ds-done-cl", "ds-done")
 	seedChild("ds-failed", "failed")
 	activeClaim("ds-failed-cl", "ds-failed")
+	// A RETIRED terminal an upgraded database still holds. It has to be healed
+	// like any other — otherwise its claim stays unreleased forever and the row
+	// reads as a live engagement — and its outcome has to stay 'cancelled',
+	// because that is what the row meant when it was written.
+	seedChild("ds-legacy-cancelled", "cancelled")
+	activeClaim("ds-legacy-cancelled-cl", "ds-legacy-cancelled")
 	// Mid-flight row with no claim: under the derived model this is simply
 	// a claimable conversation, so the sweep must leave it (and its stale
 	// placement stamp, which the next claim re-earns) alone.
@@ -331,8 +337,8 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReconcileOrphanedRuns: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("healed count = %d, want 2 (two released claims)", n)
+	if n != 3 {
+		t.Errorf("healed count = %d, want 3 (three released claims)", n)
 	}
 
 	claimState := func(id string) (released bool, outcome string) {
@@ -348,6 +354,9 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	}
 	if rel, out := claimState("ds-failed-cl"); !rel || out != "failed" {
 		t.Errorf("failed row's claim = (released=%v, outcome=%q), want (true, failed)", rel, out)
+	}
+	if rel, out := claimState("ds-legacy-cancelled-cl"); !rel || out != "cancelled" {
+		t.Errorf("legacy cancelled row's claim = (released=%v, outcome=%q), want (true, cancelled) — healing it as 'failed' would rewrite what the row meant", rel, out)
 	}
 	if got := childRunStatusDB(t, conn, "ds-stranded"); got != "" {
 		t.Errorf("mid-flight claimless row status = %q, want no stored status (already claimable)", got)

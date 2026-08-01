@@ -179,8 +179,8 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if err := stores.Conversations.SetExecutorSystem(ctx, orgID, runID, executorID, 1); err != nil {
 			t.Errorf("Conversations.SetExecutorSystem: %v", err)
 		}
-		if _, err := stores.Conversations.MarkOpenSystem(ctx, orgID, runID); err != nil {
-			t.Errorf("Conversations.MarkOpenSystem: %v", err)
+		if _, err := stores.Conversations.ParkOpenSystem(ctx, orgID, runID, db.ParkIdle()); err != nil {
+			t.Errorf("Conversations.ParkOpenSystem: %v", err)
 		}
 		if _, err := stores.Conversations.InsertMessageSystem(ctx, orgID, &domain.Message{
 			ConversationID: runID, Role: "assistant", Content: "hello", Subtype: "text",

@@ -45,7 +45,7 @@ func (f *fencedConversationStore) MarkFailedIfActiveForClaimSystem(context.Conte
 	return false, db.ErrClaimReleased
 }
 
-func (f *fencedConversationStore) ParkCancelledIfActiveForClaimSystem(context.Context, string, string, string, string, string) (bool, error) {
+func (f *fencedConversationStore) ParkOpenForClaimSystem(context.Context, string, string, string, db.Park) (bool, error) {
 	f.cancels++
 	return false, db.ErrClaimReleased
 }
@@ -209,13 +209,13 @@ func (p *phaseFencedStore) SetActiveClaimPhaseSystem(context.Context, string, st
 	return nil
 }
 
-// TestHandleCancelled_FenceTripRecordsNothing: the path a partition
+// TestParkRunOpen_CancelFenceTripRecordsNothing: the path a partition
 // self-fence trip drives every live run down. Killing the sandboxes cancels
 // each run's ctx, and each goroutine then arrives here to record its own
 // cancellation — so if the self-fence fired late, this is the write that
 // would bury a successor's live conversation. It must be refused, and
 // nothing around it may happen either.
-func TestHandleCancelled_FenceTripRecordsNothing(t *testing.T) {
+func TestParkRunOpen_CancelFenceTripRecordsNothing(t *testing.T) {
 	s, database, runID, _ := setupAdvanceFixture(t, "fence-cancelled")
 	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
 	s.agentRuns = stub
@@ -227,14 +227,16 @@ func TestHandleCancelled_FenceTripRecordsNothing(t *testing.T) {
 		t.Fatalf("seed worktree marker: %v", err)
 	}
 
-	fenced := s.handleCancelled(liveParkContext{
+	fenced := s.parkRunOpen(liveParkContext{
 		orgID:       runmode.LocalDefaultOrgID,
 		runID:       runID,
 		claudeCwd:   wt,
 		triggerType: "event",
-	}, "claim-1", "")
+		claimID:     "claim-1",
+		reason:      db.ParkStopped("user_cancelled", "Cancelled by user"),
+	}, "")
 	if !fenced {
-		t.Fatal("handleCancelled did not report the fence trip; runAgent would fall through to the unfenced disposition")
+		t.Fatal("parkRunOpen did not report the fence trip; runAgent would fall through to the unfenced disposition")
 	}
 	if stub.cancels != 1 {
 		t.Errorf("fenced cancellation park attempted %d times, want 1", stub.cancels)
@@ -252,17 +254,24 @@ func TestHandleCancelled_FenceTripRecordsNothing(t *testing.T) {
 	}
 }
 
-// TestParkCancelledAfterResume_FenceTripRecordsNothing: the resume path's
-// own self-cancel, same contract — and the workspace snapshot the successor
-// resumes from survives.
-func TestParkCancelledAfterResume_FenceTripRecordsNothing(t *testing.T) {
+// TestParkRunOpen_ResumeCancelFenceTripRecordsNothing: the resume path's own
+// self-cancel, same contract — and the workspace snapshot the successor
+// resumes from survives. It is the same park as every other stop now; what
+// this pins is that routing it through the fence (claimID set) still refuses.
+func TestParkRunOpen_ResumeCancelFenceTripRecordsNothing(t *testing.T) {
 	s, database, runID, _ := setupAdvanceFixture(t, "fence-resume-cancel")
 	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
 	s.agentRuns = stub
 
-	fenced := s.parkCancelledAfterResume(runmode.LocalDefaultOrgID, runID, "claim-1", "")
+	fenced := s.markRunOpen(liveParkContext{
+		orgID:       runmode.LocalDefaultOrgID,
+		runID:       runID,
+		triggerType: "manual",
+		claimID:     "claim-1",
+		reason:      db.ParkStopped("user_cancelled", "Run cancelled by user"),
+	})
 	if !fenced {
-		t.Fatal("parkCancelledAfterResume did not report the fence trip; the blueprint would be finalized off a successor's run")
+		t.Fatal("the resume cancel did not report the fence trip; the blueprint would be finalized off a successor's run")
 	}
 	if stub.cancels != 1 {
 		t.Errorf("fenced cancellation attempted %d times, want 1", stub.cancels)

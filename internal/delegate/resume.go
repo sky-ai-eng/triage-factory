@@ -213,50 +213,6 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *d
 	return ok
 }
 
-// parkCancelledAfterResume parks a run being resumed off the claim path
-// (Spawner.dispatchResumeClaim) back to `open` iff it is still non-terminal —
-// the resume-by-enqueue counterpart of the retired in-process goroutine's own
-// markCancelled closure. A registered s.cancels handle's Cancel() doesn't
-// touch the DB itself; the delivering claim owns the disposition any time it
-// observes its ctx cancelled.
-//
-// The snapshot the run parked with is deliberately kept. This is the same
-// workspace the resume was about to rehydrate into, and a cancel arriving mid-
-// resume is not a reason to destroy it — the blueprint's cancel terminal is
-// what records that the work stopped, and the retention TTL is what collects
-// the blob.
-//
-// claimID names the delivering engagement, so the write goes through the
-// claim fence: a resume whose executor was reaped mid-turn must not park the
-// conversation its successor has picked up. Empty keeps the unfenced write.
-// Returns fenced: true when the write was refused, in which case nothing was
-// written or broadcast.
-func (s *Spawner) parkCancelledAfterResume(orgID, runID, claimID, userID string) (fenced bool) {
-	cancelCtx := context.Background()
-	var ok bool
-	var mErr error
-	if claimID != "" {
-		ok, mErr = s.agentRuns.ParkCancelledIfActiveForClaimSystem(cancelCtx, orgID, runID, claimID, "user_cancelled", "Run cancelled by user")
-	} else {
-		mErr = s.tx.SyntheticClaimsWithTx(cancelCtx, orgID, userID, func(ts db.TxStores) error {
-			f, err := ts.Conversations.ParkCancelledIfActive(cancelCtx, orgID, runID, "user_cancelled", "Run cancelled by user")
-			ok = f
-			return err
-		})
-	}
-	if errors.Is(mErr, db.ErrClaimReleased) {
-		// A successor owns the conversation, so its disposition is not this
-		// engagement's to write.
-		delegateLog.Error("claim fence refused the resume cancellation — a successor owns this conversation; recording nothing",
-			"run", runID, "claim_id", claimID, "org_id", orgID, "error", mErr)
-		return true
-	}
-	if ok {
-		s.broadcastRunUpdate(orgID, runID, "open")
-	}
-	return false
-}
-
 // ResumeOptions configures a ResumeWithMessage invocation. Callers
 // populate these from the values they captured at the original run's
 // start, so a resume reuses the exact model / repo / tool context the run
@@ -530,7 +486,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	if out.err != nil && out.result == nil {
 		// The driver returns ctx.Err() directly when ctx triggered the kill
 		// before any completion was captured; preserve that shape so the
-		// resume goroutine's ctx.Err() check still routes through markCancelled.
+		// resume goroutine's ctx.Err() check still routes through the cancel park.
 		if ctx.Err() != nil {
 			return outcome, ctx.Err()
 		}

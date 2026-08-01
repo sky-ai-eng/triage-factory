@@ -282,7 +282,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// not abortable by shutdown. Nothing ran under this claim, so there is no
 	// workspace state to snapshot on the way down.
 	if br.Status != domain.BlueprintRunStatusRunning || br.CancelRequested {
-		if _, mErr := s.agentRuns.ParkCancelledIfActiveForClaimSystem(context.Background(), orgID, run.ID, run.ClaimID, "user_cancelled", "Blueprint cancelled by user"); errors.Is(mErr, db.ErrClaimReleased) {
+		if _, mErr := s.agentRuns.ParkOpenForClaimSystem(context.Background(), orgID, run.ID, run.ClaimID, db.ParkStopped("user_cancelled", "Blueprint cancelled by user")); errors.Is(mErr, db.ErrClaimReleased) {
 			// This claim was released before it disposed of its own step, so
 			// a successor holds the run now. Everything below acts on it —
 			// consuming its pending input, broadcasting its state, finalizing
@@ -615,7 +615,9 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		stepCancel()
 	}()
 	if stepCtx.Err() != nil {
-		disposed = s.parkCancelledAfterResume(orgID, run.ID, run.ClaimID, userID)
+		// No workspace rehydrated yet, so markRunOpen (the no-snapshot park)
+		// rather than parkRunOpen: there is nothing on disk to capture.
+		disposed = s.markRunOpen(resumeParkContext(orgID, run, task, userID))
 		return
 	}
 
@@ -688,7 +690,12 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		claimID:           run.ClaimID,
 	}, "manual", userID)
 	if stepCtx.Err() != nil {
-		disposed = s.parkCancelledAfterResume(orgID, run.ID, run.ClaimID, userID)
+		// The agent worked in the rehydrated tree before the kill, so this
+		// park snapshots it — the whole point of a stop being a park is that
+		// the work survives the gesture.
+		park := resumeParkContext(orgID, run, task, userID)
+		park.namespace, park.claudeCwd = namespace, resumeCwd
+		disposed = s.parkRunOpen(park, run.SessionID)
 		return
 	}
 	if rerr != nil {
@@ -719,6 +726,26 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	// The body owns the disposition now (re-parked, or finalized above),
 	// so the defer's re-finalize must not fire on top of it.
 	disposed = true
+}
+
+// resumeParkContext is the park a cancelled resume writes. A resume is always
+// user-initiated whatever the run's original trigger, so it routes as manual
+// under the resuming user; run.ClaimID puts the write through the claim fence,
+// because a resume whose executor was reaped mid-turn must not park the
+// conversation its successor has picked up.
+//
+// The caller fills namespace/claudeCwd when there is a workspace worth
+// snapshotting — see the two call sites, which differ on exactly that.
+func resumeParkContext(orgID string, run *domain.Conversation, task *domain.Task, userID string) liveParkContext {
+	return liveParkContext{
+		orgID:         orgID,
+		runID:         run.ID,
+		taskID:        task.ID,
+		triggerType:   "manual",
+		creatorUserID: userID,
+		claimID:       run.ClaimID,
+		reason:        db.ParkStopped("user_cancelled", "Run cancelled by user"),
+	}
 }
 
 // reactToStepTerminal is the blueprint state-machine reactor: given a step run

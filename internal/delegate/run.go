@@ -183,7 +183,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// agent has actually started — the pre-launch cancel below passes "" and
 	// snapshots a workspace with no transcript to carry.
 	cancelled := func(sessionID string) bool {
-		fenced := s.handleCancelled(liveParkContext{
+		fenced := s.parkRunOpen(liveParkContext{
 			orgID:         orgID,
 			runID:         runID,
 			taskID:        task.ID,
@@ -191,7 +191,9 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			claudeCwd:     cfg.wtPath,
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
-		}, cfg.claimID, sessionID)
+			claimID:       cfg.claimID,
+			reason:        db.ParkStopped("user_cancelled", "Cancelled by user"),
+		}, sessionID)
 		parked = true
 		return fenced
 	}
@@ -717,7 +719,7 @@ func (s *Spawner) processCompletion(
 	// it never takes this branch however envelope-shaped its text.
 	class, parsed := classifyAgentResult(completion.Result)
 	if !completion.IsError && class == turnNone {
-		s.parkRunOpen(liveParkContext{
+		_ = s.parkRunOpen(liveParkContext{
 			orgID:         orgID,
 			runID:         runID,
 			taskID:        task.ID,
@@ -725,6 +727,7 @@ func (s *Spawner) processCompletion(
 			claudeCwd:     claudeCwd,
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
+			reason:        db.ParkIdle(),
 		}, sessionID)
 		return true, false
 	}

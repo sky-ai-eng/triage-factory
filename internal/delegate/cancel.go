@@ -104,9 +104,9 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 
 	// No active goroutine — the run may be parked `open` with no subprocess to
 	// kill. Park it directly via DB.
-	// ParkCancelledIfActive's status-NOT-IN filter handles every non-terminal
-	// state, so this is also a defensive catch for any other "no goroutine but
-	// row not terminal" edge case.
+	// ParkOpen's status-NOT-IN filter handles every non-terminal state, so this
+	// is also a defensive catch for any other "no goroutine but row not
+	// terminal" edge case.
 	//
 	// We also have to drain the per-entity firing queue ourselves on
 	// terminal exit. The active-goroutine cancel paths drain via
@@ -138,8 +138,8 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 	// whichever executor holds the run — it even signals the remote owner
 	// best-effort above — so gating it on claim ownership would break the
 	// feature. The claim-fenced variants exist for the executor's own
-	// self-cancel (handleCancelled, parkCancelledAfterResume); do not route
-	// this path through them.
+	// self-park (parkRunOpen with a claim in scope, parkCancelledAfterResume);
+	// do not route this path through them.
 	//
 	// No snapshot is taken here: this path runs precisely when no live
 	// engagement exists, so either the run already parked (and snapshotted on
@@ -150,14 +150,18 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 		err     error
 	)
 	bgCtx := context.Background()
+	park := db.ParkStopped("user_cancelled", "Run cancelled by user")
+	if userID == "" {
+		park = db.ParkStopped("system_cancelled", "Run cancelled by system")
+	}
 	if userID != "" {
 		err = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, userID, func(ts db.TxStores) error {
-			f, mErr := ts.Conversations.ParkCancelledIfActive(bgCtx, orgID, runID, "user_cancelled", "Run cancelled by user")
+			f, mErr := ts.Conversations.ParkOpen(bgCtx, orgID, runID, park)
 			flipped = f
 			return mErr
 		})
 	} else {
-		flipped, err = s.agentRuns.ParkCancelledIfActiveSystem(bgCtx, orgID, runID, "system_cancelled", "Run cancelled by system")
+		flipped, err = s.agentRuns.ParkOpenSystem(bgCtx, orgID, runID, park)
 	}
 	if err != nil {
 		return fmt.Errorf("park cancelled run: %w", err)
@@ -179,70 +183,6 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 		s.notifyDrainer(orgID, triggerType, entityID)
 	}
 	return nil
-}
-
-// handleCancelled disposes of a run that exited via context cancel: it parks
-// the run `open` with its workspace intact rather than writing a terminal of
-// its own. The blueprint carries the cancellation (Spawner.Cancel raises
-// cancel_requested before the kill; the reactor finalizes off it), so what the
-// conversation records is only that it stopped without concluding.
-//
-// The park is why nothing is torn down here. The old cancel terminal removed
-// the worktree on its way out, which threw away the one thing a user who just
-// killed a wedged run is likely to want back. Now the snapshot is written
-// BEFORE the flip — the same ordering parkRunOpen uses, so a resume that lands
-// without the warm worktree can still rebuild it — the warm tree is left for
-// the blueprint's own cleanup, and the retention TTL is the reaper.
-//
-// claimID names the engagement writing this park. It matters more here than
-// anywhere else in the fenced set: killing every live sandbox is exactly what a
-// partition self-fence trip does, and each killed run's goroutine then arrives
-// here to record its own cancellation. If the self-fence fired late — the
-// failure this whole layer exists to backstop — that write would land on a
-// conversation the reaper has already handed to a successor. Empty claimID
-// keeps the unfenced write for paths with no claimed run in scope.
-//
-// Returns fenced: true when the park was refused. Nothing was recorded,
-// nothing was broadcast, and the workspace was left alone.
-func (s *Spawner) handleCancelled(park liveParkContext, claimID, sessionID string) (fenced bool) {
-	orgID, runID := park.orgID, park.runID
-	bgCtx := context.Background()
-
-	// Snapshot before the flip, best-effort — same contract as parkRunOpen.
-	// Skipped when there's no workspace yet (a cancel during setup, before the
-	// worktree exists), which snapshotWorkspace would reject anyway.
-	if park.claudeCwd != "" && park.namespace != "" {
-		if err := s.snapshotWorkspace(bgCtx, orgID, park.namespace, park.claudeCwd, sessionID); err != nil {
-			delegateLog.Warn("snapshot workspace for cancelled run before parking failed", "run_id", runID, "error", err)
-		}
-	}
-
-	var parkErr error
-	switch {
-	case claimID != "":
-		_, parkErr = s.agentRuns.ParkCancelledIfActiveForClaimSystem(bgCtx, orgID, runID, claimID, "user_cancelled", "Cancelled by user")
-	case park.triggerType == "manual":
-		parkErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, park.creatorUserID, func(ts db.TxStores) error {
-			_, pErr := ts.Conversations.ParkCancelledIfActive(bgCtx, orgID, runID, "user_cancelled", "Cancelled by user")
-			return pErr
-		})
-	default:
-		_, parkErr = s.agentRuns.ParkCancelledIfActiveSystem(bgCtx, orgID, runID, "system_cancelled", "Cancelled by system")
-	}
-	if errors.Is(parkErr, db.ErrClaimReleased) {
-		// A successor owns the conversation, so this run's cancellation is
-		// not its state to report. The workspace stays too — it may be the
-		// one that successor is running in.
-		delegateLog.Error("claim fence refused the cancellation park — a successor owns this conversation; recording nothing",
-			"run_id", runID, "claim_id", claimID, "org_id", orgID, "error", parkErr)
-		return true
-	}
-	if parkErr != nil {
-		delegateLog.Warn("failed to record cancellation", "run_id", runID, "error", parkErr)
-	}
-	s.broadcastRunUpdate(orgID, runID, "open")
-	s.recomputeTaskBoardColumn(orgID, park.taskID)
-	return false
 }
 
 // classifyFailureKind maps a runtime error from the agent process to

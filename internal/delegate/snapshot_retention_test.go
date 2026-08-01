@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -213,18 +214,18 @@ func TestListReapableSnapshotKeys_SharedBlueprintNeedsAllPastTTL(t *testing.T) {
 	}
 }
 
-// TestMarkOpenResuming_StampsAndClearsParkedAt pins the park-timestamp
-// lifecycle: MarkOpen stamps parked_at (so retention keys off the last park),
+// TestParkOpenResuming_StampsAndClearsParkedAt pins the park-timestamp
+// lifecycle: ParkOpen stamps parked_at (so retention keys off the last park),
 // the resume-by-enqueue flip clears it (the run is no longer parked).
-func TestMarkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
+func TestParkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
 	s, database, run, _ := setupAdvanceFixture(t, "parked-stamp")
 	ctx := context.Background()
 
-	if _, err := s.agentRuns.MarkOpen(ctx, runmode.LocalDefaultOrgID, run); err != nil {
-		t.Fatalf("MarkOpen: %v", err)
+	if _, err := s.agentRuns.ParkOpen(ctx, runmode.LocalDefaultOrgID, run, db.ParkIdle()); err != nil {
+		t.Fatalf("ParkOpen: %v", err)
 	}
 	if !parkedAtSet(t, database, run) {
-		t.Error("MarkOpen did not stamp parked_at")
+		t.Error("ParkOpen did not stamp parked_at")
 	}
 
 	if _, err := s.agentRuns.MarkQueuedForResume(ctx, runmode.LocalDefaultOrgID, run); err != nil {

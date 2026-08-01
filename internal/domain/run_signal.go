@@ -7,7 +7,7 @@ import "time"
 type RunSignalKind string
 
 const (
-	// RunSignalCancel hastens a live kill; the DB-only MarkCancelledIfActive
+	// RunSignalCancel hastens a live kill; the DB-only park
 	// write is already the source of truth and already works cross-pod, so
 	// this kind is fire-and-forget — never waited on.
 	RunSignalCancel RunSignalKind = "cancel"

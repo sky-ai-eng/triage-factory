@@ -73,6 +73,22 @@ const (
 	StatusFailed = "failed"
 )
 
+// The terminals this build no longer writes, and which a database provisioned
+// by an earlier one still holds. Nothing may emit these; everything that ASKS
+// "is this run over?" must still answer yes for them, because the rows are
+// real and the guards that protect them are all spelled as exclusions. That
+// asymmetry is the whole reason they keep names here rather than being deleted
+// outright: a retired value with no name gets left out of a NOT IN list by
+// accident, and the row it describes quietly becomes live again.
+const (
+	// StatusRetiredCancelled — the former third terminal. A stopped run parks
+	// `open` now; cancellation is spelled at the task and blueprint layers.
+	StatusRetiredCancelled = "cancelled"
+	// StatusRetiredTaskUnsolvable — the agent's self-reported "can't finish
+	// without a human". It never had a writer in the queue-driven model.
+	StatusRetiredTaskUnsolvable = "task_unsolvable"
+)
+
 // AllClaimPhases returns the claim `phase` vocabulary. Adding an entry here is
 // the deliberate cost of the closed-world classifier below: a new phase is a
 // decision about how the fleet console and the org-ops usage subset count it,
@@ -96,9 +112,21 @@ func IsClaimPhase(status string) bool {
 	return false
 }
 
-// AllTerminalRunStatuses returns the terminal display statuses.
+// AllTerminalRunStatuses returns the terminal display statuses this build
+// WRITES. It is the vocabulary the frontend mirror is checked against, so it
+// deliberately excludes the retired terminals: the UI should not grow arms for
+// states nothing can produce. Guards want AllStoredTerminalRunStatuses.
 func AllTerminalRunStatuses() []string {
 	return []string{StatusCompleted, StatusFailed}
+}
+
+// AllStoredTerminalRunStatuses returns every terminal a stored row may
+// actually carry — the written set plus the retired ones an upgraded database
+// still holds. This is what a predicate over EXISTING rows wants: "has this
+// run finished?" is a question about the data, not about what this build would
+// write today.
+func AllStoredTerminalRunStatuses() []string {
+	return []string{StatusCompleted, StatusFailed, StatusRetiredCancelled, StatusRetiredTaskUnsolvable}
 }
 
 // AllRunStatuses returns every value a displayed Conversation.Status may
@@ -110,13 +138,17 @@ func AllRunStatuses() []string {
 }
 
 // IsTerminalRunStatus reports whether status is a terminal run state — one the
-// run never leaves. NB failed runs are terminal regardless of failure_kind:
-// failure_kind is a *classification* of the failure (memory_limit / crash /
-// …) and is legitimately empty on an unclassified or legacy failed row, so a
-// failure count keys on status=="failed", never on a non-empty failure_kind.
+// run never leaves. It answers for STORED values, so the retired terminals
+// count: a row an older build cancelled is every bit as over as one this build
+// failed, and a guard that said otherwise would happily reopen it.
+//
+// NB failed runs are terminal regardless of failure_kind: failure_kind is a
+// *classification* of the failure (memory_limit / crash / …) and is
+// legitimately empty on an unclassified or legacy failed row, so a failure
+// count keys on status=="failed", never on a non-empty failure_kind.
 func IsTerminalRunStatus(status string) bool {
 	switch status {
-	case StatusCompleted, StatusFailed:
+	case StatusCompleted, StatusFailed, StatusRetiredCancelled, StatusRetiredTaskUnsolvable:
 		return true
 	}
 	return false
