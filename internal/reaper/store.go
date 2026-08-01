@@ -275,21 +275,16 @@ func (s *pgStore) DeleteStaleInstances(ctx context.Context, staleAfter time.Dura
 func (s *pgStore) HealClaimDesyncs(ctx context.Context) (int, error) {
 	// Duplicates internal/db/postgres's healClaimDesyncs SQL rather than
 	// importing it, keeping this package dialect-independent like the rest
-	// of the file (see pgUUIDArray's rationale) — including its span over the
-	// RETIRED terminals ('cancelled' / 'task_unsolvable'), which this build no
-	// longer writes but an upgraded database still holds. Skipping them would
-	// strand their dangling claims unreleased forever; mapping 'cancelled' to
-	// 'failed' would rewrite what those rows meant.
+	// of the file (see pgUUIDArray's rationale).
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE claims SET released_at = now(),
 		    outcome = CASE c.status
 		        WHEN 'completed' THEN 'completed'
-		        WHEN 'cancelled' THEN 'cancelled'
 		        ELSE 'failed'
 		    END
 		FROM conversations c
 		WHERE claims.conversation_id = c.id AND claims.released_at IS NULL
-		  AND c.status IN ('completed','failed','cancelled','task_unsolvable')
+		  AND c.status IN ('completed','failed')
 	`)
 	if err != nil {
 		return 0, err

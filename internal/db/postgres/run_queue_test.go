@@ -405,10 +405,6 @@ func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 	doneClaim := activeClaim(doneID)
 	failedID := seedChild("failed")
 	failedClaim := activeClaim(failedID)
-	// A RETIRED terminal an upgraded database still holds — healed like any
-	// other, with the outcome the row actually meant.
-	legacyID := seedChild("cancelled")
-	legacyClaim := activeClaim(legacyID)
 	// Mid-flight row with no claim: under the derived model this is simply
 	// a claimable conversation, so the sweep must leave it (and its stale
 	// placement stamp, which the next claim re-earns) alone.
@@ -423,8 +419,8 @@ func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReconcileOrphanedRuns: %v", err)
 	}
-	if n != 3 {
-		t.Errorf("healed count = %d, want 3 (three released claims)", n)
+	if n != 2 {
+		t.Errorf("healed count = %d, want 2 (two released claims)", n)
 	}
 
 	claimState := func(id string) (released bool, outcome string) {
@@ -441,9 +437,6 @@ func TestRunQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T) {
 	}
 	if rel, out := claimState(failedClaim); !rel || out != "failed" {
 		t.Errorf("failed row's claim = (released=%v, outcome=%q), want (true, failed)", rel, out)
-	}
-	if rel, out := claimState(legacyClaim); !rel || out != "cancelled" {
-		t.Errorf("legacy cancelled row's claim = (released=%v, outcome=%q), want (true, cancelled) — healing it as 'failed' would rewrite what the row meant", rel, out)
 	}
 	var strandedStatus sql.NullString
 	var pref any

@@ -34,30 +34,29 @@ func newRunQueueStore(conn *sql.DB) db.RunQueueStore {
 
 var _ db.RunQueueStore = (*runQueueStore)(nil)
 
-// runTerminalStatusesSQL is every STORED conversation status that means the
-// run is over, as a SQL IN-list body. Two of the four are retired — this build
-// writes only 'completed' and 'failed' (domain.AllTerminalRunStatuses) — but
-// a database provisioned by an earlier build still holds rows carrying the
-// other two, and a predicate over existing rows has to recognize them or it
-// treats finished work as live.
-//
-// The direction of the mistake is what makes this worth a constant. Every
-// guard below is an exclusion (`status NOT IN (…)`), so a terminal left out of
-// the list doesn't fail closed — it silently readmits a run that ended months
-// ago to parking, cancelling, or the active-work counters. Mirrors
-// domain.AllStoredTerminalRunStatuses; the Go-side classifier that agrees with
-// it is domain.IsTerminalRunStatus.
-const runTerminalStatusesSQL = `'completed','failed','cancelled','task_unsolvable'`
+// runTerminalStatusesSQL is the terminal conversation statuses as a SQL
+// IN-list body — two names, one owner each: the agent concluded, or the
+// infrastructure died. It describes stored rows as faithfully as new writes,
+// because the retired terminals were rewritten by migration rather than
+// carried forward (202608010002, SQLite; Postgres had no rows to migrate).
+// Mirrors domain.AllTerminalRunStatuses.
+const runTerminalStatusesSQL = `'completed','failed'`
 
 // runSettledStatusesSQL is runTerminalStatusesSQL plus 'pending_approval' —
-// the stored statuses no guard may disturb. pending_approval is retired too
-// (runs no longer park for approval), and it is here for exactly the same
-// reason: the rows exist, the agent process behind them exited long ago, and a
-// later restore can still surface their pending review.
+// the stored statuses no guard may disturb.
 //
-// This is the "not live work" set. Every exclusion predicate in this package
-// interpolates it rather than re-spelling four-to-five literals, which is what
-// let the set drift a value at a time.
+// pending_approval is the one retired status NOT migrated away, and the
+// difference is that those rows self-resolve: a human resolves the artifact
+// and the row retires itself, so they are dormant live work rather than
+// history that needs restating. Re-opening or re-failing one would destroy
+// something still in play.
+//
+// Every exclusion predicate in this package interpolates this rather than
+// re-spelling the literals. That matters more than the saved keystrokes: these
+// guards are exclusions (`status NOT IN (…)`), so a status missing from one
+// doesn't fail closed — it readmits a finished run to parking, cancelling, or
+// the active-work counters. Sixteen hand-copied copies is how the set drifted
+// a value at a time.
 const runSettledStatusesSQL = runTerminalStatusesSQL + `,'pending_approval'`
 
 // EnqueueRun mints a delegation conversation with NO status — the absence of
@@ -713,17 +712,8 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 // conversation flip and the claim release commit independently (tf_app holds
 // no claims UPDATE grant, so one atomic tx is structurally unavailable) and
 // the flip can land without the release. Release the claim, outcome mapped
-// from the status the same way the terminal writes map it.
-//
-// The status set and the outcome mapping both span the RETIRED terminals, and
-// for two different reasons. The set, because an upgraded database holds
-// 'cancelled' / 'task_unsolvable' conversations and one of them with a dangling
-// claim would otherwise never be healed — the claim stays unreleased forever,
-// which reads as a live engagement on a run that ended before this build
-// existed. The mapping, because those rows still mean what they meant when
-// they were written: a cancelled conversation releases its claim 'cancelled',
-// not 'failed'. Idempotent, and safe to run concurrently with healthy terminal
-// writes.
+// from the status the same way the terminal writes map it. Idempotent, and
+// safe to run concurrently with healthy terminal writes.
 //
 // The former second arm — an in-flight conversation whose claim released but
 // whose status flip rolled back, requeued by writing 'queued' — no longer
@@ -735,7 +725,6 @@ func healClaimDesyncs(ctx context.Context, q queryer) (released int, err error) 
 		UPDATE claims SET released_at = now(),
 		    outcome = CASE c.status
 		        WHEN 'completed' THEN 'completed'
-		        WHEN 'cancelled' THEN 'cancelled'
 		        ELSE 'failed'
 		    END
 		FROM conversations c

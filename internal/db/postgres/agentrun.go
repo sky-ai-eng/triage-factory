@@ -302,11 +302,10 @@ func (s *agentRunStore) ParkOpenForClaimSystem(ctx context.Context, orgID, runID
 // parkOpen is the one row-write behind every park — see
 // ConversationStore.ParkOpen for what `park` decides.
 //
-// The exclusion list is the settled set, which spans the RETIRED terminals:
-// without them a cancel aimed at a run an older build had already cancelled
-// would flip that row back to `open`, and an `open` row with undelivered input
-// is claimable. The guard is an exclusion, so a missing value readmits rather
-// than refuses.
+// The exclusion list is the settled set, and the guard is an exclusion — so a
+// status missing from it doesn't refuse, it readmits. An `open` row with
+// undelivered input is claimable, so a park that "succeeded" on a finished run
+// would hand it back to the dispatcher.
 //
 // COALESCE on stop_reason / result_summary rather than a bare assignment: an
 // idle park carries neither and must not blank what an earlier deliberate stop

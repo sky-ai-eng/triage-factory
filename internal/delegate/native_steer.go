@@ -34,16 +34,15 @@ func (s *Spawner) queueNativeMessage(ctx context.Context, orgID string, run doma
 	if !parked && !domain.IsActiveRunStatus(run.Status) && run.Status != "queued" {
 		return ErrRunNotSteerable
 	}
-	// A parked conversation nothing will claim can't be woken — refuse before
-	// writing the message rather than queue a row that sits forever.
-	if parked && !s.blueprintDrivableForResume(ctx, orgID, &run) {
-		return ErrRunNotSteerable
-	}
-	// A parked conversation whose workspace is gone for good can't be woken;
-	// refuse before writing anything so the caller sees the same 410 the SDK
-	// path returns rather than a row that dies at claim time.
+	// The same two structural refusals the SDK resume path applies, in the same
+	// most-permanent-first order, so both surfaces answer a given row
+	// identically. Both refuse BEFORE the message row is written: a queued
+	// message nothing will ever deliver is worse than a refusal.
 	if parked && !s.workspaceRecoverable(ctx, orgID, &run) {
 		return ErrWorkspaceExpired
+	}
+	if parked && !s.blueprintDrivableForResume(ctx, orgID, &run) {
+		return ErrConversationConcluded
 	}
 
 	pending := false

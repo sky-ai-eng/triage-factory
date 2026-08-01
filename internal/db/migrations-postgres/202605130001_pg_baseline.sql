@@ -1341,7 +1341,11 @@ CREATE TABLE public.conversations (
     -- are never read back for replay — sdk_session_id is truth for resume.
     runtime text DEFAULT 'sdk'::text NOT NULL,
     -- status is OUTCOME-OR-NOTHING: 'open' (a deliberate park), a terminal
-    -- ('completed' / 'failed' / 'cancelled' / 'task_unsolvable'), or NULL.
+    -- ('completed' — the agent concluded — or 'failed' — the infrastructure
+    -- died), or NULL. Stopping a run without concluding it is a park, not a
+    -- third terminal: cancellation is spelled at the task layer
+    -- (return-to-queue, drag-to-done) and the blueprint layer
+    -- (cancel_requested / blueprint_runs.status='cancelled').
     -- NULL is not "unknown" — it is the mid-flight state: either an active
     -- claim is driving the conversation right now, or its last claim
     -- released without an outcome and nobody has picked it up yet. "Queued"

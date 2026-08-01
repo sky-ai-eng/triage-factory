@@ -1006,44 +1006,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	// The retired terminals are the shape an upgraded database holds and this
-	// build can no longer produce. Every guard here is an exclusion, so
-	// forgetting them doesn't fail closed — it readmits a run that ended
-	// months ago. An `open` row with input is claimable, so a park that
-	// "succeeded" on one of these would hand a long-dead conversation back to
-	// the dispatcher.
-	t.Run("ParkOpen_RefusesRetiredTerminals", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		for _, retired := range []string{domain.StatusRetiredCancelled, domain.StatusRetiredTaskUnsolvable} {
-			t.Run(retired, func(t *testing.T) {
-				runID := seedConversationForTest(t, orgID, seed, retired)
-				if ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkStopped("user_cancelled", "x")); err != nil || ok {
-					t.Errorf("stop on a %s row: ok=%v err=%v, want false/nil", retired, ok, err)
-				}
-				if ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkIdle()); err != nil || ok {
-					t.Errorf("idle park on a %s row: ok=%v err=%v, want false/nil", retired, ok, err)
-				}
-				if got, _ := store.Get(ctx, orgID, runID); got.Status != retired {
-					t.Errorf("status = %q, want %q left untouched", got.Status, retired)
-				}
-			})
-		}
-	})
-
-	// Same set, same reason, on the infra-failure terminal: a legacy row must
-	// not be re-failed either.
-	t.Run("MarkFailedIfActive_RefusesRetiredTerminals", func(t *testing.T) {
-		store, orgID, _, seed := mk(t)
-		ctx := context.Background()
-		for _, retired := range []string{domain.StatusRetiredCancelled, domain.StatusRetiredTaskUnsolvable} {
-			runID := seedConversationForTest(t, orgID, seed, retired)
-			if ok, err := store.MarkFailedIfActive(ctx, orgID, runID, ""); err != nil || ok {
-				t.Errorf("fail a %s row: ok=%v err=%v, want false/nil", retired, ok, err)
-			}
-		}
-	})
-
 	t.Run("SetExecutorSystem_MintsUpdatesReleasesActiveClaim", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
