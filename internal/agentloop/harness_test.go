@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -49,6 +50,9 @@ func (t *memTranscript) ListForAssembly(_ context.Context, _, _ string) ([]domai
 		}
 		out = append(out, r)
 	}
+	// The store orders by COALESCE(seq, id); a re-seqed row must sort where
+	// its fraction puts it, not where it was inserted.
+	sort.SliceStable(out, func(i, j int) bool { return assemblyKey(out[i]) < assemblyKey(out[j]) })
 	return out, nil
 }
 
@@ -89,6 +93,82 @@ func (t *memTranscript) Insert(_ context.Context, _ string, msg *domain.Message)
 	t.rows = append(t.rows, row)
 	msg.ID = row.ID
 	return row.ID, nil
+}
+
+// Compact mirrors the store op: insert the optional reply row (forced
+// inactive), insert the result row, flip the span, re-seq undelivered rows
+// to fractions after the result row in their existing relative order.
+func (t *memTranscript) Compact(_ context.Context, _, conversationID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	insert := func(msg *domain.Message) {
+		row := *msg
+		row.ID = t.next
+		t.next++
+		if row.CreatedAt.IsZero() {
+			row.CreatedAt = time.Now().UTC()
+		}
+		row.ConversationID = conversationID
+		t.rows = append(t.rows, row)
+		msg.ID = row.ID
+	}
+	if replyRow != nil {
+		replyRow.WindowState = domain.MessageWindowInactive
+		insert(replyRow)
+	}
+	insert(resultRow)
+
+	want := make(map[int]struct{}, len(inactiveIDs))
+	for _, id := range inactiveIDs {
+		want[id] = struct{}{}
+	}
+	for i := range t.rows {
+		if _, ok := want[t.rows[i].ID]; ok {
+			t.rows[i].WindowState = domain.MessageWindowInactive
+		}
+	}
+
+	var queued []int
+	for i := range t.rows {
+		r := t.rows[i]
+		delivered := r.Delivered == nil || *r.Delivered
+		key := float64(r.ID)
+		if r.Seq != nil {
+			key = *r.Seq
+		}
+		if !delivered && key < float64(resultRow.ID) {
+			queued = append(queued, i)
+		}
+	}
+	for n, i := range queued {
+		seq := float64(resultRow.ID) + float64(n+1)/float64(len(queued)+1)
+		t.rows[i].Seq = &seq
+	}
+	return nil
+}
+
+// SettleCompactionRequest records the settlement so tests can assert the
+// failed attempt's accounting landed on the request row.
+func (t *memTranscript) SettleCompactionRequest(_ context.Context, _, _ string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := range t.rows {
+		if t.rows[i].ID != requestID {
+			continue
+		}
+		in, out, cr, cc := inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens
+		t.rows[i].InputTokens = &in
+		t.rows[i].OutputTokens = &out
+		t.rows[i].CacheReadTokens = &cr
+		t.rows[i].CacheCreationTokens = &cc
+		t.rows[i].CostUSD = costUSD
+		if t.rows[i].Metadata == nil {
+			t.rows[i].Metadata = map[string]any{}
+		}
+		t.rows[i].Metadata["compaction_failure"] = reason
+		return nil
+	}
+	return fmt.Errorf("settle: no row %d", requestID)
 }
 
 // snapshot returns a copy of every row, in insertion order.
@@ -291,6 +371,8 @@ func testParams() Params {
 		Model:          "claude-sonnet-4-5",
 		SystemPrompt:   "system",
 		HasBlueprint:   true,
+		// A delegation opens with a minted mission; compaction pins it.
+		MissionAnchored: true,
 	}
 }
 

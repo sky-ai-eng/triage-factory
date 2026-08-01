@@ -97,6 +97,12 @@ type Request struct {
 	Effort string
 	// MaxTokens caps the completion. Zero leaves it to the provider.
 	MaxTokens int
+	// ToolChoice pins the provider's tool policy for this call (a forced
+	// single-tool call). nil leaves the provider default (auto), which is
+	// what every conversational call sends — changing tool_choice
+	// invalidates the provider's messages cache, so only an out-of-band call
+	// that has already forfeited the cache may set this.
+	ToolChoice *schemas.ChatToolChoice
 	// IncludeUndelivered folds delivered=false rows into the assembled context
 	// (an injection point that wants the pending queue in-window). Off by
 	// default.
@@ -220,6 +226,9 @@ func buildChatRequest(req Request) (*schemas.BifrostChatRequest, error) {
 	}
 	if len(req.Tools) > 0 {
 		params.Tools = req.Tools
+	}
+	if req.ToolChoice != nil {
+		params.ToolChoice = req.ToolChoice
 	}
 	if req.Effort != "" {
 		effort := req.Effort
@@ -349,5 +358,45 @@ func bifrostError(e *schemas.BifrostError) error {
 	if e.Error != nil && e.Error.Type != nil && *e.Error.Type != "" {
 		fmt.Fprintf(&b, " [%s]", *e.Error.Type)
 	}
+	if isContextOverflowMessage(e.StatusCode, b.String()) {
+		return fmt.Errorf("%w: %s", ErrContextOverflow, b.String())
+	}
 	return errors.New(b.String())
+}
+
+// ErrContextOverflow classifies a provider rejection for context length: the
+// assembled prompt (plus max_tokens) does not fit the model's window. It is a
+// distinct class because the two callers must treat it opposite ways — the
+// retry classifier must NOT retry it (the same request can never succeed),
+// and the agent loop's compaction arm treats it as a trigger, not a failure.
+var ErrContextOverflow = errors.New("inference: context window exceeded")
+
+// contextOverflowMarkers are the provider spellings of the overflow class.
+// Anthropic says "prompt is too long: N tokens > M maximum" or "input length
+// and `max_tokens` exceed context limit"; OpenAI-compatible providers say
+// "context_length_exceeded" (error code) or "maximum context length".
+var contextOverflowMarkers = []string{
+	"prompt is too long",
+	"context_length_exceeded",
+	"maximum context length",
+	"input length and `max_tokens` exceed",
+}
+
+// isContextOverflowMessage matches the flattened provider error against the
+// overflow class. The status gate keeps a marker string quoted inside some
+// other failure (a 500 whose body echoes a prior request) from
+// classifying: overflow is an invalid-request rejection, so any status other
+// than 400 disqualifies. A nil status (a mid-stream error chunk with no HTTP
+// code attached) falls through to the markers alone.
+func isContextOverflowMessage(status *int, msg string) bool {
+	if status != nil && *status != 400 {
+		return false
+	}
+	lower := strings.ToLower(msg)
+	for _, m := range contextOverflowMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
 }

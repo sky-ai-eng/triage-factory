@@ -1267,6 +1267,157 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	t.Run("CompactForClaimSystem_CommitsResultFlipsSpanAndReseqsQueue", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-compact", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, runID)[0].ID
+
+		insert := func(msg domain.Message) int {
+			id, err := store.InsertMessageForClaimSystem(ctx, orgID, claimID, &msg)
+			if err != nil {
+				t.Fatalf("insert fixture row: %v", err)
+			}
+			return int(id)
+		}
+		pending := false
+		openingID := insert(domain.Message{ConversationID: runID, Role: "user", Content: "the mission"})
+		assistantID := insert(domain.Message{ConversationID: runID, Role: "assistant", Content: "working"})
+		toolID := insert(domain.Message{ConversationID: runID, Role: "tool", ToolCallID: "t1", Content: "big result"})
+		requestID := insert(domain.Message{ConversationID: runID, Role: "user",
+			Subtype: domain.MessageSubtypeInjectionCompactionRequest, Content: "please compact"})
+		// Two rows queued before the compaction commits — the ordering
+		// contract says they must land AFTER the summary despite their
+		// smaller ids, in their existing relative order.
+		queuedA := insert(domain.Message{ConversationID: runID, Role: "user", Content: "queued first", Delivered: &pending})
+		queuedB := insert(domain.Message{ConversationID: runID, Role: "user", Content: "queued second", Delivered: &pending})
+
+		replyRow := &domain.Message{Role: "assistant", Content: "<analysis>a</analysis>\n\n<summary>s</summary>", Model: "claude-haiku-4-5"}
+		resultRow := &domain.Message{Role: "user",
+			Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "the summary"}
+		span := []int{assistantID, toolID, requestID}
+		if err := store.CompactForClaimSystem(ctx, orgID, runID, claimID, replyRow, resultRow, span); err != nil {
+			t.Fatalf("CompactForClaimSystem: %v", err)
+		}
+		if replyRow.ID == 0 || resultRow.ID == 0 {
+			t.Fatalf("assigned ids not written back: reply=%d result=%d", replyRow.ID, resultRow.ID)
+		}
+
+		// Assembly: the pinned opening survives, the span and the reply are
+		// gone, the result row is present, and the queued rows sort after it.
+		window, err := store.ListForAssemblySystem(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("ListForAssemblySystem: %v", err)
+		}
+		var order []int
+		for _, m := range window {
+			order = append(order, m.ID)
+		}
+		want := []int{openingID, resultRow.ID, queuedA, queuedB}
+		if len(order) != len(want) {
+			t.Fatalf("assembly window ids = %v, want %v", order, want)
+		}
+		for i := range want {
+			if order[i] != want[i] {
+				t.Fatalf("assembly window ids = %v, want %v", order, want)
+			}
+		}
+
+		// The queued fractions live strictly between resultID and resultID+1,
+		// preserving relative order — so a row inserted after the commit sorts
+		// after them by its integer id alone.
+		byID := map[int]domain.Message{}
+		for _, m := range window {
+			byID[m.ID] = m
+		}
+		seqA, seqB := byID[queuedA].Seq, byID[queuedB].Seq
+		if seqA == nil || seqB == nil {
+			t.Fatalf("queued rows not re-seqed: a=%v b=%v", seqA, seqB)
+		}
+		lo, hi := float64(resultRow.ID), float64(resultRow.ID)+1
+		if !(*seqA > lo && *seqA < *seqB && *seqB < hi) {
+			t.Fatalf("queued seqs = (%v, %v), want ascending within (%v, %v)", *seqA, *seqB, lo, hi)
+		}
+
+		// Display: compacted history stays visible (delivered + inactive), and
+		// the reconstructed reply row renders like any other row.
+		display, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		var sawReply, sawAssistant bool
+		for _, m := range display {
+			if m.ID == replyRow.ID {
+				sawReply = true
+				if m.WindowState != domain.MessageWindowInactive {
+					t.Errorf("reply row window_state = %q, want inactive", m.WindowState)
+				}
+				if m.Model != "claude-haiku-4-5" {
+					t.Errorf("reply row model = %q, want the cheap model attribution", m.Model)
+				}
+			}
+			if m.ID == assistantID {
+				sawAssistant = true
+				if m.WindowState != domain.MessageWindowInactive {
+					t.Errorf("span row window_state = %q, want inactive", m.WindowState)
+				}
+			}
+		}
+		if !sawReply || !sawAssistant {
+			t.Fatalf("display read lost compacted history: reply=%v assistant=%v", sawReply, sawAssistant)
+		}
+	})
+
+	t.Run("SettleCompactionRequestForClaimSystem_StampsUsageCostAndReason", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-settle", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		claimID := seed.ClaimRows(t, runID)[0].ID
+		reqID, err := store.InsertMessageForClaimSystem(ctx, orgID, claimID, &domain.Message{
+			ConversationID: runID, Role: "user",
+			Subtype: domain.MessageSubtypeInjectionCompactionRequest, Content: "please compact",
+		})
+		if err != nil {
+			t.Fatalf("insert request row: %v", err)
+		}
+
+		// Exactly representable in binary: messages.cost_usd is float4 on
+		// Postgres, and a value like 0.42 would come back off by float32
+		// rounding — a dialect fact, not a store bug.
+		cost := 0.25
+		if err := store.SettleCompactionRequestForClaimSystem(ctx, orgID, runID, claimID,
+			int(reqID), 150000, 900, 140000, 2000, &cost, "tool-calls-in-reply"); err != nil {
+			t.Fatalf("SettleCompactionRequestForClaimSystem: %v", err)
+		}
+
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil || len(msgs) != 1 {
+			t.Fatalf("Messages = %v (err %v), want the one request row", msgs, err)
+		}
+		got := msgs[0]
+		if got.InputTokens == nil || *got.InputTokens != 150000 ||
+			got.OutputTokens == nil || *got.OutputTokens != 900 ||
+			got.CacheReadTokens == nil || *got.CacheReadTokens != 140000 ||
+			got.CacheCreationTokens == nil || *got.CacheCreationTokens != 2000 {
+			t.Errorf("usage = (%v %v %v %v), want the failed attempt settled",
+				got.InputTokens, got.OutputTokens, got.CacheReadTokens, got.CacheCreationTokens)
+		}
+		if got.CostUSD == nil || *got.CostUSD != cost {
+			t.Errorf("cost_usd = %v, want %v", got.CostUSD, cost)
+		}
+		if got.Metadata["compaction_failure"] != "tool-calls-in-reply" {
+			t.Errorf("metadata = %v, want compaction_failure recorded", got.Metadata)
+		}
+	})
+
 	t.Run("MarkCancelledIfActiveForClaimSystem_FlipsAndReleasesLikeItsUnfencedTwin", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

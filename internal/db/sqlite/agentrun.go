@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1197,6 +1198,112 @@ func (s *agentRunStore) markDelivered(ctx context.Context, orgID, runID string, 
 		}
 	}
 	return nil
+}
+
+// CompactForClaimSystem commits one compaction atomically — see the interface
+// doc for the full contract. Unfenced on this dialect like every ForClaim
+// write (see the claim-fence block above); the claim id is attribution.
+func (s *agentRunStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	return inTx(ctx, s.q, func(q queryer) error {
+		txStore := &agentRunStore{q: q}
+		if replyRow != nil {
+			replyRow.ConversationID = conversationID
+			replyRow.ClaimID = claimID
+			replyRow.WindowState = domain.MessageWindowInactive
+			id, err := txStore.InsertMessage(ctx, orgID, replyRow)
+			if err != nil {
+				return fmt.Errorf("insert compaction reply row: %w", err)
+			}
+			replyRow.ID = int(id)
+		}
+		resultRow.ConversationID = conversationID
+		resultRow.ClaimID = claimID
+		resultID, err := txStore.InsertMessage(ctx, orgID, resultRow)
+		if err != nil {
+			return fmt.Errorf("insert compaction result row: %w", err)
+		}
+		resultRow.ID = int(resultID)
+
+		for _, chunk := range chunkIDs(intIDsToStrings(inactiveIDs)) {
+			placeholders := make([]string, len(chunk))
+			args := make([]any, 0, len(chunk)+1)
+			args = append(args, conversationID)
+			for i, id := range chunk {
+				placeholders[i] = "?"
+				args = append(args, id)
+			}
+			if _, err := q.ExecContext(ctx, `
+				UPDATE messages SET window_state = 'inactive'
+				WHERE conversation_id = ? AND id IN (`+strings.Join(placeholders, ",")+`)
+			`, args...); err != nil {
+				return fmt.Errorf("flip compacted span: %w", err)
+			}
+		}
+
+		rows, err := q.QueryContext(ctx, `
+			SELECT id FROM messages
+			WHERE conversation_id = ? AND delivered = 0 AND COALESCE(seq, id) < ?
+			ORDER BY COALESCE(seq, id) ASC
+		`, conversationID, float64(resultID))
+		if err != nil {
+			return fmt.Errorf("read queued rows for re-seq: %w", err)
+		}
+		queued, err := scanIntIDs(rows)
+		if err != nil {
+			return err
+		}
+		for i, id := range queued {
+			seq := float64(resultID) + float64(i+1)/float64(len(queued)+1)
+			if _, err := q.ExecContext(ctx, `
+				UPDATE messages SET seq = ? WHERE conversation_id = ? AND id = ?
+			`, seq, conversationID, id); err != nil {
+				return fmt.Errorf("re-seq queued row %d: %w", id, err)
+			}
+		}
+		return nil
+	})
+}
+
+func intIDsToStrings(ids []int) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = strconv.Itoa(id)
+	}
+	return out
+}
+
+func scanIntIDs(rows *sql.Rows) ([]int, error) {
+	defer rows.Close()
+	var ids []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// SettleCompactionRequestForClaimSystem records a discarded warm attempt on
+// the request row — see the interface doc. Unfenced on this dialect.
+func (s *agentRunStore) SettleCompactionRequestForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE messages
+		SET input_tokens = ?, output_tokens = ?,
+		    cache_read_tokens = ?, cache_creation_tokens = ?,
+		    cost_usd = ?,
+		    metadata = json_set(COALESCE(metadata, '{}'), '$.compaction_failure', ?)
+		WHERE conversation_id = ? AND id = ?
+	`, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens,
+		sqliteNullFloat(costUSD), reason, conversationID, requestID)
+	return err
 }
 
 // SetWindowStateSystem is the elision/compaction primitive: a batched range flip of

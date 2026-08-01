@@ -1318,6 +1318,104 @@ func (s *agentRunStore) MarkDeliveredForClaimSystem(ctx context.Context, orgID, 
 	})
 }
 
+// CompactForClaimSystem commits one compaction atomically, behind the fence —
+// see the interface doc for the full contract. The re-seq reads the queued
+// rows inside the same transaction that inserts the result row, so the
+// fractions are computed against a queue no concurrent enqueue can reorder
+// under it: a row inserted after this transaction commits carries an id
+// greater than the result row's and sorts after every fraction on its own.
+func (s *agentRunStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		if replyRow != nil {
+			replyRow.ConversationID = conversationID
+			replyRow.ClaimID = claimID
+			replyRow.WindowState = domain.MessageWindowInactive
+			id, err := insertRunMessage(ctx, q, orgID, replyRow)
+			if err != nil {
+				return fmt.Errorf("insert compaction reply row: %w", err)
+			}
+			replyRow.ID = int(id)
+		}
+		resultRow.ConversationID = conversationID
+		resultRow.ClaimID = claimID
+		resultID, err := insertRunMessage(ctx, q, orgID, resultRow)
+		if err != nil {
+			return fmt.Errorf("insert compaction result row: %w", err)
+		}
+		resultRow.ID = int(resultID)
+
+		if len(inactiveIDs) > 0 {
+			if _, err := q.ExecContext(ctx, `
+				UPDATE messages SET window_state = 'inactive'
+				WHERE org_id = $1 AND conversation_id = $2 AND id = ANY($3)
+			`, orgID, conversationID, pgIntArray(inactiveIDs)); err != nil {
+				return fmt.Errorf("flip compacted span: %w", err)
+			}
+		}
+
+		rows, err := q.QueryContext(ctx, `
+			SELECT id FROM messages
+			WHERE org_id = $1 AND conversation_id = $2
+			  AND delivered = false
+			  AND COALESCE(seq, (id)::double precision) < $3
+			ORDER BY COALESCE(seq, (id)::double precision) ASC
+		`, orgID, conversationID, float64(resultID))
+		if err != nil {
+			return fmt.Errorf("read queued rows for re-seq: %w", err)
+		}
+		queued, err := scanIntIDs(rows)
+		if err != nil {
+			return err
+		}
+		for i, id := range queued {
+			seq := float64(resultID) + float64(i+1)/float64(len(queued)+1)
+			if _, err := q.ExecContext(ctx, `
+				UPDATE messages SET seq = $1 WHERE org_id = $2 AND conversation_id = $3 AND id = $4
+			`, seq, orgID, conversationID, id); err != nil {
+				return fmt.Errorf("re-seq queued row %d: %w", id, err)
+			}
+		}
+		return nil
+	})
+}
+
+func scanIntIDs(rows *sql.Rows) ([]int, error) {
+	defer rows.Close()
+	var ids []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// SettleCompactionRequestForClaimSystem records a discarded warm attempt on
+// the request row, behind the fence — see the interface doc.
+func (s *agentRunStore) SettleCompactionRequestForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) error {
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		_, err := q.ExecContext(ctx, `
+			UPDATE messages
+			SET input_tokens = $4, output_tokens = $5,
+			    cache_read_tokens = $6, cache_creation_tokens = $7,
+			    cost_usd = $8,
+			    metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('compaction_failure', $9::text)
+			WHERE org_id = $1 AND conversation_id = $2 AND id = $3
+		`, orgID, conversationID, requestID,
+			inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens,
+			nullFloatPtr(costUSD), reason)
+		return err
+	})
+}
+
 // SetWindowStateSystem is the elision/compaction primitive: a batched range
 // flip of window_state from `from` to `to`, restricted to rows currently in
 // state `from` whose effective assembly key (COALESCE(seq, id)) is strictly

@@ -26,6 +26,18 @@ type Transcript interface {
 	// Insert appends a row and returns its assigned id. The implementation
 	// stamps claim attribution server-side and broadcasts the row.
 	Insert(ctx context.Context, orgID string, msg *domain.Message) (int, error)
+	// Compact commits one compaction atomically: insert replyRow when
+	// non-nil (forced inactive — the forced-shape path's reconstructed
+	// artifact), insert resultRow, flip inactiveIDs out of the window, and
+	// re-seq undelivered rows to fractional positions after the result row,
+	// preserving their relative order. Assigned IDs are written back onto
+	// the row pointers.
+	Compact(ctx context.Context, orgID, conversationID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error
+	// SettleCompactionRequest records a discarded warm compaction attempt on
+	// the request row: the failed call's usage and cost (its reply is never
+	// inserted, but its dollars are real and the ledger is messages alone),
+	// and the failure reason for observability.
+	SettleCompactionRequest(ctx context.Context, orgID, conversationID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) error
 }
 
 // Provider is the streaming completion surface — inference.Client in
@@ -111,6 +123,24 @@ type Params struct {
 	// MaxTokens and Effort ride through to the provider call unchanged.
 	MaxTokens int
 	Effort    string
+
+	// MissionAnchored marks a conversation whose opening turn is a
+	// control-plane-minted mission (a task/blueprint-backed delegation).
+	// Compaction pins that opening — the summary can never mutate the task,
+	// and the cacheable prefix survives. Taskless surfaces (the curator, a
+	// free-form manual run) pass false: their first message is just the
+	// oldest message, and the original request is re-injected mechanically
+	// into the result row instead.
+	MissionAnchored bool
+
+	// CompactionThreshold is the window fraction that trips proactive
+	// compaction. Zero uses DefaultCompactionThreshold.
+	CompactionThreshold float64
+
+	// ColdCompactionModel is the forced-shape summarize call's model. Empty
+	// uses DefaultColdCompactionModel. The credentials layer must whitelist
+	// it alongside the conversation's own model.
+	ColdCompactionModel string
 
 	// UserID attributes rows the loop writes on a user's behalf (the
 	// repair notice, drained input it re-stamps). Empty for event runs.
@@ -242,10 +272,11 @@ type Logger interface {
 // Run drives one claimed engagement to a terminal disposition.
 //
 // The order inside the loop is load-bearing and matches the engine's
-// contract: drain (the only door input enters through) → budget (wrap-up
-// one call before the bound) → guards (before every call, not every turn) →
-// assemble → credentials → stream → persist → stop-reason handling → tool
-// dispatch → would-stop.
+// contract: compaction trip (before the drain, so queued input survives a
+// compaction as live input) → drain (the only door input enters through) →
+// budget (wrap-up one call before the bound) → guards (before every call,
+// not every turn) → assemble → credentials → stream → persist → stop-reason
+// handling → tool dispatch → would-stop.
 func (e *Engine) Run(ctx context.Context, params Params) Result {
 	started := time.Now()
 	maxIter := params.MaxIterations
@@ -260,6 +291,18 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		return e.failed(started, 0, fmt.Errorf("repair transcript: %w", err))
 	}
 
+	// Cold-resume compaction, after repair and before the first drain:
+	// repair → compact → drain → call, so the summarize call reads exactly
+	// what the previous engagement left and queued input stays queued
+	// through it.
+	if err := e.compactOnResume(ctx, params); err != nil {
+		if ctx.Err() != nil {
+			return e.cancelled(started, 0)
+		}
+		e.insertNotice(ctx, params, "Compacting this conversation on resume failed: "+err.Error())
+		return e.failed(started, 0, fmt.Errorf("compact on resume: %w", err))
+	}
+
 	// bareDrain is true for the engagement's first drain and for any drain
 	// that follows a no-tool-call assistant message. Every other drain
 	// happens between turns, while the model is mid-work, and is stamped as
@@ -268,19 +311,47 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 	turn := 0
 	lastText := ""
 
+	// reactiveCompacted licenses at most one overflow-triggered compaction
+	// per provider call: a second overflow immediately after compacting
+	// means compaction cannot make this request fit, and retrying is a
+	// loop. Loop-local on purpose — it scopes a single call's retry, not
+	// cross-claim state, so the derived-state discipline does not apply.
+	reactiveCompacted := false
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return e.cancelled(started, turn)
 		}
 
-		// 1. Drain. Every input — the delegation prompt itself, a user
+		// 1. Compaction trip, BEFORE the drain — the same order the resume
+		// path uses (compact → drain → call), and for the same reason: a
+		// message queued while the window filled must stay queued through
+		// the compaction so it lands after the summary as live input. A
+		// drain first would deliver it into a span no call ever read, and
+		// the flip would swallow it into the summary.
+		preRows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
+		if err != nil {
+			return e.failed(started, turn, fmt.Errorf("list rows for compaction trip: %w", err))
+		}
+		if e.compactionDue(params, preRows) {
+			if err := e.compactWarm(ctx, params); err != nil {
+				if ctx.Err() != nil {
+					return e.cancelled(started, turn)
+				}
+				e.insertNotice(ctx, params, "Compacting this conversation failed: "+err.Error())
+				return e.failed(started, turn, fmt.Errorf("compact conversation: %w", err))
+			}
+			continue
+		}
+
+		// 2. Drain. Every input — the delegation prompt itself, a user
 		// follow-up, a staged injection, a repair notice — enters here, so
 		// there is no special first-call case.
 		if err := e.drain(ctx, params, bareDrain); err != nil {
 			return e.failed(started, turn, fmt.Errorf("drain pending input: %w", err))
 		}
 
-		// 2. Rows — one post-flush read serves the budget derivation and the
+		// 2b. Rows — one post-flush read serves the budget derivation and the
 		// assembly below; no write lands between them on any path that
 		// reaches the call.
 		rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
@@ -293,6 +364,13 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// work rather than a mid-loop stop; the row's presence since the
 		// last human input is what makes the ask once-per-budget, durable
 		// across claims.
+		//
+		// A compaction restarts this derivation as a side effect: the
+		// flipped span leaves the assembly read, so its assistant turns no
+		// longer count. Deliberate — filling 80% of a model window is
+		// substantial real work, spend is the actual brake, and deriving
+		// through inactive rows would re-read the very history compaction
+		// paid to shed.
 		budget := deriveBudget(rows)
 		if budget.turns == maxIter-1 && !budget.wrapUpRequested {
 			if err := e.insertPending(ctx, params, wrapUpNotice, domain.MessageSubtypeInjectionWrapUp); err != nil {
@@ -315,8 +393,6 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			}
 		}
 
-		tools := e.toolSchemas(params)
-
 		// 5. Credentials, per call.
 		provider, client, release, err := e.Credentials.ForCall(ctx)
 		if err != nil {
@@ -325,21 +401,28 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 
 		// 6. Stream.
 		callStarted := time.Now()
-		completion, err := e.streamWithRetry(ctx, client, inference.Request{
-			Provider:     provider,
-			Model:        params.Model,
-			SystemPrompt: params.SystemPrompt,
-			Rows:         rows,
-			Tools:        tools,
-			Effort:       params.Effort,
-			MaxTokens:    params.MaxTokens,
-		})
+		completion, err := e.streamWithRetry(ctx, client, e.buildRequest(params, provider, rows))
 		if release != nil {
 			release()
 		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return e.cancelled(started, turn)
+			}
+			// Reactive arm: a context-overflow rejection is a compaction
+			// trigger, not a run failure — the proactive trip estimates and
+			// the estimate will sometimes be wrong. Compact (warm while the
+			// prior call's cache lives, forced-shape otherwise) and retry
+			// this call exactly once.
+			if errors.Is(err, inference.ErrContextOverflow) && !reactiveCompacted {
+				reactiveCompacted = true
+				if cerr := e.compactAfterOverflow(ctx, params); cerr == nil {
+					continue
+				} else if ctx.Err() != nil {
+					return e.cancelled(started, turn)
+				} else {
+					err = fmt.Errorf("compact after context overflow: %w (overflow: %v)", cerr, err)
+				}
 			}
 			// A crash or an exhausted retry between stream start and persist
 			// loses this message entirely, which is safe: its tool calls
@@ -349,6 +432,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			return e.failed(started, turn, err)
 		}
 		turn++
+		reactiveCompacted = false
 
 		// 7. Persist — one row, priced, display columns populated. Under a
 		// `length` stop the cut usually lands mid-arguments, leaving the
@@ -476,6 +560,26 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			NumTurns:      turn,
 			DurationMs:    msSince(started),
 		}
+	}
+}
+
+// buildRequest is the single constructor for a conversational provider
+// call. The warm compaction arm calls it too, and that shared construction
+// IS the request-invariance contract: the summarize call differs from the
+// call the loop would otherwise make by its appended request row and by
+// nothing else — same system prompt, same tools in the same order, same
+// (absent) tool_choice, same model, same effort, same token cap. Changing
+// any of these forfeits the cached prefix; only the forced-shape call, which
+// has already forfeited it, builds a request any other way.
+func (e *Engine) buildRequest(params Params, provider schemas.ModelProvider, rows []domain.Message) inference.Request {
+	return inference.Request{
+		Provider:     provider,
+		Model:        params.Model,
+		SystemPrompt: params.SystemPrompt,
+		Rows:         rows,
+		Tools:        e.toolSchemas(params),
+		Effort:       params.Effort,
+		MaxTokens:    params.MaxTokens,
 	}
 }
 
