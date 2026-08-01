@@ -60,10 +60,7 @@ func seedCuratorTurn(t *testing.T, srv *Server, projectID, input string) (convID
 func completeCuratorTurn(t *testing.T, srv *Server, projectID, convID string, msgID int64, reply string, cost float64) {
 	t.Helper()
 	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
-	claimID, ok, err := srv.curatorStore.ClaimTurnSystem(t.Context(), org, convID, msgID, "test-exec", 1)
-	if err != nil || !ok {
-		t.Fatalf("claim: ok=%v err=%v", ok, err)
-	}
+	claimID := claimCuratorTurn(t, srv, convID)
 	if err := srv.tx.SyntheticClaimsWithTx(t.Context(), org, user, func(ts db.TxStores) error {
 		if _, err := ts.Curator.BeginTurn(t.Context(), org, projectID, convID, msgID); err != nil {
 			return err
@@ -196,7 +193,11 @@ func TestHandleCuratorHistory_DeadLetteredTurnRendersFailed(t *testing.T) {
 	convID, msgID := seedCuratorTurn(t, srv, projectID, "poisoned")
 
 	const giveUp = "curator turn failed 3 times, giving up: begin turn: boom"
-	matched, err := srv.curatorStore.DeadLetterTurnSystem(t.Context(), runmode.LocalDefaultOrgID, convID, msgID, "test-exec", 1, giveUp)
+	// The dead-letter runs holding the engagement's claim, the way the
+	// dispatch reaches it: the loop claims, the cap trips, the claim is what
+	// carries the terminal.
+	claimCuratorTurn(t, srv, convID)
+	matched, err := srv.curatorStore.DeadLetterTurnSystem(t.Context(), runmode.LocalDefaultOrgID, convID, msgID, giveUp)
 	if err != nil || !matched {
 		t.Fatalf("dead-letter: matched=%v err=%v", matched, err)
 	}
@@ -295,9 +296,7 @@ func TestHandleCuratorReset_409OnRunningTurn(t *testing.T) {
 	srv, _, projectID := curatorTestSetup(t)
 	convID, msgID := seedCuratorTurn(t, srv, projectID, "in flight")
 	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
-	if _, ok, err := srv.curatorStore.ClaimTurnSystem(t.Context(), org, convID, msgID, "test-exec", 1); err != nil || !ok {
-		t.Fatalf("claim: ok=%v err=%v", ok, err)
-	}
+	claimCuratorTurn(t, srv, convID)
 	if err := srv.tx.SyntheticClaimsWithTx(t.Context(), org, user, func(ts db.TxStores) error {
 		_, err := ts.Curator.BeginTurn(t.Context(), org, projectID, convID, msgID)
 		return err
@@ -323,4 +322,18 @@ func TestHandleCuratorSend_503WhenRuntimeUnset(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", rr.Code)
 	}
+}
+
+// claimCuratorTurn drives the ONE claim loop far enough to own convID's
+// oldest queued turn, returning the minted claim id — the way production
+// claims a curator conversation now that there is no curator-only claim
+// door. The claim takes the globally-oldest eligible conversation, so this
+// asserts the identity rather than let a mis-claim pass silently.
+func claimCuratorTurn(t *testing.T, srv *Server, convID string) string {
+	t.Helper()
+	got, err := srv.allStores.RunQueue.ClaimNextRun(t.Context(), "test-exec", 1, db.ClaimPlacement{})
+	if err != nil || got == nil || got.ID != convID {
+		t.Fatalf("ClaimNextRun = (%+v, %v), want a claim on conversation %s", got, err, convID)
+	}
+	return got.ClaimID
 }

@@ -263,35 +263,6 @@ func (s *curatorStore) ArchiveLiveConversation(ctx context.Context, orgID, proje
 
 // --- Dispatch ---
 
-func (s *curatorStore) ClaimTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, executorID string, bootEpoch int64) (string, bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return "", false, err
-	}
-	id := uuid.New().String()
-	// The mint is guarded on the queued row still being undelivered: a raced
-	// cancel deletes it (minting then would trip the message FK), and a
-	// duplicate feed finds it delivered — both are skips, not engagements.
-	res, err := s.q.ExecContext(ctx, `
-		INSERT INTO claims (id, org_id, conversation_id, message_id, executor_id, boot_epoch, claimed_at)
-		SELECT ?, ?, ?, m.id, ?, ?, ?
-		FROM messages m
-		WHERE m.conversation_id = ? AND m.id = ?
-		  AND m.role = 'user' AND m.subtype = '' AND m.delivered = 0
-		ON CONFLICT (conversation_id) WHERE released_at IS NULL DO NOTHING
-	`, id, orgID, conversationID, executorID, bootEpoch, time.Now().UTC(), conversationID, messageID)
-	if err != nil {
-		return "", false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return "", false, err
-	}
-	if n == 0 {
-		return "", false, nil
-	}
-	return id, true, nil
-}
-
 func (s *curatorStore) BeginTurn(ctx context.Context, orgID, projectID, conversationID string, messageID int64) (*db.CuratorTurnStart, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -419,34 +390,25 @@ func (s *curatorStore) FailedTurnAttemptsSystem(ctx context.Context, orgID, conv
 	return count, lastError, rows.Err()
 }
 
-func (s *curatorStore) DeadLetterTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, executorID string, bootEpoch int64, errMsg string) (bool, error) {
+func (s *curatorStore) DeadLetterTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, errMsg string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
 	matched := false
 	err := inTx(ctx, s.q, func(q queryer) error {
-		// A live engagement owns the conversation — this gate mirrors the
-		// dispatch's own claim-conflict skip, so the poisoned row waits
-		// rather than fighting whatever is running.
-		var active int
-		if err := q.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM claims WHERE conversation_id = ? AND released_at IS NULL
-		`, conversationID).Scan(&active); err != nil {
-			return err
-		}
-		if active > 0 {
-			return nil
-		}
-		// Retire the message before minting anything: a raced cancel that
-		// already deleted (or a duplicate feed that already delivered) the
-		// row must leave zero writes behind. window_state='inactive' keeps
-		// the poisoned input out of assembly and the claimable scan;
-		// delivered=1 keeps it visible transcript history.
+		// Retire the message first, guarded on it still being queued: a
+		// raced cancel that already deleted it (or a duplicate feed that
+		// already delivered it) must leave the transcript untouched.
+		// window_state='inactive' keeps the poisoned input out of assembly
+		// and out of the claim predicate; delivered=1 keeps it visible
+		// transcript history, stamped with the engagement that gave up.
 		res, err := q.ExecContext(ctx, `
-			UPDATE messages SET delivered = 1, window_state = 'inactive'
+			UPDATE messages SET delivered = 1, window_state = 'inactive',
+			    claim_id = (SELECT cl.id FROM claims cl
+			                WHERE cl.conversation_id = ? AND cl.released_at IS NULL)
 			WHERE conversation_id = ? AND id = ?
 			  AND role = 'user' AND subtype = '' AND delivered = 0
-		`, conversationID, messageID)
+		`, conversationID, conversationID, messageID)
 		if err != nil {
 			return err
 		}
@@ -454,32 +416,15 @@ func (s *curatorStore) DeadLetterTurnSystem(ctx context.Context, orgID, conversa
 		if err != nil {
 			return err
 		}
-		if n == 0 {
-			return nil
-		}
-		// The final claim is born released: it exists to carry the terminal
-		// 'failed' the history synthesizer derives the turn's status from.
-		claimID := uuid.New().String()
-		now := time.Now().UTC()
-		if _, err := q.ExecContext(ctx, `
-			INSERT INTO claims (id, org_id, conversation_id, message_id, executor_id, boot_epoch,
-			                    claimed_at, released_at, outcome, error)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'failed', ?)
-		`, claimID, orgID, conversationID, messageID, executorID, bootEpoch, now, now, nullIfEmpty(errMsg)); err != nil {
-			return err
-		}
-		if _, err := q.ExecContext(ctx, `
-			UPDATE messages SET claim_id = ? WHERE conversation_id = ? AND id = ?
-		`, claimID, conversationID, messageID); err != nil {
-			return err
-		}
-		matched = true
-		return nil
+		matched = n > 0
+		// The claim releases either way — see the Postgres twin.
+		_, err = q.ExecContext(ctx, `
+			UPDATE claims SET released_at = ?, outcome = 'failed', error = COALESCE(error, ?)
+			WHERE conversation_id = ? AND released_at IS NULL
+		`, time.Now().UTC(), nullIfEmpty(errMsg), conversationID)
+		return err
 	})
-	if err != nil {
-		return false, err
-	}
-	return matched, nil
+	return matched, err
 }
 
 func (s *curatorStore) ReleaseActiveTurnSystem(ctx context.Context, orgID, conversationID, outcome, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error) {
@@ -584,39 +529,10 @@ func (s *curatorStore) RevertTurnContext(ctx context.Context, orgID, conversatio
 	})
 }
 
-// --- Executor claim loop / sweeps ---
-
-// ListClaimableTurnsForHomeSystem is inert in SQLite (N=1 never homes to a
-// remote executor), but implemented for interface + conformance symmetry.
-func (s *curatorStore) ListClaimableTurnsForHomeSystem(ctx context.Context, homeInstanceID string) ([]domain.CuratorTurn, error) {
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT m.id, m.conversation_id, c.org_id, c.project_id, c.creator_user_id
-		FROM messages m
-		JOIN conversations c ON c.id = m.conversation_id
-		JOIN curator_homes h ON h.org_id = c.org_id AND h.project_id = c.project_id
-		WHERE c.type = 'curator' AND c.archived_at IS NULL
-		  AND m.role = 'user' AND m.subtype = '' AND m.delivered = 0
-		  AND h.home_instance_id = ?
-		  AND NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = c.id AND cl.released_at IS NULL)
-		  AND m.id = (SELECT MIN(m2.id) FROM messages m2
-		              WHERE m2.conversation_id = c.id AND m2.role = 'user'
-		                AND m2.subtype = '' AND m2.delivered = 0)
-		ORDER BY m.id ASC
-	`, homeInstanceID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []domain.CuratorTurn
-	for rows.Next() {
-		var t domain.CuratorTurn
-		if err := rows.Scan(&t.MessageID, &t.ConversationID, &t.OrgID, &t.ProjectID, &t.CreatorUserID); err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
-}
+// --- Boot sweeps ---
+//
+// Finding a claimable curator turn lives on the ONE claim loop
+// (RunQueueStore.ClaimNextRun), not here.
 
 // CancelStrandedTurnsForHomeSystem is inert in SQLite (local uses the global
 // CancelOrphanedTurnsSystem boot sweep), but implemented for symmetry. An

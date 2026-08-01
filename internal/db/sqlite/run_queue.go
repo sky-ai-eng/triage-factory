@@ -72,6 +72,19 @@ const needsDrivingSQL = `r.archived_at IS NULL
 // nothing queued" is a finished transcript waiting for its next message.
 const curatorNeedsTurnSQL = `(r.type <> 'curator' OR ` + undeliveredInputExistsSQL + `)`
 
+// curatorHomedHereSQL is the second half of the curator gate: homing owns
+// which executor runs a project's turns. A project with no home row is
+// claimable by anyone, which is the local/role=all shape — one process,
+// nothing to home to, so curator_homes is never populated and this arm is
+// vacuously true. It exists for dialect parity: both backends run the same
+// conformance suite over the same predicate.
+const curatorHomedHereSQL = `(r.type <> 'curator'
+		OR NOT EXISTS (SELECT 1 FROM curator_homes h
+		               WHERE h.org_id = r.org_id AND h.project_id = r.project_id)
+		OR EXISTS (SELECT 1 FROM curator_homes h
+		           WHERE h.org_id = r.org_id AND h.project_id = r.project_id
+		             AND h.home_instance_id = ?))`
+
 // eligibleForDrivingSQL is the surface-agnostic "waiting to be driven" —
 // what the queue-depth counters and the display projection's derived
 // `queued` rung read.
@@ -146,10 +159,6 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 	// ownership. No candidate means no row scanned, which the scan helper
 	// reports as (nil, nil).
 	//
-	// The curator home gate the Postgres sibling applies is absent: local
-	// mode is one process, so there is nothing to home a project to and
-	// curator_homes is never populated.
-	//
 	// The ClaimPlacement arg is ignored: SQLite is N=1 (local mode, always
 	// role=all), so there is exactly one executor and the two-tier claim is
 	// vacuous — every queued run's preferred_executor_id is either this one
@@ -172,8 +181,9 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 			LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
 			WHERE `+eligibleForDrivingSQL+`
 			  AND `+blueprintDrivableSQL+`
+			  AND `+curatorHomedHereSQL+`
 			ORDER BY r.started_at, r.id
-			LIMIT 1`)
+			LIMIT 1`, executorID)
 		claimed, err := scanSqliteClaimedRun(row)
 		if err != nil || claimed == nil {
 			return err

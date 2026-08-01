@@ -45,6 +45,39 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 	}
 
+	// claimTurn drives the ONE claim loop far enough to own convID's oldest
+	// queued turn, returning the minted claim id. There is no curator-only
+	// claim door any more: a curator conversation holding an undelivered
+	// user message is simply one of the shapes the needs-driving predicate
+	// matches, so the fixture claims it the way production does. The claim
+	// is cross-org and takes the globally-oldest eligible conversation, so
+	// this asserts the identity rather than let a mis-claim pass silently.
+	claimTurnAs := func(t *testing.T, h CuratorHarness, convID, executorID string, bootEpoch int64) string {
+		t.Helper()
+		got, err := h.Stores.RunQueue.ClaimNextRun(ctx, executorID, bootEpoch, db.ClaimPlacement{})
+		if err != nil || got == nil || got.ID != convID {
+			t.Fatalf("ClaimNextRun = (%+v, %v), want a claim on conversation %s", got, err, convID)
+		}
+		return got.ClaimID
+	}
+	claimTurn := func(t *testing.T, h CuratorHarness, convID string) string {
+		t.Helper()
+		return claimTurnAs(t, h, convID, "exec-1", 1)
+	}
+
+	// claimTurnRefused asserts the loop finds convID unclaimable — the
+	// derived answer to "another engagement owns it" / "the turn is gone".
+	claimTurnRefused := func(t *testing.T, h CuratorHarness, convID string) {
+		t.Helper()
+		got, err := h.Stores.RunQueue.ClaimNextRun(ctx, "exec-1", 1, db.ClaimPlacement{})
+		if err != nil {
+			t.Fatalf("ClaimNextRun: %v", err)
+		}
+		if got != nil && got.ID == convID {
+			t.Fatalf("conversation %s was claimable; want it refused", convID)
+		}
+	}
+
 	seedTurn := func(t *testing.T, h CuratorHarness, projectID, input string) (convID string, msgID int64) {
 		t.Helper()
 		withClaims(t, h, func(ts db.TxStores) error {
@@ -115,14 +148,12 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			t.Fatalf("InFlightTurn = %+v, want queued turn for message %d", inFlight, msgID)
 		}
 
-		claimID, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", 7)
-		if err != nil || !ok || claimID == "" {
-			t.Fatalf("ClaimTurnSystem: id=%q ok=%v err=%v", claimID, ok, err)
+		claimID := claimTurnAs(t, h, convID, "exec-1", 7)
+		if claimID == "" {
+			t.Fatal("claim carried no id")
 		}
-		// Single-active: a duplicate claim conflicts and reports skip.
-		if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", 7); err != nil || ok {
-			t.Fatalf("duplicate ClaimTurnSystem: ok=%v err=%v, want conflict skip", ok, err)
-		}
+		// Single-active: the claimed conversation is no longer claimable.
+		claimTurnRefused(t, h, convID)
 
 		var start *db.CuratorTurnStart
 		withClaims(t, h, func(ts db.TxStores) error {
@@ -138,7 +169,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 
 		// A duplicate begin (re-fed turn) finds the message delivered.
-		err = h.Stores.Tx.SyntheticClaimsWithTx(ctx, h.OrgID, h.UserID, func(ts db.TxStores) error {
+		err := h.Stores.Tx.SyntheticClaimsWithTx(ctx, h.OrgID, h.UserID, func(ts db.TxStores) error {
 			_, err := ts.Curator.BeginTurn(ctx, h.OrgID, projectID, convID, msgID)
 			return err
 		})
@@ -237,9 +268,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		h := mk(t)
 		projectID := h.SeedProject(t, "lump-fallback")
 		convID, msgID := seedTurn(t, h, projectID, "no stream")
-		if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", 1); err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
+		claimTurn(t, h, convID)
 		withClaims(t, h, func(ts db.TxStores) error {
 			_, err := ts.Curator.BeginTurn(ctx, h.OrgID, projectID, convID, msgID)
 			return err
@@ -268,10 +297,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		h := mk(t)
 		projectID := h.SeedProject(t, "synthetic-settle")
 		convID, msgID := seedTurn(t, h, projectID, "answer then fail")
-		claimID, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", 1)
-		if err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
+		claimID := claimTurn(t, h, convID)
 		withClaims(t, h, func(ts db.TxStores) error {
 			_, err := ts.Curator.BeginTurn(ctx, h.OrgID, projectID, convID, msgID)
 			return err
@@ -327,10 +353,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		projectID := h.SeedProject(t, "claim-stamp")
 		convID, msgID := seedTurn(t, h, projectID, "stamp me")
 
-		claimID, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", 1)
-		if err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
+		claimID := claimTurn(t, h, convID)
 		withClaims(t, h, func(ts db.TxStores) error {
 			_, err := ts.Curator.BeginTurn(ctx, h.OrgID, projectID, convID, msgID)
 			return err
@@ -368,9 +391,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		// stamp), claim released failed. Exactly the loop shape a permanent
 		// BeginTurn failure produces.
 		for i, boom := range []string{"boom one", "boom two"} {
-			if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", int64(i+1)); err != nil || !ok {
-				t.Fatalf("claim %d: ok=%v err=%v", i, ok, err)
-			}
+			claimTurn(t, h, convID)
 			if flipped, err := h.Stores.Curator.ReleaseActiveTurnSystem(ctx, h.OrgID, convID, "failed", boom, 0, 0, 0); err != nil || !flipped {
 				t.Fatalf("release %d: flipped=%v err=%v", i, flipped, err)
 			}
@@ -395,27 +416,22 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			t.Fatalf("turn after transient failures = %+v, want still queued message %d", inFlight, msgID)
 		}
 
-		// An active engagement blocks the dead-letter (nothing written).
-		if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", 3); err != nil || !ok {
-			t.Fatalf("blocking claim: ok=%v err=%v", ok, err)
-		}
-		if matched, err := h.Stores.Curator.DeadLetterTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", 3, "nope"); err != nil || matched {
-			t.Fatalf("dead-letter under an active claim: matched=%v err=%v, want miss", matched, err)
-		}
+		// A third pickup, whose engagement reaches the cap: the dead-letter
+		// runs holding that claim (the loop mints it before handing the turn
+		// over), retiring the message and releasing the claim in one op.
+		claimTurn(t, h, convID)
 		if _, err := h.Stores.Curator.ReleaseActiveTurnSystem(ctx, h.OrgID, convID, "failed", "boom three", 0, 0, 0); err != nil {
-			t.Fatalf("release blocker: %v", err)
+			t.Fatalf("release third pickup: %v", err)
 		}
-
-		// At the cap: the dead-letter retires the message and mints the
-		// terminal claim in one op.
+		claimTurn(t, h, convID)
 		finalErr := "curator turn failed 3 times, giving up: boom three"
-		matched, err := h.Stores.Curator.DeadLetterTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", 3, finalErr)
+		matched, err := h.Stores.Curator.DeadLetterTurnSystem(ctx, h.OrgID, convID, msgID, finalErr)
 		if err != nil || !matched {
 			t.Fatalf("dead-letter: matched=%v err=%v", matched, err)
 		}
 		// Idempotence: the message is delivered now, so a duplicate feed's
-		// dead-letter is a miss.
-		if matched, err := h.Stores.Curator.DeadLetterTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", 3, finalErr); err != nil || matched {
+		// dead-letter reports a miss (and finds no claim left to release).
+		if matched, err := h.Stores.Curator.DeadLetterTurnSystem(ctx, h.OrgID, convID, msgID, finalErr); err != nil || matched {
 			t.Fatalf("duplicate dead-letter: matched=%v err=%v, want miss", matched, err)
 		}
 
@@ -432,7 +448,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			return err
 		})
 		if len(claims) != 4 {
-			t.Fatalf("claims = %d, want 4 (three failed pickups + the final dead-letter claim)", len(claims))
+			t.Fatalf("claims = %d, want 4 (three failed pickups + the engagement that dead-lettered)", len(claims))
 		}
 		final := claims[len(claims)-1]
 		if final.ReleasedAt == nil || final.Outcome != "failed" || final.Error != finalErr {
@@ -468,16 +484,19 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		convID, msgA := seedTurn(t, h, projectID, "turn A")
 		_, msgB := seedTurn(t, h, projectID, "turn B")
 
-		for _, turn := range []struct {
-			msgID int64
-			boom  string
-		}{{msgA, "boom A"}, {msgB, "boom B"}} {
-			if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, turn.msgID, "exec-1", 1); err != nil || !ok {
-				t.Fatalf("claim for %d: ok=%v err=%v", turn.msgID, ok, err)
-			}
-			if flipped, err := h.Stores.Curator.ReleaseActiveTurnSystem(ctx, h.OrgID, convID, "failed", turn.boom, 0, 0, 0); err != nil || !flipped {
-				t.Fatalf("release for %d: flipped=%v err=%v", turn.msgID, flipped, err)
-			}
+		// One failed pickup on A (the oldest queued turn, so the claim is
+		// minted to it), then A is retired so the next claim is minted to B.
+		claimTurn(t, h, convID)
+		if flipped, err := h.Stores.Curator.ReleaseActiveTurnSystem(ctx, h.OrgID, convID, "failed", "boom A", 0, 0, 0); err != nil || !flipped {
+			t.Fatalf("release for A: flipped=%v err=%v", flipped, err)
+		}
+		claimTurn(t, h, convID)
+		if matched, err := h.Stores.Curator.DeadLetterTurnSystem(ctx, h.OrgID, convID, msgA, "retire A"); err != nil || !matched {
+			t.Fatalf("retire A: matched=%v err=%v", matched, err)
+		}
+		claimTurn(t, h, convID)
+		if flipped, err := h.Stores.Curator.ReleaseActiveTurnSystem(ctx, h.OrgID, convID, "failed", "boom B", 0, 0, 0); err != nil || !flipped {
+			t.Fatalf("release for B: flipped=%v err=%v", flipped, err)
 		}
 
 		countA, lastA, err := h.Stores.Curator.FailedTurnAttemptsSystem(ctx, h.OrgID, convID, msgA)
@@ -504,9 +523,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		// One delivered turn, one queued turn, one pending injection on the
 		// drained project; a queued turn on the other project.
 		convID, deliveredID := seedTurn(t, h, projectID, "delivered turn")
-		if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, deliveredID, "exec-1", 1); err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
+		claimTurn(t, h, convID)
 		withClaims(t, h, func(ts db.TxStores) error {
 			_, err := ts.Curator.BeginTurn(ctx, h.OrgID, projectID, convID, deliveredID)
 			return err
@@ -626,9 +643,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			t.Fatalf("queue jira: %v", err)
 		}
 
-		if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", 1); err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
+		claimTurn(t, h, convID)
 		var start *db.CuratorTurnStart
 		withClaims(t, h, func(ts db.TxStores) error {
 			s, err := ts.Curator.BeginTurn(ctx, h.OrgID, projectID, convID, msgID)
@@ -676,9 +691,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			t.Fatalf("release: %v", err)
 		}
 		_, msg2 := seedTurn(t, h, projectID, "retry")
-		if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, msg2, "exec-1", 1); err != nil || !ok {
-			t.Fatalf("re-claim: ok=%v err=%v", ok, err)
-		}
+		claimTurn(t, h, convID)
 		withClaims(t, h, func(ts db.TxStores) error {
 			s, err := ts.Curator.BeginTurn(ctx, h.OrgID, projectID, convID, msg2)
 			start = s
@@ -718,9 +731,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		convID, msgID := seedTurn(t, h, projectID, "queued at reset")
 
 		// A live engagement blocks the reset.
-		if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, msgID, "exec-1", 1); err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
+		claimTurn(t, h, convID)
 		err := h.Stores.Tx.SyntheticClaimsWithTx(ctx, h.OrgID, h.UserID, func(ts db.TxStores) error {
 			_, e := ts.Curator.ArchiveLiveConversation(ctx, h.OrgID, projectID, h.UserID)
 			return e
@@ -795,9 +806,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		h := mk(t)
 		projectID := h.SeedProject(t, "sweeps")
 		convID, msgID := seedTurn(t, h, projectID, "engaged")
-		if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, msgID, "exec-old", 1); err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
+		claimTurnAs(t, h, convID, "exec-old", 1)
 		withClaims(t, h, func(ts db.TxStores) error {
 			_, err := ts.Curator.BeginTurn(ctx, h.OrgID, projectID, convID, msgID)
 			return err
@@ -844,54 +853,58 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 
 		// The global sweep releases a fresh engagement.
-		if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, queuedID, "exec-old", 2); err != nil || !ok {
-			t.Fatalf("re-claim: ok=%v err=%v", ok, err)
-		}
+		claimTurnAs(t, h, convID, "exec-old", 2)
 		if n, err := h.Stores.Curator.CancelOrphanedTurnsSystem(ctx); err != nil || n != 1 {
 			t.Fatalf("global sweep released %d (err=%v), want 1", n, err)
 		}
 	})
 
-	t.Run("ClaimLoopScan_OnePerConversationHomedOnly", func(t *testing.T) {
+	// The one claim loop reaches curator conversations through the same
+	// needs-driving predicate every other surface uses, with the home stamp
+	// as its type-conditional gate — the curator-only claimable-turn scan is
+	// gone.
+	t.Run("ClaimLoop_ClaimsAHomedCuratorTurnOldestFirst", func(t *testing.T) {
 		h := mk(t)
 		projectID := h.SeedProject(t, "scan")
 		convID, first := seedTurn(t, h, projectID, "first")
-		_, _ = seedTurn(t, h, projectID, "second")
+		_, second := seedTurn(t, h, projectID, "second")
 
-		// Un-homed: invisible to every executor's scan.
-		if turns, err := h.Stores.Curator.ListClaimableTurnsForHomeSystem(ctx, "home-1"); err != nil || len(turns) != 0 {
-			t.Fatalf("un-homed scan = %v (err=%v), want empty", turns, err)
+		// Un-homed: claimable by anyone (the local/role=all shape — one
+		// process, nothing to home to).
+		got, err := h.Stores.RunQueue.ClaimNextRun(ctx, "home-1", 1, db.ClaimPlacement{})
+		if err != nil || got == nil || got.ID != convID {
+			t.Fatalf("un-homed claim = (%+v, %v), want conversation %s", got, err, convID)
 		}
+		// The claim is minted to the conversation's OLDEST queued turn, so a
+		// backlog behind a running turn is driven one turn at a time.
+		if got.ClaimMessageID != first {
+			t.Fatalf("claim message id = %d, want the oldest queued turn %d (not %d)", got.ClaimMessageID, first, second)
+		}
+		if got.ProjectID != projectID || got.CreatorUserID != h.UserID {
+			t.Errorf("claimed projection = %+v, want identity fields populated", got)
+		}
+		// An active claim hides the conversation entirely.
+		claimTurnRefused(t, h, convID)
+		if _, err := h.Stores.Curator.ReleaseActiveTurnSystem(ctx, h.OrgID, convID, "completed", "", 0, 0, 0); err != nil {
+			t.Fatalf("release: %v", err)
+		}
+
+		// Homed elsewhere: invisible to this executor, claimable by the home.
 		if err := h.Stores.CuratorHomes.Upsert(ctx, h.OrgID, projectID, "home-1", 1); err != nil {
 			t.Fatalf("home upsert: %v", err)
 		}
-		turns, err := h.Stores.Curator.ListClaimableTurnsForHomeSystem(ctx, "home-1")
-		if err != nil {
-			t.Fatalf("scan: %v", err)
+		if other, err := h.Stores.RunQueue.ClaimNextRun(ctx, "home-2", 1, db.ClaimPlacement{}); err != nil || other != nil {
+			t.Fatalf("non-home claim = (%+v, %v), want nothing", other, err)
 		}
-		if len(turns) != 1 || turns[0].MessageID != first || turns[0].ConversationID != convID {
-			t.Fatalf("scan = %+v, want exactly the conversation's OLDEST queued turn %d", turns, first)
-		}
-		if turns[0].OrgID != h.OrgID || turns[0].ProjectID != projectID || turns[0].CreatorUserID != h.UserID {
-			t.Errorf("scan projection = %+v, want identity fields populated", turns[0])
-		}
-		// Another executor sees nothing.
-		if other, err := h.Stores.Curator.ListClaimableTurnsForHomeSystem(ctx, "home-2"); err != nil || len(other) != 0 {
-			t.Fatalf("other-home scan = %v (err=%v), want empty", other, err)
-		}
-		// An active claim hides the conversation entirely.
-		if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, first, "home-1", 1); err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
-		if turns, err := h.Stores.Curator.ListClaimableTurnsForHomeSystem(ctx, "home-1"); err != nil || len(turns) != 0 {
-			t.Fatalf("scan with active claim = %v (err=%v), want empty", turns, err)
+		if mine, err := h.Stores.RunQueue.ClaimNextRun(ctx, "home-1", 1, db.ClaimPlacement{}); err != nil || mine == nil || mine.ID != convID {
+			t.Fatalf("home claim = (%+v, %v), want conversation %s", mine, err, convID)
 		}
 	})
 
 	t.Run("CredPubKey_StampsActiveClaimOnce", func(t *testing.T) {
 		h := mk(t)
 		projectID := h.SeedProject(t, "cred")
-		convID, msgID := seedTurn(t, h, projectID, "cred turn")
+		convID, _ := seedTurn(t, h, projectID, "cred turn")
 
 		// No active claim → nothing to stamp, nothing to provision.
 		if matched, err := h.Stores.Curator.PublishTurnCredPubKeySystem(ctx, h.OrgID, convID, "pk1"); err != nil || matched {
@@ -901,9 +914,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			t.Fatalf("provision info with no claim: ok=%v err=%v, want miss", ok, err)
 		}
 
-		if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, msgID, "home-1", 3); err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
+		claimTurnAs(t, h, convID, "home-1", 3)
 		matched, err := h.Stores.Curator.PublishTurnCredPubKeySystem(ctx, h.OrgID, convID, "pk1")
 		if err != nil || !matched {
 			t.Fatalf("publish: matched=%v err=%v, want stamp", matched, err)
@@ -945,9 +956,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		if live == nil || live.SessionID != "sess-123" {
 			t.Fatalf("conversation session = %+v, want sess-123", live)
 		}
-		if _, ok, err := h.Stores.Curator.ClaimTurnSystem(ctx, h.OrgID, convID, msgID, "e", 1); err != nil || !ok {
-			t.Fatalf("claim: ok=%v err=%v", ok, err)
-		}
+		claimTurn(t, h, convID)
 		var start *db.CuratorTurnStart
 		withClaims(t, h, func(ts db.TxStores) error {
 			s, err := ts.Curator.BeginTurn(ctx, h.OrgID, projectID, convID, msgID)

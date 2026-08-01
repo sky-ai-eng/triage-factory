@@ -136,7 +136,6 @@ type App struct {
 	pollerMgr        *poller.Manager
 	spawner          *delegate.Spawner
 	curator          *curator.Curator
-	curatorClaimLoop *curator.HomeClaimLoop // executor-only: pulls homed curator turns (spec §6.3)
 	router           *routing.Router
 	srv              *server.Server
 

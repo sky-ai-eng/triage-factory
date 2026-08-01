@@ -105,10 +105,11 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed curator turn: %v", err)
 	}
-	claimID, ok, err := stores.Curator.ClaimTurnSystem(ctx, srcOrg, convID, msgID, "src-exec", 1)
-	if err != nil || !ok {
-		t.Fatalf("claim turn: ok=%v err=%v", ok, err)
+	claimed, err := stores.RunQueue.ClaimNextRun(ctx, "src-exec", 1, db.ClaimPlacement{})
+	if err != nil || claimed == nil || claimed.ID != convID {
+		t.Fatalf("claim turn = (%+v, %v), want conversation %s", claimed, err, convID)
 	}
+	claimID := claimed.ClaimID
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, srcOrg, srcUser, func(tx db.TxStores) error {
 		if _, e := tx.Curator.BeginTurn(ctx, srcOrg, projectID, convID, msgID); e != nil {
 			return e

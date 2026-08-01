@@ -103,14 +103,16 @@ type Curator struct {
 	// TF_CURATOR_TURN_MAX_ATTEMPTS at app wiring.
 	turnMaxAttempts int
 
-	// admitTurn gates one turn's execution through the host's shared agent
-	// capacity — in production the delegation spawner's AcquireTurnSlot, so a
-	// curator turn waits out the same memory guardrail and occupies the same
-	// concurrency slot a delegated run would (which also puts it in the
-	// instance heartbeat's occupancy snapshot). The wait happens with the
-	// turn's row still 'queued' and its cancel handle armed, so a cancel
-	// during the wait lands normally. nil (tests) admits immediately.
-	admitTurn func(ctx context.Context) (release func(), err error)
+	// wake nudges this pod's claim loop to scan now rather than wait out its
+	// backstop tick — the local half of the doorbell (the tf_ctl one reaches
+	// a remote home). Wired on every dispatcher-capable pod; nil elsewhere,
+	// where the scan interval is the only path and that is merely slower.
+	//
+	// Capacity is NOT gated here any more: the claim loop holds its
+	// concurrency slot for the whole turn, so a curator turn passes the same
+	// memory guardrail and occupies the same semaphore a delegated run does
+	// by construction rather than through a separate admission call.
+	wake func()
 
 	// runAgent dispatches one agent turn. Defaults to agentproc.Run in
 	// New; the multi-mode capstone pgtest (TFAC-65) overrides it to drive
@@ -358,7 +360,7 @@ func (c *Curator) SetTurnSandbox(fn BringUpTurnSandboxFunc) {
 }
 
 // getTurnSandbox returns the wired bring-up seam under the lock, matching
-// getAdmitTurn's race-free accessor shape. nil on every pod but a multi-mode
+// getSecrets' race-free accessor shape. nil on every pod but a multi-mode
 // executor.
 func (c *Curator) getTurnSandbox() BringUpTurnSandboxFunc {
 	c.mu.Lock()
@@ -366,23 +368,25 @@ func (c *Curator) getTurnSandbox() BringUpTurnSandboxFunc {
 	return c.bringUpTurnSandbox
 }
 
-// SetAdmission wires the shared turn-admission gate — the delegation
-// spawner's AcquireTurnSlot in production. Set once at startup on every pod
-// that can execute a turn in-process; without it a burst of concurrent
-// project turns fans into sandboxes the host's capacity accounting never
-// sees.
-func (c *Curator) SetAdmission(fn func(ctx context.Context) (release func(), err error)) {
+// SetWake wires this pod's claim-loop doorbell (the delegation spawner's
+// WakeDispatcher in production), so an enqueued turn is scanned immediately
+// instead of waiting out the backstop tick. Set once at startup on every
+// dispatcher-capable pod.
+func (c *Curator) SetWake(fn func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.admitTurn = fn
+	c.wake = fn
 }
 
-// getAdmitTurn returns the wired admission gate under the lock, matching
-// getSecrets' race-free accessor shape.
-func (c *Curator) getAdmitTurn() func(context.Context) (func(), error) {
+// wakeClaimLoop rings the local doorbell if one is wired. Best-effort by
+// contract: the claim loop's scan interval covers a missing or dropped wake.
+func (c *Curator) wakeClaimLoop() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.admitTurn
+	fn := c.wake
+	c.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // homeMode is the routing decision for one turn.
@@ -518,6 +522,15 @@ type queueItem struct {
 	requestID      string
 	orgID          string
 	creatorUserID  string
+	// claimID is the engagement the unified claim loop minted for this turn
+	// before handing it over. The session never mints its own — one loop
+	// claims every conversation of every surface, and a turn arrives here
+	// already owned.
+	claimID string
+	// done closes when the session has finished driving the turn, so the
+	// dispatcher goroutine that handed it over holds its concurrency slot
+	// for exactly the turn's lifetime, the way a delegated run does.
+	done chan struct{}
 }
 
 // turnRequestID renders a turn's user-message id as the wire request id.
@@ -560,11 +573,18 @@ func (c *Curator) SendMessage(ctx context.Context, projectID, orgID, creatorUser
 	if mode == homeUnavailable {
 		return "", ErrNoCuratorExecutor
 	}
+	// Refuse before writing anything once this process is shutting down: a
+	// row inserted here on a pod that is going away is still durable and
+	// still claimable, but the caller asked THIS process for a turn id and
+	// deserves the honest answer instead.
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return "", errors.New("curator is shut down")
+	}
 
-	var (
-		conversationID string
-		messageID      int64
-	)
+	var messageID int64
 	if err := c.stores.Tx.SyntheticClaimsWithTx(ctx, orgID, creatorUserID, func(ts db.TxStores) error {
 		conv, err := ts.Curator.GetOrCreateConversation(ctx, orgID, projectID, creatorUserID)
 		if err != nil {
@@ -573,7 +593,6 @@ func (c *Curator) SendMessage(ctx context.Context, projectID, orgID, creatorUser
 		if conv == nil {
 			return errors.New("conversation mint returned nothing")
 		}
-		conversationID = conv.ID
 		id, err := ts.Curator.EnqueueUserMessage(ctx, orgID, conv.ID, creatorUserID, content)
 		if err != nil {
 			return err
@@ -585,49 +604,15 @@ func (c *Curator) SendMessage(ctx context.Context, projectID, orgID, creatorUser
 	}
 	requestID := turnRequestID(messageID)
 
-	if mode == homeForward {
-		// Homed to a remote executor — do NOT run a session on this control
-		// pod. The durable undelivered message IS the delivery; the doorbell
-		// just nudges the home's claim loop so it need not wait for its
-		// backstop poll. Output streams back to this browser over the WS
-		// backplane from wherever the turn runs, so nothing else is needed
-		// here.
-		c.broadcastRequestUpdate(orgID, projectID, requestID, "queued")
-		c.ringDoorbell("curator_new", orgID, projectID)
-		return requestID, nil
-	}
-
-	item := queueItem{
-		conversationID: conversationID,
-		messageID:      messageID,
-		requestID:      requestID,
-		orgID:          orgID,
-		creatorUserID:  creatorUserID,
-	}
-
-	session := c.getOrStartSession(orgID, projectID)
-	if session == nil {
-		// A queued turn that will never run must not linger as a phantom
-		// undelivered row — delete it (it never entered context), exactly the
-		// queued-cancel semantic. WithoutCancel so a canceled/timed-out
-		// request ctx can't skip the cleanup.
-		c.deleteQueuedTurn(context.WithoutCancel(ctx), item)
-		return "", errors.New("curator is shut down")
-	}
-
-	select {
-	case session.queue <- item:
-		c.broadcastRequestUpdate(orgID, projectID, requestID, "queued")
-		return requestID, nil
-	default:
-		// Queue is full — should not happen at the per-project depth we
-		// configure, but if it ever does, drop the row up-front rather than
-		// blocking the HTTP handler (or leaving an undelivered message the
-		// in-process path would never revisit).
-		c.deleteQueuedTurn(context.WithoutCancel(ctx), item)
-		c.broadcastRequestUpdate(orgID, projectID, requestID, "failed")
-		return "", errors.New("curator queue is full")
-	}
+	// Two inserts and a doorbell — the same entry contract every surface
+	// uses. The undelivered row IS the queued turn and is what makes the
+	// conversation claimable; the wake and the cross-pod doorbell only cut
+	// the claim loop's scan-interval latency, so a dropped one costs a poll,
+	// never the turn.
+	c.broadcastRequestUpdate(orgID, projectID, requestID, "queued")
+	c.wakeClaimLoop()
+	c.ringDoorbell("curator_new", orgID, projectID)
+	return requestID, nil
 }
 
 // deleteQueuedTurn best-effort removes a queued turn's undelivered user
@@ -642,19 +627,22 @@ func (c *Curator) deleteQueuedTurn(ctx context.Context, item queueItem) {
 	}
 }
 
-// EnqueueClaimed feeds a claimable turn (scanned off the home executor's
-// claim loop, spec §6.3) into its per-project session goroutine — the
-// executor-side counterpart of SendMessage's in-process enqueue, minus the
-// row creation (the control pod already recorded the undelivered message).
-// Returns true when the turn was handed to a session; false when the curator
-// is shut down or the per-project queue is momentarily full, so the claim
-// loop leaves the turn queued and retries on its next scan.
+// DriveClaimedTurn runs one already-claimed curator turn to completion on
+// its per-project session goroutine, blocking until it finishes. The claim
+// loop hands the turn over the moment it mints the claim; blocking is what
+// keeps the loop's concurrency slot held for exactly the turn's lifetime,
+// the way a delegated run holds one.
 //
-// Idempotency: feeding the same turn twice is safe — the second dispatch's
-// claim mint skips (the first engagement is still live, or already
-// delivered the message) and returns without re-running the agent — so a
-// duplicated doorbell or a scan race never double-executes a turn.
-func (c *Curator) EnqueueClaimed(orgID, projectID, conversationID string, messageID int64, creatorUserID string) bool {
+// Per-project serialization survives the merge: the claim already fences one
+// engagement per conversation, and the session queue keeps two creators'
+// turns on the same project from racing over its shared knowledge dir and
+// pinned worktrees.
+//
+// Returns false — without touching the claim — when the turn could not be
+// handed over at all (curator shut down, or the per-project queue is
+// momentarily full). The caller releases the claim, which leaves the turn
+// queued for the next scan.
+func (c *Curator) DriveClaimedTurn(orgID, projectID, conversationID, claimID string, messageID int64, creatorUserID string) bool {
 	session := c.getOrStartSession(orgID, projectID)
 	if session == nil {
 		return false // curator shut down
@@ -665,14 +653,22 @@ func (c *Curator) EnqueueClaimed(orgID, projectID, conversationID string, messag
 		requestID:      turnRequestID(messageID),
 		orgID:          orgID,
 		creatorUserID:  creatorUserID,
+		claimID:        claimID,
+		done:           make(chan struct{}),
 	}
 	select {
 	case session.queue <- item:
-		c.broadcastRequestUpdate(orgID, projectID, item.requestID, "queued")
-		return true
 	default:
-		return false // queue full — leave the turn queued for the next scan
+		return false // queue full — leave the turn for the next scan
 	}
+	c.broadcastRequestUpdate(orgID, projectID, item.requestID, "running")
+	select {
+	case <-item.done:
+	case <-session.ctx.Done():
+		// The session was torn down (shutdown / force-stop) before it could
+		// report back. Its own teardown owns the claim from here.
+	}
+	return true
 }
 
 // Cancel fires the per-project cancel func, terminating the in-flight

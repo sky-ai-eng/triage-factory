@@ -94,14 +94,6 @@ func (a *App) startWorkers(ctx context.Context) {
 		go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
 	}
 
-	// The curator home claim loop (spec §6.3): an executor pulls the curator
-	// turns homed to it off the durable queue and runs them. Built only on
-	// multi-mode executors (buildCuratorRuntime); nil elsewhere. Doorbell-woken
-	// via the tf_ctl "curator_new" dispatch, backstop-polled on a short timer.
-	if a.curatorClaimLoop != nil {
-		go a.curatorClaimLoop.Run(ctx)
-	}
-
 	// The shared tf_ctl control-plane listener + the cross-pod run-control
 	// workers (TFAC-585). Multi mode only: local mode never wires
 	// SetRunSignals (so the apply loop / purge reaper below are no-ops

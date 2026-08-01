@@ -129,18 +129,6 @@ type CuratorStore interface {
 
 	// --- Dispatch (session goroutine) ---
 
-	// ClaimTurnSystem mints the turn's claims row (admin pool — tf_app
-	// cannot write claims), stamping messageID — the queued turn this
-	// engagement is minted to drive — so a pickup that fails before
-	// attaching any message stays attributable to its exact turn.
-	// Single-active is enforced by the schema's partial unique index, and
-	// the mint is guarded on the queued row still being undelivered.
-	// ok=false means the turn is not claimable — another engagement is live
-	// on the conversation (the queued row stays claimable for a later
-	// scan), or the row is gone/delivered (a raced cancel or duplicate
-	// feed) — and nothing was written.
-	ClaimTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, executorID string, bootEpoch int64) (claimID string, ok bool, err error)
-
 	// BeginTurn delivers the turn in one transaction: flips the turn's user
 	// message delivered=true (sql.ErrNoRows when the row is gone or already
 	// delivered — a queued-cancel or duplicate dispatch raced ahead) and
@@ -168,16 +156,19 @@ type CuratorStore interface {
 	// another zero-message failed claim. Admin pool.
 	FailedTurnAttemptsSystem(ctx context.Context, orgID, conversationID string, messageID int64) (count int, lastError string, err error)
 
-	// DeadLetterTurnSystem terminally retires a poisoned queued turn: in one
-	// transaction it marks the user message delivered=true +
-	// window_state='inactive' (out of every future assembly and out of the
-	// claimable scan, but still visible transcript history) and stamps it
-	// with a freshly minted, already-released claim (outcome='failed',
-	// error=errMsg) so history synthesis renders the turn failed. matched
-	// is false — and nothing is written — when the message is gone/already
-	// delivered (a cancel raced ahead) or another engagement is live on the
-	// conversation. Admin pool.
-	DeadLetterTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, executorID string, bootEpoch int64, errMsg string) (matched bool, err error)
+	// DeadLetterTurnSystem terminally retires a poisoned queued turn the
+	// claim loop has already claimed: in one transaction it marks the user
+	// message delivered=true + window_state='inactive' (out of every future
+	// assembly and out of the claim predicate, but still visible transcript
+	// history), stamps it with the conversation's ACTIVE claim, and releases
+	// that claim (outcome='failed', error=errMsg) so history synthesis
+	// renders the turn failed.
+	//
+	// The claim is released either way — the engagement holding it is giving
+	// up regardless — but matched is false, and the message untouched, when
+	// the row is gone or already delivered (a cancel raced ahead). Admin
+	// pool.
+	DeadLetterTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, errMsg string) (matched bool, err error)
 
 	// SetSDKSession persists the SDK resume handle captured from the agent's
 	// init event onto the conversation.
@@ -201,15 +192,12 @@ type CuratorStore interface {
 	// delta, and flipping the stale one back would double it.
 	RevertTurnContext(ctx context.Context, orgID, conversationID string, consumed []domain.CuratorContextChange, auditMessageID int64) error
 
-	// --- Executor claim loop / sweeps (admin pool) ---
-
-	// ListClaimableTurnsForHomeSystem returns, oldest first, one claimable
-	// turn per curator conversation — live, holding an undelivered plain
-	// user message ('text' — injections don't wake a turn), with no active
-	// claim — whose project's curator_homes row points at homeInstanceID.
-	// One row per conversation (its oldest queued message) so a backlog
-	// behind a running turn is fed one turn at a time.
-	ListClaimableTurnsForHomeSystem(ctx context.Context, homeInstanceID string) ([]domain.CuratorTurn, error)
+	// --- Boot sweeps (admin pool) ---
+	//
+	// Finding a claimable curator turn is NOT here: one claim loop scans
+	// every surface (RunQueueStore.ClaimNextRun), and a curator conversation
+	// holding an undelivered user message is simply one of the shapes its
+	// needs-driving predicate matches.
 
 	// CancelStrandedTurnsForHomeSystem is the executor's ownership-scoped
 	// boot recovery: releases this executor's own active curator claims from
