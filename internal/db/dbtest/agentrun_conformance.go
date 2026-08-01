@@ -1132,20 +1132,24 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		// Set: the phase lands on the active claim and the display read
-		// coalesces it over the stored 'running'.
-		if err := store.SetActiveClaimPhaseSystem(ctx, orgID, runID, "cloning"); err != nil {
-			t.Fatalf("SetActiveClaimPhaseSystem set: %v", err)
-		}
-		claims := seed.ClaimRows(t, runID)
-		if len(claims) != 1 || claims[0].Phase != "cloning" {
-			t.Fatalf("claims after set = %+v, want one active claim in phase cloning", claims)
-		}
-		got, err := store.Get(ctx, orgID, runID)
-		if err != nil || got == nil {
-			t.Fatalf("Get: err=%v got=%v", err, got)
-		}
-		if got.Status != "cloning" {
-			t.Errorf("Status = %q, want cloning (active claim's phase coalesced over stored status)", got.Status)
+		// coalesces it over the stored 'running'. Coverage is derived from
+		// the canonical vocabulary rather than a copy of it, so a phase added
+		// in Go and never taught to a store fails here on both dialects.
+		for _, phase := range domain.AllClaimPhases() {
+			if err := store.SetActiveClaimPhaseSystem(ctx, orgID, runID, phase); err != nil {
+				t.Fatalf("SetActiveClaimPhaseSystem set %s: %v", phase, err)
+			}
+			claims := seed.ClaimRows(t, runID)
+			if len(claims) != 1 || claims[0].Phase != phase {
+				t.Fatalf("claims after set %s = %+v, want one active claim in that phase", phase, claims)
+			}
+			got, err := store.Get(ctx, orgID, runID)
+			if err != nil || got == nil {
+				t.Fatalf("Get: err=%v got=%v", err, got)
+			}
+			if got.Status != phase {
+				t.Errorf("Status = %q, want %s (active claim's phase coalesced over stored status)", got.Status, phase)
+			}
 		}
 
 		// Clear: empty phase writes NULL and the display falls back to the

@@ -2,6 +2,8 @@ package main
 
 import (
 	"os"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -77,4 +79,111 @@ func TestFrontendMirrorsAllFeatures(t *testing.T) {
 			t.Errorf("feature %q is not mirrored in useEntitlements.ts — expected a `export const Feature<X> = %s` declaration", f, needle)
 		}
 	}
+}
+
+// TestFrontendMirrorsRunStatusVocabulary asserts that the frontend's copy of
+// the conversation status vocabulary matches internal/domain/run_status.go
+// EXACTLY, in both directions.
+//
+// The mirror is hand-maintained by choice — codegen buys a build step and a
+// generated file to keep eleven rarely-changing names honest — so this test is
+// the whole enforcement mechanism. Both directions are load-bearing: a phase
+// added in Go and not here silently misses every UI arm (that is how
+// `awaiting_credentials` came to render as inert grey mid-setup), and a name
+// here that Go never emits is a branch that can never be taken (that is how
+// `initializing`, `worktree_created` and `pending_approval` outlived the
+// backend states they described).
+func TestFrontendMirrorsRunStatusVocabulary(t *testing.T) {
+	src, err := os.ReadFile("frontend/src/types.ts")
+	if err != nil {
+		t.Fatalf("read types.ts: %v", err)
+	}
+	content := string(src)
+
+	compare := func(decl string, want []string) {
+		got, _ := tsArrayDecl(t, content, decl)
+		if diff := vocabularyDiff(want, got); diff != "" {
+			t.Errorf("frontend %s has drifted from internal/domain/run_status.go:\n%s", decl, diff)
+		}
+	}
+	compare("CLAIM_PHASES", domain.AllClaimPhases())
+	compare("TERMINAL_RUN_STATUSES", domain.AllTerminalRunStatuses())
+
+	// RUN_STATUSES is the full union, so it spells only the names that are
+	// neither a phase nor a terminal and spreads the other two arrays — which
+	// is what keeps it from being a third place to forget a phase.
+	var base []string
+	for _, s := range domain.AllRunStatuses() {
+		if !domain.IsClaimPhase(s) && !domain.IsTerminalRunStatus(s) {
+			base = append(base, s)
+		}
+	}
+	members, spreads := tsArrayDecl(t, content, "RUN_STATUSES")
+	if diff := vocabularyDiff(base, members); diff != "" {
+		t.Errorf("frontend RUN_STATUSES spells the wrong non-phase non-terminal statuses:\n%s", diff)
+	}
+	for _, want := range []string{"CLAIM_PHASES", "TERMINAL_RUN_STATUSES"} {
+		if !slices.Contains(spreads, want) {
+			t.Errorf("frontend RUN_STATUSES must spread ...%s rather than re-listing its members (spreads: %v)", want, spreads)
+		}
+	}
+}
+
+var (
+	tsQuotedMember = regexp.MustCompile(`'([a-z_]+)'`)
+	tsSpreadMember = regexp.MustCompile(`\.\.\.([A-Z_]+)`)
+)
+
+// tsArrayDecl pulls the quoted members and the `...SPREAD` references out of
+// an `export const <name> = [ … ]` declaration. Deliberately a small textual
+// parser rather than a TS toolchain dependency: the declarations it reads are
+// flat literal arrays by convention, and a Go test that shells out to node
+// would stop running wherever the frontend isn't installed.
+func tsArrayDecl(t *testing.T, src, name string) (members, spreads []string) {
+	t.Helper()
+	open := "export const " + name + " = ["
+	start := strings.Index(src, open)
+	if start < 0 {
+		t.Fatalf("types.ts has no `%s…]` declaration — the Go vocabulary needs a frontend mirror to check against", open)
+	}
+	body := src[start+len(open):]
+	end := strings.Index(body, "]")
+	if end < 0 {
+		t.Fatalf("types.ts declaration %s is unterminated", name)
+	}
+	body = body[:end]
+	for _, m := range tsQuotedMember.FindAllStringSubmatch(body, -1) {
+		members = append(members, m[1])
+	}
+	for _, m := range tsSpreadMember.FindAllStringSubmatch(body, -1) {
+		spreads = append(spreads, m[1])
+	}
+	return members, spreads
+}
+
+// vocabularyDiff reports set-difference both ways, or "" when the two agree.
+// Order is not compared: these are sets, and the arrays read better grouped by
+// meaning than sorted.
+func vocabularyDiff(want, got []string) string {
+	inGot := map[string]bool{}
+	for _, s := range got {
+		inGot[s] = true
+	}
+	inWant := map[string]bool{}
+	for _, s := range want {
+		inWant[s] = true
+	}
+	var lines []string
+	for _, s := range want {
+		if !inGot[s] {
+			lines = append(lines, "  missing from the frontend: "+s)
+		}
+	}
+	for _, s := range got {
+		if !inWant[s] {
+			lines = append(lines, "  frontend-only (Go never emits it): "+s)
+		}
+	}
+	slices.Sort(lines)
+	return strings.Join(lines, "\n")
 }

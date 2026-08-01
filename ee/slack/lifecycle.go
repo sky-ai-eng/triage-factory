@@ -374,11 +374,7 @@ type runEntry struct {
 // awaiting-input "open" state — both stop the worker and clear the
 // indicator; only "failed" additionally posts the failure reply.
 func isTerminalRunStatus(status string) bool {
-	switch status {
-	case "completed", "failed", "cancelled", "task_unsolvable", "open":
-		return true
-	}
-	return false
+	return domain.IsTerminalRunStatus(status) || status == domain.StatusOpen
 }
 
 // handleRunStatus resolves (and caches) the run's Slack context on first
@@ -641,13 +637,13 @@ var initialIndicatorText = indicatorText{
 // here rather than rendering guessed copy.
 func preRunIndicatorText(status string) (indicatorText, bool) {
 	switch status {
-	case "queued":
+	case domain.StatusQueued:
 		return indicatorText{status: "is queued…", loading: "Waiting for a free agent slot…"}, true
-	case "fetching":
+	case domain.ClaimPhaseFetching:
 		return indicatorText{status: "is gathering task context…", loading: "Gathering task context…"}, true
-	case "cloning":
+	case domain.ClaimPhaseCloning:
 		return indicatorText{status: "is preparing a workspace…", loading: "Preparing a workspace…"}, true
-	case "agent_starting":
+	case domain.ClaimPhaseAgentStarting:
 		return indicatorText{status: "is starting the agent…", loading: "Starting the agent…"}, true
 	}
 	return indicatorText{}, false

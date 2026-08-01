@@ -215,11 +215,12 @@ func TestRunQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 
 // TestRunQueueStore_SQLite_RequeueFromSetupPhase pins that RequeueRun fires
 // no matter which setup phase the run's active claim is in: setup progress
-// (fetching/cloning/agent_starting/awaiting_credentials) lives on the claim,
-// the conversation stays 'running' the whole time, so a workspace-setup
-// failure mid-phase must still requeue the row and make it re-claimable.
+// lives on the claim, the conversation stays 'running' the whole time, so a
+// workspace-setup failure mid-phase must still requeue the row and make it
+// re-claimable. Coverage walks the canonical vocabulary, so a phase added in
+// Go and not handled here fails rather than going untested.
 func TestRunQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
-	for _, phase := range []string{"fetching", "cloning", "agent_starting", "awaiting_credentials"} {
+	for _, phase := range domain.AllClaimPhases() {
 		t.Run(phase, func(t *testing.T) {
 			conn := openSQLiteForTest(t)
 			stores := sqlitestore.New(conn)

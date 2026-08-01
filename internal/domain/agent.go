@@ -186,10 +186,16 @@ type Conversation struct {
 	// be a pure function of rows).
 	ArchivedAt *time.Time `json:"archived_at,omitempty"`
 
-	ID        string
-	TaskID    string
-	PromptID  string // FK to prompts.id — which prompt was used for this run
-	Status    string // stored lifecycle: "queued" | "running" | "open" (a turn ended without a conclusion — not executing, not concluded); terminal: "completed" | "failed" | "cancelled" | "task_unsolvable". Setup sub-states ("fetching" | "cloning" | "agent_starting" | "awaiting_credentials") live on the live claim's phase and are coalesced into this field on reads, so a hydrated DTO may still carry any of those names. (pending_approval was removed — approval is a derived view over the unresolved-artifact set, not a stored status.)
+	ID       string
+	TaskID   string
+	PromptID string // FK to prompts.id — which prompt was used for this run
+	// Status is the DISPLAYED lifecycle: the stored column with the live
+	// claim's phase coalesced over it, so a hydrated DTO may carry a phase
+	// name here. The vocabulary and its classifiers live in run_status.go;
+	// don't restate the names anywhere else. (pending_approval was removed —
+	// approval is a derived view over the unresolved-artifact set, not a
+	// stored status.)
+	Status    string
 	Model     string
 	StartedAt time.Time
 	// QueuedAt is when the run last entered the queue; ClaimedAt is when the
@@ -601,11 +607,10 @@ type Claim struct {
 	// CredPubKey is the per-engagement credential sidecar's X25519 public
 	// key (multi-mode only; empty locally).
 	CredPubKey string `json:"-"`
-	// Phase is the setup/parked sub-state of a LIVE engagement: "fetching" |
-	// "cloning" | "agent_starting" | "awaiting_credentials". Empty = the
-	// agent process is live (or the claim is released — a released claim's
-	// phase is inert history). Display reads coalesce it over the
-	// conversation's stored status.
+	// Phase is the setup/parked sub-state of a LIVE engagement — one of the
+	// ClaimPhase* names in run_status.go. Empty = the agent process is live
+	// (or the claim is released — a released claim's phase is inert history).
+	// Display reads coalesce it over the conversation's stored status.
 	Phase     string    `json:"phase,omitempty"`
 	ClaimedAt time.Time `json:"claimed_at"`
 	// ReleasedAt nil = this claim is live. Stamped exactly once.

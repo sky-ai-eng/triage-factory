@@ -82,6 +82,55 @@ export interface TeamBot {
   display_name: string
 }
 
+// The conversation status vocabulary — the frontend's ONE copy of it. Every
+// status set the UI branches on derives from these three arrays; nothing else
+// spells a status name as a bare literal in a list.
+//
+// How this stays in sync with Go: by hand, plus a test. The names are owned by
+// internal/domain/run_status.go, and TestFrontendMirrorsRunStatusVocabulary
+// (feature_parity_test.go) parses the arrays below and fails when the two sets
+// diverge in EITHER direction — a phase added in Go and not here, or a name
+// here that Go never emits. Codegen was considered and rejected: it buys a
+// build step and a generated file to keep eleven names honest, and the test
+// catches the same drift for the cost of one `go test`.
+//
+// Both directions matter, and the second is the one that actually bit: the UI
+// branched for months on `initializing`, `worktree_created` and
+// `pending_approval`, none of which the backend has ever emitted, while
+// `awaiting_credentials` — a real phase — reached no arm at all.
+
+// CLAIM_PHASES are the setup/parked sub-states of a live executor engagement.
+// They arrive in Conversation.Status because display reads coalesce the active
+// claim's phase over the conversation's stored status.
+export const CLAIM_PHASES = [
+  'fetching',
+  'cloning',
+  'agent_starting',
+  'awaiting_credentials',
+] as const
+export type ClaimPhase = (typeof CLAIM_PHASES)[number]
+
+// TERMINAL_RUN_STATUSES are the states a conversation never leaves.
+export const TERMINAL_RUN_STATUSES = [
+  'completed',
+  'failed',
+  'cancelled',
+  'task_unsolvable',
+] as const
+export type TerminalRunStatus = (typeof TERMINAL_RUN_STATUSES)[number]
+
+// RUN_STATUSES is the full display union: the two derived states (queued and
+// running are never stored — they're computed from the claim/queue state),
+// the parked state, every claim phase, every terminal.
+export const RUN_STATUSES = [
+  'queued',
+  'running',
+  'open',
+  ...CLAIM_PHASES,
+  ...TERMINAL_RUN_STATUSES,
+] as const
+export type RunStatus = (typeof RUN_STATUSES)[number]
+
 // Conversation is the durable agent-context row's display projection —
 // served through a handler-side map, so its fields are PascalCase (mirroring
 // internal/domain/agent.go's Conversation). One conversation is one delegated
@@ -89,6 +138,10 @@ export interface TeamBot {
 export interface Conversation {
   ID: string
   TaskID: string
+  // Status is the coalesced display status. Typed `string`, not RunStatus, on
+  // purpose: this is a wire field, and a server that starts emitting a name
+  // this build predates should reach the predicates in lib/runStatus (which
+  // classify it as unknown) rather than be a compile error here.
   Status: string
   Model: string
   StartedAt: string
