@@ -68,23 +68,20 @@ type Store interface {
 	// count released.
 	CancelStrandedCuratorTurns(ctx context.Context, staleThreshold time.Duration) (int, error)
 
-	// HealClaimDesyncs runs the two janitor arms for the states the
-	// app-pool terminal writes can strand a delegation conversation in
-	// (their conversation flip and claim release commit independently):
-	// a terminal conversation with a dangling active claim gets the claim
-	// released (outcome mapped from status), and an in-flight delegation
-	// conversation with no active claim under a running blueprint parent
-	// goes back to 'queued' for re-claim. The same arms run at boot inside
+	// HealClaimDesyncs runs the janitor arm for the one state the app-pool
+	// terminal writes can still strand a conversation in (their conversation
+	// flip and claim release commit independently): a terminal conversation
+	// with a dangling active claim gets the claim released, outcome mapped
+	// from the status. The same arm runs at boot inside
 	// RunQueueStore.ReconcileOrphanedRuns; the periodic repeat here bounds
 	// the desync's lifetime to a reaper tick instead of the next restart.
-	// Both arms are idempotent and safe against in-flight healthy writes:
-	// the terminal writes stage their status UPDATE before releasing the
-	// claim, so the requeue arm blocks on that row lock and re-evaluates
-	// its WHERE post-commit — it can only match a genuinely rolled-back
-	// flip, never a completion mid-write.
-	// Curator conversations (status NULL) are never touched — their claim
-	// recovery belongs to the curator sweeps above.
-	HealClaimDesyncs(ctx context.Context) (requeued, released int, err error)
+	// Idempotent and safe against in-flight healthy writes.
+	//
+	// The former second arm — a mid-flight conversation whose claim released
+	// but whose status flip rolled back, requeued by writing 'queued' — is
+	// no longer a desync at all: a released claim on a mid-flight
+	// conversation IS the requeue.
+	HealClaimDesyncs(ctx context.Context) (released int, err error)
 }
 
 // pgStore is the Postgres implementation.
@@ -98,19 +95,20 @@ func NewPostgresStore(db *sql.DB) Store { return &pgStore{db: db} }
 var _ Store = (*pgStore)(nil)
 
 // reapCandidateJoin is the FROM/JOIN/base-WHERE shared by every reaper
-// query below: claimed 'running' runs (the one status a claimed run holds,
-// whatever setup phase its claim is in — queued/terminal/dormant rows have
-// no live process to have died) under a still-running blueprint_run
+// query below: conversations still mid-flight (status NULL — no outcome was
+// ever written) with a live claim, under a still-running blueprint_run,
 // whose executor's heartbeat row is missing (GC'd, or never registered —
-// defensive) or older than the staleness threshold. Each caller appends its
-// own cancel_requested/attempts predicate and SELECTs what it needs.
-// $1 is always the staleness threshold in seconds.
+// defensive) or older than the staleness threshold. The claim join is what
+// makes "a live process died" expressible: a parked or terminal
+// conversation has no engagement to have died. Each caller appends its own
+// cancel_requested/attempts predicate and SELECTs what it needs. $1 is
+// always the staleness threshold in seconds.
 const reapCandidateJoin = `
 	FROM conversations r
 	JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 	JOIN blueprint_runs br ON br.id = r.blueprint_run_id
 	LEFT JOIN instances i ON i.id = cl.executor_id
-	WHERE r.status = 'running'
+	WHERE r.status IS NULL
 	  AND br.status = 'running'
 	  AND (i.id IS NULL OR i.last_heartbeat_at < now() - make_interval(secs => $1))
 `
@@ -192,18 +190,18 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 		}
 	}
 
-	// 3. Not cancel-requested, attempts remaining: requeue. Same status/
-	// summary semantics as RunQueueStore.RequeueRun — clears the ownership
-	// stamp (a queued row has no owner) and leaves attempts as-is; the
-	// eventual re-claim bumps it. preferred_executor_id is cleared too
-	// (TFAC-587): the reaper requeues precisely because the stamped executor
-	// is dead, so its stamp is the staler-than-a-dwell case the placement
-	// design calls out — NULL is "unowned, claimable by any live executor
-	// now" (no aging delay), which is the correct advisory answer here.
-	// Affinity is re-earned on the next enqueue, never carried toward a
-	// corpse.
+	// 3. Not cancel-requested, attempts remaining: requeue. Same semantics as
+	// RunQueueStore.RequeueRun — releasing the claim (below) IS the requeue,
+	// since the conversation is mid-flight and re-enters the needs-driving
+	// predicate the moment it has no claim. attempts is left as-is; the
+	// eventual re-claim bumps it. preferred_executor_id is cleared: the
+	// reaper requeues precisely because the stamped executor is dead, so its
+	// stamp is the staler-than-a-dwell case the placement design calls out —
+	// NULL is "unowned, claimable by any live executor now" (no aging
+	// delay), which is the correct advisory answer here. Affinity is
+	// re-earned on the next enqueue, never carried toward a corpse.
 	_, requeuedIDs, err := reapUpdateRuns(ctx, tx, staleSecs, &maxAttempts, `
-		UPDATE conversations SET status = 'queued', queued_at = now(),
+		UPDATE conversations SET
 			preferred_executor_id = NULL,
 			result_summary = 'Requeued: executor heartbeat stale (reaper)'
 		WHERE id IN (
@@ -267,12 +265,10 @@ func (s *pgStore) DeleteStaleInstances(ctx context.Context, staleAfter time.Dura
 	return int(n), err
 }
 
-func (s *pgStore) HealClaimDesyncs(ctx context.Context) (int, int, error) {
+func (s *pgStore) HealClaimDesyncs(ctx context.Context) (int, error) {
 	// Duplicates internal/db/postgres's healClaimDesyncs SQL rather than
 	// importing it, keeping this package dialect-independent like the rest
-	// of the file (see pgUUIDArray's rationale). Statement order matters
-	// only for accounting, not correctness — each arm's predicate is
-	// disjoint from the other's write set.
+	// of the file (see pgUUIDArray's rationale).
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE claims SET released_at = now(),
 		    outcome = CASE c.status
@@ -285,32 +281,13 @@ func (s *pgStore) HealClaimDesyncs(ctx context.Context) (int, int, error) {
 		  AND c.status IN ('completed','failed','cancelled','task_unsolvable')
 	`)
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
 	rel, err := res.RowsAffected()
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
-
-	res, err = s.db.ExecContext(ctx, `
-		UPDATE conversations SET status = 'queued', queued_at = now(),
-		    preferred_executor_id = NULL
-		WHERE type = 'delegation'
-		  AND status = 'running'
-		  AND NOT EXISTS (
-		      SELECT 1 FROM claims cl
-		      WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL
-		  )
-		  AND blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
-	`)
-	if err != nil {
-		return 0, 0, err
-	}
-	req, err := res.RowsAffected()
-	if err != nil {
-		return 0, 0, err
-	}
-	return int(req), int(rel), nil
+	return int(rel), nil
 }
 
 func (s *pgStore) CancelStrandedCuratorTurns(ctx context.Context, staleThreshold time.Duration) (int, error) {

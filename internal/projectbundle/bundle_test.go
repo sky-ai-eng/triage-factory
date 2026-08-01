@@ -123,10 +123,11 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	if err != nil {
 		t.Fatalf("enqueue turn: %v", err)
 	}
-	claimID, ok, err := stores.Curator.ClaimTurnSystem(ctx, org, conv.ID, msgID, "fixture-exec", 1)
-	if err != nil || !ok {
-		t.Fatalf("claim turn: ok=%v err=%v", ok, err)
+	claimed, err := stores.RunQueue.ClaimNextRun(ctx, "fixture-exec", 1, db.ClaimPlacement{})
+	if err != nil || claimed == nil || claimed.ID != conv.ID {
+		t.Fatalf("claim turn = (%+v, %v), want conversation %s", claimed, err, conv.ID)
 	}
+	claimID := claimed.ClaimID
 	if _, err := stores.Curator.BeginTurn(ctx, org, projectID, conv.ID, msgID); err != nil {
 		t.Fatalf("begin turn: %v", err)
 	}

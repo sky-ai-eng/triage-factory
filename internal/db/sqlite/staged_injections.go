@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"sort"
 	"strconv"
@@ -57,24 +56,14 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, ru
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	// UPDATE … RETURNING claims the run's pending notes in one statement, so
-	// an injection is delivered exactly once even under a resume race.
-	// window_state='active' keeps withdrawn rows (undelivered + inactive)
-	// out of the flush — withdrawn means "never happened".
-	rows, err := s.q.QueryContext(ctx, `
-		UPDATE messages SET delivered = 1
-		WHERE org_id = ? AND conversation_id = ? AND delivered = 0
-		  AND window_state = 'active' AND subtype = ?
-		RETURNING id, conversation_id, org_id, metadata, content, created_at
-	`, orgID, runID, stagedInjectionSubtype)
+	// The shared flush primitive, narrowed to this store's subtype: one
+	// definition of "consume a conversation's pending rows" serves every
+	// producer.
+	flushed, err := flushPendingInput(ctx, s.q, orgID, runID, stagedInjectionSubtype)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out, err := scanStagedInjectionRows(rows)
-	if err != nil {
-		return nil, err
-	}
+	out := stagedInjectionsFromPending(flushed)
 	// UPDATE … RETURNING does not honor ORDER BY in SQLite, so sort by the
 	// monotonic row id to restore oldest-first — the order the bundled
 	// block reads in.
@@ -105,31 +94,29 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	return err
 }
 
-// scanStagedInjectionRows maps flushed message rows back onto the
+// stagedInjectionsFromPending maps flushed pending rows onto the
 // StagedInjection shape: the row id becomes the decimal ID, content the
 // Body, and the producer tag is unpacked from metadata.
-func scanStagedInjectionRows(rows *sql.Rows) ([]domain.StagedInjection, error) {
+func stagedInjectionsFromPending(flushed []pendingRow) []domain.StagedInjection {
 	var out []domain.StagedInjection
-	for rows.Next() {
-		var (
-			id       int64
-			n        domain.StagedInjection
-			metadata sql.NullString
-		)
-		if err := rows.Scan(&id, &n.RunID, &n.OrgID, &metadata, &n.Body, &n.CreatedAt); err != nil {
-			return nil, err
+	for _, r := range flushed {
+		n := domain.StagedInjection{
+			ID:        strconv.FormatInt(r.ID, 10),
+			RunID:     r.ConvID,
+			OrgID:     r.OrgID,
+			Body:      r.Content,
+			CreatedAt: r.CreatedAt,
 		}
-		n.ID = strconv.FormatInt(id, 10)
-		if metadata.Valid {
+		if r.Metadata != "" {
 			var meta struct {
 				Producer string `json:"producer"`
 			}
-			_ = json.Unmarshal([]byte(metadata.String), &meta)
+			_ = json.Unmarshal([]byte(r.Metadata), &meta)
 			n.Producer = meta.Producer
 		}
 		out = append(out, n)
 	}
-	return out, rows.Err()
+	return out
 }
 
 // stagedInjectionIDLess orders decimal message-row ids numerically (a

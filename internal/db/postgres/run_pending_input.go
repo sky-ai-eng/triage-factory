@@ -67,18 +67,5 @@ func (s *runPendingInputStore) Peek(ctx context.Context, orgID, runID string) (s
 }
 
 func (s *runPendingInputStore) Consume(ctx context.Context, orgID, runID string) (string, string, bool, error) {
-	var message string
-	var userID sql.NullString
-	err := s.admin.QueryRowContext(ctx, `
-		UPDATE messages SET delivered = true
-		WHERE `+pendingInputPredicate+`
-		RETURNING content, user_id::text
-	`, orgID, runID).Scan(&message, &userID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", false, nil
-	}
-	if err != nil {
-		return "", "", false, err
-	}
-	return message, userID.String, true, nil
+	return consumePendingInput(ctx, s.admin, orgID, runID)
 }

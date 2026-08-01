@@ -91,12 +91,8 @@ func TestResumeOpenRun_EnqueuesRatherThanSpawning(t *testing.T) {
 		t.Fatalf("ResumeOpenRun: %v", err)
 	}
 
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-wake'`).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status != "queued" {
-		t.Errorf("status = %q, want queued (resume-by-enqueue re-queues the row rather than flipping to running)", status)
+	if st := storedStatus(t, database, "r-wake"); st != "" {
+		t.Errorf("stored status = %q, want none — resume-by-enqueue clears the park rather than writing a queue status", st)
 	}
 
 	msg, userID, ok, err := s.pendingInput.Consume(context.Background(), runmode.LocalDefaultOrgID, "r-wake")
@@ -193,14 +189,11 @@ func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 		t.Errorf("pending input still present after dispatch: ok=%v err=%v", ok, err)
 	}
 
-	// The run left `queued`/`open` — delivery was attempted (and failed
-	// fast here for lack of a warm worktree/snapshot, landing terminal).
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-deliver'`).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status == "queued" || status == "open" {
-		t.Errorf("status = %q, want a terminal status (delivery was not attempted)", status)
+	// The run reached an outcome — delivery was attempted (and failed fast
+	// here for lack of a warm worktree/snapshot, landing terminal).
+	st := storedStatus(t, database, "r-deliver")
+	if st == "" || st == "open" {
+		t.Errorf("stored status = %q, want a terminal status (delivery was not attempted)", st)
 	}
 
 	// No cancel handle survives dispatch (deferred cleanup ran).

@@ -21,17 +21,14 @@ func newFactoryReadStore(q queryer) db.FactoryReadStore { return &factoryReadSto
 
 var _ db.FactoryReadStore = (*factoryReadStore)(nil)
 
-// sqliteFactoryActiveRunStatuses is the set of stored run.status values we
-// treat as "in flight" for the factory view. Matches the X-button
-// window in AgentCard — every state before a terminal transition
-// (completed | failed | cancelled | task_unsolvable); setup sub-states
-// live on the active claim's phase, under stored 'running'.
-// pending_approval stays defensively for legacy rows: the run is paused
-// waiting for user input, not done.
-var sqliteFactoryActiveRunStatuses = []string{
-	"running",
-	"pending_approval",
-}
+// sqliteFactoryInFlightSQL selects the conversations treated as "in flight"
+// for the factory view. Matches the X-button window in AgentCard: an
+// engagement is actually driving the conversation (an unreleased claim —
+// setup sub-states ride that claim's phase), plus the legacy
+// pending_approval rows, which are paused waiting for user input rather
+// than done. Duplicated in postgres/factory.go; intentional per-backend
+// copy.
+const sqliteFactoryInFlightSQL = `(` + activeClaimExistsSQL + ` OR r.status = 'pending_approval')`
 
 func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -122,14 +119,6 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	placeholders := "?"
-	args := make([]any, 0, len(sqliteFactoryActiveRunStatuses))
-	args = append(args, sqliteFactoryActiveRunStatuses[0])
-	for i := 1; i < len(sqliteFactoryActiveRunStatuses); i++ {
-		placeholders += ", ?"
-		args = append(args, sqliteFactoryActiveRunStatuses[i])
-	}
-
 	// memory_missing is derived from a LEFT JOIN to conversation_memory rather
 	// than read off a column on runs: "the agent has not
 	// produced its memory file" === "no conversation_memory row exists, OR the
@@ -146,9 +135,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 	query := `
 		SELECT
 			r.id, r.task_id, COALESCE(r.prompt_id, ''),
-			COALESCE((SELECT cl.phase FROM claims cl
-			          WHERE cl.conversation_id = r.id AND cl.released_at IS NULL),
-			         r.status),
+			` + sqliteDisplayStatusSQL + `,
 			COALESCE(r.model, ''), r.started_at, r.completed_at,
 			(SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id),
 			(SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = r.id),
@@ -166,11 +153,11 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 		LEFT JOIN agents a ON a.id = r.actor_agent_id
 		JOIN tasks t ON r.task_id = t.id
 		JOIN entities e ON t.entity_id = e.id
-		WHERE r.status IN (` + placeholders + `)
+		WHERE ` + sqliteFactoryInFlightSQL + `
 		ORDER BY r.started_at DESC
 	`
 
-	rows, err := s.q.QueryContext(ctx, query, args...)
+	rows, err := s.q.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}

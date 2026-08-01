@@ -423,17 +423,18 @@ func (a *App) buildCuratorRuntime() error {
 		a.curator.SetLLMResolver(llmcred.SystemEnvResolver(a.llmResolver, "tf-curator"))
 	}
 
-	// Curator turns spawn the same class of agent subprocess a delegated run
-	// does, so they share the spawner's capacity envelope: each turn waits
-	// out the dispatch memory guardrail and occupies a concurrency-semaphore
-	// slot, which also puts it in the instance heartbeat's occupancy
-	// snapshot. Wired on every pod that builds a curator — a control pod
-	// forwards turns instead of executing them, so its gate is simply never
-	// consulted.
-	a.curator.SetAdmission(a.spawner.AcquireTurnSlot)
+	// One claim loop drives both surfaces: the dispatcher claims a curator
+	// conversation exactly as it claims a delegated run, then hands it here.
+	// Capacity comes with that — the loop holds its concurrency slot for the
+	// whole turn, so a curator turn passes the same memory guardrail and
+	// occupies the same semaphore (and the same heartbeat occupancy
+	// snapshot) a delegated run does, with no separate admission gate.
+	a.spawner.SetCuratorTurnDriver(a.curator.DriveClaimedTurn)
+	// And the local doorbell: an enqueued turn nudges this pod's claim loop
+	// instead of waiting out its backstop tick.
+	a.curator.SetWake(a.spawner.WakeDispatcher)
 
 	if executorRuntime {
-		a.curatorClaimLoop = curator.NewHomeClaimLoop(a.curator, a.stores.Curator, a.identity.ID)
 		// Curator turns on an executor participate in the sealed-bundle
 		// credential path: the spawner stands each turn's network +
 		// credential sidecar up so the turn resolves LLM/GitHub/Jira through the

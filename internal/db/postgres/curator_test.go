@@ -69,10 +69,11 @@ func TestCuratorStore_Postgres_PrivateVisibility_SelfOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("alice seed: %v", err)
 	}
-	claimID, ok, err := stores.Curator.ClaimTurnSystem(ctx, orgID, convID, msgID, "exec-1", 1)
-	if err != nil || !ok {
-		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	claimed, err := stores.RunQueue.ClaimNextRun(ctx, "exec-1", 1, db.ClaimPlacement{})
+	if err != nil || claimed == nil || claimed.ID != convID {
+		t.Fatalf("claim = (%+v, %v), want conversation %s", claimed, err, convID)
 	}
+	claimID := claimed.ClaimID
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, alice, func(ts db.TxStores) error {
 		if _, err := ts.Curator.BeginTurn(ctx, orgID, projectID, convID, msgID); err != nil {
 			return err
@@ -161,11 +162,8 @@ func TestCuratorStore_Postgres_PrivateVisibility_SelfOnly(t *testing.T) {
 		t.Fatalf("bob mint: %v", err)
 	}
 
-	// The System doors DO cross the boundary — that's the claim loop /
-	// sweeps / provisioner contract.
-	if turns, err := stores.Curator.ListClaimableTurnsForHomeSystem(ctx, "never-homed"); err != nil || len(turns) != 0 {
-		t.Fatalf("system scan sanity: %v %v", turns, err)
-	}
+	// The System doors DO cross the boundary — that's the sweeps /
+	// provisioner contract.
 	if flipped, err := stores.Curator.ReleaseActiveTurnSystem(ctx, orgID, convID, "cancelled", "sweep", 0, 0, 0); err != nil || !flipped {
 		t.Fatalf("system release across users: flipped=%v err=%v, want the admin door to reach it", flipped, err)
 	}

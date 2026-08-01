@@ -36,8 +36,10 @@ func TestDispatch_ExecutorPath_ConsumesTurnSandbox(t *testing.T) {
 	t.Setenv("TF_STATE_ROOT", t.TempDir())
 	database := newTestDB(t)
 	projectID := seedProject(t, database, "homed")
-	c := New(sqlitestore.New(database), nil, "test-model")
+	stores := sqlitestore.New(database)
+	c := New(stores, nil, "test-model")
 	t.Cleanup(c.Shutdown)
+	t.Cleanup(startTestClaimLoop(t, stores, c))
 
 	fakeNet := &sandbox.RunNetwork{}
 	fakeEnv := []string{"LLM_PROXY_URL=http://127.0.0.1:9"}
@@ -120,8 +122,10 @@ func TestDispatch_InProcessPath_SkipsTurnSandbox(t *testing.T) {
 	t.Setenv("TF_STATE_ROOT", t.TempDir())
 	database := newTestDB(t)
 	projectID := seedProject(t, database, "local")
-	c := New(sqlitestore.New(database), nil, "test-model")
+	stores := sqlitestore.New(database)
+	c := New(stores, nil, "test-model")
 	t.Cleanup(c.Shutdown)
+	t.Cleanup(startTestClaimLoop(t, stores, c))
 	// No SetTurnSandbox — the untouched in-process path.
 
 	optsCh := make(chan agentproc.RunOptions, 1)

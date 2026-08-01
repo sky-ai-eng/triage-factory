@@ -207,8 +207,9 @@ func (s *agentRunStore) MarkOpen(ctx context.Context, orgID, runID string) (bool
 			UPDATE conversations
 			SET status = 'open', parked_at = ?
 			WHERE id = ?
-			  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-			                     'pending_approval', 'open')
+			  AND (status IS NULL
+			       OR status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
+			                         'pending_approval', 'open'))
 		`, time.Now().UTC(), runID)
 		if err != nil {
 			return err
@@ -226,8 +227,10 @@ func (s *agentRunStore) MarkOpen(ctx context.Context, orgID, runID string) (bool
 	return flipped, err
 }
 
-// MarkQueuedForResume is resume-by-enqueue's status flip: see the interface
-// doc comment / the Postgres twin.
+// MarkQueuedForResume is resume-by-enqueue's un-terminal write — the ONE
+// path that puts an outcome-bearing conversation back into the mid-flight
+// (status NULL) state the needs-driving predicate claims from. See the
+// interface doc comment / the Postgres twin.
 func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -235,7 +238,7 @@ func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID st
 	var flipped bool
 	err := inTx(ctx, s.q, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
-			UPDATE conversations SET status = 'queued', queued_at = CURRENT_TIMESTAMP,
+			UPDATE conversations SET status = NULL,
 			                parked_at = NULL, preferred_executor_id = NULL
 			WHERE id = ?
 			  AND (status = 'open'
@@ -358,8 +361,9 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID, fa
 			UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, ?),
 			    failure_kind = ?
 			WHERE id = ?
-			  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
-			                     'pending_approval')
+			  AND (status IS NULL
+			       OR status NOT IN ('completed','failed','cancelled','task_unsolvable',
+			                         'pending_approval'))
 		`, time.Now().UTC(), nullIfEmpty(failureKind), runID)
 		if err != nil {
 			return err
@@ -388,8 +392,9 @@ func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID,
 			UPDATE conversations
 			SET status = 'cancelled', completed_at = ?, stop_reason = ?, result_summary = ?
 			WHERE id = ?
-			  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-			                     'pending_approval')
+			  AND (status IS NULL
+			       OR status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
+			                         'pending_approval'))
 		`, now, stopReason, summary, runID)
 		if err != nil {
 			return err
@@ -417,14 +422,12 @@ func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID,
 // attempts / duration_ms / num_turns) are correlated subselects over
 // claims and the accounting columns (cost + tokens) subselects over the
 // messages ledger; claimed_at loses its declared column type inside the
-// subselect, so it scans as text and parses via parseDBDatetime. Status
-// coalesces the active claim's phase over the stored status so a live
-// engagement's setup sub-state surfaces through the field the wire has
-// always carried; predicates elsewhere keep using the stored column.
+// subselect, so it scans as text and parses via parseDBDatetime. Status is
+// the derived display ladder (sqliteDisplayStatusSQL) rather than the stored
+// column.
 const sqliteRunColumns = `
 	r.id, COALESCE(r.task_id, ''), COALESCE(r.runtime, ''),
-	COALESCE((SELECT cl.phase FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL),
-	         r.status, ''),
+	` + sqliteDisplayStatusSQL + `,
 	r.model, r.started_at, r.queued_at,
 	(SELECT MAX(cl.claimed_at) FROM claims cl WHERE cl.conversation_id = r.id) AS claimed_at,
 	r.completed_at,
@@ -446,6 +449,23 @@ const sqliteRunColumns = `
 	(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
 	COALESCE(a.display_name, '') AS actor_agent_name
 `
+
+// sqliteDisplayStatusSQL is the wire status: the SQLite mirror of the
+// Postgres pgDisplayStatusSQL ladder. The active claim's setup sub-state
+// wins; then the mere existence of an active claim is 'running'; then a
+// conversation matching the needs-driving predicate — mid-flight and
+// unclaimed, or parked and woken by input — is 'queued'; and finally the
+// stored column carries the deliberate park and the terminals. The trailing
+// ” is unreachable by construction and exists so NULL can never reach the
+// wire. Requires the conversation alias `r`.
+const sqliteDisplayStatusSQL = `COALESCE(
+		(SELECT cl_d.phase FROM claims cl_d WHERE cl_d.conversation_id = r.id AND cl_d.released_at IS NULL),
+		CASE WHEN ` + activeClaimExistsSQL + ` THEN 'running' END,
+		CASE WHEN r.status IS NULL
+		       OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `)
+		     THEN 'queued' END,
+		r.status,
+		'')`
 
 func (s *agentRunStore) Get(ctx context.Context, orgID, runID string) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -559,8 +579,9 @@ func (s *agentRunStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, en
 		JOIN tasks t ON t.id = r.task_id
 		WHERE t.entity_id = ?
 		  AND r.trigger_type = 'event'
-		  AND r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                       'pending_approval')
+		  AND (r.status IS NULL
+		       OR r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
+		                           'pending_approval'))
 	`, entityID).Scan(&count)
 	return count > 0, err
 }
@@ -571,8 +592,10 @@ func (s *agentRunStore) ActiveIDsForTask(ctx context.Context, orgID, taskID stri
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id FROM conversations
-		WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled',
-		                                      'task_unsolvable', 'pending_approval')
+		WHERE task_id = ?
+		  AND (status IS NULL
+		       OR status NOT IN ('completed', 'failed', 'cancelled',
+		                         'task_unsolvable', 'pending_approval'))
 	`, taskID)
 	if err != nil {
 		return nil, err
@@ -615,8 +638,9 @@ func (s *agentRunStore) ActiveAutoRunIDForEntitySystem(ctx context.Context, orgI
 		JOIN tasks t ON t.id = r.task_id
 		WHERE t.entity_id = ?
 		  AND r.trigger_type = 'event'
-		  AND r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                       'pending_approval')
+		  AND (r.status IS NULL
+		       OR r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
+		                           'pending_approval'))
 		ORDER BY r.started_at DESC
 		LIMIT 1
 	`, entityID).Scan(&id, &taskID)
@@ -632,8 +656,10 @@ func (s *agentRunStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, teamI
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id FROM conversations
-		WHERE team_id = ? AND status NOT IN ('completed', 'failed', 'cancelled',
-		                                     'task_unsolvable', 'pending_approval')
+		WHERE team_id = ?
+		  AND (status IS NULL
+		       OR status NOT IN ('completed', 'failed', 'cancelled',
+		                         'task_unsolvable', 'pending_approval'))
 	`, teamID)
 	if err != nil {
 		return nil, err

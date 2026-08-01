@@ -42,9 +42,7 @@ func pendingRows(t *testing.T, s *Spawner, runID string) []domain.Message {
 func TestSendMessage_NativeRunningQueuesWithoutSteering(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-native", "", "/tmp/wt-native")
-	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-native'`); err != nil {
-		t.Fatalf("running: %v", err)
-	}
+	markEngaged(t, database, "r-native")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	markNative(t, database, "r-native")
 	fc := &fakeController{}
@@ -64,13 +62,13 @@ func TestSendMessage_NativeRunningQueuesWithoutSteering(t *testing.T) {
 		t.Errorf("role = %q, want user", pending[0].Role)
 	}
 
-	// Status is untouched: a running conversation already has a driver.
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-native'`).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
+	// The engagement is untouched: a running conversation already has a
+	// driver, so queueing is delivery and there is nothing to re-queue.
+	if !hasActiveClaim(t, database, "r-native") {
+		t.Error("the live engagement was released by a steer that should only have queued a row")
 	}
-	if status != "running" {
-		t.Errorf("status = %q, want running (queueing is delivery; there is nothing to re-queue)", status)
+	if st := storedStatus(t, database, "r-native"); st != "" {
+		t.Errorf("stored status = %q, want none", st)
 	}
 }
 
@@ -91,12 +89,8 @@ func TestSendMessage_NativeParkedQueuesAndRequeues(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-parked'`).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status != "queued" {
-		t.Errorf("status = %q, want queued — a parked conversation needs a driver again", status)
+	if st := storedStatus(t, database, "r-parked"); st != "" {
+		t.Errorf("stored status = %q, want none — a parked conversation woken by input goes back to mid-flight, which is what makes it claimable again", st)
 	}
 	pending := pendingRows(t, s, "r-parked")
 	if len(pending) != 1 || pending[0].Content != "pick it back up" {
@@ -150,11 +144,7 @@ func TestSendMessage_NativeCompletedAbortIsResumable(t *testing.T) {
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-abort", runmode.LocalDefaultUserID, "try again"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-abort'`).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status != "queued" {
-		t.Errorf("status = %q, want queued", status)
+	if st := storedStatus(t, database, "r-abort"); st != "" {
+		t.Errorf("stored status = %q, want none (the un-terminal write clears the outcome)", st)
 	}
 }

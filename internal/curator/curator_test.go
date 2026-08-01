@@ -97,12 +97,12 @@ func turnState(t *testing.T, stores db.Stores, projectID, requestID string) (sta
 	}
 }
 
-// TestCurator_SendMessage_RejectsAfterShutdown pins the contract that
-// downstream HTTP handlers can rely on: once Shutdown has been called,
-// SendMessage refuses the request AND the user message it recorded before
-// the closed check (which is the realistic interleaving — the DB write
-// happens before getOrStartSession) is deleted rather than left dangling as
-// a phantom queued turn no goroutine will ever pick up.
+// TestCurator_SendMessage_RejectsAfterShutdown pins the contract downstream
+// HTTP handlers rely on: once Shutdown has been called, SendMessage refuses
+// the request outright and writes nothing. The check moved ahead of the row
+// write when the entry contract became "insert and ring the doorbell" — a
+// row inserted here would be durable and claimable by a live pod, which is
+// not what the caller asked this process for.
 func TestCurator_SendMessage_RejectsAfterShutdown(t *testing.T) {
 	database := newTestDB(t)
 	projectID := seedProject(t, database, "p")
@@ -119,45 +119,40 @@ func TestCurator_SendMessage_RejectsAfterShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get conversation: %v", err)
 	}
-	if conv == nil {
-		t.Fatal("conversation should have been minted before the closed check")
-	}
-	msgs, err := stores.Curator.ListConversationMessages(t.Context(), runmode.LocalDefaultOrgID, conv.ID)
-	if err != nil {
-		t.Fatalf("list messages: %v", err)
-	}
-	if len(msgs) != 0 {
-		t.Errorf("post-shutdown conversation has %d messages, want 0 (queued turn deleted)", len(msgs))
+	if conv != nil {
+		t.Error("a refused send must leave no conversation behind")
 	}
 }
 
-// TestCurator_CancelProject_KillsActiveSession checks that a project
-// already running has its goroutine torn down. We spawn the goroutine
-// by sending a message (which puts it on the queue), then immediately
-// cancel the project — the goroutine should exit cleanly without
-// leaking. Verified by Shutdown returning quickly and no goroutines
-// blocking the test harness.
+// TestCurator_CancelProject_KillsActiveSession checks that a project already
+// running has its goroutine torn down. The claim loop spawns the goroutine
+// when it hands the turn over; cancelling the project immediately after
+// should exit it cleanly without leaking.
 func TestCurator_CancelProject_KillsActiveSession(t *testing.T) {
 	database := newTestDB(t)
 	projectID := seedProject(t, database, "active")
 
 	hub := websocket.NewHub()
-	c := New(sqlitestore.New(database), hub, "")
+	stores := sqlitestore.New(database)
+	c := New(stores, hub, "")
 	t.Cleanup(c.Shutdown)
+	t.Cleanup(startTestClaimLoop(t, stores, c))
 
-	// SendMessage spawns the per-project goroutine if absent. The
-	// goroutine will try to invoke claude — that'll fail fast on
-	// CI / dev boxes without claude on PATH, but the failure is
-	// masked by the immediate CancelProject anyway.
 	if _, err := c.SendMessage(t.Context(), projectID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "hello"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
+	// Wait for the loop to actually start the session, then tear it down.
+	deadline := time.Now().Add(5 * time.Second)
+	for !c.HasLiveSession(projectID) {
+		if time.Now().After(deadline) {
+			t.Fatal("the claim loop never started a session for the project")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	c.CancelProject(runmode.LocalDefaultOrgID, projectID, "project deleted")
 
-	// Wait a moment for the goroutine to observe ctx.Done and exit.
-	// The contract is "tears down deterministically", not "instantly,"
-	// but it should be sub-second.
-	deadline := time.Now().Add(2 * time.Second)
+	// The contract is "tears down deterministically", not "instantly".
+	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		c.mu.Lock()
 		_, stillThere := c.sessions[projectID]
@@ -170,18 +165,18 @@ func TestCurator_CancelProject_KillsActiveSession(t *testing.T) {
 	t.Errorf("session for project %s still in map after CancelProject", projectID)
 }
 
-// TestCurator_CrossProjectParallel checks the multiplexing contract:
-// SendMessage to two different projects spawns two goroutines, and
-// canceling one doesn't stop the other. We use the post-cancel
-// session map to assert state without depending on agentproc actually
-// running.
+// TestCurator_CrossProjectParallel pins that two projects' turns run in
+// parallel: each gets its own session goroutine, and cancelling one leaves
+// the other running.
 func TestCurator_CrossProjectParallel(t *testing.T) {
 	database := newTestDB(t)
 	projectA := seedProject(t, database, "A")
 	projectB := seedProject(t, database, "B")
 
-	c := New(sqlitestore.New(database), nil, "")
+	stores := sqlitestore.New(database)
+	c := New(stores, nil, "")
 	t.Cleanup(c.Shutdown)
+	t.Cleanup(startTestClaimLoop(t, stores, c))
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -195,16 +190,25 @@ func TestCurator_CrossProjectParallel(t *testing.T) {
 	}()
 	wg.Wait()
 
-	c.mu.Lock()
-	bothPresent := c.sessions[projectA] != nil && c.sessions[projectB] != nil
-	c.mu.Unlock()
-	if !bothPresent {
-		t.Error("both projects should have an active session goroutine")
+	// Sessions start when the claim loop hands each project's turn over, so
+	// wait for both rather than assume SendMessage started them.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c.mu.Lock()
+		bothPresent := c.sessions[projectA] != nil && c.sessions[projectB] != nil
+		c.mu.Unlock()
+		if bothPresent {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("both projects should have an active session goroutine")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	c.CancelProject(runmode.LocalDefaultOrgID, projectA, "project deleted")
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		c.mu.Lock()
 		_, aGone := c.sessions[projectA]
@@ -269,4 +273,48 @@ func stringIndex(s, substr string) int {
 		}
 	}
 	return -1
+}
+
+// startTestClaimLoop stands in for the production claim loop, which lives on
+// the delegation dispatcher (internal/delegate) and cannot be imported here
+// without pointing the dependency arrow the wrong way. Same shape: claim a
+// needs-driving conversation, hand it to DriveClaimedTurn, repeat. Returns a
+// stop func the test defers.
+func startTestClaimLoop(t *testing.T, stores db.Stores, c *Curator) (stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	var inFlight sync.WaitGroup
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			claimed, err := stores.RunQueue.ClaimNextRun(ctx, "test-claim-loop", 1, db.ClaimPlacement{})
+			if err != nil || claimed == nil {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(2 * time.Millisecond):
+				}
+				continue
+			}
+			// Off the loop, like the dispatcher's per-claim goroutine — two
+			// projects' turns must be able to overlap.
+			inFlight.Add(1)
+			go func() {
+				defer inFlight.Done()
+				if !c.DriveClaimedTurn(claimed.OrgID, claimed.ProjectID, claimed.ID, claimed.ClaimID,
+					claimed.ClaimMessageID, claimed.CreatorUserID) {
+					_ = stores.RunQueue.RequeueRun(context.Background(), claimed.OrgID, claimed.ID, "test loop handoff refused")
+				}
+			}()
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+		inFlight.Wait()
+	}
 }

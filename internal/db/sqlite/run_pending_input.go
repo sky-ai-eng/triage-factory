@@ -72,17 +72,5 @@ func (s *runPendingInputStore) Consume(ctx context.Context, orgID, runID string)
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", "", false, err
 	}
-	var message string
-	var userID sql.NullString
-	err := s.q.QueryRowContext(ctx, `
-		UPDATE messages SET delivered = 1 WHERE `+pendingInputPredicate+`
-		RETURNING content, user_id
-	`, orgID, runID).Scan(&message, &userID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", false, nil
-	}
-	if err != nil {
-		return "", "", false, err
-	}
-	return message, userID.String, true, nil
+	return consumePendingInput(ctx, s.q, orgID, runID)
 }

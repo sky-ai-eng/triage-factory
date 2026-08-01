@@ -98,10 +98,7 @@ func seedTurn(t *testing.T, ctx context.Context, stores db.Stores, orgID, userID
 // two steps — leaving the conversation with a live engagement.
 func beginSeededTurn(t *testing.T, ctx context.Context, stores db.Stores, orgID, userID, projectID, conversationID string, messageID int64) string {
 	t.Helper()
-	claimID, ok, err := stores.Curator.ClaimTurnSystem(ctx, orgID, conversationID, messageID, "test-executor", 1)
-	if err != nil || !ok {
-		t.Fatalf("claim turn: ok=%v err=%v", ok, err)
-	}
+	claimID := claimSeededTurn(t, ctx, stores, conversationID)
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
 		_, err := ts.Curator.BeginTurn(ctx, orgID, projectID, conversationID, messageID)
 		return err
@@ -138,4 +135,16 @@ func turnStatusPg(t *testing.T, h *pgtest.Harness, messageID int64) string {
 		t.Fatalf("read turn status %d: %v", messageID, err)
 	}
 	return status
+}
+
+// claimSeededTurn drives the ONE claim loop far enough to own the
+// conversation's oldest queued turn, returning the minted claim id — the
+// production path now that there is no curator-only claim door.
+func claimSeededTurn(t *testing.T, ctx context.Context, stores db.Stores, conversationID string) string {
+	t.Helper()
+	got, err := stores.RunQueue.ClaimNextRun(ctx, "test-executor", 1, db.ClaimPlacement{})
+	if err != nil || got == nil || got.ID != conversationID {
+		t.Fatalf("ClaimNextRun = (%+v, %v), want a claim on conversation %s", got, err, conversationID)
+	}
+	return got.ClaimID
 }

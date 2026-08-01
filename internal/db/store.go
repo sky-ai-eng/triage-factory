@@ -150,7 +150,8 @@ type Stores struct {
 
 	// RunQueue owns the run queue — the work list the delegation dispatcher
 	// drains to drive blueprints through their steps (sibling of EventQueue).
-	// A blueprint step is enqueued as a conversations row in status='queued';
+	// A blueprint step is enqueued as a conversations row with no stored
+	// status — the absence of an outcome is what makes it claimable;
 	// a worker claims it (minting a claims row), runs the agent, and the
 	// reactor advances the blueprint_run.
 	// A system-service store (admin pool in Postgres): the dispatcher runs as

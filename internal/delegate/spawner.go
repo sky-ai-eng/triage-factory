@@ -281,7 +281,11 @@ type Spawner struct {
 	// by mu like the credential seam it sits beside.
 	blobs storage.Storage
 
-	cancels               map[string]context.CancelFunc                     // runID → cancel the entire run
+	cancels map[string]context.CancelFunc // runID → cancel the entire run
+	// curatorTurnDriver is the claim loop's curator execution arm (see
+	// SetCuratorTurnDriver). nil where no curator runtime is built.
+	curatorTurnDriver CuratorTurnDriver
+
 	dispatchWake          chan struct{}                                     // best-effort latency nudge for the run-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
 	drainer               QueueDrainer                                      // nil-safe; set post-construction via SetQueueDrainer
 	eventPublisher        EventPublisher                                    // nil-safe; set post-construction via SetEventPublisher — mirrors run status/activity onto the bus (TFAC-592)

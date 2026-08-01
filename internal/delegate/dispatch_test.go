@@ -84,7 +84,7 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 
 func queuedStepRuns(t *testing.T, database *sql.DB, brID string) []int {
 	t.Helper()
-	rows, err := database.Query(`SELECT blueprint_step_index FROM conversations WHERE blueprint_run_id = ? AND status = 'queued' ORDER BY blueprint_step_index`, brID)
+	rows, err := database.Query(`SELECT blueprint_step_index FROM conversations WHERE blueprint_run_id = ? AND status IS NULL ORDER BY blueprint_step_index`, brID)
 	if err != nil {
 		t.Fatalf("query queued runs: %v", err)
 	}
@@ -108,37 +108,47 @@ func TestDrainRunQueue_DrainingSkipsClaim(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
 	seedRun(t, database, "run-drain-skip", "sess-1", "/tmp/wt-run-drain-skip")
-	if _, err := database.Exec(`UPDATE conversations SET status = 'queued' WHERE id = ?`, "run-drain-skip"); err != nil {
-		t.Fatalf("force queued: %v", err)
-	}
+	forceClaimable(t, database, "run-drain-skip")
 
 	s.SetDraining(true)
 	s.drainRunQueue(context.Background())
 
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, "run-drain-skip").Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status != "queued" {
-		t.Errorf("status = %q, want queued — a draining instance must not claim", status)
+	if claims := claimCountFor(t, database, "run-drain-skip"); claims != 0 {
+		t.Errorf("claims = %d, want 0 — a draining instance must not claim", claims)
 	}
 
 	s.SetDraining(false)
 	s.drainRunQueue(context.Background())
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, "run-drain-skip").Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
+	// The claim is minted synchronously; drainRunQueue then dispatches the
+	// claimed run on a goroutine. This fixture's blueprint has an empty step
+	// plan, so that goroutine deterministically cancels the run — and may
+	// already have released the claim by the time we read (a race -race
+	// exposes). The claim ROW is what proves the gate let the claim through,
+	// and a released claim is still a claim.
+	if claims := claimCountFor(t, database, "run-drain-skip"); claims != 1 {
+		t.Errorf("claims = %d, want 1 once undrained", claims)
 	}
-	// ClaimNextRun flips queued->running synchronously; drainRunQueue then
-	// dispatches the claimed run on a goroutine. This fixture's blueprint has an
-	// empty step plan, so that goroutine deterministically cancels the run — and
-	// may already have done so by the time we read (a race -race exposes). It can
-	// never return to 'queued' (requeue is only for transient pre-agent errors),
-	// so any non-queued status proves the gate let the claim through once
-	// undrained — which is what this test pins. Asserting exactly 'running' races
-	// the async dispatch.
-	if status == "queued" {
-		t.Errorf("status = %q, want the run claimed (any non-queued status) once undrained", status)
+}
+
+// forceClaimable puts a seeded run into the mid-flight state the claim
+// predicate matches: no stored outcome, no active claim.
+func forceClaimable(t *testing.T, database *sql.DB, runID string) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, runID); err != nil {
+		t.Fatalf("force claimable: %v", err)
 	}
+}
+
+// claimCountFor counts every claim ever minted on a conversation — the
+// derived answer to "was this claimed", stable against a dispatch goroutine
+// that may already have released it.
+func claimCountFor(t *testing.T, database *sql.DB, runID string) int {
+	t.Helper()
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM claims WHERE conversation_id = ?`, runID).Scan(&n); err != nil {
+		t.Fatalf("count claims: %v", err)
+	}
+	return n
 }
 
 // TestDrainRunQueue_PartitionFencedSkipsClaim mirrors the draining test for
@@ -148,19 +158,13 @@ func TestDrainRunQueue_PartitionFencedSkipsClaim(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
 	seedRun(t, database, "run-pfence-skip", "sess-1", "/tmp/wt-run-pfence-skip")
-	if _, err := database.Exec(`UPDATE conversations SET status = 'queued' WHERE id = ?`, "run-pfence-skip"); err != nil {
-		t.Fatalf("force queued: %v", err)
-	}
+	forceClaimable(t, database, "run-pfence-skip")
 
 	s.partitionFenced.Store(true)
 	s.drainRunQueue(context.Background())
 
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, "run-pfence-skip").Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status != "queued" {
-		t.Errorf("status = %q, want queued — a partition-fenced instance must not claim", status)
+	if claims := claimCountFor(t, database, "run-pfence-skip"); claims != 0 {
+		t.Errorf("claims = %d, want 0 — a partition-fenced instance must not claim", claims)
 	}
 }
 

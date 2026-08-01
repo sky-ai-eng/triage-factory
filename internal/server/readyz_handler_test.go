@@ -188,15 +188,45 @@ func TestHandleReadyz_ActiveRunsCount(t *testing.T) {
 
 	// origin='interactive' (anything other than 'blueprint') sidesteps the
 	// origin-requires-parents CHECK, which otherwise demands a
-	// blueprint_run_id/task_id/prompt_id trio — this test only cares about
-	// the status column the COUNT filters on.
-	for i, status := range []string{"queued", "running", "completed"} {
+	// blueprint_run_id/task_id/prompt_id trio.
+	//
+	// Both halves of the count are derived, so the fixture states them the
+	// way the system does: a waiting conversation carries no stored status,
+	// a working one carries no stored status AND an unreleased claim, a
+	// parked one carries 'open', and a finished one carries its terminal.
+	for _, seed := range []struct{ id, status string }{
+		{"run_readyz_waiting", ""},
+		{"run_readyz_working", ""},
+		{"run_readyz_woken", "open"},
+		{"run_readyz_parked", "open"},
+		{"run_readyz_done", "completed"},
+	} {
+		var stored any
+		if seed.status != "" {
+			stored = seed.status
+		}
 		if _, err := s.db.Exec(
 			`INSERT INTO conversations (id, status, origin) VALUES (?, ?, 'interactive')`,
-			"run_readyz_"+status, status,
+			seed.id, stored,
 		); err != nil {
-			t.Fatalf("seed run %d (%s): %v", i, status, err)
+			t.Fatalf("seed run %s: %v", seed.id, err)
 		}
+	}
+	if _, err := s.db.Exec(`
+		INSERT INTO claims (id, conversation_id, executor_id, boot_epoch)
+		VALUES ('claim_readyz_working', 'run_readyz_working', 'readyz-executor', 1)
+	`); err != nil {
+		t.Fatalf("seed claim: %v", err)
+	}
+	// A follow-up on the parked run wakes it: it is claimable and displays
+	// as queued, so it is waiting work and must be counted. Its twin stays
+	// parked with nothing queued and must not be. Nothing distinguishes them
+	// but this row, which is the point.
+	if _, err := s.db.Exec(`
+		INSERT INTO messages (conversation_id, role, content, subtype, delivered, window_state)
+		VALUES ('run_readyz_woken', 'user', 'keep going', '', false, 'active')
+	`); err != nil {
+		t.Fatalf("seed follow-up: %v", err)
 	}
 
 	rec := doJSON(t, s, http.MethodGet, "/readyz", nil)
@@ -207,8 +237,8 @@ func TestHandleReadyz_ActiveRunsCount(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.ActiveRuns != 2 {
-		t.Errorf("active_runs: got %d want 2 (queued+running, not completed)", resp.ActiveRuns)
+	if resp.ActiveRuns != 3 {
+		t.Errorf("active_runs: got %d want 3 (waiting + working + parked-and-woken; not the idle parked one, not the finished one)", resp.ActiveRuns)
 	}
 }
 

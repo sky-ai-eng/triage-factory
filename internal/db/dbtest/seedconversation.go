@@ -21,9 +21,10 @@ import (
 // creator when none is supplied while an event trigger forces NULL (the
 // creator/trigger_type CHECK); origin is 'blueprint' only when the fixture
 // carries a blueprint_run_id (the origin CHECK requires the blueprint
-// parents), 'interactive' otherwise; status falls back to 'running' so the
-// delegation-has-status CHECK holds (setup sub-states are claim phase, not
-// status — see SeedActiveClaim).
+// parents), 'interactive' otherwise; status falls back to NULL — the
+// mid-flight state, which is what an unconcluded conversation carries now
+// that "queued" and "running" are derived from the claim table rather than
+// stored (see SeedActiveClaim).
 func SeedConversation(tb testing.TB, database *sql.DB, run domain.Conversation) {
 	tb.Helper()
 
@@ -51,9 +52,9 @@ func SeedConversation(tb testing.TB, database *sql.DB, run domain.Conversation) 
 	if run.BlueprintRunID != "" {
 		origin = "blueprint"
 	}
-	status := run.Status
-	if status == "" {
-		status = "running"
+	var status any
+	if run.Status != "" {
+		status = run.Status
 	}
 	var startedAt any
 	if !run.StartedAt.IsZero() {

@@ -2,6 +2,7 @@ package reaper_test
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -88,9 +89,13 @@ func seedReaperFixture(t *testing.T, h *pgtest.Harness, attempts int) reaperFixt
 		t.Fatalf("EnqueueRun: %v", err)
 	}
 	for i := 0; i < attempts; i++ {
+		// The claim is cross-org and takes the globally-oldest eligible
+		// conversation, so a test seeding several fixtures must leave no
+		// older one claimable — assert the identity rather than let a
+		// mis-claim pass silently.
 		got, err := stores.RunQueue.ClaimNextRun(ctx, executorID, 1, db.ClaimPlacement{})
-		if err != nil || got == nil {
-			t.Fatalf("ClaimNextRun (attempt %d): got=%v err=%v", i+1, got, err)
+		if err != nil || got == nil || got.ID != runID {
+			t.Fatalf("ClaimNextRun (attempt %d): got=%v err=%v, want run %s", i+1, got, err, runID)
 		}
 		if i < attempts-1 {
 			// A mid-loop requeue simulates the run bouncing back to 'queued'
@@ -144,14 +149,14 @@ func TestReapDeadExecutors_RequeuesUnderAttemptBudget(t *testing.T) {
 		t.Fatalf("counts = %+v, want {Requeued:1}", counts)
 	}
 
-	var status string
+	var status sql.NullString
 	if err := h.AdminDB.QueryRowContext(ctx,
 		`SELECT status FROM conversations WHERE id = $1`, fx.runID,
 	).Scan(&status); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
-	if status != "queued" {
-		t.Errorf("status = %q, want queued", status)
+	if status.Valid {
+		t.Errorf("status = %q, want none — releasing the claim IS the requeue", status.String)
 	}
 	// The dead engagement is released — a requeued row has no owner — and
 	// the release carries the claim-level 'reaped' outcome.
@@ -283,12 +288,14 @@ func TestReapDeadExecutors_FreshHeartbeatNeverReaped(t *testing.T) {
 		t.Fatalf("counts = %+v, want all-zero (fresh heartbeat, draining or not)", counts)
 	}
 
-	var status string
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM conversations WHERE id = $1`, fx.runID).Scan(&status); err != nil {
+	var active int
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, fx.runID,
+	).Scan(&active); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
-	if status != "running" {
-		t.Errorf("status = %q, want running (untouched)", status)
+	if active != 1 {
+		t.Errorf("active claims = %d, want 1 (the live engagement is untouched)", active)
 	}
 }
 
@@ -348,13 +355,14 @@ func TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesRunsExecutorID(t *test
 	}
 }
 
-// TestHealClaimDesyncs_HealsBothStrandedShapes pins the periodic janitor: a
-// terminal conversation with a dangling active claim gets the claim released
-// (outcome mapped from status), an in-flight claimless run under a running
-// parent is requeued, and a healthy claimed running run is untouched. These
-// are the two shapes the non-atomic app-pool terminal writes can strand;
-// the reaper repeating the boot-time arms bounds their lifetime to a tick.
-func TestHealClaimDesyncs_HealsBothStrandedShapes(t *testing.T) {
+// TestHealClaimDesyncs_ReleasesTerminalDanglingClaims pins the periodic
+// janitor: a terminal conversation with a dangling active claim gets the
+// claim released (outcome mapped from status), while a healthy engaged run
+// and a mid-flight claimless one are both untouched. That last shape used to
+// be the janitor's second arm — under the derived model a released claim on
+// a mid-flight conversation IS the requeue, so there is nothing left to heal
+// about it.
+func TestHealClaimDesyncs_ReleasesTerminalDanglingClaims(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
@@ -364,25 +372,28 @@ func TestHealClaimDesyncs_HealsBothStrandedShapes(t *testing.T) {
 	terminal := seedReaperFixture(t, h, 1)
 	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = 'completed' WHERE id = $1`, terminal.runID)
 
-	// Rolled-back flip: the claim release committed but the conversation
-	// stayed in-flight, with a stale placement stamp to clear.
-	stranded := seedReaperFixture(t, h, 1)
+	// Healthy: mid-flight with a live claim. Seeded BEFORE the claimless
+	// fixture below, because the claim is cross-org and takes the oldest
+	// eligible conversation — a run left claimable would be picked up by the
+	// next fixture's claim instead of its own.
+	healthy := seedReaperFixture(t, h, 1)
+
+	// Mid-flight with the claim released: the ordinary claimable state now,
+	// stale placement stamp and all (the next claim re-earns affinity).
+	claimless := seedReaperFixture(t, h, 1)
 	pgtest.MustExec(t, h.AdminDB, `
 		UPDATE claims SET released_at = now(), outcome = 'failed'
 		WHERE conversation_id = $1 AND released_at IS NULL
-	`, stranded.runID)
-	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = 'exec-dead' WHERE id = $1`, stranded.runID)
-
-	// Healthy: running with a live claim.
-	healthy := seedReaperFixture(t, h, 1)
+	`, claimless.runID)
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = 'exec-dead' WHERE id = $1`, claimless.runID)
 
 	store := reaper.NewPostgresStore(h.AdminDB)
-	requeued, released, err := store.HealClaimDesyncs(ctx)
+	released, err := store.HealClaimDesyncs(ctx)
 	if err != nil {
 		t.Fatalf("HealClaimDesyncs: %v", err)
 	}
-	if requeued != 1 || released != 1 {
-		t.Fatalf("healed = (requeued=%d, released=%d), want (1, 1)", requeued, released)
+	if released != 1 {
+		t.Fatalf("released = %d, want 1", released)
 	}
 
 	var rel bool
@@ -397,18 +408,18 @@ func TestHealClaimDesyncs_HealsBothStrandedShapes(t *testing.T) {
 		t.Errorf("terminal row's claim = (released=%v, outcome=%q), want (true, completed)", rel, outcome)
 	}
 
-	var status string
+	var status sql.NullString
 	var pref any
 	if err := h.AdminDB.QueryRowContext(ctx, `
 		SELECT status, preferred_executor_id FROM conversations WHERE id = $1
-	`, stranded.runID).Scan(&status, &pref); err != nil {
-		t.Fatalf("read stranded row: %v", err)
+	`, claimless.runID).Scan(&status, &pref); err != nil {
+		t.Fatalf("read claimless row: %v", err)
 	}
-	if status != "queued" || pref != nil {
-		t.Errorf("stranded row = (status=%q, preferred=%v), want (queued, cleared)", status, pref)
+	if status.Valid {
+		t.Errorf("claimless row status = %q, want none (already claimable)", status.String)
 	}
 
-	var healthyStatus string
+	var healthyStatus sql.NullString
 	var active int
 	if err := h.AdminDB.QueryRowContext(ctx, `
 		SELECT c.status, (SELECT COUNT(*) FROM claims WHERE conversation_id = c.id AND released_at IS NULL)
@@ -416,13 +427,13 @@ func TestHealClaimDesyncs_HealsBothStrandedShapes(t *testing.T) {
 	`, healthy.runID).Scan(&healthyStatus, &active); err != nil {
 		t.Fatalf("read healthy row: %v", err)
 	}
-	if healthyStatus != "running" || active != 1 {
-		t.Errorf("healthy row = (status=%q, active claims=%d), want (running, 1)", healthyStatus, active)
+	if healthyStatus.Valid || active != 1 {
+		t.Errorf("healthy row = (status=%q, active claims=%d), want (none, 1)", healthyStatus.String, active)
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if requeued, released, err := store.HealClaimDesyncs(ctx); err != nil || requeued != 0 || released != 0 {
-		t.Errorf("second sweep = (%d, %d, %v), want (0, 0, nil)", requeued, released, err)
+	if released, err := store.HealClaimDesyncs(ctx); err != nil || released != 0 {
+		t.Errorf("second sweep = (%d, %v), want (0, nil)", released, err)
 	}
 }
 

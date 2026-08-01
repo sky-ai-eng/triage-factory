@@ -82,13 +82,12 @@ func (a *App) dispatchCtl(payload string) {
 			a.wsBackplane.HandleCtlKick(payload)
 		}
 	case "curator_new":
-		// Curator homing (spec §6.3): nudge THIS pod's claim loop to scan for
-		// freshly-homed turns. Broadcast + self-filter — the loop lists only
-		// turns homed to this executor, so a control pod (no loop → nil) and a
-		// non-home executor both no-op. The backstop poll covers a dropped
-		// notification.
-		if a.curatorClaimLoop != nil {
-			a.curatorClaimLoop.Wake()
+		// Curator homing: nudge THIS pod's claim loop to scan for freshly
+		// enqueued turns. Broadcast + self-filter — the claim's own home gate
+		// admits only turns homed here, so a pod that isn't the home simply
+		// finds nothing. The backstop scan covers a dropped notification.
+		if a.spawner != nil {
+			a.spawner.WakeDispatcher()
 		}
 	case "curator_cancel":
 		// Curator homing (spec §6.3): fire the in-process session cancel if THIS

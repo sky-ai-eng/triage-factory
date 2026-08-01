@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"strconv"
 
@@ -52,26 +51,15 @@ func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n
 }
 
 func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, runID string) ([]domain.StagedInjection, error) {
-	// UPDATE … RETURNING claims the run's pending notes in one statement, so
-	// an injection is delivered exactly once even under a resume race. The
-	// row-id sort restores oldest-first (RETURNING order is unspecified).
-	// window_state='active' keeps withdrawn rows (undelivered + inactive)
-	// out of the flush — withdrawn means "never happened".
-	rows, err := s.admin.QueryContext(ctx, `
-		WITH flushed AS (
-			UPDATE messages SET delivered = true
-			WHERE org_id = $1::uuid AND conversation_id = $2::uuid
-			  AND delivered = false AND window_state = 'active' AND subtype = $3
-			RETURNING id, conversation_id, org_id, metadata, content, created_at
-		)
-		SELECT id, conversation_id::text, org_id::text, metadata::text, content, created_at
-		FROM flushed ORDER BY id ASC
-	`, orgID, runID, stagedInjectionSubtype)
+	// The shared flush primitive, narrowed to this store's subtype: one
+	// definition of "consume a conversation's pending rows" serves every
+	// producer, so a note is delivered exactly once even under a resume race
+	// and withdrawn rows stay out by the same rule the claim predicate uses.
+	flushed, err := flushPendingInput(ctx, s.admin, orgID, runID, stagedInjectionSubtype)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return scanStagedInjectionRows(rows)
+	return stagedInjectionsFromPending(flushed), nil
 }
 
 func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id string) error {
@@ -95,29 +83,27 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	return err
 }
 
-// scanStagedInjectionRows maps flushed message rows back onto the
+// stagedInjectionsFromPending maps flushed pending rows onto the
 // StagedInjection shape: the row id becomes the decimal ID, content the
 // Body, and the producer tag is unpacked from metadata.
-func scanStagedInjectionRows(rows *sql.Rows) ([]domain.StagedInjection, error) {
+func stagedInjectionsFromPending(flushed []pendingRow) []domain.StagedInjection {
 	var out []domain.StagedInjection
-	for rows.Next() {
-		var (
-			id       int64
-			n        domain.StagedInjection
-			metadata sql.NullString
-		)
-		if err := rows.Scan(&id, &n.RunID, &n.OrgID, &metadata, &n.Body, &n.CreatedAt); err != nil {
-			return nil, err
+	for _, r := range flushed {
+		n := domain.StagedInjection{
+			ID:        strconv.FormatInt(r.ID, 10),
+			RunID:     r.ConvID,
+			OrgID:     r.OrgID,
+			Body:      r.Content,
+			CreatedAt: r.CreatedAt,
 		}
-		n.ID = strconv.FormatInt(id, 10)
-		if metadata.Valid && metadata.String != "" {
+		if r.Metadata != "" {
 			var meta struct {
 				Producer string `json:"producer"`
 			}
-			_ = json.Unmarshal([]byte(metadata.String), &meta)
+			_ = json.Unmarshal([]byte(r.Metadata), &meta)
 			n.Producer = meta.Producer
 		}
 		out = append(out, n)
 	}
-	return out, rows.Err()
+	return out
 }

@@ -10,14 +10,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// childRunStatusDB reads a single conversations row's status.
+// childRunStatusDB reads a single conversations row's STORED status, with
+// SQL NULL (the mid-flight state) as "".
 func childRunStatusDB(t *testing.T, conn *sql.DB, id string) string {
 	t.Helper()
-	var s string
+	var s sql.NullString
 	if err := conn.QueryRow(`SELECT status FROM conversations WHERE id = ?`, id).Scan(&s); err != nil {
 		t.Fatalf("read run %s status: %v", id, err)
 	}
-	return s
+	return s.String
 }
 
 // TestMarkRunStatus_CancelsOrphanedChild_OnTerminal pins the atomic
@@ -50,7 +51,7 @@ func TestMarkRunStatus_CancelsOrphanedChild_OnTerminal(t *testing.T) {
 		ID: "oa-child", TaskID: task.ID, PromptID: "oa-p0", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	})
-	if _, err := conn.Exec(`UPDATE conversations SET status = 'running' WHERE id = 'oa-child'`); err != nil {
+	if _, err := conn.Exec(`UPDATE conversations SET status = NULL WHERE id = 'oa-child'`); err != nil {
 		t.Fatalf("set child running: %v", err)
 	}
 	// The racing dispatcher already claimed the child; the cancel must
@@ -168,7 +169,7 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	})
 	// Force the desync directly (bypassing MarkRunStatus's atomic cancel) to
 	// mimic a DB broken before the fix landed.
-	if _, err := conn.Exec(`UPDATE conversations SET status = 'running' WHERE id = 'ra-child'`); err != nil {
+	if _, err := conn.Exec(`UPDATE conversations SET status = NULL WHERE id = 'ra-child'`); err != nil {
 		t.Fatalf("set child A running: %v", err)
 	}
 	if _, err := conn.Exec(`UPDATE blueprint_runs SET status = 'cancelled', cancel_requested = 0 WHERE id = 'ra-br'`); err != nil {
@@ -210,7 +211,7 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 		ID: "rb-child", TaskID: taskB.ID, PromptID: "rb-p0", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brB, BlueprintStepIndex: &step0,
 	})
-	if _, err := conn.Exec(`UPDATE conversations SET status = 'running' WHERE id = 'rb-child'`); err != nil {
+	if _, err := conn.Exec(`UPDATE conversations SET status = NULL WHERE id = 'rb-child'`); err != nil {
 		t.Fatalf("set child B running: %v", err)
 	}
 	// A genuinely running child holds an active claim (ClaimNextRun mints
@@ -250,8 +251,8 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 			t.Errorf("orphan child ledger tokens = (%d,%d,%d,%d), want (150,25,1500,10)", in, out, cr, cc)
 		}
 	}
-	if got := childRunStatusDB(t, conn, "rb-child"); got != "running" {
-		t.Errorf("healthy child status = %q, want running (must not touch children under a running parent)", got)
+	if got := childRunStatusDB(t, conn, "rb-child"); got != "" {
+		t.Errorf("healthy child status = %q, want none (must not touch mid-flight children under a running parent)", got)
 	}
 
 	// Idempotent: a second sweep finds nothing.
@@ -260,12 +261,12 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	}
 }
 
-// TestReconcileOrphanedRuns_HealsClaimDesyncs pins the janitor arms on the
+// TestReconcileOrphanedRuns_HealsClaimDesyncs pins the janitor arm on the
 // SQLite side: a terminal conversation with a dangling active claim gets the
-// claim released with the status-mapped outcome, and an in-flight delegation
-// conversation with no active claim under a running parent goes back to
-// 'queued' — while the healthy shapes (running with an active claim, queued
-// with none) are untouched.
+// claim released with the status-mapped outcome, while every healthy shape
+// is untouched. A mid-flight conversation with no active claim is NOT a
+// desync any more — that shape IS the claimable state — so nothing heals it
+// and it stays exactly as it is.
 func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -310,23 +311,24 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	activeClaim("ds-done-cl", "ds-done")
 	seedChild("ds-unsolvable", "task_unsolvable")
 	activeClaim("ds-unsolvable-cl", "ds-unsolvable")
-	// Claimless running row (the rolled-back-flip shape), with a stale
-	// placement stamp the requeue must clear.
-	seedChild("ds-stranded", "running")
+	// Mid-flight row with no claim: under the derived model this is simply
+	// a claimable conversation, so the sweep must leave it (and its stale
+	// placement stamp, which the next claim re-earns) alone.
+	seedChild("ds-stranded", "")
 	if _, err := conn.Exec(`UPDATE conversations SET preferred_executor_id = 'exec-dead' WHERE id = 'ds-stranded'`); err != nil {
 		t.Fatalf("stamp placement: %v", err)
 	}
-	// Healthy shapes: running with a live claim; queued with none.
-	seedChild("ds-healthy", "running")
+	// Healthy shapes: mid-flight with a live claim; mid-flight with none.
+	seedChild("ds-healthy", "")
 	activeClaim("ds-healthy-cl", "ds-healthy")
-	seedChild("ds-queued", "queued")
+	seedChild("ds-queued", "")
 
 	n, err := stores.RunQueue.ReconcileOrphanedRuns(ctx)
 	if err != nil {
 		t.Fatalf("ReconcileOrphanedRuns: %v", err)
 	}
-	if n != 3 {
-		t.Errorf("healed count = %d, want 3 (two released claims + one requeue)", n)
+	if n != 2 {
+		t.Errorf("healed count = %d, want 2 (two released claims)", n)
 	}
 
 	claimState := func(id string) (released bool, outcome string) {
@@ -343,24 +345,17 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	if rel, out := claimState("ds-unsolvable-cl"); !rel || out != "failed" {
 		t.Errorf("task_unsolvable row's claim = (released=%v, outcome=%q), want (true, failed)", rel, out)
 	}
-	if got := childRunStatusDB(t, conn, "ds-stranded"); got != "queued" {
-		t.Errorf("stranded row status = %q, want queued", got)
-	}
-	var pref any
-	if err := conn.QueryRow(`SELECT preferred_executor_id FROM conversations WHERE id = 'ds-stranded'`).Scan(&pref); err != nil {
-		t.Fatalf("read preferred_executor_id: %v", err)
-	}
-	if pref != nil {
-		t.Errorf("stranded row preferred_executor_id = %v, want cleared", pref)
+	if got := childRunStatusDB(t, conn, "ds-stranded"); got != "" {
+		t.Errorf("mid-flight claimless row status = %q, want no stored status (already claimable)", got)
 	}
 	if rel, _ := claimState("ds-healthy-cl"); rel {
-		t.Error("healthy running row's live claim was released")
+		t.Error("healthy engaged row's live claim was released")
 	}
-	if got := childRunStatusDB(t, conn, "ds-healthy"); got != "running" {
-		t.Errorf("healthy running row status = %q, want running", got)
+	if got := childRunStatusDB(t, conn, "ds-healthy"); got != "" {
+		t.Errorf("healthy engaged row status = %q, want no stored status", got)
 	}
-	if got := childRunStatusDB(t, conn, "ds-queued"); got != "queued" {
-		t.Errorf("claimless queued row status = %q, want queued (already claimable, nothing to heal)", got)
+	if got := childRunStatusDB(t, conn, "ds-queued"); got != "" {
+		t.Errorf("claimless row status = %q, want no stored status (already claimable, nothing to heal)", got)
 	}
 
 	// Idempotent: a second sweep finds nothing.

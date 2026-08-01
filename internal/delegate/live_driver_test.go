@@ -177,9 +177,7 @@ func TestDriveLiveRun_ProcessExitCarriesErr(t *testing.T) {
 func TestDriveLiveRun_IdleHibernates(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-idle", "sess-idle", "/tmp/wt-idle")
-	if _, err := database.Exec(`UPDATE conversations SET status='running' WHERE id='r-idle'`); err != nil {
-		t.Fatalf("set running: %v", err)
-	}
+	markEngaged(t, database, "r-idle")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	var taskID string

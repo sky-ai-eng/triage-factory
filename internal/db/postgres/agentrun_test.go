@@ -538,7 +538,7 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 	}
 	// Back to running for the terminal writes below (the claim path is
 	// admin-side; here we only need the status precondition).
-	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = 'running' WHERE id = $1`, runID); err != nil {
+	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, runID); err != nil {
 		t.Fatalf("reset status to running: %v", err)
 	}
 

@@ -101,6 +101,21 @@ const (
 	ConversationRuntimeNative = "native"
 )
 
+// The conversations.type vocabulary — which surface owns a conversation.
+// App-validated (no schema CHECK, the house pattern for open vocabularies).
+// One claim loop drives every one of them; the type is what selects the
+// execution arm once a claim is minted.
+const (
+	// ConversationTypeDelegation is a task run — every blueprint step today.
+	ConversationTypeDelegation = "delegation"
+	// ConversationTypeCurator is a per-(project, creator) chat.
+	ConversationTypeCurator = "curator"
+	// ConversationTypeInteractive is reserved: the taskless "pick repos and
+	// type" surface. The claim predicate already admits it; nothing mints
+	// one yet.
+	ConversationTypeInteractive = "interactive"
+)
+
 // InjectionSubtype values discriminate a `role=user` row the system wrote
 // on the agent's behalf from one a human typed. Assembly reads them (a
 // steer row renders inside a keep-working envelope); display reads them to
@@ -287,6 +302,14 @@ type Conversation struct {
 	// call. Empty on rows hydrated by the per-org Get paths, which already
 	// carry org in their call args.
 	OrgID string `json:"-"`
+
+	// ClaimMessageID is the queued input row the claim was minted to drive —
+	// the claim's mint intent, so a pickup that fails before attaching any
+	// message stays attributable to its exact turn. Populated by
+	// RunQueueStore.ClaimNextRun for surfaces whose work unit is one queued
+	// message (curator today); 0 for a delegation conversation, whose work
+	// unit is the conversation itself.
+	ClaimMessageID int64 `json:"-"`
 
 	// ClaimID is the claims row minted for this engagement, populated only by
 	// RunQueueStore.ClaimNextRun (which returns the row it just reserved

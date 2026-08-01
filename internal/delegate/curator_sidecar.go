@@ -158,6 +158,16 @@ func (s *Spawner) curatorSidecarProvisionFor(orgID, conversationID string) agent
 			if err != nil {
 				dispatchLog.Warn("read curator turn credential bundle failed; retrying", "conversation", conversationID, "error", err)
 			} else if ok && b.BootEpoch == myBootEpoch {
+				// Un-park the claim now the bundle is here: the phase is what
+				// the brain's single awaiting-credentials scan reads, so
+				// leaving it set would have the backstop sweep re-resolve
+				// (and re-mint STS material for) a turn that is already
+				// provisioned. Best-effort — a failed clear costs one
+				// redundant re-seal, never the turn.
+				if err := s.agentRuns.SetActiveClaimPhaseSystem(provCtx, orgID, conversationID, ""); err != nil {
+					dispatchLog.Warn("clear curator turn awaiting-credentials phase failed",
+						"conversation", conversationID, "error", err)
+				}
 				return b.Sealed, b.BootEpoch, nil
 			}
 			select {

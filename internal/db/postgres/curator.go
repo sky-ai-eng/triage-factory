@@ -252,32 +252,6 @@ func (s *curatorStore) ArchiveLiveConversation(ctx context.Context, orgID, proje
 
 // --- Dispatch ---
 
-func (s *curatorStore) ClaimTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, executorID string, bootEpoch int64) (string, bool, error) {
-	id := uuid.New().String()
-	// The mint is guarded on the queued row still being undelivered: a raced
-	// cancel deletes it (minting then would trip the message FK), and a
-	// duplicate feed finds it delivered — both are skips, not engagements.
-	res, err := s.admin.ExecContext(ctx, `
-		INSERT INTO claims (id, org_id, conversation_id, message_id, executor_id, boot_epoch, claimed_at)
-		SELECT $1, $2, $3, m.id, $5, $6, now()
-		FROM messages m
-		WHERE m.org_id = $2 AND m.conversation_id = $3 AND m.id = $4
-		  AND m.role = 'user' AND m.subtype = '' AND m.delivered = false
-		ON CONFLICT (conversation_id) WHERE released_at IS NULL DO NOTHING
-	`, id, orgID, conversationID, messageID, executorID, bootEpoch)
-	if err != nil {
-		return "", false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return "", false, err
-	}
-	if n == 0 {
-		return "", false, nil
-	}
-	return id, true, nil
-}
-
 func (s *curatorStore) BeginTurn(ctx context.Context, orgID, projectID, conversationID string, messageID int64) (*db.CuratorTurnStart, error) {
 	start := &db.CuratorTurnStart{}
 	err := inTx(ctx, s.q, func(q queryer) error {
@@ -383,30 +357,20 @@ func (s *curatorStore) FailedTurnAttemptsSystem(ctx context.Context, orgID, conv
 	return count, lastError, rows.Err()
 }
 
-func (s *curatorStore) DeadLetterTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, executorID string, bootEpoch int64, errMsg string) (bool, error) {
+func (s *curatorStore) DeadLetterTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, errMsg string) (bool, error) {
 	matched := false
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		// A live engagement owns the conversation — this gate mirrors the
-		// dispatch's own claim-conflict skip, so the poisoned row waits
-		// rather than fighting whatever is running.
-		var active int
-		if err := q.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM claims
-			WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL
-		`, orgID, conversationID).Scan(&active); err != nil {
-			return err
-		}
-		if active > 0 {
-			return nil
-		}
-		// Retire the message before minting anything: a raced cancel that
-		// already deleted (or a duplicate feed that already delivered) the
-		// row must leave zero writes behind. window_state='inactive' keeps
-		// the poisoned input out of assembly and the claimable scan;
-		// delivered=true keeps it visible transcript history.
+		// Retire the message first, guarded on it still being queued: a
+		// raced cancel that already deleted it (or a duplicate feed that
+		// already delivered it) must leave the transcript untouched.
+		// window_state='inactive' keeps the poisoned input out of assembly
+		// and out of the claim predicate; delivered=true keeps it visible
+		// transcript history, stamped with the engagement that gave up.
 		res, err := q.ExecContext(ctx, `
-			UPDATE messages SET delivered = true, window_state = 'inactive'
-			WHERE org_id = $1 AND conversation_id = $2 AND id = $3
+			UPDATE messages SET delivered = true, window_state = 'inactive',
+			    claim_id = (SELECT cl.id FROM claims cl
+			                WHERE cl.conversation_id = $2::uuid AND cl.released_at IS NULL)
+			WHERE org_id = $1::uuid AND conversation_id = $2::uuid AND id = $3
 			  AND role = 'user' AND subtype = '' AND delivered = false
 		`, orgID, conversationID, messageID)
 		if err != nil {
@@ -416,32 +380,18 @@ func (s *curatorStore) DeadLetterTurnSystem(ctx context.Context, orgID, conversa
 		if err != nil {
 			return err
 		}
-		if n == 0 {
-			return nil
-		}
-		// The final claim is born released: it exists to carry the terminal
-		// 'failed' the history synthesizer derives the turn's status from.
-		claimID := uuid.New().String()
-		if _, err := q.ExecContext(ctx, `
-			INSERT INTO claims (id, org_id, conversation_id, message_id, executor_id, boot_epoch,
-			                    claimed_at, released_at, outcome, error)
-			VALUES ($1, $2, $3, $4, $5, $6, now(), now(), 'failed', $7)
-		`, claimID, orgID, conversationID, messageID, executorID, bootEpoch, nullIfEmpty(errMsg)); err != nil {
-			return err
-		}
-		if _, err := q.ExecContext(ctx, `
-			UPDATE messages SET claim_id = $1
-			WHERE org_id = $2 AND conversation_id = $3 AND id = $4
-		`, claimID, orgID, conversationID, messageID); err != nil {
-			return err
-		}
-		matched = true
-		return nil
+		matched = n > 0
+		// The claim releases either way: the engagement that reached the
+		// dead-letter gate is giving up on this conversation whether or not
+		// the poisoned row was still there to retire. Its terminal outcome
+		// is what history synthesis renders the turn from.
+		_, err = q.ExecContext(ctx, `
+			UPDATE claims SET released_at = now(), outcome = 'failed', error = COALESCE(error, $3)
+			WHERE org_id = $1::uuid AND conversation_id = $2::uuid AND released_at IS NULL
+		`, orgID, conversationID, nullIfEmpty(errMsg))
+		return err
 	})
-	if err != nil {
-		return false, err
-	}
-	return matched, nil
+	return matched, err
 }
 
 func (s *curatorStore) ReleaseActiveTurnSystem(ctx context.Context, orgID, conversationID, outcome, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error) {
@@ -540,36 +490,6 @@ func (s *curatorStore) RevertTurnContext(ctx context.Context, orgID, conversatio
 }
 
 // --- Executor claim loop / sweeps ---
-
-func (s *curatorStore) ListClaimableTurnsForHomeSystem(ctx context.Context, homeInstanceID string) ([]domain.CuratorTurn, error) {
-	rows, err := s.admin.QueryContext(ctx, `
-		SELECT m.id, m.conversation_id, c.org_id, COALESCE(c.project_id::text, ''), COALESCE(c.creator_user_id::text, '')
-		FROM messages m
-		JOIN conversations c ON c.id = m.conversation_id
-		JOIN curator_homes h ON h.org_id = c.org_id::text AND h.project_id = c.project_id::text
-		WHERE c.type = 'curator' AND c.archived_at IS NULL
-		  AND m.role = 'user' AND m.subtype = '' AND m.delivered = false
-		  AND h.home_instance_id = $1
-		  AND NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = c.id AND cl.released_at IS NULL)
-		  AND m.id = (SELECT MIN(m2.id) FROM messages m2
-		              WHERE m2.conversation_id = c.id AND m2.role = 'user'
-		                AND m2.subtype = '' AND m2.delivered = false)
-		ORDER BY m.id ASC
-	`, homeInstanceID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []domain.CuratorTurn
-	for rows.Next() {
-		var t domain.CuratorTurn
-		if err := rows.Scan(&t.MessageID, &t.ConversationID, &t.OrgID, &t.ProjectID, &t.CreatorUserID); err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
-}
 
 // CancelStrandedTurnsForHomeSystem is an outcome/error release only: the
 // ledger already holds whatever the stranded turn streamed, and a turn whose
@@ -695,7 +615,7 @@ func (s *curatorStore) QueueContextChangeSystem(ctx context.Context, orgID, proj
 
 func (s *curatorStore) PublishTurnCredPubKeySystem(ctx context.Context, orgID, conversationID, pubkey string) (bool, error) {
 	res, err := s.admin.ExecContext(ctx, `
-		UPDATE claims SET cred_pubkey = $1
+		UPDATE claims SET cred_pubkey = $1, phase = 'awaiting_credentials'
 		WHERE org_id = $2 AND conversation_id = $3 AND released_at IS NULL
 		  AND (cred_pubkey IS NULL OR cred_pubkey = '')
 	`, pubkey, orgID, conversationID)
@@ -732,34 +652,6 @@ func (s *curatorStore) GetTurnProvisionInfoSystem(ctx context.Context, orgID, co
 		return nil, false, err
 	}
 	return &p, true, nil
-}
-
-func (s *curatorStore) ListAwaitingCredentialTurnsSystem(ctx context.Context) ([]domain.CuratorTurnProvision, error) {
-	rows, err := s.admin.QueryContext(ctx, `
-		SELECT cl.conversation_id, c.org_id, COALESCE(c.project_id::text, ''),
-		       COALESCE(c.team_id::text, ''), cl.executor_id, COALESCE(cl.cred_pubkey, '')
-		FROM claims cl
-		JOIN conversations c ON c.id = cl.conversation_id
-		LEFT JOIN claim_credentials cc ON cc.claim_id = cl.id
-		LEFT JOIN instances i ON i.id = cl.executor_id
-		WHERE c.type = 'curator' AND cl.released_at IS NULL
-		  AND cl.cred_pubkey IS NOT NULL AND cl.cred_pubkey <> ''
-		  AND (cc.claim_id IS NULL OR (i.id IS NOT NULL AND cc.boot_epoch < i.boot_epoch))
-		ORDER BY cl.claimed_at ASC, cl.id ASC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []domain.CuratorTurnProvision
-	for rows.Next() {
-		var p domain.CuratorTurnProvision
-		if err := rows.Scan(&p.ConversationID, &p.OrgID, &p.ProjectID, &p.TeamID, &p.HomeInstanceID, &p.CredPubKey); err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	return out, rows.Err()
 }
 
 // --- Project bundle import ---

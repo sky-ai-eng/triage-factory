@@ -78,12 +78,8 @@ func TestSendMessage_OpenRoutesToResume(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-open'`).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status != "queued" {
-		t.Errorf("status = %q, want queued — SendMessage did not route to ResumeOpenRun's resume-by-enqueue", status)
+	if st := storedStatus(t, database, "r-open"); st != "" {
+		t.Errorf("stored status = %q, want none — SendMessage did not route to ResumeOpenRun's resume-by-enqueue", st)
 	}
 	msg, _, ok, err := s.pendingInput.Consume(context.Background(), runmode.LocalDefaultOrgID, "r-open")
 	if err != nil || !ok || msg != "go on" {
@@ -127,7 +123,7 @@ func TestSendMessage_RunningRemoteRoutesToController(t *testing.T) {
 func TestSendMessage_QueuedNotSteerable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-q", "sess-q", "/tmp/wt-q")
-	if _, err := database.Exec(`UPDATE conversations SET status='queued' WHERE id='r-q'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id='r-q'`); err != nil {
 		t.Fatalf("queued: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
@@ -200,12 +196,8 @@ func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 	if errors.Is(err, ErrRunNotSteerable) {
 		t.Errorf("completed+abort run rejected at the steerable gate: %v", err)
 	}
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-ab'`).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status != "queued" {
-		t.Errorf("status = %q, want queued (resume-by-enqueue)", status)
+	if st := storedStatus(t, database, "r-ab"); st != "" {
+		t.Errorf("stored status = %q, want none (resume-by-enqueue's un-terminal write)", st)
 	}
 }
 

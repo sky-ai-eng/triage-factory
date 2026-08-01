@@ -91,6 +91,7 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 	resolver := &capstoneResolver{token: "ghs_capstone"}
 
 	c := New(stores, nil, "capstone-model")
+	t.Cleanup(startTestClaimLoop(t, stores, c))
 	c.runAgent = stub.run
 	c.SetRunCredentialResolvers(resolver, capstoneSecrets{}, nil)
 	t.Cleanup(c.Shutdown)
@@ -288,6 +289,7 @@ func TestCurator_Postgres_Multimode_SharedReadOnlyWorktree(t *testing.T) {
 	// on the shared worktree) until released, so the two sessions overlap.
 	stub := &stubAgent{driveSink: true, inFlight: make(chan struct{}, 2), release: make(chan struct{})}
 	c := New(stores, nil, "capstone-model")
+	t.Cleanup(startTestClaimLoop(t, stores, c))
 	c.runAgent = stub.run
 	t.Cleanup(c.Shutdown)
 
@@ -407,6 +409,7 @@ func TestCurator_Postgres_Multimode_CancelMidFlight(t *testing.T) {
 
 	stub := &stubAgent{inFlight: make(chan struct{}, 1), release: make(chan struct{})}
 	c := New(stores, nil, "capstone-model")
+	t.Cleanup(startTestClaimLoop(t, stores, c))
 	c.runAgent = stub.run
 	t.Cleanup(c.Shutdown)
 
@@ -472,6 +475,7 @@ func TestCurator_Postgres_Multimode_SimulatedRestartSweepsOrphans(t *testing.T) 
 
 	// Recovery complete: a freshly-constructed Curator accepts a new turn.
 	c := New(stores, nil, "capstone-model")
+	t.Cleanup(startTestClaimLoop(t, stores, c))
 	c.runAgent = (&stubAgent{}).run
 	t.Cleanup(c.Shutdown)
 	newReq, err := c.SendMessage(ctx, projA, orgA, alice, "post-restart")
