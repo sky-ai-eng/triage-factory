@@ -10,6 +10,7 @@ import (
 
 	ssostore "github.com/sky-ai-eng/triage-factory/ee/sso/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -103,7 +104,23 @@ func (h *ssoBreakGlassHandler) handleBreakGlassAdd(w http.ResponseWriter, r *htt
 		if uid == "" {
 			return nil
 		}
-		return sso.BreakGlass.Add(r.Context(), orgID, uid)
+		added, e := sso.BreakGlass.Add(r.Context(), orgID, uid)
+		if e != nil {
+			return e
+		}
+		if !added {
+			return nil
+		}
+		// A break-glass principal keeps a working non-SSO login under
+		// enforcement — the one standing exception to the org's login policy,
+		// and the first thing to check when asking how someone got in without
+		// the IdP. The email resolves to a user id here, so the row names the
+		// principal as a target and needs no detail of its own.
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID:  userID,
+			TargetUserID: uid,
+			Action:       domain.AccessActionSSOBreakGlassAdded,
+		})
 	}); err != nil {
 		httpx.InternalError(w, "sso", err)
 		return
@@ -136,9 +153,22 @@ func (h *ssoBreakGlassHandler) handleBreakGlassRemove(w http.ResponseWriter, r *
 
 	var lastWhileEnforced bool
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		lastWhileEnforced, e = ssostore.FromTx(tx).BreakGlass.RemoveGuarded(r.Context(), orgID, target)
-		return e
+		removed, blocked, e := ssostore.FromTx(tx).BreakGlass.RemoveGuarded(r.Context(), orgID, target)
+		if e != nil {
+			return e
+		}
+		lastWhileEnforced = blocked
+		// Only a real deletion records. The guard-blocked case changed nothing,
+		// and a DELETE for a principal that was never on the list is a no-op the
+		// handler still answers 204 to.
+		if !removed {
+			return nil
+		}
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID:  userID,
+			TargetUserID: target,
+			Action:       domain.AccessActionSSOBreakGlassRemoved,
+		})
 	}); err != nil {
 		httpx.InternalError(w, "sso", err)
 		return

@@ -111,12 +111,12 @@ func (s *ssoBreakGlassStore) List(context.Context, string) ([]ssostore.SSOBreakG
 	return nil, db.ErrNotApplicableInLocal
 }
 
-func (s *ssoBreakGlassStore) Add(context.Context, string, string) error {
-	return db.ErrNotApplicableInLocal
+func (s *ssoBreakGlassStore) Add(context.Context, string, string) (bool, error) {
+	return false, db.ErrNotApplicableInLocal
 }
 
-func (s *ssoBreakGlassStore) RemoveGuarded(context.Context, string, string) (bool, error) {
-	return false, db.ErrNotApplicableInLocal
+func (s *ssoBreakGlassStore) RemoveGuarded(context.Context, string, string) (bool, bool, error) {
+	return false, false, db.ErrNotApplicableInLocal
 }
 
 func (s *ssoBreakGlassStore) SeedOwnerIfEmpty(context.Context, string) error {
