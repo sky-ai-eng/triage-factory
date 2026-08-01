@@ -130,9 +130,18 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "mint opening turn: "+err.Error(), domain.RunFailureUnclassified)
 	}
 
+	// Resolved once, here, and handed to both the engine params and the
+	// credential whitelist below — the request and the whitelist agree by
+	// construction, not by two reads of the same constant. Today this is
+	// always the default; a provider-aware resolution (a Bedrock deployment
+	// needs a Bedrock-shaped id, not the bare Anthropic one) lands at this
+	// single seam when model configuration makes "cheapest enabled"
+	// resolvable.
+	coldModel := agentloop.DefaultColdCompactionModel
+
 	engine := &agentloop.Engine{
 		Transcript:  transcript,
-		Credentials: s.nativeCredentials(cfg, model),
+		Credentials: s.nativeCredentials(cfg, model, coldModel),
 		Tools:       tools,
 		Guards:      []agentloop.Guard{&spendGuard{spawner: s, orgID: orgID, teamID: cfg.teamID}},
 		Hooks: agentloop.Hooks{
@@ -151,7 +160,8 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		UserID:         creatorUserID,
 		// A delegation's opening turn is the control-plane-minted mission:
 		// compaction pins it instead of re-injecting the first message.
-		MissionAnchored: true,
+		MissionAnchored:     true,
+		ColdCompactionModel: coldModel,
 	})
 
 	return s.recordNativeResult(ctx, orgID, runID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, priorMemory)
@@ -333,17 +343,17 @@ func (s *Spawner) nativeAgentEnv(ctx context.Context, orgID, runID, namespace st
 // bundle's own material, and the LLM proxy disappearing along with the
 // provider hosts in the egress allowlist) is the cutover phase's work, and
 // is a change of what Resolve returns — nothing above it moves.
-func (s *Spawner) nativeCredentials(cfg runConfig, model string) agentloop.Credentials {
+func (s *Spawner) nativeCredentials(cfg runConfig, model, coldModel string) agentloop.Credentials {
 	env := envSliceToMap(cfg.execSandbox.proxyEnv())
 	return &agentloop.EnvCredentials{
 		Resolve: func(context.Context) (map[string]string, error) { return env, nil },
-		// The whitelist must name the model actually requested: bifrost reads
-		// an empty whitelist as "no models", and a wildcard would let a
+		// The whitelist must name the models actually requested: bifrost
+		// reads an empty whitelist as "no models", and a wildcard would let a
 		// mis-stamped model id reach the provider unremarked. The forced-shape
-		// compaction model rides alongside — the same credentials serve both
-		// calls, and a whitelist that omitted it would fail every cold
-		// compaction at the account layer.
-		Models: []string{model, agentloop.DefaultColdCompactionModel},
+		// compaction model is the caller's resolved value, not a constant read
+		// of its own — the same resolution feeds the engine's params, so the
+		// compaction request and this whitelist cannot drift apart.
+		Models: []string{model, coldModel},
 	}
 }
 
