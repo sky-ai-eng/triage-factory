@@ -45,7 +45,7 @@ describe('status classification', () => {
   // The ghosts. Each was a live UI branch that the backend had never emitted;
   // an unknown status must now classify as nothing at all rather than land in
   // an arm by accident.
-  it.each(['initializing', 'worktree_created', 'pending_approval', ''])(
+  it.each(['initializing', 'worktree_created', ''])(
     'classifies the removed status %j as neither active, terminal, nor a phase',
     (ghost) => {
       expect(RUN_STATUSES as readonly string[]).not.toContain(ghost)

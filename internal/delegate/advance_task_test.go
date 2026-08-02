@@ -10,8 +10,8 @@ import (
 // recomputeTaskBoardColumn is the blueprint-era board placement rule: a
 // bot-claimed task's live column is a recomputed aggregate over its active
 // blueprint_run's step runs — in_review if the blueprint has an unresolved
-// artifact (a draft PR / ready review, the derived approval signal that replaced
-// pending_approval) or any run is parked open, else in_progress.
+// artifact (a draft PR / ready review — the derived approval signal, never a
+// stored status) or any run is parked open, else in_progress.
 // Terminal columns (done / leave-open) are owned by terminateBlueprint, not this
 // helper. These tests pin the aggregate directly by mutating run state and
 // invoking the recompute, without spawning a real agent.
@@ -44,8 +44,7 @@ func TestRecomputeBoard_OpenSetsInReview(t *testing.T) {
 }
 
 // An unresolved artifact (a draft PR) is the derived approval signal and lands
-// the task in the same "needs 👀" column even though no run is parked open — the
-// successor to the pending_approval run status.
+// the task in the same "needs 👀" column even though no run is parked open.
 func TestRecomputeBoard_UnresolvedArtifactSetsInReview(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "unresolved")
 	stampBotClaim(t, database, taskID)

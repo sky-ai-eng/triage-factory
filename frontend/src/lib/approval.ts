@@ -1,7 +1,7 @@
 import type { Conversation, Artifact } from '../types'
 
-// Derived-approval helpers (TFAC-382/TFAC-492). A run no longer parks in a
-// `pending_approval` status; the "needs approval" state is a *view* over the
+// Derived-approval helpers. A run never parks for
+// approval; the "needs approval" state is a *view* over the
 // run's unresolved-artifact set, projected onto the run as has_unresolved_artifacts
 // + pending_artifact_ids + the per-kind counts. These helpers keep the
 // count-aware labels and the resolve-all copy in one place so the dock, the board
@@ -25,8 +25,8 @@ export function approvalCounts(run: Conversation): ApprovalCounts {
   return { pr, review, total: pr + review }
 }
 
-// hasUnresolvedArtifacts is the single predicate every approval surface keys off,
-// replacing `run.Status === 'pending_approval'`. The flag is three-valued: the
+// hasUnresolvedArtifacts is the single predicate every approval surface keys
+// off — approval is never a run status. The flag is three-valued: the
 // server emits an explicit true/false only when the answer is definitive (the
 // artifact set was read), and OMITS it (undefined) under its transient-failure
 // guard. So honor the authoritative boolean directly when present — a definitive

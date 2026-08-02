@@ -96,7 +96,7 @@ export default function AgentCard({
       : formatElapsed(workStartedAt(run), now)
   const dwellMs = queueDwellMs(run, now)
   // Approval is derived from the unresolved-artifact set (draft PRs + ready
-  // reviews), not a `pending_approval` run status — a card needs the user
+  // reviews), never a run status — a card needs the user
   // whenever has_unresolved_artifacts is true, live or terminal.
   const needsApproval = hasUnresolvedArtifacts(run)
   const approval = approvalCounts(run)

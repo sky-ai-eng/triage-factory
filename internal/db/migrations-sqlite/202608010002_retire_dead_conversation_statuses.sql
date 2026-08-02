@@ -1,6 +1,6 @@
 -- +goose Up
--- Retire the last two conversation statuses nothing writes any more, by
--- rewriting the rows rather than teaching every predicate to recognize them.
+-- Retire every conversation status nothing writes any more, by rewriting the
+-- rows rather than teaching every predicate to recognize them.
 --
 -- 'cancelled' was a third spelling of a concept the task layer
 -- (return-to-queue, drag-to-done) and the blueprint layer (cancel_requested /
@@ -19,11 +19,6 @@
 -- silent. Rewriting the rows once leaves a single vocabulary that every guard
 -- can just read.
 --
--- 'pending_approval' deliberately does NOT get the same treatment and stays in
--- the exclusion lists: those rows self-resolve (a human resolves the artifact
--- and the row retires itself), so they are dormant-but-live work rather than
--- history that needs restating.
---
 -- parked_at is backfilled from the old terminal stamp so the
 -- snapshot-retention sweep reads each row's true age instead of treating a
 -- year-old cancellation as freshly parked. These rows have no snapshot to reap
@@ -34,6 +29,27 @@ UPDATE conversations
 SET status = 'open',
     parked_at = COALESCE(parked_at, completed_at, started_at)
 WHERE status = 'cancelled';
+
+-- 'pending_approval' is the same story one step later. Runs no longer park for
+-- approval at all: the "needs approval" state is a view over the unresolved
+-- artifact set, so a human resolves the draft PR / review and the board follows
+-- from the artifact rather than from the run's status. `open` is the faithful
+-- restatement — the run concluded its turn, the artifact it queued still exists
+-- and still drives the approval column, and `open` is inert (excluded from
+-- IsActiveRunStatus) until someone messages it. It also puts the row back in
+-- front of the snapshot-retention sweep, which enumerates `open` and
+-- `completed`: left as-is these rows pinned a workspace blob nothing could ever
+-- enumerate, so the leak closes here rather than as a special case in the query.
+--
+-- stop_reason is deliberately NOT stamped. That column already carries two
+-- vocabularies (a park reason, and the model's own stop reason on the SDK
+-- path) and renders raw in the run station, so a synthetic third value would
+-- show a user a word nothing explains. result_summary is left alone too: it
+-- holds the agent's own summary of the turn, which is not ours to overwrite.
+UPDATE conversations
+SET status = 'open',
+    parked_at = COALESCE(parked_at, completed_at, started_at)
+WHERE status = 'pending_approval';
 
 -- 'task_unsolvable' never had a writer in the queue-driven model, so this is
 -- expected to touch nothing; it exists so the vocabulary is provably closed

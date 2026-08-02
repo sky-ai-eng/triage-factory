@@ -32,7 +32,7 @@ type FleetQueueSharesSeeder struct {
 // RunFleetQueueSharesConformance covers the per-backend FleetQueueShares
 // contract: it counts an org's active (slot-occupying: an unreleased claim,
 // whatever phase that claim is in) and queued (needs-driving) runs, excludes
-// terminal and hibernated (open/pending_approval) runs from both, and
+// terminal and hibernated (`open`) runs from both, and
 // reports the configured cap — nil for an unset or non-positive value.
 // Multi-org fairness ordering is a Postgres-only concern exercised in that
 // backend's own tests; this suite runs single-org against both dialects

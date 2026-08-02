@@ -967,7 +967,7 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 	// see under RLS: it stays non-terminal (not an error — RLS filters the row,
 	// it doesn't fail), and the admin-pool boot reconcile is the backstop that
 	// heals it. Without this whole guard a cancel that raced the dispatcher's
-	// claim/setup window — or a parked open/pending_approval step the
+	// claim/setup window — or a parked `open` step the
 	// sequence-cancel path skips — would strand a child 'running', keeping the
 	// dispatcher on phantom work and pinning its feature branch in a worktree,
 	// requeuing forever.
@@ -978,7 +978,7 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 			UPDATE blueprint_runs
 			SET status = $1, abort_reason = $2, aborted_at_step = $3, completed_at = now()
 			WHERE org_id = $4 AND id = $5
-			  AND status IN ('running','pending_approval','open')
+			  AND status = 'running'
 		`, string(status), reasonArg, stepArg, orgID, id)
 		if err != nil {
 			return err
@@ -1154,7 +1154,7 @@ func blueprintActiveStepRunIDs(ctx context.Context, q queryer, orgID, blueprintR
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND blueprint_run_id = $2
 		  AND (status IS NULL
-		       OR status NOT IN (`+runSettledStatusesSQL+`,'open'))
+		       OR status NOT IN (`+runTerminalStatusesSQL+`,'open'))
 	`, orgID, blueprintRunID)
 	if err != nil {
 		return nil, err

@@ -1122,7 +1122,7 @@ func (s *Spawner) updatePhase(orgID, runID, claimID, phase string) {
 // blueprint_run's step runs, never a mirror of one run. For a bot-claimed task
 // with an active blueprint_run it sets in_review ("needs 👀") when the blueprint
 // has an unresolved artifact (a draft PR / ready review — the derived approval
-// signal that replaced the pending_approval run status) or any step
+// signal, never a stored status) or any step
 // run is parked open, else in_progress, writing tasks.status only when it
 // changes and pushing a WS nudge so peer boards follow.
 //
@@ -1179,7 +1179,7 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 		}
 	}
 	// An unresolved artifact (draft PR / ready review) is the derived approval
-	// signal that replaced the pending_approval run status: a step that completed
+	// signal, and it is derived rather than stored: a step that completed
 	// leaving one keeps the task in the approval column even though no run is open.
 	// A parked-open run and an unresolved artifact both map to the same column
 	// (in_review), so the two checks are unordered as far as the result goes; the

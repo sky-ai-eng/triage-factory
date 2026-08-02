@@ -460,8 +460,8 @@ type BlueprintStore interface {
 	// the step aborted, so without this the resumed step's new conclusion would
 	// find a terminal blueprint and never advance/close it. Returns (true, nil)
 	// when it re-opened the row, (false, nil) when the blueprint was not aborted
-	// (already running for an open/pending_approval resume, or finalized by a
-	// racing path). Runs inside the same tx as MarkResuming so the run flip and
+	// (already running for an `open` resume, or finalized by a racing
+	// path). Runs inside the same tx as MarkResuming so the run flip and
 	// the blueprint re-open commit atomically.
 	ReopenRunForResume(ctx context.Context, orgID string, id string) (reopened bool, err error)
 

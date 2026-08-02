@@ -203,8 +203,8 @@ type ConversationStore interface {
 	// caller logs and continues — the racing path's terminal
 	// status stands.
 	//
-	// `open` is intentionally NOT in the protected set (unlike
-	// pending_approval): an `open` run reaches failRun only in the warm
+	// `open` is intentionally NOT in the protected set: an `open` run
+	// reaches failRun only in the warm
 	// window after a no-conclusion turn flipped it open but before idle
 	// hibernation took its workspace snapshot (e.g. a proc.Send error on the
 	// next correction attempt). With no durable snapshot yet, the run can't be
@@ -291,15 +291,11 @@ type ConversationStore interface {
 
 	// ActiveIDsForTeamSystem returns the IDs of every active run owned by the
 	// team (conversations.team_id = teamID), using the same active set as
-	// ActiveIDsForTask: status NOT IN ('completed','failed','pending_approval').
+	// ActiveIDsForTask: status NOT IN ('completed','failed').
 	// This is the team-archive force-stop cascade's enumeration, the
 	// team-scoped sibling of ActiveIDsForTaskSystem — each returned id is
 	// passed to spawner.Cancel(orgID, runID, ""), which hard-kills a live
-	// process or parks a run that has none. pending_approval is deliberately
-	// excluded: the agent process already exited with a prepared artifact (no
-	// live work to stop), spawner.Cancel can't flip it
-	// (ParkOpen's filter omits it), and leaving it inert means a
-	// later restore can still surface the pending review. Admin pool / org-scoped: archive runs from an org-admin
+	// process or parks a run that has none. Admin pool / org-scoped: archive runs from an org-admin
 	// handler whose caller may not be a member of the team, so the team-visibility
 	// RLS would hide the rows on the app pool.
 	ActiveIDsForTeamSystem(ctx context.Context, orgID, teamID string) ([]string, error)

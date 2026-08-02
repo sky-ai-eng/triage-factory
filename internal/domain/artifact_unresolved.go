@@ -1,9 +1,9 @@
 package domain
 
-// Unresolved-artifact derivation. A blueprint run no longer parks in
-// pending_approval while a human approves a queued draft PR / pending review;
-// instead the approval state is *derived* from the run's (blueprint's) artifact
-// set. An artifact is "unresolved" when it still awaits a human verdict:
+// Unresolved-artifact derivation. A blueprint run never parks while a human
+// approves a queued draft PR / pending review; the approval state is *derived*
+// from the run's (blueprint's) artifact set instead. An artifact is
+// "unresolved" when it still awaits a human verdict:
 //
 //   - a draft pull_request (state=draft) — FirstDraftPullRequest's predicate, or
 //   - a finalized pending review (state=pending AND the ready sentinel
@@ -13,10 +13,10 @@ package domain
 // run projection, terminal task-close gate) agrees on what "unresolved" means.
 
 // HasUnresolvedArtifacts reports whether arts contains at least one artifact
-// still awaiting human resolution (a draft PR or a ready pending review). This
-// is the derived signal that replaces the stored pending_approval run status: a
-// task surfaces in the approval column whenever its artifact set has ≥1
-// unresolved item, regardless of whether its run is live or terminal.
+// still awaiting human resolution (a draft PR or a ready pending review). The
+// signal is derived, never stored: a task surfaces in the approval column
+// whenever its artifact set has ≥1 unresolved item, regardless of whether its
+// run is live or terminal.
 func HasUnresolvedArtifacts(arts []Artifact) bool {
 	return FirstDraftPullRequest(arts) != nil || FirstReadyReview(arts) != nil
 }
