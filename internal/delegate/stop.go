@@ -25,9 +25,14 @@
 // A frozen blueprint is the deliberate cost of that. A stopped step leaves its
 // blueprint 'running' with no queued step and no live claim, holding its
 // worktree, until the conversation is resumed or the task is dispositioned —
-// so every surface that counts live blueprints counts it. That is the same
-// trade as any park, just visible one layer up, and it is preferable to
-// destroying resumable work on a stop.
+// so every surface that counts live blueprints counts it.
+//
+// That cost is bounded to the stopped conversation's own task, and it has to
+// stay that way. Auto-delegation gates on the task, so a frozen blueprint
+// holds up only its own situation; the entity's other tasks keep firing. When
+// the gate keyed on the entity instead, one stopped run silently halted every
+// future automated firing on that pull request — and since the firing queue
+// drains off a run reaching a terminal, nothing was left to reopen it.
 
 package delegate
 
