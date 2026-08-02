@@ -356,7 +356,12 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 // pressed.
 //
 // A conversation not visible to the caller's org, and one that already
-// concluded, both read as "no active run" → 404.
+// concluded, both read as ErrNoActiveRun → 404, and both get the same body so
+// the response can't be used to probe which ids exist. Anything else Stop
+// returns is an internal fault on the way to stopping a run that really was
+// active — a failed read, a failed park — and goes through internalError,
+// which logs it and redacts the detail in multi mode. Reporting those as 404
+// would tell the user their run is gone when it is still running.
 func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -370,7 +375,11 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := spawner.Stop(orgID, conversationID, userID); err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		if errors.Is(err, delegate.ErrNoActiveRun) {
+			notFound(w, "run")
+			return
+		}
+		internalError(w, "agent", err)
 		return
 	}
 	// This field names the conversation's status, and a stop parks it.

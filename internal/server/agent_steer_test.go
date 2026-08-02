@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,7 +137,9 @@ func TestHandleAgentStop_RetiredPathsAreGone(t *testing.T) {
 
 // TestHandleAgentStop_UnknownRunNotFound: stopping a run not visible to
 // the caller's org is 404 — the authz gate keeps a known run id from reaching
-// another tenant's process.
+// another tenant's process — and the body is the generic "run not found", not
+// the spawner's error text, so the response can't be used to probe which ids
+// exist.
 func TestHandleAgentStop_UnknownRunNotFound(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
@@ -144,6 +147,31 @@ func TestHandleAgentStop_UnknownRunNotFound(t *testing.T) {
 	rec := doJSON(t, s, "POST", "/api/agent/conversations/r_absent/stop", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (unknown run)", rec.Code)
+	}
+	if body := rec.Body.String(); strings.Contains(body, "r_absent") {
+		t.Errorf("404 body %q echoes the requested id back", body)
+	}
+}
+
+// TestHandleAgentStop_InternalFailureIsNot404 pins the classification: only
+// "there is nothing to stop" is a 404. A read or park that fails on the way to
+// stopping a run that really was active is a server fault — reporting it as a
+// missing run tells the user their work is gone while the agent keeps running,
+// and echoing the raw error leaks DB internals to the client.
+//
+// A closed handle is the cheapest real infrastructure failure to stage; the
+// preflight read is the first thing to hit it.
+func TestHandleAgentStop_InternalFailureIsNot404(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
+	runID := seedSteerRun(t, s.db, "dberr", "running")
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/stop", nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (a failed stop is not a missing run)", rec.Code)
 	}
 }
 

@@ -42,6 +42,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 )
 
+// ErrNoActiveRun is the answer when there is nothing to stop: the conversation
+// is not visible to the caller, it already concluded, or a racing terminal
+// reached the row first. It is deliberately one error for all three — telling
+// an unauthorized caller which of them applies would confirm the id exists.
+//
+// It exists so callers can tell "nothing to stop" apart from "the stop
+// failed": everything else this returns wraps an internal fault (a failed
+// read, a failed park) and must not be reported as a missing run, nor echoed
+// to a client.
+var ErrNoActiveRun = errors.New("no active run")
+
 // Stop ends a conversation's work at any phase — clone, fetch, worktree setup,
 // or agent execution — and parks it `open`, resumable. Nothing outside the
 // conversation moves: its blueprint keeps its status and its task keeps its
@@ -105,7 +116,7 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool) error 
 		return fmt.Errorf("load run: %w", preflightErr)
 	}
 	if run == nil {
-		return fmt.Errorf("no active run %s", runID)
+		return fmt.Errorf("%w %s", ErrNoActiveRun, runID)
 	}
 	// A run that already concluded has nothing to stop, and saying so here —
 	// rather than letting the park write below discover it — is what keeps a
@@ -114,7 +125,7 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool) error 
 	// its NEXT step cancelled by a click aimed at work that had already
 	// finished.
 	if domain.IsTerminalRunStatus(run.Status) {
-		return fmt.Errorf("no active run %s", runID)
+		return fmt.Errorf("%w %s", ErrNoActiveRun, runID)
 	}
 
 	if cancelBlueprint {
@@ -203,7 +214,7 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool) error 
 		return fmt.Errorf("park stopped run: %w", err)
 	}
 	if !flipped {
-		return fmt.Errorf("no active run %s", runID)
+		return fmt.Errorf("%w %s", ErrNoActiveRun, runID)
 	}
 	s.broadcastRunUpdate(orgID, runID, "open")
 	if cancelBlueprint {

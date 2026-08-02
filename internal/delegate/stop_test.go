@@ -17,7 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 )
 
-// fakeDrainer captures DrainEntity invocations so tests can assert
+// fakeDrainer captures DrainTask invocations so tests can assert
 // the spawner's terminal-state hooks fire correctly. Synchronized
 // because notifyDrainer dispatches the call in a goroutine.
 type drainCall struct {
