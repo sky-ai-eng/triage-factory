@@ -120,7 +120,7 @@ func fenceRunCount(t *testing.T, database *sql.DB, entityID string) int {
 }
 
 // fenceCompleteRuns moves every run on the entity to a terminal status,
-// reopening the per-entity auto-run gate — exactly the boot-recovery
+// reopening the task's auto-run gate — exactly the boot-recovery
 // window (the first run already went terminal) the replay re-fires into.
 func fenceCompleteRuns(t *testing.T, database *sql.DB, entityID string) {
 	t.Helper()
@@ -134,7 +134,7 @@ func fenceCompleteRuns(t *testing.T, database *sql.DB, entityID string) {
 
 // TestHandleEvent_ReplayedEvent_FiresExactlyOnce is a regression test
 // for the immediate-fire window: an event auto-fires a run, the run reaches
-// terminal (reopening the per-entity gate), then the at-least-once router
+// terminal (reopening the task's gate), then the at-least-once router
 // queue replays the SAME event after boot recovery. Pre-fence the replay
 // passed the reopened gate and spawned a duplicate run; the
 // (triggering_event_id, trigger_id) fence turns it into a clean skip.
@@ -152,7 +152,7 @@ func TestHandleEvent_ReplayedEvent_FiresExactlyOnce(t *testing.T) {
 		t.Fatalf("after first delivery: want 1 run, got %d", n)
 	}
 
-	// R1 goes terminal — the per-entity gate reopens.
+	// R1 goes terminal — the task's gate reopens.
 	fenceCompleteRuns(t, database, entityID)
 
 	// Replay the same event instance (same evt.ID, as boot recovery would).
@@ -194,13 +194,13 @@ func TestHandleEvent_DistinctEvents_FireIndependently(t *testing.T) {
 	}
 }
 
-// TestDrainEntity_AlreadyFiredRun_SkipsWithoutDuplicate covers the drain
+// TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate covers the drain
 // path's fence handling: a pending firing whose triggering event
 // already has a committed run (a prior drain fired it but died before
 // MarkFired, or the immediate path fired it before this firing was popped)
 // must skip with reason "already_fired" rather than spawn a duplicate or
 // retry forever.
-func TestDrainEntity_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
+func TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 	stub := &fenceStubDelegator{db: database}
@@ -245,7 +245,7 @@ func TestDrainEntity_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	}
 
 	router := fenceRouter(database, stub)
-	router.DrainEntity(runmode.LocalDefaultOrgID, entityID)
+	router.DrainTask(runmode.LocalDefaultOrgID, taskID)
 
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {

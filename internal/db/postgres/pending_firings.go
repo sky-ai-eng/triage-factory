@@ -20,10 +20,9 @@ import (
 // kept honest by the explicit filter here in case the policy is ever
 // loosened).
 //
-// The per-entity firing gate's runs-shaped half lives on
-// ConversationStore (HasActiveAutoRunForEntity) — strict ownership. The
-// router composes the gate from this store's HasPendingForEntity +
-// ConversationStore's HasActiveAutoRunForEntity.
+// The per-task firing gate's runs-shaped half lives on ConversationStore —
+// strict ownership. The router composes the gate from this store's
+// HasPendingForTask + ConversationStore's HasActiveAutoRunForTask.
 type pendingFiringsStore struct{ q queryer }
 
 func newPendingFiringsStore(q queryer) db.PendingFiringsStore {
@@ -78,28 +77,31 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 	return n > 0, nil
 }
 
-// PopForEntity is a claiming pop: the subquery locks the oldest pending row
+// PopForTask is a claiming pop: the subquery locks the oldest pending row
 // under FOR UPDATE SKIP LOCKED (so a concurrent claimant skips it rather
 // than blocking on it) and the outer UPDATE flips it to 'draining' in the
 // same statement — there is no window between "read the candidate" and
-// "claim it" for a second drain to observe. Two concurrent PopForEntity
-// calls against the same entity therefore never return the same row: the
+// "claim it" for a second drain to observe. Two concurrent PopForTask
+// calls against the same task therefore never return the same row: the
 // loser's subquery either skips the now-locked row and returns the next
 // candidate, or finds none.
-func (s *pendingFiringsStore) PopForEntity(ctx context.Context, orgID, entityID string) (*domain.PendingFiring, error) {
+func (s *pendingFiringsStore) PopForTask(ctx context.Context, orgID, taskID string) (*domain.PendingFiring, error) {
+	if !isValidUUID(taskID) {
+		return nil, nil
+	}
 	row := s.q.QueryRowContext(ctx, `
 		UPDATE pending_firings
 		SET status = 'draining', claimed_at = now()
 		WHERE id = (
 			SELECT id FROM pending_firings
-			WHERE org_id = $1 AND entity_id = $2 AND status = 'pending'
+			WHERE org_id = $1 AND task_id = $2 AND status = 'pending'
 			ORDER BY queued_at ASC, id ASC
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
 		)
 		RETURNING id, entity_id, task_id, trigger_id, triggering_event_id,
 		          status, COALESCE(skip_reason, ''), queued_at, drained_at, fired_run_id
-	`, orgID, entityID)
+	`, orgID, taskID)
 	return scanPgPendingFiring(row)
 }
 
@@ -147,21 +149,24 @@ func (s *pendingFiringsStore) MarkSkipped(ctx context.Context, orgID string, fir
 	return err
 }
 
-func (s *pendingFiringsStore) HasPendingForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
+func (s *pendingFiringsStore) HasPendingForTask(ctx context.Context, orgID, taskID string) (bool, error) {
+	if !isValidUUID(taskID) {
+		return false, nil
+	}
 	// 'draining' counts as queued intent (see the interface doc): a drain
-	// mid-flight must keep the entity gate closed or a fresh event in
+	// mid-flight must keep the task gate closed or a fresh event in
 	// that window jumps the queue.
 	var count int
 	err := s.q.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM pending_firings
-		WHERE org_id = $1 AND entity_id = $2 AND status IN ('pending', 'draining')
-	`, orgID, entityID).Scan(&count)
+		WHERE org_id = $1 AND task_id = $2 AND status IN ('pending', 'draining')
+	`, orgID, taskID).Scan(&count)
 	return count > 0, err
 }
 
-func (s *pendingFiringsStore) ListEntitiesWithPending(ctx context.Context, orgID string) ([]string, error) {
+func (s *pendingFiringsStore) ListTasksWithPending(ctx context.Context, orgID string) ([]string, error) {
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT DISTINCT entity_id FROM pending_firings
+		SELECT DISTINCT task_id FROM pending_firings
 		WHERE org_id = $1 AND status = 'pending'
 	`, orgID)
 	if err != nil {

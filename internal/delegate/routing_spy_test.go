@@ -181,7 +181,7 @@ func TestCancel_UserInitiated_PreflightUsesSyntheticClaims(t *testing.T) {
 }
 
 // TestCancel_SystemInitiated_PreflightSkipsSynthClaims pins the other
-// side of the gate: router-driven cancels (DrainEntity rollback,
+// side of the gate: router-driven cancels (DrainTask rollback,
 // task-close cleanup) pass userID="" because they're system actors
 // with no user identity to project. Those must still scope by orgID
 // but go through the admin pool, not synth claims — otherwise the

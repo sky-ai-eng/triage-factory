@@ -47,14 +47,14 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 	return n > 0, nil
 }
 
-// PopForEntity is a claiming pop, mirroring the Postgres impl's shape
-// (TFAC-579): the UPDATE ... WHERE id = (oldest pending) RETURNING form
+// PopForTask is a claiming pop, mirroring the Postgres impl's shape:
+// the UPDATE ... WHERE id = (oldest pending) RETURNING form
 // atomically flips the row to 'draining' as it reads it. SQLite/local is
 // single-worker (N=1) so there's no concurrent-drain race to close here —
 // this exists for interface conformance with the Postgres impl (the shared
 // dbtest suite exercises identical claiming semantics against both
 // backends) rather than a correctness fix on this side.
-func (s *pendingFiringsStore) PopForEntity(ctx context.Context, orgID, entityID string) (*domain.PendingFiring, error) {
+func (s *pendingFiringsStore) PopForTask(ctx context.Context, orgID, taskID string) (*domain.PendingFiring, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -63,13 +63,13 @@ func (s *pendingFiringsStore) PopForEntity(ctx context.Context, orgID, entityID 
 		SET status = 'draining', claimed_at = ?
 		WHERE id = (
 			SELECT id FROM pending_firings
-			WHERE entity_id = ? AND status = 'pending'
+			WHERE task_id = ? AND status = 'pending'
 			ORDER BY queued_at ASC, id ASC
 			LIMIT 1
 		)
 		RETURNING id, entity_id, task_id, trigger_id, triggering_event_id,
 		          status, COALESCE(skip_reason, ''), queued_at, drained_at, fired_run_id
-	`, time.Now(), entityID)
+	`, time.Now(), taskID)
 	return scanSqlitePendingFiring(row)
 }
 
@@ -129,27 +129,27 @@ func (s *pendingFiringsStore) MarkSkipped(ctx context.Context, orgID string, fir
 	return err
 }
 
-func (s *pendingFiringsStore) HasPendingForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
+func (s *pendingFiringsStore) HasPendingForTask(ctx context.Context, orgID, taskID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
 	// 'draining' counts as queued intent (see the interface doc): a drain
-	// mid-flight must keep the entity gate closed or a fresh event in
+	// mid-flight must keep the task gate closed or a fresh event in
 	// that window jumps the queue.
 	var count int
 	err := s.q.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM pending_firings
-		WHERE entity_id = ? AND status IN ('pending', 'draining')
-	`, entityID).Scan(&count)
+		WHERE task_id = ? AND status IN ('pending', 'draining')
+	`, taskID).Scan(&count)
 	return count > 0, err
 }
 
-func (s *pendingFiringsStore) ListEntitiesWithPending(ctx context.Context, orgID string) ([]string, error) {
+func (s *pendingFiringsStore) ListTasksWithPending(ctx context.Context, orgID string) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT DISTINCT entity_id FROM pending_firings WHERE status = 'pending'
+		SELECT DISTINCT task_id FROM pending_firings WHERE status = 'pending'
 	`)
 	if err != nil {
 		return nil, err

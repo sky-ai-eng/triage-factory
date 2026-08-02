@@ -180,7 +180,7 @@ type TaskStore interface {
 
 	// SetStatus updates the lifecycle status only — claim cols are
 	// unaffected. The only production caller is
-	// revertTaskStatus in DrainEntity's mark-fired-failure rollback;
+	// revertTaskStatus in DrainTask's mark-fired-failure rollback;
 	// every other lifecycle write routes through a guarded helper.
 	SetStatus(ctx context.Context, orgID, taskID, status string) error
 

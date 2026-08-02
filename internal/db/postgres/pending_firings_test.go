@@ -56,16 +56,16 @@ func TestPendingFiringsStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Fatalf("Enqueue orgA: %v", err)
 	}
 
-	// PopForEntity scoped to orgB must NOT see orgA's row.
-	if got, err := stores.PendingFirings.PopForEntity(ctx, orgB, tupA.EntityID); err != nil {
-		t.Fatalf("PopForEntity cross-org: %v", err)
+	// PopForTask scoped to orgB must NOT see orgA's row.
+	if got, err := stores.PendingFirings.PopForTask(ctx, orgB, tupA.TaskID); err != nil {
+		t.Fatalf("PopForTask cross-org: %v", err)
 	} else if got != nil {
 		t.Errorf("orgB Pop returned orgA firing %d", got.ID)
 	}
 
-	// HasPendingForEntity scoped to orgB must be false.
-	if has, _ := stores.PendingFirings.HasPendingForEntity(ctx, orgB, tupA.EntityID); has {
-		t.Errorf("orgB HasPendingForEntity returned true for orgA's entity")
+	// HasPendingForTask scoped to orgB must be false.
+	if has, _ := stores.PendingFirings.HasPendingForTask(ctx, orgB, tupA.TaskID); has {
+		t.Errorf("orgB HasPendingForTask returned true for orgA's task")
 	}
 
 	// ListForEntity scoped to orgB must be empty.
@@ -73,12 +73,12 @@ func TestPendingFiringsStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("orgB ListForEntity returned %d rows for orgA's entity", len(rows))
 	}
 
-	// ListEntitiesWithPending scoped to orgB must be empty (despite
-	// orgA having pending rows). orgB has its own clean entity (tupB)
+	// ListTasksWithPending scoped to orgB must be empty (despite
+	// orgA having pending rows). orgB has its own clean task (tupB)
 	// so the test exercises the org_id filter, not the empty-table
 	// path.
-	if ids, _ := stores.PendingFirings.ListEntitiesWithPending(ctx, orgB); len(ids) != 0 {
-		t.Errorf("orgB ListEntitiesWithPending = %v, want empty", ids)
+	if ids, _ := stores.PendingFirings.ListTasksWithPending(ctx, orgB); len(ids) != 0 {
+		t.Errorf("orgB ListTasksWithPending = %v, want empty", ids)
 	}
 
 	// MarkFired/MarkSkipped cross-org must NOT mutate orgA's row.
@@ -142,10 +142,9 @@ func TestPendingFiringsStore_Postgres_EnqueueWithLocalSentinelUser(t *testing.T)
 }
 
 // TestPendingFiringsStore_Postgres_ConcurrentPopNeverDoublePops is the
-// pgtest acceptance criterion for TFAC-579 item 1: concurrently draining an
-// entity from several goroutines (simulating separate DrainEntity calls —
-// different processes, or a leader-failover overlap within one) must never
-// hand the same pending_firings row to two callers. The claiming pop (UPDATE
+// Concurrently draining a task from several goroutines (simulating separate
+// DrainTask calls — different processes, or a leader-failover overlap within
+// one) must never hand the same pending_firings row to two callers. The claiming pop (UPDATE
 // ... FOR UPDATE SKIP LOCKED ... RETURNING) is what makes this safe; a bare
 // SELECT would let two concurrent drains observe and each act on the same
 // row.
@@ -158,14 +157,16 @@ func TestPendingFiringsStore_Postgres_ConcurrentPopNeverDoublePops(t *testing.T)
 	orgID, userID, _ := seedPgPendingFiringsOrg(t, h)
 	seed := newPgPendingFiringsSeeder(h, orgID, userID)
 
+	// Every row on ONE task (distinct triggers), since the queue the drain
+	// pops from is the task's.
 	const rows = 6
-	var entityID string
+	var entityID, taskID string
 	for i := 0; i < rows; i++ {
 		tup := seed.Tuple(t)
 		if i == 0 {
-			entityID = tup.EntityID
+			entityID, taskID = tup.EntityID, tup.TaskID
 		}
-		if _, err := stores.PendingFirings.Enqueue(ctx, orgID, tup.UserID, entityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
+		if _, err := stores.PendingFirings.Enqueue(ctx, orgID, tup.UserID, entityID, taskID, tup.TriggerID, tup.EventID); err != nil {
 			t.Fatalf("Enqueue %d: %v", i, err)
 		}
 	}
@@ -186,7 +187,7 @@ func TestPendingFiringsStore_Postgres_ConcurrentPopNeverDoublePops(t *testing.T)
 			defer wg.Done()
 			ready.Done()
 			<-start
-			row, err := stores.PendingFirings.PopForEntity(ctx, orgID, entityID)
+			row, err := stores.PendingFirings.PopForTask(ctx, orgID, taskID)
 			if err != nil {
 				gotErr[i] = err
 				return

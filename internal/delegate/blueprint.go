@@ -198,11 +198,9 @@ func (s *Spawner) terminateBlueprint(
 		s.discardWorkspaceSnapshot(bgCtx, orgID, blueprintRunID)
 	}
 
-	// Drain the per-entity queue exactly once for the blueprint (independent
-	// of how many steps ran).
-	if cfgEntity := taskEntityID(s.tasks, orgID, taskID); cfgEntity != "" {
-		s.notifyDrainer(orgID, triggerType, cfgEntity)
-	}
+	// Drain the task's queue exactly once for the blueprint (independent of
+	// how many steps ran).
+	s.notifyDrainer(orgID, triggerType, taskID)
 
 	dur := time.Since(startTime)
 	blueprintLog.Info("blueprint_run terminated",
@@ -328,20 +326,6 @@ func prNumberFromRef(ref string) (int, bool) {
 		return 0, false
 	}
 	return n, true
-}
-
-// taskEntityID resolves the entity_id for a task. Used to drain the
-// per-entity firing queue at blueprint terminal.
-func taskEntityID(tasks db.TaskStore, orgID, taskID string) string {
-	t, err := tasks.GetSystem(context.Background(), orgID, taskID)
-	if err != nil {
-		blueprintLog.Warn("resolve entity for task failed", "task", taskID, "error", err)
-		return ""
-	}
-	if t == nil {
-		return ""
-	}
-	return t.EntityID
 }
 
 // nonterminalStepSysPrompt returns the system-prompt addendum for step i of
@@ -521,7 +505,7 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 // strand the blueprint_run in 'running' (and its shared-workspace snapshot in
 // the blob store).
 //
-// It does NOT drain the per-entity queue: the drainer's manual short-circuit
+// It does NOT drain the task's firing queue: the drainer's manual short-circuit
 // keys off the run's trigger type, which the caller (Cancel) already passes to
 // notifyDrainer — folding the drain in here (via terminateBlueprint) would
 // couple it to the write-pool routing and drain a manual run that must not.

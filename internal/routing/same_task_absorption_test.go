@@ -75,6 +75,11 @@ func seedAbsorbEventCatalog(t *testing.T, database *sql.DB, eventType string) {
 type injectingStubDelegator struct {
 	outcome delegate.InjectOutcome
 	calls   []injectCall
+	// allowFire lets a test exercise the OPEN-gate branch: a firing on a
+	// task with no live run of its own fires normally, even while a sibling
+	// task on the same entity is busy.
+	allowFire bool
+	delegated []string
 }
 
 type injectCall struct {
@@ -83,7 +88,11 @@ type injectCall struct {
 }
 
 func (s *injectingStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
-	return "", fmt.Errorf("unexpected Delegate call: absorption tests only exercise the busy-entity branch")
+	if !s.allowFire {
+		return "", fmt.Errorf("unexpected Delegate call: this test only exercises the busy-task branch")
+	}
+	s.delegated = append(s.delegated, task.ID)
+	return "run-" + task.ID, nil
 }
 
 func (s *injectingStubDelegator) Cancel(orgID, runID, userID string) error { return nil }
@@ -147,7 +156,7 @@ func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task 
 	}
 	trigger = trig
 
-	// Seed the "already active" run the busy-entity gate will see —
+	// Seed the "already active" run the busy-task gate will see —
 	// mirrors the immediate-fire path's own bookkeeping (a fenced
 	// blueprint_run + a running event-triggered run row) without going
 	// through the full HandleEvent dispatch.
@@ -378,15 +387,19 @@ func TestTryAutoDelegate_SameTask_DeliveredRemoteHandledWithoutRecording(t *test
 	}
 }
 
-// TestTryAutoDelegate_CrossTask_Defers is the ticket's negative case: a
-// firing whose OWN task differs from the task that owns the entity's live
-// auto run must never be absorbed into that unrelated run — it defers to
-// pending_firings exactly as before. This is the structural guarantee the
-// universal rule buys (approve→merge or a label-blueprint intent can never
-// be swallowed by an in-flight fix run; cross-team injection is impossible).
-func TestTryAutoDelegate_CrossTask_Defers(t *testing.T) {
+// TestTryAutoDelegate_SiblingTask_FiresConcurrently: a firing whose own
+// task has no live run fires immediately, even while a DIFFERENT task on the
+// same entity is mid-run. Two tasks on one pull request are two different
+// situations — that is what the task dedup key means — and each may have an
+// agent working.
+//
+// It is also the negative case for absorption: the sibling's event must
+// never be folded into an unrelated task's run (an approve→merge or a
+// label-blueprint intent can't be swallowed by an in-flight fix run, and
+// cross-team injection stays impossible).
+func TestTryAutoDelegate_SiblingTask_FiresConcurrently(t *testing.T) {
 	database := newTestDB(t)
-	// Task A owns the entity's active auto run.
+	// Task A owns a live auto run on the entity.
 	entityID, _, _, _ := setupAbsorbScenario(t, database)
 
 	// Task B is a DIFFERENT task on the SAME entity, from a different event
@@ -428,23 +441,23 @@ func TestTryAutoDelegate_CrossTask_Defers(t *testing.T) {
 		t.Fatalf("resolve cross trigger blueprint id: %v", err)
 	}
 
-	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
+	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal, allowFire: true}
 	router := newAbsorbTestRouter(database, st.Conversations, stub)
 
 	router.tryAutoDelegate(runmode.LocalDefaultOrgID, taskB, trigB, entityID, otherEventID, "")
 
 	if len(stub.calls) != 0 {
-		t.Errorf("expected no injection for a cross-task firing, got %d StageOrDeliverAdditiveEvent call(s)", len(stub.calls))
+		t.Errorf("expected no injection for a sibling-task firing, got %d StageOrDeliverAdditiveEvent call(s)", len(stub.calls))
+	}
+	if len(stub.delegated) != 1 || stub.delegated[0] != taskB.ID {
+		t.Errorf("delegated = %v, want exactly [%s] — a busy sibling task must not block this one", stub.delegated, taskB.ID)
 	}
 	rows, err := st.PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		t.Fatalf("list pending firings: %v", err)
 	}
-	if len(rows) != 1 {
-		t.Fatalf("expected the cross-task firing to defer (1 pending_firings row), got %d", len(rows))
-	}
-	if rows[0].TaskID != taskB.ID {
-		t.Errorf("deferred firing belongs to task %q, want the cross task %q", rows[0].TaskID, taskB.ID)
+	if len(rows) != 0 {
+		t.Errorf("expected the sibling-task firing to fire outright, got %d deferred row(s)", len(rows))
 	}
 }
 
@@ -601,5 +614,96 @@ func TestTryAutoDelegate_SameTask_StampsAgentClaimOnInjectedTask(t *testing.T) {
 	if got.ClaimedByAgentID != runmode.LocalDefaultAgentID {
 		t.Errorf("ClaimedByAgentID = %q, want %q — a successful injection must commit the claim like the deferral path does",
 			got.ClaimedByAgentID, runmode.LocalDefaultAgentID)
+	}
+}
+
+// TestTryAutoDelegate_FrozenTask_BlocksOnlyItself is the regression this
+// re-keying exists for. A conversation-level stop parks its conversation
+// `open` and deliberately leaves the blueprint 'running' — a frozen step
+// nothing will terminate until a human resumes it or dispositions the task.
+// Under the former entity-keyed gate that one row held the gate shut for the
+// whole entity, and because the drain is triggered by a run reaching a
+// terminal, nothing was left to reopen it: every later event on that pull
+// request queued behind a run that was never going to finish.
+//
+// Now the freeze is scoped to its own task. The frozen task still absorbs
+// its own follow-up events (it has a live conversation to fold them into),
+// and a sibling task fires immediately.
+func TestTryAutoDelegate_FrozenTask_BlocksOnlyItself(t *testing.T) {
+	database := newTestDB(t)
+	entityID, taskA, trigA, activeRunID := setupAbsorbScenario(t, database)
+
+	// Freeze task A exactly as a stop leaves it: conversation parked `open`,
+	// blueprint still 'running'.
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open' WHERE id = ?`, activeRunID); err != nil {
+		t.Fatalf("park conversation: %v", err)
+	}
+	var bpStatus string
+	if err := database.QueryRow(
+		`SELECT status FROM blueprint_runs WHERE id = (SELECT blueprint_run_id FROM conversations WHERE id = ?)`, activeRunID,
+	).Scan(&bpStatus); err != nil {
+		t.Fatalf("read blueprint status: %v", err)
+	}
+	if bpStatus != "running" {
+		t.Fatalf("fixture blueprint status = %q, want running (the frozen state under test)", bpStatus)
+	}
+
+	st := sqlitestore.New(database)
+
+	// A sibling task on the same entity fires, unblocked.
+	registerAbsorbEventType(t, absorbOtherEventType)
+	seedAbsorbEventCatalog(t, database, absorbOtherEventType)
+	siblingEventID, err := st.Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		EventType: absorbOtherEventType, EntityID: &entityID,
+		MetadataJSON: `{"sibling":true}`, CreatedAt: time.Now(), OrgID: runmode.LocalDefaultOrgID,
+	})
+	if err != nil {
+		t.Fatalf("record sibling event: %v", err)
+	}
+	createTestPrompt(t, database, domain.Prompt{ID: "p-sibling", Name: "Sibling", Body: "x", Source: "user"})
+	taskB, _, err := testTaskStore(database).FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		entityID, absorbOtherEventType, "", siblingEventID, 0.5)
+	if err != nil {
+		t.Fatalf("create sibling task: %v", err)
+	}
+	trigB := domain.EventHandler{
+		ID: "trigger-sibling", Kind: domain.EventHandlerKindTrigger,
+		BlueprintID: "p-sibling", TriggerType: domain.TriggerTypeEvent,
+		EventType: absorbOtherEventType, BreakerThreshold: intPtr(4),
+		MinAutonomySuitability: floatPtr(0), Enabled: true,
+	}
+	createTriggerForTestRouting(t, database, trigB)
+	if err := database.QueryRow(`SELECT blueprint_id FROM event_handlers WHERE id = ?`, trigB.ID).Scan(&trigB.BlueprintID); err != nil {
+		t.Fatalf("resolve sibling blueprint id: %v", err)
+	}
+
+	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal, allowFire: true}
+	router := newAbsorbTestRouter(database, st.Conversations, stub)
+	router.tryAutoDelegate(runmode.LocalDefaultOrgID, taskB, trigB, entityID, siblingEventID, "")
+
+	if len(stub.delegated) != 1 || stub.delegated[0] != taskB.ID {
+		t.Errorf("sibling delegated = %v, want [%s] — a frozen task must not hold the entity", stub.delegated, taskB.ID)
+	}
+	if rows, _ := st.PendingFirings.ListForEntity(context.Background(), runmode.LocalDefaultOrgID, entityID); len(rows) != 0 {
+		t.Errorf("sibling firing deferred behind a frozen task (%d row(s))", len(rows))
+	}
+
+	// The frozen task itself is still gated: its own follow-up folds into
+	// the parked conversation rather than starting a second run on it.
+	followupEventID, err := st.Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		EventType: absorbTestEventType, EntityID: &entityID,
+		MetadataJSON: `{"followup":true}`, CreatedAt: time.Now(), OrgID: runmode.LocalDefaultOrgID,
+	})
+	if err != nil {
+		t.Fatalf("record follow-up event: %v", err)
+	}
+	stub.delegated = nil
+	router.tryAutoDelegate(runmode.LocalDefaultOrgID, taskA, trigA, entityID, followupEventID, "")
+
+	if len(stub.delegated) != 0 {
+		t.Errorf("frozen task fired a second run (%v); its own gate must stay closed", stub.delegated)
+	}
+	if len(stub.calls) != 1 || stub.calls[0].runID != activeRunID {
+		t.Errorf("follow-up on the frozen task should fold into its parked conversation, got calls=%+v", stub.calls)
 	}
 }

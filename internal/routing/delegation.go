@@ -14,22 +14,25 @@ import (
 )
 
 // tryAutoDelegate decides whether a matched (task, trigger) fires now or
-// queues. Order of checks: breaker (per-(entity,prompt)) → entity gate
-// (per-entity, auto-only) → fire or enqueue.
+// queues. Order of checks: breaker (per-(entity,prompt)) → task gate
+// (per-task, auto-only) → fire or enqueue.
 //
 // Breaker is a hard skip — a tripped breaker means the user has work to
 // investigate before more runs land on this entity-prompt pair. Queueing
-// past it would just stack stale firings the user didn't ask for.
+// past it would just stack stale firings the user didn't ask for. It stays
+// entity-scoped on purpose: repeated failures of one prompt against one
+// entity are the signal, whichever task carried them.
 //
-// Entity gate is the per-entity serialization point: at most one auto run
-// in flight per entity, regardless of which task/trigger it came from. If
-// the gate is closed (active auto run, or older firings already queued
-// for FIFO fairness), the firing enqueues onto pending_firings instead of
-// being dropped silently.
+// The task gate is the serialization point: at most one auto run in flight
+// per task, whichever trigger it came from. A sibling task on the same
+// entity has its own gate and fires independently. If the gate is closed
+// (this task's own run is live, or older firings are queued for FIFO
+// fairness), the firing folds into the live run or enqueues onto
+// pending_firings instead of being dropped silently.
 //
 // Returns fired=true iff this call actually committed the bot to the task —
 // an immediate fireDelegate success, or a new row landed in pending_firings
-// (queued because the entity was busy; the commitment is real even though
+// (queued because the task was busy; the commitment is real even though
 // the run hasn't started yet). Every other exit — already claimed by
 // another team, a store/lookup error, the bot disabled for the team, the
 // breaker tripped, a duplicate already queued, or a replay hitting
@@ -139,43 +142,45 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 		return false
 	}
 
-	// Per-entity gate. Closed if any auto run is active on the entity OR
-	// any pending_firings rows are already queued (FIFO fairness).
-	// Compose the per-entity firing gate from its two halves:
-	// ConversationStore owns the runs-shaped predicate, PendingFiringsStore
-	// owns the queue-shaped one. canFire = neither side blocks.
+	// Per-task gate. Closed if an auto run is active on THIS TASK, or any
+	// pending_firings rows are already queued for it (FIFO fairness).
+	// Compose the gate from its two halves: ConversationStore owns the
+	// runs-shaped predicate, PendingFiringsStore owns the queue-shaped one.
+	// canFire = neither side blocks.
 	//
-	// The active-run read resolves the run's ID and owning task in one
-	// shot: a non-empty runID is exactly "an auto run is active on this
-	// entity" (identical predicate to the boolean active-run check), and
-	// the owning task decides same-task absorption below — so the gate
-	// needs no second round-trip to compare task identities.
+	// The task is the unit, not the entity. A task is one situation needing
+	// attention — that is what its (entity, event type, discriminator) dedup
+	// key means — so two situations on one pull request may each have an
+	// agent working. Gating on the entity conflated them, and once a
+	// conversation could park indefinitely (a stop freezes its blueprint
+	// 'running' by design) one such run held the gate shut for every other
+	// situation on that entity, with nothing left to reopen it.
+	//
+	// The active-run read resolves the run's ID rather than a bool: a busy
+	// gate is the additive-injection path, and folding the new event into
+	// the run needs the run.
 	gateCtx := context.Background()
-	activeRunID, activeRunTaskID, err := r.agentRuns.ActiveAutoRunIDForEntitySystem(gateCtx, orgID, entityID)
+	activeRunID, err := r.agentRuns.ActiveAutoRunIDForTaskSystem(gateCtx, orgID, task.ID)
 	if err != nil {
-		routerLog.Error("entity gate active-run query failed", "entity", entityID, "error", err)
+		routerLog.Error("task gate active-run query failed", "task_id", task.ID, "error", err)
 		return false
 	}
 	hasActive := activeRunID != ""
 	hasPending := false
 	if !hasActive {
-		hasPending, err = r.firings.HasPendingForEntity(gateCtx, orgID, entityID)
+		hasPending, err = r.firings.HasPendingForTask(gateCtx, orgID, task.ID)
 		if err != nil {
-			routerLog.Error("entity gate pending query failed", "entity", entityID, "error", err)
+			routerLog.Error("task gate pending query failed", "task_id", task.ID, "error", err)
 			return false
 		}
 	}
 	if hasActive || hasPending {
-		// Universal same-task absorption: a firing whose OWN task already
-		// holds the entity's live auto run folds into that run (inject +
-		// claim) instead of deferring a second one. Every other firing —
-		// a different task's, or hasPending-only with no live run to fold
-		// into — defers to pending_firings exactly as before. Same-task ⇒
-		// same owner team, so the principal boundary needs no separate
-		// guard, and a cross-task intent (an approve→merge, a
-		// label-blueprint firing) can never be swallowed by an unrelated
-		// run.
-		if hasActive && activeRunTaskID == task.ID {
+		// A busy gate now always means THIS task's own run is live, so
+		// absorption is the default rather than a same-task special case:
+		// fold the event into the run instead of deferring a second one.
+		// Only a firing with no live run to fold into (hasPending with the
+		// run already gone) still defers.
+		if hasActive {
 			if r.tryAdditiveInjection(gateCtx, orgID, entityID, activeRunID, task, trigger, triggeringEventID) {
 				// Commit the claim on this task exactly like the deferral
 				// path does post-Enqueue: the bot has taken responsibility
@@ -224,12 +229,12 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 			return false
 		}
 		// The gate read said idle, but a DIFFERENT (event, trigger) went
-		// active on this entity before our insert — the one-active index
-		// is the authority, the gate just a fast-path (TFAC-579). The
+		// active on this task before our insert — the one-active index
+		// is the authority, the gate just a fast-path. The
 		// intent is still valid: defer it onto pending_firings exactly as
 		// the gate's busy branch would have, instead of dropping it.
-		if errors.Is(err, delegate.ErrEntityBusy) {
-			routerLog.Info("auto-delegate deferred: entity went busy under the fire (gate race)",
+		if errors.Is(err, delegate.ErrTaskBusy) {
+			routerLog.Info("auto-delegate deferred: task went busy under the fire (gate race)",
 				"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
 			return r.enqueueBusyFiring(orgID, entityID, task, trigger, triggeringEventID, actingTeamID, agentID)
 		}
@@ -246,9 +251,9 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 }
 
 // enqueueBusyFiring defers a valid firing onto pending_firings because the
-// entity is busy, and commits the task's agent claim on success. Called
+// task is busy, and commits the task's agent claim on success. Called
 // from both places that discover busyness: the gate's fast-path read, and
-// the ErrEntityBusy loser of the fenced insert (the gate race — the DB
+// the ErrTaskBusy loser of the fenced insert (the gate race — the DB
 // index is the authority, the gate an optimization). Returns true when the
 // intent was queued and the claim stamped; false when the enqueue failed
 // or collapsed onto an already-queued (task, trigger) duplicate (whose own
@@ -270,7 +275,7 @@ func (r *Router) enqueueBusyFiring(orgID, entityID string, task *domain.Task, tr
 			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
 		return false
 	}
-	routerLog.Info("queued firing, entity busy",
+	routerLog.Info("queued firing, task busy",
 		"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
 	// Pending firing landed in the queue, commit the task to the
 	// org's agent. Stamp here (after EnqueuePendingFiring
@@ -280,13 +285,13 @@ func (r *Router) enqueueBusyFiring(orgID, entityID string, task *domain.Task, tr
 	return true
 }
 
-// tryAdditiveInjection folds a same-task firing into the entity's already-
-// active auto run via the cross-pod-aware injection seam, instead of
-// deferring a second run onto pending_firings. runID is the entity's active
-// run, resolved by the caller and already confirmed to belong to the
-// firing's own task. Returns true when the caller should treat the firing
-// as handled; false when the caller must fall through to the normal
-// deferral so the firing is never silently dropped.
+// tryAdditiveInjection folds a firing into its task's already-active auto
+// run via the cross-pod-aware injection seam, instead of deferring a second
+// run onto pending_firings. runID is that run, resolved by the caller from
+// the firing's own task — so it belongs to that task by construction, with
+// no separate ownership check to make. Returns true when the caller should
+// treat the firing as handled; false when the caller must fall through to
+// the normal deferral so the firing is never silently dropped.
 //
 // The one fall-through is StageOrDeliverAdditiveEvent reporting
 // InjectNotDelivered — dropped outright (no live process anywhere, and the
@@ -402,7 +407,7 @@ func (r *Router) stampAgentClaim(orgID string, task *domain.Task, actingTeamID, 
 
 // fireDelegate transitions the task to delegated status, broadcasts the
 // change, then fires the spawner. Returns the run ID on success — used by
-// DrainEntity to record which run a queued firing materialized into.
+// DrainTask to record which run a queued firing materialized into.
 //
 // triggeringEventID is the event instance driving this fire:
 // the immediate path passes tryAutoDelegate's event id, the drain path
@@ -460,21 +465,23 @@ func (r *Router) fireDelegate(orgID string, task *domain.Task, trigger domain.Ev
 	return runID, nil
 }
 
-// DrainEntity is the spawner's hook into the per-entity firing queue.
-// Called when an auto run terminates on the entity (any terminal status).
+// DrainTask is the spawner's hook into the per-task firing queue.
+// Called when an auto run terminates on the task (any terminal status).
 // A completed run that left an unresolved artifact still counts as terminal
-// here — the artifact is an async sidecar, so it releases the entity
+// here — the artifact is an async sidecar, so it releases the task
 // lock and doesn't block downstream processing.
 //
-// Pops pending firings in FIFO order, validates each against current
-// state (task still active? trigger still enabled? breaker still under
-// threshold?), and fires the first valid one. Stale firings are
+// Pops the task's pending firings in FIFO order, validates each against
+// current state (task still active? trigger still enabled? breaker still
+// under threshold?), and fires the first valid one. Stale firings are
 // soft-deleted with a skip_reason and the loop continues. At most one
 // firing actually fires per drain — that run becomes the new in-flight
-// for the entity and gates further drains naturally.
-func (r *Router) DrainEntity(orgID, entityID string) {
-	// Serialize drains per entity. Without this, a fast-terminating run
-	// fired by an earlier drain can spawn a second DrainEntity goroutine
+// for the task and gates further drains naturally. A sibling task on the
+// same entity has its own queue and its own drain; neither waits on the
+// other.
+func (r *Router) DrainTask(orgID, taskID string) {
+	// Serialize drains per task. Without this, a fast-terminating run
+	// fired by an earlier drain can spawn a second DrainTask goroutine
 	// that pops the same pending_firings row before the first drain
 	// transitions it out of 'pending' — leading to duplicate fireDelegate
 	// calls. The MarkPendingFiringFired/Skipped guards on
@@ -483,14 +490,14 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 	// blocks until the first releases, by which point the firing has
 	// landed in a terminal status and the second drain's pop returns the
 	// next row (or nothing).
-	mu := r.entityDrainLock(entityID)
+	mu := r.taskDrainLock(taskID)
 	mu.Lock()
 	defer mu.Unlock()
 
 	for {
-		firing, err := r.firings.PopForEntity(context.Background(), orgID, entityID)
+		firing, err := r.firings.PopForTask(context.Background(), orgID, taskID)
 		if err != nil {
-			routerLog.Error("drain pop failed", "entity", entityID, "error", err)
+			routerLog.Error("drain pop failed", "task_id", taskID, "error", err)
 			return
 		}
 		if firing == nil {
@@ -499,28 +506,28 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 
 		runID, skipReason, transientErr := r.attemptDrainOne(orgID, firing)
 		if transientErr != nil {
-			// Transient failure (DB read, Delegate). PopForEntity already
-			// claimed this row into 'draining' (TFAC-579), so release it
+			// Transient failure (DB read, Delegate). PopForTask already
+			// claimed this row into 'draining', so release it
 			// back to 'pending' rather than leaving it stuck — marking
 			// 'skipped_stale' here would permanently drop a queued intent
 			// over a temporary problem, and a 'draining' row left
-			// unresolved is invisible to HasPendingForEntity /
-			// ListEntitiesWithPending and would never be retried. The
+			// unresolved is invisible to HasPendingForTask /
+			// ListTasksWithPending and would never be retried. The
 			// periodic sweeper or the next run-terminal will retry once
 			// released.
 			if err := r.firings.Release(context.Background(), orgID, firing.ID); err != nil {
 				routerLog.Error("release firing after transient drain error failed",
-					"firing_id", firing.ID, "entity", entityID, "error", err)
+					"firing_id", firing.ID, "task_id", taskID, "error", err)
 			}
-			if errors.Is(transientErr, errDrainEntityBusy) {
+			if errors.Is(transientErr, errDrainTaskBusy) {
 				// Routine gate race, not a failure: another run went active
 				// between the pop and the fire; the release above re-queues
 				// the intent for the busy run's own terminal drain.
-				routerLog.Info("drain deferred: entity busy, firing released for retry",
-					"firing_id", firing.ID, "entity", entityID)
+				routerLog.Info("drain deferred: task busy, firing released for retry",
+					"firing_id", firing.ID, "task_id", taskID)
 			} else {
 				routerLog.Warn("drain transient error, released firing for retry",
-					"firing_id", firing.ID, "entity", entityID, "error", transientErr)
+					"firing_id", firing.ID, "task_id", taskID, "error", transientErr)
 			}
 			return
 		}
@@ -536,13 +543,13 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 				// not externally visible. Mirrors what fireDelegate
 				// already does when spawner.Delegate itself fails.
 				//
-				// PopForEntity already claimed this row into 'draining'
-				// (TFAC-579) — release it back to 'pending' so a later
+				// PopForTask already claimed this row into 'draining'
+				// — release it back to 'pending' so a later
 				// drain retries it fresh, mirroring the transientErr
 				// branch above. Without this the row is stuck in
-				// 'draining' forever: PopForEntity only ever claims
-				// 'pending' rows, and HasPendingForEntity /
-				// ListEntitiesWithPending don't see 'draining' rows
+				// 'draining' forever: PopForTask only ever claims
+				// 'pending' rows, and HasPendingForTask /
+				// ListTasksWithPending don't see 'draining' rows
 				// either, so nothing would ever pick it up again.
 				routerLog.Error("mark firing fired failed, rolling back: cancelling run + reverting task to queued",
 					"firing_id", firing.ID, "run_id", runID, "error", err)
@@ -573,24 +580,24 @@ func (r *Router) DrainEntity(orgID, entityID string) {
 			}
 			return
 		}
-		routerLog.Debug("skipped firing", "firing_id", firing.ID, "entity", entityID, "skip_reason", skipReason)
+		routerLog.Debug("skipped firing", "firing_id", firing.ID, "task_id", taskID, "skip_reason", skipReason)
 	}
 }
 
-// RunDrainSweeper periodically attempts to drain every entity that has at
+// RunDrainSweeper periodically attempts to drain every task that has at
 // least one pending firing. The sweeper is the safety net for stuck
 // queues: a firing left in 'pending' after a transient validation/fire
 // error needs *some* drain to retry it, and the natural trigger
 // (notifyDrainer from an auto-run terminal) only fires when an auto run
-// is actively terminating. If nothing's terminating — entity has no
+// is actively terminating. If nothing's terminating — task has no
 // active runs and no events arrive — the queue would otherwise sit
 // indefinitely.
 //
 // Cadence is 30s by default; tuneable via interval. Each tick lists
-// entities with pending firings (cheap — partial index) and calls
-// DrainEntity on each. DrainEntity's per-entity mutex makes the sweeper
+// tasks with pending firings (cheap — partial index) and calls
+// DrainTask on each. DrainTask's per-task mutex makes the sweeper
 // safe to run alongside event-triggered drains: if a drain is already
-// running for an entity, the sweeper's call blocks then re-pops, which
+// running for a task, the sweeper's call blocks then re-pops, which
 // is fine. Empty queues are no-ops.
 //
 // Returns when ctx is cancelled. Caller is responsible for the lifetime
@@ -630,7 +637,7 @@ func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
 // can never be stolen mid-flight.
 const drainingStaleAfter = 2 * time.Minute
 
-// sweepOrg drains every entity in a single org that has at least one
+// sweepOrg drains every task in a single org that has at least one
 // pending firing. Factored out of RunDrainSweeper so the per-org loop
 // reads as one statement and per-org errors don't bail the whole
 // cycle.
@@ -645,21 +652,26 @@ func (r *Router) sweepOrg(ctx context.Context, orgID string) {
 			"count", n, "org", orgID)
 	}
 
-	ids, err := r.firings.ListEntitiesWithPending(ctx, orgID)
+	ids, err := r.firings.ListTasksWithPending(ctx, orgID)
 	if err != nil {
-		routerLog.Error("drain sweeper: list entities with pending failed", "org", orgID, "error", err)
+		routerLog.Error("drain sweeper: list tasks with pending failed", "org", orgID, "error", err)
 		return
 	}
-	for _, eid := range ids {
-		active, err := r.agentRuns.HasActiveAutoRunForEntitySystem(ctx, orgID, eid)
+	for _, tid := range ids {
+		// Skip a task whose own run is still live — its terminal will drain
+		// the queue. Scoped to the task, so one task parked indefinitely no
+		// longer makes the sweeper step over every sibling task's queue on
+		// the same entity, which is how a stopped run used to halt triage
+		// for a whole pull request.
+		active, err := r.agentRuns.HasActiveAutoRunForTaskSystem(ctx, orgID, tid)
 		if err != nil {
-			routerLog.Error("drain sweeper: active-check failed", "entity", eid, "org", orgID, "error", err)
+			routerLog.Error("drain sweeper: active-check failed", "task_id", tid, "org", orgID, "error", err)
 			continue
 		}
 		if active {
 			continue
 		}
-		r.DrainEntity(orgID, eid)
+		r.DrainTask(orgID, tid)
 	}
 }
 
@@ -746,24 +758,24 @@ func (r *Router) attemptDrainOne(orgID string, firing *domain.PendingFiring) (ru
 		if errors.Is(err, delegate.ErrAlreadyFired) {
 			return "", domain.PendingFiringSkipAlreadyFired, nil
 		}
-		// A different (event, trigger) went active on the entity between
+		// A different (event, trigger) went active on the task between
 		// this drain's pop and the fenced insert (a fresh immediate fire,
 		// or a racing drainer). NOT a skip: the queued intent is still
 		// valid — surface it transient-shaped so the caller releases the
 		// firing back to 'pending'; the busy run's own terminal drain (or
 		// the sweeper) retries it.
-		if errors.Is(err, delegate.ErrEntityBusy) {
-			return "", "", errDrainEntityBusy
+		if errors.Is(err, delegate.ErrTaskBusy) {
+			return "", "", errDrainTaskBusy
 		}
 		return "", "", fmt.Errorf("fire delegate: %w", err)
 	}
 	return id, "", nil
 }
 
-// errDrainEntityBusy marks the drain-time entity-busy race for DrainEntity's
+// errDrainTaskBusy marks the drain-time task-busy race for DrainTask's
 // transient branch: same release-and-retry handling, but logged as routine
 // (Info) rather than as a Warn-worthy transient failure.
-var errDrainEntityBusy = errors.New("routing: entity busy at drain fire; firing released for retry")
+var errDrainTaskBusy = errors.New("routing: task busy at drain fire; firing released for retry")
 
 // revertTaskStatus moves a task's lifecycle axis back to the given
 // status and broadcasts the change so the frontend doesn't get stuck
@@ -772,7 +784,7 @@ var errDrainEntityBusy = errors.New("routing: entity busy at drain fire; firing 
 // orthogonal, and this helper only touches lifecycle.
 //
 // The only caller today is the mark-fired-failure rollback path in
-// DrainEntity: a run was successfully spawned but the UPDATE that
+// DrainTask: a run was successfully spawned but the UPDATE that
 // records the firing→run association failed. The recovery flow
 // cancels the run, leaves the firing in 'pending' so the next drain
 // retries it, and reverts the task lifecycle for FE consistency.

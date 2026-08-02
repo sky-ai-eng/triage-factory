@@ -1833,11 +1833,12 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("HasActiveAutoRunForEntity", func(t *testing.T) {
-		// Per-entity gate: any non-terminal trigger_type='event' run on any
-		// task that belongs to the entity. Manual delegations are excluded
-		// (by design — manual decoupled from the auto-queue gate); terminal
-		// runs don't count either.
+	t.Run("HasActiveAutoRunForTask", func(t *testing.T) {
+		// Per-task gate: any non-terminal trigger_type='event' run on the
+		// task. Manual delegations are excluded (by design — manual is
+		// decoupled from the auto-queue gate); terminal runs don't count
+		// either. A sibling task on the same entity is invisible here, which
+		// is the whole point of the unit being the task.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		ent := seed.Entity(t, "ha-ent")
@@ -1845,13 +1846,13 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
 		// No runs → false.
-		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); has {
-			t.Error("HasActiveAutoRunForEntity with no runs: true, want false")
+		if has, _ := store.HasActiveAutoRunForTask(ctx, orgID, taskID); has {
+			t.Error("HasActiveAutoRunForTask with no runs: true, want false")
 		}
 
 		// Manual run — must NOT trip the gate.
 		_ = seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); has {
+		if has, _ := store.HasActiveAutoRunForTask(ctx, orgID, taskID); has {
 			t.Error("manual run tripped the auto-run gate; gate must be event-only")
 		}
 
@@ -1861,8 +1862,16 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		})
-		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); !has {
+		if has, _ := store.HasActiveAutoRunForTask(ctx, orgID, taskID); !has {
 			t.Error("active event-trigger run should trip the gate")
+		}
+
+		// A second task on the SAME entity is unaffected — the gate is the
+		// task's, so a busy sibling never blocks it.
+		ev2 := seed.Event(t, ent, domain.EventGitHubPRCICheckFailed)
+		sibling := seed.Task(t, ent, domain.EventGitHubPRCICheckFailed, ev2)
+		if has, _ := store.HasActiveAutoRunForTask(ctx, orgID, sibling); has {
+			t.Error("a busy sibling task on the same entity closed this task's gate")
 		}
 
 		// Terminate the event run; only terminal event-trigger rows
@@ -1871,52 +1880,57 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
-		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); has {
+		if has, _ := store.HasActiveAutoRunForTask(ctx, orgID, taskID); has {
 			t.Error("terminal event run + active manual should NOT trip the gate")
 		}
 	})
 
-	t.Run("ActiveAutoRunIDForEntitySystem", func(t *testing.T) {
-		// Same predicate as HasActiveAutoRunForEntity (non-terminal,
-		// trigger_type='event'), but returns the run ID plus the ID of
-		// the task the run belongs to instead of a bool — the router's
-		// additive-injection branch needs the run ID to target
-		// StageOrDeliverInjection, and the absorption rule needs the
-		// task ID to confirm the run belongs to the firing's own task.
+	t.Run("ActiveAutoRunIDForTaskSystem", func(t *testing.T) {
+		// Same predicate as HasActiveAutoRunForTask (non-terminal,
+		// trigger_type='event'), but returns the run ID instead of a bool —
+		// a busy gate is the additive-injection path, which needs the run to
+		// fold the new event into.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		ent := seed.Entity(t, "ha-id-ent")
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
-		// No runs → ("", "").
-		if id, tid, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != "" || tid != "" {
-			t.Errorf("with no runs: id=%q taskID=%q err=%v, want empty/empty/nil", id, tid, err)
+		// No runs → "".
+		if id, err := store.ActiveAutoRunIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
+			t.Errorf("with no runs: id=%q err=%v, want empty/nil", id, err)
 		}
 
 		// Manual run only — must NOT resolve.
 		_ = seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		if id, tid, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != "" || tid != "" {
-			t.Errorf("manual-only: id=%q taskID=%q err=%v, want empty (event-only)", id, tid, err)
+		if id, err := store.ActiveAutoRunIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
+			t.Errorf("manual-only: id=%q err=%v, want empty (event-only)", id, err)
 		}
 
-		// Active event-trigger run → resolves to its run ID and owning task ID.
+		// Active event-trigger run → resolves to its run ID.
 		eventRunID := seed.Run(t, domain.Conversation{
 			TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
 		})
-		if id, tid, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != eventRunID || tid != taskID {
-			t.Errorf("ActiveAutoRunIDForEntitySystem = (%q, %q) err=%v, want (%q, %q)", id, tid, err, eventRunID, taskID)
+		if id, err := store.ActiveAutoRunIDForTaskSystem(ctx, orgID, taskID); err != nil || id != eventRunID {
+			t.Errorf("ActiveAutoRunIDForTaskSystem = %q err=%v, want %q", id, err, eventRunID)
+		}
+
+		// A sibling task on the same entity still resolves to nothing.
+		ev2 := seed.Event(t, ent, domain.EventGitHubPRCICheckFailed)
+		sibling := seed.Task(t, ent, domain.EventGitHubPRCICheckFailed, ev2)
+		if id, err := store.ActiveAutoRunIDForTaskSystem(ctx, orgID, sibling); err != nil || id != "" {
+			t.Errorf("sibling task: id=%q err=%v, want empty", id, err)
 		}
 
 		// Terminate it — terminal-only, plus the still-active manual run,
-		// resolves back to ("", "").
+		// resolves back to "".
 		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
-		if id, tid, err := store.ActiveAutoRunIDForEntitySystem(ctx, orgID, ent); err != nil || id != "" || tid != "" {
-			t.Errorf("terminal event run + active manual: id=%q taskID=%q err=%v, want empty", id, tid, err)
+		if id, err := store.ActiveAutoRunIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
+			t.Errorf("terminal event run + active manual: id=%q err=%v, want empty", id, err)
 		}
 	})
 

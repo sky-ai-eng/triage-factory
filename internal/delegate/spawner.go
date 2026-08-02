@@ -51,15 +51,15 @@ func shortRunID(runID string) string {
 	return runID[:8]
 }
 
-// QueueDrainer is the interface the spawner uses to notify the per-entity
+// QueueDrainer is the interface the spawner uses to notify the per-task
 // firing queue that an auto run has reached a terminal state and the
-// entity may be ready to drain its next pending firing. Implemented by
+// task may be ready to drain its next pending firing. Implemented by
 // the routing.Router. Manual runs do not call this — manual is fully
 // decoupled from the queue by design. orgID scopes the
 // drain to the run's tenant so multi-mode lookups hit the right
 // pending_firings rows.
 type QueueDrainer interface {
-	DrainEntity(orgID, entityID string)
+	DrainTask(orgID, taskID string)
 }
 
 // EventPublisher is the bus-publish seam the spawner uses to mirror run
@@ -703,13 +703,13 @@ func (s *Spawner) runURLFor(orgID, runID string) string {
 	return publicURL + "/runs/" + runID
 }
 
-// notifyDrainer fires the QueueDrainer hook for an entity if a drainer is
+// notifyDrainer fires the QueueDrainer hook for a task if a drainer is
 // configured AND the run that just finished was an auto-fired one.
 // Manual runs are fully decoupled from the queue by design — they
 // neither participate in the gate nor trigger drains. Runs in goroutine
 // to keep run-teardown latency unaffected.
-func (s *Spawner) notifyDrainer(orgID, triggerType, entityID string) {
-	if triggerType == "manual" || entityID == "" {
+func (s *Spawner) notifyDrainer(orgID, triggerType, taskID string) {
+	if triggerType == "manual" || taskID == "" {
 		return
 	}
 	s.mu.Lock()
@@ -718,7 +718,7 @@ func (s *Spawner) notifyDrainer(orgID, triggerType, entityID string) {
 	if d == nil {
 		return
 	}
-	go d.DrainEntity(orgID, entityID)
+	go d.DrainTask(orgID, taskID)
 }
 
 // SetRunCredentialResolvers wires the per-org run-credential seam:

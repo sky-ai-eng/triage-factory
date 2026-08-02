@@ -14,12 +14,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 )
 
-// fakeDrainer captures DrainEntity invocations so tests can assert
+// fakeDrainer captures DrainTask invocations so tests can assert
 // the spawner's terminal-state hooks fire correctly. Synchronized
 // because notifyDrainer dispatches the call in a goroutine.
 type drainCall struct {
-	orgID    string
-	entityID string
+	orgID  string
+	taskID string
 }
 
 type fakeDrainer struct {
@@ -32,9 +32,9 @@ func newFakeDrainer() *fakeDrainer {
 	return &fakeDrainer{called: make(chan struct{}, 8)}
 }
 
-func (f *fakeDrainer) DrainEntity(orgID, entityID string) {
+func (f *fakeDrainer) DrainTask(orgID, taskID string) {
 	f.mu.Lock()
-	f.calls = append(f.calls, drainCall{orgID: orgID, entityID: entityID})
+	f.calls = append(f.calls, drainCall{orgID: orgID, taskID: taskID})
 	f.mu.Unlock()
 	select {
 	case f.called <- struct{}{}:
@@ -53,7 +53,7 @@ func (f *fakeDrainer) callsCopy() []drainCall {
 // TestCancel_OpenAutoRun_DrainsQueue pins the fix for the
 // "Cancel without active goroutine never calls notifyDrainer" leak.
 // An auto-fired run parked `open` has no goroutine defer to piggy-back on, so
-// without the explicit drain the per-entity firing queue would stick until some
+// without the explicit drain the task's firing queue would stick until some
 // other run terminated.
 func TestCancel_OpenAutoRun_DrainsQueue(t *testing.T) {
 	database := newDelegateTestDB(t)
@@ -74,18 +74,18 @@ func TestCancel_OpenAutoRun_DrainsQueue(t *testing.T) {
 	select {
 	case <-drainer.called:
 	case <-time.After(time.Second):
-		t.Fatal("DrainEntity was never called")
+		t.Fatal("DrainTask was never called")
 	}
 
 	calls := drainer.callsCopy()
 	if len(calls) != 1 {
 		t.Fatalf("expected 1 drain call, got %d (%v)", len(calls), calls)
 	}
-	if calls[0].entityID == "" {
-		t.Errorf("DrainEntity called with empty entityID")
+	if calls[0].taskID == "" {
+		t.Errorf("DrainTask called with empty taskID")
 	}
 	if calls[0].orgID != runmode.LocalDefaultOrgID {
-		t.Errorf("DrainEntity orgID = %q, want %q", calls[0].orgID, runmode.LocalDefaultOrgID)
+		t.Errorf("DrainTask orgID = %q, want %q", calls[0].orgID, runmode.LocalDefaultOrgID)
 	}
 }
 
@@ -116,7 +116,7 @@ func TestCancel_OpenManualRun_NoDrain(t *testing.T) {
 	// honest without making it slow.
 	select {
 	case <-drainer.called:
-		t.Fatal("DrainEntity called for manual run; should be filtered by trigger_type")
+		t.Fatal("DrainTask called for manual run; should be filtered by trigger_type")
 	case <-time.After(200 * time.Millisecond):
 	}
 }
@@ -145,7 +145,7 @@ func TestCancel_AlreadyTerminal_NoDrain(t *testing.T) {
 
 	select {
 	case <-drainer.called:
-		t.Fatal("DrainEntity called on already-terminal row")
+		t.Fatal("DrainTask called on already-terminal row")
 	case <-time.After(200 * time.Millisecond):
 	}
 }

@@ -63,8 +63,8 @@ type EventPublisher interface {
 //     typed predicates — one store query, kind-discriminated handling
 //  5. Dedup-creates or bumps tasks
 //  6. Enqueues AI scoring
-//  7. Auto-delegates on matching triggers — fires if the entity is idle,
-//     enqueues onto pending_firings if the entity already has an active
+//  7. Auto-delegates on matching triggers — fires if the task is idle,
+//     enqueues onto pending_firings if the task already has an active
 //     auto run or earlier queued firings.
 //  8. Runs inline close checks for the event type
 type Router struct {
@@ -77,7 +77,7 @@ type Router struct {
 	tasks        dbpkg.TaskStore             // task lifecycle, dedup, claims, breaker
 	agentRuns    dbpkg.ConversationStore     // lookup active runs for the task-close cancel cascade
 	entities     dbpkg.EntityStore           // closed-entity guard + entity-terminating close cascade
-	firings      dbpkg.PendingFiringsStore   // per-entity firing queue + active-run gate
+	firings      dbpkg.PendingFiringsStore   // per-task firing queue + active-run gate
 	events       dbpkg.EventStore            // admin-pool RecordSystem + GetMetadataSystem for the background subscriber
 	eventQueue   dbpkg.EventQueueStore       // durable router queue the drain worker claims from; set post-construction via SetEventQueue (nil → worker is a no-op)
 	orgs         dbpkg.OrgsStore             // per-org iteration for the drain sweeper; required (RunDrainSweeper dereferences it directly)
@@ -109,17 +109,16 @@ type Router struct {
 	executorID string
 	bootEpoch  int64
 
-	// drainLocks serializes DrainEntity calls per entity. Without this,
-	// the non-mutating PopPendingFiringForEntity creates a window between
-	// pop and MarkPendingFiringFired/Skipped where a concurrent drain
-	// (typically spawned by a fast-terminating run that the first drain
-	// just fired) can pop the same row and double-fire it. The mutex
-	// closes the window: a second drain blocks until the first marks the
-	// firing terminal, so its pop returns the next row (or nothing).
+	// drainLocks serializes DrainTask calls per task. Without this, the
+	// window between a pop and MarkPendingFiringFired/Skipped lets a
+	// concurrent drain (typically spawned by a fast-terminating run that
+	// the first drain just fired) pop the same row and double-fire it. The
+	// mutex closes the window: a second drain blocks until the first marks
+	// the firing terminal, so its pop returns the next row (or nothing).
 	//
-	// Map grows monotonically with the count of distinct entities ever
-	// drained. Bounded by entity count for the lifetime of the process,
-	// which is small enough that we don't bother evicting on entity
+	// Map grows monotonically with the count of distinct tasks ever
+	// drained. Bounded by task count for the lifetime of the process,
+	// which is small enough that we don't bother evicting on task
 	// close.
 	drainLockMu sync.Mutex
 	drainLocks  map[string]*sync.Mutex
@@ -250,15 +249,15 @@ func (r *Router) autoDelegateEnabledForTeam(ctx context.Context, teamID string) 
 	return settings.AutoDelegateEnabled
 }
 
-// entityDrainLock returns the per-entity mutex used to serialize
-// DrainEntity calls. Lazily created on first use; never evicted.
-func (r *Router) entityDrainLock(entityID string) *sync.Mutex {
+// taskDrainLock returns the per-task mutex used to serialize
+// DrainTask calls. Lazily created on first use; never evicted.
+func (r *Router) taskDrainLock(taskID string) *sync.Mutex {
 	r.drainLockMu.Lock()
 	defer r.drainLockMu.Unlock()
-	mu, ok := r.drainLocks[entityID]
+	mu, ok := r.drainLocks[taskID]
 	if !ok {
 		mu = &sync.Mutex{}
-		r.drainLocks[entityID] = mu
+		r.drainLocks[taskID] = mu
 	}
 	return mu
 }

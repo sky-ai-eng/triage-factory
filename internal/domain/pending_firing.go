@@ -9,7 +9,7 @@ import "time"
 //
 // Lifecycle: pending → draining → (fired | skipped_stale), or draining →
 // pending on a transient-error release. draining is the claiming pop's
-// reservation state (TFAC-579): PopForEntity atomically flips pending →
+// reservation state: PopForTask atomically flips pending →
 // draining under FOR UPDATE SKIP LOCKED instead of a bare non-mutating
 // SELECT, so two concurrent drains can never pop the same row. Soft-deleted
 // via status transition rather than DELETE so the queue's history is

@@ -773,28 +773,30 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 	return runs, rows.Err()
 }
 
-// HasActiveAutoRunForEntity: any non-terminal trigger_type='event' run on
-// any task that belongs to the entity. Manual delegations are excluded.
-// Used by the router's per-entity firing gate.
-func (s *agentRunStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
-	return hasActiveAutoRunForEntity(ctx, s.q, orgID, entityID)
+// HasActiveAutoRunForTask: any non-terminal trigger_type='event' run on the
+// task. Manual delegations are excluded. Used by the router's per-task firing
+// gate.
+func (s *agentRunStore) HasActiveAutoRunForTask(ctx context.Context, orgID, taskID string) (bool, error) {
+	return hasActiveAutoRunForTask(ctx, s.q, orgID, taskID)
 }
 
-func (s *agentRunStore) HasActiveAutoRunForEntitySystem(ctx context.Context, orgID, entityID string) (bool, error) {
-	return hasActiveAutoRunForEntity(ctx, s.admin, orgID, entityID)
+func (s *agentRunStore) HasActiveAutoRunForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
+	return hasActiveAutoRunForTask(ctx, s.admin, orgID, taskID)
 }
 
-func hasActiveAutoRunForEntity(ctx context.Context, q queryer, orgID, entityID string) (bool, error) {
+func hasActiveAutoRunForTask(ctx context.Context, q queryer, orgID, taskID string) (bool, error) {
+	if !isValidUUID(taskID) {
+		return false, nil
+	}
 	var count int
 	err := q.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM conversations r
-		JOIN tasks t ON t.id = r.task_id AND t.org_id = r.org_id
 		WHERE r.org_id = $1
-		  AND t.entity_id = $2
+		  AND r.task_id = $2
 		  AND r.trigger_type = 'event'
 		  AND (r.status IS NULL
 		       OR r.status NOT IN (`+runTerminalStatusesSQL+`))
-	`, orgID, entityID).Scan(&count)
+	`, orgID, taskID).Scan(&count)
 	return count > 0, err
 }
 
@@ -806,23 +808,25 @@ func (s *agentRunStore) ActiveIDsForTaskSystem(ctx context.Context, orgID, taskI
 	return activeRunIDsForTask(ctx, s.admin, orgID, taskID)
 }
 
-func (s *agentRunStore) ActiveAutoRunIDForEntitySystem(ctx context.Context, orgID, entityID string) (string, string, error) {
-	var id, taskID string
+func (s *agentRunStore) ActiveAutoRunIDForTaskSystem(ctx context.Context, orgID, taskID string) (string, error) {
+	if !isValidUUID(taskID) {
+		return "", nil
+	}
+	var id string
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT r.id, r.task_id FROM conversations r
-		JOIN tasks t ON t.id = r.task_id AND t.org_id = r.org_id
+		SELECT r.id FROM conversations r
 		WHERE r.org_id = $1
-		  AND t.entity_id = $2
+		  AND r.task_id = $2
 		  AND r.trigger_type = 'event'
 		  AND (r.status IS NULL
 		       OR r.status NOT IN (`+runTerminalStatusesSQL+`))
 		ORDER BY r.started_at DESC
 		LIMIT 1
-	`, orgID, entityID).Scan(&id, &taskID)
+	`, orgID, taskID).Scan(&id)
 	if err == sql.ErrNoRows {
-		return "", "", nil
+		return "", nil
 	}
-	return id, taskID, err
+	return id, err
 }
 
 func activeRunIDsForTask(ctx context.Context, q queryer, orgID, taskID string) ([]string, error) {
