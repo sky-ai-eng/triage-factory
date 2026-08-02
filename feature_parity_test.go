@@ -91,8 +91,8 @@ func TestFrontendMirrorsAllFeatures(t *testing.T) {
 // added in Go and not here silently misses every UI arm (that is how
 // `awaiting_credentials` came to render as inert grey mid-setup), and a name
 // here that Go never emits is a branch that can never be taken (that is how
-// `initializing`, `worktree_created` and `pending_approval` outlived the
-// backend states they described).
+// `initializing` and `worktree_created` outlived the backend states they
+// described).
 func TestFrontendMirrorsRunStatusVocabulary(t *testing.T) {
 	src, err := os.ReadFile("frontend/src/types.ts")
 	if err != nil {

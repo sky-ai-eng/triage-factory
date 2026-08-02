@@ -78,8 +78,8 @@ func (s *Spawner) RunSnapshotReaper(ctx context.Context, interval time.Duration)
 }
 
 // ReapExpiredSnapshots drops the durable workspace snapshot of every
-// blueprint_run all of whose resumable-state runs (open / pending_approval /
-// completed+abort) parked/terminated before the retention TTL. Enumerates the
+// blueprint_run all of whose resumable-state runs (open / completed+abort)
+// parked/terminated before the retention TTL. Enumerates the
 // reapable keys from the DB (the blob store has no List) and discards each via
 // the idempotent discardWorkspaceSnapshot, so a key already gone is a no-op.
 // Best-effort: errors are logged, never fatal.

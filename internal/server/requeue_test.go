@@ -215,7 +215,7 @@ func assertPendingApprovalCleanedUp(
 
 // TestHandleUndo_CleansUpPendingApprovalRun is the regression
 // for the swipe-toast UX path: Cards user dismissed/claimed the
-// task, agent ran and reached pending_approval, user hits Cmd-Z (or
+// task, agent ran and left an artifact awaiting approval, user hits Cmd-Z (or
 // the toast's Undo button). The full cleanup must run AND a swipe
 // audit row should be recorded since this is a swipe undo.
 func TestHandleUndo_CleansUpPendingApprovalRun(t *testing.T) {
@@ -277,9 +277,9 @@ func TestHandleRequeue_CleansUpPendingApprovalRun(t *testing.T) {
 
 // TestHandleSwipe_DismissCleansUpPendingApprovalRun is the third
 // entry point: user swipes left to dismiss a delegated card whose
-// agent already produced a pending_approval review. Today this
-// orphans the review and leaves the run as a phantom
-// pending_approval against a dismissed task — this is the other half.
+// agent already produced a review awaiting approval. Today this
+// orphans the review and leaves it hanging unresolved against a
+// dismissed task — this is the other half.
 //
 // The dismiss-flavored human_content note carries a different
 // implication marker ("dismissed the task entirely") than the
@@ -301,8 +301,8 @@ func TestHandleSwipe_DismissCleansUpPendingApprovalRun(t *testing.T) {
 }
 
 // TestHandleSwipe_CompleteCleansUpPendingApprovalRun is the fourth
-// entry point: the Board's drag-AgentCard-to-Done gesture for a
-// pending_approval run. The complete swipe action flips the task to
+// entry point: the Board's drag-AgentCard-to-Done gesture for a run
+// awaiting approval. The complete swipe action flips the task to
 // 'done' (so the card lands in the Done column rather than
 // disappearing from the board, the way dismiss makes it) but reuses
 // the same cleanup — pending_reviews row gone, run flipped
@@ -1109,7 +1109,7 @@ func TestRequeueTask_OkFalseOnMissingID(t *testing.T) {
 
 // TestHandleUndo_NoPendingApprovalIsNoOp guards the common case:
 // the task has no delegated run (or its delegated run is still
-// active, not pending_approval). The cleanup should silently
+// active, with nothing awaiting approval). The cleanup should silently
 // no-op rather than touching unrelated runs/reviews.
 func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 	s := newTestServer(t)

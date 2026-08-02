@@ -95,9 +95,9 @@ export interface TeamBot {
 // catches the same drift for the cost of one `go test`.
 //
 // Both directions matter, and the second is the one that actually bit: the UI
-// branched for months on `initializing`, `worktree_created` and
-// `pending_approval`, none of which the backend has ever emitted, while
-// `awaiting_credentials` — a real phase — reached no arm at all.
+// branched for months on `initializing` and `worktree_created`, neither of
+// which the backend has ever emitted, while `awaiting_credentials` — a real
+// phase — reached no arm at all.
 
 // CLAIM_PHASES are the setup/parked sub-states of a live executor engagement.
 // They arrive in Conversation.Status because display reads coalesce the active
@@ -173,8 +173,8 @@ export interface Conversation {
   FailureKind?: string
   SessionID?: string
   WorktreePath?: string
-  // Derived approval signal (TFAC-382/TFAC-492). Runs no longer park in a
-  // `pending_approval` status; instead the "needs approval" state is a *view*
+  // Derived approval signal. Runs never park for
+  // approval; the "needs approval" state is a *view*
   // over the run's unresolved-artifact set. A card surfaces in the approval
   // column whenever has_unresolved_artifacts is true — whether the run is live
   // or terminal — and re-derives back to in-progress (live) / done (terminal)

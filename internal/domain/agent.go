@@ -192,9 +192,8 @@ type Conversation struct {
 	// Status is the DISPLAYED lifecycle: the stored column with the live
 	// claim's phase coalesced over it, so a hydrated DTO may carry a phase
 	// name here. The vocabulary and its classifiers live in run_status.go;
-	// don't restate the names anywhere else. (pending_approval was removed —
-	// approval is a derived view over the unresolved-artifact set, not a
-	// stored status.)
+	// don't restate the names anywhere else. Approval is a derived view over
+	// the unresolved-artifact set, never a stored status.
 	Status    string
 	Model     string
 	StartedAt time.Time

@@ -30,19 +30,9 @@ var _ db.RunQueueStore = (*runQueueStore)(nil)
 // runTerminalStatusesSQL is the terminal conversation statuses as a SQL
 // IN-list body — two names, one owner each: the agent concluded, or the
 // infrastructure died. It describes stored rows as faithfully as new writes,
-// because the retired terminals were rewritten by migration rather than
-// carried forward (202608010002, SQLite; Postgres had no rows to migrate).
-// Mirrors domain.AllTerminalRunStatuses.
-const runTerminalStatusesSQL = `'completed','failed'`
-
-// runSettledStatusesSQL is runTerminalStatusesSQL plus 'pending_approval' —
-// the stored statuses no guard may disturb.
-//
-// pending_approval is the one retired status NOT migrated away, and the
-// difference is that those rows self-resolve: a human resolves the artifact
-// and the row retires itself, so they are dormant live work rather than
-// history that needs restating. Re-opening or re-failing one would destroy
-// something still in play.
+// because every retired status was rewritten by migration rather than carried
+// forward (202608010002, SQLite; Postgres had no rows to migrate). Mirrors
+// domain.AllTerminalRunStatuses.
 //
 // Every exclusion predicate in this package interpolates this rather than
 // re-spelling the literals. That matters more than the saved keystrokes: these
@@ -50,7 +40,7 @@ const runTerminalStatusesSQL = `'completed','failed'`
 // doesn't fail closed — it readmits a finished run to parking, cancelling, or
 // the active-work counters. Sixteen hand-copied copies is how the set drifted
 // a value at a time.
-const runSettledStatusesSQL = runTerminalStatusesSQL + `,'pending_approval'`
+const runTerminalStatusesSQL = `'completed','failed'`
 
 // --- The needs-driving predicate ---------------------------------------
 //

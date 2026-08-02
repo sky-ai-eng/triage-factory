@@ -145,11 +145,10 @@ type ArtifactStore interface {
 
 	// ListByRunSystem is the admin-pool (BYPASSRLS) variant of ListByRun for
 	// system-service readers that hold a real (org_id) identity but no
-	// JWT-claims context — chiefly the delegate spawner's post-completion park
-	// check, which reads a run's artifacts from a goroutine detached from any
-	// request to decide whether to park in pending_approval. Mirrors
-	// reviews.ByRunIDSystem. Identical to ListByRun in SQLite (single-tenant,
-	// no RLS).
+	// JWT-claims context — chiefly the delegate spawner's post-completion
+	// artifact check, which reads a run's artifacts from a goroutine detached
+	// from any request. Mirrors reviews.ByRunIDSystem. Identical to ListByRun
+	// in SQLite (single-tenant, no RLS).
 	ListByRunSystem(ctx context.Context, orgID, runID string) ([]domain.Artifact, error)
 
 	// CountByRun returns the number of artifacts each given run produced,

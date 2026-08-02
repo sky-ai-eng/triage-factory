@@ -21,15 +21,6 @@ func newFactoryReadStore(q queryer) db.FactoryReadStore { return &factoryReadSto
 
 var _ db.FactoryReadStore = (*factoryReadStore)(nil)
 
-// sqliteFactoryInFlightSQL selects the conversations treated as "in flight"
-// for the factory view. Matches the X-button window in AgentCard: an
-// engagement is actually driving the conversation (an unreleased claim —
-// setup sub-states ride that claim's phase), plus the legacy
-// pending_approval rows, which are paused waiting for user input rather
-// than done. Duplicated in postgres/factory.go; intentional per-backend
-// copy.
-const sqliteFactoryInFlightSQL = `(` + activeClaimExistsSQL + ` OR r.status = 'pending_approval')`
-
 func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -115,6 +106,10 @@ func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, si
 	return out, rows.Err()
 }
 
+// ActiveRuns lists the conversations the factory view treats as in flight:
+// exactly those an engagement is actually driving (an unreleased claim — the
+// setup sub-states ride that claim's phase). Mirrors the X-button window in
+// AgentCard. Duplicated in postgres/factory.go; intentional per-backend copy.
 func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]domain.FactoryActiveRun, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -153,7 +148,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 		LEFT JOIN agents a ON a.id = r.actor_agent_id
 		JOIN tasks t ON r.task_id = t.id
 		JOIN entities e ON t.entity_id = e.id
-		WHERE ` + sqliteFactoryInFlightSQL + `
+		WHERE ` + activeClaimExistsSQL + `
 		ORDER BY r.started_at DESC
 	`
 

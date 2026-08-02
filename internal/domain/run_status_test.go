@@ -47,7 +47,6 @@ func TestIsActiveRunStatus_ClosedWorld(t *testing.T) {
 		"",
 		"initializing",     // never existed backend-side
 		"worktree_created", // ditto
-		"pending_approval", // removed: approval is a derived artifact view
 		"RUNNING",          // case matters
 		"fetchin",          // typo
 	} {

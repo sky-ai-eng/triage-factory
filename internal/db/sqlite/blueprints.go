@@ -859,7 +859,7 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 	// MarkRunStatus runs inside SyntheticClaimsWithTx (manual path) and opens a
 	// fresh one on the bare admin/system handle — either way the two writes are
 	// all-or-nothing. Without a non-terminal child a cancel that raced the
-	// dispatcher's claim/setup window (or a parked open/pending_approval step the
+	// dispatcher's claim/setup window (or a parked `open` step the
 	// sequence-cancel path skips) would strand a child 'running', keeping the
 	// dispatcher on phantom work and pinning its feature branch in a worktree,
 	// requeuing forever.
@@ -868,7 +868,7 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 		res, err := q.ExecContext(ctx, `
 			UPDATE blueprint_runs
 			SET status = ?, abort_reason = ?, aborted_at_step = ?, completed_at = ?
-			WHERE id = ? AND status IN ('running','pending_approval','open')
+			WHERE id = ? AND status = 'running'
 		`, string(status), reasonArg, stepArg, now, id)
 		if err != nil {
 			return err
@@ -1067,7 +1067,7 @@ func (s *blueprintStore) ActiveStepRunIDs(ctx context.Context, orgID, blueprintR
 		SELECT id FROM conversations
 		WHERE blueprint_run_id = ?
 		  AND (status IS NULL
-		       OR status NOT IN (`+runSettledStatusesSQL+`,'open'))
+		       OR status NOT IN (`+runTerminalStatusesSQL+`,'open'))
 	`, blueprintRunID)
 	if err != nil {
 		return nil, err

@@ -325,7 +325,7 @@ func parkOpen(ctx context.Context, q queryer, orgID, runID string, park db.Park)
 		    result_summary = COALESCE(NULLIF($3, ''), result_summary)
 		WHERE org_id = $4 AND id = $5
 		  AND (status IS NULL
-		       OR status NOT IN (`+runSettledStatusesSQL+reparkGuard+`))
+		       OR status NOT IN (`+runTerminalStatusesSQL+reparkGuard+`))
 	`, time.Now().UTC(), park.StopReason, park.ResultSummary, orgID, runID)
 	if err != nil {
 		return false, err
@@ -558,7 +558,7 @@ func (s *agentRunStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, or
 }
 
 func markFailedIfActive(ctx context.Context, q queryer, orgID, runID, failureKind string) (bool, error) {
-	// 'open' is deliberately failable here (unlike 'pending_approval') — see
+	// 'open' is deliberately failable here — see
 	// ConversationStore.MarkFailedIfActive: a warm 'open' run has no durable
 	// snapshot yet, so an infra error reaching failRun must terminate it.
 	res, err := q.ExecContext(ctx, `
@@ -566,7 +566,7 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, runID, failureKin
 		    failure_kind = NULLIF($2, '')
 		WHERE org_id = $3 AND id = $4
 		  AND (status IS NULL
-		       OR status NOT IN (`+runSettledStatusesSQL+`))
+		       OR status NOT IN (`+runTerminalStatusesSQL+`))
 	`, time.Now().UTC(), failureKind, orgID, runID)
 	if err != nil {
 		return false, err
@@ -794,7 +794,7 @@ func hasActiveAutoRunForEntity(ctx context.Context, q queryer, orgID, entityID s
 		  AND t.entity_id = $2
 		  AND r.trigger_type = 'event'
 		  AND (r.status IS NULL
-		       OR r.status NOT IN (`+runSettledStatusesSQL+`))
+		       OR r.status NOT IN (`+runTerminalStatusesSQL+`))
 	`, orgID, entityID).Scan(&count)
 	return count > 0, err
 }
@@ -816,7 +816,7 @@ func (s *agentRunStore) ActiveAutoRunIDForEntitySystem(ctx context.Context, orgI
 		  AND t.entity_id = $2
 		  AND r.trigger_type = 'event'
 		  AND (r.status IS NULL
-		       OR r.status NOT IN (`+runSettledStatusesSQL+`))
+		       OR r.status NOT IN (`+runTerminalStatusesSQL+`))
 		ORDER BY r.started_at DESC
 		LIMIT 1
 	`, orgID, entityID).Scan(&id, &taskID)
@@ -831,7 +831,7 @@ func activeRunIDsForTask(ctx context.Context, q queryer, orgID, taskID string) (
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND task_id = $2
 		  AND (status IS NULL
-		       OR status NOT IN (`+runSettledStatusesSQL+`))
+		       OR status NOT IN (`+runTerminalStatusesSQL+`))
 	`, orgID, taskID)
 	if err != nil {
 		return nil, err
@@ -853,7 +853,7 @@ func (s *agentRunStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, teamI
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND team_id = $2
 		  AND (status IS NULL
-		       OR status NOT IN (`+runSettledStatusesSQL+`))
+		       OR status NOT IN (`+runTerminalStatusesSQL+`))
 	`, orgID, teamID)
 	if err != nil {
 		return nil, err

@@ -93,8 +93,8 @@ func TestDecideBlueprintStep(t *testing.T) {
 // behavior: a non-final blueprint step that emits continue AND queued a draft PR
 // is NOT coerced and does NOT park — the artifact is an async sidecar, so the
 // step completes with its real outcome (continue) and the orchestrator advances
-// to the next step. (Previously this was coerced continue→finish and flipped to
-// pending_approval, freezing the blueprint.)
+// to the next step. (Previously this was coerced continue→finish and parked
+// for approval, freezing the blueprint.)
 func TestProcessCompletion_BlueprintStepDraftPRDoesNotPark(t *testing.T) {
 	s, database, runID, taskID := setupAdvanceFixture(t, "bp-nopark")
 	makeRunBlueprintStep(t, database, runID, taskID)

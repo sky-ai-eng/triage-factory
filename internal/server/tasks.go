@@ -349,8 +349,8 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 
 // handleRequeue is the state-driven counterpart to handleUndo: same
 // task-back-to-queue outcome, no swipe_events row. Used by Board's
-// drag-to-Queue gesture and the AgentCard's
-// "Return to queue" button on pending_approval runs. Both of those
+// drag-to-Queue gesture and the AgentCard's "Return to queue" button
+// on a run awaiting approval of its artifact. Both of those
 // are deliberate state changes, not "reverse my last swipe," so
 // audit-logging them as undo events would muddy the swipe-UX
 // analytics.
@@ -520,8 +520,8 @@ const (
 	// if any, is being discarded — the user is signalling "the work
 	// is finished" without applying the agent's verdict to GitHub.
 	discardOutcomeCompleted
-	// discardOutcomeClaimed: user claimed the task while it had a
-	// pending_approval run (Board's drag-to-You from Agent/Done, or
+	// discardOutcomeClaimed: user claimed the task while a run was
+	// awaiting approval (Board's drag-to-You from Agent/Done, or
 	// the Cards swipe-right against a delegated task). The agent's
 	// prepared review is being thrown away in favor of the human
 	// handling the entity themselves. This case exists primarily
@@ -610,7 +610,7 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 // run is cancelled by the caller (swipeTeardownRuns' spawner.Cancel pass) — the
 // process teardown owns that transition; a terminal run simply stays terminal.
 // Keyed on the task's runs (ListForTask spans the blueprint's step runs and any
-// standalone run) rather than the retired pending_approval lookup.
+// standalone run) rather than on a run status.
 //
 // outcome shapes the discard note baked into conversation_memory.human_content so the next
 // agent reading memory can distinguish "still on the docket, the human just

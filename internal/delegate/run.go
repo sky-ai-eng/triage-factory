@@ -807,8 +807,8 @@ func (s *Spawner) processCompletion(
 	// A queued draft PR / pending review NO LONGER parks the run. The
 	// artifact was already recorded by the exec choke point and is an async
 	// sidecar: a human resolves it independently and it never blocks step
-	// progression. So there's no external-action coercion and no pending_approval
-	// flip here — the step completes with its real outcome (continue advances,
+	// progression. So there's no external-action coercion and no approval park
+	// here — the step completes with its real outcome (continue advances,
 	// finish terminates) per decideBlueprintStep, and the approval state is
 	// derived downstream from the unresolved-artifact set (has_unresolved_artifacts).
 

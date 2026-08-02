@@ -902,7 +902,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	t.Run("MarkFailedIfActive_FailsOpen_RefusesTerminalAndPendingApproval", func(t *testing.T) {
+	t.Run("MarkFailedIfActive_FailsOpen_RefusesTerminal", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		// `open` is intentionally failable (a warm open run has no durable
@@ -917,11 +917,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if got, _ := store.Get(ctx, orgID, openRun); got.Status != "failed" {
 			t.Errorf("status = %q, want failed", got.Status)
-		}
-		// pending_approval is protected (it has a durable snapshot) → refused.
-		paRun := seedConversationForTest(t, orgID, seed, "pending_approval")
-		if ok, _ := store.MarkFailedIfActive(ctx, orgID, paRun, ""); ok {
-			t.Errorf("MarkFailedIfActive flipped a pending_approval run; want refused")
 		}
 		// Already terminal → refused.
 		doneRun := seedConversationForTest(t, orgID, seed, "completed")

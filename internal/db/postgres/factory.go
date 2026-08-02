@@ -28,14 +28,6 @@ func newFactoryReadStore(q queryer) db.FactoryReadStore { return &factoryReadSto
 
 var _ db.FactoryReadStore = (*factoryReadStore)(nil)
 
-// pgFactoryInFlightSQL selects the conversations treated as "in flight" for
-// the factory view. Matches the X-button window in AgentCard: an engagement
-// is actually driving the conversation (an unreleased claim — setup
-// sub-states ride that claim's phase), plus the legacy pending_approval
-// rows, which are paused waiting for user input rather than done.
-// Duplicated in sqlite/factory.go; intentional per-backend copy.
-const pgFactoryInFlightSQL = `(` + activeClaimExistsSQL + ` OR r.status = 'pending_approval')`
-
 func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error) {
 	// Scoped to the viewer's teams by the same tracked-set semi-join the
 	// entity belt uses (factoryEventTrackedExists). The station header's
@@ -134,6 +126,10 @@ func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, si
 	return out, rows.Err()
 }
 
+// ActiveRuns lists the conversations the factory view treats as in flight:
+// exactly those an engagement is actually driving (an unreleased claim — the
+// setup sub-states ride that claim's phase). Mirrors the X-button window in
+// AgentCard. Duplicated in sqlite/factory.go; intentional per-backend copy.
 func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]domain.FactoryActiveRun, error) {
 	// memory_missing derivation: the agent has not produced
 	// its memory file iff no conversation_memory row exists, OR the row's
@@ -162,7 +158,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
 		JOIN tasks t ON r.task_id = t.id AND t.org_id = r.org_id
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-		WHERE r.org_id = $1 AND ` + pgFactoryInFlightSQL + `
+		WHERE r.org_id = $1 AND ` + activeClaimExistsSQL + `
 		ORDER BY r.started_at DESC
 	`
 
