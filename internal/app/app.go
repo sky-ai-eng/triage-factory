@@ -440,7 +440,7 @@ func (a *App) wire() {
 	}
 
 	// The router and reloader are brain components. spawner.Delegate ←
-	// router (construction arg); router.DrainEntity ← spawner
+	// router (construction arg); router.DrainTask ← spawner
 	// (post-construction) — the latter closes the cycle. An executor has
 	// neither: its spawner's queue drainer stays nil (nil-safe), and it
 	// runs no poller for the reloader to nudge.

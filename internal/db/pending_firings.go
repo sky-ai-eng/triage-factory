@@ -91,7 +91,7 @@ type PendingFiringsStore interface {
 	// This is the crash recovery for the claiming pop: a drainer that
 	// died between PopForTask and MarkFired/MarkSkipped/Release leaves
 	// a row nothing else will ever touch. Deliberately staleness-based
-	// rather than ownership-scoped (contrast runs/event_queue, TFAC-578):
+	// rather than ownership-scoped (contrast runs/event_queue):
 	// a firing claim is a milliseconds-scale DB transaction, not
 	// long-lived owned work, and redelivery is safe — the (event,
 	// trigger) fence and the one-active-per-task index absorb a

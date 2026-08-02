@@ -404,7 +404,7 @@ func (r *Router) stampAgentClaim(orgID string, task *domain.Task, actingTeamID, 
 
 // fireDelegate transitions the task to delegated status, broadcasts the
 // change, then fires the spawner. Returns the run ID on success — used by
-// DrainEntity to record which run a queued firing materialized into.
+// DrainTask to record which run a queued firing materialized into.
 //
 // triggeringEventID is the event instance driving this fire:
 // the immediate path passes tryAutoDelegate's event id, the drain path
@@ -503,13 +503,13 @@ func (r *Router) DrainTask(orgID, taskID string) {
 
 		runID, skipReason, transientErr := r.attemptDrainOne(orgID, firing)
 		if transientErr != nil {
-			// Transient failure (DB read, Delegate). PopForEntity already
-			// claimed this row into 'draining' (TFAC-579), so release it
+			// Transient failure (DB read, Delegate). PopForTask already
+			// claimed this row into 'draining', so release it
 			// back to 'pending' rather than leaving it stuck — marking
 			// 'skipped_stale' here would permanently drop a queued intent
 			// over a temporary problem, and a 'draining' row left
-			// unresolved is invisible to HasPendingForEntity /
-			// ListEntitiesWithPending and would never be retried. The
+			// unresolved is invisible to HasPendingForTask /
+			// ListTasksWithPending and would never be retried. The
 			// periodic sweeper or the next run-terminal will retry once
 			// released.
 			if err := r.firings.Release(context.Background(), orgID, firing.ID); err != nil {
@@ -540,13 +540,13 @@ func (r *Router) DrainTask(orgID, taskID string) {
 				// not externally visible. Mirrors what fireDelegate
 				// already does when spawner.Delegate itself fails.
 				//
-				// PopForEntity already claimed this row into 'draining'
-				// (TFAC-579) — release it back to 'pending' so a later
+				// PopForTask already claimed this row into 'draining'
+				// — release it back to 'pending' so a later
 				// drain retries it fresh, mirroring the transientErr
 				// branch above. Without this the row is stuck in
-				// 'draining' forever: PopForEntity only ever claims
-				// 'pending' rows, and HasPendingForEntity /
-				// ListEntitiesWithPending don't see 'draining' rows
+				// 'draining' forever: PopForTask only ever claims
+				// 'pending' rows, and HasPendingForTask /
+				// ListTasksWithPending don't see 'draining' rows
 				// either, so nothing would ever pick it up again.
 				routerLog.Error("mark firing fired failed, rolling back: cancelling run + reverting task to queued",
 					"firing_id", firing.ID, "run_id", runID, "error", err)
@@ -781,7 +781,7 @@ var errDrainTaskBusy = errors.New("routing: task busy at drain fire; firing rele
 // orthogonal, and this helper only touches lifecycle.
 //
 // The only caller today is the mark-fired-failure rollback path in
-// DrainEntity: a run was successfully spawned but the UPDATE that
+// DrainTask: a run was successfully spawned but the UPDATE that
 // records the firing→run association failed. The recovery flow
 // cancels the run, leaves the firing in 'pending' so the next drain
 // retries it, and reverts the task lifecycle for FE consistency.

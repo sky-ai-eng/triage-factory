@@ -347,7 +347,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 	})
 
-	t.Run("HasPendingForEntity_tracks_pending_rows", func(t *testing.T) {
+	t.Run("HasPendingForTask_tracks_pending_rows", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)
 		has, err := s.HasPendingForTask(ctx, orgID, tup.TaskID)
@@ -386,7 +386,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 			t.Fatalf("Enqueue: %v", err)
 		}
 		if row, err := s.PopForTask(ctx, orgID, tup.TaskID); err != nil || row == nil {
-			t.Fatalf("PopForEntity: row=%v err=%v", row, err)
+			t.Fatalf("PopForTask: row=%v err=%v", row, err)
 		}
 		// While the drain is mid-flight ('draining'), a duplicate
 		// (task, trigger) enqueue must collapse exactly as it would
@@ -410,7 +410,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 			t.Fatalf("Enqueue: %v", err)
 		}
 		if row, err := s.PopForTask(ctx, orgID, tup.TaskID); err != nil || row == nil {
-			t.Fatalf("PopForEntity: row=%v err=%v", row, err)
+			t.Fatalf("PopForTask: row=%v err=%v", row, err)
 		}
 
 		// A cutoff in the past: the fresh claim is NOT stale — a live
