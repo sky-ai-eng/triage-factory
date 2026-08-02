@@ -11,9 +11,15 @@ import (
 
 // PendingFiringsStore owns the pending_firings table — the FIFO queue
 // of "intent to auto-delegate" rows the router enqueues whenever an
-// event matches a trigger but the entity already has an active auto
+// event matches a trigger but the task already has an active auto
 // run (or earlier queued firings ahead of it). The drain loop pops
 // them in queue order as auto runs terminate.
+//
+// The queue drains per TASK, matching the gate that fills it. An
+// entity-shaped queue under a task-shaped gate would reintroduce the
+// cross-situation stall it was built to avoid: one task's firing sitting
+// at the head of the entity's FIFO — behind a conversation parked
+// indefinitely — would block every other task's firing behind it.
 //
 // All methods take orgID; local mode passes runmode.LocalDefaultOrgID.
 // Postgres impl runs against the admin pool (system-service: the
@@ -23,8 +29,8 @@ import (
 // equals the local sentinel and otherwise ignores it (single-tenant
 // by design).
 //
-// The per-entity firing gate is composed at the call site (router)
-// from HasPendingForEntity here + ConversationStore.HasActiveAutoRunForEntity
+// The per-task firing gate is composed at the call site (router)
+// from HasPendingForTask here + ConversationStore.HasActiveAutoRunForTask
 // — strict ownership rather than threading a runs-shaped predicate
 // through this store.
 type PendingFiringsStore interface {
@@ -46,8 +52,8 @@ type PendingFiringsStore interface {
 	// userID — the local schema has no creator column.
 	Enqueue(ctx context.Context, orgID, userID, entityID, taskID, triggerID, triggeringEventID string) (bool, error)
 
-	// PopForEntity is a CLAIMING pop (TFAC-579): it atomically flips the
-	// oldest 'pending' row for the entity to 'draining' (stamping
+	// PopForTask is a CLAIMING pop: it atomically flips the
+	// oldest 'pending' row for the task to 'draining' (stamping
 	// claimed_at) and returns it, or nil if none. Postgres implements
 	// this as one UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP
 	// LOCKED) statement, so two concurrent drains (different processes,
@@ -68,11 +74,11 @@ type PendingFiringsStore interface {
 	// worth keeping (it avoids needless round-trips reclaiming rows
 	// across goroutines in one process), but is no longer load-bearing
 	// for correctness.
-	PopForEntity(ctx context.Context, orgID, entityID string) (*domain.PendingFiring, error)
+	PopForTask(ctx context.Context, orgID, taskID string) (*domain.PendingFiring, error)
 
 	// Release reverts a 'draining' row back to 'pending' (clearing
 	// claimed_at) after a transient failure (DB read, spawner.Delegate
-	// error, an entity-busy fire race) downstream of PopForEntity — the
+	// error, a task-busy fire race) downstream of PopForTask — the
 	// claim didn't pan out, but the intent is still valid and should be
 	// retried by a future drain or the periodic sweeper. Guarded by
 	// status='draining' so it's a no-op on a row that's since reached a
@@ -83,12 +89,12 @@ type PendingFiringsStore interface {
 	// stamped before the cutoff (or that has no claimed_at at all — a
 	// legacy wedge) back to 'pending', returning how many it recovered.
 	// This is the crash recovery for the claiming pop: a drainer that
-	// died between PopForEntity and MarkFired/MarkSkipped/Release leaves
+	// died between PopForTask and MarkFired/MarkSkipped/Release leaves
 	// a row nothing else will ever touch. Deliberately staleness-based
 	// rather than ownership-scoped (contrast runs/event_queue, TFAC-578):
 	// a firing claim is a milliseconds-scale DB transaction, not
 	// long-lived owned work, and redelivery is safe — the (event,
-	// trigger) fence and the one-active-per-entity index absorb a
+	// trigger) fence and the one-active-per-task index absorb a
 	// duplicate drain as a clean skip/defer. Called by the drain sweeper
 	// each pass with a generous cutoff.
 	RequeueStaleDraining(ctx context.Context, orgID string, before time.Time) (int, error)
@@ -96,7 +102,7 @@ type PendingFiringsStore interface {
 	// MarkFired transitions a 'draining' firing to 'fired' and records the
 	// blueprint_run that resulted from it (runID is a blueprint_run id — the
 	// firing unit — which fired_run_id FKs to blueprint_runs). Guarded by
-	// status='draining' — only a row PopForEntity actually claimed can be
+	// status='draining' — only a row PopForTask actually claimed can be
 	// resolved this way — so a stray call against a 'pending' or already-
 	// terminal row is a no-op rather than a silent double-transition.
 	MarkFired(ctx context.Context, orgID string, firingID int64, runID string) error
@@ -106,28 +112,29 @@ type PendingFiringsStore interface {
 	// closed, trigger disabled, breaker tripped, claim changed).
 	// Transient fire-time failures release back to 'pending' via Release
 	// instead. Skipping doesn't halt the drain loop — the next pending
-	// firing for the entity is still considered.
+	// firing for the task is still considered.
 	MarkSkipped(ctx context.Context, orgID string, firingID int64, reason string) error
 
-	// HasPendingForEntity returns true iff the entity has any
+	// HasPendingForTask returns true iff the task has any
 	// pending_firings row in 'pending' OR 'draining' status. The router
-	// composes this with ConversationStore.HasActiveAutoRunForEntity to
+	// composes this with ConversationStore.HasActiveAutoRunForTask to
 	// enforce FIFO drainage — a new firing must queue behind older
-	// queued rows OR an active auto run on the same entity. 'draining'
+	// queued rows OR an active auto run on the same task. 'draining'
 	// counts as queued intent: a drain mid-flight (popped but not yet
 	// fired) must still close the gate, or a fresh event in that window
 	// would fire immediately and jump the queue.
-	HasPendingForEntity(ctx context.Context, orgID, entityID string) (bool, error)
+	HasPendingForTask(ctx context.Context, orgID, taskID string) (bool, error)
 
-	// ListEntitiesWithPending returns the distinct entity IDs that
+	// ListTasksWithPending returns the distinct task IDs that
 	// have at least one pending_firings row in 'pending' status. Used
-	// by the background drain sweeper to bound its work to entities
+	// by the background drain sweeper to bound its work to tasks
 	// that actually need draining.
-	ListEntitiesWithPending(ctx context.Context, orgID string) ([]string, error)
+	ListTasksWithPending(ctx context.Context, orgID string) ([]string, error)
 
 	// ListForEntity returns all pending_firings rows for an entity in
-	// queue order (oldest first), regardless of status. Used by
-	// debug/audit views and test assertions to see the full queue
-	// history for an entity.
+	// queue order (oldest first), regardless of status. The one read
+	// that stays entity-shaped on purpose: it backs debug/audit views
+	// and test assertions, where "everything queued against this pull
+	// request" is the question being asked.
 	ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.PendingFiring, error)
 }

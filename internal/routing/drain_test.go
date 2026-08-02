@@ -164,10 +164,10 @@ func setupDrainScenario(t *testing.T, database *sql.DB) (entityID, taskID, trigg
 	return
 }
 
-// TestDrainEntity_ClosedTask verifies the drain re-validates task state at
+// TestDrainTask_ClosedTask verifies the drain re-validates task state at
 // drain time. A firing whose task closed mid-pause must transition to
 // skipped_stale with task_closed rather than firing into a dead task.
-func TestDrainEntity_ClosedTask(t *testing.T) {
+func TestDrainTask_ClosedTask(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 
@@ -182,7 +182,7 @@ func TestDrainEntity_ClosedTask(t *testing.T) {
 	}
 
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
-	router.DrainEntity(runmode.LocalDefaultOrgID, entityID)
+	router.DrainTask(runmode.LocalDefaultOrgID, taskID)
 
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -201,7 +201,7 @@ func TestDrainEntity_ClosedTask(t *testing.T) {
 
 // TestRevertTaskStatus_PreservesClaim pins the contract that
 // revertTaskStatus only touches the lifecycle axis. Its sole caller
-// (the mark-fired-failure rollback in DrainEntity) leaves the
+// (the mark-fired-failure rollback in DrainTask) leaves the
 // pending_firings row in 'pending' so the next drain retries; the
 // retry's attemptDrainOne gate requires the bot
 // claim to still be set or it skips with claim_changed. Clearing
@@ -241,7 +241,7 @@ func TestRevertTaskStatus_PreservesClaim(t *testing.T) {
 	}
 }
 
-// TestDrainEntity_SnoozedTask pins the semantic that snooze is
+// TestDrainTask_SnoozedTask pins the semantic that snooze is
 // a lifecycle-axis "do not act" signal that's orthogonal to claim. A
 // pending firing for a bot-claimed task that gets snoozed (e.g., user
 // said "wait until Tuesday" while the firing was queued behind a busy
@@ -250,7 +250,7 @@ func TestRevertTaskStatus_PreservesClaim(t *testing.T) {
 // all three mean "task is not currently drain-eligible." A snooze
 // wake-on-bump creates a fresh event → new firing if the trigger
 // still matches; the deferred firing is the wrong wake path.
-func TestDrainEntity_SnoozedTask(t *testing.T) {
+func TestDrainTask_SnoozedTask(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 
@@ -271,7 +271,7 @@ func TestDrainEntity_SnoozedTask(t *testing.T) {
 	}
 
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
-	router.DrainEntity(runmode.LocalDefaultOrgID, entityID)
+	router.DrainTask(runmode.LocalDefaultOrgID, taskID)
 
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -289,10 +289,10 @@ func TestDrainEntity_SnoozedTask(t *testing.T) {
 	}
 }
 
-// TestDrainEntity_DisabledTrigger verifies the drain respects current
+// TestDrainTask_DisabledTrigger verifies the drain respects current
 // trigger state. A trigger disabled mid-pause must not fire its queued
 // firings on resume.
-func TestDrainEntity_DisabledTrigger(t *testing.T) {
+func TestDrainTask_DisabledTrigger(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 
@@ -303,7 +303,7 @@ func TestDrainEntity_DisabledTrigger(t *testing.T) {
 	setTriggerEnabledForTestRouting(t, database, triggerID, false)
 
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
-	router.DrainEntity(runmode.LocalDefaultOrgID, entityID)
+	router.DrainTask(runmode.LocalDefaultOrgID, taskID)
 
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -320,27 +320,20 @@ func TestDrainEntity_DisabledTrigger(t *testing.T) {
 	}
 }
 
-// TestDrainEntity_MultipleStaleFirings verifies the drain loop walks past
+// TestDrainTask_MultipleStaleFirings verifies the drain loop walks past
 // stale firings rather than stopping at the first one. Three queued
-// firings, all with closed tasks → all three must end up marked
-// skipped_stale (none left in pending).
-func TestDrainEntity_MultipleStaleFirings(t *testing.T) {
+// firings on one task, whose task is closed → all three must end up marked
+// skipped_stale (none left in pending). Three triggers on ONE task, not
+// three tasks: the queue the drain pops from is the task's.
+func TestDrainTask_MultipleStaleFirings(t *testing.T) {
 	database := newTestDB(t)
-	entityID, _, _, eventID := setupDrainScenario(t, database)
+	entityID, taskID, _, eventID := setupDrainScenario(t, database)
 
-	// Three distinct (task, trigger) pairs so the dedup index lets all
-	// three coexist as pending. Distinct prompts because prompt_triggers
-	// has a unique index on (prompt_id, event_type, trigger_type).
-	taskIDs := []string{}
-	triggerIDs := []string{}
+	// Three distinct triggers on the one task so the (task, trigger) dedup
+	// index lets all three coexist as pending. Distinct prompts because
+	// prompt_triggers has a unique index on (prompt_id, event_type,
+	// trigger_type).
 	for i := 0; i < 3; i++ {
-		dedup := []string{"checkA", "checkB", "checkC"}[i]
-		task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, dedup, eventID, 0.5)
-		if err != nil {
-			t.Fatalf("create task %d: %v", i, err)
-		}
-		taskIDs = append(taskIDs, task.ID)
-
 		promptID := []string{"p-1", "p-2", "p-3"}[i]
 		createTestPrompt(t, database, domain.Prompt{ID: promptID, Name: promptID, Body: "x", Source: "user"})
 		trigID := []string{"tr-1", "tr-2", "tr-3"}[i]
@@ -351,22 +344,18 @@ func TestDrainEntity_MultipleStaleFirings(t *testing.T) {
 			BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0),
 			Enabled: true,
 		})
-		triggerIDs = append(triggerIDs, trigID)
-
-		if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, task.ID, trigID, eventID); err != nil {
+		if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, trigID, eventID); err != nil {
 			t.Fatalf("enqueue %d: %v", i, err)
 		}
 	}
 
-	// Close every task so all three drain as task_closed.
-	for _, id := range taskIDs {
-		if err := testTaskStore(database).Close(t.Context(), runmode.LocalDefaultOrgID, id, "test_close", ""); err != nil {
-			t.Fatalf("close task %s: %v", id, err)
-		}
+	// Close the task so all three drain as task_closed.
+	if err := testTaskStore(database).Close(t.Context(), runmode.LocalDefaultOrgID, taskID, "test_close", ""); err != nil {
+		t.Fatalf("close task: %v", err)
 	}
 
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
-	router.DrainEntity(runmode.LocalDefaultOrgID, entityID)
+	router.DrainTask(runmode.LocalDefaultOrgID, taskID)
 
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -383,17 +372,16 @@ func TestDrainEntity_MultipleStaleFirings(t *testing.T) {
 			t.Errorf("row %d: skip_reason = %q, want task_closed", i, r.SkipReason)
 		}
 	}
-	_ = triggerIDs // referenced for clarity in the loop above
 }
 
-// TestDrainEntity_EmptyQueue verifies a drain on an entity with no pending
+// TestDrainTask_EmptyQueue verifies a drain on a task with no pending
 // firings is a clean no-op — no error, no side effects, no panic.
-func TestDrainEntity_EmptyQueue(t *testing.T) {
+func TestDrainTask_EmptyQueue(t *testing.T) {
 	database := newTestDB(t)
-	entityID, _, _, _ := setupDrainScenario(t, database)
+	entityID, taskID, _, _ := setupDrainScenario(t, database)
 
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
-	router.DrainEntity(runmode.LocalDefaultOrgID, entityID) // must not panic or error visibly
+	router.DrainTask(runmode.LocalDefaultOrgID, taskID) // must not panic or error visibly
 
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
@@ -404,7 +392,7 @@ func TestDrainEntity_EmptyQueue(t *testing.T) {
 	}
 }
 
-// TestDrainEntity_ConcurrentDrainsDoNotDoubleFire is the regression test
+// TestDrainTask_ConcurrentDrainsDoNotDoubleFire is the regression test
 // for the pop-fire-mark race: without per-entity serialization, a fast-
 // terminating run fired by drainer A could trigger drainer B before A
 // reached MarkPendingFiringFired, and B would pop the same still-pending
@@ -417,7 +405,7 @@ func TestDrainEntity_EmptyQueue(t *testing.T) {
 // Without the mutex this test is reliably racy in practice (every drainer
 // passes the validation guard, every drainer calls Delegate); with it,
 // only one drainer ever reaches Delegate.
-func TestDrainEntity_ConcurrentDrainsDoNotDoubleFire(t *testing.T) {
+func TestDrainTask_ConcurrentDrainsDoNotDoubleFire(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 
@@ -434,7 +422,7 @@ func TestDrainEntity_ConcurrentDrainsDoNotDoubleFire(t *testing.T) {
 	for i := 0; i < drainers; i++ {
 		go func() {
 			defer wg.Done()
-			router.DrainEntity(runmode.LocalDefaultOrgID, entityID)
+			router.DrainTask(runmode.LocalDefaultOrgID, taskID)
 		}()
 	}
 	wg.Wait()
@@ -466,7 +454,7 @@ func TestDrainEntity_ConcurrentDrainsDoNotDoubleFire(t *testing.T) {
 // runs, no incoming events). Models the safety-net scenario the sweeper
 // exists for.
 //
-// Setup: enqueue a firing without ever calling DrainEntity manually.
+// Setup: enqueue a firing without ever calling DrainTask manually.
 // Without the sweeper this firing would sit in 'pending' forever. Start
 // the sweeper at 30ms cadence; within a few ticks it should pick up the
 // firing, validate, and fire.

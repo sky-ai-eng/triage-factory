@@ -552,22 +552,21 @@ func (s *agentRunStore) ListForTasks(ctx context.Context, orgID string, taskIDs 
 	return runs, nil
 }
 
-// HasActiveAutoRunForEntity: any non-terminal trigger_type='event' run on
-// any task that belongs to the entity. Manual delegations are excluded.
-// Used by the router's per-entity firing gate.
-func (s *agentRunStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
+// HasActiveAutoRunForTask: any non-terminal trigger_type='event' run on the
+// task. Manual delegations are excluded. Used by the router's per-task firing
+// gate.
+func (s *agentRunStore) HasActiveAutoRunForTask(ctx context.Context, orgID, taskID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
 	var count int
 	err := s.q.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM conversations r
-		JOIN tasks t ON t.id = r.task_id
-		WHERE t.entity_id = ?
+		WHERE r.task_id = ?
 		  AND r.trigger_type = 'event'
 		  AND (r.status IS NULL
 		       OR r.status NOT IN (`+runTerminalStatusesSQL+`))
-	`, entityID).Scan(&count)
+	`, taskID).Scan(&count)
 	return count > 0, err
 }
 
@@ -604,33 +603,32 @@ func (s *agentRunStore) ActiveIDsForTask(ctx context.Context, orgID, taskID stri
 // parity with Postgres. The delegate spawner consumes these from
 // its goroutine paths that detach from the request context.
 
-func (s *agentRunStore) HasActiveAutoRunForEntitySystem(ctx context.Context, orgID, entityID string) (bool, error) {
-	return s.HasActiveAutoRunForEntity(ctx, orgID, entityID)
+func (s *agentRunStore) HasActiveAutoRunForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error) {
+	return s.HasActiveAutoRunForTask(ctx, orgID, taskID)
 }
 
 func (s *agentRunStore) ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
 	return s.ActiveIDsForTask(ctx, orgID, taskID)
 }
 
-func (s *agentRunStore) ActiveAutoRunIDForEntitySystem(ctx context.Context, orgID, entityID string) (string, string, error) {
+func (s *agentRunStore) ActiveAutoRunIDForTaskSystem(ctx context.Context, orgID, taskID string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return "", "", err
+		return "", err
 	}
-	var id, taskID string
+	var id string
 	err := s.q.QueryRowContext(ctx, `
-		SELECT r.id, r.task_id FROM conversations r
-		JOIN tasks t ON t.id = r.task_id
-		WHERE t.entity_id = ?
+		SELECT r.id FROM conversations r
+		WHERE r.task_id = ?
 		  AND r.trigger_type = 'event'
 		  AND (r.status IS NULL
 		       OR r.status NOT IN (`+runTerminalStatusesSQL+`))
 		ORDER BY r.started_at DESC
 		LIMIT 1
-	`, entityID).Scan(&id, &taskID)
+	`, taskID).Scan(&id)
 	if err == sql.ErrNoRows {
-		return "", "", nil
+		return "", nil
 	}
-	return id, taskID, err
+	return id, err
 }
 
 func (s *agentRunStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, teamID string) ([]string, error) {

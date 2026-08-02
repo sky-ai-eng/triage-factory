@@ -108,23 +108,16 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 	// is also a defensive catch for any other "no goroutine but row not
 	// terminal" edge case.
 	//
-	// We also have to drain the per-entity firing queue ourselves on
+	// We also have to drain the task's firing queue ourselves on
 	// terminal exit. The active-goroutine cancel paths drain via
 	// their goroutine defer (Delegate's defer / ResumeOpenRun's
 	// defer); a Cancel() that hits this DB-only path has no defer to
 	// piggy-back on, so an auto-fired run cancelled while parked
-	// `open` would leave the entity's firing queue stuck
-	// until some other run on that entity terminated. The preflight
-	// above already loaded the run, so trigger_type is in hand; we
-	// only need a separate task read to resolve entity_id for the
-	// drain notify. Errors on that task read are swallowed: the flip
-	// below decides whether to surface as "no active run" or proceed;
-	// drain just won't fire if entityID stays empty.
+	// `open` would leave the task's firing queue stuck
+	// until some other run on that task terminated. The preflight
+	// above already loaded the run, so both the trigger type and the
+	// task the drain is keyed on are already in hand.
 	triggerType := run.TriggerType
-	var entityID string
-	if task, _ := s.tasks.GetSystem(context.Background(), orgID, run.TaskID); task != nil {
-		entityID = task.EntityID
-	}
 
 	// User-initiated cancel: write under the cancelling user's
 	// synthetic claims so RLS sees a legitimate user-attributed
@@ -176,12 +169,10 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 	// blueprint_run, clean the warm worktree) so the row isn't orphaned. The
 	// snapshot is deliberately NOT dropped: it is the parked workspace this
 	// cancel just retained.
-	// The per-entity drain stays below, keyed off the run's trigger type so the
+	// The per-task drain stays below, keyed off the run's trigger type so the
 	// manual short-circuit holds.
 	s.finalizeParkedBlueprintOnCancel(bgCtx, orgID, run, userID)
-	if entityID != "" {
-		s.notifyDrainer(orgID, triggerType, entityID)
-	}
+	s.notifyDrainer(orgID, triggerType, run.TaskID)
 	return nil
 }
 

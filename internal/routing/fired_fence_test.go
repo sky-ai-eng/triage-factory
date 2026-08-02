@@ -194,13 +194,13 @@ func TestHandleEvent_DistinctEvents_FireIndependently(t *testing.T) {
 	}
 }
 
-// TestDrainEntity_AlreadyFiredRun_SkipsWithoutDuplicate covers the drain
+// TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate covers the drain
 // path's fence handling: a pending firing whose triggering event
 // already has a committed run (a prior drain fired it but died before
 // MarkFired, or the immediate path fired it before this firing was popped)
 // must skip with reason "already_fired" rather than spawn a duplicate or
 // retry forever.
-func TestDrainEntity_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
+func TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 	stub := &fenceStubDelegator{db: database}
@@ -245,7 +245,7 @@ func TestDrainEntity_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	}
 
 	router := fenceRouter(database, stub)
-	router.DrainEntity(runmode.LocalDefaultOrgID, entityID)
+	router.DrainTask(runmode.LocalDefaultOrgID, taskID)
 
 	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {

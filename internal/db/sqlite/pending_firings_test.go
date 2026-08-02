@@ -45,8 +45,8 @@ func TestPendingFiringsStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.PendingFirings.Enqueue(ctx, bogusOrg, runmode.LocalDefaultUserID, "e", "t", "tr", "ev"); err == nil {
 		t.Errorf("Enqueue with non-local orgID should error")
 	}
-	if _, err := stores.PendingFirings.PopForEntity(ctx, bogusOrg, "e"); err == nil {
-		t.Errorf("PopForEntity with non-local orgID should error")
+	if _, err := stores.PendingFirings.PopForTask(ctx, bogusOrg, "t"); err == nil {
+		t.Errorf("PopForTask with non-local orgID should error")
 	}
 	if err := stores.PendingFirings.MarkFired(ctx, bogusOrg, 1, "r"); err == nil {
 		t.Errorf("MarkFired with non-local orgID should error")
@@ -54,11 +54,11 @@ func TestPendingFiringsStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if err := stores.PendingFirings.MarkSkipped(ctx, bogusOrg, 1, "reason"); err == nil {
 		t.Errorf("MarkSkipped with non-local orgID should error")
 	}
-	if _, err := stores.PendingFirings.HasPendingForEntity(ctx, bogusOrg, "e"); err == nil {
-		t.Errorf("HasPendingForEntity with non-local orgID should error")
+	if _, err := stores.PendingFirings.HasPendingForTask(ctx, bogusOrg, "t"); err == nil {
+		t.Errorf("HasPendingForTask with non-local orgID should error")
 	}
-	if _, err := stores.PendingFirings.ListEntitiesWithPending(ctx, bogusOrg); err == nil {
-		t.Errorf("ListEntitiesWithPending with non-local orgID should error")
+	if _, err := stores.PendingFirings.ListTasksWithPending(ctx, bogusOrg); err == nil {
+		t.Errorf("ListTasksWithPending with non-local orgID should error")
 	}
 	if _, err := stores.PendingFirings.ListForEntity(ctx, bogusOrg, "e"); err == nil {
 		t.Errorf("ListForEntity with non-local orgID should error")

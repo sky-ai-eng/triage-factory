@@ -198,11 +198,9 @@ func (s *Spawner) terminateBlueprint(
 		s.discardWorkspaceSnapshot(bgCtx, orgID, blueprintRunID)
 	}
 
-	// Drain the per-entity queue exactly once for the blueprint (independent
-	// of how many steps ran).
-	if cfgEntity := taskEntityID(s.tasks, orgID, taskID); cfgEntity != "" {
-		s.notifyDrainer(orgID, triggerType, cfgEntity)
-	}
+	// Drain the task's queue exactly once for the blueprint (independent of
+	// how many steps ran).
+	s.notifyDrainer(orgID, triggerType, taskID)
 
 	dur := time.Since(startTime)
 	blueprintLog.Info("blueprint_run terminated",
@@ -328,20 +326,6 @@ func prNumberFromRef(ref string) (int, bool) {
 		return 0, false
 	}
 	return n, true
-}
-
-// taskEntityID resolves the entity_id for a task. Used to drain the
-// per-entity firing queue at blueprint terminal.
-func taskEntityID(tasks db.TaskStore, orgID, taskID string) string {
-	t, err := tasks.GetSystem(context.Background(), orgID, taskID)
-	if err != nil {
-		blueprintLog.Warn("resolve entity for task failed", "task", taskID, "error", err)
-		return ""
-	}
-	if t == nil {
-		return ""
-	}
-	return t.EntityID
 }
 
 // nonterminalStepSysPrompt returns the system-prompt addendum for step i of

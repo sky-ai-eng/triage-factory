@@ -15,7 +15,7 @@ import (
 //   - the orgID to pass to every call,
 //   - a PendingFiringsSeeder for fixtures the store can't create itself
 //     (entity → task → event_handler → event chains, plus optional
-//     non-terminal runs for the HasActiveAutoRunForEntity gate).
+//     non-terminal runs for the HasActiveAutoRunForTask gate).
 type PendingFiringsStoreFactory func(t *testing.T) (
 	store db.PendingFiringsStore,
 	orgID string,
@@ -45,7 +45,7 @@ type PendingFiringsSeeder struct {
 	// runID. Used by MarkFired tests to satisfy fired_run_id's FK to
 	// runs(id). Status / trigger_type aren't load-bearing here —
 	// the conformance suite only needs a real run row to point at;
-	// the per-entity firing gate's runs-shaped half is owned by
+	// the per-task firing gate's runs-shaped half is owned by
 	// ConversationStore and tested there.
 	RunForTask func(t *testing.T, taskID string) string
 }
@@ -56,25 +56,26 @@ type PendingFiringsSeeder struct {
 //   - Enqueue inserts a row in 'pending' status and returns inserted=true.
 //   - Enqueue with the same (task_id, trigger_id) while one is pending
 //     collapses via ON CONFLICT DO NOTHING and returns inserted=false.
-//   - PopForEntity is a CLAIMING pop: it returns the oldest pending row
+//   - PopForTask is a CLAIMING pop: it returns the oldest pending row
 //     and atomically flips it to 'draining' in the same statement (no
 //     window for a second concurrent pop to observe and claim the same
 //     row).
-//   - PopForEntity returns nil on empty queue and ignores non-pending
-//     (including already-'draining') rows.
+//   - PopForTask returns nil on empty queue and ignores non-pending
+//     (including already-'draining') rows, and never reaches into a
+//     sibling task's queue.
 //   - Release reverts a 'draining' row back to 'pending'; no-op against
 //     a row that's since reached a terminal state.
 //   - MarkFired flips 'draining' → 'fired' with run_id; idempotent
 //     against already-terminal rows (guarded by status='draining').
 //   - MarkSkipped flips 'draining' → 'skipped_stale' with reason;
 //     same idempotency guard.
-//   - HasPendingForEntity tracks presence of 'pending' rows.
-//   - ListEntitiesWithPending returns distinct entity ids that have
+//   - HasPendingForTask tracks presence of 'pending' rows.
+//   - ListTasksWithPending returns distinct task ids that have
 //     at least one 'pending' row, scoped to the org.
 //   - ListForEntity orders by queued_at ASC then id ASC.
 //
-// The runs-shaped half of the per-entity firing gate
-// (HasActiveAutoRunForEntity) is owned by ConversationStore — its
+// The runs-shaped half of the per-task firing gate
+// (HasActiveAutoRunForTask) is owned by ConversationStore — its
 // behavior is covered by that store's own tests, not here.
 func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFactory) {
 	t.Helper()
@@ -127,30 +128,26 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 	})
 
-	t.Run("PopForEntity_claims_oldest_pending", func(t *testing.T) {
+	t.Run("PopForTask_claims_oldest_pending", func(t *testing.T) {
 		s, orgID, seed := mk(t)
-		tup1 := seed.Tuple(t) // same entity, distinct task+trigger
+		tup1 := seed.Tuple(t)
 		tup2 := seed.Tuple(t)
-		// Re-point tup2 at tup1's entity by inserting against tup1's
-		// entity with tup2's task/trigger. Backend seeders can't share
-		// an entity across two Tuple calls, so we enqueue against
-		// tup1.EntityID using tup1.TaskID/tup1.TriggerID first then
-		// tup2.TaskID/tup2.TriggerID — both reference rows the seeder
-		// already FK-validated under their own entities. The dedup
-		// index is on (task_id, trigger_id) so collisions across
-		// entities aren't a concern.
+		// Two firings on ONE task, distinct triggers. The queue drains per
+		// task, so a second task's firing lives in its own queue and is not
+		// what this orders against. The dedup index is (task_id, trigger_id)
+		// while pending, so two triggers on one task are two rows.
 		if _, err := s.Enqueue(ctx, orgID, tup1.UserID, tup1.EntityID, tup1.TaskID, tup1.TriggerID, tup1.EventID); err != nil {
 			t.Fatalf("first Enqueue: %v", err)
 		}
-		if _, err := s.Enqueue(ctx, orgID, tup2.UserID, tup1.EntityID, tup2.TaskID, tup2.TriggerID, tup2.EventID); err != nil {
+		if _, err := s.Enqueue(ctx, orgID, tup2.UserID, tup1.EntityID, tup1.TaskID, tup2.TriggerID, tup2.EventID); err != nil {
 			t.Fatalf("second Enqueue: %v", err)
 		}
-		got, err := s.PopForEntity(ctx, orgID, tup1.EntityID)
+		got, err := s.PopForTask(ctx, orgID, tup1.TaskID)
 		if err != nil || got == nil {
 			t.Fatalf("Pop: got=%v err=%v", got, err)
 		}
-		if got.TaskID != tup1.TaskID {
-			t.Errorf("Pop returned task %q, want oldest %q", got.TaskID, tup1.TaskID)
+		if got.TriggerID != tup1.TriggerID {
+			t.Errorf("Pop returned trigger %q, want oldest %q", got.TriggerID, tup1.TriggerID)
 		}
 		// Claiming: the popped row is atomically reserved as 'draining' so
 		// a concurrent drain can't also claim it.
@@ -175,15 +172,42 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 		// A second Pop must NOT return the already-claimed row — it should
 		// skip straight to the next pending one.
-		got2, err := s.PopForEntity(ctx, orgID, tup1.EntityID)
+		got2, err := s.PopForTask(ctx, orgID, tup1.TaskID)
 		if err != nil || got2 == nil {
 			t.Fatalf("second Pop: got=%v err=%v", got2, err)
 		}
-		if got2.TaskID != tup2.TaskID {
-			t.Errorf("second Pop returned task %q, want %q (the still-pending one)", got2.TaskID, tup2.TaskID)
+		if got2.TriggerID != tup2.TriggerID {
+			t.Errorf("second Pop returned trigger %q, want %q (the still-pending one)", got2.TriggerID, tup2.TriggerID)
 		}
 		if got2.ID == got.ID {
 			t.Errorf("second Pop returned the same row as the first claim — double-pop")
+		}
+	})
+
+	t.Run("PopForTask_ignores_a_sibling_tasks_queue", func(t *testing.T) {
+		// The unit of the queue is the task. A firing enqueued for one task
+		// is invisible to another task's drain even when both sit on the
+		// same entity — which is what keeps a task parked indefinitely from
+		// holding up every other situation on that pull request.
+		s, orgID, seed := mk(t)
+		tupA := seed.Tuple(t)
+		tupB := seed.Tuple(t)
+		if _, err := s.Enqueue(ctx, orgID, tupA.UserID, tupA.EntityID, tupA.TaskID, tupA.TriggerID, tupA.EventID); err != nil {
+			t.Fatalf("Enqueue tupA: %v", err)
+		}
+		if _, err := s.Enqueue(ctx, orgID, tupB.UserID, tupA.EntityID, tupB.TaskID, tupB.TriggerID, tupB.EventID); err != nil {
+			t.Fatalf("Enqueue tupB on the same entity: %v", err)
+		}
+		got, err := s.PopForTask(ctx, orgID, tupB.TaskID)
+		if err != nil || got == nil {
+			t.Fatalf("Pop tupB: got=%v err=%v", got, err)
+		}
+		if got.TaskID != tupB.TaskID {
+			t.Errorf("Pop for task %q returned a firing for task %q", tupB.TaskID, got.TaskID)
+		}
+		// tupA's firing is untouched by tupB's drain.
+		if has, err := s.HasPendingForTask(ctx, orgID, tupA.TaskID); err != nil || !has {
+			t.Errorf("sibling task's firing was consumed by another task's drain (has=%v err=%v)", has, err)
 		}
 	})
 
@@ -193,14 +217,14 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
-		row, err := s.PopForEntity(ctx, orgID, tup.EntityID)
+		row, err := s.PopForTask(ctx, orgID, tup.TaskID)
 		if err != nil || row == nil {
 			t.Fatalf("Pop: row=%v err=%v", row, err)
 		}
 		if err := s.Release(ctx, orgID, row.ID); err != nil {
 			t.Fatalf("Release: %v", err)
 		}
-		has, err := s.HasPendingForEntity(ctx, orgID, tup.EntityID)
+		has, err := s.HasPendingForTask(ctx, orgID, tup.TaskID)
 		if err != nil {
 			t.Fatalf("HasPending: %v", err)
 		}
@@ -208,7 +232,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 			t.Errorf("released row should be pending again")
 		}
 		// Release against an already-terminal row is a no-op.
-		row2, _ := s.PopForEntity(ctx, orgID, tup.EntityID)
+		row2, _ := s.PopForTask(ctx, orgID, tup.TaskID)
 		if row2 == nil {
 			t.Fatalf("expected the released row to be poppable again")
 		}
@@ -224,10 +248,10 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 	})
 
-	t.Run("PopForEntity_nil_on_empty_queue", func(t *testing.T) {
+	t.Run("PopForTask_nil_on_empty_queue", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)
-		got, err := s.PopForEntity(ctx, orgID, tup.EntityID)
+		got, err := s.PopForTask(ctx, orgID, tup.TaskID)
 		if err != nil {
 			t.Fatalf("Pop: %v", err)
 		}
@@ -236,20 +260,20 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 	})
 
-	t.Run("PopForEntity_ignores_non_pending", func(t *testing.T) {
+	t.Run("PopForTask_ignores_non_pending", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)
 		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
-		row, err := s.PopForEntity(ctx, orgID, tup.EntityID)
+		row, err := s.PopForTask(ctx, orgID, tup.TaskID)
 		if err != nil || row == nil {
 			t.Fatalf("Pop: row=%v err=%v", row, err)
 		}
 		if err := s.MarkSkipped(ctx, orgID, row.ID, domain.PendingFiringSkipTaskClosed); err != nil {
 			t.Fatalf("MarkSkipped: %v", err)
 		}
-		got, err := s.PopForEntity(ctx, orgID, tup.EntityID)
+		got, err := s.PopForTask(ctx, orgID, tup.TaskID)
 		if err != nil {
 			t.Fatalf("Pop after skip: %v", err)
 		}
@@ -264,7 +288,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
-		row, _ := s.PopForEntity(ctx, orgID, tup.EntityID)
+		row, _ := s.PopForTask(ctx, orgID, tup.TaskID)
 
 		// MarkFired references a real run row in Postgres
 		// (fired_run_id has FK with ON DELETE on (fired_run_id, org_id)
@@ -292,7 +316,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
-		row, _ := s.PopForEntity(ctx, orgID, tup.EntityID)
+		row, _ := s.PopForTask(ctx, orgID, tup.TaskID)
 		if err := s.MarkSkipped(ctx, orgID, row.ID, domain.PendingFiringSkipTaskClosed); err != nil {
 			t.Fatalf("MarkSkipped: %v", err)
 		}
@@ -313,7 +337,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
-		row, _ := s.PopForEntity(ctx, orgID, tup.EntityID)
+		row, _ := s.PopForTask(ctx, orgID, tup.TaskID)
 		if err := s.MarkSkipped(ctx, orgID, row.ID, domain.PendingFiringSkipBreakerTripped); err != nil {
 			t.Fatalf("MarkSkipped: %v", err)
 		}
@@ -326,7 +350,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 	t.Run("HasPendingForEntity_tracks_pending_rows", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tup := seed.Tuple(t)
-		has, err := s.HasPendingForEntity(ctx, orgID, tup.EntityID)
+		has, err := s.HasPendingForTask(ctx, orgID, tup.TaskID)
 		if err != nil {
 			t.Fatalf("HasPending: %v", err)
 		}
@@ -336,20 +360,20 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
-		has, _ = s.HasPendingForEntity(ctx, orgID, tup.EntityID)
+		has, _ = s.HasPendingForTask(ctx, orgID, tup.TaskID)
 		if !has {
 			t.Errorf("queue with pending row should report true")
 		}
-		row, _ := s.PopForEntity(ctx, orgID, tup.EntityID)
+		row, _ := s.PopForTask(ctx, orgID, tup.TaskID)
 		// A popped ('draining') row is still queued intent — the gate must
 		// stay closed while a drain is mid-flight, or a fresh event in
 		// that window would fire immediately and jump the queue.
-		has, _ = s.HasPendingForEntity(ctx, orgID, tup.EntityID)
+		has, _ = s.HasPendingForTask(ctx, orgID, tup.TaskID)
 		if !has {
 			t.Errorf("a 'draining' row must keep HasPending true (gate stays closed mid-drain)")
 		}
 		_ = s.MarkSkipped(ctx, orgID, row.ID, domain.PendingFiringSkipTriggerDisabled)
-		has, _ = s.HasPendingForEntity(ctx, orgID, tup.EntityID)
+		has, _ = s.HasPendingForTask(ctx, orgID, tup.TaskID)
 		if has {
 			t.Errorf("after only terminal rows remain, HasPending should be false")
 		}
@@ -361,7 +385,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
-		if row, err := s.PopForEntity(ctx, orgID, tup.EntityID); err != nil || row == nil {
+		if row, err := s.PopForTask(ctx, orgID, tup.TaskID); err != nil || row == nil {
 			t.Fatalf("PopForEntity: row=%v err=%v", row, err)
 		}
 		// While the drain is mid-flight ('draining'), a duplicate
@@ -385,7 +409,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
 			t.Fatalf("Enqueue: %v", err)
 		}
-		if row, err := s.PopForEntity(ctx, orgID, tup.EntityID); err != nil || row == nil {
+		if row, err := s.PopForTask(ctx, orgID, tup.TaskID); err != nil || row == nil {
 			t.Fatalf("PopForEntity: row=%v err=%v", row, err)
 		}
 
@@ -413,7 +437,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if len(rows) != 1 || rows[0].Status != domain.PendingFiringStatusPending {
 			t.Fatalf("requeued row should be back in 'pending', got %+v", rows)
 		}
-		reclaimed, err := s.PopForEntity(ctx, orgID, tup.EntityID)
+		reclaimed, err := s.PopForTask(ctx, orgID, tup.TaskID)
 		if err != nil || reclaimed == nil {
 			t.Fatalf("re-pop after requeue: row=%v err=%v", reclaimed, err)
 		}
@@ -425,28 +449,27 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 	})
 
-	t.Run("ListEntitiesWithPending_distinct_per_entity", func(t *testing.T) {
+	t.Run("ListTasksWithPending_distinct_per_task", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		tupA := seed.Tuple(t)
 		tupB := seed.Tuple(t)
 
-		// Two pending rows on tupA's entity; one on tupB's.
+		// Two pending rows on tupA's task (distinct triggers), one on tupB's
+		// — the sweeper's work list is one entry per task with queued
+		// intent, not one per row.
 		if _, err := s.Enqueue(ctx, orgID, tupA.UserID, tupA.EntityID, tupA.TaskID, tupA.TriggerID, tupA.EventID); err != nil {
 			t.Fatalf("Enqueue tupA: %v", err)
 		}
-		// Same entity, distinct task — Tuple gives us a fresh tuple
-		// rooted on a different entity, so use tupB's task/trigger
-		// against tupA's entity for the dedup-non-collision check.
-		if _, err := s.Enqueue(ctx, orgID, tupB.UserID, tupA.EntityID, tupB.TaskID, tupB.TriggerID, tupB.EventID); err != nil {
-			t.Fatalf("Enqueue second on tupA entity: %v", err)
+		if _, err := s.Enqueue(ctx, orgID, tupB.UserID, tupA.EntityID, tupA.TaskID, tupB.TriggerID, tupB.EventID); err != nil {
+			t.Fatalf("Enqueue second on tupA task: %v", err)
 		}
 
-		ids, err := s.ListEntitiesWithPending(ctx, orgID)
+		ids, err := s.ListTasksWithPending(ctx, orgID)
 		if err != nil {
-			t.Fatalf("ListEntitiesWithPending: %v", err)
+			t.Fatalf("ListTasksWithPending: %v", err)
 		}
-		if len(ids) != 1 || ids[0] != tupA.EntityID {
-			t.Errorf("expected distinct ids = [%q], got %v", tupA.EntityID, ids)
+		if len(ids) != 1 || ids[0] != tupA.TaskID {
+			t.Errorf("expected distinct ids = [%q], got %v", tupA.TaskID, ids)
 		}
 	})
 

@@ -677,14 +677,14 @@ func (s *blueprintStore) createRunEventTriggered(ctx context.Context, orgID stri
 			(SELECT entity_id FROM tasks WHERE id = $4 AND org_id = $2)
 		)
 	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, abortReason, completedAt, stepPlan); err != nil {
-		// Same one-active-per-entity translation as the fenced insert:
+		// Same one-active-per-task translation as the fenced insert:
 		// production event runs route through CreateRunIfNotFiredSystem
 		// today, but any caller reaching this path (tests seeding event
 		// runs, a future direct CreateRun user) deserves the documented
 		// sentinel, not a raw unique_violation.
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blueprintRunsOneActivePerEntityConstraint {
-			return "", db.ErrEntityBusyActiveAutoRun
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blueprintRunsOneActivePerTaskConstraint {
+			return "", db.ErrTaskBusyActiveAutoRun
 		}
 		return "", fmt.Errorf("insert blueprint_run (event): %w", err)
 	}
@@ -713,15 +713,14 @@ func (s *blueprintStore) createRunManual(ctx context.Context, orgID string, br d
 	return br.ID, nil
 }
 
-// blueprintRunsOneActivePerEntityConstraint is the partial unique index
-// name backing "at most one active (trigger_type='event', status='running')
-// blueprint_run per entity" (TFAC-579) — the DB-enforced twin of the
-// router's in-process entity gate (HasActiveAutoRunForEntitySystem), which
-// was check-then-act: two processes (or a leader-failover overlap within
-// one) could both pass the check and each mint an active auto run on the
-// same entity via different triggers. See the migration for the full index
-// definition.
-const blueprintRunsOneActivePerEntityConstraint = "blueprint_runs_one_active_auto_run_per_entity"
+// blueprintRunsOneActivePerTaskConstraint is the partial unique index name
+// backing "at most one active (trigger_type='event', status='running')
+// blueprint_run per task" — the DB-enforced twin of the router's in-process
+// task gate (HasActiveAutoRunForTaskSystem), which is check-then-act: two
+// processes (or a leader-failover overlap within one) could both pass the
+// check and each mint an active auto run on the same task via different
+// triggers. See the migration for the full index definition.
+const blueprintRunsOneActivePerTaskConstraint = "blueprint_runs_one_active_auto_run_per_task"
 
 // CreateRunIfNotFiredSystem is the event-path fenced insert (admin pool).
 // Two independent unique constraints can turn this insert into a clean
@@ -735,7 +734,7 @@ const blueprintRunsOneActivePerEntityConstraint = "blueprint_runs_one_active_aut
 //     while another auto run is still active there. A single INSERT's ON
 //     CONFLICT can only target one arbiter index, so this second case
 //     isn't inference-eligible — it surfaces as a raw unique_violation,
-//     translated to db.ErrEntityBusyActiveAutoRun. NOT the inserted=false
+//     translated to db.ErrTaskBusyActiveAutoRun. NOT the inserted=false
 //     contract: a replay is permanently satisfied, entity-busy is a
 //     deferral — the caller must queue the intent, not drop it.
 func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun) (bool, error) {
@@ -766,8 +765,8 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)
 	if err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blueprintRunsOneActivePerEntityConstraint {
-			return false, db.ErrEntityBusyActiveAutoRun
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blueprintRunsOneActivePerTaskConstraint {
+			return false, db.ErrTaskBusyActiveAutoRun
 		}
 		return false, fmt.Errorf("insert blueprint_run (fenced): %w", err)
 	}

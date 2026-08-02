@@ -243,13 +243,18 @@ type ConversationStore interface {
 	// nil. MemoryMissing + claim fields derived per Get.
 	ListForTasks(ctx context.Context, orgID string, taskIDs []string) ([]domain.Conversation, error)
 
-	// HasActiveAutoRunForEntity returns true if any task on the
-	// entity has a non-terminal run with trigger_type='event'.
-	// Manual delegations are intentionally excluded
-	// (manual decoupled from the queue). Used by the router's
-	// per-entity firing gate; sweeper uses the same predicate to
-	// skip entities that wouldn't drain anyway.
-	HasActiveAutoRunForEntity(ctx context.Context, orgID, entityID string) (bool, error)
+	// HasActiveAutoRunForTask returns true if the task has a non-terminal
+	// run with trigger_type='event'. Manual delegations are intentionally
+	// excluded (manual is decoupled from the queue). Used by the router's
+	// per-task firing gate.
+	//
+	// The task is the unit, not the entity: a task IS one situation needing
+	// attention (that is what its dedup key means), so two tasks on one pull
+	// request may each have an agent in flight. Keying this on the entity
+	// also meant one conversation parked indefinitely — a stop freezes its
+	// blueprint 'running' by design — held the gate shut for every other
+	// situation on that entity.
+	HasActiveAutoRunForTask(ctx context.Context, orgID, taskID string) (bool, error)
 
 	// ActiveIDsForTask returns the IDs of runs on the task that
 	// haven't reached a terminal state. Used by the task-close
@@ -266,23 +271,22 @@ type ConversationStore interface {
 	// optimization, not a correctness gate.
 	ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error)
 
-	// HasActiveAutoRunForEntitySystem mirrors HasActiveAutoRunForEntity
+	// HasActiveAutoRunForTaskSystem mirrors HasActiveAutoRunForTask
 	// but routes through the admin pool in Postgres. The router's
-	// per-entity firing gate consumes this from its eventbus subscriber
+	// per-task firing gate consumes this from its eventbus subscriber
 	// goroutine, which has no JWT-claims context.
-	HasActiveAutoRunForEntitySystem(ctx context.Context, orgID, entityID string) (bool, error)
+	HasActiveAutoRunForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
 
-	// ActiveAutoRunIDForEntitySystem returns the ID of the entity's active
-	// event-triggered run together with the ID of the task that run belongs
-	// to, or ("", "") when none. Same predicate as
-	// HasActiveAutoRunForEntitySystem (trigger_type='event', non-terminal);
-	// if the at-most-one-active-auto-run-per-entity invariant is ever
+	// ActiveAutoRunIDForTaskSystem returns the ID of the task's active
+	// event-triggered run, or "" when none. Same predicate as
+	// HasActiveAutoRunForTaskSystem (trigger_type='event', non-terminal);
+	// if the at-most-one-active-auto-run-per-task invariant is ever
 	// violated, returns the most recently created. Admin pool only — the
-	// router's additive-event injection branch is the sole consumer, from
-	// the same claims-less background goroutine as the Has* sibling. The
-	// task id lets the absorption rule confirm the active run belongs to the
-	// firing's own task before folding into it.
-	ActiveAutoRunIDForEntitySystem(ctx context.Context, orgID, entityID string) (runID, taskID string, err error)
+	// router's firing gate is the sole consumer, from the same claims-less
+	// background goroutine as the Has* sibling. It returns the id rather
+	// than a bool because a busy gate is the additive-injection path, which
+	// needs the run to fold the new event into.
+	ActiveAutoRunIDForTaskSystem(ctx context.Context, orgID, taskID string) (runID string, err error)
 
 	// ActiveIDsForTaskSystem mirrors ActiveIDsForTask but routes through
 	// the admin pool in Postgres. The router's task-close cascade uses
