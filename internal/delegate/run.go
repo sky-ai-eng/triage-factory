@@ -840,19 +840,24 @@ func (s *Spawner) processCompletion(
 
 	s.updateBreakerCounter(task.ID, triggerType, status)
 
-	// A completed+abort run (the agent deliberately stopped) is message-resumable,
-	// so snapshot its workspace now — while the worktree and session transcript
-	// are still on disk — then let the per-run cleanup defers tear the worktree
-	// down (parked stays false: keeping every aborted run's worktree warm is not
-	// acceptable, so cold rehydrate from this blob is the resume path).
-	// terminateBlueprint retains the blob for an aborted terminal; the TTL sweep
-	// reaps it. A completed run that produced a draft PR / pending review does NOT
-	// park or snapshot for that reason — the artifact is a sidecar
-	// resolved asynchronously, the step completed with its real outcome, and the
-	// approval state is derived from the unresolved-artifact set downstream.
-	if status == "completed" && domain.RunOutcome(outcome) == domain.RunOutcomeAbort {
+	// Every non-failed terminal snapshots its workspace now — while the worktree
+	// and session transcript are still on disk — then lets the cleanup defers tear
+	// the worktree down (parked stays false: keeping a concluded run's worktree
+	// warm is not acceptable, so cold rehydrate from this blob is the resume
+	// path). `completed` is the whole non-failed terminal set, whatever the
+	// outcome: an abort is picked back up by a human, and a finish is the case a
+	// follow-up on concluded work needs — a workspace that only exists for the
+	// runs that went badly is a workspace nobody can follow up on. A failed run
+	// is excluded: the infrastructure under it died, so there is nothing coherent
+	// to rehydrate, and failRun drops whatever blob it had.
+	//
+	// Every step of a blueprint writes to the one key the blueprint shares, so a
+	// multi-step run overwrites its own blob per step and the last writer — the
+	// step a resume would land on — wins. terminateBlueprint retains it for every
+	// terminal but `failed`; the TTL sweep is what collects it.
+	if status == "completed" {
 		if err := s.snapshotWorkspace(ctx, orgID, namespace, claudeCwd, sessionID); err != nil {
-			delegateLog.Warn("snapshot workspace for aborted run failed", "run", runID, "error", err)
+			delegateLog.Warn("snapshot workspace for completed run failed", "run", runID, "outcome", outcome, "error", err)
 		}
 	}
 

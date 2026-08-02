@@ -37,8 +37,11 @@ var ErrRunNotSteerable = errors.New("run is not steerable")
 // parked status.
 //
 // Keyed on (status, outcome), not status alone: a finish run (completed +
-// outcome='finish') is deliberately excluded — resuming finish runs is a
-// gray area held out to avoid snapshotting every completed run.
+// outcome='finish') is still excluded here. Its workspace now exists — every
+// completed terminal snapshots — so the reason is no longer "there is nothing to
+// resume onto"; what is missing is the rest of the path, since the claim gate
+// only drives conversations under a still-running blueprint and a finished one
+// never restarts. Widening this predicate is that work, not this one.
 func resumableState(status, outcome string) bool {
 	switch status {
 	case "open":

@@ -174,26 +174,27 @@ func (s *Spawner) terminateBlueprint(
 	// sweep is the backstop.
 	s.reclaimBlueprintStepStaging(bgCtx, orgID, blueprintRunID)
 
-	// Drop the durable workspace snapshot now the blueprint is terminal so the
-	// blob store doesn't orphan it — EXCEPT the two terminals whose final step
-	// run is left in a state a human may want to pick back up:
+	// The durable workspace snapshot outlives every terminal but `failed`. The
+	// worktree above was just cleaned, so for each of them this blob is the only
+	// copy of the work left:
 	//
-	//   - aborted: the completed+abort step run is message-resumable, and the
-	//     worktree above was cleaned, so this blob IS the resume path.
+	//   - completed: the blueprint did its job and the final step's workspace is
+	//     what a follow-up on that work continues from. Discarding here is what
+	//     made a clean finish the one outcome nobody could come back to.
+	//   - aborted: the completed+abort step run is message-resumable.
 	//   - cancelled: someone stopped this work, and the step parked `open`
 	//     rather than being torn down. Throwing the workspace away at exactly
 	//     the moment a user is most likely to want it back is the behavior this
 	//     retention exists to stop.
 	//
-	// Both are reaped by the retention TTL sweep once they age out (it already
-	// enumerates `open` and completed+abort runs), so the cost of a cancel is a
-	// blob that expires rather than a workspace that is gone. Keyed by
-	// blueprint_run_id (the shared workspace's key); idempotent, so the discard
-	// is a no-op for a blueprint that never snapshotted. Covers the rest: clean
-	// finish and fail.
-	switch status {
-	case domain.BlueprintRunStatusAborted, domain.BlueprintRunStatusCancelled:
-	default:
+	// All three are collected by the retention TTL sweep once they age out (it
+	// enumerates `open` and every `completed` run), so the cost is a blob that
+	// expires rather than a workspace that is gone. `failed` still discards
+	// immediately: the infrastructure under the run died, so there is nothing
+	// coherent to resume onto, and any blob is from an earlier step's park.
+	// Keyed by blueprint_run_id (the shared workspace's key); idempotent, so the
+	// discard is a no-op for a blueprint that never snapshotted.
+	if status == domain.BlueprintRunStatusFailed {
 		s.discardWorkspaceSnapshot(bgCtx, orgID, blueprintRunID)
 	}
 

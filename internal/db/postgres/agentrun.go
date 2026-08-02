@@ -378,18 +378,17 @@ func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID st
 }
 
 func (s *agentRunStore) ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error) {
-	// Resumable-state runs (open / completed+abort) grouped by their shared
-	// snapshot key (org, blueprint_run_id); a key is reapable once its newest
-	// resumable run last parked before the cutoff. The park timestamp is
-	// COALESCE(parked_at, completed_at, started_at): parked_at for an open run
-	// (re-stamped each park, so resumes don't age it), completed_at for the
-	// completed+abort terminal, started_at a legacy fallback. Admin pool — the
-	// retention sweep is a tenant-spanning system job with no JWT claims.
+	// Snapshot-bearing runs (parked `open` / any `completed` terminal) grouped by
+	// their shared snapshot key (org, blueprint_run_id); a key is reapable once
+	// its newest such run last parked or concluded before the cutoff. The
+	// timestamp is COALESCE(parked_at, completed_at, started_at): parked_at for an
+	// open run (re-stamped each park, so resumes don't age it), completed_at for a
+	// terminal, started_at a legacy fallback. Admin pool — the retention sweep is
+	// a tenant-spanning system job with no JWT claims.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT org_id, blueprint_run_id
 		FROM conversations
-		WHERE status = 'open'
-		   OR (status = 'completed' AND outcome = 'abort')
+		WHERE status IN ('open', 'completed')
 		GROUP BY org_id, blueprint_run_id
 		HAVING MAX(COALESCE(parked_at, completed_at, started_at)) < $1
 	`, cutoff)

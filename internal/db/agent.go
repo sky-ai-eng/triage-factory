@@ -617,15 +617,17 @@ type ConversationStore interface {
 	LastAgentActivityAtSystem(ctx context.Context, orgID, runID string) (at time.Time, ok bool, err error)
 
 	// ListReapableSnapshotKeysSystem returns the (org, blueprint_run_id) of
-	// every blueprint_run all of whose resumable-state runs (open /
-	// completed+abort) last parked before cutoff — the workspace snapshot keys the
-	// retention reaper may safely drop. A blueprint_run with any resumable run
-	// still within the TTL is omitted (its shared blob is still wanted). The park
+	// every blueprint_run all of whose snapshot-bearing runs — parked `open` or
+	// any `completed` terminal, matching what the write side snapshots — last
+	// parked or concluded before cutoff. These are the workspace snapshot keys
+	// the retention reaper may safely drop. A blueprint_run with any such run
+	// still within the TTL is omitted (its shared blob is still wanted). The
 	// timestamp is COALESCE(parked_at, completed_at, started_at): parked_at tracks
 	// an open run's last park (stamped by MarkOpen, cleared by the resume flips, so
 	// a repeatedly-resumed long-lived run is keyed off its most recent park rather
-	// than its initial start), completed_at covers the completed+abort terminal,
-	// and started_at is a legacy fallback. System-wide / no org scoping — the
+	// than its initial start), completed_at covers the terminals, and started_at
+	// is a legacy fallback. `failed` is absent on purpose — a failed run's blob is
+	// dropped at the failure, not aged out. System-wide / no org scoping — the
 	// retention sweep is a maintenance job that spans tenants; the admin pool is
 	// the right door (BYPASSRLS) since the reaper holds no JWT claims.
 	ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error)
