@@ -365,8 +365,8 @@ func TestCancel_SignalsRemoteOwnerBestEffort(t *testing.T) {
 	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = 'r-cancel'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
-	if status != "cancelled" {
-		t.Errorf("status = %q, want cancelled (the DB-only write must be synchronous, unaffected by the async hastening signal)", status)
+	if status != "open" {
+		t.Errorf("status = %q, want open (the DB-only park must be synchronous, unaffected by the async hastening signal)", status)
 	}
 	sig := fakeSignals.findUnacked(t, "executor-2")
 	if sig.Kind != domain.RunSignalCancel {
@@ -395,8 +395,8 @@ func TestCancel_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic(t *testing
 	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = 'r-cancel-noinst'`).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
-	if status != "cancelled" {
-		t.Errorf("status = %q, want cancelled", status)
+	if status != "open" {
+		t.Errorf("status = %q, want open", status)
 	}
 	// Give the fire-and-forget goroutine a beat to run (and not panic); it
 	// must never insert a signal without an instance store to confirm

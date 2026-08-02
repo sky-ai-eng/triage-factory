@@ -277,20 +277,21 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 
 	// A cancel raced in between the claim and now (the claim filters
 	// cancel_requested, but the window is non-zero), or the blueprint is already
-	// terminal: don't run the agent. Mark this claimed step cancelled and
-	// finalize the blueprint if it's still running. Detached writes — this is a
-	// terminal disposition, not abortable by shutdown.
+	// terminal: don't run the agent. Park this claimed step and finalize the
+	// blueprint if it's still running. Detached writes — this is a disposition,
+	// not abortable by shutdown. Nothing ran under this claim, so there is no
+	// workspace state to snapshot on the way down.
 	if br.Status != domain.BlueprintRunStatusRunning || br.CancelRequested {
-		if _, mErr := s.agentRuns.MarkCancelledIfActiveForClaimSystem(context.Background(), orgID, run.ID, run.ClaimID, "user_cancelled", "Blueprint cancelled by user"); errors.Is(mErr, db.ErrClaimReleased) {
+		if _, mErr := s.agentRuns.ParkOpenForClaimSystem(context.Background(), orgID, run.ID, run.ClaimID, db.ParkStopped("user_cancelled", "Blueprint cancelled by user")); errors.Is(mErr, db.ErrClaimReleased) {
 			// This claim was released before it disposed of its own step, so
 			// a successor holds the run now. Everything below acts on it —
 			// consuming its pending input, broadcasting its state, finalizing
 			// its blueprint — so none of it runs.
-			dispatchLog.Error("claim fence refused the raced-cancel terminal — a successor owns this conversation; recording nothing",
+			dispatchLog.Error("claim fence refused the raced-cancel park — a successor owns this conversation; recording nothing",
 				"run", run.ID, "claim_id", run.ClaimID, "org_id", orgID, "error", mErr)
 			return
 		} else if mErr != nil {
-			dispatchLog.Warn("mark raced-cancel step cancelled failed", "run", run.ID, "error", mErr)
+			dispatchLog.Warn("park raced-cancel step failed", "run", run.ID, "error", mErr)
 		}
 		// This claim won't run the agent, so a resume message staged for it
 		// must not survive to be mis-delivered on a later reclaim — discard it.
@@ -303,7 +304,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 				dispatchLog.Warn("clear pending input for raced-cancel step failed", "run", run.ID, "error", cErr)
 			}
 		}
-		s.broadcastRunUpdate(orgID, run.ID, "cancelled")
+		s.broadcastRunUpdate(orgID, run.ID, "open")
 		if br.Status == domain.BlueprintRunStatusRunning {
 			cfg := runConfig{orgID: orgID, teamID: run.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != "" && task.EntitySource == "github"}
 			s.terminateBlueprint(orgID, br.ID, task.ID, run.TriggerType, run.CreatorUserID, startTime, cfg,
@@ -614,7 +615,9 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		stepCancel()
 	}()
 	if stepCtx.Err() != nil {
-		disposed = s.markCancelledAfterResume(orgID, run.ID, run.ClaimID, userID)
+		// No workspace rehydrated yet, so markRunOpen (the no-snapshot park)
+		// rather than parkRunOpen: there is nothing on disk to capture.
+		disposed = s.markRunOpen(resumeParkContext(orgID, run, task, userID))
 		return
 	}
 
@@ -687,7 +690,12 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		claimID:           run.ClaimID,
 	}, "manual", userID)
 	if stepCtx.Err() != nil {
-		disposed = s.markCancelledAfterResume(orgID, run.ID, run.ClaimID, userID)
+		// The agent worked in the rehydrated tree before the kill, so this
+		// park snapshots it — the whole point of a stop being a park is that
+		// the work survives the gesture.
+		park := resumeParkContext(orgID, run, task, userID)
+		park.namespace, park.claudeCwd = namespace, resumeCwd
+		disposed = s.parkRunOpen(park, run.SessionID)
 		return
 	}
 	if rerr != nil {
@@ -720,6 +728,26 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	disposed = true
 }
 
+// resumeParkContext is the park a cancelled resume writes. A resume is always
+// user-initiated whatever the run's original trigger, so it routes as manual
+// under the resuming user; run.ClaimID puts the write through the claim fence,
+// because a resume whose executor was reaped mid-turn must not park the
+// conversation its successor has picked up.
+//
+// The caller fills namespace/claudeCwd when there is a workspace worth
+// snapshotting — see the two call sites, which differ on exactly that.
+func resumeParkContext(orgID string, run *domain.Conversation, task *domain.Task, userID string) liveParkContext {
+	return liveParkContext{
+		orgID:         orgID,
+		runID:         run.ID,
+		taskID:        task.ID,
+		triggerType:   "manual",
+		creatorUserID: userID,
+		claimID:       run.ClaimID,
+		reason:        db.ParkStopped("user_cancelled", "Run cancelled by user"),
+	}
+}
+
 // reactToStepTerminal is the blueprint state-machine reactor: given a step run
 // that has reached a terminal (or parked) state, advance the blueprint_run.
 // This is the post-step switch lifted out of the old runBlueprint loop —
@@ -735,22 +763,18 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 		stepIdx = *stepRun.BlueprintStepIndex
 	}
 
-	// Parked mid-step: leave the blueprint running, the worktree on disk, and the
-	// snapshot in the blob store for the resume path. The aggregate column lands
-	// the task in_review. Only `open` parks now: a step that queued a
-	// draft PR / pending review completes normally and the orchestrator advances —
-	// the artifact is a sidecar, surfaced via the derived approval column below.
-	if stepRun.Status == "open" {
-		dispatchLog.Info("blueprint_run step paused; blueprint remains running", "blueprint_run", br.ID, "step", stepIdx, "status", stepRun.Status)
-		s.recomputeTaskBoardColumn(orgID, br.TaskID)
-		return
-	}
-
 	// Sequence-level cancel: a cancel requested while the step was running ends
 	// the blueprint without enqueuing the next step. Re-read the signal — it may
 	// have been raised after the claim. On a read error we proceed with the
 	// pre-agent br: a cancel raised in this narrow window could then be missed and
 	// enqueue one extra step (the documented claim-window trade-off), so log it.
+	//
+	// This check comes BEFORE the parked arm below, and that ordering is the
+	// whole cancel path: a cancelled step now parks `open` rather than writing
+	// a terminal of its own, so cancel_requested is the only thing left that
+	// distinguishes "stopped because someone killed it" from "stopped between
+	// turns". Read the park first and every cancel would strand its blueprint
+	// 'running' forever.
 	if fresh, err := s.blueprints.GetRunSystem(context.Background(), orgID, br.ID); err != nil {
 		dispatchLog.Warn("reactor: refresh blueprint_run for cancel check failed; proceeding with pre-agent state (a cancel in this window may enqueue one extra step)", "blueprint_run", br.ID, "error", err)
 	} else if fresh != nil {
@@ -765,12 +789,20 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 		return
 	}
 
-	switch stepRun.Status {
-	case "cancelled":
-		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
-			domain.BlueprintRunStatusCancelled, "step cancelled", &stepIdx, false)
+	// Parked mid-step with no cancel behind it: leave the blueprint running, the
+	// worktree on disk, and the snapshot in the blob store for the resume path.
+	// The aggregate column lands the task in_review. Only `open` parks now: a
+	// step that queued a draft PR / pending review completes normally and the
+	// orchestrator advances — the artifact is a sidecar, surfaced via the
+	// derived approval column below.
+	if stepRun.Status == "open" {
+		dispatchLog.Info("blueprint_run step paused; blueprint remains running", "blueprint_run", br.ID, "step", stepIdx, "status", stepRun.Status)
+		s.recomputeTaskBoardColumn(orgID, br.TaskID)
 		return
-	case "failed", "task_unsolvable":
+	}
+
+	switch stepRun.Status {
+	case "failed":
 		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 			domain.BlueprintRunStatusFailed, "step "+stepRun.Status, &stepIdx, false)
 		return

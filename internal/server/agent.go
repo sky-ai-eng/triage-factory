@@ -360,7 +360,10 @@ func (ag *agentHandler) handleAgentCancel(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+	// The gesture is a cancel; the row it leaves behind is parked. Report the
+	// latter — this field names the conversation's status, and 'cancelled' has
+	// not been one since a stop became a park.
+	writeJSON(w, http.StatusOK, map[string]string{"status": "open"})
 }
 
 // runVisible reports whether conversationID exists and is visible to the caller's org
@@ -509,6 +512,10 @@ func (ag *agentHandler) handleAgentInterrupt(w http.ResponseWriter, r *http.Requ
 // the run's state. An expired workspace (ErrWorkspaceExpired) is 410 Gone: the
 // run's saved state was reaped after the retention window, so retrying won't
 // help — the client surfaces the clear error rather than a transient conflict.
+// A concluded conversation (ErrConversationConcluded) is 409 as well, but it
+// carries its own message: the work finished and follow-ups on it are not
+// available yet, which is a different thing from a lost race and becomes a
+// success once that capability lands.
 // A cross-pod signal whose owning executor never acked (ErrSignalAckTimeout,
 // TFAC-585) is 504 Gateway Timeout — the reply-leg contract's "run owner did
 // not acknowledge; the run may be mid-teardown" case; the UI already
@@ -521,7 +528,8 @@ func steerErrorStatus(err error) int {
 		return http.StatusGatewayTimeout
 	case errors.Is(err, delegate.ErrNoLiveProcess),
 		errors.Is(err, delegate.ErrRunNotSteerable),
-		errors.Is(err, delegate.ErrRunNotResumable):
+		errors.Is(err, delegate.ErrRunNotResumable),
+		errors.Is(err, delegate.ErrConversationConcluded):
 		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError

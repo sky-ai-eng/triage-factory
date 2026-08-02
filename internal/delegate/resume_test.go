@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/storage"
 )
 
 // TestResumeOpenRun_EmptyUserID guards the first gate: a resume must carry the
@@ -71,6 +72,80 @@ func TestResumeOpenRun_NotResumable(t *testing.T) {
 	if !errors.Is(err, ErrRunNotResumable) {
 		t.Errorf("err = %v, want ErrRunNotResumable", err)
 	}
+}
+
+// TestResumeOpenRun_RefusalTaxonomy pins which of three answers a parked run
+// gets, and the ORDER the two structural ones are asked in. All three rows
+// look identically resumable from the conversation alone, so the whole
+// distinction lives in what is true around them:
+//
+//   - workspace reaped by the retention TTL → 410 Gone, permanent.
+//   - workspace intact, blueprint finished  → 409 concluded, temporary; this
+//     becomes a success once resuming a finished blueprint lands.
+//   - both                                  → the permanent one wins, because
+//     telling someone to come back later for a workspace that no longer exists
+//     is the wrong half of the truth.
+//
+// The third case is not hypothetical: it is every run stopped by an older
+// build. The old cancel path discarded the snapshot AND cancelled the
+// blueprint, so a migrated row has both conditions and must answer 410.
+func TestResumeOpenRun_RefusalTaxonomy(t *testing.T) {
+	park := func(t *testing.T, database *sql.DB, id string, blueprintStatus string, keepWorkspace bool) *Spawner {
+		t.Helper()
+		wt := "/tmp/does-not-exist-" + id
+		if keepWorkspace {
+			wt = t.TempDir() // a warm worktree on disk === recoverable
+		}
+		seedRun(t, database, id, "sess-"+id, wt)
+		if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id=?`, id); err != nil {
+			t.Fatalf("park: %v", err)
+		}
+		if _, err := database.Exec(`UPDATE blueprint_runs SET status=? WHERE id=?`, blueprintStatus, "seedbpr-"+id); err != nil {
+			t.Fatalf("set blueprint status: %v", err)
+		}
+		s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+		// A blob store with nothing in it: no snapshot to rehydrate from, so a
+		// run whose worktree is also gone is unrecoverable for real.
+		blobs, err := storage.New()
+		if err != nil {
+			t.Fatalf("storage.New: %v", err)
+		}
+		s.SetStorage(blobs)
+		return s
+	}
+
+	t.Run("workspace reaped, blueprint running", func(t *testing.T) {
+		paths.SetForTest(t, t.TempDir())
+		database := newDelegateTestDB(t)
+		s := park(t, database, "r-reaped", "running", false)
+		err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-reaped", "msg", runmode.LocalDefaultUserID)
+		if !errors.Is(err, ErrWorkspaceExpired) {
+			t.Errorf("err = %v, want ErrWorkspaceExpired (410)", err)
+		}
+	})
+
+	t.Run("workspace intact, blueprint finished", func(t *testing.T) {
+		paths.SetForTest(t, t.TempDir())
+		database := newDelegateTestDB(t)
+		s := park(t, database, "r-concluded", "cancelled", true)
+		err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-concluded", "msg", runmode.LocalDefaultUserID)
+		if !errors.Is(err, ErrConversationConcluded) {
+			t.Errorf("err = %v, want ErrConversationConcluded (409, and a success once follow-ups land)", err)
+		}
+		if st := storedStatus(t, database, "r-concluded"); st != "open" {
+			t.Errorf("stored status = %q, want open — a refused wake must leave the row parked, not queued", st)
+		}
+	})
+
+	t.Run("both gone — the migrated legacy row", func(t *testing.T) {
+		paths.SetForTest(t, t.TempDir())
+		database := newDelegateTestDB(t)
+		s := park(t, database, "r-legacy", "cancelled", false)
+		err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-legacy", "msg", runmode.LocalDefaultUserID)
+		if !errors.Is(err, ErrWorkspaceExpired) {
+			t.Errorf("err = %v, want ErrWorkspaceExpired — the permanent answer wins over the temporary one", err)
+		}
+	})
 }
 
 // TestResumeOpenRun_EnqueuesRatherThanSpawning is resume-by-enqueue's core

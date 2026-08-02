@@ -50,6 +50,43 @@ func resumableState(status, outcome string) bool {
 	}
 }
 
+// blueprintDrivableForResume is the other half of "resumable": the run's state
+// says a message COULD continue it, and this says anything would actually pick
+// it up. ClaimNextRun only drives rows whose blueprint_run is 'running' and
+// not cancel-requested, so waking a run under a finished blueprint would flip
+// it mid-flight and strand it there — claimed by nobody, counted as queue depth
+// by every counter, forever. `aborted` passes because the resume re-opens it in
+// the same transaction as the flip.
+//
+// This matters more now that a cancelled run parks `open` instead of writing a
+// terminal: `open` under a cancelled blueprint is a real and reachable state,
+// and it reads resumable from the row alone. Widening the gate to a finished
+// blueprint's final conversation is the resume work this epic builds toward;
+// until that lands, refusing is the honest answer.
+//
+// Admin-pool read on purpose: blueprint_runs RLS hides another user's manual
+// blueprint, and a teammate resuming a run must not be refused for a row they
+// merely cannot see. A run with no blueprint, or a lookup that fails, is
+// treated as drivable — an inability to check must not strand a resumable run,
+// and the claim gate re-checks for real.
+func (s *Spawner) blueprintDrivableForResume(ctx context.Context, orgID string, run *domain.Conversation) bool {
+	if s.blueprints == nil || run.BlueprintRunID == "" {
+		return true
+	}
+	br, err := s.blueprints.GetRunSystem(ctx, orgID, run.BlueprintRunID)
+	if err != nil {
+		delegateLog.Warn("resume: blueprint state lookup inconclusive; treating as drivable", "run", run.ID, "blueprint_run", run.BlueprintRunID, "error", err)
+		return true
+	}
+	if br == nil {
+		return true
+	}
+	if br.CancelRequested {
+		return false
+	}
+	return br.Status == domain.BlueprintRunStatusRunning || br.Status == domain.BlueprintRunStatusAborted
+}
+
 // SendMessage delivers a free-form user message to a run, owning the
 // live-vs-resume routing:
 //

@@ -230,7 +230,11 @@ func TestReapDeadExecutors_TerminalFailsExecutorLostPastAttemptBudget(t *testing
 // TestReapDeadExecutors_CancelRequestedFinalizesCancelledNotRequeued pins
 // "cancel-requested rows go through the existing cancel finalization
 // instead of requeue" — even a run still within its attempt budget must
-// finalize cancelled, never come back as queued work.
+// finalize, never come back as queued work.
+//
+// The split is the one every cancel path uses: the blueprint takes the
+// 'cancelled' terminal, the conversation parks `open` with its workspace, and
+// the claim gate refuses the parked row because its blueprint is terminal.
 func TestReapDeadExecutors_CancelRequestedFinalizesCancelledNotRequeued(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -250,14 +254,18 @@ func TestReapDeadExecutors_CancelRequestedFinalizesCancelledNotRequeued(t *testi
 	}
 
 	var runStatus, brStatus string
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM conversations WHERE id = $1`, fx.runID).Scan(&runStatus); err != nil {
+	var parked bool
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status, parked_at IS NOT NULL FROM conversations WHERE id = $1`, fx.runID).Scan(&runStatus, &parked); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
 	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM blueprint_runs WHERE id = $1`, fx.blueprintRunID).Scan(&brStatus); err != nil {
 		t.Fatalf("read back blueprint_run: %v", err)
 	}
-	if runStatus != "cancelled" || brStatus != "cancelled" {
-		t.Errorf("(run=%q, blueprint_run=%q), want both cancelled", runStatus, brStatus)
+	if runStatus != "open" || brStatus != "cancelled" {
+		t.Errorf("(run=%q, blueprint_run=%q), want (open, cancelled)", runStatus, brStatus)
+	}
+	if !parked {
+		t.Error("reaped run has no parked_at; the retention sweep keys a parked workspace off it")
 	}
 }
 

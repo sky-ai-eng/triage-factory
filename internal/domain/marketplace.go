@@ -162,8 +162,8 @@ type ListingSummary struct {
 // aggregated run activity across every copy installed from it (TFAC-540).
 // TeamsUsing counts only installing teams whose copy still exists
 // (prompts/blueprints.deleted_at IS NULL). TotalRuns/SuccessRate/LastRunAt
-// count only TERMINAL runs (completed/failed/cancelled/task_unsolvable for
-// prompts, +aborted for blueprints) — a still-running run hasn't resolved
+// count only TERMINAL runs (completed/failed for prompts; completed/failed/
+// cancelled/aborted for blueprints) — a still-running run hasn't resolved
 // either way, so it counts toward neither "how much work got done" nor "how
 // well," and must not silently score as a failure just because it isn't
 // 'completed' yet. This holds across copy deletion too: root_object_id

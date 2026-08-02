@@ -934,7 +934,7 @@ func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id stri
 	return markBlueprintRunStatus(ctx, s.admin, nil, orgID, id, status, abortReason, abortedAtStep)
 }
 
-// adjacentClaims routes the cancelled children's claim release: nil means q
+// adjacentClaims routes the parked children's claim release: nil means q
 // holds claims-write privilege and the release rides the child-cancel
 // statement itself; non-nil means q is the RLS app handle (SELECT-only on
 // claims), so the release lands on that admin-backed queryer AFTER the tx
@@ -972,7 +972,7 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 	// dispatcher on phantom work and pinning its feature branch in a worktree,
 	// requeuing forever.
 	var changed bool
-	var cancelledChildIDs []string
+	var parkedChildIDs []string
 	err := inTx(ctx, q, func(tx queryer) error {
 		res, err := tx.ExecContext(ctx, `
 			UPDATE blueprint_runs
@@ -991,9 +991,9 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 		// Only on a real transition to a terminal target.
 		if changed && status.Terminal() {
 			if adjacentClaims == nil {
-				return cancelOrphanedChildRunsWithClaims(ctx, tx, orgID, id)
+				return parkOrphanedChildRunsWithClaims(ctx, tx, orgID, id)
 			}
-			cancelledChildIDs, err = cancelOrphanedChildRuns(ctx, tx, orgID, id)
+			parkedChildIDs, err = parkOrphanedChildRuns(ctx, tx, orgID, id)
 			return err
 		}
 		return nil
@@ -1001,58 +1001,61 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 	if err != nil {
 		return false, err
 	}
-	if adjacentClaims != nil && len(cancelledChildIDs) > 0 {
+	if adjacentClaims != nil && len(parkedChildIDs) > 0 {
 		// Adjacent, not atomic: when the app-side work is composed into a
 		// caller's still-open tx this release can land against a cancel that
 		// later rolls back (an in-flight child with no active claim), and a
-		// crash can leave cancelled children with dangling claims — both are
+		// crash can leave parked children with dangling claims — both are
 		// the janitor-healed shapes the app-pool claim split already accepts.
-		return changed, releaseCancelledChildClaims(ctx, adjacentClaims, orgID, cancelledChildIDs)
+		return changed, releaseParkedChildClaims(ctx, adjacentClaims, orgID, parkedChildIDs)
 	}
 	return changed, nil
 }
 
-// cancelOrphanedChildRunsWithClaims marks every non-terminal child run of
-// blueprintRunID 'cancelled' (stamping completed_at) and releases those
-// children's active claims in the same statement — q must hold claims-write
-// privilege. Called by markBlueprintRunStatus's atomic flip;
-// RunQueueStore.ReconcileOrphanedRuns applies the same terminal-status filter
-// in its own boot sweep (it can't share this body — different store,
-// different scope). The filter is the canonical run terminal set used across
-// the agentrun store.
-func cancelOrphanedChildRunsWithClaims(ctx context.Context, q queryer, orgID, blueprintRunID string) error {
+// parkOrphanedChildRunsWithClaims parks every still-mid-flight child run of
+// blueprintRunID `open` and releases those children's active claims in the
+// same statement — q must hold claims-write privilege. Called by
+// markBlueprintRunStatus's atomic flip; RunQueueStore.ReconcileOrphanedRuns
+// applies the same predicate in its own boot sweep (it can't share this body —
+// different store, different scope).
+//
+// A park, not a terminal: the child neither failed nor concluded, it was
+// stopped when its parent ended. Read the `open` as "stopped without
+// concluding", NOT as "resumable" — the parent is terminal, so the claim gate
+// refuses it. Scoped to status IS NULL: a child that already parked itself
+// keeps its own parked_at and stop_reason, and one that already reached a
+// terminal is left alone.
+func parkOrphanedChildRunsWithClaims(ctx context.Context, q queryer, orgID, blueprintRunID string) error {
 	_, err := q.ExecContext(ctx, `
-		WITH cancelled AS (
+		WITH parked AS (
 			UPDATE conversations
-			SET status = 'cancelled',
-			    completed_at = COALESCE(completed_at, now()),
+			SET status = 'open',
+			    parked_at = COALESCE(parked_at, now()),
 			    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
 			    result_summary = COALESCE(NULLIF(result_summary, ''), $3)
-			WHERE org_id = $1 AND blueprint_run_id = $2
-			  AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
+			WHERE org_id = $1 AND blueprint_run_id = $2 AND status IS NULL
 			RETURNING id
 		)
 		UPDATE claims SET released_at = now(), outcome = 'cancelled'
-		FROM cancelled
-		WHERE claims.conversation_id = cancelled.id AND claims.released_at IS NULL
-	`, orgID, blueprintRunID, "Cancelled: owning blueprint run reached a terminal state")
+		FROM parked
+		WHERE claims.conversation_id = parked.id AND claims.released_at IS NULL
+	`, orgID, blueprintRunID, "Stopped: owning blueprint run reached a terminal state")
 	return err
 }
 
-// cancelOrphanedChildRuns is the app-pool (claims-SELECT-only) variant of the
-// same child cancel: it returns the cancelled ids so the caller can release
-// their claims on an admin-backed queryer.
-func cancelOrphanedChildRuns(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]string, error) {
+// parkOrphanedChildRuns is the app-pool (claims-SELECT-only) variant of the
+// same child park: it returns the parked ids so the caller can release their
+// claims on an admin-backed queryer.
+func parkOrphanedChildRuns(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		UPDATE conversations
-		SET status = 'cancelled',
-		    completed_at = COALESCE(completed_at, now()),
+		SET status = 'open',
+		    parked_at = COALESCE(parked_at, now()),
 		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
 		    result_summary = COALESCE(NULLIF(result_summary, ''), $3)
-		WHERE org_id = $1 AND blueprint_run_id = $2
-		  AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
+		WHERE org_id = $1 AND blueprint_run_id = $2 AND status IS NULL
 		RETURNING id
-	`, orgID, blueprintRunID, "Cancelled: owning blueprint run reached a terminal state")
+	`, orgID, blueprintRunID, "Stopped: owning blueprint run reached a terminal state")
 	if err != nil {
 		return nil, err
 	}
@@ -1068,7 +1071,7 @@ func cancelOrphanedChildRuns(ctx context.Context, q queryer, orgID, blueprintRun
 	return ids, rows.Err()
 }
 
-func releaseCancelledChildClaims(ctx context.Context, q queryer, orgID string, conversationIDs []string) error {
+func releaseParkedChildClaims(ctx context.Context, q queryer, orgID string, conversationIDs []string) error {
 	_, err := q.ExecContext(ctx, `
 		UPDATE claims SET released_at = now(), outcome = 'cancelled'
 		WHERE org_id = $1 AND conversation_id = ANY($2) AND released_at IS NULL
@@ -1151,8 +1154,7 @@ func blueprintActiveStepRunIDs(ctx context.Context, q queryer, orgID, blueprintR
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND blueprint_run_id = $2
 		  AND (status IS NULL
-		       OR status NOT IN ('completed','failed','cancelled','task_unsolvable',
-		                         'pending_approval','open'))
+		       OR status NOT IN (`+runSettledStatusesSQL+`,'open'))
 	`, orgID, blueprintRunID)
 	if err != nil {
 		return nil, err

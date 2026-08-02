@@ -227,10 +227,13 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		fx := factory(t)
 		ctx := context.Background()
 
-		cancelledRun := fx.Seeder.Run(t, RunSpendFixture{
+		// Parked without concluding — the shape a stopped run leaves behind.
+		// The point is that it is NOT 'completed': its tokens are real spend
+		// and must survive whatever else is true of the row.
+		parkedRun := fx.Seeder.Run(t, RunSpendFixture{
 			TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual",
 			Model: "m", Cost: spendCostPtr(0.40),
-			Tokens: SpendTokens{50, 60, 70, 80}, Status: "cancelled", StartedAt: t1,
+			Tokens: SpendTokens{50, 60, 70, 80}, Status: "open", StartedAt: t1,
 		})
 		failedRun := fx.Seeder.Run(t, RunSpendFixture{
 			TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual",
@@ -247,8 +250,8 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 			t.Fatalf("ListSpend: %v", err)
 		}
 		byID := indexSpend(t, rows)
-		assertTokens(t, "cancelled-run", byID[cancelledRun], SpendTokens{50, 60, 70, 80})
-		assertCost(t, "cancelled-run.cost", byID[cancelledRun].TotalCostUSD, 0.40)
+		assertTokens(t, "parked-run", byID[parkedRun], SpendTokens{50, 60, 70, 80})
+		assertCost(t, "cancelled-run.cost", byID[parkedRun].TotalCostUSD, 0.40)
 		assertTokens(t, "failed-run", byID[failedRun], SpendTokens{5, 6, 7, 8})
 		assertTokens(t, "cancelled-curator", byID[cancelledCurator], SpendTokens{9, 8, 7, 6})
 	})

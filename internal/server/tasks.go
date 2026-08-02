@@ -515,7 +515,7 @@ const (
 	discardOutcomeRequeued discardOutcome = iota
 	discardOutcomeDismissed
 	// discardOutcomeCompleted: user marked the task done from a
-	// terminal-state AgentCard (failed, cancelled) by
+	// finished AgentCard (failed, or parked after a cancel) by
 	// dragging it to the Done column. The agent's prepared review,
 	// if any, is being discarded — the user is signalling "the work
 	// is finished" without applying the agent's verdict to GitHub.

@@ -883,7 +883,7 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 		// paths the triggering step is already terminal, so this is a guard that
 		// fires only on the race.
 		if changed && status.Terminal() {
-			return cancelOrphanedChildRuns(ctx, q, id)
+			return parkOrphanedChildRuns(ctx, q, id)
 		}
 		return nil
 	})
@@ -893,36 +893,39 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 	return changed, nil
 }
 
-// cancelOrphanedChildRuns marks every non-terminal child run of blueprintRunID
-// 'cancelled' (stamping completed_at) and releases those children's active
-// claims. Called by MarkRunStatus's atomic flip;
-// RunQueueStore.ReconcileOrphanedRuns applies the same terminal-status filter in
-// its own boot sweep (it can't share this body — different store, different
-// scope). The filter is the canonical run terminal set used across the agentrun
-// store.
-func cancelOrphanedChildRuns(ctx context.Context, q queryer, blueprintRunID string) error {
-	// Claims first: the subquery's non-terminal predicate matches exactly the
-	// rows the cancel below is about to retire, and both statements share the
+// parkOrphanedChildRuns parks every still-mid-flight child run of
+// blueprintRunID `open` and releases those children's active claims. Called by
+// MarkRunStatus's atomic flip; RunQueueStore.ReconcileOrphanedRuns applies the
+// same predicate in its own boot sweep (it can't share this body — different
+// store, different scope).
+//
+// A park, not a terminal: the child neither failed nor concluded, it was
+// stopped when its parent ended. Read the `open` as "stopped without
+// concluding", NOT as "resumable" — the parent is terminal, so the claim gate
+// refuses it. Scoped to status IS NULL: a child that already parked itself
+// keeps its own parked_at and stop_reason, and one that already reached a
+// terminal is left alone.
+func parkOrphanedChildRuns(ctx context.Context, q queryer, blueprintRunID string) error {
+	// Claims first: the subquery's mid-flight predicate matches exactly the
+	// rows the park below is about to retire, and both statements share the
 	// caller's transaction, so the pair lands atomically either way.
 	if _, err := q.ExecContext(ctx, `
 		UPDATE claims SET released_at = ?, outcome = 'cancelled'
 		WHERE released_at IS NULL
 		  AND conversation_id IN (
 		      SELECT id FROM conversations
-		      WHERE blueprint_run_id = ?
-		        AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`)))
+		      WHERE blueprint_run_id = ? AND status IS NULL)
 	`, time.Now().UTC(), blueprintRunID); err != nil {
 		return err
 	}
 	_, err := q.ExecContext(ctx, `
 		UPDATE conversations
-		SET status = 'cancelled',
-		    completed_at = COALESCE(completed_at, ?),
+		SET status = 'open',
+		    parked_at = COALESCE(parked_at, ?),
 		    stop_reason = COALESCE(stop_reason, 'blueprint_terminal'),
 		    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
-		WHERE blueprint_run_id = ?
-		  AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
-	`, time.Now().UTC(), "Cancelled: owning blueprint run reached a terminal state", blueprintRunID)
+		WHERE blueprint_run_id = ? AND status IS NULL
+	`, time.Now().UTC(), "Stopped: owning blueprint run reached a terminal state", blueprintRunID)
 	return err
 }
 
@@ -1064,8 +1067,7 @@ func (s *blueprintStore) ActiveStepRunIDs(ctx context.Context, orgID, blueprintR
 		SELECT id FROM conversations
 		WHERE blueprint_run_id = ?
 		  AND (status IS NULL
-		       OR status NOT IN ('completed','failed','cancelled','task_unsolvable',
-		                         'pending_approval','open'))
+		       OR status NOT IN (`+runSettledStatusesSQL+`,'open'))
 	`, blueprintRunID)
 	if err != nil {
 		return nil, err

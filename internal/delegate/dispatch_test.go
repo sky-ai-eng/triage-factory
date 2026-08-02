@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -168,16 +169,24 @@ func TestDrainRunQueue_PartitionFencedSkipsClaim(t *testing.T) {
 	}
 }
 
-// TestReconcileRunQueue_CancelsOrphanUnderTerminalBlueprint is the
-// boot-reconcile integration check: a child run left 'running' under an
-// already-terminal blueprint_run (the desync) must be cancelled by the boot
+// TestReconcileRunQueue_ParksOrphanUnderTerminalBlueprint is the
+// boot-reconcile integration check: a child run left mid-flight under an
+// already-terminal blueprint_run (the desync) must be healed by the boot
 // sweep, so the dispatcher stops treating it as live work and its feature
 // branch is no longer pinned in a worktree.
-func TestReconcileRunQueue_CancelsOrphanUnderTerminalBlueprint(t *testing.T) {
+//
+// It parks `open` rather than writing a terminal, because nothing about an
+// orphan failed and nothing about it concluded. The park is NOT a claim that
+// the row is resumable: its blueprint is terminal, so the claim gate refuses
+// it — which the second half of this test pins.
+func TestReconcileRunQueue_ParksOrphanUnderTerminalBlueprint(t *testing.T) {
 	s, database, brID, _, run0 := reactorFixture(t, "recon-orphan", 1, "running", "")
 
-	// Force the desync directly, mimicking a DB broken before the atomic cancel
-	// in MarkRunStatus landed: terminal parent, child still running.
+	// Force the desync directly, mimicking a DB broken before the atomic park
+	// in MarkRunStatus landed: terminal parent, child still mid-flight.
+	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, run0); err != nil {
+		t.Fatalf("force child mid-flight: %v", err)
+	}
 	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'cancelled', cancel_requested = 0 WHERE id = ?`, brID); err != nil {
 		t.Fatalf("force blueprint cancelled: %v", err)
 	}
@@ -188,8 +197,24 @@ func TestReconcileRunQueue_CancelsOrphanUnderTerminalBlueprint(t *testing.T) {
 	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, run0).Scan(&status); err != nil {
 		t.Fatalf("read child status: %v", err)
 	}
-	if status != "cancelled" {
-		t.Errorf("orphan child status = %q, want cancelled after boot reconcile", status)
+	if status != "open" {
+		t.Errorf("orphan child status = %q, want open after boot reconcile", status)
+	}
+
+	// An `open` row with undelivered input is the one shape the claim
+	// predicate would otherwise drive. The blueprint gate is what stops it.
+	if _, err := database.Exec(`
+		INSERT INTO messages (conversation_id, org_id, role, subtype, content, delivered, window_state)
+		VALUES (?, ?, 'user', '', 'pick this back up', 0, 'active')`,
+		run0, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("queue input on the parked orphan: %v", err)
+	}
+	claimed, err := s.runQueue.ClaimNextRun(context.Background(), "exec-orphan", 1, db.ClaimPlacement{})
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if claimed != nil {
+		t.Errorf("claimed %q — a parked orphan under a terminal blueprint must never be driven", claimed.ID)
 	}
 }
 
@@ -363,6 +388,41 @@ func TestReactor_ParkedStepLeavesRunning(t *testing.T) {
 	}
 	if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusRunning {
 		t.Errorf("blueprint status = %q, want running (parked)", br.Status)
+	}
+}
+
+// TestReactor_CancelledStepParksAndTerminatesBlueprint is the ordering the
+// whole cancel path now rests on. A cancelled step parks `open` rather than
+// writing a terminal of its own, so the reactor has to read cancel_requested
+// BEFORE the parked arm — read the park first and every cancelled run would
+// strand its blueprint 'running' forever with nobody to finalize it.
+func TestReactor_CancelledStepParksAndTerminatesBlueprint(t *testing.T) {
+	s, database, brID, _, run0 := reactorFixture(t, "cancel-park", 2, "open", "")
+	org := runmode.LocalDefaultOrgID
+	if _, err := s.blueprints.RequestRunCancelSystem(context.Background(), org, brID); err != nil {
+		t.Fatalf("RequestRunCancelSystem: %v", err)
+	}
+
+	stepRun, _ := s.agentRuns.GetSystem(context.Background(), org, run0)
+	stepRun.TriggerType = "manual"
+	stepRun.CreatorUserID = runmode.LocalDefaultUserID
+	// The pre-agent blueprint the dispatcher captured has no cancel on it; the
+	// reactor's own refresh is what must find the signal.
+	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+
+	if q := queuedStepRuns(t, database, brID); len(q) != 0 {
+		t.Fatalf("queued step runs = %v, want none (cancel must not advance)", q)
+	}
+	if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusCancelled {
+		t.Errorf("blueprint status = %q, want cancelled — a parked step under a cancel must not leave it running", br.Status)
+	}
+	// The step keeps its park; the blueprint carries the cancellation.
+	var status string
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, run0).Scan(&status); err != nil {
+		t.Fatalf("read step status: %v", err)
+	}
+	if status != "open" {
+		t.Errorf("step status = %q, want open", status)
 	}
 }
 

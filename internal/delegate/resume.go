@@ -30,6 +30,20 @@ import (
 // state.
 var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
 
+// ErrConversationConcluded is returned when a run is parked and its workspace
+// is intact, but the blueprint behind it has finished — a stopped run, or one
+// whose sequence completed. Nothing will claim it (ClaimNextRun only drives a
+// running blueprint), so a wake would strand it mid-flight forever.
+//
+// Its own sentinel rather than ErrRunNotResumable, because the two say
+// different things to a person. "Not resumable" means the state moved under
+// you: refresh and look again. This means the work is finished and following
+// up on it is not available yet — nothing about refreshing will change it, and
+// the answer becomes a success once resuming a finished blueprint's final
+// conversation lands. Callers map it to 409 with copy that says so; it is the
+// single symbol that work deletes.
+var ErrConversationConcluded = errors.New("resume: this run's work has finished; follow-ups on a completed blueprint are not available yet")
+
 // ErrWorkspaceExpired is returned by ResumeOpenRun when a resumable run's
 // workspace is gone for good: its warm worktree was swept AND its durable
 // snapshot was reaped by the retention TTL. The run's status is left unchanged
@@ -105,12 +119,27 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 	if run.Model == "" {
 		return fmt.Errorf("run has no model; cannot resume")
 	}
-	// Refuse a wake whose workspace is gone for good with no side effect, so
-	// the caller sees 410 Gone. Without this the flip below succeeds and the
-	// run dies at claim time (a generic failRun) instead — turning an
-	// expected, recoverable "this workspace expired" into a destroyed run.
+	// The two structural refusals, ordered most-permanent first, because both
+	// are true of the same rows and only one of them is worth telling a person
+	// about.
+	//
+	// A workspace reaped by the retention TTL is gone for good: no warm
+	// worktree, no snapshot, nothing to rebuild from, and no future release
+	// brings it back. That is 410 Gone, and refusing here means no side effect
+	// — without it the flip below succeeds and the run dies at claim time as a
+	// generic failRun, turning an expected "this expired" into a destroyed run.
+	// Every run stopped by an older build lands here too: the old cancel path
+	// discarded the snapshot on its way out, so a migrated row has no workspace
+	// by construction and inherits exactly this answer.
 	if !s.workspaceRecoverable(ctx, orgID, run) {
 		return ErrWorkspaceExpired
+	}
+	// The workspace survives but nothing will drive it: the blueprint finished.
+	// Checked second precisely because it is the temporary one — this refusal
+	// is what the resume work lifts, where an expired workspace never comes
+	// back.
+	if !s.blueprintDrivableForResume(ctx, orgID, run) {
+		return ErrConversationConcluded
 	}
 
 	// A completed+abort run's blueprint already terminated (aborted) when
@@ -207,50 +236,6 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *d
 		return true
 	}
 	return ok
-}
-
-// markCancelledAfterResume writes the terminal cancelled status for a
-// run being resumed off the claim path (Spawner.dispatchResumeClaim) iff
-// the run is still non-terminal — the resume-by-enqueue counterpart of
-// the retired in-process goroutine's own markCancelled closure. A
-// registered s.cancels handle's Cancel() doesn't touch the DB itself; the
-// delivering claim owns the terminal write any time it observes its ctx
-// cancelled.
-// claimID names the delivering engagement, so the terminal goes through the
-// claim fence: a resume whose executor was reaped mid-turn must not cancel
-// the conversation its successor has picked up. Empty keeps the unfenced
-// write. Returns fenced: true when the terminal was refused, in which case
-// nothing was written, broadcast, or discarded.
-func (s *Spawner) markCancelledAfterResume(orgID, runID, claimID, userID string) (fenced bool) {
-	cancelCtx := context.Background()
-	var ok bool
-	var mErr error
-	if claimID != "" {
-		ok, mErr = s.agentRuns.MarkCancelledIfActiveForClaimSystem(cancelCtx, orgID, runID, claimID, "user_cancelled", "Run cancelled by user")
-	} else {
-		mErr = s.tx.SyntheticClaimsWithTx(cancelCtx, orgID, userID, func(ts db.TxStores) error {
-			f, err := ts.Conversations.MarkCancelledIfActive(cancelCtx, orgID, runID, "user_cancelled", "Run cancelled by user")
-			ok = f
-			return err
-		})
-	}
-	if errors.Is(mErr, db.ErrClaimReleased) {
-		// A successor owns the conversation. Its snapshot is the workspace
-		// that successor resumes from, so the discard below is skipped along
-		// with the terminal itself.
-		delegateLog.Error("claim fence refused the resume cancellation — a successor owns this conversation; recording nothing",
-			"run", runID, "claim_id", claimID, "org_id", orgID, "error", mErr)
-		return true
-	}
-	if ok {
-		s.broadcastRunUpdate(orgID, runID, "cancelled")
-		// Cancelled mid-resume: the run won't continue, so drop the
-		// snapshot taken when it parked. Same key/no-op semantics as
-		// failRun's discard (runID-keyed; harmless for a blueprint step,
-		// which terminateBlueprint cleans by blueprint_run_id).
-		s.discardWorkspaceSnapshot(cancelCtx, orgID, runID)
-	}
-	return false
 }
 
 // ResumeOptions configures a ResumeWithMessage invocation. Callers
@@ -526,7 +511,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	if out.err != nil && out.result == nil {
 		// The driver returns ctx.Err() directly when ctx triggered the kill
 		// before any completion was captured; preserve that shape so the
-		// resume goroutine's ctx.Err() check still routes through markCancelled.
+		// resume goroutine's ctx.Err() check still routes through the cancel park.
 		if ctx.Err() != nil {
 			return outcome, ctx.Err()
 		}

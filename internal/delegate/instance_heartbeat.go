@@ -357,7 +357,7 @@ func (s *Spawner) PartitionFenced() bool {
 // control pod (which never populates s.cancels for delegated runs — it
 // runs no dispatcher) or an executor with nothing in flight kills zero,
 // harmlessly. The goroutine actually running each cancelled step observes
-// ctx.Err() and writes its own terminal row (handleCancelled) exactly as a
+// ctx.Err() and parks its own run (parkRunOpen) exactly as a
 // user-initiated Cancel does; this function only fires the signal.
 func (s *Spawner) killAllLiveSandboxes() int {
 	s.mu.Lock()

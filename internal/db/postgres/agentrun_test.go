@@ -454,7 +454,7 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 // TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims
 // pins the routing the delegate spawner uses for manual-run
-// bookkeeping: lifecycle writes (Complete, MarkCancelledIfActive,
+// bookkeeping: lifecycle writes (Complete, ParkOpen,
 // MarkResuming) wrapped in SyntheticClaimsWithTx must pass RLS under
 // tf_app and land the expected status. Mirrors the spawner's per-call-site
 // branch:
@@ -518,11 +518,11 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 	// Drive each lifecycle write through SyntheticClaimsWithTx — the
 	// shape the spawner uses for every manual-run bookkeeping point.
 
-	// MarkOpen (park) then MarkQueuedForResume (resume-by-enqueue) — the
+	// ParkOpen (park) then MarkQueuedForResume (resume-by-enqueue) — the
 	// open→queued CAS the resume path drives under the user's claims.
 	var parked, requeued bool
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		p, mErr := tx.Conversations.MarkOpen(ctx, orgID, runID)
+		p, mErr := tx.Conversations.ParkOpen(ctx, orgID, runID, db.ParkIdle())
 		parked = p
 		if mErr != nil {
 			return mErr
@@ -531,7 +531,7 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 		requeued = r
 		return mErr
 	}); err != nil {
-		t.Fatalf("MarkOpen/MarkQueuedForResume under synth claims: %v", err)
+		t.Fatalf("ParkOpen/MarkQueuedForResume under synth claims: %v", err)
 	}
 	if !parked || !requeued {
 		t.Errorf("park/requeue = (%v, %v), want (true, true)", parked, requeued)

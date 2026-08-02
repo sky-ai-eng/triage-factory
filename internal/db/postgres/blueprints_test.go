@@ -191,12 +191,12 @@ func TestBlueprintStore_Postgres_ReplaceAndListSteps(t *testing.T) {
 
 // TestBlueprintStore_Postgres_RunLifecycle exercises CreateRun → GetRun →
 // RunsForBlueprint (surfacing the step run's terminal runs.outcome) →
-// TestBlueprintStore_Postgres_MarkRunStatus_CancelsOrphanedChild pins the
-// atomic guarantee: flipping a blueprint_run to a terminal status cancels any
-// still-active child run in the same transaction (stamping completed_at), so a
-// terminal parent is never observed alongside a live child. Mirrors the SQLite
-// coverage to prevent Postgres/SQLite divergence.
-func TestBlueprintStore_Postgres_MarkRunStatus_CancelsOrphanedChild(t *testing.T) {
+// TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild pins the
+// atomic guarantee: flipping a blueprint_run to a terminal status parks any
+// still-mid-flight child run in the same transaction (stamping parked_at), so
+// a terminal parent is never observed alongside a live child. Mirrors the
+// SQLite coverage to prevent Postgres/SQLite divergence.
+func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
@@ -245,7 +245,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_CancelsOrphanedChild(t *testing.T
 			t.Fatalf("read claim for %s: %v", convID, err)
 		}
 		if !released || outcome != "cancelled" {
-			t.Errorf("cancelled child's claim = (released=%v, outcome=%q), want (true, cancelled)", released, outcome)
+			t.Errorf("parked child's claim = (released=%v, outcome=%q), want (true, cancelled)", released, outcome)
 		}
 	}
 	seedChildClaim(childID, "exec-oc")
@@ -257,8 +257,8 @@ func TestBlueprintStore_Postgres_MarkRunStatus_CancelsOrphanedChild(t *testing.T
 	if !changed {
 		t.Fatal("MarkRunStatusSystem reported no change")
 	}
-	if st, completed := pgRunStatus(t, h, childID); st != "cancelled" || !completed {
-		t.Errorf("child = (%q, completed=%v), want (cancelled, true) — a terminal parent must not strand a live child", st, completed)
+	if st, parked := pgRunParked(t, h, childID); st != "open" || !parked {
+		t.Errorf("child = (%q, parked=%v), want (open, true) — a terminal parent must not strand a live child", st, parked)
 	}
 	assertClaimReleased(childID)
 
@@ -285,8 +285,8 @@ func TestBlueprintStore_Postgres_MarkRunStatus_CancelsOrphanedChild(t *testing.T
 	if !changed {
 		t.Fatal("MarkRunStatus reported no change")
 	}
-	if st, completed := pgRunStatus(t, h, childID2); st != "cancelled" || !completed {
-		t.Errorf("child 2 = (%q, completed=%v), want (cancelled, true)", st, completed)
+	if st, parked := pgRunParked(t, h, childID2); st != "open" || !parked {
+		t.Errorf("child 2 = (%q, parked=%v), want (open, true)", st, parked)
 	}
 	assertClaimReleased(childID2)
 }

@@ -144,7 +144,7 @@ func (s *Spawner) getController() RunController {
 // today's N=1 behavior, including its exact error), and only on a local
 // miss resolve a remote owner. Cancel is NOT extended here — cancel's
 // cross-pod hastening is fire-and-forget from cancel.go's Spawner.Cancel
-// (the DB-only MarkCancelledIfActive write is already the source of
+// (the DB-only park write is already the source of
 // truth), so crossPodController.Cancel is a pure passthrough to the local
 // lookup.
 type crossPodController struct {
@@ -241,7 +241,7 @@ func (s *Spawner) routeControlSignal(ctx context.Context, runID string, kind dom
 
 // signalCancelBestEffort hastens a live remote kill for a run this pod
 // doesn't own locally — fire-and-forget, per the reply-leg contract's
-// cancel row: the caller's DB-only MarkCancelledIfActive write is already
+// cancel row: the caller's DB-only park write is already
 // the source of truth and already works cross-pod, so a failure or
 // timeout here is never surfaced. No-op when runSignals isn't wired
 // (local mode, or multi mode before/without SetRunSignals).

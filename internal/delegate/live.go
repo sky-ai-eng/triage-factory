@@ -17,6 +17,7 @@ package delegate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -51,6 +52,13 @@ type liveParkContext struct {
 	claudeCwd     string
 	triggerType   string
 	creatorUserID string
+	// claimID names the engagement writing the park, routing it through the
+	// claim fence. Empty keeps the unfenced write — the live driver's idle
+	// park has no claim in scope.
+	claimID string
+	// reason is why: db.ParkIdle() for a turn that simply ended,
+	// db.ParkStopped(...) for a cancel. See ConversationStore.ParkOpen.
+	reason db.Park
 }
 
 // liveOutcome is the disposition of one agent invocation, produced
@@ -65,7 +73,7 @@ type liveParkContext struct {
 //     keeping the warm worktree.
 //   - err set, no result → the process errored / was cancelled before any
 //     terminal result, or the agent never corrected an invalid conclusion
-//     envelope within the bound; the caller routes through handleCancelled /
+//     envelope within the bound; the caller routes through parkRunOpen /
 //     failRun.
 type liveOutcome struct {
 	result     *agentproc.Result
@@ -235,10 +243,10 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 					// Bounded resume: no idle timer will ever close the warm
 					// process — close it and park to a durable resume.
 					_ = proc.Close()
-					s.parkRunOpen(park, proc.SessionID())
+					_ = s.parkRunOpen(park, proc.SessionID())
 					return liveOutcome{hibernated: true}
 				}
-				s.markRunOpen(park)
+				_ = s.markRunOpen(park)
 				resetIdleTimer(idle, idleTimeout)
 				continue
 			}
@@ -291,7 +299,7 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 				// reconcile correctly leaves alone (nothing to resume). No retry, no
 				// fail, no claim about why. Re-arm idle and loop; idle later closes
 				// the warm process (status stays open).
-				s.markRunOpen(park)
+				_ = s.markRunOpen(park)
 				resetIdleTimer(idle, idleTimeout)
 			}
 
@@ -303,7 +311,7 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 			// to a durable resume. The status flips to open here; whether a process
 			// was warm was never a status.
 			_ = proc.Close()
-			s.parkRunOpen(park, proc.SessionID())
+			_ = s.parkRunOpen(park, proc.SessionID())
 			return liveOutcome{hibernated: true}
 
 		case <-proc.Done():
@@ -326,58 +334,101 @@ func invalidEnvelopeCorrection() string {
 }
 
 // markRunOpen flips a run's status to `open` under a race guard, then nudges
-// the board + UI. The shared flip for both the warm path (the live driver's
-// no-conclusion turn, where the process stays warm in s.procs and there's
-// nothing to snapshot yet) and parkRunOpen (process gone — snapshots first).
-// Flipping on the no-conclusion turn, rather than only at idle, is what makes a
-// crash in the warm window recover correctly: the boot reconcile leaves `open`
-// runs alone, since a restart provides no input to resume them. Nil-safe so the
-// no-DB driver tests can exercise the loop.
-func (s *Spawner) markRunOpen(park liveParkContext) {
+// the board + UI. The shared flip for every park: the warm path (the live
+// driver's no-conclusion turn, where the process stays warm in s.procs and
+// there's nothing to snapshot yet), parkRunOpen (process gone — snapshots
+// first), and a cancel (park.reason names the stop). Flipping on the
+// no-conclusion turn, rather than only at idle, is what makes a crash in the
+// warm window recover correctly: the boot reconcile leaves `open` runs alone,
+// since a restart provides no input to resume them. Nil-safe so the no-DB
+// driver tests can exercise the loop.
+//
+// Routing has three arms, and which one a park takes says who is speaking. An
+// engagement parking its own run (claimID set) goes through the claim fence,
+// so a zombie executor cannot park a conversation its successor holds. A
+// manual run with no claim in scope writes under the creator's synthetic
+// claims. Everything else is a system write on the admin pool.
+//
+// Returns fenced: true when the fence refused the write because this
+// engagement's claim was released. Nothing was recorded or broadcast, and the
+// caller must not act on the run's state either — it belongs to whoever holds
+// the claim now. Always false on the two unfenced arms.
+func (s *Spawner) markRunOpen(park liveParkContext) (fenced bool) {
 	if s.agentRuns == nil {
-		return // test fixture with no DB wired
+		return false // test fixture with no DB wired
 	}
 	bgCtx := context.Background()
 	var flipped bool
 	var err error
-	if park.triggerType == "manual" {
+	switch {
+	case park.claimID != "":
+		flipped, err = s.agentRuns.ParkOpenForClaimSystem(bgCtx, park.orgID, park.runID, park.claimID, park.reason)
+	case park.triggerType == "manual":
 		err = s.tx.SyntheticClaimsWithTx(bgCtx, park.orgID, park.creatorUserID, func(ts db.TxStores) error {
-			f, e := ts.Conversations.MarkOpen(bgCtx, park.orgID, park.runID)
+			f, e := ts.Conversations.ParkOpen(bgCtx, park.orgID, park.runID, park.reason)
 			flipped = f
 			return e
 		})
-	} else {
-		flipped, err = s.agentRuns.MarkOpenSystem(bgCtx, park.orgID, park.runID)
+	default:
+		flipped, err = s.agentRuns.ParkOpenSystem(bgCtx, park.orgID, park.runID, park.reason)
+	}
+	if errors.Is(err, db.ErrClaimReleased) {
+		// A successor owns the conversation, so this park is not its state to
+		// report. The workspace stays too — it may be the one that successor
+		// is running in.
+		delegateLog.Error("claim fence refused the park — a successor owns this conversation; recording nothing",
+			"run", park.runID, "claim_id", park.claimID, "org_id", park.orgID, "error", err)
+		return true
 	}
 	if err != nil {
 		delegateLog.Warn("mark run open failed", "run", park.runID, "error", err)
-		return
+		return false
 	}
 	if !flipped {
-		// A racing terminal flip (cancel/takeover) won — leave its status.
-		return
+		// A racing terminal flip won, or this is an idle re-park of a row
+		// already `open` — leave its status and say nothing.
+		return false
 	}
 	s.broadcastRunUpdate(park.orgID, park.runID, "open")
 	s.recomputeTaskBoardColumn(park.orgID, park.taskID)
+	return false
 }
 
 // parkRunOpen records a run as `open` when its process is gone — the live
-// driver idle-closed it, or a one-shot/resume turn ended without a conclusion.
-// It snapshots the workspace (the cold-resume backstop) BEFORE the flip so a
-// resume that lands without the warm worktree can rebuild it, then flips the
-// status via markRunOpen and toasts. markRunOpen is the warm-process sibling
-// (no snapshot — the process is still alive to take the next message). "open"
-// makes no claim about why the run stopped or who continues it; any later input
-// resumes it on the same ResumeWithMessage path.
-func (s *Spawner) parkRunOpen(park liveParkContext, sessionID string) {
+// driver idle-closed it, a one-shot/resume turn ended without a conclusion, or
+// someone cancelled it. It snapshots the workspace (the cold-resume backstop)
+// BEFORE the flip so a resume that lands without the warm worktree can rebuild
+// it, then flips the status via markRunOpen. markRunOpen is the warm-process
+// sibling (no snapshot — the process is still alive to take the next message).
+// "open" makes no claim about why the run stopped or who continues it; any
+// later input resumes it on the same ResumeWithMessage path.
+//
+// The cancel path is this same function, and that is the point: the old
+// cancel handler wrote its own terminal and removed the worktree on its way
+// out, which threw away the one thing a user who just killed a wedged run is
+// likely to want back. A stop is a park with a reason attached.
+func (s *Spawner) parkRunOpen(park liveParkContext, sessionID string) (fenced bool) {
 	// Snapshot BEFORE the flip: once dormant the run can resume on a host
 	// without the warm worktree, so the blob must exist by the time the
 	// status commits. Best-effort — the kept warm worktree is the fast path.
-	if err := s.snapshotWorkspace(context.Background(), park.orgID, park.namespace, park.claudeCwd, sessionID); err != nil {
-		delegateLog.Warn("snapshot workspace for run before parking open failed", "run", park.runID, "error", err)
+	// Skipped when there is no workspace yet (a cancel during setup), which
+	// snapshotWorkspace would reject anyway.
+	if park.claudeCwd != "" && park.namespace != "" {
+		if err := s.snapshotWorkspace(context.Background(), park.orgID, park.namespace, park.claudeCwd, sessionID); err != nil {
+			delegateLog.Warn("snapshot workspace before parking open failed", "run", park.runID, "error", err)
+		}
 	}
-	s.markRunOpen(park)
-	toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s is open — resumes on the next message", shortRunID(park.runID)))
+	if fenced := s.markRunOpen(park); fenced {
+		return true
+	}
+	// Only the idle park toasts. A deliberate stop terminates the blueprint
+	// behind it, so "resumes on the next message" would be a promise this
+	// build cannot keep — the claim gate refuses a parked step under a
+	// finished blueprint until the resume work lands.
+	if !park.reason.Deliberate() {
+		toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s is open — resumes on the next message", shortRunID(park.runID)))
+	}
+	return false
 }
 
 // runOneShot wraps the blocking one-shot agentproc.Run into the shared

@@ -9,6 +9,52 @@ import (
 
 //go:generate go run github.com/vektra/mockery/v2 --name=ConversationStore --output=./mocks --case=underscore --with-expecter
 
+// Park is why a conversation is being parked `open` — the sole input to
+// ConversationStore.ParkOpen, and the sole thing that distinguishes the two
+// ways a run stops without concluding.
+//
+// It is a type rather than a pair of strings because the distinction is
+// load-bearing three times over (see ParkOpen) and was previously carried by
+// having two nearly-identical store methods, which is exactly how their
+// predicates drifted apart.
+type Park struct {
+	// StopReason is recorded on the conversation. Empty for an idle park:
+	// "the turn ended and nothing more arrived" is not a reason worth a word,
+	// and blanking a reason an earlier stop recorded would lose it.
+	StopReason string
+	// ResultSummary is the human-facing note for a deliberate stop. Empty
+	// leaves whatever is already on the row.
+	ResultSummary string
+}
+
+// ParkIdle is the turn simply ending — the live driver's no-conclusion turn or
+// its idle close. No reason, claim released 'parked', an already-parked row
+// left alone.
+func ParkIdle() Park { return Park{} }
+
+// ParkStopped is a deliberate stop: someone ended this run. Records the
+// reason, releases the claim 'cancelled', and re-parks an already-parked row
+// so the caller knows the stop landed and can finalize the blueprint behind
+// it. stopReason must be non-empty — an empty one is an idle park by
+// definition, and silently becoming one would drop the claim outcome that is
+// the only remaining record of the cancellation.
+func ParkStopped(stopReason, summary string) Park {
+	return Park{StopReason: stopReason, ResultSummary: summary}
+}
+
+// Deliberate reports whether this park was asked for rather than arrived at.
+func (p Park) Deliberate() bool { return p.StopReason != "" }
+
+// ClaimOutcome is what the engagement's claim releases with. A deliberate stop
+// is the one place an engagement's cancellation is still recorded, now that
+// the conversation status no longer spells it.
+func (p Park) ClaimOutcome() string {
+	if p.Deliberate() {
+		return "cancelled"
+	}
+	return "parked"
+}
+
 // ConversationStore owns the conversations / messages tables — agent
 // conversation lifecycle, transcript messages, and the derived queries the
 // delegate spawner + agent handler + chains depend on. All methods take
@@ -50,10 +96,9 @@ type ConversationStore interface {
 	// Complete finalizes a conversation (status + terminal narrative
 	// fields only — the conversation carries no accounting cache) and
 	// releases the conversation's active claim (if one exists) with an
-	// outcome mapped from status ('failed'/'task_unsolvable' release as
-	// 'failed', 'cancelled' as 'cancelled', anything else as 'completed'),
-	// stamping the invocation's reported duration/turns telemetry onto the
-	// released claim.
+	// outcome mapped from status ('failed' releases as 'failed', anything
+	// else as 'completed'), stamping the invocation's reported
+	// duration/turns telemetry onto the released claim.
 	//
 	// costUSD is the invocation's reported total, settled as ONE lump on
 	// the engagement's own newest message row — the newest row attributed
@@ -78,14 +123,29 @@ type ConversationStore interface {
 	// is 'failed' and the caller classified the cause; "" → NULL.
 	Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary, outcome, outcomeReason, failureKind string) error
 
-	// MarkOpen flips a running run to `open` — a turn ended without a
-	// conclusion (or the live process idle-closed). Stamps parked_at to the
-	// current time so the snapshot-retention sweep keys this open run off its
-	// last park rather than started_at, and releases the active claim with
-	// outcome 'parked' (the engagement ended; the parked conversation has no
-	// owner until the next claim). Returns ok=false (no error) if the row
-	// already reached a terminal state.
-	MarkOpen(ctx context.Context, orgID, runID string) (bool, error)
+	// ParkOpen flips a run to `open`: it stopped without concluding. This is
+	// the ONLY writer of that state, and there is deliberately only one —
+	// an idle hibernation and a user's cancel produce the same row, because
+	// they are the same fact about the conversation. Stamps parked_at (only
+	// when unset, so a re-park doesn't restart the snapshot-retention clock on
+	// a workspace that went dormant earlier) and releases the active claim.
+	// Returns ok=false (no error) if the row already reached a terminal state.
+	//
+	// park says WHY, and that is the one input the two callers differ on. It
+	// decides three things at once, so the difference between "the turn ended"
+	// and "someone stopped this" is stated once rather than forked into two
+	// methods that drifted:
+	//
+	//   - the stop_reason / result_summary recorded on the row (a Park with no
+	//     reason leaves both untouched rather than blanking them),
+	//   - the outcome the claim releases with — 'parked' for an idle turn-end,
+	//     'cancelled' for a deliberate stop, which is now the ONLY place the
+	//     cancellation of an engagement is recorded,
+	//   - whether an already-parked row counts as a flip. A deliberate stop
+	//     re-parks (the caller has to learn it landed, so it can finalize the
+	//     blueprint); an idle park does not, because the live driver parks on
+	//     every no-conclusion turn and each one would otherwise re-broadcast.
+	ParkOpen(ctx context.Context, orgID, runID string, park Park) (bool, error)
 
 	// MarkQueuedForResume is resume-by-enqueue's status flip: the
 	// (status, outcome) compare-and-swap over every non-finish
@@ -99,6 +159,14 @@ type ConversationStore interface {
 	// ok=false means the run is no longer resumable (a concurrent
 	// resume/cancel/claim already moved it) — the caller maps the miss to
 	// 409.
+	//
+	// The blueprint half of "resumable" is NOT checked here: ClaimNextRun
+	// only drives rows whose blueprint is still running, so waking one under
+	// a finished blueprint would strand it mid-flight forever. That gate
+	// lives in the caller (delegate.blueprintDrivableForResume), because it
+	// needs an admin-pool read — blueprint_runs RLS hides another user's
+	// manual blueprint, and a teammate resuming a run must not be refused
+	// for a row they merely cannot see.
 	MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error)
 
 	// SetSession stores the Claude Code session id captured from
@@ -125,12 +193,6 @@ type ConversationStore interface {
 	// spawner finishes worktree setup (GitHub PR clone, Jira
 	// run-root creation).
 	SetWorktreePath(ctx context.Context, orgID, runID, path string) error
-
-	// MarkCancelledIfActive marks a run cancelled with the given
-	// stop_reason / summary, but only if the row hasn't already
-	// reached a terminal state. Releases the active claim (if any) with
-	// outcome 'cancelled'. Used by the user-cancel path.
-	MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
 
 	// MarkFailedIfActive flips a run to 'failed' iff it hasn't
 	// already reached a terminal state, releasing the active claim (if
@@ -229,16 +291,15 @@ type ConversationStore interface {
 
 	// ActiveIDsForTeamSystem returns the IDs of every active run owned by the
 	// team (conversations.team_id = teamID), using the same active set as
-	// ActiveIDsForTask: status NOT IN ('completed','failed','cancelled',
-	// 'task_unsolvable','pending_approval'). This is the team-archive force-stop
-	// cascade's enumeration, the team-scoped sibling of
-	// ActiveIDsForTaskSystem — each returned id is passed to
-	// spawner.Cancel(orgID, runID, ""), which hard-kills a live process or marks
-	// a parked `open` run cancelled. pending_approval is deliberately excluded:
-	// the agent process already exited with a prepared artifact (no live work to
-	// stop), spawner.Cancel can't flip it (MarkCancelledIfActive's filter omits
-	// it), and leaving it inert means a later restore can still surface the
-	// pending review. Admin pool / org-scoped: archive runs from an org-admin
+	// ActiveIDsForTask: status NOT IN ('completed','failed','pending_approval').
+	// This is the team-archive force-stop cascade's enumeration, the
+	// team-scoped sibling of ActiveIDsForTaskSystem — each returned id is
+	// passed to spawner.Cancel(orgID, runID, ""), which hard-kills a live
+	// process or parks a run that has none. pending_approval is deliberately
+	// excluded: the agent process already exited with a prepared artifact (no
+	// live work to stop), spawner.Cancel can't flip it
+	// (ParkOpen's filter omits it), and leaving it inert means a
+	// later restore can still surface the pending review. Admin pool / org-scoped: archive runs from an org-admin
 	// handler whose caller may not be a member of the team, so the team-visibility
 	// RLS would hide the rows on the app pool.
 	ActiveIDsForTeamSystem(ctx context.Context, orgID, teamID string) ([]string, error)
@@ -393,7 +454,7 @@ type ConversationStore interface {
 	// has been passed in. Routes through the admin pool because the
 	// agent subprocess has no JWT-claims context yet.
 	LookupOrgForRunSystem(ctx context.Context, runID string) (string, error)
-	MarkOpenSystem(ctx context.Context, orgID, runID string) (bool, error)
+	ParkOpenSystem(ctx context.Context, orgID, runID string, park Park) (bool, error)
 	SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error
 	// SetActiveClaimPhaseSystem writes claims.phase on the conversation's
 	// ACTIVE claim — the setup/parked sub-state of a live engagement
@@ -423,7 +484,7 @@ type ConversationStore interface {
 	RecordClaimSandboxStatsSystem(ctx context.Context, orgID, claimID string, peakMemMB *int, cpuUsec *int64) error
 
 	SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error
-	MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
+
 	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID, failureKind string) (bool, error)
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.Message) (int64, error)
 
@@ -523,9 +584,9 @@ type ConversationStore interface {
 	// which is a different thing and must not be treated as a lost race.
 	MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, failureKind string) (bool, error)
 
-	// MarkCancelledIfActiveForClaimSystem is MarkCancelledIfActive driven by
-	// the engagement: the terminal an executor writes when its own run's
-	// context is cancelled, refused once it has been fenced out.
+	// ParkOpenForClaimSystem is ParkOpen driven by the engagement itself: the
+	// park an executor writes when its own run's context is cancelled, refused
+	// once it has been fenced out.
 	//
 	// The unfenced twin stays, and is what a USER-initiated cancel uses. That
 	// distinction is the whole reason both exist: a person cancelling a run
@@ -534,7 +595,13 @@ type ConversationStore interface {
 	// only entitled to end a run it still owns. Reaching for the unfenced
 	// version from an engagement path is how the cancel route around this
 	// fence gets rebuilt.
-	MarkCancelledIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, stopReason, summary string) (bool, error)
+	//
+	// The idle park has no claim in scope and so goes through the unfenced
+	// ParkOpen. That is a live gap rather than a decision — a zombie executor
+	// can still idle-park a conversation a successor holds — but closing it
+	// means threading a claim id through the live driver, which is its own
+	// change.
+	ParkOpenForClaimSystem(ctx context.Context, orgID, runID, claimID string, park Park) (bool, error)
 
 	// SetClaimPhaseSystem writes claims.phase on one named claim — the
 	// claim-keyed sibling of SetActiveClaimPhaseSystem, for the engagement

@@ -1,6 +1,15 @@
 // User-driven cancellation and the failure-finalization helpers a
-// cancelled or errored run uses to reach a terminal DB state +
-// surface a toast.
+// cancelled or errored run uses to reach its final DB state + surface a toast.
+//
+// Cancellation is spelled at two layers and neither of them is the
+// conversation. The task layer has return-to-queue and drag-to-done; the
+// blueprint layer has cancel_requested / BlueprintRunStatusCancelled. So a
+// cancelled run PARKS `open` — it stopped without concluding, which is all the
+// conversation row has to say — and its blueprint carries the cancellation.
+// The park keeps the workspace: the snapshot is written before the flip and
+// the retention TTL is what eventually collects it, because the moment a user
+// kills a wedged run is exactly the moment they are most likely to want the
+// work back.
 
 package delegate
 
@@ -8,13 +17,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
-	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // Cancel aborts a run at any phase — clone, fetch, worktree setup, or agent execution.
@@ -59,12 +66,31 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 	if run == nil {
 		return fmt.Errorf("no active run %s", runID)
 	}
+	// A run that already concluded has nothing to cancel, and saying so here —
+	// rather than letting the park write below discover it — is what keeps a
+	// stale cancel a pure no-op. It has to come before the blueprint signal:
+	// a completed step whose blueprint is still advancing would otherwise have
+	// its NEXT step cancelled by a click aimed at work that had already
+	// finished.
+	if domain.IsTerminalRunStatus(run.Status) {
+		return fmt.Errorf("no active run %s", runID)
+	}
+
+	// The cancellation itself belongs to the blueprint layer, so raise its
+	// signal FIRST — before anything is killed and before this call's own
+	// write. Two things follow from the ordering: whichever path disposes of
+	// the run (the reactor in the run's own goroutine, or the DB-only write
+	// below) sees cancel_requested and finalizes the blueprint 'cancelled',
+	// and the claim gate stops handing this blueprint's steps out, so nothing
+	// re-claims the run in the window between the kill and the finalize.
+	s.requestBlueprintCancel(context.Background(), orgID, run.BlueprintRunID)
 
 	// Route the hard-kill through the control seam: at N=1 it resolves the
 	// registered ctx cancel from s.cancels; horizontal scaling swaps it for
 	// a DB-signal to the executor that owns the run. A found handle SIGKILLs
-	// the live process (the goroutine then writes the terminal cancelled
-	// status when it observes ctx.Err()).
+	// the live process (the goroutine then parks the run when it observes
+	// ctx.Err(), and its reactor finalizes the blueprint off the signal
+	// raised above).
 	if s.getController().Cancel(runID) {
 		return nil
 	}
@@ -77,10 +103,10 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 	s.signalCancelBestEffort(orgID, runID, run.ExecutorID)
 
 	// No active goroutine — the run may be parked `open` with no subprocess to
-	// kill. Mark it cancelled directly via DB.
-	// MarkCancelledIfActive's status-NOT-IN filter handles every non-terminal
-	// state, so this is also a defensive catch for any other "no goroutine but
-	// row not terminal" edge case.
+	// kill. Park it directly via DB.
+	// ParkOpen's status-NOT-IN filter handles every non-terminal state, so this
+	// is also a defensive catch for any other "no goroutine but row not
+	// terminal" edge case.
 	//
 	// We also have to drain the per-entity firing queue ourselves on
 	// terminal exit. The active-goroutine cancel paths drain via
@@ -105,41 +131,51 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 	// transition. System-initiated cancel (router cleanup, drain
 	// sweeps): admin pool, no user attribution. Detached context —
 	// the request that triggered Cancel can be gone but the
-	// terminal write still needs to land.
+	// park still needs to land.
 	//
 	// Unfenced, deliberately: this is an outside actor ending a run, not an
 	// engagement ending itself. The whole point of a cancel is to override
 	// whichever executor holds the run — it even signals the remote owner
 	// best-effort above — so gating it on claim ownership would break the
 	// feature. The claim-fenced variants exist for the executor's own
-	// self-cancel (handleCancelled, markCancelledAfterResume); do not route
-	// this path through them.
+	// self-park (parkRunOpen with a claim in scope, parkCancelledAfterResume);
+	// do not route this path through them.
+	//
+	// No snapshot is taken here: this path runs precisely when no live
+	// engagement exists, so either the run already parked (and snapshotted on
+	// its way down) or it never got far enough to have a workspace worth
+	// capturing.
 	var (
 		flipped bool
 		err     error
 	)
 	bgCtx := context.Background()
+	park := db.ParkStopped("user_cancelled", "Run cancelled by user")
+	if userID == "" {
+		park = db.ParkStopped("system_cancelled", "Run cancelled by system")
+	}
 	if userID != "" {
 		err = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, userID, func(ts db.TxStores) error {
-			f, mErr := ts.Conversations.MarkCancelledIfActive(bgCtx, orgID, runID, "user_cancelled", "Run cancelled by user")
+			f, mErr := ts.Conversations.ParkOpen(bgCtx, orgID, runID, park)
 			flipped = f
 			return mErr
 		})
 	} else {
-		flipped, err = s.agentRuns.MarkCancelledIfActiveSystem(bgCtx, orgID, runID, "system_cancelled", "Run cancelled by system")
+		flipped, err = s.agentRuns.ParkOpenSystem(bgCtx, orgID, runID, park)
 	}
 	if err != nil {
-		return fmt.Errorf("mark cancelled: %w", err)
+		return fmt.Errorf("park cancelled run: %w", err)
 	}
 	if !flipped {
 		return fmt.Errorf("no active run %s", runID)
 	}
-	s.broadcastRunUpdate(orgID, runID, "cancelled")
+	s.broadcastRunUpdate(orgID, runID, "open")
 	// This DB-only cancel path runs only with no live orchestrator goroutine —
-	// the step had parked (open), so the orchestrator already
-	// returned and the owning blueprint_run is stuck in 'running'. Finalize it
-	// (cancel the blueprint_run, clean the shared worktree, discard the
-	// blueprint_run-keyed snapshot) so neither the row nor the blob is orphaned.
+	// the step had parked (open), so the orchestrator already returned and the
+	// owning blueprint_run is stuck in 'running'. Finalize it (cancel the
+	// blueprint_run, clean the warm worktree) so the row isn't orphaned. The
+	// snapshot is deliberately NOT dropped: it is the parked workspace this
+	// cancel just retained.
 	// The per-entity drain stays below, keyed off the run's trigger type so the
 	// manual short-circuit holds.
 	s.finalizeParkedBlueprintOnCancel(bgCtx, orgID, run, userID)
@@ -147,55 +183,6 @@ func (s *Spawner) Cancel(orgID, runID, userID string) error {
 		s.notifyDrainer(orgID, triggerType, entityID)
 	}
 	return nil
-}
-
-// handleCancelled finalizes a run that exited via context cancel. wtPath
-// is the worktree directory the run was using (empty for no-cwd Jira
-// runs); we clean it up explicitly here in addition to runAgent's
-// deferred cleanup so the bare-repo registration is pruned even if the
-// goroutine returns through one of the early paths that doesn't reach
-// the defer (e.g., setupErr before the defer is installed).
-// claimID names the engagement writing this terminal. It matters more here
-// than anywhere else in the fenced set: killing every live sandbox is exactly
-// what a partition self-fence trip does, and each killed run's goroutine then
-// arrives here to record its own cancellation. If the self-fence fired late —
-// the failure this whole layer exists to backstop — that write would land on
-// a conversation the reaper has already handed to a successor. Empty claimID
-// keeps the unfenced write for paths with no claimed run in scope.
-//
-// Returns fenced: true when the terminal was refused. Nothing was recorded,
-// nothing was broadcast, and the worktree was left alone.
-func (s *Spawner) handleCancelled(orgID, runID string, startTime time.Time, wtPath, claimID, triggerType, creatorUserID string) (fenced bool) {
-	elapsed := int(time.Since(startTime).Milliseconds())
-	bgCtx := context.Background()
-	var completeErr error
-	switch {
-	case claimID != "":
-		completeErr = s.agentRuns.CompleteForClaimSystem(bgCtx, orgID, runID, claimID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "", "")
-	case triggerType == "manual":
-		completeErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.Conversations.Complete(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "", "")
-		})
-	default:
-		completeErr = s.agentRuns.CompleteSystem(bgCtx, orgID, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user", "", "", "")
-	}
-	if errors.Is(completeErr, db.ErrClaimReleased) {
-		// A successor owns the conversation, so this run's cancellation is
-		// not its state to report. The worktree stays too — it may be the
-		// workspace that successor is running in.
-		delegateLog.Error("claim fence refused the cancellation terminal — a successor owns this conversation; recording nothing",
-			"run_id", runID, "claim_id", claimID, "org_id", orgID, "error", completeErr)
-		return true
-	}
-	if completeErr != nil {
-		delegateLog.Warn("failed to record cancellation", "run_id", runID, "error", completeErr)
-	}
-	s.broadcastRunUpdate(orgID, runID, "cancelled")
-	if wtPath != "" {
-		// Best-effort cleanup; same rationale as the defer in runAgent.
-		_ = worktree.RemoveAt(wtPath, runID)
-	}
-	return false
 }
 
 // classifyFailureKind maps a runtime error from the agent process to

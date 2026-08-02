@@ -173,15 +173,29 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		return true
 	}
 
-	// cancelled records this run's cancelled terminal, folding a fence trip
-	// the same way. This is the path a partition self-fence trip drives every
-	// live run down, so a late self-fence lands here first.
-	cancelled := func() bool {
-		if !s.handleCancelled(orgID, runID, startTime, cfg.wtPath, cfg.claimID, triggerType, creatorUserID) {
-			return false
-		}
+	// cancelled parks this run and folds a fence trip the same way. This is
+	// the path a partition self-fence trip drives every live run down, so a
+	// late self-fence lands here first. parked is set unconditionally, not
+	// just on a fence trip: a cancel is a park now, so the worktree stays as
+	// the warm resume cache exactly like an idle hibernation's does.
+	//
+	// sessionID rides in from the caller because it is only known once the
+	// agent has actually started — the pre-launch cancel below passes "" and
+	// snapshots a workspace with no transcript to carry.
+	cancelled := func(sessionID string) bool {
+		fenced := s.parkRunOpen(liveParkContext{
+			orgID:         orgID,
+			runID:         runID,
+			taskID:        task.ID,
+			namespace:     memoryNamespace(cfg.blueprintRunID, runID),
+			claudeCwd:     cfg.wtPath,
+			triggerType:   triggerType,
+			creatorUserID: creatorUserID,
+			claimID:       cfg.claimID,
+			reason:        db.ParkStopped("user_cancelled", "Cancelled by user"),
+		}, sessionID)
 		parked = true
-		return true
+		return fenced
 	}
 
 	if cfg.hasWT {
@@ -407,7 +421,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	s.updatePhase(orgID, runID, cfg.claimID, domain.ClaimPhaseAgentStarting)
 	if ctx.Err() != nil {
-		return cancelled()
+		return cancelled("")
 	}
 
 	extraEnv := []string{
@@ -629,7 +643,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	if out.err != nil {
 		if ctx.Err() != nil {
-			return cancelled()
+			return cancelled(out.sessionID)
 		}
 		return fail(fmt.Sprintf("%v\nstderr: %s", out.err, out.stderr), classifyFailureKind(out.err))
 	}
@@ -705,7 +719,7 @@ func (s *Spawner) processCompletion(
 	// it never takes this branch however envelope-shaped its text.
 	class, parsed := classifyAgentResult(completion.Result)
 	if !completion.IsError && class == turnNone {
-		s.parkRunOpen(liveParkContext{
+		_ = s.parkRunOpen(liveParkContext{
 			orgID:         orgID,
 			runID:         runID,
 			taskID:        task.ID,
@@ -713,6 +727,7 @@ func (s *Spawner) processCompletion(
 			claudeCwd:     claudeCwd,
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
+			reason:        db.ParkIdle(),
 		}, sessionID)
 		return true, false
 	}
@@ -857,16 +872,14 @@ func (s *Spawner) processCompletion(
 	// orchestrator advances (next step) or terminates (done / leave-open).
 	s.recomputeTaskBoardColumn(orgID, task.ID)
 
-	// Toast the terminal state. Success cases auto-hide; failed/unsolvable
-	// show as an error toast so the user notices even if they've clicked
-	// away from the runs page.
+	// Toast the terminal state. Success cases auto-hide; a failure shows as an
+	// error toast so the user notices even if they've clicked away from the
+	// runs page.
 	switch status {
 	case "completed":
 		toast.Success(s.wsHub, orgID, fmt.Sprintf("Run %s completed", shortRunID(runID)))
 	case "failed":
 		toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s failed: %s", shortRunID(runID), truncateToastMsg(resultSummary, 160)))
-	case "task_unsolvable":
-		toast.Warning(s.wsHub, orgID, fmt.Sprintf("Run %s — task unsolvable: %s", shortRunID(runID), truncateToastMsg(resultSummary, 140)))
 	}
 
 	// Workspace-snapshot cleanup is owned by terminateBlueprint, keyed by

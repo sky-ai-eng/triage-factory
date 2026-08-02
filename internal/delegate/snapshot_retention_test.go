@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -89,6 +90,24 @@ func TestTerminateBlueprint_AbortRetainsSnapshot(t *testing.T) {
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
 		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
+
+	assertSnapshotPresent(t, s, bpr, true)
+}
+
+// TestTerminateBlueprint_CancelRetainsSnapshot: a cancelled blueprint keeps its
+// workspace snapshot too. Its final step parked `open` rather than being torn
+// down, and throwing the workspace away at exactly the moment a user killed a
+// wedged run is the behavior this retention exists to stop — the TTL sweep is
+// what collects it instead.
+func TestTerminateBlueprint_CancelRetainsSnapshot(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	s, database, runID, taskID := setupAdvanceFixture(t, "term-cancel-keep")
+	wireBlobStore(t, s)
+	bpr := blueprintRunIDForRun(t, database, runID)
+	putTestSnapshot(t, s, bpr)
+
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
+		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCancelled, "cancelled", nil, true)
 
 	assertSnapshotPresent(t, s, bpr, true)
 }
@@ -195,18 +214,18 @@ func TestListReapableSnapshotKeys_SharedBlueprintNeedsAllPastTTL(t *testing.T) {
 	}
 }
 
-// TestMarkOpenResuming_StampsAndClearsParkedAt pins the park-timestamp
-// lifecycle: MarkOpen stamps parked_at (so retention keys off the last park),
+// TestParkOpenResuming_StampsAndClearsParkedAt pins the park-timestamp
+// lifecycle: ParkOpen stamps parked_at (so retention keys off the last park),
 // the resume-by-enqueue flip clears it (the run is no longer parked).
-func TestMarkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
+func TestParkOpenResuming_StampsAndClearsParkedAt(t *testing.T) {
 	s, database, run, _ := setupAdvanceFixture(t, "parked-stamp")
 	ctx := context.Background()
 
-	if _, err := s.agentRuns.MarkOpen(ctx, runmode.LocalDefaultOrgID, run); err != nil {
-		t.Fatalf("MarkOpen: %v", err)
+	if _, err := s.agentRuns.ParkOpen(ctx, runmode.LocalDefaultOrgID, run, db.ParkIdle()); err != nil {
+		t.Fatalf("ParkOpen: %v", err)
 	}
 	if !parkedAtSet(t, database, run) {
-		t.Error("MarkOpen did not stamp parked_at")
+		t.Error("ParkOpen did not stamp parked_at")
 	}
 
 	if _, err := s.agentRuns.MarkQueuedForResume(ctx, runmode.LocalDefaultOrgID, run); err != nil {

@@ -14,7 +14,14 @@ package domain
 //
 //	queued | fetching | cloning | agent_starting |
 //	awaiting_credentials | running | open            (non-terminal)
-//	completed | failed | cancelled | task_unsolvable (terminal)
+//	completed | failed                               (terminal)
+//
+// The terminal half is deliberately two names with one owner each: the agent
+// concluded, or the infrastructure died. Stopping a run without concluding it
+// is a park (`open`), not a third terminal — a park that is never resumed IS
+// the cancellation, and cancellation itself is already spelled at the task
+// layer (return-to-queue, drag-to-done) and the blueprint layer
+// (`cancel_requested` / BlueprintRunStatusCancelled).
 //
 // Keeping the sets here means "is this run active?" / "is this a phase?" has
 // ONE definition, not a copy per handler that can drift from the model.
@@ -60,10 +67,10 @@ const (
 	// not concluded, resumed through its own path rather than the dispatcher.
 	StatusOpen = "open"
 
-	StatusCompleted      = "completed"
-	StatusFailed         = "failed"
-	StatusCancelled      = "cancelled"
-	StatusTaskUnsolvable = "task_unsolvable"
+	// StatusCompleted — the agent reached a conclusion.
+	StatusCompleted = "completed"
+	// StatusFailed — the infrastructure under the agent died.
+	StatusFailed = "failed"
 )
 
 // AllClaimPhases returns the claim `phase` vocabulary. Adding an entry here is
@@ -89,9 +96,13 @@ func IsClaimPhase(status string) bool {
 	return false
 }
 
-// AllTerminalRunStatuses returns the terminal display statuses.
+// AllTerminalRunStatuses returns the terminal display statuses. One set, and
+// it describes stored rows as faithfully as it describes new writes: the
+// retired terminals were rewritten by migration rather than carried forward as
+// names every predicate has to remember (202608010002, SQLite; Postgres had no
+// rows to migrate). A stored status this doesn't list is a bug, not history.
 func AllTerminalRunStatuses() []string {
-	return []string{StatusCompleted, StatusFailed, StatusCancelled, StatusTaskUnsolvable}
+	return []string{StatusCompleted, StatusFailed}
 }
 
 // AllRunStatuses returns every value a displayed Conversation.Status may
@@ -103,13 +114,15 @@ func AllRunStatuses() []string {
 }
 
 // IsTerminalRunStatus reports whether status is a terminal run state — one the
-// run never leaves. NB failed runs are terminal regardless of failure_kind:
-// failure_kind is a *classification* of the failure (memory_limit / crash /
-// …) and is legitimately empty on an unclassified or legacy failed row, so a
-// failure count keys on status=="failed", never on a non-empty failure_kind.
+// run never leaves.
+//
+// NB failed runs are terminal regardless of failure_kind: failure_kind is a
+// *classification* of the failure (memory_limit / crash / …) and is
+// legitimately empty on an unclassified or legacy failed row, so a failure
+// count keys on status=="failed", never on a non-empty failure_kind.
 func IsTerminalRunStatus(status string) bool {
 	switch status {
-	case StatusCompleted, StatusFailed, StatusCancelled, StatusTaskUnsolvable:
+	case StatusCompleted, StatusFailed:
 		return true
 	}
 	return false

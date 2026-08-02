@@ -45,15 +45,14 @@ var _ db.ConversationStore = (*agentRunStore)(nil)
 // --- Lifecycle ---
 
 // claimOutcomeForStatus maps a conversation's terminal status onto the
-// claims outcome vocabulary: the engagement that produced a failed (or
-// unsolvable) conversation failed, a cancelled one was cancelled, and
-// everything else completed.
+// claims outcome vocabulary: the engagement that produced a failed
+// conversation failed, and everything else completed. The stored terminal
+// vocabulary is two names, so this is a two-way map; a cancelled engagement
+// releases with outcome 'cancelled' from the park path, which names the
+// outcome directly rather than deriving it from a status.
 func claimOutcomeForStatus(status string) string {
-	switch status {
-	case "failed", "task_unsolvable":
+	if status == "failed" {
 		return "failed"
-	case "cancelled":
-		return "cancelled"
 	}
 	return "completed"
 }
@@ -253,42 +252,81 @@ func releaseActiveClaimWithTelemetry(ctx context.Context, q queryer, orgID, runI
 	return err
 }
 
-// MarkOpen's park release is adjacent, not atomic — see releaseActiveClaim.
-// An 'open' row with a dangling claim needs no janitor arm of its own: the
-// resume flip (MarkQueuedForResume) releases any active claim on its way
-// back to the queue.
-func (s *agentRunStore) MarkOpen(ctx context.Context, orgID, runID string) (bool, error) {
-	flipped, err := markOpen(ctx, s.q, orgID, runID)
+// ParkOpen's release is adjacent, not atomic — see releaseActiveClaim. An
+// 'open' row with a dangling claim needs no janitor arm of its own: the resume
+// flip (MarkQueuedForResume) releases any active claim on its way back to the
+// queue.
+func (s *agentRunStore) ParkOpen(ctx context.Context, orgID, runID string, park db.Park) (bool, error) {
+	flipped, err := parkOpen(ctx, s.q, orgID, runID, park)
 	if err != nil || !flipped {
 		return flipped, err
 	}
-	return true, releaseActiveClaim(ctx, s.admin, orgID, runID, "parked")
+	return true, releaseActiveClaim(ctx, s.admin, orgID, runID, park.ClaimOutcome())
 }
 
-func (s *agentRunStore) MarkOpenSystem(ctx context.Context, orgID, runID string) (bool, error) {
+func (s *agentRunStore) ParkOpenSystem(ctx context.Context, orgID, runID string, park db.Park) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.admin, func(q queryer) error {
 		var err error
-		flipped, err = markOpen(ctx, q, orgID, runID)
+		flipped, err = parkOpen(ctx, q, orgID, runID, park)
 		if err != nil || !flipped {
 			return err
 		}
-		return releaseActiveClaim(ctx, q, orgID, runID, "parked")
+		return releaseActiveClaim(ctx, q, orgID, runID, park.ClaimOutcome())
 	})
 	return flipped, err
 }
 
-func markOpen(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
-	// pending_approval stays in the exclusion list as a backward-compat guard:
-	// runs no longer park in it, but a legacy row must not be re-opened from it.
+// ParkOpenForClaimSystem is ParkOpenSystem behind the fence — the self-park an
+// executor writes when its own run's ctx is killed. Its unfenced twin serves
+// the user-initiated cancel, which is deliberately not gated on ownership.
+func (s *agentRunStore) ParkOpenForClaimSystem(ctx context.Context, orgID, runID, claimID string, park db.Park) (bool, error) {
+	var flipped bool
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, runID, claimID); err != nil {
+			return err
+		}
+		var err error
+		flipped, err = parkOpen(ctx, q, orgID, runID, park)
+		if err != nil || !flipped {
+			return err
+		}
+		return releaseActiveClaim(ctx, q, orgID, runID, park.ClaimOutcome())
+	})
+	if err != nil {
+		return false, err
+	}
+	return flipped, nil
+}
+
+// parkOpen is the one row-write behind every park — see
+// ConversationStore.ParkOpen for what `park` decides.
+//
+// The exclusion list is the settled set, and the guard is an exclusion — so a
+// status missing from it doesn't refuse, it readmits. An `open` row with
+// undelivered input is claimable, so a park that "succeeded" on a finished run
+// would hand it back to the dispatcher.
+//
+// COALESCE on stop_reason / result_summary rather than a bare assignment: an
+// idle park carries neither and must not blank what an earlier deliberate stop
+// recorded.
+func parkOpen(ctx context.Context, q queryer, orgID, runID string, park db.Park) (bool, error) {
+	// A deliberate stop re-parks an already-parked row; an idle turn-end does
+	// not. Spelled as an extra excluded status rather than two queries.
+	reparkGuard := `, 'open'`
+	if park.Deliberate() {
+		reparkGuard = ``
+	}
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations
-		SET status = 'open', parked_at = now()
-		WHERE org_id = $1 AND id = $2
+		SET status = 'open',
+		    parked_at = COALESCE(parked_at, $1),
+		    stop_reason = COALESCE(NULLIF($2, ''), stop_reason),
+		    result_summary = COALESCE(NULLIF($3, ''), result_summary)
+		WHERE org_id = $4 AND id = $5
 		  AND (status IS NULL
-		       OR status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                         'pending_approval', 'open'))
-	`, orgID, runID)
+		       OR status NOT IN (`+runSettledStatusesSQL+reparkGuard+`))
+	`, time.Now().UTC(), park.StopReason, park.ResultSummary, orgID, runID)
 	if err != nil {
 		return false, err
 	}
@@ -528,73 +566,8 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, runID, failureKin
 		    failure_kind = NULLIF($2, '')
 		WHERE org_id = $3 AND id = $4
 		  AND (status IS NULL
-		       OR status NOT IN ('completed','failed','cancelled','task_unsolvable',
-		                         'pending_approval'))
+		       OR status NOT IN (`+runSettledStatusesSQL+`))
 	`, time.Now().UTC(), failureKind, orgID, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
-}
-
-// MarkCancelledIfActive's release is adjacent, not atomic — see
-// releaseActiveClaim for the crash shapes and the janitor arms that heal
-// them.
-func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
-	flipped, err := markCancelledIfActive(ctx, s.q, orgID, runID, stopReason, summary)
-	if err != nil || !flipped {
-		return flipped, err
-	}
-	return true, releaseActiveClaim(ctx, s.admin, orgID, runID, "cancelled")
-}
-
-func (s *agentRunStore) MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
-	var flipped bool
-	err := inTx(ctx, s.admin, func(q queryer) error {
-		var err error
-		flipped, err = markCancelledIfActive(ctx, q, orgID, runID, stopReason, summary)
-		if err != nil || !flipped {
-			return err
-		}
-		return releaseActiveClaim(ctx, q, orgID, runID, "cancelled")
-	})
-	return flipped, err
-}
-
-// MarkCancelledIfActiveForClaimSystem is MarkCancelledIfActiveSystem behind
-// the fence — the self-cancel an executor writes when its own run's ctx is
-// killed. Its unfenced twin above serves the user-initiated cancel, which is
-// deliberately not gated on ownership.
-func (s *agentRunStore) MarkCancelledIfActiveForClaimSystem(ctx context.Context, orgID, runID, claimID, stopReason, summary string) (bool, error) {
-	var flipped bool
-	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, runID, claimID); err != nil {
-			return err
-		}
-		var err error
-		flipped, err = markCancelledIfActive(ctx, q, orgID, runID, stopReason, summary)
-		if err != nil || !flipped {
-			return err
-		}
-		return releaseActiveClaim(ctx, q, orgID, runID, "cancelled")
-	})
-	if err != nil {
-		return false, err
-	}
-	return flipped, nil
-}
-
-func markCancelledIfActive(ctx context.Context, q queryer, orgID, runID, stopReason, summary string) (bool, error) {
-	now := time.Now()
-	res, err := q.ExecContext(ctx, `
-		UPDATE conversations
-		SET status = 'cancelled', completed_at = $1, stop_reason = $2, result_summary = $3
-		WHERE org_id = $4 AND id = $5
-		  AND (status IS NULL
-		       OR status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                         'pending_approval'))
-	`, now, stopReason, summary, orgID, runID)
 	if err != nil {
 		return false, err
 	}
@@ -821,8 +794,7 @@ func hasActiveAutoRunForEntity(ctx context.Context, q queryer, orgID, entityID s
 		  AND t.entity_id = $2
 		  AND r.trigger_type = 'event'
 		  AND (r.status IS NULL
-		       OR r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                           'pending_approval'))
+		       OR r.status NOT IN (`+runSettledStatusesSQL+`))
 	`, orgID, entityID).Scan(&count)
 	return count > 0, err
 }
@@ -844,8 +816,7 @@ func (s *agentRunStore) ActiveAutoRunIDForEntitySystem(ctx context.Context, orgI
 		  AND t.entity_id = $2
 		  AND r.trigger_type = 'event'
 		  AND (r.status IS NULL
-		       OR r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                           'pending_approval'))
+		       OR r.status NOT IN (`+runSettledStatusesSQL+`))
 		ORDER BY r.started_at DESC
 		LIMIT 1
 	`, orgID, entityID).Scan(&id, &taskID)
@@ -860,8 +831,7 @@ func activeRunIDsForTask(ctx context.Context, q queryer, orgID, taskID string) (
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND task_id = $2
 		  AND (status IS NULL
-		       OR status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                         'pending_approval'))
+		       OR status NOT IN (`+runSettledStatusesSQL+`))
 	`, orgID, taskID)
 	if err != nil {
 		return nil, err
@@ -883,8 +853,7 @@ func (s *agentRunStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, teamI
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND team_id = $2
 		  AND (status IS NULL
-		       OR status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
-		                         'pending_approval'))
+		       OR status NOT IN (`+runSettledStatusesSQL+`))
 	`, orgID, teamID)
 	if err != nil {
 		return nil, err
