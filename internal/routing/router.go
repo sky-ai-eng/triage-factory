@@ -21,13 +21,17 @@ type Scorer interface {
 }
 
 // Delegator is the minimal interface the router needs from the delegate
-// spawner — kicking off a run, cancelling one, and injecting into a live
+// spawner — kicking off a run, tearing one down, and injecting into a live
 // one. Narrowed from *delegate.Spawner so tests can stub the spawn surface
 // without bringing up a worktree, the agent subprocess, etc. Production
 // wiring passes a *delegate.Spawner.
 type Delegator interface {
 	Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error)
-	Cancel(orgID, runID, userID string) error
+	// StopAndCancelBlueprint is the teardown half: the router only stops a
+	// conversation when the layer above it has already ended — a task closed,
+	// a firing rolled back — so the owning blueprint dies with it rather than
+	// freezing 'running' over work nothing will resume.
+	StopAndCancelBlueprint(orgID, runID, userID string) error
 	// StageOrDeliverAdditiveEvent routes one agent-facing additive-event
 	// injection for a run by its live state — local process, live remote
 	// executor (TFAC-585's `inject` conversation_signals kind), or the durable

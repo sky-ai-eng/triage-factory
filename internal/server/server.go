@@ -1000,9 +1000,11 @@ func (s *Server) routes() {
 	// Run-scoped artifact read (A·6, TFAC-465): the run's artifacts across
 	// every kind, team-scoped via the run. Backs the run-detail surface (TFAC-470).
 	s.api("GET /api/agent/conversations/{conversationID}/artifacts", ag.handleAgentArtifacts)
-	s.apiMutating("POST /api/agent/conversations/{conversationID}/cancel", ag.handleAgentCancel)
+	// The one conversation-level stop. It replaces the former /cancel and
+	// /interrupt outright rather than aliasing them: two addresses is how they
+	// drifted into two meanings of `open` in the first place.
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/stop", ag.handleAgentStop)
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/message", ag.handleMessage)
-	s.apiMutating("POST /api/agent/conversations/{conversationID}/interrupt", ag.handleAgentInterrupt)
 	// The pending set behind the demoted `permission_request` frame: the frame
 	// carries only the tool_call_id and every surface reads the prompt from
 	// here, so a refresh / second tab / cold load reconstructs it.

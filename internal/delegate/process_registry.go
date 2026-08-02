@@ -405,7 +405,7 @@ func (s *Spawner) awaitingCredentialsKnobs() (time.Duration, time.Duration) {
 // Cancel signals the hard-kill ctx. At N=1 the in-process impl resolves
 // the target from s.procs / s.cancels; horizontal scaling replaces it with
 // a DB-signal to the executor that owns the run's lease, leaving the
-// callers (Cancel, and P3's interrupt/steer endpoints) unchanged.
+// callers (the stop verb, and P3's steer endpoint) unchanged.
 type RunController interface {
 	// Interrupt stops the run's current turn, leaving the process alive
 	// for further input. Errors when the run has no live process.
@@ -456,9 +456,10 @@ func (c inProcessController) Cancel(runID string) bool {
 }
 
 // Interrupt stops a live run's current turn through the control seam,
-// leaving the process alive for further input. The P3 message/pause
-// endpoints call this; routing through s.controller (read via
-// getController) is what keeps the horizontal-scaling swap additive.
+// leaving the process alive for further input — the in-turn pause, distinct
+// from the stop verb, which ends the engagement and parks the conversation.
+// Routing through s.controller (read via getController) is what keeps the
+// horizontal-scaling swap additive.
 func (s *Spawner) Interrupt(ctx context.Context, runID string) error {
 	return s.getController().Interrupt(ctx, runID)
 }

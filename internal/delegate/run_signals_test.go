@@ -344,10 +344,10 @@ func TestCrossPodController_LocalHitNeverGoesRemote(t *testing.T) {
 	}
 }
 
-// TestCancel_SignalsRemoteOwnerBestEffort: Cancel's DB-only write is
+// TestStop_SignalsRemoteOwnerBestEffort: the stop verb's DB-only write is
 // synchronous and unaffected by the cross-pod hastening signal; the signal
 // itself lands asynchronously (fire-and-forget, never waited on).
-func TestCancel_SignalsRemoteOwnerBestEffort(t *testing.T) {
+func TestStop_SignalsRemoteOwnerBestEffort(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-cancel", "sess", "/tmp/wt")
 	dbtest.SeedActiveClaim(t, database, "r-cancel", "executor-2", 0)
@@ -358,8 +358,8 @@ func TestCancel_SignalsRemoteOwnerBestEffort(t *testing.T) {
 	}}
 	s.SetRunSignals(fakeSignals, nil)
 
-	if err := s.Cancel(runmode.LocalDefaultOrgID, "r-cancel", runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("Cancel: %v", err)
+	if err := s.Stop(runmode.LocalDefaultOrgID, "r-cancel", runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
 	var status string
 	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = 'r-cancel'`).Scan(&status); err != nil {
@@ -379,7 +379,7 @@ func TestCancel_SignalsRemoteOwnerBestEffort(t *testing.T) {
 // deployment can wire runSignals without an instance store (e.g. a
 // misconfigured role), and the fire-and-forget hastening path must simply
 // no-op rather than panic in its own goroutine.
-func TestCancel_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic(t *testing.T) {
+func TestStop_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-cancel-noinst", "sess", "/tmp/wt")
 	dbtest.SeedActiveClaim(t, database, "r-cancel-noinst", "executor-2", 0)
@@ -388,8 +388,8 @@ func TestCancel_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic(t *testing
 	s.instances = nil
 	s.SetRunSignals(fakeSignals, nil)
 
-	if err := s.Cancel(runmode.LocalDefaultOrgID, "r-cancel-noinst", runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("Cancel: %v", err)
+	if err := s.Stop(runmode.LocalDefaultOrgID, "r-cancel-noinst", runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
 	var status string
 	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = 'r-cancel-noinst'`).Scan(&status); err != nil {

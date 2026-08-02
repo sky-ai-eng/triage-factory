@@ -38,7 +38,7 @@ func (s *fenceStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOp
 	return stubDelegateRun(s.db, task, opts)
 }
 
-func (s *fenceStubDelegator) Cancel(orgID, runID, userID string) error { return nil }
+func (s *fenceStubDelegator) StopAndCancelBlueprint(orgID, runID, userID string) error { return nil }
 
 func (s *fenceStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered

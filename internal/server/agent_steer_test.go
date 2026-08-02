@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,29 +84,94 @@ func TestHandleMessage_EmptyTextRejected(t *testing.T) {
 	}
 }
 
-// TestHandleAgentInterrupt_NoLiveProcessConflict: interrupting an existing run
-// that has no live process is 409 (nothing to interrupt).
-func TestHandleAgentInterrupt_NoLiveProcessConflict(t *testing.T) {
+// TestHandleAgentStop_ParksAndLeavesBlueprintRunning is the endpoint's whole
+// contract: a run with no live process still stops — it parks — and the
+// blueprint behind it is left running and un-cancelled, which is what keeps the
+// parked conversation resumable.
+//
+// The former /cancel took the blueprint terminal with it and /interrupt did
+// not, so `open` meant "resumable" or "dead forever" depending on which button
+// the user pressed. Both paths are gone; this pins the one that replaced them.
+func TestHandleAgentStop_ParksAndLeavesBlueprintRunning(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	runID := seedSteerRun(t, s.db, "int", "running")
+	runID := seedSteerRun(t, s.db, "stop", "running")
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/interrupt", nil)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409 (run exists but has no live process)", rec.Code)
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/stop", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a run with no live process still stops — it parks)", rec.Code)
+	}
+
+	var runStatus, stopReason, bpStatus string
+	var cancelRequested bool
+	if err := s.db.QueryRow(`
+		SELECT c.status, COALESCE(c.stop_reason, ''), br.status, br.cancel_requested
+		  FROM conversations c JOIN blueprint_runs br ON br.id = c.blueprint_run_id
+		 WHERE c.id = ?`, runID).Scan(&runStatus, &stopReason, &bpStatus, &cancelRequested); err != nil {
+		t.Fatalf("read post-stop state: %v", err)
+	}
+	if runStatus != "open" || stopReason != "user_cancelled" {
+		t.Errorf("conversation = (%q, %q), want (open, user_cancelled)", runStatus, stopReason)
+	}
+	if bpStatus != "running" || cancelRequested {
+		t.Errorf("blueprint = (%q, cancel_requested=%v), want (running, false) — a stop freezes the plan, it does not finalize it", bpStatus, cancelRequested)
 	}
 }
 
-// TestHandleAgentInterrupt_UnknownRunNotFound: interrupting a run not visible to
+// TestHandleAgentStop_RetiredPathsAreGone: /cancel and /interrupt were removed
+// outright rather than aliased. Two addresses for one gesture is how they
+// drifted into two meanings of `open`, and nothing consumes the API outside
+// this repo's own frontend.
+func TestHandleAgentStop_RetiredPathsAreGone(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
+	runID := seedSteerRun(t, s.db, "retired", "running")
+
+	for _, path := range []string{"cancel", "interrupt"} {
+		rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/"+path, nil)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("POST /%s status = %d, want 404 (route retired)", path, rec.Code)
+		}
+	}
+}
+
+// TestHandleAgentStop_UnknownRunNotFound: stopping a run not visible to
 // the caller's org is 404 — the authz gate keeps a known run id from reaching
-// another tenant's process.
-func TestHandleAgentInterrupt_UnknownRunNotFound(t *testing.T) {
+// another tenant's process — and the body is the generic "run not found", not
+// the spawner's error text, so the response can't be used to probe which ids
+// exist.
+func TestHandleAgentStop_UnknownRunNotFound(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 
-	rec := doJSON(t, s, "POST", "/api/agent/conversations/r_absent/interrupt", nil)
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/r_absent/stop", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (unknown run)", rec.Code)
+	}
+	if body := rec.Body.String(); strings.Contains(body, "r_absent") {
+		t.Errorf("404 body %q echoes the requested id back", body)
+	}
+}
+
+// TestHandleAgentStop_InternalFailureIsNot404 pins the classification: only
+// "there is nothing to stop" is a 404. A read or park that fails on the way to
+// stopping a run that really was active is a server fault — reporting it as a
+// missing run tells the user their work is gone while the agent keeps running,
+// and echoing the raw error leaks DB internals to the client.
+//
+// A closed handle is the cheapest real infrastructure failure to stage; the
+// preflight read is the first thing to hit it.
+func TestHandleAgentStop_InternalFailureIsNot404(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
+	runID := seedSteerRun(t, s.db, "dberr", "running")
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/stop", nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (a failed stop is not a missing run)", rec.Code)
 	}
 }
 

@@ -45,7 +45,7 @@ export default function RunDetail() {
   // and a not-yet-spawned step has a name but no run.
   const [chainStepLabels, setChainStepLabels] = useState<ChainStepLabel[] | null>(null)
   const [now, setNow] = useState(() => Date.now())
-  const [interruptPending, setInterruptPending] = useState(false)
+  const [stopPending, setStopPending] = useState(false)
   // Approval is derived now, not a stored run status: the run's unresolved
   // artifact set (draft PRs + ready reviews) drives a *list* of approvable cards.
   // `activeArtifact` is the one per-item editor currently open (you edit one at a
@@ -141,15 +141,23 @@ export default function RunDetail() {
     }
   }, [run?.blueprint_run_id, run?.TaskID])
 
-  const handleCancel = useCallback(async () => {
-    if (!run) return
+  // Stop the run: the agent stops, the conversation parks `open`, and its
+  // blueprint and task stay exactly where they were — so the composer's offer
+  // to pick the work back up is true. stopPending disables the controls while
+  // the POST is in flight so rapid clicks can't stack requests ahead of the WS
+  // status flip.
+  const handleStop = useCallback(async () => {
+    if (!run || stopPending) return
+    setStopPending(true)
     try {
-      const res = await fetch(`/api/agent/conversations/${run.ID}/cancel`, { method: 'POST' })
-      if (!res.ok) toast.error(await readError(res, 'Failed to cancel run'))
+      const res = await fetch(`/api/agent/conversations/${run.ID}/stop`, { method: 'POST' })
+      if (!res.ok) toast.error(await readError(res, 'Failed to stop run'))
     } catch (err) {
-      toast.error(`Failed to cancel run: ${(err as Error).message}`)
+      toast.error(`Failed to stop run: ${(err as Error).message}`)
+    } finally {
+      setStopPending(false)
     }
-  }, [run])
+  }, [run, stopPending])
 
   // Steer a run: a free-form message lands on the live process (or wakes an
   // `open` run via resume). The backend records + broadcasts it as an
@@ -170,23 +178,6 @@ export default function RunDetail() {
     },
     [run],
   )
-
-  // Interrupt pauses the current turn (run → open), leaving the process warm —
-  // distinct from Cancel, which abandons the run. The composer stays open.
-  // interruptPending disables the Pause button while the POST is in flight so
-  // rapid clicks can't stack concurrent interrupts ahead of the WS status flip.
-  const handleInterrupt = useCallback(async () => {
-    if (!run || interruptPending) return
-    setInterruptPending(true)
-    try {
-      const res = await fetch(`/api/agent/conversations/${run.ID}/interrupt`, { method: 'POST' })
-      if (!res.ok) toast.error(await readError(res, 'Failed to interrupt run'))
-    } catch (err) {
-      toast.error(`Failed to interrupt run: ${(err as Error).message}`)
-    } finally {
-      setInterruptPending(false)
-    }
-  }, [run, interruptPending])
 
   // doRequeue fires the actual requeue. Return-to-queue is a task-level
   // force-resolve-all: the backend tears down every unresolved artifact (closes
@@ -267,13 +258,13 @@ export default function RunDetail() {
 
   const actions: StationActions = {
     onBack: () => navigate(orgHref('/board')),
-    onCancel: handleCancel,
+    onCancel: handleStop,
     onRequeue: handleRequeue,
     onReview: handleReview,
     onOpenArtifact: handleOpenArtifact,
     onMessage: handleMessage,
-    onInterrupt: handleInterrupt,
-    interruptPending,
+    onInterrupt: handleStop,
+    stopPending,
     onResolvePermission: resolvePermission,
   }
 

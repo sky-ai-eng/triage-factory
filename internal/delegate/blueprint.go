@@ -384,7 +384,12 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 // resumed one, finalizeParkedBlueprintOnCancel for one that had already
 // parked). Best-effort: a failure here leaves the blueprint running with a
 // parked step, which the boot reconcile and the retention sweep both tolerate,
-// so it logs rather than failing the cancel.
+// so it logs rather than failing the caller.
+//
+// Only the blueprint's own cancel verb and the lifecycle teardown one layer up
+// (a closed or swiped task, an archived team) reach this. Stopping a
+// conversation must not: the signal is what turns a parked step into a
+// permanently unresumable one.
 func (s *Spawner) requestBlueprintCancel(ctx context.Context, orgID, blueprintRunID string) {
 	if s.blueprints == nil || blueprintRunID == "" {
 		return
@@ -498,15 +503,20 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 }
 
 // finalizeParkedBlueprintOnCancel finalizes the owning blueprint_run when a step
-// run is cancelled through the spawner's DB-only path (Cancel with no live
-// orchestrator goroutine — the step had parked, so the orchestrator already
-// returned and nothing else will mark the blueprint_run terminal). Without this,
-// cancelling an open/approval-parked step would mark only the run cancelled and
-// strand the blueprint_run in 'running' (and its shared-workspace snapshot in
-// the blob store).
+// run is torn down through the spawner's DB-only path (StopAndCancelBlueprint
+// with no live orchestrator goroutine — the step had parked, so the
+// orchestrator already returned and nothing else will mark the blueprint_run
+// terminal). Without this, a lifecycle teardown of an open-parked step would
+// park only the conversation and strand the blueprint_run in 'running' (and its
+// shared-workspace snapshot in the blob store) for work its task has already
+// finished with.
+//
+// The plain conversation stop deliberately does not call this: there the
+// 'running' blueprint IS the intended state, because it is what keeps the
+// parked step claimable again on resume.
 //
 // It does NOT drain the task's firing queue: the drainer's manual short-circuit
-// keys off the run's trigger type, which the caller (Cancel) already passes to
+// keys off the run's trigger type, which the caller already passes to
 // notifyDrainer — folding the drain in here (via terminateBlueprint) would
 // couple it to the write-pool routing and drain a manual run that must not.
 // So this finalizes the blueprint row + worktree + snapshot only:

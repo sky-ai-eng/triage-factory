@@ -61,11 +61,12 @@ func resumableState(status, outcome string) bool {
 // by every counter, forever. `aborted` passes because the resume re-opens it in
 // the same transaction as the flip.
 //
-// This matters more now that a cancelled run parks `open` instead of writing a
-// terminal: `open` under a cancelled blueprint is a real and reachable state,
-// and it reads resumable from the row alone. Widening the gate to a finished
-// blueprint's final conversation is the resume work this epic builds toward;
-// until that lands, refusing is the honest answer.
+// Stopping a conversation no longer reaches this arm — a stop freezes its
+// blueprint 'running' precisely so the parked step stays claimable. What still
+// reaches it is a blueprint cancelled at its own layer, and (until resuming a
+// finished blueprint's final step lands) a completed one: both leave parked
+// rows that nothing would claim, and they read resumable from the
+// conversation alone. Refusing is the honest answer for those.
 //
 // Admin-pool read on purpose: blueprint_runs RLS hides another user's manual
 // blueprint, and a teammate resuming a run must not be refused for a row they
