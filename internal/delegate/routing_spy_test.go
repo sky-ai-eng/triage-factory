@@ -155,7 +155,7 @@ func TestResolvePrompt_EventStaysOnAdminPool(t *testing.T) {
 // and the attacker would be invisible to the audit trail. This test
 // proves the user-initiated path goes through SyntheticClaimsWithTx
 // before any cancels-map access, with the caller's userID for RLS.
-func TestCancel_UserInitiated_PreflightUsesSyntheticClaims(t *testing.T) {
+func TestStop_UserInitiated_PreflightUsesSyntheticClaims(t *testing.T) {
 	const runID = "run-cancel-spy"
 	const callerID = "00000000-0000-0000-0000-000000000ddd"
 
@@ -167,10 +167,10 @@ func TestCancel_UserInitiated_PreflightUsesSyntheticClaims(t *testing.T) {
 	stores.Tx = tx
 	s := NewSpawner(database, stores, nil, nil, "")
 
-	// No goroutine registered in s.cancels — Cancel will fall through
+	// No goroutine registered in s.cancels — Stop will fall through
 	// to the DB path. The preflight runs first; the assertion is the
 	// synth call.
-	_ = s.Cancel(runmode.LocalDefaultOrgID, runID, callerID)
+	_ = s.Stop(runmode.LocalDefaultOrgID, runID, callerID)
 
 	if len(tx.synthCalls) < 1 {
 		t.Fatalf("SyntheticClaimsWithTx called %d times; want at least 1 (preflight must route through synth claims)", len(tx.synthCalls))
@@ -186,7 +186,7 @@ func TestCancel_UserInitiated_PreflightUsesSyntheticClaims(t *testing.T) {
 // with no user identity to project. Those must still scope by orgID
 // but go through the admin pool, not synth claims — otherwise the
 // router's no-user-context path would FK-fail in multi-mode.
-func TestCancel_SystemInitiated_PreflightSkipsSynthClaims(t *testing.T) {
+func TestStop_SystemInitiated_PreflightSkipsSynthClaims(t *testing.T) {
 	const runID = "run-cancel-system-spy"
 
 	database := newDelegateTestDB(t)
@@ -197,10 +197,10 @@ func TestCancel_SystemInitiated_PreflightSkipsSynthClaims(t *testing.T) {
 	stores.Tx = tx
 	s := NewSpawner(database, stores, nil, nil, "")
 
-	_ = s.Cancel(runmode.LocalDefaultOrgID, runID, "")
+	_ = s.Stop(runmode.LocalDefaultOrgID, runID, "")
 
 	if len(tx.synthCalls) != 0 {
-		t.Errorf("SyntheticClaimsWithTx called %d times; want 0 for system-initiated cancel (must use admin pool, not synth claims)", len(tx.synthCalls))
+		t.Errorf("SyntheticClaimsWithTx called %d times; want 0 for a system-initiated stop (must use admin pool, not synth claims)", len(tx.synthCalls))
 	}
 }
 

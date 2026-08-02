@@ -1000,9 +1000,14 @@ func (s *Server) routes() {
 	// Run-scoped artifact read (A·6, TFAC-465): the run's artifacts across
 	// every kind, team-scoped via the run. Backs the run-detail surface (TFAC-470).
 	s.api("GET /api/agent/conversations/{conversationID}/artifacts", ag.handleAgentArtifacts)
-	s.apiMutating("POST /api/agent/conversations/{conversationID}/cancel", ag.handleAgentCancel)
+	// One stop verb, three addresses. /stop is the name; /cancel and /interrupt
+	// are what clients already POST to and stay for a deprecation window. They
+	// share a handler rather than agreeing with each other, so they cannot
+	// diverge into two meanings again.
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/stop", ag.handleAgentStop)
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/cancel", ag.handleAgentStop)
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/interrupt", ag.handleAgentStop)
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/message", ag.handleMessage)
-	s.apiMutating("POST /api/agent/conversations/{conversationID}/interrupt", ag.handleAgentInterrupt)
 	// The pending set behind the demoted `permission_request` frame: the frame
 	// carries only the tool_call_id and every surface reads the prompt from
 	// here, so a refresh / second tab / cold load reconstructs it.

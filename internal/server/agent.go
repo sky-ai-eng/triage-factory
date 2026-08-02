@@ -344,7 +344,21 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, domain.MessageDTOs(messages))
 }
 
-func (ag *agentHandler) handleAgentCancel(w http.ResponseWriter, r *http.Request) {
+// handleAgentStop is the conversation-level stop verb: the agent stops, the
+// conversation parks `open`, and everything outside it freezes — the blueprint
+// keeps its status and the task keeps its disposition, which is what leaves the
+// parked conversation resumable. Cancelling a plan is the blueprint endpoint's
+// job; dispositioning work is the task gestures'.
+//
+// Three paths resolve here — /stop, plus the older /cancel and /interrupt —
+// because there is one operation, not three. Sharing the handler (rather than
+// two handlers agreeing) is what stopped them drifting into two meanings of
+// `open` that a user could only tell apart by which button they pressed. The
+// old paths stay until the UI's Pause and Cancel controls merge.
+//
+// A conversation not visible to the caller's org, and one that already
+// concluded, both read as "no active run" → 404.
+func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -356,13 +370,11 @@ func (ag *agentHandler) handleAgentCancel(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
 		return
 	}
-	if err := spawner.Cancel(orgID, conversationID, userID); err != nil {
+	if err := spawner.Stop(orgID, conversationID, userID); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
-	// The gesture is a cancel; the row it leaves behind is parked. Report the
-	// latter — this field names the conversation's status, and 'cancelled' has
-	// not been one since a stop became a park.
+	// This field names the conversation's status, and a stop parks it.
 	writeJSON(w, http.StatusOK, map[string]string{"status": "open"})
 }
 
@@ -472,40 +484,7 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 }
 
-// handleAgentInterrupt stops a live run's current turn, leaving the process
-// alive for further input. The run is authorized under the caller's org first
-// (404 if not visible) — the process registry is keyed by run id alone, so this
-// gate keeps a known run id from interrupting another tenant's run. An existing
-// run with no live process is 409 — nothing to interrupt.
-func (ag *agentHandler) handleAgentInterrupt(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
-	if !ok {
-		return
-	}
-	userID := ClaimsFrom(r.Context()).Subject
-	conversationID := r.PathValue("conversationID")
-	spawner := ag.spawner()
-	if spawner == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
-		return
-	}
-	exists, err := ag.runVisible(r.Context(), orgID, userID, conversationID)
-	if err != nil {
-		internalError(w, "agent", err)
-		return
-	}
-	if !exists {
-		notFound(w, "run")
-		return
-	}
-	if err := spawner.Interrupt(r.Context(), conversationID); err != nil {
-		writeJSON(w, steerErrorStatus(err), map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "interrupted"})
-}
-
-// steerErrorStatus maps a SendMessage / Interrupt error to an HTTP status. A
+// steerErrorStatus maps a SendMessage error to an HTTP status. A
 // run that can't take the op right now — no live process (ErrNoLiveProcess),
 // not steerable (ErrRunNotSteerable), or a lost resume race
 // (ErrRunNotResumable) — is 409 Conflict so the client refreshes and re-reads
@@ -519,7 +498,7 @@ func (ag *agentHandler) handleAgentInterrupt(w http.ResponseWriter, r *http.Requ
 // A cross-pod signal whose owning executor never acked (ErrSignalAckTimeout,
 // TFAC-585) is 504 Gateway Timeout — the reply-leg contract's "run owner did
 // not acknowledge; the run may be mid-teardown" case; the UI already
-// tolerates steer/interrupt failure. Everything else is a server-side 500.
+// tolerates a failed steer. Everything else is a server-side 500.
 func steerErrorStatus(err error) int {
 	switch {
 	case errors.Is(err, delegate.ErrWorkspaceExpired):

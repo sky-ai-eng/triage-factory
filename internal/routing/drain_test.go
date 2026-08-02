@@ -96,7 +96,7 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 	return brID, nil
 }
 
-func (s *stubDelegator) Cancel(orgID, runID, userID string) error { return nil }
+func (s *stubDelegator) StopAndCancelBlueprint(orgID, runID, userID string) error { return nil }
 
 func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered

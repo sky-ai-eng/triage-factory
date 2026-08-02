@@ -120,23 +120,23 @@ func TestStampExecutor_WritesExecutorID(t *testing.T) {
 	}
 }
 
-// TestCancel_ActiveRun_RoutesThroughController verifies the live-run cancel
+// TestStop_ActiveRun_RoutesThroughController verifies the live-run stop
 // path: an active run (a registered cancel handle) is killed via the
 // controller rather than the DB-only path.
-func TestCancel_ActiveRun_RoutesThroughController(t *testing.T) {
+func TestStop_ActiveRun_RoutesThroughController(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-active", "sess", "/tmp/wt") // status running
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	fired := make(chan struct{}, 1)
 	s.cancels["r-active"] = func() { fired <- struct{}{} }
 
-	if err := s.Cancel(runmode.LocalDefaultOrgID, "r-active", runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("cancel: %v", err)
+	if err := s.Stop(runmode.LocalDefaultOrgID, "r-active", runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("stop: %v", err)
 	}
 	select {
 	case <-fired:
 	default:
-		t.Error("expected Cancel to fire the registered cancel func via the controller")
+		t.Error("expected Stop to fire the registered cancel func via the controller")
 	}
 }
 

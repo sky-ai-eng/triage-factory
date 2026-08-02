@@ -557,7 +557,9 @@ function IntakeDock({
               {approvalAction(counts)} →
             </DockButton>
           )}
-          {/* Interrupt pauses the turn (→ open); distinct from Cancel's abandon. */}
+          {/* Pause and Cancel post to aliases of one stop verb — both park the
+              run open, resumable. Merging them into a single control is UI work
+              that rides with the native-loop phase. */}
           {active && actions.onInterrupt && (
             <DockButton
               tone="var(--hmi-cyan)"

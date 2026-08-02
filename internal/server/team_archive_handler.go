@@ -180,15 +180,17 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 		curatorSessions = cur.InFlightProjectCount(projectIDs)
 	}
 
-	// Force-stop the runs. spawner.Cancel("" userID) hard-kills a live process or
-	// marks a parked `open` run cancelled, all on the admin pool. A per-run error
+	// Force-stop the runs. StopAndCancelBlueprint("" userID) hard-kills a live
+	// process or parks one that has none, and cancels the blueprint behind it —
+	// an archived team's work is over, so a frozen 'running' blueprint would
+	// hold a worktree nobody can resume. All on the admin pool. A per-run error
 	// is a benign race (the run reached terminal on its own) — log and keep going
 	// so one stuck run can't strand the rest; count only the ones we stopped.
 	cancelledRuns := 0
 	if sp := th.spawnerRuntime(); sp != nil {
 		for _, runID := range runIDs {
-			if cErr := sp.Cancel(orgID, runID, ""); cErr != nil {
-				teamsLog.Warn("archive: run cancel failed", "team", teamID, "run", runID, "error", cErr)
+			if cErr := sp.StopAndCancelBlueprint(orgID, runID, ""); cErr != nil {
+				teamsLog.Warn("archive: run stop failed", "team", teamID, "run", runID, "error", cErr)
 				continue
 			}
 			cancelledRuns++

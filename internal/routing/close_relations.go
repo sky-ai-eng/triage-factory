@@ -374,14 +374,17 @@ func keepJiraReassign(_ domain.Event, ctx closeContext, t domain.Task) bool {
 
 // --- shared close helpers (used by the driver) ------------------------------
 
-// cancelActiveRunsForTask asks the spawner to abort any non-terminal runs on
-// the task. Called before a task transitions to done/dismissed so the agent
-// stops work on a task the system has decided is resolved.
+// cancelActiveRunsForTask asks the spawner to stop any non-terminal runs on
+// the task and cancel the blueprints behind them. Called before a task
+// transitions to done/dismissed so the agent stops work on a task the system
+// has decided is resolved. The blueprint half rides along because this is the
+// task's own disposition: nothing will resume these conversations, so leaving
+// their blueprints frozen 'running' would hold worktrees for finished work.
 //
 // Errors are logged and swallowed. "no active run" from the spawner is expected
 // when a run races us to natural completion between the DB lookup and the
-// cancel call — the run ends up terminal either way and the task close still
-// lands. Cancellation is fire-and-forget; the run's own goroutine parks it
+// call — the run ends up terminal either way and the task close still
+// lands. Teardown is fire-and-forget; the run's own goroutine parks it
 // asynchronously.
 func (r *Router) cancelActiveRunsForTask(orgID, taskID string) {
 	if r.spawner == nil {
@@ -393,8 +396,8 @@ func (r *Router) cancelActiveRunsForTask(orgID, taskID string) {
 		return
 	}
 	for _, id := range ids {
-		if err := r.spawner.Cancel(orgID, id, ""); err != nil {
-			routerLog.Error("cancel run on task close failed", "run_id", id, "task_id", taskID, "error", err)
+		if err := r.spawner.StopAndCancelBlueprint(orgID, id, ""); err != nil {
+			routerLog.Error("stop run on task close failed", "run_id", id, "task_id", taskID, "error", err)
 		}
 	}
 }

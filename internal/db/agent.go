@@ -298,8 +298,8 @@ type ConversationStore interface {
 	// ActiveIDsForTask: status NOT IN ('completed','failed').
 	// This is the team-archive force-stop cascade's enumeration, the
 	// team-scoped sibling of ActiveIDsForTaskSystem — each returned id is
-	// passed to spawner.Cancel(orgID, runID, ""), which hard-kills a live
-	// process or parks a run that has none. Admin pool / org-scoped: archive runs from an org-admin
+	// passed to spawner.StopAndCancelBlueprint(orgID, runID, ""), which
+	// hard-kills a live process or parks a run that has none. Admin pool / org-scoped: archive runs from an org-admin
 	// handler whose caller may not be a member of the team, so the team-visibility
 	// RLS would hide the rows on the app pool.
 	ActiveIDsForTeamSystem(ctx context.Context, orgID, teamID string) ([]string, error)

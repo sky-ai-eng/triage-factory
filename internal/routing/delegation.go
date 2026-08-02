@@ -537,11 +537,13 @@ func (r *Router) DrainTask(orgID, taskID string) {
 				// committed inside the spawner goroutine) but the UPDATE
 				// that records the firing→run association failed.
 				//
-				// Roll the side-effect chain back in reverse: Cancel the
-				// run we just spawned, then revert the task to 'queued'
-				// so the limbo state (task=delegated + no live run) is
-				// not externally visible. Mirrors what fireDelegate
-				// already does when spawner.Delegate itself fails.
+				// Roll the side-effect chain back in reverse: tear down
+				// the run we just spawned — blueprint included, since the
+				// firing that minted it is being undone — then revert the
+				// task to 'queued' so the limbo state (task=delegated + no
+				// live run) is not externally visible. Mirrors what
+				// fireDelegate already does when spawner.Delegate itself
+				// fails.
 				//
 				// PopForTask already claimed this row into 'draining'
 				// — release it back to 'pending' so a later
@@ -551,11 +553,11 @@ func (r *Router) DrainTask(orgID, taskID string) {
 				// 'pending' rows, and HasPendingForTask /
 				// ListTasksWithPending don't see 'draining' rows
 				// either, so nothing would ever pick it up again.
-				routerLog.Error("mark firing fired failed, rolling back: cancelling run + reverting task to queued",
+				routerLog.Error("mark firing fired failed, rolling back: tearing down run + reverting task to queued",
 					"firing_id", firing.ID, "run_id", runID, "error", err)
 				if r.spawner != nil {
-					if cerr := r.spawner.Cancel(orgID, runID, ""); cerr != nil {
-						routerLog.Warn("cancel run after mark-fired failure (run may already be terminal, drain still triggers from its defer)",
+					if cerr := r.spawner.StopAndCancelBlueprint(orgID, runID, ""); cerr != nil {
+						routerLog.Warn("stop run after mark-fired failure (run may already be terminal, drain still triggers from its defer)",
 							"run_id", runID, "error", cerr)
 					}
 				}

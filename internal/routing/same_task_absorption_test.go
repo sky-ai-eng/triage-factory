@@ -95,7 +95,9 @@ func (s *injectingStubDelegator) Delegate(task domain.Task, opts delegate.Delega
 	return "run-" + task.ID, nil
 }
 
-func (s *injectingStubDelegator) Cancel(orgID, runID, userID string) error { return nil }
+func (s *injectingStubDelegator) StopAndCancelBlueprint(orgID, runID, userID string) error {
+	return nil
+}
 
 func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	s.calls = append(s.calls, injectCall{orgID, runID, producer, body, firing})
