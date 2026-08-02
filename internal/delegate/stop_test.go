@@ -232,6 +232,73 @@ func TestStopAndCancelBlueprint_OpenStep_FinalizesBlueprintRun(t *testing.T) {
 	}
 }
 
+// TestCancelBlueprint_FinalizesRunAndParksSteps pins the layer the stop verb
+// hands cancellation off TO. Now that stopping a conversation only freezes the
+// plan, this is the only verb that can end one — a blueprint sitting 'running'
+// with no queued step and no live claim has no other exit short of resuming
+// the conversation or dispositioning the task.
+//
+// It lives beside the stop tests on purpose: the pair is the split. The
+// conversation verb parks and freezes; the blueprint verb finalizes. Both park
+// the step, and only one writes a blueprint terminal.
+func TestCancelBlueprint_FinalizesRunAndParksSteps(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	const runID = "r-bp-cancel"
+	seedRun(t, database, runID, "sess-bp-cancel", "/tmp/wt-bp-cancel")
+	brID := "seedbpr-" + runID
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+
+	// No registered subprocess handle, so this takes CancelBlueprint's
+	// paused-blueprint branch: park every active step itself, then finalize.
+	if err := s.CancelBlueprint(runmode.LocalDefaultOrgID, brID, runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("CancelBlueprint: %v", err)
+	}
+
+	var bpStatus string
+	if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id = ?`, brID).Scan(&bpStatus); err != nil {
+		t.Fatalf("read blueprint_run: %v", err)
+	}
+	if bpStatus != "cancelled" {
+		t.Errorf("blueprint_run status = %q, want cancelled", bpStatus)
+	}
+	var stepStatus, stopReason string
+	if err := database.QueryRow(`SELECT status, COALESCE(stop_reason, '') FROM conversations WHERE id = ?`, runID).Scan(&stepStatus, &stopReason); err != nil {
+		t.Fatalf("read step conversation: %v", err)
+	}
+	if stepStatus != "open" || stopReason != "user_cancelled" {
+		t.Errorf("step = (%q, %q), want (open, user_cancelled) — cancelling the plan parks its steps, it does not write terminals on them", stepStatus, stopReason)
+	}
+}
+
+// TestCancelBlueprint_AlreadyTerminalIsNoOp: the blueprint verb is idempotent
+// against a plan that already ended, so a second click cannot re-stamp a
+// terminal over the one that recorded how the blueprint actually finished.
+func TestCancelBlueprint_AlreadyTerminalIsNoOp(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	const runID = "r-bp-done"
+	seedRun(t, database, runID, "sess-bp-done", "/tmp/wt-bp-done")
+	brID := "seedbpr-" + runID
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE id = ?`, brID); err != nil {
+		t.Fatalf("complete blueprint: %v", err)
+	}
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	if err := s.CancelBlueprint(runmode.LocalDefaultOrgID, brID, runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("CancelBlueprint on a terminal plan: %v", err)
+	}
+
+	var bpStatus string
+	if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id = ?`, brID).Scan(&bpStatus); err != nil {
+		t.Fatalf("read blueprint_run: %v", err)
+	}
+	if bpStatus != "completed" {
+		t.Errorf("blueprint_run status = %q, want completed (unchanged)", bpStatus)
+	}
+}
+
 // TestStop_UniformAcrossBlueprintShapes pins that stopping means the same
 // thing wherever the conversation sits in a plan: the conversation parks
 // `open` and the blueprint, if there is one, is left exactly as it was. The

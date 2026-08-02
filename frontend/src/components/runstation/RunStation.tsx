@@ -32,13 +32,14 @@ export interface StationActions {
   onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
   /** Steer the run with a free-form message (live process or `open` resume). */
   onMessage?: (text: string) => void
-  /** Pause the current turn (run → open), leaving the process warm. */
+  /** Stop the run (→ open, resumable). Same operation as onCancel; the two
+   *  controls are not merged yet. */
   onInterrupt?: () => void
   /** Answer a pending tool-permission prompt. The promise settles when the
    *  resolve POST finishes — PermissionPrompt awaits it to hold its
    *  single-flight guard. */
   onResolvePermission?: (toolCallID: string, decision: PermissionDecisionInput) => Promise<void>
-  interruptPending?: boolean
+  stopPending?: boolean
 }
 
 // What a chain segment is called: the step prompt's name, with the step's brief
@@ -557,17 +558,17 @@ function IntakeDock({
               {approvalAction(counts)} →
             </DockButton>
           )}
-          {/* Pause and Cancel post to aliases of one stop verb — both park the
-              run open, resumable. Merging them into a single control is UI work
-              that rides with the native-loop phase. */}
+          {/* Pause and Cancel are one operation now — both stop the run and
+              park it open, resumable. Merging them into a single control is UI
+              work that rides with the native-loop phase. */}
           {active && actions.onInterrupt && (
             <DockButton
               tone="var(--hmi-cyan)"
               onClick={actions.onInterrupt}
-              disabled={actions.interruptPending}
+              disabled={actions.stopPending}
               icon={<Pause size={11} />}
             >
-              {actions.interruptPending ? 'Pausing…' : 'Pause'}
+              {actions.stopPending ? 'Stopping…' : 'Pause'}
             </DockButton>
           )}
           {active && actions.onCancel && (

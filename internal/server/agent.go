@@ -350,11 +350,10 @@ func (ag *agentHandler) handleMessages(w http.ResponseWriter, r *http.Request) {
 // parked conversation resumable. Cancelling a plan is the blueprint endpoint's
 // job; dispositioning work is the task gestures'.
 //
-// Three paths resolve here — /stop, plus the older /cancel and /interrupt —
-// because there is one operation, not three. Sharing the handler (rather than
-// two handlers agreeing) is what stopped them drifting into two meanings of
-// `open` that a user could only tell apart by which button they pressed. The
-// old paths stay until the UI's Pause and Cancel controls merge.
+// It is the single address for the gesture. The former /cancel and /interrupt
+// are gone rather than aliased: two endpoints is how one gesture grew two
+// meanings of `open` that a user could only tell apart by which button they
+// pressed.
 //
 // A conversation not visible to the caller's org, and one that already
 // concluded, both read as "no active run" → 404.

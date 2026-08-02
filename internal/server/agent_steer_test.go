@@ -83,51 +83,53 @@ func TestHandleMessage_EmptyTextRejected(t *testing.T) {
 	}
 }
 
-// TestHandleAgentStop_AliasesLeaveIdenticalState is the collapse, pinned:
-// /stop, /cancel and /interrupt are three addresses for one operation, so a
-// run stopped through any of them ends in the same place — conversation parked
-// `open`, blueprint left running and un-cancelled, hence still resumable.
+// TestHandleAgentStop_ParksAndLeavesBlueprintRunning is the endpoint's whole
+// contract: a run with no live process still stops — it parks — and the
+// blueprint behind it is left running and un-cancelled, which is what keeps the
+// parked conversation resumable.
 //
-// Before the collapse /cancel took the blueprint terminal with it and
-// /interrupt did not, so `open` meant "resumable" or "dead forever" depending
-// on which button the user pressed. Comparing the full post-state across the
-// three paths is what stops them drifting back apart.
-func TestHandleAgentStop_AliasesLeaveIdenticalState(t *testing.T) {
-	type state struct{ runStatus, stopReason, bpStatus string }
+// The former /cancel took the blueprint terminal with it and /interrupt did
+// not, so `open` meant "resumable" or "dead forever" depending on which button
+// the user pressed. Both paths are gone; this pins the one that replaced them.
+func TestHandleAgentStop_ParksAndLeavesBlueprintRunning(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
+	runID := seedSteerRun(t, s.db, "stop", "running")
 
-	stopVia := func(t *testing.T, path, suffix string) state {
-		t.Helper()
-		s := newTestServer(t)
-		s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-		runID := seedSteerRun(t, s.db, suffix, "running")
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/stop", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a run with no live process still stops — it parks)", rec.Code)
+	}
 
+	var runStatus, stopReason, bpStatus string
+	var cancelRequested bool
+	if err := s.db.QueryRow(`
+		SELECT c.status, COALESCE(c.stop_reason, ''), br.status, br.cancel_requested
+		  FROM conversations c JOIN blueprint_runs br ON br.id = c.blueprint_run_id
+		 WHERE c.id = ?`, runID).Scan(&runStatus, &stopReason, &bpStatus, &cancelRequested); err != nil {
+		t.Fatalf("read post-stop state: %v", err)
+	}
+	if runStatus != "open" || stopReason != "user_cancelled" {
+		t.Errorf("conversation = (%q, %q), want (open, user_cancelled)", runStatus, stopReason)
+	}
+	if bpStatus != "running" || cancelRequested {
+		t.Errorf("blueprint = (%q, cancel_requested=%v), want (running, false) — a stop freezes the plan, it does not finalize it", bpStatus, cancelRequested)
+	}
+}
+
+// TestHandleAgentStop_RetiredPathsAreGone: /cancel and /interrupt were removed
+// outright rather than aliased. Two addresses for one gesture is how they
+// drifted into two meanings of `open`, and nothing consumes the API outside
+// this repo's own frontend.
+func TestHandleAgentStop_RetiredPathsAreGone(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
+	runID := seedSteerRun(t, s.db, "retired", "running")
+
+	for _, path := range []string{"cancel", "interrupt"} {
 		rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/"+path, nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("POST /%s status = %d, want 200 (a run with no live process still stops — it parks)", path, rec.Code)
-		}
-
-		var got state
-		var cancelRequested bool
-		if err := s.db.QueryRow(`
-			SELECT c.status, COALESCE(c.stop_reason, ''), br.status, br.cancel_requested
-			  FROM conversations c JOIN blueprint_runs br ON br.id = c.blueprint_run_id
-			 WHERE c.id = ?`, runID).Scan(&got.runStatus, &got.stopReason, &got.bpStatus, &cancelRequested); err != nil {
-			t.Fatalf("read post-stop state: %v", err)
-		}
-		if cancelRequested {
-			t.Errorf("POST /%s raised cancel_requested; no conversation-level operation may", path)
-		}
-		return got
-	}
-
-	want := state{runStatus: "open", stopReason: "user_cancelled", bpStatus: "running"}
-	canonical := stopVia(t, "stop", "stop")
-	if canonical != want {
-		t.Fatalf("POST /stop left %+v, want %+v", canonical, want)
-	}
-	for _, alias := range []string{"cancel", "interrupt"} {
-		if got := stopVia(t, alias, alias); got != canonical {
-			t.Errorf("POST /%s left %+v, want %+v (identical to /stop)", alias, got, canonical)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("POST /%s status = %d, want 404 (route retired)", path, rec.Code)
 		}
 	}
 }
@@ -139,11 +141,9 @@ func TestHandleAgentStop_UnknownRunNotFound(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 
-	for _, path := range []string{"stop", "cancel", "interrupt"} {
-		rec := doJSON(t, s, "POST", "/api/agent/conversations/r_absent/"+path, nil)
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("POST /%s status = %d, want 404 (unknown run)", path, rec.Code)
-		}
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/r_absent/stop", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (unknown run)", rec.Code)
 	}
 }
 

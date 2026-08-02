@@ -176,12 +176,12 @@ export default function AgentCard({
                     type="button"
                     onClick={async () => {
                       try {
-                        const res = await fetch(`/api/agent/conversations/${run.ID}/cancel`, {
+                        const res = await fetch(`/api/agent/conversations/${run.ID}/stop`, {
                           method: 'POST',
                         })
-                        if (!res.ok) toast.error(await readError(res, 'Failed to cancel run'))
+                        if (!res.ok) toast.error(await readError(res, 'Failed to stop run'))
                       } catch (err) {
-                        toast.error(`Failed to cancel run: ${(err as Error).message}`)
+                        toast.error(`Failed to stop run: ${(err as Error).message}`)
                       }
                     }}
                     className="inline-flex items-center text-dismiss/40 transition-colors hover:text-dismiss"
