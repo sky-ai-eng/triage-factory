@@ -6,11 +6,17 @@
 // rebuilds from the snapshot — never a brick.
 //
 // Two snapshot triggers are wired today: idle hibernation to `open`
-// (hibernatePark, live.go) and a completed+abort terminal (processCompletion),
-// both message-resumable. A third — an executor-drain/scale-down trigger — is a forward seam for the
-// execution-plane split: there are no executors to drain yet, so it is
-// intentionally NOT wired. When it lands it calls snapshotWorkspace with the
-// same key, identically to the two triggers above.
+// (hibernatePark, live.go) and every non-failed terminal — which after the
+// terminal vocabulary shrank to completed|failed is `completed`, whatever the
+// outcome (processCompletion). A third — an executor-drain/scale-down trigger —
+// is a forward seam for the execution-plane split: there are no executors to
+// drain yet, so it is intentionally NOT wired. When it lands it calls
+// snapshotWorkspace with the same key, identically to the two triggers above.
+//
+// The write policy and the retention sweep move together, always: the reaper
+// enumerates exactly the states listed above (ListReapableSnapshotKeysSystem),
+// so widening one without the other either leaks blobs forever or reaps a
+// workspace something still wants.
 
 package delegate
 

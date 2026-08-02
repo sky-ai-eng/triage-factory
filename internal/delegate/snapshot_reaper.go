@@ -1,11 +1,16 @@
-// Workspace-snapshot retention reaper. Every parked/aborted run carries a
+// Workspace-snapshot retention reaper. Every parked or concluded run carries a
 // durable workspace blob (the cold-resume backstop). Resume value decays fast —
 // week-old WIP against a moved-on main is rarely worth rehydrating — so the
-// blobs are bounded by a retention TTL: the reaper enumerates resumable-state
-// runs whose parked/terminal timestamp predates the TTL and drops their
-// snapshots. It enumerates from the DB (the blob store has no List), keyed by
-// blueprint_run_id, and only reaps a key once ALL of that blueprint's resumable
-// runs are past the TTL — blueprint steps share one blob.
+// blobs are bounded by a retention TTL: the reaper enumerates the snapshot-
+// bearing states whose parked/terminal timestamp predates the TTL and drops
+// their snapshots. It enumerates from the DB (the blob store has no List), keyed
+// by blueprint_run_id, and only reaps a key once ALL of that blueprint's
+// snapshot-bearing runs are past the TTL — blueprint steps share one blob.
+//
+// One TTL, deliberately: a finished run's blob is kept exactly as long as a
+// parked one's. Splitting them is a governance decision (run origin, team
+// setting with an org clamp) that belongs with bot-branch retention, not a
+// second knob invented here the first time the storage number looks large.
 
 package delegate
 
@@ -78,10 +83,11 @@ func (s *Spawner) RunSnapshotReaper(ctx context.Context, interval time.Duration)
 }
 
 // ReapExpiredSnapshots drops the durable workspace snapshot of every
-// blueprint_run all of whose resumable-state runs (open / completed+abort)
-// parked/terminated before the retention TTL. Enumerates the
-// reapable keys from the DB (the blob store has no List) and discards each via
-// the idempotent discardWorkspaceSnapshot, so a key already gone is a no-op.
+// blueprint_run all of whose snapshot-bearing runs (parked `open` / any
+// `completed` terminal) parked or concluded before the retention TTL.
+// Enumerates the reapable keys from the DB (the blob store has no List) and
+// discards each via the idempotent discardWorkspaceSnapshot, so a key already
+// gone is a no-op.
 // Best-effort: errors are logged, never fatal.
 func (s *Spawner) ReapExpiredSnapshots(ctx context.Context) {
 	blobs := s.Storage()

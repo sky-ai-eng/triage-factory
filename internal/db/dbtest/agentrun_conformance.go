@@ -1001,6 +1001,57 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// The completed-only blueprint: every step concluded cleanly, nothing parked
+	// and nothing aborted. It is the case the retention query used to omit
+	// wholesale — its rows matched neither `open` nor completed+abort, so the
+	// blueprint appeared in no group and its shared workspace blob was never
+	// reaped. Now that a clean completion snapshots, that omission is a permanent
+	// leak rather than a harmless gap, so `completed` is reapable whatever the
+	// outcome, and both halves of the TTL are pinned here: past the cutoff the key
+	// enumerates, before it the key does not.
+	t.Run("ListReapableSnapshotKeys_CompletedOnlyBlueprint", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "reap-completed-only")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+
+		// Two steps of ONE blueprint — they share a snapshot key, so the sweep
+		// has to reason about the blueprint rather than the row.
+		bpr := seed.BlueprintRun(t, taskID)
+		mkStep := func() string {
+			return seed.Run(t, domain.Conversation{
+				TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running",
+				Model: "m", BlueprintRunID: bpr,
+			})
+		}
+		step1, step2 := mkStep(), mkStep()
+		if err := store.Complete(ctx, orgID, step1, "completed", 0, 0, 0, "", "handed off", "continue", "", ""); err != nil {
+			t.Fatalf("complete step 1: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, step2, "completed", 0, 0, 0, "", "shipped it", "finish", "", ""); err != nil {
+			t.Fatalf("complete step 2: %v", err)
+		}
+
+		// A cutoff in the future is "the whole blueprint has aged out".
+		aged, err := store.ListReapableSnapshotKeysSystem(ctx, time.Now().Add(time.Hour))
+		if err != nil {
+			t.Fatalf("ListReapableSnapshotKeysSystem(aged): %v", err)
+		}
+		if !reapKeysContain(aged, bpr) {
+			t.Errorf("blueprint %s whose every step completed is not reapable past the TTL; its workspace blob would never be collected", bpr)
+		}
+
+		// …and one in the past is "nothing has aged out yet".
+		fresh, err := store.ListReapableSnapshotKeysSystem(ctx, time.Now().Add(-time.Hour))
+		if err != nil {
+			t.Fatalf("ListReapableSnapshotKeysSystem(fresh): %v", err)
+		}
+		if reapKeysContain(fresh, bpr) {
+			t.Errorf("just-completed blueprint %s is already reapable; the TTL has not elapsed", bpr)
+		}
+	})
+
 	t.Run("SetExecutorSystem_MintsUpdatesReleasesActiveClaim", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -3080,6 +3131,17 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 		}
 	})
+}
+
+// reapKeysContain reports whether the retention sweep's key set names this
+// blueprint_run.
+func reapKeysContain(keys []domain.SnapshotReapKey, blueprintRunID string) bool {
+	for _, k := range keys {
+		if k.BlueprintRunID == blueprintRunID {
+			return true
+		}
+	}
+	return false
 }
 
 // seedConversationForTest creates a fresh entity+event+task+run chain and

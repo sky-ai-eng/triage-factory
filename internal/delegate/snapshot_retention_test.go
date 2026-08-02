@@ -14,13 +14,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 )
 
-// TestProcessCompletion_DraftPRWritesNoSnapshot: a completed step that queued a
-// draft PR no longer parks or snapshots. The artifact is an async
-// sidecar — the step completes with its real outcome (continue) and is not
-// resumable through a parked status, so no workspace snapshot is written.
-func TestProcessCompletion_DraftPRWritesNoSnapshot(t *testing.T) {
+// TestProcessCompletion_DraftPRDoesNotPark: a completed step that queued a draft
+// PR does not park. The artifact is an async sidecar — the step completes with
+// its real outcome (continue) rather than waiting on a human — and like every
+// completed terminal it snapshots on the way out.
+func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, runID, taskID := setupAdvanceFixture(t, "draftpr-nosnap")
+	s, database, runID, taskID := setupAdvanceFixture(t, "draftpr-nopark")
 	wireBlobStore(t, s)
 	bpr := blueprintRunIDForRun(t, database, runID)
 
@@ -36,7 +36,7 @@ func TestProcessCompletion_DraftPRWritesNoSnapshot(t *testing.T) {
 	if run := loadRun(t, s, runID); run.Status != "completed" || run.Outcome != "continue" {
 		t.Fatalf("run = {status:%q outcome:%q}, want {completed continue}", run.Status, run.Outcome)
 	}
-	assertSnapshotPresent(t, s, bpr, false)
+	assertSnapshotPresent(t, s, bpr, true)
 }
 
 // TestProcessCompletion_PlainAbortWritesSnapshot: a plain abort (completed +
@@ -63,18 +63,47 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 	assertSnapshotPresent(t, s, bpr, true)
 }
 
-// TestProcessCompletion_FinishNoPendingWritesNoSnapshot is the contrast: a clean
-// finish with no queued artifact is not resumable, so it writes no snapshot.
-func TestProcessCompletion_FinishNoPendingWritesNoSnapshot(t *testing.T) {
+// TestProcessCompletion_CleanFinishWritesSnapshot is the case the write policy
+// was widened for: a clean finish snapshots its workspace at the terminal write,
+// while the worktree and transcript are still on disk, so the work a successful
+// run produced is still somewhere once the cleanup defers tear the tree down.
+func TestProcessCompletion_CleanFinishWritesSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, runID, taskID := setupAdvanceFixture(t, "fin-nosnap")
+	s, database, runID, taskID := setupAdvanceFixture(t, "fin-snap")
 	wireBlobStore(t, s)
 	bpr := blueprintRunIDForRun(t, database, runID)
 
 	task := loadTask(t, s, taskID)
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
+	parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
 		res(`{"outcome":"finish","summary":"shipped it"}`), t.TempDir(), nil, "", "event", "")
 
+	if parked {
+		t.Error("processCompletion(clean finish) = true; want parked=false (a finish is terminal; the snapshot is the resume path, not a warm tree)")
+	}
+	if run := loadRun(t, s, runID); run.Status != "completed" || run.Outcome != "finish" {
+		t.Fatalf("run = {status:%q outcome:%q}, want {completed finish}", run.Status, run.Outcome)
+	}
+	assertSnapshotPresent(t, s, bpr, true)
+}
+
+// TestProcessCompletion_FailedWritesNoSnapshot is the contrast that keeps the
+// widening honest: `completed` is the whole snapshot set, not "any terminal". A
+// failed run's infrastructure died, so there is nothing coherent to rehydrate.
+func TestProcessCompletion_FailedWritesNoSnapshot(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	s, database, runID, taskID := setupAdvanceFixture(t, "fail-nosnap")
+	wireBlobStore(t, s)
+	bpr := blueprintRunIDForRun(t, database, runID)
+
+	task := loadTask(t, s, taskID)
+	errored := res(`the agent runtime blew up`)
+	errored.IsError = true
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, bpr, "", task,
+		errored, t.TempDir(), nil, "", "event", "")
+
+	if run := loadRun(t, s, runID); run.Status != "failed" {
+		t.Fatalf("run status = %q, want failed", run.Status)
+	}
 	assertSnapshotPresent(t, s, bpr, false)
 }
 
@@ -112,17 +141,36 @@ func TestTerminateBlueprint_CancelRetainsSnapshot(t *testing.T) {
 	assertSnapshotPresent(t, s, bpr, true)
 }
 
-// TestTerminateBlueprint_FinishDiscardsSnapshot: a clean finish is not resumable,
-// so terminateBlueprint drops its snapshot immediately.
-func TestTerminateBlueprint_FinishDiscardsSnapshot(t *testing.T) {
+// TestTerminateBlueprint_CompletedRetainsSnapshot: a cleanly completed blueprint
+// keeps its workspace snapshot. terminateBlueprint tears the worktree down, so
+// discarding here would delete the blob the step just wrote seconds earlier and
+// leave a successful blueprint as the one outcome with no workspace at all.
+func TestTerminateBlueprint_CompletedRetainsSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, runID, taskID := setupAdvanceFixture(t, "term-finish-drop")
+	s, database, runID, taskID := setupAdvanceFixture(t, "term-finish-keep")
 	wireBlobStore(t, s)
 	bpr := blueprintRunIDForRun(t, database, runID)
 	putTestSnapshot(t, s, bpr)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
 		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
+
+	assertSnapshotPresent(t, s, bpr, true)
+}
+
+// TestTerminateBlueprint_FailedDiscardsSnapshot: `failed` is the one terminal
+// that still drops its blob at terminate time rather than aging out — the
+// infrastructure under the run died, so there is nothing coherent to resume onto
+// and any blob is an earlier step's park.
+func TestTerminateBlueprint_FailedDiscardsSnapshot(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	s, database, runID, taskID := setupAdvanceFixture(t, "term-failed-drop")
+	wireBlobStore(t, s)
+	bpr := blueprintRunIDForRun(t, database, runID)
+	putTestSnapshot(t, s, bpr)
+
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
+		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusFailed, "crashed", nil, true)
 
 	assertSnapshotPresent(t, s, bpr, false)
 }
@@ -154,10 +202,13 @@ func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
 	assertSnapshotPresent(t, s, freshBpr, true) // within the TTL → kept
 }
 
-// TestListReapableSnapshotKeys_ExcludesFinishAndInTTL pins the query rules: a
-// past-TTL completed+abort key is eligible, a past-TTL finish run is excluded
-// (not resumable), and a within-TTL open run is not yet eligible.
-func TestListReapableSnapshotKeys_ExcludesFinishAndInTTL(t *testing.T) {
+// TestListReapableSnapshotKeys_CoversEveryCompletedExcludesFailedAndInTTL pins
+// the query rules against the widened write policy: a past-TTL completed run is
+// eligible whatever its outcome (abort AND finish — the finish case is the one
+// the old outcome='abort' filter silently omitted, leaving its blob forever), a
+// past-TTL failed run is excluded (it never had a blob to age out), and a
+// within-TTL open run is not yet eligible.
+func TestListReapableSnapshotKeys_CoversEveryCompletedExcludesFailedAndInTTL(t *testing.T) {
 	s, database, abortRun, _ := setupAdvanceFixture(t, "reap-rules")
 	abortBpr := blueprintRunIDForRun(t, database, abortRun)
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, abortRun); err != nil {
@@ -165,24 +216,39 @@ func TestListReapableSnapshotKeys_ExcludesFinishAndInTTL(t *testing.T) {
 	}
 
 	seedRun(t, database, "r-fin2", "s", "/tmp/wt")
+	finishBpr := blueprintRunIDForRun(t, database, "r-fin2")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish', completed_at=datetime('now','-30 days') WHERE id='r-fin2'`); err != nil {
 		t.Fatalf("finish run: %v", err)
 	}
+	seedRun(t, database, "r-failed2", "s", "/tmp/wt")
+	failedBpr := blueprintRunIDForRun(t, database, "r-failed2")
+	if _, err := database.Exec(`UPDATE conversations SET status='failed', completed_at=datetime('now','-30 days') WHERE id='r-failed2'`); err != nil {
+		t.Fatalf("failed run: %v", err)
+	}
 	seedRun(t, database, "r-open2", "s", "/tmp/wt")
+	openBpr := blueprintRunIDForRun(t, database, "r-open2")
 	if _, err := database.Exec(`UPDATE conversations SET status='open', completed_at=NULL, started_at=datetime('now') WHERE id='r-open2'`); err != nil {
 		t.Fatalf("open run: %v", err)
 	}
 
 	cutoff := time.Now().Add(-14 * 24 * time.Hour)
-	keys, err := s.agentRuns.ListReapableSnapshotKeysSystem(context.Background(), cutoff)
-	if err != nil {
-		t.Fatalf("ListReapableSnapshotKeysSystem: %v", err)
+	keys := reapKeys(t, s, cutoff)
+	if !keysContain(keys, abortBpr) {
+		t.Errorf("past-TTL completed+abort key %s not reapable", abortBpr)
 	}
-	if len(keys) != 1 || keys[0].BlueprintRunID != abortBpr {
-		t.Fatalf("reapable keys = %+v, want exactly the old abort key %s (finish excluded, fresh open excluded)", keys, abortBpr)
+	if !keysContain(keys, finishBpr) {
+		t.Errorf("past-TTL completed+finish key %s not reapable; its snapshot would leak forever", finishBpr)
 	}
-	if keys[0].OrgID != runmode.LocalDefaultOrgID {
-		t.Errorf("key org = %q, want %q", keys[0].OrgID, runmode.LocalDefaultOrgID)
+	if keysContain(keys, failedBpr) {
+		t.Errorf("failed key %s is reapable; failed runs carry no snapshot to age out", failedBpr)
+	}
+	if keysContain(keys, openBpr) {
+		t.Errorf("within-TTL open key %s is reapable; the TTL has not elapsed", openBpr)
+	}
+	for _, k := range keys {
+		if k.OrgID != runmode.LocalDefaultOrgID {
+			t.Errorf("key org = %q, want %q", k.OrgID, runmode.LocalDefaultOrgID)
+		}
 	}
 }
 
