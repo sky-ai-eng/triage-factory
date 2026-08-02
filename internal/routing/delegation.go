@@ -14,22 +14,25 @@ import (
 )
 
 // tryAutoDelegate decides whether a matched (task, trigger) fires now or
-// queues. Order of checks: breaker (per-(entity,prompt)) → entity gate
-// (per-entity, auto-only) → fire or enqueue.
+// queues. Order of checks: breaker (per-(entity,prompt)) → task gate
+// (per-task, auto-only) → fire or enqueue.
 //
 // Breaker is a hard skip — a tripped breaker means the user has work to
 // investigate before more runs land on this entity-prompt pair. Queueing
-// past it would just stack stale firings the user didn't ask for.
+// past it would just stack stale firings the user didn't ask for. It stays
+// entity-scoped on purpose: repeated failures of one prompt against one
+// entity are the signal, whichever task carried them.
 //
-// Entity gate is the per-entity serialization point: at most one auto run
-// in flight per entity, regardless of which task/trigger it came from. If
-// the gate is closed (active auto run, or older firings already queued
-// for FIFO fairness), the firing enqueues onto pending_firings instead of
-// being dropped silently.
+// The task gate is the serialization point: at most one auto run in flight
+// per task, whichever trigger it came from. A sibling task on the same
+// entity has its own gate and fires independently. If the gate is closed
+// (this task's own run is live, or older firings are queued for FIFO
+// fairness), the firing folds into the live run or enqueues onto
+// pending_firings instead of being dropped silently.
 //
 // Returns fired=true iff this call actually committed the bot to the task —
 // an immediate fireDelegate success, or a new row landed in pending_firings
-// (queued because the entity was busy; the commitment is real even though
+// (queued because the task was busy; the commitment is real even though
 // the run hasn't started yet). Every other exit — already claimed by
 // another team, a store/lookup error, the bot disabled for the team, the
 // breaker tripped, a duplicate already queued, or a replay hitting
@@ -248,9 +251,9 @@ func (r *Router) tryAutoDelegate(orgID string, task *domain.Task, trigger domain
 }
 
 // enqueueBusyFiring defers a valid firing onto pending_firings because the
-// entity is busy, and commits the task's agent claim on success. Called
+// task is busy, and commits the task's agent claim on success. Called
 // from both places that discover busyness: the gate's fast-path read, and
-// the ErrEntityBusy loser of the fenced insert (the gate race — the DB
+// the ErrTaskBusy loser of the fenced insert (the gate race — the DB
 // index is the authority, the gate an optimization). Returns true when the
 // intent was queued and the claim stamped; false when the enqueue failed
 // or collapsed onto an already-queued (task, trigger) duplicate (whose own
@@ -272,7 +275,7 @@ func (r *Router) enqueueBusyFiring(orgID, entityID string, task *domain.Task, tr
 			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
 		return false
 	}
-	routerLog.Info("queued firing, entity busy",
+	routerLog.Info("queued firing, task busy",
 		"entity", entityID, "task_id", task.ID, "trigger", trigger.ID)
 	// Pending firing landed in the queue, commit the task to the
 	// org's agent. Stamp here (after EnqueuePendingFiring
@@ -282,13 +285,13 @@ func (r *Router) enqueueBusyFiring(orgID, entityID string, task *domain.Task, tr
 	return true
 }
 
-// tryAdditiveInjection folds a same-task firing into the entity's already-
-// active auto run via the cross-pod-aware injection seam, instead of
-// deferring a second run onto pending_firings. runID is the entity's active
-// run, resolved by the caller and already confirmed to belong to the
-// firing's own task. Returns true when the caller should treat the firing
-// as handled; false when the caller must fall through to the normal
-// deferral so the firing is never silently dropped.
+// tryAdditiveInjection folds a firing into its task's already-active auto
+// run via the cross-pod-aware injection seam, instead of deferring a second
+// run onto pending_firings. runID is that run, resolved by the caller from
+// the firing's own task — so it belongs to that task by construction, with
+// no separate ownership check to make. Returns true when the caller should
+// treat the firing as handled; false when the caller must fall through to
+// the normal deferral so the firing is never silently dropped.
 //
 // The one fall-through is StageOrDeliverAdditiveEvent reporting
 // InjectNotDelivered — dropped outright (no live process anywhere, and the

@@ -31,10 +31,9 @@ func TestPendingFiringsStore_SQLite(t *testing.T) {
 }
 
 // TestPendingFiringsStore_SQLite_RejectsNonLocalOrg pins the
-// assertLocalOrg guard on every method. The runs/tasks-shaped methods
-// (HasActiveAutoRunForEntity, EntityCanFireImmediately) also fire the
-// guard before touching the data — important because their queries
-// would otherwise return false for any orgID by joining away the rows.
+// assertLocalOrg guard on every method — important because these queries
+// would otherwise return an empty result for any orgID rather than
+// refusing it, which reads as "nothing queued" instead of "wrong tenant".
 func TestPendingFiringsStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	conn := newSQLiteForPendingFiringsTest(t)
 	stores := sqlitestore.New(conn)

@@ -69,7 +69,7 @@ type PendingFiringsStore interface {
 	// lost: the drain sweeper requeues rows whose claim has gone stale
 	// via RequeueStaleDraining — a drain is a handful of DB round-trips
 	// (Delegate is a pure enqueue), so a minutes-old claim is a dead
-	// drainer, not a slow one. The per-entity in-process mutex the router
+	// drainer, not a slow one. The per-task in-process mutex the router
 	// already holds around the whole pop→decide→mark sequence is still
 	// worth keeping (it avoids needless round-trips reclaiming rows
 	// across goroutines in one process), but is no longer load-bearing

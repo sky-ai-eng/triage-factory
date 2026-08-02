@@ -393,10 +393,10 @@ func TestDrainTask_EmptyQueue(t *testing.T) {
 }
 
 // TestDrainTask_ConcurrentDrainsDoNotDoubleFire is the regression test
-// for the pop-fire-mark race: without per-entity serialization, a fast-
+// for the pop-fire-mark race: without per-task serialization, a fast-
 // terminating run fired by drainer A could trigger drainer B before A
 // reached MarkPendingFiringFired, and B would pop the same still-pending
-// row and call Delegate again. With the per-entity mutex, the second
+// row and call Delegate again. With the per-task mutex, the second
 // drainer blocks until the first marks the firing terminal, then sees
 // nothing pending and returns clean.
 //

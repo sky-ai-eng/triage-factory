@@ -53,7 +53,7 @@ func (f *fakeDrainer) callsCopy() []drainCall {
 // TestCancel_OpenAutoRun_DrainsQueue pins the fix for the
 // "Cancel without active goroutine never calls notifyDrainer" leak.
 // An auto-fired run parked `open` has no goroutine defer to piggy-back on, so
-// without the explicit drain the per-entity firing queue would stick until some
+// without the explicit drain the task's firing queue would stick until some
 // other run terminated.
 func TestCancel_OpenAutoRun_DrainsQueue(t *testing.T) {
 	database := newDelegateTestDB(t)

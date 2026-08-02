@@ -20,10 +20,9 @@ import (
 // kept honest by the explicit filter here in case the policy is ever
 // loosened).
 //
-// The per-entity firing gate's runs-shaped half lives on
-// ConversationStore (HasActiveAutoRunForEntity) — strict ownership. The
-// router composes the gate from this store's HasPendingForTask +
-// ConversationStore's HasActiveAutoRunForTask.
+// The per-task firing gate's runs-shaped half lives on ConversationStore —
+// strict ownership. The router composes the gate from this store's
+// HasPendingForTask + ConversationStore's HasActiveAutoRunForTask.
 type pendingFiringsStore struct{ q queryer }
 
 func newPendingFiringsStore(q queryer) db.PendingFiringsStore {

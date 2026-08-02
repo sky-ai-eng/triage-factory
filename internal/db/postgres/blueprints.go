@@ -729,13 +729,13 @@ const blueprintRunsOneActivePerTaskConstraint = "blueprint_runs_one_active_auto_
 //   - blueprint_runs_event_trigger_fence (ON CONFLICT, inference-targeted):
 //     a replayed (triggering_event_id, trigger_id) — the at-least-once event
 //     queue redelivering an event whose first auto-delegation already fired.
-//   - blueprint_runs_one_active_auto_run_per_entity (caught below): a
-//     DIFFERENT (event, trigger) pair racing to fire on the SAME entity
-//     while another auto run is still active there. A single INSERT's ON
+//   - blueprint_runs_one_active_auto_run_per_task (caught below): a
+//     DIFFERENT (event, trigger) pair racing to fire on the SAME task
+//     while another auto run is still active on it. A single INSERT's ON
 //     CONFLICT can only target one arbiter index, so this second case
 //     isn't inference-eligible — it surfaces as a raw unique_violation,
 //     translated to db.ErrTaskBusyActiveAutoRun. NOT the inserted=false
-//     contract: a replay is permanently satisfied, entity-busy is a
+//     contract: a replay is permanently satisfied, task-busy is a
 //     deferral — the caller must queue the intent, not drop it.
 func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun) (bool, error) {
 	if br.TriggeringEventID == "" || br.TriggerID == "" {

@@ -156,7 +156,7 @@ func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task 
 	}
 	trigger = trig
 
-	// Seed the "already active" run the busy-entity gate will see —
+	// Seed the "already active" run the busy-task gate will see —
 	// mirrors the immediate-fire path's own bookkeeping (a fenced
 	// blueprint_run + a running event-triggered run row) without going
 	// through the full HandleEvent dispatch.

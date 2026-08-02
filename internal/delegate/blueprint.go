@@ -505,7 +505,7 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 // strand the blueprint_run in 'running' (and its shared-workspace snapshot in
 // the blob store).
 //
-// It does NOT drain the per-entity queue: the drainer's manual short-circuit
+// It does NOT drain the task's firing queue: the drainer's manual short-circuit
 // keys off the run's trigger type, which the caller (Cancel) already passes to
 // notifyDrainer — folding the drain in here (via terminateBlueprint) would
 // couple it to the write-pool routing and drain a manual run that must not.
