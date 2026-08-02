@@ -145,7 +145,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	// workspace, which the retention TTL collects on its own schedule instead
 	// of a reaper throwing it away the instant a host went quiet.
 	parkedBlueprintIDs, parkedIDs, err := reapUpdateRuns(ctx, tx, staleSecs, nil, `
-		UPDATE conversations SET status = 'open', parked_at = COALESCE(parked_at, now()), stop_reason = 'cancelled',
+		UPDATE conversations SET status = 'open', parked_at = COALESCE(parked_at, now()), stop_reason = 'system_cancelled',
 			result_summary = 'Stopped: owning blueprint run was cancel-requested under a dead executor (reaper)'
 		WHERE id IN (
 			SELECT r.id `+reapCandidateJoin+`

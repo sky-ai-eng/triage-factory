@@ -360,7 +360,10 @@ func (ag *agentHandler) handleAgentCancel(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+	// The gesture is a cancel; the row it leaves behind is parked. Report the
+	// latter — this field names the conversation's status, and 'cancelled' has
+	// not been one since a stop became a park.
+	writeJSON(w, http.StatusOK, map[string]string{"status": "open"})
 }
 
 // runVisible reports whether conversationID exists and is visible to the caller's org
