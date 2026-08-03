@@ -1,9 +1,7 @@
-// Open-run resume flow: a run that went `open` (a turn ended without a
-// conclusion and the process then idle-closed) is woken by ResumeOpenRun,
-// which flips it back to running and re-invokes the session with a new message.
-// ResumeWithMessage is the lower-level re-invoke helper. The P3 steering
-// endpoints (message/interrupt) are the production caller; this is the durable
-// cold-resume backstop beneath the warm-process steering path.
+// The SDK resume machinery: what a woken conversation is refused for, what a
+// lost wake means, and ResumeWithMessage — the re-invoke that hands a claimed
+// resume's message to a prior headless claude session. The wake itself lives in
+// followup.go; this is the cold-resume backstop beneath it.
 
 package delegate
 
@@ -19,16 +17,16 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// ErrRunNotResumable is returned by ResumeOpenRun when the run is not in a
-// resumable state (MarkQueuedForResume only flips open / completed) — a
-// concurrent failure or terminal moved it out from under the caller. Callers
-// map this to 409 Conflict so the client can refresh and see the actual state.
+// ErrRunNotResumable is returned when a wake's compare-and-swap found the
+// conversation no longer in a resumable state (MarkQueuedForResume only flips
+// open / completed) — a concurrent failure or terminal moved it out from under
+// the caller. Callers map this to 409 Conflict so the client can refresh and
+// see the actual state.
 //
 // A competing RESUME is not in this set, and that is the whole distinction the
 // lost-flip path has to make (see lostWakeOutcome). Two wakes race, one loses,
@@ -62,180 +60,12 @@ var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
 // you: refresh and look again. This means refreshing will never change it.
 var ErrConversationConcluded = errors.New("resume: this conversation can no longer be continued — its blueprint was cancelled, or it concluded on a later step (only a blueprint's final conversation takes follow-ups)")
 
-// ErrWorkspaceExpired is returned by ResumeOpenRun when a resumable run's
-// workspace is gone for good: its warm worktree was swept AND its durable
-// snapshot was reaped by the retention TTL. The run's status is left unchanged
-// (no flip), so the user gets a clear "this workspace has expired" signal rather
+// ErrWorkspaceExpired is returned when a resumable conversation's workspace is
+// gone for good: its warm worktree was swept AND its durable snapshot was
+// reaped by the retention TTL. The conversation's status is left unchanged (no
+// flip), so the user gets a clear "this workspace has expired" signal rather
 // than seeing the run silently fail mid-resume. Callers map it to 410 Gone.
 var ErrWorkspaceExpired = errors.New("resume: this run's workspace has expired and can no longer be resumed")
-
-// ResumeOpenRun is resume-by-enqueue (TFAC-585, decision log #7): a
-// message to a parked or concluded-but-resumable run (open or completed —
-// see resumableState) records the message durably, then re-queues the
-// SAME runs row as ordinary claimable work — no in-process resume
-// goroutine spawns, in ANY mode (the previous in-process implementation
-// is retired entirely, TF_ROLE=all included). This method:
-//  1. validates the run is resumable (session id, worktree path, model)
-//     and that its workspace can still be recovered — a warm worktree or a
-//     durable snapshot (else ErrWorkspaceExpired → 410, with no side effect)
-//  2. records agentMessage on the conversation's pending-input queue, then —
-//     in a second tx — flips the run's status back to `queued` (a
-//     compare-and-swap race guard, MarkQueuedForResume) and, for a
-//     completed+abort run whose blueprint already terminated aborted,
-//     re-opens that blueprint. The two are deliberately unbound, exactly as
-//     on the native path: the queue appends, so a wake that loses the CAS to
-//     another wake has still queued its message and the winner's claim
-//     delivers it (lostWakeOutcome separates that from a flip lost to a
-//     terminal, which is still a conflict). Ordering is what matters — the
-//     message is written BEFORE the flip, so a crash between them leaves
-//     input for the next claim to drain rather than a claimable run with
-//     nothing to say
-//  3. records the resume on the task's timeline and nudges the dispatcher
-//     (a ~ms same-process wake at TF_ROLE=all; a cross-pod wake is out of
-//     scope here — the claiming executor's own scan-interval backstop picks
-//     the row up, per the ticket's accepted "wake latency traverses the
-//     queue" decision)
-//
-// The actual delivery — rehydrating the workspace and re-invoking Claude
-// with the recorded message — happens later, off the ordinary claim path
-// (Spawner.dispatchResumeClaim in dispatch.go), on whichever executor
-// claims the row. This is the split the ticket calls for: "operations on
-// live processes are routed; creation of work is queued" — a resume mints
-// work, so it goes through the same admission gates (memory floor,
-// concurrency cap, fair ordering) every other queued run does.
-//
-// agentMessage is the plain-text message to feed the resumed session (in
-// P3, the user's steering text).
-//
-// userID identifies the resuming user — the actor whose action woke the
-// run. Every write here (and, later, every write inside the delivering
-// claim) routes under this user's synthetic claims regardless of the
-// run's original trigger type (an event-triggered run resumed by a
-// teammate gets the teammate's identity on the resume writes, which is
-// the audit-honest outcome). Local mode passes runmode.LocalDefaultUserID;
-// multi-mode handlers extract it from JWT claims.
-func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage, userID string) error {
-	if userID == "" {
-		return fmt.Errorf("resume: empty user id")
-	}
-	if s.pendingInput == nil {
-		return fmt.Errorf("resume: no pending-input store wired")
-	}
-	run, err := s.agentRuns.GetSystem(ctx, orgID, runID)
-	if err != nil {
-		return fmt.Errorf("load run: %w", err)
-	}
-	if run == nil {
-		return fmt.Errorf("run not found")
-	}
-	// Only a resumable run (open / completed) can be woken. The
-	// MarkQueuedForResume compare-and-swap re-checks under the row lock,
-	// so this early-out doesn't relax the race guard — it just avoids
-	// recording an input row for a run that's obviously not resumable.
-	if !resumableState(run.Status, run.Outcome) {
-		return ErrRunNotResumable
-	}
-	if run.SessionID == "" {
-		return fmt.Errorf("run has no session id; cannot resume")
-	}
-	if run.WorktreePath == "" {
-		return fmt.Errorf("run has no worktree path; cannot resume")
-	}
-	if run.Model == "" {
-		return fmt.Errorf("run has no model; cannot resume")
-	}
-	// The two structural refusals, ordered most-permanent first, because both
-	// are true of the same rows and only one of them is worth telling a person
-	// about.
-	//
-	// A workspace reaped by the retention TTL is gone for good: no warm
-	// worktree, no snapshot, nothing to rebuild from, and no future release
-	// brings it back. That is 410 Gone, and refusing here means no side effect
-	// — without it the flip below succeeds and the run dies at claim time as a
-	// generic failRun, turning an expected "this expired" into a destroyed run.
-	// Every run stopped by an older build lands here too: the old cancel path
-	// discarded the snapshot on its way out, so a migrated row has no workspace
-	// by construction and inherits exactly this answer.
-	if !s.workspaceRecoverable(ctx, orgID, run) {
-		return ErrWorkspaceExpired
-	}
-	// The workspace survives but nothing would drive it — the blueprint was
-	// cancelled, or it finished on a later step and this is not the conversation
-	// it came to rest on. Checked second because it is about the sequence rather
-	// than the workspace, and a person whose workspace is gone is better served
-	// by hearing that.
-	if !s.blueprintDrivableForResume(ctx, orgID, run) {
-		return ErrConversationConcluded
-	}
-
-	// A completed+abort run's blueprint already terminated (aborted) when
-	// the step stopped. Re-open it to running in the same tx as the run
-	// flip (below) so the eventual resumed step's new conclusion re-
-	// finalizes the blueprint through the normal post-resume disposition
-	// (ResumeBlueprintAfterResume, called from dispatchResumeClaim once
-	// delivery completes). An open resume leaves its still-running
-	// blueprint alone — ReopenRunForResume's CAS (status='aborted') is a
-	// no-op there, and so is a follow-up on a blueprint that finished:
-	// finished machinery never restarts, and the follow-up rides it as-is.
-	blueprintRunID := run.BlueprintRunID
-	reopenAbortedBlueprint := run.Status == "completed" && domain.RunOutcome(run.Outcome) == domain.RunOutcomeAbort
-
-	// Step 2a: queue the message. Unconditional and first, mirroring
-	// queueNativeMessage — a message written before the flip is at worst
-	// input waiting for a claim, while a flip written before the message is a
-	// claimable run with nothing to say. Routed under the resuming user's
-	// synthetic claims (resume is always user-initiated regardless of the
-	// run's original trigger).
-	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
-		return ts.RunPendingInput.Store(ctx, orgID, runID, userID, agentMessage)
-	}); err != nil {
-		return fmt.Errorf("record pending input: %w", err)
-	}
-
-	// Step 2b: flip the run (from its resumable state) back to `queued` —
-	// resume-by-enqueue re-queues the SAME row as ordinary claimable work
-	// rather than flipping straight to `running` the way the retired
-	// in-process implementation did.
-	var flipped bool
-	err = s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
-		f, fErr := ts.Conversations.MarkQueuedForResume(ctx, orgID, runID)
-		if fErr != nil {
-			return fErr
-		}
-		flipped = f
-		if !f {
-			return nil // lost the wake CAS — another wake already re-queued it
-		}
-		// Re-open the aborted blueprint atomically with the run flip. A failure
-		// rolls back the run flip too, so run + blueprint never split across the
-		// resumable/terminal boundary.
-		if reopenAbortedBlueprint && blueprintRunID != "" {
-			if _, rErr := ts.Blueprints.ReopenRunForResume(ctx, orgID, blueprintRunID); rErr != nil {
-				return rErr
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("flip status: %w", err)
-	}
-	if !flipped {
-		return s.lostWakeOutcome(ctx, orgID, runID)
-	}
-	s.broadcastRunUpdate(orgID, runID, "queued")
-	s.recordResumeTaskEvent(ctx, orgID, userID, *run)
-	// The parked step is queued for resume again → bounce the aggregate
-	// board column back to in_progress (no-op if a sibling run is still
-	// parked).
-	s.recomputeTaskBoardColumn(orgID, run.TaskID)
-	// Same-process fast path (TF_ROLE=all): the wake is a ~ms in-process
-	// dispatcher nudge. Cross-pod, there is no wake nudge here by design —
-	// the claiming executor's own scan-interval backstop
-	// (DefaultRunScanInterval) picks the row up; a cross-pod wake nudge
-	// (tf_wake) is TFAC-586's fleet-reaper scope, not this seam's.
-	s.wakeDispatcher()
-	return nil
-}
 
 // lostWakeOutcome answers for a wake whose compare-and-swap found the
 // conversation already moved. The message is queued either way — the only
@@ -364,7 +194,7 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *d
 type ResumeOptions struct {
 	// Model is the model the run started with. **Required** — a resume
 	// must reuse the model captured at run start (run.Model, captured by
-	// ResumeOpenRun), never a freshly-resolved one, or a config change between
+	// dispatchResumeClaim), never a freshly-resolved one, or a config change
 	// the initial invocation and the resume would silently switch models
 	// mid-run. ResumeWithMessage rejects an empty Model with an error
 	// rather than falling back to a live per-(org, team) resolve, which
@@ -392,13 +222,13 @@ type ResumeOptions struct {
 	// TRIAGE_FACTORY_BLUEPRINT_RUN_ID so per-run scratch paths resolve to the
 	// same place they did on the initial invocation. Required for the resume to
 	// stay consistent with the initial env; callers capture it from the run
-	// (ResumeOpenRun → run.BlueprintRunID).
+	// (dispatchResumeClaim → run.BlueprintRunID).
 	Namespace string
 
 	// TeamID is the run's owning team. Resolves the presence-gated
 	// absent-auto-deny policy for the resumed run's permission prompts
 	// (TFAC-392), and stamps the resumed run's agenthost.RunInfo.TeamID so
-	// the capture writers can attribute artifacts (TFAC-458). ResumeOpenRun
+	// the capture writers can attribute artifacts (TFAC-458). The claim
 	// captures it from the run row (run.TeamID, NOT NULL); empty falls back
 	// to the schema defaults for the absent-auto-deny resolve.
 	TeamID string
@@ -423,8 +253,9 @@ type ResumeOptions struct {
 //
 // ResumeWithMessage always returns a non-nil *ResumeOutcome (the same struct on
 // every path, error or not), so callers guard on Completion == nil, not on a
-// nil outcome. Callers decide how to interpret a nil Completion — ResumeOpenRun
-// treats it as a session-level failure and surfaces an error.
+// nil outcome. Callers decide how to interpret a nil Completion —
+// dispatchResumeClaim treats it as a session-level failure and surfaces an
+// error.
 type ResumeOutcome struct {
 	Completion *agentproc.Result
 	Result     *agentResult
@@ -434,7 +265,7 @@ type ResumeOutcome struct {
 // ResumeWithMessage resumes a prior headless claude session with a new
 // user message and streams the result through the same message-
 // persistence path as the initial invocation. The cold-resume backstop for an
-// open run (ResumeOpenRun) when the warm process is gone.
+// open run when the warm process is gone.
 //
 // Callers pass the sessionID captured during the initial run (read
 // from runs.session_id, populated on the runSink during the original
@@ -461,7 +292,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	// here — rather than falling back to a live per-(org,
 	// team) resolve — is what closes the mid-run model-drift gap: a config
 	// change between the initial invocation and this resume must never
-	// switch models underneath a single logical run. ResumeOpenRun captures
+	// switch models underneath a single logical run. The resume claim captures
 	// and passes it (run.Model); an empty value is a wiring bug, surfaced loudly.
 	if opts.Model == "" {
 		return nil, fmt.Errorf("resume: missing model (caller must pass the model captured at run start)")

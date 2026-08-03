@@ -169,7 +169,7 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool) error 
 	//
 	// We also have to drain the task's firing queue ourselves on
 	// terminal exit. The active-goroutine kill paths drain via
-	// their goroutine defer (Delegate's defer / ResumeOpenRun's
+	// their goroutine defer (Delegate's defer / the resume claim's
 	// defer); a stop that hits this DB-only path has no defer to
 	// piggy-back on, so an auto-fired run stopped while parked
 	// `open` would leave the task's firing queue stuck

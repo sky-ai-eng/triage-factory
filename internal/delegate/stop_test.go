@@ -422,7 +422,7 @@ func TestStop_MidBlueprintStep_ResumesAndIsDriven(t *testing.T) {
 		t.Fatalf("stop: %v", err)
 	}
 
-	if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, runID, "carry on", runmode.LocalDefaultUserID); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, runID, runmode.LocalDefaultUserID, "carry on"); err != nil {
 		t.Fatalf("resume after stop: %v (a stopped step must stay resumable)", err)
 	}
 

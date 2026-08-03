@@ -14,21 +14,35 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 )
 
-// TestResumeOpenRun_EmptyUserID guards the first gate: a resume must carry the
-// resuming user's identity (its writes route under that user's synthetic
-// claims). No DB touched.
-func TestResumeOpenRun_EmptyUserID(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "any", "msg", ""); err == nil {
+// TestFollowUp_EmptyUserID guards the identity gate: every write a follow-up
+// makes routes under the sending user's synthetic claims, so a message with no
+// actor is refused before any of them.
+func TestFollowUp_EmptyUserID(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-anon", "sess", t.TempDir())
+	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-anon'`); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-anon", "", "msg"); err == nil {
 		t.Fatal("expected an error for an empty user id")
+	}
+	if st := storedStatus(t, database, "r-anon"); st != "open" {
+		t.Errorf("stored status = %q, want open — a refused follow-up writes nothing", st)
 	}
 }
 
-// TestResumeOpenRun_ValidationGuards walks the field guards that reject a
-// resume before the pending-input write / requeue flip — each returns a
-// plain error the caller surfaces. seedRun gives a complete row; each case
-// blanks the one field under test.
-func TestResumeOpenRun_ValidationGuards(t *testing.T) {
+// TestFollowUp_SDKOnlyValidationGuards walks the three fields an SDK resume
+// needs on the row before a wake means anything: it re-invokes a Claude session
+// BY ID, in the tree it ran in, on the model it started with. Each case blanks
+// one of them and expects a refusal naming it.
+//
+// The native subtest is the other half of the same statement — these are the
+// one place in the ladder where the runtime changes the answer, so the same row
+// that refuses under `sdk` must be accepted under `native`, whose undelivered
+// message rows ARE its resume state.
+func TestFollowUp_SDKOnlyValidationGuards(t *testing.T) {
 	cases := []struct {
 		name    string
 		mutate  string // SQL to blank the field under test
@@ -50,32 +64,61 @@ func TestResumeOpenRun_ValidationGuards(t *testing.T) {
 			}
 			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-			err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-guard", "msg", runmode.LocalDefaultUserID)
+			err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-guard", runmode.LocalDefaultUserID, "msg")
 			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
 				t.Errorf("err = %v, want one mentioning %q", err, tc.wantSub)
 			}
 		})
 	}
+
+	t.Run("native needs none of them", func(t *testing.T) {
+		database := newDelegateTestDB(t)
+		// No session id, and the worktree it does carry is gone: a native
+		// conversation resumes off its transcript, not off either of those.
+		seedRun(t, database, "r-native-guard", "", "")
+		if _, err := database.Exec(`UPDATE conversations SET status='open', model=NULL WHERE id='r-native-guard'`); err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+		markNative(t, database, "r-native-guard")
+
+		if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-native-guard", runmode.LocalDefaultUserID, "carry on"); err != nil {
+			t.Fatalf("SendMessage: %v", err)
+		}
+		if got := pendingRows(t, s, "r-native-guard"); len(got) != 1 {
+			t.Errorf("queued rows = %d, want 1 — the SDK's session guards must not reach a native conversation", len(got))
+		}
+	})
 }
 
-// TestResumeOpenRun_NotResumable pins the resumable-state guard: a failed run
-// can't be woken — its workspace did not survive — so ResumeOpenRun returns
-// ErrRunNotResumable for the caller to map to 409, before any DB write.
-func TestResumeOpenRun_NotResumable(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-term", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE conversations SET status='failed' WHERE id='r-term'`); err != nil {
-		t.Fatalf("fail: %v", err)
-	}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+// TestFollowUp_TerminalRefused pins the ladder's floor, for both runtimes: a
+// failed conversation's workspace did not survive, so nothing will ever read a
+// row queued against it and SendMessage refuses before writing one.
+func TestFollowUp_TerminalRefused(t *testing.T) {
+	for _, runtime := range []string{"sdk", "native"} {
+		t.Run(runtime, func(t *testing.T) {
+			database := newDelegateTestDB(t)
+			seedRun(t, database, "r-term", "sess", "/tmp/wt")
+			if _, err := database.Exec(`UPDATE conversations SET status='failed' WHERE id='r-term'`); err != nil {
+				t.Fatalf("fail: %v", err)
+			}
+			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+			if runtime == "native" {
+				markNative(t, database, "r-term")
+			}
 
-	err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-term", "msg", runmode.LocalDefaultUserID)
-	if !errors.Is(err, ErrRunNotResumable) {
-		t.Errorf("err = %v, want ErrRunNotResumable", err)
+			err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-term", runmode.LocalDefaultUserID, "msg")
+			if !errors.Is(err, ErrRunNotSteerable) {
+				t.Errorf("err = %v, want ErrRunNotSteerable", err)
+			}
+			if got := pendingRows(t, s, "r-term"); len(got) != 0 {
+				t.Errorf("a refused message must not leave a row behind: %+v", got)
+			}
+		})
 	}
 }
 
-// TestResumeOpenRun_RefusalTaxonomy pins which of three answers a parked run
+// TestFollowUp_RefusalTaxonomy pins which of three answers a parked run
 // gets, and the ORDER the two structural ones are asked in. All three rows
 // look identically resumable from the conversation alone, so the whole
 // distinction lives in what is true around them:
@@ -91,8 +134,13 @@ func TestResumeOpenRun_NotResumable(t *testing.T) {
 // The third case is not hypothetical: it is every run stopped by an older
 // build. The old cancel path discarded the snapshot AND cancelled the
 // blueprint, so a migrated row has both conditions and must answer 410.
-func TestResumeOpenRun_RefusalTaxonomy(t *testing.T) {
-	park := func(t *testing.T, database *sql.DB, id string, blueprintStatus string, keepWorkspace bool) *Spawner {
+//
+// Every case runs under BOTH runtimes, because that is the property the
+// consolidation buys: one ladder, so a given row answers the same way whatever
+// drives it. Only the SDK's session/worktree/model checks are runtime-specific,
+// and they sit above this and are pinned separately.
+func TestFollowUp_RefusalTaxonomy(t *testing.T) {
+	park := func(t *testing.T, database *sql.DB, id, runtime, blueprintStatus string, keepWorkspace bool) *Spawner {
 		t.Helper()
 		wt := "/tmp/does-not-exist-" + id
 		if keepWorkspace {
@@ -106,6 +154,9 @@ func TestResumeOpenRun_RefusalTaxonomy(t *testing.T) {
 			t.Fatalf("set blueprint status: %v", err)
 		}
 		s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+		if runtime == "native" {
+			markNative(t, database, id)
+		}
 		// A blob store with nothing in it: no snapshot to rehydrate from, so a
 		// run whose worktree is also gone is unrecoverable for real.
 		blobs, err := storage.New()
@@ -116,62 +167,75 @@ func TestResumeOpenRun_RefusalTaxonomy(t *testing.T) {
 		return s
 	}
 
-	t.Run("workspace reaped, blueprint running", func(t *testing.T) {
-		paths.SetForTest(t, t.TempDir())
-		database := newDelegateTestDB(t)
-		s := park(t, database, "r-reaped", "running", false)
-		err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-reaped", "msg", runmode.LocalDefaultUserID)
-		if !errors.Is(err, ErrWorkspaceExpired) {
-			t.Errorf("err = %v, want ErrWorkspaceExpired (410)", err)
-		}
-	})
+	for _, runtime := range []string{"sdk", "native"} {
+		t.Run(runtime, func(t *testing.T) {
+			t.Run("workspace reaped, blueprint running", func(t *testing.T) {
+				paths.SetForTest(t, t.TempDir())
+				database := newDelegateTestDB(t)
+				s := park(t, database, "r-reaped", runtime, "running", false)
+				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-reaped", runmode.LocalDefaultUserID, "msg")
+				if !errors.Is(err, ErrWorkspaceExpired) {
+					t.Errorf("err = %v, want ErrWorkspaceExpired (410)", err)
+				}
+				if got := pendingRows(t, s, "r-reaped"); len(got) != 0 {
+					t.Errorf("a refused wake must write nothing: %+v", got)
+				}
+			})
 
-	t.Run("workspace intact, blueprint cancelled", func(t *testing.T) {
-		paths.SetForTest(t, t.TempDir())
-		database := newDelegateTestDB(t)
-		s := park(t, database, "r-concluded", "cancelled", true)
-		err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-concluded", "msg", runmode.LocalDefaultUserID)
-		if !errors.Is(err, ErrConversationConcluded) {
-			t.Errorf("err = %v, want ErrConversationConcluded (409)", err)
-		}
-		if st := storedStatus(t, database, "r-concluded"); st != "open" {
-			t.Errorf("stored status = %q, want open — a refused wake must leave the row parked, not queued", st)
-		}
-	})
+			t.Run("workspace intact, blueprint cancelled", func(t *testing.T) {
+				paths.SetForTest(t, t.TempDir())
+				database := newDelegateTestDB(t)
+				s := park(t, database, "r-concluded", runtime, "cancelled", true)
+				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-concluded", runmode.LocalDefaultUserID, "msg")
+				if !errors.Is(err, ErrConversationConcluded) {
+					t.Errorf("err = %v, want ErrConversationConcluded (409)", err)
+				}
+				if st := storedStatus(t, database, "r-concluded"); st != "open" {
+					t.Errorf("stored status = %q, want open — a refused wake must leave the row parked, not queued", st)
+				}
+				if got := pendingRows(t, s, "r-concluded"); len(got) != 0 {
+					t.Errorf("a refused wake must write nothing: %+v", got)
+				}
+			})
 
-	t.Run("workspace intact, blueprint finished — the follow-up case", func(t *testing.T) {
-		// The same shape as the refusal above, one word apart in the
-		// blueprint's terminal, and the opposite answer. Finished work is
-		// followed up on; called-off work is not.
-		paths.SetForTest(t, t.TempDir())
-		database := newDelegateTestDB(t)
-		s := park(t, database, "r-followup", "completed", true)
-		if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-followup", "msg", runmode.LocalDefaultUserID); err != nil {
-			t.Fatalf("ResumeOpenRun on a finished blueprint: %v", err)
-		}
-		if st := storedStatus(t, database, "r-followup"); st != "" {
-			t.Errorf("stored status = %q, want none — the wake un-terminals the row", st)
-		}
-	})
+			t.Run("workspace intact, blueprint finished — the follow-up case", func(t *testing.T) {
+				// The same shape as the refusal above, one word apart in the
+				// blueprint's terminal, and the opposite answer. Finished work is
+				// followed up on; called-off work is not.
+				paths.SetForTest(t, t.TempDir())
+				database := newDelegateTestDB(t)
+				s := park(t, database, "r-followup", runtime, "completed", true)
+				if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-followup", runmode.LocalDefaultUserID, "msg"); err != nil {
+					t.Fatalf("follow-up on a finished blueprint: %v", err)
+				}
+				if st := storedStatus(t, database, "r-followup"); st != "" {
+					t.Errorf("stored status = %q, want none — the wake un-terminals the row", st)
+				}
+				if got := pendingRows(t, s, "r-followup"); len(got) != 1 {
+					t.Errorf("queued rows = %d, want the follow-up waiting for the next claim", len(got))
+				}
+			})
 
-	t.Run("both gone — the migrated legacy row", func(t *testing.T) {
-		paths.SetForTest(t, t.TempDir())
-		database := newDelegateTestDB(t)
-		s := park(t, database, "r-legacy", "cancelled", false)
-		err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-legacy", "msg", runmode.LocalDefaultUserID)
-		if !errors.Is(err, ErrWorkspaceExpired) {
-			t.Errorf("err = %v, want ErrWorkspaceExpired — the permanent answer wins over the temporary one", err)
-		}
-	})
+			t.Run("both gone — the migrated legacy row", func(t *testing.T) {
+				paths.SetForTest(t, t.TempDir())
+				database := newDelegateTestDB(t)
+				s := park(t, database, "r-legacy", runtime, "cancelled", false)
+				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-legacy", runmode.LocalDefaultUserID, "msg")
+				if !errors.Is(err, ErrWorkspaceExpired) {
+					t.Errorf("err = %v, want ErrWorkspaceExpired — the permanent answer wins over the temporary one", err)
+				}
+			})
+		})
+	}
 }
 
-// TestResumeOpenRun_EnqueuesRatherThanSpawning is resume-by-enqueue's core
-// contract (TFAC-585, decision log #7): ResumeOpenRun records the message
+// TestFollowUp_EnqueuesRatherThanSpawning is resume-by-enqueue's core
+// contract (TFAC-585, decision log #7): the follow-up records the message
 // durably and flips the run's SAME row back to `queued` — no in-process
 // resume goroutine, no s.cancels registration, at any point during the
 // call. The message is only consumed later, by whichever executor claims
 // the row.
-func TestResumeOpenRun_EnqueuesRatherThanSpawning(t *testing.T) {
+func TestFollowUp_EnqueuesRatherThanSpawning(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-wake", "sess-wake", "/tmp/does-not-exist-wake")
 	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-wake'`); err != nil {
@@ -179,8 +243,8 @@ func TestResumeOpenRun_EnqueuesRatherThanSpawning(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-wake", "the answer", runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("ResumeOpenRun: %v", err)
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-wake", runmode.LocalDefaultUserID, "the answer"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
 	}
 
 	if st := storedStatus(t, database, "r-wake"); st != "" {
@@ -201,7 +265,7 @@ func TestResumeOpenRun_EnqueuesRatherThanSpawning(t *testing.T) {
 	_, active := s.cancels["r-wake"]
 	s.mu.Unlock()
 	if active {
-		t.Error("ResumeOpenRun registered a cancel handle — an in-process resume goroutine must not spawn")
+		t.Error("the follow-up registered a cancel handle — an in-process resume goroutine must not spawn")
 	}
 }
 
@@ -230,7 +294,7 @@ func (c staleOpenConversations) GetSystem(ctx context.Context, orgID, runID stri
 	return run, err
 }
 
-// TestResumeOpenRun_LostWakeRaceStillDelivers pins what append buys: a wake
+// TestFollowUp_LostWakeRaceStillDelivers pins what append buys: a wake
 // that loses the MarkQueuedForResume CAS is a SUCCESS, not a 409, because its
 // message is already queued and the winner's claim drains whatever is queued.
 //
@@ -239,7 +303,7 @@ func (c staleOpenConversations) GetSystem(ctx context.Context, orgID, runID stri
 // bound into the CAS's transaction. It no longer is, so this walks the race to
 // its end: the winner flips, the loser queues onto the row it read as still
 // parked, and one claim carries both messages away.
-func TestResumeOpenRun_LostWakeRaceStillDelivers(t *testing.T) {
+func TestFollowUp_LostWakeRaceStillDelivers(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-race", "sess-race", "/tmp/does-not-exist-race")
@@ -247,7 +311,7 @@ func TestResumeOpenRun_LostWakeRaceStillDelivers(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-race", "ship it", runmode.LocalDefaultUserID); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-race", runmode.LocalDefaultUserID, "ship it"); err != nil {
 		t.Fatalf("winning wake: %v", err)
 	}
 
@@ -256,7 +320,7 @@ func TestResumeOpenRun_LostWakeRaceStillDelivers(t *testing.T) {
 	loserStores := testSpawnerStores(database)
 	loserStores.Conversations = staleOpenOnce(loserStores.Conversations)
 	loser := NewSpawner(database, loserStores, nil, nil, "claude-sonnet-4-6")
-	if err := loser.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-race", "and check the migration", runmode.LocalDefaultUserID); err != nil {
+	if err := loser.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-race", runmode.LocalDefaultUserID, "and check the migration"); err != nil {
 		t.Fatalf("losing wake returned %v, want nil — its message is queued, so there is nothing to report", err)
 	}
 
@@ -277,13 +341,13 @@ func TestResumeOpenRun_LostWakeRaceStillDelivers(t *testing.T) {
 	}
 }
 
-// TestResumeOpenRun_LostToTerminalIsAConflict is the other half of the same
+// TestFollowUp_LostToTerminalIsAConflict is the other half of the same
 // refusal, and the reason a lost flip cannot simply report success: the CAS
 // declines a conversation that went terminal exactly as it declines one
 // another wake already re-queued, but here nothing will ever claim the row, so
 // the queued message is never delivered. A 200 would tell the user their
 // message landed when it did not.
-func TestResumeOpenRun_LostToTerminalIsAConflict(t *testing.T) {
+func TestFollowUp_LostToTerminalIsAConflict(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-died", "sess-died", "/tmp/does-not-exist-died")
@@ -296,7 +360,7 @@ func TestResumeOpenRun_LostToTerminalIsAConflict(t *testing.T) {
 	stores.Conversations = staleOpenOnce(stores.Conversations)
 	s := NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6")
 
-	err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-died", "one more thing", runmode.LocalDefaultUserID)
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-died", runmode.LocalDefaultUserID, "one more thing")
 	if !errors.Is(err, ErrRunNotResumable) {
 		t.Fatalf("err = %v, want ErrRunNotResumable — nothing claims a terminal conversation, so the message is not delivered", err)
 	}
@@ -305,12 +369,12 @@ func TestResumeOpenRun_LostToTerminalIsAConflict(t *testing.T) {
 	}
 }
 
-// TestResumeOpenRun_CompletedAbortReopensBlueprintAtomically: a
+// TestFollowUp_CompletedAbortReopensBlueprintAtomically: a
 // completed+abort run's blueprint (already terminal 'aborted') is reopened
 // to 'running' in the SAME tx as the requeue flip — required for
 // ClaimNextRun to ever claim the row (it only claims under a 'running'
 // blueprint_run).
-func TestResumeOpenRun_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
+func TestFollowUp_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-ab", "sess-ab", "/tmp/wt-ab")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort' WHERE id='r-ab'`); err != nil {
@@ -322,8 +386,8 @@ func TestResumeOpenRun_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-ab", "pick it back up", runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("ResumeOpenRun: %v", err)
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-ab", runmode.LocalDefaultUserID, "pick it back up"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
 	}
 
 	var bpStatus string
@@ -355,7 +419,7 @@ func claimAndDispatch(t *testing.T, s *Spawner, database *sql.DB) {
 }
 
 // TestDispatchResumeClaim_DeliversRecordedInput proves the delivery half of
-// resume-by-enqueue end to end: after ResumeOpenRun enqueues, claiming and
+// resume-by-enqueue end to end: after the follow-up enqueues, claiming and
 // dispatching the row consumes the pending input exactly once (a second
 // consume finds nothing) and drives the resume — failing fast here for
 // lack of a warm worktree/snapshot (no subprocess), landing the run
@@ -370,8 +434,8 @@ func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-deliver", "the answer", runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("ResumeOpenRun: %v", err)
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-deliver", runmode.LocalDefaultUserID, "the answer"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
 	}
 
 	claimAndDispatch(t, s, database)
@@ -405,7 +469,7 @@ func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 // is seeded (garbage content) so the enqueue-time recoverability pre-flight
 // passes but the actual rehydrate fails at claim — the realistic
 // enqueue-then-workspace-lost race, not an already-expired workspace (which
-// ResumeOpenRun now refuses up front — see the sibling test).
+// the follow-up path now refuses up front — see the sibling test).
 func TestDispatchResumeClaim_WorkspaceFailureFinalizesBlueprint(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, run, _ := setupAdvanceFixture(t, "open-strand")
@@ -416,8 +480,8 @@ func TestDispatchResumeClaim_WorkspaceFailureFinalizesBlueprint(t *testing.T) {
 		t.Fatalf("park open: %v", err)
 	}
 
-	if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, run, "carry on", runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("ResumeOpenRun: %v", err)
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, run, runmode.LocalDefaultUserID, "carry on"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
 	}
 	claimAndDispatch(t, s, database)
 
@@ -431,14 +495,14 @@ func TestDispatchResumeClaim_WorkspaceFailureFinalizesBlueprint(t *testing.T) {
 	assertSnapshotPresent(t, s, bpr, false) // discarded, not orphaned
 }
 
-// TestResumeOpenRun_ExpiredWorkspaceRefusedAtEnqueue pins the workspace-expiry
+// TestFollowUp_ExpiredWorkspaceRefusedAtEnqueue pins the workspace-expiry
 // contract: a wake whose workspace is gone for good (no warm worktree, no
 // durable snapshot) is refused with ErrWorkspaceExpired at enqueue, with NO
 // side effect — the run stays resumable, no pending-input row is recorded, and
 // the blueprint is left running. Without the pre-flight the flip succeeds and
 // the run is destroyed at claim time (a generic failRun) instead of the caller
 // seeing a clean 410.
-func TestResumeOpenRun_ExpiredWorkspaceRefusedAtEnqueue(t *testing.T) {
+func TestFollowUp_ExpiredWorkspaceRefusedAtEnqueue(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, run, _ := setupAdvanceFixture(t, "expired")
 	bpr := blueprintRunIDForRun(t, database, run)
@@ -447,9 +511,9 @@ func TestResumeOpenRun_ExpiredWorkspaceRefusedAtEnqueue(t *testing.T) {
 		t.Fatalf("park open: %v", err)
 	}
 
-	err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, run, "carry on", runmode.LocalDefaultUserID)
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, run, runmode.LocalDefaultUserID, "carry on")
 	if !errors.Is(err, ErrWorkspaceExpired) {
-		t.Fatalf("ResumeOpenRun err = %v, want ErrWorkspaceExpired", err)
+		t.Fatalf("SendMessage err = %v, want ErrWorkspaceExpired", err)
 	}
 
 	var status string

@@ -878,7 +878,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		// The CAS loser: a second flip on the now-queued row finds no
 		// resumable state and refuses — this is the guard that makes two
-		// concurrent ResumeOpenRun calls resolve to exactly one requeue
+		// concurrent wakes resolve to exactly one requeue
 		// (the loser surfaces ErrRunNotResumable at the delegate layer).
 		if ok, _ := store.MarkQueuedForResume(ctx, orgID, runID); ok {
 			t.Errorf("second flip on a queued row succeeded; want refused (CAS loser)")

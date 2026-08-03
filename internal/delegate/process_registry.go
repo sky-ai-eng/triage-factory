@@ -247,7 +247,12 @@ type liveRunHandle struct {
 
 // registerProc records a run's live process handle so control ops can
 // reach it across HTTP turns. Mirrors the cancels-map registration the
-// dispatcher and ResumeOpenRun already do, under the same s.mu.
+// dispatcher already does, under the same s.mu.
+//
+// The SOLE writer of s.procs, and SendMessage's fast path depends on that: a
+// registered handle is proof the conversation is an SDK one, so a message can
+// be steered into the process without re-reading the runtime. A second driver
+// registering here silently breaks that.
 func (s *Spawner) registerProc(orgID, runID string, lr *agentproc.LiveRun) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -275,8 +280,7 @@ func (s *Spawner) deregisterProc(runID string) {
 // the run goroutine holds no JWT claims). This re-stamps what
 // RunQueueStore.ClaimNextRun already wrote atomically at claim (TFAC-578) on
 // a fresh claim — cheap and harmless — but it is the ONLY stamp on the
-// resume path (ResumeOpenRun flips a parked run straight to 'running' via
-// MarkResuming, bypassing the claim), so it must write both columns, not
+// resume path, so it must write both columns, not
 // just executor_id, to keep boot_epoch reflecting the most recent boot that
 // touched the row rather than whatever epoch it was originally claimed
 // under. Best-effort: a failure is logged, not fatal, because executor

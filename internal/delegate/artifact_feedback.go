@@ -6,7 +6,7 @@
 //   - Live run (a warm, steerable process): InjectArtifactNote steers a single
 //     <system-note> into it immediately, fire-and-forget.
 //   - Terminal / paused run: nothing is persisted here. The ledger is *derived*
-//     — at the next user follow-up (SendMessage → ResumeOpenRun), the resolved
+//     — at the next user follow-up (SendMessage), the resolved
 //     artifacts since the agent's last activity are bundled into one <system-note>
 //     prepended ahead of the user's message (artifactLedgerForResume). No new
 //     table: the artifacts' updated_at + terminal state vs the run's last agent

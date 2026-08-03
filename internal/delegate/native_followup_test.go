@@ -35,10 +35,11 @@ func pendingRows(t *testing.T, s *Spawner, runID string) []domain.Message {
 	return out
 }
 
-// TestSendMessage_NativeRunningQueuesWithoutSteering pins the native routing:
-// a message to a RUNNING native conversation is delivered by queueing it, so
-// no controller round trip happens and nothing 409s because the work is on
-// another pod. The loop drains it before its next call.
+// TestSendMessage_NativeRunningQueuesWithoutSteering pins the half of the split
+// that has no SDK counterpart: a message to a RUNNING native conversation is
+// delivered by queueing it, so no controller round trip happens and nothing
+// 409s because the work is on another pod. The loop drains it before its next
+// call.
 func TestSendMessage_NativeRunningQueuesWithoutSteering(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-native", "", "/tmp/wt-native")
@@ -65,66 +66,61 @@ func TestSendMessage_NativeRunningQueuesWithoutSteering(t *testing.T) {
 	// The engagement is untouched: a running conversation already has a
 	// driver, so queueing is delivery and there is nothing to re-queue.
 	if !hasActiveClaim(t, database, "r-native") {
-		t.Error("the live engagement was released by a steer that should only have queued a row")
+		t.Error("the live engagement was released by a follow-up that should only have queued a row")
 	}
 	if st := storedStatus(t, database, "r-native"); st != "" {
 		t.Errorf("stored status = %q, want none", st)
 	}
 }
 
-// TestSendMessage_NativeParkedQueuesAndRequeues pins the other half: a parked
-// native conversation gets the message queued AND the row flipped back to
-// `queued` so an executor picks it up — with no pending-input side-table row,
-// because the loop's own drain is what delivers it.
-func TestSendMessage_NativeParkedQueuesAndRequeues(t *testing.T) {
+// TestSendMessage_NativeQueuedAppendsWithoutWaking is the arm that answers
+// opposite to the SDK's (TestSendMessage_QueuedSDKNotSteerable): a native
+// conversation waiting for its first claim takes the message, because the claim
+// that arrives drains the transcript rather than resuming a session. Nothing is
+// woken — the row is already claimable.
+func TestSendMessage_NativeQueuedAppendsWithoutWaking(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-parked", "", t.TempDir())
-	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-parked'`); err != nil {
-		t.Fatalf("open: %v", err)
+	seedRun(t, database, "r-nq", "", "/tmp/wt-nq")
+	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id='r-nq'`); err != nil {
+		t.Fatalf("queued: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	markNative(t, database, "r-parked")
+	markNative(t, database, "r-nq")
+	fc := &fakeController{}
+	s.controller = fc
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-parked", runmode.LocalDefaultUserID, "pick it back up"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-nq", runmode.LocalDefaultUserID, "and this too"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-
-	if st := storedStatus(t, database, "r-parked"); st != "" {
-		t.Errorf("stored status = %q, want none — a parked conversation woken by input goes back to mid-flight, which is what makes it claimable again", st)
+	if fc.steerCalls != 0 {
+		t.Errorf("controller steer calls = %d, want 0", fc.steerCalls)
 	}
-	pending := pendingRows(t, s, "r-parked")
-	if len(pending) != 1 || pending[0].Content != "pick it back up" {
-		t.Fatalf("the message must be queued as an undelivered row: %+v", pending)
+	if got := pendingRows(t, s, "r-nq"); len(got) != 1 || got[0].Content != "and this too" {
+		t.Fatalf("the message must be queued for the coming claim: %+v", got)
 	}
 }
 
-// TestSendMessage_NativeTerminalNotSteerable pins that a genuinely terminal
-// native conversation still refuses a message — queueing is delivery only
-// while something can still drive the conversation. `completed` in any of its
+// TestSendMessage_NativeCancelledNotSteerable pins that a conversation resting
+// on a status no wake can reach still refuses. `completed` in any of its
 // outcomes is deliberately absent: concluded work is followed up on, not
-// refused (see TestSendMessage_NativeCompletedIsResumable).
-func TestSendMessage_NativeTerminalNotSteerable(t *testing.T) {
-	for _, tc := range []struct{ name, status, outcome string }{
-		{"failed", "failed", ""},
-		{"cancelled", "cancelled", ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			database := newDelegateTestDB(t)
-			seedRun(t, database, "r-term", "", "/tmp/wt-term")
-			if _, err := database.Exec(`UPDATE conversations SET status=?, outcome=NULLIF(?, '') WHERE id='r-term'`, tc.status, tc.outcome); err != nil {
-				t.Fatalf("set terminal: %v", err)
-			}
-			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-			markNative(t, database, "r-term")
+// refused (see TestSendMessage_NativeCompletedIsResumable). `failed` is the
+// same refusal for both runtimes and lives with the shared ladder
+// (TestFollowUp_TerminalRefused).
+func TestSendMessage_NativeCancelledNotSteerable(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-term", "", "/tmp/wt-term")
+	if _, err := database.Exec(`UPDATE conversations SET status='cancelled' WHERE id='r-term'`); err != nil {
+		t.Fatalf("set terminal: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	markNative(t, database, "r-term")
 
-			err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-term", runmode.LocalDefaultUserID, "hello?")
-			if !errors.Is(err, ErrRunNotSteerable) {
-				t.Fatalf("err = %v, want ErrRunNotSteerable", err)
-			}
-			if got := pendingRows(t, s, "r-term"); len(got) != 0 {
-				t.Errorf("a refused message must not leave a row behind: %+v", got)
-			}
-		})
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-term", runmode.LocalDefaultUserID, "hello?")
+	if !errors.Is(err, ErrRunNotSteerable) {
+		t.Fatalf("err = %v, want ErrRunNotSteerable", err)
+	}
+	if got := pendingRows(t, s, "r-term"); len(got) != 0 {
+		t.Errorf("a refused message must not leave a row behind: %+v", got)
 	}
 }
 
