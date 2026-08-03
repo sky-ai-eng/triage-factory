@@ -3,12 +3,15 @@ package delegate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -493,6 +496,158 @@ func TestParkRunOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 	// …and the warm worktree was not torn down under it.
 	if _, err := os.Stat(filepath.Join(wtPath, "_tfac", "notes.txt")); err != nil {
 		t.Errorf("worktree removed by the cancel (%v); parking retains it and the TTL is the reaper", err)
+	}
+}
+
+// TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable drives the
+// two halves of a split-mode stop in the order they really run.
+//
+// In the control/executor split, EVERY stop of a live native run takes the
+// DB-only park: the process registry Spawner.stop consults first is per-pod,
+// and control never holds the process. So control parks the row, releases the
+// claim, and fires the cancel signal at the executor as best-effort
+// hastening; the executor's own teardown lands seconds later, holding a claim
+// that is already released. Every write it makes is refused — which leaves
+// the unfenced workspace snapshot as the only thing it still has to
+// contribute, and the only thing a follow-up needs.
+//
+// That is the sequence this test pins, because it used to be broken end to
+// end: the engine classified a ctx kill observed inside a store write as a
+// failure, the failure path's FIRST write is fenced, and it returned there
+// before reaching any snapshot. Net state was a parked run with no workspace
+// anywhere, and a follow-up a minute later answered 410 "this run's workspace
+// has expired" for a workspace that had never been saved.
+func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s, database, runID, taskID := setupAdvanceFixture(t, "cross-pod-stop")
+	blobs, err := storage.New()
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	s.SetStorage(blobs)
+	markNative(t, database, runID)
+
+	// The worktree lives on the executor. Control's copy of the path resolves
+	// to nothing, exactly as it would on another machine — so recoverability
+	// can only be answered by the snapshot.
+	wtPath := t.TempDir()
+	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "half-finished work")
+	if _, err := database.Exec(
+		`UPDATE conversations SET worktree_path = ? WHERE id = ?`,
+		filepath.Join(t.TempDir(), "not-on-this-pod"), runID,
+	); err != nil {
+		t.Fatalf("point the row at an off-pod worktree: %v", err)
+	}
+	namespace := blueprintRunIDForRun(t, database, runID)
+
+	// 1. Control's half: park, release the claim, signal the executor. It
+	// takes no snapshot — the workspace is on a machine it cannot reach.
+	if err := s.Stop(runmode.LocalDefaultOrgID, runID, runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if got := storedStatus(t, database, runID); got != "open" {
+		t.Fatalf("after control's park, status = %q, want open", got)
+	}
+
+	// 2. The executor's half. Its engine reports the kill as a cancellation
+	// however it observed it, and its teardown writes into a conversation
+	// whose claim step 1 released. SQLite does not fence (single process,
+	// nothing to refuse), so the refusal is injected — as everywhere else in
+	// this package.
+	fenced := &fencedConversationStore{ConversationStore: s.agentRuns}
+	s.agentRuns = fenced
+	gotFenced := s.recordNativeResult(context.Background(), runmode.LocalDefaultOrgID, runID,
+		loadTask(t, s, taskID),
+		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: "claim-1", blueprintRunID: namespace},
+		namespace, wtPath, "manual", runmode.LocalDefaultUserID, time.Now(),
+		agentloop.Result{Kind: agentloop.ResultCancelled, Err: context.Canceled}, nil)
+	s.agentRuns = fenced.ConversationStore
+	if !gotFenced {
+		t.Fatal("the executor's teardown did not report the fence trip; it would go on to react to a conversation it no longer owns")
+	}
+	if fenced.cancels != 1 {
+		t.Errorf("fenced park attempted %d times, want 1", fenced.cancels)
+	}
+
+	// The blob is the whole point of the teardown, and it is all of it.
+	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, namespace))
+	if err != nil {
+		t.Fatalf("the fenced teardown wrote no workspace snapshot: %v", err)
+	}
+	_ = rc.Close()
+	if got := storedStatus(t, database, runID); got != "open" {
+		t.Errorf("status = %q, want open — control's park stands and the fenced teardown records no terminal of its own", got)
+	}
+	var msgs int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, runID).Scan(&msgs); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if msgs != 0 {
+		t.Errorf("messages = %d, want none — a stop is not an agent_error and writes no failure row", msgs)
+	}
+
+	// 3. The user's follow-up, a minute later. It has to be accepted off the
+	// snapshot alone, and it has to be claimable.
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, runID, runmode.LocalDefaultUserID, "actually, try the other approach"); err != nil {
+		t.Fatalf("follow-up after a cross-pod stop: %v (ErrWorkspaceExpired here is the bug this ticket exists for)", err)
+	}
+	claimed, err := s.runQueue.ClaimNextRun(context.Background(), "test-executor", 1, db.ClaimPlacement{})
+	if err != nil {
+		t.Fatalf("claim next run: %v", err)
+	}
+	if claimed == nil || claimed.ID != runID {
+		t.Fatalf("claimed = %v, want the stopped conversation %s — the follow-up was accepted but nothing will drive it", claimed, runID)
+	}
+}
+
+// TestRecordNativeResult_GenuineFailureIsStillAFailure is the other side of
+// the reclassification: routing a cancelled engagement to the park must not
+// have softened what a real failure does. It still writes `failed`, it still
+// records the cause on the transcript, and it still declines to snapshot a
+// workspace nothing will resume into.
+func TestRecordNativeResult_GenuineFailureIsStillAFailure(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s, database, runID, taskID := setupAdvanceFixture(t, "native-genuine-fail")
+	blobs, err := storage.New()
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	s.SetStorage(blobs)
+
+	wtPath := t.TempDir()
+	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "work the failure discards")
+	namespace := blueprintRunIDForRun(t, database, runID)
+
+	if fenced := s.recordNativeResult(context.Background(), runmode.LocalDefaultOrgID, runID,
+		loadTask(t, s, taskID),
+		runConfig{orgID: runmode.LocalDefaultOrgID, blueprintRunID: namespace},
+		namespace, wtPath, "event", "", time.Now(),
+		agentloop.Result{
+			Kind:        agentloop.ResultFailed,
+			FailureKind: domain.RunFailureAgentError,
+			Err:         errors.New("tool host is unusable: broken pipe"),
+		}, nil); fenced {
+		t.Fatal("recordNativeResult reported a fence trip on an unfenced store")
+	}
+
+	if got := storedStatus(t, database, runID); got != "failed" {
+		t.Errorf("status = %q, want failed", got)
+	}
+	var content string
+	if err := database.QueryRow(
+		`SELECT content FROM messages WHERE conversation_id = ? AND is_error = 1`, runID,
+	).Scan(&content); err != nil {
+		t.Fatalf("read the failure row: %v", err)
+	}
+	if !strings.Contains(content, "broken pipe") {
+		t.Errorf("failure row = %q, want the underlying cause", content)
+	}
+	if ok, err := s.Storage().Exists(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, namespace)); err != nil {
+		t.Fatalf("snapshot existence: %v", err)
+	} else if ok {
+		t.Error("a failed run snapshotted its workspace; the failure path keeps no workspace and the reaper never enumerates one")
 	}
 }
 

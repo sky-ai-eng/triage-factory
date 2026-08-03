@@ -30,6 +30,11 @@ type memTranscript struct {
 	// failInsert, when set, makes the next Insert fail — used to exercise
 	// the loop's error paths.
 	failInsert error
+	// failMarkDelivered, when set, fails the next MarkDelivered. A function
+	// rather than an error so a test can land something else inside the
+	// write it stands in for — a context kill, most of all, which is how a
+	// stop is really observed by a flush that was already in flight.
+	failMarkDelivered func() error
 }
 
 func newMemTranscript(seed ...domain.Message) *memTranscript {
@@ -57,6 +62,13 @@ func (t *memTranscript) ListForAssembly(_ context.Context, _, _ string) ([]domai
 }
 
 func (t *memTranscript) MarkDelivered(_ context.Context, _, _ string, ids []int, subtype string) error {
+	if t.failMarkDelivered != nil {
+		fail := t.failMarkDelivered
+		t.failMarkDelivered = nil
+		if err := fail(); err != nil {
+			return err
+		}
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	want := make(map[int]struct{}, len(ids))

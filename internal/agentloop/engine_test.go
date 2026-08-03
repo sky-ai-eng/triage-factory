@@ -765,6 +765,72 @@ func TestRun_CancellationStopsWithoutFurtherRows(t *testing.T) {
 	}
 }
 
+// TestRun_CancellationObservedThroughAFailedWriteIsStillACancellation covers
+// the siblings of the stream arm above: the dozen exits that see a stop not as
+// ctx.Done but as an ordinary store error, because the kill landed inside the
+// write they were making.
+//
+// Getting this wrong is not a mislabel. A ResultFailed run has its workspace
+// snapshot discarded, so a user who stopped a run mid-write got back "this
+// run's workspace has expired" a minute later — the workspace was never saved
+// because the loop reported a failure and the failure path throws it away.
+//
+// Both subtests deliberately fail the write with a plain error whose text
+// merely mentions cancellation: the classification must come from the context,
+// never from matching on a message.
+func TestRun_CancellationObservedThroughAFailedWriteIsStillACancellation(t *testing.T) {
+	t.Run("persisting the assistant message", func(t *testing.T) {
+		tr := newMemTranscript(pendingUser("go"))
+		ctx, cancel := context.WithCancel(context.Background())
+		// The stop lands while the turn streams; the very next write is the
+		// one that observes it.
+		p := &scriptedProvider{turns: []scriptedTurn{{text: "done", onCall: func() {
+			cancel()
+			tr.failInsert = errors.New("insert message: context canceled")
+		}}}}
+		e := newTestEngine(tr, p, newScriptedToolHost())
+
+		if got := e.Run(ctx, testParams()); got.Kind != ResultCancelled {
+			t.Fatalf("disposition = %v, want cancelled (err: %v)", got.Kind, got.Err)
+		}
+	})
+
+	t.Run("flushing pending input", func(t *testing.T) {
+		tr := newMemTranscript(pendingUser("go"))
+		ctx, cancel := context.WithCancel(context.Background())
+		// The kill lands inside the flush itself, which is why the loop's
+		// own top-of-iteration ctx check cannot catch it.
+		tr.failMarkDelivered = func() error {
+			cancel()
+			return errors.New("mark delivered: context canceled")
+		}
+		e := newTestEngine(tr, &scriptedProvider{}, newScriptedToolHost())
+
+		got := e.Run(ctx, testParams())
+		if got.Kind != ResultCancelled {
+			t.Fatalf("disposition = %v, want cancelled (err: %v)", got.Kind, got.Err)
+		}
+	})
+}
+
+// TestRun_AFailedWriteWithALiveContextStillFails is the other half of the
+// pair: the reclassification is keyed on the context alone, so a write that
+// fails for its own reasons is still a failure and still fails the
+// conversation.
+func TestRun_AFailedWriteWithALiveContextStillFails(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	tr.failMarkDelivered = func() error { return errors.New("deadlock detected") }
+	e := newTestEngine(tr, &scriptedProvider{}, newScriptedToolHost())
+
+	got := e.Run(context.Background(), testParams())
+	if got.Kind != ResultFailed {
+		t.Fatalf("disposition = %v, want failed", got.Kind)
+	}
+	if got.FailureKind != domain.RunFailureAgentError {
+		t.Errorf("failure kind = %q, want %q", got.FailureKind, domain.RunFailureAgentError)
+	}
+}
+
 func TestRun_CostIsStampedPerAssistantRowAndNullWhenUnpriceable(t *testing.T) {
 	tr := newMemTranscript(pendingUser("go"))
 	p := &scriptedProvider{turns: []scriptedTurn{{
