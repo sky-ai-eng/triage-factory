@@ -186,3 +186,30 @@ describe('AgentCard queue-dwell footer', () => {
     expect(screen.queryByText(/^queued /)).not.toBeInTheDocument()
   })
 })
+
+describe('AgentCard parked rendering', () => {
+  // A stopped run parks `open` — it is neither working nor concluded — and the
+  // card has to say so itself. Left to the live-feed fallback it shows a
+  // motionless ticker of the turn that already ended, which reads as a run
+  // still in flight.
+  it('names the parked state and offers the run’s two exits', () => {
+    const onRequeue = vi.fn()
+    render(
+      <MemoryRouter>
+        <AgentCard task={task} run={run({ Status: 'open' })} onRequeue={onRequeue} />
+      </MemoryRouter>,
+    )
+    expect(screen.getByText(/idle — stopped without concluding, resumable/)).toBeInTheDocument()
+    // Return to queue is the give-up exit; the expand link is the resume one
+    // (the composer lives in the run view).
+    expect(screen.getByRole('button', { name: 'Return to queue' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /expand run details/i })).toBeInTheDocument()
+  })
+
+  it('keeps the parked notice off live and terminal cards', () => {
+    renderCard({ Status: 'running' })
+    expect(screen.queryByText(/stopped without concluding/)).not.toBeInTheDocument()
+    renderCard({ Status: 'completed' })
+    expect(screen.queryByText(/stopped without concluding/)).not.toBeInTheDocument()
+  })
+})

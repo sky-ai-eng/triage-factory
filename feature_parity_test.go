@@ -86,13 +86,19 @@ func TestFrontendMirrorsAllFeatures(t *testing.T) {
 // EXACTLY, in both directions.
 //
 // The mirror is hand-maintained by choice — codegen buys a build step and a
-// generated file to keep eleven rarely-changing names honest — so this test is
-// the whole enforcement mechanism. Both directions are load-bearing: a phase
-// added in Go and not here silently misses every UI arm (that is how
-// `awaiting_credentials` came to render as inert grey mid-setup), and a name
-// here that Go never emits is a branch that can never be taken (that is how
-// `initializing` and `worktree_created` outlived the backend states they
-// described).
+// generated file to keep eleven rarely-changing names honest. Both directions
+// are load-bearing: a phase added in Go and not here silently misses every UI
+// arm (that is how `awaiting_credentials` came to render as inert grey
+// mid-setup), and a name here that Go never emits is a branch that can never be
+// taken (that is how `initializing` and `worktree_created` outlived the backend
+// states they described).
+//
+// What this test canNOT see is component code, which never reads the arrays it
+// pins — it compares a status against a bare literal, and two retired statuses
+// walked back in that way within days of this test landing. That half is
+// enforced on the frontend side, by the run-status/no-ghost-run-status ESLint
+// rule (frontend/eslint-rules/), which reads its vocabulary out of the very
+// declarations parsed below.
 func TestFrontendMirrorsRunStatusVocabulary(t *testing.T) {
 	src, err := os.ReadFile("frontend/src/types.ts")
 	if err != nil {

@@ -7,6 +7,7 @@ import type { PendingPermission, PermissionDecisionInput } from '../../lib/permi
 import {
   isActiveStatus,
   isFailedStatus,
+  isTerminalStatus,
   formatDurationMs,
   formatElapsed,
   isActiveRun,
@@ -483,11 +484,13 @@ function IntakeDock({
   // the run is live or terminal (TFAC-382/TFAC-492).
   const counts = approvalCounts(run)
   const hasUnresolved = hasUnresolvedArtifacts(run)
-  const isTerminal =
-    run.Status === 'failed' ||
-    run.Status === 'cancelled' ||
-    run.Status === 'task_unsolvable' ||
-    run.Status === 'completed'
+  const isTerminal = isTerminalStatus(run.Status)
+  // Parked: stopped without concluding. Not terminal — the composer below
+  // offers to resume it — but the run is over unless the user picks it up, so
+  // it takes the same Return-to-queue exit a terminal gets. That exit used to
+  // arrive via the retired `cancelled` terminal, and a stop leaves the run
+  // here now.
+  const isParked = run.Status === 'open'
   // A run takes steering when a turn is executing or it's resumable by message
   // (open / completed+abort — same gate the backend wakes on).
   const steerable = active || isResumableRun(run)
@@ -511,11 +514,7 @@ function IntakeDock({
             ? run.FailureKind === 'memory_limit'
               ? 'killed — exceeded its memory limit (raise TF_RUN_MEMORY_LIMIT_MB if needed)'
               : 'run failed'
-            : run.Status === 'cancelled'
-              ? 'run cancelled'
-              : run.Status === 'task_unsolvable'
-                ? 'agent could not finish'
-                : run.Status
+            : run.Status
 
   return (
     <div className="relative z-10 shrink-0 border-t border-border-subtle px-4 py-2.5">
@@ -580,7 +579,7 @@ function IntakeDock({
               Cancel
             </DockButton>
           )}
-          {(isTerminal || hasUnresolved) && actions.onRequeue && (
+          {(isTerminal || isParked || hasUnresolved) && actions.onRequeue && (
             <DockButton tone="var(--color-text-tertiary)" onClick={actions.onRequeue}>
               Return to queue
             </DockButton>

@@ -42,16 +42,18 @@ describe('status classification', () => {
     }
   })
 
-  // The ghosts. Each was a live UI branch that the backend had never emitted;
-  // an unknown status must now classify as nothing at all rather than land in
-  // an arm by accident.
+  // Values from outside the vocabulary: a raw NULL read as '', and two names
+  // the UI once branched on that the backend has never emitted. The
+  // classifiers are closed-world, so anything they don't recognize must fall
+  // through every set rather than land in an arm by accident — which is the
+  // property worth testing on values that are, deliberately, not statuses.
   it.each(['initializing', 'worktree_created', ''])(
-    'classifies the removed status %j as neither active, terminal, nor a phase',
-    (ghost) => {
-      expect(RUN_STATUSES as readonly string[]).not.toContain(ghost)
-      expect(isActiveStatus(ghost)).toBe(false)
-      expect(isTerminalStatus(ghost)).toBe(false)
-      expect(isClaimPhase(ghost)).toBe(false)
+    'classifies the unknown value %j as neither active, terminal, nor a phase',
+    (unknown) => {
+      expect(RUN_STATUSES as readonly string[]).not.toContain(unknown)
+      expect(isActiveStatus(unknown)).toBe(false)
+      expect(isTerminalStatus(unknown)).toBe(false)
+      expect(isClaimPhase(unknown)).toBe(false)
     },
   )
 

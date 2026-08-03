@@ -8,12 +8,17 @@ export default defineConfig({
   // off (explicit imports keep the app's type surface clean); CSS skipped (the
   // tests assert on text/roles, not Tailwind output). setup wires jest-dom
   // matchers + per-test cleanup.
+  //
+  // eslint-rules/ is in the include set so the custom lint rules ship with
+  // RuleTester fixtures that run in CI like any other test. They live outside
+  // src/ because eslint.config.js loads them as plain ESM, and tsconfig covers
+  // src only.
   test: {
     environment: 'jsdom',
     globals: false,
     css: false,
     setupFiles: ['./src/test/setup.ts'],
-    include: ['src/**/*.test.{ts,tsx}'],
+    include: ['src/**/*.test.{ts,tsx}', 'eslint-rules/*.test.js'],
   },
   server: {
     // Pinned (not just Vite's default) because the backend's CSRF origin

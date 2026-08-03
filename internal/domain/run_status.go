@@ -39,6 +39,12 @@ package domain
 // direction. Both directions matter: the drift this replaced ran the other
 // way, with the frontend branching on three statuses the backend had never
 // heard of.
+//
+// That test pins the mirror's arrays, and the frontend's own
+// run-status/no-ghost-run-status ESLint rule pins the code that branches on
+// them — a status comparison or `case` arm naming something outside this file
+// fails the lint. The two together are what closes the loop: the arrays are
+// not what component code reads.
 
 // The claim `phase` vocabulary: the setup/parked sub-states of a LIVE
 // engagement, stored on claims.phase and coalesced over the conversation's
