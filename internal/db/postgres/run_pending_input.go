@@ -2,21 +2,18 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
 // runPendingInputStore is the Postgres impl of db.RunPendingInputStore —
-// the durable half of resume-by-enqueue (TFAC-585), stored as an
-// undelivered plain user message (role='user', blank subtype,
-// delivered=false) on the conversation's own transcript. Reachable two
-// ways: the resume flip binds it to the claims tx so Store commits
-// atomically with the status flip under the resuming user's claims (the
-// messages RLS policy admits the write via the conversation's own
-// visibility); Consume runs off the admin pool from the dispatcher's claim
-// path, a goroutine with no request context.
+// the durable half of resume-by-enqueue, stored as undelivered plain user
+// messages (role='user', blank subtype, delivered=false) on the
+// conversation's own transcript. Reachable two ways: the resume path writes
+// through the claims tx, under the resuming user's claims (the messages RLS
+// policy admits the write via the conversation's own visibility); Consume
+// runs off the admin pool from the dispatcher's claim path, a goroutine with
+// no request context.
 type runPendingInputStore struct{ admin queryer }
 
 func newRunPendingInputStore(admin queryer) db.RunPendingInputStore {
@@ -25,45 +22,50 @@ func newRunPendingInputStore(admin queryer) db.RunPendingInputStore {
 
 var _ db.RunPendingInputStore = (*runPendingInputStore)(nil)
 
-// pendingInputPredicate scopes every read/write to the one row shape this
-// store owns: the conversation's undelivered plain user message. The
-// subtype filter keeps it disjoint from the staged-injection notes, which
-// are also undelivered user rows.
+// pendingInputPredicate scopes this store's reads to the row shape it owns:
+// the conversation's undelivered plain user messages. The subtype filter
+// keeps them disjoint from the staged-injection notes, which are also
+// undelivered user rows.
 const pendingInputPredicate = `org_id = $1::uuid AND conversation_id = $2::uuid AND role = 'user' AND subtype = '' AND delivered = false`
 
 func (s *runPendingInputStore) Store(ctx context.Context, orgID, runID, userID, message string) error {
-	// Delete-then-insert preserves the replace contract the former
-	// run_pending_input upsert had: at most one undelivered user row per
-	// conversation, latest write wins.
-	return inTx(ctx, s.admin, func(q queryer) error {
-		if _, err := q.ExecContext(ctx, `
-			DELETE FROM messages WHERE `+pendingInputPredicate+`
-		`, orgID, runID); err != nil {
-			return err
-		}
-		_, err := q.ExecContext(ctx, `
-			INSERT INTO messages (org_id, conversation_id, user_id, role, content, subtype, delivered)
-			VALUES ($1::uuid, $2::uuid, NULLIF($3, '')::uuid, 'user', $4, '', false)
-		`, orgID, runID, userID, message)
-		return err
-	})
+	// A plain insert: the queue appends. Two messages sent to a parked
+	// conversation before it wakes are two rows, and Consume joins them —
+	// the delete-then-insert this replaced dropped the first one silently.
+	_, err := s.admin.ExecContext(ctx, `
+		INSERT INTO messages (org_id, conversation_id, user_id, role, content, subtype, delivered)
+		VALUES ($1::uuid, $2::uuid, NULLIF($3, '')::uuid, 'user', $4, '', false)
+	`, orgID, runID, userID, message)
+	return err
 }
 
 func (s *runPendingInputStore) Peek(ctx context.Context, orgID, runID string) (string, string, bool, error) {
-	var message string
-	var userID sql.NullString
-	err := s.admin.QueryRowContext(ctx, `
-		SELECT content, user_id::text FROM messages
-		WHERE `+pendingInputPredicate+`
-		ORDER BY id DESC LIMIT 1
-	`, orgID, runID).Scan(&message, &userID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", false, nil
-	}
+	// window_state='active' is not in the shared predicate but belongs in
+	// every read of it: a withdrawn row (undelivered + inactive) never
+	// happened, and the flush skips it. Without this the routing decision
+	// would see input the delivery then cannot find.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT content, COALESCE(user_id::text, '') FROM messages
+		WHERE `+pendingInputPredicate+` AND window_state = 'active'
+		ORDER BY id ASC
+	`, orgID, runID)
 	if err != nil {
 		return "", "", false, err
 	}
-	return message, userID.String, true, nil
+	defer rows.Close()
+	var queued []pendingRow
+	for rows.Next() {
+		var r pendingRow
+		if err := rows.Scan(&r.Content, &r.UserID); err != nil {
+			return "", "", false, err
+		}
+		queued = append(queued, r)
+	}
+	if err := rows.Err(); err != nil {
+		return "", "", false, err
+	}
+	message, userID, ok := joinPendingRows(queued)
+	return message, userID, ok, nil
 }
 
 func (s *runPendingInputStore) Consume(ctx context.Context, orgID, runID string) (string, string, bool, error) {

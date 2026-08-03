@@ -494,9 +494,13 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 
 // steerErrorStatus maps a SendMessage error to an HTTP status. A
 // run that can't take the op right now — no live process (ErrNoLiveProcess),
-// not steerable (ErrRunNotSteerable), or a lost resume race
+// not steerable (ErrRunNotSteerable), or moved out of a resumable state
 // (ErrRunNotResumable) — is 409 Conflict so the client refreshes and re-reads
-// the run's state. An expired workspace (ErrWorkspaceExpired) is 410 Gone: the
+// the run's state. Two wakes racing is NOT among them: the loser's message is
+// queued alongside the winner's and delivered by the winner's claim, so it
+// returns nil and the client is told "sent", which is what happened. A wake
+// that loses to a conversation going terminal still 409s — nothing will claim
+// it, so nothing delivers the message. An expired workspace (ErrWorkspaceExpired) is 410 Gone: the
 // run's saved state was reaped after the retention window, so retrying won't
 // help — the client surfaces the clear error rather than a transient conflict.
 // A concluded conversation (ErrConversationConcluded) is 409 as well, but it

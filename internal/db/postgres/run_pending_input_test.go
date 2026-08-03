@@ -32,6 +32,10 @@ func TestRunPendingInputStore_Postgres(t *testing.T) {
 					t.Fatalf("delete run: %v", err)
 				}
 			},
+			SecondUser: func(t *testing.T) string {
+				t.Helper()
+				return pgtest.SeedUser(t, h, "teammate")
+			},
 		}
 		return stores.RunPendingInput, orgID, userID, seed
 	})

@@ -24,13 +24,18 @@ type RunPendingInputSeeder struct {
 	// DeleteRun removes the run row so the FK ON DELETE CASCADE subtest can
 	// verify a purged run takes its pending input with it.
 	DeleteRun func(t *testing.T, runID string)
+
+	// SecondUser returns a second user id valid for the same org, so the
+	// multi-author subtests can queue rows from two people. The store's
+	// attribution rule (newest row wins) is unobservable with one.
+	SecondUser func(t *testing.T) string
 }
 
 // RunRunPendingInputStoreConformance covers the RunPendingInputStore
 // contract every backend impl must hold (TFAC-585): store-then-consume
-// (destructive, exactly once), the idempotent upsert-keyed-by-run_id crash
-// contract, per-run isolation, absence reads as ok=false (never an error),
-// and FK cascade.
+// (destructive, exactly once), the append-and-join queue contract, Peek and
+// Consume agreeing on what is pending, per-run isolation, absence reads as
+// ok=false (never an error), and FK cascade.
 func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -104,17 +109,18 @@ func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFac
 		}
 	})
 
-	t.Run("Store_is_an_idempotent_upsert_keyed_by_run_id", func(t *testing.T) {
+	// The heart of the append contract: two messages sent to a parked
+	// conversation before it wakes are both delivered. The store this replaced
+	// deleted the first one — no error, no log, nothing in the transcript.
+	t.Run("Store_appends_and_Consume_joins_in_order", func(t *testing.T) {
 		store, orgID, userID, seed := mk(t)
-		runID := seed.Run(t, "upsert")
+		runID := seed.Run(t, "append")
 
-		if err := store.Store(ctx, orgID, runID, userID, "first attempt"); err != nil {
+		if err := store.Store(ctx, orgID, runID, userID, "fix the null check"); err != nil {
 			t.Fatalf("store first: %v", err)
 		}
-		// A retry (e.g. the requeue step failed and the user/client resends)
-		// overwrites rather than accumulating a second row.
-		if err := store.Store(ctx, orgID, runID, userID, "retried attempt"); err != nil {
-			t.Fatalf("store retry: %v", err)
+		if err := store.Store(ctx, orgID, runID, userID, "actually no, fix the test"); err != nil {
+			t.Fatalf("store second: %v", err)
 		}
 		msg, _, ok, err := store.Consume(ctx, orgID, runID)
 		if err != nil {
@@ -123,16 +129,70 @@ func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFac
 		if !ok {
 			t.Fatal("consume ok=false, want true")
 		}
-		if msg != "retried attempt" {
-			t.Errorf("message = %q, want the latest write %q (upsert must replace, not accumulate)", msg, "retried attempt")
+		want := "fix the null check" + db.PendingInputSeparator + "actually no, fix the test"
+		if msg != want {
+			t.Errorf("message = %q, want %q (both messages, oldest first)", msg, want)
 		}
-		// And nothing further is pending — proves there was only ever one row.
-		_, _, ok, err = store.Consume(ctx, orgID, runID)
-		if err != nil {
-			t.Fatalf("second consume: %v", err)
+		// One flush drains everything it joined — no row is left behind to be
+		// re-delivered on a later claim.
+		if _, _, ok, err := store.Consume(ctx, orgID, runID); err != nil || ok {
+			t.Errorf("second consume = (ok=%v, err=%v); want ok=false — the flush must drain every joined row", ok, err)
 		}
-		if ok {
-			t.Error("a second row survived the upsert")
+	})
+
+	// Peek routes the claim to the resume path and Consume delivers; they read
+	// the same rows a rehydrate apart, so they must read them the same way.
+	t.Run("Peek_and_Consume_agree_across_several_rows", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		runID := seed.Run(t, "agree")
+
+		for _, m := range []string{"one", "two", "three"} {
+			if err := store.Store(ctx, orgID, runID, userID, m); err != nil {
+				t.Fatalf("store %q: %v", m, err)
+			}
+		}
+		peeked, peekedUser, ok, err := store.Peek(ctx, orgID, runID)
+		if err != nil || !ok {
+			t.Fatalf("peek = (ok=%v, err=%v); want ok=true", ok, err)
+		}
+		consumed, consumedUser, ok, err := store.Consume(ctx, orgID, runID)
+		if err != nil || !ok {
+			t.Fatalf("consume = (ok=%v, err=%v); want ok=true", ok, err)
+		}
+		if peeked != consumed {
+			t.Errorf("peek = %q but consume = %q; the routing decision and the delivery must agree", peeked, consumed)
+		}
+		if peekedUser != consumedUser {
+			t.Errorf("peek user = %q but consume user = %q; attribution must agree too", peekedUser, consumedUser)
+		}
+	})
+
+	// Attribution with several authors: one id rides the delivering claim's
+	// writes, and it is the newest row's — the most recent human intent.
+	t.Run("Attribution_is_the_newest_rows_user", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		if seed.SecondUser == nil {
+			t.Skip("backend seeder supplies no second user")
+		}
+		runID := seed.Run(t, "authors")
+		teammate := seed.SecondUser(t)
+
+		if err := store.Store(ctx, orgID, runID, userID, "my follow-up"); err != nil {
+			t.Fatalf("store mine: %v", err)
+		}
+		if err := store.Store(ctx, orgID, runID, teammate, "and while you're in there"); err != nil {
+			t.Fatalf("store teammate's: %v", err)
+		}
+		msg, gotUser, ok, err := store.Consume(ctx, orgID, runID)
+		if err != nil || !ok {
+			t.Fatalf("consume = (ok=%v, err=%v); want ok=true", ok, err)
+		}
+		if gotUser != teammate {
+			t.Errorf("userID = %q, want the newest row's author %q", gotUser, teammate)
+		}
+		want := "my follow-up" + db.PendingInputSeparator + "and while you're in there"
+		if msg != want {
+			t.Errorf("message = %q, want %q — a second author appends, it does not replace", msg, want)
 		}
 	})
 

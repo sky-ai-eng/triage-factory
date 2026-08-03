@@ -25,12 +25,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// ErrRunNotResumable is returned by ResumeOpenRun when the run can't be
-// resumed in its current state — typically a concurrent cancel, approval, or a
-// competing resume moved it between the caller's validation read and our status
-// flip (MarkQueuedForResume only flips a resumable run: open / completed).
-// Callers map this to 409 Conflict so the client can refresh and see the actual
-// state.
+// ErrRunNotResumable is returned by ResumeOpenRun when the run is not in a
+// resumable state (MarkQueuedForResume only flips open / completed) — a
+// concurrent failure or terminal moved it out from under the caller. Callers
+// map this to 409 Conflict so the client can refresh and see the actual state.
+//
+// A competing RESUME is not in this set, and that is the whole distinction the
+// lost-flip path has to make (see lostWakeOutcome). Two wakes race, one loses,
+// and the loser's message is queued alongside the winner's for the winner's
+// claim to deliver — nothing about that is a conflict to report. A flip lost
+// to a conversation that went terminal instead IS one: nothing will claim it,
+// so the queued message is never delivered.
 var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
 
 // ErrConversationConcluded is returned when a conversation's workspace is
@@ -73,12 +78,18 @@ var ErrWorkspaceExpired = errors.New("resume: this run's workspace has expired a
 //  1. validates the run is resumable (session id, worktree path, model)
 //     and that its workspace can still be recovered — a warm worktree or a
 //     durable snapshot (else ErrWorkspaceExpired → 410, with no side effect)
-//  2. in ONE tx: flips the run's status back to `queued` (a compare-and-swap
-//     race guard, MarkQueuedForResume), records agentMessage on
-//     run_pending_input, and — for a completed+abort run whose blueprint
-//     already terminated aborted — re-opens that blueprint.
-//     Binding the input write to the winning flip is what keeps concurrent
-//     wakes from persisting a loser's message for a later claim to deliver
+//  2. records agentMessage on the conversation's pending-input queue, then —
+//     in a second tx — flips the run's status back to `queued` (a
+//     compare-and-swap race guard, MarkQueuedForResume) and, for a
+//     completed+abort run whose blueprint already terminated aborted,
+//     re-opens that blueprint. The two are deliberately unbound, exactly as
+//     on the native path: the queue appends, so a wake that loses the CAS to
+//     another wake has still queued its message and the winner's claim
+//     delivers it (lostWakeOutcome separates that from a flip lost to a
+//     terminal, which is still a conflict). Ordering is what matters — the
+//     message is written BEFORE the flip, so a crash between them leaves
+//     input for the next claim to drain rather than a claimable run with
+//     nothing to say
 //  3. records the resume on the task's timeline and nudges the dispatcher
 //     (a ~ms same-process wake at TF_ROLE=all; a cross-pod wake is out of
 //     scope here — the claiming executor's own scan-interval backstop picks
@@ -169,12 +180,22 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 	blueprintRunID := run.BlueprintRunID
 	reopenAbortedBlueprint := run.Status == "completed" && domain.RunOutcome(run.Outcome) == domain.RunOutcomeAbort
 
-	// Step 2: flip the run (from its resumable state) back to `queued` —
-	// resume-by-enqueue re-queues the SAME row as ordinary claimable work
-	// rather than flipping straight to `running` the way the retired
-	// in-process implementation did. Routed under the resuming user's
+	// Step 2a: queue the message. Unconditional and first, mirroring
+	// queueNativeMessage — a message written before the flip is at worst
+	// input waiting for a claim, while a flip written before the message is a
+	// claimable run with nothing to say. Routed under the resuming user's
 	// synthetic claims (resume is always user-initiated regardless of the
 	// run's original trigger).
+	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
+		return ts.RunPendingInput.Store(ctx, orgID, runID, userID, agentMessage)
+	}); err != nil {
+		return fmt.Errorf("record pending input: %w", err)
+	}
+
+	// Step 2b: flip the run (from its resumable state) back to `queued` —
+	// resume-by-enqueue re-queues the SAME row as ordinary claimable work
+	// rather than flipping straight to `running` the way the retired
+	// in-process implementation did.
 	var flipped bool
 	err = s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
 		f, fErr := ts.Conversations.MarkQueuedForResume(ctx, orgID, runID)
@@ -183,14 +204,7 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 		}
 		flipped = f
 		if !f {
-			return nil // lost the wake CAS — no winner, so no input to record
-		}
-		// Record the input in the SAME tx as the winning flip. Binding the
-		// write to the CAS is what makes concurrent wakes safe: a loser rolls
-		// this back, so only the winner's message ever persists and no orphan
-		// row survives a lost race for a later claim to mis-deliver.
-		if sErr := ts.RunPendingInput.Store(ctx, orgID, runID, userID, agentMessage); sErr != nil {
-			return fmt.Errorf("record pending input: %w", sErr)
+			return nil // lost the wake CAS — another wake already re-queued it
 		}
 		// Re-open the aborted blueprint atomically with the run flip. A failure
 		// rolls back the run flip too, so run + blueprint never split across the
@@ -206,7 +220,7 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 		return fmt.Errorf("flip status: %w", err)
 	}
 	if !flipped {
-		return ErrRunNotResumable
+		return s.lostWakeOutcome(ctx, orgID, runID)
 	}
 	s.broadcastRunUpdate(orgID, runID, "queued")
 	s.recordResumeTaskEvent(ctx, orgID, userID, *run)
@@ -221,6 +235,50 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 	// (tf_wake) is TFAC-586's fleet-reaper scope, not this seam's.
 	s.wakeDispatcher()
 	return nil
+}
+
+// lostWakeOutcome answers for a wake whose compare-and-swap found the
+// conversation already moved. The message is queued either way — the only
+// question left is whether anything is coming to drain it, and the CAS refuses
+// two situations that answer it oppositely:
+//
+//   - another wake won the race, or an engagement has since claimed the row.
+//     Something is driving the conversation and drains whatever is queued, so
+//     this wake succeeded and there is nothing to report.
+//   - the conversation moved to a terminal. No claim predicate spans it, so
+//     the queued row is never delivered. Reporting success there is a lie the
+//     caller cannot detect, so it gets the same "the state moved under you"
+//     answer the up-front guard gives.
+//
+// The distinction is exactly the displayed status, which is derived: `queued`
+// and the active statuses are "a claim will drive it" and "a claim is driving
+// it". `open` cannot appear — this wake's own undelivered row derives a parked
+// conversation to `queued` — so everything else is a terminal.
+//
+// The queued row is left where it is on the refusing path. It is what the user
+// typed, it is inert while the conversation stays terminal (nothing claims it),
+// and a wake that later revives the conversation should carry it rather than
+// find it deleted.
+//
+// A re-read that fails answers like a terminal: unable to prove delivery is
+// coming, and a false success is worse here than a conflict the client
+// resolves by refreshing.
+func (s *Spawner) lostWakeOutcome(ctx context.Context, orgID, runID string) error {
+	run, err := s.agentRuns.GetSystem(ctx, orgID, runID)
+	if err != nil {
+		delegateLog.Warn("resume: lost the wake race and could not re-read the conversation; reporting a conflict",
+			"run", runID, "org_id", orgID, "error", err)
+		return ErrRunNotResumable
+	}
+	if run == nil {
+		return ErrRunNotResumable
+	}
+	if run.Status == domain.StatusQueued || domain.IsActiveRunStatus(run.Status) {
+		return nil
+	}
+	delegateLog.Warn("resume: lost the wake race to a conversation that went terminal; the queued message will not be delivered",
+		"run", runID, "org_id", orgID, "status", run.Status)
+	return ErrRunNotResumable
 }
 
 // recordResumeTaskEvent puts a follow-up on its task's timeline.
