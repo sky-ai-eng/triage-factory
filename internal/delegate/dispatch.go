@@ -299,12 +299,12 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 		} else if mErr != nil {
 			dispatchLog.Warn("park raced-cancel step failed", "run", run.ID, "error", mErr)
 		}
-		// This claim won't run the agent, so a resume message staged for it
-		// must not survive to be mis-delivered on a later reclaim — discard it.
+		// This claim won't run the agent, so whatever was queued for it must
+		// not survive to be mis-delivered on a later reclaim — discard it.
 		// Skipped for a native conversation for the same reason the resume
 		// routing below is: its undelivered rows are its ordinary input queue,
-		// not a staged resume message, and flipping one delivered here would
-		// silently drop a turn from a cancelled-then-restarted conversation.
+		// not staged resume messages, and flipping them delivered here would
+		// silently drop turns from a cancelled-then-restarted conversation.
 		if s.pendingInput != nil && run.Runtime != domain.ConversationRuntimeNative {
 			if _, _, _, cErr := s.pendingInput.Consume(context.Background(), orgID, run.ID); cErr != nil {
 				dispatchLog.Warn("clear pending input for raced-cancel step failed", "run", run.ID, "error", cErr)
@@ -323,13 +323,13 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// model it runs on before either arm below picks it up.
 	run.Model = s.modelForClaim(ctx, orgID, br, *run)
 
-	// Resume-by-enqueue (TFAC-585): a pending-input row means this claim is
-	// NOT a fresh/crash-reclaimed blueprint step — it's a parked/terminal-
-	// resumable run woken by a user message and re-queued onto its own row
+	// Resume-by-enqueue (TFAC-585): queued input means this claim is NOT a
+	// fresh/crash-reclaimed blueprint step — it's a parked/terminal-resumable
+	// run woken by a user message and re-queued onto its own row
 	// (ResumeOpenRun/SendMessage). Peek (not Consume) routes the claim to the
-	// resume path — dispatchResumeClaim deletes the row only once it is about
+	// resume path — dispatchResumeClaim flushes the rows only once it is about
 	// to deliver, so a crash during the intervening workspace rehydrate leaves
-	// the row for the next claim rather than losing the message.
+	// them for the next claim rather than losing the message.
 	//
 	// Native conversations never take this branch. Undelivered rows are how
 	// ALL input reaches a native loop — the delegation's opening turn, a
@@ -652,17 +652,26 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	}
 
 	resumeCwd, werr := s.ensureWorkspace(stepCtx, orgID, run, owner, repo, "")
-	// Delete the pending-input row now that the rehydrate has RETURNED (either
-	// way). Routing only peeked it (dispatchClaimedRun), so a crash DURING the
-	// rehydrate above left the row intact for the next claim to re-deliver.
+	// Flush the queued input now that the rehydrate has RETURNED (either way).
+	// Routing only peeked it (dispatchClaimedRun), so a crash DURING the
+	// rehydrate above left the rows intact for the next claim to re-deliver.
 	// Past this point the claim is committed to a terminal outcome here
-	// (deliver on success, failRun on error), so draining the row avoids an
-	// orphan on the failure path while still surviving the rehydrate-crash
-	// window. We already hold agentMessage/userID from the peek, so this is a
-	// plain delete; a failure here logs and proceeds.
+	// (deliver on success, failRun on error), so draining avoids an orphan on
+	// the failure path while still surviving the rehydrate-crash window.
+	//
+	// Deliver what the flush claimed, not what routing peeked: the queue
+	// appends, so a message sent DURING the rehydrate is a row the peek never
+	// saw and this flush just marked delivered. Keeping the peeked text would
+	// swallow it — the one silent loss this whole path exists to prevent. A
+	// failure here logs and proceeds on the peeked text.
 	if s.pendingInput != nil {
-		if _, _, _, cErr := s.pendingInput.Consume(ctx, orgID, run.ID); cErr != nil {
+		if msg, uid, ok, cErr := s.pendingInput.Consume(ctx, orgID, run.ID); cErr != nil {
 			dispatchLog.Warn("consume pending input before delivery failed", "run", run.ID, "error", cErr)
+		} else if ok && msg != "" {
+			agentMessage = msg
+			if uid != "" {
+				userID = uid
+			}
 		}
 	}
 	if werr != nil {

@@ -33,6 +33,14 @@ func TestRunPendingInputStore_SQLite(t *testing.T) {
 					t.Fatalf("delete run: %v", err)
 				}
 			},
+			SecondUser: func(t *testing.T) string {
+				t.Helper()
+				id := uuid.New().String()
+				if _, err := conn.Exec(`INSERT INTO users (id, display_name) VALUES (?, 'teammate')`, id); err != nil {
+					t.Fatalf("seed second user: %v", err)
+				}
+				return id
+			},
 		}
 		return stores.RunPendingInput, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, seed
 	})

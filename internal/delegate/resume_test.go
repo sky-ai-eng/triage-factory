@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
@@ -201,6 +202,68 @@ func TestResumeOpenRun_EnqueuesRatherThanSpawning(t *testing.T) {
 	s.mu.Unlock()
 	if active {
 		t.Error("ResumeOpenRun registered a cancel handle — an in-process resume goroutine must not spawn")
+	}
+}
+
+// staleOpenConversations reports every conversation as still parked `open`,
+// whatever it has since become. That is the one thing the losing half of a
+// wake race has that a sequential caller cannot: a read taken before the
+// winner's flip. Everything downstream — including the MarkQueuedForResume CAS
+// that then genuinely fails — runs against the real row.
+type staleOpenConversations struct{ db.ConversationStore }
+
+func (c staleOpenConversations) GetSystem(ctx context.Context, orgID, runID string) (*domain.Conversation, error) {
+	run, err := c.ConversationStore.GetSystem(ctx, orgID, runID)
+	if run != nil {
+		run.Status, run.Outcome = "open", ""
+	}
+	return run, err
+}
+
+// TestResumeOpenRun_LostWakeRaceStillDelivers pins what append buys: a wake
+// that loses the MarkQueuedForResume CAS is a SUCCESS, not a 409, because its
+// message is already queued and the winner's claim drains whatever is queued.
+//
+// Under the replace contract this could not be true — the loser's write would
+// have clobbered the winner's — which is exactly why the input write used to be
+// bound into the CAS's transaction. It no longer is, so this walks the race to
+// its end: the winner flips, the loser queues onto the row it read as still
+// parked, and one claim carries both messages away.
+func TestResumeOpenRun_LostWakeRaceStillDelivers(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-race", "sess-race", "/tmp/does-not-exist-race")
+	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-race'`); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-race", "ship it", runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("winning wake: %v", err)
+	}
+
+	// The loser reached its flip a moment later, still holding the pre-flip
+	// read. Its CAS finds the row already re-queued and fails for real.
+	loserStores := testSpawnerStores(database)
+	loserStores.Conversations = staleOpenConversations{loserStores.Conversations}
+	loser := NewSpawner(database, loserStores, nil, nil, "claude-sonnet-4-6")
+	if err := loser.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-race", "and check the migration", runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("losing wake returned %v, want nil — its message is queued, so there is nothing to report", err)
+	}
+
+	want := "ship it" + db.PendingInputSeparator + "and check the migration"
+	msg, _, ok, err := s.pendingInput.Peek(context.Background(), runmode.LocalDefaultOrgID, "r-race")
+	if err != nil || !ok {
+		t.Fatalf("peek = (ok=%v, err=%v); want ok=true", ok, err)
+	}
+	if msg != want {
+		t.Errorf("queued input = %q, want %q — the loser's message must survive alongside the winner's", msg, want)
+	}
+
+	// And the winner's claim carries both away: nothing is left queued for a
+	// later claim to re-deliver.
+	claimAndDispatch(t, s, database)
+	if _, _, ok, err := s.pendingInput.Consume(context.Background(), runmode.LocalDefaultOrgID, "r-race"); err != nil || ok {
+		t.Errorf("input still queued after the winner's claim: ok=%v err=%v", ok, err)
 	}
 }
 

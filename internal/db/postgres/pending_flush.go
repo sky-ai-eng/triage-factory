@@ -2,7 +2,10 @@ package postgres
 
 import (
 	"context"
+	"strings"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
 // pendingRow is one row the flush claimed: enough for every consumer without
@@ -65,14 +68,35 @@ func flushPendingInput(ctx context.Context, q queryer, orgID, convID, subtype st
 // consumePendingInput is the resume path's view of the flush: a parked
 // conversation's plain user input, delivered and handed back. It is the same
 // primitive every other pending row goes through — the empty subtype is what
-// discriminates "the user's next message" from an injection. Store keeps at
-// most one such row per conversation, so the newest is the one; taking the
-// newest rather than the oldest matches Peek, which routes off it.
+// discriminates "the user's next message" from an injection.
+//
+// Every flushed row is returned, joined, because every flushed row is a
+// message a person sent. The flush marks them all delivered whatever this
+// does with them, so returning one and dropping the rest is how they would be
+// lost silently.
 func consumePendingInput(ctx context.Context, q queryer, orgID, convID string) (message, userID string, ok bool, err error) {
 	flushed, err := flushPendingInput(ctx, q, orgID, convID, "")
-	if err != nil || len(flushed) == 0 {
+	if err != nil {
 		return "", "", false, err
 	}
-	newest := flushed[len(flushed)-1]
-	return newest.Content, newest.UserID, true, nil
+	message, userID, ok = joinPendingRows(flushed)
+	return message, userID, ok, nil
+}
+
+// joinPendingRows assembles queued input into the single prompt string an SDK
+// resume takes: every row, oldest first, separated by a blank line. Peek and
+// Consume both go through it, which is what keeps the routing decision and
+// the delivery from disagreeing about what is pending.
+//
+// The userID is the NEWEST row's — see db.RunPendingInputStore for why a
+// queue with several authors reports one, and why it is that one.
+func joinPendingRows(rows []pendingRow) (message, userID string, ok bool) {
+	if len(rows) == 0 {
+		return "", "", false
+	}
+	parts := make([]string, 0, len(rows))
+	for _, r := range rows {
+		parts = append(parts, r.Content)
+	}
+	return strings.Join(parts, db.PendingInputSeparator), rows[len(rows)-1].UserID, true
 }
