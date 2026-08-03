@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import * as Popover from '@radix-ui/react-popover'
-import type { Conversation, Task } from '../types'
+import type { Conversation, RunStatusValue, Task } from '../types'
 import { EMPTY_FEED, type FeedLine, type RunCardFeed } from '../lib/runFeed'
 import { useOrgHref } from '../hooks/useOrgHref'
 import ArtifactList from './ArtifactList'
@@ -14,6 +14,7 @@ import {
   isActiveRun,
   isActiveStatus,
   isFailedStatus,
+  isTerminalStatus,
   QUEUE_DWELL_VISIBLE_MS,
   queueDwellMs,
   workStartedAt,
@@ -100,14 +101,14 @@ export default function AgentCard({
   // whenever has_unresolved_artifacts is true, live or terminal.
   const needsApproval = hasUnresolvedArtifacts(run)
   const approval = approvalCounts(run)
-  const isFailed = run.Status === 'failed'
-  const isCancelled = run.Status === 'cancelled'
-  // task_unsolvable: the agent's self-reported "can't finish without a human."
-  // Functionally a failure from the user's POV, so it gets the same
-  // Return-to-queue affordance.
-  const isUnsolvable = run.Status === 'task_unsolvable'
+  const isFailed = isFailedStatus(run.Status)
+  // Parked: the turn ended without concluding — stopped from this card's own ✕,
+  // or ended mid-thought — so the run is neither working nor settled. Its
+  // workspace stays warm and it is resumable from the run view, which is why it
+  // is NOT a terminal and gets its own block rather than a stale ticker.
+  const isParked = run.Status === 'open'
   // A terminal run is settled — show its outcome, not a live feed.
-  const isTerminal = isFailed || isCancelled || isUnsolvable || run.Status === 'completed'
+  const isTerminal = isTerminalStatus(run.Status)
 
   // A parked tool-permission prompt OR an unresolved artifact set is the card's
   // "needs you" moment — it takes the steady amber attention glow so it can't be
@@ -214,13 +215,16 @@ export default function AgentCard({
         </div>
 
         {/* Activity — a queued run states that it's waiting (a slot, not a
-            bug); a terminal run shows its outcome; a live run shows a
+            bug); a parked run states that it stopped and can be picked back
+            up; a terminal run shows its outcome; a live run shows a
             flush, borderless feed of one-liners (no window-into-the-agent; the
             expanded view is for that). A memory-limit kill has no
             ResultSummary (infra failures write run_messages, not a summary)
             but still gets the ResultBlock — its kind carries the copy. */}
         {isQueued ? (
           <QueuedBlock />
+        ) : isParked ? (
+          <ParkedBlock />
         ) : isTerminal && (run.ResultSummary || run.FailureKind === 'memory_limit') ? (
           <ResultBlock
             status={run.Status}
@@ -285,7 +289,7 @@ export default function AgentCard({
           </div>
 
           <div className="flex items-center gap-3">
-            {(isFailed || isCancelled || isUnsolvable || needsApproval) && onRequeue && (
+            {(isFailed || isParked || needsApproval) && onRequeue && (
               <button
                 onClick={onRequeue}
                 className="text-[12px] font-medium text-text-tertiary transition-colors hover:text-text-secondary"
@@ -383,6 +387,28 @@ function QueuedBlock() {
   )
 }
 
+// ParkedBlock is the `open` run's honest state: the turn ended without
+// concluding, nothing is executing, and the work is still there to pick up. It
+// takes the feed's slot rather than sitting alongside it because a parked run's
+// ticker is stale by definition — the last few lines read as live work when
+// none is happening, which is exactly how the retired `cancelled` arm's absence
+// would have left this state. The transcript is one click away in the run view,
+// which is also where the composer lives; the footer's Return to queue is the
+// other exit.
+function ParkedBlock() {
+  return (
+    <div className="flex h-[3.5rem] items-end px-4 pb-1 font-mono text-[10.5px] text-text-tertiary/70">
+      <span
+        className="inline-flex items-center gap-2"
+        title="The run stopped without concluding and its workspace is still warm. Open the run view to send it a follow-up, or return the task to the queue."
+      >
+        <span className="inline-block h-1 w-1 rounded-full bg-snooze" />
+        idle — stopped without concluding, resumable
+      </span>
+    </div>
+  )
+}
+
 // The feed fades in at its top edge so older lines dissolve as new ones arrive.
 const FEED_MASK = 'linear-gradient(to bottom, transparent 0, #000 22px, #000 100%)'
 
@@ -446,27 +472,17 @@ function ResultBlock({
   summary,
   failureKind,
 }: {
-  status: string
+  status: RunStatusValue
   summary: string
   failureKind?: string
 }) {
   const memoryKilled = status === 'failed' && failureKind === 'memory_limit'
-  const tone =
-    status === 'failed' || status === 'cancelled'
-      ? 'problem'
-      : status === 'task_unsolvable'
-        ? 'attention'
-        : 'good'
-  const heading =
-    status === 'cancelled'
-      ? 'Cancelled'
-      : status === 'failed'
-        ? memoryKilled
-          ? 'Killed: memory limit'
-          : 'Failed'
-        : status === 'task_unsolvable'
-          ? 'Unsolvable'
-          : 'Done'
+  // Tone and heading come off the shared failed-terminal predicate rather than
+  // a list of names, so a future terminal styles as a failure by default —
+  // the safe direction, and the same reasoning as FAILED_STATUSES itself.
+  const failed = isFailedStatus(status)
+  const tone = failed ? 'problem' : 'good'
+  const heading = memoryKilled ? 'Killed: memory limit' : failed ? 'Failed' : 'Done'
   const body =
     memoryKilled && !summary
       ? 'The agent process exceeded its per-run memory limit and was stopped. Raise TF_RUN_MEMORY_LIMIT_MB if this run legitimately needs more.'

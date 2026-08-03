@@ -14,6 +14,7 @@ import { usePermissionQueues } from '../hooks/usePermissionQueues'
 import {
   isActiveRun,
   isActiveStatus,
+  isFailedStatus,
   isPermissionTerminalStatus,
   isTerminalStatus,
 } from '../lib/runStatus'
@@ -332,9 +333,14 @@ export default function Board() {
         return Array.from({ length: total }, (_, i) => {
           const existing = data.steps?.[i]?.run
           if (existing) return existing
+          // A step with no run yet. Its status is empty rather than a
+          // made-up name: the classifiers read an unrecognized value as
+          // nothing at all, and inventing one would put a word in the
+          // conversation vocabulary that no conversation can carry. The
+          // `__pending-` id is what marks the row synthetic.
           return {
             ID: `__pending-${chainRunID}-${i}`,
-            Status: 'pending',
+            Status: '',
             blueprint_run_id: chainRunID,
             blueprint_step_index: i,
           } as unknown as Conversation
@@ -758,8 +764,8 @@ export default function Board() {
 
   // Sort tasks with active runs in a meaningful order. Used for
   // In Progress and In Review where the run state matters for
-  // attention. Pending_approval > failed/cancelled/unsolvable >
-  // running > completed.
+  // attention. Needs-you (a parked permission prompt or an unresolved
+  // artifact) > failed > everything in flight > completed.
   const sortByRunAttention = useCallback(
     (tasks: Task[]) => {
       const weight = (t: Task) => {
@@ -769,12 +775,7 @@ export default function Board() {
         // urgent "needs you" — top weight — so it can't be missed in the column.
         if ((permQueueMap[run.ID]?.length ?? 0) > 0) return 0
         if (hasUnresolvedArtifacts(run)) return 0
-        if (
-          run.Status === 'failed' ||
-          run.Status === 'cancelled' ||
-          run.Status === 'task_unsolvable'
-        )
-          return 1
+        if (isFailedStatus(run.Status)) return 1
         if (run.Status === 'completed') return 3
         return 2
       }

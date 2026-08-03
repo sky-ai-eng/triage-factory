@@ -16,7 +16,9 @@ import type {
   FleetSandboxes,
   FleetSandboxSeries,
   FleetTimeseries,
+  RunStatusValue,
 } from '../types'
+import { isActiveStatus } from '../lib/runStatus'
 
 // Fleet — the sandbox-fleet administration console (TFAC-589). Operator-gated,
 // EE-licensed (FeatureFleet). A DB-backed live view over the instances registry,
@@ -675,14 +677,23 @@ function CopyId({ id, kind }: { id: string; kind: string }) {
   )
 }
 
-const STATUS_TONE: Record<string, ChipTone> = {
-  completed: 'good',
-  failed: 'problem',
-  task_unsolvable: 'problem',
-  cancelled: 'neutral',
-  running: 'rust',
-  queued: 'attention',
-  open: 'attention',
+// The chip tone for a sandbox claim's conversation status. A switch on a
+// declared conversation status rather than a status-keyed record: the record
+// carried two names the backend had already stopped emitting, and a record's
+// keys are invisible to the vocabulary lint — a `case` arm is not.
+function statusTone(status: RunStatusValue): ChipTone {
+  if (isActiveStatus(status)) return 'rust'
+  switch (status) {
+    case 'completed':
+      return 'good'
+    case 'failed':
+      return 'problem'
+    case 'queued':
+    case 'open':
+      return 'attention'
+    default:
+      return 'neutral'
+  }
 }
 
 function SandboxState({ claim }: { claim: FleetSandboxClaim }) {
@@ -691,7 +702,7 @@ function SandboxState({ claim }: { claim: FleetSandboxClaim }) {
     : (claim.status ?? '—')
   return (
     <span className="inline-flex items-center gap-1.5">
-      <Chip tone={STATUS_TONE[claim.status ?? ''] ?? 'neutral'}>{label}</Chip>
+      <Chip tone={statusTone(claim.status ?? '')}>{label}</Chip>
       {claim.live && <Chip tone="rust">live</Chip>}
     </span>
   )

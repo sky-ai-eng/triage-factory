@@ -25,7 +25,7 @@ import {
   noteWrittenTeam,
   teamFilterQuery,
 } from '../hooks/useTeams'
-import type { Conversation, FactoryEntity, FactorySnapshot, Task } from '../types'
+import type { Conversation, FactoryEntity, FactorySnapshot, RunStatusValue, Task } from '../types'
 import { isActiveStatus } from '../lib/runStatus'
 
 // Production factory page — Babylon scene driven by /api/factory/snapshot.
@@ -842,21 +842,19 @@ function entityLabel(e: FactoryEntity): string {
 // Status-keyed colors for the run-row indicator dot and the inline
 // status label. Pulled from the project palette tokens so the trays
 // feel cohesive with the rest of the app: claim/sage for active,
-// snooze/amber for parked, dismiss/rose for failed, neutral tertiary
-// for cancelled.
+// snooze/amber for parked, dismiss/rose for failed, secondary for the
+// rest (queued, and completed — a finished run is unremarkable here).
 //
 // The active arm is the shared predicate rather than a list of names, so
 // every claim phase — including a run parked awaiting its credential
 // bundle — reads as working instead of falling through to the inert grey.
-function runStatusColor(status: string): string {
+function runStatusColor(status: RunStatusValue): string {
   if (isActiveStatus(status)) return '#3f6b4d' // --color-claim (sage)
   switch (status) {
     case 'open':
       return '#8a6e1f' // --color-snooze (warm amber)
     case 'failed':
       return '#a84545' // --color-dismiss (warm rose)
-    case 'cancelled':
-      return '#6b6560' // --color-text-tertiary (neutral)
     default:
       return '#4a4541' // --color-text-secondary
   }
@@ -864,7 +862,7 @@ function runStatusColor(status: string): string {
 
 // Shorter copy for the statuses whose raw name reads badly in a tray row;
 // everything else renders as itself.
-function runStatusLabel(status: string): string {
+function runStatusLabel(status: RunStatusValue): string {
   switch (status) {
     case 'agent_starting':
       return 'starting'

@@ -14,15 +14,7 @@ import { hasUnresolvedArtifacts } from '../../lib/approval'
 // amber your-move, green done, red failed. Everything is flat. Depth is never
 // implied (that's the whole reason this isn't a 3D scene).
 
-export type StationKey =
-  | 'queued'
-  | 'working'
-  | 'open'
-  | 'attention'
-  | 'done'
-  | 'failed'
-  | 'cancelled'
-  | 'unsolvable'
+export type StationKey = 'queued' | 'working' | 'open' | 'attention' | 'done' | 'failed'
 
 export interface StationState {
   key: StationKey
@@ -116,26 +108,6 @@ export function stationState(run: Conversation): StationState {
         live: false,
         scanner: false,
         heat: 0,
-        belt: 0,
-      }
-    case 'cancelled':
-      return {
-        key: 'cancelled',
-        light: 'var(--color-dismiss)',
-        label: 'CANCELLED',
-        live: false,
-        scanner: false,
-        heat: 0,
-        belt: 0,
-      }
-    case 'task_unsolvable':
-      return {
-        key: 'unsolvable',
-        light: 'var(--color-snooze)',
-        label: 'UNSOLVABLE',
-        live: false,
-        scanner: false,
-        heat: 0.1,
         belt: 0,
       }
     default:

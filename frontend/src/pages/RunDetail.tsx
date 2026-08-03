@@ -121,10 +121,12 @@ export default function RunDetail() {
           )
           const padded: Conversation[] = data.steps.map((s, i) => {
             if (s.run) return s.run
+            // Synthetic row for a step that hasn't been spawned; its status is
+            // empty because it has no run, not a name outside the vocabulary.
             return {
               ID: `__pending-${run.blueprint_run_id}-${i}`,
               TaskID: run.TaskID,
-              Status: 'pending',
+              Status: '',
               Model: '',
               StartedAt: '',
               ResultSummary: '',

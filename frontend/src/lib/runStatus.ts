@@ -1,5 +1,5 @@
 import { CLAIM_PHASES, TERMINAL_RUN_STATUSES } from '../types'
-import type { ClaimPhase, Conversation, TerminalRunStatus } from '../types'
+import type { ClaimPhase, Conversation, RunStatusValue, TerminalRunStatus } from '../types'
 
 // Every set here is derived from the vocabulary in types.ts, which is checked
 // against internal/domain/run_status.go by a Go test. Adding a claim phase in
@@ -17,7 +17,7 @@ export const ACTIVE_STATUSES = ['running', ...CLAIM_PHASES] as const
 // future terminal lands here by default, which is the safe direction.
 export const FAILED_STATUSES = TERMINAL_RUN_STATUSES.filter((s) => s !== 'completed')
 
-export function isTerminalStatus(status: string): status is TerminalRunStatus {
+export function isTerminalStatus(status: RunStatusValue): status is TerminalRunStatus {
   return (TERMINAL_RUN_STATUSES as readonly string[]).includes(status)
 }
 
@@ -27,11 +27,11 @@ export function isTerminalStatus(status: string): status is TerminalRunStatus {
 // because the question is about permission staleness, not lifecycle; the two
 // answers coincide today. Shared by the board and useRunDetail so the two
 // surfaces drop in lockstep.
-export function isPermissionTerminalStatus(status: string): boolean {
+export function isPermissionTerminalStatus(status: RunStatusValue): boolean {
   return isTerminalStatus(status)
 }
 
-export function isClaimPhase(status: string): status is ClaimPhase {
+export function isClaimPhase(status: RunStatusValue): status is ClaimPhase {
   return (CLAIM_PHASES as readonly string[]).includes(status)
 }
 
@@ -39,11 +39,11 @@ export function isActiveRun(run: Conversation): boolean {
   return isActiveStatus(run.Status)
 }
 
-export function isActiveStatus(status: string): boolean {
+export function isActiveStatus(status: RunStatusValue): boolean {
   return (ACTIVE_STATUSES as readonly string[]).includes(status)
 }
 
-export function isFailedStatus(status: string): boolean {
+export function isFailedStatus(status: RunStatusValue): boolean {
   return (FAILED_STATUSES as readonly string[]).includes(status)
 }
 

@@ -98,6 +98,14 @@ export interface TeamBot {
 // branched for months on `initializing` and `worktree_created`, neither of
 // which the backend has ever emitted, while `awaiting_credentials` — a real
 // phase — reached no arm at all.
+//
+// That test pins these arrays and nothing else, which bought about a week:
+// component code doesn't read the arrays, it compares a status against a bare
+// literal, and no amount of array-pinning can see a literal in a switch arm.
+// So the arrays have a second enforcer — the run-status/no-ghost-run-status
+// ESLint rule (frontend/eslint-rules/), which reads the vocabulary out of this
+// file and fails the lint on any comparison or `case` that tests a
+// conversation status against a name the arrays don't hold.
 
 // CLAIM_PHASES are the setup/parked sub-states of a live executor engagement.
 // They arrive in Conversation.Status because display reads coalesce the active
@@ -129,6 +137,20 @@ export const RUN_STATUSES = [
 ] as const
 export type RunStatus = (typeof RUN_STATUSES)[number]
 
+// RunStatusValue is a conversation status as it arrives over the wire: a plain
+// string, deliberately NOT the RunStatus union, so a server emitting a name
+// this build predates flows through the lib/runStatus predicates (which
+// classify it as unknown) instead of being a compile error at the boundary.
+//
+// It exists to be a NAME rather than a type constraint. The lint rule reads a
+// status comparison two ways — `<expr>.Status` (the PascalCase Conversation
+// projection; every other DTO in this file spells its own status lowercase, so
+// the case alone separates the curator-turn and blueprint-run vocabularies from
+// this one) and any value annotated with this alias. So a helper that takes a
+// status second-hand — `runStatusColor(status)`, a tone switch — says so in its
+// signature and gets checked like the property access it came from.
+export type RunStatusValue = string
+
 // Conversation is the durable agent-context row's display projection —
 // served through a handler-side map, so its fields are PascalCase (mirroring
 // internal/domain/agent.go's Conversation). One conversation is one delegated
@@ -136,11 +158,10 @@ export type RunStatus = (typeof RUN_STATUSES)[number]
 export interface Conversation {
   ID: string
   TaskID: string
-  // Status is the coalesced display status. Typed `string`, not RunStatus, on
-  // purpose: this is a wire field, and a server that starts emitting a name
-  // this build predates should reach the predicates in lib/runStatus (which
-  // classify it as unknown) rather than be a compile error here.
-  Status: string
+  // Status is the coalesced display status. RunStatusValue (a string), not the
+  // RunStatus union, on purpose — see the alias for why the wire field stays
+  // open-world and how the lint rule closes the branching over it.
+  Status: RunStatusValue
   Model: string
   StartedAt: string
   // QueuedAt is when the run last entered the queue; ClaimedAt is when the
@@ -1500,8 +1521,13 @@ export interface FleetSandboxClaim {
   duration_seconds: number
   peak_mem_mb?: number
   cpu_usec?: number
-  status?: string
+  /** The driven conversation's status — the same vocabulary Conversation.Status
+   *  carries, so branch on it through a RunStatusValue-annotated helper rather
+   *  than inline literals. */
+  status?: RunStatusValue
   failure_kind?: string
+  /** How the ENGAGEMENT ended (completed | failed | cancelled | requeued |
+   *  parked | reaped) — a claim vocabulary of its own, not a run status. */
   outcome?: string
 }
 
