@@ -6,14 +6,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
-// runPendingInputStore is the Postgres impl of db.RunPendingInputStore —
-// the durable half of resume-by-enqueue, stored as undelivered plain user
-// messages (role='user', blank subtype, delivered=false) on the
-// conversation's own transcript. Reachable two ways: the resume path writes
-// through the claims tx, under the resuming user's claims (the messages RLS
-// policy admits the write via the conversation's own visibility); Consume
-// runs off the admin pool from the dispatcher's claim path, a goroutine with
-// no request context.
+// runPendingInputStore is the Postgres impl of db.RunPendingInputStore — the
+// read half of resume-by-enqueue over the undelivered plain user messages
+// (role='user', blank subtype, delivered=false) the ordinary transcript insert
+// leaves on the conversation. Peek and Consume run off the admin pool from the
+// dispatcher's claim path, a goroutine with no request context; the write they
+// read is the follow-up path's InsertMessage through the claims tx, under the
+// sending user's claims.
 type runPendingInputStore struct{ admin queryer }
 
 func newRunPendingInputStore(admin queryer) db.RunPendingInputStore {
@@ -27,17 +26,6 @@ var _ db.RunPendingInputStore = (*runPendingInputStore)(nil)
 // keeps them disjoint from the staged-injection notes, which are also
 // undelivered user rows.
 const pendingInputPredicate = `org_id = $1::uuid AND conversation_id = $2::uuid AND role = 'user' AND subtype = '' AND delivered = false`
-
-func (s *runPendingInputStore) Store(ctx context.Context, orgID, runID, userID, message string) error {
-	// A plain insert: the queue appends. Two messages sent to a parked
-	// conversation before it wakes are two rows, and Consume joins them —
-	// the delete-then-insert this replaced dropped the first one silently.
-	_, err := s.admin.ExecContext(ctx, `
-		INSERT INTO messages (org_id, conversation_id, user_id, role, content, subtype, delivered)
-		VALUES ($1::uuid, $2::uuid, NULLIF($3, '')::uuid, 'user', $4, '', false)
-	`, orgID, runID, userID, message)
-	return err
-}
 
 func (s *runPendingInputStore) Peek(ctx context.Context, orgID, runID string) (string, string, bool, error) {
 	// window_state='active' is not in the shared predicate but belongs in

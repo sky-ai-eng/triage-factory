@@ -15,11 +15,19 @@ import (
 type RunPendingInputStoreFactory func(t *testing.T) (store db.RunPendingInputStore, orgID, userID string, seed RunPendingInputSeeder)
 
 // RunPendingInputSeeder is a bag of callbacks the conformance suite uses to
-// stage fixture rows RunPendingInputStore doesn't own.
+// stage fixture rows RunPendingInputStore doesn't own — which now includes the
+// queued rows themselves, since the store reads a queue it does not write.
 type RunPendingInputSeeder struct {
 	// Run inserts a run row and returns its id. suffix discriminates
 	// per-subtest seeds so unique indexes don't collide.
 	Run func(t *testing.T, suffix string) (runID string)
+
+	// StagePending queues one message the way production does — the ordinary
+	// transcript insert, undelivered. Backends wire it to their own
+	// ConversationStore.InsertMessage rather than a hand-rolled INSERT, so
+	// what this suite reads is exactly what the follow-up path writes; a
+	// column the writer stops setting fails here rather than in production.
+	StagePending func(t *testing.T, runID, userID, message string)
 
 	// DeleteRun removes the run row so the FK ON DELETE CASCADE subtest can
 	// verify a purged run takes its pending input with it.
@@ -32,10 +40,12 @@ type RunPendingInputSeeder struct {
 }
 
 // RunRunPendingInputStoreConformance covers the RunPendingInputStore
-// contract every backend impl must hold (TFAC-585): store-then-consume
-// (destructive, exactly once), the append-and-join queue contract, Peek and
-// Consume agreeing on what is pending, per-run isolation, absence reads as
-// ok=false (never an error), and FK cascade.
+// contract every backend impl must hold (TFAC-585): consume is destructive and
+// exactly once, the append-and-join queue contract, Peek and Consume agreeing
+// on what is pending, per-run isolation, absence reads as ok=false (never an
+// error), and FK cascade. Rows are staged through the production writer (see
+// RunPendingInputSeeder.StagePending), because a reader that only agrees with
+// its own test-local INSERT proves nothing.
 func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -44,9 +54,7 @@ func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFac
 		store, orgID, userID, seed := mk(t)
 		runID := seed.Run(t, "drain")
 
-		if err := store.Store(ctx, orgID, runID, userID, "pick this back up"); err != nil {
-			t.Fatalf("store: %v", err)
-		}
+		seed.StagePending(t, runID, userID, "pick this back up")
 		msg, gotUser, ok, err := store.Consume(ctx, orgID, runID)
 		if err != nil {
 			t.Fatalf("consume: %v", err)
@@ -75,9 +83,7 @@ func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFac
 		store, orgID, userID, seed := mk(t)
 		runID := seed.Run(t, "peek")
 
-		if err := store.Store(ctx, orgID, runID, userID, "still here"); err != nil {
-			t.Fatalf("store: %v", err)
-		}
+		seed.StagePending(t, runID, userID, "still here")
 		// Peek twice: both return the row (non-destructive).
 		for i := 0; i < 2; i++ {
 			msg, gotUser, ok, err := store.Peek(ctx, orgID, runID)
@@ -116,12 +122,8 @@ func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFac
 		store, orgID, userID, seed := mk(t)
 		runID := seed.Run(t, "append")
 
-		if err := store.Store(ctx, orgID, runID, userID, "fix the null check"); err != nil {
-			t.Fatalf("store first: %v", err)
-		}
-		if err := store.Store(ctx, orgID, runID, userID, "actually no, fix the test"); err != nil {
-			t.Fatalf("store second: %v", err)
-		}
+		seed.StagePending(t, runID, userID, "fix the null check")
+		seed.StagePending(t, runID, userID, "actually no, fix the test")
 		msg, _, ok, err := store.Consume(ctx, orgID, runID)
 		if err != nil {
 			t.Fatalf("consume: %v", err)
@@ -147,9 +149,7 @@ func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFac
 		runID := seed.Run(t, "agree")
 
 		for _, m := range []string{"one", "two", "three"} {
-			if err := store.Store(ctx, orgID, runID, userID, m); err != nil {
-				t.Fatalf("store %q: %v", m, err)
-			}
+			seed.StagePending(t, runID, userID, m)
 		}
 		peeked, peekedUser, ok, err := store.Peek(ctx, orgID, runID)
 		if err != nil || !ok {
@@ -177,12 +177,8 @@ func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFac
 		runID := seed.Run(t, "authors")
 		teammate := seed.SecondUser(t)
 
-		if err := store.Store(ctx, orgID, runID, userID, "my follow-up"); err != nil {
-			t.Fatalf("store mine: %v", err)
-		}
-		if err := store.Store(ctx, orgID, runID, teammate, "and while you're in there"); err != nil {
-			t.Fatalf("store teammate's: %v", err)
-		}
+		seed.StagePending(t, runID, userID, "my follow-up")
+		seed.StagePending(t, runID, teammate, "and while you're in there")
 		msg, gotUser, ok, err := store.Consume(ctx, orgID, runID)
 		if err != nil || !ok {
 			t.Fatalf("consume = (ok=%v, err=%v); want ok=true", ok, err)
@@ -200,9 +196,7 @@ func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFac
 		store, orgID, userID, seed := mk(t)
 		runA := seed.Run(t, "iso-a")
 		runB := seed.Run(t, "iso-b")
-		if err := store.Store(ctx, orgID, runA, userID, "for-A"); err != nil {
-			t.Fatalf("store A: %v", err)
-		}
+		seed.StagePending(t, runA, userID, "for-A")
 		_, _, ok, err := store.Consume(ctx, orgID, runB)
 		if err != nil {
 			t.Fatalf("consume B: %v", err)
@@ -222,9 +216,7 @@ func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFac
 	t.Run("Run_delete_cascades_pending_input", func(t *testing.T) {
 		store, orgID, userID, seed := mk(t)
 		runID := seed.Run(t, "cascade")
-		if err := store.Store(ctx, orgID, runID, userID, "doomed"); err != nil {
-			t.Fatalf("store: %v", err)
-		}
+		seed.StagePending(t, runID, userID, "doomed")
 		seed.DeleteRun(t, runID)
 		_, _, ok, err := store.Consume(ctx, orgID, runID)
 		if err != nil {

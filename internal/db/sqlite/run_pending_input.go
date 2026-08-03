@@ -8,11 +8,11 @@ import (
 )
 
 // runPendingInputStore is the SQLite impl of db.RunPendingInputStore — the
-// durable half of resume-by-enqueue, stored as undelivered plain user
-// messages (role='user', blank subtype, delivered=0) on the conversation's
-// own transcript. SQLite is N=1, no RLS; org_id exists for parity with the
-// Postgres baseline and every caller passes LocalDefaultOrgID (asserted at
-// each entry).
+// read half of resume-by-enqueue over the undelivered plain user messages
+// (role='user', blank subtype, delivered=0) the ordinary transcript insert
+// leaves on the conversation. SQLite is N=1, no RLS; org_id exists for parity
+// with the Postgres baseline and every caller passes LocalDefaultOrgID
+// (asserted at each entry).
 type runPendingInputStore struct{ q queryer }
 
 func newRunPendingInputStore(q queryer) db.RunPendingInputStore {
@@ -26,20 +26,6 @@ var _ db.RunPendingInputStore = (*runPendingInputStore)(nil)
 // keeps them disjoint from the staged-injection notes, which are also
 // undelivered user rows.
 const pendingInputPredicate = `org_id = ? AND conversation_id = ? AND role = 'user' AND subtype = '' AND delivered = 0`
-
-func (s *runPendingInputStore) Store(ctx context.Context, orgID, runID, userID, message string) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
-	}
-	// A plain insert: the queue appends. Two messages sent to a parked
-	// conversation before it wakes are two rows, and Consume joins them —
-	// the delete-then-insert this replaced dropped the first one silently.
-	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO messages (org_id, conversation_id, user_id, role, content, subtype, delivered)
-		VALUES (?, ?, ?, 'user', ?, '', 0)
-	`, orgID, runID, sqliteNullStr(userID), message)
-	return err
-}
 
 func (s *runPendingInputStore) Peek(ctx context.Context, orgID, runID string) (string, string, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {

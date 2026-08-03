@@ -1,12 +1,14 @@
 package postgres_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // TestRunPendingInputStore_Postgres runs the shared conformance suite
@@ -30,6 +32,22 @@ func TestRunPendingInputStore_Postgres(t *testing.T) {
 				t.Helper()
 				if _, err := h.AdminDB.Exec(`DELETE FROM conversations WHERE id = $1`, runID); err != nil {
 					t.Fatalf("delete run: %v", err)
+				}
+			},
+			// Through the production writer, not a test-local INSERT: the
+			// store under test reads rows it does not write, so staging them
+			// any other way would let the two drift apart unnoticed.
+			StagePending: func(t *testing.T, runID, userID, message string) {
+				t.Helper()
+				pending := false
+				if _, err := stores.Conversations.InsertMessageSystem(context.Background(), orgID, &domain.Message{
+					ConversationID: runID,
+					UserID:         userID,
+					Role:           "user",
+					Content:        message,
+					Delivered:      &pending,
+				}); err != nil {
+					t.Fatalf("stage pending input: %v", err)
 				}
 			},
 			SecondUser: func(t *testing.T) string {

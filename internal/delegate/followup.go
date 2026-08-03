@@ -264,13 +264,34 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, run domain.Co
 		}
 	}
 
-	// The write. One row shape — an undelivered plain user message on the
-	// conversation's transcript — and one store method for it, whatever the
-	// runtime. The queue appends, so several messages sent before a claim
+	// The write, and it is an ordinary transcript insert whatever the runtime —
+	// the queue IS the transcript's undelivered tail (role='user', blank
+	// subtype, delivered=false), which is the row shape RunPendingInputStore's
+	// Peek/Consume read. It appends, so several messages sent before a claim
 	// arrives are all delivered: the native loop folds them in as separate
 	// turns, an SDK resume takes them joined into its one prompt string.
+	//
+	// InsertMessage rather than a bespoke insert because the broadcast below
+	// needs what only the writer can give it — the DB-assigned id and
+	// created_at, both stamped onto msg here. A synthesized row would stream an
+	// id of 0, and the client dedups and orders by id, so two follow-ups would
+	// collapse into one and a later refetch would double them against their
+	// real ids.
+	pending := false
+	msg := &domain.Message{
+		ConversationID: run.ID,
+		UserID:         userID,
+		Role:           "user",
+		Content:        text,
+		Delivered:      &pending,
+	}
 	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
-		return ts.RunPendingInput.Store(ctx, orgID, run.ID, userID, text)
+		id, iErr := ts.Conversations.InsertMessage(ctx, orgID, msg)
+		if iErr != nil {
+			return iErr
+		}
+		msg.ID = int(id)
+		return nil
 	}); err != nil {
 		return fmt.Errorf("queue follow-up: %w", err)
 	}
@@ -281,14 +302,7 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, run domain.Co
 	// whose single input door is this row. Doing it again here would put the
 	// same sentence in front of the user twice.
 	if run.Runtime == domain.ConversationRuntimeNative {
-		pending := false
-		s.broadcastMessage(orgID, run.ID, &domain.Message{
-			ConversationID: run.ID,
-			UserID:         userID,
-			Role:           "user",
-			Content:        text,
-			Delivered:      &pending,
-		})
+		s.broadcastMessage(orgID, run.ID, msg)
 	}
 
 	if !wake {

@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // markNative stamps a seeded conversation as the native runtime, the ratchet
@@ -70,6 +72,85 @@ func TestSendMessage_NativeRunningQueuesWithoutSteering(t *testing.T) {
 	}
 	if st := storedStatus(t, database, "r-native"); st != "" {
 		t.Errorf("stored status = %q, want none", st)
+	}
+}
+
+// capturedEvents collects everything a hub broadcasts. Wired as the hub's
+// backplane, which Broadcast publishes to alongside the local fan-out — the
+// one seam that observes a payload without a socket on the other end.
+type capturedEvents struct {
+	mu     sync.Mutex
+	events []websocket.Event
+}
+
+func (c *capturedEvents) Publish(evt websocket.Event) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.events = append(c.events, evt)
+}
+
+func (c *capturedEvents) messages() []domain.MessageDTO {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []domain.MessageDTO
+	for _, e := range c.events {
+		if e.Type != "message" {
+			continue
+		}
+		if dto, ok := e.Data.(domain.MessageDTO); ok {
+			out = append(out, dto)
+		}
+	}
+	return out
+}
+
+// TestSendMessage_NativeBroadcastCarriesTheStoredRow pins the payload, not just
+// the fact of a broadcast. The client folds streamed rows into its held
+// transcript by id — dedup on id, sort on id — so a row streamed with the
+// zero id is not a cosmetic wart: two follow-ups collapse into one rendered
+// row, and the next refetch re-adds both under their real ids as duplicates.
+// created_at is the same story for the rendered timestamp.
+//
+// Which is why the queued row is written through the transcript insert and the
+// broadcast carries what that write stamped, rather than a struct assembled
+// beside it.
+func TestSendMessage_NativeBroadcastCarriesTheStoredRow(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-bcast", "", "/tmp/wt-bcast")
+	markEngaged(t, database, "r-bcast")
+	hub := websocket.NewHub()
+	captured := &capturedEvents{}
+	hub.SetBackplane(captured)
+	s := NewSpawner(database, testSpawnerStores(database), nil, hub, "m")
+	markNative(t, database, "r-bcast")
+
+	for _, text := range []string{"first", "second"} {
+		if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-bcast", runmode.LocalDefaultUserID, text); err != nil {
+			t.Fatalf("SendMessage(%q): %v", text, err)
+		}
+	}
+
+	streamed := captured.messages()
+	if len(streamed) != 2 {
+		t.Fatalf("broadcast messages = %d, want 2", len(streamed))
+	}
+	stored := pendingRows(t, s, "r-bcast")
+	if len(stored) != 2 {
+		t.Fatalf("stored undelivered rows = %d, want 2", len(stored))
+	}
+	for i, dto := range streamed {
+		if dto.ID == 0 {
+			t.Errorf("broadcast[%d].id = 0; the client dedups and orders by id, so an unstamped row collapses into its siblings and duplicates on the next refetch", i)
+		}
+		if dto.ID != stored[i].ID {
+			t.Errorf("broadcast[%d].id = %d, want the stored row's %d", i, dto.ID, stored[i].ID)
+		}
+		if dto.CreatedAt.IsZero() {
+			t.Errorf("broadcast[%d].created_at is the zero time; the row renders as year 0001", i)
+		}
+	}
+	if streamed[0].ID == streamed[1].ID {
+		t.Error("both follow-ups streamed the same id — they would render as one row")
 	}
 }
 
