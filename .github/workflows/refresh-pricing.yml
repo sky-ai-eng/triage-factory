@@ -78,6 +78,7 @@ jobs:
           cat /tmp/gate.log
 
       - name: Open/update tracking issue on gate failure
+        id: gate_issue
         if: steps.gate.outputs.ok != '1'
         continue-on-error: true
         env:
@@ -96,12 +97,22 @@ jobs:
             cat /tmp/gate.log
             echo '```'
           } > "$BODY_FILE"
-          ./scripts/ci-upsert-issue.sh pricing-gate-failure "$TITLE" "$BODY_FILE"
+          number="$(./scripts/ci-upsert-issue.sh pricing-gate-failure "$TITLE" "$BODY_FILE")"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
 
       - name: Fail the job on gate failure
         if: steps.gate.outputs.ok != '1'
+        env:
+          # outcome, not conclusion: continue-on-error rewrites the latter to
+          # success, so only outcome still says whether the filing worked.
+          ISSUE_OUTCOME: ${{ steps.gate_issue.outcome }}
+          ISSUE_NUMBER: ${{ steps.gate_issue.outputs.number }}
         run: |
-          echo "::error::pricing verification gate failed — a tracking issue was opened; no PR created."
+          if [ "$ISSUE_OUTCOME" = "success" ] && [ -n "$ISSUE_NUMBER" ]; then
+            echo "::error::pricing verification gate failed — tracked in #${ISSUE_NUMBER}; no PR created."
+          else
+            echo "::error::pricing verification gate failed, and filing the tracking issue ALSO failed (see the step above) — this failure is recorded only in this run; no PR created."
+          fi
           exit 1
 
       - name: Detect pricing schema drift
