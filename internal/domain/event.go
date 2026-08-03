@@ -139,6 +139,14 @@ const (
 	EventSystemConversationStatus   = "system:conversation:status"
 	EventSystemConversationActivity = "system:conversation:activity"
 
+	// EventSystemConversationResumed marks a user follow-up waking a parked or
+	// concluded conversation. It exists so the gesture leaves a trace on the
+	// task it belongs to: the follow-up is linked through the task_events
+	// junction, which is how a closed card can show that work continued
+	// without its status ever moving out of done. See
+	// internal/domain/events/system.go for the metadata shape.
+	EventSystemConversationResumed = "system:conversation:resumed"
+
 	// EventSystemRoutingDisposition is the per-event sentinel
 	// Router.HandleEvent publishes after it finishes handling one event
 	// (TFAC-593): frozen, taskless (no handler/owner/unroutable), task
@@ -206,6 +214,7 @@ func AllEventTypes() []EventType {
 		{ID: EventSystemTaskDelegationBlockedSubtasks, Source: "system", Category: "delegation", Label: "Delegation Blocked: Subtasks", Description: "Auto-delegation skipped because parent has open subtasks"},
 		{ID: EventSystemConversationStatus, Source: "system", Category: "delegation", Label: "Conversation Status", Description: "A delegated conversation's status changed"},
 		{ID: EventSystemConversationActivity, Source: "system", Category: "delegation", Label: "Conversation Activity", Description: "A delegated conversation invoked a tool"},
+		{ID: EventSystemConversationResumed, Source: "system", Category: "delegation", Label: "Conversation Resumed", Description: "A user sent a follow-up to a parked or concluded conversation"},
 		{ID: EventSystemRoutingDisposition, Source: "system", Category: "routing", Label: "Routing Disposition", Description: "The router finished handling an event (frozen, taskless, task created/bumped, or error)"},
 	}
 }

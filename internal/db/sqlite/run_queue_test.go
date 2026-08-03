@@ -838,6 +838,15 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 				}
 				return status.String
 			},
+			SetBlueprintState: func(t *testing.T, status string, currentStepIndex int) {
+				t.Helper()
+				if _, err := conn.Exec(
+					`UPDATE blueprint_runs SET status = ?, current_step_index = ? WHERE id = ?`,
+					status, currentStepIndex, brID,
+				); err != nil {
+					t.Fatalf("set blueprint state: %v", err)
+				}
+			},
 			InsertRow: func(t *testing.T, convID string, msg domain.Message) int64 {
 				t.Helper()
 				msg.ConversationID = convID

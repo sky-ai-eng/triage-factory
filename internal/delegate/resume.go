@@ -9,40 +9,53 @@ package delegate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // ErrRunNotResumable is returned by ResumeOpenRun when the run can't be
 // resumed in its current state — typically a concurrent cancel, approval, or a
 // competing resume moved it between the caller's validation read and our status
-// flip (MarkQueuedForResume only flips a resumable run: open / completed+abort).
+// flip (MarkQueuedForResume only flips a resumable run: open / completed).
 // Callers map this to 409 Conflict so the client can refresh and see the actual
 // state.
 var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
 
-// ErrConversationConcluded is returned when a run is parked and its workspace
-// is intact, but the blueprint behind it has finished — a stopped run, or one
-// whose sequence completed. Nothing will claim it (ClaimNextRun only drives a
-// running blueprint), so a wake would strand it mid-flight forever.
+// ErrConversationConcluded is returned when a conversation's workspace is
+// intact but its blueprint will never drive it again, so a wake would strand it
+// mid-flight forever — claimed by nobody, counted as queue depth by every
+// counter. Two shapes reach it, and the message names both because a caller
+// cannot tell them apart from the outside:
+//
+//   - the blueprint was cancelled at its own layer, so nothing under it runs
+//     again; or
+//   - the blueprint finished on a later step. Only the conversation it came to
+//     rest on takes follow-ups — the workspace snapshot is one blob per
+//     blueprint run that every step overwrites, so an earlier step has no tree
+//     of its own left to resume into.
+//
+// One sentinel for both because they are the same answer to the only question
+// the caller is asking: this is permanent, and it is about this conversation
+// rather than about timing. A conversation stopped by a user reaches neither —
+// a stop freezes its blueprint 'running' precisely so the parked step stays
+// claimable.
 //
 // Its own sentinel rather than ErrRunNotResumable, because the two say
 // different things to a person. "Not resumable" means the state moved under
-// you: refresh and look again. This means the work is finished and following
-// up on it is not available yet — nothing about refreshing will change it, and
-// the answer becomes a success once resuming a finished blueprint's final
-// conversation lands. Callers map it to 409 with copy that says so; it is the
-// single symbol that work deletes.
-var ErrConversationConcluded = errors.New("resume: this run's work has finished; follow-ups on a completed blueprint are not available yet")
+// you: refresh and look again. This means refreshing will never change it.
+var ErrConversationConcluded = errors.New("resume: this conversation can no longer be continued — its blueprint was cancelled, or it concluded on a later step (only a blueprint's final conversation takes follow-ups)")
 
 // ErrWorkspaceExpired is returned by ResumeOpenRun when a resumable run's
 // workspace is gone for good: its warm worktree was swept AND its durable
@@ -52,24 +65,25 @@ var ErrConversationConcluded = errors.New("resume: this run's work has finished;
 var ErrWorkspaceExpired = errors.New("resume: this run's workspace has expired and can no longer be resumed")
 
 // ResumeOpenRun is resume-by-enqueue (TFAC-585, decision log #7): a
-// message to a parked/terminal-but-resumable run (open or completed+abort
-// — see resumableState) records the message durably, then re-queues the
+// message to a parked or concluded-but-resumable run (open or completed —
+// see resumableState) records the message durably, then re-queues the
 // SAME runs row as ordinary claimable work — no in-process resume
 // goroutine spawns, in ANY mode (the previous in-process implementation
 // is retired entirely, TF_ROLE=all included). This method:
 //  1. validates the run is resumable (session id, worktree path, model)
 //     and that its workspace can still be recovered — a warm worktree or a
 //     durable snapshot (else ErrWorkspaceExpired → 410, with no side effect)
-//  2. in ONE tx: flips the run's status back to `queued` (a (status,
-//     outcome) compare-and-swap race guard, MarkQueuedForResume), records
-//     agentMessage on run_pending_input, and — for a completed+abort run
-//     whose blueprint already terminated aborted — re-opens that blueprint.
+//  2. in ONE tx: flips the run's status back to `queued` (a compare-and-swap
+//     race guard, MarkQueuedForResume), records agentMessage on
+//     run_pending_input, and — for a completed+abort run whose blueprint
+//     already terminated aborted — re-opens that blueprint.
 //     Binding the input write to the winning flip is what keeps concurrent
 //     wakes from persisting a loser's message for a later claim to deliver
-//  3. nudges the dispatcher (a ~ms same-process wake at TF_ROLE=all; a
-//     cross-pod wake is out of scope here — the claiming executor's own
-//     scan-interval backstop picks the row up, per the ticket's accepted
-//     "wake latency traverses the queue" decision)
+//  3. records the resume on the task's timeline and nudges the dispatcher
+//     (a ~ms same-process wake at TF_ROLE=all; a cross-pod wake is out of
+//     scope here — the claiming executor's own scan-interval backstop picks
+//     the row up, per the ticket's accepted "wake latency traverses the
+//     queue" decision)
 //
 // The actual delivery — rehydrating the workspace and re-invoking Claude
 // with the recorded message — happens later, off the ordinary claim path
@@ -103,7 +117,7 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 	if run == nil {
 		return fmt.Errorf("run not found")
 	}
-	// Only a resumable run (open / completed+abort) can be woken. The
+	// Only a resumable run (open / completed) can be woken. The
 	// MarkQueuedForResume compare-and-swap re-checks under the row lock,
 	// so this early-out doesn't relax the race guard — it just avoids
 	// recording an input row for a run that's obviously not resumable.
@@ -134,10 +148,11 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 	if !s.workspaceRecoverable(ctx, orgID, run) {
 		return ErrWorkspaceExpired
 	}
-	// The workspace survives but nothing will drive it: the blueprint finished.
-	// Checked second precisely because it is the temporary one — this refusal
-	// is what the resume work lifts, where an expired workspace never comes
-	// back.
+	// The workspace survives but nothing would drive it — the blueprint was
+	// cancelled, or it finished on a later step and this is not the conversation
+	// it came to rest on. Checked second because it is about the sequence rather
+	// than the workspace, and a person whose workspace is gone is better served
+	// by hearing that.
 	if !s.blueprintDrivableForResume(ctx, orgID, run) {
 		return ErrConversationConcluded
 	}
@@ -149,10 +164,8 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 	// (ResumeBlueprintAfterResume, called from dispatchResumeClaim once
 	// delivery completes). An open resume leaves its still-running
 	// blueprint alone — ReopenRunForResume's CAS (status='aborted') is a
-	// no-op there. Reopening now (not at claim time) is required:
-	// ClaimNextRun only claims rows whose blueprint_run is 'running', so a
-	// still-'aborted' blueprint would make this row permanently
-	// unclaimable.
+	// no-op there, and so is a follow-up on a blueprint that finished:
+	// finished machinery never restarts, and the follow-up rides it as-is.
 	blueprintRunID := run.BlueprintRunID
 	reopenAbortedBlueprint := run.Status == "completed" && domain.RunOutcome(run.Outcome) == domain.RunOutcomeAbort
 
@@ -196,6 +209,7 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 		return ErrRunNotResumable
 	}
 	s.broadcastRunUpdate(orgID, runID, "queued")
+	s.recordResumeTaskEvent(ctx, orgID, userID, *run)
 	// The parked step is queued for resume again → bounce the aggregate
 	// board column back to in_progress (no-op if a sibling run is still
 	// parked).
@@ -207,6 +221,53 @@ func (s *Spawner) ResumeOpenRun(ctx context.Context, orgID, runID, agentMessage,
 	// (tf_wake) is TFAC-586's fleet-reaper scope, not this seam's.
 	s.wakeDispatcher()
 	return nil
+}
+
+// recordResumeTaskEvent puts a follow-up on its task's timeline.
+//
+// A resume deliberately moves nothing a person can see: the conversation goes
+// back to queued, the blueprint is untouched, and a done task stays done. So
+// this row — an event plus its task_events link — is the only trace the card
+// keeps that work continued after it closed.
+//
+// Recorded, never published. This is audit linkage, not a routing signal, and
+// no consumer should have to filter it back out of the bus.
+//
+// Best-effort throughout, and detached from the caller's ctx: the resume has
+// already committed by the time this runs, so failing it over a missing audit
+// row would turn a follow-up that worked into an error nobody can act on.
+// run carries the pre-flip state — the whole point of the row is which rest
+// state the follow-up woke.
+func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID string, run domain.Conversation) {
+	if s.events == nil || s.tasks == nil || run.TaskID == "" {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	meta, err := json.Marshal(events.SystemConversationResumedMetadata{
+		ConversationID: run.ID,
+		TaskID:         run.TaskID,
+		UserID:         userID,
+		BlueprintRunID: run.BlueprintRunID,
+		FromStatus:     run.Status,
+		FromOutcome:    run.Outcome,
+	})
+	if err != nil {
+		delegateLog.Warn("marshal resume event metadata failed; the follow-up is not on the task timeline", "run", run.ID, "error", err)
+		return
+	}
+	eventID, err := s.events.RecordSystem(ctx, orgID, domain.Event{
+		OrgID:        orgID,
+		EventType:    domain.EventSystemConversationResumed,
+		MetadataJSON: string(meta),
+		OccurredAt:   time.Now().UTC(),
+	})
+	if err != nil {
+		delegateLog.Warn("record resume event failed; the follow-up is not on the task timeline", "run", run.ID, "task", run.TaskID, "error", err)
+		return
+	}
+	if err := s.tasks.RecordEventSystem(ctx, orgID, run.TaskID, eventID, "resumed"); err != nil {
+		delegateLog.Warn("link resume event to task failed", "run", run.ID, "task", run.TaskID, "event", eventID, "error", err)
+	}
 }
 
 // workspaceRecoverable reports whether a parked run can still be resumed:

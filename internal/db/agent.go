@@ -148,25 +148,25 @@ type ConversationStore interface {
 	ParkOpen(ctx context.Context, orgID, runID string, park Park) (bool, error)
 
 	// MarkQueuedForResume is resume-by-enqueue's status flip: the
-	// (status, outcome) compare-and-swap over every non-finish
-	// parked/terminal state — `open`, or `completed` with outcome `abort` —
-	// with target `queued`: resume-by-enqueue re-queues the SAME row as
+	// compare-and-swap over every state a conversation can come to rest on
+	// and be woken from — `open` or `completed`, whatever the outcome —
+	// back to mid-flight: resume-by-enqueue re-queues the SAME row as
 	// ordinary claimable work instead of spawning an in-process goroutine.
 	// Releases any still-active claim with outcome 'requeued' (ownership is
 	// re-established by ClaimNextRun minting a fresh claim at the actual
-	// claim, exactly like a fresh EnqueueRun'd row). Clears parked_at and
-	// stamps queued_at so the queue timer reads the fresh episode.
+	// claim, exactly like a fresh EnqueueRun'd row). Clears parked_at.
 	// ok=false means the run is no longer resumable (a concurrent
-	// resume/cancel/claim already moved it) — the caller maps the miss to
-	// 409.
+	// resume/cancel/claim already moved it, or it failed) — the caller maps
+	// the miss to 409.
 	//
-	// The blueprint half of "resumable" is NOT checked here: ClaimNextRun
-	// only drives rows whose blueprint is still running, so waking one under
-	// a finished blueprint would strand it mid-flight forever. That gate
-	// lives in the caller (delegate.blueprintDrivableForResume), because it
-	// needs an admin-pool read — blueprint_runs RLS hides another user's
-	// manual blueprint, and a teammate resuming a run must not be refused
-	// for a row they merely cannot see.
+	// The blueprint half of "resumable" is NOT checked here: the claim gate
+	// drives a conversation under a finished blueprint only if it is that
+	// blueprint's last one, so waking any other would strand it mid-flight
+	// forever. That gate lives in the caller
+	// (delegate.blueprintDrivableForResume), because it needs an admin-pool
+	// read — blueprint_runs RLS hides another user's manual blueprint, and a
+	// teammate resuming a run must not be refused for a row they merely
+	// cannot see.
 	MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error)
 
 	// SetSession stores the Claude Code session id captured from

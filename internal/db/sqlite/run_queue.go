@@ -99,9 +99,14 @@ const eligibleForDrivingSQL = needsDrivingSQL + ` AND ` + curatorNeedsTurnSQL
 
 // blueprintDrivableSQL is the delegation arm's gate, applied over a LEFT
 // JOIN so a conversation with no blueprint parent (curator today,
-// interactive tomorrow) is not filtered out by the join itself.
+// interactive tomorrow) is not filtered out by the join itself. The rest —
+// why a called-off blueprint drives nothing and is checked on both of its
+// columns, and why a finished one keeps only its LAST conversation drivable —
+// is the Postgres twin's; this is the same predicate in the other dialect.
 const blueprintDrivableSQL = `(r.blueprint_run_id IS NULL
-	    OR (br.cancel_requested = 0 AND br.status = 'running'))`
+	    OR (br.cancel_requested = 0 AND br.status <> 'cancelled'
+	        AND (br.status = 'running'
+	             OR r.blueprint_step_index = br.current_step_index)))`
 
 // curatorTurnMessageSQL is the queued turn a curator claim is minted to
 // drive — the conversation's oldest undelivered plain user row, stamped as

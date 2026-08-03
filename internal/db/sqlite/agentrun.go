@@ -259,8 +259,7 @@ func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID st
 			UPDATE conversations SET status = NULL,
 			                parked_at = NULL, preferred_executor_id = NULL
 			WHERE id = ?
-			  AND (status = 'open'
-			       OR (status = 'completed' AND outcome = 'abort'))
+			  AND status IN ('open', 'completed')
 		`, runID)
 		if err != nil {
 			return err

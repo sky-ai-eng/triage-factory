@@ -501,7 +501,7 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID,
 		return InjectNotDelivered
 	}
 	run, err := s.agentRuns.GetSystem(ctx, orgID, runID)
-	if err != nil || run == nil || !resumableState(run.Status, run.Outcome) {
+	if err != nil || run == nil || !injectionWillFlush(run.Status, run.Outcome) {
 		// The row staged above is now orphaned: the caller falls through to
 		// the normal deferral (enqueueBusyFiring), and a staged row nothing
 		// will ever flush is a permanent leak — worse, a double-delivery

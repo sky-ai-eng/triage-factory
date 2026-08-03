@@ -100,15 +100,13 @@ func TestSendMessage_NativeParkedQueuesAndRequeues(t *testing.T) {
 
 // TestSendMessage_NativeTerminalNotSteerable pins that a genuinely terminal
 // native conversation still refuses a message — queueing is delivery only
-// while something can still drive the conversation.
+// while something can still drive the conversation. `completed` in any of its
+// outcomes is deliberately absent: concluded work is followed up on, not
+// refused (see TestSendMessage_NativeCompletedIsResumable).
 func TestSendMessage_NativeTerminalNotSteerable(t *testing.T) {
 	for _, tc := range []struct{ name, status, outcome string }{
 		{"failed", "failed", ""},
 		{"cancelled", "cancelled", ""},
-		{"completed finish", "completed", "finish"},
-		// The outcome a run that simply stopped now carries. It is the
-		// ordinary completed state, so it must be as closed as `finish`.
-		{"completed continue", "completed", "continue"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			database := newDelegateTestDB(t)
@@ -130,21 +128,30 @@ func TestSendMessage_NativeTerminalNotSteerable(t *testing.T) {
 	}
 }
 
-// TestSendMessage_NativeCompletedAbortIsResumable pins the deliberate
-// exception: the agent chose to stop, so a follow-up picks the work back up.
-func TestSendMessage_NativeCompletedAbortIsResumable(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-abort", "", t.TempDir())
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort' WHERE id='r-abort'`); err != nil {
-		t.Fatalf("abort: %v", err)
-	}
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	markNative(t, database, "r-abort")
+// TestSendMessage_NativeCompletedIsResumable: every completed outcome takes a
+// follow-up, `finish` included. The agent stopping mid-work and the agent
+// finishing are both states a person picks back up, and both left a workspace
+// behind to pick it up in.
+func TestSendMessage_NativeCompletedIsResumable(t *testing.T) {
+	for _, outcome := range []string{"abort", "finish", "continue"} {
+		t.Run(outcome, func(t *testing.T) {
+			database := newDelegateTestDB(t)
+			seedRun(t, database, "r-done", "", t.TempDir())
+			if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome=? WHERE id='r-done'`, outcome); err != nil {
+				t.Fatalf("complete: %v", err)
+			}
+			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+			markNative(t, database, "r-done")
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-abort", runmode.LocalDefaultUserID, "try again"); err != nil {
-		t.Fatalf("SendMessage: %v", err)
-	}
-	if st := storedStatus(t, database, "r-abort"); st != "" {
-		t.Errorf("stored status = %q, want none (the un-terminal write clears the outcome)", st)
+			if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-done", runmode.LocalDefaultUserID, "try again"); err != nil {
+				t.Fatalf("SendMessage: %v", err)
+			}
+			if st := storedStatus(t, database, "r-done"); st != "" {
+				t.Errorf("stored status = %q, want none (the un-terminal write clears the outcome)", st)
+			}
+			if got := pendingRows(t, s, "r-done"); len(got) != 1 {
+				t.Errorf("follow-up rows = %d, want 1 queued for the next claim", len(got))
+			}
+		})
 	}
 }

@@ -38,13 +38,17 @@ func seedSteerRun(t *testing.T, database *sql.DB, suffix, status string) string 
 }
 
 // TestHandleMessage_RecordsThenConflictsOnTerminal drives the message
-// endpoint against a terminal run: the run is visible (so it's recorded, not a
+// endpoint against a failed run: the run is visible (so it's recorded, not a
 // 404), the user message lands in the transcript, then SendMessage reports it
 // not steerable → 409. Asserts the 409 and the recorded row (role/subtype/body).
+//
+// `failed` rather than `completed` because that is what "terminal" means to
+// the steering gate now: a conversation that concluded takes a follow-up, and
+// only one whose infrastructure died has nothing left to say a message to.
 func TestHandleMessage_RecordsThenConflictsOnTerminal(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	runID := seedSteerRun(t, s.db, "msg", "completed")
+	runID := seedSteerRun(t, s.db, "msg", "failed")
 
 	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+runID+"/message", map[string]string{"text": "pick this back up"})
 	if rec.Code != http.StatusConflict {

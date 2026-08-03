@@ -200,13 +200,37 @@ const curatorHomedHereSQL = `(r.type <> 'curator' OR
 const eligibleForDrivingSQL = needsDrivingSQL + ` AND ` + curatorNeedsTurnSQL
 
 // blueprintDrivableSQL is the delegation arm's gate, applied as a LEFT JOIN
-// rather than an inner one: a queued step of a cancel-requested or already
-// terminal blueprint is deliberately never claimed (the sequence-level
-// cancel is honored here), while a conversation with no blueprint parent —
-// curator today, interactive tomorrow — must not be filtered out by the
-// join at all.
+// rather than an inner one: a conversation with no blueprint parent — curator
+// today, interactive tomorrow — must not be filtered out by the join at all.
+//
+// A blueprint that was CALLED OFF drives nothing, ever. That is the
+// `cancel_requested`/`cancelled` pair: the signal a cancel raises while the
+// sequence still runs, and the terminal it settles on. Both are checked
+// because they are written by different paths at different moments, and a gate
+// that depends on two columns staying in lockstep is a gate that opens the day
+// they don't.
+//
+// Otherwise: a running blueprint drives its queued step, and a blueprint that
+// reached any other terminal keeps its LAST conversation drivable so a user can
+// take another turn in the same workspace. The finished machinery never
+// restarts — only the conversation moves. Last-only is forced by storage, not
+// chosen: the workspace snapshot is keyed on the blueprint run, one blob every
+// step overwrites, so an earlier step would rehydrate the final step's tree and
+// answer out of somebody else's context. `current_step_index` names that step —
+// only AdvanceStep writes it, the reactor advances before enqueuing the next
+// step, and no terminal write touches it, so a blueprint that stopped at step N
+// (planned end or an early finish) leaves the column at N.
+//
+// Sequencing lives on the blueprint_runs row the claim already joins, so this
+// stays a column comparison rather than a correlated scan over sibling
+// conversations. That matters: this is the hot claim scan. A conversation with
+// a NULL step index compares NULL and is not drivable through that arm, which
+// is the right answer — a step that never recorded its position cannot prove it
+// is the one holding the workspace.
 const blueprintDrivableSQL = `(r.blueprint_run_id IS NULL
-	    OR (br.cancel_requested = false AND br.status = 'running'))`
+	    OR (br.cancel_requested = false AND br.status <> 'cancelled'
+	        AND (br.status = 'running'
+	             OR r.blueprint_step_index = br.current_step_index)))`
 
 // curatorTurnMessageSQL is the queued turn a curator claim is minted to
 // drive — the conversation's oldest undelivered plain user row, stamped as
