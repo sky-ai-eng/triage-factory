@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import * as Popover from '@radix-ui/react-popover'
-import type { Conversation, RunStatusValue, Task } from '../types'
+import type { Conversation, Task } from '../types'
 import { EMPTY_FEED, type FeedLine, type RunCardFeed } from '../lib/runFeed'
 import { useOrgHref } from '../hooks/useOrgHref'
 import ArtifactList from './ArtifactList'
@@ -9,6 +9,8 @@ import RequestedReviewerBadge from './RequestedReviewerBadge'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
 import {
+  chainPosition,
+  completionKind,
   formatDurationMs,
   formatElapsed,
   isActiveRun,
@@ -20,7 +22,14 @@ import {
   workStartedAt,
 } from '../lib/runStatus'
 import { AttentionRow, CardPlane, EventTag, HudHeader, SourceTag } from './board/cardChrome'
-import { compactNum, runGlow, TONE_TEXT, type Glow, type StepState } from './board/cardStyle'
+import {
+  compactNum,
+  runGlow,
+  TONE_TEXT,
+  type Glow,
+  type StepState,
+  type Tone,
+} from './board/cardStyle'
 import { PermissionPrompt } from './permissions/PermissionPrompt'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 import {
@@ -226,11 +235,7 @@ export default function AgentCard({
         ) : isParked ? (
           <ParkedBlock />
         ) : isTerminal && (run.ResultSummary || run.FailureKind === 'memory_limit') ? (
-          <ResultBlock
-            status={run.Status}
-            summary={run.ResultSummary}
-            failureKind={run.FailureKind}
-          />
+          <ResultBlock run={run} />
         ) : (
           <LiveFeed lines={stats.lines} isActive={isActive} />
         )}
@@ -467,22 +472,39 @@ function LiveFeed({ lines, isActive }: { lines: FeedLine[]; isActive: boolean })
 // kill swaps the generic Failed verdict for a specific one and, when the run
 // has no summary (infra failures don't write one), explanatory copy naming
 // the knob to turn.
-function ResultBlock({
-  status,
-  summary,
-  failureKind,
-}: {
-  status: RunStatusValue
-  summary: string
-  failureKind?: string
-}) {
-  const memoryKilled = status === 'failed' && failureKind === 'memory_limit'
+//
+// The success terminal splits three ways (lib/runStatus completionKind), and
+// the card says which: a mid-chain step that handed off is not the task being
+// over, and an abort is not a success at all. Same derivation the run station's
+// state light uses, so the board card and the run page agree.
+function ResultBlock({ run }: { run: Conversation }) {
+  const status = run.Status
+  const summary = run.ResultSummary
+  const memoryKilled = status === 'failed' && run.FailureKind === 'memory_limit'
   // Tone and heading come off the shared failed-terminal predicate rather than
   // a list of names, so a future terminal styles as a failure by default —
   // the safe direction, and the same reasoning as FAILED_STATUSES itself.
   const failed = isFailedStatus(status)
-  const tone = failed ? 'problem' : 'good'
-  const heading = memoryKilled ? 'Killed: memory limit' : failed ? 'Failed' : 'Done'
+  const completion = completionKind(run)
+  const pos = chainPosition(run)
+  const tone: Tone = failed
+    ? 'problem'
+    : completion === 'stopped'
+      ? 'attention'
+      : completion === 'handoff'
+        ? 'neutral'
+        : 'good'
+  const heading = memoryKilled
+    ? 'Killed: memory limit'
+    : failed
+      ? 'Failed'
+      : completion === 'stopped'
+        ? 'Stopped'
+        : completion === 'handoff'
+          ? pos
+            ? `Step ${pos.step}/${pos.total} done`
+            : 'Step done'
+          : 'Done'
   const body =
     memoryKilled && !summary
       ? 'The agent process exceeded its per-run memory limit and was stopped. Raise TF_RUN_MEMORY_LIMIT_MB if this run legitimately needs more.'

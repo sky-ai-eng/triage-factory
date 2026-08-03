@@ -47,6 +47,116 @@ export function isFailedStatus(status: RunStatusValue): boolean {
   return (FAILED_STATUSES as readonly string[]).includes(status)
 }
 
+// ChainPosition — where a conversation sits in its blueprint's frozen step
+// plan. Every delegated run belongs to a blueprint (the schema requires it), so
+// a plan of one step IS the plain single-prompt run: that reads as no chain at
+// all, and returns null here.
+//
+// null also covers "position unknown": blueprint_step_count is 0 when the
+// server could not resolve the plan (a manual blueprint run belongs to its
+// creator under RLS, so a teammate reads 0), and a run predating the field
+// carries neither. Callers fall back to the unqualified reading rather than
+// guessing a position.
+export interface ChainPosition {
+  /** 1-based, for display — "step 2 of 4". */
+  step: number
+  total: number
+  /** The last step of the plan: nothing runs after this one. */
+  isFinal: boolean
+}
+
+export function chainPosition(run: Conversation): ChainPosition | null {
+  const total = run.blueprint_step_count ?? 0
+  const index = run.blueprint_step_index
+  if (total <= 1 || index == null || index < 0) return null
+  return { step: index + 1, total, isFinal: index >= total - 1 }
+}
+
+// CompletionKind splits the one stored success terminal into what it actually
+// meant. `completed` is where three different endings land, and collapsing them
+// to one word is how a mid-chain step came to read as the whole task finishing:
+//
+//   - 'handoff' — a step of a chain that isn't the last one, whose part is done.
+//     Another step picks the work up; the task is NOT over.
+//   - 'stopped' — the work stopped without finishing and the task stays open for
+//     a human: the agent aborted, or a non-final step ended with no usable
+//     hand-off.
+//   - 'done'    — the work is over. The chain's final step, a single-prompt run,
+//     or a step that deliberately ended the whole workflow early ('finish').
+//
+// Position, not outcome, is what separates the first from the third, because
+// `continue` is what an ORDINARY completion records — the native loop stamps it
+// on every step including the last (internal/agentloop), while under the SDK a
+// terminal step reports `finish`.
+//
+// The arms below mirror decideBlueprintStep (internal/delegate/blueprint.go)
+// one for one, because that function is what actually decides whether anything
+// runs after this conversation — so it is written as the same switch over the
+// same two inputs rather than as a position test with an outcome test inside
+// it. Only two of its arms consult the position, and the difference is
+// load-bearing:
+//
+//   - `continue` / `''` branch on it. Handing off needs a step to hand off TO,
+//     so on the final step both resolve to a plain finish, and only before it
+//     does `continue` advance and a missing outcome abort ("no-outcome").
+//   - `abort`, and anything the vocabulary does not recognize, abort the
+//     blueprint wherever they land. An unrecognized value is a name this build
+//     predates or a bug, and the orchestrator refuses to close a task on one
+//     at any position — reading it as 'done' on the last step would put a green
+//     verdict on a blueprint that actually aborted.
+//
+// A position we cannot read at all (chainPosition null — an unresolved plan
+// length) is the one genuine unknown. It reads as final, which is the
+// conservative direction for the two arms that care and irrelevant to the two
+// that don't.
+export type CompletionKind = 'done' | 'handoff' | 'stopped'
+
+export function completionKind(run: Conversation): CompletionKind | null {
+  if (run.Status !== 'completed') return null
+  const pos = chainPosition(run)
+  const isFinal = pos ? pos.isFinal : true
+  switch (run.Outcome) {
+    case 'continue':
+      return isFinal ? 'done' : 'handoff'
+    case 'finish':
+      return 'done'
+    case 'abort':
+      return 'stopped'
+    case '':
+    case undefined:
+      return isFinal ? 'done' : 'stopped'
+    default:
+      return 'stopped'
+  }
+}
+
+// completionGloss — the plain-language line for a settled conversation, in one
+// place so the run dock and the telemetry rail can't tell the viewer two
+// different stories about the same row. Empty for a run that hasn't completed.
+export function completionGloss(run: Conversation): string {
+  const kind = completionKind(run)
+  if (!kind) return ''
+  const pos = chainPosition(run)
+  if (kind === 'stopped') {
+    // Two ways to stop, and they are different news: the agent decided to,
+    // or it ended on nothing the workflow could act on (no outcome recorded,
+    // or one this build doesn't know). The rail prints the raw token beside
+    // this, so the second line doesn't repeat it.
+    return run.Outcome === 'abort'
+      ? 'stopped without finishing — the task stays open for a human'
+      : 'ended without a usable outcome — the workflow stopped here for a human'
+  }
+  if (kind === 'handoff') {
+    return `step ${pos!.step} of ${pos!.total} done — handed off to the next step`
+  }
+  // Only an explicit `finish` reaches this from mid-chain, so the sentence is
+  // safe to say: the agent chose to end the workflow. Every other non-final
+  // ending is 'stopped' above and must never be described as a deliberate one.
+  if (pos && !pos.isFinal) return 'ended the workflow early — the later steps were skipped'
+  if (pos) return `work complete — the last of ${pos.total} steps`
+  return 'work complete'
+}
+
 // isResumableRun mirrors the backend resumableState gate: a run with no live
 // turn can still take a follow-up message (waking a durable resume) when it
 // parked `open`, or aborted (completed + outcome='abort'). A finish run

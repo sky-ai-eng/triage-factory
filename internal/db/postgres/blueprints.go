@@ -1145,6 +1145,36 @@ func (s *blueprintStore) ActiveStepRunIDsSystem(ctx context.Context, orgID, blue
 	return blueprintActiveStepRunIDs(ctx, s.admin, orgID, blueprintRunID)
 }
 
+func (s *blueprintStore) StepPlanLengths(ctx context.Context, orgID string, blueprintRunIDs []string) (map[string]int, error) {
+	out := make(map[string]int, len(blueprintRunIDs))
+	if len(blueprintRunIDs) == 0 {
+		return out, nil
+	}
+	// App pool (RLS-active), matching the handler that asks: manual blueprint
+	// runs are creator-scoped, so another user's manual run is absent from the
+	// result rather than counted. The caller degrades to the unqualified
+	// projection there, exactly as the chain rail already does for a run whose
+	// blueprint row it cannot read.
+	rows, err := s.app.QueryContext(ctx, `
+		SELECT id::text, json_array_length(step_plan::json)
+		FROM blueprint_runs
+		WHERE org_id = $1 AND id = ANY($2)
+	`, orgID, pgUUIDArray(blueprintRunIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
 func blueprintActiveStepRunIDs(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]string, error) {
 	if !isValidUUID(blueprintRunID) {
 		return nil, nil

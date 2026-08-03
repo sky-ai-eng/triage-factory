@@ -233,6 +233,14 @@ export interface Conversation {
   actor_agent_name?: string
   blueprint_run_id?: string
   blueprint_step_index?: number | null
+  // blueprint_step_count is the length of the owning blueprint run's frozen
+  // step plan — what turns blueprint_step_index into a position ("step 2 of
+  // 4") and says whether a completed step is the chain's last. 0 when the
+  // server could not resolve the plan (a manual blueprint run is creator-scoped
+  // under RLS, so a teammate reads 0); lib/runStatus treats that as unknown and
+  // falls back to the unqualified reading. Every delegated run belongs to a
+  // blueprint, so 1 — not 0 — is the plain single-prompt run.
+  blueprint_step_count?: number
   // Token rollups: the SUM over this conversation's messages, derived by the
   // same run read that carries TotalCostUSD / DurationMs / NumTurns. The
   // authoritative numbers — the same ones the usage dashboard reports — so a

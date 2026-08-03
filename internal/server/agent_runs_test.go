@@ -291,3 +291,91 @@ func TestRunResponse_TokenSums(t *testing.T) {
 		}
 	}
 }
+
+// TestRunResponse_CarriesOutcomeAndChainPosition pins the three fields a
+// surface needs to tell a handed-off step from the one that ended the task:
+// the terminal outcome, its abort note, and the owning blueprint's plan
+// length beside the step's own index. Position is what disambiguates —
+// `continue` is what an ordinary completion records, so the outcome alone
+// cannot say whether the chain moves on.
+func TestRunResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
+	s := newTestServer(t)
+	runID := seedSteerRun(t, s.db, "chainpos", "running")
+
+	// Step 0 of a three-step plan, concluded the way processCompletion does.
+	var blueprintRunID string
+	if err := s.db.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, runID).Scan(&blueprintRunID); err != nil {
+		t.Fatalf("read blueprint_run_id: %v", err)
+	}
+	execSQL(t, s.db, `UPDATE blueprint_runs SET step_plan = ? WHERE id = ?`,
+		`[{"step_index":0},{"step_index":1},{"step_index":2}]`, blueprintRunID)
+	execSQL(t, s.db, `UPDATE conversations SET blueprint_step_index = 0 WHERE id = ?`, runID)
+	if err := sqlitestore.New(s.db).Conversations.CompleteSystem(context.Background(), runmode.LocalDefaultOrgID,
+		runID, "completed", 0, 0, 0, "", "did my part", "continue", "", ""); err != nil {
+		t.Fatalf("complete run: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
+	}
+	if got["Outcome"] != "continue" {
+		t.Errorf("Outcome = %v, want continue", got["Outcome"])
+	}
+	if _, ok := got["OutcomeReason"]; !ok {
+		t.Error("run response omits OutcomeReason")
+	}
+	if n, isNum := got["blueprint_step_count"].(float64); !isNum || n != 3 {
+		t.Errorf("blueprint_step_count = %v, want 3", got["blueprint_step_count"])
+	}
+	if n, isNum := got["blueprint_step_index"].(float64); !isNum || n != 0 {
+		t.Errorf("blueprint_step_index = %v, want 0", got["blueprint_step_index"])
+	}
+
+	// The batched list path the board reads carries the same position, from
+	// one lookup over the deduped blueprint_run ids.
+	rec = doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_ids=t_chainpos", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET run list = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var list struct {
+		Runs map[string][]map[string]any `json:"runs"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v; body=%s", err, rec.Body.String())
+	}
+	runs := list.Runs["t_chainpos"]
+	if len(runs) != 1 {
+		t.Fatalf("listed runs = %d, want 1", len(runs))
+	}
+	if n, isNum := runs[0]["blueprint_step_count"].(float64); !isNum || n != 3 {
+		t.Errorf("listed blueprint_step_count = %v, want 3", runs[0]["blueprint_step_count"])
+	}
+	if runs[0]["Outcome"] != "continue" {
+		t.Errorf("listed Outcome = %v, want continue", runs[0]["Outcome"])
+	}
+
+	// The single-prompt shape — every delegated run is a blueprint step, and a
+	// plain one is a plan of exactly one, which is what says "no chain here".
+	single := seedSteerRun(t, s.db, "chainless", "queued")
+	var singleBlueprintRunID string
+	if err := s.db.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, single).Scan(&singleBlueprintRunID); err != nil {
+		t.Fatalf("read single blueprint_run_id: %v", err)
+	}
+	execSQL(t, s.db, `UPDATE blueprint_runs SET step_plan = ? WHERE id = ?`, `[{"step_index":0}]`, singleBlueprintRunID)
+	rec = doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+single, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET single-step conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	got = nil
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode single-step: %v; body=%s", err, rec.Body.String())
+	}
+	if n, isNum := got["blueprint_step_count"].(float64); !isNum || n != 1 {
+		t.Errorf("single-step blueprint_step_count = %v, want 1", got["blueprint_step_count"])
+	}
+}

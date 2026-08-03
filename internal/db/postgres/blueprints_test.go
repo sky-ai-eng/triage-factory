@@ -402,6 +402,70 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	}
 }
 
+// TestBlueprintStore_Postgres_StepPlanLengths pins the batched plan-length
+// read the run projection uses to say whether a step is its chain's last one:
+// one query over many blueprint runs, counted in SQL over the frozen plan, and
+// a run it cannot resolve is absent from the map rather than reported as a
+// zero-step plan.
+func TestBlueprintStore_Postgres_StepPlanLengths(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	blueprints := stores.Blueprints
+	ctx := context.Background()
+
+	blueprintID := "blueprint-spl-" + orgID[:8]
+	stepPromptID := "step-spl-" + orgID[:8]
+	seedPgBlueprint(t, h, orgID, userID, blueprintID)
+	seedPgPrompt(t, h, orgID, userID, stepPromptID)
+	taskID := seedPgTask(t, h, orgID, userID)
+
+	plan := []domain.BlueprintPlanStep{
+		{StepIndex: 0, PromptID: stepPromptID, PromptName: "One", PromptBody: "body one", Source: "user"},
+		{StepIndex: 1, PromptID: stepPromptID, PromptName: "Two", PromptBody: "body two", Source: "user"},
+		{StepIndex: 2, PromptID: stepPromptID, PromptName: "Three", PromptBody: "body three", Source: "user"},
+	}
+	threeID, err := blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+		BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
+		WorktreePath: "/tmp/wt-pg-spl-3", StepPlan: plan,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun (three steps): %v", err)
+	}
+	oneID, err := blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+		BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
+		WorktreePath: "/tmp/wt-pg-spl-1", StepPlan: plan[:1],
+	})
+	if err != nil {
+		t.Fatalf("CreateRun (one step): %v", err)
+	}
+	missingID := uuid.NewString()
+
+	got, err := blueprints.StepPlanLengths(ctx, orgID, []string{threeID, oneID, missingID})
+	if err != nil {
+		t.Fatalf("StepPlanLengths: %v", err)
+	}
+	if got[threeID] != 3 {
+		t.Errorf("three-step plan length = %d, want 3", got[threeID])
+	}
+	if got[oneID] != 1 {
+		t.Errorf("one-step plan length = %d, want 1", got[oneID])
+	}
+	if _, ok := got[missingID]; ok {
+		t.Error("an unresolvable blueprint run must be absent from the map, not reported as a zero-step plan")
+	}
+
+	empty, err := blueprints.StepPlanLengths(ctx, orgID, nil)
+	if err != nil {
+		t.Fatalf("StepPlanLengths(nil): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("StepPlanLengths(nil) = %v, want an empty map", empty)
+	}
+}
+
 // TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS pins the
 // internal trigger_type routing in CreateRun against actual RLS,
 // not the AdminDB-bypassed conformance setup:

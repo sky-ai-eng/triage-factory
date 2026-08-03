@@ -383,6 +383,62 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome(t *testing.T) {
 	}
 }
 
+// TestBlueprintStore_SQLite_StepPlanLengths pins the batched plan-length read
+// the run projection uses to say whether a step is its chain's last one. It
+// counts in SQL over the frozen plan, and a blueprint run it cannot resolve is
+// absent from the map rather than reported as a zero-step plan.
+func TestBlueprintStore_SQLite_StepPlanLengths(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	blueprints := sqlitestore.New(conn).Blueprints
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	task := seedEntityEventTask(t, conn, "blueprint-plan-len")
+	insertBlueprintForTest(t, conn, "len-blueprint", "Len Blueprint")
+
+	plan := []domain.BlueprintPlanStep{
+		{StepIndex: 0, PromptID: "p0", PromptName: "One", PromptBody: "body one"},
+		{StepIndex: 1, PromptID: "p1", PromptName: "Two", PromptBody: "body two"},
+		{StepIndex: 2, PromptID: "p2", PromptName: "Three", PromptBody: "body three"},
+	}
+	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "len-bpr-three", BlueprintID: "len-blueprint", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+		StepPlan: plan,
+	}); err != nil {
+		t.Fatalf("CreateRun (three steps): %v", err)
+	}
+	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		ID: "len-bpr-one", BlueprintID: "len-blueprint", TaskID: task.ID,
+		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+		StepPlan: plan[:1],
+	}); err != nil {
+		t.Fatalf("CreateRun (one step): %v", err)
+	}
+
+	got, err := blueprints.StepPlanLengths(ctx, org, []string{"len-bpr-three", "len-bpr-one", "len-bpr-missing"})
+	if err != nil {
+		t.Fatalf("StepPlanLengths: %v", err)
+	}
+	if got["len-bpr-three"] != 3 {
+		t.Errorf("three-step plan length = %d, want 3", got["len-bpr-three"])
+	}
+	if got["len-bpr-one"] != 1 {
+		t.Errorf("one-step plan length = %d, want 1", got["len-bpr-one"])
+	}
+	if _, ok := got["len-bpr-missing"]; ok {
+		t.Error("an unresolvable blueprint run must be absent from the map, not reported as a zero-step plan")
+	}
+
+	empty, err := blueprints.StepPlanLengths(ctx, org, nil)
+	if err != nil {
+		t.Fatalf("StepPlanLengths(nil): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("StepPlanLengths(nil) = %v, want an empty map", empty)
+	}
+}
+
 // TestBlueprintStore_SQLite_MarkRunStatus_Guarded pins the lost-update
 // race guard: only non-terminal statuses accept a transition.
 func TestBlueprintStore_SQLite_MarkRunStatus_Guarded(t *testing.T) {

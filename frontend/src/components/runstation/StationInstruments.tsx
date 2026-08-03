@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import type { Message, Conversation } from '../../types'
 import {
+  completionGloss,
   formatDurationMs,
   formatElapsed,
   QUEUE_DWELL_VISIBLE_MS,
@@ -99,7 +100,12 @@ export function TelemetryRail({ run, messages, state, now, onOpenArtifact }: Pro
           <Readout k="started" v={clockStamp(started)} title={started.toLocaleString()} />
         )}
         {run.StopReason && <Readout k="stop" v={run.StopReason} />}
-        {run.Outcome && <Readout k="outcome" v={run.Outcome} accent={state.light} />}
+        {/* The stored token, plus what it meant for the task. On its own
+            `continue` is an orchestration term the viewer has no way to read —
+            and the one that decides whether anything runs after this. */}
+        {run.Outcome && (
+          <Readout k="outcome" v={run.Outcome} accent={state.light} note={completionGloss(run)} />
+        )}
       </Section>
 
       {/* Artifacts — everything the run produced (branch / PR / review / issue /
@@ -213,28 +219,35 @@ function ContextGauge({ used, limit, light }: { used: number; limit: number; lig
   )
 }
 
+// A readout is a key/value line; `note` adds a plain-language second line
+// under it, for a value whose stored spelling doesn't speak for itself.
 function Readout({
   k,
   v,
   title,
   accent,
+  note,
 }: {
   k: string
   v: string
   title?: string
   accent?: string
+  note?: string
 }) {
   return (
-    <div className="flex items-baseline justify-between gap-3" title={title}>
-      <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.1em] text-text-tertiary/70">
-        {k}
-      </span>
-      <span
-        className="min-w-0 truncate text-right font-mono text-[11px] tabular-nums"
-        style={{ color: accent ?? 'var(--color-text-primary)' }}
-      >
-        {v}
-      </span>
+    <div title={title}>
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="shrink-0 font-mono text-[10px] uppercase tracking-[0.1em] text-text-tertiary/70">
+          {k}
+        </span>
+        <span
+          className="min-w-0 truncate text-right font-mono text-[11px] tabular-nums"
+          style={{ color: accent ?? 'var(--color-text-primary)' }}
+        >
+          {v}
+        </span>
+      </div>
+      {note && <p className="mt-0.5 text-[10.5px] leading-snug text-text-tertiary/80">{note}</p>}
     </div>
   )
 }

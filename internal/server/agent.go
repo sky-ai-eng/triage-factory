@@ -63,7 +63,20 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 				arts = a
 			}
 		}
-		resp = runResponse(run, counts[run.ID], arts)
+		// The owning blueprint's plan length, so the run page can tell a
+		// handed-off step from the one that ended the task. Best-effort like
+		// the artifact list above: a failure (or a blueprint row RLS hides)
+		// leaves the count at 0 and the projection unqualified, never a failed
+		// status fetch.
+		var stepCount int
+		if run.BlueprintRunID != "" {
+			if lens, lerr := tx.Blueprints.StepPlanLengths(r.Context(), orgID, []string{run.BlueprintRunID}); lerr != nil {
+				serverLog.Warn("blueprint step-plan length lookup failed; omitting blueprint_step_count", "run", run.ID, "blueprint_run", run.BlueprintRunID, "error", lerr)
+			} else {
+				stepCount = lens[run.BlueprintRunID]
+			}
+		}
+		resp = runResponse(run, counts[run.ID], arts, stepCount)
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -241,12 +254,28 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 // `pending_artifact_id` overlay discriminators — approval is no longer a stored
 // run status but a view over the unresolved-artifact set.
 //
-// Pure projection — it does no I/O. The caller supplies both inputs, which is
+// Pure projection — it does no I/O. The caller supplies every input, which is
 // what lets the run-list path batch its reads instead of issuing them per run:
 //   - artifactCount from Artifacts.CountByRun (the single-run path counts one
 //     run; the list path batches every run in one query — N+1 avoidance).
 //   - arts is the run's artifact set, which the caller reads best-effort (only
 //     for runs that have any artifact, so a run with none costs no list).
+//   - stepCount is the length of the owning blueprint run's frozen plan, from
+//     Blueprints.StepPlanLengths (batched the same way). 0 when the run has no
+//     blueprint, and when the caller could not resolve one — a manual blueprint
+//     run belongs to its creator under RLS, so a teammate reads 0 here and gets
+//     the unqualified projection, which is what they already get for the chain
+//     rail.
+//
+// stepCount is what makes a step's position legible: paired with
+// blueprint_step_index it says whether a completed step is its chain's last —
+// the difference between the task being over and the next step picking it up.
+// Outcome alone cannot say that. It is the vocabulary an agent emits about its
+// OWN ending, and what a given value implies for the chain depends on the
+// runtime: under the SDK a terminal step reports `finish`, while the native
+// loop stamps `continue` on every ordinary completion, final and single-step
+// runs included (internal/agentloop, internal/delegate/blueprint.go's
+// decideBlueprintStep is what resolves it against position).
 //
 // The derived approval keys are emitted only when the answer is definitive: when
 // the run has no artifacts (artifactCount == 0, so nothing can be unresolved) or
@@ -255,23 +284,29 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 // OMITTED rather than reported as a misleading false, so a transient DB/RLS hiccup
 // can't hide approval-required work; the client treats their absence as "unknown"
 // and re-derives on the next refresh.
-func runResponse(run *domain.Conversation, artifactCount int, arts []domain.Artifact) map[string]any {
+func runResponse(run *domain.Conversation, artifactCount int, arts []domain.Artifact, stepCount int) map[string]any {
 	out := map[string]any{
-		"ID":                   run.ID,
-		"TaskID":               run.TaskID,
-		"PromptID":             run.PromptID,
-		"Status":               run.Status,
-		"Model":                run.Model,
-		"StartedAt":            run.StartedAt,
-		"QueuedAt":             run.QueuedAt,
-		"ClaimedAt":            run.ClaimedAt,
-		"CompletedAt":          run.CompletedAt,
-		"TotalCostUSD":         run.TotalCostUSD,
-		"DurationMs":           run.DurationMs,
-		"NumTurns":             run.NumTurns,
-		"StopReason":           run.StopReason,
-		"WorktreePath":         run.WorktreePath,
-		"ResultSummary":        run.ResultSummary,
+		"ID":            run.ID,
+		"TaskID":        run.TaskID,
+		"PromptID":      run.PromptID,
+		"Status":        run.Status,
+		"Model":         run.Model,
+		"StartedAt":     run.StartedAt,
+		"QueuedAt":      run.QueuedAt,
+		"ClaimedAt":     run.ClaimedAt,
+		"CompletedAt":   run.CompletedAt,
+		"TotalCostUSD":  run.TotalCostUSD,
+		"DurationMs":    run.DurationMs,
+		"NumTurns":      run.NumTurns,
+		"StopReason":    run.StopReason,
+		"WorktreePath":  run.WorktreePath,
+		"ResultSummary": run.ResultSummary,
+		// The terminal envelope's parsed outcome and its abort note. PascalCase
+		// with the legacy set they belong to; empty string when the run holds
+		// none (still executing, an infra failure, or an outcome gate that
+		// exhausted its retries).
+		"Outcome":              run.Outcome,
+		"OutcomeReason":        run.OutcomeReason,
 		"FailureKind":          string(run.FailureKind),
 		"SessionID":            run.SessionID,
 		"MemoryMissing":        run.MemoryMissing,
@@ -281,6 +316,7 @@ func runResponse(run *domain.Conversation, artifactCount int, arts []domain.Arti
 		"actor_agent_name":     run.ActorAgentName,
 		"blueprint_run_id":     run.BlueprintRunID,
 		"blueprint_step_index": run.BlueprintStepIndex,
+		"blueprint_step_count": stepCount,
 		"artifact_count":       artifactCount,
 		// The token rollups the run read already SUMs, alongside the cost /
 		// duration / turns ones above. snake_case like every key added since
@@ -649,10 +685,12 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 //     over just those run ids (count>0), grouped per run. The derivation needs
 //     the actual artifacts, but a run with none can't have an unresolved one, so
 //     it costs no list.
+//   - blueprint_step_count for the runs that belong to a blueprint: one
+//     StepPlanLengths over the deduped blueprint_run ids.
 //
-// Best-effort: a ListByRuns failure drops the derived flags (logged) but leaves
-// counts and the rest intact. Shared by the single-task and batched (task_ids)
-// run-list paths.
+// Best-effort: a ListByRuns or StepPlanLengths failure drops what that read
+// contributes (logged) but leaves counts and the rest intact. Shared by the
+// single-task and batched (task_ids) run-list paths.
 func enrichRuns(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) ([]map[string]any, error) {
 	runIDs := make([]string, len(runs))
 	for i := range runs {
@@ -678,9 +716,31 @@ func enrichRuns(ctx context.Context, tx db.TxStores, orgID string, runs []domain
 			}
 		}
 	}
+	// One read for every blueprint in the set, keyed by blueprint_run id and
+	// deduped first (a chain's steps all name the same one). Best-effort: a
+	// failure leaves every blueprint_step_count at 0, which reads as "position
+	// unknown" and costs the qualifier, not the row.
+	var blueprintRunIDs []string
+	seenBlueprints := map[string]bool{}
+	for i := range runs {
+		id := runs[i].BlueprintRunID
+		if id == "" || seenBlueprints[id] {
+			continue
+		}
+		seenBlueprints[id] = true
+		blueprintRunIDs = append(blueprintRunIDs, id)
+	}
+	stepCounts := map[string]int{}
+	if len(blueprintRunIDs) > 0 {
+		if lens, lerr := tx.Blueprints.StepPlanLengths(ctx, orgID, blueprintRunIDs); lerr != nil {
+			serverLog.Warn("blueprint step-plan length batch lookup failed; omitting blueprint_step_count", "error", lerr)
+		} else {
+			stepCounts = lens
+		}
+	}
 	out := make([]map[string]any, len(runs))
 	for i := range runs {
-		out[i] = runResponse(&runs[i], counts[runs[i].ID], artsByRun[runs[i].ID])
+		out[i] = runResponse(&runs[i], counts[runs[i].ID], artsByRun[runs[i].ID], stepCounts[runs[i].BlueprintRunID])
 	}
 	return out, nil
 }

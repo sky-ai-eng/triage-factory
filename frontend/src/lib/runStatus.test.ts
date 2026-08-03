@@ -3,6 +3,9 @@ import type { Conversation } from '../types'
 import { CLAIM_PHASES, RUN_STATUSES, TERMINAL_RUN_STATUSES } from '../types'
 import {
   ACTIVE_STATUSES,
+  chainPosition,
+  completionGloss,
+  completionKind,
   isActiveStatus,
   isClaimPhase,
   isFailedStatus,
@@ -73,6 +76,118 @@ describe('status classification', () => {
     }
     for (const status of ['queued', 'running', 'open', ...CLAIM_PHASES]) {
       expect(isPermissionTerminalStatus(status)).toBe(false)
+    }
+  })
+})
+
+// A completed conversation is three different endings wearing one status, and
+// the discriminator is POSITION, not outcome: `continue` is what an ordinary
+// completion records under the native loop (every step, last one included),
+// while the SDK's terminal step reports `finish`. Branching on the outcome
+// alone would label an ordinary single-prompt native run as handed off.
+describe('chain position and completion', () => {
+  const step = (index: number, total: number, over: Partial<Conversation> = {}) =>
+    base({
+      Status: 'completed',
+      blueprint_run_id: 'br1',
+      blueprint_step_index: index,
+      blueprint_step_count: total,
+      ...over,
+    })
+
+  it('reads a plan of one as no chain at all — that is the plain single-prompt run', () => {
+    expect(chainPosition(step(0, 1))).toBeNull()
+    expect(completionKind(step(0, 1, { Outcome: 'continue' }))).toBe('done')
+  })
+
+  it('treats an unresolved plan length as unknown position, not as step one of none', () => {
+    // 0 is what the server sends when it could not read the blueprint row
+    // (a teammate's manual run under RLS); absent is a client predating it.
+    expect(chainPosition(step(0, 0))).toBeNull()
+    expect(chainPosition(base({ Status: 'completed', blueprint_step_index: 0 }))).toBeNull()
+    expect(completionKind(step(0, 0, { Outcome: 'continue' }))).toBe('done')
+  })
+
+  it('numbers a mid-chain step for display and marks the last one final', () => {
+    expect(chainPosition(step(1, 4))).toEqual({ step: 2, total: 4, isFinal: false })
+    expect(chainPosition(step(3, 4))).toEqual({ step: 4, total: 4, isFinal: true })
+  })
+
+  it('calls a non-final step that concluded normally a hand-off, not the task finishing', () => {
+    expect(completionKind(step(1, 4, { Outcome: 'continue' }))).toBe('handoff')
+    expect(completionGloss(step(1, 4, { Outcome: 'continue' }))).toBe(
+      'step 2 of 4 done — handed off to the next step',
+    )
+  })
+
+  it('calls the chain’s last step done, even though it too records continue', () => {
+    expect(completionKind(step(3, 4, { Outcome: 'continue' }))).toBe('done')
+    expect(completionKind(step(3, 4, { Outcome: 'finish' }))).toBe('done')
+  })
+
+  it('calls a mid-chain finish done — it ended the whole workflow early', () => {
+    expect(completionKind(step(1, 4, { Outcome: 'finish' }))).toBe('done')
+    expect(completionGloss(step(1, 4, { Outcome: 'finish' }))).toBe(
+      'ended the workflow early — the later steps were skipped',
+    )
+  })
+
+  it('calls a non-final step with no recorded outcome stopped, mirroring the orchestrator', () => {
+    // decideBlueprintStep aborts the blueprint on this ("no-outcome"), so
+    // nothing runs after the step and a human owns the task. Reading it as a
+    // hand-off would claim a successor that will never come; reading it as
+    // done would be the original bug.
+    expect(completionKind(step(1, 4, { Outcome: '' }))).toBe('stopped')
+    expect(completionKind(step(1, 4))).toBe('stopped')
+    expect(completionGloss(step(1, 4, { Outcome: '' }))).toBe(
+      'ended without a usable outcome — the workflow stopped here for a human',
+    )
+    // The abort keeps its own wording — the agent decided to stop, which is a
+    // different thing to tell the viewer than a step that just never said.
+    expect(completionGloss(step(1, 4, { Outcome: 'abort' }))).toBe(
+      'stopped without finishing — the task stays open for a human',
+    )
+  })
+
+  it('leaves the final step and the single-prompt run alone when the outcome is missing', () => {
+    // Same missing outcome, opposite disposition: decideBlueprintStep resolves
+    // it to a finish once there is no step left to hand off to. This is the
+    // arm that DOES branch on position.
+    expect(completionKind(step(3, 4, { Outcome: '' }))).toBe('done')
+    expect(completionKind(step(0, 1, { Outcome: '' }))).toBe('done')
+  })
+
+  it('stops on an outcome the vocabulary does not know, at every position', () => {
+    // The arm that does NOT branch on position: decideBlueprintStep's default
+    // aborts on an unrecognized value wherever it lands, refusing to close a
+    // task on a name it can't interpret. The final step is the one that would
+    // otherwise slip through as a green verdict on an aborted blueprint —
+    // this wire field is deliberately open-world, so a build reading a name
+    // added after it shipped has to land somewhere honest.
+    expect(completionKind(step(1, 4, { Outcome: 'from_the_future' }))).toBe('stopped')
+    expect(completionKind(step(3, 4, { Outcome: 'from_the_future' }))).toBe('stopped')
+    expect(completionKind(step(0, 1, { Outcome: 'from_the_future' }))).toBe('stopped')
+    // Position it cannot read at all doesn't rescue it either — the
+    // orchestrator's answer here doesn't depend on the position.
+    expect(completionKind(step(1, 0, { Outcome: 'from_the_future' }))).toBe('stopped')
+    expect(completionGloss(step(3, 4, { Outcome: 'from_the_future' }))).toBe(
+      'ended without a usable outcome — the workflow stopped here for a human',
+    )
+  })
+
+  it('separates an abort from a success wherever it lands in the chain', () => {
+    expect(completionKind(step(1, 4, { Outcome: 'abort' }))).toBe('stopped')
+    expect(completionKind(step(3, 4, { Outcome: 'abort' }))).toBe('stopped')
+    expect(completionKind(base({ Status: 'completed', Outcome: 'abort' }))).toBe('stopped')
+    expect(completionGloss(base({ Status: 'completed', Outcome: 'abort' }))).toBe(
+      'stopped without finishing — the task stays open for a human',
+    )
+  })
+
+  it('answers for completed conversations only', () => {
+    for (const status of ['queued', 'running', 'open', 'failed', ...CLAIM_PHASES]) {
+      expect(completionKind(base({ Status: status })), status).toBeNull()
+      expect(completionGloss(base({ Status: status })), status).toBe('')
     }
   })
 })

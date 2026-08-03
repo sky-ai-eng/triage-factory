@@ -1,5 +1,5 @@
 import type { Conversation } from '../../types'
-import { isActiveRun } from '../../lib/runStatus'
+import { chainPosition, completionKind, isActiveRun } from '../../lib/runStatus'
 import { hasUnresolvedArtifacts } from '../../lib/approval'
 
 // stationStyle — the design system for the run-station HMI. It maps a run's
@@ -14,7 +14,15 @@ import { hasUnresolvedArtifacts } from '../../lib/approval'
 // amber your-move, green done, red failed. Everything is flat. Depth is never
 // implied (that's the whole reason this isn't a 3D scene).
 
-export type StationKey = 'queued' | 'working' | 'open' | 'attention' | 'done' | 'failed'
+export type StationKey =
+  | 'queued'
+  | 'working'
+  | 'open'
+  | 'attention'
+  | 'done'
+  | 'handoff'
+  | 'stopped'
+  | 'failed'
 
 export interface StationState {
   key: StationKey
@@ -90,16 +98,52 @@ export function stationState(run: Conversation): StationState {
         heat: 0.3,
         belt: 0.5,
       }
-    case 'completed':
-      return {
-        key: 'done',
-        light: 'var(--color-claim)',
-        label: 'DONE',
-        live: false,
-        scanner: false,
-        heat: 0.12,
-        belt: 0,
+    case 'completed': {
+      // One stored terminal, three endings — see completionKind. The machine
+      // wears a different light for each, because "this step is done" and "the
+      // task is done" are not the same news, and the green DONE plate was
+      // telling a viewer mid-chain that the whole thing had stopped.
+      switch (completionKind(run)) {
+        case 'handoff': {
+          // Cyan, not green: the powered-and-waiting trim. This step concluded
+          // and the line moved on, so the belt keeps idling — green here reads
+          // as "nothing follows", which is exactly the wrong conclusion. The
+          // position rides the label so the plate itself says where you are.
+          const pos = chainPosition(run)
+          return {
+            key: 'handoff',
+            light: HMI_CYAN,
+            label: pos ? `STEP ${pos.step}/${pos.total} DONE` : 'STEP DONE',
+            live: false,
+            scanner: false,
+            heat: 0.12,
+            belt: 0.34,
+          }
+        }
+        case 'stopped':
+          // An abort is a completed row, but the agent gave up and the task is
+          // still open — that is a your-move amber, never a success green.
+          return {
+            key: 'stopped',
+            light: 'var(--color-snooze)',
+            label: 'STOPPED',
+            live: false,
+            scanner: false,
+            heat: 0.12,
+            belt: 0,
+          }
+        default:
+          return {
+            key: 'done',
+            light: 'var(--color-claim)',
+            label: 'DONE',
+            live: false,
+            scanner: false,
+            heat: 0.12,
+            belt: 0,
+          }
       }
+    }
     case 'failed':
       return {
         key: 'failed',
