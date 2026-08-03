@@ -211,14 +211,7 @@ func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Tran
 	if len(rows) > 0 {
 		return nil
 	}
-	pending := false
-	_, err = transcript.Insert(ctx, orgID, &domain.Message{
-		ConversationID: runID,
-		UserID:         creatorUserID,
-		Role:           "user",
-		Content:        openingTurn,
-		Delivered:      &pending,
-	})
+	_, err = transcript.Insert(ctx, orgID, pendingUserInput(runID, creatorUserID, openingTurn))
 	return err
 }
 

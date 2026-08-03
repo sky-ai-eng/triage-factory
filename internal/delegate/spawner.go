@@ -1,7 +1,7 @@
 // The Spawner type — central coordinator for delegated agent runs — and
 // the small cross-cutting helpers (status broadcasts, status updates,
 // drainer/classification wiring) every other file in this package
-// reaches for. The lifecycle methods (Delegate, Cancel, ResumeOpenRun)
+// reaches for. The lifecycle methods (Delegate, Stop, SendMessage)
 // live in their own files; this one is the type definition + the bits
 // that don't belong anywhere else.
 

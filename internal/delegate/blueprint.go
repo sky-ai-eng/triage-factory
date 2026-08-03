@@ -576,7 +576,7 @@ func (s *Spawner) markBlueprintRunStatusAsUser(ctx context.Context, orgID, userI
 }
 
 // ResumeBlueprintAfterResume finalizes a blueprint after one of its step runs
-// was resumed (via ResumeOpenRun) and reached a terminal state — once
+// was resumed (via a user follow-up) and reached a terminal state — once
 // processCompletion reports the step is no longer parked. It reads the resumed
 // step's terminal runs.outcome + position and routes through terminateBlueprint,
 // so a 1-step (or final-step) resume closes the task on finish and leaves it

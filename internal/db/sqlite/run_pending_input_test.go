@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -33,6 +34,10 @@ func TestRunPendingInputStore_SQLite(t *testing.T) {
 					t.Fatalf("delete run: %v", err)
 				}
 			},
+			StagePending: func(t *testing.T, runID, userID, message string) {
+				t.Helper()
+				stagePendingViaTranscript(t, stores, runmode.LocalDefaultOrgID, runID, userID, message)
+			},
 			SecondUser: func(t *testing.T) string {
 				t.Helper()
 				id := uuid.New().String()
@@ -53,8 +58,8 @@ func TestRunPendingInputStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 	const badOrg = "11111111-1111-1111-1111-111111111111"
 
-	if err := stores.RunPendingInput.Store(ctx, badOrg, "r", "u", "msg"); err == nil {
-		t.Error("Store(non-local org) should error")
+	if _, _, _, err := stores.RunPendingInput.Peek(ctx, badOrg, "r"); err == nil {
+		t.Error("Peek(non-local org) should error")
 	}
 	if _, _, _, err := stores.RunPendingInput.Consume(ctx, badOrg, "r"); err == nil {
 		t.Error("Consume(non-local org) should error")
@@ -72,4 +77,22 @@ func seedSQLiteRunForPendingInput(t *testing.T, conn *sql.DB, suffix string) str
 		t.Fatalf("seed run %s (%s): %v", id, fmt.Sprintf("pending-input-%s", suffix), err)
 	}
 	return id
+}
+
+// stagePendingViaTranscript queues a follow-up the way Spawner.queueFollowUp
+// does — an undelivered plain user row through the ordinary transcript insert.
+// Going through the production writer is the point: the store under test reads
+// rows it does not write, so a test-local INSERT would let the two drift.
+func stagePendingViaTranscript(t *testing.T, stores db.Stores, orgID, runID, userID, message string) {
+	t.Helper()
+	pending := false
+	if _, err := stores.Conversations.InsertMessage(context.Background(), orgID, &domain.Message{
+		ConversationID: runID,
+		UserID:         userID,
+		Role:           "user",
+		Content:        message,
+		Delivered:      &pending,
+	}); err != nil {
+		t.Fatalf("stage pending input: %v", err)
+	}
 }

@@ -326,7 +326,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// Resume-by-enqueue: queued input means this claim is NOT a
 	// fresh/crash-reclaimed blueprint step — it's a parked/terminal-resumable
 	// run woken by a user message and re-queued onto its own row
-	// (ResumeOpenRun/SendMessage). Peek (not Consume) routes the claim to the
+	// (SendMessage's follow-up path). Peek (not Consume) routes the claim to the
 	// resume path — dispatchResumeClaim flushes the rows only once it is about
 	// to deliver, so a crash during the intervening workspace rehydrate leaves
 	// them for the next claim rather than losing the message.
@@ -573,7 +573,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 }
 
 // dispatchResumeClaim delivers a resume-by-enqueue claim's durably-recorded
-// message (TFAC-585): the delivery half of what ResumeOpenRun's in-process
+// message (TFAC-585): the delivery half of what the retired in-process resume
 // goroutine used to do end-to-end. No blueprint-step machinery runs here —
 // a resumed run isn't advancing to a new step, it's continuing its
 // current one, so this bypasses the mission/skill/plan logic entirely and

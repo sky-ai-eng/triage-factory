@@ -210,7 +210,7 @@ type ConversationStore interface {
 	// next correction attempt). With no durable snapshot yet, the run can't be
 	// left resumably-open, so failing it is correct — and the per-run cleanup
 	// then tears the worktree down. A durably-parked open run (snapshot taken,
-	// worktree kept) is only ever woken via ResumeOpenRun, which flips it to
+	// worktree kept) is only ever woken by a follow-up, which flips it to
 	// `running` before any failRun could see it, so this never clobbers a
 	// resumable run.
 	//
