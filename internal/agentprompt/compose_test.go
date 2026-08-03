@@ -53,7 +53,7 @@ func TestBuild_NativeRequiresMulti(t *testing.T) {
 			t.Error("Build did not panic on a Spec the manifest refuses")
 		}
 	}()
-	_ = Build(spec, Parts{})
+	_ = Build(spec)
 }
 
 // TestBuild_StableForSpec is the cacheable-prefix property (rule 3): a fixed
@@ -62,8 +62,8 @@ func TestBuild_NativeRequiresMulti(t *testing.T) {
 // prompt-cache write.
 func TestBuild_StableForSpec(t *testing.T) {
 	for _, spec := range allSpecs() {
-		first := Build(spec, Parts{})
-		second := Build(spec, Parts{})
+		first := Build(spec)
+		second := Build(spec)
 		if first != second {
 			t.Errorf("Build(%+v) is not stable across calls", spec)
 		}
@@ -79,8 +79,8 @@ func TestBuild_StableForSpec(t *testing.T) {
 // and only multi has an egress allowlist and a scoped per-run credential. A
 // single text serving both would have to assert something false in one.
 func TestBuild_ModeArmsDiverge(t *testing.T) {
-	local := Build(machinistSpec(ModeLocal), Parts{})
-	multi := Build(machinistSpec(ModeMulti), Parts{})
+	local := Build(machinistSpec(ModeLocal))
+	multi := Build(machinistSpec(ModeMulti))
 	if local == multi {
 		t.Fatal("ModeLocal and ModeMulti composed identical text; the mode arms are not wired")
 	}
@@ -97,34 +97,26 @@ func TestBuild_ModeArmsDiverge(t *testing.T) {
 	}
 }
 
-// TestBuild_SDKIgnoresParts pins the channel split: the SDK harness delivers
-// the handoff addendum itself (--append-system-prompt), so Build's output must
-// not vary with Parts — otherwise the same text would arrive twice.
-func TestBuild_SDKIgnoresParts(t *testing.T) {
+// TestBuildNonTerminalStep_SDKIsUnchanged pins the channel split: the SDK
+// harness delivers the handoff addendum itself (--append-system-prompt), so
+// appending it to the composed text as well would send it twice.
+func TestBuildNonTerminalStep_SDKIsUnchanged(t *testing.T) {
 	spec := machinistSpec(ModeMulti)
-	bare := Build(spec, Parts{})
-	loaded := Build(spec, Parts{NonTerminalStep: true})
-	if bare != loaded {
-		t.Error("SDK Build varied with Parts; its harness owns that channel")
+	if Build(spec) != BuildNonTerminalStep(spec) {
+		t.Error("the SDK's non-terminal composition grew an addendum its harness already delivers")
 	}
 }
 
-// TestBuild_NativeAppendsOnlyTheAddendum pins what a native composition may
-// carry beyond the static blocks: the handoff addendum, and nothing else.
-//
-// Everything about the particular run — the mission, the run context, and above
-// all the externally-authored task block — reaches the model through the
-// conversation's opening turn instead. Build has no channel for it, which is
-// what makes "no attacker-influenceable text in the instructions" a property of
-// the type rather than of every caller remembering.
-func TestBuild_NativeAppendsOnlyTheAddendum(t *testing.T) {
+// TestBuildNonTerminalStep_NativeAppendsOnlyTheAddendum pins what a native
+// composition may carry beyond the static blocks: the handoff addendum, and
+// nothing else. Everything about the particular run — the mission, the run
+// context, the externally-authored task block — reaches the model through the
+// opening turn instead, and this package takes no argument that could carry it.
+func TestBuildNonTerminalStep_NativeAppendsOnlyTheAddendum(t *testing.T) {
 	spec := Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti}
-	terminal := Build(spec, Parts{})
-	handoff := Build(spec, Parts{NonTerminalStep: true})
+	terminal := Build(spec)
+	handoff := BuildNonTerminalStep(spec)
 
-	if !strings.HasPrefix(handoff, strings.TrimSuffix(terminal, "\n")) {
-		t.Error("native Build did not keep the static composition as a prefix")
-	}
 	addendum := strings.TrimSpace(block(blockCompletionNativeNT))
 	if want := strings.TrimSuffix(terminal, "\n") + "\n\n" + addendum + "\n"; handoff != want {
 		t.Errorf("a non-terminal step's prompt is not exactly the prefix plus the addendum;\ngot  %q\nwant %q", handoff, want)
@@ -261,7 +253,7 @@ func walkBlocks(t *testing.T) []string {
 // fork into terminal and non-terminal variants.
 func TestBuild_NativeSectionOrder(t *testing.T) {
 	spec := Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti}
-	got := Build(spec, Parts{NonTerminalStep: true})
+	got := BuildNonTerminalStep(spec)
 
 	prev := -1
 	for _, section := range []string{

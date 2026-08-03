@@ -77,10 +77,9 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID, owned)
 	}
 
-	// Both halves of what the model reads are composed here, before the jail is
-	// launched, so the fallible half fails the claim before it has cost a
-	// sandbox. The system prompt is the contract and is spec-static; everything
-	// this particular run is about rides the opening turn.
+	// Composed before the jail is launched, so the fallible half fails the claim
+	// without having cost a sandbox. The system prompt is the same for every
+	// native run; everything about this one rides the opening turn.
 	opening, err := s.buildNativeOpeningTurn(ctx, task, mission, cfg, runID, namespace)
 	if err != nil {
 		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "compose opening turn: "+err.Error(), domain.RunFailureUnclassified)
@@ -202,10 +201,9 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 // between this insert and the first call leaves the row for the next claim
 // to drain rather than losing the opening.
 //
-// One row, not several. Compaction pins whichever shape it takes — the
-// anchored span is the whole leading run of rows before the first assistant
-// turn — so this is a choice about what the model reads, and the mission and
-// the context it is about are one statement of what to do.
+// One row, not several: the mission and the context it is about are one
+// statement of what to do. Compaction pins either shape — the anchored span is
+// every leading row before the first assistant turn — so either would work.
 func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Transcript, orgID, runID, creatorUserID, opening string) error {
 	rows, err := transcript.ListForAssembly(ctx, orgID, runID)
 	if err != nil {
@@ -218,21 +216,20 @@ func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Tran
 	return err
 }
 
-// nativeSystemPrompt is the run's system prompt, and it is the composed
-// framework blocks alone: who the agent is, what harness it is in, what it may
-// do, plus the handoff addendum when a later step follows this one.
+// nativeSystemPrompt is the run's whole system prompt: the composed framework
+// blocks, plus the handoff addendum when a later step follows this one.
 //
-// Nothing about the particular run reaches it, and that is a security property
-// before it is a caching one. The task context renders PR titles, commit
-// subjects and issue bodies — which is why it carries untrusted markers at all
-// — and an agent that finds attacker-influenceable text inside its own
-// instructions has no structural reason to treat it differently from the
-// instructions around it. The caching follows rather than motivates: the whole
-// prompt is byte-identical for every run sharing a Spec and a step position, so
-// the shared prefix reaches the end of the instructions instead of stopping at
-// the first per-run byte.
+// Nothing about the particular run is in it. The task context renders PR
+// titles, commit subjects and issue bodies — text an outsider can write, which
+// is why it carries untrusted markers — and text sitting inside the agent's own
+// instructions reads as instruction. It rides the opening turn instead, which
+// also leaves this prompt identical for every run with the same spec and step
+// position, so the cached prefix reaches the end of the instructions.
 func nativeSystemPrompt(nonTerminalStep bool) string {
-	return agentprompt.Build(nativeSpec(), agentprompt.Parts{NonTerminalStep: nonTerminalStep})
+	if nonTerminalStep {
+		return agentprompt.BuildNonTerminalStep(nativeSpec())
+	}
+	return agentprompt.Build(nativeSpec())
 }
 
 // buildNativeOpeningTurn resolves this run's inputs and composes the
@@ -254,18 +251,17 @@ func (s *Spawner) buildNativeOpeningTurn(ctx context.Context, task domain.Task, 
 		namespace, s.resolveBranchTemplate(ctx, task), s.runURLFor(cfg.orgID, runID)), nil
 }
 
-// composeNativeOpeningTurn assembles what the native loop says first: the run
-// context, the task context, and the mission, in that order — the authoritative
-// instruction last, after the externally-authored material it is about.
+// composeNativeOpeningTurn assembles what the loop says first: run context,
+// task context, then the mission — the instruction last, after the external
+// material it is about.
 //
-// Interpolation runs on the mission alone, before the task-context block joins
-// it, so no externally-authored text is ever interpolated. That ordering is a
-// security property, not a style choice; see buildPrompt, this function's
-// counterpart on the SDK path, which composes its user message the same way.
+// Interpolation runs on the mission alone, before the task context joins it, so
+// externally-authored text is never scanned for placeholders. That ordering is a
+// security property, not a style choice; buildPrompt does the same on the SDK
+// path.
 func composeNativeOpeningTurn(task domain.Task, metadataJSON, skeleton, mission, binaryPath, runID, runRoot, blueprintRunID, branchTemplate, runURL string) string {
-	// Compatibility shim, the same one buildPrompt runs: prompts written against
-	// a `triagefactory` on PATH get the binary's real location before
-	// interpolation.
+	// The same shim buildPrompt runs: prompts written against a `triagefactory`
+	// on PATH get the real binary location before interpolation.
 	body := strings.ReplaceAll(mission, "triagefactory exec", binaryPath+" exec")
 	replacer := BuildPromptReplacer(task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID, branchTemplate, runURL)
 
@@ -336,11 +332,10 @@ func (s *Spawner) prepareInheritedMemory(ctx context.Context, orgID, runID, cwd 
 // nativeRunContext renders the fact the standing framework prompt refers to but
 // cannot contain: the team's branch convention.
 //
-// It rides the opening turn rather than the instructions because it is per-run
-// text — a different team's runs say something different — and the framework
-// prompt's value is being byte-identical for every run in the fleet. It is
-// system-authored, so unlike the task context beneath it, it carries no
-// untrusted markers.
+// It rides the opening turn because it is per-run text — a different team says
+// something different — and the framework prompt's value is being identical for
+// every run in the fleet. It is system-authored, so unlike the task context
+// beneath it, it carries no untrusted markers.
 //
 // The memory path used to be the second line here, assembled out of the run
 // root and TF's own primary keys. It is a fixed path now, so it says the same

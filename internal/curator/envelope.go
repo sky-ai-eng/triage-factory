@@ -63,7 +63,7 @@ func renderEnvelope(in envelopeInputs) string {
 		"{{TRACKERS_BLOCK}}", renderTrackersBlock(in.JiraProjectKey, in.LinearProjectKey),
 		"{{TOOLS_REFERENCE}}", toolsReference,
 		"{{BINARY_PATH}}", in.BinaryPath,
-	).Replace(agentprompt.Build(curatorSpec(), agentprompt.Parts{}))
+	).Replace(agentprompt.Build(curatorSpec()))
 }
 
 func projectNameOrFallback(name string) string {

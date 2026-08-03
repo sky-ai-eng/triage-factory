@@ -92,15 +92,12 @@ func TestNativeLoop_LiveSmoke(t *testing.T) {
 		// that runs a live model against the real tool host, so it is also the
 		// only place the production prompt and the production tool schemas are
 		// put in front of a provider together.
-		SystemPrompt: agentprompt.Build(
-			agentprompt.Spec{
-				Surface: agentprompt.SurfaceMachinist,
-				Runtime: agentprompt.RuntimeNative,
-				Family:  agentprompt.FamilyClaude,
-				Mode:    agentprompt.ModeMulti,
-			},
-			agentprompt.Parts{},
-		),
+		SystemPrompt: agentprompt.Build(agentprompt.Spec{
+			Surface: agentprompt.SurfaceMachinist,
+			Runtime: agentprompt.RuntimeNative,
+			Family:  agentprompt.FamilyClaude,
+			Mode:    agentprompt.ModeMulti,
+		}),
 		MaxIterations: 10,
 	})
 

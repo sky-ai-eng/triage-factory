@@ -657,11 +657,9 @@ func TestCompaction_SanitizesModelTextForStore(t *testing.T) {
 	})
 }
 
-// composedOpeningTurn is the shape a delegation's opening turn actually has now
-// that the mission rides the transcript rather than the system prompt: several
-// sections in one row, the untrusted task block among them. The fixtures above
-// use a one-line stand-in; this one is here because the pin has to hold for
-// what production writes.
+// composedOpeningTurn is the shape a delegation's opening turn really has now
+// that the mission rides the transcript: several sections in one row. The
+// fixtures above use a one-line stand-in; the pin has to hold for this.
 const composedOpeningTurn = "<run_context>\n" +
 	"Branch naming convention for this team: tfac/SKY-9\n" +
 	"</run_context>\n\n" +
@@ -673,14 +671,10 @@ const composedOpeningTurn = "<run_context>\n" +
 	"</task_context>\n\n" +
 	"Fix the failing check on pull request 18."
 
-// TestAnchoredCompaction_PinsTheComposedOpeningTurn is the half of the mission
-// move that compaction owns. MissionAnchored means "the opening turn is a
-// control-plane-minted mission, so it is never elided"; with the mission
-// actually living there, this is what keeps a long run from summarizing away
-// the only statement of what it was asked to do.
-//
-// Several turns happen first, so the pin is exercised where it matters — not on
-// a transcript whose opening is also its only row.
+// TestAnchoredCompaction_PinsTheComposedOpeningTurn is what keeps a long run
+// from summarizing away the only statement of what it was asked to do. Several
+// turns happen first, so the pin is exercised on a real window rather than on a
+// transcript whose opening is also its only row.
 func TestAnchoredCompaction_PinsTheComposedOpeningTurn(t *testing.T) {
 	tr := newMemTranscript(
 		domain.Message{Role: "user", Content: composedOpeningTurn},
@@ -703,8 +697,8 @@ func TestAnchoredCompaction_PinsTheComposedOpeningTurn(t *testing.T) {
 	if opening == nil || opening.WindowState == domain.MessageWindowInactive {
 		t.Fatalf("opening turn = %+v, want pinned active through the compaction", opening)
 	}
-	// Everything after it went, including the intervening turns — the pin is the
-	// opening, not "the beginning of the conversation".
+	// Everything after it went: the pin is the opening, not the beginning of the
+	// conversation.
 	for _, gone := range []string{"reading the failing job", "check the flaky test too", "found the race", "pushed the fix"} {
 		row := tr.find(func(m domain.Message) bool { return m.Content == gone })
 		if row == nil || row.WindowState != domain.MessageWindowInactive {
@@ -728,11 +722,10 @@ func TestAnchoredCompaction_PinsTheComposedOpeningTurn(t *testing.T) {
 	}
 }
 
-// TestCompactionSpan_AnchorCoversEveryLeadingUserRow pins the pin itself
-// against the shape the opening turn is not, but could become: several rows
-// rather than one. The anchored span is the whole leading run before the first
-// assistant turn, so splitting the mission across rows later does not silently
-// start feeding half of it to the summarizer.
+// TestCompactionSpan_AnchorCoversEveryLeadingUserRow covers the shape the
+// opening turn is not, but could become: several rows rather than one. The
+// anchor is every leading row before the first assistant turn, so splitting the
+// mission up later cannot feed half of it to the summarizer.
 func TestCompactionSpan_AnchorCoversEveryLeadingUserRow(t *testing.T) {
 	rows := []domain.Message{
 		{ID: 1, Role: "user", Content: "<run_context>…</run_context>"},
@@ -747,7 +740,7 @@ func TestCompactionSpan_AnchorCoversEveryLeadingUserRow(t *testing.T) {
 		t.Errorf("anchored span = %v, want %v — every leading user row is the mission", got, want)
 	}
 	// Unanchored, the same rows are all fair game: a taskless conversation's
-	// opening is just its oldest message, re-injected mechanically instead.
+	// opening is just its oldest message, re-injected into the result row.
 	if got, want := compactionSpan(rows, false), []int{1, 2, 3, 4, 5, 6}; !reflect.DeepEqual(got, want) {
 		t.Errorf("unanchored span = %v, want %v", got, want)
 	}
