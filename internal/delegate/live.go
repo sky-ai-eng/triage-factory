@@ -373,9 +373,25 @@ func (s *Spawner) markRunOpen(park liveParkContext) (fenced bool) {
 		flipped, err = s.agentRuns.ParkOpenSystem(bgCtx, park.orgID, park.runID, park.reason)
 	}
 	if errors.Is(err, db.ErrClaimReleased) {
-		// A successor owns the conversation, so this park is not its state to
-		// report. The workspace stays too — it may be the one that successor
-		// is running in.
+		// Whoever holds the claim now owns the conversation, so this park is
+		// not this engagement's state to report. The workspace stays too — it
+		// may be the one they are running in.
+		//
+		// A deliberate stop says so at INFO, because there the refusal is the
+		// design working. Control parks the row and releases the claim the
+		// instant the user asks, and this engagement's teardown then arrives
+		// to find the state already recorded by the actor who asked for it —
+		// every cross-pod stop produces exactly one of these. Alarming on it
+		// would train the reader to ignore the line that matters.
+		//
+		// An idle park has no such outside actor, so a refusal there means a
+		// successor really did take the conversation out from under a live
+		// engagement. That keeps ERROR.
+		if park.reason.Deliberate() {
+			delegateLog.Info("claim fence refused the park after a deliberate stop — the stopping actor already parked this conversation; recording nothing further",
+				"run", park.runID, "claim_id", park.claimID, "org_id", park.orgID)
+			return true
+		}
 		delegateLog.Error("claim fence refused the park — a successor owns this conversation; recording nothing",
 			"run", park.runID, "claim_id", park.claimID, "org_id", park.orgID, "error", err)
 		return true
@@ -413,6 +429,15 @@ func (s *Spawner) parkRunOpen(park liveParkContext, sessionID string) (fenced bo
 	// status commits. Best-effort — the kept warm worktree is the fast path.
 	// Skipped when there is no workspace yet (a cancel during setup), which
 	// snapshotWorkspace would reject anyway.
+	//
+	// The ordering carries a second load in the control/executor split, and
+	// it is the whole reason a cross-pod stop stays resumable. There the row
+	// is already parked and the claim already released — by control, on the
+	// user's behalf (see Spawner.stop) — so this engagement's flip below is
+	// refused by the fence. The unfenced snapshot is then the only thing this
+	// teardown still has to contribute, and it is the thing the follow-up
+	// needs. Flipping first and snapshotting after would leave a
+	// deliberately-stopped run with no workspace at all.
 	if park.claudeCwd != "" && park.namespace != "" {
 		if err := s.snapshotWorkspace(context.Background(), park.orgID, park.namespace, park.claudeCwd, sessionID); err != nil {
 			delegateLog.Warn("snapshot workspace before parking open failed", "run", park.runID, "error", err)

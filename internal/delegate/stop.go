@@ -193,10 +193,28 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool) error 
 	// self-park (parkRunOpen with a claim in scope, parkCancelledAfterResume);
 	// do not route this path through them.
 	//
-	// No snapshot is taken here: this path runs precisely when no live
-	// engagement exists, so either the run already parked (and snapshotted on
-	// its way down) or it never got far enough to have a workspace worth
-	// capturing.
+	// No snapshot is taken here, and in the split that is a sequencing
+	// contract rather than an absence. Two situations reach this write. The
+	// run may genuinely have no live engagement — already parked (and
+	// snapshotted on its way down), or never far enough along to have a
+	// workspace worth capturing. Or the engagement is live on an executor,
+	// which is the ordinary case for every cross-pod stop: the process
+	// registry consulted above is per-pod, and control never holds the
+	// process. This pod cannot snapshot a worktree that is on another
+	// machine, and it must not wait for one either — so it takes the fast
+	// half deliberately, parking the row and releasing the claim at once so
+	// the user gets a composer the moment they ask for one.
+	//
+	// The other half is the executor's own teardown, seconds later, when the
+	// signal above reaches its engine: it snapshots BEFORE its status flip,
+	// so the workspace lands even though the flip is then refused by the
+	// claim fence this release just tripped. That ordering is what makes the
+	// stop resumable at all — see parkRunOpen, which owns it.
+	//
+	// The gap between the two is real and accepted: a follow-up sent inside
+	// it finds no workspace yet and is refused as expired. It is seconds
+	// wide, and closing it belongs to a resumability signal rather than to
+	// blocking this verb on a cross-pod round trip.
 	var (
 		flipped bool
 		err     error

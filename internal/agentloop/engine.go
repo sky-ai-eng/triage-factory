@@ -158,9 +158,13 @@ const (
 	// a notice row; the next claim continues it.
 	ResultParked
 	// ResultFailed — the engagement could not continue (retry
-	// exhaustion, a fatal tool-host error). The conversation fails.
+	// exhaustion, a fatal tool-host error) with its context still live.
+	// The conversation fails.
 	ResultFailed
-	// ResultCancelled — the context was cancelled.
+	// ResultCancelled — the context was cancelled. Every exit under a
+	// killed context reports this, however the kill was observed: a write
+	// that came back "context canceled" is a cancellation, not a failure
+	// that happens to mention one.
 	ResultCancelled
 )
 
@@ -288,7 +292,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 	// Unconditional and idempotent — there is no resume branch, so the
 	// crash-recovery path is the path that runs every time and cannot rot.
 	if err := e.repairTranscript(ctx, params); err != nil {
-		return e.failed(started, 0, fmt.Errorf("repair transcript: %w", err))
+		return e.failed(ctx, started, 0, fmt.Errorf("repair transcript: %w", err))
 	}
 
 	// Cold-resume compaction, after repair and before the first drain:
@@ -297,10 +301,10 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 	// through it.
 	if err := e.compactOnResume(ctx, params); err != nil {
 		if ctx.Err() != nil {
-			return e.cancelled(started, 0)
+			return e.cancelled(ctx, started, 0)
 		}
 		e.insertNotice(ctx, params, "Compacting this conversation on resume failed: "+err.Error())
-		return e.failed(started, 0, fmt.Errorf("compact on resume: %w", err))
+		return e.failed(ctx, started, 0, fmt.Errorf("compact on resume: %w", err))
 	}
 
 	// bareDrain is true for the engagement's first drain and for any drain
@@ -320,7 +324,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return e.cancelled(started, turn)
+			return e.cancelled(ctx, started, turn)
 		}
 
 		// 1. Compaction trip, BEFORE the drain — the same order the resume
@@ -331,15 +335,15 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// the flip would swallow it into the summary.
 		preRows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 		if err != nil {
-			return e.failed(started, turn, fmt.Errorf("list rows for compaction trip: %w", err))
+			return e.failed(ctx, started, turn, fmt.Errorf("list rows for compaction trip: %w", err))
 		}
 		if e.compactionDue(params, preRows) {
 			if err := e.compactWarm(ctx, params); err != nil {
 				if ctx.Err() != nil {
-					return e.cancelled(started, turn)
+					return e.cancelled(ctx, started, turn)
 				}
 				e.insertNotice(ctx, params, "Compacting this conversation failed: "+err.Error())
-				return e.failed(started, turn, fmt.Errorf("compact conversation: %w", err))
+				return e.failed(ctx, started, turn, fmt.Errorf("compact conversation: %w", err))
 			}
 			continue
 		}
@@ -348,7 +352,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// follow-up, a staged injection, a repair notice — enters here, so
 		// there is no special first-call case.
 		if err := e.drain(ctx, params, bareDrain); err != nil {
-			return e.failed(started, turn, fmt.Errorf("drain pending input: %w", err))
+			return e.failed(ctx, started, turn, fmt.Errorf("drain pending input: %w", err))
 		}
 
 		// 2b. Rows — one post-flush read serves the budget derivation and the
@@ -356,7 +360,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// reaches the call.
 		rows, err := e.Transcript.ListForAssembly(ctx, params.OrgID, params.ConversationID)
 		if err != nil {
-			return e.failed(started, turn, fmt.Errorf("list rows for assembly: %w", err))
+			return e.failed(ctx, started, turn, fmt.Errorf("list rows for assembly: %w", err))
 		}
 
 		// 3. The turn budget, derived from rows. One call before the bound,
@@ -374,7 +378,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		budget := deriveBudget(rows)
 		if budget.turns == maxIter-1 && !budget.wrapUpRequested {
 			if err := e.insertPending(ctx, params, wrapUpNotice, domain.MessageSubtypeInjectionWrapUp); err != nil {
-				return e.failed(started, turn, fmt.Errorf("insert wrap-up notice: %w", err))
+				return e.failed(ctx, started, turn, fmt.Errorf("insert wrap-up notice: %w", err))
 			}
 			continue
 		}
@@ -396,7 +400,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// 5. Credentials, per call.
 		provider, client, release, err := e.Credentials.ForCall(ctx)
 		if err != nil {
-			return e.failed(started, turn, fmt.Errorf("resolve provider credentials: %w", err))
+			return e.failed(ctx, started, turn, fmt.Errorf("resolve provider credentials: %w", err))
 		}
 
 		// 6. Stream.
@@ -407,7 +411,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		}
 		if err != nil {
 			if ctx.Err() != nil {
-				return e.cancelled(started, turn)
+				return e.cancelled(ctx, started, turn)
 			}
 			// Reactive arm: a context-overflow rejection is a compaction
 			// trigger, not a run failure — the proactive trip estimates and
@@ -419,7 +423,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 				if cerr := e.compactAfterOverflow(ctx, params); cerr == nil {
 					continue
 				} else if ctx.Err() != nil {
-					return e.cancelled(started, turn)
+					return e.cancelled(ctx, started, turn)
 				} else {
 					err = fmt.Errorf("compact after context overflow: %w (overflow: %v)", cerr, err)
 				}
@@ -429,7 +433,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			// never ran. Record the error as a row so the failure has a
 			// visible cause in the transcript, then fail.
 			e.insertNotice(ctx, params, "The model call failed and could not be retried: "+err.Error())
-			return e.failed(started, turn, err)
+			return e.failed(ctx, started, turn, err)
 		}
 		turn++
 		reactiveCompacted = false
@@ -446,7 +450,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		}
 		assistantRow, err := e.persistAssistant(ctx, params, completion, msSince(callStarted))
 		if err != nil {
-			return e.failed(started, turn, fmt.Errorf("persist assistant message: %w", err))
+			return e.failed(ctx, started, turn, fmt.Errorf("persist assistant message: %w", err))
 		}
 		lastText = assistantRow.Content
 		calls := assistantRow.ToolCalls
@@ -460,7 +464,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		if isLengthStop(completion.FinishReason) && len(calls) > 0 {
 			for _, call := range calls {
 				if err := e.insertToolResult(ctx, params, call, truncatedBatchNotice, true); err != nil {
-					return e.failed(started, turn, err)
+					return e.failed(ctx, started, turn, err)
 				}
 			}
 			bareDrain = false
@@ -472,13 +476,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		if len(calls) > 0 {
 			outcome, terminated, err := e.dispatchBatch(ctx, params, calls)
 			if err != nil {
-				// A cancellation observed mid-batch is a cancellation, not a
-				// failure: the user asked to stop, and the calls that did not
-				// run simply did not run.
-				if ctx.Err() != nil {
-					return e.cancelled(started, turn)
-				}
-				return e.failed(started, turn, err)
+				return e.failed(ctx, started, turn, err)
 			}
 			if terminated {
 				// stop_blueprint's summary argument is the account of the
@@ -505,7 +503,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// concluding now would drop it.
 		pending, err := e.hasPending(ctx, params)
 		if err != nil {
-			return e.failed(started, turn, fmt.Errorf("recheck pending input: %w", err))
+			return e.failed(ctx, started, turn, fmt.Errorf("recheck pending input: %w", err))
 		}
 		if pending {
 			continue
@@ -538,7 +536,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		if e.Hooks.ShouldStopAfterTurn != nil {
 			if nudge := e.Hooks.ShouldStopAfterTurn(ctx, turn, lastText); nudge != "" {
 				if err := e.insertPending(ctx, params, nudge, domain.MessageSubtypeInjectionNudge); err != nil {
-					return e.failed(started, turn, fmt.Errorf("insert turn-end nudge: %w", err))
+					return e.failed(ctx, started, turn, fmt.Errorf("insert turn-end nudge: %w", err))
 				}
 				continue
 			}
@@ -656,7 +654,27 @@ const truncatedBatchNotice = "This tool call was not executed: the model's respo
 	"so the tool arguments in that message may be silently truncated and are not safe to run. " +
 	"Re-issue the call you intended, with smaller arguments or fewer calls in one message."
 
-func (e *Engine) failed(started time.Time, turn int, err error) Result {
+// failed is every exit that could not continue — and the single place the
+// engine decides whether "could not continue" means failure at all.
+//
+// A killed context reaches most of those exits as an ordinary error: the
+// store call, the flush, the dispatch that was in flight when the kill landed
+// returns one, and its text says "context canceled" rather than anything
+// about a cancellation. Classifying that as a failure is not a cosmetic
+// mislabel — a failed run discards its workspace snapshot, which is exactly
+// the thing a person who just pressed stop wants kept. So the check lives
+// here, once, rather than at each exit, where the next one added would
+// silently omit it.
+//
+// The reclassification is one-way and deliberately generous: a genuine
+// failure racing a simultaneous stop is recorded as a park. That is the
+// better answer either way — parked-open with a workspace beats
+// failed-with-the-workspace-thrown-away for a run someone had just asked to
+// end.
+func (e *Engine) failed(ctx context.Context, started time.Time, turn int, err error) Result {
+	if ctx.Err() != nil {
+		return e.cancelled(ctx, started, turn)
+	}
 	return Result{
 		Kind:        ResultFailed,
 		FailureKind: domain.RunFailureAgentError,
@@ -666,12 +684,22 @@ func (e *Engine) failed(started time.Time, turn int, err error) Result {
 	}
 }
 
-func (e *Engine) cancelled(started time.Time, turn int) Result {
+// cancelled reports the context's own error rather than a constant. Every
+// caller is already inside a `ctx.Err() != nil` guard, so the value is the
+// real cause — and the two causes are not interchangeable to a reader: a
+// deadline is the engagement running out of time (something to tune), a
+// cancel is somebody stopping it (nothing to tune). The fallback exists only
+// so Err is never nil on this Kind, which its doc promises.
+func (e *Engine) cancelled(ctx context.Context, started time.Time, turn int) Result {
+	cause := ctx.Err()
+	if cause == nil {
+		cause = context.Canceled
+	}
 	return Result{
 		Kind:       ResultCancelled,
 		NumTurns:   turn,
 		DurationMs: msSince(started),
-		Err:        context.Canceled,
+		Err:        cause,
 	}
 }
 
