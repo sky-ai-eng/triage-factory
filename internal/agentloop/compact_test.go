@@ -656,3 +656,99 @@ func TestCompaction_SanitizesModelTextForStore(t *testing.T) {
 		assertNoNUL(t, tr)
 	})
 }
+
+// composedOpeningTurn is the shape a delegation's opening turn actually has now
+// that the mission rides the transcript rather than the system prompt: several
+// sections in one row, the untrusted task block among them. The fixtures above
+// use a one-line stand-in; this one is here because the pin has to hold for
+// what production writes.
+const composedOpeningTurn = "<run_context>\n" +
+	"Branch naming convention for this team: tfac/SKY-9\n" +
+	"</run_context>\n\n" +
+	"<task_context>\n" +
+	"Reference data about the task that fired this run.\n\n" +
+	"- Task: CI is failing on the retry path\n" +
+	"- Repository: owner/repo\n" +
+	"- Pull request: #18\n" +
+	"</task_context>\n\n" +
+	"Fix the failing check on pull request 18."
+
+// TestAnchoredCompaction_PinsTheComposedOpeningTurn is the half of the mission
+// move that compaction owns. MissionAnchored means "the opening turn is a
+// control-plane-minted mission, so it is never elided"; with the mission
+// actually living there, this is what keeps a long run from summarizing away
+// the only statement of what it was asked to do.
+//
+// Several turns happen first, so the pin is exercised where it matters — not on
+// a transcript whose opening is also its only row.
+func TestAnchoredCompaction_PinsTheComposedOpeningTurn(t *testing.T) {
+	tr := newMemTranscript(
+		domain.Message{Role: "user", Content: composedOpeningTurn},
+		domain.Message{Role: "assistant", Content: "reading the failing job"},
+		domain.Message{Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "check the flaky test too"},
+		domain.Message{Role: "assistant", Content: "found the race"},
+		usedAssistant("pushed the fix", overThreshold, time.Now().UTC()),
+	)
+	provider := &scriptedProvider{turns: []scriptedTurn{
+		summaryReply("fixed the race, pushed"),
+		{text: "done"},
+	}}
+	engine := newTestEngine(tr, provider, newScriptedToolHost())
+
+	if result := engine.Run(context.Background(), testParams()); result.Kind != ResultConcluded {
+		t.Fatalf("result = %+v, want concluded", result)
+	}
+
+	opening := tr.find(func(m domain.Message) bool { return m.Content == composedOpeningTurn })
+	if opening == nil || opening.WindowState == domain.MessageWindowInactive {
+		t.Fatalf("opening turn = %+v, want pinned active through the compaction", opening)
+	}
+	// Everything after it went, including the intervening turns — the pin is the
+	// opening, not "the beginning of the conversation".
+	for _, gone := range []string{"reading the failing job", "check the flaky test too", "found the race", "pushed the fix"} {
+		row := tr.find(func(m domain.Message) bool { return m.Content == gone })
+		if row == nil || row.WindowState != domain.MessageWindowInactive {
+			t.Errorf("row %q = %+v, want compacted", gone, row)
+		}
+	}
+
+	// What the model reads next: the mission, in full, ahead of the summary.
+	final := provider.requests[len(provider.requests)-1]
+	var window []string
+	for _, r := range final.Rows {
+		if r.WindowState != domain.MessageWindowInactive {
+			window = append(window, r.Content)
+		}
+	}
+	if len(window) == 0 || window[0] != composedOpeningTurn {
+		t.Fatalf("post-compaction window opens with %.60q, want the whole opening turn", strings.Join(window, "|"))
+	}
+	if !strings.Contains(strings.Join(window, "\n"), "fixed the race, pushed") {
+		t.Errorf("post-compaction window = %v, want the summary after the mission", window)
+	}
+}
+
+// TestCompactionSpan_AnchorCoversEveryLeadingUserRow pins the pin itself
+// against the shape the opening turn is not, but could become: several rows
+// rather than one. The anchored span is the whole leading run before the first
+// assistant turn, so splitting the mission across rows later does not silently
+// start feeding half of it to the summarizer.
+func TestCompactionSpan_AnchorCoversEveryLeadingUserRow(t *testing.T) {
+	rows := []domain.Message{
+		{ID: 1, Role: "user", Content: "<run_context>…</run_context>"},
+		{ID: 2, Role: "user", Content: "<task_context>…</task_context>"},
+		{ID: 3, Role: "user", Content: "the mission"},
+		{ID: 4, Role: "assistant", Content: "working"},
+		{ID: 5, Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "and this"},
+		{ID: 6, Role: "assistant", Content: "still working"},
+		{ID: 7, Role: "user", Content: "queued", Delivered: boolPtr(false)},
+	}
+	if got, want := compactionSpan(rows, true), []int{4, 5, 6}; !reflect.DeepEqual(got, want) {
+		t.Errorf("anchored span = %v, want %v — every leading user row is the mission", got, want)
+	}
+	// Unanchored, the same rows are all fair game: a taskless conversation's
+	// opening is just its oldest message, re-injected mechanically instead.
+	if got, want := compactionSpan(rows, false), []int{1, 2, 3, 4, 5, 6}; !reflect.DeepEqual(got, want) {
+		t.Errorf("unanchored span = %v, want %v", got, want)
+	}
+}

@@ -121,24 +121,22 @@ type Spec struct {
 	Mode    Mode
 }
 
-// Parts is the per-run text a composed prompt carries after its static
-// prefix — never part of the cacheable region.
+// Parts is the per-run *selection* a composed prompt carries after its static
+// prefix. Deliberately not per-run text: a composed prompt is the contract the
+// agent works under, and the material that contract is about — the mission, and
+// the system-rendered task block carrying titles and bodies anyone who can
+// comment on a pull request may have written — reaches the model through the
+// conversation's opening turn on both runtimes. Keeping it there is what makes
+// the whole system prompt a function of the Spec, so the shared prefix runs to
+// the end of the instructions instead of stopping at the first per-run byte.
 //
-// The field set is deliberately identical to the native loop engine's
-// EnvelopeParts so that swapping its BuildSystemPrompt call for Build is
-// mechanical. Under RuntimeSDK the harness delivers this material through the
-// user message rather than the system prompt, so Build ignores every field and
-// SDK callers pass Parts{}; the SDK's own composition (mission first, then the
-// composed framework text) stays with the caller that owns those channels.
+// Under RuntimeSDK the harness delivers even this on a channel of its own
+// (--append-system-prompt), so Build ignores the field and SDK callers pass
+// Parts{}.
 type Parts struct {
-	// RunContext is the run-identifying preamble (run id, entity, repo).
-	RunContext string
-	// TaskContext is the system-rendered, externally-authored task block.
-	TaskContext string
-	// Mission is the resolved prompt-row body for this run or step.
-	Mission string
-	// HasBlueprint marks a run driven by a multi-step blueprint.
-	HasBlueprint bool
-	// NonTerminalStep marks a step that hands off rather than concluding.
+	// NonTerminalStep marks a step that hands off to a later blueprint step
+	// instead of concluding the run. It selects a block rather than supplying
+	// text — the addendum is spec-static — and appending it after the composed
+	// prefix is what keeps that prefix one cache entry across both shapes.
 	NonTerminalStep bool
 }
