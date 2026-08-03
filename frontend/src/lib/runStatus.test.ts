@@ -3,6 +3,9 @@ import type { Conversation } from '../types'
 import { CLAIM_PHASES, RUN_STATUSES, TERMINAL_RUN_STATUSES } from '../types'
 import {
   ACTIVE_STATUSES,
+  chainPosition,
+  completionGloss,
+  completionKind,
   isActiveStatus,
   isClaimPhase,
   isFailedStatus,
@@ -73,6 +76,83 @@ describe('status classification', () => {
     }
     for (const status of ['queued', 'running', 'open', ...CLAIM_PHASES]) {
       expect(isPermissionTerminalStatus(status)).toBe(false)
+    }
+  })
+})
+
+// A completed conversation is three different endings wearing one status, and
+// the discriminator is POSITION, not outcome: `continue` is what an ordinary
+// completion records under the native loop (every step, last one included),
+// while the SDK's terminal step reports `finish`. Branching on the outcome
+// alone would label an ordinary single-prompt native run as handed off.
+describe('chain position and completion', () => {
+  const step = (index: number, total: number, over: Partial<Conversation> = {}) =>
+    base({
+      Status: 'completed',
+      blueprint_run_id: 'br1',
+      blueprint_step_index: index,
+      blueprint_step_count: total,
+      ...over,
+    })
+
+  it('reads a plan of one as no chain at all — that is the plain single-prompt run', () => {
+    expect(chainPosition(step(0, 1))).toBeNull()
+    expect(completionKind(step(0, 1, { Outcome: 'continue' }))).toBe('done')
+  })
+
+  it('treats an unresolved plan length as unknown position, not as step one of none', () => {
+    // 0 is what the server sends when it could not read the blueprint row
+    // (a teammate's manual run under RLS); absent is a client predating it.
+    expect(chainPosition(step(0, 0))).toBeNull()
+    expect(chainPosition(base({ Status: 'completed', blueprint_step_index: 0 }))).toBeNull()
+    expect(completionKind(step(0, 0, { Outcome: 'continue' }))).toBe('done')
+  })
+
+  it('numbers a mid-chain step for display and marks the last one final', () => {
+    expect(chainPosition(step(1, 4))).toEqual({ step: 2, total: 4, isFinal: false })
+    expect(chainPosition(step(3, 4))).toEqual({ step: 4, total: 4, isFinal: true })
+  })
+
+  it('calls a non-final step that concluded normally a hand-off, not the task finishing', () => {
+    expect(completionKind(step(1, 4, { Outcome: 'continue' }))).toBe('handoff')
+    expect(completionGloss(step(1, 4, { Outcome: 'continue' }))).toBe(
+      'step 2 of 4 done — handed off to the next step',
+    )
+  })
+
+  it('calls the chain’s last step done, even though it too records continue', () => {
+    expect(completionKind(step(3, 4, { Outcome: 'continue' }))).toBe('done')
+    expect(completionKind(step(3, 4, { Outcome: 'finish' }))).toBe('done')
+  })
+
+  it('calls a mid-chain finish done — it ended the whole workflow early', () => {
+    expect(completionKind(step(1, 4, { Outcome: 'finish' }))).toBe('done')
+    expect(completionGloss(step(1, 4, { Outcome: 'finish' }))).toBe(
+      'ended the workflow early — the later steps were skipped',
+    )
+  })
+
+  it('claims no hand-off for a step that recorded no outcome at all', () => {
+    // The backend aborts the blueprint on this ("no-outcome"); asserting a
+    // hand-off that never happened would be the same lie in the other
+    // direction.
+    expect(completionKind(step(1, 4, { Outcome: '' }))).toBe('done')
+    expect(completionKind(step(1, 4))).toBe('done')
+  })
+
+  it('separates an abort from a success wherever it lands in the chain', () => {
+    expect(completionKind(step(1, 4, { Outcome: 'abort' }))).toBe('stopped')
+    expect(completionKind(step(3, 4, { Outcome: 'abort' }))).toBe('stopped')
+    expect(completionKind(base({ Status: 'completed', Outcome: 'abort' }))).toBe('stopped')
+    expect(completionGloss(base({ Status: 'completed', Outcome: 'abort' }))).toBe(
+      'stopped without finishing — the task stays open for a human',
+    )
+  })
+
+  it('answers for completed conversations only', () => {
+    for (const status of ['queued', 'running', 'open', 'failed', ...CLAIM_PHASES]) {
+      expect(completionKind(base({ Status: status })), status).toBeNull()
+      expect(completionGloss(base({ Status: status })), status).toBe('')
     }
   })
 })

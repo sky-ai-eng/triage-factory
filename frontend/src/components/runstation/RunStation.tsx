@@ -8,6 +8,7 @@ import {
   isActiveStatus,
   isFailedStatus,
   isTerminalStatus,
+  completionGloss,
   formatDurationMs,
   formatElapsed,
   isActiveRun,
@@ -507,9 +508,10 @@ function IntakeDock({
       : run.Status === 'open'
         ? 'open — idle, resumable'
         : run.Status === 'completed'
-          ? run.Outcome === 'abort'
-            ? 'aborted — resumable'
-            : 'work complete'
+          ? // The state word above says which ending; this says what it means
+            // for the task, in words. Shared with the rail so the two surfaces
+            // can't drift.
+            completionGloss(run)
           : run.Status === 'failed'
             ? run.FailureKind === 'memory_limit'
               ? 'killed — exceeded its memory limit (raise TF_RUN_MEMORY_LIMIT_MB if needed)'

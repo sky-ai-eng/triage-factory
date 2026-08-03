@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -1080,6 +1081,38 @@ func (s *blueprintStore) ActiveStepRunIDs(ctx context.Context, orgID, blueprintR
 			return nil, err
 		}
 		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+func (s *blueprintStore) StepPlanLengths(ctx context.Context, orgID string, blueprintRunIDs []string) (map[string]int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	out := make(map[string]int, len(blueprintRunIDs))
+	if len(blueprintRunIDs) == 0 {
+		return out, nil
+	}
+	args := make([]any, len(blueprintRunIDs))
+	for i, id := range blueprintRunIDs {
+		args[i] = id
+	}
+	ph := strings.TrimRight(strings.Repeat("?, ", len(args)), ", ")
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id, json_array_length(step_plan)
+		FROM blueprint_runs WHERE id IN (`+ph+`)
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
 	}
 	return out, rows.Err()
 }

@@ -489,6 +489,21 @@ type BlueprintStore interface {
 	// not reached a terminal state.
 	ActiveStepRunIDs(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
 
+	// StepPlanLengths returns how many steps each named blueprint run's frozen
+	// plan holds, keyed by blueprint_run id. A run whose row is absent — not
+	// found, or hidden from the caller (manual runs are creator-scoped under
+	// RLS) — is simply missing from the map rather than reported as 0, so a
+	// caller can tell "no such plan visible" from a plan of no steps.
+	//
+	// It counts in SQL rather than returning the plan: step_plan holds every
+	// step's snapshotted prompt body, and the caller wants a length. Batched
+	// because the run-list projection resolves a whole board's worth of
+	// conversations at once and must stay O(1) in queries.
+	//
+	// App pool: the only callers are request handlers projecting runs the same
+	// request already read under RLS.
+	StepPlanLengths(ctx context.Context, orgID string, blueprintRunIDs []string) (map[string]int, error)
+
 	// --- Admin-pool variants (`...System`) ------------------------------
 	//
 	// These mirror the per-method shape of the corresponding app-pool methods

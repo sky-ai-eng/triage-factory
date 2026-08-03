@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { Conversation } from '../../types'
 import { RUN_STATUSES } from '../../types'
 import { isActiveStatus } from '../../lib/runStatus'
-import { stationState, type StationKey } from './stationStyle'
+import { HMI_CYAN, stationState, type StationKey } from './stationStyle'
 
 const run = (over: Partial<Conversation>): Conversation =>
   ({
@@ -56,5 +56,48 @@ describe('stationState', () => {
 
   it('echoes a status this build predates rather than guessing a light', () => {
     expect(stationState(run({ Status: 'from_the_future' })).label).toBe('FROM_THE_FUTURE')
+  })
+
+  // The machine wears ONE light, so a mid-chain step wearing the same green
+  // DONE plate as a finished task is the whole bug: the viewer reads the
+  // biggest thing on the page and concludes the work stopped.
+  describe('a completed run is three endings, not one', () => {
+    const step = (index: number, total: number, outcome: string) =>
+      run({
+        Status: 'completed',
+        blueprint_run_id: 'br1',
+        blueprint_step_index: index,
+        blueprint_step_count: total,
+        Outcome: outcome,
+      })
+
+    it('says which step finished, in cyan, when the chain moves on', () => {
+      const state = stationState(step(1, 4, 'continue'))
+      expect(state.key).toBe('handoff')
+      expect(state.label).toBe('STEP 2/4 DONE')
+      // Not the success green: green is what says nothing follows.
+      expect(state.light).toBe(HMI_CYAN)
+      // The belt keeps idling — the work moved down the line, it didn't stop.
+      expect(state.belt).toBeGreaterThan(0)
+    })
+
+    it('keeps the unqualified DONE for the last step and the single-prompt run', () => {
+      expect(stationState(step(3, 4, 'continue')).label).toBe('DONE')
+      expect(stationState(step(0, 1, 'continue')).label).toBe('DONE')
+      // A mid-chain `finish` ended the whole workflow: the task IS over.
+      expect(stationState(step(1, 4, 'finish')).label).toBe('DONE')
+    })
+
+    it('lights an abort amber — the agent gave up and the task is still open', () => {
+      const state = stationState(run({ Status: 'completed', Outcome: 'abort' }))
+      expect(state.key).toBe('stopped')
+      expect(state.label).toBe('STOPPED')
+      expect(state.light).toBe('var(--color-snooze)')
+    })
+
+    it('falls back to the plain state word when the position is unknowable', () => {
+      // blueprint_step_count 0 — the server could not resolve the plan.
+      expect(stationState(step(1, 0, 'continue')).label).toBe('DONE')
+    })
   })
 })
