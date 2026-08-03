@@ -89,26 +89,45 @@ export function chainPosition(run: Conversation): ChainPosition | null {
 // on every step including the last (internal/agentloop), while under the SDK a
 // terminal step reports `finish`.
 //
-// For a non-final step this mirrors decideBlueprintStep
-// (internal/delegate/blueprint.go), which is a total function of the same two
-// inputs: `continue` advances, `finish` ends the workflow early, and everything
-// else — a missing outcome (the gate exhausted its retries) or a value it does
-// not recognize — aborts the blueprint. So the last arm is 'stopped', not a
-// hedge: the step's own row says `completed`, but nothing runs after it and a
-// human owns the task. Position we cannot read at all (chainPosition null) is
-// the one genuine unknown, and it reads as plain 'done' rather than guessing.
+// The arms below mirror decideBlueprintStep (internal/delegate/blueprint.go)
+// one for one, because that function is what actually decides whether anything
+// runs after this conversation — so it is written as the same switch over the
+// same two inputs rather than as a position test with an outcome test inside
+// it. Only two of its arms consult the position, and the difference is
+// load-bearing:
+//
+//   - `continue` / `''` branch on it. Handing off needs a step to hand off TO,
+//     so on the final step both resolve to a plain finish, and only before it
+//     does `continue` advance and a missing outcome abort ("no-outcome").
+//   - `abort`, and anything the vocabulary does not recognize, abort the
+//     blueprint wherever they land. An unrecognized value is a name this build
+//     predates or a bug, and the orchestrator refuses to close a task on one
+//     at any position — reading it as 'done' on the last step would put a green
+//     verdict on a blueprint that actually aborted.
+//
+// A position we cannot read at all (chainPosition null — an unresolved plan
+// length) is the one genuine unknown. It reads as final, which is the
+// conservative direction for the two arms that care and irrelevant to the two
+// that don't.
 export type CompletionKind = 'done' | 'handoff' | 'stopped'
 
 export function completionKind(run: Conversation): CompletionKind | null {
   if (run.Status !== 'completed') return null
-  if (run.Outcome === 'abort') return 'stopped'
   const pos = chainPosition(run)
-  if (pos && !pos.isFinal) {
-    if (run.Outcome === 'continue') return 'handoff'
-    if (run.Outcome === 'finish') return 'done'
-    return 'stopped'
+  const isFinal = pos ? pos.isFinal : true
+  switch (run.Outcome) {
+    case 'continue':
+      return isFinal ? 'done' : 'handoff'
+    case 'finish':
+      return 'done'
+    case 'abort':
+      return 'stopped'
+    case '':
+    case undefined:
+      return isFinal ? 'done' : 'stopped'
+    default:
+      return 'stopped'
   }
-  return 'done'
 }
 
 // completionGloss — the plain-language line for a settled conversation, in one
@@ -119,9 +138,13 @@ export function completionGloss(run: Conversation): string {
   if (!kind) return ''
   const pos = chainPosition(run)
   if (kind === 'stopped') {
+    // Two ways to stop, and they are different news: the agent decided to,
+    // or it ended on nothing the workflow could act on (no outcome recorded,
+    // or one this build doesn't know). The rail prints the raw token beside
+    // this, so the second line doesn't repeat it.
     return run.Outcome === 'abort'
       ? 'stopped without finishing — the task stays open for a human'
-      : 'ended without handing off — the workflow stopped here for a human'
+      : 'ended without a usable outcome — the workflow stopped here for a human'
   }
   if (kind === 'handoff') {
     return `step ${pos!.step} of ${pos!.total} done — handed off to the next step`

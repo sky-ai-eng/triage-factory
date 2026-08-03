@@ -95,10 +95,16 @@ describe('stationState', () => {
       expect(state.light).toBe('var(--color-snooze)')
     })
 
-    it('lights a mid-chain step with no usable outcome amber too — nothing follows it', () => {
+    it('lights a mid-chain step with no recorded outcome amber too — nothing follows it', () => {
       // The orchestrator aborts the blueprint here, so a green DONE would be
       // the reported bug wearing a different outcome.
       expect(stationState(step(1, 4, '')).key).toBe('stopped')
+    })
+
+    it('never puts a success light on an outcome it cannot interpret', () => {
+      // Including on the LAST step, where the orchestrator still aborts.
+      expect(stationState(step(1, 4, 'from_the_future')).key).toBe('stopped')
+      expect(stationState(step(3, 4, 'from_the_future')).key).toBe('stopped')
     })
 
     it('falls back to the plain state word when the position is unknowable', () => {
