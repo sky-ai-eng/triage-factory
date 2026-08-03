@@ -1,6 +1,7 @@
 package promptseed
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -29,6 +30,30 @@ func TestShippedPromptsParse(t *testing.T) {
 		}
 		if p.Source != "system" {
 			t.Errorf("shipped prompt %s has non-system source %q", p.SystemSlug, p.Source)
+		}
+	}
+}
+
+// promptHole is the `{{SCREAMING_CASE}}` shape that reads as a slot something
+// is expected to fill. Braces around lowercase are left alone because they are
+// content elsewhere — the Jira formatting guidance teaches `{{monospace}}`,
+// which is Jira's own markup and belongs in front of the model verbatim.
+var promptHole = regexp.MustCompile(`\{\{[A-Z][A-Z0-9_]*\}\}`)
+
+// TestShippedPromptsAreLiteral holds the defaults to what a user can write.
+// A prompt row is user-editable, and what a user types is what the model reads,
+// so a shipped body that left a slot for something to fill would be an example
+// of a capability nobody could reproduce — and, with nothing filling it, brace
+// syntax rendered at the model.
+//
+// Everything a body needs is already addressable in prose: the task context
+// names the pull request and the event's own fields, the run context names the
+// run root and the branch convention, and `triagefactory exec …` resolves to the
+// run's binary.
+func TestShippedPromptsAreLiteral(t *testing.T) {
+	for _, p := range Prompts() {
+		if hole := promptHole.FindString(p.Body); hole != "" {
+			t.Errorf("shipped prompt %s leaves %s for something to fill; nothing does", p.SystemSlug, hole)
 		}
 	}
 }

@@ -1,4 +1,4 @@
-Slack interactions use `{{BINARY_PATH}} exec slack`. Your stdout is NOT visible to anyone in Slack — the ONLY human-visible channel you have is `exec slack send`. If you don't send a message, the user never learns what you did.
+Slack interactions use `triagefactory exec slack`. Your stdout is NOT visible to anyone in Slack — the ONLY human-visible channel you have is `exec slack send`. If you don't send a message, the user never learns what you did.
 
 Verbs:
 - `exec slack send --channel <C> [--thread-ts <TS>] (--body <md> | --body-file <path|->) [--attach-file <path|->]` — post a message. Body is optional when `--attach-file` is given (a file-only message is fine); at least one of the two is required. `--thread-ts` replies into an existing thread; omit it to post a new channel-root message. Returns `{"channel":..., "ts":...}` — keep the `ts` if you'll `edit`/`react` on this message later.
@@ -14,5 +14,5 @@ Rules:
 - Reply in the thread that triggered you. Your event metadata carries the channel and thread timestamp — pass them back explicitly on every call (`--channel`/`--thread-ts`); there is no implicit "current channel". Don't post to a channel's root unless the task actually asks for that.
 - Slack renders real Markdown (tables, code blocks, lists) via `send`/`edit` — write normally, no need to convert to Slack's legacy `mrkdwn` syntax.
 - These verbs are general-purpose: a GitHub- or Jira-triggered run may use them too, on any channel its team tracks — you aren't restricted to Slack-triggered runs.
-- Repos are acquired on demand, same as any other run: `{{BINARY_PATH}} exec workspace add <owner>/<repo>`.
-- Sign off with a link back to this run when it's useful for the reader to dig deeper: {{RUN_URL}} (omit the line entirely if that's blank — never fabricate a link).
+- Repos are acquired on demand, same as any other run: `triagefactory exec workspace add <owner>/<repo>`.
+- Sign off with a link back to this run when it's useful for the reader to dig deeper — <run_context> carries the URL. Omit the line entirely when it carries none; never fabricate a link.

@@ -1,4 +1,4 @@
-Jira interactions use `{{BINARY_PATH}} exec jira`. Run `{{BINARY_PATH}} exec jira --help` for the full command list, and `--help` on any subcommand for details.
+Jira interactions use `triagefactory exec jira`. Run `triagefactory exec jira --help` for the full command list, and `--help` on any subcommand for details.
 
 Workflows:
 - Inspect an issue: `exec jira ticket view <KEY>`, `exec jira ticket list-children <KEY>`, `exec jira ticket list-transitions <KEY>`.
@@ -12,18 +12,18 @@ Gotchas:
 
 # Workspace (per-run worktree materialization)
 
-Jira runs start with no codebase. Your initial cwd is the run-root — a throwaway directory with no git, no source, no `--repo` context. You decide which configured repo(s) the ticket belongs in and materialize a worktree per repo via `{{BINARY_PATH}} exec workspace`. Run `{{BINARY_PATH}} exec workspace --help` for the full surface.
+Jira runs start with no codebase. Your initial cwd is the run-root — a throwaway directory with no git, no source, no `--repo` context. You decide which configured repo(s) the ticket belongs in and materialize a worktree per repo via `triagefactory exec workspace`. Run `triagefactory exec workspace --help` for the full surface.
 
 Discovery:
-- `{{BINARY_PATH}} exec workspace list` — JSON inventory with two sections:
+- `triagefactory exec workspace list` — JSON inventory with two sections:
   - `available`: configured repos you could `add` but haven't yet, each with a `description` field (one-line upstream metadata, e.g. "Core API service") that's your strongest disambiguation signal when the ticket alone isn't conclusive
   - `materialized`: worktrees you've already added for this run, with their absolute paths and the checkout each landed on
   Run this first when the ticket text doesn't make the target repo obvious. The `available` section is your universe of options; `add` rejects anything outside it.
 
 Materialize (two separate Bash calls — do NOT chain with `cd "$(...)"`; the permission allowlist matches per-call and a `cd` wrapping a substitution is rejected as an unrecognized command shape, even though each piece on its own would pass):
-1. `{{BINARY_PATH}} exec workspace add <owner>/<repo>` — clones (or reuses the bare cache) and checks out the repo's default branch, DETACHED, then prints the absolute worktree path on stdout. `--ref <branch>` checks out an existing branch instead; `--pr <N>` checks out PR #N's head (fork-aware). Idempotent: a second `add` for the same repo prints the existing path without re-creating, so re-running on retry is safe.
+1. `triagefactory exec workspace add <owner>/<repo>` — clones (or reuses the bare cache) and checks out the repo's default branch, DETACHED, then prints the absolute worktree path on stdout. `--ref <branch>` checks out an existing branch instead; `--pr <N>` checks out PR #N's head (fork-aware). Idempotent: a second `add` for the same repo prints the existing path without re-creating, so re-running on retry is safe.
 2. In the next Bash call, `cd <printed-path>` — once you're inside the worktree you have a real git checkout: gh subcommands resolve via `.git/config` (no `--repo` needed), and you can use the full git/build/test toolchain.
-3. Before committing, create your own working branch: `git checkout -b {{BRANCH_TEMPLATE}}` (your team's convention — adapt the suffix to the work). Push it with `git push -u origin <your-branch>`. The exact name is yours to choose — push the branch you're on, never a base or protected one.
+3. Before committing, create your own working branch, named following your team's branch naming convention as <run_context> gives it (adapt the suffix to the work): `git checkout -b <your-branch>`. Push it with `git push -u origin <your-branch>`. The exact name is yours to choose — push the branch you're on, never a base or protected one.
 
 If the ticket spans multiple repos, repeat the pattern for each — they materialize as siblings under the run-root.
 
@@ -32,4 +32,4 @@ Failure modes:
 - "repo is not tracked by this team" — the repo is configured org-wide but not attached to your team; you can't materialize (or push to) it. Pick a tracked repo from `workspace list available`.
 - "repo has no clone URL on its profile; try re-profiling" — the user's repo profile is incomplete. Report `task_unsolvable` and surface the message; the user fixes it on the Settings page.
 
-Don't `cd` outside the materialized worktrees for code work. Files outside `{{RUN_ROOT}}` are blocked by the session's file-access scope, and the only writable area outside the worktrees is `{{RUN_ROOT}}/_tfac/` (which is where your run memory goes — see <entity_memory> in the envelope).
+Don't `cd` outside the materialized worktrees for code work. Files outside your run root (the absolute path <run_context> names) are blocked by the session's file-access scope, and the only writable area outside the worktrees is `_tfac/` directly under that root (which is where your run memory goes — see <entity_memory> in the envelope).

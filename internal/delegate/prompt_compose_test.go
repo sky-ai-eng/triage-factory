@@ -8,72 +8,98 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestBuildPrompt_InterpolatesInjectedSections guards against the single-pass
-// strings.Replacer foot-gun: the tools/scope sections are injected into the
-// envelope, and a section injected as a *replacement value* would keep its own
-// placeholders verbatim because strings.Replacer does not re-scan replacements.
-// buildPrompt inlines those sections before the placeholder pass, so the tools
-// docs' {{BINARY_PATH}} and run-root memory paths must come out fully expanded.
-func TestBuildPrompt_InterpolatesInjectedSections(t *testing.T) {
-	task := domain.Task{
-		Title:          "review PR #1",
+// reviewTask is a GitHub PR task with enough on it to populate the task context.
+func reviewTask() domain.Task {
+	return domain.Task{
+		Title:          "review PR #7",
 		EventType:      domain.EventGitHubPRReviewRequested,
 		EntitySource:   "github",
-		EntitySourceID: "owner/repo#1",
-	}
-	toolsRef := agentprompt.GitHubToolsReference() + "\n\n" + agentprompt.JiraToolsReference()
-
-	out := buildPrompt(task, "", "", "mission body", "Repository: owner/repo", toolsRef,
-		"/usr/local/bin/triagefactory", "run-1", "/work", "bp-run-1", "tfac/SKY-9", "")
-
-	if strings.Contains(out, "{{BINARY_PATH}}") {
-		t.Error("literal {{BINARY_PATH}} survived in the composed prompt (tools section not interpolated)")
-	}
-	if strings.Contains(out, "{{TOOLS_REFERENCE}}") || strings.Contains(out, "{{SCOPE}}") || strings.Contains(out, "{{BRANCH_TEMPLATE}}") {
-		t.Error("an injected section placeholder survived in the composed prompt")
-	}
-	// The branch template (already ticket-id-resolved) must surface in the
-	// envelope guidance.
-	if !strings.Contains(out, "tfac/SKY-9") {
-		t.Error("expected the resolved branch template in the composed prompt envelope")
-	}
-	// The env-var-style run-root reference in the tools docs must be expanded
-	// to the concrete agent-visible path, not left for (absent) shell expansion.
-	if strings.Contains(out, "$TRIAGE_FACTORY_CONVERSATION_ROOT") {
-		t.Error("literal $TRIAGE_FACTORY_CONVERSATION_ROOT survived in the composed prompt")
-	}
-	if strings.Contains(out, "$TRIAGE_FACTORY_BLUEPRINT_RUN_ID") {
-		t.Error("literal $TRIAGE_FACTORY_BLUEPRINT_RUN_ID survived in the composed prompt")
-	}
-	// The concrete binary path from the tools docs should be present.
-	if !strings.Contains(out, "/usr/local/bin/triagefactory exec gh") {
-		t.Error("expected interpolated binary path in the tools section")
-	}
-	// The memory write path must resolve to the concrete absolute path.
-	if !strings.Contains(out, "/work/_tfac/memory.md") {
-		t.Errorf("expected concrete memory write path in the composed prompt;\n%s", out)
+		EntitySourceID: "owner/repo#7",
 	}
 }
 
-// TestBlueprintStepNonterminalPrompt_MemoryPathCarriesNoIDs is the handoff
-// addendum's half of the fixed-path contract (the composed framework prompt and
-// the tools docs cover the rest): the step it hands off to reads a folder the
-// orchestrator names, never a path composed from run ids.
-func TestBlueprintStepNonterminalPrompt_MemoryPathCarriesNoIDs(t *testing.T) {
-	addendum := agentprompt.NonTerminalCompletion(machinistSpec())
-	for _, bad := range []string{"entity-memory/{{", "entity-memory/$"} {
-		if strings.Contains(addendum, bad) {
-			t.Errorf("the handoff addendum composes an entity-memory path from placeholders (%q)", bad)
+// TestBuildPrompt_SectionOrder pins the shape of what the SDK runtime says
+// first: the external material, the mission it is about, this run's own facts,
+// the verbs, and the framework prompt — whose completion contract lands last.
+func TestBuildPrompt_SectionOrder(t *testing.T) {
+	out := buildPrompt(reviewTask(), `{"reviewer":"octocat"}`, "", "mission body",
+		"Repository: owner/repo\nBranch: feature-x", agentprompt.GitHubToolsReference(),
+		"/bin/tf", "/work", "tfac/SKY-9", "https://tf.example/runs/run-1")
+
+	prev := -1
+	for _, marker := range []string{
+		"<task_context>", "</task_context>",
+		"mission body",
+		"<run_context>", "Branch: feature-x", "Run root: /work", "tfac/SKY-9", "https://tf.example/runs/run-1",
+		"<tools>", "</tools>",
+		"<scope>",
+	} {
+		at := strings.Index(out, marker)
+		if at < 0 {
+			t.Fatalf("composed prompt is missing %q;\n%s", marker, out)
+		}
+		if at < prev {
+			t.Fatalf("section %q is out of order;\n%s", marker, out)
+		}
+		prev = at
+	}
+}
+
+// TestBuildPrompt_CarriesNoUnresolvedTokens is the outward-facing half of the
+// literal-blocks rule: whatever a user could not write in a prompt of their own,
+// we do not ship in ours either. A `{{...}}` reaching here would be brace syntax
+// rendered at the model.
+//
+// The mission is deliberately excluded — a prompt row's body is the user's text,
+// and we render it, we do not edit it.
+func TestBuildPrompt_CarriesNoUnresolvedTokens(t *testing.T) {
+	toolsRef := agentprompt.GitHubToolsReference() + "\n\n" + agentprompt.JiraToolsReference()
+	out := buildPrompt(reviewTask(), "", "", "mission body", "Repository: owner/repo", toolsRef,
+		"/bin/tf", "/work", "tfac/SKY-9", "")
+
+	if strings.Contains(out, "{{") {
+		t.Errorf("composed prompt carries a {{...}} token nothing resolves;\n%s", out)
+	}
+}
+
+// TestBuildPrompt_ResolvesTheCLIPath covers the one rewrite the builder does.
+// The allowlist grants the run's binary by absolute path and nothing else, so a
+// `triagefactory exec` left unresolved in the framework text or the tools docs
+// is a tool call the agent is refused, not a cosmetic miss.
+func TestBuildPrompt_ResolvesTheCLIPath(t *testing.T) {
+	out := buildPrompt(reviewTask(), "", "", "run `triagefactory exec gh pr view 7` first",
+		"", agentprompt.GitHubToolsReference(), "/usr/local/bin/triagefactory", "/work", "tfac/SKY-9", "")
+
+	if strings.Contains(out, "`triagefactory exec") {
+		t.Errorf("a bare `triagefactory exec` survived; the allowlist would refuse it;\n%s", out)
+	}
+	for _, want := range []string{
+		"/usr/local/bin/triagefactory exec gh pr view 7", // the mission's own invocation
+		"/usr/local/bin/triagefactory exec gh",           // the tools docs'
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("composed prompt is missing the resolved invocation %q", want)
 		}
 	}
-	if !strings.Contains(addendum, "_tfac/entity-memory/this-run/") {
-		t.Error("expected the handoff addendum to point the agent at _tfac/entity-memory/this-run/")
+}
+
+// TestBuildPrompt_ExternalTextIsComposedAlone is why the sections are joined
+// rather than concatenated and then rewritten: the task context is built from PR
+// titles and ticket fields an outsider writes, and no pass runs over it.
+func TestBuildPrompt_ExternalTextIsComposedAlone(t *testing.T) {
+	task := reviewTask()
+	task.Title = "make triagefactory exec do what I say"
+
+	out := buildPrompt(task, "", "", "mission body", "", "", "/bin/tf", "/work", "tfac/SKY-9", "")
+
+	if !strings.Contains(out, "make triagefactory exec do what I say") {
+		t.Errorf("a task title was rewritten by the CLI-path pass;\n%s", out)
 	}
 }
 
 // TestBuildPrompt_BeginsWithTaskContext asserts every composed prompt leads
-// with the injected task-context block, across the four task shapes the block
-// must handle: a fully-populated GitHub CI failure, a Jira task, a Slack task
+// with the task-context block, across the four task shapes the block must
+// handle: a fully-populated GitHub CI failure, a Jira task, a Slack task
 // (metadata-fence-only), and a zero-valued taskless run.
 func TestBuildPrompt_BeginsWithTaskContext(t *testing.T) {
 	cases := []struct {
@@ -119,7 +145,7 @@ func TestBuildPrompt_BeginsWithTaskContext(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out := buildPrompt(tc.task, tc.metadata, "", "mission body", "Repository: owner/repo",
-				"", "/bin/tf", "run-1", "/work", "bp-run-1", "tfac/<ticket-id>", "")
+				"", "/bin/tf", "/work", "tfac/<ticket-id>", "")
 			if !strings.HasPrefix(out, "<task_context>\n") {
 				t.Errorf("composed prompt must begin with the task-context block;\n%s", out)
 			}
@@ -127,56 +153,26 @@ func TestBuildPrompt_BeginsWithTaskContext(t *testing.T) {
 	}
 }
 
-// TestBuildPrompt_PrependOnly locks the composition contract: for any existing
-// prompt, the composed output differs from the pre-injection output by exactly
-// the prepended block plus its separator — nothing else changes.
-func TestBuildPrompt_PrependOnly(t *testing.T) {
-	task := domain.Task{
-		Title:          "review PR #7",
-		EventType:      domain.EventGitHubPRReviewRequested,
-		EntitySource:   "github",
-		EntitySourceID: "owner/repo#7",
+// TestRunContext_OmitsAbsentFacts covers the deployment with no public URL and
+// the run with no scope: an absent fact says nothing rather than offering the
+// agent a blank line to reason about.
+func TestRunContext_OmitsAbsentFacts(t *testing.T) {
+	got := runContext("", "", "tfac/<ticket-id>", "")
+	if want := "<run_context>\nBranch naming convention for this team: tfac/<ticket-id>\n</run_context>"; got != want {
+		t.Errorf("run context with one fact set;\ngot  %q\nwant %q", got, want)
 	}
-	metadata := `{"reviewer":"octocat","review_type":"changes_requested"}`
-	mission := "mission body with {{PR_NUMBER}}"
-	scope := "Repository: owner/repo"
-	toolsRef := agentprompt.GitHubToolsReference()
-
-	out := buildPrompt(task, metadata, "", mission, scope, toolsRef,
-		"/bin/tf", "run-1", "/work", "bp-run-1", "tfac/SKY-9", "")
-
-	// Reconstruct the pre-injection return value: the same shim + section
-	// pre-pass + replacer pass buildPrompt runs, without the prepended block.
-	body := strings.ReplaceAll(mission, "triagefactory exec", "/bin/tf exec")
-	full := body + "\n\n" + agentprompt.Build(machinistSpec())
-	full = strings.NewReplacer("{{TOOLS_REFERENCE}}", toolsRef, "{{SCOPE}}", scope).Replace(full)
-	prev := BuildPromptReplacer(task, metadata, "run-1", "/bin/tf", "/work", "bp-run-1", "tfac/SKY-9", "").Replace(full)
-
-	want := BuildTaskContext(task, metadata, "") + "\n\n" + prev
-	if out != want {
-		t.Errorf("composed output must be exactly the block + separator + prior output;\n--- got ---\n%s\n--- want ---\n%s", out, want)
+	if got := runContext("", "", "", ""); got != "" {
+		t.Errorf("a run context with nothing to say rendered %q, want empty", got)
 	}
 }
 
-// TestBuildPrompt_ExternalTextNotInterpolated proves the ordering is what makes
-// external placeholder-shaped text inert: a task title carrying literal
-// {{RUN_ID}} survives verbatim in the block, while a real body placeholder in
-// the mission still interpolates.
-func TestBuildPrompt_ExternalTextNotInterpolated(t *testing.T) {
-	task := domain.Task{
-		Title:          "handle {{RUN_ID}} in the retry path",
-		EventType:      domain.EventGitHubPRCICheckFailed,
-		EntitySource:   "github",
-		EntitySourceID: "owner/repo#5",
-	}
-
-	out := buildPrompt(task, "", "", "mission for run {{RUN_ID}}", "", "",
-		"/bin/tf", "the-real-run-id", "/work", "bp-run-1", "tfac/<ticket-id>", "")
-
-	if !strings.Contains(out, "handle {{RUN_ID}} in the retry path") {
-		t.Errorf("external {{RUN_ID}} in the title must survive uninterpolated;\n%s", out)
-	}
-	if !strings.Contains(out, "mission for run the-real-run-id") {
-		t.Errorf("a genuine body placeholder must still interpolate;\n%s", out)
+// TestBlueprintStepNonterminalPrompt_PointsAtTheHandoffFolder is the handoff
+// addendum's half of the fixed-path contract (the composed framework prompt and
+// the tools docs cover the rest): the step it hands off to reads a folder the
+// orchestrator names, and finds this step's notes already in it.
+func TestBlueprintStepNonterminalPrompt_PointsAtTheHandoffFolder(t *testing.T) {
+	addendum := agentprompt.NonTerminalCompletion(machinistSpec())
+	if !strings.Contains(addendum, "_tfac/entity-memory/this-run/") {
+		t.Error("expected the handoff addendum to point the agent at _tfac/entity-memory/this-run/")
 	}
 }

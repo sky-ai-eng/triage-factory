@@ -1,4 +1,4 @@
-GitHub interactions use `{{BINARY_PATH}} exec gh`. Run `{{BINARY_PATH}} exec gh --help` for the full command list, and `--help` on any subcommand for details.
+GitHub interactions use `triagefactory exec gh`. Run `triagefactory exec gh --help` for the full command list, and `--help` on any subcommand for details.
 
 Workflows:
 - Inspect a PR: `exec gh pr view`, `exec gh pr diff`, `exec gh pr files`. Use `-v` for full review/comment bodies. `pr diff` does NOT print the whole diff — it persists it to `./_tfac/pr-diffs/<owner>__<repo>__<number>/` (a `full.diff` plus a `manifest.json`) and prints the manifest JSON. Read/Grep the `full_diff_path` from the manifest instead of expecting the diff on stdout; the manifest's `files` array gives you per-file status and +/- counts up front. The diff is framed against YOUR CHECKOUT — the commit your worktree is on, recorded as `head_sha` — not the live PR head, so what you read here is exactly what your review comments will anchor to. If the PR branch has new commits you don't have, the manifest sets `"stale": true` with `behind_by` and a `warning`: run `git pull` to update your checkout before reviewing if you want the current code (otherwise you'll review and comment on the older code you have in hand, which is valid but may already be addressed). Pass `--file <path>` to print just one file's diff inline, or `--stdout` to print the entire diff inline.
@@ -17,14 +17,14 @@ Repo target resolution:
 Gotchas:
 - `pr view`, `pr diff`, `pr files` all take `<pr_number>` as the positional argument. **`pr review-view` is different** — it takes `<review_id>` positional and the PR number as `--pr <pr_number>`. Review ids come from `pr view <pr_number> -v` -> `reviews[].id`. Canonical shape:
   ```
-  {{BINARY_PATH}} exec gh pr review-view <review_id> --pr <pr_number> -v
+  triagefactory exec gh pr review-view <review_id> --pr <pr_number> -v
   ```
   `pr thread-view` is also asymmetric: `<pr_number> <comment_id>` (two positionals, no `--pr` flag). When in doubt, run `--help` on the subcommand.
 - The `--body` for `finalize-review` should begin with a `##` title (e.g. "## Looks good — minor nits") followed by your summary. A top-level heading and metadata footer are added automatically; use `##` for yours.
-- `finalize-review` is the **last** call in a delegated review run. It drafts your review for human approval rather than posting it to GitHub directly (it does NOT submit to GitHub — the human's approval does) — your review (summary + inline comments) is staged TF-side and nothing reaches GitHub until a human approves. The response will be `{"status": "drafted_awaiting_approval", ...}`. After you see that response, do NOT call `finalize-review` again (the second call will hard-error). Write your `{{RUN_ROOT}}/_tfac/memory.md` memory file and return your completion JSON.
+- `finalize-review` is the **last** call in a delegated review run. It drafts your review for human approval rather than posting it to GitHub directly (it does NOT submit to GitHub — the human's approval does) — your review (summary + inline comments) is staged TF-side and nothing reaches GitHub until a human approves. The response will be `{"status": "drafted_awaiting_approval", ...}`. After you see that response, do NOT call `finalize-review` again (the second call will hard-error). Write your `_tfac/memory.md` memory file in your run root and return your completion JSON.
 - For multi-line `--body` arguments, use a heredoc:
   ```
-  {{BINARY_PATH}} exec gh pr add-review-comment <review_id> --file <path> --line <N> --severity <blocker|major|minor|clean> --body "$(cat <<'EOF'
+  triagefactory exec gh pr add-review-comment <review_id> --file <path> --line <N> --severity <blocker|major|minor|clean> --body "$(cat <<'EOF'
   Your comment here.
   Can span multiple lines, include "quotes", and code blocks.
   EOF

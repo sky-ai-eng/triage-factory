@@ -390,34 +390,33 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		return fail("failed to resolve own binary path: "+err.Error(), domain.RunFailureUnclassified)
 	}
 
-	// Load the primary event's metadata so buildPrompt can flatten its
-	// fields into named placeholders (WORKFLOW_RUN_ID, HEAD_SHA, etc.) —
-	// see placeholders.go. A DB failure here is non-fatal: the replacer
-	// just leaves event-derived placeholders empty. FKs guarantee the
-	// event exists, so a real miss would be a DB-level problem we want
-	// to log and continue through rather than aborting the run.
+	// Load the primary event's metadata so the task context can carry the
+	// event's own fields (workflow run id, head sha, check name, ...). A DB
+	// failure here is non-fatal: the block just renders without them. FKs
+	// guarantee the event exists, so a real miss would be a DB-level problem we
+	// want to log and continue through rather than aborting the run.
 	metadataJSON, err := s.events.GetMetadataSystem(context.Background(), orgID, task.PrimaryEventID)
 	if err != nil {
-		delegateLog.Warn("load event metadata for task failed; event placeholders will render empty", "task", task.ID, "event", task.PrimaryEventID, "error", err)
+		delegateLog.Warn("load event metadata for task failed; the task context will carry no event fields", "task", task.ID, "event", task.PrimaryEventID, "error", err)
 		metadataJSON = ""
 	}
 
 	// Resolve the paths the agent will actually observe, which differ from the
 	// host paths under the sandbox: the run-root is bind-mounted at "/work" and
-	// the TF binary at sandboxTFBinary. Pre-expanding these into the prompt is
-	// what makes the agent's file tools (no shell expansion) and its
-	// `{{BINARY_PATH}} exec ...` invocations resolve regardless of sandbox mode.
+	// the TF binary at sandboxTFBinary. The prompt states both concretely, which
+	// is what makes the agent's file tools (no shell expansion) and its
+	// `triagefactory exec ...` invocations resolve regardless of sandbox mode.
 	// selfBin itself stays the host path below for BuildAllowedToolsWithExtras —
 	// agentproc.Run rewrites the allowlist's binary path for the sandbox on its
 	// own (rewriteAllowedToolsForSandbox).
 	agentRunRoot := agentproc.AgentVisibleRoot(cfg.runRoot)
 	agentBin := agentproc.AgentVisibleBinary(selfBin)
 	// The team's branch-naming convention, ticket-id-resolved, surfaced to the
-	// agent as envelope guidance (TFAC-498). Not enforced — the push gate
+	// agent as run-context guidance (TFAC-498). Not enforced — the push gate
 	// authorizes whatever branch the worktree lands on.
 	branchTemplate := s.resolveBranchTemplate(context.Background(), task)
 	runURL := s.runURLFor(orgID, runID)
-	prompt := buildPrompt(task, metadataJSON, cfg.prSkeleton, mission, cfg.scope, cfg.toolsRef, agentBin, runID, agentRunRoot, namespace, branchTemplate, runURL)
+	prompt := buildPrompt(task, metadataJSON, cfg.prSkeleton, mission, cfg.scope, cfg.toolsRef, agentBin, agentRunRoot, branchTemplate, runURL)
 
 	s.updatePhase(orgID, runID, cfg.claimID, domain.ClaimPhaseAgentStarting)
 	if ctx.Err() != nil {

@@ -87,7 +87,7 @@ Skip the suggestion block when the fix spans lines outside the comment's range o
 </suggestions>
 
 <handoff>
-Write your findings to `{{RUN_ROOT}}/_tfac/review/{{BLUEPRINT_RUN_ID}}/correctness.json` as a single JSON object. This file is your entire deliverable — a later step reads it and posts the review. Use the absolute path; create the directory if needed.
+Write your findings to `_tfac/review/correctness.json`, under your run root, as a single JSON object. This file is your entire deliverable — a later step reads it and posts the review. Create the directory if needed.
 
 Schema:
 
@@ -118,7 +118,7 @@ If the change is sound, write `{"findings": [], "summary": "<short natural take 
 <process>
 1. Read the PR — title, body, and existing reviews, including their inline comments — so you don't repeat a point already raised.
 2. Read the diff, file by file if it's large.
-3. Run the passes in <how_to_find>. Read beyond the diff freely — surrounding source, callers, neighboring files — both to confirm a real bug and to kill a low-confidence one. A parallel security pass may have already written its findings to `{{RUN_ROOT}}/_tfac/review/{{BLUEPRINT_RUN_ID}}/security.json`; if it's there, skim it so you don't duplicate what it already flagged.
+3. Run the passes in <how_to_find>. Read beyond the diff freely — surrounding source, callers, neighboring files — both to confirm a real bug and to kill a low-confidence one. A parallel security pass may have already written its findings to `_tfac/review/security.json`; if it's there, skim it so you don't duplicate what it already flagged.
 4. Write the findings file per <handoff>.
 
 This task is read-only. Do not edit, stage, commit, or push anything, and do not post any part of the review yourself — that's a later step's job. The worktree exists for reading context.
