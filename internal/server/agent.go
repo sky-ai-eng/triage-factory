@@ -500,8 +500,10 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 // run's saved state was reaped after the retention window, so retrying won't
 // help — the client surfaces the clear error rather than a transient conflict.
 // A concluded conversation (ErrConversationConcluded) is 409 as well, but it
-// carries its own message: this conversation's blueprint was cancelled, which
-// is a permanent answer rather than a lost race the client should re-read.
+// carries its own message: this conversation's blueprint will never drive it
+// again (cancelled, or finished on a later step). That is a permanent answer
+// rather than a lost race the client should re-read — surface the text, don't
+// prompt a refresh.
 // A cross-pod signal whose owning executor never acked (ErrSignalAckTimeout,
 // TFAC-585) is 504 Gateway Timeout — the reply-leg contract's "run owner did
 // not acknowledge; the run may be mid-teardown" case; the UI already

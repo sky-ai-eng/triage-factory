@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -145,28 +146,77 @@ func TestFollowUpOnFinishedBlueprint_LeavesTheBlueprintAndTaskAlone(t *testing.T
 	}
 }
 
-// TestFollowUpOnFinishedBlueprint_NonFinalStepIsRefused: the snapshot key is
-// the blueprint run, one blob every step overwrites, so an earlier step would
-// rehydrate the last step's tree. The refusal is at the claim, which is where
-// it has to be — the conversation row alone reads perfectly resumable.
-func TestFollowUpOnFinishedBlueprint_NonFinalStepIsRefused(t *testing.T) {
+// TestFollowUpOnANonFinalStepIsRefused: the snapshot key is the blueprint run,
+// one blob every step overwrites, so an earlier step has no tree of its own left
+// to resume into. The refusal has to happen HERE, before the flip — the claim
+// gate declining afterwards is not a refusal, it is a row stranded mid-flight
+// that nothing will ever pick up.
+//
+// Every non-running terminal, and both runtimes. `aborted` is the one that
+// nearly got away: an aborted blueprint re-opens on resume, but only for the
+// conversation that carries the abort — the step it aborted ON, which is where
+// current_step_index already points. An EARLIER step of the same blueprint
+// concluded with `continue` and re-opens nothing, so waking it leaves the
+// blueprint terminal and its index pointing past the row.
+func TestFollowUpOnANonFinalStepIsRefused(t *testing.T) {
+	for _, tc := range []struct{ blueprint, outcome string }{
+		{"completed", "finish"},
+		{"aborted", "continue"},
+		{"failed", "continue"},
+	} {
+		for _, runtime := range []string{"sdk", "native"} {
+			t.Run(tc.blueprint+"/"+runtime, func(t *testing.T) {
+				paths.SetForTest(t, t.TempDir())
+				database := newDelegateTestDB(t)
+				seedRun(t, database, "r-earlier", "sess-earlier", t.TempDir())
+				if _, err := database.Exec(
+					`UPDATE conversations SET status='completed', outcome=? WHERE id='r-earlier'`, tc.outcome,
+				); err != nil {
+					t.Fatalf("conclude conversation: %v", err)
+				}
+				bpr := blueprintRunIDForRun(t, database, "r-earlier")
+				// The blueprint came to rest on step 1; this conversation is step 0.
+				finishBlueprint(t, database, bpr, tc.blueprint, 1)
+				s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+				if runtime == "native" {
+					markNative(t, database, "r-earlier")
+				}
+
+				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-earlier", runmode.LocalDefaultUserID, "one more thing")
+				if !errors.Is(err, ErrConversationConcluded) {
+					t.Fatalf("err = %v, want ErrConversationConcluded — a wake here strands the row for good", err)
+				}
+				if st := storedStatus(t, database, "r-earlier"); st != "completed" {
+					t.Errorf("stored status = %q, want completed — a refused wake writes nothing", st)
+				}
+				if gotStatus, gotStep := blueprintState(t, database, bpr); gotStatus != tc.blueprint || gotStep != 1 {
+					t.Errorf("blueprint = (%q, %d), want it untouched at (%q, 1)", gotStatus, gotStep, tc.blueprint)
+				}
+			})
+		}
+	}
+}
+
+// TestFollowUpOnTheAbortedStepItselfIsAccepted is the other half: the
+// conversation an aborted blueprint actually stopped on is where
+// current_step_index points, so it resumes — and re-opens its blueprint, which
+// is what distinguishes it from a blueprint that finished.
+func TestFollowUpOnTheAbortedStepItselfIsAccepted(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-earlier", "sess-earlier", t.TempDir())
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish' WHERE id='r-earlier'`); err != nil {
-		t.Fatalf("finish conversation: %v", err)
+	seedRun(t, database, "r-aborted", "sess-aborted", t.TempDir())
+	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort' WHERE id='r-aborted'`); err != nil {
+		t.Fatalf("abort conversation: %v", err)
 	}
-	bpr := blueprintRunIDForRun(t, database, "r-earlier")
-	// The blueprint ran on to step 1; this conversation is step 0.
-	finishBlueprint(t, database, bpr, "completed", 1)
+	bpr := blueprintRunIDForRun(t, database, "r-aborted")
+	finishBlueprint(t, database, bpr, "aborted", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-earlier", runmode.LocalDefaultUserID, "one more thing")
-	if err == nil {
-		t.Fatal("a non-final step of a finished blueprint accepted a follow-up; nothing would ever claim it")
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-aborted", runmode.LocalDefaultUserID, "pick it back up"); err != nil {
+		t.Fatalf("SendMessage on the step the blueprint aborted on: %v", err)
 	}
-	if st := storedStatus(t, database, "r-earlier"); st != "completed" {
-		t.Errorf("stored status = %q, want completed — a refused wake writes nothing", st)
+	if gotStatus, _ := blueprintState(t, database, bpr); gotStatus != "running" {
+		t.Errorf("blueprint status = %q, want running — an abort resumes its sequence", gotStatus)
 	}
 }
 

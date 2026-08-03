@@ -86,16 +86,20 @@ func injectionWillFlush(status, outcome string) bool {
 // nobody, counted as queue depth by every counter, forever — so this refuses
 // first rather than letting the flip land.
 //
-// It is blueprintDrivableForClaim plus one arm, and it has to stay that:
-// widening only the claim gate leaves the refusal here, and widening only this
-// strands the row. The extra arm is `aborted`, which passes because the resume
-// re-opens the blueprint to running in the same transaction as the flip — the
-// claim gate never sees an aborted blueprint on this path.
+// It is blueprintDrivableForClaim, exactly, and that identity is the whole
+// safety property: this predicate is allowed to be stricter than the claim gate
+// (a refused wake writes nothing), and never more permissive (a wake the claim
+// gate then declines is the strand this whole seam exists to prevent). Sharing
+// one function is the only way to keep that true through the next edit.
 //
-// What refuses is a blueprint that was called off. It leaves parked
-// conversations that read resumable from the conversation row alone and that
-// nothing will ever claim, and that is the whole of ErrConversationConcluded
-// now.
+// `aborted` needs no arm of its own. A blueprint aborts on the step it was
+// running, and no terminal write moves current_step_index, so the aborting
+// conversation IS the final step and the shared predicate already admits it.
+// An EARLIER step of that same aborted blueprint must be refused — the resume's
+// blueprint re-open is conditioned on the conversation's own completed+abort
+// terminal, so an earlier step (completed+continue, or parked open) would flip
+// to mid-flight with the blueprint still 'aborted' and its index still pointing
+// past it: claimable by nothing, forever.
 //
 // Admin-pool read on purpose: blueprint_runs RLS hides another user's manual
 // blueprint, and a teammate resuming a run must not be refused for a row they
@@ -109,12 +113,6 @@ func (s *Spawner) blueprintDrivableForResume(ctx context.Context, orgID string, 
 	br, err := s.blueprints.GetRunSystem(ctx, orgID, run.BlueprintRunID)
 	if err != nil {
 		delegateLog.Warn("resume: blueprint state lookup inconclusive; treating as drivable", "run", run.ID, "blueprint_run", run.BlueprintRunID, "error", err)
-		return true
-	}
-	if br == nil {
-		return true
-	}
-	if br.Status == domain.BlueprintRunStatusAborted && !br.CancelRequested {
 		return true
 	}
 	return blueprintDrivableForClaim(br, run.BlueprintStepIndex)

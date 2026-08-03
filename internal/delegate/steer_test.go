@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -178,6 +179,56 @@ func TestResumableState(t *testing.T) {
 		if got := resumableState(tc.status, tc.outcome); got != tc.want {
 			t.Errorf("resumableState(%q, %q) = %v, want %v", tc.status, tc.outcome, got, tc.want)
 		}
+	}
+}
+
+// TestBlueprintDrivableForClaim walks the gate the claim scan applies in SQL
+// and the dispatcher + resume pre-check apply in Go. The row that matters most
+// is the earlier step of a NON-running blueprint: it must refuse for every
+// terminal, `aborted` included. An aborted blueprint's own step resumes and
+// re-opens it, but an earlier one does not — the re-open is conditioned on the
+// conversation's completed+abort terminal, so waking an earlier step leaves the
+// blueprint terminal with current_step_index pointing past the row, and nothing
+// ever claims it.
+func TestBlueprintDrivableForClaim(t *testing.T) {
+	idx := func(i int) *int { return &i }
+	cases := []struct {
+		name      string
+		status    domain.BlueprintRunStatus
+		cancelReq bool
+		stepIndex *int // the conversation's; the blueprint rests at step 2
+		want      bool
+	}{
+		{"running drives any step", domain.BlueprintRunStatusRunning, false, idx(0), true},
+		{"running drives a nil step", domain.BlueprintRunStatusRunning, false, nil, true},
+		{"cancel_requested drives nothing", domain.BlueprintRunStatusRunning, true, idx(2), false},
+		{"cancelled terminal drives nothing", domain.BlueprintRunStatusCancelled, false, idx(2), false},
+
+		{"completed, final step", domain.BlueprintRunStatusCompleted, false, idx(2), true},
+		{"completed, earlier step", domain.BlueprintRunStatusCompleted, false, idx(0), false},
+		{"aborted, final step", domain.BlueprintRunStatusAborted, false, idx(2), true},
+		{"aborted, earlier step", domain.BlueprintRunStatusAborted, false, idx(0), false},
+		{"failed, final step", domain.BlueprintRunStatusFailed, false, idx(2), true},
+		{"failed, earlier step", domain.BlueprintRunStatusFailed, false, idx(0), false},
+
+		// A conversation that never recorded its position cannot prove it is
+		// the one holding the workspace — the Go spelling of the SQL's NULL
+		// comparison.
+		{"terminal, no step index", domain.BlueprintRunStatusCompleted, false, nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			br := &domain.BlueprintRun{Status: tc.status, CancelRequested: tc.cancelReq, CurrentStepIndex: 2}
+			if got := blueprintDrivableForClaim(br, tc.stepIndex); got != tc.want {
+				t.Errorf("blueprintDrivableForClaim = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// No blueprint parent (curator today, interactive tomorrow) is not this
+	// gate's business — it mirrors the SQL's LEFT JOIN, not an inner one.
+	if !blueprintDrivableForClaim(nil, nil) {
+		t.Error("a nil blueprint must be drivable")
 	}
 }
 
