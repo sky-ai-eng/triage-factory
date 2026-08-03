@@ -78,25 +78,36 @@ export function chainPosition(run: Conversation): ChainPosition | null {
 //
 //   - 'handoff' — a step of a chain that isn't the last one, whose part is done.
 //     Another step picks the work up; the task is NOT over.
-//   - 'stopped' — the agent aborted: it stopped without finishing and the task
-//     stays open for a human.
+//   - 'stopped' — the work stopped without finishing and the task stays open for
+//     a human: the agent aborted, or a non-final step ended with no usable
+//     hand-off.
 //   - 'done'    — the work is over. The chain's final step, a single-prompt run,
 //     or a step that deliberately ended the whole workflow early ('finish').
 //
 // Position, not outcome, is what separates the first from the third, because
 // `continue` is what an ORDINARY completion records — the native loop stamps it
 // on every step including the last (internal/agentloop), while under the SDK a
-// terminal step reports `finish`. Requiring an explicit `continue` for 'handoff'
-// keeps the two runtimes honest and leaves the ambiguous case ('' — an outcome
-// gate that exhausted its retries, which aborts the blueprint backend-side)
-// reading as plain 'done' rather than claiming a hand-off that never happened.
+// terminal step reports `finish`.
+//
+// For a non-final step this mirrors decideBlueprintStep
+// (internal/delegate/blueprint.go), which is a total function of the same two
+// inputs: `continue` advances, `finish` ends the workflow early, and everything
+// else — a missing outcome (the gate exhausted its retries) or a value it does
+// not recognize — aborts the blueprint. So the last arm is 'stopped', not a
+// hedge: the step's own row says `completed`, but nothing runs after it and a
+// human owns the task. Position we cannot read at all (chainPosition null) is
+// the one genuine unknown, and it reads as plain 'done' rather than guessing.
 export type CompletionKind = 'done' | 'handoff' | 'stopped'
 
 export function completionKind(run: Conversation): CompletionKind | null {
   if (run.Status !== 'completed') return null
   if (run.Outcome === 'abort') return 'stopped'
   const pos = chainPosition(run)
-  if (pos && !pos.isFinal && run.Outcome === 'continue') return 'handoff'
+  if (pos && !pos.isFinal) {
+    if (run.Outcome === 'continue') return 'handoff'
+    if (run.Outcome === 'finish') return 'done'
+    return 'stopped'
+  }
   return 'done'
 }
 
@@ -107,10 +118,17 @@ export function completionGloss(run: Conversation): string {
   const kind = completionKind(run)
   if (!kind) return ''
   const pos = chainPosition(run)
-  if (kind === 'stopped') return 'stopped without finishing — the task stays open for a human'
+  if (kind === 'stopped') {
+    return run.Outcome === 'abort'
+      ? 'stopped without finishing — the task stays open for a human'
+      : 'ended without handing off — the workflow stopped here for a human'
+  }
   if (kind === 'handoff') {
     return `step ${pos!.step} of ${pos!.total} done — handed off to the next step`
   }
+  // Only an explicit `finish` reaches this from mid-chain, so the sentence is
+  // safe to say: the agent chose to end the workflow. Every other non-final
+  // ending is 'stopped' above and must never be described as a deliberate one.
   if (pos && !pos.isFinal) return 'ended the workflow early — the later steps were skipped'
   if (pos) return `work complete — the last of ${pos.total} steps`
   return 'work complete'

@@ -132,12 +132,29 @@ describe('chain position and completion', () => {
     )
   })
 
-  it('claims no hand-off for a step that recorded no outcome at all', () => {
-    // The backend aborts the blueprint on this ("no-outcome"); asserting a
-    // hand-off that never happened would be the same lie in the other
-    // direction.
-    expect(completionKind(step(1, 4, { Outcome: '' }))).toBe('done')
-    expect(completionKind(step(1, 4))).toBe('done')
+  it('calls a non-final step with no usable outcome stopped, mirroring the orchestrator', () => {
+    // decideBlueprintStep aborts the blueprint on both of these ("no-outcome"
+    // / "unknown-outcome"), so nothing runs after the step and a human owns
+    // the task. Reading it as a hand-off would claim a successor that will
+    // never come; reading it as done would be the original bug.
+    for (const over of [{ Outcome: '' }, {}, { Outcome: 'from_the_future' }]) {
+      expect(completionKind(step(1, 4, over)), JSON.stringify(over)).toBe('stopped')
+    }
+    expect(completionGloss(step(1, 4, { Outcome: '' }))).toBe(
+      'ended without handing off — the workflow stopped here for a human',
+    )
+    // The abort keeps its own wording — the agent decided to stop, which is a
+    // different thing to tell the viewer than a step that just never said.
+    expect(completionGloss(step(1, 4, { Outcome: 'abort' }))).toBe(
+      'stopped without finishing — the task stays open for a human',
+    )
+  })
+
+  it('leaves the final step and the single-prompt run alone when the outcome is missing', () => {
+    // Same missing outcome, opposite disposition: decideBlueprintStep resolves
+    // it to a finish once there is no step left to hand off to.
+    expect(completionKind(step(3, 4, { Outcome: '' }))).toBe('done')
+    expect(completionKind(step(0, 1, { Outcome: '' }))).toBe('done')
   })
 
   it('separates an abort from a success wherever it lands in the chain', () => {

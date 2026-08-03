@@ -95,6 +95,12 @@ describe('stationState', () => {
       expect(state.light).toBe('var(--color-snooze)')
     })
 
+    it('lights a mid-chain step with no usable outcome amber too — nothing follows it', () => {
+      // The orchestrator aborts the blueprint here, so a green DONE would be
+      // the reported bug wearing a different outcome.
+      expect(stationState(step(1, 4, '')).key).toBe('stopped')
+    })
+
     it('falls back to the plain state word when the position is unknowable', () => {
       // blueprint_step_count 0 — the server could not resolve the plan.
       expect(stationState(step(1, 0, 'continue')).label).toBe('DONE')
