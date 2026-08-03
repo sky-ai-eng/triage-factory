@@ -34,10 +34,13 @@ import { readFileSync } from 'node:fs'
 // pass.
 //
 // Positions checked: `===`/`!==` comparisons and `case` arms — i.e. every place
-// a status name decides something. ASSIGNMENT positions are deliberately not
-// checked: the board and run view mint placeholder rows for un-spawned chain
-// steps whose `Status` is a client-side sentinel the server never sends, and
-// those are honest — nothing branches on the name.
+// a status name decides something. The name may be a bare literal or a `const`
+// alias holding one, since naming a ghost is what a reader does when they think
+// the name is worth keeping, and a guard that only sees inline literals rewards
+// exactly that. ASSIGNMENT positions are deliberately not checked: the board and
+// run view mint placeholder rows for un-spawned chain steps whose `Status` is a
+// client-side sentinel the server never sends, and those are honest — nothing
+// branches on the name.
 
 const VOCABULARY_SOURCE = new URL('../src/types.ts', import.meta.url)
 const VOCABULARY_DECLARATIONS = ['CLAIM_PHASES', 'TERMINAL_RUN_STATUSES', 'RUN_STATUSES']
@@ -100,6 +103,8 @@ export default {
     messages: {
       ghost:
         "'{{status}}' is not a conversation status, so this branch can never be taken. The vocabulary is owned by internal/domain/run_status.go and mirrored in src/types.ts (CLAIM_PHASES / TERMINAL_RUN_STATUSES / RUN_STATUSES): {{vocabulary}}.",
+      ghostAlias:
+        "{{alias}} is '{{status}}', which is not a conversation status, so this branch can never be taken. The vocabulary is owned by internal/domain/run_status.go and mirrored in src/types.ts (CLAIM_PHASES / TERMINAL_RUN_STATUSES / RUN_STATUSES): {{vocabulary}}.",
     },
   },
 
@@ -116,12 +121,44 @@ export default {
       if (!node) return null
       if (node.type === 'ChainExpression') return unwrap(node.expression)
       if (node.type === 'TSNonNullExpression') return unwrap(node.expression)
+      if (node.type === 'TSAsExpression') return unwrap(node.expression)
+      if (node.type === 'TSSatisfiesExpression') return unwrap(node.expression)
       return node
     }
 
-    function stringLiteral(node) {
+    // The status name a comparison operand carries: a bare literal, or a
+    // `const` alias holding one (`const CANCELLED = 'cancelled' as const`).
+    // Following the alias matters because the rule is otherwise trivially
+    // sidestepped by naming the ghost — and naming it is what a reader does
+    // when they think the name is worth keeping.
+    //
+    // Only same-file `const` initializers are followed. An imported constant,
+    // a property of a frozen map, a value computed at runtime: all invisible
+    // here, and all of them would need cross-file or type information to see.
+    // The `.Status` and RunStatusValue scoping is what makes those rare — a
+    // status that reaches a comparison still has to reach it through one of
+    // the two shapes above.
+    function statusValue(node) {
       const inner = unwrap(node)
-      return inner?.type === 'Literal' && typeof inner.value === 'string' ? inner : null
+      if (!inner) return null
+      if (inner.type === 'Literal' && typeof inner.value === 'string') {
+        return { node: inner, value: inner.value, alias: null }
+      }
+      if (inner.type !== 'Identifier') return null
+      const value = constStringValue(inner)
+      return value === null ? null : { node: inner, value, alias: inner.name }
+    }
+
+    // The string a `const` identifier was initialized with, or null for
+    // anything else — a `let` (rebindable), a destructured binding, an import,
+    // a non-literal initializer.
+    function constStringValue(identifier) {
+      const definition = resolveVariable(identifier)?.defs[0]
+      if (definition?.type !== 'Variable' || definition.parent?.kind !== 'const') return null
+      if (definition.node.id?.type !== 'Identifier') return null
+      const initializer = unwrap(definition.node.init)
+      if (initializer?.type !== 'Literal' || typeof initializer.value !== 'string') return null
+      return initializer.value
     }
 
     function resolveVariable(identifier) {
@@ -164,6 +201,12 @@ export default {
     }
 
     function isRunStatusExpression(node) {
+      if (!node) return false
+      // An explicit `as RunStatusValue` names the value the same way an
+      // annotation does, and it is how a wire field reaches a comparison.
+      if (node.type === 'TSAsExpression' && typeReferenceName(node.typeAnnotation) === STATUS_TYPE) {
+        return true
+      }
       const inner = unwrap(node)
       if (!inner) return false
       if (inner.type === 'MemberExpression') {
@@ -177,31 +220,40 @@ export default {
       return false
     }
 
+    // Which side of a comparison is the status being tested, and which is the
+    // name it is tested against. The subject is decided first: an identifier
+    // can be both a declared status and a const holding a string, and the
+    // declaration is the stronger signal — `const s: RunStatusValue = 'open'`
+    // compared against `'cancelled'` is the ghost, not the `'open'`.
+    function report(subject, operand) {
+      if (!isRunStatusExpression(subject)) return
+      const status = statusValue(operand)
+      if (!status || RUN_STATUS_VOCABULARY.has(status.value)) return
+      context.report({
+        node: status.node,
+        messageId: status.alias ? 'ghostAlias' : 'ghost',
+        data: { status: status.value, alias: status.alias, vocabulary: VOCABULARY },
+      })
+    }
+
     return {
       BinaryExpression(node) {
         if (!COMPARISON_OPERATORS.has(node.operator)) return
-        const left = stringLiteral(node.left)
-        const right = stringLiteral(node.right)
-        if (left && !right) checks.push({ literal: left, subject: node.right })
-        else if (right && !left) checks.push({ literal: right, subject: node.left })
+        checks.push({ left: node.left, right: node.right })
       },
 
       SwitchStatement(node) {
         for (const branch of node.cases) {
-          const literal = branch.test ? stringLiteral(branch.test) : null
-          if (literal) checks.push({ literal, subject: node.discriminant })
+          if (branch.test) checks.push({ left: node.discriminant, right: branch.test })
         }
       },
 
       'Program:exit'() {
-        for (const { literal, subject } of checks) {
-          if (RUN_STATUS_VOCABULARY.has(literal.value)) continue
-          if (!isRunStatusExpression(subject)) continue
-          context.report({
-            node: literal,
-            messageId: 'ghost',
-            data: { status: literal.value, vocabulary: VOCABULARY },
-          })
+        for (const { left, right } of checks) {
+          // A comparison of two statuses (`run.Status === other.Status`) names
+          // nothing, so neither ordering fires.
+          if (isRunStatusExpression(left)) report(left, right)
+          else report(right, left)
         }
       },
     }

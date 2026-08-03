@@ -29,6 +29,10 @@ const ruleTester = new RuleTester({
 // parse keeps a status added in Go from rewriting this file.
 const vocabulary = [...RUN_STATUS_VOCABULARY].join(', ')
 const ghost = (status) => ({ messageId: 'ghost', data: { status, vocabulary } })
+const ghostAlias = (status, alias) => ({
+  messageId: 'ghostAlias',
+  data: { status, alias, vocabulary },
+})
 
 describe('no-ghost-run-status', () => {
   it('reads the vocabulary out of the types.ts mirror', () => {
@@ -70,6 +74,14 @@ describe('no-ghost-run-status', () => {
         "const status = thing.status ?? 'idle'; if (status === 'cancelled') show()",
         // Claim OUTCOME, a third vocabulary that shares the word.
         "if (claim.outcome === 'cancelled') release()",
+        // A real status behind a const alias — the alias is fine, the name is
+        // what is checked.
+        "const OPEN = 'open' as const; if (run.Status === OPEN) park()",
+        // A const alias compared against the OTHER vocabularies: following the
+        // alias must not widen what the rule considers a conversation.
+        "const CANCELLED = 'cancelled'; if (request.status === CANCELLED) show()",
+        // Two statuses compared to each other name nothing at all.
+        'if (run.Status === step.Status) same()',
       ],
       invalid: [],
     })
@@ -111,6 +123,31 @@ describe('no-ghost-run-status', () => {
         // Declared after its caller: the reason the checks run at Program:exit.
         {
           code: "const bad = tone('x'); function tone(status: RunStatusValue) { return status === 'cancelled' }",
+          errors: [ghost('cancelled')],
+        },
+        // Behind a const alias — naming the ghost must not launder it.
+        {
+          code: "const CANCELLED = 'cancelled'; if (run.Status === CANCELLED) showCancelled()",
+          errors: [ghostAlias('cancelled', 'CANCELLED')],
+        },
+        {
+          code: "const UNSOLVABLE = 'task_unsolvable' as const; switch (run.Status) { case UNSOLVABLE: return 1 }",
+          errors: [ghostAlias('task_unsolvable', 'UNSOLVABLE')],
+        },
+        {
+          code: "const CANCELLED = 'cancelled'; function tone(status: RunStatusValue) { return status !== CANCELLED }",
+          errors: [ghostAlias('cancelled', 'CANCELLED')],
+        },
+        // A declared status compared against a ghost: the declaration decides
+        // which side is the subject, so its own initializer isn't mistaken for
+        // the name under test.
+        {
+          code: "const status: RunStatusValue = 'open'; if (status === 'cancelled') showCancelled()",
+          errors: [ghost('cancelled')],
+        },
+        // An `as RunStatusValue` cast names the value the same way.
+        {
+          code: "if (((claim.status ?? '') as RunStatusValue) === 'cancelled') show()",
           errors: [ghost('cancelled')],
         },
       ],
