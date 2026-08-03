@@ -25,17 +25,15 @@ const baseFraming = "Reference data about the task that fired this run. Values c
 // instructions to the agent:
 //
 //   - The prompt builders compose this block as its own section, so it is the
-//     one section neither the legacy-token sweep nor the CLI-path rewrite runs
-//     over.
+//     one section the CLI-path rewrite never runs over.
 //   - Every field value is flattened to a single line (singleLine), so an
 //     embedded newline can't forge an additional "- Label: value" entry.
 //   - The whole external region is bracketed by an unguessable BEGIN/END marker
 //     pair the framing names, so no value can forge a structural boundary (a
 //     stray </task_context>, a fake end marker) and escape the data region.
 //
-// metadataJSON is the primary event's metadata blob, the same value the
-// replacer receives — "" is fine and simply yields a block with no event
-// fields (and no raw-metadata fence).
+// metadataJSON is the primary event's metadata blob — "" is fine and simply
+// yields a block with no event fields (and no raw-metadata fence).
 //
 // skeleton is the pre-rendered PR history block (internal/prskeleton), or ""
 // for a task with no PR behind it. It is external content of exactly the same

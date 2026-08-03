@@ -58,7 +58,7 @@ When the fix is a single obviously-correct replacement that fits the comment's l
 </suggestions>
 
 <handoff>
-Write your findings to `_tfac/review/security.json`, under your run root, as a single JSON object. This file is your entire deliverable — a later step reads it and posts the review. Create the directory if needed.
+Write your findings to `_tfac/review/security.json` under your run root. Use the run root's ABSOLUTE path — `<run_context>` names it — because you may have cd'd into a subdirectory while reading code, and a relative `_tfac/` would then land somewhere the next step never looks. This file is your entire deliverable — a later step reads it and posts the review. Create the directory if needed.
 
 Schema:
 

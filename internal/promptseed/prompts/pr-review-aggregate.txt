@@ -6,7 +6,9 @@ The two findings files sit under your run root:
 
 Each is a JSON object: `{"findings": [ {file, line, start_line, severity, in_diff, body}, ... ], "summary": "..."}`. A file may be missing if that pass found nothing or did not run — treat a missing or unreadable file as `{"findings": [], "summary": ""}` and continue. Do not fail the run over a missing file. If either file is absent, write that JSON to its canonical path (`_tfac/review/security.json` or `…/correctness.json`) before proceeding, so the `jq` calls in STEP 4 always have a readable file at the expected location.
 
-Work through these steps in order. Use the Bash tool; `jq` is available.
+First, `cd` to your run root — `<run_context>` gives its absolute path. Every `_tfac/...` path below is relative to it, so the commands only resolve from there.
+
+Then work through these steps in order. Use the Bash tool; `jq` is available.
 
 STEP 1 — Read both files.
 Read security.json and correctness.json. Combine their `findings` arrays into one list (security findings first). Keep each finding's fields intact.
