@@ -62,7 +62,7 @@ describe('TelemetryRail token readouts', () => {
       conversation_id: 'r1',
       role: 'assistant',
       content: 'working',
-      subtype: 'text',
+      subtype: '',
       created_at: iso(0),
       input_tokens: 7,
       output_tokens: 7,

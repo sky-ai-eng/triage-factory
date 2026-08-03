@@ -45,7 +45,7 @@ function message(over: Partial<Message>): Message {
     conversation_id: RUN_ID,
     role: 'assistant',
     content: 'working',
-    subtype: 'text',
+    subtype: '',
     created_at: new Date(T0).toISOString(),
     ...over,
   }

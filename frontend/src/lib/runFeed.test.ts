@@ -9,7 +9,7 @@ function msg(over: Partial<Message>): Message {
     conversation_id: 'r1',
     role: 'assistant',
     content: '',
-    subtype: 'text',
+    subtype: '',
     tool_call_id: '',
     is_error: false,
     model: '',
