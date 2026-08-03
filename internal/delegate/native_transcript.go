@@ -59,8 +59,14 @@ func (t *nativeTranscript) Insert(ctx context.Context, orgID string, msg *domain
 		return 0, fmt.Errorf("insert message: %w", err)
 	}
 	msg.ID = int(id)
-	// An undelivered row is pending input, not transcript: broadcasting it
-	// would render a message the model has not been shown yet.
+	// An undelivered row written by the loop is machine-minted input — the
+	// opening turn, a repair notice — and rendering it would show the user a
+	// message nobody typed and the model has not been shown yet.
+	//
+	// Not a rule about undelivered rows in general: a user's follow-up is the
+	// same shape and IS broadcast, by the control-plane path that wrote it
+	// (queueFollowUp), because a person is waiting to see their own words. The
+	// distinction is who authored the row, not whether it has been delivered.
 	if msg.Delivered == nil || *msg.Delivered {
 		t.spawner.broadcastMessage(orgID, t.conversation, msg)
 	}

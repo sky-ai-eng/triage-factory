@@ -277,14 +277,7 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, run domain.Co
 	// id of 0, and the client dedups and orders by id, so two follow-ups would
 	// collapse into one and a later refetch would double them against their
 	// real ids.
-	pending := false
-	msg := &domain.Message{
-		ConversationID: run.ID,
-		UserID:         userID,
-		Role:           "user",
-		Content:        text,
-		Delivered:      &pending,
-	}
+	msg := pendingUserInput(run.ID, userID, text)
 	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
 		id, iErr := ts.Conversations.InsertMessage(ctx, orgID, msg)
 		if iErr != nil {
@@ -311,6 +304,37 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, run domain.Co
 		return nil
 	}
 	return s.wakeParked(ctx, orgID, run, userID)
+}
+
+// pendingUserInput builds the one row every input to a conversation takes: an
+// undelivered plain user message on its own transcript. That shape is not
+// cosmetic — it is the entire definition of the pending-input queue, matched by
+// RunPendingInputStore's `role='user' AND subtype=” AND delivered=false`
+// predicate, and no DB constraint backs it (a partial unique index on
+// undelivered user rows cannot exist on the shared messages table, because
+// curator conversations legitimately queue several).
+//
+// Both producers build the row here — a user's follow-up (queueFollowUp) and a
+// delegation's opening turn (mintOpeningTurn) — so the queue cannot end up with
+// two definitions of what it holds.
+//
+// What they do NOT share is the door they write through, and that difference is
+// deliberate rather than leftover. A follow-up arrives on the control plane
+// where no engagement exists yet, so it writes under the sending user's
+// synthetic claims and RLS is the gate. An opening turn is written by the
+// executor's own loop, a detached goroutine with no request claims at all,
+// where the claim fence is the gate instead (see nativeTranscript). Forcing one
+// call site would mean giving up the fence on one side or inventing claims on
+// the other; sharing the row is the part that was actually duplicated.
+func pendingUserInput(conversationID, userID, text string) *domain.Message {
+	pending := false
+	return &domain.Message{
+		ConversationID: conversationID,
+		UserID:         userID,
+		Role:           "user",
+		Content:        text,
+		Delivered:      &pending,
+	}
 }
 
 // drainsUndeliveredInput reports whether a conversation that is NOT parked will

@@ -153,3 +153,43 @@ func TestPrepareInheritedMemory_TrustsAClaimThatAlreadyRan(t *testing.T) {
 		})
 	}
 }
+
+// TestMintOpeningTurn_QueuesThePendingInputShape pins the half of the input
+// contract the loop owns. The opening turn is queued as an undelivered plain
+// user row — the same shape a follow-up takes, and the shape
+// RunPendingInputStore's predicate is written against — so the engagement's
+// entry really is just its first drain, with no first-call special case.
+//
+// It also pins the idempotence the gate exists for: a re-claim of a
+// conversation that has already spoken adds nothing, so a crash between this
+// insert and the first call cannot double the opening.
+func TestMintOpeningTurn_QueuesThePendingInputShape(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-open-turn", "", "/tmp/wt-open-turn")
+	markEngaged(t, database, "r-open-turn")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	transcript := newNativeTranscript(s, runmode.LocalDefaultOrgID, "r-open-turn", "")
+
+	ctx := context.Background()
+	if err := s.mintOpeningTurn(ctx, transcript, runmode.LocalDefaultOrgID, "r-open-turn", runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("mintOpeningTurn: %v", err)
+	}
+
+	rows := pendingRows(t, s, "r-open-turn")
+	if len(rows) != 1 {
+		t.Fatalf("undelivered rows = %d, want the opening turn waiting for the first drain", len(rows))
+	}
+	// The pending-input predicate, spelled out: anything else and the queue's
+	// reads stop seeing a row the loop is relying on.
+	if rows[0].Role != "user" || rows[0].Subtype != "" || rows[0].Content != openingTurn {
+		t.Errorf("opening turn = %+v, want a plain user row carrying openingTurn", rows[0])
+	}
+
+	// Re-claiming a conversation that has already spoken adds nothing.
+	if err := s.mintOpeningTurn(ctx, transcript, runmode.LocalDefaultOrgID, "r-open-turn", runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("second mintOpeningTurn: %v", err)
+	}
+	if got := pendingRows(t, s, "r-open-turn"); len(got) != 1 {
+		t.Errorf("undelivered rows after a re-claim = %d, want 1 — the opening must not double", len(got))
+	}
+}
