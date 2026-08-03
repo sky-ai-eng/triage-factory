@@ -11,8 +11,14 @@
 -- contract is kept consistent with the SQLite baseline so this stays the
 -- canonical Postgres entry point.)
 --
--- Future Postgres schema changes go in NEW NNN-numbered migration files in
--- this directory. NEVER edit this baseline. Down is a no-op.
+-- Editing policy: multi mode has not shipped, so there is no Postgres install
+-- anywhere to migrate and this baseline is MUTABLE. Schema changes are folded
+-- into it in place rather than amended by a follow-up file — the data model is
+-- still churning heavily, and one readable document beats a baseline plus a
+-- stack of diffs that never gets re-collapsed. (The SQLite twin is the
+-- opposite: local mode ships, so it takes forward migrations.) When multi mode
+-- ships this file freezes and further changes go in NEW NNN-numbered migration
+-- files in this directory. Down is a no-op.
 --
 -- === Deliberate cross-dialect divergence (do NOT "fix" in a later migration) ======
 -- This baseline and its SQLite twin
@@ -5542,16 +5548,11 @@ CREATE TABLE public.blueprint_runs (
     worktree_path text NOT NULL,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
-    -- entity_id (TFAC-579) denormalizes task_id's entity, backfilled from
-    -- tasks at insert time. Exists solely so
-    -- blueprint_runs_one_active_auto_run_per_entity below can express the
-    -- router's "at most one auto run in flight per entity" invariant as a
-    -- real DB constraint — the entity gate (HasActiveAutoRunForEntitySystem)
-    -- was check-then-act, so two processes (or two goroutines racing a
-    -- leader-failover overlap) could both pass the check and each mint an
-    -- active auto run on the same entity via different triggers. Nullable:
-    -- manual runs (trigger_type='manual') never populate it and never
-    -- participate in the partial index.
+    -- entity_id denormalizes task_id's entity, backfilled from tasks at
+    -- insert time. It keys no constraint — it is the cheap entity lens for
+    -- reads that want "which PR was this run about" without joining back
+    -- through tasks. Nullable: manual runs (trigger_type='manual') never
+    -- populate it.
     entity_id uuid,
     CONSTRAINT blueprint_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'completed'::text, 'aborted'::text, 'failed'::text, 'cancelled'::text]))),
     CONSTRAINT blueprint_runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL))))
@@ -5608,12 +5609,28 @@ CREATE INDEX idx_conversations_queued_preferred ON public.conversations (preferr
 -- at most one blueprint_run. Partial WHERE triggering_event_id IS NOT NULL so
 -- manual blueprint runs (NULL) never participate.
 CREATE UNIQUE INDEX blueprint_runs_event_trigger_fence ON public.blueprint_runs (triggering_event_id, trigger_id) WHERE (triggering_event_id IS NOT NULL);
--- One active auto (trigger_type='event') run per entity (TFAC-579). Partial
--- on entity_id IS NOT NULL so manual runs (which never populate it) never
--- collide. The insert (CreateRunIfNotFiredSystem) catches a violation here
--- the same way it already catches the event/trigger fence above — a lost
--- race translates to inserted=false, the same "clean skip" contract.
-CREATE UNIQUE INDEX blueprint_runs_one_active_auto_run_per_entity ON public.blueprint_runs (org_id, entity_id) WHERE (trigger_type = 'event'::text AND status = 'running'::text AND entity_id IS NOT NULL);
+-- One active auto (trigger_type='event') run per task — the DB-enforced twin
+-- of the router's in-process gate (HasActiveAutoRunForTaskSystem), which is
+-- check-then-act, so two processes (or two goroutines racing a leader-failover
+-- overlap) could both pass the check and each mint an active auto run on the
+-- same task via different triggers.
+--
+-- The task is the unit, not the entity. A task is one situation that needs
+-- attention — that is exactly what its (entity_id, event_type, dedup_key)
+-- dedup index means — so two tasks on one pull request may each have an agent
+-- in flight. Keying this on the entity also made a parked run load-bearing: a
+-- conversation-level stop parks its conversation and leaves the blueprint
+-- 'running' deliberately, so one stopped run held the only slot for the whole
+-- entity and silently halted every future automated firing on it.
+--
+-- Still scoped to trigger_type='event'. A second manual run on one task is
+-- deliberately allowed today; widening this to cover manual delegations
+-- requires re-delegation to first replace its predecessor.
+--
+-- A violation here is a DEFERRAL, not the event/trigger fence's clean skip:
+-- CreateRunIfNotFiredSystem translates it to db.ErrTaskBusyActiveAutoRun so
+-- the caller queues the intent instead of dropping it as a replay.
+CREATE UNIQUE INDEX blueprint_runs_one_active_auto_run_per_task ON public.blueprint_runs (org_id, task_id) WHERE (trigger_type = 'event'::text AND status = 'running'::text);
 
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
