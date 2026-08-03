@@ -171,7 +171,8 @@ func TestMintOpeningTurn_QueuesThePendingInputShape(t *testing.T) {
 	transcript := newNativeTranscript(s, runmode.LocalDefaultOrgID, "r-open-turn", "")
 
 	ctx := context.Background()
-	if err := s.mintOpeningTurn(ctx, transcript, runmode.LocalDefaultOrgID, "r-open-turn", runmode.LocalDefaultUserID); err != nil {
+	opening := "<task_context>\nPull request owner/repo#7\n</task_context>\n\nfix the failing check"
+	if err := s.mintOpeningTurn(ctx, transcript, runmode.LocalDefaultOrgID, "r-open-turn", runmode.LocalDefaultUserID, opening); err != nil {
 		t.Fatalf("mintOpeningTurn: %v", err)
 	}
 
@@ -181,12 +182,12 @@ func TestMintOpeningTurn_QueuesThePendingInputShape(t *testing.T) {
 	}
 	// The pending-input predicate, spelled out: anything else and the queue's
 	// reads stop seeing a row the loop is relying on.
-	if rows[0].Role != "user" || rows[0].Subtype != "" || rows[0].Content != openingTurn {
-		t.Errorf("opening turn = %+v, want a plain user row carrying openingTurn", rows[0])
+	if rows[0].Role != "user" || rows[0].Subtype != "" || rows[0].Content != opening {
+		t.Errorf("opening turn = %+v, want a plain user row carrying the composed mission", rows[0])
 	}
 
 	// Re-claiming a conversation that has already spoken adds nothing.
-	if err := s.mintOpeningTurn(ctx, transcript, runmode.LocalDefaultOrgID, "r-open-turn", runmode.LocalDefaultUserID); err != nil {
+	if err := s.mintOpeningTurn(ctx, transcript, runmode.LocalDefaultOrgID, "r-open-turn", runmode.LocalDefaultUserID, opening); err != nil {
 		t.Fatalf("second mintOpeningTurn: %v", err)
 	}
 	if got := pendingRows(t, s, "r-open-turn"); len(got) != 1 {

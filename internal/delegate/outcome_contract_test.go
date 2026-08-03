@@ -43,7 +43,7 @@ func TestNonterminalStepSysPrompt_PositionGated(t *testing.T) {
 // fragment below, which does). It also no longer mentions `yield` — that
 // vocabulary was removed.
 func TestTerminalContractHasNoContinue(t *testing.T) {
-	env := agentprompt.Build(machinistSpec(), agentprompt.Parts{})
+	env := agentprompt.Build(machinistSpec())
 	if strings.Contains(env, "continue") {
 		t.Errorf("terminal completion contract must not mention `continue`")
 	}

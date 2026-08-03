@@ -92,21 +92,20 @@ func composeBlocks(paths []string) string {
 	return strings.Join(sections, "\n\n")
 }
 
-// Build composes the agent-facing framework prompt for spec, then appends
-// whatever per-run text parts carries.
+// Build composes the agent-facing framework prompt for spec — the whole prompt
+// for a step that concludes the run. A step that hands off to a later one calls
+// BuildNonTerminalStep instead.
 //
 // The result is byte-identical for a fixed Spec (rule 3): the block set, the
-// arm each section takes, and the join are all functions of the Spec alone.
-// Under RuntimeSDK the composed text is the whole return value — the SDK
-// harness delivers mission and task context on channels the caller owns, so
-// Parts is ignored there and callers pass Parts{}, and the return is the
-// init-time string with no per-call work at all.
+// arm each section takes, and the join depend on nothing else. Per-run text has
+// no way in — the mission and the task context ride the opening turn — so this
+// returns the string composed at init.
 //
 // Panics on a Spec no arm covers. The Spec is assembled from typed constants
 // at a handful of call sites, so an unrepresentable combination is a wiring
 // bug that must fail on the first run rather than degrade a live agent's
 // instructions.
-func Build(spec Spec, parts Parts) string {
+func Build(spec Spec) string {
 	static, ok := staticPrompts[spec]
 	if !ok {
 		paths, err := manifest(spec)
@@ -115,39 +114,30 @@ func Build(spec Spec, parts Parts) string {
 		}
 		static = composeBlocks(paths)
 	}
-	tail := runParts(spec, parts)
-	if len(tail) == 0 {
-		return static + "\n"
-	}
-	return static + "\n\n" + strings.Join(tail, "\n\n") + "\n"
+	return static + "\n"
 }
 
-// runParts renders everything that follows the cached prefix, in order.
+// BuildNonTerminalStep composes the framework prompt for a blueprint step that
+// hands off to a later step instead of concluding the run: Build's text with
+// the handoff addendum appended.
 //
-// The handoff addendum leads it on the native runtime. That placement is the
-// whole reason it is not a block: it has to sit after the completion contract
-// it amends and before the per-run sections, and putting it inside the static
-// set would fork that set into terminal and non-terminal variants — two cache
-// entries for a few hundred bytes. The SDK reaches it through
-// NonTerminalCompletion instead, because its harness delivers the addendum on
-// a channel of its own.
-
-func runParts(spec Spec, parts Parts) []string {
+// The addendum is appended rather than composed into the block set. It still
+// lands after the completion contract it amends, and the static set stays one
+// cache entry instead of forking into terminal and non-terminal variants.
+//
+// Under RuntimeSDK this returns Build's text unchanged. Not a gap: that harness
+// takes the addendum on --append-system-prompt, so appending it here too would
+// send it twice.
+func BuildNonTerminalStep(spec Spec) string {
+	static := Build(spec)
 	if spec.Runtime != RuntimeNative {
-		return nil
+		return static
 	}
-	var out []string
-	if parts.NonTerminalStep {
-		if addendum := strings.TrimSpace(NonTerminalCompletion(spec)); addendum != "" {
-			out = append(out, addendum)
-		}
+	addendum := strings.TrimSpace(NonTerminalCompletion(spec))
+	if addendum == "" {
+		return static
 	}
-	for _, s := range []string{parts.RunContext, parts.TaskContext, parts.Mission} {
-		if t := strings.TrimSpace(s); t != "" {
-			out = append(out, t)
-		}
-	}
-	return out
+	return strings.TrimSuffix(static, "\n") + "\n\n" + addendum + "\n"
 }
 
 // nonTerminalCompletions is the handoff addendum per runtime, resolved once at
@@ -167,11 +157,9 @@ var nonTerminalCompletions = func() map[Runtime]string {
 // that hands off to a later blueprint step instead of concluding the run, or
 // "" when spec's runtime has no such block yet.
 //
-// This is a second entry point rather than a Parts flag because the SDK
-// delivers it as --append-system-prompt: a different channel, resolved at a
-// different point, from the composed prompt Build returns. Folding it into
-// Build would have to pick one of the two, and either choice moves text the
-// caller cannot move back.
+// It is exported alongside BuildNonTerminalStep because the SDK takes this text
+// on --append-system-prompt — a different channel from the composed prompt, so
+// that caller needs the addendum by itself.
 func NonTerminalCompletion(spec Spec) string {
 	return nonTerminalCompletions[spec.Runtime]
 }

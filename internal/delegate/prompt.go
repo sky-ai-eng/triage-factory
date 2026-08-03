@@ -177,7 +177,7 @@ func buildPrompt(task domain.Task, metadataJSON, skeleton, mission, scope, tools
 	// session, so rewrite those before interpolation. New prompts should
 	// use {{BINARY_PATH}} directly.
 	body := strings.ReplaceAll(mission, "triagefactory exec", binaryPath+" exec")
-	full := body + "\n\n" + agentprompt.Build(machinistSpec(), agentprompt.Parts{})
+	full := body + "\n\n" + agentprompt.Build(machinistSpec())
 
 	// Inline the scope and tools sections into the template text FIRST.
 	// strings.Replacer does a single non-re-scanning pass, so a section

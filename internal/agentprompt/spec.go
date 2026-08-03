@@ -23,8 +23,10 @@
 //     split it. A GPT set later is `identity/machinist.gpt.txt` plus a family
 //     arm in the manifest, not a new tree.
 //  3. Build is byte-identical for a fixed Spec, across runs and across
-//     processes — the cacheable-prefix property. Per-run text arrives in Parts
-//     and is appended after.
+//     processes — the cacheable-prefix property. Per-run text never arrives
+//     here: the mission, and the task context it is about, ride the
+//     conversation's opening turn instead. Nothing in this package takes an
+//     argument that could carry them.
 //  4. Mode is a parameter, not a package-level read. Build never calls
 //     runmode.Current(); the caller passes it. That keeps the package pure and
 //     both variants testable without env manipulation.
@@ -119,26 +121,4 @@ type Spec struct {
 	Runtime Runtime
 	Family  Family
 	Mode    Mode
-}
-
-// Parts is the per-run text a composed prompt carries after its static
-// prefix — never part of the cacheable region.
-//
-// The field set is deliberately identical to the native loop engine's
-// EnvelopeParts so that swapping its BuildSystemPrompt call for Build is
-// mechanical. Under RuntimeSDK the harness delivers this material through the
-// user message rather than the system prompt, so Build ignores every field and
-// SDK callers pass Parts{}; the SDK's own composition (mission first, then the
-// composed framework text) stays with the caller that owns those channels.
-type Parts struct {
-	// RunContext is the run-identifying preamble (run id, entity, repo).
-	RunContext string
-	// TaskContext is the system-rendered, externally-authored task block.
-	TaskContext string
-	// Mission is the resolved prompt-row body for this run or step.
-	Mission string
-	// HasBlueprint marks a run driven by a multi-step blueprint.
-	HasBlueprint bool
-	// NonTerminalStep marks a step that hands off rather than concluding.
-	NonTerminalStep bool
 }

@@ -69,7 +69,10 @@ func TestNativeLoop_LiveSmoke(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	tr := newMemTranscript(pendingUser("Read SECRET.txt in the working directory and tell me the answer it names. Then stop."))
+	// Production shape: the mission rides the opening turn, not the system
+	// prompt, so the seeded row is the whole of what this run is asked to do.
+	tr := newMemTranscript(pendingUser("Answer the user's question using your tools.\n\n" +
+		"Read SECRET.txt in the working directory and tell me the answer it names. Then stop."))
 	engine := &Engine{
 		Transcript: tr,
 		Credentials: &EnvCredentials{
@@ -89,15 +92,12 @@ func TestNativeLoop_LiveSmoke(t *testing.T) {
 		// that runs a live model against the real tool host, so it is also the
 		// only place the production prompt and the production tool schemas are
 		// put in front of a provider together.
-		SystemPrompt: agentprompt.Build(
-			agentprompt.Spec{
-				Surface: agentprompt.SurfaceMachinist,
-				Runtime: agentprompt.RuntimeNative,
-				Family:  agentprompt.FamilyClaude,
-				Mode:    agentprompt.ModeMulti,
-			},
-			agentprompt.Parts{Mission: "Answer the user's question using your tools."},
-		),
+		SystemPrompt: agentprompt.Build(agentprompt.Spec{
+			Surface: agentprompt.SurfaceMachinist,
+			Runtime: agentprompt.RuntimeNative,
+			Family:  agentprompt.FamilyClaude,
+			Mode:    agentprompt.ModeMulti,
+		}),
 		MaxIterations: 10,
 	})
 

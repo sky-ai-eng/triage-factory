@@ -53,7 +53,7 @@ func TestBuild_NativeRequiresMulti(t *testing.T) {
 			t.Error("Build did not panic on a Spec the manifest refuses")
 		}
 	}()
-	_ = Build(spec, Parts{})
+	_ = Build(spec)
 }
 
 // TestBuild_StableForSpec is the cacheable-prefix property (rule 3): a fixed
@@ -62,8 +62,8 @@ func TestBuild_NativeRequiresMulti(t *testing.T) {
 // prompt-cache write.
 func TestBuild_StableForSpec(t *testing.T) {
 	for _, spec := range allSpecs() {
-		first := Build(spec, Parts{})
-		second := Build(spec, Parts{})
+		first := Build(spec)
+		second := Build(spec)
 		if first != second {
 			t.Errorf("Build(%+v) is not stable across calls", spec)
 		}
@@ -79,8 +79,8 @@ func TestBuild_StableForSpec(t *testing.T) {
 // and only multi has an egress allowlist and a scoped per-run credential. A
 // single text serving both would have to assert something false in one.
 func TestBuild_ModeArmsDiverge(t *testing.T) {
-	local := Build(machinistSpec(ModeLocal), Parts{})
-	multi := Build(machinistSpec(ModeMulti), Parts{})
+	local := Build(machinistSpec(ModeLocal))
+	multi := Build(machinistSpec(ModeMulti))
 	if local == multi {
 		t.Fatal("ModeLocal and ModeMulti composed identical text; the mode arms are not wired")
 	}
@@ -97,33 +97,32 @@ func TestBuild_ModeArmsDiverge(t *testing.T) {
 	}
 }
 
-// TestBuild_SDKIgnoresParts pins the channel split: under the SDK runtime the
-// mission and task context reach the model through the caller's user message,
-// so Build's output must not vary with Parts — otherwise the same text would
-// arrive twice and the prefix would stop being static.
-func TestBuild_SDKIgnoresParts(t *testing.T) {
+// TestBuildNonTerminalStep_SDKIsUnchanged pins the channel split: the SDK
+// harness delivers the handoff addendum itself (--append-system-prompt), so
+// appending it to the composed text as well would send it twice.
+func TestBuildNonTerminalStep_SDKIsUnchanged(t *testing.T) {
 	spec := machinistSpec(ModeMulti)
-	bare := Build(spec, Parts{})
-	loaded := Build(spec, Parts{RunContext: "RC", TaskContext: "TC", Mission: "M", NonTerminalStep: true})
-	if bare != loaded {
-		t.Error("SDK Build varied with Parts; per-run text belongs in the caller's user message")
+	if Build(spec) != BuildNonTerminalStep(spec) {
+		t.Error("the SDK's non-terminal composition grew an addendum its harness already delivers")
 	}
 }
 
-// TestBuild_NativeAppendsParts pins the seam the native loop engine drops
-// into: its per-run material is carried in the framework prompt, appended
-// after the static prefix so the prefix stays cacheable.
-func TestBuild_NativeAppendsParts(t *testing.T) {
+// TestBuildNonTerminalStep_NativeAppendsOnlyTheAddendum pins what a native
+// composition may carry beyond the static blocks: the handoff addendum, and
+// nothing else. Everything about the particular run — the mission, the run
+// context, the externally-authored task block — reaches the model through the
+// opening turn instead, and this package takes no argument that could carry it.
+func TestBuildNonTerminalStep_NativeAppendsOnlyTheAddendum(t *testing.T) {
 	spec := Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti}
-	prefix := Build(spec, Parts{})
-	full := Build(spec, Parts{RunContext: "RUN-CTX", TaskContext: "TASK-CTX", Mission: "MISSION"})
-	if !strings.HasPrefix(full, strings.TrimSuffix(prefix, "\n")) {
-		t.Error("native Build did not keep the static composition as a prefix")
+	terminal := Build(spec)
+	handoff := BuildNonTerminalStep(spec)
+
+	addendum := strings.TrimSpace(block(blockCompletionNativeNT))
+	if want := strings.TrimSuffix(terminal, "\n") + "\n\n" + addendum + "\n"; handoff != want {
+		t.Errorf("a non-terminal step's prompt is not exactly the prefix plus the addendum;\ngot  %q\nwant %q", handoff, want)
 	}
-	for _, want := range []string{"RUN-CTX", "TASK-CTX", "MISSION"} {
-		if !strings.Contains(full, want) {
-			t.Errorf("native Build dropped %q", want)
-		}
+	if strings.Contains(terminal, addendum) {
+		t.Error("a terminal step carries the handoff addendum")
 	}
 }
 
@@ -249,29 +248,19 @@ func walkBlocks(t *testing.T) []string {
 }
 
 // TestBuild_NativeSectionOrder pins the one ordering that is load-bearing
-// rather than stylistic.
-//
-// The handoff addendum has to fall after the composed prefix and before the
-// per-run sections: it amends the completion contract, so it must be read
-// after it, and it must sit outside the cached region or the prefix forks into
-// terminal and non-terminal variants. The mission comes last so the
-// authoritative instruction is the most recent thing in the window, after the
-// externally-authored task context rather than before it.
+// rather than stylistic: the handoff addendum falls after the completion
+// contract it amends, and outside the cached region, so the prefix does not
+// fork into terminal and non-terminal variants.
 func TestBuild_NativeSectionOrder(t *testing.T) {
 	spec := Spec{Surface: SurfaceMachinist, Runtime: RuntimeNative, Family: FamilyClaude, Mode: ModeMulti}
-	got := Build(spec, Parts{
-		RunContext:      "RUN-CTX",
-		TaskContext:     "TASK-CTX",
-		Mission:         "MISSION",
-		NonTerminalStep: true,
-	})
-
-	identity := block(blockIdentityMachinistNv)
-	completion := block(blockCompletionNative)
-	addendum := strings.TrimSpace(block(blockCompletionNativeNT))
+	got := BuildNonTerminalStep(spec)
 
 	prev := -1
-	for _, section := range []string{identity, completion, addendum, "RUN-CTX", "TASK-CTX", "MISSION"} {
+	for _, section := range []string{
+		block(blockIdentityMachinistNv),
+		block(blockCompletionNative),
+		strings.TrimSpace(block(blockCompletionNativeNT)),
+	} {
 		at := strings.Index(got, section)
 		if at < 0 {
 			t.Fatalf("composed prompt is missing a section: %.40q", section)
@@ -280,13 +269,6 @@ func TestBuild_NativeSectionOrder(t *testing.T) {
 			t.Fatalf("section %.40q is out of order", section)
 		}
 		prev = at
-	}
-
-	// A terminal step must not carry the addendum at all; the two shapes differ
-	// only here, which is what lets them share one cached prefix.
-	terminal := Build(spec, Parts{Mission: "MISSION"})
-	if strings.Contains(terminal, addendum) {
-		t.Error("a terminal step carries the handoff addendum")
 	}
 }
 

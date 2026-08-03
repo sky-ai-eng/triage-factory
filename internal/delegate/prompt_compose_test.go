@@ -148,7 +148,7 @@ func TestBuildPrompt_PrependOnly(t *testing.T) {
 	// Reconstruct the pre-injection return value: the same shim + section
 	// pre-pass + replacer pass buildPrompt runs, without the prepended block.
 	body := strings.ReplaceAll(mission, "triagefactory exec", "/bin/tf exec")
-	full := body + "\n\n" + agentprompt.Build(machinistSpec(), agentprompt.Parts{})
+	full := body + "\n\n" + agentprompt.Build(machinistSpec())
 	full = strings.NewReplacer("{{TOOLS_REFERENCE}}", toolsRef, "{{SCOPE}}", scope).Replace(full)
 	prev := BuildPromptReplacer(task, metadata, "run-1", "/bin/tf", "/work", "bp-run-1", "tfac/SKY-9", "").Replace(full)
 

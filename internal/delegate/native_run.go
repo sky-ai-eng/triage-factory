@@ -77,10 +77,14 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID, owned)
 	}
 
-	systemPrompt, err := s.buildNativeSystemPrompt(ctx, task, mission, cfg, runID, namespace)
+	// Composed before the jail is launched, so the fallible half fails the claim
+	// without having cost a sandbox. The system prompt is the same for every
+	// native run; everything about this one rides the opening turn.
+	opening, err := s.buildNativeOpeningTurn(ctx, task, mission, cfg, runID, namespace)
 	if err != nil {
-		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "compose system prompt: "+err.Error(), domain.RunFailureUnclassified)
+		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "compose opening turn: "+err.Error(), domain.RunFailureUnclassified)
 	}
+	systemPrompt := nativeSystemPrompt(cfg.appendSysPrompt != "")
 
 	s.updatePhase(orgID, runID, cfg.claimID, domain.ClaimPhaseAgentStarting)
 	if ctx.Err() != nil {
@@ -142,7 +146,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	delegateLog.Info("native agent loop starting", "run", runID, "cwd", claudeCwd, "model", model)
 
 	transcript := newNativeTranscript(s, orgID, runID, cfg.claimID)
-	if err := s.mintOpeningTurn(ctx, transcript, orgID, runID, creatorUserID); err != nil {
+	if err := s.mintOpeningTurn(ctx, transcript, orgID, runID, creatorUserID, opening); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "run", runID, "claim", cfg.claimID)
 			return true
@@ -187,15 +191,8 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	return s.recordNativeResult(ctx, orgID, runID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, priorMemory)
 }
 
-// openingTurn is the delegation's first user message. The mission itself
-// rides the system prompt (it is part of the cacheable prefix), so this row
-// exists to open the conversation rather than to carry instructions — a
-// provider call needs at least one user message, and the loop has exactly
-// one way for input to arrive.
-const openingTurn = "Begin. Your mission and the contract you work under are in your instructions above."
-
-// mintOpeningTurn queues the opening turn when the conversation has no
-// transcript yet.
+// mintOpeningTurn queues the delegation's opening turn — the mission and the
+// task context it is about — when the conversation has no transcript yet.
 //
 // It is written pending, like every other input, so the engagement's entry
 // is just its first drain — there is no first-call special case anywhere in
@@ -203,7 +200,11 @@ const openingTurn = "Begin. Your mission and the contract you work under are in 
 // of a conversation that has already spoken adds nothing, and a crash
 // between this insert and the first call leaves the row for the next claim
 // to drain rather than losing the opening.
-func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Transcript, orgID, runID, creatorUserID string) error {
+//
+// One row, not several: the mission and the context it is about are one
+// statement of what to do. Compaction pins either shape — the anchored span is
+// every leading row before the first assistant turn — so either would work.
+func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Transcript, orgID, runID, creatorUserID, opening string) error {
 	rows, err := transcript.ListForAssembly(ctx, orgID, runID)
 	if err != nil {
 		return err
@@ -211,19 +212,30 @@ func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Tran
 	if len(rows) > 0 {
 		return nil
 	}
-	_, err = transcript.Insert(ctx, orgID, pendingUserInput(runID, creatorUserID, openingTurn))
+	_, err = transcript.Insert(ctx, orgID, pendingUserInput(runID, creatorUserID, opening))
 	return err
 }
 
-// buildNativeSystemPrompt assembles this run's system prompt: the composed
-// framework blocks for the native runtime, then the per-run sections.
+// nativeSystemPrompt is the run's whole system prompt: the composed framework
+// blocks, plus the handoff addendum when a later step follows this one.
 //
-// Interpolation runs on the mission alone, before the untrusted task-context
-// block joins it, so no externally-authored text is ever interpolated. That
-// ordering is a security property, not a style choice; see buildPrompt. The
-// framework blocks themselves carry no placeholders — the two values that vary
-// reach the model through RunContext.
-func (s *Spawner) buildNativeSystemPrompt(ctx context.Context, task domain.Task, mission string, cfg runConfig, runID, namespace string) (string, error) {
+// Nothing about the particular run is in it. The task context renders PR
+// titles, commit subjects and issue bodies — text an outsider can write, which
+// is why it carries untrusted markers — and text sitting inside the agent's own
+// instructions reads as instruction. It rides the opening turn instead, which
+// also leaves this prompt identical for every run with the same spec and step
+// position, so the cached prefix reaches the end of the instructions.
+func nativeSystemPrompt(nonTerminalStep bool) string {
+	if nonTerminalStep {
+		return agentprompt.BuildNonTerminalStep(nativeSpec())
+	}
+	return agentprompt.Build(nativeSpec())
+}
+
+// buildNativeOpeningTurn resolves this run's inputs and composes the
+// conversation's first user message. The fallible resolutions live here; the
+// composition itself is composeNativeOpeningTurn.
+func (s *Spawner) buildNativeOpeningTurn(ctx context.Context, task domain.Task, mission string, cfg runConfig, runID, namespace string) (string, error) {
 	selfBin, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("resolve own binary path: %w", err)
@@ -234,25 +246,36 @@ func (s *Spawner) buildNativeSystemPrompt(ctx context.Context, task domain.Task,
 			"task", task.ID, "event", task.PrimaryEventID, "error", err)
 		metadataJSON = ""
 	}
+	return composeNativeOpeningTurn(task, metadataJSON, cfg.prSkeleton, mission,
+		agentproc.AgentVisibleBinary(selfBin), runID, agentproc.AgentVisibleRoot(cfg.runRoot),
+		namespace, s.resolveBranchTemplate(ctx, task), s.runURLFor(cfg.orgID, runID)), nil
+}
 
-	agentBin := agentproc.AgentVisibleBinary(selfBin)
-	agentRunRoot := agentproc.AgentVisibleRoot(cfg.runRoot)
-	branchTemplate := s.resolveBranchTemplate(ctx, task)
-	runURL := s.runURLFor(cfg.orgID, runID)
+// composeNativeOpeningTurn assembles what the loop says first: run context,
+// task context, then the mission — the instruction last, after the external
+// material it is about.
+//
+// Interpolation runs on the mission alone, before the task context joins it, so
+// externally-authored text is never scanned for placeholders. That ordering is a
+// security property, not a style choice; buildPrompt does the same on the SDK
+// path.
+func composeNativeOpeningTurn(task domain.Task, metadataJSON, skeleton, mission, binaryPath, runID, runRoot, blueprintRunID, branchTemplate, runURL string) string {
+	// The same shim buildPrompt runs: prompts written against a `triagefactory`
+	// on PATH get the real binary location before interpolation.
+	body := strings.ReplaceAll(mission, "triagefactory exec", binaryPath+" exec")
+	replacer := BuildPromptReplacer(task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID, branchTemplate, runURL)
 
-	body := strings.ReplaceAll(mission, "triagefactory exec", agentBin+" exec")
-	replacer := BuildPromptReplacer(task, metadataJSON, runID, agentBin, agentRunRoot, namespace, branchTemplate, runURL)
-	return agentprompt.Build(nativeSpec(), agentprompt.Parts{
-		RunContext:  nativeRunContext(branchTemplate),
-		TaskContext: BuildTaskContext(task, metadataJSON, cfg.prSkeleton),
-		Mission:     replacer.Replace(body),
-		// A delegation always executes a blueprint — a single-step one is
-		// still one — so this path never builds the taskless shape. The
-		// distinction exists for the conversations the loop does not drive
-		// yet, where a person is present to be answered instead.
-		HasBlueprint:    true,
-		NonTerminalStep: cfg.appendSysPrompt != "",
-	}), nil
+	var sections []string
+	for _, section := range []string{
+		nativeRunContext(branchTemplate),
+		BuildTaskContext(task, metadataJSON, skeleton),
+		replacer.Replace(body),
+	} {
+		if trimmed := strings.TrimSpace(section); trimmed != "" {
+			sections = append(sections, trimmed)
+		}
+	}
+	return strings.Join(sections, "\n\n")
 }
 
 // nativeSpec is the prompt selector for every native engagement.
@@ -306,18 +329,18 @@ func (s *Spawner) prepareInheritedMemory(ctx context.Context, orgID, runID, cwd 
 	return fingerprintAgentMemoryFile(cwd)
 }
 
-// nativeRunContext renders the fact the standing envelope refers to but cannot
-// contain: the team's branch convention.
+// nativeRunContext renders the fact the standing framework prompt refers to but
+// cannot contain: the team's branch convention.
 //
-// It lives here rather than interpolated into the envelope because the
-// envelope's value is being byte-identical for every run in the fleet — one
-// cached prefix instead of per-run tokens. A line of genuinely per-run text
-// belongs in the part that was never going to be cached anyway. It is
-// system-authored, so unlike the task context it carries no untrusted markers.
+// It rides the opening turn because it is per-run text — a different team says
+// something different — and the framework prompt's value is being identical for
+// every run in the fleet. It is system-authored, so unlike the task context
+// beneath it, it carries no untrusted markers.
 //
 // The memory path used to be the second line here, assembled out of the run
 // root and TF's own primary keys. It is a fixed path now, so it says the same
-// thing for every run and has moved into the envelope where it is cached.
+// thing for every run and has moved into the framework blocks, where it is
+// cached.
 func nativeRunContext(branchTemplate string) string {
 	return "<run_context>\n" +
 		"Branch naming convention for this team: " + branchTemplate + "\n" +
