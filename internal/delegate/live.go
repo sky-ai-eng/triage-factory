@@ -438,12 +438,31 @@ func (s *Spawner) parkRunOpen(park liveParkContext, sessionID string) (fenced bo
 	// teardown still has to contribute, and it is the thing the follow-up
 	// needs. Flipping first and snapshotting after would leave a
 	// deliberately-stopped run with no workspace at all.
+	snapshotted := false
 	if park.claudeCwd != "" && park.namespace != "" {
 		if err := s.snapshotWorkspace(context.Background(), park.orgID, park.namespace, park.claudeCwd, sessionID); err != nil {
 			delegateLog.Warn("snapshot workspace before parking open failed", "run", park.runID, "error", err)
+		} else {
+			snapshotted = true
 		}
 	}
 	if fenced := s.markRunOpen(park); fenced {
+		// The fenced teardown's one contribution just landed, and it is the one
+		// a follow-up needs. The actor who stopped this run parked the row and
+		// announced `open` before the blob existed, so every watcher read it as
+		// unresumable and stopped asking — this says the workspace is here now.
+		//
+		// Two conditions, and both are about not announcing something untrue.
+		// A snapshot that actually succeeded, because there is otherwise
+		// nothing to announce. And a DELIBERATE park, because that is the
+		// refusal whose `open` is real: control recorded it on the user's
+		// behalf. The other refusal — a successor taking the conversation out
+		// from under a live engagement — leaves it running under someone else,
+		// and repeating a parked status there would be this teardown reporting
+		// a state that isn't the row's.
+		if snapshotted && park.reason.Deliberate() {
+			s.broadcastRunResumable(park.orgID, park.runID)
+		}
 		return true
 	}
 	// Only the idle park toasts. A deliberate stop terminates the blueprint

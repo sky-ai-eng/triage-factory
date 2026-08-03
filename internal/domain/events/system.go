@@ -135,6 +135,12 @@ type SystemConversationStatusMetadata struct {
 	ConversationID string `json:"conversation_id"`
 	Status         string `json:"status"`                 // the broadcast status string
 	FailureKind    string `json:"failure_kind,omitempty"` // set on the failed arm only
+	// Resumable rides the parked status when the run's workspace snapshot
+	// lands after the park was already announced — the moment a follow-up
+	// becomes possible, which no status change of its own marks. A pointer
+	// because absence means "unchanged, ask the run read", which is not the
+	// same claim as false.
+	Resumable *bool `json:"resumable,omitempty"`
 }
 
 // No predicate fields — fires once per instance, users can only enable / disable.

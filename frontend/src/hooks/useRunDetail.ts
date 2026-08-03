@@ -496,6 +496,16 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           if (isPermissionTerminalStatus(event.data.status ?? '')) {
             dropRun(runID)
           }
+          // `resumable` rides a status the row may already have — a workspace
+          // snapshot landing after the park was announced, or (later) a
+          // retention sweep collecting one. Apply it to the held row before the
+          // refetch below returns, so the composer enables (or disables) on the
+          // frame rather than on the round-trip. The refetch is still the
+          // authority and overwrites this.
+          const resumable = event.data.resumable
+          if (resumable !== undefined) {
+            setRun((prev) => (prev ? { ...prev, resumable } : prev))
+          }
           fetch(`/api/agent/conversations/${runID}`)
             .then((r) => (r.ok ? r.json() : null))
             .then((data: Conversation | null) => {

@@ -1289,6 +1289,44 @@ func (s *Spawner) broadcastRunUpdate(orgID, runID, status string) {
 	})
 }
 
+// broadcastRunResumable is broadcastRunUpdate's late-workspace arm: the same
+// conversation_update carrying the parked status the row already has, plus the
+// one thing that changed — the workspace snapshot exists, so a follow-up can
+// land now.
+//
+// It closes a window nothing else can. A cross-pod stop parks the row and
+// announces `open` from control, seconds before the executor's teardown writes
+// the snapshot; between those two moments the run read honestly answers "not
+// resumable", and without this the browser would keep that answer until
+// someone reloaded the page.
+//
+// The status rides along rather than a new event type because resumability is
+// an attribute of the already-announced park, not a new situation — the same
+// shape broadcastRunFailed uses for failure_kind, and it makes the field
+// two-way: a retention sweep that collects the snapshot can announce
+// `resumable: false` the same way, disabling an open composer live instead of
+// failing on send. Consumers must therefore merge a repeated `open`
+// idempotently; nothing may read this as a transition.
+//
+// The hub's cross-pod backplane is what puts it in front of a browser attached
+// to some other pod, so the executor emitting it is enough.
+func (s *Spawner) broadcastRunResumable(orgID, runID string) {
+	if s.wsHub != nil {
+		s.wsHub.Broadcast(websocket.Event{
+			Type:           "conversation_update",
+			OrgID:          orgID,
+			ConversationID: runID,
+			Data:           map[string]any{"status": domain.StatusOpen, "resumable": true},
+		})
+	}
+	resumable := true
+	s.publishEvent(orgID, domain.EventSystemConversationStatus, events.SystemConversationStatusMetadata{
+		ConversationID: runID,
+		Status:         domain.StatusOpen,
+		Resumable:      &resumable,
+	})
+}
+
 // broadcastRunFailed is broadcastRunUpdate's failure arm: the same
 // agent_run_update event with the machine-readable failure kind
 // alongside the status flip, so the frontend can render kind-specific

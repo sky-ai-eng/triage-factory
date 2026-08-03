@@ -29,6 +29,44 @@ import (
 // state.
 var ErrRunNotSteerable = errors.New("run is not steerable")
 
+// The SDK-only resume preconditions, as errors rather than formatted strings so
+// the one ladder can hand them back by name. Each is a row that cannot be
+// resumed at all — no session to re-invoke, no tree to re-invoke it in, no
+// model to re-invoke it on — so they read as internal faults (500) rather than
+// as a state the client should re-read.
+var (
+	errResumeNoSessionID    = errors.New("run has no session id; cannot resume")
+	errResumeNoWorktreePath = errors.New("run has no worktree path; cannot resume")
+	errResumeNoModel        = errors.New("run has no model; cannot resume")
+)
+
+// The refusal ladder's rungs, named. A rung travels two ways from the single
+// walk in followUpBlock: SendMessage turns it into the error a refused send
+// returns, and ResumabilityFor hands the same value to the run detail read,
+// where the composer renders it as the reason it is disabled. That is the whole
+// reason the ladder answers with a value instead of only an error — a client
+// that has to infer "can a follow-up land?" from status alone gets it wrong for
+// every row whose workspace or blueprint says otherwise.
+//
+// Empty means no refusal: a message lands.
+const (
+	// ResumeBlockedNotSteerable — the conversation is resting somewhere no wake
+	// reaches and nothing is draining its queue (a failed run).
+	ResumeBlockedNotSteerable = "not_steerable"
+	// ResumeBlockedSessionMissing / WorktreeMissing / ModelMissing — an SDK row
+	// missing one of the three fields its resume re-invokes a Claude session
+	// with. Never a native conversation: its messages ARE its resume state.
+	ResumeBlockedSessionMissing  = "session_missing"
+	ResumeBlockedWorktreeMissing = "worktree_missing"
+	ResumeBlockedModelMissing    = "model_missing"
+	// ResumeBlockedWorkspaceExpired — no warm worktree and no snapshot. Gone for
+	// good; no later release brings it back.
+	ResumeBlockedWorkspaceExpired = "workspace_expired"
+	// ResumeBlockedBlueprintConcluded — the workspace survives but nothing would
+	// drive it: the blueprint was cancelled, or it finished on a later step.
+	ResumeBlockedBlueprintConcluded = "blueprint_concluded"
+)
+
 // resumableState reports whether a run with no warm process can be woken by a
 // follow-up message. Two stored states qualify, and between them they are every
 // non-failed rung a conversation can come to rest on:
@@ -248,21 +286,17 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, run domain.Co
 		return fmt.Errorf("send: empty user id")
 	}
 
-	// The gate: a conversation takes a message when it is resting somewhere a
-	// wake can reach (resumableState) or when something is already reading its
-	// queue. `failed` is neither — its workspace did not survive, so there is
-	// nothing to say a message to.
+	// The gate, refused BEFORE the row is written: a queued message nothing will
+	// ever deliver is worse than a refusal. followUpBlock is the same walk the
+	// run read serves `resumable` from, so a composer the server left live and a
+	// send the server accepts are the same decision made once.
+	if block := s.followUpBlock(ctx, orgID, &run); block != "" {
+		return blockedFollowUpError(block)
+	}
+	// Past the gate, the only question left is which half accepted it: a
+	// conversation resting somewhere a wake reaches needs the flip below, and
+	// one whose driver already drains its queue needs nothing further.
 	wake := resumableState(run.Status, run.Outcome)
-	if !wake && !drainsUndeliveredInput(run) {
-		return ErrRunNotSteerable
-	}
-	// Refuse BEFORE the row is written: a queued message nothing will ever
-	// deliver is worse than a refusal.
-	if wake {
-		if err := s.refuseUnwakeableFollowUp(ctx, orgID, &run); err != nil {
-			return err
-		}
-	}
 
 	// The write, and it is an ordinary transcript insert whatever the runtime —
 	// the queue IS the transcript's undelivered tail (role='user', blank
@@ -358,15 +392,86 @@ func drainsUndeliveredInput(run domain.Conversation) bool {
 	return domain.IsActiveRunStatus(run.Status) || run.Status == domain.StatusQueued
 }
 
-// refuseUnwakeableFollowUp walks the refusals a parked conversation has to
+// followUpBlock is the whole read-only gate a follow-up passes before anything
+// is written: may a message land on this conversation, and if not, why not.
+//
+// One walk, two readers. queueFollowUp turns the answer into the error a
+// refused send returns; ResumabilityFor hands it to the run detail read so the
+// composer can be disabled with the same reason instead of accepting text that
+// will 409 on send. Sharing the walk is the point — the client cannot see two
+// of the three inputs (workspace survival, blueprint drivability), so any
+// second copy of this is a copy that drifts.
+//
+// The split below is SendMessage's own: a conversation resting somewhere a wake
+// reaches walks the refusal ladder, and one that is not resting there takes a
+// message only if something is already draining its queue.
+func (s *Spawner) followUpBlock(ctx context.Context, orgID string, run *domain.Conversation) string {
+	if !resumableState(run.Status, run.Outcome) {
+		if drainsUndeliveredInput(*run) {
+			return ""
+		}
+		return ResumeBlockedNotSteerable
+	}
+	return s.unwakeableFollowUpBlock(ctx, orgID, run)
+}
+
+// blockedFollowUpError is the error a refusal reaches the HTTP layer as.
+// steerErrorStatus maps these onto statuses; the reasons the server also puts
+// on the run read are the same rungs by another name, so a composer disabled
+// for `workspace_expired` and a send refused with 410 cannot disagree.
+func blockedFollowUpError(block string) error {
+	switch block {
+	case "":
+		return nil
+	case ResumeBlockedSessionMissing:
+		return errResumeNoSessionID
+	case ResumeBlockedWorktreeMissing:
+		return errResumeNoWorktreePath
+	case ResumeBlockedModelMissing:
+		return errResumeNoModel
+	case ResumeBlockedWorkspaceExpired:
+		return ErrWorkspaceExpired
+	case ResumeBlockedBlueprintConcluded:
+		return ErrConversationConcluded
+	default:
+		return ErrRunNotSteerable
+	}
+}
+
+// ResumabilityFor answers, for one conversation, the question the composer
+// needs and the client cannot compute: will a follow-up be accepted? ok=false
+// carries the rung that refused it — the same value SendMessage's refusal is
+// built from, read off the same walk.
+//
+// A read, not a promise. It is the state at read time, and two users can race
+// or a retention sweep can collect the snapshot between this answer and the
+// send; the 409/410 on SendMessage stays the enforcement. This just stops the
+// UI offering an input that has no chance.
+//
+// An active conversation is steerable by a route this gate never sees — its
+// live process takes the text directly — so it answers yes without walking
+// anything. The detail read skips active rows anyway; this keeps the function
+// total for anyone who doesn't.
+func (s *Spawner) ResumabilityFor(ctx context.Context, orgID string, run *domain.Conversation) (ok bool, reason string) {
+	if run == nil {
+		return false, ResumeBlockedNotSteerable
+	}
+	if domain.IsActiveRunStatus(run.Status) {
+		return true, ""
+	}
+	block := s.followUpBlock(ctx, orgID, run)
+	return block == "", block
+}
+
+// unwakeableFollowUpBlock walks the refusals a parked conversation has to
 // survive before a wake is worth writing, most-permanent-first — because all of
 // them are true of rows that look identically resumable from the conversation
 // alone, and only the most permanent one is worth telling a person about.
 //
 // One ladder for both runtimes, so a given row gets the same answer for the
-// same reason whatever drives it. The SDK-only block at the top is the sole
-// exception, and it is named rather than implied.
-func (s *Spawner) refuseUnwakeableFollowUp(ctx context.Context, orgID string, run *domain.Conversation) error {
+// same reason whatever drives it. The SDK-only rungs at the top are the sole
+// exception, and they are named rather than implied.
+func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, run *domain.Conversation) string {
 	// The SDK's resume re-invokes a Claude session BY ID, in the tree it ran in,
 	// on the model it started with — a config change between the original
 	// invocation and this wake must not switch models underneath one logical
@@ -375,13 +480,13 @@ func (s *Spawner) refuseUnwakeableFollowUp(ctx context.Context, orgID string, ru
 	// the resume state, replayed into a fresh invocation by the loop itself.
 	if run.Runtime != domain.ConversationRuntimeNative {
 		if run.SessionID == "" {
-			return fmt.Errorf("run has no session id; cannot resume")
+			return ResumeBlockedSessionMissing
 		}
 		if run.WorktreePath == "" {
-			return fmt.Errorf("run has no worktree path; cannot resume")
+			return ResumeBlockedWorktreeMissing
 		}
 		if run.Model == "" {
-			return fmt.Errorf("run has no model; cannot resume")
+			return ResumeBlockedModelMissing
 		}
 	}
 	// A workspace reaped by the retention TTL is gone for good: no warm
@@ -393,7 +498,7 @@ func (s *Spawner) refuseUnwakeableFollowUp(ctx context.Context, orgID string, ru
 	// path discarded the snapshot on its way out, so a migrated row has no
 	// workspace by construction and inherits exactly this answer.
 	if !s.workspaceRecoverable(ctx, orgID, run) {
-		return ErrWorkspaceExpired
+		return ResumeBlockedWorkspaceExpired
 	}
 	// The workspace survives but nothing would drive it — the blueprint was
 	// cancelled, or it finished on a later step and this is not the conversation
@@ -401,9 +506,9 @@ func (s *Spawner) refuseUnwakeableFollowUp(ctx context.Context, orgID string, ru
 	// than the workspace, and a person whose workspace is gone is better served
 	// by hearing that.
 	if !s.blueprintDrivableForResume(ctx, orgID, run) {
-		return ErrConversationConcluded
+		return ResumeBlockedBlueprintConcluded
 	}
-	return nil
+	return ""
 }
 
 // wakeParked flips a parked conversation back to `queued` so the dispatcher

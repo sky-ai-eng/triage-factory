@@ -157,13 +157,54 @@ export function completionGloss(run: Conversation): string {
   return 'work complete'
 }
 
-// isResumableRun mirrors the backend resumableState gate: a run with no live
-// turn can still take a follow-up message (waking a durable resume) when it
-// parked `open`, or aborted (completed + outcome='abort'). A finish run
-// (completed + outcome='finish') is excluded. The composer keys off this so
-// the same 409-refresh path covers every resumable state.
+// isResumableRun mirrors the backend resumableState gate — the STATUS half of
+// resumability, and the cheap first cut only. A run with no live turn can be
+// woken by a follow-up when it parked `open` or when it concluded: an abort is
+// work a human picks back up, a finish is work a human follows up on, and both
+// have a workspace to land in because every completed terminal snapshots.
+// `failed` is the exclusion — the infrastructure under it died, so there is no
+// tree to rehydrate.
+//
+// Outcome no longer discriminates, which is why this reads as status alone.
+//
+// Status is one of three inputs, and the only one the client can see: whether
+// the workspace survived and whether anything would drive it are server-side
+// facts. So this is never the whole answer — use canResumeRun, which folds in
+// the server's own verdict.
 export function isResumableRun(run: Conversation): boolean {
-  return run.Status === 'open' || (run.Status === 'completed' && run.Outcome === 'abort')
+  return run.Status === 'open' || run.Status === 'completed'
+}
+
+// canResumeRun is the composer's gate for a run with no live turn: the cheap
+// status cut above, then the server's answer, which is authoritative.
+//
+// `!== false` rather than `=== true` is the compatibility rule the field is
+// specified with: the run read omits `resumable` for rows it doesn't compute it
+// for (active, failed) and any response that predates the field carries none.
+// Absent means "the server didn't answer" — fall back to the status reading —
+// while an explicit false is a real refusal with a reason attached.
+export function canResumeRun(run: Conversation): boolean {
+  return isResumableRun(run) && run.resumable !== false
+}
+
+// resumeBlockedCopy — what to tell someone whose conversation looks resumable
+// but isn't, in the words the 410/409 on send would have used. The reason comes
+// from the server (internal/delegate's ResumeBlocked* rungs); an unrecognized
+// one falls through to the generic sentence, since a build that predates a new
+// rung still has to say something true.
+export function resumeBlockedCopy(run: Conversation): string {
+  switch (run.resume_blocked_reason) {
+    case 'workspace_expired':
+      return 'Workspace expired — this conversation can’t be resumed.'
+    case 'blueprint_concluded':
+      return 'This conversation can’t be continued — its blueprint was cancelled, or it concluded on an earlier step.'
+    case 'session_missing':
+    case 'worktree_missing':
+    case 'model_missing':
+      return 'This run didn’t record the state a resume needs, so it can’t be continued.'
+    default:
+      return 'This conversation can’t take a follow-up.'
+  }
 }
 
 // workStartedAt — when the run actually began executing: the dispatcher's
