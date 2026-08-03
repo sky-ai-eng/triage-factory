@@ -301,7 +301,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 	// through it.
 	if err := e.compactOnResume(ctx, params); err != nil {
 		if ctx.Err() != nil {
-			return e.cancelled(started, 0)
+			return e.cancelled(ctx, started, 0)
 		}
 		e.insertNotice(ctx, params, "Compacting this conversation on resume failed: "+err.Error())
 		return e.failed(ctx, started, 0, fmt.Errorf("compact on resume: %w", err))
@@ -324,7 +324,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return e.cancelled(started, turn)
+			return e.cancelled(ctx, started, turn)
 		}
 
 		// 1. Compaction trip, BEFORE the drain — the same order the resume
@@ -340,7 +340,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		if e.compactionDue(params, preRows) {
 			if err := e.compactWarm(ctx, params); err != nil {
 				if ctx.Err() != nil {
-					return e.cancelled(started, turn)
+					return e.cancelled(ctx, started, turn)
 				}
 				e.insertNotice(ctx, params, "Compacting this conversation failed: "+err.Error())
 				return e.failed(ctx, started, turn, fmt.Errorf("compact conversation: %w", err))
@@ -411,7 +411,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		}
 		if err != nil {
 			if ctx.Err() != nil {
-				return e.cancelled(started, turn)
+				return e.cancelled(ctx, started, turn)
 			}
 			// Reactive arm: a context-overflow rejection is a compaction
 			// trigger, not a run failure — the proactive trip estimates and
@@ -423,7 +423,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 				if cerr := e.compactAfterOverflow(ctx, params); cerr == nil {
 					continue
 				} else if ctx.Err() != nil {
-					return e.cancelled(started, turn)
+					return e.cancelled(ctx, started, turn)
 				} else {
 					err = fmt.Errorf("compact after context overflow: %w (overflow: %v)", cerr, err)
 				}
@@ -673,7 +673,7 @@ const truncatedBatchNotice = "This tool call was not executed: the model's respo
 // end.
 func (e *Engine) failed(ctx context.Context, started time.Time, turn int, err error) Result {
 	if ctx.Err() != nil {
-		return e.cancelled(started, turn)
+		return e.cancelled(ctx, started, turn)
 	}
 	return Result{
 		Kind:        ResultFailed,
@@ -684,12 +684,22 @@ func (e *Engine) failed(ctx context.Context, started time.Time, turn int, err er
 	}
 }
 
-func (e *Engine) cancelled(started time.Time, turn int) Result {
+// cancelled reports the context's own error rather than a constant. Every
+// caller is already inside a `ctx.Err() != nil` guard, so the value is the
+// real cause — and the two causes are not interchangeable to a reader: a
+// deadline is the engagement running out of time (something to tune), a
+// cancel is somebody stopping it (nothing to tune). The fallback exists only
+// so Err is never nil on this Kind, which its doc promises.
+func (e *Engine) cancelled(ctx context.Context, started time.Time, turn int) Result {
+	cause := ctx.Err()
+	if cause == nil {
+		cause = context.Canceled
+	}
 	return Result{
 		Kind:       ResultCancelled,
 		NumTurns:   turn,
 		DurationMs: msSince(started),
-		Err:        context.Canceled,
+		Err:        cause,
 	}
 }
 

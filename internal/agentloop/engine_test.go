@@ -813,6 +813,37 @@ func TestRun_CancellationObservedThroughAFailedWriteIsStillACancellation(t *test
 	})
 }
 
+// TestRun_CancellationCarriesTheContextsOwnCause: the disposition collapses
+// the two ways a context dies, the reported cause must not. A deadline is the
+// engagement running out of time — something to tune — and a cancel is
+// somebody stopping it, which is nothing to tune; a reader who is told
+// "context canceled" for a run that timed out goes looking for a person who
+// pressed stop.
+//
+// Driven through the reroute rather than a pre-expired context, because that
+// is the arm that reads the cause secondhand: the deadline lands inside the
+// flush, whose error text is deliberately not what the classification uses.
+func TestRun_CancellationCarriesTheContextsOwnCause(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	// Long enough that the loop's top-of-iteration ctx check passes first, so
+	// the deadline is genuinely observed by the write and not before it.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	tr.failMarkDelivered = func() error {
+		<-ctx.Done()
+		return errors.New("mark delivered: context deadline exceeded")
+	}
+	e := newTestEngine(tr, &scriptedProvider{}, newScriptedToolHost())
+
+	got := e.Run(ctx, testParams())
+	if got.Kind != ResultCancelled {
+		t.Fatalf("disposition = %v, want cancelled (err: %v)", got.Kind, got.Err)
+	}
+	if !errors.Is(got.Err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want context.DeadlineExceeded — the cause is the context's, not a constant", got.Err)
+	}
+}
+
 // TestRun_AFailedWriteWithALiveContextStillFails is the other half of the
 // pair: the reclassification is keyed on the context alone, so a write that
 // fails for its own reasons is still a failure and still fails the
