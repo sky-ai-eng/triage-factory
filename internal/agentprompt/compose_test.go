@@ -145,41 +145,22 @@ func TestNonTerminalCompletion_RuntimeArms(t *testing.T) {
 	}
 }
 
-// interpolatedBlocks is the shrinking allowlist of blocks still carrying
-// {{PLACEHOLDER}} interpolation. Every other block is enforced literal.
+// TestBlocks_AreLiteral is the rule that makes a block readable as the text the
+// model receives: what is written here is what is sent. A block that carried a
+// `{{NAME}}` would be a promise that something, somewhere, fills it in — and a
+// user writing their own prompt has no way to make that same promise, so a block
+// relying on one would be an example of nothing they could reproduce.
 //
-// These are resolved by delegate.BuildPromptReplacer and curator.renderEnvelope
-// today. The follow-up that deletes the placeholder system empties this list;
-// an allowlist that must shrink keeps the debt visible instead of silent, so
-// entries are removed here and never added.
-var interpolatedBlocks = map[string]bool{
-	"identity/machinist.txt":      true, // {{SCOPE}}, {{BINARY_PATH}}
-	"identity/curator.txt":        true, // {{PROJECT_NAME}}, {{PROJECT_DESCRIPTION}}, {{PINNED_REPOS_BLOCK}}, {{TRACKERS_BLOCK}}
-	"harness/sdk-claude-code.txt": true, // {{TOOLS_REFERENCE}}
-	"harness/sdk-curator.txt":     true, // {{BINARY_PATH}}, {{TOOLS_REFERENCE}}
-	"guardrails/common.txt":       true, // {{BRANCH_TEMPLATE}}
-	"verbs/project-knowledge.txt": true, // {{RUN_ROOT}}
-	"verbs/memory.txt":            true, // {{RUN_ROOT}}, {{BINARY_PATH}}
-	"tools/github.txt":            true, // {{BINARY_PATH}}, {{RUN_ROOT}}
-	"tools/jira.txt":              true, // {{BINARY_PATH}}, {{RUN_ROOT}}, {{BRANCH_TEMPLATE}}
-}
-
-// TestBlocks_NoUnexpectedPlaceholders enforces the no-placeholder rule by
-// default and names the exceptions explicitly. It fails in both directions: a
-// literal `{{` in a block outside the list, and a listed block that no longer
-// carries one (so the allowlist can only shrink).
-func TestBlocks_NoUnexpectedPlaceholders(t *testing.T) {
+// A fact that genuinely varies per run belongs in the tail's <run_context> /
+// <project_context> / <tools> sections, which a block refers to by name.
+func TestBlocks_AreLiteral(t *testing.T) {
 	for _, p := range walkBlocks(t) {
 		body, err := blocksFS.ReadFile(path.Join("blocks", p))
 		if err != nil {
 			t.Fatalf("read %s: %v", p, err)
 		}
-		has := strings.Contains(string(body), "{{")
-		switch {
-		case has && !interpolatedBlocks[p]:
-			t.Errorf("block %s carries a {{placeholder}} but is not on the interpolation allowlist", p)
-		case !has && interpolatedBlocks[p]:
-			t.Errorf("block %s is on the interpolation allowlist but has no {{placeholder}} left — remove the entry", p)
+		if strings.Contains(string(body), "{{") {
+			t.Errorf("block %s is not literal — it carries a {{...}} token nothing resolves", p)
 		}
 	}
 }
@@ -275,10 +256,10 @@ func TestBuild_NativeSectionOrder(t *testing.T) {
 // TestNativeBlocks_NameTheRealPaths ties the absolute paths the native blocks
 // spell out to the constants that produce them.
 //
-// They are written literally because the blocks must stay placeholder-free to
-// be cacheable, which trades interpolation for a drift risk: move the sandbox
-// work root or rename the scratch dir, and every native run is told to write
-// its handoff somewhere that does not exist, with nothing else failing.
+// Writing them out is what keeps the prefix cacheable, and it carries a drift
+// risk in exchange: move the sandbox work root or rename the scratch dir, and
+// every native run is told to write its handoff somewhere that does not exist,
+// with nothing else failing.
 //
 // Every mention must also be reached from the fixed root. A bare relative
 // `_tfac/` resolves against whatever repo the agent last changed into, which

@@ -1,5 +1,5 @@
-// Prompt resolution + composition (mission text + the composed agent
-// framework prompt + placeholder interpolation), plus parsing of the agent's terminal
+// Prompt resolution + composition (mission text, the run's per-run tail, and
+// the composed agent framework prompt), plus parsing of the agent's terminal
 // completion JSON envelope and the small string utilities the prompt
 // path needs (extra-tools merging, owner/repo splitting).
 
@@ -162,44 +162,80 @@ func machinistSpec() agentprompt.Spec {
 	}
 }
 
-// buildPrompt composes mission + the agent framework prompt and interpolates
-// all placeholders in one pass. See placeholders.go for the full catalog —
-// every {{X}} in the mission or the composed framework text gets resolved
-// here, with unknown names falling through as literal braces so they're
-// obvious to prompt authors on first run. metadataJSON is the primary event's
-// metadata blob ("" is fine — event-derived placeholders just render empty).
-// skeleton is the rendered PR history block, empty for a task with no pull
-// request behind it.
-func buildPrompt(task domain.Task, metadataJSON, skeleton, mission, scope, toolsRef, binaryPath, runID, runRoot, blueprintRunID, branchTemplate, runURL string) string {
-	// Compatibility shim: some early prompts were written with the literal
-	// "triagefactory exec" prefix on CLI invocations, assuming the binary
-	// was on PATH. The binary lives at an absolute path in the worktree
-	// session, so rewrite those before interpolation. New prompts should
-	// use {{BINARY_PATH}} directly.
-	body := strings.ReplaceAll(mission, "triagefactory exec", binaryPath+" exec")
-	full := body + "\n\n" + agentprompt.Build(machinistSpec())
+// buildPrompt composes what the SDK runtime says first: the task context, the
+// mission, this run's own facts, its verb reference, then the framework prompt —
+// whose completion contract is last, so it is the final thing the model reads.
+//
+// Each section is composed on its own. BuildTaskContext is built entirely from
+// external data — PR titles, ticket fields, chat messages — and is the one
+// section resolveCLIPath never runs over; joining first and rewriting after
+// would put a rewrite over attacker-influenced text for no gain.
+//
+// metadataJSON is the primary event's metadata blob ("" is fine — the context
+// block just carries no event fields). skeleton is the rendered PR history
+// block, empty for a task with no pull request behind it.
+func buildPrompt(task domain.Task, metadataJSON, skeleton, mission, scope, toolsRef, binaryPath, runRoot, branchTemplate, runURL string) string {
+	cli := func(s string) string { return resolveCLIPath(s, binaryPath) }
+	return joinSections(
+		BuildTaskContext(task, metadataJSON, skeleton),
+		cli(mission),
+		runContext(scope, runRoot, branchTemplate, runURL),
+		cli("<tools>\n"+strings.TrimSpace(toolsRef)+"\n</tools>"),
+		cli(agentprompt.Build(machinistSpec())),
+	)
+}
 
-	// Inline the scope and tools sections into the template text FIRST.
-	// strings.Replacer does a single non-re-scanning pass, so a section
-	// injected as a replacement *value* keeps any placeholders it carries
-	// verbatim — and the tools docs reference {{BINARY_PATH}}, {{BRANCH_TEMPLATE}},
-	// and run-root-relative paths. Folding them in here lets the single
-	// BuildPromptReplacer pass below interpolate them too.
-	full = strings.NewReplacer(
-		"{{TOOLS_REFERENCE}}", toolsRef,
-		"{{SCOPE}}", scope,
-	).Replace(full)
+// resolveCLIPath points every `triagefactory exec …` invocation at the binary
+// this run can actually execute: the host binary's own path in local mode, the
+// canonical bind-mount inside the jail. The allowlist
+// (agentproc.BuildAllowedTools) grants that absolute path and nothing else, so
+// an unresolved invocation is a denied tool call rather than a cosmetic miss.
+//
+// Never run it over externally-authored text.
+func resolveCLIPath(text, binaryPath string) string {
+	return strings.ReplaceAll(text, "triagefactory exec", binaryPath+" exec")
+}
 
-	// Prepend the system-rendered task context AFTER the replacer pass, never
-	// before. strings.Replacer does not re-scan replacement values, so today no
-	// externally-influenced text (a PR title, a metadata blob) is ever
-	// interpolated. The context block is built entirely from that same class of
-	// external data; folding it into `full` before .Replace would open a fresh
-	// interpolation path over attacker-influenced text. Composing after keeps
-	// the block's own contents inert while every existing prompt interpolates
-	// exactly as before.
-	return BuildTaskContext(task, metadataJSON, skeleton) + "\n\n" +
-		BuildPromptReplacer(task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID, branchTemplate, runURL).Replace(full)
+// runContext renders what the framework prompt refers to but cannot contain:
+// the facts of this particular run. agentprompt.Build is byte-identical for a
+// fixed Spec so the fleet shares one cached prefix, which leaves anything that
+// differs between two runs — what this one is pointed at, where its tree is,
+// what the team calls its branches — to arrive here instead.
+//
+// System-authored, so unlike the task context it carries no untrusted markers.
+// An absent fact renders no line: a deployment with no public URL says nothing
+// about a URL rather than offering a blank one.
+func runContext(scope, runRoot, branchTemplate, runURL string) string {
+	var lines []string
+	if s := strings.TrimSpace(scope); s != "" {
+		lines = append(lines, s)
+	}
+	if runRoot != "" {
+		lines = append(lines, "Run root: "+runRoot+
+			" — every `_tfac/...` path in your instructions sits directly under this directory."+
+			" Reach it by the absolute path, so it resolves from whatever directory you have cd'd into.")
+	}
+	if branchTemplate != "" {
+		lines = append(lines, "Branch naming convention for this team: "+branchTemplate)
+	}
+	if runURL != "" {
+		lines = append(lines, "Run URL: "+runURL)
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "<run_context>\n" + strings.Join(lines, "\n") + "\n</run_context>"
+}
+
+// joinSections drops the empty sections and separates the rest by a blank line.
+func joinSections(sections ...string) string {
+	var kept []string
+	for _, s := range sections {
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			kept = append(kept, trimmed)
+		}
+	}
+	return strings.Join(kept, "\n\n")
 }
 
 // resolveBranchTemplate returns the team's branch-naming convention with the

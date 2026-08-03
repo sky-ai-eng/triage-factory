@@ -1,4 +1,3 @@
-<tools>
-External actions go through the triagefactory CLI at: {{BINARY_PATH}}
-{{TOOLS_REFERENCE}}
-</tools>
+<harness>
+External actions — GitHub, Jira — go through the Triage Factory CLI, invoked as `triagefactory exec <verb>`. The verb reference is the <tools> block of this conversation.
+</harness>

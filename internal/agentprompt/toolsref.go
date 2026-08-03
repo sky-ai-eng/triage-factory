@@ -3,8 +3,8 @@ package agentprompt
 // The tools reference is agent-facing prompt text that varies on the run's
 // entity sources rather than on any Spec axis — a Jira run sees the Jira verbs,
 // a Slack-thread run sees the Slack verbs, and both see GitHub's. So it is not
-// a manifest section: the caller picks the set and injects it into the harness
-// block's {{TOOLS_REFERENCE}} slot.
+// a manifest section: the caller picks the set and appends it as the <tools>
+// section of the per-run tail, which the harness blocks point at.
 //
 // Core's two sets are embedded from the same blocks tree as everything else.
 // Non-core sources register at init, which is the whole reason the registry
@@ -50,9 +50,10 @@ var coreToolsReferenceSources = map[string]bool{
 // entity source (e.g. "slack"). Called from an ee package's init(); panics
 // on empty source/text, a duplicate source, or a core source ("github",
 // "jira") — a wiring bug that must fail at boot, not silently degrade a
-// run's tool docs. The registered text may itself carry placeholders like
-// {{BINARY_PATH}} — the same {{TOOLS_REFERENCE}} pre-pass that handles
-// GitHubToolsReference (internal/delegate/prompt.go) covers it.
+// run's tool docs. Registered text is literal, like the embedded blocks: write
+// `triagefactory exec <verb>` (the prompt builder points it at the run's
+// binary), and name a per-run fact by pointing at the section of the prompt
+// that carries it.
 func RegisterToolsReference(source, text string) {
 	if source == "" {
 		panic("agentprompt.RegisterToolsReference: source must not be empty")

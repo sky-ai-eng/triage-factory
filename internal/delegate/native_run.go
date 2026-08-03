@@ -80,7 +80,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	// Composed before the jail is launched, so the fallible half fails the claim
 	// without having cost a sandbox. The system prompt is the same for every
 	// native run; everything about this one rides the opening turn.
-	opening, err := s.buildNativeOpeningTurn(ctx, task, mission, cfg, runID, namespace)
+	opening, err := s.buildNativeOpeningTurn(ctx, task, mission, cfg)
 	if err != nil {
 		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "compose opening turn: "+err.Error(), domain.RunFailureUnclassified)
 	}
@@ -235,47 +235,38 @@ func nativeSystemPrompt(nonTerminalStep bool) string {
 // buildNativeOpeningTurn resolves this run's inputs and composes the
 // conversation's first user message. The fallible resolutions live here; the
 // composition itself is composeNativeOpeningTurn.
-func (s *Spawner) buildNativeOpeningTurn(ctx context.Context, task domain.Task, mission string, cfg runConfig, runID, namespace string) (string, error) {
+func (s *Spawner) buildNativeOpeningTurn(ctx context.Context, task domain.Task, mission string, cfg runConfig) (string, error) {
 	selfBin, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("resolve own binary path: %w", err)
 	}
 	metadataJSON, err := s.events.GetMetadataSystem(context.Background(), cfg.orgID, task.PrimaryEventID)
 	if err != nil {
-		delegateLog.Warn("load event metadata for task failed; event placeholders will render empty",
+		delegateLog.Warn("load event metadata for task failed; the task context will carry no event fields",
 			"task", task.ID, "event", task.PrimaryEventID, "error", err)
 		metadataJSON = ""
 	}
 	return composeNativeOpeningTurn(task, metadataJSON, cfg.prSkeleton, mission,
-		agentproc.AgentVisibleBinary(selfBin), runID, agentproc.AgentVisibleRoot(cfg.runRoot),
-		namespace, s.resolveBranchTemplate(ctx, task), s.runURLFor(cfg.orgID, runID)), nil
+		agentproc.AgentVisibleBinary(selfBin), s.resolveBranchTemplate(ctx, task)), nil
 }
 
 // composeNativeOpeningTurn assembles what the loop says first: run context,
 // task context, then the mission — the instruction last, after the external
 // material it is about.
 //
-// Interpolation runs on the mission alone, before the task context joins it, so
-// externally-authored text is never scanned for placeholders. That ordering is a
-// security property, not a style choice; buildPrompt does the same on the SDK
-// path.
-func composeNativeOpeningTurn(task domain.Task, metadataJSON, skeleton, mission, binaryPath, runID, runRoot, blueprintRunID, branchTemplate, runURL string) string {
-	// The same shim buildPrompt runs: prompts written against a `triagefactory`
-	// on PATH get the real binary location before interpolation.
-	body := strings.ReplaceAll(mission, "triagefactory exec", binaryPath+" exec")
-	replacer := BuildPromptReplacer(task, metadataJSON, runID, binaryPath, runRoot, blueprintRunID, branchTemplate, runURL)
-
-	var sections []string
-	for _, section := range []string{
-		nativeRunContext(branchTemplate),
+// The mission is composed on its own, so externally-authored text is never run
+// through resolveCLIPath. That ordering is a security property, not a style
+// choice; buildPrompt does the same on the SDK path.
+//
+// The native blocks name the in-jail paths and the `tfac` applet outright, so
+// the run context carries only the branch convention — a fact that differs per
+// team, and the one thing those blocks cannot state for themselves.
+func composeNativeOpeningTurn(task domain.Task, metadataJSON, skeleton, mission, binaryPath, branchTemplate string) string {
+	return joinSections(
+		runContext("", "", branchTemplate, ""),
 		BuildTaskContext(task, metadataJSON, skeleton),
-		replacer.Replace(body),
-	} {
-		if trimmed := strings.TrimSpace(section); trimmed != "" {
-			sections = append(sections, trimmed)
-		}
-	}
-	return strings.Join(sections, "\n\n")
+		resolveCLIPath(mission, binaryPath),
+	)
 }
 
 // nativeSpec is the prompt selector for every native engagement.
@@ -327,24 +318,6 @@ func (s *Spawner) prepareInheritedMemory(ctx context.Context, orgID, runID, cwd 
 		clearAgentMemoryFile(cwd, owned)
 	}
 	return fingerprintAgentMemoryFile(cwd)
-}
-
-// nativeRunContext renders the fact the standing framework prompt refers to but
-// cannot contain: the team's branch convention.
-//
-// It rides the opening turn because it is per-run text — a different team says
-// something different — and the framework prompt's value is being identical for
-// every run in the fleet. It is system-authored, so unlike the task context
-// beneath it, it carries no untrusted markers.
-//
-// The memory path used to be the second line here, assembled out of the run
-// root and TF's own primary keys. It is a fixed path now, so it says the same
-// thing for every run and has moved into the framework blocks, where it is
-// cached.
-func nativeRunContext(branchTemplate string) string {
-	return "<run_context>\n" +
-		"Branch naming convention for this team: " + branchTemplate + "\n" +
-		"</run_context>"
 }
 
 // nativeAgentEnv is the env the jail's tool host exports to every `bash`

@@ -211,23 +211,24 @@ func TestBuildTaskContext_MetadataFenceOutrunsBackticks(t *testing.T) {
 	}
 }
 
-func TestBuildTaskContext_ExternalTextUninterpolated(t *testing.T) {
-	// Locks the compose-after-replace ordering: external text that looks like
-	// a placeholder must survive verbatim, never interpolated.
+func TestBuildTaskContext_ExternalTextRendersVerbatim(t *testing.T) {
+	// The block is data about the task, so what an outsider wrote is what the
+	// model sees — this one is the source of truth for the values around it, and
+	// a rewrite of any kind here would make it something else.
 	task := domain.Task{
-		Title:          "handle {{RUN_ID}} in the retry path",
+		Title:          "handle the retry path in triagefactory exec",
 		EventType:      domain.EventGitHubPRCICheckFailed,
 		EntitySource:   "github",
 		EntitySourceID: "owner/repo#5",
 	}
-	metaJSON := `{"summary":"see {{RUN_ID}} for the failing run"}`
+	metaJSON := `{"summary":"see run 12 for the failing job"}`
 
 	got := BuildTaskContext(task, metaJSON, "")
-	if !strings.Contains(got, "handle {{RUN_ID}} in the retry path") {
-		t.Errorf("literal {{RUN_ID}} in the title must render verbatim;\n%s", got)
+	if !strings.Contains(got, "handle the retry path in triagefactory exec") {
+		t.Errorf("the title must render verbatim;\n%s", got)
 	}
-	if !strings.Contains(got, "{{RUN_ID}}") {
-		t.Errorf("literal {{RUN_ID}} in metadata must render verbatim;\n%s", got)
+	if !strings.Contains(got, "see run 12 for the failing job") {
+		t.Errorf("metadata must render verbatim;\n%s", got)
 	}
 }
 

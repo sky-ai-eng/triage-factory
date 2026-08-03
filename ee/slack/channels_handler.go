@@ -643,11 +643,11 @@ func teamHasSlackMessageTrigger(ctx context.Context, tx db.TxStores, orgID, team
 }
 
 // slackMessagePromptName/Body are the shipped-content for the default
-// slack:message blueprint seeded on a team's first tracked channel. Body
-// interpolates the literal {{EVENT_METADATA_JSON}} placeholder — the
-// message's channel/thread_ts/sender/text otherwise never reach the run,
-// since a task carries only its title. Deliberately doesn't hinge on
-// whether the triggering message was an explicit @-mention or an
+// slack:message blueprint seeded on a team's first tracked channel. The
+// message's channel/thread_ts/sender/text reach the run through the task
+// context's raw event metadata — a task itself carries only its title — so the
+// body points there rather than interpolating anything. Deliberately doesn't
+// hinge on whether the triggering message was an explicit @-mention or an
 // engaged-thread follow-up — the agent's job is the same either way, and
 // mention-ness is metadata, not a different situation (see
 // domain.EventSlackMessage's doc). Greenfield: pre-release, existing
@@ -655,8 +655,8 @@ func teamHasSlackMessageTrigger(ctx context.Context, tx db.TxStores, orgID, team
 const (
 	slackMessagePromptName = "Slack assistant"
 	slackMessagePromptBody = "A teammate reached out to the agent in a Slack thread. The task's entity is the " +
-		"thread. Parse the channel, thread_ts, sender, and message text out of this event's metadata:\n\n" +
-		"{{EVENT_METADATA_JSON}}\n\n" +
+		"thread. Parse the channel, thread_ts, sender, and message text out of the raw event metadata in " +
+		"the task context above.\n\n" +
 		"Read the thread (`exec slack read thread --channel <channel> --ts <thread_ts>`, or `--ts <ts>` when " +
 		"thread_ts is empty — the triggering message itself started the thread) to see the full request in " +
 		"context, gather what you need from the linked entity and any referenced repos/issues, do the work using " +

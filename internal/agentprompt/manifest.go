@@ -41,10 +41,10 @@ const (
 	// The native counterparts of the sections above. They are separate files
 	// rather than arms of the same file because the two runtimes are different
 	// harnesses that happen to discuss the same subjects: the SDK's text names
-	// wrapper verbs (`exec gh pr view`) and carries the interpolation its
-	// caller resolves, while the native loop's names the real `gh` and the
-	// fixed in-jail paths. Several pairs will converge once the placeholder
-	// pass lands, and merging them then is a text edit, not a structural one.
+	// the wrapper verbs (`exec gh pr view`) and reaches its scratch dir through
+	// the run root, while the native loop's names the real `gh` and the fixed
+	// in-jail paths. Merging a converged pair is a text edit, not a structural
+	// one.
 	blockVerbLinkedContextNv = "verbs/linked-context-native.txt"
 	blockVerbWorkspaceNv     = "verbs/workspace-native.txt"
 	blockVerbProjectKnowNv   = "verbs/project-knowledge-native.txt"

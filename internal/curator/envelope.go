@@ -35,9 +35,9 @@ type envelopeInputs struct {
 	BinaryPath         string
 }
 
-// renderEnvelope substitutes the templated placeholders in the composed
-// curator block set with concrete values, returning the
-// --append-system-prompt payload for one curator dispatch. Static at
+// renderEnvelope composes the --append-system-prompt payload for one curator
+// dispatch: the curator block set, then this project's own facts and the verb
+// reference the blocks point at. Static at
 // the *project* level (project name + description don't change
 // session-to-session) but rendered fresh each turn so that a) the
 // pinned-repo / tracker snapshot reflects current state on first
@@ -47,23 +47,31 @@ type envelopeInputs struct {
 // keep the envelope current too so the values never go further out
 // of date than one turn.
 func renderEnvelope(in envelopeInputs) string {
-	// Resolve nested placeholders only within trusted template-derived
-	// content before rendering the outer envelope. This preserves the
-	// existing TOOLS_REFERENCE behavior without allowing later
-	// substitutions to rewrite user-provided fields such as project name
-	// or description.
-	toolsReference := strings.NewReplacer(
-		"{{BINARY_PATH}}", in.BinaryPath,
-	).Replace(renderToolsReference())
+	// The composed blocks and the verb docs are ours, so they name the CLI as
+	// `triagefactory exec <verb>` and get pointed at this process's own binary.
+	// The project's name and description are the user's text and are rendered
+	// verbatim — no pass runs over them.
+	cli := func(s string) string { return strings.ReplaceAll(s, "triagefactory exec", in.BinaryPath+" exec") }
 
-	return strings.NewReplacer(
-		"{{PROJECT_NAME}}", projectNameOrFallback(in.ProjectName),
-		"{{PROJECT_DESCRIPTION}}", projectDescriptionOrFallback(in.ProjectDescription),
-		"{{PINNED_REPOS_BLOCK}}", renderPinnedReposBlock(in.PinnedRepos),
-		"{{TRACKERS_BLOCK}}", renderTrackersBlock(in.JiraProjectKey, in.LinearProjectKey),
-		"{{TOOLS_REFERENCE}}", toolsReference,
-		"{{BINARY_PATH}}", in.BinaryPath,
-	).Replace(agentprompt.Build(curatorSpec()))
+	return strings.Join([]string{
+		cli(strings.TrimSpace(agentprompt.Build(curatorSpec()))),
+		renderProjectContext(in),
+		cli("<tools>\n" + strings.TrimSpace(renderToolsReference()) + "\n</tools>"),
+	}, "\n\n")
+}
+
+// renderProjectContext renders the per-project facts the curator blocks refer
+// to but cannot contain: which project this session is about, what is pinned to
+// it, and which tracker it is linked to. The blocks stay identical across every
+// project so their prefix is one cached string per deployment.
+func renderProjectContext(in envelopeInputs) string {
+	return "<project_context>\n" +
+		"Project: " + projectNameOrFallback(in.ProjectName) + "\n\n" +
+		"Description:\n" + projectDescriptionOrFallback(in.ProjectDescription) + "\n\n" +
+		"Pinned repositories, materialized as read-only working trees:\n" +
+		renderPinnedReposBlock(in.PinnedRepos) + "\n\n" +
+		renderTrackersBlock(in.JiraProjectKey, in.LinearProjectKey) + "\n" +
+		"</project_context>"
 }
 
 func projectNameOrFallback(name string) string {
