@@ -116,25 +116,6 @@ var trustedToolHostBinaryPath = "/opt/tf/bin/tf-harness-tools"
 // host mount.
 func TrustedToolHostBinaryPath() string { return trustedToolHostBinaryPath }
 
-// TrustedToolHostSocketDirDestination is the fixed in-sandbox directory the
-// per-run tool-host socket directory is bind-mounted at (read-write — the
-// in-jail server binds its socket inside it).
-//
-// A directory rather than a socket file, unlike the agenthost mount, because
-// the listener is on the far side here: the agenthost socket exists
-// host-side before launch and is mounted as a file, while the tool host's
-// socket does not exist until the jailed process binds it, so what crosses
-// the boundary is the directory it appears in.
-const TrustedToolHostSocketDirDestination = "/run/tf-tools"
-
-// TrustedToolHostSocketDir is the broker's derivation of "this run's own
-// tool-host socket directory" host-side path. Like the agenthost socket, the
-// broker does not create it — the orchestrator does, before the launch RPC —
-// so the broker VALIDATES a launch's mount source against this derivation.
-func TrustedToolHostSocketDir(runID string) string {
-	return filepath.Join(trustedAgentHostSocketRoot, sanitizeRunIDForSocket(runID)+"-tools")
-}
-
 // TrustedAgentHostSocketDestination mirrors cmd/exec/agenthost's exported
 // DefaultSocketPath — the fixed in-sandbox path the per-run agenthost
 // socket is bind-mounted at. Duplicated as a literal for the same cycle
@@ -142,35 +123,6 @@ func TrustedToolHostSocketDir(runID string) string {
 // cmd/exec/agenthost's own test suite cross-checks the two literals stay
 // equal.
 const TrustedAgentHostSocketDestination = "/run/tf.sock"
-
-// trustedAgentHostSocketRoot mirrors cmd/exec/agenthost's private
-// hostSocketRoot constant. Duplicated for the same reason as the
-// destination constants above. A var (not const) — like cmd/capbroker's
-// brokerSocketPath — so this package's own tests can redirect it away
-// from the real, root-owned /run/tf, which a non-root `go test`
-// invocation can't create; production never reassigns it.
-var trustedAgentHostSocketRoot = "/run/tf"
-
-// sanitizeRunIDForSocket mirrors cmd/exec/agenthost's private
-// sanitizeSocketName exactly (character-for-character); a drift test in
-// that package cross-checks the two functions agree.
-func sanitizeRunIDForSocket(s string) string {
-	r := strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z',
-			r >= 'A' && r <= 'Z',
-			r >= '0' && r <= '9',
-			r == '-' || r == '_':
-			return r
-		default:
-			return '-'
-		}
-	}, s)
-	if len(r) > 64 {
-		r = r[:64]
-	}
-	return r
-}
 
 // TrustedAgentHostSocketPath is the broker's own derivation of "this run's
 // own agenthost socket" host-side path. Unlike TrustedSDKDir/

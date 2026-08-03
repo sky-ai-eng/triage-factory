@@ -53,6 +53,28 @@ else
   fail=1
 fi
 
+# Everything above only ever typechecks the host's own GOOS, so a symbol
+# parked behind a `//go:build linux` tag and referenced from an untagged
+# file passes every check on a Linux runner and breaks the build on a
+# macOS laptop (and vice versa). Both are supported dev platforms — the
+# sandbox is Linux-only at RUNTIME, but the whole module still has to
+# compile on a Mac — so build for both and let whichever one isn't the
+# host catch the tag mistake. Cross-compiles cost a one-time stdlib
+# build; after that the build cache makes them cheap.
+#
+# `go build ./...` over multiple packages discards binaries, so this
+# leaves no artifacts behind. It needs frontend/dist for the root
+# package's go:embed, same as `go vet` above.
+blue "cross-platform build"
+for target in linux/amd64 darwin/arm64; do
+  if GOOS="${target%/*}" GOARCH="${target#*/}" go build ./...; then
+    green "builds for $target"
+  else
+    red "build failed for $target — check for a build-tagged symbol used from an untagged file"
+    fail=1
+  fi
+done
+
 blue "golangci-lint"
 if command -v golangci-lint >/dev/null 2>&1; then
   if (( FIX )); then
