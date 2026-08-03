@@ -275,13 +275,19 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 		return
 	}
 
-	// A cancel raced in between the claim and now (the claim filters
-	// cancel_requested, but the window is non-zero), or the blueprint is already
-	// terminal: don't run the agent. Park this claimed step and finalize the
+	// A claim the blueprint no longer authorizes: a cancel raced in between the
+	// claim and now (the claim filters cancel_requested, but the window is
+	// non-zero), or this conversation is not the one a finished blueprint left
+	// drivable. Don't run the agent — park this claimed step and finalize the
 	// blueprint if it's still running. Detached writes — this is a disposition,
 	// not abortable by shutdown. Nothing ran under this claim, so there is no
 	// workspace state to snapshot on the way down.
-	if br.Status != domain.BlueprintRunStatusRunning || br.CancelRequested {
+	//
+	// The predicate is the claim gate's, re-applied on this side of the claim.
+	// It has to be: reading it as "the blueprint is still running" is what would
+	// park a follow-up on concluded work the instant it was claimed — the exact
+	// silent, permanent failure that widening the gate is meant to end.
+	if !blueprintDrivableForClaim(br, run.BlueprintStepIndex) {
 		if _, mErr := s.agentRuns.ParkOpenForClaimSystem(context.Background(), orgID, run.ID, run.ClaimID, db.ParkStopped("user_cancelled", "Blueprint cancelled by user")); errors.Is(mErr, db.ErrClaimReleased) {
 			// This claim was released before it disposed of its own step, so
 			// a successor holds the run now. Everything below acts on it —
@@ -313,6 +319,10 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 		return
 	}
 
+	// Past the authorization gate, so this claim will really run — decide the
+	// model it runs on before either arm below picks it up.
+	run.Model = s.modelForClaim(ctx, orgID, br, *run)
+
 	// Resume-by-enqueue (TFAC-585): a pending-input row means this claim is
 	// NOT a fresh/crash-reclaimed blueprint step — it's a parked/terminal-
 	// resumable run woken by a user message and re-queued onto its own row
@@ -332,6 +342,26 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 			dispatchLog.Warn("peek pending input failed; falling through to the blueprint-step path", "run", run.ID, "error", perr)
 		} else if ok {
 			s.dispatchResumeClaim(ctx, run, task, msg, userID)
+			return
+		}
+		// An SDK claim on a finished blueprint that carries no message to
+		// deliver. Only a crash reaches this: the staged message was consumed
+		// by an earlier claim that then died before concluding, or the peek
+		// above failed outright. The step machinery below would re-run the
+		// final step's mission from the top on work that is already concluded,
+		// so park the conversation back and leave its workspace alone — the
+		// next follow-up re-queues it with a message of its own.
+		//
+		// A native conversation never needs this: its input lives in the
+		// transcript, so a re-claim with nothing new to say is just the loop
+		// continuing, which is what it should do.
+		if br.Status != domain.BlueprintRunStatusRunning {
+			if _, mErr := s.agentRuns.ParkOpenForClaimSystem(context.Background(), orgID, run.ID, run.ClaimID, db.ParkIdle()); mErr != nil {
+				dispatchLog.Warn("park message-less follow-up claim failed", "run", run.ID, "error", mErr)
+			}
+			dispatchLog.Warn("follow-up claim on a finished blueprint carried no message; parked without running the step",
+				"run", run.ID, "blueprint_run", br.ID, "org_id", orgID)
+			s.broadcastRunUpdate(orgID, run.ID, "open")
 			return
 		}
 	}
@@ -864,6 +894,33 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 			domain.BlueprintRunStatusAborted, reason, &stepIdx, false)
 	}
+}
+
+// modelForClaim resolves the model one claim runs on.
+//
+// A claim under a running blueprint is a step of a plan, and it runs on the
+// model frozen onto that step — the anti-drift rule the whole run path holds
+// to, so a config change mid-blueprint never switches models underneath work
+// already in progress.
+//
+// A claim under a blueprint that has already finished is something else: a
+// follow-up on concluded work, whose model is a fresh decision rather than an
+// inherited one. It gets the team's current default. The alternative is worse
+// than it sounds — a three-step review blueprint ends in a cheap aggregator
+// (stepModelOrInherit's downgrade), so inheriting would answer a person's
+// first-ever follow-up with the aggregator, at exactly the moment they are
+// deciding whether follow-ups work at all.
+//
+// Nothing is written: the conversation row keeps the model its step ran on, and
+// no blueprint step's model moves. Only this turn is re-modelled.
+func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.BlueprintRun, run domain.Conversation) string {
+	if br == nil || br.Status == domain.BlueprintRunStatusRunning {
+		return run.Model
+	}
+	if m := s.resolveModel(ctx, orgID, run.TeamID); m != "" {
+		return m
+	}
+	return run.Model
 }
 
 // stepModelOrInherit resolves the model a blueprint step runs on from its

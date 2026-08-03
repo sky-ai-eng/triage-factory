@@ -162,6 +162,37 @@ func (p SystemConversationActivityPredicate) Matches(m SystemConversationActivit
 }
 
 // -----------------------------------------------------------------------------
+// system:conversation:resumed — a user's follow-up woke a parked or concluded
+// conversation. Recorded (not published) so the task_events junction can link
+// the follow-up to the task it continued: the task's own status is deliberately
+// untouched, so this row is the only evidence the card has that anything
+// happened after it closed.
+//
+// The blueprint run id is carried because a follow-up on a finished blueprint
+// is the case the row exists to make visible; it is empty for a conversation
+// with no blueprint parent.
+// -----------------------------------------------------------------------------
+
+type SystemConversationResumedMetadata struct {
+	ConversationID string `json:"conversation_id"`
+	TaskID         string `json:"task_id"`
+	UserID         string `json:"user_id"`
+	BlueprintRunID string `json:"blueprint_run_id,omitempty"`
+	// FromStatus / FromOutcome are the rest state the follow-up woke the
+	// conversation from: `open` is a parked turn being picked back up,
+	// `completed` is a follow-up on work that already concluded.
+	FromStatus  string `json:"from_status"`
+	FromOutcome string `json:"from_outcome,omitempty"`
+}
+
+// No predicate fields — fires once per instance, users can only enable / disable.
+type SystemConversationResumedPredicate struct{}
+
+func (p SystemConversationResumedPredicate) Matches(m SystemConversationResumedMetadata) bool {
+	return true
+}
+
+// -----------------------------------------------------------------------------
 // system:routing:disposition — one sentinel per event Router.HandleEvent
 // finishes handling (TFAC-593). Routing is async (event_queue → worker), so
 // this is how a source that published an event (e.g. Slack) learns
@@ -222,5 +253,6 @@ func init() {
 	Register(NewSchema[SystemTaskDelegationBlockedSubtasksMetadata, SystemTaskDelegationBlockedSubtasksPredicate](domain.EventSystemTaskDelegationBlockedSubtasks, OwnershipUnrouted))
 	Register(NewSchema[SystemConversationStatusMetadata, SystemConversationStatusPredicate](domain.EventSystemConversationStatus, OwnershipUnrouted))
 	Register(NewSchema[SystemConversationActivityMetadata, SystemConversationActivityPredicate](domain.EventSystemConversationActivity, OwnershipUnrouted))
+	Register(NewSchema[SystemConversationResumedMetadata, SystemConversationResumedPredicate](domain.EventSystemConversationResumed, OwnershipUnrouted))
 	Register(NewSchema[SystemRoutingDispositionMetadata, SystemRoutingDispositionPredicate](domain.EventSystemRoutingDisposition, OwnershipUnrouted))
 }

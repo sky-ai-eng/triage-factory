@@ -57,14 +57,14 @@ func TestResumeOpenRun_ValidationGuards(t *testing.T) {
 	}
 }
 
-// TestResumeOpenRun_NotResumable pins the resumable-state guard: a finish
-// terminal (completed without an abort outcome) can't be woken — ResumeOpenRun
-// returns ErrRunNotResumable for the caller to map to 409, before any DB write.
+// TestResumeOpenRun_NotResumable pins the resumable-state guard: a failed run
+// can't be woken — its workspace did not survive — so ResumeOpenRun returns
+// ErrRunNotResumable for the caller to map to 409, before any DB write.
 func TestResumeOpenRun_NotResumable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedRun(t, database, "r-term", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish' WHERE id='r-term'`); err != nil {
-		t.Fatalf("complete: %v", err)
+	if _, err := database.Exec(`UPDATE conversations SET status='failed' WHERE id='r-term'`); err != nil {
+		t.Fatalf("fail: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
@@ -79,12 +79,13 @@ func TestResumeOpenRun_NotResumable(t *testing.T) {
 // look identically resumable from the conversation alone, so the whole
 // distinction lives in what is true around them:
 //
-//   - workspace reaped by the retention TTL → 410 Gone, permanent.
-//   - workspace intact, blueprint finished  → 409 concluded, temporary; this
-//     becomes a success once resuming a finished blueprint lands.
-//   - both                                  → the permanent one wins, because
-//     telling someone to come back later for a workspace that no longer exists
-//     is the wrong half of the truth.
+//   - workspace reaped by the retention TTL → 410 Gone.
+//   - workspace intact, blueprint cancelled → 409 concluded. A blueprint that
+//     merely FINISHED is not in this set — that is the follow-up case and it
+//     succeeds; called off is the one that still refuses.
+//   - both                                  → the workspace answer wins,
+//     because telling someone their sequence was cancelled implies there is
+//     something left to cancel back into, and there isn't.
 //
 // The third case is not hypothetical: it is every run stopped by an older
 // build. The old cancel path discarded the snapshot AND cancelled the
@@ -124,16 +125,31 @@ func TestResumeOpenRun_RefusalTaxonomy(t *testing.T) {
 		}
 	})
 
-	t.Run("workspace intact, blueprint finished", func(t *testing.T) {
+	t.Run("workspace intact, blueprint cancelled", func(t *testing.T) {
 		paths.SetForTest(t, t.TempDir())
 		database := newDelegateTestDB(t)
 		s := park(t, database, "r-concluded", "cancelled", true)
 		err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-concluded", "msg", runmode.LocalDefaultUserID)
 		if !errors.Is(err, ErrConversationConcluded) {
-			t.Errorf("err = %v, want ErrConversationConcluded (409, and a success once follow-ups land)", err)
+			t.Errorf("err = %v, want ErrConversationConcluded (409)", err)
 		}
 		if st := storedStatus(t, database, "r-concluded"); st != "open" {
 			t.Errorf("stored status = %q, want open — a refused wake must leave the row parked, not queued", st)
+		}
+	})
+
+	t.Run("workspace intact, blueprint finished — the follow-up case", func(t *testing.T) {
+		// The same shape as the refusal above, one word apart in the
+		// blueprint's terminal, and the opposite answer. Finished work is
+		// followed up on; called-off work is not.
+		paths.SetForTest(t, t.TempDir())
+		database := newDelegateTestDB(t)
+		s := park(t, database, "r-followup", "completed", true)
+		if err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-followup", "msg", runmode.LocalDefaultUserID); err != nil {
+			t.Fatalf("ResumeOpenRun on a finished blueprint: %v", err)
+		}
+		if st := storedStatus(t, database, "r-followup"); st != "" {
+			t.Errorf("stored status = %q, want none — the wake un-terminals the row", st)
 		}
 	})
 

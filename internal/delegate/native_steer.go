@@ -27,9 +27,10 @@ func (s *Spawner) queueNativeMessage(ctx context.Context, orgID string, run doma
 	if text == "" {
 		return fmt.Errorf("send: empty message")
 	}
-	if isTerminalForSteer(run) {
-		return ErrRunNotSteerable
-	}
+	// The one gate: a conversation takes a message when something is driving it
+	// (running, or queued and about to be), or when it is resting somewhere a
+	// wake can reach (resumableState). `failed` is neither — its workspace did
+	// not survive, so there is nothing to say a message to.
 	parked := resumableState(run.Status, run.Outcome)
 	if !parked && !domain.IsActiveRunStatus(run.Status) && run.Status != "queued" {
 		return ErrRunNotSteerable
@@ -69,23 +70,6 @@ func (s *Spawner) queueNativeMessage(ctx context.Context, orgID string, run doma
 	return s.requeueParkedNative(ctx, orgID, run, userID)
 }
 
-// isTerminalForSteer reports whether a conversation has reached a state no
-// message can reopen. A `completed` conversation whose outcome was an abort
-// is deliberately NOT terminal — the agent chose to stop, and a follow-up
-// picks the work back up. A cancelled conversation isn't terminal either: it
-// parks `open`, and whether it can actually be woken is the blueprint's
-// answer to give (blueprintDrivableForResume), not this switch's.
-func isTerminalForSteer(run domain.Conversation) bool {
-	switch run.Status {
-	case "failed":
-		return true
-	case "completed":
-		return domain.RunOutcome(run.Outcome) != domain.RunOutcomeAbort
-	default:
-		return false
-	}
-}
-
 // requeueParkedNative flips a parked native conversation back to `queued` so
 // the dispatcher claims it again, re-opening an aborted blueprint in the same
 // transaction.
@@ -107,9 +91,13 @@ func (s *Spawner) requeueParkedNative(ctx context.Context, orgID string, run dom
 		if !f {
 			return nil // lost the wake CAS — another wake already re-queued it
 		}
-		// ClaimNextRun only claims rows whose blueprint_run is 'running', so
-		// an aborted blueprint must reopen atomically with the flip or the
-		// row becomes permanently unclaimable.
+		// An aborted blueprint reopens atomically with the flip. Not for
+		// claimability — an abort leaves current_step_index on the step that
+		// aborted, so the finished-blueprint arm of the claim gate would take
+		// it either way — but for disposition: an abort is work that paused
+		// mid-plan, so its blueprint goes back to running and re-finalizes off
+		// the resumed step's new terminal. A blueprint that FINISHED is the
+		// opposite case and stays finished; the follow-up rides it as-is.
 		if reopenAborted && run.BlueprintRunID != "" {
 			if _, rErr := ts.Blueprints.ReopenRunForResume(ctx, orgID, run.BlueprintRunID); rErr != nil {
 				return rErr
@@ -126,6 +114,7 @@ func (s *Spawner) requeueParkedNative(ctx context.Context, orgID string, run dom
 		return nil
 	}
 	s.broadcastRunUpdate(orgID, run.ID, "queued")
+	s.recordResumeTaskEvent(ctx, orgID, userID, run)
 	s.recomputeTaskBoardColumn(orgID, run.TaskID)
 	s.wakeDispatcher()
 	return nil

@@ -68,10 +68,12 @@ func (s *Spawner) HandlePRNewCommits(evt domain.Event) {
 		if domain.ReviewAnchoredAtHead(a, meta.HeadSHA) {
 			continue
 		}
-		// Only deliver where an injection can land: a warm process (steered live) or a
-		// resumable run (staged for its next resume). A truly terminal, non-
-		// resumable run (completed+finish, failed, cancelled) can never read a
-		// staged injection — staging it would leak a row that never flushes — so skip.
+		// Only deliver where an injection can land: a warm process (steered live)
+		// or a conversation something is already coming back to
+		// (injectionWillFlush). A conversation that concluded is skipped even
+		// though a person could now wake it — a row that waits on a follow-up
+		// that may never come is a leak, and the freshness notice is stale by
+		// the time one arrives anyway.
 		live := s.getProc(a.ConversationID) != nil
 		if !live {
 			run, err := s.agentRuns.GetSystem(ctx, evt.OrgID, a.ConversationID)
@@ -79,7 +81,7 @@ func (s *Spawner) HandlePRNewCommits(evt domain.Event) {
 				delegateLog.Warn("new-commits injection: load run failed", "run", a.ConversationID, "error", err)
 				continue
 			}
-			if run == nil || !resumableState(run.Status, run.Outcome) {
+			if run == nil || !injectionWillFlush(run.Status, run.Outcome) {
 				continue
 			}
 		}

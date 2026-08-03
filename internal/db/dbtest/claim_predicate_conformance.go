@@ -31,6 +31,13 @@ type ClaimPredicateHarness struct {
 	// StoredStatus reads conversations.status back, SQL NULL as "".
 	StoredStatus func(t *testing.T, convID string) string
 
+	// SetBlueprintState writes the shared blueprint_run's status and
+	// current_step_index directly. The store's own writes cannot reach a
+	// terminal blueprint whose sequencing column still points at a step (the
+	// guarded MarkRunStatus refuses a non-running row), and that combination
+	// is exactly what the finished-blueprint arm of the claim gate reads.
+	SetBlueprintState func(t *testing.T, status string, currentStepIndex int)
+
 	// InsertRow inserts one messages row verbatim — the suite needs
 	// undelivered/delivered, subtyped, window-stated and fractionally
 	// sequenced rows that no production writer produces in combination.
@@ -171,12 +178,119 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				h.InsertRow(t, convID, userRow("try again", false))
 				mustNotClaim(t, h)
 
-				// Only the explicit un-terminal write brings it back, and
-				// only for the resumable shape (completed + abort).
+				// Only the explicit un-terminal write brings it back — and
+				// then it is ordinary claimable work again. That is what makes
+				// a follow-up on concluded work reachable at all: the queued
+				// message alone never was, and never will be, enough.
+				if flipped, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, convID); err != nil || !flipped {
+					t.Fatalf("MarkQueuedForResume on a completed run = (%v, %v), want a flip", flipped, err)
+				}
+				mustClaim(t, h, convID)
+			})
+
+			t.Run("Failed_IsNotBroughtBackByTheUnTerminalWrite", func(t *testing.T) {
+				// The one rest state with no way back. Its workspace did not
+				// survive, so there is nothing to resume onto — the CAS has to
+				// refuse rather than leave a row queued for a claim that would
+				// find no tree.
+				h := mk(t)
+				convID := h.EnqueueDelegation(t, runtime)
+				mustClaim(t, h, convID)
+				release(t, h, h.OrgID, convID, "failed")
+				h.SetStoredStatus(t, convID, "failed")
+				h.InsertRow(t, convID, userRow("try again", false))
+
 				if flipped, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, convID); err != nil || flipped {
-					t.Fatalf("MarkQueuedForResume on a plain completed run = (%v, %v), want no flip", flipped, err)
+					t.Fatalf("MarkQueuedForResume on a failed run = (%v, %v), want no flip", flipped, err)
 				}
 				mustNotClaim(t, h)
+				if st := h.StoredStatus(t, convID); st != "failed" {
+					t.Errorf("stored status = %q, want failed — a refused flip writes nothing", st)
+				}
+			})
+
+			// The finished-blueprint arm. A blueprint that reached a terminal
+			// never restarts, but the conversation it came to rest on stays
+			// claimable so a follow-up can be driven in the same workspace.
+			// Every case below stages two conversations under one blueprint so
+			// "only the last one" is asserted against a real sibling rather
+			// than against nothing.
+			t.Run("FinishedBlueprint", func(t *testing.T) {
+				// stage conducts both conversations to a completed terminal and
+				// settles the blueprint at currentStep, then re-queues the one
+				// named by resumeStep. It returns the two conversation ids in
+				// step order.
+				stage := func(t *testing.T, h ClaimPredicateHarness, blueprintStatus string, currentStep int) (string, string) {
+					t.Helper()
+					var ids [2]string
+					for i := range ids {
+						ids[i] = h.EnqueueDelegation(t, runtime)
+						mustClaim(t, h, ids[i])
+						release(t, h, h.OrgID, ids[i], "completed")
+						h.SetStoredStatus(t, ids[i], "completed")
+					}
+					h.SetBlueprintState(t, blueprintStatus, currentStep)
+					return ids[0], ids[1]
+				}
+				resume := func(t *testing.T, h ClaimPredicateHarness, convID string) {
+					t.Helper()
+					if flipped, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, convID); err != nil || !flipped {
+						t.Fatalf("MarkQueuedForResume(%s) = (%v, %v), want a flip", convID, flipped, err)
+					}
+				}
+
+				t.Run("LastConversationIsClaimable_AnEarlierOneNever", func(t *testing.T) {
+					h := mk(t)
+					first, last := stage(t, h, "completed", 1)
+
+					// The earlier step re-queues — the CAS is about the
+					// conversation, not the plan — and then sits there. The
+					// snapshot it would rehydrate is the last step's, so
+					// driving it would answer out of the wrong workspace.
+					resume(t, h, first)
+					mustNotClaim(t, h)
+
+					// The last one is the follow-up's home, and it is claimed
+					// even with the un-claimable sibling ahead of it in the
+					// queue.
+					resume(t, h, last)
+					mustClaim(t, h, last)
+					mustNotClaim(t, h)
+
+					// And again, indefinitely: the follow-up concludes, and
+					// the next one is claimed the same way. Nothing about the
+					// first resume consumed the conversation's claimability —
+					// which is what "follow up on it again" means.
+					release(t, h, h.OrgID, last, "completed")
+					h.SetStoredStatus(t, last, "completed")
+					resume(t, h, last)
+					mustClaim(t, h, last)
+				})
+
+				t.Run("EarlyFinish_ResumesTheStepThatActuallyRan", func(t *testing.T) {
+					// A blueprint that finished at step 0 of a two-step plan.
+					// current_step_index is the durable record of where it
+					// stopped, so the follow-up lands on step 0 — not on the
+					// last step of the plan, which never ran.
+					h := mk(t)
+					ran, neverRan := stage(t, h, "completed", 0)
+
+					resume(t, h, neverRan)
+					mustNotClaim(t, h)
+
+					resume(t, h, ran)
+					mustClaim(t, h, ran)
+				})
+
+				t.Run("CancelledBlueprintDrivesNothing", func(t *testing.T) {
+					// Called off is not the same as finished: nothing under a
+					// cancelled blueprint is claimable, its last conversation
+					// included.
+					h := mk(t)
+					_, last := stage(t, h, "cancelled", 1)
+					resume(t, h, last)
+					mustNotClaim(t, h)
+				})
 			})
 
 			t.Run("Compaction_RequestDoesNotWake_FractionalSeqStillMatches", func(t *testing.T) {

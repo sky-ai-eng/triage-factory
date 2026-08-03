@@ -884,7 +884,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("second flip on a queued row succeeded; want refused (CAS loser)")
 		}
 
-		// completed + outcome=abort → ok (message-resumable).
+		// completed → ok, whatever the outcome. The agent stopping mid-work and
+		// the agent finishing are both states a person can follow up on, and
+		// both left a workspace behind to follow up in.
 		abortRun := seedConversationForTest(t, orgID, seed, "running")
 		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "", "stopped", "abort", "needs a human", ""); err != nil {
 			t.Fatalf("complete+abort: %v", err)
@@ -892,13 +894,22 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, abortRun); err != nil || !ok {
 			t.Errorf("from completed+abort: ok=%v err=%v, want true", ok, err)
 		}
-		// completed + outcome=finish → refused (finish excluded).
 		finishRun := seedConversationForTest(t, orgID, seed, "running")
 		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, "", "shipped", "finish", "", ""); err != nil {
 			t.Fatalf("complete+finish: %v", err)
 		}
-		if ok, _ := store.MarkQueuedForResume(ctx, orgID, finishRun); ok {
-			t.Errorf("from completed+finish succeeded; want refused")
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, finishRun); err != nil || !ok {
+			t.Errorf("from completed+finish: ok=%v err=%v, want true — a follow-up on concluded work", ok, err)
+		}
+		// failed → refused. The infrastructure under it died, so there is no
+		// workspace to land a follow-up in; this is the one rest state the CAS
+		// still excludes.
+		failedRun := seedConversationForTest(t, orgID, seed, "running")
+		if err := store.Complete(ctx, orgID, failedRun, "failed", 0, 0, 0, "", "", "", "", ""); err != nil {
+			t.Fatalf("fail: %v", err)
+		}
+		if ok, _ := store.MarkQueuedForResume(ctx, orgID, failedRun); ok {
+			t.Errorf("from failed succeeded; want refused")
 		}
 	})
 
@@ -1922,6 +1933,24 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		sibling := seed.Task(t, ent, domain.EventGitHubPRCICheckFailed, ev2)
 		if id, err := store.ActiveAutoRunIDForTaskSystem(ctx, orgID, sibling); err != nil || id != "" {
 			t.Errorf("sibling task: id=%q err=%v, want empty", id, err)
+		}
+
+		// The same answer for a conversation a user RESUMED. A resume keeps
+		// trigger_type='event' and puts the row back mid-flight, so it reads
+		// as a live auto run again — for its own task, and only its own. A
+		// human-paced follow-up on one card must never hold up automated
+		// triage of a different card on the same entity.
+		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
+			t.Fatalf("conclude before resume: %v", err)
+		}
+		if flipped, err := store.MarkQueuedForResume(ctx, orgID, eventRunID); err != nil || !flipped {
+			t.Fatalf("MarkQueuedForResume: ok=%v err=%v", flipped, err)
+		}
+		if id, err := store.ActiveAutoRunIDForTaskSystem(ctx, orgID, taskID); err != nil || id != eventRunID {
+			t.Errorf("resumed conversation, own task: id=%q err=%v, want %q", id, err, eventRunID)
+		}
+		if id, err := store.ActiveAutoRunIDForTaskSystem(ctx, orgID, sibling); err != nil || id != "" {
+			t.Errorf("resumed conversation, sibling task on the same entity: id=%q err=%v, want empty", id, err)
 		}
 
 		// Terminate it — terminal-only, plus the still-active manual run,

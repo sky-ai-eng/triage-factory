@@ -139,26 +139,26 @@ func TestSendMessage_QueuedNotSteerable(t *testing.T) {
 	}
 }
 
-// TestSendMessage_TerminalNotSteerable: a terminal finish run (no live process,
-// completed without an abort outcome) can take no message — SendMessage returns
+// TestSendMessage_TerminalNotSteerable: a failed run (no live process, no
+// workspace that survived) can take no message — SendMessage returns
 // ErrRunNotSteerable for the handler to map to 409.
 func TestSendMessage_TerminalNotSteerable(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-done", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE conversations SET status='completed' WHERE id='r-done'`); err != nil {
-		t.Fatalf("complete: %v", err)
+	seedRun(t, database, "r-dead", "sess", "/tmp/wt")
+	if _, err := database.Exec(`UPDATE conversations SET status='failed' WHERE id='r-dead'`); err != nil {
+		t.Fatalf("fail: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-done", runmode.LocalDefaultUserID, "hi")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-dead", runmode.LocalDefaultUserID, "hi")
 	if !errors.Is(err, ErrRunNotSteerable) {
 		t.Errorf("err = %v, want ErrRunNotSteerable", err)
 	}
 }
 
-// TestResumableState pins the (status, outcome) wake gate the routing and the
-// MarkQueuedForResume CAS both key on: every non-finish parked/terminal state
-// is resumable, a finish run is not.
+// TestResumableState pins the wake gate the routing and the
+// MarkQueuedForResume CAS both key on: every state a conversation comes to
+// rest on is resumable except `failed`, and outcome does not discriminate.
 func TestResumableState(t *testing.T) {
 	cases := []struct {
 		status, outcome string
@@ -166,16 +166,44 @@ func TestResumableState(t *testing.T) {
 	}{
 		{"open", "", true},
 		{"completed", "abort", true},
-		{"completed", "finish", false}, // finish is the one terminal excluded
-		{"completed", "", false},
+		{"completed", "finish", true}, // concluded work is followed up on
+		{"completed", "continue", true},
+		{"completed", "", true},
 		{"running", "", false},
 		{"queued", "", false},
-		{"failed", "", false},
-		{"cancelled", "abort", false}, // status gates first — only completed pairs with abort
+		{"failed", "", false},      // the one rest state with no workspace left
+		{"failed", "abort", false}, // outcome never rescues a status
 	}
 	for _, tc := range cases {
 		if got := resumableState(tc.status, tc.outcome); got != tc.want {
 			t.Errorf("resumableState(%q, %q) = %v, want %v", tc.status, tc.outcome, got, tc.want)
+		}
+	}
+}
+
+// TestInjectionWillFlush pins the narrower predicate the staged-injection
+// producers use, and the gap between it and resumableState: a conversation
+// that FINISHED can be woken by a person but has nothing coming on its own, so
+// an automated injection staged against it would wait on a follow-up that may
+// never arrive.
+func TestInjectionWillFlush(t *testing.T) {
+	cases := []struct {
+		status, outcome string
+		want            bool
+	}{
+		{"open", "", true},
+		{"completed", "abort", true},
+		{"completed", "finish", false},
+		{"completed", "", false},
+		{"failed", "", false},
+	}
+	for _, tc := range cases {
+		if got := injectionWillFlush(tc.status, tc.outcome); got != tc.want {
+			t.Errorf("injectionWillFlush(%q, %q) = %v, want %v", tc.status, tc.outcome, got, tc.want)
+		}
+		if injectionWillFlush(tc.status, tc.outcome) && !resumableState(tc.status, tc.outcome) {
+			t.Errorf("injectionWillFlush(%q, %q) is true where resumableState is false; it must stay the narrower of the two",
+				tc.status, tc.outcome)
 		}
 	}
 }
@@ -201,19 +229,34 @@ func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 	}
 }
 
-// TestSendMessage_CompletedFinishNotSteerable: a completed+finish run is NOT
-// resumable (finish is the one non-finish-state exclusion) → ErrRunNotSteerable.
-func TestSendMessage_CompletedFinishNotSteerable(t *testing.T) {
+// TestSendMessage_CompletedFinishIsResumable: the case the epic exists for. A
+// blueprint whose final step finished cleanly takes a follow-up — the message
+// is recorded, the row goes back to mid-flight, and the blueprint is left
+// exactly as it was.
+func TestSendMessage_CompletedFinishIsResumable(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-fin", "sess", "/tmp/wt")
+	seedRun(t, database, "r-fin", "sess-fin", t.TempDir())
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish' WHERE id='r-fin'`); err != nil {
 		t.Fatalf("completed+finish: %v", err)
 	}
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status='completed', current_step_index=0 WHERE id='seedbpr-r-fin'`); err != nil {
+		t.Fatalf("finish blueprint: %v", err)
+	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-fin", runmode.LocalDefaultUserID, "more please")
-	if !errors.Is(err, ErrRunNotSteerable) {
-		t.Errorf("err = %v, want ErrRunNotSteerable (finish runs are excluded from resume)", err)
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-fin", runmode.LocalDefaultUserID, "more please"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if st := storedStatus(t, database, "r-fin"); st != "" {
+		t.Errorf("stored status = %q, want none (resume-by-enqueue's un-terminal write)", st)
+	}
+	var bpStatus string
+	var bpStep int
+	if err := database.QueryRow(`SELECT status, current_step_index FROM blueprint_runs WHERE id='seedbpr-r-fin'`).Scan(&bpStatus, &bpStep); err != nil {
+		t.Fatalf("read blueprint: %v", err)
+	}
+	if bpStatus != "completed" || bpStep != 0 {
+		t.Errorf("blueprint moved to (%q, %d); finished machinery never restarts", bpStatus, bpStep)
 	}
 }
 

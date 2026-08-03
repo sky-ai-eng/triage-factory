@@ -338,7 +338,9 @@ func parkOpen(ctx context.Context, q queryer, orgID, runID string, park db.Park)
 // path that puts an outcome-bearing conversation back into the mid-flight
 // (status NULL) state the needs-driving predicate claims from. Its guard is
 // what keeps a terminal conversation un-claimable by anything else, whatever
-// rows it holds. Always claims-scoped — resume is always user-initiated, so
+// rows it holds — and the guard is now status alone, since `failed` is the
+// only rest state a conversation cannot be woken from (its workspace did not
+// survive). Always claims-scoped — resume is always user-initiated, so
 // there is no admin-pool "...System" variant. The active claim releases as
 // 'requeued' (ownership is re-established when ClaimNextRun mints a fresh
 // claim, exactly like a fresh EnqueueRun'd row). preferred_executor_id is
@@ -353,8 +355,7 @@ func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID st
 		UPDATE conversations SET status = NULL,
 		                parked_at = NULL, preferred_executor_id = NULL
 		WHERE org_id = $1 AND id = $2
-		  AND (status = 'open'
-		       OR (status = 'completed' AND outcome = 'abort'))
+		  AND status IN ('open', 'completed')
 	`, orgID, runID)
 	if err != nil {
 		return false, err

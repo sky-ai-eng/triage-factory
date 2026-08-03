@@ -24,25 +24,52 @@ import (
 var ErrRunNotSteerable = errors.New("run is not steerable")
 
 // resumableState reports whether a run with no warm process can be woken by a
-// follow-up message. The resumable set is every non-finish parked/terminal
-// state:
+// follow-up message. Two stored states qualify, and between them they are every
+// non-failed rung a conversation can come to rest on:
 //
-//   - open               — a turn ended without a conclusion (works today).
-//   - completed + abort  — the agent voluntarily stopped; a follow-up can pick
-//     the work back up (its blueprint is re-opened on resume).
+//   - open      — a turn ended without a conclusion.
+//   - completed — the agent concluded. Whatever the outcome: an abort is work a
+//     human picks back up, a finish is work a human follows up on, and both
+//     have a workspace to land in because every completed terminal snapshots.
 //
-// Runs never park for approval. A terminal blueprint run that left an
-// unresolved artifact (draft PR / ready review) is still message-resumable
-// through the completed+abort path + the feedback ledger — not through a
-// parked status.
+// Outcome no longer discriminates, so this reads as status alone. It keeps the
+// two-argument shape because the MarkQueuedForResume CAS it mirrors is still
+// spelled over the same pair, and a caller that has an outcome in hand should
+// not have to know that this predicate has stopped caring.
 //
-// Keyed on (status, outcome), not status alone: a finish run (completed +
-// outcome='finish') is still excluded here. Its workspace now exists — every
-// completed terminal snapshots — so the reason is no longer "there is nothing to
-// resume onto"; what is missing is the rest of the path, since the claim gate
-// only drives conversations under a still-running blueprint and a finished one
-// never restarts. Widening this predicate is that work, not this one.
-func resumableState(status, outcome string) bool {
+// `failed` is the exclusion: the infrastructure under the run died, so there is
+// no coherent workspace to rehydrate — failRun drops whatever blob it had.
+// Runs never park for approval; a terminal run that left an unresolved artifact
+// (draft PR / ready review) resumes through this same path plus the feedback
+// ledger, not through a parked status.
+func resumableState(status, _ string) bool {
+	switch status {
+	case "open", "completed":
+		return true
+	default:
+		return false
+	}
+}
+
+// injectionWillFlush reports whether an injection staged against a conversation
+// with no warm process will actually be read.
+//
+// Deliberately narrower than resumableState, and the gap is the point.
+// resumableState answers "can a person wake this?", which concluded work now
+// says yes to. This answers "is something already coming back to read a row
+// nobody asked for?" — and for work that finished, nothing is. A follow-up may
+// never arrive; until it does the staged row is a leak, and if one eventually
+// does arrive it is a double delivery against the fresh run the event's own
+// deferral spawned in the meantime. Staging is an automated channel and needs
+// an automated reader:
+//
+//   - open              — a claim picks it back up as soon as input lands.
+//   - completed + abort — the agent stopped mid-work; the blueprint re-opens on
+//     the resume, so the work is still in flight in every sense but the row.
+//
+// A conversation that finished is not in that set, whatever a message could do
+// to it.
+func injectionWillFlush(status, outcome string) bool {
 	switch status {
 	case "open":
 		return true
@@ -55,18 +82,20 @@ func resumableState(status, outcome string) bool {
 
 // blueprintDrivableForResume is the other half of "resumable": the run's state
 // says a message COULD continue it, and this says anything would actually pick
-// it up. ClaimNextRun only drives rows whose blueprint_run is 'running' and
-// not cancel-requested, so waking a run under a finished blueprint would flip
-// it mid-flight and strand it there — claimed by nobody, counted as queue depth
-// by every counter, forever. `aborted` passes because the resume re-opens it in
-// the same transaction as the flip.
+// it up. Waking a run nothing will claim strands it mid-flight — claimed by
+// nobody, counted as queue depth by every counter, forever — so this refuses
+// first rather than letting the flip land.
 //
-// Stopping a conversation no longer reaches this arm — a stop freezes its
-// blueprint 'running' precisely so the parked step stays claimable. What still
-// reaches it is a blueprint cancelled at its own layer, and (until resuming a
-// finished blueprint's final step lands) a completed one: both leave parked
-// rows that nothing would claim, and they read resumable from the
-// conversation alone. Refusing is the honest answer for those.
+// It is blueprintDrivableForClaim plus one arm, and it has to stay that:
+// widening only the claim gate leaves the refusal here, and widening only this
+// strands the row. The extra arm is `aborted`, which passes because the resume
+// re-opens the blueprint to running in the same transaction as the flip — the
+// claim gate never sees an aborted blueprint on this path.
+//
+// What refuses is a blueprint that was called off. It leaves parked
+// conversations that read resumable from the conversation row alone and that
+// nothing will ever claim, and that is the whole of ErrConversationConcluded
+// now.
 //
 // Admin-pool read on purpose: blueprint_runs RLS hides another user's manual
 // blueprint, and a teammate resuming a run must not be refused for a row they
@@ -85,10 +114,45 @@ func (s *Spawner) blueprintDrivableForResume(ctx context.Context, orgID string, 
 	if br == nil {
 		return true
 	}
-	if br.CancelRequested {
+	if br.Status == domain.BlueprintRunStatusAborted && !br.CancelRequested {
+		return true
+	}
+	return blueprintDrivableForClaim(br, run.BlueprintStepIndex)
+}
+
+// blueprintDrivableForClaim is the Go mirror of blueprintDrivableSQL: given a
+// blueprint_runs row already in hand, may this conversation be driven?
+//
+// The claim scan asks the same question in SQL; this asks it again on the far
+// side of the claim, where the window between the scan and the read is
+// non-zero. The two must agree — a claim the dispatcher then refuses to drive
+// is a run that ping-pongs between the queue and a park.
+//
+// A nil blueprint is drivable: a conversation with no blueprint parent (curator
+// today, interactive tomorrow) is not this gate's business, matching the SQL's
+// LEFT JOIN.
+func blueprintDrivableForClaim(br *domain.BlueprintRun, stepIndex *int) bool {
+	if br == nil {
+		return true
+	}
+	// Called off: the signal a cancel raises while the sequence still runs, and
+	// the terminal it settles on. Both, for the reason the SQL gives.
+	if br.CancelRequested || br.Status == domain.BlueprintRunStatusCancelled {
 		return false
 	}
-	return br.Status == domain.BlueprintRunStatusRunning || br.Status == domain.BlueprintRunStatusAborted
+	return br.Status == domain.BlueprintRunStatusRunning || isFinalBlueprintStep(br, stepIndex)
+}
+
+// isFinalBlueprintStep reports whether stepIndex names the step the blueprint
+// came to rest on — the one conversation of a finished blueprint that a
+// follow-up may land on. Mirrors the equality arm of blueprintDrivableSQL, and
+// exists so the claim path and the resume pre-check cannot drift apart.
+//
+// A nil index is not final. It is the Go spelling of the SQL's NULL comparison,
+// and it is the conservative answer for the same reason: a conversation that
+// never recorded its position cannot prove it is the one holding the workspace.
+func isFinalBlueprintStep(br *domain.BlueprintRun, stepIndex *int) bool {
+	return br != nil && stepIndex != nil && *stepIndex == br.CurrentStepIndex
 }
 
 // SendMessage delivers a free-form user message to a run, owning the
@@ -96,7 +160,7 @@ func (s *Spawner) blueprintDrivableForResume(ctx context.Context, orgID string, 
 //
 //   - live (a registered warm process) → Steer it in place through the control
 //     seam (no DB read — the fast path).
-//   - a resumable run (no warm process; open / completed+abort — see
+//   - a resumable run (no warm process; open / completed — see
 //     resumableState) → wake it via ResumeOpenRun, which re-invokes the
 //     session with the message as the next turn's input.
 //   - anything else → ErrRunNotSteerable.
@@ -151,7 +215,7 @@ func (s *Spawner) SendMessage(ctx context.Context, orgID, runID, userID, text st
 		// process's registry is a genuine race → ErrNoLiveProcess.
 		return s.Steer(ctx, runID, text)
 	case resumableState(run.Status, run.Outcome):
-		// Parked (open / completed+abort) → wake via resume-by-enqueue. Unlike the
+		// Parked or concluded (open / completed) → wake via resume-by-enqueue. Unlike the
 		// live-steer branch, the out-of-band <system-note> prepends (staged
 		// injections + artifact ledger) are NOT composed here: resume-by-enqueue
 		// (TFAC-585) defers delivery to whichever executor claims the re-queued row,

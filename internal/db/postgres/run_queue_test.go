@@ -943,6 +943,12 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 				}
 				return status.String
 			},
+			SetBlueprintState: func(t *testing.T, status string, currentStepIndex int) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB,
+					`UPDATE blueprint_runs SET status = $2, current_step_index = $3 WHERE id = $1`,
+					brID, status, currentStepIndex)
+			},
 			InsertRow: func(t *testing.T, convID string, msg domain.Message) int64 {
 				t.Helper()
 				msg.ConversationID = convID
