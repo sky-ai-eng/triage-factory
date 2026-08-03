@@ -556,7 +556,7 @@ func (r *Router) DrainTask(orgID, taskID string) {
 				routerLog.Error("mark firing fired failed, rolling back: tearing down run + reverting task to queued",
 					"firing_id", firing.ID, "run_id", runID, "error", err)
 				if r.spawner != nil {
-					if cerr := r.spawner.StopAndCancelBlueprint(orgID, runID, ""); cerr != nil {
+					if cerr := r.spawner.StopAndCancelBlueprint(orgID, runID, "", delegate.StopCauseFiringReverted); cerr != nil {
 						routerLog.Warn("stop run after mark-fired failure (run may already be terminal, drain still triggers from its defer)",
 							"run_id", runID, "error", cerr)
 					}

@@ -189,7 +189,7 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 	cancelledRuns := 0
 	if sp := th.spawnerRuntime(); sp != nil {
 		for _, runID := range runIDs {
-			if cErr := sp.StopAndCancelBlueprint(orgID, runID, ""); cErr != nil {
+			if cErr := sp.StopAndCancelBlueprint(orgID, runID, "", delegate.StopCauseTeamArchived); cErr != nil {
 				teamsLog.Warn("archive: run stop failed", "team", teamID, "run", runID, "error", cErr)
 				continue
 			}

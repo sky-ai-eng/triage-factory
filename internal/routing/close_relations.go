@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -396,7 +397,7 @@ func (r *Router) cancelActiveRunsForTask(orgID, taskID string) {
 		return
 	}
 	for _, id := range ids {
-		if err := r.spawner.StopAndCancelBlueprint(orgID, id, ""); err != nil {
+		if err := r.spawner.StopAndCancelBlueprint(orgID, id, "", delegate.StopCauseTaskClosed); err != nil {
 			routerLog.Error("stop run on task close failed", "run_id", id, "task_id", taskID, "error", err)
 		}
 	}

@@ -600,7 +600,7 @@ func (s *Server) swipeTeardownRuns(r *http.Request, orgID, userID, id, action st
 	// runs go terminal with them rather than freezing 'running' — the plain
 	// conversation stop is for a user pausing work they mean to come back to.
 	for _, runID := range ids {
-		if err := s.spawner.StopAndCancelBlueprint(orgID, runID, userID); err != nil {
+		if err := s.spawner.StopAndCancelBlueprint(orgID, runID, userID, delegate.StopCauseTaskDispositioned); err != nil {
 			swipeLog.Warn("stop run failed", "run", runID, "action", action, "task", id, "error", err)
 		}
 	}

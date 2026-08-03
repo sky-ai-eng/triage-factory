@@ -1,4 +1,5 @@
 import type { Message } from '../types'
+import { isSystemNotice } from './messageVoice'
 
 // runFeed — the bounded per-run projection the board's AgentCards render from.
 //
@@ -69,9 +70,13 @@ function linesForMessage(msg: Message): FeedLine[] {
     hour12: false,
   })
   // Operator steers show on the ticker too — the card should reflect that
-  // someone redirected the run.
+  // someone redirected the run. A system-authored user row (a stop note, an
+  // executor-changed notice) rides the same role and is NOT that: it shows
+  // without the attribution, because prefixing the machine's own words with
+  // "you:" tells the reader they said something they never said.
   if (msg.role === 'user' && msg.content) {
-    out.push({ id: `u-${msg.id}`, time, text: `you: ${clip(msg.content, 64)}` })
+    const text = isSystemNotice(msg) ? clip(msg.content, 70) : `you: ${clip(msg.content, 64)}`
+    out.push({ id: `u-${msg.id}`, time, text })
     return out
   }
   if (msg.role !== 'assistant') return out

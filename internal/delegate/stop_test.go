@@ -212,7 +212,7 @@ func TestStopAndCancelBlueprint_OpenStep_FinalizesBlueprintRun(t *testing.T) {
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-teardown", runmode.LocalDefaultUserID); err != nil {
+	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-teardown", runmode.LocalDefaultUserID, StopCauseTaskDispositioned); err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
 
@@ -579,12 +579,30 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 	if got := storedStatus(t, database, runID); got != "open" {
 		t.Errorf("status = %q, want open — control's park stands and the fenced teardown records no terminal of its own", got)
 	}
+	// One row, and it is the stop's own note. A stop is not an agent_error,
+	// so the fenced teardown writes no failure row — but the stop itself
+	// records what it did, on the transcript, where the resumed model reads
+	// it.
 	var msgs int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, runID).Scan(&msgs); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
-	if msgs != 0 {
-		t.Errorf("messages = %d, want none — a stop is not an agent_error and writes no failure row", msgs)
+	if msgs != 1 {
+		t.Errorf("messages = %d, want exactly the stop note — a stop is not an agent_error and writes no failure row", msgs)
+	}
+	var role, subtype, content string
+	var isError bool
+	if err := database.QueryRow(
+		`SELECT role, subtype, content, is_error FROM messages WHERE conversation_id = ?`, runID,
+	).Scan(&role, &subtype, &content, &isError); err != nil {
+		t.Fatalf("read the stop note: %v", err)
+	}
+	if role != "user" || subtype != domain.MessageSubtypeStopNote || isError {
+		t.Errorf("stop note = (role=%q, subtype=%q, is_error=%v), want (user, %s, false)",
+			role, subtype, isError, domain.MessageSubtypeStopNote)
+	}
+	if content != stopNoteByUser {
+		t.Errorf("stop note content = %q, want %q", content, stopNoteByUser)
 	}
 
 	// 3. The user's follow-up, a minute later. It has to be accepted off the
@@ -664,7 +682,7 @@ func TestStopAndCancelBlueprint_AlreadyTerminal_LeavesBlueprintAlone(t *testing.
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-stale", runmode.LocalDefaultUserID); err == nil {
+	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-stale", runmode.LocalDefaultUserID, StopCauseTaskDispositioned); err == nil {
 		t.Fatal("expected 'no active run' on a concluded run")
 	}
 

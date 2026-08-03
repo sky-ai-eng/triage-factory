@@ -3,6 +3,7 @@ import Markdown from 'react-markdown'
 import { Check, Copy } from 'lucide-react'
 import type { Message, Conversation, ToolCall } from '../../types'
 import { isActiveRun } from '../../lib/runStatus'
+import { isSystemNotice } from '../../lib/messageVoice'
 import { stripWorktree } from '../../lib/worktree'
 import { toast } from '../Toast/toastStore'
 import { stationState } from './stationStyle'
@@ -194,6 +195,21 @@ function buildRows(messages: Message[], worktree: string | undefined): React.Rea
 
   const rows: React.ReactNode[] = []
   for (const msg of messages) {
+    // A system-authored user row — a stop note, an executor-changed notice,
+    // the loop's wrap-up ask — is the machine explaining itself, and gets a
+    // marker line rather than a YOU line. Checked before the operator arm
+    // below, which would otherwise attribute every one of them to the person
+    // reading the screen.
+    if (isSystemNotice(msg)) {
+      if (msg.content) {
+        rows.push(
+          <ScreenRow key={`n-${msg.id}`} time={clockTime(msg.created_at)}>
+            <NoticeLine text={msg.content} />
+          </ScreenRow>,
+        )
+      }
+      continue
+    }
     // Steering input: the message endpoint records the user's words as a
     // Role:"user" row before routing them to the process — render them as
     // operator lines so a steer is visible in the feed it steered.
@@ -307,6 +323,28 @@ const UserLine = memo(function UserLine({ text }: { text: string }) {
       >
         {text}
       </div>
+    </div>
+  )
+})
+
+// NoticeLine — the machine speaking about itself: a stop, a park, a swapped
+// executor. A dim rule and dim ink, no author tag, deliberately unlike both
+// the operator's cyan YOU line and the agent's prose — the reader should be
+// able to tell at a glance that nobody said this.
+const NoticeLine = memo(function NoticeLine({ text }: { text: string }) {
+  return (
+    <div className="flex items-baseline gap-2">
+      <span
+        className="mt-[7px] h-px w-4 shrink-0 self-start"
+        style={{ background: 'var(--hmi-line)' }}
+        aria-hidden
+      />
+      <span
+        className="whitespace-pre-wrap text-[12px] italic leading-relaxed"
+        style={{ color: 'var(--hmi-ink-dim)' }}
+      >
+        {text}
+      </span>
     </div>
   )
 })

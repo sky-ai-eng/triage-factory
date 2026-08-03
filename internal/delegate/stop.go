@@ -58,6 +58,52 @@ import (
 // to a client.
 var ErrNoActiveRun = errors.New("no active run")
 
+// StopCause names the lifecycle event a teardown caller is acting on — the
+// thing that caller knows and the conversation itself does not. It exists so
+// the note a stop leaves on the transcript can say why the work ended rather
+// than only that it did: nothing resumes a conversation torn down this way,
+// so that note is the entire explanation a human reading the history gets.
+type StopCause string
+
+const (
+	// StopCauseTaskClosed — the system decided the task is resolved (its
+	// entity merged, closed, or otherwise stopped needing attention).
+	StopCauseTaskClosed StopCause = "task_closed"
+	// StopCauseTaskDispositioned — a user swiped the task away.
+	StopCauseTaskDispositioned StopCause = "task_dispositioned"
+	// StopCauseTeamArchived — the team that owns the work was archived.
+	StopCauseTeamArchived StopCause = "team_archived"
+	// StopCauseFiringReverted — the firing that spawned the run was rolled
+	// back, so the run should never have existed.
+	StopCauseFiringReverted StopCause = "firing_reverted"
+)
+
+// note is the sentence this cause writes into the transcript. Every arm names
+// the lifecycle event, because "stopped" alone is what the reader already
+// knows from the row's presence.
+func (c StopCause) note() string {
+	switch c {
+	case StopCauseTaskClosed:
+		return "Run stopped: the task it was working on was closed."
+	case StopCauseTaskDispositioned:
+		return "Run stopped: the task it was working on was dispositioned."
+	case StopCauseTeamArchived:
+		return "Run stopped: the team that owns this work was archived."
+	case StopCauseFiringReverted:
+		return "Run stopped: the firing that started it was rolled back."
+	}
+	return "Run stopped: the work it belonged to was closed out."
+}
+
+// The two sentences the plain stop verb writes. A stop is not a cancellation
+// and nothing concluded, so neither says so — and the user's says the one
+// thing that is actually true of the conversation afterwards: it can be
+// picked back up.
+const (
+	stopNoteByUser   = "Run stopped by the user. It may be resumed later."
+	stopNoteBySystem = "Run stopped by the system."
+)
+
 // Stop ends a conversation's work at any phase — clone, fetch, worktree setup,
 // or agent execution — and parks it `open`, resumable. Nothing outside the
 // conversation moves: its blueprint keeps its status and its task keeps its
@@ -71,7 +117,11 @@ var ErrNoActiveRun = errors.New("no active run")
 // runmode.LocalDefaultUserID; multi-mode handlers extract from JWT
 // claims.
 func (s *Spawner) Stop(orgID, runID, userID string) error {
-	return s.stop(orgID, runID, userID, false)
+	note := stopNoteBySystem
+	if userID != "" {
+		note = stopNoteByUser
+	}
+	return s.stop(orgID, runID, userID, false, note)
 }
 
 // StopAndCancelBlueprint stops the conversation and finalizes its blueprint
@@ -83,15 +133,19 @@ func (s *Spawner) Stop(orgID, runID, userID string) error {
 //
 // A conversation-level stop must never route here: the terminal blueprint is
 // exactly what makes a parked conversation unresumable.
-func (s *Spawner) StopAndCancelBlueprint(orgID, runID, userID string) error {
-	return s.stop(orgID, runID, userID, true)
+//
+// cause is the lifecycle event the caller is acting on. It reaches the
+// transcript verbatim, so the ended conversation explains its own ending to
+// whoever reads it later.
+func (s *Spawner) StopAndCancelBlueprint(orgID, runID, userID string, cause StopCause) error {
+	return s.stop(orgID, runID, userID, true, cause.note())
 }
 
 // stop is the shared body of both verbs. cancelBlueprint gates the two places
 // the blueprint layer is touched, and nothing else differs — one path, so the
 // stop verb and the lifecycle teardown cannot drift apart in the parts they
-// share.
-func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool) error {
+// share. note is the sentence each verb writes onto the transcript.
+func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool, note string) error {
 	// Preflight: load the run under the caller's identity so a
 	// cross-org runID surfaces as "not found" BEFORE we tear anything
 	// down. The cancels map below is keyed only by runID, so without
@@ -131,6 +185,25 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool) error 
 	// finished.
 	if domain.IsTerminalRunStatus(run.Status) {
 		return fmt.Errorf("%w %s", ErrNoActiveRun, runID)
+	}
+
+	// The stop's record is a transcript row, not a verdict on the
+	// conversation. It is the same delivered stop-note the engine writes for
+	// its own park decisions, and it goes in here — one site above the three
+	// arms below (local kill, cross-pod signal, DB-only park), because this
+	// is the only place that knows who asked.
+	//
+	// Before the kill, deliberately. A resumed model otherwise reads a turn
+	// that stops mid-sentence followed by a new message, with nothing
+	// between them saying a person intervened; writing it first means the
+	// explanation exists even if this pod dies in the next line.
+	//
+	// Skipped for a conversation already parked `open`: re-stopping a parked
+	// row is a gesture with nothing to stop, and stacking a notice per click
+	// is exactly what the engine's own hasNoticeSince guard exists to
+	// prevent.
+	if run.Status != domain.StatusOpen {
+		s.insertStopNote(orgID, runID, userID, note)
 	}
 
 	if cancelBlueprint {
@@ -220,9 +293,13 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool) error 
 		err     error
 	)
 	bgCtx := context.Background()
-	park := db.ParkStopped("user_cancelled", "Run cancelled by user")
+	// No result summary, on either arm. The summary is the run station's
+	// verdict block, and a stop concluded nothing — the note written above is
+	// the record. The machine code stays: it is claim-layer vocabulary the
+	// claim outcome is derived from, not text anyone reads.
+	park := db.ParkStopped("user_cancelled", "")
 	if userID == "" {
-		park = db.ParkStopped("system_cancelled", "Run cancelled by system")
+		park = db.ParkStopped("system_cancelled", "")
 	}
 	if userID != "" {
 		err = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, userID, func(ts db.TxStores) error {
@@ -257,6 +334,50 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool) error 
 	// short-circuit holds.
 	s.notifyDrainer(orgID, triggerType, run.TaskID)
 	return nil
+}
+
+// insertStopNote writes the stop onto the transcript: a delivered role=user
+// row carrying the stop-note subtype, the same shape the engine's own park
+// notices take. Delivered rather than pending because it states what
+// happened; a resumed conversation reads it in place instead of consuming it
+// as input, and the turn budget doesn't renew on it.
+//
+// userID routes the write the same way every other user-attributed write in
+// this file does — synthetic claims for a person, the admin pool for the
+// system — and lands on the row so the transcript records who stopped it.
+//
+// Unfenced, for the same reason the park below it is: this is an outside
+// actor ending a run, not an engagement writing about itself, and the whole
+// point of a stop is to override whichever executor holds the conversation.
+// It is why the fenced per-claim variant is not used here.
+//
+// Best effort: a stop whose note failed to land is still a stop, and
+// returning an error here would leave a live agent running because its
+// explanation could not be written.
+func (s *Spawner) insertStopNote(orgID, runID, userID, content string) {
+	if content == "" || s.agentRuns == nil {
+		return
+	}
+	ctx := context.Background()
+	msg := &domain.Message{
+		ConversationID: runID,
+		UserID:         userID,
+		Role:           "user",
+		Subtype:        domain.MessageSubtypeStopNote,
+		Content:        content,
+	}
+	var err error
+	if userID != "" {
+		err = s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
+			_, ierr := ts.Conversations.InsertMessage(ctx, orgID, msg)
+			return ierr
+		})
+	} else {
+		_, err = s.agentRuns.InsertMessageSystem(ctx, orgID, msg)
+	}
+	if err != nil {
+		delegateLog.Warn("record stop note failed; the stop itself still lands", "run", runID, "error", err)
+	}
 }
 
 // classifyFailureKind maps a runtime error from the agent process to

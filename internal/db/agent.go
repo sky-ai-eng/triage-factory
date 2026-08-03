@@ -24,6 +24,13 @@ type Park struct {
 	StopReason string
 	// ResultSummary is the human-facing note for a deliberate stop. Empty
 	// leaves whatever is already on the row.
+	//
+	// Every stop path passes it empty, and that is the point: the summary is
+	// what the run station renders as the conversation's verdict, and a stop
+	// reached no verdict. What happened is recorded on the transcript
+	// instead, as a stop-note row the agent reads on resume and a human reads
+	// in place. The field stays because a future deliberate park with an
+	// actual conclusion to state would want it.
 	ResultSummary string
 }
 
