@@ -8,11 +8,11 @@ import (
 )
 
 // runPendingInputStore is the SQLite impl of db.RunPendingInputStore — the
-// durable half of resume-by-enqueue (TFAC-585), stored as undelivered plain
-// user messages (role='user', blank subtype, delivered=0) on the
-// conversation's own transcript. SQLite is N=1, no RLS; org_id exists for
-// parity with the Postgres baseline and every caller passes
-// LocalDefaultOrgID (asserted at each entry).
+// durable half of resume-by-enqueue, stored as undelivered plain user
+// messages (role='user', blank subtype, delivered=0) on the conversation's
+// own transcript. SQLite is N=1, no RLS; org_id exists for parity with the
+// Postgres baseline and every caller passes LocalDefaultOrgID (asserted at
+// each entry).
 type runPendingInputStore struct{ q queryer }
 
 func newRunPendingInputStore(q queryer) db.RunPendingInputStore {

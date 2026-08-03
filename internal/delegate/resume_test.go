@@ -205,16 +205,26 @@ func TestResumeOpenRun_EnqueuesRatherThanSpawning(t *testing.T) {
 	}
 }
 
-// staleOpenConversations reports every conversation as still parked `open`,
-// whatever it has since become. That is the one thing the losing half of a
-// wake race has that a sequential caller cannot: a read taken before the
-// winner's flip. Everything downstream — including the MarkQueuedForResume CAS
-// that then genuinely fails — runs against the real row.
-type staleOpenConversations struct{ db.ConversationStore }
+// staleOpenConversations reports the FIRST conversation read as still parked
+// `open`, whatever the row has since become, and every read after it honestly.
+// That is exactly the losing half of a wake race, and the one thing a
+// sequential caller cannot have: a validation read taken before the winner's
+// flip, followed by a re-read that sees the truth. Everything in between —
+// including the MarkQueuedForResume CAS that then genuinely fails — runs
+// against the real row.
+type staleOpenConversations struct {
+	db.ConversationStore
+	reads *int
+}
+
+func staleOpenOnce(inner db.ConversationStore) staleOpenConversations {
+	return staleOpenConversations{ConversationStore: inner, reads: new(int)}
+}
 
 func (c staleOpenConversations) GetSystem(ctx context.Context, orgID, runID string) (*domain.Conversation, error) {
 	run, err := c.ConversationStore.GetSystem(ctx, orgID, runID)
-	if run != nil {
+	*c.reads++
+	if run != nil && *c.reads == 1 {
 		run.Status, run.Outcome = "open", ""
 	}
 	return run, err
@@ -244,7 +254,7 @@ func TestResumeOpenRun_LostWakeRaceStillDelivers(t *testing.T) {
 	// The loser reached its flip a moment later, still holding the pre-flip
 	// read. Its CAS finds the row already re-queued and fails for real.
 	loserStores := testSpawnerStores(database)
-	loserStores.Conversations = staleOpenConversations{loserStores.Conversations}
+	loserStores.Conversations = staleOpenOnce(loserStores.Conversations)
 	loser := NewSpawner(database, loserStores, nil, nil, "claude-sonnet-4-6")
 	if err := loser.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-race", "and check the migration", runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("losing wake returned %v, want nil — its message is queued, so there is nothing to report", err)
@@ -264,6 +274,34 @@ func TestResumeOpenRun_LostWakeRaceStillDelivers(t *testing.T) {
 	claimAndDispatch(t, s, database)
 	if _, _, ok, err := s.pendingInput.Consume(context.Background(), runmode.LocalDefaultOrgID, "r-race"); err != nil || ok {
 		t.Errorf("input still queued after the winner's claim: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestResumeOpenRun_LostToTerminalIsAConflict is the other half of the same
+// refusal, and the reason a lost flip cannot simply report success: the CAS
+// declines a conversation that went terminal exactly as it declines one
+// another wake already re-queued, but here nothing will ever claim the row, so
+// the queued message is never delivered. A 200 would tell the user their
+// message landed when it did not.
+func TestResumeOpenRun_LostToTerminalIsAConflict(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-died", "sess-died", "/tmp/does-not-exist-died")
+	// The conversation failed while this wake was mid-flight; the wake still
+	// holds the read it validated against.
+	if _, err := database.Exec(`UPDATE conversations SET status='failed' WHERE id='r-died'`); err != nil {
+		t.Fatalf("fail: %v", err)
+	}
+	stores := testSpawnerStores(database)
+	stores.Conversations = staleOpenOnce(stores.Conversations)
+	s := NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6")
+
+	err := s.ResumeOpenRun(context.Background(), runmode.LocalDefaultOrgID, "r-died", "one more thing", runmode.LocalDefaultUserID)
+	if !errors.Is(err, ErrRunNotResumable) {
+		t.Fatalf("err = %v, want ErrRunNotResumable — nothing claims a terminal conversation, so the message is not delivered", err)
+	}
+	if st := storedStatus(t, database, "r-died"); st != "failed" {
+		t.Errorf("stored status = %q, want failed — a lost flip must not move the row", st)
 	}
 }
 

@@ -109,9 +109,9 @@ func RunRunPendingInputStoreConformance(t *testing.T, mk RunPendingInputStoreFac
 		}
 	})
 
-	// The heart of TFAC-735: two messages sent to a parked conversation before
-	// it wakes are both delivered. The store this replaced deleted the first
-	// one — no error, no log, nothing in the transcript.
+	// The heart of the append contract: two messages sent to a parked
+	// conversation before it wakes are both delivered. The store this replaced
+	// deleted the first one — no error, no log, nothing in the transcript.
 	t.Run("Store_appends_and_Consume_joins_in_order", func(t *testing.T) {
 		store, orgID, userID, seed := mk(t)
 		runID := seed.Run(t, "append")

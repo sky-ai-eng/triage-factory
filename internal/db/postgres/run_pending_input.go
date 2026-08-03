@@ -7,8 +7,8 @@ import (
 )
 
 // runPendingInputStore is the Postgres impl of db.RunPendingInputStore —
-// the durable half of resume-by-enqueue (TFAC-585), stored as undelivered
-// plain user messages (role='user', blank subtype, delivered=false) on the
+// the durable half of resume-by-enqueue, stored as undelivered plain user
+// messages (role='user', blank subtype, delivered=false) on the
 // conversation's own transcript. Reachable two ways: the resume path writes
 // through the claims tx, under the resuming user's claims (the messages RLS
 // policy admits the write via the conversation's own visibility); Consume

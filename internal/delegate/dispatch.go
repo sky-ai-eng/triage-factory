@@ -323,7 +323,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// model it runs on before either arm below picks it up.
 	run.Model = s.modelForClaim(ctx, orgID, br, *run)
 
-	// Resume-by-enqueue (TFAC-585): queued input means this claim is NOT a
+	// Resume-by-enqueue: queued input means this claim is NOT a
 	// fresh/crash-reclaimed blueprint step — it's a parked/terminal-resumable
 	// run woken by a user message and re-queued onto its own row
 	// (ResumeOpenRun/SendMessage). Peek (not Consume) routes the claim to the
