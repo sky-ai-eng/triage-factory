@@ -176,6 +176,71 @@ func TestStopAndCancelBlueprint_NoteNamesTheCause(t *testing.T) {
 	}
 }
 
+// TestStopAndCancelBlueprint_ParkedRunStillGetsItsNote is the case the plain
+// verb's skip must not swallow. Every teardown caller enumerates its task's
+// non-terminal runs — `open` among them — so a parked conversation is the
+// ordinary thing a closed or swiped task tears down, not an edge case. That
+// teardown is permanent, so the note is the only explanation the transcript
+// will ever carry; skipping it as a "re-stop" would end the conversation in
+// silence.
+func TestStopAndCancelBlueprint_ParkedRunStillGetsItsNote(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-parked-teardown", "sess-pt", "/tmp/wt-pt")
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open' WHERE id = 'r-parked-teardown'`); err != nil {
+		t.Fatalf("park run: %v", err)
+	}
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-parked-teardown", "", StopCauseTaskClosed); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+
+	notes := stopNotes(t, database, "r-parked-teardown")
+	if len(notes) != 1 {
+		t.Fatalf("stop notes = %d, want 1 — a parked conversation torn down by its task explains nothing without it", len(notes))
+	}
+	if notes[0].Content != StopCauseTaskClosed.note() {
+		t.Errorf("content = %q, want %q", notes[0].Content, StopCauseTaskClosed.note())
+	}
+
+	// A second teardown reaching the same row — the router closes the task,
+	// then the team is archived — says nothing new, so it writes nothing.
+	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-parked-teardown", "", StopCauseTaskClosed); err != nil {
+		t.Fatalf("second teardown: %v", err)
+	}
+	if notes := stopNotes(t, database, "r-parked-teardown"); len(notes) != 1 {
+		t.Errorf("stop notes after a repeated teardown = %d, want 1", len(notes))
+	}
+}
+
+// TestStop_NoteRepeatsOnceAPersonHasSpoken: the dedupe walks back only to the
+// last human input, so a conversation that was stopped, resumed, and stopped
+// again records both stops. Suppressing the second would leave the resumed
+// turn looking like it ended on its own.
+func TestStop_NoteRepeatsOnceAPersonHasSpoken(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-restop", "", "/tmp/wt-restop")
+	markNative(t, database, "r-restop")
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	if err := s.Stop(runmode.LocalDefaultOrgID, "r-restop", runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("first stop: %v", err)
+	}
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-restop", runmode.LocalDefaultUserID, "pick it back up"); err != nil {
+		t.Fatalf("follow-up: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE conversations SET status = 'running' WHERE id = 'r-restop'`); err != nil {
+		t.Fatalf("re-engage the conversation: %v", err)
+	}
+	if err := s.Stop(runmode.LocalDefaultOrgID, "r-restop", runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("second stop: %v", err)
+	}
+
+	if notes := stopNotes(t, database, "r-restop"); len(notes) != 2 {
+		t.Errorf("stop notes = %d, want 2 — a person spoke between the two stops, so both are news", len(notes))
+	}
+}
+
 // TestStop_ResumedConversationAssemblesTheNote is the model-facing half of the
 // feature. A stopped native conversation that gets a follow-up must hand the
 // engine a window in which the interruption is visible in place — otherwise

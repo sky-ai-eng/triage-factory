@@ -149,11 +149,17 @@ func (e *Engine) insertNotice(ctx context.Context, params Params, content string
 	}
 }
 
-// hasNoticeSince reports whether an identical notice row already exists
+// HasNoticeSince reports whether an identical notice row already exists
 // after the last human input — the guard a re-claimed, still-parked
 // conversation needs so its park notice is written once, not once per
 // claim.
-func hasNoticeSince(rows []domain.Message, content string) bool {
+//
+// Exported because the stop verb needs the same answer about the notes it
+// writes, and the rule has to be one rule: "don't repeat what the transcript
+// already says, unless a person has spoken since." Anything that stops a
+// conversation is a producer of these rows now, and a second definition of
+// when to suppress one is how the two drift.
+func HasNoticeSince(rows []domain.Message, content string) bool {
 	for i := len(rows) - 1; i >= 0; i-- {
 		r := rows[i]
 		if r.Role != "user" {

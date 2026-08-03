@@ -41,6 +41,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -198,11 +199,15 @@ func (s *Spawner) stop(orgID, runID, userID string, cancelBlueprint bool, note s
 	// between them saying a person intervened; writing it first means the
 	// explanation exists even if this pod dies in the next line.
 	//
-	// Skipped for a conversation already parked `open`: re-stopping a parked
-	// row is a gesture with nothing to stop, and stacking a notice per click
-	// is exactly what the engine's own hasNoticeSince guard exists to
-	// prevent.
-	if run.Status != domain.StatusOpen {
+	// The plain stop verb skips an already-parked conversation: re-stopping a
+	// parked row is a gesture with nothing to stop, so there is nothing to
+	// record. A lifecycle teardown is the opposite — it reaches parked
+	// conversations routinely, because every caller enumerates non-terminal
+	// runs and `open` is non-terminal — and for those it is the first and
+	// last thing the transcript will ever say about why the work ended. Skip
+	// it there and a swiped or closed task silently ends a conversation with
+	// no explanation at all, which is the case this note exists for.
+	if cancelBlueprint || run.Status != domain.StatusOpen {
 		s.insertStopNote(orgID, runID, userID, note)
 	}
 
@@ -359,6 +364,22 @@ func (s *Spawner) insertStopNote(orgID, runID, userID, content string) {
 		return
 	}
 	ctx := context.Background()
+	// Never say the same thing twice in a row. Two teardowns can reach one
+	// conversation — a task closed by the router and then swiped, an archived
+	// team over a task that already closed — and each enumerates every
+	// non-terminal run, so the second arrives at a row the first already
+	// explained. The engine's guard is reused rather than reimplemented: it
+	// walks back only to the last human input, so a stop after a resume is a
+	// new event and gets its own note. A failed read falls through and
+	// writes: a duplicated sentence is a far smaller loss than a conversation
+	// that never says why it ended.
+	if rows, err := s.agentRuns.ListForAssemblySystem(ctx, orgID, runID); err == nil {
+		if agentloop.HasNoticeSince(rows, content) {
+			return
+		}
+	} else {
+		delegateLog.Warn("stop-note dedupe read failed; writing the note anyway", "run", runID, "error", err)
+	}
 	msg := &domain.Message{
 		ConversationID: runID,
 		UserID:         userID,
