@@ -13,6 +13,8 @@ import {
   formatElapsed,
   isActiveRun,
   isResumableRun,
+  canResumeRun,
+  resumeBlockedCopy,
   workStartedAt,
 } from '../../lib/runStatus'
 import { approvalAction, approvalCounts, hasUnresolvedArtifacts } from '../../lib/approval'
@@ -492,9 +494,16 @@ function IntakeDock({
   // arrive via the retired `cancelled` terminal, and a stop leaves the run
   // here now.
   const isParked = run.Status === 'open'
-  // A run takes steering when a turn is executing or it's resumable by message
-  // (open / completed+abort — same gate the backend wakes on).
-  const steerable = active || isResumableRun(run)
+  // A run takes steering when a turn is executing, or when a follow-up would
+  // actually be accepted. Status is the cheap first cut and the server's
+  // `resumable` is the authority: whether the workspace survived and whether
+  // anything would drive it are facts only it can see, and a run that looks
+  // parked-and-warm from here may answer every message with a 409/410.
+  const steerable = active || canResumeRun(run)
+  // The honest other half: a run whose status says "resumable" but whose
+  // server verdict says otherwise gets the reason where the input would have
+  // been, rather than a live composer that fails on send.
+  const resumeBlocked = !active && isResumableRun(run) && run.resumable === false
   const hasPrompt = pending.length > 0
 
   const sublabel = hasUnresolved
@@ -589,8 +598,8 @@ function IntakeDock({
         </div>
       </div>
 
-      {/* Steering composer — live + `open` runs, hidden (not unmounted) behind a
-          pending prompt so a draft in progress isn't lost. */}
+      {/* Steering composer — live + resumable runs, hidden (not unmounted) behind
+          a pending prompt so a draft in progress isn't lost. */}
       {steerable && actions.onMessage && (
         <DockComposer
           state={state}
@@ -598,6 +607,18 @@ function IntakeDock({
           onSend={actions.onMessage}
           hidden={hasPrompt}
         />
+      )}
+
+      {/* …and where the composer would have been for a run the server won't
+          resume: the reason, in the same words the refused send would have
+          given. */}
+      {resumeBlocked && actions.onMessage && (
+        <p
+          role="status"
+          className="mt-2.5 rounded-[5px] border border-border-subtle bg-black/[0.02] px-2.5 py-2 text-[12px] leading-relaxed text-text-tertiary"
+        >
+          {resumeBlockedCopy(run)}
+        </p>
       )}
     </div>
   )
