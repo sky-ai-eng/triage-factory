@@ -63,12 +63,12 @@ func (e *Engine) drain(ctx context.Context, params Params, bare bool) error {
 
 // IsHumanInput reports whether a role=user row is genuine user input rather
 // than something the system inserted on the agent's behalf. The human set is
-// closed: a blank subtype (the normal spelling — the mission prompt, an API
-// follow-up), "text" (the legacy spelling of the same), and the mid-work
-// steer stamp those rows receive at flush. Everything system-authored
-// carries a subtype outside this set — see the InjectionSubtype constants.
+// closed: a blank subtype — the spelling of an ordinary turn, the mission
+// prompt and an API follow-up alike — and the mid-work steer stamp those rows
+// receive at flush. Everything system-authored carries a subtype outside this
+// set — see the InjectionSubtype constants.
 func IsHumanInput(r domain.Message) bool {
-	return r.Subtype == "" || r.Subtype == "text" || r.Subtype == domain.MessageSubtypeInjectionSteer
+	return r.Subtype == "" || r.Subtype == domain.MessageSubtypeInjectionSteer
 }
 
 // hasPending reports whether any undelivered row is waiting — the would-stop
@@ -149,11 +149,17 @@ func (e *Engine) insertNotice(ctx context.Context, params Params, content string
 	}
 }
 
-// hasNoticeSince reports whether an identical notice row already exists
+// HasNoticeSince reports whether an identical notice row already exists
 // after the last human input — the guard a re-claimed, still-parked
 // conversation needs so its park notice is written once, not once per
 // claim.
-func hasNoticeSince(rows []domain.Message, content string) bool {
+//
+// Exported because the stop verb needs the same answer about the notes it
+// writes, and the rule has to be one rule: "don't repeat what the transcript
+// already says, unless a person has spoken since." Anything that stops a
+// conversation is a producer of these rows now, and a second definition of
+// when to suppress one is how the two drift.
+func HasNoticeSince(rows []domain.Message, content string) bool {
 	for i := len(rows) - 1; i >= 0; i-- {
 		r := rows[i]
 		if r.Role != "user" {

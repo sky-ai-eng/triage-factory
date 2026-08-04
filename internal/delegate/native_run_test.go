@@ -130,7 +130,6 @@ func TestPrepareInheritedMemory_TrustsAClaimThatAlreadyRan(t *testing.T) {
 					ConversationID: "r-mem",
 					UserID:         runmode.LocalDefaultUserID,
 					Role:           "user",
-					Subtype:        "text",
 					Content:        "go",
 					Delivered:      &pending,
 				}); err != nil {

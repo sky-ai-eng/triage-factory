@@ -99,14 +99,14 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 	t.Run("InsertMessage", func(t *testing.T) {
 		fx := newFenceFixture(t, h, "exec-fence-insert")
 		if _, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
-			ConversationID: fx.runID, Role: "assistant", Subtype: "text", Content: "live",
+			ConversationID: fx.runID, Role: "assistant", Content: "live",
 		}); err != nil {
 			t.Fatalf("insert while claimed: %v", err)
 		}
 		reap(t, h.AdminDB, fx.orgID, fx.runID)
 
 		_, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
-			ConversationID: fx.runID, Role: "assistant", Subtype: "text", Content: "zombie",
+			ConversationID: fx.runID, Role: "assistant", Content: "zombie",
 		})
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("insert after reap = %v, want ErrClaimReleased", err)
@@ -288,7 +288,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		other := seedSecondConversation(t, fx)
 
 		_, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
-			ConversationID: other, Role: "assistant", Subtype: "text", Content: "wrong conversation",
+			ConversationID: other, Role: "assistant", Content: "wrong conversation",
 		})
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("insert onto another conversation = %v, want ErrClaimReleased", err)
@@ -323,7 +323,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		// The engagement's own conversation is unaffected — this refuses
 		// misdirected writes, not the caller.
 		if _, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
-			ConversationID: fx.runID, Role: "assistant", Subtype: "text", Content: "own conversation",
+			ConversationID: fx.runID, Role: "assistant", Content: "own conversation",
 		}); err != nil {
 			t.Fatalf("insert onto its own conversation: %v", err)
 		}
@@ -380,7 +380,7 @@ func TestClaimFence_SerializesAgainstAConcurrentRelease(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		_, werr := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
-			ConversationID: fx.runID, Role: "assistant", Subtype: "text", Content: "zombie",
+			ConversationID: fx.runID, Role: "assistant", Content: "zombie",
 		})
 		done <- werr
 	}()
@@ -439,12 +439,12 @@ func TestClaimFence_SuccessorWritesWhileTheZombieIsRefused(t *testing.T) {
 	}
 
 	if _, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, successorClaim, &domain.Message{
-		ConversationID: fx.runID, Role: "assistant", Subtype: "text", Content: "successor",
+		ConversationID: fx.runID, Role: "assistant", Content: "successor",
 	}); err != nil {
 		t.Fatalf("successor insert: %v", err)
 	}
 	if _, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, zombieClaim, &domain.Message{
-		ConversationID: fx.runID, Role: "assistant", Subtype: "text", Content: "zombie",
+		ConversationID: fx.runID, Role: "assistant", Content: "zombie",
 	}); !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("zombie insert = %v, want ErrClaimReleased", err)
 	}

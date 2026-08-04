@@ -566,6 +566,26 @@ func TestWrapUpPrecedence_CompactionFirst(t *testing.T) {
 	}
 }
 
+// TestDeriveBudget_StopNoteDoesNotRenew pins the same invariant for the
+// stop-note row, which now has two producers: the loop's own park decisions
+// and a user pressing stop. Both write a role=user row, and neither is
+// somebody asking for more work — a note that renewed the budget would hand a
+// resumed engagement a full allowance it was never granted, and a re-stopped
+// conversation an unbounded one.
+func TestDeriveBudget_StopNoteDoesNotRenew(t *testing.T) {
+	rows := []domain.Message{
+		{Role: "user", Content: "do the thing"},
+		{Role: "assistant"},
+		{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "Run stopped by the user. It may be resumed later."},
+	}
+	if b := deriveBudget(rows); b.turns != 1 {
+		t.Fatalf("turns = %d, want 1 (the stop note renewed the budget)", b.turns)
+	}
+	if IsHumanInput(domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote}) {
+		t.Error("IsHumanInput(stop-note) = true, want false")
+	}
+}
+
 // TestDeriveBudget_CompactionRowsDoNotRenew pins the vocabulary invariant:
 // neither the request nor the result row is human input, so neither resets
 // the derived turn budget.

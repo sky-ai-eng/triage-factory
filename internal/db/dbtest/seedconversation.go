@@ -105,7 +105,7 @@ func SeedConversation(tb testing.TB, database *sql.DB, run domain.Conversation) 
 			INSERT INTO messages (org_id, conversation_id, role, subtype, content, cost_usd,
 			                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 			                      created_at)
-			VALUES (?, ?, 'assistant', 'text', 'seeded work', ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+			VALUES (?, ?, 'assistant', '', 'seeded work', ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
 		`, orgID, run.ID, cost, run.InputTokens, run.OutputTokens,
 			run.CacheReadTokens, run.CacheCreationTokens, startedAt); err != nil {
 			tb.Fatalf("SeedConversation %s ledger row: %v", run.ID, err)

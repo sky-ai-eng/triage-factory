@@ -192,7 +192,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
 			claimID:       cfg.claimID,
-			reason:        db.ParkStopped("user_cancelled", "Cancelled by user"),
+			reason:        db.ParkStopped("user_cancelled", ""),
 		}, sessionID)
 		parked = true
 		return fenced

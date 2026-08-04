@@ -315,7 +315,7 @@ func newPgSpendSeeder(conn *sql.DB, orgID, teamProjectID, nullTeamProjectID stri
 				(org_id, conversation_id, role, subtype, content, model,
 				 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 				 cost_usd, created_at)
-			VALUES ($1, $2, 'assistant', 'text', 'work', NULLIF($3, ''),
+			VALUES ($1, $2, 'assistant', '', 'work', NULLIF($3, ''),
 			        $4, $5, $6, $7, $8, $9)
 			RETURNING id
 		`, orgID, convID, model,

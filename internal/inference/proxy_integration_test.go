@@ -86,7 +86,7 @@ func TestClient_ThroughRunProxy(t *testing.T) {
 	got, err := client.Stream(ctx, Request{
 		Provider: ProviderAnthropic,
 		Model:    model,
-		Rows:     []domain.Message{{Role: "user", Subtype: "text", Content: "hi"}},
+		Rows:     []domain.Message{{Role: "user", Content: "hi"}},
 	})
 	if err != nil {
 		t.Fatalf("stream through the run proxy: %v", err)
@@ -164,7 +164,7 @@ func TestClient_ThroughRunProxy_WrongToken(t *testing.T) {
 	_, err = client.Stream(ctx, Request{
 		Provider: ProviderAnthropic,
 		Model:    "claude-sonnet-5",
-		Rows:     []domain.Message{{Role: "user", Subtype: "text", Content: "hi"}},
+		Rows:     []domain.Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
 		t.Fatal("a rejected token must fail the call")
@@ -205,7 +205,7 @@ func TestClient_UnreachableEndpoint(t *testing.T) {
 	_, err = client.Stream(ctx, Request{
 		Provider: ProviderAnthropic,
 		Model:    "claude-sonnet-5",
-		Rows:     []domain.Message{{Role: "user", Subtype: "text", Content: "hi"}},
+		Rows:     []domain.Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
 		t.Fatal("dialing a dead endpoint must fail")
@@ -291,7 +291,7 @@ func TestClient_ThroughRunProxy_OnPrivateIP(t *testing.T) {
 	got, err := client.Stream(ctx, Request{
 		Provider: ProviderAnthropic,
 		Model:    model,
-		Rows:     []domain.Message{{Role: "user", Subtype: "text", Content: "hi"}},
+		Rows:     []domain.Message{{Role: "user", Content: "hi"}},
 	})
 	if err != nil {
 		t.Fatalf("stream through a proxy on a private IP: %v", err)
@@ -338,7 +338,7 @@ func TestPrivateNetworkOptInIsRequired(t *testing.T) {
 	_, err = client.Stream(ctx, Request{
 		Provider: ProviderAnthropic,
 		Model:    "claude-sonnet-5",
-		Rows:     []domain.Message{{Role: "user", Subtype: "text", Content: "hi"}},
+		Rows:     []domain.Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
 		t.Fatal("without the opt-in, a private-IP endpoint must be refused")

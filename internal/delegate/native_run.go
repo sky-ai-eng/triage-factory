@@ -97,7 +97,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
 			claimID:       cfg.claimID,
-			reason:        db.ParkStopped("user_cancelled", "Cancelled by user"),
+			reason:        db.ParkStopped("user_cancelled", ""),
 		}, "")
 	}
 
@@ -134,7 +134,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 				triggerType:   triggerType,
 				creatorUserID: creatorUserID,
 				claimID:       cfg.claimID,
-				reason:        db.ParkStopped("user_cancelled", "Cancelled by user"),
+				reason:        db.ParkStopped("user_cancelled", ""),
 			}, "")
 		}
 		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "connect to tool host: "+err.Error(), domain.RunFailureUnclassified)
@@ -522,7 +522,7 @@ func (s *Spawner) recordNativeResult(
 			triggerType:   triggerType,
 			creatorUserID: creatorUserID,
 			claimID:       cfg.claimID,
-			reason:        db.ParkStopped("user_cancelled", "Cancelled by user"),
+			reason:        db.ParkStopped("user_cancelled", ""),
 		}, "")
 
 	case agentloop.ResultFailed:

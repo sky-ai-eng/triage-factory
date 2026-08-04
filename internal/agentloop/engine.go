@@ -386,7 +386,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// 4. Guards, before every call. The turn backstop reads the derived
 		// budget; configured guards see the engagement's own call count.
 		if notice := e.checkGuards(ctx, params, budget.turns, turn, maxIter); notice != "" {
-			if !hasNoticeSince(rows, notice) {
+			if !HasNoticeSince(rows, notice) {
 				e.insertNotice(ctx, params, notice)
 			}
 			return Result{
@@ -518,7 +518,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// contradict the wrap-up ask one turn earlier.
 		if budget.wrapUpRequested {
 			notice := limitParkNotice(maxIter)
-			if !hasNoticeSince(rows, notice) {
+			if !HasNoticeSince(rows, notice) {
 				e.insertNotice(ctx, params, notice)
 			}
 			return Result{

@@ -253,7 +253,7 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 			var id int64
 			if err := conn.QueryRow(
 				`INSERT INTO messages (org_id, conversation_id, role, subtype, content, `+column+`)
-				 VALUES ($1, $2, 'assistant', 'text', 'x', $3::jsonb) RETURNING id`,
+				 VALUES ($1, $2, 'assistant', '', 'x', $3::jsonb) RETURNING id`,
 				orgID, runID, rawJSON,
 			).Scan(&id); err != nil {
 				t.Fatalf("seed raw message (%s): %v", column, err)
@@ -554,7 +554,7 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 		}
 		if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 			_, mErr := tx.Conversations.InsertMessage(ctx, orgID, &domain.Message{
-				ConversationID: runID, Role: "assistant", Subtype: "text", Content: "work",
+				ConversationID: runID, Role: "assistant", Content: "work",
 			})
 			return mErr
 		}); err != nil {

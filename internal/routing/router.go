@@ -30,8 +30,9 @@ type Delegator interface {
 	// StopAndCancelBlueprint is the teardown half: the router only stops a
 	// conversation when the layer above it has already ended — a task closed,
 	// a firing rolled back — so the owning blueprint dies with it rather than
-	// freezing 'running' over work nothing will resume.
-	StopAndCancelBlueprint(orgID, runID, userID string) error
+	// freezing 'running' over work nothing will resume. The cause names which
+	// of those it was, and reaches the stopped conversation's transcript.
+	StopAndCancelBlueprint(orgID, runID, userID string, cause delegate.StopCause) error
 	// StageOrDeliverAdditiveEvent routes one agent-facing additive-event
 	// injection for a run by its live state — local process, live remote
 	// executor (TFAC-585's `inject` conversation_signals kind), or the durable

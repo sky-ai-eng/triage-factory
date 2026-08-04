@@ -64,7 +64,7 @@ func TestDelegate_EventPath_StampsTriggerIDOnStepRun(t *testing.T) {
 	// the invariant the usage page's by-category / by-rule split depends on.
 	if _, err := database.Exec(`
 		INSERT INTO messages (org_id, conversation_id, role, subtype, content)
-		VALUES (?, ?, 'assistant', 'text', 'work')
+		VALUES (?, ?, 'assistant', '', 'work')
 	`, org, runID); err != nil {
 		t.Fatalf("seed ledger row: %v", err)
 	}

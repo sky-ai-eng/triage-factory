@@ -95,7 +95,7 @@ func (s *injectingStubDelegator) Delegate(task domain.Task, opts delegate.Delega
 	return "run-" + task.ID, nil
 }
 
-func (s *injectingStubDelegator) StopAndCancelBlueprint(orgID, runID, userID string) error {
+func (s *injectingStubDelegator) StopAndCancelBlueprint(orgID, runID, userID string, cause delegate.StopCause) error {
 	return nil
 }
 

@@ -160,7 +160,7 @@ func (ch *curatorHandler) handleCuratorHistory(w http.ResponseWriter, r *http.Re
 }
 
 // synthesizeCuratorTurns rebuilds the legacy turn wire shape from a curator
-// conversation's rows: each plain user message ('text') starts a turn whose
+// conversation's rows: each plain user message (blank subtype) starts a turn whose
 // status is 'queued' while the row is undelivered and otherwise derives from
 // the claim its following rows carry (active → running; released outcome
 // completed/cancelled/failed → done/cancelled/failed) — falling back to the

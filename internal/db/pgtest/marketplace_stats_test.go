@@ -88,7 +88,7 @@ func seedPromptRun(t *testing.T, h *Harness, orgID, userID, teamID, taskID, prom
 	// Accounting rides the ledger + claim telemetry the stats derive from.
 	MustExec(t, h.AdminDB, `
 		INSERT INTO messages (org_id, conversation_id, role, subtype, content, cost_usd, created_at)
-		VALUES ($1, $2, 'assistant', 'text', 'work', 0.01, $3)
+		VALUES ($1, $2, 'assistant', '', 'work', 0.01, $3)
 	`, orgID, convID, startedAt)
 	MustExec(t, h.AdminDB, `
 		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome, duration_ms)

@@ -478,7 +478,7 @@ func seedUsageLocal(t *testing.T, s *Server) (triggerID, blueprintName string) {
 	exec(`INSERT INTO messages
 			(org_id, conversation_id, role, subtype, content, model, cost_usd,
 			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-		 VALUES (?, 'r-manual', 'assistant', 'text', 'work', 'claude-opus-4-8', 1.00, 100, 10, 5, 1, ?)`,
+		 VALUES (?, 'r-manual', 'assistant', '', 'work', 'claude-opus-4-8', 1.00, 100, 10, 5, 1, ?)`,
 		org, t1)
 	// Autonomous run fired by the trigger (NULL creator, team-scoped).
 	exec(`INSERT INTO conversations
@@ -488,7 +488,7 @@ func seedUsageLocal(t *testing.T, s *Server) (triggerID, blueprintName string) {
 	exec(`INSERT INTO messages
 			(org_id, conversation_id, role, subtype, content, model, cost_usd,
 			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-		 VALUES (?, 'r-auto', 'assistant', 'text', 'work', 'claude-haiku-4-5', 0.25, 20, 2, 0, 0, ?)`,
+		 VALUES (?, 'r-auto', 'assistant', '', 'work', 'claude-haiku-4-5', 0.25, 20, 2, 0, 0, ?)`,
 		org, t2)
 	// Curator turns: a curator conversation plus one cost-stamped ledger row
 	// (curator rows carry no model on the wire, so model stays NULL).
@@ -500,7 +500,7 @@ func seedUsageLocal(t *testing.T, s *Server) (triggerID, blueprintName string) {
 	exec(`INSERT INTO messages
 			(org_id, conversation_id, role, subtype, content, cost_usd,
 			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-		 VALUES (?, 'conv-cur-team', 'assistant', 'text', 'ack', 0.50, 11, 1, 0, 0, ?)`,
+		 VALUES (?, 'conv-cur-team', 'assistant', '', 'ack', 0.50, 11, 1, 0, 0, ?)`,
 		org, t1)
 	// NULL-team curator turn by the user (org-visibility project).
 	exec(`INSERT INTO conversations
@@ -510,7 +510,7 @@ func seedUsageLocal(t *testing.T, s *Server) (triggerID, blueprintName string) {
 	exec(`INSERT INTO messages
 			(org_id, conversation_id, role, subtype, content, cost_usd,
 			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-		 VALUES (?, 'conv-cur-org', 'assistant', 'text', 'ack', 0.10, 1, 1, 0, 0, ?)`,
+		 VALUES (?, 'conv-cur-org', 'assistant', '', 'ack', 0.10, 1, 1, 0, 0, ?)`,
 		org, t2)
 	// System job (org-level, NULL team).
 	exec(`INSERT INTO system_llm_runs

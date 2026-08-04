@@ -191,7 +191,7 @@ func TestConsolidateRunsBeforeCacheBreakpoint(t *testing.T) {
 
 func TestWrapSteer_WrapsOnlySteerRows(t *testing.T) {
 	rows := []domain.Message{
-		{ID: 1, Role: "user", Subtype: "text", Content: "plain"},
+		{ID: 1, Role: "user", Content: "plain"},
 		{ID: 2, Role: "assistant", Content: "r"},
 		{ID: 3, Role: "user", Subtype: domain.MessageSubtypeInjectionSteer, Content: "also check the tests"},
 	}

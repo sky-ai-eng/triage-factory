@@ -183,7 +183,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 			t.Errorf("Conversations.ParkOpenSystem: %v", err)
 		}
 		if _, err := stores.Conversations.InsertMessageSystem(ctx, orgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Content: "hello", Subtype: "text",
+			ConversationID: runID, Role: "assistant", Content: "hello",
 		}); err != nil {
 			t.Errorf("Conversations.InsertMessageSystem: %v", err)
 		}

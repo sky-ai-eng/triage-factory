@@ -157,6 +157,23 @@ export function completionGloss(run: Conversation): string {
   return 'work complete'
 }
 
+// stopReasonLabel glosses the stored stop_reason for display. The stored
+// values are claim-layer machine vocabulary — `user_cancelled` is what the
+// claim releases as, and it stays that way — but printing them raw tells a
+// viewer their run was cancelled, when a stop cancels nothing: the
+// conversation parks, keeps its workspace, and can be picked back up. An
+// unrecognized code prints as stored rather than being hidden.
+export function stopReasonLabel(reason: string): string {
+  switch (reason) {
+    case 'user_cancelled':
+      return 'stopped by user'
+    case 'system_cancelled':
+      return 'stopped by system'
+    default:
+      return reason
+  }
+}
+
 // isResumableRun mirrors the backend resumableState gate — the STATUS half of
 // resumability, and the cheap first cut only. A run with no live turn can be
 // woken by a follow-up when it parked `open` or when it concluded: an abort is

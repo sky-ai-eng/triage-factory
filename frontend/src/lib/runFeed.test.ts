@@ -9,7 +9,7 @@ function msg(over: Partial<Message>): Message {
     conversation_id: 'r1',
     role: 'assistant',
     content: '',
-    subtype: 'text',
+    subtype: '',
     tool_call_id: '',
     is_error: false,
     model: '',
@@ -85,5 +85,33 @@ describe('feedFromMessages', () => {
     expect(feedFromMessages(messages)).toEqual(folded)
     expect(feedFromMessages(messages).tokens).toBe(3)
     expect(feedFromMessages(messages).lines.map((l) => l.text)).toEqual(['a', 'you: steer it'])
+  })
+})
+
+// The ticker's "you:" prefix is an attribution, and a role=user row is not
+// always a person: the backend writes stop notes and executor notices on the
+// same role. Prefixing those tells the reader they said something they never
+// said.
+describe('system-authored rows on the ticker', () => {
+  it('shows a stop note without the operator attribution', () => {
+    const feed = feedFromMessages([
+      msg({ role: 'user', subtype: '', content: 'fix the build' }),
+      msg({
+        role: 'user',
+        subtype: 'stop-note',
+        content: 'Run stopped by the user. It may be resumed later.',
+      }),
+    ])
+    expect(feed.lines.map((l) => l.text)).toEqual([
+      'you: fix the build',
+      'Run stopped by the user. It may be resumed later.',
+    ])
+  })
+
+  it('still attributes a mid-work steer to the operator', () => {
+    const feed = feedFromMessages([
+      msg({ role: 'user', subtype: 'injection:steer', content: 'also check the tests' }),
+    ])
+    expect(feed.lines.map((l) => l.text)).toEqual(['you: also check the tests'])
   })
 })

@@ -2083,7 +2083,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			ConversationID: runID,
 			Role:           "assistant",
 			Content:        "hello",
-			Subtype:        "text",
 		}
 		id, err := store.InsertMessage(ctx, orgID, msg)
 		if err != nil {
@@ -2302,7 +2301,6 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			ConversationID: runID,
 			Role:           "assistant",
 			Content:        "thinking then answering",
-			Subtype:        "text",
 			Reasoning: []domain.ReasoningDetail{
 				{Index: 0, Type: "text", Text: "step one", Signature: "sig-abc"},
 			},
@@ -2354,9 +2352,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		measured := 4312
 		instant := 0
 		for _, m := range []*domain.Message{
-			{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "thought", DurationMs: &measured},
+			{ConversationID: runID, Role: "assistant", Content: "thought", DurationMs: &measured},
 			{ConversationID: runID, Role: "tool", Subtype: "tool", Content: "ok", ToolCallID: "t1", DurationMs: &instant},
-			{ConversationID: runID, Role: "user", Subtype: "text", Content: "no timing on a user row"},
+			{ConversationID: runID, Role: "user", Content: "no timing on a user row"},
 		} {
 			if _, err := store.InsertMessage(ctx, orgID, m); err != nil {
 				t.Fatalf("InsertMessage: %v", err)
@@ -2566,11 +2564,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		runID := seedConversationForTest(t, orgID, seed, "running")
 
-		idA, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "a"})
+		idA, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "a"})
 		if err != nil {
 			t.Fatalf("InsertMessage a: %v", err)
 		}
-		idB, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "b"})
+		idB, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "b"})
 		if err != nil {
 			t.Fatalf("InsertMessage b: %v", err)
 		}
@@ -2583,7 +2581,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		// A later NULL-seq row still lands last: COALESCE falls back to its id,
 		// which is above both seq keys.
-		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Subtype: "text", Content: "c"}); err != nil {
+		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: runID, Role: "assistant", Content: "c"}); err != nil {
 			t.Fatalf("InsertMessage c: %v", err)
 		}
 
@@ -2644,7 +2642,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		insert := func(conversationID, content string) int {
 			t.Helper()
 			id, err := store.InsertMessage(ctx, orgID, &domain.Message{
-				ConversationID: conversationID, Role: "assistant", Subtype: "text", Content: content,
+				ConversationID: conversationID, Role: "assistant", Content: content,
 			})
 			if err != nil {
 				t.Fatalf("InsertMessage %q: %v", content, err)
