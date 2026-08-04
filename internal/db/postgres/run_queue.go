@@ -58,6 +58,9 @@ const runTerminalStatusesSQL = `'completed','failed'`
 // one-way ratchet — a conversation already carrying 'sdk' keeps running
 // through the SDK path regardless of what new rows mint.
 func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain.Conversation) error {
+	if err := db.AssertBlueprintStepIndexed(run); err != nil {
+		return err
+	}
 	triggerType := run.TriggerType
 	if triggerType == "" {
 		triggerType = "manual"
@@ -210,27 +213,28 @@ const eligibleForDrivingSQL = needsDrivingSQL + ` AND ` + curatorNeedsTurnSQL
 // that depends on two columns staying in lockstep is a gate that opens the day
 // they don't.
 //
-// Otherwise: a running blueprint drives its queued step, and a blueprint that
-// reached any other terminal keeps its LAST conversation drivable so a user can
-// take another turn in the same workspace. The finished machinery never
-// restarts — only the conversation moves. Last-only is forced by storage, not
-// chosen: the workspace snapshot is keyed on the blueprint run, one blob every
-// step overwrites, so an earlier step would rehydrate the final step's tree and
-// answer out of somebody else's context. `current_step_index` names that step —
-// only AdvanceStep writes it, the reactor advances before enqueuing the next
-// step, and no terminal write touches it, so a blueprint that stopped at step N
-// (planned end or an early finish) leaves the column at N.
+// Otherwise a blueprint drives exactly ONE of its conversations, whatever its
+// status: the one `current_step_index` names — the step being dispatched while
+// it runs, the step it came to rest on once it stopped.
+//
+// One is the ceiling because the workspace is one. Every step shares a worktree
+// and a snapshot blob keyed on the blueprint run, so two driven at once means
+// two agents in one git tree and whichever concludes last overwriting the
+// other's snapshot. Storage forces the rule; the predicate states it.
+//
+// Equality alone admits every legitimate dispatch because the pointer moves
+// BEFORE the row it names is enqueued (see reactToStepTerminal), and nothing
+// else moves it — no terminal write touches it, so a blueprint that stopped at
+// step N leaves it at N, the conversation a follow-up must land on.
 //
 // Sequencing lives on the blueprint_runs row the claim already joins, so this
 // stays a column comparison rather than a correlated scan over sibling
-// conversations. That matters: this is the hot claim scan. A conversation with
-// a NULL step index compares NULL and is not drivable through that arm, which
-// is the right answer — a step that never recorded its position cannot prove it
-// is the one holding the workspace.
+// conversations. That matters: this is the hot claim scan. A NULL step index
+// compares NULL and is not drivable — a step that never recorded its position
+// cannot prove it holds the workspace, and EnqueueRun refuses to mint one.
 const blueprintDrivableSQL = `(r.blueprint_run_id IS NULL
 	    OR (br.cancel_requested = false AND br.status <> 'cancelled'
-	        AND (br.status = 'running'
-	             OR r.blueprint_step_index = br.current_step_index)))`
+	        AND r.blueprint_step_index = br.current_step_index))`
 
 // curatorTurnMessageSQL is the queued turn a curator claim is minted to
 // drive — the conversation's oldest undelivered plain user row, stamped as

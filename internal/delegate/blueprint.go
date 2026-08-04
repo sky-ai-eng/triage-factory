@@ -597,6 +597,15 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
 	if cr.Status != domain.BlueprintRunStatusRunning {
 		return
 	}
+	// reactToStepTerminal's far-side re-check, on the path a resumed step
+	// finalizes through instead. Same reason it has one: this terminates the
+	// blueprint, and doing that on a step the sequence has moved past kills a
+	// run whose current step is still executing.
+	if !isCurrentBlueprintStep(cr, stepIdx) {
+		blueprintLog.Error("resume finalize: terminal from a step the blueprint has moved past; ignoring it (no transition)",
+			"blueprint_run", cr.ID, "step_run", stepRunID, "step", stepIdx, "current_step", cr.CurrentStepIndex)
+		return
+	}
 
 	stepRun, err := s.agentRuns.GetSystem(context.Background(), orgID, stepRunID)
 	if err != nil || stepRun == nil {

@@ -2,10 +2,28 @@ package db
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrBlueprintStepUnindexed refuses a blueprint conversation that records no
+// position in its sequence. The claim gate drives the one step
+// current_step_index names, so the row could never be claimed by anyone: a
+// refusal at the mint beats a row that sits invisible in the work list.
+var ErrBlueprintStepUnindexed = errors.New("enqueue: blueprint conversation has no step index")
+
+// AssertBlueprintStepIndexed is the guard both dialects' EnqueueRun opens with.
+// A conversation with no blueprint parent passes — the gate never compares an
+// index for one.
+func AssertBlueprintStepIndexed(run domain.Conversation) error {
+	if run.BlueprintRunID != "" && run.BlueprintStepIndex == nil {
+		return fmt.Errorf("%w (conversation %s, blueprint_run %s)", ErrBlueprintStepUnindexed, run.ID, run.BlueprintRunID)
+	}
+	return nil
+}
 
 // RunQueueStore owns the claim loop — the ONE scan that finds conversations
 // needing to be driven, on every surface. It is the sibling of
@@ -67,6 +85,8 @@ type RunQueueStore interface {
 	// carries the
 	// step's identity: ID, TaskID, PromptID, Model, TriggerType,
 	// CreatorUserID, TriggerID, BlueprintRunID (required), BlueprintStepIndex.
+	// A blueprint conversation with no step index is refused — see
+	// ErrBlueprintStepUnindexed.
 	// PreferredExecutorID (TFAC-587) is the rendezvous placement stamp, empty
 	// for no affinity (placement disabled, local N=1, or a non-repo key).
 	// Routes through the admin pool — the dispatcher/reactor mint work items

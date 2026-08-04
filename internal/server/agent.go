@@ -579,7 +579,7 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 // help — the client surfaces the clear error rather than a transient conflict.
 // A concluded conversation (ErrConversationConcluded) is 409 as well, but it
 // carries its own message: this conversation's blueprint will never drive it
-// again (cancelled, or finished on a later step). That is a permanent answer
+// again (it has moved past this step, or was cancelled). That is a permanent answer
 // rather than a lost race the client should re-read — surface the text, don't
 // prompt a refresh.
 // A cross-pod signal whose owning executor never acked (ErrSignalAckTimeout,

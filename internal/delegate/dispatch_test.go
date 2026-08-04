@@ -426,6 +426,120 @@ func TestReactor_CancelledStepParksAndTerminatesBlueprint(t *testing.T) {
 	}
 }
 
+// TestReactor_IgnoresTerminalFromAStepTheBlueprintMovedPast forges the exact
+// corruption the claim gate now refuses to set up: step 0 concluded, the
+// blueprint advanced to step 1, and step 0's conversation reaches a terminal
+// anyway — the shape an in-flight engagement leaves behind when the gate
+// narrows under it. Every transition either post-run path could make reads the
+// sequence's position off the CONCLUDING conversation, so acting on a stale one
+// corrupts the blueprint, and each subtest pins one of the ways.
+//
+// The fixture is the same throughout: a three-step plan whose live step is 1.
+func TestReactor_IgnoresTerminalFromAStepTheBlueprintMovedPast(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+
+	// stage builds the advanced blueprint and hands back the spawner, the DB,
+	// the blueprint id, the task id and the STALE step-0 run ready to conclude
+	// with the given outcome.
+	stage := func(t *testing.T, suffix, step0Outcome string) (*Spawner, *sql.DB, string, string, domain.Conversation) {
+		t.Helper()
+		s, database, brID, taskID, run0 := reactorFixture(t, suffix, 3, "completed", step0Outcome)
+		ctx := context.Background()
+
+		// The advance the reactor itself performed on step 0's first
+		// conclusion: pointer first, then the row it names. Step 1 is
+		// mid-flight (NULL status) and holds the shared worktree.
+		if err := s.blueprints.SetRunCurrentStepSystem(ctx, org, brID, 1); err != nil {
+			t.Fatalf("SetRunCurrentStepSystem: %v", err)
+		}
+		step1 := 1
+		dbtest.SeedConversation(t, database, domain.Conversation{
+			ID: "rrun1-" + suffix, TaskID: taskID, PromptID: suffix + "-p1",
+			Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step1,
+		})
+
+		stepRun, err := s.agentRuns.GetSystem(ctx, org, run0)
+		if err != nil || stepRun == nil {
+			t.Fatalf("read stale step run: (%v, %v)", stepRun, err)
+		}
+		stepRun.TriggerType = "manual"
+		stepRun.CreatorUserID = runmode.LocalDefaultUserID
+		return s, database, brID, taskID, *stepRun
+	}
+
+	t.Run("continue does not advance or double-enqueue", func(t *testing.T) {
+		// The corruption: next := 0+1 rewrites current_step_index backwards to
+		// 1 and enqueues a SECOND copy of the step already running.
+		s, database, brID, _, stale := stage(t, "stale-adv", "continue")
+
+		s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), stale, runConfig{orgID: org}, time.Now())
+
+		if q := queuedStepRuns(t, database, brID); len(q) != 1 || q[0] != 1 {
+			t.Fatalf("queued step runs = %v, want [1] — the live step must not be enqueued a second time", q)
+		}
+		br := mustGetRun(t, s, org, brID)
+		if br.CurrentStepIndex != 1 {
+			t.Errorf("current_step_index = %d, want 1 — a stale terminal must not move the pointer", br.CurrentStepIndex)
+		}
+		if br.Status != domain.BlueprintRunStatusRunning {
+			t.Errorf("blueprint status = %q, want running", br.Status)
+		}
+	})
+
+	t.Run("finish does not terminate the blueprint under a live step", func(t *testing.T) {
+		// The one confirmed in the wild: terminateBlueprint finalizes the
+		// blueprint, closes the task and removes the worktree — out from under
+		// the agent still working in it.
+		s, database, brID, taskID, stale := stage(t, "stale-fin", "finish")
+
+		s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), stale, runConfig{orgID: org}, time.Now())
+
+		if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusRunning {
+			t.Errorf("blueprint status = %q, want running — step 1 is still executing", br.Status)
+		}
+		if got := readTaskStatus(t, database, taskID); got == "done" {
+			t.Error("task closed on a stale step's finish while its blueprint's live step was still running")
+		}
+	})
+
+	t.Run("the resume finalizer refuses it on the same grounds", func(t *testing.T) {
+		// The other post-run orchestration path: a follow-up's conclusion
+		// finalizes through ResumeBlueprintAfterResume rather than the reactor,
+		// and it terminates blueprints too — so it carries the same re-check.
+		s, database, brID, taskID, stale := stage(t, "stale-resume", "finish")
+
+		s.ResumeBlueprintAfterResume(org, stale.ID, runmode.LocalDefaultUserID)
+
+		if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusRunning {
+			t.Errorf("blueprint status = %q, want running — step 1 is still executing", br.Status)
+		}
+		if got := readTaskStatus(t, database, taskID); got == "done" {
+			t.Error("task closed by a stale step's resume while its blueprint's live step was still running")
+		}
+	})
+
+	t.Run("a cancel is left for the live step to carry", func(t *testing.T) {
+		// A cancel does end everything — but the disposition belongs to
+		// whichever path disposes of the step that is actually running.
+		// Finalizing here would tear the worktree out from under it just the
+		// same, and the live step's own conclusion finalizes moments later.
+		s, _, brID, _, stale := stage(t, "stale-can", "continue")
+		if _, err := s.blueprints.RequestRunCancelSystem(context.Background(), org, brID); err != nil {
+			t.Fatalf("RequestRunCancelSystem: %v", err)
+		}
+
+		s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), stale, runConfig{orgID: org}, time.Now())
+
+		br := mustGetRun(t, s, org, brID)
+		if br.Status != domain.BlueprintRunStatusRunning {
+			t.Errorf("blueprint status = %q, want running — the live step disposes of the cancel", br.Status)
+		}
+		if !br.CancelRequested {
+			t.Error("cancel_requested was cleared; the signal must survive for the live step to read")
+		}
+	})
+}
+
 func mustGetRun(t *testing.T, s *Spawner, org, brID string) *domain.BlueprintRun {
 	t.Helper()
 	br, err := s.blueprints.GetRunSystem(context.Background(), org, brID)

@@ -223,15 +223,19 @@ func TestRunQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 
 	orgID, userID := seedPgOrgForBlueprints(t, h)
 	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
+	bpID := pgBlueprintIDOfRun(t, h, brID)
 
+	// N runs queued at once = N blueprint_runs, each on its own step 0.
 	const n = 40
 	want := make(map[string]bool, n)
 	for i := 0; i < n; i++ {
 		runID := uuid.New().String()
-		idx := i
+		step0 := 0
 		if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 			ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
-			TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
+			TriggerType: "manual", CreatorUserID: userID,
+			BlueprintRunID:     seedPgBlueprintRunOn(t, h, orgID, userID, bpID, taskID),
+			BlueprintStepIndex: &step0,
 		}); err != nil {
 			t.Fatalf("EnqueueRun %d: %v", i, err)
 		}
@@ -610,18 +614,21 @@ func TestRunQueueStore_Postgres_FleetQueueShares(t *testing.T) {
 		h.Reset(t)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		orgID, userID := seedPgOrgForBlueprints(t, h)
-		brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
 
-		nextStep := 0
 		seed := dbtest.FleetQueueSharesSeeder{
+			// One blueprint_run per staged run — the real firing model (one
+			// delegation = one blueprint_run), and what makes several queued
+			// rows concurrently claimable: a blueprint drives its current
+			// step and no other, so siblings under one blueprint could never
+			// all be queued at once.
 			EnqueueRun: func(t *testing.T) string {
 				t.Helper()
-				idx := nextStep
-				nextStep++
+				brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
 				runID := uuid.New().String()
+				step := 0
 				if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 					ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
-					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
+					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step,
 				}); err != nil {
 					t.Fatalf("EnqueueRun: %v", err)
 				}
@@ -683,14 +690,36 @@ func seedPgRunQueueFixture(t *testing.T, h *pgtest.Harness, orgID, userID string
 	promptID = "rq-p-" + uuid.New().String()[:8]
 	seedPgPrompt(t, h, orgID, userID, promptID)
 	taskID = seedPgTask(t, h, orgID, userID)
-	brID = uuid.New().String()
+	return seedPgBlueprintRunOn(t, h, orgID, userID, bpID, taskID), taskID, promptID
+}
+
+// seedPgBlueprintRunOn mints one more running blueprint_run against an existing
+// blueprint + task. A fixture staging several CONCURRENTLY queued runs needs
+// one of these per run: a blueprint drives the single step its
+// current_step_index names, so sibling steps of one blueprint are never
+// claimable at the same moment — which is the real firing model anyway (one
+// delegation = one blueprint_run).
+func seedPgBlueprintRunOn(t *testing.T, h *pgtest.Harness, orgID, userID, bpID, taskID string) string {
+	t.Helper()
+	brID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO blueprint_runs (id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, status, worktree_path, started_at, step_plan)
 		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', $6, now(), '[]')
 	`, brID, orgID, userID, bpID, taskID, "/tmp/wt-"+brID); err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}
-	return brID, taskID, promptID
+	return brID
+}
+
+// pgBlueprintIDOfRun reads the blueprint a blueprint_run was minted from, so a
+// fixture holding only a run id can stage more runs beside it.
+func pgBlueprintIDOfRun(t *testing.T, h *pgtest.Harness, brID string) string {
+	t.Helper()
+	var bpID string
+	if err := h.AdminDB.QueryRow(`SELECT blueprint_id FROM blueprint_runs WHERE id = $1`, brID).Scan(&bpID); err != nil {
+		t.Fatalf("read blueprint_id of %s: %v", brID, err)
+	}
+	return bpID
 }
 
 // TestRunQueueStore_Postgres_QueuedAtStamps mirrors the SQLite twin: enqueue
@@ -915,6 +944,10 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 				t.Helper()
 				idx := nextStep
 				nextStep++
+				// Pointer first, then the row it names — the order the
+				// reactor writes in, and the reason the claim gate can be a
+				// plain equality.
+				pgtest.MustExec(t, h.AdminDB, `UPDATE blueprint_runs SET current_step_index = $2 WHERE id = $1`, brID, idx)
 				convID := uuid.New().String()
 				if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 					ID: convID, TaskID: taskID, PromptID: promptID, Model: "m",
@@ -926,6 +959,13 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 				// one backend covers both engines.
 				pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET runtime = $2 WHERE id = $1`, convID, runtime)
 				return convID
+			},
+			EnqueueUnindexed: func(t *testing.T) error {
+				t.Helper()
+				return stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
+					ID: uuid.New().String(), TaskID: taskID, PromptID: promptID, Model: "m",
+					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID,
+				})
 			},
 			SetStoredStatus: func(t *testing.T, convID, status string) {
 				t.Helper()

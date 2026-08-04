@@ -200,10 +200,10 @@ func seedRunInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, suffix stri
 	blueprintRunID := seedBlueprintRunInOrg(t, r, orgID, userID, taskID)
 	runID := uuid.NewString()
 	if _, err := r.h.AdminDB.Exec(`
-		INSERT INTO conversations (id, org_id, task_id, team_id, prompt_id, status, model, creator_user_id, trigger_type, blueprint_run_id)
+		INSERT INTO conversations (id, org_id, task_id, team_id, prompt_id, status, model, creator_user_id, trigger_type, blueprint_run_id, blueprint_step_index)
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-		        $4, 'running', 'm', $5, 'manual', $6)
+		        $4, 'running', 'm', $5, 'manual', $6, 0)
 	`, runID, orgID, taskID, promptID, userID, blueprintRunID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}

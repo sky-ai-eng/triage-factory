@@ -42,23 +42,25 @@ var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
 // counter. Two shapes reach it, and the message names both because a caller
 // cannot tell them apart from the outside:
 //
+//   - the blueprint has moved past this step. Its steps share one worktree and
+//     one snapshot blob, so the tree an earlier step would resume into is no
+//     longer its own — while the blueprint is still running (a later step is in
+//     that tree right now) exactly as once it has stopped; or
 //   - the blueprint was cancelled at its own layer, so nothing under it runs
-//     again; or
-//   - the blueprint finished on a later step. Only the conversation it came to
-//     rest on takes follow-ups — the workspace snapshot is one blob per
-//     blueprint run that every step overwrites, so an earlier step has no tree
-//     of its own left to resume into.
+//     again.
 //
 // One sentinel for both because they are the same answer to the only question
 // the caller is asking: this is permanent, and it is about this conversation
-// rather than about timing. A conversation stopped by a user reaches neither —
-// a stop freezes its blueprint 'running' precisely so the parked step stays
-// claimable.
+// rather than about timing. Not a claim that the conversation ended of its own
+// accord — a step that concluded cleanly is exactly what reaches here once the
+// blueprint moves on. A conversation stopped by a user reaches neither: a stop
+// freezes its blueprint 'running' with the pointer on that step, precisely so
+// the parked step stays claimable.
 //
 // Its own sentinel rather than ErrRunNotResumable, because the two say
 // different things to a person. "Not resumable" means the state moved under
 // you: refresh and look again. This means refreshing will never change it.
-var ErrConversationConcluded = errors.New("resume: this conversation can no longer be continued — its blueprint was cancelled, or it concluded on a later step (only a blueprint's final conversation takes follow-ups)")
+var ErrConversationConcluded = errors.New("resume: this conversation can no longer be continued — its blueprint has moved past this step, or was cancelled (only the step a blueprint is currently on takes follow-ups)")
 
 // ErrWorkspaceExpired is returned when a resumable conversation's workspace is
 // gone for good: its warm worktree was swept AND its durable snapshot was

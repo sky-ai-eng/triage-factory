@@ -63,7 +63,8 @@ const (
 	// good; no later release brings it back.
 	ResumeBlockedWorkspaceExpired = "workspace_expired"
 	// ResumeBlockedBlueprintConcluded — the workspace survives but nothing would
-	// drive it: the blueprint was cancelled, or it finished on a later step.
+	// drive it: the blueprint has moved past this step (a later one is running,
+	// or it came to rest on one), or it was cancelled.
 	ResumeBlockedBlueprintConcluded = "blueprint_concluded"
 )
 
@@ -182,18 +183,18 @@ func blueprintDrivableForClaim(br *domain.BlueprintRun, stepIndex *int) bool {
 	if br.CancelRequested || br.Status == domain.BlueprintRunStatusCancelled {
 		return false
 	}
-	return br.Status == domain.BlueprintRunStatusRunning || isFinalBlueprintStep(br, stepIndex)
+	return isCurrentBlueprintStep(br, stepIndex)
 }
 
-// isFinalBlueprintStep reports whether stepIndex names the step the blueprint
-// came to rest on — the one conversation of a finished blueprint that a
-// follow-up may land on. Mirrors the equality arm of blueprintDrivableSQL, and
-// exists so the claim path and the resume pre-check cannot drift apart.
+// isCurrentBlueprintStep reports whether stepIndex names the step the blueprint
+// is on — the step being dispatched while it runs, and the step it came to rest
+// on once it stopped. It holds under every blueprint status: an earlier step is
+// never resumable, because the blueprint's one workspace has moved past it.
 //
-// A nil index is not final. It is the Go spelling of the SQL's NULL comparison,
-// and it is the conservative answer for the same reason: a conversation that
-// never recorded its position cannot prove it is the one holding the workspace.
-func isFinalBlueprintStep(br *domain.BlueprintRun, stepIndex *int) bool {
+// A nil index is not current. It is the Go spelling of the SQL's NULL
+// comparison, and conservative for the same reason: a conversation that never
+// recorded its position cannot prove it holds the workspace.
+func isCurrentBlueprintStep(br *domain.BlueprintRun, stepIndex *int) bool {
 	return br != nil && stepIndex != nil && *stepIndex == br.CurrentStepIndex
 }
 
@@ -500,11 +501,10 @@ func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, run
 	if !s.workspaceRecoverable(ctx, orgID, run) {
 		return ResumeBlockedWorkspaceExpired
 	}
-	// The workspace survives but nothing would drive it — the blueprint was
-	// cancelled, or it finished on a later step and this is not the conversation
-	// it came to rest on. Asked second because it is about the sequence rather
-	// than the workspace, and a person whose workspace is gone is better served
-	// by hearing that.
+	// The workspace survives but nothing would drive it — the blueprint has
+	// moved past this step, or it was cancelled. Asked second because it is
+	// about the sequence rather than the workspace, and a person whose workspace
+	// is gone is better served by hearing that.
 	if !s.blueprintDrivableForResume(ctx, orgID, run) {
 		return ResumeBlockedBlueprintConcluded
 	}

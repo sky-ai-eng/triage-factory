@@ -24,6 +24,12 @@ func execSQL(t *testing.T, database *sql.DB, query string, args ...any) {
 // seedSteerRun installs the entity → event → prompt → task → blueprint_run → run
 // chain a steering endpoint needs, on the local-default org/team, and returns
 // the run id. status sets the run's lifecycle state.
+//
+// The run is step 0 of its blueprint, which is where the blueprint's
+// current_step_index sits — the shape EnqueueRun produces, and the one the
+// drivability gate reads. A row that named no step would be undrivable, so a
+// fixture that left it NULL would silently make every steering test a test of
+// the refusal path.
 func seedSteerRun(t *testing.T, database *sql.DB, suffix, status string) string {
 	t.Helper()
 	const eventType = "github:pr:ci_check_failed"
@@ -33,7 +39,7 @@ func seedSteerRun(t *testing.T, database *sql.DB, suffix, status string) string 
 	execSQL(t, database, `INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES (?, 'P', 'b', ?, ?)`, p, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
 	execSQL(t, database, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id) VALUES (?, ?, ?, ?)`, tk, e, eventType, ev)
 	brID := seedBlueprintRunSQLite(t, database, tk)
-	execSQL(t, database, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id) VALUES (?, ?, ?, ?, 'manual', ?)`, rn, tk, p, status, brID)
+	execSQL(t, database, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index) VALUES (?, ?, ?, ?, 'manual', ?, 0)`, rn, tk, p, status, brID)
 	return rn
 }
 

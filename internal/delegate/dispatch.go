@@ -883,6 +883,17 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 	if br.Status != domain.BlueprintRunStatusRunning {
 		return // already finalized by a racing cancel/terminate
 	}
+	// A terminal from a step the blueprint has moved past. Every transition
+	// below reads the sequence's position off THIS conversation, so a stale one
+	// advances backwards over the live step, re-enqueues it, or terminates the
+	// blueprint out from under it — none of it recoverable by a later pass. The
+	// claim gate refuses such a step; this is the far-side re-check, which
+	// catches an engagement already in flight when it did.
+	if !isCurrentBlueprintStep(br, stepRun.BlueprintStepIndex) {
+		dispatchLog.Error("reactor: terminal from a step the blueprint has moved past; ignoring it (no advance, no enqueue, no transition)",
+			"blueprint_run", br.ID, "run", stepRun.ID, "step", stepRun.BlueprintStepIndex, "current_step", br.CurrentStepIndex, "status", stepRun.Status)
+		return
+	}
 	if br.CancelRequested {
 		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 			domain.BlueprintRunStatusCancelled, "cancelled", &stepIdx, false)

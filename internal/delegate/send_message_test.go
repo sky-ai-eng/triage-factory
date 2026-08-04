@@ -225,24 +225,30 @@ func TestDrainsUndeliveredInput(t *testing.T) {
 }
 
 // TestBlueprintDrivableForClaim walks the gate the claim scan applies in SQL
-// and the dispatcher + resume pre-check apply in Go. The row that matters most
-// is the earlier step of a NON-running blueprint: it must refuse for every
-// terminal, `aborted` included. An aborted blueprint's own step resumes and
-// re-opens it, but an earlier one does not — the re-open is conditioned on the
-// conversation's completed+abort terminal, so waking an earlier step leaves the
-// blueprint terminal with current_step_index pointing past the row, and nothing
-// ever claims it.
+// and the dispatcher + resume pre-check apply in Go. One rule under every
+// status: the blueprint drives the step its current_step_index names, and no
+// other. An earlier step is refused while the blueprint is still RUNNING for
+// the sharpest reason of all — a later step is executing in the shared worktree
+// right now, so driving this one puts two agents in one tree and lets a stale
+// terminal rewrite the sequence out from under the live step.
+//
+// The refusal holds for every terminal too, `aborted` included. An aborted
+// blueprint's own step resumes and re-opens it, but an earlier one does not —
+// the re-open is conditioned on the conversation's completed+abort terminal, so
+// waking an earlier step leaves the blueprint terminal with current_step_index
+// pointing past the row, and nothing ever claims it.
 func TestBlueprintDrivableForClaim(t *testing.T) {
 	idx := func(i int) *int { return &i }
 	cases := []struct {
 		name      string
 		status    domain.BlueprintRunStatus
 		cancelReq bool
-		stepIndex *int // the conversation's; the blueprint rests at step 2
+		stepIndex *int // the conversation's; the blueprint is on step 2
 		want      bool
 	}{
-		{"running drives any step", domain.BlueprintRunStatusRunning, false, idx(0), true},
-		{"running drives a nil step", domain.BlueprintRunStatusRunning, false, nil, true},
+		{"running drives its current step", domain.BlueprintRunStatusRunning, false, idx(2), true},
+		{"running refuses an earlier step", domain.BlueprintRunStatusRunning, false, idx(0), false},
+		{"running refuses a nil step", domain.BlueprintRunStatusRunning, false, nil, false},
 		{"cancel_requested drives nothing", domain.BlueprintRunStatusRunning, true, idx(2), false},
 		{"cancelled terminal drives nothing", domain.BlueprintRunStatusCancelled, false, idx(2), false},
 
