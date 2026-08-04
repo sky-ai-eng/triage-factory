@@ -156,14 +156,16 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 
 	t.Run("run_queue_enqueue_and_claim", func(t *testing.T) {
 		runID := newUUID(t, h)
+		step0 := 0
 		if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
-			ID:             runID,
-			TaskID:         taskID,
-			PromptID:       promptID,
-			Model:          "test-model",
-			TriggerType:    "manual",
-			CreatorUserID:  userID,
-			BlueprintRunID: blueprintRunID,
+			ID:                 runID,
+			TaskID:             taskID,
+			PromptID:           promptID,
+			Model:              "test-model",
+			TriggerType:        "manual",
+			CreatorUserID:      userID,
+			BlueprintRunID:     blueprintRunID,
+			BlueprintStepIndex: &step0,
 		}); err != nil {
 			t.Fatalf("RunQueue.EnqueueRun (dispatcher's own step enqueue): %v", err)
 		}
@@ -540,9 +542,11 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 func seedQueuedRun(t *testing.T, h *Harness, stores db.Stores, ctx context.Context, orgID, taskID, promptID, blueprintRunID string) string {
 	t.Helper()
 	runID := newUUID(t, h)
+	step0 := 0
 	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
 		ID: runID, TaskID: taskID, PromptID: promptID, Model: "test-model",
 		TriggerType: "manual", CreatorUserID: "", BlueprintRunID: blueprintRunID,
+		BlueprintStepIndex: &step0,
 	}); err != nil {
 		t.Fatalf("seedQueuedRun EnqueueRun: %v", err)
 	}

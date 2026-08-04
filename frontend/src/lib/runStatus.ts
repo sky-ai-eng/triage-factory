@@ -214,7 +214,7 @@ export function resumeBlockedCopy(run: Conversation): string {
     case 'workspace_expired':
       return 'Workspace expired — this conversation can’t be resumed.'
     case 'blueprint_concluded':
-      return 'This conversation can’t be continued — its blueprint was cancelled, or it concluded on an earlier step.'
+      return 'This blueprint has moved past this step — only the step it’s on takes follow-ups.'
     case 'session_missing':
     case 'worktree_missing':
     case 'model_missing':

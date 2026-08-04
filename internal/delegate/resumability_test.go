@@ -32,6 +32,7 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 	cases := []struct {
 		name            string
 		blueprintStatus string
+		currentStep     int // the blueprint's position; the seeded run is step 0
 		removeWorkspace bool
 		wantOK          bool
 		wantReason      string
@@ -41,6 +42,18 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 			name:            "warm workspace, blueprint finished",
 			blueprintStatus: "completed",
 			wantOK:          true,
+		},
+		{
+			// The blueprint is still going and a LATER step holds the shared
+			// worktree. Nothing about this row says so — it is a cleanly
+			// completed step with a warm tree — which is why the server has to
+			// answer, and why it must answer the same way the send does.
+			name:            "workspace intact, blueprint running a later step",
+			blueprintStatus: "running",
+			currentStep:     1,
+			wantOK:          false,
+			wantReason:      ResumeBlockedBlueprintConcluded,
+			wantErr:         ErrConversationConcluded,
 		},
 		{
 			name:            "workspace removed",
@@ -68,8 +81,8 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 					wt := t.TempDir()
 					seedRun(t, database, runID, "sess-"+runID, wt)
 					setRunStatus(t, database, runID, "open")
-					if _, err := database.Exec(`UPDATE blueprint_runs SET status=? WHERE id=?`,
-						tc.blueprintStatus, blueprintRunIDForRun(t, database, runID)); err != nil {
+					if _, err := database.Exec(`UPDATE blueprint_runs SET status=?, current_step_index=? WHERE id=?`,
+						tc.blueprintStatus, tc.currentStep, blueprintRunIDForRun(t, database, runID)); err != nil {
 						t.Fatalf("set blueprint status: %v", err)
 					}
 					s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")

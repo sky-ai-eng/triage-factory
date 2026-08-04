@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -18,10 +19,21 @@ type ClaimPredicateHarness struct {
 	UserID string
 
 	// EnqueueDelegation mints one delegation conversation under a running
-	// blueprint_run and returns its id. runtime is 'sdk' or 'native': the
-	// dialect stamps its own at mint (Postgres native, SQLite sdk), so the
-	// seeder rewrites the column to cover both engines against one backend.
+	// blueprint_run and returns its id. Successive calls are successive STEPS
+	// of that one blueprint, and each advances the blueprint's
+	// current_step_index to the step it is about to mint — the order the
+	// reactor writes in, and the thing the claim gate's equality reads.
+	// runtime is 'sdk' or 'native': the dialect stamps its own at mint
+	// (Postgres native, SQLite sdk), so the seeder rewrites the column to
+	// cover both engines against one backend.
 	EnqueueDelegation func(t *testing.T, runtime string) (convID string)
+
+	// EnqueueUnindexed attempts the same mint with NO blueprint step index
+	// and hands back the store's error. It is the one shape the claim gate
+	// could never admit — a conversation that names no position in its
+	// sequence — so the mint has to refuse it rather than leave a row in the
+	// work list that nothing will ever pick up.
+	EnqueueUnindexed func(t *testing.T) error
 
 	// SetStoredStatus writes conversations.status directly — the fixture
 	// door for the parks and terminals the suite needs on demand. An empty
@@ -216,6 +228,55 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				if st := h.StoredStatus(t, convID); st != "failed" {
 					t.Errorf("stored status = %q, want failed — a refused flip writes nothing", st)
 				}
+			})
+
+			// Ordinary sequential dispatch, which the gate must not narrow into
+			// a stall: every step of a running blueprint is claimed exactly
+			// once, in order, and exactly one is claimable at a time.
+			t.Run("RunningBlueprint_EveryStepIsClaimedExactlyOnce", func(t *testing.T) {
+				h := mk(t)
+				for step := 0; step < 3; step++ {
+					convID := h.EnqueueDelegation(t, runtime)
+					mustClaim(t, h, convID)
+					mustNotClaim(t, h)
+					release(t, h, h.OrgID, convID, "completed")
+					h.SetStoredStatus(t, convID, "completed")
+				}
+			})
+
+			// A blueprint drives the step it is ON, and no other — while it is
+			// still running, exactly as once it has stopped. The step being
+			// dispatched holds the shared worktree, so an earlier one is not a
+			// second unit of work but a second agent in one tree.
+			t.Run("RunningBlueprint_DrivesOnlyItsCurrentStep", func(t *testing.T) {
+				h := mk(t)
+
+				// Step 0 runs and concludes; step 1 is enqueued behind it and
+				// claimed, which is the ordinary sequential dispatch.
+				first := h.EnqueueDelegation(t, runtime)
+				mustClaim(t, h, first)
+				release(t, h, h.OrgID, first, "completed")
+				h.SetStoredStatus(t, first, "completed")
+
+				second := h.EnqueueDelegation(t, runtime)
+				mustClaim(t, h, second)
+
+				// Now the follow-up on the COMPLETED earlier step, with step 1
+				// still executing. The un-terminal flip is about the
+				// conversation and lands, and the queued row is real — the
+				// claim gate is what refuses, so the step sits there rather
+				// than starting a second agent in step 1's worktree.
+				if flipped, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, first); err != nil || !flipped {
+					t.Fatalf("MarkQueuedForResume(%s) = (%v, %v), want a flip", first, flipped, err)
+				}
+				h.InsertRow(t, first, userRow("actually, one more thing", false))
+				mustNotClaim(t, h)
+
+				// And it stays refused after the live step releases: the
+				// blueprint is on step 1, so step 0 is behind it for good.
+				release(t, h, h.OrgID, second, "parked")
+				h.SetStoredStatus(t, second, "open")
+				mustNotClaim(t, h)
 			})
 
 			// The finished-blueprint arm. A blueprint that reached a terminal
@@ -482,4 +543,19 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			})
 		})
 	}
+
+	// Runtime-independent: the mint refuses what the gate could never admit.
+	t.Run("BlueprintConversationWithoutAStepIndexIsRefusedAtTheMint", func(t *testing.T) {
+		h := mk(t)
+		if h.EnqueueUnindexed == nil {
+			t.Skip("harness cannot stage an unindexed mint")
+		}
+		err := h.EnqueueUnindexed(t)
+		if !errors.Is(err, db.ErrBlueprintStepUnindexed) {
+			t.Fatalf("EnqueueRun with no step index = %v, want ErrBlueprintStepUnindexed", err)
+		}
+		// The refusal is the whole point: nothing landed, so nothing is
+		// sitting in the work list that no claim could ever reach.
+		mustNotClaim(t, h)
+	})
 }

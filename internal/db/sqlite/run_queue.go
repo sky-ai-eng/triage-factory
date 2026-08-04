@@ -101,12 +101,12 @@ const eligibleForDrivingSQL = needsDrivingSQL + ` AND ` + curatorNeedsTurnSQL
 // JOIN so a conversation with no blueprint parent (curator today,
 // interactive tomorrow) is not filtered out by the join itself. The rest —
 // why a called-off blueprint drives nothing and is checked on both of its
-// columns, and why a finished one keeps only its LAST conversation drivable —
-// is the Postgres twin's; this is the same predicate in the other dialect.
+// columns, and why a blueprint drives only the one conversation its
+// `current_step_index` names, whatever its status — is the Postgres twin's;
+// this is the same predicate in the other dialect.
 const blueprintDrivableSQL = `(r.blueprint_run_id IS NULL
 	    OR (br.cancel_requested = 0 AND br.status <> 'cancelled'
-	        AND (br.status = 'running'
-	             OR r.blueprint_step_index = br.current_step_index)))`
+	        AND r.blueprint_step_index = br.current_step_index))`
 
 // curatorTurnMessageSQL is the queued turn a curator claim is minted to
 // drive — the conversation's oldest undelivered plain user row, stamped as
@@ -154,6 +154,9 @@ const runQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.task
 // split lands where the row is written rather than as a caller-passed knob.
 func (s *runQueueStore) EnqueueRun(ctx context.Context, orgID string, run domain.Conversation) error {
 	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	if err := db.AssertBlueprintStepIndexed(run); err != nil {
 		return err
 	}
 	triggerType := run.TriggerType

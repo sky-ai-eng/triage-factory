@@ -14,32 +14,41 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// fairnessFixture is one org's ready-to-enqueue run-queue fixture: a running
-// blueprint_run under a fresh task + prompt, reused for every run enqueued
-// under that org (distinct step indices), plus the org's creator user id.
+// fairnessFixture is one org's ready-to-enqueue run-queue fixture: a blueprint
+// + task + prompt every run enqueued under that org hangs off, plus the org's
+// creator user id. Each run gets its own blueprint_run — see enqueue.
 type fairnessFixture struct {
 	orgID, userID          string
-	brID, taskID, promptID string
-	nextStep               int
+	bpID, taskID, promptID string
+	h                      *pgtest.Harness
 }
 
 func newFairnessFixture(t *testing.T, h *pgtest.Harness) fairnessFixture {
 	t.Helper()
 	orgID, userID := seedPgOrgForBlueprints(t, h)
 	brID, taskID, promptID := seedPgRunQueueFixture(t, h, orgID, userID)
-	return fairnessFixture{orgID: orgID, userID: userID, brID: brID, taskID: taskID, promptID: promptID}
+	return fairnessFixture{
+		orgID: orgID, userID: userID,
+		bpID: pgBlueprintIDOfRun(t, h, brID), taskID: taskID, promptID: promptID, h: h,
+	}
 }
 
-// enqueue stages one queued run under the fixture (distinct step index each
-// call), optionally stamped with a preferred executor. Returns the run id.
+// enqueue stages one queued run under the fixture, optionally stamped with a
+// preferred executor. Returns the run id.
+//
+// One blueprint_run per run, each on step 0: fairness is about many runs
+// competing for slots at the same instant, and a blueprint only ever offers the
+// one step its current_step_index names — sibling steps of a single blueprint
+// are queued in sequence, never together.
 func (f *fairnessFixture) enqueue(t *testing.T, stores db.Stores, preferred string) string {
 	t.Helper()
 	runID := uuid.New().String()
-	idx := f.nextStep
-	f.nextStep++
+	step0 := 0
 	if err := stores.RunQueue.EnqueueRun(context.Background(), f.orgID, domain.Conversation{
 		ID: runID, TaskID: f.taskID, PromptID: f.promptID, Model: "m",
-		TriggerType: "manual", CreatorUserID: f.userID, BlueprintRunID: f.brID, BlueprintStepIndex: &idx,
+		TriggerType: "manual", CreatorUserID: f.userID,
+		BlueprintRunID:      seedPgBlueprintRunOn(t, f.h, f.orgID, f.userID, f.bpID, f.taskID),
+		BlueprintStepIndex:  &step0,
 		PreferredExecutorID: preferred,
 	}); err != nil {
 		t.Fatalf("EnqueueRun: %v", err)

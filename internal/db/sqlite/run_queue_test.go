@@ -558,25 +558,27 @@ func TestRunQueueStore_SQLite_FleetQueueShares(t *testing.T) {
 		if err := stores.Blueprints.ReplaceSteps(ctx, org, "rqfqs-bp", []string{"rqfqs-p0"}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
-		brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
-			ID: "rqfqs-br", BlueprintID: "rqfqs-bp", TaskID: task.ID,
-			TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
-			WorktreePath: "/tmp/wt-rqfqs",
-		})
-		if err != nil {
-			t.Fatalf("CreateRun: %v", err)
-		}
-
-		nextStep := 0
 		seed := dbtest.FleetQueueSharesSeeder{
+			// One blueprint_run per staged run — the real firing model (one
+			// delegation = one blueprint_run), and what makes several
+			// queued rows concurrently claimable: a blueprint drives its
+			// current step and no other, so siblings under one blueprint
+			// could never all be queued at once.
 			EnqueueRun: func(t *testing.T) string {
 				t.Helper()
-				idx := nextStep
-				nextStep++
 				runID := uuid.New().String()
+				step := 0
+				brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+					ID: "rqfqs-br-" + runID, BlueprintID: "rqfqs-bp", TaskID: task.ID,
+					TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+					WorktreePath: "/tmp/wt-rqfqs",
+				})
+				if err != nil {
+					t.Fatalf("CreateRun: %v", err)
+				}
 				if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
 					ID: runID, TaskID: task.ID, PromptID: "rqfqs-p0", Model: "m",
-					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &idx,
+					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step,
 				}); err != nil {
 					t.Fatalf("EnqueueRun: %v", err)
 				}
@@ -806,6 +808,12 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 				t.Helper()
 				idx := nextStep
 				nextStep++
+				// Pointer first, then the row it names — the order the
+				// reactor writes in, and the reason the claim gate can be a
+				// plain equality.
+				if _, err := conn.Exec(`UPDATE blueprint_runs SET current_step_index = ? WHERE id = ?`, idx, brID); err != nil {
+					t.Fatalf("advance current_step_index: %v", err)
+				}
 				convID := uuid.New().String()
 				if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
 					ID: convID, TaskID: task.ID, PromptID: "rqpr-p0", Model: "m",
@@ -819,6 +827,13 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 					t.Fatalf("set runtime: %v", err)
 				}
 				return convID
+			},
+			EnqueueUnindexed: func(t *testing.T) error {
+				t.Helper()
+				return stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
+					ID: uuid.New().String(), TaskID: task.ID, PromptID: "rqpr-p0", Model: "m",
+					TriggerType: "manual", BlueprintRunID: brID,
+				})
 			},
 			SetStoredStatus: func(t *testing.T, convID, status string) {
 				t.Helper()

@@ -2,10 +2,30 @@ package db
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrBlueprintStepUnindexed is EnqueueRun's refusal of a blueprint conversation
+// that records no position in its sequence. The claim gate drives the one step
+// its blueprint's current_step_index names, so such a row could never be
+// claimed — by anyone, ever. Refusing the mint turns a row that would sit
+// invisible in the work list into an error the caller sees.
+var ErrBlueprintStepUnindexed = errors.New("enqueue: blueprint conversation has no step index")
+
+// AssertBlueprintStepIndexed is the guard both dialects' EnqueueRun opens with,
+// shared so the invariant has one spelling. A conversation with no blueprint
+// parent passes: the index is meaningless there, and the claim gate's first
+// disjunct lets it through without ever comparing one.
+func AssertBlueprintStepIndexed(run domain.Conversation) error {
+	if run.BlueprintRunID != "" && run.BlueprintStepIndex == nil {
+		return fmt.Errorf("%w (conversation %s, blueprint_run %s)", ErrBlueprintStepUnindexed, run.ID, run.BlueprintRunID)
+	}
+	return nil
+}
 
 // RunQueueStore owns the claim loop — the ONE scan that finds conversations
 // needing to be driven, on every surface. It is the sibling of
@@ -67,6 +87,11 @@ type RunQueueStore interface {
 	// carries the
 	// step's identity: ID, TaskID, PromptID, Model, TriggerType,
 	// CreatorUserID, TriggerID, BlueprintRunID (required), BlueprintStepIndex.
+	// A blueprint conversation with no step index is REFUSED by both dialects:
+	// the claim gate drives the one step its blueprint's current_step_index
+	// names, so a row that never recorded its position would be unclaimable
+	// forever. The refusal is where that becomes visible — at the mint, to the
+	// caller — instead of as a silently stranded row.
 	// PreferredExecutorID (TFAC-587) is the rendezvous placement stamp, empty
 	// for no affinity (placement disabled, local N=1, or a non-repo key).
 	// Routes through the admin pool — the dispatcher/reactor mint work items
