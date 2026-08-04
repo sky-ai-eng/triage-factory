@@ -3,6 +3,7 @@ import { render, screen, act, waitFor } from '@testing-library/react'
 import { useRunDetail } from './useRunDetail'
 import { TelemetryRail } from '../components/runstation/StationInstruments'
 import { stationState } from '../components/runstation/stationStyle'
+import { canResumeRun, resumeBlockedCopy } from '../lib/runStatus'
 import type { Conversation, Message, WSEvent } from '../types'
 
 // The hook's live updates arrive through the singleton websocket. Mocking the
@@ -569,5 +570,82 @@ describe('useRunDetail transcript reconciliation', () => {
     // Now it is closed out, so the asking stops.
     await tick()
     expect(sinceRequests(fetchMock)).toHaveLength(2)
+  })
+})
+
+// The composer's gate as the user experiences it: a parked run whose workspace
+// hadn't landed yet renders the blocked copy, and the announcement that it has
+// landed turns the input back on with no reload.
+function ComposerHarness() {
+  const { run } = useRunDetail(RUN_ID)
+  if (!run) return <div>loading</div>
+  return <div>{canResumeRun(run) ? 'composer live' : resumeBlockedCopy(run)}</div>
+}
+
+describe('useRunDetail resumability', () => {
+  // The run row read, parked from the second call on: the mount gets an
+  // answer, and every refetch after it hangs. Anything that changes on screen
+  // past that point can only have come from the websocket frame.
+  let parkedRefetch: ReturnType<typeof deferred<Conversation>>
+
+  function mockResumableFetch() {
+    parkedRefetch = deferred<Conversation>()
+    let runReads = 0
+    const fetchMock = vi.fn((url: string) => {
+      const [path] = url.split('?')
+      if (path !== `/api/agent/conversations/${RUN_ID}`) {
+        // Everything else this mount pulls — transcript, artifacts, pending
+        // permissions — is empty here; the run row is the whole subject.
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) })
+      }
+      runReads++
+      const body = runReads === 1 ? Promise.resolve(serverRun) : parkedRefetch.promise
+      return Promise.resolve({ ok: true, status: 200, json: () => body })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  beforeEach(() => {
+    dispatch = null
+    serverMessages = []
+    pendingSince = null
+    failSinceReads = false
+    serverRun = conversation({
+      Status: 'open',
+      resumable: false,
+      resume_blocked_reason: 'workspace_expired',
+    })
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('turns the composer on when the workspace snapshot is announced', async () => {
+    mockResumableFetch()
+    render(<ComposerHarness />)
+    // A cross-pod stop parks the row before the executor writes the blob, so
+    // this is the honest state on arrival.
+    expect(await screen.findByText(/workspace expired/i)).toBeInTheDocument()
+
+    // The fenced teardown's snapshot landed. Same event, same status the row
+    // already has, one extra field.
+    send({
+      type: 'conversation_update',
+      conversation_id: RUN_ID,
+      data: { status: 'open', resumable: true },
+    })
+
+    await waitFor(() => expect(screen.getByText('composer live')).toBeInTheDocument())
+  })
+
+  it('leaves the held answer alone when a status frame says nothing about it', async () => {
+    serverRun = conversation({ Status: 'open', resumable: true })
+    mockResumableFetch()
+    render(<ComposerHarness />)
+    expect(await screen.findByText('composer live')).toBeInTheDocument()
+
+    // Absent is "unchanged", not false — every other status flip on the wire
+    // carries no resumable field and must not close a live composer.
+    send({ type: 'conversation_update', conversation_id: RUN_ID, data: { status: 'open' } })
+    await waitFor(() => expect(screen.getByText('composer live')).toBeInTheDocument())
   })
 })

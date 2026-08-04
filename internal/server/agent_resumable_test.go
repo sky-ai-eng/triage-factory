@@ -1,0 +1,137 @@
+package server
+
+import (
+	"encoding/json"
+	"net/http"
+	"testing"
+
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	"github.com/sky-ai-eng/triage-factory/internal/storage"
+)
+
+// readRun issues the run detail read and decodes it.
+func readRun(t *testing.T, s *Server, runID string) map[string]any {
+	t.Helper()
+	rec := doJSON(t, s, "GET", "/api/agent/conversations/"+runID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode run: %v", err)
+	}
+	return out
+}
+
+// withEmptyBlobStore wires a blob store with nothing in it, so a run whose
+// worktree is also gone is unrecoverable for real rather than
+// unverifiable (an unwired store answers "recoverable" by design).
+func withEmptyBlobStore(t *testing.T, s *Server) *delegate.Spawner {
+	t.Helper()
+	paths.SetForTest(t, t.TempDir())
+	spawner := delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6")
+	blobs, err := storage.New()
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	spawner.SetStorage(blobs)
+	s.SetSpawner(spawner)
+	return spawner
+}
+
+// TestHandleAgentStatus_ResumableWorkspaceExpired: the read tells the client
+// what only the server can know. The row is parked and looks resumable from
+// its status — which is all the client can see — but its workspace is gone, so
+// the composer this read gates must come up disabled rather than accept a
+// message that answers 410.
+func TestHandleAgentStatus_ResumableWorkspaceExpired(t *testing.T) {
+	s := newTestServer(t)
+	withEmptyBlobStore(t, s)
+	runID := seedSteerRun(t, s.db, "resgone", "open")
+	// Native: the resume state is the transcript, so the ladder reaches the
+	// workspace question rather than stopping at a missing session id.
+	execSQL(t, s.db, `UPDATE conversations SET runtime='native', worktree_path='' WHERE id=?`, runID)
+
+	got := readRun(t, s, runID)
+	if got["resumable"] != false {
+		t.Errorf("resumable = %v, want false", got["resumable"])
+	}
+	if got["resume_blocked_reason"] != delegate.ResumeBlockedWorkspaceExpired {
+		t.Errorf("resume_blocked_reason = %v, want %q", got["resume_blocked_reason"], delegate.ResumeBlockedWorkspaceExpired)
+	}
+}
+
+// TestHandleAgentStatus_ResumableParkedRun: the unchanged case. A parked run
+// with a live workspace under a running blueprint reads resumable, with no
+// reason attached — the composer stays live and the follow-up works.
+func TestHandleAgentStatus_ResumableParkedRun(t *testing.T) {
+	s := newTestServer(t)
+	withEmptyBlobStore(t, s)
+	runID := seedSteerRun(t, s.db, "reswarm", "open")
+	execSQL(t, s.db, `UPDATE conversations SET runtime='native', worktree_path=? WHERE id=?`, t.TempDir(), runID)
+
+	got := readRun(t, s, runID)
+	if got["resumable"] != true {
+		t.Errorf("resumable = %v, want true", got["resumable"])
+	}
+	if _, ok := got["resume_blocked_reason"]; ok {
+		t.Errorf("resume_blocked_reason = %v, want the key absent when nothing is blocking", got["resume_blocked_reason"])
+	}
+}
+
+// TestHandleAgentStatus_ResumableBlueprintCancelled: the workspace survives but
+// nothing would drive it, which is a different sentence to put in front of a
+// person than "expired" — so it is a different reason on the wire.
+func TestHandleAgentStatus_ResumableBlueprintCancelled(t *testing.T) {
+	s := newTestServer(t)
+	withEmptyBlobStore(t, s)
+	runID := seedSteerRun(t, s.db, "rescancelled", "open")
+	execSQL(t, s.db, `UPDATE conversations SET runtime='native', worktree_path=? WHERE id=?`, t.TempDir(), runID)
+	execSQL(t, s.db, `UPDATE blueprint_runs SET status='cancelled'
+		WHERE id = (SELECT blueprint_run_id FROM conversations WHERE id=?)`, runID)
+
+	got := readRun(t, s, runID)
+	if got["resumable"] != false {
+		t.Errorf("resumable = %v, want false", got["resumable"])
+	}
+	if got["resume_blocked_reason"] != delegate.ResumeBlockedBlueprintConcluded {
+		t.Errorf("resume_blocked_reason = %v, want %q", got["resume_blocked_reason"], delegate.ResumeBlockedBlueprintConcluded)
+	}
+}
+
+// TestHandleAgentStatus_ResumabilityOmittedForActiveAndFailed: the two shapes
+// the read deliberately doesn't answer for. An active run is steered through
+// its live process (and the client's own `active` arm already opens the
+// composer); a failed one has no workspace by construction. Absence is the
+// answer — the client falls back to the status reading, which is right for
+// both — and it is what keeps a blob existence check off every live run's
+// poll.
+func TestHandleAgentStatus_ResumabilityOmittedForActiveAndFailed(t *testing.T) {
+	for _, status := range []string{"running", "cloning", "failed"} {
+		t.Run(status, func(t *testing.T) {
+			s := newTestServer(t)
+			withEmptyBlobStore(t, s)
+			runID := seedSteerRun(t, s.db, "resskip"+status, "running")
+			if status != "running" {
+				execSQL(t, s.db, `UPDATE conversations SET status=? WHERE id=?`, status, runID)
+			}
+			if status == "cloning" {
+				// A claim phase is the coalesced display status, not a stored
+				// one — seed it the way the dispatcher does.
+				execSQL(t, s.db, `UPDATE conversations SET status='running' WHERE id=?`, runID)
+				execSQL(t, s.db, `INSERT INTO claims (id, conversation_id, org_id, executor_id, boot_epoch, phase)
+					VALUES (?, ?, 'local-org', 'exec-1', 1, 'cloning')`, "cl_"+runID, runID)
+			}
+
+			got := readRun(t, s, runID)
+			if got["Status"] != status {
+				t.Fatalf("display status = %v, want %s — the fixture didn't produce the shape under test", got["Status"], status)
+			}
+			if _, ok := got["resumable"]; ok {
+				t.Errorf("resumable = %v, want the key absent for a %s run", got["resumable"], status)
+			}
+		})
+	}
+}

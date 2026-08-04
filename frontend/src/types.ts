@@ -252,6 +252,27 @@ export interface Conversation {
   output_tokens?: number
   cache_read_tokens?: number
   cache_creation_tokens?: number
+  // resumable is the server's answer to "will a follow-up be accepted?" — the
+  // three-part backend predicate (status, workspace survival, blueprint
+  // drivability) of which the client can see exactly one part. The composer
+  // gates on it: a stopped run whose workspace never made it, was reaped by
+  // retention, or predates the snapshot work looks identically resumable from
+  // Status alone and answers every message with a 409/410.
+  //
+  // Detail read only (GET /api/agent/conversations/{id}) and only for a run
+  // that is neither active nor failed — the board shows no composer, an active
+  // run is steered through its live process, and a failed one has no workspace.
+  // ABSENT therefore means "the server didn't answer", not false: consumers
+  // fall back to the status-only reading, which is correct for the runs that
+  // skip it. It is a read, not a promise — the send's own 409/410 stays the
+  // enforcement.
+  resumable?: boolean
+  // resume_blocked_reason names the rung that refused, present only when
+  // resumable is false: 'workspace_expired' | 'blueprint_concluded' |
+  // 'session_missing' | 'worktree_missing' | 'model_missing' | 'not_steerable'
+  // (internal/delegate's ResumeBlocked* constants). Open-world by design — an
+  // unrecognized reason renders as the generic "can't be resumed" copy.
+  resume_blocked_reason?: string
 }
 
 // ArtifactKind is the closed set of artifact discriminators the backend emits
@@ -1122,6 +1143,13 @@ export type WSEvent =
         status?: string
         failure_kind?: string
         request_id?: string
+        // resumable rides the parked status when a run's workspace snapshot
+        // lands after the park was already announced (a cross-pod stop parks
+        // from control seconds before the executor writes the blob) — the
+        // moment a follow-up becomes possible, which no status change marks.
+        // The status repeats what the row already has, so consumers must merge
+        // it idempotently: a second `open` is not a transition.
+        resumable?: boolean
       }
     }
   // Artifact reconciliation (TFAC-464): an artifact a conversation produced

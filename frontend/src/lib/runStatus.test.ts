@@ -3,6 +3,7 @@ import type { Conversation } from '../types'
 import { CLAIM_PHASES, RUN_STATUSES, TERMINAL_RUN_STATUSES } from '../types'
 import {
   ACTIVE_STATUSES,
+  canResumeRun,
   chainPosition,
   completionGloss,
   completionKind,
@@ -13,6 +14,7 @@ import {
   isResumableRun,
   isTerminalStatus,
   queueDwellMs,
+  resumeBlockedCopy,
   workStartedAt,
 } from './runStatus'
 
@@ -193,15 +195,61 @@ describe('chain position and completion', () => {
 })
 
 describe('isResumableRun', () => {
-  it('wakes a parked run and an aborted one', () => {
+  it('wakes a parked run and any conclusion, mirroring the backend resumableState', () => {
     expect(isResumableRun(base({ Status: 'open' }))).toBe(true)
     expect(isResumableRun(base({ Status: 'completed', Outcome: 'abort' }))).toBe(true)
+    // Finished work is followed up on — outcome stopped discriminating when
+    // every completed terminal started snapshotting its workspace.
+    expect(isResumableRun(base({ Status: 'completed', Outcome: 'finish' }))).toBe(true)
   })
 
-  it('excludes a finished run and anything still in flight', () => {
-    expect(isResumableRun(base({ Status: 'completed', Outcome: 'finish' }))).toBe(false)
+  it('excludes the failed terminal and anything still in flight', () => {
+    expect(isResumableRun(base({ Status: 'failed' }))).toBe(false)
+    expect(isResumableRun(base({ Status: 'queued' }))).toBe(false)
     expect(isResumableRun(base({ Status: 'running' }))).toBe(false)
     expect(isResumableRun(base({ Status: 'awaiting_credentials' }))).toBe(false)
+  })
+})
+
+describe('canResumeRun', () => {
+  it('defers to the server when it answered', () => {
+    expect(canResumeRun(base({ Status: 'open', resumable: true }))).toBe(true)
+    // The whole point of the field: status says resumable, the workspace says
+    // otherwise, and only the server can see the difference.
+    expect(
+      canResumeRun(
+        base({ Status: 'open', resumable: false, resume_blocked_reason: 'workspace_expired' }),
+      ),
+    ).toBe(false)
+  })
+
+  it('falls back to status when the server omitted the field', () => {
+    // Absent means "not answered" — an older response, or a run the detail read
+    // skips — never false.
+    expect(canResumeRun(base({ Status: 'open' }))).toBe(true)
+    expect(canResumeRun(base({ Status: 'failed' }))).toBe(false)
+  })
+
+  it('never opens the composer on a status that cannot take a follow-up', () => {
+    expect(canResumeRun(base({ Status: 'failed', resumable: true }))).toBe(false)
+  })
+})
+
+describe('resumeBlockedCopy', () => {
+  it('names the workspace and the blueprint cases separately', () => {
+    expect(resumeBlockedCopy(base({ resume_blocked_reason: 'workspace_expired' }))).toMatch(
+      /workspace expired/i,
+    )
+    expect(resumeBlockedCopy(base({ resume_blocked_reason: 'blueprint_concluded' }))).toMatch(
+      /blueprint/i,
+    )
+  })
+
+  it('says something true for a reason this build does not know', () => {
+    expect(resumeBlockedCopy(base({ resume_blocked_reason: 'reason_from_the_future' }))).toMatch(
+      /follow-up/i,
+    )
+    expect(resumeBlockedCopy(base({}))).toMatch(/follow-up/i)
   })
 })
 

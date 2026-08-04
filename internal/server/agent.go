@@ -86,7 +86,45 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 		notFound(w, "run")
 		return
 	}
+	addResumability(r.Context(), resp, orgID, run, ag.spawner())
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// addResumability puts the server's answer to "can a follow-up land on this
+// conversation?" on the run's detail read: `resumable`, plus
+// `resume_blocked_reason` naming the rung that refused when it can't. It is the
+// same walk SendMessage refuses on (Spawner.ResumabilityFor), so the composer
+// the client renders and the send the server accepts cannot disagree — the
+// client can see only one of the three inputs (status), and a stopped run whose
+// workspace never made it looks identical from there to one that is warm.
+//
+// Detail read only, and deliberately: the board never shows a composer, and the
+// workspace half of the answer is a blob existence check the batched list would
+// pay per row for nothing.
+//
+// Two shapes of run are skipped, and their absence from the payload is the
+// answer. An ACTIVE run is steered through its live process, a route this gate
+// doesn't model — and the client's own `active` arm already opens the composer,
+// so the check would be a blob read to confirm what the status said. A FAILED
+// run has no coherent workspace by construction. In both cases the keys are
+// omitted rather than guessed, and the client falls back to the status-only
+// reading, which is right for both.
+//
+// Runs outside the tx that read the row: the workspace probe stats the disk and
+// may reach blob storage, and no read should hold a transaction open across
+// that. A spawner that isn't wired (delegation disabled) omits the keys too.
+func addResumability(ctx context.Context, resp map[string]any, orgID string, run *domain.Conversation, spawner *delegate.Spawner) {
+	if spawner == nil || run == nil {
+		return
+	}
+	if domain.IsActiveRunStatus(run.Status) || run.Status == domain.StatusFailed {
+		return
+	}
+	ok, reason := spawner.ResumabilityFor(ctx, orgID, run)
+	resp["resumable"] = ok
+	if !ok {
+		resp["resume_blocked_reason"] = reason
+	}
 }
 
 // handleArtifactRefresh is the Tier-2, run-scoped half of artifact
