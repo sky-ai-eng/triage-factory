@@ -11,13 +11,14 @@ import (
 )
 
 // TestBootstrapSchemaForTest_MatchesMigrate pins the cached bootstrap
-// path to the real Migrate path. The cached bundle only snapshots
-// sqlite_master, goose_db_version, and events_catalog — so a future
-// migration that starts inserting required rows into any other table
-// (e.g. a defaults table, a settings row) will silently diverge from
-// the real bootstrap and most tests will start from the wrong schema
-// state. This test fails loudly in that case by row-counting every
-// user table on both paths.
+// path to the real Migrate path. Nearly every store and handler test in
+// the repo starts from the cached path, so if the restored page image
+// ever stops reproducing a freshly migrated database — a schema object
+// that doesn't survive the round trip, a migration whose seeded rows
+// land somewhere the template never captured — those tests all start
+// from the wrong state and say nothing about it. This test fails loudly
+// instead, comparing the schema catalog and row-counting every user
+// table on both paths.
 func TestBootstrapSchemaForTest_MatchesMigrate(t *testing.T) {
 	cached := openMem(t)
 	if err := BootstrapSchemaForTest(cached); err != nil {
@@ -71,8 +72,9 @@ func TestBootstrapSchemaForTest_MatchesMigrate(t *testing.T) {
 		}
 		if gotCount != wantCount {
 			t.Errorf("table %s: cached bootstrap has %d row(s), real has %d. "+
-				"If a new migration started seeding rows into this table, "+
-				"extend buildSchemaBundle in test_schema.go to dump that table.",
+				"The cached path restores a page image of a migrated template, "+
+				"so a divergence here means the image no longer round-trips "+
+				"what Migrate produces — see buildSchemaImage in test_schema.go.",
 				table, gotCount, wantCount)
 		}
 	}
@@ -104,9 +106,9 @@ func openMem(t *testing.T) *sql.DB {
 }
 
 // dumpSchema returns the sql column of sqlite_master in rowid order,
-// excluding sqlite-internal entries. This is the same shape
-// buildSchemaBundle dumps, so byte-equality here proves the replay
-// produced an identical schema catalog.
+// excluding sqlite-internal entries. Byte-equality across the two paths
+// proves the restored image carries an identical schema catalog, down
+// to the order the objects were created in.
 func dumpSchema(t *testing.T, db *sql.DB) []string {
 	t.Helper()
 	rows, err := db.Query(`

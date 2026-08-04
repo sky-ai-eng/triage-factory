@@ -121,9 +121,18 @@ jobs:
       # rerun is visible in the log ("DONE N runs"), so absorbed flakes
       # stay auditable rather than silent. A process-level kill of the
       # test binary itself (no per-test attribution) still fails the job.
+      #
+      # -timeout raises go test's 10m per-package default. That default is
+      # the one failure mode the rerun backstop above can't absorb: crossing
+      # it doesn't fail a test, it panics the whole package binary, so there
+      # is no per-test attribution to rerun and the job fails on a
+      # wall-clock cliff rather than on a defect. Under -race, with several
+      # package binaries sharing four runner cores, the largest packages run
+      # for minutes; 20m leaves them headroom while keeping the deadlock
+      # backstop the flag exists for.
       - name: Go test
         if: steps.docs.outputs.only != 'true'
-        run: go run gotest.tools/gotestsum@v1.13.0 --format standard-quiet --rerun-fails=2 --rerun-fails-max-failures=15 --packages=./... -- -race
+        run: go run gotest.tools/gotestsum@v1.13.0 --format standard-quiet --rerun-fails=2 --rerun-fails-max-failures=15 --packages=./... -- -race -timeout 20m
 
       - name: Docs-only change, build/test skipped
         if: steps.docs.outputs.only == 'true'
