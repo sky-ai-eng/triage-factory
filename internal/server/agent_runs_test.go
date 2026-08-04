@@ -26,7 +26,7 @@ func TestHandleConversations_Batched(t *testing.T) {
 	const taskA = "t_ba"
 	const olderA = "r_ba_old"
 	brOld := seedBlueprintRunSQLite(t, s.db, taskA)
-	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, started_at) VALUES (?, ?, 'p_ba', 'completed', 'manual', ?, '2020-01-01 00:00:00')`, olderA, taskA, brOld)
+	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index, started_at) VALUES (?, ?, 'p_ba', 'completed', 'manual', ?, 0, '2020-01-01 00:00:00')`, olderA, taskA, brOld)
 
 	// Task B: a single run.
 	primaryB := seedSteerRun(t, s.db, "bb", "running") // run r_bb on task t_bb

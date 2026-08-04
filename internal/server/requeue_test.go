@@ -66,8 +66,8 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	}
 	blueprintRunID := seedBlueprintRunSQLite(t, database, "t_pa")
 	if _, err := database.Exec(
-		`INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id)
-		 VALUES ('r_pa', 't_pa', 'p_pa', 'completed', 'manual', ?)`,
+		`INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index)
+		 VALUES ('r_pa', 't_pa', 'p_pa', 'completed', 'manual', ?, 0)`,
 		blueprintRunID,
 	); err != nil {
 		t.Fatalf("seed run: %v", err)
