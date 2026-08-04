@@ -210,5 +210,11 @@ func (hostOps) ReapOrphans(ctx context.Context) error {
 	// before any run exists.
 	reapOrphanSidecars()
 
+	// Leftover runsc container state from a crashed broker. Unlike the
+	// sweeps above, this one has no natural collision to rely on: the ids
+	// are keyed to subnet indices a fresh boot allocates from zero in a
+	// different order, so state nobody sweeps is state nothing ever reclaims.
+	reapOrphanRuntimeState(ctx)
+
 	return reapBundleOrphans(ctx)
 }

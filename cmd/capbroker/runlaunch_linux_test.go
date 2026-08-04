@@ -26,13 +26,19 @@ import (
 // actuals is whatever the test wants Wait to report back through the
 // WaitRun result, so the wire path for the measured actuals is exercised
 // without a real cgroup (which needs CAP_SYS_ADMIN and a live jail).
+// stderrTail plays the same role for the jail's stderr tail: whatever the
+// test wants Wait to have captured, so the wire path back to the
+// orchestrator's LaunchedRun.Stderr is exercised without a real gVisor
+// failure to produce one.
 type stubRuntime struct {
-	cmd     *exec.Cmd
-	actuals sandbox.RunActuals
+	cmd        *exec.Cmd
+	actuals    sandbox.RunActuals
+	stderrTail string
 }
 
 func (s *stubRuntime) Wait() (bool, error)         { return false, s.cmd.Wait() }
 func (s *stubRuntime) Actuals() sandbox.RunActuals { return s.actuals }
+func (s *stubRuntime) StderrTail() string          { return s.stderrTail }
 func (s *stubRuntime) Kill() error {
 	if s.cmd.Process == nil {
 		return nil
@@ -526,5 +532,62 @@ func TestBrokerServer_KillUnknownRunIsNoop(t *testing.T) {
 	client := serveTestBroker(t, &fakeOps{})
 	if err := client.call(context.Background(), methodKillRun, killRunArgs{ContainerID: "nope"}, nil); err != nil {
 		t.Errorf("KillRun for unknown run = %v, want nil", err)
+	}
+}
+
+// withStubRuntimeStderr is withStubRuntime with the exit-time stderr tail
+// scripted, for the test that follows it across the RPC.
+func withStubRuntimeStderr(t *testing.T, mkCmd func(ctx context.Context) *exec.Cmd, tail string) {
+	t.Helper()
+	orig := launchRuntime
+	launchRuntime = func(ctx context.Context, _, _ string, _ int, stdio *os.File, stderr io.Writer) (jailedRuntime, error) {
+		cmd := mkCmd(ctx)
+		cmd.Stdin = stdio
+		cmd.Stdout = stdio
+		cmd.Stderr = stderr
+		err := cmd.Start()
+		_ = stdio.Close()
+		if err != nil {
+			return nil, err
+		}
+		return &stubRuntime{cmd: cmd, stderrTail: tail}, nil
+	}
+	t.Cleanup(func() { launchRuntime = orig })
+	withStubPrepareBundle(t)
+}
+
+// TestBrokerRun_StderrTailCrossesTheWire pins that what the broker kept of
+// the jail's stderr reaches the orchestrator with the exit status. runsc
+// writes its own create failures there and nowhere else, so without this the
+// orchestrator's "exited before connecting" error can only say that a jail
+// died, never why — which is what made a container-id collision a multi-step
+// diagnosis instead of a one-line one.
+func TestBrokerRun_StderrTailCrossesTheWire(t *testing.T) {
+	const tail = `creating container: container with id "c-stderr" already exists`
+	withStubRuntimeStderr(t, func(ctx context.Context) *exec.Cmd { return exec.CommandContext(ctx, "cat") }, tail)
+	withTempStdioSocketDir(t)
+	client := serveTestBroker(t, &fakeOps{})
+
+	run, err := client.LaunchRun(context.Background(), validLaunchParams("c-stderr"))
+	if err != nil {
+		t.Fatalf("LaunchRun: %v", err)
+	}
+	defer run.Close()
+	if err := run.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Before Wait there is no exit status to have carried a tail with.
+	if got := run.Stderr(); got != "" {
+		t.Errorf("Stderr before Wait = %q, want empty", got)
+	}
+	if err := run.Stdin().Close(); err != nil {
+		t.Fatalf("close stdin: %v", err)
+	}
+	if err := run.Wait(); err != nil {
+		t.Errorf("Wait: %v", err)
+	}
+
+	if got := run.Stderr(); got != tail {
+		t.Errorf("Stderr after Wait = %q, want %q", got, tail)
 	}
 }

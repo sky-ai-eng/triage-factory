@@ -43,8 +43,9 @@ type PrivilegedOps interface {
 	// without changing this signature later.
 	EnsureRootfs(ctx context.Context, selector RootfsSelector) (rootfsPath string, err error)
 
-	// ReapOrphans sweeps leftover netns/veth/iptables/cgroup state left
-	// by a previous, hard-crashed process. Called once at TF startup.
+	// ReapOrphans sweeps leftover netns/veth/iptables/cgroup and runsc
+	// container state left by a previous, hard-crashed process. Called
+	// once at TF startup.
 	ReapOrphans(ctx context.Context) error
 
 	// ChownRunTree hands a run tree's ownership to the sandbox identity
@@ -242,11 +243,18 @@ type LaunchParams struct {
 	// no-blueprint run. Descriptive of the run like RunID, not a lifecycle key.
 	MemoryNamespace string
 
-	// ContainerID is the runsc container id — unique per live Wrap (a fresh
-	// subnet index is folded into it), and grep-friendly (it embeds a RunID
-	// fragment). It is the per-run lifecycle key: the runsc container id,
-	// the per-run cgroup name, and the broker's wait/kill key. The
+	// ContainerID is the runsc container id — unique among LIVE wraps (a
+	// fresh subnet index is folded into it), and grep-friendly (it embeds a
+	// RunID fragment). It is the per-run lifecycle key: the runsc container
+	// id, the per-run cgroup name, and the broker's wait/kill key. The
 	// (non-unique) RunID deliberately is NOT that key.
+	//
+	// Sequential engagements of one run DO recur on the same id — same
+	// RunID, and the allocator hands back the lowest free index — which is
+	// safe because the launch clears any state left under it first
+	// (DeleteRuntimeState). Deterministic ids are what keep an engagement's
+	// retries grep-able as one thing; uniquifying them per attempt would
+	// trade that away and orphan a state dir per kill.
 	ContainerID string
 
 	// Rootfs selects the curated rootfs variant by NAME; the broker

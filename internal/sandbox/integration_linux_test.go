@@ -647,3 +647,101 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 // Ensure filepath is used (defensive; gofmt would otherwise drop it
 // if the only reference goes away during a future edit).
 var _ = filepath.Join
+
+// runtimeStateEntriesFor lists the entries runsc still holds under its state
+// root for one container id — the on-disk residue a killed jail leaves and a
+// graceful one does not.
+func runtimeStateEntriesFor(containerID string) []string {
+	entries, err := os.ReadDir(runscStateRoot())
+	if err != nil {
+		return nil
+	}
+	var found []string
+	for _, e := range entries {
+		if id, ok := containerIDFromRuntimeStateEntry(e.Name()); ok && id == containerID {
+			found = append(found, e.Name())
+		}
+	}
+	return found
+}
+
+// TestIntegration_KilledJailLeavesNoRuntimeState pins the eager half of the
+// state hygiene against a real runsc: `runsc run` removes its own state only
+// on a graceful exit, so a SIGKILLed jail — which is how every stop and every
+// cancellation ends one — would otherwise leave it behind forever. After the
+// reap (Kill then Wait, the broker's own sequence) nothing may remain.
+func TestIntegration_KilledJailLeavesNoRuntimeState(t *testing.T) {
+	requireRunsc(t)
+
+	cfg := minimalConfig(t)
+	cfg.Argv = []string{"/bin/sleep", "60"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	run, sb, err := Wrap(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+	defer sb.Close()
+	if err := run.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	_ = run.Close() // SIGKILL, exactly as a stop does
+	_ = run.Wait()  // the reap that follows it
+
+	if left := runtimeStateEntriesFor(sb.ContainerID); len(left) > 0 {
+		t.Errorf("runsc state for %s survived the reap: %v", sb.ContainerID, left)
+	}
+}
+
+// TestIntegration_ReusedContainerIDAfterUnreapedKill is the reported failure
+// end to end: stop a run, follow up on it, and the resume mints the identical
+// container id — same conversation, and the allocator hands back the index
+// the stop just freed. Here the kill is deliberately left unreaped (a crashed
+// broker, a host that died mid-run), so the corpse's state is still on disk
+// when the second launch asks runsc to create over it.
+func TestIntegration_ReusedContainerIDAfterUnreapedKill(t *testing.T) {
+	requireRunsc(t)
+
+	cfg := minimalConfig(t)
+	cfg.Argv = []string{"/bin/sleep", "60"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	first, sb1, err := Wrap(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Wrap (first): %v", err)
+	}
+	if err := first.Start(); err != nil {
+		t.Fatalf("Start (first): %v", err)
+	}
+	killedID := sb1.ContainerID
+
+	// Kill and abandon: no Wait, so nothing reaps the state. Closing the
+	// sandbox returns the subnet index to the pool, which is what makes the
+	// next launch re-mint this exact id.
+	_ = first.Close()
+	_ = sb1.Close()
+
+	cfg.Argv = []string{"/bin/echo", "resumed"}
+	second, sb2, err := Wrap(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Wrap (resume): %v", err)
+	}
+	defer sb2.Close()
+	defer second.Close()
+	if sb2.ContainerID != killedID {
+		t.Fatalf("resume container id = %q, want the killed jail's %q — this test no longer exercises id reuse", sb2.ContainerID, killedID)
+	}
+
+	out, err := runToCompletion(t, second)
+	if err != nil {
+		t.Fatalf("resumed run failed on a reused container id: %v (output: %s)", err, out)
+	}
+	if !strings.Contains(string(out), "resumed") {
+		t.Errorf("resumed run output = %q, want the payload to have run", out)
+	}
+}

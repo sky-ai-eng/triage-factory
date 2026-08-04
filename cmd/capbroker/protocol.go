@@ -172,11 +172,19 @@ type waitRunArgs struct {
 // so a version-skewed pairing across this change degrades to unrecorded
 // actuals rather than a misread frame — which is why they did not need a
 // ProtocolVersion bump.
+//
+// StderrTail is the bounded tail of what the jail wrote to stderr, and rides
+// this result for a related reason: the broker is the only process that ever
+// sees it (runsc's stderr is the broker's own, deliberately never the
+// agent's payload channel), so a jail that died before saying anything on
+// its payload socket can be explained from nowhere else. Diagnostics, capped
+// far under maxFrameSize, and additive like the two above.
 type waitRunResult struct {
-	ExitError string `json:"exit_error,omitempty"`
-	OOMKilled bool   `json:"oom_killed,omitempty"`
-	PeakMemMB *int   `json:"peak_mem_mb,omitempty"`
-	CPUUsec   *int64 `json:"cpu_usec,omitempty"`
+	ExitError  string `json:"exit_error,omitempty"`
+	OOMKilled  bool   `json:"oom_killed,omitempty"`
+	PeakMemMB  *int   `json:"peak_mem_mb,omitempty"`
+	CPUUsec    *int64 `json:"cpu_usec,omitempty"`
+	StderrTail string `json:"stderr_tail,omitempty"`
 }
 
 type killRunArgs struct {

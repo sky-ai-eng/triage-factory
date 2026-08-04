@@ -41,6 +41,12 @@ type supervisedRuntime interface {
 type jailedRuntime interface {
 	supervisedRuntime
 	Actuals() sandbox.RunActuals
+
+	// StderrTail is the bounded tail of what the jail wrote to stderr,
+	// valid after Wait for the same reason Actuals is. It rides the wait
+	// result so the orchestrator can name gVisor's own create/boot failure
+	// instead of reporting a dead jail with an empty stderr.
+	StderrTail() string
 }
 
 // launchRuntime is the seam the broker execs the runtime through. The
@@ -66,11 +72,12 @@ var prepareBundle = sandbox.PrepareBundle
 // written before that close and read only after it, so no further lock is
 // needed to observe them.
 type runEntry struct {
-	rt      supervisedRuntime
-	done    chan struct{}
-	oom     bool
-	actuals sandbox.RunActuals
-	waitErr error
+	rt         supervisedRuntime
+	done       chan struct{}
+	oom        bool
+	actuals    sandbox.RunActuals
+	stderrTail string
+	waitErr    error
 }
 
 // launchRun is the broker's spec-owning launch. It VALIDATES the params at
@@ -208,6 +215,7 @@ func (s *Server) launchRun(ctx context.Context, a launchRunArgs) (any, error) {
 		oom, werr := rt.Wait()
 		entry.oom = oom
 		entry.actuals = rt.Actuals()
+		entry.stderrTail = rt.StderrTail()
 		entry.waitErr = werr
 		_ = sandbox.RemoveBundle(bundleDir)
 		s.releaseLaunchSlot()
@@ -241,9 +249,10 @@ func (s *Server) waitRun(ctx context.Context, a waitRunArgs) (any, error) {
 	s.runsMu.Unlock()
 
 	res := waitRunResult{
-		OOMKilled: entry.oom,
-		PeakMemMB: entry.actuals.PeakMemMB,
-		CPUUsec:   entry.actuals.CPUUsec,
+		OOMKilled:  entry.oom,
+		PeakMemMB:  entry.actuals.PeakMemMB,
+		CPUUsec:    entry.actuals.CPUUsec,
+		StderrTail: entry.stderrTail,
 	}
 	if entry.waitErr != nil {
 		res.ExitError = entry.waitErr.Error()
