@@ -1105,12 +1105,17 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if got.Attempts != 1 {
 			t.Errorf("Attempts after release = %d, want 1 (released claims still count)", got.Attempts)
 		}
+		// This suite pins the DISPLAY read's Attempts, which is the lifetime
+		// engagement count. The claim path returns a different quantity under
+		// the same name — the retry budget's current queue episode, pinned in
+		// RunClaimPredicateConformance. Neither is the other's regression.
 		if got.ClaimedAt == nil {
 			t.Errorf("ClaimedAt after release = nil, want the released claim's claimed_at")
 		}
 
 		// A re-mint after release is a NEW claim — attempts becomes the
-		// claim count, and one-active-claim holds (the released row stays).
+		// lifetime claim count, and one-active-claim holds (the released row
+		// stays).
 		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-b", 5); err != nil {
 			t.Fatalf("SetExecutorSystem re-mint: %v", err)
 		}

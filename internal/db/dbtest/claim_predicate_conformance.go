@@ -305,6 +305,11 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			t.Run("Attempts_CountTheCurrentQueueEpisode_NotTheLifetime", func(t *testing.T) {
 				// The retry budget's unit. The SQL is its definition, so
 				// this is where it is pinned.
+				//
+				// Only the CLAIM path's Attempts. The display reads return a
+				// lifetime engagement count under the same field name —
+				// deliberately, and pinned in RunAgentRunConformance. See
+				// domain.Conversation.Attempts for which is which.
 				h := mk(t)
 				convID := h.EnqueueDelegation(t, runtime)
 
