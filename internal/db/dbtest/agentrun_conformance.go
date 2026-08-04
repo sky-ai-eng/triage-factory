@@ -821,6 +821,31 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// worktree_path is half of what an SDK wake needs: the cwd `claude
+	// --resume` keys its session storage by. Every claim of a conversation
+	// re-stamps it — a warm re-claim with the same value, a cold rehydrate with
+	// the tree it just rebuilt — so the write has to be an unconditional
+	// overwrite on both dialects, not a set-once.
+	t.Run("SetWorktreePathSystem_StampsAndRestamps", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+		if err := store.SetWorktreePathSystem(ctx, orgID, runID, "/tmp/triagefactory-runs/warm"); err != nil {
+			t.Fatalf("SetWorktreePathSystem: %v", err)
+		}
+		got, _ := store.Get(ctx, orgID, runID)
+		if got == nil || got.WorktreePath != "/tmp/triagefactory-runs/warm" {
+			t.Fatalf("worktree_path = %v, want /tmp/triagefactory-runs/warm", got)
+		}
+		if err := store.SetWorktreePathSystem(ctx, orgID, runID, "/tmp/triagefactory-runs/rebuilt"); err != nil {
+			t.Fatalf("re-stamp: %v", err)
+		}
+		got, _ = store.Get(ctx, orgID, runID)
+		if got == nil || got.WorktreePath != "/tmp/triagefactory-runs/rebuilt" {
+			t.Errorf("worktree_path after a rehydrate onto a fresh path = %v, want /tmp/triagefactory-runs/rebuilt", got)
+		}
+	})
+
 	t.Run("MarkOpen_FlipsRunning_RefusesTerminal", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
