@@ -114,16 +114,24 @@ type RunQueueStore interface {
 	// queued step of a cancel-requested or already-terminal blueprint is
 	// deliberately never claimed — the sequence-level cancel is honored here
 	// (decision: a queued-not-started step cancels with zero work).
+	//
+	// The returned Attempts is the retry budget's counter, scoped to the
+	// conversation's current queue episode rather than its lifetime — see
+	// the dialect implementations' episodeAttemptsSQL for the model, which
+	// the SQL is the definition of.
 	ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement ClaimPlacement) (*domain.Conversation, error)
 
 	// RequeueRun hands a claimed conversation back after a transient
-	// dispatcher failure (e.g. workspace setup hiccup), recording lastErr for
-	// visibility. Releasing the claim IS the requeue — the conversation is
-	// mid-flight, so the moment it has no claim it matches the needs-driving
-	// predicate again. attempts is left as-is (the claim already counted it),
-	// so the dispatcher can fail the run out once attempts crosses its
-	// budget. Guarded on a mid-flight conversation with a live claim, so a
-	// stale call can't act on a terminal or parked row.
+	// dispatcher failure — a workspace setup hiccup, a runtime that failed to
+	// launch, a handoff nobody on this instance could take — recording
+	// lastErr for visibility. Releasing the claim IS the requeue: the
+	// conversation is mid-flight, so the moment it has no claim it matches
+	// the needs-driving predicate again. The claim releases 'requeued', which
+	// is also what keeps the current queue episode open, so the next claim's
+	// Attempts counts this try and the dispatcher can stop retrying a run
+	// that fails the same way every time. Guarded on a mid-flight
+	// conversation with a live claim, so a stale call can't act on a terminal
+	// or parked row.
 	RequeueRun(ctx context.Context, orgID, runID, lastErr string) error
 
 	// ResetProcessingRuns is the boot reconcile sweep: every conversation

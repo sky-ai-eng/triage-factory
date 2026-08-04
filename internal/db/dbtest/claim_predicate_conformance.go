@@ -293,6 +293,59 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				})
 			})
 
+			t.Run("Attempts_CountTheCurrentQueueEpisode_NotTheLifetime", func(t *testing.T) {
+				// The retry budget's unit. The SQL is its definition, so
+				// this is where it is pinned.
+				h := mk(t)
+				convID := h.EnqueueDelegation(t, runtime)
+
+				// Four healthy engagements — the ordinary shape of a
+				// conversation a user has followed up on a few times. Each
+				// runs, parks, and is woken by the next message.
+				for i := 0; i < 4; i++ {
+					got := mustClaim(t, h, convID)
+					if got.Attempts != 1 {
+						t.Fatalf("engagement %d claimed with attempts = %d, want 1 — a healthy predecessor ends the episode", i+1, got.Attempts)
+					}
+					release(t, h, h.OrgID, convID, "parked")
+					h.SetStoredStatus(t, convID, "open")
+					h.InsertRow(t, convID, userRow("keep going", false))
+				}
+
+				// Now it hits a run of hand-backs. Those are the episode,
+				// and only those: the budget counts from the fifth
+				// engagement, not from the first.
+				for want := 1; want <= 3; want++ {
+					got := mustClaim(t, h, convID)
+					if got.Attempts != want {
+						t.Fatalf("hand-back %d claimed with attempts = %d, want %d", want, got.Attempts, want)
+					}
+					release(t, h, h.OrgID, convID, "requeued")
+				}
+
+				// A reap is a hand-back too — an engagement whose process
+				// died recorded nothing about the conversation, so it stays
+				// inside the episode. Excluding it is how a run that kills
+				// its executor would crash-loop the dispatcher forever.
+				got := mustClaim(t, h, convID)
+				if got.Attempts != 4 {
+					t.Fatalf("claim after three requeues = %d attempts, want 4", got.Attempts)
+				}
+				release(t, h, h.OrgID, convID, "reaped")
+				if got := mustClaim(t, h, convID); got.Attempts != 5 {
+					t.Fatalf("claim after three requeues and a reap = %d attempts, want 5 — a reap records nothing, so it does not end the episode", got.Attempts)
+				}
+
+				// One engagement that gets somewhere ends the episode, and
+				// the next claim starts a fresh budget.
+				release(t, h, h.OrgID, convID, "parked")
+				h.SetStoredStatus(t, convID, "open")
+				h.InsertRow(t, convID, userRow("try again", false))
+				if got := mustClaim(t, h, convID); got.Attempts != 1 {
+					t.Fatalf("claim after a healthy engagement = %d attempts, want 1", got.Attempts)
+				}
+			})
+
 			t.Run("Compaction_RequestDoesNotWake_FractionalSeqStillMatches", func(t *testing.T) {
 				h := mk(t)
 				convID := h.EnqueueDelegation(t, runtime)

@@ -260,11 +260,52 @@ const runQueueClaimSelect = `r.id, r.org_id,
 	r.blueprint_step_index,
 	` + curatorTurnMessageSQL + ` AS turn_message_id`
 
+// handedBackOutcomesSQL is the pair of claim outcomes that record nothing
+// about the conversation: 'requeued' (a recovery seam gave the claim back — a
+// setup hiccup, a runtime that would not launch, a handoff nobody could take)
+// and 'reaped' (the engagement's process died, and a boot sweep or the reaper
+// released the claim it left behind). Every other outcome is an engagement
+// speaking for itself: it concluded, it failed, it parked, it was stopped.
+const handedBackOutcomesSQL = `'requeued','reaped'`
+
+// episodeAttemptsSQL is the retry budget's unit: how many times THIS queue
+// episode has been attempted, the claim being minted included.
+//
+// An episode is the run of consecutive hand-backs at the tail of the
+// conversation's claim history. It ends at the most recent claim that recorded
+// an outcome of its own, because that is an engagement that got somewhere —
+// and the budget exists to stop retrying one that never does.
+//
+// Counting the conversation's LIFETIME claims instead — which this was, back
+// when a conversation had exactly one engagement — is not a harsher budget but
+// a wrong one. Every stop, resume and wake mints a claim, so a conversation
+// picked up four times reached its next claim already over budget, and the
+// first transient hiccup it ever met was misread as a deterministic crash: the
+// blueprint failed and the worktree went with it, on a conversation whose four
+// prior engagements had all been healthy.
+//
+// Reaps stay inside the episode deliberately. A run that hard-kills its
+// executor is handed back by the next boot's sweep looking exactly like a run
+// that was never claimed, so excluding them would let a process-killing
+// conversation crash-loop the dispatcher forever — the one thing the lifetime
+// count did get right.
+//
+// The minted claim is excluded by construction rather than by the CTE snapshot
+// — it has no outcome yet, and both arms require one.
+const episodeAttemptsSQL = `(SELECT COUNT(*) + 1 FROM claims c2
+	WHERE c2.conversation_id = candidate.id
+	  AND c2.outcome IN (` + handedBackOutcomesSQL + `)
+	  AND NOT EXISTS (
+	      SELECT 1 FROM claims c3
+	      WHERE c3.conversation_id = c2.conversation_id
+	        AND c3.outcome IS NOT NULL
+	        AND c3.outcome NOT IN (` + handedBackOutcomesSQL + `)
+	        AND c3.claimed_at > c2.claimed_at))::int`
+
 // runQueueClaimReturning is the outer-SELECT projection of ClaimNextRun. The
 // claim identity (executor/claim id/claimed_at/attempts) rides the same
 // statement: the id + claimed_at come from the freshly inserted claims row,
-// attempts as the prior-claim count + 1 (data-modifying CTEs share one
-// snapshot, so the count can't see the row the sibling CTE inserts). The
+// attempts from the current queue episode (see episodeAttemptsSQL). The
 // claim id is returned because the executor needs to name this engagement
 // later — at teardown, once it has been released and can no longer be found
 // by looking for the conversation's active claim.
@@ -274,7 +315,7 @@ const runQueueClaimReturning = `candidate.id::text, candidate.org_id::text, cand
 	candidate.team_id, candidate.project_id,
 	candidate.blueprint_run_id, candidate.blueprint_step_index, candidate.turn_message_id,
 	minted.id::text AS claim_id, minted.claimed_at,
-	(SELECT COUNT(*) + 1 FROM claims c2 WHERE c2.conversation_id = candidate.id)::int AS attempts`
+	` + episodeAttemptsSQL + ` AS attempts`
 
 func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement) (*domain.Conversation, error) {
 	// One scan, every surface: the needs-driving predicate is type-agnostic

@@ -306,7 +306,10 @@ func (c staleOpenConversations) GetSystem(ctx context.Context, orgID, runID stri
 func TestFollowUp_LostWakeRaceStillDelivers(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-race", "sess-race", "/tmp/does-not-exist-race")
+	// A real worktree, so the claim gets far enough to deliver: a missing one
+	// is a runtime failure and hands the claim back with both messages still
+	// queued, which is a different test.
+	seedRun(t, database, "r-race", "sess-race", t.TempDir())
 	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-race'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -421,14 +424,18 @@ func claimAndDispatch(t *testing.T, s *Spawner, database *sql.DB) {
 // TestDispatchResumeClaim_DeliversRecordedInput proves the delivery half of
 // resume-by-enqueue end to end: after the follow-up enqueues, claiming and
 // dispatching the row consumes the pending input exactly once (a second
-// consume finds nothing) and drives the resume — failing fast here for
-// lack of a warm worktree/snapshot (no subprocess), landing the run
+// consume finds nothing) and drives the resume — failing fast here on the
+// session transcript the warm worktree does not hold, landing the run
 // terminal. What matters is that delivery was attempted off the ordinary
 // claim path, not an in-process goroutine.
+//
+// The worktree is real: a missing one is a runtime that would not come up,
+// which hands the claim straight back with the input untouched, and this test
+// is about what happens once it does come up.
 func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-deliver", "sess-deliver", "/tmp/does-not-exist-deliver")
+	seedRun(t, database, "r-deliver", "sess-deliver", t.TempDir())
 	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-deliver'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -461,16 +468,20 @@ func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 	}
 }
 
-// TestDispatchResumeClaim_WorkspaceFailureFinalizesBlueprint is the
-// resume-by-enqueue counterpart of the retired in-process goroutine's
-// early-exit regression test: a resume claim that fails at ensureWorkspace
-// must finalize the blueprint and discard its snapshot — not strand the
-// blueprint_run `running` with a blob the reaper will never see. A snapshot
-// is seeded (garbage content) so the enqueue-time recoverability pre-flight
-// passes but the actual rehydrate fails at claim — the realistic
+// TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks is the
+// resume-by-enqueue counterpart of the native path's launch-failure contract:
+// a rehydrate that will not complete is the resume's runtime failing to come
+// up, so the claim goes back on the queue rather than ending the conversation.
+// A snapshot is seeded (garbage content) so the enqueue-time recoverability
+// pre-flight passes but the actual rehydrate fails at claim — the realistic
 // enqueue-then-workspace-lost race, not an already-expired workspace (which
-// the follow-up path now refuses up front — see the sibling test).
-func TestDispatchResumeClaim_WorkspaceFailureFinalizesBlueprint(t *testing.T) {
+// the follow-up path refuses up front — see the sibling test).
+//
+// The exhausted budget then parks `open`, which is also the answer to the
+// worry this test was originally written for: `open` is a state the retention
+// sweep selects, so the snapshot the retries preserved is collected on its own
+// TTL rather than orphaned behind a blueprint stranded 'running' forever.
+func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	s, database, run, _ := setupAdvanceFixture(t, "open-strand")
 	bpr := blueprintRunIDForRun(t, database, run)
@@ -483,16 +494,29 @@ func TestDispatchResumeClaim_WorkspaceFailureFinalizesBlueprint(t *testing.T) {
 	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, run, runmode.LocalDefaultUserID, "carry on"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
-	claimAndDispatch(t, s, database)
 
-	var bpStatus string
-	if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id=?`, bpr).Scan(&bpStatus); err != nil {
-		t.Fatalf("read blueprint_run status: %v", err)
+	// The dispatcher's whole budget, one claim at a time.
+	for i := 0; i < maxRunAttempts; i++ {
+		claimAndDispatch(t, s, database)
+		var bpStatus string
+		if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id=?`, bpr).Scan(&bpStatus); err != nil {
+			t.Fatalf("read blueprint_run status: %v", err)
+		}
+		if bpStatus != "running" {
+			t.Fatalf("blueprint_run moved to %q on attempt %d; a runtime that never started moves no blueprint", bpStatus, i+1)
+		}
+		assertSnapshotPresent(t, s, bpr, true)
 	}
-	if bpStatus == "running" {
-		t.Errorf("blueprint_run stranded 'running' after a failed resume claim; want finalized")
+
+	if st := storedStatus(t, database, run); st != domain.StatusOpen {
+		t.Errorf("stored status = %q after the budget ran out, want open", st)
 	}
-	assertSnapshotPresent(t, s, bpr, false) // discarded, not orphaned
+	// Nothing is claimable any more: the queued follow-up was settled on the
+	// way down, so the retries stop rather than spinning forever.
+	claimed, err := s.runQueue.ClaimNextRun(context.Background(), "test-executor", 1, db.ClaimPlacement{})
+	if err != nil || claimed != nil {
+		t.Fatalf("ClaimNextRun after the park = (%v, %v), want nothing claimable", claimed, err)
+	}
 }
 
 // TestFollowUp_ExpiredWorkspaceRefusedAtEnqueue pins the workspace-expiry

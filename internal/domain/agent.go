@@ -295,10 +295,13 @@ type Conversation struct {
 	BlueprintRunID     string `json:"blueprint_run_id,omitempty"`     // FK to blueprint_runs.id — populated for runs that are a step inside a multi-step blueprint
 	BlueprintStepIndex *int   `json:"blueprint_step_index,omitempty"` // 0-based step index within the blueprint; nil for non-blueprint-step runs
 
-	// Attempts is the run-queue claim counter: how many times the dispatcher
-	// has claimed this run row (mirrors event_queue.attempts). Bumped by
-	// RunQueueStore.ClaimNextRun; the dispatcher reads it to fail a poison run
-	// out of the queue once it crosses the retry budget. 0 for never-queued runs.
+	// Attempts is the retry budget's counter: how many times the CURRENT
+	// queue episode has been attempted, this claim included. Consecutive
+	// hand-backs count; a claim that got anywhere at all — concluded, parked,
+	// stopped, reaped — ends the episode and the next claim starts at 1.
+	// Computed by RunQueueStore.ClaimNextRun; the dispatcher reads it to stop
+	// retrying a run that fails the same way every time. 0 for never-claimed
+	// conversations.
 	Attempts int `json:"attempts,omitempty"`
 
 	// OrgID is the run's owning tenant. Populated only by
