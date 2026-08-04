@@ -270,9 +270,11 @@ type LaunchedRun interface {
 	Stdout() io.Reader
 
 	// Stderr returns the runtime's captured stderr. In-process this is the
-	// runsc child's stderr; brokered it is empty (the broker keeps runsc's
-	// stderr on its own side and surfaces it to logs — it is not the
-	// agent's payload channel). Meaningful after Wait.
+	// runsc child's stderr; brokered it is a bounded tail of it (the bytes
+	// stay on the broker's side and go to its logs — this is not the agent's
+	// payload channel — and only a capped diagnostic tail rides back, so a
+	// jail that dies before connecting can name its own failure). Meaningful
+	// after Wait.
 	Stderr() string
 
 	// Wait blocks until the runtime exits and returns its exit error (nil

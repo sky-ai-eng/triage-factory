@@ -67,9 +67,10 @@ type brokerRun struct {
 	watchCancel context.CancelFunc
 	started     bool
 
-	oom       bool               // set by Wait, read by OOMKilled (same goroutine)
-	actuals   sandbox.RunActuals // set by Wait, read by Actuals (same goroutine)
-	closeOnce sync.Once
+	oom        bool               // set by Wait, read by OOMKilled (same goroutine)
+	actuals    sandbox.RunActuals // set by Wait, read by Actuals (same goroutine)
+	stderrTail string             // set by Wait, read by Stderr (same goroutine)
+	closeOnce  sync.Once
 }
 
 func (r *brokerRun) Start() error {
@@ -125,10 +126,12 @@ func (r *brokerRun) Start() error {
 func (r *brokerRun) Stdin() io.WriteCloser { return unixWriteCloser{r.conn} }
 func (r *brokerRun) Stdout() io.Reader     { return r.conn }
 
-// Stderr is empty: the broker keeps runsc's stderr on its own side (gVisor
-// boot logs, surfaced to the broker's logs) — it is not the agent's
-// payload channel.
-func (r *brokerRun) Stderr() string { return "" }
+// Stderr is the bounded tail the broker kept of runsc's stderr, fetched with
+// the exit status by Wait — empty before it. The bytes still live on the
+// broker's side (gVisor boot logs go to the broker's own logs; this is not
+// the agent's payload channel); what crosses is a capped diagnostic tail, so
+// a jail that dies before it ever connects can say why.
+func (r *brokerRun) Stderr() string { return r.stderrTail }
 
 // Pid is 0: the runtime is the broker's child, not reachable from this
 // (orchestrator) process.
@@ -147,6 +150,7 @@ func (r *brokerRun) Wait() error {
 	err := r.client.callWithCap(context.Background(), methodWaitRun, waitRunArgs{ContainerID: r.params.ContainerID}, &res, 0)
 	r.oom = res.OOMKilled
 	r.actuals = sandbox.RunActuals{PeakMemMB: res.PeakMemMB, CPUUsec: res.CPUUsec}
+	r.stderrTail = res.StderrTail
 	r.stopWatcher()
 	if r.conn != nil {
 		_ = r.conn.Close()
