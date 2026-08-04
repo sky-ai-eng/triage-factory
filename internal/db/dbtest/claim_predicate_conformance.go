@@ -50,6 +50,15 @@ type ClaimPredicateHarness struct {
 	// DisplayStatus reads the conversation back through the display
 	// projection — what the wire actually carries.
 	DisplayStatus func(t *testing.T, convID string) string
+
+	// CollapseClaimTimestamps rewrites every one of a conversation's claim
+	// timestamps to a single identical value — the worst case a coarse clock
+	// could produce, which no production writer reaches (they all bind a
+	// high-resolution instant) and which nothing else can stage. It exists so
+	// the retry budget's ordering can be tested for what it does when the
+	// timestamps stop resolving, rather than only for what it does when they
+	// happen to.
+	CollapseClaimTimestamps func(t *testing.T, convID string)
 }
 
 // ClaimPredicateFactory builds a fresh harness per subtest.
@@ -291,6 +300,108 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 					resume(t, h, last)
 					mustNotClaim(t, h)
 				})
+			})
+
+			t.Run("Attempts_CountTheCurrentQueueEpisode_NotTheLifetime", func(t *testing.T) {
+				// The retry budget's unit. The SQL is its definition, so
+				// this is where it is pinned.
+				//
+				// Only the CLAIM path's Attempts. The display reads return a
+				// lifetime engagement count under the same field name —
+				// deliberately, and pinned in RunAgentRunConformance. See
+				// domain.Conversation.Attempts for which is which.
+				h := mk(t)
+				convID := h.EnqueueDelegation(t, runtime)
+
+				// Four healthy engagements — the ordinary shape of a
+				// conversation a user has followed up on a few times. Each
+				// runs, parks, and is woken by the next message.
+				for i := 0; i < 4; i++ {
+					got := mustClaim(t, h, convID)
+					if got.Attempts != 1 {
+						t.Fatalf("engagement %d claimed with attempts = %d, want 1 — a healthy predecessor ends the episode", i+1, got.Attempts)
+					}
+					release(t, h, h.OrgID, convID, "parked")
+					h.SetStoredStatus(t, convID, "open")
+					h.InsertRow(t, convID, userRow("keep going", false))
+				}
+
+				// Now it hits a run of hand-backs. Those are the episode,
+				// and only those: the budget counts from the fifth
+				// engagement, not from the first.
+				for want := 1; want <= 3; want++ {
+					got := mustClaim(t, h, convID)
+					if got.Attempts != want {
+						t.Fatalf("hand-back %d claimed with attempts = %d, want %d", want, got.Attempts, want)
+					}
+					release(t, h, h.OrgID, convID, "requeued")
+				}
+
+				// A reap is a hand-back too — an engagement whose process
+				// died recorded nothing about the conversation, so it stays
+				// inside the episode. Excluding it is how a run that kills
+				// its executor would crash-loop the dispatcher forever.
+				got := mustClaim(t, h, convID)
+				if got.Attempts != 4 {
+					t.Fatalf("claim after three requeues = %d attempts, want 4", got.Attempts)
+				}
+				release(t, h, h.OrgID, convID, "reaped")
+				if got := mustClaim(t, h, convID); got.Attempts != 5 {
+					t.Fatalf("claim after three requeues and a reap = %d attempts, want 5 — a reap records nothing, so it does not end the episode", got.Attempts)
+				}
+
+				// One engagement that gets somewhere ends the episode, and
+				// the next claim starts a fresh budget.
+				release(t, h, h.OrgID, convID, "parked")
+				h.SetStoredStatus(t, convID, "open")
+				h.InsertRow(t, convID, userRow("try again", false))
+				if got := mustClaim(t, h, convID); got.Attempts != 1 {
+					t.Fatalf("claim after a healthy engagement = %d attempts, want 1", got.Attempts)
+				}
+			})
+
+			t.Run("Attempts_ACoarseClockNeverOverCounts", func(t *testing.T) {
+				// The ordering the episode is read off is timestamps, and
+				// timestamps have a resolution. Every writer binds a
+				// high-resolution instant today, so claims of one
+				// conversation are always distinguishable — but the budget's
+				// two failure directions are not symmetric, and the one that
+				// matters is what happens when they stop being.
+				//
+				// Over-counting is the destructive one: a boundary hidden
+				// between two same-instant claims leaves a spent episode
+				// looking longer than it is, and a first engagement that
+				// exhausts its budget is poison-pilled. Under-counting costs
+				// at most one more round of retries. So the ordering is
+				// written to collapse toward finding a boundary, and this
+				// pins that at the limit: every timestamp identical, which
+				// is as unresolved as a clock can get.
+				h := mk(t)
+				if h.CollapseClaimTimestamps == nil {
+					t.Skip("harness cannot stage a coarse clock")
+				}
+				convID := h.EnqueueDelegation(t, runtime)
+
+				// A hand-back, then a healthy engagement that ends the
+				// episode, then one more hand-back.
+				mustClaim(t, h, convID)
+				release(t, h, h.OrgID, convID, "requeued")
+				mustClaim(t, h, convID)
+				release(t, h, h.OrgID, convID, "parked")
+				h.SetStoredStatus(t, convID, "open")
+				h.InsertRow(t, convID, userRow("keep going", false))
+				mustClaim(t, h, convID)
+				release(t, h, h.OrgID, convID, "requeued")
+
+				h.CollapseClaimTimestamps(t, convID)
+
+				// Truthfully this is 2: one hand-back since the park. With
+				// nothing left to order the claims by, the only answer that
+				// is never destructive is to read the boundary as present.
+				got := mustClaim(t, h, convID)
+				if got.Attempts > 2 {
+					t.Errorf("attempts = %d with every claim timestamped identically, want at most 2 — a clock that stops resolving must not spend budget the episode never used", got.Attempts)
+				}
 			})
 
 			t.Run("Compaction_RequestDoesNotWake_FractionalSeqStillMatches", func(t *testing.T) {

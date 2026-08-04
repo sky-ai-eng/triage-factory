@@ -115,6 +115,24 @@ const curatorTurnMessageSQL = `(SELECT MIN(m_t.id) FROM messages m_t
 		WHERE m_t.conversation_id = r.id AND m_t.delivered = 0
 		  AND m_t.role = 'user' AND m_t.subtype = '' AND m_t.window_state = 'active')`
 
+// handedBackOutcomesSQL / episodeAttemptsSQL count the claim being minted
+// within the conversation's CURRENT queue episode — the run of consecutive
+// claims handed back without the engagement ever recording anything. The
+// Postgres twin carries the model; this is the same predicate in the other
+// dialect.
+const handedBackOutcomesSQL = `'requeued','reaped'`
+
+const episodeAttemptsSQL = `
+	SELECT COUNT(*) + 1 FROM claims c2
+	WHERE c2.conversation_id = ?
+	  AND c2.outcome IN (` + handedBackOutcomesSQL + `)
+	  AND NOT EXISTS (
+	      SELECT 1 FROM claims c3
+	      WHERE c3.conversation_id = c2.conversation_id
+	        AND c3.outcome IS NOT NULL
+	        AND c3.outcome NOT IN (` + handedBackOutcomesSQL + `)
+	        AND c3.claimed_at >= COALESCE(c2.released_at, c2.claimed_at))`
+
 // runQueueClaimCols is the column list ClaimNextRun returns, shared with the
 // scan helper. visibility is left at its row default on enqueue; team_id is
 // surfaced so the construction-path RunInfo built off a claimed run carries
@@ -227,9 +245,7 @@ func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, boo
 		}
 		claimed.ClaimID = claimID
 		var attempts int
-		if err := q.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM claims WHERE conversation_id = ?
-		`, claimed.ID).Scan(&attempts); err != nil {
+		if err := q.QueryRowContext(ctx, episodeAttemptsSQL, claimed.ID).Scan(&attempts); err != nil {
 			return err
 		}
 		claimed.ExecutorID = executorID

@@ -45,11 +45,44 @@ const toolHostDialTimeout = 60 * time.Second
 // unseal into the sidecar, the workspace build-or-rehydrate, the cap-broker
 // launch of the per-run network — is runtime-independent and already done by
 // the dispatcher.
-func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model, triggerType, creatorUserID string) (fenced bool) {
+//
+// Nothing here fails the conversation before the agent has spoken. Standing up
+// a jail is infrastructure, fallible for the same passing reasons workspace
+// setup is — a broker restart, an exhausted subnet, stale runsc state — and a
+// conversation that has been running for an hour must not be ended by two
+// seconds of that. Every failure ahead of engine.Run therefore comes back as a
+// launchErr for the dispatcher to retry; only the loop itself writes terminals.
+func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model, triggerType, creatorUserID string) engagementDisposition {
 	model = nativeWireModel(model)
 	orgID := cfg.orgID
 	namespace := memoryNamespace(cfg.blueprintRunID, runID)
 	claudeCwd := cfg.wtPath
+
+	// The park a stop lands on, wherever the stop catches this engagement.
+	stopped := func() engagementDisposition {
+		fenced := s.parkRunOpen(liveParkContext{
+			orgID:         orgID,
+			runID:         runID,
+			taskID:        task.ID,
+			namespace:     namespace,
+			claudeCwd:     claudeCwd,
+			triggerType:   triggerType,
+			creatorUserID: creatorUserID,
+			claimID:       cfg.claimID,
+			reason:        db.ParkStopped("user_cancelled", ""),
+		}, "")
+		return engagementDisposition{fenced: fenced}
+	}
+	// launchFailed is every pre-agent exit. A cancelled ctx is read first: a
+	// user who stopped the run during bring-up asked for exactly the park the
+	// later phases give them, and retrying it would restart the work they just
+	// stopped.
+	launchFailed := func(err error) engagementDisposition {
+		if ctx.Err() != nil {
+			return stopped()
+		}
+		return engagementDisposition{launchErr: err}
+	}
 
 	// Ambient context the agent reads from disk, identical to the SDK path:
 	// prior task memories and the project knowledge base, staged before the jail
@@ -82,23 +115,13 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	// native run; everything about this one rides the opening turn.
 	opening, err := s.buildNativeOpeningTurn(ctx, task, mission, cfg)
 	if err != nil {
-		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "compose opening turn: "+err.Error(), domain.RunFailureUnclassified)
+		return launchFailed(fmt.Errorf("compose opening turn: %w", err))
 	}
 	systemPrompt := nativeSystemPrompt(cfg.appendSysPrompt != "")
 
 	s.updatePhase(orgID, runID, cfg.claimID, domain.ClaimPhaseAgentStarting)
 	if ctx.Err() != nil {
-		return s.parkRunOpen(liveParkContext{
-			orgID:         orgID,
-			runID:         runID,
-			taskID:        task.ID,
-			namespace:     namespace,
-			claudeCwd:     claudeCwd,
-			triggerType:   triggerType,
-			creatorUserID: creatorUserID,
-			claimID:       cfg.claimID,
-			reason:        db.ParkStopped("user_cancelled", ""),
-		}, "")
+		return stopped()
 	}
 
 	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
@@ -118,26 +141,13 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		RecordSandboxActuals: s.recordSandboxActuals,
 	})
 	if err != nil {
-		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "launch tool host: "+err.Error(), domain.RunFailureUnclassified)
+		return launchFailed(fmt.Errorf("launch tool host: %w", err))
 	}
 	defer func() { _ = jail.Close() }()
 
 	conn, err := jail.Accept(ctx, toolHostDialTimeout)
 	if err != nil {
-		if ctx.Err() != nil {
-			return s.parkRunOpen(liveParkContext{
-				orgID:         orgID,
-				runID:         runID,
-				taskID:        task.ID,
-				namespace:     namespace,
-				claudeCwd:     claudeCwd,
-				triggerType:   triggerType,
-				creatorUserID: creatorUserID,
-				claimID:       cfg.claimID,
-				reason:        db.ParkStopped("user_cancelled", ""),
-			}, "")
-		}
-		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "connect to tool host: "+err.Error(), domain.RunFailureUnclassified)
+		return launchFailed(fmt.Errorf("connect to tool host: %w", err))
 	}
 	tools := agentloop.NewToolHost(conn, 0)
 	defer func() { _ = tools.Close() }()
@@ -149,9 +159,9 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	if err := s.mintOpeningTurn(ctx, transcript, orgID, runID, creatorUserID, opening); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "run", runID, "claim", cfg.claimID)
-			return true
+			return engagementDisposition{fenced: true}
 		}
-		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, "mint opening turn: "+err.Error(), domain.RunFailureUnclassified)
+		return launchFailed(fmt.Errorf("mint opening turn: %w", err))
 	}
 
 	// Resolved once, here, and handed to both the engine params and the
@@ -188,7 +198,9 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		ColdCompactionModel: coldModel,
 	})
 
-	return s.recordNativeResult(ctx, orgID, runID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, priorMemory)
+	return engagementDisposition{
+		fenced: s.recordNativeResult(ctx, orgID, runID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, priorMemory),
+	}
 }
 
 // mintOpeningTurn queues the delegation's opening turn — the mission and the

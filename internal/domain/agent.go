@@ -295,10 +295,30 @@ type Conversation struct {
 	BlueprintRunID     string `json:"blueprint_run_id,omitempty"`     // FK to blueprint_runs.id — populated for runs that are a step inside a multi-step blueprint
 	BlueprintStepIndex *int   `json:"blueprint_step_index,omitempty"` // 0-based step index within the blueprint; nil for non-blueprint-step runs
 
-	// Attempts is the run-queue claim counter: how many times the dispatcher
-	// has claimed this run row (mirrors event_queue.attempts). Bumped by
-	// RunQueueStore.ClaimNextRun; the dispatcher reads it to fail a poison run
-	// out of the queue once it crosses the retry budget. 0 for never-queued runs.
+	// Attempts counts this conversation's engagements — but WHICH engagements
+	// depends on which read filled it in, because the two producers answer
+	// different questions and both answers are wanted. Check the producer
+	// before branching on it.
+	//
+	//   - RunQueueStore.ClaimNextRun fills it with the CURRENT queue episode:
+	//     this claim plus the consecutive hand-backs behind it ('requeued' /
+	//     'reaped' — see the dialects' episodeAttemptsSQL). This is the retry
+	//     budget's counter and the only meaning anything branches on
+	//     (delegate.handlePreAgentFailure). An engagement that got anywhere
+	//     ends the episode, so a conversation resumed four times still claims
+	//     at 1.
+	//   - The display reads (Get / GetSystem / the list projections) fill it
+	//     with every claim the conversation has ever had, alongside the
+	//     lifetime duration/turn sums it is bundled with. That is engagement
+	//     history for a human, not a budget.
+	//
+	// Do not read one as the other. A lifetime count used as a budget is
+	// exactly what made a healthy resumed conversation look like a poison
+	// pill — five follow-ups and its next transient hiccup failed the
+	// blueprint and took the worktree with it.
+	//
+	// 0 for never-claimed conversations, and on projections that don't select
+	// it.
 	Attempts int `json:"attempts,omitempty"`
 
 	// OrgID is the run's owning tenant. Populated only by

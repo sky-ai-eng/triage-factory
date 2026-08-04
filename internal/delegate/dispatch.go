@@ -32,10 +32,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 )
 
-// maxRunAttempts caps how many times the dispatcher re-claims a single queued
-// run before failing it as a poison pill. A healthy step runs on attempt 1;
-// repeated attempts mean a deterministic setup crash, and failing it out stops
-// the dispatcher from spinning one row while the rest of the queue waits.
+// maxRunAttempts caps how many times the dispatcher re-claims one queue
+// episode before giving up on it. A healthy engagement starts on attempt 1;
+// consecutive failures with nothing ever started mean a deterministic fault,
+// and stopping there is what keeps the dispatcher from spinning one row while
+// the rest of the queue waits. What "giving up" means then is not one thing —
+// see disposeOfExhaustedRun.
+//
+// At the scan interval this is about ten seconds of automatic retry, which is
+// the shape of the transient infrastructure faults it exists for. A fault that
+// outlasts it is not one more retry away.
 const maxRunAttempts = 5
 
 // Default cadences for RunDispatcher, exported so main can tune them and tests
@@ -239,8 +245,10 @@ func (s *Spawner) drainRunQueue(ctx context.Context) {
 
 // dispatchClaimedRun runs one claimed blueprint step: load its context,
 // rehydrate the shared workspace, materialize the step skill, run the agent,
-// then hand the terminal state to the reactor. Failures before the agent runs
-// requeue the run (transient) or fail it out (poison) without wedging the queue.
+// then hand the terminal state to the reactor. Nothing that fails before the
+// agent's first turn ends the conversation — it goes back on the queue for
+// another attempt, and only an exhausted budget decides anything permanent
+// (handlePreAgentFailure).
 //
 // Context split: the pre-agent setup reads honor the dispatcher ctx so a
 // shutdown (or a future timeout) cancels them cleanly — a ctx-cancelled read
@@ -377,7 +385,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 		if ctx.Err() != nil {
 			return // dispatcher shutting down — leave the claimed run for boot reconcile
 		}
-		s.handleStepSetupError(orgID, br, *run, err)
+		s.handlePreAgentFailure(orgID, br, *run, err)
 		return
 	}
 	defer execSandbox.Close()
@@ -426,7 +434,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// fails the blueprint.
 	cfg, err := s.buildStepConfig(ctx, orgID, br, *task, *run, gh, execSandbox)
 	if err != nil {
-		s.handleStepSetupError(orgID, br, *run, err)
+		s.handlePreAgentFailure(orgID, br, *run, err)
 		return
 	}
 	cfg.orgID = orgID
@@ -526,11 +534,11 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// session does not reconstruct the rows. Both engines report fenced the
 	// same way: their engagement writes go through the claim fence, and a
 	// refusal means a successor owns the conversation.
-	var fenced bool
+	var disp engagementDisposition
 	if run.Runtime == domain.ConversationRuntimeNative {
-		fenced = s.runNativeAgent(stepCtx, run.ID, *task, mission, cfg, time.Now(), run.Model, run.TriggerType, run.CreatorUserID)
+		disp = s.runNativeAgent(stepCtx, run.ID, *task, mission, cfg, time.Now(), run.Model, run.TriggerType, run.CreatorUserID)
 	} else {
-		fenced = s.runAgent(stepCtx, run.ID, *task, mission, cfg, time.Now(), run.Model, run.TriggerType, run.CreatorUserID, run.SessionID)
+		disp = engagementDisposition{fenced: s.runAgent(stepCtx, run.ID, *task, mission, cfg, time.Now(), run.Model, run.TriggerType, run.CreatorUserID, run.SessionID)}
 	}
 
 	s.mu.Lock()
@@ -544,8 +552,17 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	// terminate, or close a task on the strength of it. Nothing was written,
 	// nothing is reacted to, and the staged skill + memory dirs stay for
 	// whoever holds the claim now.
-	if fenced {
+	if disp.fenced {
 		stepParked = true
+		return
+	}
+	// The runtime never came up, so the agent never spoke. Nothing was
+	// recorded and nothing is terminal — this goes back through the same
+	// hand-back the workspace-setup failures use, and the staged dirs stay
+	// for the retry that is seconds away (or for the next claim of a parked
+	// step; only the poison pill ends the step and reclaims them).
+	if disp.launchErr != nil {
+		stepParked = s.handlePreAgentFailure(orgID, br, *run, disp.launchErr)
 		return
 	}
 
@@ -596,6 +613,10 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	// is the second reason to skip the re-finalize and a stronger one: a
 	// refused terminal means a successor engagement owns this conversation,
 	// so finalizing its blueprint would terminate work that is still running.
+	//
+	// The pre-agent exits set it outright, for the opposite reason: they
+	// dispose of nothing at all. The claim goes back on the queue, so the
+	// blueprint has to stay exactly as it is for the retry to resume into.
 	var disposed bool
 	defer func() {
 		// An early exit (missing fields / workspace failure / cancel
@@ -651,20 +672,24 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		return
 	}
 
-	resumeCwd, werr := s.ensureWorkspace(stepCtx, orgID, run, owner, repo, "")
-	// Flush the queued input now that the rehydrate has RETURNED (either way).
-	// Routing only peeked it (dispatchClaimedRun), so a crash DURING the
-	// rehydrate above left the rows intact for the next claim to re-deliver.
-	// Past this point the claim is committed to a terminal outcome here
-	// (deliver on success, failRun on error), so draining avoids an orphan on
-	// the failure path while still surviving the rehydrate-crash window.
+	// Flush the queued input: routing only peeked it (dispatchClaimedRun), so
+	// the rows are still there and the delivery has to claim them.
 	//
 	// Deliver what the flush claimed, not what routing peeked: the queue
 	// appends, so a message sent DURING the rehydrate is a row the peek never
 	// saw and this flush just marked delivered. Keeping the peeked text would
 	// swallow it — the one silent loss this whole path exists to prevent. A
 	// failure here logs and proceeds on the peeked text.
-	if s.pendingInput != nil {
+	//
+	// Called only where this claim is committed to disposing of the
+	// conversation itself. Every exit above a call to it hands the claim back
+	// with the rows untouched, so the retry re-delivers rather than resuming
+	// into silence — which is also why a crash anywhere before delivery costs
+	// nothing.
+	flushPendingInput := func() {
+		if s.pendingInput == nil {
+			return
+		}
 		if msg, uid, ok, cErr := s.pendingInput.Consume(ctx, orgID, run.ID); cErr != nil {
 			dispatchLog.Warn("consume pending input before delivery failed", "run", run.ID, "error", cErr)
 		} else if ok && msg != "" {
@@ -674,8 +699,31 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 			}
 		}
 	}
+
+	// handBack is this path's pre-agent exit, the twin of the native runtime's
+	// launchFailed: the resume's runtime did not come up, nothing was
+	// delivered, and another attempt costs nothing. A cancelled ctx is read
+	// first — a user who stopped the run mid-bring-up asked for a park, and
+	// retrying it would restart exactly the work they stopped. No snapshot on
+	// that park: no agent has touched the tree under this claim, so there is
+	// nothing new to capture and the workspace it would resume onto is the one
+	// already in the store.
+	handBack := func(cause error) {
+		disposed = true
+		if stepCtx.Err() != nil {
+			disposed = s.markRunOpen(resumeParkContext(orgID, run, task, userID))
+			return
+		}
+		s.handlePreAgentFailure(orgID, nil, *run, cause)
+	}
+
+	resumeCwd, werr := s.ensureWorkspace(stepCtx, orgID, run, owner, repo, "")
 	if werr != nil {
-		disposed = s.failRun(orgID, run.ID, task.ID, run.ClaimID, "manual", userID, "ensure workspace before resume failed: "+werr.Error(), domain.RunFailureUnclassified)
+		// A rehydrate that failed is the resume runtime failing to come up,
+		// and it fails for the same passing reasons the native path's jail
+		// does. Hand the claim back rather than ending a conversation that
+		// has been running perfectly well until now.
+		handBack(fmt.Errorf("ensure workspace before resume failed: %w", werr))
 		return
 	}
 
@@ -690,7 +738,14 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	// where we were", and an amnesiac session that only sees the new steering
 	// line would confuse the agent (or re-do already-done work) worse than a
 	// clear "start over" would.
+	//
+	// The one exit here that is a real terminal rather than a hand-back: a
+	// lost session file is a diagnosis, not a hiccup, and retrying it four
+	// more times would only spend the budget arriving at the same answer. So
+	// the queued message is flushed on the way out — it stays in the
+	// transcript, and there is no successor claim left to deliver it to.
 	if !sessionTranscriptExists(resumeCwd, run.SessionID) {
+		flushPendingInput()
 		disposed = s.failRun(orgID, run.ID, task.ID, run.ClaimID, "manual", userID,
 			"This run's chat session could not be restored (its transcript did not survive — most often the executor was restarted or rebuilt), so the conversation can't be resumed. Start a new request to continue this work.",
 			domain.RunFailureSessionLost)
@@ -703,10 +758,16 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	// nil on all/local. Torn down after the resume turn returns.
 	execSandbox, esErr := s.bringUpExecutorSandbox(stepCtx, orgID, run, *task)
 	if esErr != nil {
-		disposed = s.failRun(orgID, run.ID, task.ID, run.ClaimID, "manual", userID, "bring up credential sidecar for resume failed: "+esErr.Error(), domain.RunFailureUnclassified)
+		// Still pre-agent: the sidecar is part of the runtime coming up, so
+		// the answer is another attempt, not a dead conversation.
+		handBack(fmt.Errorf("bring up credential sidecar for resume failed: %w", esErr))
 		return
 	}
 	defer execSandbox.Close()
+
+	// Past every hand-back: this claim now owns the conversation's outcome, so
+	// the queued rows become this turn's message.
+	flushPendingInput()
 
 	repoEnv := ""
 	if owner != "" && repo != "" {
@@ -1146,21 +1207,160 @@ func stagedStepSkillsSource(runID string) string {
 	return dir
 }
 
-// handleStepSetupError requeues a claimed run whose workspace setup hit a
-// transient error, or fails the blueprint out once the run exhausts its retry
-// budget (poison pill). The shared worktree, if partially built, stays on disk.
-func (s *Spawner) handleStepSetupError(orgID string, br *domain.BlueprintRun, run domain.Conversation, setupErr error) {
+// engagementDisposition is what one claim's engagement leaves behind, as far
+// as the dispatcher is concerned. The zero value is the ordinary case: the
+// agent ran, its terminal is on the row, and the reactor should read it.
+type engagementDisposition struct {
+	// fenced means this engagement's claim was released mid-run and a
+	// successor owns the conversation. Nothing was written and nothing may be
+	// reacted to — the row now describes somebody else's work.
+	fenced bool
+	// launchErr means the engagement never reached the agent's first turn:
+	// workspace setup, the jail, the tool host, the opening turn. Nothing was
+	// recorded, so there is nothing to react to and nothing lost by trying
+	// again — see handlePreAgentFailure.
+	launchErr error
+}
+
+// handlePreAgentFailure disposes of a claimed run whose engagement never got
+// as far as the agent's first turn — a workspace that would not build or
+// rehydrate, a jail that would not start, a tool host that would not answer.
+//
+// Every one of those is infrastructure, and infrastructure fails
+// transiently: a broker restart, an exhausted subnet, stale runsc state, a
+// host briefly out of memory. So the answer is another attempt, through the
+// claim itself — RequeueRun releases the claim 'requeued', the conversation
+// stays claimable, and the next scan re-drives it a couple of seconds later.
+// Everything the engagement would have needed is untouched by construction,
+// because nothing tore it down: the workspace snapshot, the worktree, the
+// blueprint and the transcript are all exactly as the last engagement left
+// them.
+//
+// The budget is what stops a deterministic failure from spinning the queue,
+// and it is spent per queue episode, not per lifetime (see Conversation.
+// Attempts) — a healthy engagement resets it, so a conversation resumed four
+// times still meets its next hiccup with a full budget.
+//
+// Returns whether the conversation survived. A requeue and an exhausted park
+// both leave the step live, so whatever this claim staged for it on disk is
+// the next claim's to re-mount; false is the poison pill, and the step is over.
+func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, run domain.Conversation, cause error) (survived bool) {
 	if run.Attempts >= maxRunAttempts {
-		dispatchLog.Error("workspace setup failed after attempts; failing blueprint", "run", run.ID, "attempts", run.Attempts, "error", setupErr)
-		s.terminateBlueprint(orgID, br.ID, run.TaskID, run.TriggerType, run.CreatorUserID, time.Now(),
-			runConfig{orgID: orgID, teamID: run.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
-			domain.BlueprintRunStatusFailed, "workspace setup: "+setupErr.Error(), run.BlueprintStepIndex, false)
+		return s.disposeOfExhaustedRun(orgID, br, run, cause)
+	}
+	dispatchLog.Warn("engagement failed before the agent ran, requeuing", "run", run.ID, "attempt", run.Attempts, "error", cause)
+	if err := s.runQueue.RequeueRun(context.Background(), orgID, run.ID, cause.Error()); err != nil {
+		dispatchLog.Warn("requeue run after a pre-agent failure failed", "run", run.ID, "error", err)
+	}
+	return true
+}
+
+// disposeOfExhaustedRun answers for a run that failed the same way
+// maxRunAttempts times over. What that means depends entirely on whether
+// anything has been said yet, and the two answers are opposites.
+//
+// A conversation with a transcript is work in progress — a resumed thread, a
+// woken park, a step re-claimed after a crash. Failing it would discard a
+// workspace, a worktree and a blueprint over a runtime that never started, so
+// it parks `open` instead, with a note on the transcript saying what happened
+// and what to do about it. The user's next message re-arms a whole fresh
+// budget; the note is also what the resumed model reads, so it knows why there
+// is a gap.
+//
+// A first engagement has nothing to protect. Its blueprint step has never run,
+// there is no workspace worth keeping, and a loud failure is the honest answer
+// — it surfaces on the task and the auto-delegation breaker keeps its signal.
+// That is today's poison pill, unchanged.
+//
+// A nil br is the resume path, which has no blueprint in scope and needs
+// none: a resume continues a conversation that has already been driven, so
+// it is the first case by construction.
+func (s *Spawner) disposeOfExhaustedRun(orgID string, br *domain.BlueprintRun, run domain.Conversation, cause error) (survived bool) {
+	if br == nil || s.conversationHasTranscript(orgID, run.ID) {
+		dispatchLog.Error("the runtime failed to start on every attempt; parking the conversation instead of failing it",
+			"run", run.ID, "attempts", run.Attempts, "error", cause)
+		s.parkAfterLaunchExhaustion(orgID, run, cause)
+		return true
+	}
+	dispatchLog.Error("workspace setup failed after attempts; failing blueprint", "run", run.ID, "attempts", run.Attempts, "error", cause)
+	s.terminateBlueprint(orgID, br.ID, run.TaskID, run.TriggerType, run.CreatorUserID, time.Now(),
+		runConfig{orgID: orgID, teamID: run.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
+		domain.BlueprintRunStatusFailed, cause.Error(), run.BlueprintStepIndex, false)
+	return false
+}
+
+// conversationHasTranscript reports whether anything has been said in this
+// conversation yet — the same signal mintOpeningTurn and prepareInheritedMemory
+// read to answer the same question.
+//
+// A read failure answers "yes". The two ways of being wrong are not
+// symmetric: treating a live conversation as fresh destroys its workspace and
+// fails its blueprint, while treating a fresh one as live costs a park nobody
+// resumes and a task that has to be re-fired by hand.
+func (s *Spawner) conversationHasTranscript(orgID, runID string) bool {
+	if s.agentRuns == nil {
+		return false
+	}
+	rows, err := s.agentRuns.ListForAssemblySystem(context.Background(), orgID, runID)
+	if err != nil {
+		dispatchLog.Warn("read transcript to decide an exhausted run's disposition failed; treating it as work in progress",
+			"run", runID, "error", err)
+		return true
+	}
+	return len(rows) > 0
+}
+
+// parkAfterLaunchExhaustion puts a conversation whose runtime would not start
+// back to rest, with the reason on its transcript.
+//
+// The note is the whole point. Nothing else in the system explains a resume
+// that silently never came up — the run station shows a parked conversation
+// and the user is left to guess — so it says how many attempts were made, what
+// the last one failed with, and that a message starts a fresh one. It goes in
+// before the park, and through the claim fence like every other write this
+// engagement makes: a successor that took the conversation while this one was
+// failing to launch owns it, and neither the note nor the park is ours to
+// write then.
+//
+// Whatever input was waiting is marked delivered on the way down. It is not
+// discarded — it stays in the transcript, in order, where the next engagement
+// reads it — but it must stop counting as a wake, or `open` plus an
+// undelivered message would re-claim the conversation immediately and the
+// budget would buy nothing at all.
+func (s *Spawner) parkAfterLaunchExhaustion(orgID string, run domain.Conversation, cause error) {
+	bgCtx := context.Background()
+	note := fmt.Sprintf("The runtime failed to start after %d attempts: %s. Send a message to retry.", run.Attempts, cause)
+	if _, err := s.agentRuns.InsertMessageForClaimSystem(bgCtx, orgID, run.ClaimID, &domain.Message{
+		ConversationID: run.ID,
+		UserID:         run.CreatorUserID,
+		Role:           "user",
+		Subtype:        domain.MessageSubtypeStopNote,
+		Content:        note,
+	}); err != nil {
+		if errors.Is(err, db.ErrClaimReleased) {
+			dispatchLog.Error("claim fence refused the launch-failure note — a successor owns this conversation; recording nothing",
+				"run", run.ID, "claim_id", run.ClaimID, "org_id", orgID)
+			return
+		}
+		dispatchLog.Warn("record launch-failure note failed; the park still lands", "run", run.ID, "error", err)
+	}
+	if s.pendingInput != nil {
+		if _, _, _, err := s.pendingInput.Consume(bgCtx, orgID, run.ID); err != nil {
+			dispatchLog.Warn("settle pending input before parking a run that could not start failed", "run", run.ID, "error", err)
+		}
+	}
+	if _, err := s.agentRuns.ParkOpenForClaimSystem(bgCtx, orgID, run.ID, run.ClaimID, db.ParkStopped("launch_failed", "")); err != nil {
+		if errors.Is(err, db.ErrClaimReleased) {
+			dispatchLog.Error("claim fence refused the park after a launch failure — a successor owns this conversation",
+				"run", run.ID, "claim_id", run.ClaimID, "org_id", orgID)
+			return
+		}
+		dispatchLog.Warn("park run that could not start failed", "run", run.ID, "error", err)
 		return
 	}
-	dispatchLog.Warn("workspace setup failed, requeuing", "run", run.ID, "attempt", run.Attempts, "error", setupErr)
-	if err := s.runQueue.RequeueRun(context.Background(), orgID, run.ID, "workspace setup: "+setupErr.Error()); err != nil {
-		dispatchLog.Warn("requeue run after setup failure failed", "run", run.ID, "error", err)
-	}
+	s.broadcastRunUpdate(orgID, run.ID, "open")
+	s.recomputeTaskBoardColumn(orgID, run.TaskID)
+	toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s could not start: %s", shortRunID(run.ID), truncateToastMsg(cause.Error(), 160)))
 }
 
 // failClaimedRun marks an orphaned claimed run failed (its blueprint_run

@@ -962,6 +962,14 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 				t.Helper()
 				pgtest.MustExec(t, h.AdminDB, `UPDATE messages SET seq = $2 WHERE id = $1`, msgID, seq)
 			},
+			CollapseClaimTimestamps: func(t *testing.T, convID string) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB, `
+					UPDATE claims
+					SET claimed_at = timestamptz '2026-01-01 00:00:00Z',
+					    released_at = CASE WHEN released_at IS NULL THEN NULL ELSE timestamptz '2026-01-01 00:00:00Z' END
+					WHERE conversation_id = $1`, convID)
+			},
 			DisplayStatus: func(t *testing.T, convID string) string {
 				t.Helper()
 				got, err := stores.Conversations.GetSystem(ctx, orgID, convID)

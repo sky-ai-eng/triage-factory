@@ -410,6 +410,13 @@ func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID, fa
 // subselect, so it scans as text and parses via parseDBDatetime. Status is
 // the derived display ladder (sqliteDisplayStatusSQL) rather than the stored
 // column.
+//
+// `attempts` here is the LIFETIME claim count — engagement history for a
+// human, matching the lifetime sums beside it. It is deliberately not the
+// same quantity ClaimNextRun returns under that name, which is the retry
+// budget's current-episode counter (episodeAttemptsSQL, run_queue.go). Two
+// questions, one field; see domain.Conversation.Attempts before carrying
+// either one somewhere new.
 const sqliteRunColumns = `
 	r.id, COALESCE(r.task_id, ''), COALESCE(r.runtime, ''),
 	` + sqliteDisplayStatusSQL + `,

@@ -639,6 +639,13 @@ const pgDisplayStatusSQL = `COALESCE(
 // duration_ms/num_turns the SUM of the per-engagement telemetry. The
 // aggregate lateral always yields exactly one row, so a never-claimed
 // conversation reads (NULL, 0, NULL, NULL, NULL, NULL).
+//
+// `attempts` here is the LIFETIME claim count — engagement history for a
+// human, matching the lifetime sums beside it. It is deliberately not the
+// same quantity ClaimNextRun returns under that name, which is the retry
+// budget's current-episode counter (episodeAttemptsSQL, run_queue.go). Two
+// questions, one field; see domain.Conversation.Attempts before carrying
+// either one somewhere new.
 const runClaimLateral = `
 	LEFT JOIN LATERAL (
 		SELECT MAX(c2.claimed_at) AS claimed_at,

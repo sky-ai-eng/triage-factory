@@ -395,18 +395,19 @@ func TestStop_UniformAcrossBlueprintShapes(t *testing.T) {
 // 'running' and not cancel-requested — the exact state the old
 // conversation-level cancel destroyed.
 //
-// The claim's own work fails fast here (no warm worktree, no snapshot, no
-// agent subprocess); what is being pinned is that the resume was accepted,
-// claimed, and delivered, not what the agent then did with it.
+// The claim's own work fails fast here (the warm worktree holds no session
+// transcript, so there is no agent subprocess); what is being pinned is that
+// the resume was accepted, claimed, and delivered, not what the agent then
+// did with it.
 func TestStop_MidBlueprintStep_ResumesAndIsDriven(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	const runID = "r-resume-after-stop"
-	// A worktree path that does not exist: with no blob store wired the
-	// enqueue-time recoverability check cannot disprove recoverability and lets
-	// the wake through, and the claim then fails fast instead of launching an
-	// agent.
-	seedRun(t, database, runID, "sess-resume", "/tmp/does-not-exist-resume-after-stop")
+	// A real worktree, empty: the rehydrate warm-returns (a missing one is a
+	// runtime failure, which hands the claim back rather than delivering) and
+	// the claim then stops on the absent session transcript instead of
+	// launching an agent.
+	seedRun(t, database, runID, "sess-resume", t.TempDir())
 	brID := "seedbpr-" + runID
 	plan, err := json.Marshal([]domain.BlueprintPlanStep{
 		{StepIndex: 0, PromptID: "test-prompt", PromptName: "One", PromptBody: "b", Source: "user"},

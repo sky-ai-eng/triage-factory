@@ -91,7 +91,7 @@ func decideBlueprintStep(outcome string, isFinal bool) (decision blueprintStepOu
 //
 // The cfg here is a cleanup-scoped config (worktree fields + orgID), not the
 // full run-execution config. The run-bearing callers (dispatchClaimedRun /
-// handleStepSetupError) stamp cfg.teamID off the claimed run, but the
+// handlePreAgentFailure) stamp cfg.teamID off the claimed run, but the
 // CancelBlueprint / paused-cleanup callers have only a task (no claimed run)
 // and leave it empty — so cfg.teamID is NOT reliably set here. Any future
 // run-attributed work on the terminal path (e.g. recording a failed run's
