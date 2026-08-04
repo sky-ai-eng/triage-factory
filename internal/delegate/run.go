@@ -145,6 +145,12 @@ func (s *Spawner) resolveCommitIdentity(ctx context.Context, orgID, triggerType,
 func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string, priorSessionID string) (fenced bool) {
 	orgID := cfg.orgID
 
+	// The config is built, so whatever this engagement was going to write about
+	// where it runs and on what has been written. Hold the row to it now, while
+	// the claim path that wrote it is still the thing to fix — see
+	// resume_contract.go.
+	s.assertResumeCoordinates(ctx, orgID, runID, resumeCheckClaim)
+
 	// This engagement's questions die with it: once it lets go, any prompt
 	// still open was asked by a process that no longer exists. Best-effort
 	// tidy for audit reads only — ListPending derives the same answer from the
@@ -626,6 +632,20 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	if sink.fenceTripped() {
 		parked = true
 		return true
+	}
+
+	// The stream is over and the row is about to come to rest — parked, or
+	// terminal on a step someone may still pick up. Whatever is on it now is
+	// what a follow-up finds, so this is where the session id is expected: it
+	// does not exist before the stream's first system/init, which is why the
+	// claim-time check above leaves it alone. Detached ctx — a shutdown that
+	// cancelled the run must not skip the diagnostic about the row it left.
+	//
+	// An engagement that produced neither a park nor a result never reached a
+	// session at all; its failure is already recorded, and naming a coordinate
+	// it was never going to have would just be noise on top.
+	if out.hibernated || out.result != nil {
+		s.assertResumeCoordinates(context.Background(), orgID, runID, resumeCheckRest)
 	}
 
 	// Idle hibernation parked the run (status `open`, snapshot written) — a

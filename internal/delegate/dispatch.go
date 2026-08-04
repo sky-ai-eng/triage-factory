@@ -1154,6 +1154,21 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	default:
 		return runConfig{}, fmt.Errorf("unsupported task source: %s", task.EntitySource)
 	}
+	// The resolved path goes onto the STEP's own conversation row, not just the
+	// blueprint's. That row is where the SDK resume reads the cwd to re-invoke
+	// the session in — `claude --resume` keys its session storage by cwd — so a
+	// step whose row carries no path is refused a follow-up for a reason that
+	// has nothing to do with its state. The first-claim arm above gets this from
+	// the source setups; every arm here produces cfg.wtPath, so one write after
+	// the switch covers all three.
+	//
+	// Idempotent, and correct on both workspace paths: a re-claim resolves the
+	// same warm path, and a cold rehydrate onto a fresh one writes the tree the
+	// resumed session will actually run in.
+	if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, run.ID, cfg.wtPath); err != nil {
+		dispatchLog.Warn("set worktree_path for blueprint step failed; a follow-up to this conversation will be refused",
+			"run", run.ID, "blueprint_run", br.ID, "error", err)
+	}
 	return cfg, nil
 }
 
