@@ -18,7 +18,7 @@ import (
 func seedMessageAt(t *testing.T, s *Spawner, runID string, at time.Time) {
 	t.Helper()
 	if _, err := s.agentRuns.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-		ConversationID: runID, Role: "assistant", Subtype: "text", Content: "agent turn", CreatedAt: at,
+		ConversationID: runID, Role: "assistant", Content: "agent turn", CreatedAt: at,
 	}); err != nil {
 		t.Fatalf("seed agent message: %v", err)
 	}

@@ -243,7 +243,7 @@ func seedPgRunsForStats(t *testing.T, conn *sql.DB, orgID, userID, promptID stri
 		// ledger row + one released claim carrying the duration telemetry.
 		if _, err := conn.Exec(`
 			INSERT INTO messages (org_id, conversation_id, role, subtype, content, cost_usd, created_at)
-			VALUES ($1, $2, 'assistant', 'text', 'work', 0.01, $3)
+			VALUES ($1, $2, 'assistant', '', 'work', 0.01, $3)
 		`, orgID, runID, startedAt); err != nil {
 			t.Fatalf("seed run message %d: %v", i, err)
 		}

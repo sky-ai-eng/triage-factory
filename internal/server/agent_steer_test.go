@@ -60,7 +60,7 @@ func TestHandleMessage_RecordsThenConflictsOnTerminal(t *testing.T) {
 		t.Fatalf("read recorded message: %v", err)
 	}
 	if role != "user" || subtype != "" || content != "pick this back up" {
-		t.Errorf("recorded message = {role:%q subtype:%q content:%q}, want {user, text, pick this back up}", role, subtype, content)
+		t.Errorf("recorded message = {role:%q subtype:%q content:%q}, want {user, blank, pick this back up}", role, subtype, content)
 	}
 }
 

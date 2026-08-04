@@ -87,11 +87,12 @@ func (s *Spawner) deliverInjectionLive(orgID, runID, wrapped string) {
 // agent actually consumes. Recorded as role='user' (not agent activity), so it
 // never advances the artifact-change ledger watermark.
 //
-// Subtype is "system_note", not "text": the transcript renders user rows by Role
-// regardless of subtype today (so this shows as an operator line), but tagging it
-// distinctly from a human steer (server's message endpoint records those as
-// subtype="text") leaves the UI a handle to style it / drop the reply affordance
-// later without a schema change.
+// Subtype is "system_note" rather than blank, which is what a person's own
+// message carries: the row is a machine-composed record of a human action,
+// not the human's words. The transcript reads the distinction — a user row
+// outside the human set renders as a system marker instead of an operator
+// line — so the tag is what keeps this from being attributed to whoever is
+// reading the screen.
 func (s *Spawner) recordInjectedNote(orgID, runID, content string) {
 	if s.agentRuns == nil {
 		return

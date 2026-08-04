@@ -80,7 +80,7 @@ func TestCuratorStore_Postgres_PrivateVisibility_SelfOnly(t *testing.T) {
 		}
 		_, err := ts.Conversations.InsertMessage(ctx, orgID, &domain.Message{
 			ConversationID: convID, UserID: alice, ClaimID: claimID,
-			Role: "assistant", Subtype: "text", Content: "private ack",
+			Role: "assistant", Content: "private ack",
 		})
 		return err
 	}); err != nil {

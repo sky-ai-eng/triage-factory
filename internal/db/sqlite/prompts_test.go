@@ -100,7 +100,7 @@ func seedSQLiteRunsForStats(t *testing.T, conn *sql.DB, promptID string, statusB
 		// ledger row + one released claim carrying the duration telemetry.
 		if _, err := conn.Exec(`
 			INSERT INTO messages (conversation_id, role, subtype, content, cost_usd, created_at)
-			VALUES (?, 'assistant', 'text', 'work', 0.01, ?)
+			VALUES (?, 'assistant', '', 'work', 0.01, ?)
 		`, runID, startedAt); err != nil {
 			t.Fatalf("seed run message %d: %v", i, err)
 		}

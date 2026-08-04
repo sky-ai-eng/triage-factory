@@ -125,7 +125,7 @@ func newSQLiteSpendSeeder(conn *sql.DB, teamProjectID, nullTeamProjectID string)
 				(org_id, conversation_id, role, subtype, content, model,
 				 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 				 cost_usd, created_at)
-			VALUES (?, ?, 'assistant', 'text', 'work', ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, 'assistant', '', 'work', ?, ?, ?, ?, ?, ?, ?)
 		`, runmode.LocalDefaultOrgID, convID, nullStr(model),
 			tok.Input, tok.Output, tok.CacheRead, tok.CacheCreation, cost, at)
 		if err != nil {

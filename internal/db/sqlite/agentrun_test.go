@@ -243,7 +243,7 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 			// column is a fixed test-controlled name (not user input), so
 			// string-building the column into the statement is safe here.
 			res, err := conn.Exec(
-				`INSERT INTO messages (conversation_id, role, subtype, content, `+column+`) VALUES (?, 'assistant', 'text', 'x', ?)`,
+				`INSERT INTO messages (conversation_id, role, subtype, content, `+column+`) VALUES (?, 'assistant', '', 'x', ?)`,
 				runID, rawJSON,
 			)
 			if err != nil {

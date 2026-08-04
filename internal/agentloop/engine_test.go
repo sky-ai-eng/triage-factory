@@ -964,7 +964,7 @@ func TestRun_HumanInputResetsTheTurnBudget(t *testing.T) {
 		domain.Message{Role: "assistant", Content: "t3"},
 		// The legacy "text" spelling of a normal user row must still read
 		// as human — rows written before the blank-subtype vocabulary.
-		domain.Message{Role: "user", Subtype: "text", Content: "keep going please", Delivered: &pending},
+		domain.Message{Role: "user", Content: "keep going please", Delivered: &pending},
 	)
 	p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
 	e := newTestEngine(tr, p, newScriptedToolHost())

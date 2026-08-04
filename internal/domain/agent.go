@@ -122,7 +122,7 @@ const (
 // label the row; the native loop's turn budget reads them to tell genuine
 // user input apart from its own insertions — only a human row renews the
 // budget, so every loop-authored row must carry a subtype outside the
-// human set ("", "text", the steer stamp).
+// human set (blank, the steer stamp).
 const (
 	// MessageSubtypeInjectionSteer marks input that was drained between
 	// turns — the model was mid-work when it arrived.
@@ -375,10 +375,15 @@ type Message struct {
 	// ClaimID attributes the row to the executor engagement that produced
 	// it; empty for rows produced outside any claim (a queued user
 	// message, a pending injection). Never read by assembly.
-	ClaimID             string
-	Role                string // "assistant" | "tool" | "user" — see ConversationStore's doc comment for the full allowed set incl. reserved subtypes
-	Content             string
-	Subtype             string // "text" | "thinking" | "tool_use" | "tool"
+	ClaimID string
+	Role    string // "assistant" | "tool" | "user" — see ConversationStore's doc comment for the full allowed set incl. reserved subtypes
+	Content string
+	// Subtype discriminates a row that deviates from ordinary role
+	// behavior. Blank is normal — an assistant turn, a tool result, a
+	// person's message — and every discriminating value is named: the
+	// InjectionSubtype constants, MessageSubtypeStopNote, the curator's
+	// context_change, the artifact system_note.
+	Subtype             string
 	ToolCalls           []ToolCall
 	ToolCallID          string
 	IsError             bool

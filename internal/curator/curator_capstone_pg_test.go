@@ -525,7 +525,7 @@ func (s *stubAgent) run(ctx context.Context, opts agentproc.RunOptions, sink age
 		// then rolls the per-claim SUM onto the claim's token columns.
 		_ = sink.OnSession("sess-capstone")
 		_ = sink.OnMessage(&domain.Message{
-			Role: "assistant", Subtype: "text", Content: "capstone ack",
+			Role: "assistant", Content: "capstone ack",
 			InputTokens:         intPtr(capstoneInputTokens),
 			OutputTokens:        intPtr(capstoneOutputTokens),
 			CacheReadTokens:     intPtr(capstoneCacheReadTokens),
@@ -804,7 +804,7 @@ func assistantMessageCount(t *testing.T, h *pgtest.Harness, requestID string) in
 	if err := h.AdminDB.QueryRow(`
 		SELECT count(*) FROM messages
 		WHERE conversation_id = (SELECT conversation_id FROM messages WHERE id = $1)
-		  AND role = 'assistant' AND subtype = 'text'
+		  AND role = 'assistant' AND subtype = ''
 	`, turnID(t, requestID)).Scan(&n); err != nil {
 		t.Fatalf("count messages %s: %v", requestID, err)
 	}
@@ -817,7 +817,7 @@ func firstAssistantMessageCreator(t *testing.T, h *pgtest.Harness, requestID str
 	if err := h.AdminDB.QueryRow(`
 		SELECT user_id::text FROM messages
 		WHERE conversation_id = (SELECT conversation_id FROM messages WHERE id = $1)
-		  AND role = 'assistant' AND subtype = 'text'
+		  AND role = 'assistant' AND subtype = ''
 		ORDER BY id LIMIT 1
 	`, turnID(t, requestID)).Scan(&got); err != nil {
 		t.Fatalf("read message creator %s: %v", requestID, err)
@@ -849,7 +849,7 @@ func nonTerminalCount(t *testing.T, h *pgtest.Harness, projectID string) int {
 		    SELECT count(*) FROM messages m
 		    JOIN conversations c ON c.id = m.conversation_id
 		    WHERE c.project_id = $1 AND c.type = 'curator'
-		      AND m.role = 'user' AND m.subtype = 'text' AND m.delivered = false
+		      AND m.role = 'user' AND m.subtype = '' AND m.delivered = false
 		) + (
 		    SELECT count(*) FROM claims cl
 		    JOIN conversations c ON c.id = cl.conversation_id

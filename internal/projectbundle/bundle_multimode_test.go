@@ -119,7 +119,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 		}
 		_, e := tx.Conversations.InsertMessage(ctx, srcOrg, &domain.Message{
 			ConversationID: convID, UserID: srcUser, ClaimID: claimID,
-			Role: "assistant", Subtype: "text", Content: "ack", CreatedAt: time.Now().UTC(),
+			Role: "assistant", Content: "ack", CreatedAt: time.Now().UTC(),
 		})
 		return e
 	}); err != nil {

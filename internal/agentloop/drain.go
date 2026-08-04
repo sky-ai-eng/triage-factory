@@ -63,12 +63,12 @@ func (e *Engine) drain(ctx context.Context, params Params, bare bool) error {
 
 // IsHumanInput reports whether a role=user row is genuine user input rather
 // than something the system inserted on the agent's behalf. The human set is
-// closed: a blank subtype (the normal spelling — the mission prompt, an API
-// follow-up), "text" (the legacy spelling of the same), and the mid-work
-// steer stamp those rows receive at flush. Everything system-authored
-// carries a subtype outside this set — see the InjectionSubtype constants.
+// closed: a blank subtype — the spelling of an ordinary turn, the mission
+// prompt and an API follow-up alike — and the mid-work steer stamp those rows
+// receive at flush. Everything system-authored carries a subtype outside this
+// set — see the InjectionSubtype constants.
 func IsHumanInput(r domain.Message) bool {
-	return r.Subtype == "" || r.Subtype == "text" || r.Subtype == domain.MessageSubtypeInjectionSteer
+	return r.Subtype == "" || r.Subtype == domain.MessageSubtypeInjectionSteer
 }
 
 // hasPending reports whether any undelivered row is waiting — the would-stop

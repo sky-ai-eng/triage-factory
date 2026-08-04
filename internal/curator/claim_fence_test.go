@@ -34,7 +34,7 @@ func TestTurnSink_FenceTripKillsTheTurnAndRecordsIt(t *testing.T) {
 	c := &Curator{stores: db.Stores{Conversations: fencedConversationStore{}}}
 	sink := newTurnSink(c, "proj-1", "conv-1", "req-1", "claim-1", "org-1", "user-1", func() { killed = true })
 
-	err := sink.OnMessage(&domain.Message{Role: "assistant", Subtype: "text", Content: "hello"})
+	err := sink.OnMessage(&domain.Message{Role: "assistant", Content: "hello"})
 	if !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("OnMessage = %v, want the fence trip surfaced to the runtime", err)
 	}

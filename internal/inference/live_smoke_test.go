@@ -59,7 +59,7 @@ func TestInference_LiveSmoke(t *testing.T) {
 
 	// Turn 1: the model should think, then call the add tool.
 	rows := []domain.Message{
-		{ID: 1, Role: "user", Subtype: "text", Content: "Please compute 40 + 2 using the add tool."},
+		{ID: 1, Role: "user", Content: "Please compute 40 + 2 using the add tool."},
 	}
 	first, err := client.Stream(ctx, Request{
 		Provider: ProviderAnthropic, Model: model,

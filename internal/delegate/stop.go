@@ -433,7 +433,6 @@ func (s *Spawner) failRun(orgID, runID, taskID, claimID, triggerType, creatorUse
 	failMsg := &domain.Message{
 		ConversationID: runID,
 		Role:           "assistant",
-		Subtype:        "text",
 		Content:        "Error: " + errMsg,
 		IsError:        true,
 	}

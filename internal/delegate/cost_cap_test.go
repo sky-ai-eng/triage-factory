@@ -73,7 +73,7 @@ func seedSpendAt(t *testing.T, database *sql.DB, cost float64, occurredAt time.T
 	}
 	if _, err := database.Exec(`
 		INSERT INTO messages (org_id, conversation_id, role, subtype, content, cost_usd, created_at)
-		VALUES (?, ?, 'assistant', 'text', 'work', ?, ?)
+		VALUES (?, ?, 'assistant', '', 'work', ?, ?)
 	`, runmode.LocalDefaultOrgID, convID, cost, occurredAt); err != nil {
 		t.Fatalf("seed spend ledger row: %v", err)
 	}
