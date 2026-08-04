@@ -187,7 +187,7 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	// fixed TraceIDs like "scorer-batch"), but the subnet idx is — the
 	// allocator gives a fresh idx for every live Wrap. Pair them so the ID
 	// stays grep-friendly while being uniquely distinguishable.
-	containerID := fmt.Sprintf("tf-%s-%d", truncate(cfg.RunID, 11), idx)
+	containerID := fmt.Sprintf("tf-%s-%d", truncate(cfg.RunID, containerIDRunFragmentMax), idx)
 	// Published on the Sandbox before the launch so an observer (the resource
 	// sampler) reads the id this launch actually used rather than re-deriving
 	// it. Set even if the launch below fails: the group may already exist and
@@ -226,6 +226,13 @@ func logCgroupFailOpenOnce(err error) {
 		sandboxLog.Warn("per-run memory ceiling unavailable; runs continue without limits", "error", err)
 	})
 }
+
+// containerIDRunFragmentMax is how much of a RunID a container id carries.
+// Named rather than repeated as a literal because the boot sweep's matcher
+// (tfContainerIDRE) is built from it: the sweep delete-forces what it
+// matches, so a matcher looser than what this package can actually mint is
+// reach it has no use for.
+const containerIDRunFragmentMax = 11
 
 // truncate cuts s to maxLen chars. Used for container IDs that
 // runsc imposes a 64-char practical limit on; we play it short.

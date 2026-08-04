@@ -169,10 +169,19 @@ func runscStateRoot() string {
 var runtimeStateExtensions = []string{".state", ".lock", ".json"}
 
 // tfContainerIDRE matches exactly the container ids this package mints:
-// tf-<run id fragment>-<subnet index>. Strict for the same reason the netns
-// reaper's regex is — the sweep deletes what it matches, and the state root
-// is shared with whatever else on the host runs runsc.
-var tfContainerIDRE = regexp.MustCompile(`^tf-[A-Za-z0-9._-]{1,48}-\d{1,3}$`)
+// tf-<run id fragment>-<subnet index>, where the fragment is a RunID cut to
+// containerIDRunFragmentMax and the index is one byte in decimal. Strict for
+// the same reason the netns reaper's regex is — the sweep deletes what it
+// matches, and the state root is shared with whatever else on the host runs
+// runsc, some of which may well use tf-shaped ids of its own.
+//
+// Built from the mint's own bound rather than a hand-picked ceiling: a
+// matcher wider than what Wrap can produce is reach the sweep has no use
+// for, and a matcher narrower than it would strand our own state. Erring
+// wide is the worse direction — a missed entry is a leak the next launch of
+// that id still clears, while an over-match deletes a container we do not
+// own.
+var tfContainerIDRE = regexp.MustCompile(fmt.Sprintf(`^tf-[A-Za-z0-9._-]{1,%d}-\d{1,3}$`, containerIDRunFragmentMax))
 
 // containerIDFromRuntimeStateEntry recovers the container id from one entry
 // name under runsc's state root, or reports that the entry isn't ours.

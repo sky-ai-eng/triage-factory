@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -173,6 +174,11 @@ func TestContainerIDFromRuntimeStateEntry(t *testing.T) {
 		{"tf-abc-1234", "", false},
 		// The sidecar's registry key is not a runsc container at all.
 		{"tf-abc123def-3-sc", "", false},
+		// Longer than any id this package can mint (the fragment is a RunID
+		// cut to containerIDRunFragmentMax), so it belongs to someone else's
+		// runsc — matching it would delete a container we do not own.
+		{"tf-thisfragmentiswaytoolong-3", "", false},
+		{"tf-thisfragmentiswaytoolong-3_sandbox:tf-thisfragmentiswaytoolong-3.state", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -274,4 +280,33 @@ func contains(haystack []string, needle string) bool {
 // shQuote single-quotes s for the `sh -c` stand-ins above.
 func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// TestTFContainerIDRE_TracksTheMint is the anti-drift pin between the id the
+// sweep will delete-force and the id Wrap actually mints. It builds ids with
+// the mint's own formula, so widening truncate's bound without widening the
+// matcher (or the reverse) fails here rather than silently stranding our
+// state — or, worse, reaching state we do not own.
+func TestTFContainerIDRE_TracksTheMint(t *testing.T) {
+	mint := func(runID string, idx uint8) string {
+		return fmt.Sprintf("tf-%s-%d", truncate(runID, containerIDRunFragmentMax), idx)
+	}
+	for _, runID := range []string{
+		"550e8400-e29b-41d4-a716-446655440000", // a conversation uuid, truncated
+		"scorer-batch",                         // a fixed TraceID
+		"a",                                    // the shortest thing a caller can pass
+	} {
+		for _, idx := range []uint8{0, 7, 255} {
+			id := mint(runID, idx)
+			if !tfContainerIDRE.MatchString(id) {
+				t.Errorf("the sweep would not recognize its own container id %q (run %q, idx %d)", id, runID, idx)
+			}
+		}
+	}
+
+	// One character past what the mint can produce is not ours.
+	overlong := "tf-" + strings.Repeat("a", containerIDRunFragmentMax+1) + "-0"
+	if tfContainerIDRE.MatchString(overlong) {
+		t.Errorf("matcher accepts %q, which is longer than any id this package mints — it reaches containers we do not own", overlong)
+	}
 }
