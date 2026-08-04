@@ -131,7 +131,7 @@ const episodeAttemptsSQL = `
 	      WHERE c3.conversation_id = c2.conversation_id
 	        AND c3.outcome IS NOT NULL
 	        AND c3.outcome NOT IN (` + handedBackOutcomesSQL + `)
-	        AND c3.claimed_at > c2.claimed_at)`
+	        AND c3.claimed_at >= COALESCE(c2.released_at, c2.claimed_at))`
 
 // runQueueClaimCols is the column list ClaimNextRun returns, shared with the
 // scan helper. visibility is left at its row default on enqueue; team_id is

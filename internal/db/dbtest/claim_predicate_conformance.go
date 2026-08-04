@@ -50,6 +50,15 @@ type ClaimPredicateHarness struct {
 	// DisplayStatus reads the conversation back through the display
 	// projection — what the wire actually carries.
 	DisplayStatus func(t *testing.T, convID string) string
+
+	// CollapseClaimTimestamps rewrites every one of a conversation's claim
+	// timestamps to a single identical value — the worst case a coarse clock
+	// could produce, which no production writer reaches (they all bind a
+	// high-resolution instant) and which nothing else can stage. It exists so
+	// the retry budget's ordering can be tested for what it does when the
+	// timestamps stop resolving, rather than only for what it does when they
+	// happen to.
+	CollapseClaimTimestamps func(t *testing.T, convID string)
 }
 
 // ClaimPredicateFactory builds a fresh harness per subtest.
@@ -343,6 +352,50 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				h.InsertRow(t, convID, userRow("try again", false))
 				if got := mustClaim(t, h, convID); got.Attempts != 1 {
 					t.Fatalf("claim after a healthy engagement = %d attempts, want 1", got.Attempts)
+				}
+			})
+
+			t.Run("Attempts_ACoarseClockNeverOverCounts", func(t *testing.T) {
+				// The ordering the episode is read off is timestamps, and
+				// timestamps have a resolution. Every writer binds a
+				// high-resolution instant today, so claims of one
+				// conversation are always distinguishable — but the budget's
+				// two failure directions are not symmetric, and the one that
+				// matters is what happens when they stop being.
+				//
+				// Over-counting is the destructive one: a boundary hidden
+				// between two same-instant claims leaves a spent episode
+				// looking longer than it is, and a first engagement that
+				// exhausts its budget is poison-pilled. Under-counting costs
+				// at most one more round of retries. So the ordering is
+				// written to collapse toward finding a boundary, and this
+				// pins that at the limit: every timestamp identical, which
+				// is as unresolved as a clock can get.
+				h := mk(t)
+				if h.CollapseClaimTimestamps == nil {
+					t.Skip("harness cannot stage a coarse clock")
+				}
+				convID := h.EnqueueDelegation(t, runtime)
+
+				// A hand-back, then a healthy engagement that ends the
+				// episode, then one more hand-back.
+				mustClaim(t, h, convID)
+				release(t, h, h.OrgID, convID, "requeued")
+				mustClaim(t, h, convID)
+				release(t, h, h.OrgID, convID, "parked")
+				h.SetStoredStatus(t, convID, "open")
+				h.InsertRow(t, convID, userRow("keep going", false))
+				mustClaim(t, h, convID)
+				release(t, h, h.OrgID, convID, "requeued")
+
+				h.CollapseClaimTimestamps(t, convID)
+
+				// Truthfully this is 2: one hand-back since the park. With
+				// nothing left to order the claims by, the only answer that
+				// is never destructive is to read the boundary as present.
+				got := mustClaim(t, h, convID)
+				if got.Attempts > 2 {
+					t.Errorf("attempts = %d with every claim timestamped identically, want at most 2 — a clock that stops resolving must not spend budget the episode never used", got.Attempts)
 				}
 			})
 

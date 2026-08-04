@@ -862,6 +862,16 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 					t.Fatalf("set seq: %v", err)
 				}
 			},
+			CollapseClaimTimestamps: func(t *testing.T, convID string) {
+				t.Helper()
+				if _, err := conn.Exec(`
+					UPDATE claims
+					SET claimed_at = '2026-01-01 00:00:00',
+					    released_at = CASE WHEN released_at IS NULL THEN NULL ELSE '2026-01-01 00:00:00' END
+					WHERE conversation_id = ?`, convID); err != nil {
+					t.Fatalf("collapse claim timestamps: %v", err)
+				}
+			},
 			DisplayStatus: func(t *testing.T, convID string) string {
 				t.Helper()
 				got, err := stores.Conversations.Get(ctx, org, convID)

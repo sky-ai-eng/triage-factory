@@ -292,6 +292,19 @@ const handedBackOutcomesSQL = `'requeued','reaped'`
 //
 // The minted claim is excluded by construction rather than by the CTE snapshot
 // — it has no outcome yet, and both arms require one.
+//
+// "Later than" is spelled against the hand-back's RELEASE, not its claim, and
+// non-strictly. Engagements on one conversation never overlap (the claim is
+// mutually exclusive by idx_claims_one_active), so a claim taken at or after
+// another's release is unambiguously the later one — which makes the
+// comparison independent of how finely the stored timestamps resolve. Spelled
+// the obvious way instead — claimed_at > claimed_at — two claims that landed
+// inside one clock tick would hide the boundary between them and the budget
+// would over-count, and over-counting is the direction that poison-pills a
+// step early. This way a degenerate clock collapses toward finding a boundary,
+// which costs at most one more round of retries. COALESCE covers a released
+// row that somehow carries an outcome without a release timestamp: it degrades
+// to comparing claims rather than silently never matching.
 const episodeAttemptsSQL = `(SELECT COUNT(*) + 1 FROM claims c2
 	WHERE c2.conversation_id = candidate.id
 	  AND c2.outcome IN (` + handedBackOutcomesSQL + `)
@@ -300,7 +313,7 @@ const episodeAttemptsSQL = `(SELECT COUNT(*) + 1 FROM claims c2
 	      WHERE c3.conversation_id = c2.conversation_id
 	        AND c3.outcome IS NOT NULL
 	        AND c3.outcome NOT IN (` + handedBackOutcomesSQL + `)
-	        AND c3.claimed_at > c2.claimed_at))::int`
+	        AND c3.claimed_at >= COALESCE(c2.released_at, c2.claimed_at)))::int`
 
 // runQueueClaimReturning is the outer-SELECT projection of ClaimNextRun. The
 // claim identity (executor/claim id/claimed_at/attempts) rides the same
