@@ -42,22 +42,20 @@ var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
 // counter. Two shapes reach it, and the message names both because a caller
 // cannot tell them apart from the outside:
 //
-//   - the blueprint has moved past this step. A blueprint drives one
-//     conversation at a time — the step it is on — because its steps share one
-//     worktree and one snapshot blob, so once the sequence advances, the tree
-//     an earlier step would resume into is no longer its own. This holds while
-//     the blueprint is still running (a later step is executing in that tree
-//     right now) exactly as it does once the blueprint has stopped; or
+//   - the blueprint has moved past this step. Its steps share one worktree and
+//     one snapshot blob, so the tree an earlier step would resume into is no
+//     longer its own — while the blueprint is still running (a later step is in
+//     that tree right now) exactly as once it has stopped; or
 //   - the blueprint was cancelled at its own layer, so nothing under it runs
 //     again.
 //
 // One sentinel for both because they are the same answer to the only question
 // the caller is asking: this is permanent, and it is about this conversation
-// rather than about timing. It is not a claim that this conversation ended of
-// its own accord — a step that concluded cleanly is exactly the shape that
-// reaches here once the blueprint moves on. A conversation stopped by a user
-// reaches neither — a stop freezes its blueprint 'running' with the pointer on
-// that step, precisely so the parked step stays claimable.
+// rather than about timing. Not a claim that the conversation ended of its own
+// accord — a step that concluded cleanly is exactly what reaches here once the
+// blueprint moves on. A conversation stopped by a user reaches neither: a stop
+// freezes its blueprint 'running' with the pointer on that step, precisely so
+// the parked step stays claimable.
 //
 // Its own sentinel rather than ErrRunNotResumable, because the two say
 // different things to a person. "Not resumable" means the state moved under

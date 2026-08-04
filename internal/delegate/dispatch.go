@@ -883,18 +883,12 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 	if br.Status != domain.BlueprintRunStatusRunning {
 		return // already finalized by a racing cancel/terminate
 	}
-	// A terminal from a step the blueprint is no longer on. Every transition
-	// below reads the sequence's position off THIS conversation, so acting on a
-	// stale one corrupts the blueprint three ways at once: the advance rewrites
-	// current_step_index backwards and enqueues a second copy of the step
-	// already running, and a finish or an abort tears down the worktree the live
-	// step is working in. None of that is recoverable by a later pass, so the
-	// answer is to do nothing and say so.
-	//
-	// The claim gate is the enforcement — an earlier step is not claimable under
-	// any blueprint status — and this is the far-side re-check, the same shape
-	// the claim fence takes everywhere else. It catches what the gate cannot:
-	// an engagement already in flight when the gate narrowed under it.
+	// A terminal from a step the blueprint has moved past. Every transition
+	// below reads the sequence's position off THIS conversation, so a stale one
+	// advances backwards over the live step, re-enqueues it, or terminates the
+	// blueprint out from under it — none of it recoverable by a later pass. The
+	// claim gate refuses such a step; this is the far-side re-check, which
+	// catches an engagement already in flight when it did.
 	if !isCurrentBlueprintStep(br, stepRun.BlueprintStepIndex) {
 		dispatchLog.Error("reactor: terminal from a step the blueprint has moved past; ignoring it (no advance, no enqueue, no transition)",
 			"blueprint_run", br.ID, "run", stepRun.ID, "step", stepRun.BlueprintStepIndex, "current_step", br.CurrentStepIndex, "status", stepRun.Status)

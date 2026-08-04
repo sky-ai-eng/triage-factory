@@ -214,32 +214,24 @@ const eligibleForDrivingSQL = needsDrivingSQL + ` AND ` + curatorNeedsTurnSQL
 // they don't.
 //
 // Otherwise a blueprint drives exactly ONE of its conversations, whatever its
-// status: the one `current_step_index` names. That column is the sequence's
-// position — the step being dispatched right now while the blueprint runs, and
-// the step it came to rest on once it stopped — so a single equality answers
-// both, and one conversation per blueprint is claimable at any instant.
+// status: the one `current_step_index` names — the step being dispatched while
+// it runs, the step it came to rest on once it stopped.
 //
-// One is the ceiling because the workspace is one. Every step of a blueprint
-// shares a worktree and a snapshot blob, both keyed on the blueprint run, so
-// two conversations driven at once means two agents mutating one git tree and
-// whichever concludes last overwriting the other's snapshot. An earlier step
-// would also rehydrate the current step's tree and answer out of somebody
-// else's context. Storage forces the rule; the predicate states it.
+// One is the ceiling because the workspace is one. Every step shares a worktree
+// and a snapshot blob keyed on the blueprint run, so two driven at once means
+// two agents in one git tree and whichever concludes last overwriting the
+// other's snapshot. Storage forces the rule; the predicate states it.
 //
-// Equality alone is enough for every legitimate dispatch because the pointer
-// moves BEFORE the row it names is enqueued (see reactToStepTerminal): a
-// blueprint starts at 0 and enqueues step 0, an advance writes `next` and then
-// enqueues step `next`, and a requeue or retry of the current step leaves the
-// column where it is. Nothing else moves it — no terminal write touches it — so
-// a blueprint that stopped at step N (planned end, early finish, or an abort)
-// leaves it at N, which is exactly the conversation a follow-up must land on.
+// Equality alone admits every legitimate dispatch because the pointer moves
+// BEFORE the row it names is enqueued (see reactToStepTerminal), and nothing
+// else moves it — no terminal write touches it, so a blueprint that stopped at
+// step N leaves it at N, the conversation a follow-up must land on.
 //
 // Sequencing lives on the blueprint_runs row the claim already joins, so this
 // stays a column comparison rather than a correlated scan over sibling
-// conversations. That matters: this is the hot claim scan. A conversation with
-// a NULL step index compares NULL and is not drivable, which is the right
-// answer — a step that never recorded its position cannot prove it is the one
-// holding the workspace. EnqueueRun refuses to mint such a row.
+// conversations. That matters: this is the hot claim scan. A NULL step index
+// compares NULL and is not drivable — a step that never recorded its position
+// cannot prove it holds the workspace, and EnqueueRun refuses to mint one.
 const blueprintDrivableSQL = `(r.blueprint_run_id IS NULL
 	    OR (br.cancel_requested = false AND br.status <> 'cancelled'
 	        AND r.blueprint_step_index = br.current_step_index))`

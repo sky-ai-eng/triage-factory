@@ -597,12 +597,10 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepRunID, userID string) {
 	if cr.Status != domain.BlueprintRunStatusRunning {
 		return
 	}
-	// The same far-side re-check reactToStepTerminal carries, for the same
-	// reason: this path terminates the blueprint, and terminating it on a step
-	// the sequence has moved past would finalize a run whose current step is
-	// still executing — and remove the shared worktree out from under it. The
-	// claim gate refuses an earlier step, so reaching here means an engagement
-	// that was already in flight when it did.
+	// reactToStepTerminal's far-side re-check, on the path a resumed step
+	// finalizes through instead. Same reason it has one: this terminates the
+	// blueprint, and doing that on a step the sequence has moved past kills a
+	// run whose current step is still executing.
 	if !isCurrentBlueprintStep(cr, stepIdx) {
 		blueprintLog.Error("resume finalize: terminal from a step the blueprint has moved past; ignoring it (no transition)",
 			"blueprint_run", cr.ID, "step_run", stepRunID, "step", stepIdx, "current_step", cr.CurrentStepIndex)

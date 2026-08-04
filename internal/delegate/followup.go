@@ -188,14 +188,12 @@ func blueprintDrivableForClaim(br *domain.BlueprintRun, stepIndex *int) bool {
 
 // isCurrentBlueprintStep reports whether stepIndex names the step the blueprint
 // is on — the step being dispatched while it runs, and the step it came to rest
-// on once it stopped. It is the whole of the drivability rule below the cancel
-// check, and it holds under every blueprint status: an earlier step is never
-// resumable, because the blueprint's one workspace has moved past it.
+// on once it stopped. It holds under every blueprint status: an earlier step is
+// never resumable, because the blueprint's one workspace has moved past it.
 //
 // A nil index is not current. It is the Go spelling of the SQL's NULL
-// comparison, and it is the conservative answer for the same reason: a
-// conversation that never recorded its position cannot prove it is the one
-// holding the workspace.
+// comparison, and conservative for the same reason: a conversation that never
+// recorded its position cannot prove it holds the workspace.
 func isCurrentBlueprintStep(br *domain.BlueprintRun, stepIndex *int) bool {
 	return br != nil && stepIndex != nil && *stepIndex == br.CurrentStepIndex
 }
