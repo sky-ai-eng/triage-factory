@@ -129,7 +129,10 @@ const (
 	MessageSubtypeInjectionSteer = "injection:steer"
 	// MessageSubtypeInjectionExecutorChanged marks the claim-time notice
 	// that the workspace was restored from its last snapshot, so work done
-	// during an interrupted engagement may be absent.
+	// during an interrupted engagement may be absent. The restore is what
+	// the row means and what a re-claim dedupes on; whether the notice also
+	// says the executor changed depends on the claims, and the name is the
+	// stored value rather than a summary of the text.
 	MessageSubtypeInjectionExecutorChanged = "injection:executor-changed"
 	// MessageSubtypeInjectionNudge marks a would-stop nudge the loop
 	// inserted on a hook's behalf (the artifact contract, today).

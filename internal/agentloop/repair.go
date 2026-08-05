@@ -16,18 +16,33 @@ const interruptedToolResult = "interrupted: the executor changed and the workspa
 	"this call's result is unknown and its effects may be partially present or absent — " +
 	"verify state before repeating any side-effectful action."
 
-// executorChangedNotice is the claim-time notice inserted when this
-// engagement follows earlier assistant turns. It describes the workspace
-// exactly: snapshots are taken at graceful dormancy points, so everything up
-// to the last park or step boundary survived — including uncommitted and
-// untracked files — and precisely the interrupted engagement's work since
-// that point is absent.
-const executorChangedNotice = "<system-note>\n" +
-	"This run resumed on a different executor. Your workspace was restored from its last snapshot " +
+// workspaceRestoredBody describes a reconstructed workspace exactly:
+// snapshots are taken at graceful dormancy points, so everything up to the
+// last park or step boundary survived — including uncommitted and untracked
+// files — and precisely the interrupted engagement's work since that point is
+// absent.
+const workspaceRestoredBody = "Your workspace was restored from its last snapshot " +
 	"(or built fresh if none existed yet). Everything committed or written up to that snapshot is present, " +
 	"including uncommitted and untracked files. Any changes made after it — during the engagement that was " +
-	"interrupted — are not present. Check the working tree and git log before building on what you remember doing.\n" +
-	"</system-note>"
+	"interrupted — are not present. Check the working tree and git log before building on what you remember doing."
+
+// executorChangedSentence is said only when a predecessor engagement
+// demonstrably ran elsewhere. It is a separate sentence rather than part of
+// the body because it is a separate fact: a workspace can be rebuilt on the
+// executor that parked it (a wiped run root, a startup sweep), and asserting
+// a move that did not happen is the thing this whole notice must not do.
+const executorChangedSentence = "This run resumed on a different executor. "
+
+// workspaceRestoredNotice composes the claim-time notice for an engagement
+// entering a tree that is a reconstruction rather than the one its
+// predecessor left behind.
+func workspaceRestoredNotice(executorChanged bool) string {
+	notice := "<system-note>\n"
+	if executorChanged {
+		notice += executorChangedSentence
+	}
+	return notice + workspaceRestoredBody + "\n</system-note>"
+}
 
 // repairTranscript makes the conversation's transcript legal and honest
 // before this engagement reads it. It runs unconditionally on every claim
@@ -45,7 +60,7 @@ func (e *Engine) repairTranscript(ctx context.Context, params Params) error {
 	if err := e.repairDanglingToolCalls(ctx, params, rows); err != nil {
 		return err
 	}
-	return e.noticeExecutorChanged(ctx, params, rows)
+	return e.noticeWorkspaceRestored(ctx, params, rows)
 }
 
 // repairDanglingToolCalls answers every tool call that has no persisted
@@ -99,14 +114,26 @@ func (e *Engine) repairDanglingToolCalls(ctx context.Context, params Params, row
 	return nil
 }
 
-// noticeExecutorChanged queues the workspace-restored notice when this
-// conversation has already done work under an earlier claim.
+// noticeWorkspaceRestored queues the workspace-restored notice when this
+// engagement entered a rebuilt tree and the conversation has already done work
+// under an earlier claim.
 //
-// Gated on prior assistant rows existing, which is what keeps a
-// credential-parking retry or a requeue-before-start silent: those re-claims
-// changed nothing about the workspace the model has seen, so a notice would
-// be noise the model has to reason about.
-func (e *Engine) noticeExecutorChanged(ctx context.Context, params Params, rows []domain.Message) error {
+// Both gates say the same thing from opposite ends — there is work the model
+// remembers doing, and the tree it did that work in is gone. Drop either and
+// the notice is false. A warm resume keeps it silent because nothing was lost:
+// the interrupted engagement's changes are right there, and the only genuine
+// unknown, an interrupted call's effects, is already answered in-band by the
+// dangling-call repair above. The prior-work gate keeps a credential-parking
+// retry or a requeue-before-start silent for the same reason — there is
+// nothing the model remembers to be wrong about.
+//
+// Telling an agent its intact workspace was restored costs a verification
+// pass it did not need, and teaches it that system notes are worth
+// second-guessing. That is the more expensive of the two errors, by far.
+func (e *Engine) noticeWorkspaceRestored(ctx context.Context, params Params, rows []domain.Message) error {
+	if !params.Workspace.Restored() {
+		return nil
+	}
 	priorWork := false
 	for _, r := range rows {
 		if r.Role == "assistant" {
@@ -124,7 +151,7 @@ func (e *Engine) noticeExecutorChanged(ctx context.Context, params Params, rows 
 			return nil
 		}
 	}
-	return e.insertPending(ctx, params, executorChangedNotice, domain.MessageSubtypeInjectionExecutorChanged)
+	return e.insertPending(ctx, params, workspaceRestoredNotice(params.ExecutorChanged), domain.MessageSubtypeInjectionExecutorChanged)
 }
 
 // isDelivered mirrors the schema default: nil means delivered, only an

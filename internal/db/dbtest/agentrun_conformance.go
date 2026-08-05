@@ -1790,6 +1790,75 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
+	// The read behind the resume notice's executor sentence: from the claim an
+	// engagement holds, name the executor that ran the one before it. Ordering
+	// is the whole contract — the answer must be the immediate predecessor, not
+	// just some earlier claim — so it is asserted across three engagements
+	// rather than two.
+	t.Run("PriorClaimExecutorSystem_NamesTheImmediatePredecessor", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedConversationForTest(t, orgID, seed, "running")
+
+		mint := func(t *testing.T, executorID string, epoch int64) {
+			t.Helper()
+			// The empty stamp releases the active claim; without it the next
+			// mint would update in place instead of starting an engagement.
+			if err := store.SetExecutorSystem(ctx, orgID, runID, "", 0); err != nil {
+				t.Fatalf("release before minting %s: %v", executorID, err)
+			}
+			if err := store.SetExecutorSystem(ctx, orgID, runID, executorID, epoch); err != nil {
+				t.Fatalf("SetExecutorSystem %s: %v", executorID, err)
+			}
+		}
+		prior := func(t *testing.T, claimID string) string {
+			t.Helper()
+			got, err := store.PriorClaimExecutorSystem(ctx, orgID, runID, claimID)
+			if err != nil {
+				t.Fatalf("PriorClaimExecutorSystem: %v", err)
+			}
+			return got
+		}
+
+		if err := store.SetExecutorSystem(ctx, orgID, runID, "exec-1", 1); err != nil {
+			t.Fatalf("SetExecutorSystem exec-1: %v", err)
+		}
+		claims := seed.ClaimRows(t, runID)
+		if len(claims) != 1 {
+			t.Fatalf("claims = %+v, want 1", claims)
+		}
+		// A conversation's first engagement has no predecessor, and that is a
+		// value rather than an error — the caller asks on every claim.
+		if got := prior(t, claims[0].ID); got != "" {
+			t.Errorf("prior executor of the first claim = %q, want empty", got)
+		}
+
+		mint(t, "exec-2", 2)
+		claims = seed.ClaimRows(t, runID)
+		if len(claims) != 2 {
+			t.Fatalf("claims = %+v, want 2", claims)
+		}
+		if got := prior(t, claims[1].ID); got != "exec-1" {
+			t.Errorf("prior executor of the second claim = %q, want exec-1", got)
+		}
+
+		mint(t, "exec-3", 3)
+		claims = seed.ClaimRows(t, runID)
+		if len(claims) != 3 {
+			t.Fatalf("claims = %+v, want 3", claims)
+		}
+		if got := prior(t, claims[2].ID); got != "exec-2" {
+			t.Errorf("prior executor of the third claim = %q, want exec-2 (the immediate predecessor)", got)
+		}
+
+		// A conversation with no claims at all answers empty, not an error.
+		bare := seedConversationForTest(t, orgID, seed, "queued")
+		got, err := store.PriorClaimExecutorSystem(ctx, orgID, bare, claims[2].ID)
+		if err != nil || got != "" {
+			t.Errorf("PriorClaimExecutorSystem on an unclaimed conversation = %q, %v; want empty and no error", got, err)
+		}
+	})
+
 	t.Run("ListForTask_OrderedByStartedAtDesc", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

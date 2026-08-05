@@ -493,6 +493,27 @@ func (s *agentRunStore) SetClaimPhaseSystem(ctx context.Context, orgID, conversa
 	})
 }
 
+// PriorClaimExecutorSystem reads the predecessor engagement's executor.
+//
+// The caller's own claim is excluded by id rather than by liveness: it is the
+// newest row by construction (one active claim per conversation), and keying
+// on the id the caller actually holds means a fenced-out caller reads the
+// claim before its own, not itself. The id comparison is on text so a
+// malformed id is simply no match, the same answer as a missing row.
+func (s *agentRunStore) PriorClaimExecutorSystem(ctx context.Context, orgID, conversationID, claimID string) (string, error) {
+	var executorID string
+	err := s.admin.QueryRowContext(ctx, `
+		SELECT executor_id FROM claims
+		WHERE org_id = $1 AND conversation_id = $2 AND id::text <> $3
+		ORDER BY claimed_at DESC, created_at DESC
+		LIMIT 1
+	`, orgID, conversationID, claimID).Scan(&executorID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return executorID, err
+}
+
 // RecordClaimSandboxStatsSystem is keyed on the claim id alone (org bound as
 // defense in depth) with NO released_at predicate — the teardown that
 // measures these numbers runs after the claim is released.

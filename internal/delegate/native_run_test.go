@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -191,5 +192,98 @@ func TestMintOpeningTurn_QueuesThePendingInputShape(t *testing.T) {
 	}
 	if got := pendingRows(t, s, "r-open-turn"); len(got) != 1 {
 		t.Errorf("undelivered rows after a re-claim = %d, want 1 — the opening must not double", len(got))
+	}
+}
+
+// TestExecutorChangedSince pins the one claim in the resume notice that
+// neither the transcript nor the tree on disk can establish: that the
+// engagement before this one ran somewhere else.
+//
+// The read is deliberately skipped on a warm workspace, where nothing is said
+// at all — a query whose answer cannot change the outcome is a query the
+// common resume should not pay for.
+func TestExecutorChangedSince(t *testing.T) {
+	const org = runmode.LocalDefaultOrgID
+	ctx := context.Background()
+
+	// Stages a conversation whose live claim belongs to self, preceded by a
+	// released claim on predecessor (skipped when empty — a first claim).
+	setup := func(t *testing.T, runID, predecessor, self string) (*Spawner, string) {
+		t.Helper()
+		database := newDelegateTestDB(t)
+		seedRun(t, database, runID, "sess", "/tmp/wt-"+runID)
+		s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+		if predecessor != "" {
+			s.SetExecutorID(predecessor, 1)
+			s.stampExecutor(org, runID)
+			if err := s.agentRuns.SetExecutorSystem(ctx, org, runID, "", 0); err != nil {
+				t.Fatalf("release the predecessor's claim: %v", err)
+			}
+		}
+		s.SetExecutorID(self, 2)
+		s.stampExecutor(org, runID)
+		var claimID string
+		if err := database.QueryRow(
+			`SELECT id FROM claims WHERE conversation_id = ? AND released_at IS NULL`, runID,
+		).Scan(&claimID); err != nil {
+			t.Fatalf("read the live claim: %v", err)
+		}
+		return s, claimID
+	}
+
+	tests := []struct {
+		name        string
+		predecessor string
+		prov        domain.WorkspaceProvenance
+		want        bool
+	}{
+		{
+			name:        "a rebuild after a predecessor elsewhere",
+			predecessor: "exec-other",
+			prov:        domain.WorkspaceProvenanceRehydrated,
+			want:        true,
+		},
+		{
+			// A wiped run root or a startup sweep: the tree is gone, the
+			// executor never moved.
+			name:        "a rebuild on the executor that parked it",
+			predecessor: "exec-self",
+			prov:        domain.WorkspaceProvenanceRehydrated,
+		},
+		{
+			name: "a first claim has no predecessor to differ from",
+			prov: domain.WorkspaceProvenanceFresh,
+		},
+		{
+			// Nothing is said about a warm tree, so nothing is asked.
+			name:        "a warm resume, predecessor elsewhere or not",
+			predecessor: "exec-other",
+			prov:        domain.WorkspaceProvenanceWarm,
+		},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runID := fmt.Sprintf("r-exec-changed-%d", i)
+			s, claimID := setup(t, runID, tc.predecessor, "exec-self")
+			if got := s.executorChangedSince(ctx, org, runID, claimID, tc.prov); got != tc.want {
+				t.Errorf("executorChangedSince = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExecutorChangedSince_UnwiredIdentityStaysSilent: a spawner with no
+// resolved instance id cannot tell its own claims from anyone else's, and a
+// notice must never assert a move on the strength of a comparison against
+// nothing.
+func TestExecutorChangedSince_UnwiredIdentityStaysSilent(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedRun(t, database, "r-exec-unwired", "sess", "/tmp/wt-unwired")
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+	if err := s.agentRuns.SetExecutorSystem(context.Background(), runmode.LocalDefaultOrgID, "r-exec-unwired", "exec-other", 1); err != nil {
+		t.Fatalf("mint the predecessor's claim: %v", err)
+	}
+	if s.executorChangedSince(context.Background(), runmode.LocalDefaultOrgID, "r-exec-unwired", "some-claim", domain.WorkspaceProvenanceRehydrated) {
+		t.Error("an unwired spawner claimed the executor changed; it has no identity to compare against")
 	}
 }

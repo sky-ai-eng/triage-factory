@@ -305,6 +305,31 @@ func (s *agentRunStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID, ru
 	return err
 }
 
+// PriorClaimExecutorSystem reads the predecessor engagement's executor. The
+// caller's own claim is excluded by id — it is the newest row by construction
+// (one active claim per conversation), so the predecessor is the next one back.
+//
+// rowid breaks a claimed_at tie: CURRENT_TIMESTAMP resolves to whole seconds
+// here, so two claims minted in the same second are otherwise unordered. The
+// answer is the same either way at N=1 (one executor), but the ordering is
+// part of the contract both dialects are held to.
+func (s *agentRunStore) PriorClaimExecutorSystem(ctx context.Context, orgID, conversationID, claimID string) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	var executorID string
+	err := s.q.QueryRowContext(ctx, `
+		SELECT executor_id FROM claims
+		WHERE conversation_id = ? AND id <> ?
+		ORDER BY claimed_at DESC, rowid DESC
+		LIMIT 1
+	`, conversationID, claimID).Scan(&executorID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return executorID, err
+}
+
 // RecordClaimSandboxStatsSystem is keyed on the claim id alone, with NO
 // released_at predicate — the teardown that measures these numbers runs
 // after the claim is released.

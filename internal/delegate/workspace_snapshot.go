@@ -211,30 +211,36 @@ func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID s
 }
 
 // ensureWorkspace guarantees the run's worktree exists on disk before a resume
-// re-invokes the agent, returning the cwd to resume in. Warm path: the parked
-// worktree survived on disk (the dormancy guards kept it) → return it as-is,
-// rehydrate is a no-op. Cold path: it's gone (host loss, /tmp wipe, or a
-// startup sweep) → rebuild it from the durable snapshot and return the rebuilt
-// path. owner/repo/cloneURL locate (and, on a fresh host only, seed) the bare
-// the git delta replays onto; they're empty/unused for a non-git run-root.
-func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain.Conversation, owner, repo, cloneURL string) (string, error) {
+// re-invokes the agent, returning the cwd to resume in and how that tree came
+// to be. Warm path: the parked worktree survived on disk (the dormancy guards
+// kept it) → return it as-is, rehydrate is a no-op. Cold path: it's gone (host
+// loss, /tmp wipe, or a startup sweep) → rebuild it from the durable snapshot
+// and return the rebuilt path. owner/repo/cloneURL locate (and, on a fresh host
+// only, seed) the bare the git delta replays onto; they're empty/unused for a
+// non-git run-root.
+//
+// The provenance is returned rather than inferred downstream because this is
+// the only frame that knows it: past here a warm tree and a reconstruction of
+// one are the same directory, and what the agent is told about its own prior
+// work turns on the difference.
+func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain.Conversation, owner, repo, cloneURL string) (string, domain.WorkspaceProvenance, error) {
 	if run.WorktreePath != "" {
 		if _, err := os.Stat(run.WorktreePath); err == nil {
-			return run.WorktreePath, nil // warm: worktree still on disk
+			return run.WorktreePath, domain.WorkspaceProvenanceWarm, nil // warm: worktree still on disk
 		}
 	}
 
 	blobs := s.Storage()
 	if blobs == nil {
-		return "", fmt.Errorf("worktree %q missing and no blob store to rehydrate from", run.WorktreePath)
+		return "", "", fmt.Errorf("worktree %q missing and no blob store to rehydrate from", run.WorktreePath)
 	}
 	keyID := memoryNamespace(run.BlueprintRunID, run.ID)
 	rc, err := blobs.Get(ctx, snapshotKey(orgID, keyID))
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			return "", fmt.Errorf("worktree %q missing and no snapshot for %s to rehydrate from", run.WorktreePath, keyID)
+			return "", "", fmt.Errorf("worktree %q missing and no snapshot for %s to rehydrate from", run.WorktreePath, keyID)
 		}
-		return "", fmt.Errorf("rehydrate: get snapshot: %w", err)
+		return "", "", fmt.Errorf("rehydrate: get snapshot: %w", err)
 	}
 	defer func() { _ = rc.Close() }()
 
@@ -242,7 +248,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 	// run.WorktreePath on the same host; a fresh path after landing elsewhere).
 	wtDir := worktree.RunRoot(keyID)
 	if err := s.rehydrateFromSnapshot(ctx, orgID, owner, repo, cloneURL, wtDir, rc); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if wtDir != run.WorktreePath {
 		// Point the run (and the cleanup paths that key off it) at the rebuilt
@@ -255,7 +261,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 			delegateLog.Warn("rehydrate: persist new worktree_path failed; stale path will force a repeat cold rehydrate on the next resume", "worktree_path", wtDir, "run", run.ID, "error", err)
 		}
 	}
-	return wtDir, nil
+	return wtDir, domain.WorkspaceProvenanceRehydrated, nil
 }
 
 // rehydrateFromSnapshot unpacks a snapshot blob and reconstructs the worktree

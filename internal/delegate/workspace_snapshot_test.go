@@ -46,9 +46,12 @@ func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
 	writeFile(t, marker, "warm")
 
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
-	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
+	got, prov, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (warm): %v", err)
+	}
+	if prov != domain.WorkspaceProvenanceWarm {
+		t.Errorf("warm provenance = %q, want warm — a reused tree must not be reported as a restore", prov)
 	}
 	if got != wtPath {
 		t.Errorf("warm cwd = %q, want the on-disk worktree %q", got, wtPath)
@@ -113,9 +116,12 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	gitT(t, bareDir, "branch", "-D", "feature")
 
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
-	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
+	got, prov, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
+	}
+	if prov != domain.WorkspaceProvenanceRehydrated {
+		t.Errorf("cold provenance = %q, want rehydrated", prov)
 	}
 	if got != wtPath {
 		t.Errorf("rehydrated cwd = %q, want %q", got, wtPath)
@@ -165,7 +171,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptBearingSnapshotIsResumable(t *testin
 	}
 
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID, SessionID: sessionID}
-	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "", "", "")
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "", "", "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
@@ -200,7 +206,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable(t *testin
 	}
 
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID, SessionID: sessionID}
-	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "", "", "")
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "", "", "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
@@ -288,7 +294,7 @@ func TestEnsureWorkspace_ColdPath_CorruptGzipChecksumErrors(t *testing.T) {
 	// Cold path: the warm worktree is absent, so the resume can only come from
 	// the (now corrupt) blob — which must surface as an error.
 	run := &domain.Conversation{ID: runID, WorktreePath: filepath.Join(t.TempDir(), "gone"), BlueprintRunID: runID}
-	if _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "", "", ""); err == nil {
+	if _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "", "", ""); err == nil {
 		t.Fatal("ensureWorkspace accepted a snapshot with a corrupted gzip checksum; want an integrity error")
 	}
 }
@@ -375,7 +381,7 @@ func TestEnsureWorkspace_ColdPath_DetachedHead(t *testing.T) {
 	gitT(t, bareDir, "branch", "-D", "feature")
 
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
-	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (detached): %v", err)
 	}
@@ -424,7 +430,7 @@ func TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits(t *testing.T) {
 	gitT(t, bareDir, "branch", "-D", "feature")
 
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
-	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (never-pushed branch): %v", err)
 	}
@@ -446,7 +452,7 @@ func TestEnsureWorkspace_ColdPath_NoSnapshotErrors(t *testing.T) {
 	s := newStorageSpawner(t)
 
 	run := &domain.Conversation{ID: "wt-missing", WorktreePath: filepath.Join(t.TempDir(), "gone")}
-	if _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "o", "r", ""); err == nil {
+	if _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "o", "r", ""); err == nil {
 		t.Fatal("ensureWorkspace should error when neither the worktree nor a snapshot exists")
 	}
 }

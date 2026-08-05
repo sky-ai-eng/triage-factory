@@ -138,41 +138,120 @@ func TestRun_RepairAnswersUnansweredToolCallsWithoutRedispatch(t *testing.T) {
 	}
 }
 
-func TestRun_ExecutorChangedNoticeGatedOnPriorAssistantWork(t *testing.T) {
-	t.Run("prior work queues the notice", func(t *testing.T) {
-		tr := newMemTranscript(
+// TestRun_WorkspaceRestoredNoticeIsProvenanceDriven pins what the loop is
+// allowed to tell an agent about the tree it woke up in. The notice describes
+// a loss — work the model remembers doing that is not on disk — so it may only
+// be said when a loss actually happened, and its executor sentence only when
+// an executor actually changed. A resume onto the warm tree, on the executor
+// that parked it, is the common case and must be silent.
+func TestRun_WorkspaceRestoredNoticeIsProvenanceDriven(t *testing.T) {
+	priorWork := func() *memTranscript {
+		return newMemTranscript(
 			domain.Message{ConversationID: "conv", Role: "user", Content: "go"},
 			domain.Message{ConversationID: "conv", Role: "assistant", Content: "working"},
 		)
-		p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
-		e := newTestEngine(tr, p, newScriptedToolHost())
-		if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
-			t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
-		}
-		notice := tr.find(func(m domain.Message) bool {
+	}
+	findNotice := func(tr *memTranscript) *domain.Message {
+		return tr.find(func(m domain.Message) bool {
 			return m.Subtype == domain.MessageSubtypeInjectionExecutorChanged
 		})
-		if notice == nil {
-			t.Fatal("a conversation with prior assistant work must be told the workspace was restored")
+	}
+	run := func(t *testing.T, tr *memTranscript, params Params) {
+		t.Helper()
+		p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
+		if got := newTestEngine(tr, p, newScriptedToolHost()).Run(context.Background(), params); got.Kind != ResultConcluded {
+			t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
 		}
-		if !strings.Contains(notice.Content, "restored from its last snapshot") {
-			t.Errorf("the notice must describe the snapshot boundary: %q", notice.Content)
+	}
+
+	t.Run("a warm resume says nothing at all", func(t *testing.T) {
+		tr := priorWork()
+		run(t, tr, workspaceParams(domain.WorkspaceProvenanceWarm, false))
+		if n := findNotice(tr); n != nil {
+			t.Fatalf("the interrupted engagement's work is right there; a warm resume must not claim otherwise: %+v", n)
+		}
+	})
+
+	t.Run("a rebuilt workspace states the restore without claiming a move", func(t *testing.T) {
+		tr := priorWork()
+		run(t, tr, workspaceParams(domain.WorkspaceProvenanceRehydrated, false))
+		n := findNotice(tr)
+		if n == nil {
+			t.Fatal("work the model remembers is not on this tree; it has to be told")
+		}
+		if !strings.Contains(n.Content, "restored from its last snapshot") {
+			t.Errorf("the notice must describe the snapshot boundary: %q", n.Content)
+		}
+		if strings.Contains(n.Content, "different executor") {
+			t.Errorf("a rebuild on the same executor must not claim the run moved: %q", n.Content)
+		}
+	})
+
+	t.Run("a genuine executor change earns the sentence", func(t *testing.T) {
+		tr := priorWork()
+		run(t, tr, workspaceParams(domain.WorkspaceProvenanceRehydrated, true))
+		n := findNotice(tr)
+		if n == nil || !strings.Contains(n.Content, "different executor") {
+			t.Fatalf("a predecessor on another executor must be stated: %+v", n)
+		}
+		if !strings.Contains(n.Content, "restored from its last snapshot") {
+			t.Errorf("the executor sentence adds to the restore, it does not replace it: %q", n.Content)
+		}
+	})
+
+	t.Run("a freshly built workspace is a restore too", func(t *testing.T) {
+		tr := priorWork()
+		run(t, tr, workspaceParams(domain.WorkspaceProvenanceFresh, false))
+		if findNotice(tr) == nil {
+			t.Fatal("a tree built from scratch carries none of the remembered work either")
 		}
 	})
 
 	t.Run("a re-claim before any work stays silent", func(t *testing.T) {
 		tr := newMemTranscript(pendingUser("go"))
-		p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
-		e := newTestEngine(tr, p, newScriptedToolHost())
-		if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
-			t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
-		}
-		if n := tr.find(func(m domain.Message) bool {
-			return m.Subtype == domain.MessageSubtypeInjectionExecutorChanged
-		}); n != nil {
+		run(t, tr, workspaceParams(domain.WorkspaceProvenanceRehydrated, true))
+		if n := findNotice(tr); n != nil {
 			t.Fatalf("a credential-parking / requeue-before-start re-claim must stay silent: %+v", n)
 		}
 	})
+
+	t.Run("an unclassified workspace is not asserted to have been restored", func(t *testing.T) {
+		tr := priorWork()
+		run(t, tr, testParams())
+		if n := findNotice(tr); n != nil {
+			t.Fatalf("a caller that never restores a workspace must not have one claimed for it: %+v", n)
+		}
+	})
+}
+
+// TestRun_WorkspaceRestoredNoticeDoesNotStack: a claim that queued the notice
+// and died before the model ever read it must not leave a second copy behind.
+func TestRun_WorkspaceRestoredNoticeDoesNotStack(t *testing.T) {
+	pending := false
+	tr := newMemTranscript(
+		domain.Message{ConversationID: "conv", Role: "user", Content: "go"},
+		domain.Message{ConversationID: "conv", Role: "assistant", Content: "working"},
+		domain.Message{
+			ConversationID: "conv", Role: "user",
+			Subtype:   domain.MessageSubtypeInjectionExecutorChanged,
+			Content:   workspaceRestoredNotice(false),
+			Delivered: &pending,
+		},
+	)
+	p := &scriptedProvider{turns: []scriptedTurn{{text: "done"}}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+	if got := e.Run(context.Background(), workspaceParams(domain.WorkspaceProvenanceRehydrated, false)); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+	}
+	var notices int
+	for _, r := range tr.snapshot() {
+		if r.Subtype == domain.MessageSubtypeInjectionExecutorChanged {
+			notices++
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("workspace-restored notices = %d, want the undelivered one already queued and no second", notices)
+	}
 }
 
 func TestRun_RepairIsIdempotentAcrossClaims(t *testing.T) {
@@ -180,11 +259,12 @@ func TestRun_RepairIsIdempotentAcrossClaims(t *testing.T) {
 		domain.Message{ConversationID: "conv", Role: "user", Content: "go"},
 		domain.Message{ConversationID: "conv", Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "c1", Name: "bash"}}},
 	)
-	// Two engagements back to back, as a crash-then-reclaim produces.
+	// Two engagements back to back, as a crash-then-reclaim produces, each
+	// landing on a rebuilt tree so both halves of the repair pass run.
 	for i, text := range []string{"first", "second"} {
 		p := &scriptedProvider{turns: []scriptedTurn{{text: text}}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
-		if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		if got := e.Run(context.Background(), workspaceParams(domain.WorkspaceProvenanceRehydrated, false)); got.Kind != ResultConcluded {
 			t.Fatalf("engagement %d: disposition = %v (err: %v)", i, got.Kind, got.Err)
 		}
 	}

@@ -257,7 +257,7 @@ func TestRehydrate_RestoredTreeCarriesTheMemorySymlink(t *testing.T) {
 
 	runmode.SetForTest(t, runmode.ModeMulti)
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
-	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
