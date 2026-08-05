@@ -909,20 +909,25 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("second flip on a queued row succeeded; want refused (CAS loser)")
 		}
 
-		// completed → ok, whatever the outcome. The agent stopping mid-work and
-		// the agent finishing are both states a person can follow up on, and
-		// both left a workspace behind to follow up in.
-		abortRun := seedConversationForTest(t, orgID, seed, "running")
+		// completed → ok, whatever the outcome, once the blueprint that owned
+		// the step has stopped. The agent stopping mid-work and the agent
+		// finishing are both states a person can follow up on, and both left a
+		// workspace behind to follow up in. Settling the blueprint first is the
+		// order the reactor writes in; the window between the two writes is the
+		// subtest below.
+		abortRun, abortBR := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
 		if err := store.Complete(ctx, orgID, abortRun, "completed", 0, 0, 0, "", "stopped", "abort", "needs a human", ""); err != nil {
 			t.Fatalf("complete+abort: %v", err)
 		}
+		seed.SetBlueprintRunStatus(t, abortBR, "aborted")
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, abortRun); err != nil || !ok {
 			t.Errorf("from completed+abort: ok=%v err=%v, want true", ok, err)
 		}
-		finishRun := seedConversationForTest(t, orgID, seed, "running")
+		finishRun, finishBR := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
 		if err := store.Complete(ctx, orgID, finishRun, "completed", 0, 0, 0, "", "shipped", "finish", "", ""); err != nil {
 			t.Fatalf("complete+finish: %v", err)
 		}
+		seed.SetBlueprintRunStatus(t, finishBR, "completed")
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, finishRun); err != nil || !ok {
 			t.Errorf("from completed+finish: ok=%v err=%v, want true — a follow-up on concluded work", ok, err)
 		}
@@ -935,6 +940,53 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if ok, _ := store.MarkQueuedForResume(ctx, orgID, failedRun); ok {
 			t.Errorf("from failed succeeded; want refused")
+		}
+	})
+
+	// The window between a step's terminal write and its blueprint reacting to
+	// it, where the conversation reads `completed` to every status-only gate and
+	// only a statement that also reads the parent can tell the difference.
+	t.Run("MarkQueuedForResume_RefusesAConcludedStepOfARunningBlueprint", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		runID, brID := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
+		if err := store.Complete(ctx, orgID, runID, "completed", 0, 0, 0, "", "handed off", "continue", "", ""); err != nil {
+			t.Fatalf("complete step: %v", err)
+		}
+		// The blueprint has not reacted yet — exactly the live failure.
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, runID); err != nil || ok {
+			t.Fatalf("mid-handoff: ok=%v err=%v, want false/nil — the reactor still has to read this terminal", ok, err)
+		}
+		got, err := store.GetSystem(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("get after refused flip: %v", err)
+		}
+		if got.Status != "completed" {
+			t.Errorf("status = %q, want completed — a refused CAS writes nothing", got.Status)
+		}
+
+		// Once the sequence stops, the same call lands: the step it came to
+		// rest on is the follow-up's home.
+		seed.SetBlueprintRunStatus(t, brID, "completed")
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, runID); err != nil || !ok {
+			t.Fatalf("after the blueprint settled: ok=%v err=%v, want true", ok, err)
+		}
+	})
+
+	// Why the guard is spelled per-arm rather than over the whole statement: a
+	// PARKED step of a running blueprint is a paused step, not a concluded one,
+	// so the `open` arm stays unconditional.
+	t.Run("MarkQueuedForResume_WakesAParkedStepOfARunningBlueprint", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		runID, _ := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
+		if ok, err := store.ParkOpen(ctx, orgID, runID, db.ParkStopped("manual", "")); err != nil || !ok {
+			t.Fatalf("park: ok=%v err=%v", ok, err)
+		}
+		if ok, err := store.MarkQueuedForResume(ctx, orgID, runID); err != nil || !ok {
+			t.Fatalf("stop→resume under a running blueprint: ok=%v err=%v, want true", ok, err)
 		}
 	})
 
@@ -1949,10 +2001,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 
 		// Active event-trigger run → resolves to its run ID.
+		eventBR := seed.BlueprintRun(t, taskID)
 		eventRunID := seed.Run(t, domain.Conversation{
 			TaskID: taskID, PromptID: agentRunTestPrompt(t),
 			Status: "running", Model: "m", TriggerType: "event",
-			BlueprintRunID: seed.BlueprintRun(t, taskID),
+			BlueprintRunID: eventBR,
 		})
 		if id, err := store.ActiveAutoRunIDForTaskSystem(ctx, orgID, taskID); err != nil || id != eventRunID {
 			t.Errorf("ActiveAutoRunIDForTaskSystem = %q err=%v, want %q", id, err, eventRunID)
@@ -1973,6 +2026,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", "", "finish", "", ""); err != nil {
 			t.Fatalf("conclude before resume: %v", err)
 		}
+		// The blueprint settles first: a resume fixture that skipped this would
+		// be staging a state the CAS refuses.
+		seed.SetBlueprintRunStatus(t, eventBR, "completed")
 		if flipped, err := store.MarkQueuedForResume(ctx, orgID, eventRunID); err != nil || !flipped {
 			t.Fatalf("MarkQueuedForResume: ok=%v err=%v", flipped, err)
 		}
@@ -3226,6 +3282,22 @@ func seedConversationForTest(t *testing.T, orgID string, seed ConversationSeeder
 	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 	return seedConversationForTaskTest(t, orgID, taskID, status, seed)
+}
+
+// seedConversationWithBlueprintForTest is seedConversationForTest plus the
+// blueprint_run id it minted (running, like a real firing), for subtests whose
+// subject is the parent's state rather than the conversation's.
+func seedConversationWithBlueprintForTest(t *testing.T, orgID string, seed ConversationSeeder, status string) (runID, blueprintRunID string) {
+	t.Helper()
+	_ = orgID
+	ent := seed.Entity(t, "seed-bp-"+status+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+	brID := seed.BlueprintRun(t, taskID)
+	return seed.Run(t, domain.Conversation{
+		TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: status, Model: "m",
+		BlueprintRunID: brID,
+	}), brID
 }
 
 // seedConversationForTaskTest creates a run on an existing task, used

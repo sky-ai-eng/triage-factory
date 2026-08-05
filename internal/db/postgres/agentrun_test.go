@@ -736,3 +736,105 @@ func seedPgConversationPromptIn(t *testing.T, h *pgtest.Harness, id, orgID, user
 		t.Fatalf("seed prompt %s: %v", id, err)
 	}
 }
+
+// TestConversationStore_Postgres_HandOffGuardHoldsForANonCreator puts the
+// hand-off guard under the pool it actually runs on, as the principal it is
+// most likely to be wrong for.
+//
+// blueprint_runs_select is creator-scoped for manual runs, so a teammate who
+// may legitimately update a team-visible conversation sees NO row for its
+// blueprint. Written as a correlated subquery, the guard reads that emptiness
+// as "no blueprint is running" and lets the flip through — reopening the
+// window for everyone except the person who started the sequence, which is
+// the shape a conformance suite wired to the admin pool cannot see.
+//
+// Both directions are asserted, because a guard that refuses everyone would
+// pass the first half and silently break teammate follow-up.
+func TestConversationStore_Postgres_HandOffGuardHoldsForANonCreator(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, creator, teamID := pgtest.SeedOrgWithUser(t, h, "creator")
+	teammate := seedPgMember(t, h, orgID, "teammate", "member")
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, teammate, teamID)
+	seedPgConversationPromptIn(t, h, "p_handoff_rls", orgID, creator)
+
+	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Handoff RLS', '', '{}'::jsonb, now())
+	`, entityID, orgID, "handoff-"+orgID[:8])
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, 'github:pr:ci_check_failed', '', '{}'::jsonb, now())
+	`, eventID, orgID, entityID)
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key,
+		                   primary_event_id, status, scoring_status, priority_score)
+		VALUES ($1, $2, $3, $4, 'team', $5, 'github:pr:ci_check_failed', '', $6, 'queued', 'pending', 0.5)
+	`, taskID, orgID, creator, teamID, entityID, eventID)
+
+	// The creator's manual blueprint, still running, and its concluded step:
+	// the hand-off window, exactly as the reactor would find it.
+	brID := seedPgBlueprintRun(t, h, orgID, creator, taskID)
+	stepIdx := 0
+	convID := seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
+		TaskID: taskID, PromptID: "p_handoff_rls", Status: "completed", Model: "m",
+		TriggerType: "manual", CreatorUserID: creator,
+		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
+	})
+
+	// The precondition this test rests on: the teammate genuinely cannot see
+	// the blueprint row. Without it the assertions below would pass for the
+	// wrong reason.
+	if err := h.WithUser(t, teammate, orgID, func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM blueprint_runs WHERE id = $1`, brID).Scan(&n); err != nil {
+			return err
+		}
+		if n != 0 {
+			t.Errorf("the teammate can see %d blueprint_runs rows; this test needs the creator-scoped policy to hide it", n)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read blueprint_runs as the teammate: %v", err)
+	}
+
+	// The wake, as the teammate, in the window. Refused — the guard reads the
+	// blueprint's state whoever is asking.
+	var flipped bool
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, teammate, func(tx db.TxStores) error {
+		f, mErr := tx.Conversations.MarkQueuedForResume(ctx, orgID, convID)
+		flipped = f
+		return mErr
+	}); err != nil {
+		t.Fatalf("MarkQueuedForResume as a non-creator: %v", err)
+	}
+	if flipped {
+		t.Error("a non-creator's wake flipped a concluded step of a running blueprint; the guard fell open on a row RLS hides")
+	}
+	var status string
+	if err := h.AdminDB.QueryRow(`SELECT status FROM conversations WHERE id = $1`, convID).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+	if status != "completed" {
+		t.Errorf("status = %q, want completed — a refused CAS writes nothing", status)
+	}
+
+	// Once the blueprint stops, the same teammate's follow-up lands. The guard
+	// is about the sequence's state, never about who can see it.
+	pgtest.MustExec(t, h.AdminDB, `UPDATE blueprint_runs SET status = 'completed' WHERE id = $1`, brID)
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, teammate, func(tx db.TxStores) error {
+		f, mErr := tx.Conversations.MarkQueuedForResume(ctx, orgID, convID)
+		flipped = f
+		return mErr
+	}); err != nil {
+		t.Fatalf("MarkQueuedForResume after the blueprint settled: %v", err)
+	}
+	if !flipped {
+		t.Error("the teammate's follow-up was refused after the blueprint finished; the guard must not fail closed on an invisible row")
+	}
+}

@@ -66,6 +66,10 @@ const (
 	// drive it: the blueprint has moved past this step (a later one is running,
 	// or it came to rest on one), or it was cancelled.
 	ResumeBlockedBlueprintConcluded = "blueprint_concluded"
+	// ResumeBlockedStepHandedOff — the step concluded and its blueprint has
+	// not reacted yet. The one rung about TIMING rather than about the
+	// conversation: a beat later the answer changes.
+	ResumeBlockedStepHandedOff = "step_handed_off"
 )
 
 // resumableState reports whether a run with no warm process can be woken by a
@@ -125,15 +129,17 @@ func injectionWillFlush(status, outcome string) bool {
 	}
 }
 
-// blueprintDrivableForResume is the other half of "resumable": the run's state
-// says a message COULD continue it, and this says anything would actually pick
-// it up. Waking a run nothing will claim strands it mid-flight — claimed by
-// nobody, counted as queue depth by every counter, forever — so this refuses
-// first rather than letting the flip land.
+// blueprintFollowUpBlock is the other half of "resumable": the run's own state
+// says a message COULD continue it, and this asks what the sequence it belongs
+// to has to say about that. Two refusals, one blueprint_runs read, because they
+// are two readings of the same row and a second read would let them disagree.
 //
-// It is blueprintDrivableForClaim, exactly, and that identity is the whole
-// safety property: this predicate is allowed to be stricter than the claim gate
-// (a refused wake writes nothing), and never more permissive (a wake the claim
+// The first is drivability: waking a run nothing will claim strands it
+// mid-flight — claimed by nobody, counted as queue depth by every counter,
+// forever — so this refuses rather than letting the flip land. It is
+// blueprintDrivableForClaim, exactly, and that identity is the whole safety
+// property: this predicate is allowed to be stricter than the claim gate (a
+// refused wake writes nothing), and never more permissive (a wake the claim
 // gate then declines is the strand this whole seam exists to prevent). Sharing
 // one function is the only way to keep that true through the next edit.
 //
@@ -146,21 +152,34 @@ func injectionWillFlush(status, outcome string) bool {
 // to mid-flight with the blueprint still 'aborted' and its index still pointing
 // past it: claimable by nothing, forever.
 //
+// The second is the hand-off — a step that concluded while its blueprint is
+// still running, refused for the reason the CAS states (see
+// ConversationStore.MarkQueuedForResume). Refused now and allowed a beat later
+// is the conservative order: once the reactor has run, either the blueprint
+// moved past this step (the drivability arm above, permanently) or it came to
+// rest on it (nothing refuses). Allow now, discover later is the failure.
+//
 // Admin-pool read on purpose: blueprint_runs RLS hides another user's manual
 // blueprint, and a teammate resuming a run must not be refused for a row they
 // merely cannot see. A run with no blueprint, or a lookup that fails, is
 // treated as drivable — an inability to check must not strand a resumable run,
-// and the claim gate re-checks for real.
-func (s *Spawner) blueprintDrivableForResume(ctx context.Context, orgID string, run *domain.Conversation) bool {
+// and both the CAS and the claim gate re-check for real.
+func (s *Spawner) blueprintFollowUpBlock(ctx context.Context, orgID string, run *domain.Conversation) string {
 	if s.blueprints == nil || run.BlueprintRunID == "" {
-		return true
+		return ""
 	}
 	br, err := s.blueprints.GetRunSystem(ctx, orgID, run.BlueprintRunID)
 	if err != nil {
 		delegateLog.Warn("resume: blueprint state lookup inconclusive; treating as drivable", "run", run.ID, "blueprint_run", run.BlueprintRunID, "error", err)
-		return true
+		return ""
 	}
-	return blueprintDrivableForClaim(br, run.BlueprintStepIndex)
+	if !blueprintDrivableForClaim(br, run.BlueprintStepIndex) {
+		return ResumeBlockedBlueprintConcluded
+	}
+	if br != nil && br.Status == domain.BlueprintRunStatusRunning && run.Status == domain.StatusCompleted {
+		return ResumeBlockedStepHandedOff
+	}
+	return ""
 }
 
 // blueprintDrivableForClaim is the Go mirror of blueprintDrivableSQL: given a
@@ -434,6 +453,8 @@ func blockedFollowUpError(block string) error {
 		return ErrWorkspaceExpired
 	case ResumeBlockedBlueprintConcluded:
 		return ErrConversationConcluded
+	case ResumeBlockedStepHandedOff:
+		return ErrStepHandedOff
 	default:
 		return ErrRunNotSteerable
 	}
@@ -501,14 +522,11 @@ func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, run
 	if !s.workspaceRecoverable(ctx, orgID, run) {
 		return ResumeBlockedWorkspaceExpired
 	}
-	// The workspace survives but nothing would drive it — the blueprint has
-	// moved past this step, or it was cancelled. Asked second because it is
-	// about the sequence rather than the workspace, and a person whose workspace
-	// is gone is better served by hearing that.
-	if !s.blueprintDrivableForResume(ctx, orgID, run) {
-		return ResumeBlockedBlueprintConcluded
-	}
-	return ""
+	// The workspace survives but the blueprint says otherwise: nothing would ever
+	// drive this conversation, or nothing would drive it yet. Asked last because
+	// both are about the sequence rather than the workspace, and a person whose
+	// workspace is gone is better served by hearing that.
+	return s.blueprintFollowUpBlock(ctx, orgID, run)
 }
 
 // wakeParked flips a parked conversation back to `queued` so the dispatcher

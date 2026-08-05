@@ -166,14 +166,21 @@ type ConversationStore interface {
 	// resume/cancel/claim already moved it, or it failed) — the caller maps
 	// the miss to 409.
 	//
-	// The blueprint half of "resumable" is NOT checked here: the claim gate
-	// drives a conversation under a finished blueprint only if it is that
-	// blueprint's last one, so waking any other would strand it mid-flight
-	// forever. That gate lives in the caller
-	// (delegate.blueprintDrivableForResume), because it needs an admin-pool
-	// read — blueprint_runs RLS hides another user's manual blueprint, and a
+	// One blueprint fact IS checked here, in the same statement, because it
+	// is the one no caller can check without racing: a `completed` row whose
+	// blueprint is still running is refused. That row has handed its terminal
+	// to the reactor and is moments from being advanced past or finalized;
+	// un-terminaling it makes the reactor read a successor's state where this
+	// engagement's terminal should be, and the blueprint dies on it. The
+	// `open` arm is unconditional by contrast — a stopped mid-blueprint step
+	// is a paused step continuing, and its conclusion SHOULD advance the
+	// sequence.
+	//
+	// WHICH step of a finished blueprint may be woken is still not checked
+	// here — only the last one may, and that gate needs an admin-pool read
+	// (blueprint_runs RLS hides another user's manual blueprint, and a
 	// teammate resuming a run must not be refused for a row they merely
-	// cannot see.
+	// cannot see), so it lives in the caller.
 	MarkQueuedForResume(ctx context.Context, orgID, runID string) (bool, error)
 
 	// SetSession stores the Claude Code session id captured from

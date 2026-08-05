@@ -581,7 +581,10 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 // carries its own message: this conversation's blueprint will never drive it
 // again (it has moved past this step, or was cancelled). That is a permanent answer
 // rather than a lost race the client should re-read — surface the text, don't
-// prompt a refresh.
+// prompt a refresh. A step that just handed off (ErrStepHandedOff) is 409 for
+// the opposite reason: the conversation concluded and its blueprint has not
+// reacted yet, so the answer genuinely does change a beat later and a refresh
+// is exactly what resolves it.
 // A cross-pod signal whose owning executor never acked (ErrSignalAckTimeout,
 // TFAC-585) is 504 Gateway Timeout — the reply-leg contract's "run owner did
 // not acknowledge; the run may be mid-teardown" case; the UI already
@@ -595,7 +598,8 @@ func steerErrorStatus(err error) int {
 	case errors.Is(err, delegate.ErrNoLiveProcess),
 		errors.Is(err, delegate.ErrRunNotSteerable),
 		errors.Is(err, delegate.ErrRunNotResumable),
-		errors.Is(err, delegate.ErrConversationConcluded):
+		errors.Is(err, delegate.ErrConversationConcluded),
+		errors.Is(err, delegate.ErrStepHandedOff):
 		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError

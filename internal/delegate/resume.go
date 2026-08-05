@@ -62,6 +62,14 @@ var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
 // you: refresh and look again. This means refreshing will never change it.
 var ErrConversationConcluded = errors.New("resume: this conversation can no longer be continued — its blueprint has moved past this step, or was cancelled (only the step a blueprint is currently on takes follow-ups)")
 
+// ErrStepHandedOff is returned when a conversation concluded as a step of a
+// blueprint that has not reacted to that terminal yet.
+//
+// Its own sentinel because it says the opposite of ErrConversationConcluded to
+// the person reading it: that one means refreshing will never change the
+// answer, this one means it will, and shortly. Callers map it to 409 Conflict.
+var ErrStepHandedOff = errors.New("resume: this step just handed off to the next one — follow up on the blueprint's latest step")
+
 // ErrWorkspaceExpired is returned when a resumable conversation's workspace is
 // gone for good: its warm worktree was swept AND its durable snapshot was
 // reaped by the retention TTL. The conversation's status is left unchanged (no
@@ -95,6 +103,11 @@ var ErrWorkspaceExpired = errors.New("resume: this run's workspace has expired a
 // A re-read that fails answers like a terminal: unable to prove delivery is
 // coming, and a false success is worse here than a conflict the client
 // resolves by refreshing.
+//
+// One shape reaches the terminal arm without having moved at all: a concluded
+// step the CAS's hand-off guard refused after the pre-check let it through. The
+// conflict is right (nothing claims it while the reactor still owes it a
+// decision); only the log line's "went terminal" overstates what happened.
 func (s *Spawner) lostWakeOutcome(ctx context.Context, orgID, runID string) error {
 	run, err := s.agentRuns.GetSystem(ctx, orgID, runID)
 	if err != nil {

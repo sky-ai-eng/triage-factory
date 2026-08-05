@@ -338,9 +338,15 @@ func parkOpen(ctx context.Context, q queryer, orgID, runID string, park db.Park)
 // path that puts an outcome-bearing conversation back into the mid-flight
 // (status NULL) state the needs-driving predicate claims from. Its guard is
 // what keeps a terminal conversation un-claimable by anything else, whatever
-// rows it holds — and the guard is now status alone, since `failed` is the
-// only rest state a conversation cannot be woken from (its workspace did not
-// survive). Always claims-scoped — resume is always user-initiated, so
+// rows it holds — see the interface doc for the two exclusions and why the
+// blueprint check is in this statement rather than in the caller.
+//
+// It goes through tf.blueprint_run_is_running rather than a correlated
+// subquery because this statement runs on the app pool: blueprint_runs is
+// creator-scoped for manual runs, so a non-creator teammate's subquery would
+// find nothing and the guard would fail OPEN on exactly the rows it protects.
+//
+// Always claims-scoped — resume is always user-initiated, so
 // there is no admin-pool "...System" variant. The active claim releases as
 // 'requeued' (ownership is re-established when ClaimNextRun mints a fresh
 // claim, exactly like a fresh EnqueueRun'd row). preferred_executor_id is
@@ -355,7 +361,10 @@ func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID st
 		UPDATE conversations SET status = NULL,
 		                parked_at = NULL, preferred_executor_id = NULL
 		WHERE org_id = $1 AND id = $2
-		  AND status IN ('open', 'completed')
+		  AND (status = 'open'
+		       OR (status = 'completed'
+		           AND NOT tf.blueprint_run_is_running(
+		                     conversations.blueprint_run_id, conversations.org_id)))
 	`, orgID, runID)
 	if err != nil {
 		return false, err
