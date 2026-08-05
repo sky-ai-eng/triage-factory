@@ -232,6 +232,15 @@ func (a CloneAuth) configEntries() [][2]string {
 	return nil
 }
 
+// GitConfigEntries is the exported view of configEntries: the exact git-config
+// (key, value) pairs this auth puts in front of a network git invocation, in
+// order. Same rationale as CloneAuthFromOptions — a caller that threads a
+// credential asserts what its git would actually run under, rather than that it
+// passed some opaque value. Empty for the inert zero CloneAuth.
+func (a CloneAuth) GitConfigEntries() [][2]string {
+	return a.configEntries()
+}
+
 // gitConfigEnviron returns base (a parent environment, e.g. os.Environ())
 // extended with this auth's extraHeader as a git env-config entry, plus true;
 // or (nil, false) when the auth is inert, so the caller leaves cmd.Env unset

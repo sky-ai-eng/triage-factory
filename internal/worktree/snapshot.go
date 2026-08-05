@@ -323,11 +323,20 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 // on this host (a fresh executor). In the local reboot / `/tmp`-wipe case the
 // bare survives under the persistent state-root, so cloneURL goes unused.
 //
-// auth is the host-side HTTPS credential (inert in local/SSH/public). It
-// authenticates both the on-demand re-clone of a missing bare AND the lazy
-// promisor fetch the worktree-add checkout triggers on the blobless bare —
-// without it, a fresh-executor resume of a private repo fails at either step
-// with an anonymous "could not read Username" / promisor fetch error.
+// auth is the host-side HTTPS credential (inert in local/SSH/public), and every
+// rebuild of a private repo needs it — not only the fresh-executor one. It
+// authenticates two independent hops:
+//
+//   - the on-demand re-clone of a missing bare (fresh executor), and
+//   - the lazy promisor fetch the worktree-add checkout triggers on the
+//     blobless bare, which happens whether or not the bare was already here. A
+//     bare that exists is not a bare that is self-sufficient: it was cloned
+//     --filter=blob:none, so checking out HEAD goes back to origin for the
+//     blobs it deferred.
+//
+// Without it either step fails anonymously — "could not read Username", then
+// "could not fetch <sha> from promisor remote". Local mode masks the second
+// hop, because the operator's ambient git credentials answer it.
 func RestoreWorkspaceGit(ctx context.Context, owner, repo, wtDir string, d *GitDelta, cloneURL string, auth CloneAuth) error {
 	if d == nil {
 		return fmt.Errorf("restore: nil git delta")

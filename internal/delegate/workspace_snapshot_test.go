@@ -46,7 +46,7 @@ func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
 	writeFile(t, marker, "warm")
 
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
-	got, prov, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
+	got, prov, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{owner: owner, repo: repo})
 	if err != nil {
 		t.Fatalf("ensureWorkspace (warm): %v", err)
 	}
@@ -116,7 +116,7 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	gitT(t, bareDir, "branch", "-D", "feature")
 
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
-	got, prov, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
+	got, prov, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{owner: owner, repo: repo})
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
@@ -171,7 +171,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptBearingSnapshotIsResumable(t *testin
 	}
 
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID, SessionID: sessionID}
-	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "", "", "")
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{})
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
@@ -206,7 +206,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable(t *testin
 	}
 
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID, SessionID: sessionID}
-	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "", "", "")
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{})
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
@@ -294,7 +294,7 @@ func TestEnsureWorkspace_ColdPath_CorruptGzipChecksumErrors(t *testing.T) {
 	// Cold path: the warm worktree is absent, so the resume can only come from
 	// the (now corrupt) blob — which must surface as an error.
 	run := &domain.Conversation{ID: runID, WorktreePath: filepath.Join(t.TempDir(), "gone"), BlueprintRunID: runID}
-	if _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "", "", ""); err == nil {
+	if _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{}); err == nil {
 		t.Fatal("ensureWorkspace accepted a snapshot with a corrupted gzip checksum; want an integrity error")
 	}
 }
@@ -381,7 +381,7 @@ func TestEnsureWorkspace_ColdPath_DetachedHead(t *testing.T) {
 	gitT(t, bareDir, "branch", "-D", "feature")
 
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
-	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{owner: owner, repo: repo})
 	if err != nil {
 		t.Fatalf("ensureWorkspace (detached): %v", err)
 	}
@@ -430,7 +430,7 @@ func TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits(t *testing.T) {
 	gitT(t, bareDir, "branch", "-D", "feature")
 
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
-	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, owner, repo, "")
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{owner: owner, repo: repo})
 	if err != nil {
 		t.Fatalf("ensureWorkspace (never-pushed branch): %v", err)
 	}
@@ -452,7 +452,7 @@ func TestEnsureWorkspace_ColdPath_NoSnapshotErrors(t *testing.T) {
 	s := newStorageSpawner(t)
 
 	run := &domain.Conversation{ID: "wt-missing", WorktreePath: filepath.Join(t.TempDir(), "gone")}
-	if _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, "o", "r", ""); err == nil {
+	if _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{owner: "o", repo: "r"}); err == nil {
 		t.Fatal("ensureWorkspace should error when neither the worktree nor a snapshot exists")
 	}
 }
