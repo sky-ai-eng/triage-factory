@@ -3,6 +3,7 @@ package postgres
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -47,8 +48,11 @@ func wrapAppPoolPermErr(err error, callsite string) error {
 
 // wrapAdminPoolPermErr turns a Postgres permission-denied error (SQLSTATE
 // 42501) from an admin-pool call into a legible one, naming the table
-// Postgres reports (surfaced here via pgErr.TableName) instead of leaving
-// a bare pq error for whoever reads the logs.
+// Postgres reports (see permDeniedTable) instead of leaving a bare pq error
+// for whoever reads the logs. A denial on something that isn't a table — a
+// sequence, a schema — is reported as an unnamed object rather than
+// mislabelled as one, since a reader sent after the wrong kind of grant
+// looks straight past the real gap.
 //
 // Historically the admin pool never raised 42501 at all — it connected as
 // supabase_admin, the real superuser. That changed for executors: their
@@ -88,14 +92,48 @@ func wrapAdminPoolPermErr(err error, callsite string) error {
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "42501" {
-		table := pgErr.TableName
-		if table == "" {
-			table = "(unknown — see the wrapped error's DETAIL)"
+		// When the object can't be recovered, the wording declines with it.
+		// Saying "on table (unknown)" would assert a fact the parse just
+		// refused to claim, and send a reader whose sequence or schema grant
+		// is missing hunting for a table grant that is already there.
+		subject, ask := "(unknown object — see the wrapped error's message)", "with this error"
+		if table := permDeniedTable(pgErr); table != "" {
+			subject, ask = "on table "+table, "with this table name"
 		}
-		return fmt.Errorf("%s: permission denied on table %s — this is a Triage Factory bug "+
+		return fmt.Errorf("%s: permission denied %s — this is a Triage Factory bug "+
 			"(a missing database grant), not a local misconfiguration; upgrade to the latest "+
 			"release or file an issue at https://github.com/sky-ai-eng/triage-factory/issues "+
-			"with this table name: %w", callsite, table, err)
+			"%s: %w", callsite, subject, ask, err)
 	}
 	return err
+}
+
+// permDeniedTable recovers the table a 42501 is about.
+//
+// The structured field is tried first and essentially never answers: Postgres
+// populates PgError.TableName from the error's TABLE NAME field, which the
+// privilege check does not emit. What it does emit is the object's name in the
+// primary message — "permission denied for table sandbox_stats" — so the
+// message is the fallback, and in practice the only source. Without it the
+// wrapper printed "unknown" while the answer sat one line further down the
+// operator's log, in the wrapped error.
+//
+// Both spellings of the same message are accepted ("relation" is the older
+// one) so a server-version change cannot silently turn the name back into
+// "unknown". A denial on some other object kind — a sequence, a schema, a
+// function — falls through to the empty string rather than guessing a table
+// name it isn't; the wrapped error still carries the full message.
+func permDeniedTable(pgErr *pgconn.PgError) string {
+	if pgErr.TableName != "" {
+		return pgErr.TableName
+	}
+	for _, prefix := range []string{
+		"permission denied for table ",
+		"permission denied for relation ",
+	} {
+		if name, ok := strings.CutPrefix(pgErr.Message, prefix); ok {
+			return name
+		}
+	}
+	return ""
 }
