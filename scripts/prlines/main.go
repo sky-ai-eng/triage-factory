@@ -52,15 +52,16 @@ type options struct {
 }
 
 func main() {
-	if err := run(); err != nil {
+	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "prlines: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(args []string, stdout, stderr io.Writer) error {
 	var opts options
 	fs := flag.NewFlagSet("prlines", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	fs.StringVar(&opts.base, "base", "", "base ref to diff from (skips base resolution)")
 	fs.StringVar(&opts.head, "head", "HEAD", "head ref to diff to")
 	fs.StringVar(&opts.remote, "remote", "", "remote holding the base branch (default: origin, or the only remote)")
@@ -74,7 +75,7 @@ func run() error {
 		fmt.Fprint(fs.Output(), "Count a PR's changed lines by kind, for the PR template's table.\n\nFlags:\n")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(os.Args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
@@ -89,8 +90,21 @@ func run() error {
 	}
 	opts.remote = remote
 
-	branch := r.currentBranch()
-	base, warns, err := resolveBase(r, opts, branch)
+	// --worktree counts what is on disk, which is not a commit and cannot also
+	// be some other ref. Silently preferring one over the other would report a
+	// number for something the caller did not ask about.
+	if opts.worktree && opts.head != "HEAD" {
+		return fmt.Errorf("--worktree compares the working tree against its own branch point, so --head %s cannot also apply; drop one", opts.head)
+	}
+
+	// Everything downstream describes and resolves the ref actually being
+	// counted, which is only the checked-out branch by default. Keying any of
+	// it off the working directory instead would label a --head run with the
+	// wrong branch name and look up the wrong branch's pull request.
+	headBranch := r.branchForRef(opts.head)
+	headLabel := headLabelFor(opts.head, headBranch)
+
+	base, warns, err := resolveBase(r, opts, headBranch)
 	if err != nil {
 		return err
 	}
@@ -109,14 +123,10 @@ func run() error {
 		warns = append(warns, "working tree has uncommitted changes, which are NOT counted; pass --worktree to include them")
 	}
 
-	// The working tree is not a commit, so its merge base is computed against
-	// HEAD — the same branch point either way, since uncommitted work cannot
-	// move where the branch was cut from.
-	rangeHead := opts.head
-	if opts.worktree {
-		rangeHead = "HEAD"
-	}
-	mergeBaseRev, headCommit, warns, err := resolveRange(r, base.Ref, rangeHead, warns)
+	// In --worktree mode opts.head is necessarily HEAD, and the merge base is
+	// computed against it: uncommitted work cannot move where the branch was
+	// cut from, so the branch point is the same either way.
+	mergeBaseRev, headCommit, warns, err := resolveRange(r, base.Ref, opts.head, warns)
 	if err != nil {
 		return err
 	}
@@ -124,7 +134,7 @@ func run() error {
 	// or pointed at the wrong one — but it is the ordinary state of a branch
 	// whose first commit is still uncommitted, so --worktree still has work.
 	if mergeBaseRev == headCommit && !opts.worktree {
-		return fmt.Errorf("%s is an ancestor of %s — there is nothing to count; is this branch actually the base?", rangeHead, base.Ref)
+		return fmt.Errorf("%s is an ancestor of %s — there is nothing to count; is this branch actually the base?", headLabel, base.Ref)
 	}
 
 	raw, err := r.diff(mergeBaseRev, headRev)
@@ -140,15 +150,28 @@ func run() error {
 	res.Warnings = append(warns, res.Warnings...)
 
 	if opts.jsonOut {
-		return emitJSON(os.Stdout, r, base, mergeBaseRev, headCommit, branch, res, opts)
+		return emitJSON(stdout, r, base, mergeBaseRev, headCommit, headLabel, res, opts)
 	}
 
-	printHeader(os.Stderr, r, base, mergeBaseRev, headCommit, branch, res, opts)
+	printHeader(stderr, r, base, mergeBaseRev, headCommit, headLabel, res, opts)
 	if opts.explain {
-		printPerFile(os.Stderr, res)
+		printPerFile(stderr, res)
 	}
-	renderTable(os.Stdout, res.Buckets)
+	renderTable(stdout, res.Buckets)
 	return nil
+}
+
+// headLabelFor names the ref being counted, for display and for error text:
+// the branch name when the caller just said HEAD, and otherwise exactly the ref
+// they asked for.
+func headLabelFor(headRef, headBranch string) string {
+	if headRef != "HEAD" {
+		return headRef
+	}
+	if headBranch != "" {
+		return headBranch
+	}
+	return "detached HEAD"
 }
 
 func resolveRange(r *repo, baseRef, headRef string, warns []string) (string, string, []string, error) {
@@ -195,11 +218,8 @@ func renderTable(w io.Writer, b buckets) {
 	}
 }
 
-func printHeader(w io.Writer, r *repo, base baseRef, mergeBaseRev, headCommit, branch string, res result, opts options) {
-	head := branch
-	if head == "" {
-		head = "detached HEAD"
-	}
+func printHeader(w io.Writer, r *repo, base baseRef, mergeBaseRev, headCommit, headLabel string, res result, opts options) {
+	head := headLabel
 	if opts.worktree {
 		head += " + working tree"
 	}
@@ -263,7 +283,7 @@ func printPerFile(w io.Writer, res result) {
 	fmt.Fprintln(w)
 }
 
-func emitJSON(w io.Writer, r *repo, base baseRef, mergeBaseRev, headCommit, branch string, res result, opts options) error {
+func emitJSON(w io.Writer, r *repo, base baseRef, mergeBaseRev, headCommit, headLabel string, res result, opts options) error {
 	type refInfo struct {
 		Ref    string `json:"ref"`
 		Source string `json:"source,omitempty"`
@@ -277,7 +297,7 @@ func emitJSON(w io.Writer, r *repo, base baseRef, mergeBaseRev, headCommit, bran
 		result
 	}{
 		Base:      refInfo{Ref: base.Ref, Source: base.Source},
-		Head:      refInfo{Ref: branch, Commit: headCommit},
+		Head:      refInfo{Ref: headLabel, Commit: headCommit},
 		MergeBase: mergeBaseRev,
 		Worktree:  opts.worktree,
 		result:    res,

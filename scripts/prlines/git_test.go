@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -273,5 +275,152 @@ func TestParsePRInfo(t *testing.T) {
 	pr, err = parsePRInfo(`{}`)
 	if err != nil || pr != nil {
 		t.Fatalf("got %+v, %v; want nil, nil", pr, err)
+	}
+}
+
+// stackedRepo checks out main with a "feature" branch one commit ahead, so a
+// --head run has somewhere to point that is not the working directory.
+func stackedRepo(t *testing.T) *testRepo {
+	t.Helper()
+	tr := newTestRepo(t)
+	tr.write("seed.go", "package p\n")
+	tr.commit("seed")
+	tr.mustGit("push", "-q", "origin", "main")
+	tr.mustGit("checkout", "-q", "-b", "feature")
+	tr.write("mine.go", "package p\n\nfunc Mine() {}\n")
+	tr.commit("feature work")
+	tr.mustGit("checkout", "-q", "main")
+	return tr
+}
+
+// TestRunLabelsTheRefItCounted covers the case where the counted commit and the
+// working directory disagree: the header must describe --head, not whatever
+// branch happens to be checked out.
+func TestRunLabelsTheRefItCounted(t *testing.T) {
+	tr := stackedRepo(t)
+	featureHead := shortSHA(strings.TrimSpace(tr.mustGit("rev-parse", "feature")))
+	t.Chdir(tr.root)
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"--head", "feature", "--no-fetch", "--no-gh"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run: %v\n%s", err, stderr.String())
+	}
+
+	var headLine string
+	for _, l := range strings.Split(stderr.String(), "\n") {
+		if strings.HasPrefix(l, "head ") {
+			headLine = l
+		}
+	}
+	if headLine == "" {
+		t.Fatalf("no head line in header:\n%s", stderr.String())
+	}
+	if !strings.Contains(headLine, "feature") {
+		t.Errorf("head line does not name the counted ref: %q", headLine)
+	}
+	if strings.Contains(headLine, "main") {
+		t.Errorf("head line names the checked-out branch instead of --head: %q", headLine)
+	}
+	if !strings.Contains(headLine, featureHead) {
+		t.Errorf("head line %q does not carry feature's commit %s", headLine, featureHead)
+	}
+}
+
+func TestRunJSONHeadRefMatchesCommit(t *testing.T) {
+	tr := stackedRepo(t)
+	want := strings.TrimSpace(tr.mustGit("rev-parse", "feature"))
+	t.Chdir(tr.root)
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"--head", "feature", "--no-fetch", "--no-gh", "--json"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run: %v\n%s", err, stderr.String())
+	}
+
+	var payload struct {
+		Head struct {
+			Ref    string `json:"ref"`
+			Commit string `json:"commit"`
+		} `json:"head"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("parsing JSON: %v\n%s", err, stdout.String())
+	}
+	// The pair has to describe one ref; a name from the working directory next
+	// to a commit from --head is worse than either alone.
+	if payload.Head.Ref != "feature" {
+		t.Errorf("head.ref = %q, want feature", payload.Head.Ref)
+	}
+	if payload.Head.Commit != want {
+		t.Errorf("head.commit = %q, want %q", payload.Head.Commit, want)
+	}
+}
+
+func TestBranchForRef(t *testing.T) {
+	tr := stackedRepo(t)
+	sha := strings.TrimSpace(tr.mustGit("rev-parse", "feature"))
+
+	if got := tr.branchForRef("HEAD"); got != "main" {
+		t.Errorf("branchForRef(HEAD) = %q, want main", got)
+	}
+	if got := tr.branchForRef("feature"); got != "feature" {
+		t.Errorf("branchForRef(feature) = %q, want feature", got)
+	}
+	// A sha, a remote-tracking ref and a revision expression name no branch, so
+	// the per-branch base sources must not be consulted for them.
+	for _, ref := range []string{sha, "origin/main", "HEAD~1"} {
+		if got := tr.branchForRef(ref); got != "" {
+			t.Errorf("branchForRef(%q) = %q, want empty", ref, got)
+		}
+	}
+
+	tr.mustGit("checkout", "-q", "--detach", "HEAD")
+	if got := tr.branchForRef("HEAD"); got != "" {
+		t.Errorf("branchForRef(HEAD) on a detached HEAD = %q, want empty", got)
+	}
+}
+
+func TestHeadLabelFor(t *testing.T) {
+	cases := []struct{ ref, branch, want string }{
+		{"HEAD", "feature", "feature"},
+		{"HEAD", "", "detached HEAD"},
+		{"feature", "feature", "feature"},
+		{"origin/main", "", "origin/main"},
+		{"abc1234", "", "abc1234"},
+	}
+	for _, tc := range cases {
+		if got := headLabelFor(tc.ref, tc.branch); got != tc.want {
+			t.Errorf("headLabelFor(%q, %q) = %q, want %q", tc.ref, tc.branch, got, tc.want)
+		}
+	}
+}
+
+func TestResolveBaseFollowsHeadBranch(t *testing.T) {
+	tr := stackedRepo(t)
+	tr.mustGit("push", "-q", "origin", "main:release")
+	tr.mustGit("fetch", "-q", "origin")
+	// tfBase is set on the branch --head names, not the checked-out one.
+	tr.mustGit("config", "branch.feature.tfBase", "origin/release")
+
+	opts := options{remote: "origin", head: "feature", noFetch: true, noGH: true}
+	base, _, err := resolveBase(tr.repo, opts, tr.branchForRef(opts.head))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.Ref != "origin/release" {
+		t.Fatalf("base = %q, want origin/release from branch.feature.tfBase", base.Ref)
+	}
+}
+
+func TestWorktreeAndHeadAreExclusive(t *testing.T) {
+	tr := stackedRepo(t)
+	t.Chdir(tr.root)
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"--worktree", "--head", "feature", "--no-fetch", "--no-gh"}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected an error: --worktree cannot also honour --head")
+	}
+	if !strings.Contains(err.Error(), "--head") {
+		t.Errorf("error should name the conflicting flag, got: %v", err)
 	}
 }

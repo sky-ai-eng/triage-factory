@@ -108,7 +108,7 @@ func resolveBase(r *repo, opts options, branch string) (baseRef, []string, error
 	}
 
 	if branch != "" && !opts.noGH {
-		pr, err := lookupPR(r)
+		pr, err := lookupPR(r, branch)
 		switch {
 		case err != nil:
 			warns = append(warns, fmt.Sprintf("gh pull-request lookup failed (%v); falling back", err))
@@ -267,6 +267,21 @@ func (r *repo) currentBranch() string {
 	return strings.TrimSpace(out)
 }
 
+// branchForRef names the local branch a head ref points at, which is what the
+// per-branch base sources key off. It is empty for a detached HEAD, a raw sha,
+// a remote-tracking ref or a revision expression — none of which name a branch
+// whose pull request or tfBase could be looked up, so base resolution falls
+// through to the default branch rather than answering for some other branch.
+func (r *repo) branchForRef(ref string) string {
+	if ref == "" || ref == "HEAD" {
+		return r.currentBranch()
+	}
+	if r.gitOK("show-ref", "--verify", "--quiet", "refs/heads/"+ref) {
+		return ref
+	}
+	return ""
+}
+
 func (r *repo) resolveCommit(rev string) (string, error) {
 	out, err := r.git("rev-parse", "--verify", rev+"^{commit}")
 	if err != nil {
@@ -337,15 +352,17 @@ type prInfo struct {
 	IsCrossRepository bool   `json:"isCrossRepository"`
 }
 
-// lookupPR returns the PR for the current branch, or nil when there is none.
+// lookupPR returns the PR for the named branch, or nil when there is none.
+// The branch is passed explicitly rather than left to gh's default, which is
+// the checked-out one — that would answer for the wrong branch under --head.
 // "No pull request found" is an ordinary outcome — a branch that has not been
 // pushed yet is the normal case for the first run — so it is not an error.
-func lookupPR(r *repo) (*prInfo, error) {
+func lookupPR(r *repo, branch string) (*prInfo, error) {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return nil, nil
 	}
 	out, err := runCmd(context.Background(), 20*time.Second, r.root,
-		"gh", "pr", "view", "--json", "number,baseRefName,state,isCrossRepository")
+		"gh", "pr", "view", branch, "--json", "number,baseRefName,state,isCrossRepository")
 	if err != nil {
 		if strings.Contains(err.Error(), "no pull requests found") || strings.Contains(err.Error(), "no open pull requests") {
 			return nil, nil
