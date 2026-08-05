@@ -74,6 +74,17 @@ type ConversationSeeder struct {
 	// the suite can assert mint/release bookkeeping.
 	ClaimRows func(t *testing.T, conversationID string) []ClaimRow
 
+	// CollapseClaimTimes forces every claim on the conversation to share one
+	// claimed_at and created_at, leaving released_at as recorded. It stages
+	// the tie a Postgres transaction produces for free — now() is fixed for
+	// the transaction, so claims minted together are indistinguishable by
+	// mint time — which is what any "which claim came before mine" read has
+	// to stay deterministic through.
+	//
+	// It destroys the ordering ClaimRows itself sorts by, so a test that
+	// calls it must read the claim ids first.
+	CollapseClaimTimes func(t *testing.T, conversationID string)
+
 	// BlueprintRun mints a blueprint + blueprint_run pair against the
 	// given taskID and returns the blueprint_run id. Every conversation
 	// row carries a NOT NULL blueprint_run_id FK (a single prompt is a
@@ -1856,6 +1867,22 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		got, err := store.PriorClaimExecutorSystem(ctx, orgID, bare, claims[2].ID)
 		if err != nil || got != "" {
 			t.Errorf("PriorClaimExecutorSystem on an unclaimed conversation = %q, %v; want empty and no error", got, err)
+		}
+
+		// Mint times tied — the shape a single Postgres transaction produces,
+		// since now() is fixed for its whole duration. The read must still name
+		// the same predecessor rather than whichever row the plan happened to
+		// emit first: an ordering that is only usually total would flip the
+		// agent-facing executor sentence at random.
+		//
+		// Read the ids before collapsing: this is destroying the very column
+		// ClaimRows orders by.
+		ids := []string{claims[0].ID, claims[1].ID, claims[2].ID}
+		seed.CollapseClaimTimes(t, runID)
+		for i := 0; i < 8; i++ {
+			if got := prior(t, ids[2]); got != "exec-2" {
+				t.Fatalf("prior executor with tied mint times = %q, want exec-2 — the sort is not total", got)
+			}
 		}
 	})
 

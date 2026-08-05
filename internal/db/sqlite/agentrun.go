@@ -309,10 +309,17 @@ func (s *agentRunStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID, ru
 // caller's own claim is excluded by id — it is the newest row by construction
 // (one active claim per conversation), so the predecessor is the next one back.
 //
-// rowid breaks a claimed_at tie: CURRENT_TIMESTAMP resolves to whole seconds
-// here, so two claims minted in the same second are otherwise unordered. The
-// answer is the same either way at N=1 (one executor), but the ordering is
-// part of the contract both dialects are held to.
+// The sort is total, for the reason the Postgres arm spells out. Ties are
+// reachable here too: the mint writes a precise Go timestamp, but the column's
+// own default is CURRENT_TIMESTAMP at whole-second resolution, so any row that
+// takes it can tie with a neighbour. released_at breaks a tie meaningfully —
+// of two claims that started together the one that finished later is the
+// nearer predecessor, and an unreleased one is nearer still, which is what the
+// IS NULL term buys (SQLite sorts NULLs last under DESC, where Postgres is
+// told NULLS FIRST). rowid is the backstop that leaves nothing undecided.
+//
+// The answer is the same either way at N=1, where there is one executor to
+// name, but the ordering is part of a contract both dialects are held to.
 func (s *agentRunStore) PriorClaimExecutorSystem(ctx context.Context, orgID, conversationID, claimID string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
@@ -321,7 +328,7 @@ func (s *agentRunStore) PriorClaimExecutorSystem(ctx context.Context, orgID, con
 	err := s.q.QueryRowContext(ctx, `
 		SELECT executor_id FROM claims
 		WHERE conversation_id = ? AND id <> ?
-		ORDER BY claimed_at DESC, rowid DESC
+		ORDER BY claimed_at DESC, (released_at IS NULL) DESC, released_at DESC, rowid DESC
 		LIMIT 1
 	`, conversationID, claimID).Scan(&executorID)
 	if errors.Is(err, sql.ErrNoRows) {

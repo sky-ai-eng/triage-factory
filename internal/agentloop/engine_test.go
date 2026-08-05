@@ -138,13 +138,14 @@ func TestRun_RepairAnswersUnansweredToolCallsWithoutRedispatch(t *testing.T) {
 	}
 }
 
-// TestRun_WorkspaceRestoredNoticeIsProvenanceDriven pins what the loop is
+// TestRun_WorkspaceRebuiltNoticeIsProvenanceDriven pins what the loop is
 // allowed to tell an agent about the tree it woke up in. The notice describes
 // a loss — work the model remembers doing that is not on disk — so it may only
-// be said when a loss actually happened, and its executor sentence only when
-// an executor actually changed. A resume onto the warm tree, on the executor
-// that parked it, is the common case and must be silent.
-func TestRun_WorkspaceRestoredNoticeIsProvenanceDriven(t *testing.T) {
+// be said when a loss actually happened, it must describe the loss that
+// actually occurred, and its executor sentence may only appear when an
+// executor actually changed. A resume onto the warm tree, on the executor that
+// parked it, is the common case and must be silent.
+func TestRun_WorkspaceRebuiltNoticeIsProvenanceDriven(t *testing.T) {
 	priorWork := func() *memTranscript {
 		return newMemTranscript(
 			domain.Message{ConversationID: "conv", Role: "user", Content: "go"},
@@ -172,7 +173,7 @@ func TestRun_WorkspaceRestoredNoticeIsProvenanceDriven(t *testing.T) {
 		}
 	})
 
-	t.Run("a rebuilt workspace states the restore without claiming a move", func(t *testing.T) {
+	t.Run("a snapshot restore states the restore without claiming a move", func(t *testing.T) {
 		tr := priorWork()
 		run(t, tr, workspaceParams(domain.WorkspaceProvenanceRehydrated, false))
 		n := findNotice(tr)
@@ -181,6 +182,9 @@ func TestRun_WorkspaceRestoredNoticeIsProvenanceDriven(t *testing.T) {
 		}
 		if !strings.Contains(n.Content, "restored from its last snapshot") {
 			t.Errorf("the notice must describe the snapshot boundary: %q", n.Content)
+		}
+		if !strings.Contains(n.Content, "uncommitted and untracked files") {
+			t.Errorf("a snapshot carries the uncaptured-by-git work, and the agent needs to know it is there: %q", n.Content)
 		}
 		if strings.Contains(n.Content, "different executor") {
 			t.Errorf("a rebuild on the same executor must not claim the run moved: %q", n.Content)
@@ -199,11 +203,26 @@ func TestRun_WorkspaceRestoredNoticeIsProvenanceDriven(t *testing.T) {
 		}
 	})
 
-	t.Run("a freshly built workspace is a restore too", func(t *testing.T) {
+	// The two rebuilds are not interchangeable. A snapshot restore keeps the
+	// work git never saw; a from-scratch build keeps only what reached the
+	// remote. Promising the former's survivors on the latter's tree would be
+	// the same falsehood this notice exists to stop, told at the moment the
+	// agent has least to work from.
+	t.Run("a from-scratch build says so, and promises nothing a snapshot would have carried", func(t *testing.T) {
 		tr := priorWork()
 		run(t, tr, workspaceParams(domain.WorkspaceProvenanceFresh, false))
-		if findNotice(tr) == nil {
+		n := findNotice(tr)
+		if n == nil {
 			t.Fatal("a tree built from scratch carries none of the remembered work either")
+		}
+		if !strings.Contains(n.Content, "no snapshot to restore from") {
+			t.Errorf("the notice must say there was no snapshot: %q", n.Content)
+		}
+		if strings.Contains(n.Content, "restored from its last snapshot") {
+			t.Errorf("nothing was restored here; claiming it was is the bug in miniature: %q", n.Content)
+		}
+		if !strings.Contains(n.Content, "did not push") {
+			t.Errorf("the surviving set is what reached the remote, and the notice has to say so: %q", n.Content)
 		}
 	})
 
@@ -215,18 +234,18 @@ func TestRun_WorkspaceRestoredNoticeIsProvenanceDriven(t *testing.T) {
 		}
 	})
 
-	t.Run("an unclassified workspace is not asserted to have been restored", func(t *testing.T) {
+	t.Run("an unclassified workspace is not asserted to have been rebuilt", func(t *testing.T) {
 		tr := priorWork()
 		run(t, tr, testParams())
 		if n := findNotice(tr); n != nil {
-			t.Fatalf("a caller that never restores a workspace must not have one claimed for it: %+v", n)
+			t.Fatalf("a caller that never rebuilds a workspace must not have one claimed for it: %+v", n)
 		}
 	})
 }
 
-// TestRun_WorkspaceRestoredNoticeDoesNotStack: a claim that queued the notice
+// TestRun_WorkspaceRebuiltNoticeDoesNotStack: a claim that queued the notice
 // and died before the model ever read it must not leave a second copy behind.
-func TestRun_WorkspaceRestoredNoticeDoesNotStack(t *testing.T) {
+func TestRun_WorkspaceRebuiltNoticeDoesNotStack(t *testing.T) {
 	pending := false
 	tr := newMemTranscript(
 		domain.Message{ConversationID: "conv", Role: "user", Content: "go"},
@@ -234,7 +253,7 @@ func TestRun_WorkspaceRestoredNoticeDoesNotStack(t *testing.T) {
 		domain.Message{
 			ConversationID: "conv", Role: "user",
 			Subtype:   domain.MessageSubtypeInjectionExecutorChanged,
-			Content:   workspaceRestoredNotice(false),
+			Content:   workspaceRebuiltNotice(domain.WorkspaceProvenanceRehydrated, false),
 			Delivered: &pending,
 		},
 	)
@@ -250,7 +269,7 @@ func TestRun_WorkspaceRestoredNoticeDoesNotStack(t *testing.T) {
 		}
 	}
 	if notices != 1 {
-		t.Fatalf("workspace-restored notices = %d, want the undelivered one already queued and no second", notices)
+		t.Fatalf("workspace-rebuilt notices = %d, want the undelivered one already queued and no second", notices)
 	}
 }
 

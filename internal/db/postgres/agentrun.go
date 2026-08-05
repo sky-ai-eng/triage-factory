@@ -500,12 +500,23 @@ func (s *agentRunStore) SetClaimPhaseSystem(ctx context.Context, orgID, conversa
 // on the id the caller actually holds means a fenced-out caller reads the
 // claim before its own, not itself. The id comparison is on text so a
 // malformed id is simply no match, the same answer as a missing row.
+//
+// The sort must be TOTAL, not merely usually-total. claimed_at and created_at
+// both default to now(), which is the transaction timestamp, so two claims
+// minted in one transaction tie on every timestamp column and the row Postgres
+// returns would be whatever the plan happened to produce — a nondeterministic
+// answer feeding a sentence about what the agent's workspace has been through.
+// released_at breaks the tie meaningfully (of two claims that started
+// together, the one that finished later is the nearer predecessor, and an
+// unreleased one is nearer still, hence NULLS FIRST); the primary key is the
+// backstop that makes the order total when even that ties, where "which came
+// first" is genuinely undefined and only stability is left to want.
 func (s *agentRunStore) PriorClaimExecutorSystem(ctx context.Context, orgID, conversationID, claimID string) (string, error) {
 	var executorID string
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT executor_id FROM claims
 		WHERE org_id = $1 AND conversation_id = $2 AND id::text <> $3
-		ORDER BY claimed_at DESC, created_at DESC
+		ORDER BY claimed_at DESC, released_at DESC NULLS FIRST, id DESC
 		LIMIT 1
 	`, orgID, conversationID, claimID).Scan(&executorID)
 	if errors.Is(err, sql.ErrNoRows) {

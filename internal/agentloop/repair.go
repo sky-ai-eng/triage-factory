@@ -16,32 +16,48 @@ const interruptedToolResult = "interrupted: the executor changed and the workspa
 	"this call's result is unknown and its effects may be partially present or absent — " +
 	"verify state before repeating any side-effectful action."
 
-// workspaceRestoredBody describes a reconstructed workspace exactly:
-// snapshots are taken at graceful dormancy points, so everything up to the
-// last park or step boundary survived — including uncommitted and untracked
-// files — and precisely the interrupted engagement's work since that point is
-// absent.
-const workspaceRestoredBody = "Your workspace was restored from its last snapshot " +
-	"(or built fresh if none existed yet). Everything committed or written up to that snapshot is present, " +
+// snapshotRestoredBody describes a workspace rebuilt from its snapshot
+// exactly: snapshots are taken at graceful dormancy points, so everything up
+// to the last park or step boundary survived — including uncommitted and
+// untracked files — and precisely the interrupted engagement's work since that
+// point is absent.
+const snapshotRestoredBody = "Your workspace was restored from its last snapshot. " +
+	"Everything committed or written up to that snapshot is present, " +
 	"including uncommitted and untracked files. Any changes made after it — during the engagement that was " +
 	"interrupted — are not present. Check the working tree and git log before building on what you remember doing."
 
+// builtFreshBody is the other rebuild, and it is a strictly larger loss: no
+// snapshot was involved, so the tree holds what the remote holds and nothing
+// else. Saying "restored from its last snapshot" here would promise
+// uncommitted and untracked files that were never captured, which is the same
+// class of falsehood as claiming a restore that never happened.
+const builtFreshBody = "Your workspace was built from scratch — there was no snapshot to restore from. " +
+	"Only what reached the remote is present. Anything the interrupted engagement did not push — local commits, " +
+	"uncommitted edits, untracked files, scratch under the run root — is gone. " +
+	"Check the working tree and git log before building on what you remember doing."
+
 // executorChangedSentence is said only when a predecessor engagement
 // demonstrably ran elsewhere. It is a separate sentence rather than part of
-// the body because it is a separate fact: a workspace can be rebuilt on the
+// either body because it is a separate fact: a workspace can be rebuilt on the
 // executor that parked it (a wiped run root, a startup sweep), and asserting
 // a move that did not happen is the thing this whole notice must not do.
 const executorChangedSentence = "This run resumed on a different executor. "
 
-// workspaceRestoredNotice composes the claim-time notice for an engagement
-// entering a tree that is a reconstruction rather than the one its
-// predecessor left behind.
-func workspaceRestoredNotice(executorChanged bool) string {
+// workspaceRebuiltNotice composes the claim-time notice for an engagement
+// entering a tree built where its predecessor's workspace used to be, saying
+// which rebuild it was — the two lose different things, and a notice that
+// blurred them would overstate what survived exactly when the agent has least
+// to work from.
+func workspaceRebuiltNotice(prov domain.WorkspaceProvenance, executorChanged bool) string {
 	notice := "<system-note>\n"
 	if executorChanged {
 		notice += executorChangedSentence
 	}
-	return notice + workspaceRestoredBody + "\n</system-note>"
+	body := builtFreshBody
+	if prov == domain.WorkspaceProvenanceRehydrated {
+		body = snapshotRestoredBody
+	}
+	return notice + body + "\n</system-note>"
 }
 
 // repairTranscript makes the conversation's transcript legal and honest
@@ -60,7 +76,7 @@ func (e *Engine) repairTranscript(ctx context.Context, params Params) error {
 	if err := e.repairDanglingToolCalls(ctx, params, rows); err != nil {
 		return err
 	}
-	return e.noticeWorkspaceRestored(ctx, params, rows)
+	return e.noticeWorkspaceRebuilt(ctx, params, rows)
 }
 
 // repairDanglingToolCalls answers every tool call that has no persisted
@@ -114,9 +130,9 @@ func (e *Engine) repairDanglingToolCalls(ctx context.Context, params Params, row
 	return nil
 }
 
-// noticeWorkspaceRestored queues the workspace-restored notice when this
-// engagement entered a rebuilt tree and the conversation has already done work
-// under an earlier claim.
+// noticeWorkspaceRebuilt queues the workspace notice when this engagement
+// entered a rebuilt tree and the conversation has already done work under an
+// earlier claim.
 //
 // Both gates say the same thing from opposite ends — there is work the model
 // remembers doing, and the tree it did that work in is gone. Drop either and
@@ -130,8 +146,8 @@ func (e *Engine) repairDanglingToolCalls(ctx context.Context, params Params, row
 // Telling an agent its intact workspace was restored costs a verification
 // pass it did not need, and teaches it that system notes are worth
 // second-guessing. That is the more expensive of the two errors, by far.
-func (e *Engine) noticeWorkspaceRestored(ctx context.Context, params Params, rows []domain.Message) error {
-	if !params.Workspace.Restored() {
+func (e *Engine) noticeWorkspaceRebuilt(ctx context.Context, params Params, rows []domain.Message) error {
+	if !params.Workspace.Rebuilt() {
 		return nil
 	}
 	priorWork := false
@@ -151,7 +167,7 @@ func (e *Engine) noticeWorkspaceRestored(ctx context.Context, params Params, row
 			return nil
 		}
 	}
-	return e.insertPending(ctx, params, workspaceRestoredNotice(params.ExecutorChanged), domain.MessageSubtypeInjectionExecutorChanged)
+	return e.insertPending(ctx, params, workspaceRebuiltNotice(params.Workspace, params.ExecutorChanged), domain.MessageSubtypeInjectionExecutorChanged)
 }
 
 // isDelivered mirrors the schema default: nil means delivered, only an

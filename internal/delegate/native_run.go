@@ -219,7 +219,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 // the tree, while a spurious one is exactly the false claim this notice is
 // being made honest about.
 func (s *Spawner) executorChangedSince(ctx context.Context, orgID, runID, claimID string, prov domain.WorkspaceProvenance) bool {
-	if !prov.Restored() || claimID == "" {
+	if !prov.Rebuilt() || claimID == "" {
 		return false
 	}
 	self, _ := s.executorIdentity()
