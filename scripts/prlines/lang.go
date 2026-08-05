@@ -320,7 +320,14 @@ func charLiteralLen(s string) int {
 		return 0
 	}
 	if s[1] == '\\' {
-		for j := 2; j < len(s) && j < 12; j++ {
+		// The byte after the backslash is escaped, whatever it is — so the
+		// search for the closer starts past it. Starting at 2 instead would
+		// stop on the escaped quote in '\'' and report the literal a byte
+		// short. The bound only stops a runaway scan on malformed input; a
+		// lifetime tick can never reach here, since it has no backslash. It
+		// clears the longest real escape ('\U0001F600', '\u{10FFFF}') with room
+		// to spare rather than exactly, so the next one added doesn't fall off.
+		for j := 3; j < len(s) && j < 16; j++ {
 			if s[j] == '\'' {
 				return j + 1
 			}

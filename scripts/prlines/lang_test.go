@@ -157,6 +157,57 @@ func TestLangForContentDetectsShebang(t *testing.T) {
 	}
 }
 
+// TestCharLiteralLen asserts the byte length itself. The scanner tests above
+// can only see a line's final classification, and hasCode is already set by the
+// time this function returns — so a literal reported a byte short leaves no
+// trace there, and the scanner walks on from the wrong offset unnoticed.
+func TestCharLiteralLen(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{`'a'`, 3},
+		{`'é'`, 4}, // one rune, two bytes
+		{`'\n'`, 4},
+		{`'\\'`, 4},
+		{`'\''`, 4}, // the escaped quote is not the closer
+		{`'\x41'`, 6},
+		{`'\U0001F600'`, 12}, // longest escape Go has
+		{`'\u{10FFFF}'`, 12}, // ...and Rust
+		{`'a'b'`, 3},         // stops at the first real closer
+		{`''`, 0},
+		{`'a`, 0},
+		{`'\'`, 0},       // the backslash escapes the would-be closer
+		{`'a str`, 0},    // a Rust lifetime tick, not a literal
+		{`'static x`, 0}, // ...and a longer one
+		{`x'a'`, 0},      // must start at the quote
+	}
+	for _, tc := range cases {
+		if got := charLiteralLen(tc.in); got != tc.want {
+			t.Errorf("charLiteralLen(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestScanEscapedQuoteLiteralLeavesNoState checks that quote-dense lines end
+// with the scanner back in the neutral state, since an unbalanced string or
+// comment state is what would corrupt every line after this one — the damage a
+// single line's own classification cannot show.
+//
+// Note this does NOT cover charLiteralLen's byte length: a literal consumed a
+// byte short still lands here as code, because the stray quote is re-read as
+// ordinary punctuation and hasCode is already set. That is what TestCharLiteralLen
+// is for.
+func TestScanEscapedQuoteLiteralLeavesNoState(t *testing.T) {
+	var st scanState
+	if got := scanLine(langGo, "q := '\\''+'x' // done", &st); got != lineCode {
+		t.Errorf("got %v, want code", got)
+	}
+	if st.raw != "" || st.blockDepth != 0 {
+		t.Errorf("scanner ended the line mid-state: raw=%q blockDepth=%d", st.raw, st.blockDepth)
+	}
+}
+
 func TestClassifyTextFallback(t *testing.T) {
 	cases := []struct {
 		l    lang
