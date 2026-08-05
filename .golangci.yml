@@ -1,7 +1,10 @@
 version: "2"
 
 run:
-  timeout: 3m
+  # scripts/lint.sh runs the Go, Rust and frontend toolchains concurrently, so
+  # on a small CI runner this competes for cores with a cold clippy build. The
+  # headroom is for that contention, not for the analysis itself.
+  timeout: 5m
 
 linters:
   default: none

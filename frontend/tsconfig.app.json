@@ -1,5 +1,9 @@
 {
   "compilerOptions": {
+    // Without this, `noEmit` makes tsc write a stub .tsbuildinfo with no
+    // program state, so `tsc -b` re-checks every file on every run. Setting
+    // it explicitly is what makes the build info incremental.
+    "incremental": true,
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
     "target": "ES2023",
     "useDefineForClassFields": true,

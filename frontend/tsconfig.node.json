@@ -1,5 +1,8 @@
 {
   "compilerOptions": {
+    // See tsconfig.app.json — `noEmit` alone yields a stub .tsbuildinfo and
+    // a full re-check on every `tsc -b`.
+    "incremental": true,
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
     "target": "ES2023",
     "lib": ["ES2023"],
