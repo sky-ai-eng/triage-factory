@@ -3,6 +3,12 @@
 # Usage:
 #   ./scripts/lint.sh           # check only, exit non-zero on issues
 #   ./scripts/lint.sh --fix     # auto-fix where possible
+#
+# The three toolchains are independent, so they run concurrently and each
+# writes to its own log; the logs are replayed in a fixed order at the end so
+# console output stays deterministic regardless of which group finishes first.
+# A failing group never short-circuits the others — one run reports every
+# problem in the tree, not just the first toolchain to find one.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,145 +21,241 @@ fi
 
 GOIMPORTS="${GOIMPORTS:-$(go env GOPATH)/bin/goimports}"
 
+# nproc is GNU; macOS is a supported dev platform and only has sysctl.
+if command -v nproc >/dev/null 2>&1; then
+  NPROC="$(nproc)"
+elif command -v sysctl >/dev/null 2>&1; then
+  NPROC="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+else
+  NPROC=4
+fi
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 blue() { printf '\033[34m== %s ==\033[0m\n' "$*"; }
 
-fail=0
+# Run a check group in the background, capturing its output and exit status.
+# Groups must not write to the console directly — ordering would interleave.
+group() {
+  local name="$1"
+  shift
+  (
+    set +e
+    "$@" >"$WORK/$name.log" 2>&1
+    echo $? >"$WORK/$name.rc"
+  ) &
+}
+
+# The tracked, non-vendored .go files the goimports step and the paths guard
+# both scan. Returns non-zero rather than an empty list if anything goes wrong,
+# because both callers treat "no files" as a reason to fail: a guard that
+# scanned nothing has verified nothing, and must not report OK. grep's exit 1
+# ("no lines matched") is a legitimate empty result and is caught by the
+# emptiness check; anything above that is a real grep error.
+list_go_files() {
+  local files status
+  files=$(git ls-files '*.go') || return 1
+  files=$(printf '%s\n' "$files" | grep -v '^vendor/')
+  status=$?
+  (( status <= 1 )) || return 1
+  [[ -n "${files//[[:space:]]/}" ]] || return 1
+  printf '%s\n' "$files"
+}
 
 # --- Go ---------------------------------------------------------------------
-blue "goimports"
-if [[ ! -x "$GOIMPORTS" ]]; then
-  red "goimports not found at $GOIMPORTS — run: go install golang.org/x/tools/cmd/goimports@latest"
-  fail=1
-else
-  # Format every tracked .go file except generated/vendored.
-  go_files=$(git ls-files '*.go' | grep -v '^vendor/' || true)
-  if [[ -n "$go_files" ]]; then
-    if (( FIX )); then
-      echo "$go_files" | xargs "$GOIMPORTS" -w
-      green "goimports applied"
+go_group() {
+  local rc=0 status
+  # Groups run with errexit off so one failing check doesn't hide the rest, so
+  # every command whose stdout is consumed as data has its exit status checked
+  # explicitly below. Otherwise a tool that dies with an empty stdout — a
+  # goimports parse error, an awk that won't start — reads exactly like a clean
+  # result. pipefail survives `set +e`, so $? after a pipeline is the status of
+  # the first command that failed.
+
+  # This runs over every *tracked* .go file rather than the build graph, and
+  # that is the whole point: golangci-lint's formatters only see files that
+  # survive the host's build tags, so the //go:build linux files would go
+  # unformatted-checked on a Mac. goimports is single-threaded per process,
+  # so fan it out across cores.
+  blue "goimports"
+  if [[ ! -x "$GOIMPORTS" ]]; then
+    red "goimports not found at $GOIMPORTS — run: go install golang.org/x/tools/cmd/goimports@latest"
+    rc=1
+  else
+    local go_files unformatted
+    if ! go_files=$(list_go_files); then
+      red "goimports: could not resolve the tracked Go file list — formatting NOT verified"
+      rc=1
+    elif (( FIX )); then
+      printf '%s\n' "$go_files" | xargs -P "$NPROC" -n 150 "$GOIMPORTS" -w
+      status=$?
+      if (( status != 0 )); then
+        red "goimports -w exited $status — formatting NOT applied to every file (see the error above)"
+        rc=1
+      else
+        green "goimports applied"
+      fi
     else
-      unformatted=$(echo "$go_files" | xargs "$GOIMPORTS" -l)
-      if [[ -n "$unformatted" ]]; then
+      # goimports -l exits 0 when it lists unformatted files; a non-zero exit
+      # means it could not read or parse something, and its stdout is then
+      # empty — indistinguishable from "everything is formatted" unless the
+      # status is checked.
+      unformatted=$(printf '%s\n' "$go_files" | xargs -P "$NPROC" -n 150 "$GOIMPORTS" -l)
+      status=$?
+      if (( status != 0 )); then
+        red "goimports exited $status — formatting NOT verified (see the error above)"
+        rc=1
+      elif [[ -n "$unformatted" ]]; then
         red "Unformatted Go files:"
         echo "$unformatted"
-        fail=1
+        rc=1
       else
         green "Go formatting OK"
       fi
     fi
   fi
-fi
 
-blue "go vet"
-if go vet ./...; then
-  green "go vet OK"
-else
-  fail=1
-fi
+  # No standalone `go vet ./...` step: .golangci.yml enables govet, which runs
+  # go vet's own passes over the same packages (tests included, since
+  # golangci-lint analyses test files by default). Running both meant
+  # typechecking the whole module twice for one set of findings.
 
-# Everything above only ever typechecks the host's own GOOS, so a symbol
-# parked behind a `//go:build linux` tag and referenced from an untagged
-# file passes every check on a Linux runner and breaks the build on a
-# macOS laptop (and vice versa). Both are supported dev platforms — the
-# sandbox is Linux-only at RUNTIME, but the whole module still has to
-# compile on a Mac — so build for both and let whichever one isn't the
-# host catch the tag mistake. Cross-compiles cost a one-time stdlib
-# build; after that the build cache makes them cheap.
-#
-# `go build ./...` over multiple packages discards binaries, so this
-# leaves no artifacts behind. It needs frontend/dist for the root
-# package's go:embed, same as `go vet` above.
-blue "cross-platform build"
-for target in linux/amd64 darwin/arm64; do
-  if GOOS="${target%/*}" GOARCH="${target#*/}" go build ./...; then
-    green "builds for $target"
+  # A symbol parked behind a `//go:build linux` tag and referenced from an
+  # untagged file passes every host-GOOS check on a Linux runner and breaks
+  # the build on a macOS laptop (and vice versa). Both are supported dev
+  # platforms — the sandbox is Linux-only at RUNTIME, but the whole module
+  # still has to compile on a Mac — so build for the platform that ISN'T the
+  # host and let it catch the tag mistake. Building the host's own platform
+  # would only repeat the typecheck golangci-lint already does.
+  #
+  # `go build ./...` over multiple packages discards binaries, so this leaves
+  # no artifacts behind. It needs frontend/dist for the root package's
+  # go:embed, same as golangci-lint below.
+  blue "cross-platform build"
+  local host_target target
+  host_target="$(go env GOOS)/$(go env GOARCH)"
+  for target in linux/amd64 darwin/arm64; do
+    if [[ "$target" == "$host_target" ]]; then
+      green "skipping $target (host platform — typechecked by golangci-lint)"
+      continue
+    fi
+    if GOOS="${target%/*}" GOARCH="${target#*/}" go build ./...; then
+      green "builds for $target"
+    else
+      red "build failed for $target — check for a build-tagged symbol used from an untagged file"
+      rc=1
+    fi
+  done
+
+  blue "golangci-lint"
+  if command -v golangci-lint >/dev/null 2>&1; then
+    if (( FIX )); then
+      golangci-lint run --fix ./... || rc=1
+    else
+      golangci-lint run ./... || rc=1
+    fi
   else
-    red "build failed for $target — check for a build-tagged symbol used from an untagged file"
-    fail=1
+    red "golangci-lint not installed (brew install golangci-lint)"
+    rc=1
   fi
-done
 
-blue "golangci-lint"
-if command -v golangci-lint >/dev/null 2>&1; then
-  if (( FIX )); then
-    golangci-lint run --fix ./... || fail=1
+  # forbidigo (in .golangci.yml) bans os.UserHomeDir outside internal/paths,
+  # but its AST matcher can't see string literals — so the ".triagefactory"
+  # path literal needs this companion grep. It must catch both the
+  # double-quoted and the backtick raw-string forms (".triagefactory",
+  # `.triagefactory`, "~/.triagefactory/...") while NOT tripping on:
+  #   - the same path quoted inside a doc comment (a backtick-quoted path in
+  #     a comment is textually identical to a raw-string literal), and
+  #   - the triagefactory.com marketing domain in URLs.
+  # So: strip // line comments first, then match .triagefactory only as a
+  # path *segment* — flanked by a quote/backtick/slash/tilde and ending the
+  # segment with / or a closing quote/backtick (the domain is followed by
+  # ".com", so it's excluded). internal/paths owns the literal; test files
+  # may reference it.
+  #
+  # One awk pass over the whole file list, not a sed|grep pipeline per file —
+  # the per-file form spawned two processes for each of ~900 files. `sort -u`
+  # collapses a file that matches on several lines (awk's `nextfile` would
+  # too, but it isn't portable to the BSD awk on macOS).
+  blue "paths state-literal guard"
+  local go_src literal_offenders
+  if ! go_src=$(list_go_files); then
+    red "paths state-literal guard: could not resolve the tracked Go file list — guard NOT verified"
+    rc=1
   else
-    golangci-lint run ./... || fail=1
+    go_src=$(printf '%s\n' "$go_src" | grep -v '_test\.go$' | grep -v '^internal/paths/')
+    status=$?
+    if (( status > 1 )); then
+      red "paths state-literal guard: could not filter the Go file list — guard NOT verified"
+      rc=1
+    elif [[ -z "${go_src//[[:space:]]/}" ]]; then
+      red "paths state-literal guard: no Go files left to scan — guard NOT verified"
+      rc=1
+    else
+      literal_offenders=$(printf '%s\n' "$go_src" | xargs awk '
+        { line = $0; sub(/\/\/.*/, "", line)
+          if (line ~ /[`"\/~]\.triagefactory[\/"`]/) print FILENAME }' | sort -u)
+      status=$?
+      if (( status != 0 )); then
+        red "paths state-literal guard: scan exited $status — guard NOT verified (see the error above)"
+        rc=1
+      elif [[ -n "$literal_offenders" ]]; then
+        red '".triagefactory" path literal found outside internal/paths — use a paths.* resolver:'
+        echo "$literal_offenders"
+        rc=1
+      else
+        green "paths state-literal guard OK"
+      fi
+    fi
   fi
-else
-  red "golangci-lint not installed (brew install golangci-lint)"
-  fail=1
-fi
 
-# forbidigo (in .golangci.yml) bans os.UserHomeDir outside internal/paths,
-# but its AST matcher can't see string literals — so the ".triagefactory"
-# path literal needs this companion grep. It must catch both the
-# double-quoted and the backtick raw-string forms (".triagefactory",
-# `.triagefactory`, "~/.triagefactory/...") while NOT tripping on:
-#   - the same path quoted inside a doc comment (a backtick-quoted path in
-#     a comment is textually identical to a raw-string literal), and
-#   - the triagefactory.com marketing domain in URLs.
-# So: strip // line comments first, then match .triagefactory only as a
-# path *segment* — flanked by a quote/backtick/slash/tilde and ending the
-# segment with / or a closing quote/backtick (the domain is followed by
-# ".com", so it's excluded). internal/paths owns the literal; test files
-# may reference it.
-blue "paths state-literal guard"
-go_src=$(git ls-files '*.go' \
-  | grep -v '_test\.go$' \
-  | grep -v '^internal/paths/' || true)
-literal_offenders=""
-for f in $go_src; do
-  if sed 's://.*::' "$f" | grep -qE '[`"/~]\.triagefactory[/"`]'; then
-    literal_offenders+="$f"$'\n'
-  fi
-done
-if [[ -n "$literal_offenders" ]]; then
-  red '".triagefactory" path literal found outside internal/paths — use a paths.* resolver:'
-  echo "$literal_offenders"
-  fail=1
-else
-  green "paths state-literal guard OK"
-fi
-
-# Open-core boundary: the dependency graph points inward, so core (internal/,
-# cmd/) must never import ee/. Only the composition root (package main, at the
-# repo root) wires ee in — ee.Install() + the ee/sso blank import — so it is the
-# sole allowed importer and lives outside these trees. We check Imports AND
-# Test/XTestImports: a core *test* reaching into ee (the old in-package
-# test-stub wiring) is exactly the regression this blocks.
-blue "ee import boundary guard"
-ee_pkg="github.com/sky-ai-eng/triage-factory/ee"
-# Run go list as its own step and check its exit status: suppressing the error
-# (2>/dev/null + || true) would let a go list failure (build break, bad build
-# tag) masquerade as "no offenders" and report OK without verifying anything.
-# Stderr flows to the console so any failure is visible; the `if !` keeps
-# set -e from aborting before we can report it.
-if ! ee_pkg_imports=$(go list -f '{{$ip := .ImportPath}}{{range .Imports}}{{$ip}} {{.}}
+  # Open-core boundary: the dependency graph points inward, so core (internal/,
+  # cmd/) must never import ee/. Only the composition root (package main, at the
+  # repo root) wires ee in — ee.Install() + the ee/sso blank import — so it is the
+  # sole allowed importer and lives outside these trees. We check Imports AND
+  # Test/XTestImports: a core *test* reaching into ee (the old in-package
+  # test-stub wiring) is exactly the regression this blocks.
+  blue "ee import boundary guard"
+  local ee_pkg="github.com/sky-ai-eng/triage-factory/ee"
+  local ee_pkg_imports ee_offenders
+  # Run go list as its own step and check its exit status: suppressing the error
+  # (2>/dev/null + || true) would let a go list failure (build break, bad build
+  # tag) masquerade as "no offenders" and report OK without verifying anything.
+  # Stderr flows to the log so any failure is visible; the `if !` keeps
+  # set -e from aborting before we can report it.
+  if ! ee_pkg_imports=$(go list -f '{{$ip := .ImportPath}}{{range .Imports}}{{$ip}} {{.}}
 {{end}}{{range .TestImports}}{{$ip}} {{.}}
 {{end}}{{range .XTestImports}}{{$ip}} {{.}}
 {{end}}' ./internal/... ./cmd/...); then
-  red "ee import boundary guard: 'go list' failed (see above) — boundary NOT verified"
-  fail=1
-elif [[ -z "${ee_pkg_imports//[[:space:]]/}" ]]; then
-  # internal/ + cmd/ always have many packages with imports; empty output means
-  # go list silently resolved nothing — treat as unverified, not as "no offenders".
-  red "ee import boundary guard: 'go list' returned no packages — boundary NOT verified"
-  fail=1
-else
-  ee_offenders=$(printf '%s\n' "$ee_pkg_imports" \
-    | awk -v ee="$ee_pkg" '$2 == ee || index($2, ee"/") == 1 {print $1" imports "$2}' \
-    | sort -u)
-  if [[ -n "$ee_offenders" ]]; then
-    red "core (internal/, cmd/) must not import ee/ — the open-core boundary points inward; only package main may wire ee:"
-    echo "$ee_offenders"
-    fail=1
+    red "ee import boundary guard: 'go list' failed (see above) — boundary NOT verified"
+    rc=1
+  elif [[ -z "${ee_pkg_imports//[[:space:]]/}" ]]; then
+    # internal/ + cmd/ always have many packages with imports; empty output means
+    # go list silently resolved nothing — treat as unverified, not as "no offenders".
+    red "ee import boundary guard: 'go list' returned no packages — boundary NOT verified"
+    rc=1
   else
-    green "ee import boundary guard OK"
+    ee_offenders=$(printf '%s\n' "$ee_pkg_imports" \
+      | awk -v ee="$ee_pkg" '$2 == ee || index($2, ee"/") == 1 {print $1" imports "$2}' \
+      | sort -u)
+    status=$?
+    if (( status != 0 )); then
+      red "ee import boundary guard: offender scan exited $status — boundary NOT verified"
+      rc=1
+    elif [[ -n "$ee_offenders" ]]; then
+      red "core (internal/, cmd/) must not import ee/ — the open-core boundary points inward; only package main may wire ee:"
+      echo "$ee_offenders"
+      rc=1
+    else
+      green "ee import boundary guard OK"
+    fi
   fi
-fi
+
+  return $rc
+}
 
 # --- Rust (harness/) ---------------------------------------------------------
 # The in-sandbox tool binaries. CI gates on fmt + clippy-as-errors, and until
@@ -162,66 +264,107 @@ fi
 # unused import. A missing toolchain is a hard failure for the same reason
 # golangci-lint's is: a skip silently downgrades this script's contract from
 # "CI will pass" to "the parts I could check will pass".
-blue "cargo fmt + clippy"
-CARGO="${CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}"
-if [[ ! -x "$CARGO" ]]; then
-  red "cargo not found — install rust (https://rustup.rs) or set CARGO=/path/to/cargo"
-  fail=1
-else
-  pushd harness >/dev/null
+rust_group() {
+  local rc=0
+  blue "cargo fmt + clippy"
+  local CARGO="${CARGO:-$(command -v cargo || echo "$HOME/.cargo/bin/cargo")}"
+  if [[ ! -x "$CARGO" ]]; then
+    red "cargo not found — install rust (https://rustup.rs) or set CARGO=/path/to/cargo"
+    return 1
+  fi
+  cd "$REPO_ROOT/harness"
   if (( FIX )); then
-    "$CARGO" fmt || fail=1
+    "$CARGO" fmt || rc=1
     green "cargo fmt applied"
   else
-    "$CARGO" fmt --check || fail=1
+    "$CARGO" fmt --check || rc=1
   fi
   # Check-only even under --fix: `clippy --fix` rewrites source and wants a
   # clean tree, which is a bigger promise than the rest of --fix makes.
-  "$CARGO" clippy --all-targets -- -D warnings || fail=1
-  popd >/dev/null
-fi
+  "$CARGO" clippy --all-targets -- -D warnings || rc=1
+  return $rc
+}
 
 # --- Frontend ---------------------------------------------------------------
-cd frontend
+frontend_group() {
+  local rc=0
+  cd "$REPO_ROOT/frontend"
 
-# pnpm isn't bundled with Node the way npm is, and `pnpm exec` needs deps
-# already installed — fail with an actionable message instead of a bare
-# "command not found" from the tools below.
-if ! command -v pnpm >/dev/null 2>&1; then
-  corepack enable >/dev/null 2>&1 || true
-fi
-if ! command -v pnpm >/dev/null 2>&1; then
-  red "pnpm not found — run: corepack enable (version pinned in frontend/package.json)"
-  exit 1
-fi
-if [[ ! -d node_modules ]]; then
-  red "frontend deps not installed — run: cd frontend && pnpm install"
-  exit 1
-fi
+  # pnpm isn't bundled with Node the way npm is, and `pnpm exec` needs deps
+  # already installed — fail with an actionable message instead of a bare
+  # "command not found" from the tools below.
+  if ! command -v pnpm >/dev/null 2>&1; then
+    corepack enable >/dev/null 2>&1 || true
+  fi
+  if ! command -v pnpm >/dev/null 2>&1; then
+    red "pnpm not found — run: corepack enable (version pinned in frontend/package.json)"
+    return 1
+  fi
+  if [[ ! -d node_modules ]]; then
+    red "frontend deps not installed — run: cd frontend && pnpm install"
+    return 1
+  fi
 
-blue "prettier"
-if (( FIX )); then
-  pnpm exec prettier --write "src/**/*.{ts,tsx,css,json}"
-  green "prettier applied"
-else
-  if ! pnpm exec prettier --check "src/**/*.{ts,tsx,css,json}"; then
+  # prettier, eslint and tsc don't read each other's output, so run them
+  # concurrently as well. Every cache below lives under node_modules/, which
+  # is already gitignored, and each tool invalidates its own entries by
+  # content hash — a stale cache cannot mask a real finding.
+  local sub="$WORK/frontend"
+  mkdir -p "$sub"
+
+  (
+    set +e
+    if (( FIX )); then
+      pnpm exec prettier --write --cache "src/**/*.{ts,tsx,css,json}"
+    else
+      pnpm exec prettier --check --cache "src/**/*.{ts,tsx,css,json}"
+    fi
+    echo $? >"$sub/prettier.rc"
+  ) >"$sub/prettier.log" 2>&1 &
+
+  (
+    set +e
+    if (( FIX )); then
+      pnpm exec eslint . --fix --cache --cache-location node_modules/.cache/eslint
+    else
+      pnpm exec eslint . --cache --cache-location node_modules/.cache/eslint
+    fi
+    echo $? >"$sub/eslint.rc"
+  ) >"$sub/eslint.log" 2>&1 &
+
+  (
+    set +e
+    pnpm exec tsc -b --noEmit
+    echo $? >"$sub/tsc.rc"
+  ) >"$sub/tsc.log" 2>&1 &
+
+  wait
+
+  local step
+  for step in prettier eslint tsc; do
+    blue "$step"
+    cat "$sub/$step.log"
+    if [[ "$(cat "$sub/$step.rc")" != "0" ]]; then
+      rc=1
+    elif [[ "$step" == "prettier" ]] && (( FIX )); then
+      green "prettier applied"
+    fi
+  done
+  return $rc
+}
+
+group go go_group
+group rust rust_group
+group frontend frontend_group
+wait
+
+fail=0
+for g in go rust frontend; do
+  cat "$WORK/$g.log"
+  if [[ "$(cat "$WORK/$g.rc")" != "0" ]]; then
     fail=1
   fi
-fi
-
-blue "eslint"
-if (( FIX )); then
-  pnpm exec eslint . --fix || fail=1
-else
-  pnpm exec eslint . || fail=1
-fi
-
-blue "tsc"
-if ! pnpm exec tsc -b --noEmit; then
-  fail=1
-fi
-
-cd "$REPO_ROOT"
+done
 
 if (( fail )); then
   red "lint failed"
