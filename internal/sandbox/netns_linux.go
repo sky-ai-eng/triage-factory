@@ -81,6 +81,20 @@ func setupNetwork(ctx context.Context, runID string, subnetIdx uint8) (*netState
 	}
 	state.upstreamIF = upstreamIF
 
+	// Delete-if-exists before the add, the same remove-first rule the per-run
+	// socket and the injector cert follow. `ip netns add` fails outright on an
+	// existing name, and the name is deterministic in (run id, subnet index) —
+	// so a namespace leaked by a failed teardown of an earlier engagement of
+	// this same run is a name collision waiting for whichever later claim
+	// happens to draw the same index. The boot-time reap covers a process that
+	// crashed; it does not cover a live process whose one teardown failed.
+	//
+	// It can never delete a live namespace: the index is allocated to this
+	// bring-up before setupNetwork is called and stays held for the cell's
+	// life, so no other live cell can be using a name that ends in this index.
+	// Best-effort — the common case is that there is nothing to delete.
+	_ = runIPNoErr(ctx, "netns", "delete", netnsName)
+
 	// Each ip command is wrapped so failure → cleanup of partial state.
 	// We return the partial state on the way out so cleanup can use it.
 

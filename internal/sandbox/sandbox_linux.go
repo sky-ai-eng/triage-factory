@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 // teardownState collects everything Close needs to undo. Populated
@@ -314,15 +315,32 @@ func setupRunNetwork(ctx context.Context, runID string) (*RunNetwork, error) {
 // Sandbox.Close's ordering (a freed idx a concurrent Allocate could reclaim
 // mid-teardown would collide with the still-lingering veth). Uses a detached
 // context so a cancelled run still drains — teardown must run regardless.
+//
+// The index is a scarce, MaxSandboxes-wide resource that also keys the run's
+// netns name and its sidecar uid, so a teardown that stalls narrows the whole
+// executor's concurrency and keeps a name reserved that nothing is using. The
+// slow case is invisible from the outside — the run has already ended — so it
+// is timed here and reported when it exceeds the budget below, rather than
+// being inferred later from a run that could not get a slot.
 func (n *RunNetwork) Close() error {
 	if n == nil || n.closed {
 		return nil
 	}
 	n.closed = true
 	ns, _ := n.netSt.(NetworkState)
+	started := time.Now()
 	if err := defaultOps.TeardownNetwork(context.Background(), ns); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox: teardown run network: %v\n", err)
 	}
 	defaultAllocator().Release(n.Idx)
+	if elapsed := time.Since(started); elapsed > slowNetworkTeardown {
+		sandboxLog.Warn("run network teardown was slow; its subnet index stayed held for that long and the slot was unavailable to any other run",
+			"subnet_idx", n.Idx, "netns", ns.NetnsName, "took", elapsed)
+	}
 	return nil
 }
+
+// slowNetworkTeardown is how long a per-run network teardown may take before
+// it is worth a log line. The work is a handful of brokered `ip`/`iptables`
+// invocations, so anything past a second is not the teardown being busy.
+const slowNetworkTeardown = time.Second

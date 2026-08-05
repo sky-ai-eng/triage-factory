@@ -46,6 +46,13 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, conversation
 		return nil, nil
 	}
 
+	// Clear an earlier turn's per-run files before this turn's cell is built,
+	// for the same reason the delegated path does: the socket root's entries
+	// are keyed by the conversation id, so consecutive turns of one curator
+	// session share them, and the sidecar about to be launched cannot clear a
+	// predecessor's (sticky root, per-turn sidecar uid).
+	sandbox.ClearRunCellFiles(conversationID)
+
 	net, err := sandbox.SetupRunNetwork(ctx, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("set up curator turn network: %w", err)
@@ -118,7 +125,7 @@ func (s *Spawner) BringUpCuratorSandbox(ctx context.Context, orgID, conversation
 		return nil, fmt.Errorf("bring up curator credential sidecar: %w", err)
 	}
 
-	es := &executorSandbox{net: net, sidecar: sc, conn: conn, res: res, stopRelay: make(chan struct{})}
+	es := &executorSandbox{runID: conversationID, net: net, sidecar: sc, conn: conn, res: res, stopRelay: make(chan struct{})}
 	// Same mid-flight refresh relay as a delegated run: the brain re-mints and
 	// re-seals the turn's short-lived credentials into claim_credentials
 	// (keyed by the conversation's active claim), and this goroutine relays

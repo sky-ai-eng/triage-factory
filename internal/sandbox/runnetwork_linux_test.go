@@ -138,3 +138,33 @@ func TestSandboxClose_RespectsNetworkOwnership(t *testing.T) {
 		t.Fatalf("self-built Close should have released idx %d", ownedIdx)
 	}
 }
+
+// TestRunNetworkClose_ReleasesIndexAfterCancelledRun pins the stop path. A stop
+// cancels the run's context, and the cell teardown that follows runs entirely
+// under that cancelled context — so if Close threaded it through, the brokered
+// teardown would fail immediately and the subnet index would be handed back
+// only if the failure path happens to release it. Both halves matter to the
+// executor, not just to this run: the index is a MaxSandboxes-wide slot, and it
+// is what the successor engagement's netns name and sidecar uid are derived
+// from, so an index held past the stop narrows concurrency and pushes the
+// successor onto a different uid than the files it inherits were written by.
+func TestRunNetworkClose_ReleasesIndexAfterCancelledRun(t *testing.T) {
+	rec := installRecordingNetOps(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	net, err := SetupRunNetwork(ctx, "run-stopped")
+	if err != nil {
+		t.Fatalf("SetupRunNetwork: %v", err)
+	}
+	cancel() // the stop
+
+	if err := net.Close(); err != nil {
+		t.Fatalf("Close after the run's context was cancelled: %v", err)
+	}
+	if got := rec.teardowns.Load(); got != 1 {
+		t.Fatalf("TeardownNetwork called %d times after a cancelled run, want 1 — teardown must not inherit the run's cancellation", got)
+	}
+	if !defaultAllocator().IsFree(net.Idx) {
+		t.Fatalf("subnet idx %d is still held after the stop's teardown; it must come back at teardown, not at the next boot", net.Idx)
+	}
+}

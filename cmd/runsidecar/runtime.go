@@ -661,9 +661,11 @@ func (r *credRuntime) shutdown(ctx context.Context) {
 	r.proxies, r.githubAPI, r.jiraAPI, r.ghInjector, r.agentHost = nil, nil, nil, nil, nil
 	r.mu.Unlock()
 	// Drain the socket server first (unblocks its accept loop + removes the
-	// socket file) so a graceful teardown leaves no stale /run/tf socket; a
-	// SIGKILL teardown skips this and the file is reclaimed by the next run's
-	// stale-socket removal, exactly like a crashed run today.
+	// socket file) so a graceful teardown leaves no stale /run/tf socket. A
+	// SIGKILL teardown skips this; the file is then reclaimed on the
+	// orchestrator side — by this cell's teardown, or failing that by the next
+	// engagement's bring-up clear — because a successor sidecar at a different
+	// per-run uid could not unlink it under the sticky socket root.
 	if agentHost != nil {
 		_ = agentHost.Close()
 	}
