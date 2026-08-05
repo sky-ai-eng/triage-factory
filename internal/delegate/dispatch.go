@@ -717,7 +717,26 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 		s.handlePreAgentFailure(orgID, nil, *run, cause)
 	}
 
-	resumeCwd, werr := s.ensureWorkspace(stepCtx, orgID, run, owner, repo, "")
+	// TF_ROLE=executor: bring up the run network + credential sidecar + proxies
+	// for the resumed agent turn. nil on all/local. Torn down after the resume
+	// turn returns.
+	//
+	// It comes up BEFORE the rehydrate below, and that ordering is the whole
+	// point: a resume of a finished blueprint cold-rehydrates by design (the
+	// concluded run's worktree was torn down), and rebuilding a private repo's
+	// worktree needs the network — the shared bare is a blobless partial clone,
+	// so the rebuild's checkout triggers a lazy promisor fetch. The sidecar's
+	// git proxy is the only credential an executor has for it.
+	execSandbox, esErr := s.bringUpExecutorSandbox(stepCtx, orgID, run, *task)
+	if esErr != nil {
+		// Still pre-agent: the sidecar is part of the runtime coming up, so
+		// the answer is another attempt, not a dead conversation.
+		handBack(fmt.Errorf("bring up credential sidecar for resume failed: %w", esErr))
+		return
+	}
+	defer execSandbox.Close()
+
+	resumeCwd, werr := s.ensureWorkspace(stepCtx, orgID, run, s.gitSeedFor(stepCtx, orgID, owner, repo, execSandbox))
 	if werr != nil {
 		// A rehydrate that failed is the resume runtime failing to come up,
 		// and it fails for the same passing reasons the native path's jail
@@ -751,19 +770,6 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 			domain.RunFailureSessionLost)
 		return
 	}
-
-	// TF_ROLE=executor: bring up the run network + credential sidecar + proxies
-	// for the resumed agent turn (the worktree was already rehydrated above — no
-	// clone — so this only feeds the agent's LLM/git proxies and the agenthost).
-	// nil on all/local. Torn down after the resume turn returns.
-	execSandbox, esErr := s.bringUpExecutorSandbox(stepCtx, orgID, run, *task)
-	if esErr != nil {
-		// Still pre-agent: the sidecar is part of the runtime coming up, so
-		// the answer is another attempt, not a dead conversation.
-		handBack(fmt.Errorf("bring up credential sidecar for resume failed: %w", esErr))
-		return
-	}
-	defer execSandbox.Close()
 
 	// Past every hand-back: this claim now owns the conversation's outcome, so
 	// the queued rows become this turn's message.
@@ -1129,7 +1135,10 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// PR's history includes whatever the earlier steps pushed, which is
 		// exactly what this step needs to see.
 		cfg.prSkeleton = renderPRSkeleton(ctx, prReadClient(gh, execSandbox), owner, repo, prNumber)
-		wt, err := s.ensureWorkspace(ctx, orgID, runForWS, owner, repo, "")
+		// The rehydrate's git runs through this claim's own sidecar proxy — the
+		// sandbox is already up (dispatchClaimedRun brings it up before calling
+		// here), so the proxy is live by the time the rebuild fetches.
+		wt, err := s.ensureWorkspace(ctx, orgID, runForWS, s.gitSeedFor(ctx, orgID, owner, repo, execSandbox))
 		if err != nil {
 			return runConfig{}, err
 		}
@@ -1138,7 +1147,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
 		cfg.toolsRef = agentprompt.GitHubToolsReference() + "\n\n" + agentprompt.JiraToolsReference()
 		cfg.hasWT = false
-		wt, err := s.ensureWorkspace(ctx, orgID, runForWS, "", "", "")
+		wt, err := s.ensureWorkspace(ctx, orgID, runForWS, gitSeed{})
 		if err != nil {
 			return runConfig{}, err
 		}
@@ -1151,7 +1160,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		}
 		cfg.toolsRef = toolsRef
 		cfg.hasWT = false
-		wt, err := s.ensureWorkspace(ctx, orgID, runForWS, "", "", "")
+		wt, err := s.ensureWorkspace(ctx, orgID, runForWS, gitSeed{})
 		if err != nil {
 			return runConfig{}, err
 		}
