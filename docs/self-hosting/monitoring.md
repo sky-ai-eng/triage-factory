@@ -211,7 +211,7 @@ resolve.
 | --- | --- | --- |
 | `tempo` | trace backend — OTLP/HTTP on `:4318`, query API on `:3200` | nothing |
 | `prometheus` | scrapes every pod's `:9464`; receives Tempo's generated span metrics | nothing |
-| `grafana` | the UI that joins them; data sources and correlations provisioned from disk | `127.0.0.1:3001` |
+| `grafana` | the UI that joins them; data sources and correlations provisioned from disk | `127.0.0.1:3030` |
 
 Grafana is the only one reachable from the host, because a human has to open
 it, and it publishes to `127.0.0.1` explicitly — Docker's default would put an
@@ -306,7 +306,16 @@ Tracing](../local-mode/tuning.md#tracing).
 ## Executor health — `GET /healthz`
 
 Each executor exposes a localhost-only `GET /healthz` (default `127.0.0.1:3001`,
-`TF_HEALTHZ_PORT`) — the container HEALTHCHECK target. It reports:
+`TF_HEALTHZ_PORT`) — the container HEALTHCHECK target. **That loopback address is
+the executor container's own**, not the host's: the executor publishes no ports
+at all, so nothing you curl from the host reaches it. Read it through the
+container:
+
+```sh
+docker compose exec executor curl -fsS http://127.0.0.1:3001/healthz | jq .
+```
+
+It reports:
 
 ```json
 {

@@ -720,7 +720,7 @@ services:
   #
   #   TF_TRACES_ENDPOINT=http://tempo:4318      # in .env — see .env.example
   #   docker compose --profile observability up -d
-  #   open http://localhost:3001                # Grafana
+  #   open http://localhost:3030                # Grafana
   #
   # The variable is separate from the profile on purpose and compose cannot
   # fuse them: enabling tracing is one explicit variable in every mode (see
@@ -805,7 +805,12 @@ services:
       - ./docker/observability/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/triage-factory.yaml:ro
       - grafana-data:/var/lib/grafana
     ports:
-      - "127.0.0.1:3001:3000"
+      # 3030, not the 3001 next to :3000 you'd reach for. 3001 is the
+      # executor's TF_HEALTHZ_PORT: container-local here, but a host bind under
+      # scripts/multi-mode-dev.sh, so the two would fight on a dev box — and in
+      # docs the shared number reads as one address whichever way you meet it
+      # first, which is how an operator ends up curling Grafana for /healthz.
+      - "127.0.0.1:3030:3000"
 
 volumes:
   pg-data:

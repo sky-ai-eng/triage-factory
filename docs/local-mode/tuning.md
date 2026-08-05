@@ -126,14 +126,14 @@ compose stack uses, so the correlations are identical:
 docker network create tf-traces
 docker network connect --alias tempo tf-traces tf-tempo
 
-docker run -d --name tf-grafana --network tf-traces -p 127.0.0.1:3001:3000 \
+docker run -d --name tf-grafana --network tf-traces -p 127.0.0.1:3030:3000 \
   -e GF_AUTH_ANONYMOUS_ENABLED=true -e GF_AUTH_ANONYMOUS_ORG_ROLE=Admin \
   -e GF_AUTH_DISABLE_LOGIN_FORM=true \
   -v "$PWD/docker/observability/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/triage-factory.yaml:ro" \
   grafana/grafana:13.1.2
 ```
 
-Then open <http://localhost:3001> → **Explore** → **Tempo**. The file also
+Then open <http://localhost:3030> → **Explore** → **Tempo**. The file also
 provisions a Prometheus data source, which has nothing behind it in this
 two-container shape; the only thing that notices is the trace view's Service
 Graph tab. Anonymous Admin with no login form is a deliberate dev-loop
