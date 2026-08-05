@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // TestListen_Permissions pins the socket hygiene invariant: 01731 dir
@@ -87,5 +89,29 @@ func TestListen_RefusesNonSocketFile(t *testing.T) {
 	}
 	if string(data) != "not a socket" {
 		t.Error("listen must not have modified or removed the non-socket file, but its contents changed")
+	}
+}
+
+// TestBrokerSocket_IsReservedAgainstPerRunSweeps is the drift guard on the one
+// literal that keeps a per-run cleanup from unlinking this broker's control
+// socket. Both live in the same directory, and the per-run paths are derived
+// from a run id by a sanitizer that maps any input onto a flat name there — so
+// internal/sandbox's sweeps refuse a derived path whose basename is this
+// socket's. That refusal is spelled as a duplicated literal, because this
+// package imports internal/sandbox and the dependency cannot run the other
+// way; nothing but this test keeps the two spellings together.
+//
+// The failure it catches is quiet and total: rename the broker socket without
+// updating the reserved set, and the sweeps go back to being permitted to
+// delete it — with no compile error, and no symptom until a run id happens to
+// derive onto the new name and takes every subsequent run on the host down.
+func TestBrokerSocket_IsReservedAgainstPerRunSweeps(t *testing.T) {
+	if !sandbox.IsReservedSocketRootPath(DefaultSocketPath) {
+		t.Errorf("sandbox's per-run sweeps do not treat %q as reserved; a run id deriving onto it would be permitted to unlink the broker's control socket", DefaultSocketPath)
+	}
+	// The reservation must be narrow: an ordinary per-run socket in the same
+	// directory is exactly what those sweeps exist to remove.
+	if perRun := sandbox.TrustedAgentHostSocketPath("some-run-id"); sandbox.IsReservedSocketRootPath(perRun) {
+		t.Errorf("%q is reserved, but it is per-run state the cell teardown has to be able to clear", perRun)
 	}
 }

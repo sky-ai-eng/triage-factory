@@ -127,6 +127,14 @@ func StartWithServer(server *Server, runID string) (*HostDaemon, sandbox.Mount, 
 	// would otherwise EADDRINUSE on a path that's actually unused.
 	// Stale files in /run/tf/ are by definition from a previous TF
 	// process — the only writer is this codepath — so removal is safe.
+	//
+	// Safe, but not always PERMITTED, and the difference decides nothing
+	// here only because someone else has already handled it: the socket root
+	// is sticky, so a stale file owned by a previous engagement's sidecar uid
+	// is refused to this one with EPERM. The orchestrator clears a
+	// predecessor's per-run files at cell bring-up, before this process is
+	// launched (sandbox.ClearRunCellFiles) — that, not this line, is what
+	// makes a successor engagement of the same run come up.
 	_ = os.Remove(sockPath)
 
 	listener, err := net.Listen("unix", sockPath)
@@ -270,10 +278,39 @@ func WriteInjectorCert(runID string, certPEM []byte) error {
 		return fmt.Errorf("agenthost: mkdir %s: %w", hostSocketRoot, err)
 	}
 	path := CertPathFor(runID)
+	if err := writeFreshInjectorCert(path, certPEM); err != nil {
+		return err
+	}
+	return grantReadOnlyToSandbox(path)
+}
+
+// writeFreshInjectorCert creates the cert as a NEW file, removing whatever is
+// already at the path first — the same remove-before-create rule
+// StartWithServer applies to the socket, for the same reason and one more.
+//
+// The path is keyed by run id, so sequential engagements of one conversation
+// share it, and a truncate-in-place would hand the new injector the previous
+// engagement's file: wrong mode, wrong owner, and — under a mid-teardown
+// overlap — a window where the cert the jail mounts is not the one the serving
+// injector holds. Creating it fresh makes the file belong to whoever is
+// serving it, whatever uid that is.
+//
+// It is NOT the mechanism that makes a stale predecessor survivable, and must
+// not be mistaken for one. The socket root is sticky (cmd/capbroker's listen /
+// runBroker pin it 0173x, root-or-orchestrator owned), so unlink authority
+// there belongs to the file's own owner and to the directory's — and a
+// successor sidecar drawing a different subnet index runs at a different uid
+// than the file's owner, so this removal is refused with EPERM and the write
+// that follows fails EACCES exactly as it did before. Clearing a predecessor's
+// files is therefore the orchestrator's job, done at cell bring-up before this
+// process is launched (sandbox.ClearRunCellFiles). What this covers is the
+// same-owner case: the reused subnet index, and the root/dev path.
+func writeFreshInjectorCert(path string, certPEM []byte) error {
+	_ = os.Remove(path)
 	if err := os.WriteFile(path, certPEM, 0o640); err != nil {
 		return fmt.Errorf("agenthost: write injector cert %s: %w", path, err)
 	}
-	return grantReadOnlyToSandbox(path)
+	return nil
 }
 
 // grantReadOnlyToSandbox grants the sandbox uid/gid read access to a per-run

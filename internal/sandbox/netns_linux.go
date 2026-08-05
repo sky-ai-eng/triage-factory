@@ -81,6 +81,53 @@ func setupNetwork(ctx context.Context, runID string, subnetIdx uint8) (*netState
 	}
 	state.upstreamIF = upstreamIF
 
+	// Reclaim a stale namespace of this name before the add, the same
+	// remove-first rule the per-run socket and the injector cert follow.
+	// `ip netns add` fails outright on an existing name, and the name is
+	// deterministic in (run id, subnet index) — so a namespace leaked by a
+	// failed teardown of an earlier engagement of this same run is a name
+	// collision waiting for whichever later claim happens to draw the same
+	// index. The boot-time reap covers a process that crashed; it does not
+	// cover a live process whose one teardown failed.
+	//
+	// Gated on this process's OWN ledger, not on the caller's word. The
+	// argument that this name cannot belong to a live cell — the subnet index
+	// is held for the cell's life, so no other live cell can be using a name
+	// ending in it — is a property of the orchestrator's in-process allocator,
+	// and the run id and index reach this function as unvalidated RPC
+	// arguments. Every other remove-first here is bounded by something the
+	// kernel enforces; a namespace has no owner to check, so nothing but this
+	// gate stands between a caller with a wrong idea of what is stale and a
+	// live cell's namespace.
+	//
+	// What that costs is name theft rather than an outage, and the gate is
+	// worth having anyway. `ip netns delete` unlinks the NAME; the namespace
+	// itself is refcounted by the processes inside it, so the victim keeps its
+	// interfaces and its traffic keeps flowing. What breaks is the bookkeeping
+	// on top: the name now resolves to a namespace the victim is not in, and
+	// the victim's own teardown — which works by name — later unlinks the
+	// successor's instead, and so on down the chain. Silent cross-cell state
+	// corruption is not a trade worth making for a reclaim, so a namespace this
+	// process created and has not torn down is left exactly where it is, and
+	// the add below fails loudly as it always did.
+	if owner, live := netnsLiveRun(netnsName); live {
+		sandboxLog.Error("refusing to reclaim a network namespace this process created and has not torn down; the launch will fail rather than take a live cell's namespace name",
+			"netns", netnsName, "live_run", owner, "requested_run", runID, "subnet_idx", subnetIdx)
+	} else {
+		// Best-effort — the common case is that there is nothing to delete.
+		_ = runIPNoErr(ctx, "netns", "delete", netnsName)
+	}
+
+	// The namespace itself, ahead of the rest, so the ledger records it the
+	// moment it exists rather than after the addressing that follows. A
+	// failure between here and the end leaves it unregistered on purpose: the
+	// caller's error path tears this partial state down, and anything that
+	// survives that teardown is stale by definition and must stay reclaimable.
+	if err := runIP(ctx, "netns", "add", netnsName); err != nil {
+		return state, fmt.Errorf("netns: netns add: %w", err)
+	}
+	markNetnsLive(netnsName, runID)
+
 	// Each ip command is wrapped so failure → cleanup of partial state.
 	// We return the partial state on the way out so cleanup can use it.
 
@@ -88,8 +135,6 @@ func setupNetwork(ctx context.Context, runID string, subnetIdx uint8) (*netState
 		name string
 		argv []string
 	}{
-		// netns add
-		{"netns add", []string{"netns", "add", netnsName}},
 		// veth pair
 		{"veth add", []string{"link", "add", vethHost, "type", "veth", "peer", "name", vethSandbox}},
 		// move sandbox side into netns
@@ -141,6 +186,12 @@ func teardownNetwork(ctx context.Context, state *netState) error {
 	if state == nil {
 		return nil
 	}
+	// Drop the ledger entry first, and unconditionally. A teardown whose
+	// `ip netns delete` fails is exactly how a namespace leaks, and that leak
+	// is what a later bring-up has to be free to reclaim — keeping a failed
+	// teardown "live" would wedge this (run id, index) pair until the process
+	// restarted, which is the opposite of what the reclaim exists for.
+	forgetNetns(state.netnsName)
 	// `ip link delete` on the host veth also removes its peer in
 	// the netns (kernel keeps the pair atomic).
 	_ = runIPNoErr(ctx, "link", "delete", state.vethHost)

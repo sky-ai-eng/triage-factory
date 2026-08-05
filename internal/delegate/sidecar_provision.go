@@ -32,6 +32,12 @@ type executorSandbox struct {
 	conn    *sidecarproto.Conn
 	res     *sidecarproto.StartProxiesResult
 
+	// runID is the key every per-run file under the socket root is named
+	// after — the conversation id, for a delegated run and a curator turn
+	// alike. Held so teardown can clear this cell's files by the same
+	// derivation bring-up cleared them by.
+	runID string
+
 	// stopRelay stops the credential-refresh relay goroutine; closed once by
 	// Close. relayOnce guards the close against a double Close.
 	stopRelay chan struct{}
@@ -47,13 +53,21 @@ type executorSandbox struct {
 
 // Close tears the executor sandbox down in the order that keeps the veth alive
 // under anything still using it: stop the refresh relay, stop the supervision
-// reader, SIGKILL the sidecar (freeing its proxies + unsealed bundle), then tear
-// down the network the proxies were bound on and release its subnet index. Safe
-// on nil.
+// reader, SIGKILL the sidecar (freeing its proxies + unsealed bundle), remove
+// the per-run files that sidecar left under the socket root, then tear down the
+// network the proxies were bound on and release its subnet index. Safe on nil.
+//
+// The file removal sits exactly there — after the sidecar is dead so nothing
+// can re-create them behind it, and before the index is released so the
+// ownership guard ReleaseRunCellFiles applies still holds (see its doc). It is
+// hygiene: the run's next engagement clears whatever is left regardless, and
+// this is what keeps a long-lived executor's tmpfs socket root from carrying
+// one orphaned pair per run id it ever ran.
 func (e *executorSandbox) Close() {
 	if e == nil {
 		return
 	}
+	started := time.Now()
 	if e.stopRelay != nil {
 		e.relayOnce.Do(func() { close(e.stopRelay) })
 	}
@@ -64,9 +78,27 @@ func (e *executorSandbox) Close() {
 		_ = e.sidecar.Close()
 	}
 	if e.net != nil {
+		if e.runID != "" {
+			sandbox.ReleaseRunCellFiles(e.runID, e.net.Idx)
+		}
 		_ = e.net.Close()
 	}
+	// A stop that queues a message re-claims the conversation within a scan
+	// tick, so this teardown routinely overlaps its own successor's bring-up.
+	// Every resource it frees — the subnet index, the sidecar uid derived from
+	// it, the netns name — is one the successor may be waiting on, so how long
+	// it took is worth having in the log next to the successor's first line.
+	if elapsed := time.Since(started); elapsed > slowCellTeardown {
+		dispatchLog.Warn("cell teardown was slow; the run's subnet index and sidecar uid stayed held for that long",
+			"run", e.runID, "took", elapsed)
+	}
 }
+
+// slowCellTeardown is how long a cell teardown may take before it is logged.
+// The work is a supervision-socket close, a SIGKILL, two unlinks and a
+// brokered network teardown — none of which waits on the agent — so a teardown
+// past this is holding a scarce slot for a reason worth naming.
+const slowCellTeardown = 2 * time.Second
 
 // credRelayNudge is a one-shot request to the credential-refresh relay: re-read
 // the sealed-bundle channel now and push any new blob to the sidecar, replying
@@ -200,6 +232,16 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 		return nil, nil
 	}
 
+	// Clear whatever an earlier engagement of this conversation left under the
+	// socket root before anything in the new cell is created. The per-run
+	// socket and injector cert are keyed by run id, so sequential engagements
+	// share those paths, and the sidecar about to be launched can neither
+	// truncate nor unlink a file owned by its predecessor's uid — the socket
+	// root is sticky. This process can (it owns that directory), and doing it
+	// here, ahead of the launch, is what makes an immediate re-claim that
+	// races the previous cell's teardown come up instead of failing.
+	sandbox.ClearRunCellFiles(run.ID)
+
 	net, err := sandbox.SetupRunNetwork(ctx, run.ID)
 	if err != nil {
 		return nil, fmt.Errorf("set up run network: %w", err)
@@ -291,7 +333,7 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 		GitProxyToken:  res.GitProxyToken,
 	})
 
-	es := &executorSandbox{net: net, sidecar: sc, conn: conn, res: res, stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
+	es := &executorSandbox{runID: run.ID, net: net, sidecar: sc, conn: conn, res: res, stopRelay: make(chan struct{}), credNudge: make(chan credRelayNudge)}
 	_, myBootEpoch := s.executorIdentity()
 
 	// A relayed `workspace add` widens this run's authorized repo set, which
