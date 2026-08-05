@@ -185,6 +185,124 @@ Shutdown flushes: a batch of finished spans that hasn't been exported yet is
 written out on SIGTERM before the process exits, so the traces covering a
 restart survive it.
 
+### The bundled trace stack
+
+TF ships no trace backend in the sense that matters — nothing is required and
+nothing starts by default — but the compose file carries an **opt-in profile**
+with one, because push-based signals have no equivalent of "point your existing
+scraper at it": until a backend exists somewhere, a span has nowhere to go.
+
+Two steps, and neither implies the other:
+
+```sh
+TF_TRACES_ENDPOINT=http://tempo:4318      # 1. in .env — this is what enables tracing
+
+docker compose --profile observability up -d   # 2. start the backend
+```
+
+Compose cannot fuse them, and shouldn't: enabling tracing is one explicit
+variable in every mode, and a profile that quietly exported an OTLP address
+would be precisely the inherited-endpoint case `TF_TRACES_ENDPOINT` exists to
+refuse. Starting the profile without the variable is harmless; setting the
+variable without the profile costs retried exports to a name that doesn't
+resolve.
+
+| Service | Role | Published |
+| --- | --- | --- |
+| `tempo` | trace backend — OTLP/HTTP on `:4318`, query API on `:3200` | nothing |
+| `prometheus` | scrapes every pod's `:9464`; receives Tempo's generated span metrics | nothing |
+| `grafana` | the UI that joins them; data sources and correlations provisioned from disk | `127.0.0.1:3001` |
+
+Grafana is the only one reachable from the host, because a human has to open
+it, and it publishes to `127.0.0.1` explicitly — Docker's default would put an
+anonymous-Admin Grafana on every interface the box has. **None of this is meant
+to be internet-facing.** A deployment where the trace UI needs to be reachable
+by more than the operator on the box should run Grafana behind the same reverse
+proxy and auth as everything else, and the same goes for pointing TF at a Tempo
+that isn't on the compose network: spans are unauthenticated on the wire unless
+you configure TLS.
+
+Config lives in [`docker/observability/`](../../docker/observability/) — Tempo's
+config, Prometheus's scrape config, and Grafana's data sources. One detail worth
+knowing: Prometheus finds TF's `:9464` by DNS service discovery rather than
+static targets, so `--scale executor=3` is scraped as three targets instead of
+whichever replica DNS happened to answer with.
+
+#### Is the pipe working?
+
+Spans are pushed, so an unreachable backend costs you spans rather than raising
+an alert — and "nothing in Grafana" looks identical whether TF never exported or
+Tempo never stored. Pushing one span by hand separates the two:
+
+```sh
+docker compose --profile observability exec grafana sh -c '
+  s=$(date +%s)
+  curl -sS -X POST http://tempo:4318/v1/traces -H "content-type: application/json" -d "{
+    \"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"smoke\"}}]},
+    \"scopeSpans\":[{\"spans\":[{\"traceId\":\"1234567890abcdef1234567890abcdef\",\"spanId\":\"1234567890abcdef\",
+    \"name\":\"smoke.test\",\"kind\":1,
+    \"startTimeUnixNano\":\"$((s-1))000000000\",\"endTimeUnixNano\":\"${s}000000000\",
+    \"attributes\":[{\"key\":\"conversation.id\",\"value\":{\"stringValue\":\"smoke-1\"}}]}]}]}]}"'
+```
+
+(Second-precision timestamps because `date +%s%N` — nanoseconds — exists on
+neither the container's busybox nor macOS, and a span stamped in 1970 is stored
+happily and then never appears in any search.)
+
+Then look for it in Grafana (Explore → Tempo → `{ .conversation.id = "smoke-1" }`;
+allow ~10s, a trace is searchable once the ingester has cut it). If the hand-sent
+span shows up and TF's don't, the problem is on TF's side — check the process
+logs for `tracing enabled` at boot and `opentelemetry sdk error` after it. If
+neither shows up, it's Tempo: `tempo_distributor_spans_received_total` in
+Prometheus counts what actually arrived.
+
+#### Clicking from a span to everything related
+
+Domain IDs ride on spans as attributes — `conversation.id`, `event.id`,
+`task.id` — and never the other way around: no TF table stores a trace ID,
+because traces age out on a much shorter clock than the rows would, and the
+column would mostly point at deleted traces. The way back is therefore a search
+on the attribute, and Grafana's provisioning turns that search into a click.
+Open any span with a `conversation.id` and its links menu offers **Traces for
+this conversation**, which runs `{ .conversation.id = "…" }` — every other trace
+that touched the same conversation, across pods and across pipeline stages that
+deliberately do not share a trace. Same for `event.id` and `task.id`.
+
+Adding another attribute to that list is a `correlations:` entry in
+`docker/observability/grafana-datasources.yaml` plus a restart of the Grafana
+container; the file's comments walk through the shape.
+
+#### Metrics ↔ traces
+
+Two things wire the metrics half in, both provisioned:
+
+- **Exemplars.** Prometheus runs with `--enable-feature=exemplar-storage`, so
+  the trace IDs TF attaches to histogram samples are stored, and the Prometheus
+  data source turns each into a link into Tempo. A spike in a latency panel
+  becomes a click through to one slow request.
+- **Span metrics and the service graph.** Tempo's metrics-generator derives RED
+  metrics (`traces_spanmetrics_*`) and service-graph edges from the spans it
+  receives and remote-writes them to Prometheus. That is what fills the trace
+  view's **Service Graph** tab and the trace-to-metrics links on a span, and it
+  works regardless of what TF itself instruments.
+
+Trace-to-**logs** is deliberately not configured: it needs a log store to point
+at and this stack ships none. The logs↔traces join is still there — every line
+emitted under a span carries `trace_id` — it is just `docker compose logs | grep
+<trace_id>` rather than a click. Adding a Loki container and a `tracesToLogsV2`
+block to the Tempo data source is the upgrade path.
+
+#### Retention
+
+Tempo keeps blocks for 7 days and Prometheus keeps samples for 7 days, matched
+on purpose so an exemplar never outlives the trace it links to. All three
+volumes (`tempo-data`, `prometheus-data`, `grafana-data`) are caches: losing
+them loses observability history, never TF state.
+
+For the local-mode dev loop — a single `docker run` of Tempo against a TF binary
+running on the host — see [Environment tuning →
+Tracing](../local-mode/tuning.md#tracing).
+
 ## Executor health — `GET /healthz`
 
 Each executor exposes a localhost-only `GET /healthz` (default `127.0.0.1:3001`,

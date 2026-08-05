@@ -1,0 +1,45 @@
+# Prometheus — the metrics half of the bundled `observability` compose
+# profile, and the reason a span and a metric can be looked at together.
+#
+# Two jobs it does that a trace backend alone cannot: it scrapes TF's own
+# :9464 (so the counters and the spans live in one Grafana), and it receives
+# Tempo's generated RED/service-graph metrics over remote-write, which is
+# what the Tempo data source's trace-to-metrics links query.
+
+global:
+  # Faster than the 1m default because this stack exists to watch something
+  # that just happened. Nothing here is retained long enough for the extra
+  # samples to matter.
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # TF pods. DNS service discovery rather than static targets, because
+  # `docker compose up -d --scale executor=3` gives the `executor` service
+  # three container IPs behind one name: a static target would resolve to
+  # whichever A record came back first and silently scrape one of the three.
+  # Compose's embedded DNS returns them all, and the refresh picks up
+  # replicas that come and go.
+  #
+  # Both roles are scraped the same way — every pod serves its own :9464,
+  # counters are per-process, so a fleet total is a `sum` at query time.
+  - job_name: triagefactory
+    dns_sd_configs:
+      - names: [triagefactory, executor]
+        type: A
+        port: 9464
+        refresh_interval: 30s
+    relabel_configs:
+      # __meta_dns_name is the service name the target was discovered
+      # through, so this is exactly the control/executor split — a label
+      # worth having, unlike the container IP that lands in `instance`.
+      - source_labels: [__meta_dns_name]
+        target_label: tf_service
+
+  # Tempo itself. Not vanity metrics: `tempo_distributor_spans_received_total`
+  # is the fastest answer to "is the pipe working at all" when a span never
+  # shows up in the UI — it distinguishes "TF never exported" from "Tempo got
+  # it and search hasn't caught up".
+  - job_name: tempo
+    static_configs:
+      - targets: ['tempo:3200']

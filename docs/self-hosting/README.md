@@ -15,7 +15,7 @@ reviewer evaluates, see [docs/security/](../security/).
 ## Operate
 
 - [Fleet console & operators](fleet-console.md) — the deployment-wide admin view + granting operator access via the `operator` CLI
-- [Monitoring & health checks](monitoring.md) — `/api/health`, `/readyz`, executor `/healthz`
+- [Monitoring & health checks](monitoring.md) — `/api/health`, `/readyz`, executor `/healthz`, `:9464` metrics, and traces (`TF_TRACES_ENDPOINT` + the opt-in Tempo/Grafana profile)
 - [Scaling out](scaling.md) — control + N executors, per-role DB pools, HA reverse proxy
 - [Client IP & trusted proxies](networking.md) — `TF_TRUSTED_PROXY_CIDR` behind a load balancer
 - [Durable workspace storage](storage.md) — SeaweedFS + BYO S3/R2

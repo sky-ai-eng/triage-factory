@@ -110,6 +110,27 @@ EOF
 echo "Running jwk-init..."
 TF_PUBLIC_URL="$PUBLIC_URL" "$BIN" jwk-init --write-env "$ENV_FILE"
 
+# --- Static contract: the observability profile stays opt-in ---------------
+#
+# Tempo/Prometheus/Grafana live in the same compose file but must never join
+# the default `up`. This file is what an operator deploys, and a trace backend
+# nobody asked for is three unrequested containers, one of them publishing a
+# port. Static check — `config` resolves profiles without pulling or starting
+# anything, so it costs nothing and it fails the instant someone drops the
+# `profiles:` key while editing a neighbouring service.
+echo "Asserting the observability profile is opt-in..."
+default_services=$(dc config --services)
+profile_services=$(dc --profile observability config --services)
+for svc in tempo prometheus grafana; do
+  if printf '%s\n' "$default_services" | grep -qx "$svc"; then
+    fail "$svc starts on a plain 'docker compose up' — it must be gated behind --profile observability"
+  fi
+  if ! printf '%s\n' "$profile_services" | grep -qx "$svc"; then
+    fail "$svc is missing from --profile observability"
+  fi
+done
+pass "observability profile is opt-in (tempo/prometheus/grafana absent by default, present with the profile)"
+
 # --- Bring the stack up ----------------------------------------------------
 #
 # Build from the working tree (the triagefactory service uses build:, so this

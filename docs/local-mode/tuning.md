@@ -1,8 +1,9 @@
 # Environment tuning (local mode)
 
-Environment-variable knobs for run concurrency, logging, the Claude binary, and
-the agent engine's runtime. The concurrency, logging, and JIT settings apply in
-multi mode too; the `TF_CLAUDE_BINARY` override is local-mode only.
+Environment-variable knobs for run concurrency, logging, tracing, the Claude
+binary, and the agent engine's runtime. The concurrency, logging, tracing, and
+JIT settings apply in multi mode too; the `TF_CLAUDE_BINARY` override is
+local-mode only.
 
 ## Run concurrency
 
@@ -48,6 +49,102 @@ Every line carries a `component` field (e.g. `component=router`) naming the
 subsystem — the structured replacement for the old `[router]` prefixes. Verbose
 steady-state traces (such as per-poll credential-tier resolution) log at `debug`,
 so set `TF_LOG_LEVEL=debug` to surface them.
+
+## Tracing
+
+Tracing is off in local mode and multi mode alike until `TF_TRACES_ENDPOINT`
+names an OTLP/HTTP backend. That one variable is the whole switch — there is no
+`runmode` gate — and while it is unset no tracer provider is installed at all,
+so the cost of leaving tracing off is zero rather than small. Where the metrics
+listener defaults differently per mode (it opens a port, so a laptop shouldn't
+open it unasked), tracing only ever pushes to an address someone typed.
+
+Which is also why there is nothing to curl: spans are **pushed**, so something
+has to be listening before a single one is visible. For the local dev loop that
+something is one container.
+
+### Tempo in one `docker run`
+
+From the repo root (the `-v` paths are relative to it):
+
+```bash
+docker run -d --name tf-tempo \
+  -p 127.0.0.1:4318:4318 -p 127.0.0.1:3200:3200 \
+  -v "$PWD/docker/observability/tempo-standalone.yaml:/etc/tempo/tempo.yaml:ro" \
+  grafana/tempo:2.10.7 -config.file=/etc/tempo/tempo.yaml
+
+TF_TRACES_ENDPOINT=http://localhost:4318 ./triagefactory
+```
+
+`4318` is OTLP ingest (where TF pushes) and `3200` is Tempo's query API (where
+you read); both bind loopback. The config is checked in — local-disk storage, a
+day of retention, no cluster, nothing to operate. TF logs `tracing enabled` with
+the resolved address at boot; if it doesn't, the variable didn't reach the
+process.
+
+Read what arrived straight off the query API — no UI required, which is exactly
+what you want when the question is "did the span I just added export, with the
+attributes I expect?":
+
+```bash
+# every trace Tempo has seen recently
+curl -sS -G http://localhost:3200/api/search --data-urlencode 'q={}' | jq '.traces[].rootTraceName'
+
+# one pipeline's traces, by the attribute that identifies it
+curl -sS -G http://localhost:3200/api/search --data-urlencode 'q={ .conversation.id = "<id>" }' | jq
+
+# the whole trace, spans and attributes included
+curl -sS http://localhost:3200/api/traces/<trace-id> | jq
+```
+
+A trace is searchable a beat after it finishes (Tempo cuts it once it has been
+idle ~10s); `/api/traces/<id>` finds it immediately. If nothing shows up at all,
+push a span by hand to tell a broken exporter from a quiet TF:
+
+```bash
+s=$(date +%s)
+curl -sS -X POST http://localhost:4318/v1/traces -H 'content-type: application/json' -d "{
+  \"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"smoke\"}}]},
+  \"scopeSpans\":[{\"spans\":[{\"traceId\":\"1234567890abcdef1234567890abcdef\",\"spanId\":\"1234567890abcdef\",
+  \"name\":\"smoke.test\",\"kind\":1,
+  \"startTimeUnixNano\":\"$((s-1))000000000\",\"endTimeUnixNano\":\"${s}000000000\",
+  \"attributes\":[{\"key\":\"conversation.id\",\"value\":{\"stringValue\":\"smoke-1\"}}]}]}]}]}"
+```
+
+Second-precision timestamps on purpose: `date +%s%N` exists on neither macOS nor
+busybox, and a span accidentally stamped in 1970 is stored happily and then
+never appears in any search.
+
+### Adding the trace view
+
+When reading JSON stops being enough — waterfalls, span attributes side by side,
+the attribute correlations that jump from a span to every other trace touching
+the same conversation — add Grafana next to it. Same provisioning file the
+compose stack uses, so the correlations are identical:
+
+```bash
+docker network create tf-traces
+docker network connect --alias tempo tf-traces tf-tempo
+
+docker run -d --name tf-grafana --network tf-traces -p 127.0.0.1:3001:3000 \
+  -e GF_AUTH_ANONYMOUS_ENABLED=true -e GF_AUTH_ANONYMOUS_ORG_ROLE=Admin \
+  -e GF_AUTH_DISABLE_LOGIN_FORM=true \
+  -v "$PWD/docker/observability/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/triage-factory.yaml:ro" \
+  grafana/grafana:13.1.2
+```
+
+Then open <http://localhost:3001> → **Explore** → **Tempo**. The file also
+provisions a Prometheus data source, which has nothing behind it in this
+two-container shape; the only thing that notices is the trace view's Service
+Graph tab. Anonymous Admin with no login form is a deliberate dev-loop
+convenience and the reason both containers publish to `127.0.0.1` only.
+
+Tear the whole thing down with `docker rm -f tf-tempo tf-grafana && docker
+network rm tf-traces` — no state outside the containers, and TF's own SQLite
+never learns any of this happened.
+The multi-mode equivalent is a compose profile that wires the same three pieces
+together for you: see [Monitoring → The bundled trace
+stack](../self-hosting/monitoring.md#the-bundled-trace-stack).
 
 ## Claude binary
 
