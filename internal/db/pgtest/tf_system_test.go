@@ -132,6 +132,11 @@ func TestTfSystem_CrossOrgSystemReadSucceeds(t *testing.T) {
 // means a missing grant: add it to the tf_system section of the pg
 // baseline while that file is still pre-release and freely editable: a
 // new migration granting the table once it is not.
+//
+// It covers the call sites that have no shared conformance suite of their
+// own. The executor-path stores that DO have one — the telemetry samplers —
+// run their suites role-bound in tf_system_stores_test.go; together the two
+// are the grant list's enforcement.
 func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)

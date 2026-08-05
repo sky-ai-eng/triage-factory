@@ -8384,11 +8384,15 @@ GRANT SELECT ON TABLE public.llm_spend TO tf_app;
 -- to LOGIN with TF_SYSTEM_PASSWORD once this migration has applied; see
 -- docker-compose.yml. No DDL grant of any kind, ever. This is an
 -- enumerated allowlist of exactly the tables the executor's dispatcher,
--- cross-pod signal apply loop, and heartbeat touch —
--- verified against code and pinned by the pgtest conformance suite
--- (internal/db/pgtest/tf_system_test.go). Any future migration that adds a
--- table to the executor's code path must add that table's tf_system grant
--- in the SAME migration; the conformance test is the enforcement backstop.
+-- cross-pod signal apply loop, heartbeat, and telemetry sampler touch —
+-- verified against code and pinned by two pgtest suites, both of which run as
+-- this role rather than as a superuser: the executor-surface walk
+-- (internal/db/pgtest/tf_system_test.go) and the role-bound store conformance
+-- runs (internal/db/pgtest/tf_system_stores_test.go). Any future migration
+-- that adds a table to the executor's code path must add that table's
+-- tf_system grant in the SAME migration; those suites are the enforcement
+-- backstop, and a store whose conformance suite is not run role-bound has no
+-- backstop at all.
 
 GRANT USAGE ON SCHEMA public, tf TO tf_system;
 
@@ -8441,6 +8445,14 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.instances TO tf_system;
 -- granted here too so the posture matches instances regardless of which admin
 -- role a pod's pool binds).
 GRANT SELECT, INSERT, DELETE ON TABLE public.instance_stats TO tf_system;
+-- sandbox_stats: the same sampler tick that writes instance_stats appends one
+-- row per live jail, and the same retention reaper DELETEs the tail. Unlike
+-- its twin, this one only ever has work to do where the jails are — the
+-- executor, which is also the only pod whose admin pool binds this role — so
+-- there is no other pod whose success could stand in for it. SELECT for the
+-- per-run usage read, granted here for the instance_stats reason: the posture
+-- matches regardless of which admin role a pod's pool binds.
+GRANT SELECT, INSERT, DELETE ON TABLE public.sandbox_stats TO tf_system;
 -- operators: the deployment-operator identity. The fleet gate + the operator
 -- CLI read/write it via the admin pool; granted to tf_system so the operator
 -- CLI works regardless of which admin role its connection binds.
