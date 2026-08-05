@@ -46,9 +46,18 @@ CHANGELOG is left to release-please — don't hand-edit it.
 <summary><strong>Line breakdown</strong></summary>
 
 <!--
-Changed lines in this PR, split by kind. Exact counts when AI assistance was
-used (have the agent count them from the diff); a rough estimate is fine
-otherwise — say which it is.
+Changed lines in this PR, split by kind. Don't count these by hand:
+
+  ./scripts/pr-lines.sh            # prints this table, filled in
+  ./scripts/pr-lines.sh --explain  # ...plus how every file was bucketed
+
+It resolves the base the same way GitHub does (the merge base of your branch
+and the PR's base branch), so a branch that predates recent work on main still
+reports only its own lines. Buckets are exclusive, in this order:
+documentation > comments > tests > code. Lock files and blank lines are
+excluded and reported separately. Add --worktree to count uncommitted work.
+
+If you counted by hand or estimated instead, say which.
 -->
 
 | Kind          | Added | Removed |

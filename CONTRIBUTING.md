@@ -48,6 +48,8 @@ section rather than deleting it:
 - **Change** — what you did, plus anything intentionally left out of scope
 - **Scope / verification** — the commands you ran and what passed (baseline:
   `./scripts/lint.sh` and `go test ./...`), and what new tests cover
+- **Line breakdown** — run `./scripts/pr-lines.sh` and paste its table; it
+  counts the same diff GitHub shows, split into code, tests, docs and comments
 
 Use a conventional-commit PR title (`type(scope): summary`) and keep the
 matching footer line — `Resolves TFAC-NNN` for ticketed work, or `Unticketed`.
