@@ -44,8 +44,15 @@ var (
 
 // tracesConfig is the resolved tracing configuration.
 type tracesConfig struct {
-	// endpoint is the OTLP/HTTP URL to push spans to; "" means tracing is
-	// disabled and no exporter is built.
+	// endpoint is the OTLP/HTTP endpoint URL handed to the exporter; ""
+	// means tracing is disabled and no exporter is built.
+	//
+	// Not necessarily the URL spans are POSTed to: a bare base URL
+	// ("http://tempo:4318") carries an empty path, and the exporter fills
+	// in the OTLP-standard /v1/traces for it. A path given here is used
+	// verbatim instead. Both spellings are normal — a collector's docs
+	// usually print the base — so this resolves the scheme and host, and
+	// leaves the signal path to the exporter's own defaulting.
 	endpoint string
 
 	// otelEndpointIgnored records the one combination worth a log line:
@@ -187,8 +194,9 @@ func ShutdownTraces(ctx context.Context) error {
 //
 // A value with no scheme is read as plaintext ("tempo:4318" →
 // "http://tempo:4318"), since the in-cluster collector is the overwhelming
-// case; spell https:// explicitly for a TLS backend. A path is preserved
-// when given and defaults to /v1/traces when not, per the OTLP/HTTP spec.
+// case; spell https:// explicitly for a TLS backend. A path is passed
+// through as given; this function never invents one, leaving the empty
+// case to the exporter, which fills in the OTLP-standard /v1/traces.
 func resolveTracesEndpoint(tfRaw, otelRaw string) (tracesConfig, error) {
 	raw := strings.TrimSpace(tfRaw)
 	switch strings.ToLower(raw) {
