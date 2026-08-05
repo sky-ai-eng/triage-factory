@@ -49,9 +49,31 @@ group() {
   ) &
 }
 
+# The tracked, non-vendored .go files the goimports step and the paths guard
+# both scan. Returns non-zero rather than an empty list if anything goes wrong,
+# because both callers treat "no files" as a reason to fail: a guard that
+# scanned nothing has verified nothing, and must not report OK. grep's exit 1
+# ("no lines matched") is a legitimate empty result and is caught by the
+# emptiness check; anything above that is a real grep error.
+list_go_files() {
+  local files status
+  files=$(git ls-files '*.go') || return 1
+  files=$(printf '%s\n' "$files" | grep -v '^vendor/')
+  status=$?
+  (( status <= 1 )) || return 1
+  [[ -n "${files//[[:space:]]/}" ]] || return 1
+  printf '%s\n' "$files"
+}
+
 # --- Go ---------------------------------------------------------------------
 go_group() {
-  local rc=0
+  local rc=0 status
+  # Groups run with errexit off so one failing check doesn't hide the rest, so
+  # every command whose stdout is consumed as data has its exit status checked
+  # explicitly below. Otherwise a tool that dies with an empty stdout — a
+  # goimports parse error, an awk that won't start — reads exactly like a clean
+  # result. pipefail survives `set +e`, so $? after a pipeline is the status of
+  # the first command that failed.
 
   # This runs over every *tracked* .go file rather than the build graph, and
   # that is the whole point: golangci-lint's formatters only see files that
@@ -63,22 +85,35 @@ go_group() {
     red "goimports not found at $GOIMPORTS — run: go install golang.org/x/tools/cmd/goimports@latest"
     rc=1
   else
-    local go_files
-    go_files=$(git ls-files '*.go' | grep -v '^vendor/' || true)
-    if [[ -n "$go_files" ]]; then
-      if (( FIX )); then
-        echo "$go_files" | xargs -P "$NPROC" -n 150 "$GOIMPORTS" -w
-        green "goimports applied"
+    local go_files unformatted
+    if ! go_files=$(list_go_files); then
+      red "goimports: could not resolve the tracked Go file list — formatting NOT verified"
+      rc=1
+    elif (( FIX )); then
+      printf '%s\n' "$go_files" | xargs -P "$NPROC" -n 150 "$GOIMPORTS" -w
+      status=$?
+      if (( status != 0 )); then
+        red "goimports -w exited $status — formatting NOT applied to every file (see the error above)"
+        rc=1
       else
-        local unformatted
-        unformatted=$(echo "$go_files" | xargs -P "$NPROC" -n 150 "$GOIMPORTS" -l)
-        if [[ -n "$unformatted" ]]; then
-          red "Unformatted Go files:"
-          echo "$unformatted"
-          rc=1
-        else
-          green "Go formatting OK"
-        fi
+        green "goimports applied"
+      fi
+    else
+      # goimports -l exits 0 when it lists unformatted files; a non-zero exit
+      # means it could not read or parse something, and its stdout is then
+      # empty — indistinguishable from "everything is formatted" unless the
+      # status is checked.
+      unformatted=$(printf '%s\n' "$go_files" | xargs -P "$NPROC" -n 150 "$GOIMPORTS" -l)
+      status=$?
+      if (( status != 0 )); then
+        red "goimports exited $status — formatting NOT verified (see the error above)"
+        rc=1
+      elif [[ -n "$unformatted" ]]; then
+        red "Unformatted Go files:"
+        echo "$unformatted"
+        rc=1
+      else
+        green "Go formatting OK"
       fi
     fi
   fi
@@ -147,21 +182,34 @@ go_group() {
   # too, but it isn't portable to the BSD awk on macOS).
   blue "paths state-literal guard"
   local go_src literal_offenders
-  go_src=$(git ls-files '*.go' \
-    | grep -v '_test\.go$' \
-    | grep -v '^internal/paths/' || true)
-  literal_offenders=""
-  if [[ -n "$go_src" ]]; then
-    literal_offenders=$(echo "$go_src" | xargs awk '
-      { line = $0; sub(/\/\/.*/, "", line)
-        if (line ~ /[`"\/~]\.triagefactory[\/"`]/) print FILENAME }' | sort -u)
-  fi
-  if [[ -n "$literal_offenders" ]]; then
-    red '".triagefactory" path literal found outside internal/paths — use a paths.* resolver:'
-    echo "$literal_offenders"
+  if ! go_src=$(list_go_files); then
+    red "paths state-literal guard: could not resolve the tracked Go file list — guard NOT verified"
     rc=1
   else
-    green "paths state-literal guard OK"
+    go_src=$(printf '%s\n' "$go_src" | grep -v '_test\.go$' | grep -v '^internal/paths/')
+    status=$?
+    if (( status > 1 )); then
+      red "paths state-literal guard: could not filter the Go file list — guard NOT verified"
+      rc=1
+    elif [[ -z "${go_src//[[:space:]]/}" ]]; then
+      red "paths state-literal guard: no Go files left to scan — guard NOT verified"
+      rc=1
+    else
+      literal_offenders=$(printf '%s\n' "$go_src" | xargs awk '
+        { line = $0; sub(/\/\/.*/, "", line)
+          if (line ~ /[`"\/~]\.triagefactory[\/"`]/) print FILENAME }' | sort -u)
+      status=$?
+      if (( status != 0 )); then
+        red "paths state-literal guard: scan exited $status — guard NOT verified (see the error above)"
+        rc=1
+      elif [[ -n "$literal_offenders" ]]; then
+        red '".triagefactory" path literal found outside internal/paths — use a paths.* resolver:'
+        echo "$literal_offenders"
+        rc=1
+      else
+        green "paths state-literal guard OK"
+      fi
+    fi
   fi
 
   # Open-core boundary: the dependency graph points inward, so core (internal/,
@@ -193,7 +241,11 @@ go_group() {
     ee_offenders=$(printf '%s\n' "$ee_pkg_imports" \
       | awk -v ee="$ee_pkg" '$2 == ee || index($2, ee"/") == 1 {print $1" imports "$2}' \
       | sort -u)
-    if [[ -n "$ee_offenders" ]]; then
+    status=$?
+    if (( status != 0 )); then
+      red "ee import boundary guard: offender scan exited $status — boundary NOT verified"
+      rc=1
+    elif [[ -n "$ee_offenders" ]]; then
       red "core (internal/, cmd/) must not import ee/ — the open-core boundary points inward; only package main may wire ee:"
       echo "$ee_offenders"
       rc=1
