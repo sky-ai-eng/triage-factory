@@ -252,6 +252,18 @@ func TestDefaultBranchAmbiguityIsAnError(t *testing.T) {
 	tr.mustGit("push", "-q", "origin", "main:master")
 	tr.mustGit("fetch", "-q", "origin")
 
+	// git 2.48+ creates refs/remotes/origin/HEAD on fetch by default
+	// (remote.<name>.followRemoteHEAD), which answers authoritatively before
+	// the probe is ever reached; older git leaves it unset. Staging it and then
+	// removing it puts every git version in the same state — the case under
+	// test is a clone without it, and inheriting that precondition from the
+	// host's git is how this passed locally and failed in CI.
+	tr.mustGit("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	tr.mustGit("remote", "set-head", "origin", "--delete")
+	if tr.gitOK("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD") {
+		t.Fatal("origin/HEAD is still set, so the ambiguous-probe path cannot be reached")
+	}
+
 	// Two conventional names and no origin/HEAD: refusing beats guessing,
 	// because a wrong base silently produces a plausible table.
 	_, _, err := resolveBase(tr.repo, options{remote: "origin", noFetch: true, noGH: true}, "main")
