@@ -178,6 +178,17 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 			}
 			return out
 		},
+		CollapseClaimTimes: func(t *testing.T, conversationID string) {
+			t.Helper()
+			if _, err := conn.Exec(`
+				UPDATE claims
+				SET claimed_at = (SELECT MIN(claimed_at) FROM claims WHERE conversation_id = ?),
+				    created_at = (SELECT MIN(created_at) FROM claims WHERE conversation_id = ?)
+				WHERE conversation_id = ?
+			`, conversationID, conversationID, conversationID); err != nil {
+				t.Fatalf("collapse claim times: %v", err)
+			}
+		},
 		StampAgentClaim: func(t *testing.T, taskID, agentID string) {
 			t.Helper()
 			if _, err := conn.Exec(

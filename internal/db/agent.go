@@ -481,6 +481,17 @@ type ConversationStore interface {
 	// is inert history and must not be rewritten.
 	SetActiveClaimPhaseSystem(ctx context.Context, orgID, conversationID, phase string) error
 
+	// PriorClaimExecutorSystem returns the executor id of the newest claim on
+	// the conversation other than claimID — the engagement that ran just
+	// before the caller's. Empty (with a nil error) when the caller's claim
+	// is the conversation's first, so "no predecessor" and "a predecessor on
+	// an unrecorded executor" are the same answer: neither is evidence the
+	// executor changed.
+	//
+	// The one read behind the resume notice's executor sentence, which may
+	// only be said when a predecessor demonstrably ran somewhere else.
+	PriorClaimExecutorSystem(ctx context.Context, orgID, conversationID, claimID string) (string, error)
+
 	// RecordClaimSandboxStatsSystem stamps one claim's measured sandbox cost
 	// — peak memory (MiB) and CPU time (µs), read from the run's cgroup at
 	// teardown. Keyed on the CLAIM ID, and deliberately valid on an

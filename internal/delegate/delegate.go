@@ -57,6 +57,13 @@ type runConfig struct {
 	// context it has always had.
 	prSkeleton string
 
+	// workspace is how wtPath came to be — warm from the previous engagement,
+	// rehydrated from the durable snapshot, or built fresh. Resolved by the
+	// setup that produced the tree (buildStepConfig), because nothing
+	// downstream can tell a warm tree from a reconstruction of one. Empty on
+	// paths that build no workspace.
+	workspace domain.WorkspaceProvenance
+
 	extraAllowedTools string // comma-separated extra tools from prompt.AllowedTools + agent scans; merged into --allowedTools at spawn time
 
 	// Chain-mode toggles. When isBlueprintStep is true the chain

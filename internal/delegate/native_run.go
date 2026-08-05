@@ -196,11 +196,43 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		// compaction pins it instead of re-injecting the first message.
 		MissionAnchored:     true,
 		ColdCompactionModel: coldModel,
+		Workspace:           cfg.workspace,
+		ExecutorChanged:     s.executorChangedSince(ctx, orgID, runID, cfg.claimID, cfg.workspace),
 	})
 
 	return engagementDisposition{
 		fenced: s.recordNativeResult(ctx, orgID, runID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, priorMemory),
 	}
+}
+
+// executorChangedSince reports whether the engagement before this one ran on
+// a different executor — the one claim of the resume notice that neither the
+// transcript nor the tree on disk can establish.
+//
+// Asked only of a workspace that was rebuilt, because that is the only case
+// where anything is said at all: a warm tree is by construction the one this
+// executor already held, and skipping the read there keeps the common resume
+// free of a query whose answer could not change the outcome.
+//
+// A read failure answers false. The two ways of being wrong are not
+// symmetric: a missing sentence costs the agent a fact it can rediscover from
+// the tree, while a spurious one is exactly the false claim this notice is
+// being made honest about.
+func (s *Spawner) executorChangedSince(ctx context.Context, orgID, runID, claimID string, prov domain.WorkspaceProvenance) bool {
+	if !prov.Rebuilt() || claimID == "" {
+		return false
+	}
+	self, _ := s.executorIdentity()
+	if self == "" {
+		return false
+	}
+	prior, err := s.agentRuns.PriorClaimExecutorSystem(ctx, orgID, runID, claimID)
+	if err != nil {
+		delegateLog.Warn("read the prior claim's executor failed; the resume notice will not claim the executor changed",
+			"run", runID, "claim", claimID, "error", err)
+		return false
+	}
+	return prior != "" && prior != self
 }
 
 // mintOpeningTurn queues the delegation's opening turn — the mission and the

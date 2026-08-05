@@ -145,6 +145,21 @@ type Params struct {
 	// UserID attributes rows the loop writes on a user's behalf (the
 	// repair notice, drained input it re-stamps). Empty for event runs.
 	UserID string
+
+	// Workspace is how the run tree this engagement entered came to be. The
+	// claim path resolves it; the loop cannot, since a warm tree and a
+	// reconstruction of one are the same directory from in here.
+	//
+	// It gates the one thing the loop says about the workspace. Unset means
+	// the caller does not restore workspaces and nothing is claimed about
+	// this one — the same silence a warm tree gets, because a restore that
+	// cannot be established must not be asserted.
+	Workspace domain.WorkspaceProvenance
+
+	// ExecutorChanged reports that the engagement before this one ran on a
+	// different executor. Read alongside Workspace: it only ever adds a
+	// sentence to a notice a restore already earned.
+	ExecutorChanged bool
 }
 
 // ResultKind is how an engagement ended.

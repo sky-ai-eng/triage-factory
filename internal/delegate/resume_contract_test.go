@@ -213,6 +213,25 @@ func TestBuildStepConfig_StampsNativeStepRowsToo(t *testing.T) {
 	}
 }
 
+// TestBuildStepConfig_ReportsAWarmTreeAsWarm is the claim path's half of the
+// resume notice's honesty: a later step whose shared worktree is still on disk
+// resolves warm, so the loop it feeds says nothing about a restore that did not
+// happen. Nothing downstream can re-derive this — past here the reused tree and
+// a rebuilt one are the same directory.
+func TestBuildStepConfig_ReportsAWarmTreeAsWarm(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	wt := t.TempDir()
+	f := seedStepFixture(t, "jira", "warm-provenance", 2, wt)
+
+	cfg := f.claimStep(t, f.blueprintRun(t), 1)
+	if cfg.wtPath != wt {
+		t.Fatalf("cwd = %q, want the intact shared worktree %q", cfg.wtPath, wt)
+	}
+	if cfg.workspace != domain.WorkspaceProvenanceWarm {
+		t.Errorf("workspace provenance = %q, want warm", cfg.workspace)
+	}
+}
+
 // TestBuildStepConfig_ColdRehydrateStampsTheTreeTheSessionRunsIn covers the
 // case where the workspace is not on disk at all and ensureWorkspace rebuilds
 // it from the durable snapshot. Whatever path that rebuild lands on is where
@@ -277,6 +296,9 @@ func TestBuildStepConfig_ColdRehydrateStampsTheTreeTheSessionRunsIn(t *testing.T
 			cfg := f.claimStep(t, f.blueprintRun(t), 1)
 			if cfg.wtPath != rebuilt {
 				t.Fatalf("rehydrated cwd = %q, want %q", cfg.wtPath, rebuilt)
+			}
+			if cfg.workspace != domain.WorkspaceProvenanceRehydrated {
+				t.Errorf("workspace provenance = %q, want rehydrated — the loop's resume notice is written off this", cfg.workspace)
 			}
 			if got := storedWorktreePath(t, f.database, f.runIDs[1]); got != rebuilt {
 				t.Errorf("conversation worktree_path = %q, want the rebuilt %q — the row must point at the tree the resumed session runs in", got, rebuilt)

@@ -179,6 +179,16 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 			}
 			return out
 		},
+		CollapseClaimTimes: func(t *testing.T, conversationID string) {
+			t.Helper()
+			if _, err := conn.Exec(`
+				UPDATE claims SET claimed_at = m.at, created_at = m.at
+				FROM (SELECT MIN(claimed_at) AS at FROM claims WHERE conversation_id = $1) m
+				WHERE conversation_id = $1
+			`, conversationID); err != nil {
+				t.Fatalf("collapse claim times: %v", err)
+			}
+		},
 		StampAgentClaim: func(t *testing.T, taskID, agent string) {
 			t.Helper()
 			if _, err := conn.Exec(

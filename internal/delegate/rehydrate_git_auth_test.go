@@ -202,7 +202,7 @@ func TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential(t *testing.T) 
 	sandbox := proxySandbox("http://10.42.0.3:4100", "run-placeholder")
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
 	seed := s.gitSeedFor(context.Background(), runmode.LocalDefaultOrgID, owner, repo, sandbox)
-	if _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, seed); err != nil {
+	if _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, seed); err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
 
@@ -260,7 +260,7 @@ func TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare(t *testing.T) {
 
 	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
 	seed := s.gitSeedFor(context.Background(), runmode.LocalDefaultOrgID, owner, repo, nil)
-	got, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, seed)
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, seed)
 	if err != nil {
 		t.Fatalf("ensureWorkspace with no bare on this host: %v", err)
 	}

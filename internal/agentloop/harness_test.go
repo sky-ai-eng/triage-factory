@@ -388,6 +388,15 @@ func testParams() Params {
 	}
 }
 
+// workspaceParams is testParams for an engagement whose run tree the claim
+// path has classified — the input the claim-time notice turns on.
+func workspaceParams(prov domain.WorkspaceProvenance, executorChanged bool) Params {
+	p := testParams()
+	p.Workspace = prov
+	p.ExecutorChanged = executorChanged
+	return p
+}
+
 func pendingUser(content string) domain.Message {
 	pending := false
 	return domain.Message{Role: "user", Content: content, Delivered: &pending}

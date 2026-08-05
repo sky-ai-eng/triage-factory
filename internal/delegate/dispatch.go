@@ -736,7 +736,10 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	}
 	defer execSandbox.Close()
 
-	resumeCwd, werr := s.ensureWorkspace(stepCtx, orgID, run, s.gitSeedFor(stepCtx, orgID, owner, repo, execSandbox))
+	// The SDK path's resume carries its context in the session file rather than
+	// in rows, so it has no claim-time notice to make honest — the provenance
+	// is dropped here rather than threaded on to nothing.
+	resumeCwd, _, werr := s.ensureWorkspace(stepCtx, orgID, run, s.gitSeedFor(stepCtx, orgID, owner, repo, execSandbox))
 	if werr != nil {
 		// A rehydrate that failed is the resume runtime failing to come up,
 		// and it fails for the same passing reasons the native path's jail
@@ -1111,6 +1114,9 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		if err != nil {
 			return runConfig{}, err
 		}
+		// Whatever the source setup built, it built from nothing: this arm runs
+		// only when the blueprint has no worktree recorded yet.
+		cfg.workspace = domain.WorkspaceProvenanceFresh
 		// Stamp the shared worktree path onto the blueprint_run so later steps
 		// (and the resume/cancel cleanup) can reconstruct it.
 		if e := s.blueprints.SetRunWorktreePathSystem(context.Background(), orgID, br.ID, cfg.wtPath); e != nil {
@@ -1138,20 +1144,20 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// The rehydrate's git runs through this claim's own sidecar proxy — the
 		// sandbox is already up (dispatchClaimedRun brings it up before calling
 		// here), so the proxy is live by the time the rebuild fetches.
-		wt, err := s.ensureWorkspace(ctx, orgID, runForWS, s.gitSeedFor(ctx, orgID, owner, repo, execSandbox))
+		wt, prov, err := s.ensureWorkspace(ctx, orgID, runForWS, s.gitSeedFor(ctx, orgID, owner, repo, execSandbox))
 		if err != nil {
 			return runConfig{}, err
 		}
-		cfg.wtPath, cfg.runRoot = wt, wt
+		cfg.wtPath, cfg.runRoot, cfg.workspace = wt, wt, prov
 	case "jira":
 		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
 		cfg.toolsRef = agentprompt.GitHubToolsReference() + "\n\n" + agentprompt.JiraToolsReference()
 		cfg.hasWT = false
-		wt, err := s.ensureWorkspace(ctx, orgID, runForWS, gitSeed{})
+		wt, prov, err := s.ensureWorkspace(ctx, orgID, runForWS, gitSeed{})
 		if err != nil {
 			return runConfig{}, err
 		}
-		cfg.wtPath, cfg.runRoot = wt, wt
+		cfg.wtPath, cfg.runRoot, cfg.workspace = wt, wt, prov
 	case "slack":
 		cfg.scope = fmt.Sprintf("Slack thread: %s", task.EntitySourceID)
 		toolsRef := agentprompt.GitHubToolsReference()
@@ -1160,11 +1166,11 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		}
 		cfg.toolsRef = toolsRef
 		cfg.hasWT = false
-		wt, err := s.ensureWorkspace(ctx, orgID, runForWS, gitSeed{})
+		wt, prov, err := s.ensureWorkspace(ctx, orgID, runForWS, gitSeed{})
 		if err != nil {
 			return runConfig{}, err
 		}
-		cfg.wtPath, cfg.runRoot = wt, wt
+		cfg.wtPath, cfg.runRoot, cfg.workspace = wt, wt, prov
 	default:
 		return runConfig{}, fmt.Errorf("unsupported task source: %s", task.EntitySource)
 	}
