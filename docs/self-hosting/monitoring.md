@@ -1,9 +1,12 @@
 # Monitoring & health checks
 
-Triage Factory exposes three health endpoints and a Prometheus metrics
-endpoint. Point liveness at `/api/health`, readiness/load-balancer rotation at
-`/readyz`, (in a scaled fleet) the container HEALTHCHECK for each executor at
-its localhost `/healthz`, and your metrics scraper at `:9464/metrics`.
+Triage Factory exposes three health endpoints, a Prometheus metrics endpoint,
+and — when you configure a backend — an OTLP trace stream. Point liveness at
+`/api/health`, readiness/load-balancer rotation at `/readyz`, (in a scaled
+fleet) the container HEALTHCHECK for each executor at its localhost
+`/healthz`, and your metrics scraper at `:9464/metrics`. Traces work the
+other way around: nothing scrapes them, the process pushes them to the
+endpoint you name in `TF_TRACES_ENDPOINT`.
 
 ## Readiness — `GET /readyz`
 
@@ -104,6 +107,83 @@ pods in an HA topology):
 ```
 sum(increase(tf_slack_retry_deliveries_total[15m])) > 0
 ```
+
+## Traces — `TF_TRACES_ENDPOINT`
+
+Tracing is **off in every mode until you set `TF_TRACES_ENDPOINT`**, and that
+one variable is the whole switch:
+
+```sh
+TF_TRACES_ENDPOINT=http://tempo:4318
+```
+
+Point it at anything that speaks **OTLP over HTTP** — Grafana Tempo, Jaeger,
+an OpenTelemetry Collector, a vendor endpoint. TF ships no trace backend, the
+same posture it takes with metrics. A value with no scheme is read as
+plaintext (`tempo:4318` → `http://tempo:4318`); spell `https://` out for a
+TLS backend. A path is used as given and defaults to `/v1/traces`.
+`TF_TRACES_ENDPOINT=off` disables tracing, which is how you override an
+inherited value.
+
+**Traces are pushed, not scraped — and that difference is the thing to
+internalize.** Prometheus cannot receive or store them: there is no port to
+scrape and no endpoint to curl. Each process batches finished spans and POSTs
+them to the endpoint above, which means the backend has to be reachable *from
+the pod*, and it means an unreachable backend costs you spans rather than
+raising an alert. Watch the process's own logs for `opentelemetry sdk error`
+records if spans never show up.
+
+Every process traces itself the same way — control pods and executors alike,
+local mode and multi mode alike. Two processes deliberately never emit spans
+at all: the **cap-broker** and the per-run **credential sidecar**. Giving the
+most privileged process on the host a new outbound network dependency, or
+punching an OTLP destination through the sidecar's fail-closed egress
+allowlist, is not worth broker-internal timing. Their work is visible as
+client-side spans in the executor around each IPC call.
+
+Standard `OTEL_EXPORTER_OTLP_*` variables still reach the exporter for the
+knobs TF does not wrap — headers (`OTEL_EXPORTER_OTLP_HEADERS`, for a
+vendor's auth token), timeout, compression, TLS. The exceptions are the two
+endpoint variables, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and
+`OTEL_EXPORTER_OTLP_ENDPOINT`: `TF_TRACES_ENDPOINT` overrides both, and
+neither enables tracing on its own. An OTLP address inherited from a compose
+file or a sidecar shouldn't quietly start a trace pipeline nobody asked this
+process for.
+
+If you set one of them and TF is not tracing, you get a warning naming the
+variable rather than silence:
+
+```
+WARN an OTLP endpoint is configured but TF_TRACES_ENDPOINT is not; tracing
+     stays disabled (set TF_TRACES_ENDPOINT to enable it)
+     ignored=[OTEL_EXPORTER_OTLP_TRACES_ENDPOINT]
+```
+
+Set `TF_TRACES_ENDPOINT` to the same address to turn it on, or
+`TF_TRACES_ENDPOINT=off` to say you meant it and silence the warning.
+
+Same don't-publish-externally posture as `:9464`: spans carry opaque IDs
+(`org.id`, `conversation.id`, `task.id`) and never repo names, usernames, PR
+titles, or message text — but they are unauthenticated on the wire unless you
+configure TLS, so keep the collector inside the compose network / cluster.
+
+Two joins tie the three signals together, and neither needs a database
+column:
+
+- **Logs → traces.** Any log line emitted while a span is active carries
+  `trace_id` and `span_id`. Grep a trace ID out of the logs, paste it into
+  your trace UI.
+- **Metrics → traces (exemplars).** `/metrics` serves OpenMetrics to any
+  scraper that negotiates for it, which is what carries **exemplars** —
+  individual samples annotated with the trace ID of the request that produced
+  them. Enable them on your scraper (`--enable-feature=exemplar-storage` on
+  Prometheus) and a spike in a latency histogram becomes a click through to
+  a trace of one slow request. Scrapers that don't negotiate OpenMetrics see
+  the same plain text as before.
+
+Shutdown flushes: a batch of finished spans that hasn't been exported yet is
+written out on SIGTERM before the process exits, so the traces covering a
+restart survive it.
 
 ## Executor health — `GET /healthz`
 

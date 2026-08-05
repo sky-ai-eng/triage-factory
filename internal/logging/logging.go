@@ -29,6 +29,11 @@
 // broker's and an orchestrator's interleaved stdout stay distinguishable
 // after boot even though every "component" tag they emit (router,
 // sandbox, ...) can otherwise overlap between the two processes.
+//
+// Records emitted through a *Context call variant while a span is active
+// additionally carry "trace_id" and "span_id" — see trace.go. Nothing
+// needs configuring for that; with tracing disabled the attributes simply
+// never appear.
 package logging
 
 import (
@@ -78,7 +83,7 @@ var processName atomic.Value
 func init() {
 	processName.Store("")
 	levelVar.Set(ParseLevel(os.Getenv(envLevel)))
-	slog.SetDefault(slog.New(procHandler{newHandler(output)}))
+	slog.SetDefault(slog.New(procHandler{traceHandler{newHandler(output)}}))
 }
 
 // SetProcess binds a process-scoped "proc" attribute onto every subsequent

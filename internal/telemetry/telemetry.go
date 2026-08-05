@@ -1,12 +1,21 @@
-// Package telemetry owns the process's OpenTelemetry SDK wiring and the
-// Prometheus /metrics listener. It is deliberately a socket, not an engine:
-// TF instruments itself with the OTel API, exposes the result in Prometheus
-// text format on a dedicated port, and ships no collector, no dashboards,
-// and no storage — operators point whatever scraper they already run
-// (Prometheus, an OTel Collector's prometheus receiver, a vendor agent) at
-// the endpoint, or just curl it. Distributed tracing will mount its
-// TracerProvider here when it lands; adopting the OTel metrics API now is
-// what keeps that a wiring change rather than a call-site migration.
+// Package telemetry owns the process's OpenTelemetry SDK wiring: the meter
+// provider behind the Prometheus /metrics listener, and the tracer provider
+// behind the OTLP span exporter. It is deliberately a socket, not an
+// engine: TF instruments itself with the OTel API and ships no collector,
+// no dashboards, and no storage — operators point whatever scraper they
+// already run (Prometheus, an OTel Collector's prometheus receiver, a
+// vendor agent) at /metrics, and whatever trace backend they already run
+// (Tempo, Jaeger, a collector, a vendor) at TF_TRACES_ENDPOINT.
+//
+// The two halves differ in direction, and that difference drives most of
+// their asymmetries. Metrics are *pulled*: the process holds current values
+// and a scraper comes to get them, so nothing is ever lost by exiting and
+// the only configuration that matters is a bind address. Traces are
+// *pushed*: finished spans are batched and sent, so an unflushed batch dies
+// with the process (hence ShutdownTraces, which the binary's shutdown path
+// must call) and the configuration that matters is a destination. Metrics
+// therefore default on in multi mode, where opening a port is free; traces
+// default off everywhere, since there is no sensible default destination.
 //
 // Conventions for instrumenting a subsystem:
 //
@@ -25,6 +34,30 @@
 //   - Metric values must be safe to expose unauthenticated on an internal
 //     network: counts, durations, opaque IDs — never repo names, usernames,
 //     message text, or other tenant data. Same posture as GET /readyz.
+//
+// Conventions for tracing a subsystem:
+//
+//   - Get a tracer from the global provider, named for the Go package that
+//     owns the spans (otel.Tracer("internal/poller")). No package needs to
+//     know whether tracing is on: disabled means the no-op provider, and a
+//     no-op span costs an interface call.
+//   - Name spans noun.verb or subsystem.stage in OTel dot form
+//     ("poll.github.org", "route.event", "engagement.setup"). Span names
+//     are a low-cardinality dimension exactly like metric names — never
+//     interpolate an ID into one.
+//   - Attribute hygiene is the metric-label rule, verbatim: opaque IDs
+//     (org.id, event.id, conversation.id, task.id) yes; repo names, PR
+//     titles, usernames, message text, file paths never. Spans leave the
+//     process, so this is a data-egress boundary, not a cardinality
+//     preference.
+//   - An anticipated skip (provider backoff, dedup, quiet hours) is an
+//     outcome attribute, not a span error status. Reserve the error status
+//     for things that are actually wrong, so "traces with errors" stays a
+//     usable filter.
+//   - Log correlation is automatic but not free: internal/logging stamps
+//     trace_id/span_id from the record's context, which slog only carries
+//     on the *Context call variants. Under a span, prefer
+//     log.InfoContext(ctx, ...) over log.Info(...).
 package telemetry
 
 import (
@@ -75,18 +108,52 @@ const metricsNamespace = "tf"
 // runs with metrics enabled.
 var handler http.Handler
 
-// Init resolves the metrics configuration and, when enabled, installs the
-// OTel SDK meter provider (backed by a Prometheus exporter + registry with
-// the Go runtime collectors) as the process-global provider. Returns the
-// resolved bind address, "" when metrics are disabled — the caller keeps it
-// and hands it to Serve after its workers are up.
+// Init resolves the telemetry configuration and installs whichever of the
+// two SDK providers the environment enables: the meter provider (backed by
+// a Prometheus exporter + registry with the Go runtime collectors) and the
+// tracer provider (batch processor → OTLP/HTTP exporter, see traces.go).
+// The two are independent — either, both, or neither — and share one
+// resource, so a process's metrics and spans agree on service identity.
+// Returns the resolved metrics bind address, "" when metrics are disabled —
+// the caller keeps it and hands it to Serve after its workers are up.
+// Tracing needs no such second step: it pushes, so there is nothing to
+// serve.
 //
-// Called once at boot, before any subsystem constructs instruments. When
-// disabled, the OTel global stays the no-op provider, so every instrument
-// in the binary records into /dev/null at zero cost — local mode's default.
+// Called once at boot, before any subsystem constructs instruments or
+// tracers. When disabled, the corresponding OTel global stays the no-op
+// provider, so every instrument and span in the binary costs nothing —
+// local mode's default for metrics, and every mode's default for traces.
 // A setup failure is logged and reported as disabled rather than failing
-// boot: metrics are diagnostics, never a boot dependency.
+// boot: telemetry is diagnostics, never a boot dependency.
+//
+// The caller owns one obligation in return: call ShutdownTraces during
+// shutdown, or the final batch of spans is dropped.
 func Init(version string) (addr string) {
+	res := buildResource(version)
+	initTraces(res)
+	return initMetrics(res)
+}
+
+// buildResource assembles the service identity both providers export
+// under.
+func buildResource(version string) *resource.Resource {
+	res, err := resource.Merge(resource.Default(), resource.NewSchemaless(
+		semconv.ServiceName("triagefactory"),
+		semconv.ServiceVersion(version),
+	))
+	if err != nil {
+		// Merge only errors on schema-URL conflicts, which NewSchemaless
+		// can't produce — but if it ever does, a default resource still
+		// yields a working exporter, so degrade rather than disable.
+		telemetryLog.Warn("telemetry resource merge failed; using default resource", "error", err)
+		return resource.Default()
+	}
+	return res
+}
+
+// initMetrics installs the meter provider and builds the /metrics handler
+// Serve mounts, returning the resolved bind address ("" = disabled).
+func initMetrics(res *resource.Resource) (addr string) {
 	addr = resolveAddr(os.Getenv("TF_METRICS_ADDR"), runmode.Current())
 	if addr == "" {
 		return ""
@@ -97,18 +164,6 @@ func Init(version string) (addr string) {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
-
-	res, err := resource.Merge(resource.Default(), resource.NewSchemaless(
-		semconv.ServiceName("triagefactory"),
-		semconv.ServiceVersion(version),
-	))
-	if err != nil {
-		// Merge only errors on schema-URL conflicts, which NewSchemaless
-		// can't produce — but if it ever does, a default resource still
-		// yields a working exporter, so degrade rather than disable.
-		telemetryLog.Warn("telemetry resource merge failed; using default resource", "error", err)
-		res = resource.Default()
-	}
 
 	exporter, err := otelprom.New(
 		otelprom.WithRegisterer(registry),
@@ -131,7 +186,15 @@ func Init(version string) (addr string) {
 	)
 	otel.SetMeterProvider(provider)
 
-	handler = promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
+	// OpenMetrics content negotiation is what makes exemplars reachable:
+	// the SDK records them by default whenever a sampled span is active
+	// (its trace-based exemplar filter), but the Prometheus text format
+	// has nowhere to put them, so a scraper only sees them if it can ask
+	// for OpenMetrics and this handler is willing to answer in it. That is
+	// the one genuine metrics↔traces bridge — a histogram bucket that
+	// hands you the trace ID of a request that landed in it. Scrapers that
+	// don't negotiate still get plain Prometheus text, unchanged.
+	handler = promhttp.HandlerFor(registry, promhttp.HandlerOpts{EnableOpenMetrics: true})
 	return addr
 }
 
