@@ -174,3 +174,61 @@ func TestReleaseRunCellFiles_NothingToRelease(t *testing.T) {
 	redirectSocketRoot(t)
 	ReleaseRunCellFiles("run-a", 0)
 }
+
+// brokerSocketBasename is the entry these two tests defend. Spelled as a
+// literal rather than read from the reserved set, so a test that agrees with
+// the code by construction can't pass while both are wrong; cmd/capbroker's
+// own drift test pins this spelling to the path the broker actually binds.
+const brokerSocketBasename = "cap-broker.sock"
+
+// TestClearRunCellFiles_RefusesAReservedEntry is the guard on the sweeps'
+// reach. The per-run paths are derived from a run id by a sanitizer that maps
+// ANY input onto a flat name in this one shared directory, so a run id of
+// "cap-broker" derives onto the broker's control socket — and the process
+// running this sweep owns the directory, which is exactly the authority the
+// socket root's sticky bit does not take away from it. Deleting that socket
+// takes down every subsequent run on the host.
+//
+// Unreachable today (run ids are conversation UUIDs). Pinned anyway, because
+// the thing standing between here and that outage would otherwise be a fact
+// about id formats held in someone's head.
+func TestClearRunCellFiles_RefusesAReservedEntry(t *testing.T) {
+	root := redirectSocketRoot(t)
+	broker := filepath.Join(root, brokerSocketBasename)
+	if err := os.WriteFile(broker, []byte("the broker's control socket"), 0o600); err != nil {
+		t.Fatalf("seed broker socket: %v", err)
+	}
+	seedCellFiles(t, "cap-broker")
+
+	ClearRunCellFiles("cap-broker")
+
+	mustExist(t, broker, "the broker's control socket is not per-run state and no run's sweep may remove it")
+	// The rest of that id's family cannot collide with anything reserved, so it
+	// is still swept — the refusal is scoped to the entry it protects, not a
+	// bail-out that silently skips the run's real cleanup.
+	mustNotExist(t, TrustedGHInjectorCertPath("cap-broker"), "a non-colliding entry of the same run is still this run's to clear")
+	mustNotExist(t, TrustedToolHostSocketDir("cap-broker"), "a non-colliding entry of the same run is still this run's to clear")
+}
+
+// TestReleaseRunCellFiles_RefusesAReservedEntry is the same guard on the
+// teardown side. Root-gated so the socket is staged owned by the cell's own
+// sidecar uid: that is what makes the refusal the reason it survives, rather
+// than the ownership check that would have refused it anyway.
+func TestReleaseRunCellFiles_RefusesAReservedEntry(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("needs root to stage the reserved entry owned by this cell's sidecar uid, which is what isolates the reserved check from the ownership check")
+	}
+	root := redirectSocketRoot(t)
+	broker := filepath.Join(root, brokerSocketBasename)
+	if err := os.WriteFile(broker, []byte("the broker's control socket"), 0o600); err != nil {
+		t.Fatalf("seed broker socket: %v", err)
+	}
+	const idx = 4
+	if err := os.Chown(broker, SidecarUID(idx), WorktreeGID); err != nil {
+		t.Fatalf("chown broker socket to this cell's sidecar uid: %v", err)
+	}
+
+	ReleaseRunCellFiles("cap-broker", idx)
+
+	mustExist(t, broker, "the reserved check must lead the ownership check, not depend on it")
+}

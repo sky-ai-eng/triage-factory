@@ -50,13 +50,30 @@ import (
 // Best-effort and silent on a missing path: the common case is that nothing is
 // there at all.
 func ClearRunCellFiles(runID string) {
-	_ = os.Remove(TrustedAgentHostSocketPath(runID))
-	_ = os.Remove(TrustedGHInjectorCertPath(runID))
+	removeCellEntry(TrustedAgentHostSocketPath(runID), os.Remove)
+	removeCellEntry(TrustedGHInjectorCertPath(runID), os.Remove)
 	// Orchestrator-created, unlike the two above, and already recreated from
 	// scratch by the run that needs it (agentproc's prepareToolHostSocket) —
 	// swept here too so one call clears the whole per-run family rather than
 	// most of it.
-	_ = os.RemoveAll(TrustedToolHostSocketDir(runID))
+	removeCellEntry(TrustedToolHostSocketDir(runID), os.RemoveAll)
+}
+
+// removeCellEntry unlinks one derived per-run path, unless that path turns out
+// to name something the socket root reserves — see IsReservedSocketRootPath
+// for why a per-run derivation can land on one, and why this process in
+// particular is the one that has to check.
+//
+// Loud rather than silent: reaching it means a run id derived onto shared
+// infrastructure, which is a bug in whatever minted that id, and the run it
+// belongs to is about to fail in a way nobody would otherwise connect to it.
+func removeCellEntry(path string, remove func(string) error) {
+	if IsReservedSocketRootPath(path) {
+		sandboxLog.Error("refusing to remove a reserved entry under the per-run socket root: a run id derived onto it",
+			"path", path)
+		return
+	}
+	_ = remove(path)
 }
 
 // ReleaseRunCellFiles removes the files THIS cell's credential sidecar created
@@ -85,7 +102,18 @@ func ReleaseRunCellFiles(runID string, subnetIdx uint8) {
 // removeIfOwnedBy unlinks path only if it exists and its owner is uid.
 // Lstat, not Stat: the decision is about the entry itself, and a symlink is
 // never something this codepath created.
+//
+// The reserved check leads, ahead of the ownership one, so the rule holds by
+// itself rather than as a consequence of who happens to own what: the broker's
+// socket is owned by root or by the orchestrator, so the uid guard below would
+// also refuse it today, and a rule that survives only while that stays true is
+// not a rule.
 func removeIfOwnedBy(path string, uid int) {
+	if IsReservedSocketRootPath(path) {
+		sandboxLog.Error("refusing to remove a reserved entry under the per-run socket root: a run id derived onto it",
+			"path", path)
+		return
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return // already gone, or unreadable — either way, not ours to remove
