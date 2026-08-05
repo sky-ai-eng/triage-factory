@@ -784,9 +784,17 @@ services:
     # point of the provisioning file mounted below. Don't float this backwards.
     image: grafana/grafana:13.1.2
     restart: unless-stopped
+    # service_started, not the service_healthy every other depends_on in this
+    # file uses — spelled out rather than left as the bare-list shorthand so
+    # the divergence is a statement instead of an oversight. Neither dependency
+    # ships a healthcheck to wait on (Tempo's image is distroless: no shell, no
+    # curl/wget to probe with), and Grafana needs neither of them up anyway —
+    # a data source is dialled when someone runs a query, and reconnects on its
+    # own. Ordering is all this buys: start them first so the first page open
+    # isn't against a Tempo that hasn't bound its port yet.
     depends_on:
-      - tempo
-      - prometheus
+      tempo: { condition: service_started }
+      prometheus: { condition: service_started }
     environment:
       # Anonymous Admin, no login form. This is a dev/example stack bound to
       # loopback (see the ports note in the section header) and a password
