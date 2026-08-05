@@ -151,6 +151,14 @@ type Spawner struct {
 	// (RecordSystem — the detached mirror has no JWT-claims context). A plain
 	// store ref like s.jiraRules; nil-safe (a partial test Stores skips recording).
 	externalActions db.ExternalActionStore
+	// repos reads repo_profiles under the admin pool (GetSystem) for the one
+	// thing a workspace rehydrate needs and cannot derive: the repo's upstream
+	// clone URL. The first claim gets that URL from the PR object it already
+	// fetched; a later step / a resume fetches no PR, so the profile — written
+	// in the org's configured protocol — is the URL's home. A plain store ref
+	// like s.orgs; nil-safe (a partial test Stores yields no URL, and the
+	// rehydrate degrades to the bare-must-already-exist path).
+	repos db.RepoStore
 	// teams reads per-team settings under the admin pool (GetSettingsSystem)
 	// at spawn time — currently the TFAC-392 presence-gated absent-auto-deny
 	// knobs (grace window + on/off toggle). Resolved once per run when the
@@ -513,6 +521,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		spend:            stores.Spend,
 		jiraRules:        stores.JiraStatusRules,
 		externalActions:  stores.ExternalActions,
+		repos:            stores.Repos,
 		teams:            stores.Teams,
 		instances:        stores.Instances,
 		instanceStats:    stores.InstanceStats,

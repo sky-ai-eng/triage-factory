@@ -62,6 +62,13 @@ const (
 // until termination ingests it) is non-recoverable and IS captured.
 var scratchExcludes = map[string]bool{"entity-memory": true, "project-knowledge": true}
 
+// restoreWorkspaceGit is the git half of a cold rehydrate. A package var, in the
+// same spirit as worktreePushTargetBranch: the credential a rehydrate hands git
+// is the thing that broke, and a test that only reads the rebuilt tree cannot
+// see it. Swapping this lets a test assert the git config the rebuild would run
+// under without standing up an authenticating remote.
+var restoreWorkspaceGit = worktree.RestoreWorkspaceGit
+
 // snapshotManifest is the small header describing what a snapshot blob carries,
 // read first on rehydrate to decide how to reconstruct.
 type snapshotManifest struct {
@@ -210,14 +217,88 @@ func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID s
 	return tw.Close()
 }
 
+// gitSeed is everything a cold rehydrate's git rebuild needs about the repo it
+// replays the delta onto: where the bare lives (owner/repo), the upstream URL
+// that seeds one when this executor has none, and the credential that
+// authenticates the network git the rebuild does. The zero value is the non-git
+// run-root (a Jira/Slack lazy root), which has no bare and no delta.
+//
+// auth covers TWO network hops, not one — see RestoreWorkspaceGit. Seeding a
+// missing bare is the obvious one; the load-bearing one is that the shared bare
+// is a blobless partial clone, so the rebuild's `git worktree add` checkout
+// triggers a lazy promisor fetch against origin even when the bare is already
+// there. A bare that exists is not a bare that is self-sufficient.
+type gitSeed struct {
+	owner    string
+	repo     string
+	cloneURL string
+	auth     worktree.CloneAuth
+}
+
+// gitSeedFor resolves the seed for a GitHub-backed run's rehydrate. The clone
+// URL comes from the repo profile (written in the org's configured protocol) —
+// no PR is fetched on a later step or a resume, so there is no per-run URL to
+// inherit.
+//
+// The auth is the run's own git-proxy routing whenever an executor sandbox
+// exists, i.e. exactly the wiring setupGitHub does for the first clone: the
+// orchestrator holds no GitHub token, and the sidecar attaches the real one on
+// the upstream hop. Local mode gets the zero CloneAuth on purpose — the
+// operator's ambient git credentials are its design, and there is no sidecar to
+// route through.
+//
+// Degradations are deliberate and independent: with no profile URL the rebuild
+// still authenticates (the insteadOf falls back to the org's git host base, the
+// same upstream the sidecar's proxy relays to) but cannot seed a missing bare;
+// with no sandbox it seeds and fetches anonymously, which is only ever local.
+func (s *Spawner) gitSeedFor(ctx context.Context, orgID, owner, repo string, execSandbox *executorSandbox) gitSeed {
+	seed := gitSeed{owner: owner, repo: repo}
+	if owner == "" || repo == "" {
+		return seed
+	}
+	if s.repos != nil {
+		if profile, err := s.repos.GetSystem(ctx, orgID, owner+"/"+repo); err != nil {
+			delegateLog.Warn("load repo profile for workspace rehydrate failed; a missing bare cannot be seeded", "org", orgID, "repo", owner+"/"+repo, "error", err)
+		} else if profile != nil {
+			seed.cloneURL = profile.CloneURL
+		}
+	}
+	upstream := seed.cloneURL
+	if upstream == "" {
+		upstream = s.gitHostBaseFor(ctx, orgID)
+	}
+	seed.auth = execSandbox.GitCloneAuth(upstream)
+	return seed
+}
+
+// gitHostBaseFor is the org's non-secret git host base (github.com, or a GHES
+// host) — the insteadOf upstream the sidecar's git proxy relays to, and the
+// fallback when no clone URL is on file. Empty when the resolver is unwired or
+// the read fails, which leaves the caller's CloneAuth inert rather than pointed
+// at a guessed host.
+func (s *Spawner) gitHostBaseFor(ctx context.Context, orgID string) string {
+	s.mu.Lock()
+	resolver := s.ghResolver
+	s.mu.Unlock()
+	if resolver == nil {
+		return ""
+	}
+	base, err := resolver.BaseURLFor(ctx, orgID)
+	if err != nil {
+		delegateLog.Warn("resolve org github base for workspace rehydrate failed; the rebuild's git will run unauthenticated", "org", orgID, "error", err)
+		return ""
+	}
+	return base
+}
+
 // ensureWorkspace guarantees the run's worktree exists on disk before a resume
 // re-invokes the agent, returning the cwd to resume in. Warm path: the parked
 // worktree survived on disk (the dormancy guards kept it) → return it as-is,
 // rehydrate is a no-op. Cold path: it's gone (host loss, /tmp wipe, or a
 // startup sweep) → rebuild it from the durable snapshot and return the rebuilt
-// path. owner/repo/cloneURL locate (and, on a fresh host only, seed) the bare
-// the git delta replays onto; they're empty/unused for a non-git run-root.
-func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain.Conversation, owner, repo, cloneURL string) (string, error) {
+// path. seed locates, seeds and authenticates the bare the git delta replays
+// onto; its zero value is the non-git run-root.
+func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain.Conversation, seed gitSeed) (string, error) {
 	if run.WorktreePath != "" {
 		if _, err := os.Stat(run.WorktreePath); err == nil {
 			return run.WorktreePath, nil // warm: worktree still on disk
@@ -241,7 +322,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 	// Rebuild at the deterministic, host-local run-root for this key (equal to
 	// run.WorktreePath on the same host; a fresh path after landing elsewhere).
 	wtDir := worktree.RunRoot(keyID)
-	if err := s.rehydrateFromSnapshot(ctx, orgID, owner, repo, cloneURL, wtDir, rc); err != nil {
+	if err := s.rehydrateFromSnapshot(ctx, wtDir, seed, rc); err != nil {
 		return "", err
 	}
 	if wtDir != run.WorktreePath {
@@ -270,7 +351,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 // RestoreWorkspaceGit runs below), then moved into place with one rename. This
 // mirrors the snapshot side's temp-file staging so neither direction buffers a
 // large workspace whole.
-func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID, owner, repo, cloneURL, wtDir string, r io.Reader) error {
+func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed gitSeed, r io.Reader) error {
 	var man snapshotManifest
 	var bundle, patch, session []byte
 
@@ -343,15 +424,17 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID, owner, repo,
 
 	if man.HasGit {
 		delta := &worktree.GitDelta{Branch: man.Branch, Head: man.Head, Bundle: bundle, Patch: patch}
-		// No clone credential is minted here: every ensureWorkspace caller
-		// passes an empty cloneURL (the rebuild replays the delta onto a bare
-		// that already exists on this host), and CloneAuthFor returns zero
-		// auth for an empty URL — so the former token mint never reached git.
-		// If a fresh-host seed-from-cloneURL path lands later, its auth must
-		// route through the run's credential sidecar (the git proxy), never an
-		// in-process resolver read.
-		auth := worktree.CloneAuthFor(cloneURL, "")
-		if err := worktree.RestoreWorkspaceGit(ctx, owner, repo, wtDir, delta, cloneURL, auth); err != nil {
+		// No credential is minted here and none ever should be: the seed's auth
+		// was resolved by the caller, which in multi mode routes it through the
+		// run's credential sidecar (the git proxy) rather than reading a token
+		// in-process. It authenticates both hops the rebuild can take — seeding
+		// a bare this executor lacks, and the lazy promisor fetch the
+		// worktree-add checkout triggers on the blobless bare even when the bare
+		// is already here. The second is the one that bites: it needs the
+		// network on every cold rehydrate of a private repo, not just a fresh
+		// host, and local mode masks it because ambient git credentials answer
+		// it there.
+		if err := restoreWorkspaceGit(ctx, seed.owner, seed.repo, wtDir, delta, seed.cloneURL, seed.auth); err != nil {
 			return fmt.Errorf("rehydrate: restore git: %w", err)
 		}
 	} else {
