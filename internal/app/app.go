@@ -396,10 +396,24 @@ func (a *App) Run(ctx context.Context) error {
 	return a.runExecutorHealthz(ctx)
 }
 
-// Close releases the database pools and the instance identity lock. Safe
-// to call on a partially-built App (nil fields are skipped), so
-// `defer a.Close()` right after New is always correct.
+// Close flushes telemetry and releases the database pools and the instance
+// identity lock. Safe to call on a partially-built App (nil fields are
+// skipped), so `defer a.Close()` right after New is always correct.
 func (a *App) Close() error {
+	// Spans first, before the pools go: a finished span sitting in the
+	// batch processor is lost outright if the process exits without
+	// flushing, and the shutdown path is exactly the window whose traces
+	// are most worth having. Its own deadline, not the run context's —
+	// Close runs after that context has been cancelled by SIGINT/SIGTERM,
+	// so an inherited one would abort the flush it is meant to bound. No
+	// error return: a dropped batch of diagnostics must not become the
+	// process's exit status.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := telemetry.ShutdownTraces(shutdownCtx); err != nil {
+		appLog.Error("flush traces failed", "error", err)
+	}
+
 	if a.capBroker != nil {
 		if err := a.capBroker.Close(); err != nil {
 			appLog.Error("close cap-broker failed", "error", err)
