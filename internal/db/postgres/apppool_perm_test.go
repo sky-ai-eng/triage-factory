@@ -28,7 +28,7 @@ func TestWrapAdminPoolPermErr_NamesTheTableFromTheMessage(t *testing.T) {
 	if err == nil {
 		t.Fatal("wrapAdminPoolPermErr returned nil for a 42501")
 	}
-	if !strings.Contains(err.Error(), "sandbox_stats") {
+	if !strings.Contains(err.Error(), "permission denied on table sandbox_stats") {
 		t.Errorf("wrapped error does not name the table: %v", err)
 	}
 	if strings.Contains(err.Error(), "unknown") {
@@ -95,10 +95,13 @@ func TestPermDeniedTable(t *testing.T) {
 	}
 }
 
-// A 42501 that names no table still has to produce a usable message — and it
-// must point at where the name actually lives (the wrapped message), not at a
-// DETAIL field the privilege check never populates.
-func TestWrapAdminPoolPermErr_UnknownTablePointsAtTheMessage(t *testing.T) {
+// A 42501 that names no table still has to produce a usable message — one that
+// points at where the name actually lives (the wrapped message, not a DETAIL
+// field the privilege check never populates) and that does not claim the
+// object is a table. The sequence grants in the tf_system block make this a
+// real shape, not a hypothetical: a reader told "permission denied on table
+// (unknown)" goes looking for a table grant that is already there.
+func TestWrapAdminPoolPermErr_NonTableObjectIsNotCalledATable(t *testing.T) {
 	err := wrapAdminPoolPermErr(&pgconn.PgError{
 		Code:    "42501",
 		Message: "permission denied for sequence messages_id_seq",
@@ -106,11 +109,22 @@ func TestWrapAdminPoolPermErr_UnknownTablePointsAtTheMessage(t *testing.T) {
 	if err == nil {
 		t.Fatal("wrapAdminPoolPermErr returned nil for a 42501")
 	}
+	if strings.Contains(err.Error(), "table") {
+		t.Errorf("wrapped error calls a sequence denial a table problem: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unknown object") {
+		t.Errorf("wrapped error does not say the object went unnamed: %v", err)
+	}
 	if strings.Contains(err.Error(), "DETAIL") {
 		t.Errorf("wrapped error still points the reader at DETAIL: %v", err)
 	}
 	if !strings.Contains(err.Error(), "messages_id_seq") {
 		t.Errorf("wrapped error lost the underlying message: %v", err)
+	}
+	// The diagnosis is the only thing that changes shape — the reader still
+	// gets told this is our bug and what to do about it.
+	if !strings.Contains(err.Error(), "Triage Factory bug") {
+		t.Errorf("wrapped error dropped the diagnosis: %v", err)
 	}
 }
 

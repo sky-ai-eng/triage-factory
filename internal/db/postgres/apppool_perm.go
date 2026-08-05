@@ -49,7 +49,10 @@ func wrapAppPoolPermErr(err error, callsite string) error {
 // wrapAdminPoolPermErr turns a Postgres permission-denied error (SQLSTATE
 // 42501) from an admin-pool call into a legible one, naming the table
 // Postgres reports (see permDeniedTable) instead of leaving a bare pq error
-// for whoever reads the logs.
+// for whoever reads the logs. A denial on something that isn't a table — a
+// sequence, a schema — is reported as an unnamed object rather than
+// mislabelled as one, since a reader sent after the wrong kind of grant
+// looks straight past the real gap.
 //
 // Historically the admin pool never raised 42501 at all — it connected as
 // supabase_admin, the real superuser. That changed for executors: their
@@ -89,14 +92,18 @@ func wrapAdminPoolPermErr(err error, callsite string) error {
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "42501" {
-		table := permDeniedTable(pgErr)
-		if table == "" {
-			table = "(unknown — see the wrapped error's message)"
+		// When the object can't be recovered, the wording declines with it.
+		// Saying "on table (unknown)" would assert a fact the parse just
+		// refused to claim, and send a reader whose sequence or schema grant
+		// is missing hunting for a table grant that is already there.
+		subject, ask := "(unknown object — see the wrapped error's message)", "with this error"
+		if table := permDeniedTable(pgErr); table != "" {
+			subject, ask = "on table "+table, "with this table name"
 		}
-		return fmt.Errorf("%s: permission denied on table %s — this is a Triage Factory bug "+
+		return fmt.Errorf("%s: permission denied %s — this is a Triage Factory bug "+
 			"(a missing database grant), not a local misconfiguration; upgrade to the latest "+
 			"release or file an issue at https://github.com/sky-ai-eng/triage-factory/issues "+
-			"with this table name: %w", callsite, table, err)
+			"%s: %w", callsite, subject, ask, err)
 	}
 	return err
 }
