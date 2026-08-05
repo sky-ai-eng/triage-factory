@@ -143,12 +143,24 @@ client-side spans in the executor around each IPC call.
 
 Standard `OTEL_EXPORTER_OTLP_*` variables still reach the exporter for the
 knobs TF does not wrap — headers (`OTEL_EXPORTER_OTLP_HEADERS`, for a
-vendor's auth token), timeout, compression, TLS. The one exception is
-`OTEL_EXPORTER_OTLP_ENDPOINT`: `TF_TRACES_ENDPOINT` overrides it, and on its
-own it does **not** enable tracing (you'll get a warning log line if it is
-set and `TF_TRACES_ENDPOINT` is not). An OTLP address inherited from a
-compose file or a sidecar shouldn't quietly start a trace pipeline nobody
-asked this process for.
+vendor's auth token), timeout, compression, TLS. The exceptions are the two
+endpoint variables, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and
+`OTEL_EXPORTER_OTLP_ENDPOINT`: `TF_TRACES_ENDPOINT` overrides both, and
+neither enables tracing on its own. An OTLP address inherited from a compose
+file or a sidecar shouldn't quietly start a trace pipeline nobody asked this
+process for.
+
+If you set one of them and TF is not tracing, you get a warning naming the
+variable rather than silence:
+
+```
+WARN an OTLP endpoint is configured but TF_TRACES_ENDPOINT is not; tracing
+     stays disabled (set TF_TRACES_ENDPOINT to enable it)
+     ignored=[OTEL_EXPORTER_OTLP_TRACES_ENDPOINT]
+```
+
+Set `TF_TRACES_ENDPOINT` to the same address to turn it on, or
+`TF_TRACES_ENDPOINT=off` to say you meant it and silence the warning.
 
 Same don't-publish-externally posture as `:9464`: spans carry opaque IDs
 (`org.id`, `conversation.id`, `task.id`) and never repo names, usernames, PR

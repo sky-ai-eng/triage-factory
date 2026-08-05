@@ -24,13 +24,22 @@ const (
 	// "off unless configured" is the same answer everywhere.
 	envTracesEndpoint = "TF_TRACES_ENDPOINT"
 
-	// envOTLPEndpoint is the OTel-standard exporter endpoint. TF reads it
-	// only to detect (and warn about) the case where an operator set the
-	// conventional variable and expected tracing to come on — see
-	// resolveTracesEndpoint. Every OTEL_EXPORTER_OTLP_* knob TF does not
-	// wrap (headers, timeout, compression, TLS) still reaches the exporter
-	// directly, because the SDK reads its own environment.
-	envOTLPEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	// envOTLPTracesEndpoint and envOTLPEndpoint are the OTel-standard
+	// exporter endpoints, listed in the spec's own precedence order: the
+	// signal-specific variable outranks the generic one. TF reads them only
+	// to detect (and name) the case where an operator set a conventional
+	// variable and expected tracing to come on — see resolveTracesEndpoint.
+	// Both are covered because they fail the same way for opposite kinds of
+	// operator: the generic one is usually *inherited* from a shared
+	// collector address, while the traces-specific one is usually set by
+	// someone deliberately turning on tracing — the reader most owed an
+	// explanation when nothing happens.
+	//
+	// Every OTEL_EXPORTER_OTLP_* knob TF does not wrap (headers, timeout,
+	// compression, TLS) still reaches the exporter directly, because the
+	// SDK reads its own environment.
+	envOTLPTracesEndpoint = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
+	envOTLPEndpoint       = "OTEL_EXPORTER_OTLP_ENDPOINT"
 )
 
 // tracesMu guards tracerProvider — Init and ShutdownTraces run once each,
@@ -55,13 +64,20 @@ type tracesConfig struct {
 	// leaves the signal path to the exporter's own defaulting.
 	endpoint string
 
-	// otelEndpointIgnored records the one combination worth a log line:
-	// OTEL_EXPORTER_OTLP_ENDPOINT set while TF_TRACES_ENDPOINT is not.
-	// Tracing stays off (TF_TRACES_ENDPOINT is the only enable gate), but
-	// an operator who set the conventional variable expected spans, so
-	// silence would read as a bug in the exporter rather than a missing
-	// knob.
-	otelEndpointIgnored bool
+	// ignoredOTelEnv names the standard OTLP endpoint variables that carry
+	// a value while TF_TRACES_ENDPOINT does not, in OTel's precedence
+	// order. Tracing stays off — TF_TRACES_ENDPOINT is the only enable gate
+	// — but an operator who set one of these expected spans, so silence
+	// would read as a broken exporter rather than a missing knob.
+	//
+	// Scoped to the disabled case on purpose. When tracing IS on these
+	// variables are overridden too (the endpoint reaches the exporter as an
+	// explicit option, which outranks any of them), but that is visible:
+	// the "tracing enabled" line prints the address that won. Disabled
+	// emits no line at all, which is the asymmetry this exists to close.
+	// Empty for an explicit TF_TRACES_ENDPOINT=off — a deliberate answer,
+	// not a surprise.
+	ignoredOTelEnv []string
 }
 
 // initTraces installs the SDK tracer provider (batch processor →
@@ -76,13 +92,18 @@ type tracesConfig struct {
 // boot, matching the metrics path: telemetry is diagnostics, never a boot
 // dependency.
 func initTraces(res *resource.Resource) {
-	cfg, err := resolveTracesEndpoint(os.Getenv(envTracesEndpoint), os.Getenv(envOTLPEndpoint))
+	cfg, err := resolveTracesEndpoint(
+		os.Getenv(envTracesEndpoint),
+		os.Getenv(envOTLPTracesEndpoint),
+		os.Getenv(envOTLPEndpoint),
+	)
 	if err != nil {
 		telemetryLog.Error("invalid TF_TRACES_ENDPOINT; tracing disabled", "error", err)
 		return
 	}
-	if cfg.otelEndpointIgnored {
-		telemetryLog.Warn("OTEL_EXPORTER_OTLP_ENDPOINT is set but TF_TRACES_ENDPOINT is not; tracing stays disabled (set TF_TRACES_ENDPOINT to enable it)")
+	if len(cfg.ignoredOTelEnv) > 0 {
+		telemetryLog.Warn("an OTLP endpoint is configured but TF_TRACES_ENDPOINT is not; tracing stays disabled (set TF_TRACES_ENDPOINT to enable it)",
+			"ignored", cfg.ignoredOTelEnv)
 	}
 	if cfg.endpoint == "" {
 		return
@@ -175,20 +196,23 @@ func ShutdownTraces(ctx context.Context) error {
 	return tp.Shutdown(ctx)
 }
 
-// resolveTracesEndpoint turns the two environment values into a resolved
-// tracing configuration. Pure, so the precedence rules below are table
-// tests rather than a deployment experiment — same shape as resolveAddr.
+// resolveTracesEndpoint turns TF_TRACES_ENDPOINT and the two standard OTLP
+// endpoint variables into a resolved tracing configuration. Pure, so the
+// precedence rules below are table tests rather than a deployment
+// experiment — same shape as resolveAddr.
 //
 // Precedence:
 //
 //   - TF_TRACES_ENDPOINT set → that value, always. It reaches the exporter
-//     as an explicit option, which by OTel's own contract outranks
-//     OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_TRACES_ENDPOINT.
-//   - TF_TRACES_ENDPOINT unset/empty → disabled, even when
-//     OTEL_EXPORTER_OTLP_ENDPOINT is set. A shared collector address
-//     inherited from a compose file or a sidecar's env must not silently
-//     start a trace pipeline nobody asked this process for; enabling
-//     tracing is one deliberate variable, everywhere.
+//     as an explicit option, which by OTel's own contract outranks both
+//     OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and OTEL_EXPORTER_OTLP_ENDPOINT.
+//   - TF_TRACES_ENDPOINT unset/empty → disabled, no matter what the two
+//     standard variables say. A collector address inherited from a compose
+//     file or a sidecar's env must not silently start a trace pipeline
+//     nobody asked this process for; enabling tracing is one deliberate
+//     variable, everywhere. Whichever standard variables were set are
+//     reported back for the warning that keeps the disable from being
+//     silent — see ignoredOTelEnv.
 //   - TF_TRACES_ENDPOINT set to off/false/disabled/none/0 → disabled, the
 //     escape hatch for overriding an inherited value.
 //
@@ -197,11 +221,11 @@ func ShutdownTraces(ctx context.Context) error {
 // case; spell https:// explicitly for a TLS backend. A path is passed
 // through as given; this function never invents one, leaving the empty
 // case to the exporter, which fills in the OTLP-standard /v1/traces.
-func resolveTracesEndpoint(tfRaw, otelRaw string) (tracesConfig, error) {
+func resolveTracesEndpoint(tfRaw, otelTracesRaw, otelGenericRaw string) (tracesConfig, error) {
 	raw := strings.TrimSpace(tfRaw)
 	switch strings.ToLower(raw) {
 	case "":
-		return tracesConfig{otelEndpointIgnored: strings.TrimSpace(otelRaw) != ""}, nil
+		return tracesConfig{ignoredOTelEnv: setOTLPEndpointVars(otelTracesRaw, otelGenericRaw)}, nil
 	case "off", "false", "disabled", "none", "0":
 		return tracesConfig{}, nil
 	}
@@ -220,4 +244,19 @@ func resolveTracesEndpoint(tfRaw, otelRaw string) (tracesConfig, error) {
 		return tracesConfig{}, fmt.Errorf("endpoint %q: missing host", tfRaw)
 	}
 	return tracesConfig{endpoint: u.String()}, nil
+}
+
+// setOTLPEndpointVars names whichever standard OTLP endpoint variables
+// carry a value, in the spec's precedence order (signal-specific first).
+// nil when neither is set, which is the overwhelmingly common case and the
+// one that must not produce a warning.
+func setOTLPEndpointVars(tracesRaw, genericRaw string) []string {
+	var set []string
+	if strings.TrimSpace(tracesRaw) != "" {
+		set = append(set, envOTLPTracesEndpoint)
+	}
+	if strings.TrimSpace(genericRaw) != "" {
+		set = append(set, envOTLPEndpoint)
+	}
+	return set
 }

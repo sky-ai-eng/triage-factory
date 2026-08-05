@@ -8,10 +8,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
@@ -21,29 +23,66 @@ import (
 
 func TestResolveTracesEndpoint(t *testing.T) {
 	cases := []struct {
-		name        string
-		tfRaw       string
-		otelRaw     string
-		want        string
-		wantIgnored bool
-		wantErr     bool
+		name string
+		// tfRaw / otelTracesRaw / otelGenericRaw are TF_TRACES_ENDPOINT,
+		// OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, OTEL_EXPORTER_OTLP_ENDPOINT.
+		tfRaw          string
+		otelTracesRaw  string
+		otelGenericRaw string
+		want           string
+		wantIgnored    []string
+		wantErr        bool
 	}{
 		{name: "unset is disabled", want: ""},
 		{name: "empty-ish is disabled", tfRaw: "   ", want: ""},
 		// The enable gate is TF_TRACES_ENDPOINT and only TF_TRACES_ENDPOINT:
 		// an OTLP endpoint inherited from a compose file or a sidecar's env
-		// must not silently start a trace pipeline. It is worth a log line,
-		// though, which is what the ignored flag drives.
-		{name: "otel endpoint alone does not enable", otelRaw: "http://collector:4318", want: "", wantIgnored: true},
-		{name: "tf endpoint wins over otel endpoint", tfRaw: "http://tempo:4318", otelRaw: "http://collector:4318", want: "http://tempo:4318"},
+		// must not silently start a trace pipeline. Neither standard
+		// variable may enable tracing, and each has to be named when it
+		// doesn't, or the disable is exactly as silent as if we never
+		// looked.
+		{
+			name:           "generic otel endpoint alone does not enable",
+			otelGenericRaw: "http://collector:4318",
+			want:           "",
+			wantIgnored:    []string{envOTLPEndpoint},
+		},
+		{
+			// The likelier spelling for someone deliberately turning on
+			// tracing, as opposed to inheriting a collector address.
+			name:          "traces-specific otel endpoint alone does not enable",
+			otelTracesRaw: "http://collector:4318/v1/traces",
+			want:          "",
+			wantIgnored:   []string{envOTLPTracesEndpoint},
+		},
+		{
+			name:           "both otel endpoints reported in precedence order",
+			otelTracesRaw:  "http://collector:4318/v1/traces",
+			otelGenericRaw: "http://collector:4318",
+			want:           "",
+			wantIgnored:    []string{envOTLPTracesEndpoint, envOTLPEndpoint},
+		},
+		{
+			name:           "tf endpoint wins over both otel endpoints",
+			tfRaw:          "http://tempo:4318",
+			otelTracesRaw:  "http://collector:4318/v1/traces",
+			otelGenericRaw: "http://collector:4318",
+			want:           "http://tempo:4318",
+		},
 		{name: "off disables", tfRaw: "off", want: ""},
 		{name: "false disables", tfRaw: "False", want: ""},
 		{name: "disabled disables", tfRaw: "disabled", want: ""},
 		{name: "none disables", tfRaw: "none", want: ""},
 		{name: "zero disables", tfRaw: "0", want: ""},
-		// An explicit disable still counts as "TF_TRACES_ENDPOINT was set",
-		// so there is nothing surprising to warn about.
-		{name: "explicit off suppresses the otel warning", tfRaw: "off", otelRaw: "http://collector:4318", want: "", wantIgnored: false},
+		{
+			// An explicit disable still counts as "TF_TRACES_ENDPOINT was
+			// set", so there is nothing surprising to warn about.
+			name:           "explicit off suppresses the otel warning",
+			tfRaw:          "off",
+			otelTracesRaw:  "http://collector:4318/v1/traces",
+			otelGenericRaw: "http://collector:4318",
+			want:           "",
+		},
 		{name: "scheme-less value is plaintext http", tfRaw: "tempo:4318", want: "http://tempo:4318"},
 		{name: "https preserved", tfRaw: "https://tempo.example.com:4318", want: "https://tempo.example.com:4318"},
 		{name: "explicit path preserved", tfRaw: "http://collector:4318/v1/traces", want: "http://collector:4318/v1/traces"},
@@ -53,21 +92,23 @@ func TestResolveTracesEndpoint(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := resolveTracesEndpoint(tc.tfRaw, tc.otelRaw)
+			got, err := resolveTracesEndpoint(tc.tfRaw, tc.otelTracesRaw, tc.otelGenericRaw)
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("resolveTracesEndpoint(%q, %q) = %+v, nil; want an error", tc.tfRaw, tc.otelRaw, got)
+					t.Fatalf("resolveTracesEndpoint(%q, %q, %q) = %+v, nil; want an error",
+						tc.tfRaw, tc.otelTracesRaw, tc.otelGenericRaw, got)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("resolveTracesEndpoint(%q, %q): %v", tc.tfRaw, tc.otelRaw, err)
+				t.Fatalf("resolveTracesEndpoint(%q, %q, %q): %v",
+					tc.tfRaw, tc.otelTracesRaw, tc.otelGenericRaw, err)
 			}
 			if got.endpoint != tc.want {
 				t.Errorf("endpoint = %q; want %q", got.endpoint, tc.want)
 			}
-			if got.otelEndpointIgnored != tc.wantIgnored {
-				t.Errorf("otelEndpointIgnored = %v; want %v", got.otelEndpointIgnored, tc.wantIgnored)
+			if !slices.Equal(got.ignoredOTelEnv, tc.wantIgnored) {
+				t.Errorf("ignoredOTelEnv = %v; want %v", got.ignoredOTelEnv, tc.wantIgnored)
 			}
 		})
 	}
@@ -188,26 +229,85 @@ func TestInitTraces_ModeAgnostic(t *testing.T) {
 // stays the no-op provider — spans carry no span context, so nothing can
 // be sampled, exported, or correlated, and there is no exporter to shut
 // down.
+// Neither standard OTLP variable may enable tracing on its own, and
+// whichever one is set has to be named in the warning — a disable that
+// leaves no trace in the log is indistinguishable from a broken exporter,
+// which is the confusion the warning exists to prevent.
 func TestInitTraces_Disabled(t *testing.T) {
-	restoreTraceGlobals(t)
-
-	t.Setenv("TF_METRICS_ADDR", "off")
-	t.Setenv("TF_TRACES_ENDPOINT", "")
-	// Set to prove it is not an enable gate on its own.
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.invalid:4318")
-
-	Init("v-test")
-
-	_, span := otel.Tracer("telemetry/test").Start(context.Background(), "noop")
-	defer span.End()
-	if sc := span.SpanContext(); sc.IsValid() {
-		t.Errorf("span context is valid with tracing disabled: %s", sc.TraceID())
+	cases := []struct {
+		name        string
+		env         map[string]string
+		wantWarning []string
+	}{
+		{
+			name: "nothing configured at all",
+			env:  map[string]string{},
+		},
+		{
+			name:        "generic otlp endpoint set",
+			env:         map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://collector.invalid:4318"},
+			wantWarning: []string{"OTEL_EXPORTER_OTLP_ENDPOINT"},
+		},
+		{
+			name:        "traces-specific otlp endpoint set",
+			env:         map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://collector.invalid:4318/v1/traces"},
+			wantWarning: []string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"},
+		},
+		{
+			name: "both set",
+			env: map[string]string{
+				"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://collector.invalid:4318/v1/traces",
+				"OTEL_EXPORTER_OTLP_ENDPOINT":        "http://collector.invalid:4318",
+			},
+			wantWarning: []string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT"},
+		},
 	}
-	if span.IsRecording() {
-		t.Error("span is recording with tracing disabled")
-	}
-	if err := ShutdownTraces(context.Background()); err != nil {
-		t.Fatalf("ShutdownTraces with tracing disabled: %v", err)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			restoreTraceGlobals(t)
+
+			t.Setenv("TF_METRICS_ADDR", "off")
+			t.Setenv("TF_TRACES_ENDPOINT", "")
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+			t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+
+			var logs bytes.Buffer
+			restoreLog := logging.SetOutput(&logs)
+			Init("v-test")
+			restoreLog()
+
+			_, span := otel.Tracer("telemetry/test").Start(context.Background(), "noop")
+			defer span.End()
+			if sc := span.SpanContext(); sc.IsValid() {
+				t.Errorf("span context is valid with tracing disabled: %s", sc.TraceID())
+			}
+			if span.IsRecording() {
+				t.Error("span is recording with tracing disabled")
+			}
+			if err := ShutdownTraces(context.Background()); err != nil {
+				t.Fatalf("ShutdownTraces with tracing disabled: %v", err)
+			}
+
+			out := logs.String()
+			if len(tc.wantWarning) == 0 {
+				if strings.Contains(out, "tracing stays disabled") {
+					t.Errorf("warned with no OTLP variable set: %q", out)
+				}
+				return
+			}
+			if !strings.Contains(out, "tracing stays disabled") {
+				t.Fatalf("no warning for a set-but-ignored OTLP endpoint: %q", out)
+			}
+			for _, want := range tc.wantWarning {
+				if !strings.Contains(out, want) {
+					t.Errorf("warning does not name %s: %q", want, out)
+				}
+			}
+		})
 	}
 }
 
@@ -332,7 +432,7 @@ func scrape(t *testing.T, addr, accept string) string {
 // TestRedactedEndpoint: a collector behind basic auth is a legitimate
 // configuration, and the boot log line must not print its password.
 func TestRedactedEndpoint(t *testing.T) {
-	cfg, err := resolveTracesEndpoint("https://otel:hunter2@collector.example.com:4318", "")
+	cfg, err := resolveTracesEndpoint("https://otel:hunter2@collector.example.com:4318", "", "")
 	if err != nil {
 		t.Fatalf("resolveTracesEndpoint: %v", err)
 	}
