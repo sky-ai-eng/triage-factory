@@ -364,6 +364,51 @@ $$;
 
 
 --
+-- Name: blueprint_run_is_running(uuid, uuid); Type: FUNCTION; Schema: tf; Owner: -
+--
+
+-- The resume CAS (ConversationStore.MarkQueuedForResume) refuses to
+-- un-terminal a `completed` conversation whose blueprint is still running:
+-- that row's terminal is the reactor's input, moments from an advance or a
+-- finalize. The check has to be IN the CAS statement — a caller reading the
+-- blueprint separately races the very window the guard exists to close.
+--
+-- That statement runs on the app pool, and blueprint_runs_select is
+-- creator-scoped for manual runs: a teammate who may legitimately update a
+-- team-visible conversation cannot see its manual blueprint_runs row. A plain
+-- correlated subquery would find nothing for that teammate and the guard would
+-- fail OPEN — the one direction that reopens the failure. So this reads one
+-- blueprint's running-ness past the creator scope — a within-org, non-security
+-- boundary, the same trade org_tracked_repos above makes — while preserving
+-- the ORG boundary: with request claims it requires p_org_id to equal the
+-- caller's org; with no claims (admin-pool / system / test) the guard is
+-- skipped. The pinned search_path blocks definer hijacking.
+--
+-- One bit, about a blueprint the caller's own conversation already names. A
+-- NULL id (a conversation with no blueprint) and a row that does not exist
+-- both answer false, so the CAS's NOT reads as "nothing says stop".
+-- +goose StatementBegin
+CREATE FUNCTION tf.blueprint_run_is_running(p_id uuid, p_org_id uuid) RETURNS boolean
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+  IF p_id IS NULL THEN
+    RETURN false;
+  END IF;
+  IF tf.current_org_id() IS NOT NULL AND p_org_id <> tf.current_org_id() THEN
+    RAISE EXCEPTION 'blueprint_run_is_running: requested org % does not match caller org %', p_org_id, tf.current_org_id();
+  END IF;
+  RETURN EXISTS (
+    SELECT 1 FROM blueprint_runs br
+    WHERE br.id = p_id AND br.org_id = p_org_id AND br.status = 'running'
+  );
+END;
+$$;
+-- +goose StatementEnd
+
+
+--
 -- Name: user_in_team(uuid); Type: FUNCTION; Schema: tf; Owner: -
 --
 
@@ -4772,6 +4817,14 @@ GRANT ALL ON FUNCTION tf.user_has_org_access(target_org uuid) TO tf_app;
 
 REVOKE ALL ON FUNCTION tf.org_tracked_repos(p_org_id uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.org_tracked_repos(p_org_id uuid) TO tf_app;
+
+
+--
+-- Name: FUNCTION blueprint_run_is_running(p_id uuid, p_org_id uuid); Type: ACL; Schema: tf; Owner: -
+--
+
+REVOKE ALL ON FUNCTION tf.blueprint_run_is_running(p_id uuid, p_org_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION tf.blueprint_run_is_running(p_id uuid, p_org_id uuid) TO tf_app;
 
 
 --

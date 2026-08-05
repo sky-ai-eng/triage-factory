@@ -317,6 +317,9 @@ func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort' WHERE id='r-ab'`); err != nil {
 		t.Fatalf("completed+abort: %v", err)
 	}
+	// The blueprint an abort terminates, as the reactor leaves it — without
+	// this the fixture is staging the hand-off window, not a stopped run.
+	settleRunBlueprint(t, database, "r-ab", "aborted")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-ab", runmode.LocalDefaultUserID, "pick it back up")

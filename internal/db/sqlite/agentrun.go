@@ -259,7 +259,11 @@ func (s *agentRunStore) MarkQueuedForResume(ctx context.Context, orgID, runID st
 			UPDATE conversations SET status = NULL,
 			                parked_at = NULL, preferred_executor_id = NULL
 			WHERE id = ?
-			  AND status IN ('open', 'completed')
+			  AND (status = 'open'
+			       OR (status = 'completed'
+			           AND NOT EXISTS (SELECT 1 FROM blueprint_runs br
+			                           WHERE br.id = conversations.blueprint_run_id
+			                             AND br.status = 'running')))
 		`, runID)
 		if err != nil {
 			return err

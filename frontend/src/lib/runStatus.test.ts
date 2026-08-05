@@ -245,6 +245,17 @@ describe('resumeBlockedCopy', () => {
     )
   })
 
+  it('tells a just-handed-off step apart from one the blueprint has left behind', () => {
+    // Two refusals that both mention the blueprint, and the difference is the
+    // whole message: one is over, the other is a moment.
+    const handedOff = resumeBlockedCopy(base({ resume_blocked_reason: 'step_handed_off' }))
+    expect(handedOff).toMatch(/handed off/i)
+    expect(handedOff).toMatch(/latest step/i)
+    expect(handedOff).not.toBe(
+      resumeBlockedCopy(base({ resume_blocked_reason: 'blueprint_concluded' })),
+    )
+  })
+
   it('says something true for a reason this build does not know', () => {
     expect(resumeBlockedCopy(base({ resume_blocked_reason: 'reason_from_the_future' }))).toMatch(
       /follow-up/i,

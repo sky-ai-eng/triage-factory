@@ -96,6 +96,18 @@ func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath stri
 	})
 }
 
+// settleRunBlueprint puts a seedRun fixture's blueprint into a terminal state —
+// what the reactor writes once it has read a step's terminal, and the missing
+// half of any fixture that stages a `completed` conversation by hand. Without
+// it the fixture has staged the hand-off window rather than concluded work, and
+// reads as unwakeable for exactly the right reason.
+func settleRunBlueprint(t *testing.T, database *sql.DB, runID, status string) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status = ? WHERE id = ?`, status, "seedbpr-"+runID); err != nil {
+		t.Fatalf("settle blueprint for %s: %v", runID, err)
+	}
+}
+
 // seedJiraRun is the Jira variant of seedRun: the task's entity is
 // jira-sourced so source-gated paths see a Jira run rather than a
 // GitHub PR run.

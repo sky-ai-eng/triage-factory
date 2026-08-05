@@ -540,6 +540,44 @@ func TestReactor_IgnoresTerminalFromAStepTheBlueprintMovedPast(t *testing.T) {
 	})
 }
 
+// TestReactor_LeavesASuccessorsConversationAlone is the same lesson on the
+// other axis: a re-read showing neither this engagement's terminal nor a park
+// means someone else picked the conversation up in between. Queued, mid-setup
+// and running all say that, and none of them says "this step is wedged" — but
+// the default arm failed the blueprint on all three, which is how a follow-up
+// in the hand-off window killed a healthy sequence. Refusing the wake removes
+// that entrant; this keeps the next one (a crash re-claim, a boot reconcile)
+// from finding the same edge.
+func TestReactor_LeavesASuccessorsConversationAlone(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+
+	for _, status := range []string{domain.StatusQueued, domain.StatusRunning, domain.ClaimPhaseCloning} {
+		t.Run(status, func(t *testing.T) {
+			s, database, brID, taskID, run0 := reactorFixture(t, "successor-"+status, 2, "completed", "continue")
+
+			stepRun := loadRun(t, s, run0)
+			stepRun.Status = status
+			stepRun.TriggerType = "manual"
+			stepRun.CreatorUserID = runmode.LocalDefaultUserID
+			s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+
+			if q := queuedStepRuns(t, database, brID); len(q) != 0 {
+				t.Errorf("queued step runs = %v, want none — nothing about a successor's state says to advance", q)
+			}
+			br := mustGetRun(t, s, org, brID)
+			if br.Status != domain.BlueprintRunStatusRunning {
+				t.Errorf("blueprint status = %q, want running — a successor owns the conversation, so this engagement writes no transition", br.Status)
+			}
+			if br.CurrentStepIndex != 0 {
+				t.Errorf("current_step_index = %d, want 0", br.CurrentStepIndex)
+			}
+			if got := readTaskStatus(t, database, taskID); got == "done" {
+				t.Error("task closed off a successor's state")
+			}
+		})
+	}
+}
+
 func mustGetRun(t *testing.T, s *Spawner, org, brID string) *domain.BlueprintRun {
 	t.Helper()
 	br, err := s.blueprints.GetRunSystem(context.Background(), org, brID)

@@ -196,6 +196,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				mustClaim(t, h, convID)
 				release(t, h, h.OrgID, convID, "completed")
 				h.SetStoredStatus(t, convID, "completed")
+				h.SetBlueprintState(t, "completed", 0)
 				h.InsertRow(t, convID, userRow("try again", false))
 				mustNotClaim(t, h)
 
@@ -262,20 +263,30 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				mustClaim(t, h, second)
 
 				// Now the follow-up on the COMPLETED earlier step, with step 1
-				// still executing. The un-terminal flip is about the
-				// conversation and lands, and the queued row is real — the
-				// claim gate is what refuses, so the step sits there rather
-				// than starting a second agent in step 1's worktree.
-				if flipped, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, first); err != nil || !flipped {
-					t.Fatalf("MarkQueuedForResume(%s) = (%v, %v), want a flip", first, flipped, err)
+				// still executing. Refused before it writes anything — the
+				// un-terminal flip reads the parent's status too.
+				if flipped, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, first); err != nil || flipped {
+					t.Fatalf("MarkQueuedForResume(%s) = (%v, %v), want no flip under a running blueprint", first, flipped, err)
 				}
+				if st := h.StoredStatus(t, first); st != "completed" {
+					t.Errorf("stored status = %q, want completed — a refused CAS writes nothing", st)
+				}
+
+				// And the queued row it would have woken changes nothing:
+				// the conversation is terminal, so no predicate spans it.
 				h.InsertRow(t, first, userRow("actually, one more thing", false))
 				mustNotClaim(t, h)
 
-				// And it stays refused after the live step releases: the
-				// blueprint is on step 1, so step 0 is behind it for good.
+				// It stays refused after the live step releases, now for the
+				// second reason: the blueprint is on step 1, so step 0 is
+				// behind it for good. That arm is the claim gate's — the flip
+				// lands and nothing claims it.
 				release(t, h, h.OrgID, second, "parked")
 				h.SetStoredStatus(t, second, "open")
+				h.SetBlueprintState(t, "aborted", 1)
+				if flipped, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, first); err != nil || !flipped {
+					t.Fatalf("MarkQueuedForResume(%s) = (%v, %v), want a flip once the blueprint stopped", first, flipped, err)
+				}
 				mustNotClaim(t, h)
 			})
 

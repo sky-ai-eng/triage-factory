@@ -920,10 +920,15 @@ func (s *Spawner) reactToStepTerminal(orgID string, br *domain.BlueprintRun, ste
 	case "completed":
 		// fall through to the outcome decision below
 	default:
-		// Any unexpected non-terminal status: the blueprint can't
-		// sensibly continue, so fail it.
-		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
-			domain.BlueprintRunStatusFailed, "step ended with status "+stepRun.Status, &stepIdx, false)
+		// Neither a terminal nor the park above, on a row this engagement just
+		// wrote a terminal to: something re-queued or re-claimed the
+		// conversation in between, so this status is a SUCCESSOR's, not a
+		// wedged step. Same answer as a claim fence, for the same reason —
+		// every transition below would be decided on someone else's state.
+		// Failing the blueprint here is how a successor's liveness got read as
+		// this engagement's corruption, unrecoverably.
+		dispatchLog.Error("reactor: the step's re-read shows a successor's state, not this engagement's terminal; writing no blueprint transition",
+			"blueprint_run", br.ID, "run", stepRun.ID, "step", stepIdx, "status", stepRun.Status)
 		return
 	}
 

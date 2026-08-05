@@ -831,6 +831,32 @@ func (s *Spawner) processCompletion(
 	// finish terminates) per decideBlueprintStep, and the approval state is
 	// derived downstream from the unresolved-artifact set (has_unresolved_artifacts).
 
+	// Every non-failed terminal snapshots its workspace — while the worktree and
+	// session transcript are still on disk — then lets the cleanup defers tear
+	// the worktree down (parked stays false: keeping a concluded run's worktree
+	// warm is not acceptable, so cold rehydrate from this blob is the resume
+	// path). `completed` is the whole non-failed terminal set, whatever the
+	// outcome: an abort is picked back up by a human, and a finish is the case a
+	// follow-up on concluded work needs — a workspace that only exists for the
+	// runs that went badly is a workspace nobody can follow up on. A failed run
+	// is excluded: the infrastructure under it died, so there is nothing coherent
+	// to rehydrate, and failRun drops whatever blob it had.
+	//
+	// Every step of a blueprint writes to the one key the blueprint shares, so a
+	// multi-step run overwrites its own blob per step and the last writer — the
+	// step a resume would land on — wins. terminateBlueprint retains it for every
+	// terminal but `failed`; the TTL sweep is what collects it.
+	//
+	// BEFORE the terminal write, and that ordering is the contract: the terminal
+	// is also the claim release, so the instant it commits a follow-up can be
+	// accepted and a claim minted — for a workspace that, the other way round, is
+	// still being written.
+	if status == "completed" {
+		if err := s.snapshotWorkspace(ctx, orgID, namespace, claudeCwd, sessionID); err != nil {
+			delegateLog.Warn("snapshot workspace for completed run failed", "run", runID, "outcome", outcome, "error", err)
+		}
+	}
+
 	var completeErr error
 	switch {
 	case claimID != "":
@@ -846,9 +872,11 @@ func (s *Spawner) processCompletion(
 		// A successor owns the conversation, so this result is not the run's
 		// disposition — it is the output of an engagement that lost its
 		// claim. Recording it would overwrite live work with a stale
-		// terminal, and every step below (breaker, snapshot, board, toast,
-		// broadcast) reports on that same overwritten row. Stop here, and
-		// park so the successor's workspace is left alone.
+		// terminal, and every step below (breaker, board, toast, broadcast)
+		// reports on that same overwritten row. Stop here, and park so the
+		// successor's workspace is left alone. The snapshot above already
+		// landed, harmlessly: the successor holds the claim, so nothing can
+		// resume from the blob before its own conclusion overwrites it.
 		delegateLog.Error("claim fence refused the completion terminal — a successor owns this conversation; recording nothing",
 			"run", runID, "claim_id", claimID, "org_id", orgID, "error", completeErr)
 		return true, true
@@ -858,27 +886,6 @@ func (s *Spawner) processCompletion(
 	}
 
 	s.updateBreakerCounter(task.ID, triggerType, status)
-
-	// Every non-failed terminal snapshots its workspace now — while the worktree
-	// and session transcript are still on disk — then lets the cleanup defers tear
-	// the worktree down (parked stays false: keeping a concluded run's worktree
-	// warm is not acceptable, so cold rehydrate from this blob is the resume
-	// path). `completed` is the whole non-failed terminal set, whatever the
-	// outcome: an abort is picked back up by a human, and a finish is the case a
-	// follow-up on concluded work needs — a workspace that only exists for the
-	// runs that went badly is a workspace nobody can follow up on. A failed run
-	// is excluded: the infrastructure under it died, so there is nothing coherent
-	// to rehydrate, and failRun drops whatever blob it had.
-	//
-	// Every step of a blueprint writes to the one key the blueprint shares, so a
-	// multi-step run overwrites its own blob per step and the last writer — the
-	// step a resume would land on — wins. terminateBlueprint retains it for every
-	// terminal but `failed`; the TTL sweep is what collects it.
-	if status == "completed" {
-		if err := s.snapshotWorkspace(ctx, orgID, namespace, claudeCwd, sessionID); err != nil {
-			delegateLog.Warn("snapshot workspace for completed run failed", "run", runID, "outcome", outcome, "error", err)
-		}
-	}
 
 	// Task disposition (close on finish, leave-open on abort) is the
 	// orchestrator's job now, not the step's: runBlueprint reads this run's

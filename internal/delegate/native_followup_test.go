@@ -209,6 +209,10 @@ func TestSendMessage_NativeCancelledNotSteerable(t *testing.T) {
 // follow-up, `finish` included. The agent stopping mid-work and the agent
 // finishing are both states a person picks back up, and both left a workspace
 // behind to pick it up in.
+//
+// The blueprint is settled alongside each terminal, because that is when the
+// conversation becomes a person's again: while the sequence still runs, the
+// step's terminal is the reactor's to read.
 func TestSendMessage_NativeCompletedIsResumable(t *testing.T) {
 	for _, outcome := range []string{"abort", "finish", "continue"} {
 		t.Run(outcome, func(t *testing.T) {
@@ -217,6 +221,11 @@ func TestSendMessage_NativeCompletedIsResumable(t *testing.T) {
 			if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome=? WHERE id='r-done'`, outcome); err != nil {
 				t.Fatalf("complete: %v", err)
 			}
+			blueprintTerminal := "completed"
+			if outcome == "abort" {
+				blueprintTerminal = "aborted"
+			}
+			settleRunBlueprint(t, database, "r-done", blueprintTerminal)
 			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 			markNative(t, database, "r-done")
 
