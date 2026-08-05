@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -82,6 +83,92 @@ func TestSetupNetwork_OverStaleNetnsOfTheSameName(t *testing.T) {
 	if err := runIP(ctx, "-n", name, "link", "show", state.vethSandbox); err != nil {
 		t.Errorf("sandbox veth %s is not in netns %s: %v", state.vethSandbox, name, err)
 	}
+}
+
+// TestSetupNetwork_RefusesToReclaimALiveNetns is the bound on the one
+// destructive step in this cell that privilege rather than ownership permits.
+//
+// The broker holds CAP_NET_ADMIN and the kernel will delete whatever namespace
+// name it is handed; the run id and subnet index that name it arrive as
+// unvalidated RPC arguments, and the reason they cannot name a live cell lives
+// in the ORCHESTRATOR's allocator, on the far side of that boundary. So the
+// reclaim consults this process's own ledger, and a namespace it created and
+// has not torn down is left alone — the bring-up then fails on `File exists`,
+// loud and self-contained, exactly as it did before the reclaim existed.
+//
+// Without this, a caller with a wrong idea about what is stale — an allocator
+// bug, or the compromised orchestrator the threat model already covers — would
+// take the name out from under a live cell instead of being refused. Not an
+// outage for the victim (the namespace is refcounted by the processes in it and
+// survives losing its name) but silent cross-cell corruption: the name resolves
+// somewhere else, and the victim's by-name teardown then unlinks the
+// successor's namespace instead.
+func TestSetupNetwork_RefusesToReclaimALiveNetns(t *testing.T) {
+	const runID = "live-netns-run"
+	name := NetnsNameForRun(runID, staleNetnsSubnetIdx)
+	requireNetnsCapableHost(t, name)
+
+	// Stand in for the sibling cell that created it: same name, and this
+	// process still believes it is live.
+	markNetnsLive(name, "the-live-sibling-run")
+	t.Cleanup(func() { forgetNetns(name) })
+
+	ctx := context.Background()
+	state, err := setupNetwork(ctx, runID, staleNetnsSubnetIdx)
+	t.Cleanup(func() {
+		forgetNetns(name)
+		_ = teardownNetwork(context.Background(), state)
+	})
+	if err == nil {
+		t.Fatal("setupNetwork reclaimed a namespace this process believes is live; it must fail instead of deleting it")
+	}
+	// The failure has to be the namespace refusing to be recreated, not some
+	// earlier step — and the namespace itself has to still be there.
+	if !strings.Contains(err.Error(), "File exists") {
+		t.Errorf("setupNetwork error = %v, want the `ip netns add` collision (File exists)", err)
+	}
+	if !netnsExists(t, name) {
+		t.Error("the live namespace was deleted; the ledger gate did not hold")
+	}
+}
+
+// TestSetupNetwork_LedgerTracksTheNamespaceLifecycle pins the two ledger edges
+// the gate above depends on: a namespace is live from the moment it exists,
+// and a teardown gives up its claim even when the delete behind it fails —
+// otherwise a failed teardown, which is precisely how one leaks, would wedge
+// its (run id, index) pair against every later reclaim.
+func TestSetupNetwork_LedgerTracksTheNamespaceLifecycle(t *testing.T) {
+	const runID = "ledger-netns-run"
+	name := NetnsNameForRun(runID, staleNetnsSubnetIdx)
+	requireNetnsCapableHost(t, name)
+
+	ctx := context.Background()
+	state, err := setupNetwork(ctx, runID, staleNetnsSubnetIdx)
+	t.Cleanup(func() {
+		forgetNetns(name)
+		_ = teardownNetwork(context.Background(), state)
+	})
+	if err != nil {
+		t.Fatalf("setupNetwork: %v", err)
+	}
+	if owner, live := netnsLiveRun(name); !live || owner != runID {
+		t.Errorf("after setup, ledger has (%q, live=%v); want this run's namespace recorded as live", owner, live)
+	}
+
+	if err := teardownNetwork(ctx, state); err != nil {
+		t.Fatalf("teardownNetwork: %v", err)
+	}
+	if owner, live := netnsLiveRun(name); live {
+		t.Errorf("after teardown, ledger still claims %q is live (run %q); a later bring-up could never reclaim a leaked namespace", name, owner)
+	}
+}
+
+// netnsExists reports whether a namespace of this name is present, by asking
+// `ip` rather than stat-ing /var/run/netns — the same tool the setup path uses,
+// so the answer cannot disagree with it about what "exists" means.
+func netnsExists(t *testing.T, name string) bool {
+	t.Helper()
+	return runIP(context.Background(), "netns", "exec", name, "true") == nil
 }
 
 // TestSetupNetwork_CleanHost is the ordinary path, kept beside the case above
