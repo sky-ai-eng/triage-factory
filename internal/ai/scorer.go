@@ -238,7 +238,6 @@ func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets ag
 		Secrets:      secrets,
 		LLMResolver:  llmResolve,
 		Metadata:     map[string]any{"batch_size": len(tasks)},
-		CostFn:       CalculateCostUSD,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("scorer agent failed: %w", err)

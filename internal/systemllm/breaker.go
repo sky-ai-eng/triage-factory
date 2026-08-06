@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/sky-ai-eng/triage-factory/internal/inference"
 )
 
 // providerBreakerBaseDelay is the first cooldown a transient failure opens
@@ -142,35 +144,83 @@ func (b *providerBreaker) recordResult(provider string, transientFailure bool) {
 }
 
 // isTransientFailure reports whether err reflects an upstream condition
-// worth backing off on: an overloaded/rate-limited/5xx API response
-// (mirrors the SDK's own retry classifier, internal/requestconfig — by the
-// time completeDirect sees callErr, the SDK has already exhausted its own
-// retries for exactly this class), or a network-level failure that never
-// got a response at all — the SDK's request executor returns the
-// underlying http.Client.Do error verbatim when even its own retries never
-// got a response, which net/http surfaces as a *url.Error wrapping the
-// dial/DNS/TLS/timeout failure; that satisfies net.Error, and an
-// unreachable endpoint looks identical to an overloaded one from the
-// caller's side.
+// worth backing off on: an overloaded/rate-limited/5xx API response, or a
+// network-level failure that never got a response at all — an unreachable
+// endpoint looks identical to an overloaded one from the caller's side.
 //
 // Everything else does NOT trip the breaker: a caller-cancelled or
 // deadline-exceeded ctx is not a provider signal; a 4xx client error (bad
 // request, auth, not found) is a permanent misconfiguration no cooldown
-// will fix; and an unrecognized local/SDK error (a request body that
-// couldn't be replayed for retry, a malformed error response the SDK
-// couldn't parse into apierror.Error, ...) is equally not something a
-// cooldown fixes — bucketing every unclassified error as transient would
-// silently downgrade a genuine, recurring bug to a quiet "retrying next
-// cycle" log line instead of surfacing it.
+// will fix; a context overflow is a deterministic rejection of this exact
+// prompt and says nothing about provider health; and an unrecognized error
+// is equally not something a cooldown fixes — bucketing every unclassified
+// error as transient would silently downgrade a genuine, recurring bug to a
+// quiet "retrying next cycle" log line instead of surfacing it.
+//
+// Classification is on the error text because that is the shape the neutral
+// layer produces: internal/inference flattens a provider failure into a
+// message, deliberately rendering the status code as "(HTTP %d)" and the
+// wrapped cause alongside it, precisely so a caller can sort transient from
+// permanent. Nothing structured survives to match on — the transport error
+// underneath is rendered, not wrapped — which is also why the whole cooldown
+// matters more than it used to: bifrost's default retry count is zero, so
+// the first failure here is the first failure, not the tail of a retry
+// budget already spent inside a client.
 func isTransientFailure(ctx context.Context, err error) bool {
 	if err == nil || ctx.Err() != nil {
 		return false
 	}
-	var apiErr *anthropic.Error
-	if errors.As(err, &apiErr) {
-		sc := apiErr.StatusCode
-		return sc == 408 || sc == 409 || sc == 429 || sc >= 500
+	if errors.Is(err, inference.ErrContextOverflow) {
+		return false
 	}
-	var netErr net.Error
-	return errors.As(err, &netErr)
+	msg := strings.ToLower(err.Error())
+	// A rendered status is the authoritative signal and settles the question
+	// either way: an error carrying one is classified on it alone, so a 400
+	// whose body happens to quote "connection reset" stays permanent.
+	if status, ok := renderedHTTPStatus(msg); ok {
+		return status == 408 || status == 409 || status == 429 || status >= 500
+	}
+	for _, m := range transportFailureMarkers {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// renderedHTTPStatusPattern matches the status marker internal/inference
+// renders into a provider error. Anchored on that exact spelling rather than
+// on a bare three-digit number, so a request id or a token count in the
+// message can't be read as a status.
+var renderedHTTPStatusPattern = regexp.MustCompile(`\(http (\d{3})\)`)
+
+func renderedHTTPStatus(msg string) (int, bool) {
+	m := renderedHTTPStatusPattern.FindStringSubmatch(msg)
+	if m == nil {
+		return 0, false
+	}
+	status, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0, false
+	}
+	return status, true
+}
+
+// transportFailureMarkers classify a failure that never reached the provider
+// (dial, DNS, TLS, timeout, a reset mid-stream) and so carries no status to
+// render. Deliberately narrower than the retry classifier in
+// internal/agentloop: that one decides whether to try again immediately, this
+// one opens a cooldown that gates every other org sharing the endpoint, so an
+// ambiguous match costs more here than a missed one.
+var transportFailureMarkers = []string{
+	"connection refused",
+	"connection reset",
+	"no such host",
+	"i/o timeout",
+	"tls handshake timeout",
+	"timeout awaiting response",
+	"context deadline exceeded",
+	"network is unreachable",
+	"no route to host",
+	"broken pipe",
 }

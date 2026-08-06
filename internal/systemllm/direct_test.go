@@ -2,7 +2,9 @@ package systemllm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,56 +15,75 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/inference"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // stubSecrets is a minimal agentproc.SecretsReader backed by an in-memory
-// map, keyed "org/key" — enough for buildDirectClient's credential
-// precedence to exercise every provider branch without a real store.
+// map, keyed "org/key" — enough for the credential precedence to exercise
+// every provider branch without a real store.
 type stubSecrets map[string]string
 
 func (s stubSecrets) Get(_ context.Context, orgID, key string) (string, error) {
 	return s[orgID+"/"+key], nil
 }
 
-// capturingHandler records the last request it served (method/path/header)
-// alongside a caller-supplied response, so tests can assert on how
-// buildDirectClient shaped the outgoing call. ServeHTTP runs on a
-// goroutine spawned by the httptest server, distinct from the test
-// goroutine that reads these fields back (often after the SDK's own retry
-// loop has driven several requests through it) — mu guards every access so
-// that's race-free rather than relying on the request/response round trip
-// to provide ordering the race detector doesn't recognize.
+// capturingHandler stands in for the Anthropic Messages API: it records the
+// last request it served (path, headers, decoded body) and answers with
+// either a caller-supplied error status or a streamed completion, since the
+// inference client always streams.
+//
+// ServeHTTP runs on a goroutine spawned by the httptest server, distinct from
+// the test goroutine that reads these fields back — mu guards every access so
+// that's race-free rather than relying on the request/response round trip to
+// provide ordering the race detector doesn't recognize.
 type capturingHandler struct {
 	t      *testing.T
 	status int
-	body   string
+	// text is the assistant text the streamed response carries. Ignored when
+	// status is an error status.
+	text string
+	// errBody overrides the default error payload for an error status.
+	errBody string
 
 	mu            sync.Mutex
 	lastReqHeader http.Header
 	lastReqPath   string
+	lastReqBody   map[string]any
 	reqCount      int
 }
 
 func (h *capturingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	raw, _ := io.ReadAll(r.Body)
+	var body map[string]any
+	_ = json.Unmarshal(raw, &body)
+
 	h.mu.Lock()
 	h.reqCount++
 	h.lastReqHeader = r.Header.Clone()
 	h.lastReqPath = r.URL.Path
+	h.lastReqBody = body
 	h.mu.Unlock()
 
-	io.Copy(io.Discard, r.Body)
-	w.Header().Set("Content-Type", "application/json")
-	status := h.status
-	if status == 0 {
-		status = http.StatusOK
+	if h.status != 0 && h.status != http.StatusOK {
+		errBody := h.errBody
+		if errBody == "" {
+			errBody = `{"type":"error","error":{"type":"invalid_request_error","message":"stub error"}}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(h.status)
+		_, _ = w.Write([]byte(errBody))
+		return
 	}
-	w.WriteHeader(status)
-	body := h.body
-	if body == "" {
-		body = `{"type":"error","error":{"type":"invalid_request_error","message":"stub error"}}`
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	for _, frame := range anthropicStreamFrames(h.text) {
+		fmt.Fprint(w, frame)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
 	}
-	w.Write([]byte(body))
 }
 
 // Requests returns the number of requests served so far. Safe for
@@ -89,6 +110,28 @@ func (h *capturingHandler) LastPath() string {
 	return h.lastReqPath
 }
 
+// LastBody returns the most recently served request's decoded JSON body. Safe
+// for concurrent use with ServeHTTP.
+func (h *capturingHandler) LastBody() map[string]any {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lastReqBody
+}
+
+// anthropicStreamFrames builds a complete Anthropic streaming response around
+// the given (already-JSON-safe) text: one text block plus a usage block
+// exercising every token category RecordDirect reads.
+func anthropicStreamFrames(text string) []string {
+	return []string{
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test123\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-haiku-4-5-20251001\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3}}}\n\n",
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"" + text + "\"}}\n\n",
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	}
+}
+
 func completeOpts(orgID string, secrets agentproc.SecretsReader) CompleteOptions {
 	return CompleteOptions{
 		OrgID:        orgID,
@@ -102,18 +145,15 @@ func completeOpts(orgID string, secrets agentproc.SecretsReader) CompleteOptions
 		Temperature:  0.1,
 		TraceID:      "test-trace",
 		Secrets:      secrets,
-		CostFn: func(model string, in, out, cacheRead, cacheCreate int) float64 {
-			return float64(in+out+cacheRead+cacheCreate) / 1000
-		},
 	}
 }
 
 // TestComplete_Direct_AnthropicAPIKey pins the Anthropic direct-key path:
-// the resolved api key goes out as X-Api-Key, the configured base URL is
-// honored, and the response text passes through untouched.
+// the resolved api key goes out as x-api-key, the configured base URL is
+// honored, and the streamed response text passes through untouched.
 func TestComplete_Direct_AnthropicAPIKey(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	h := &capturingHandler{t: t, body: sprintfBody(`hello world`)}
+	h := &capturingHandler{t: t, text: "hello world"}
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -130,7 +170,7 @@ func TestComplete_Direct_AnthropicAPIKey(t *testing.T) {
 		t.Errorf("Text = %q, want %q", result.Text, "hello world")
 	}
 	if got := h.LastHeader().Get("X-Api-Key"); got != "sk-ant-test" {
-		t.Errorf("X-Api-Key = %q, want sk-ant-test", got)
+		t.Errorf("x-api-key = %q, want sk-ant-test", got)
 	}
 	if h.LastHeader().Get("Authorization") != "" {
 		t.Errorf("Authorization should be unset with no auth token configured, got %q", h.LastHeader().Get("Authorization"))
@@ -139,12 +179,12 @@ func TestComplete_Direct_AnthropicAPIKey(t *testing.T) {
 
 // TestComplete_Direct_AnthropicAuthTokenBearer pins the gateway bearer path:
 // when anthropic_auth_token is configured alongside the api key, both the
-// X-Api-Key header AND an Authorization: Bearer header go out — matching
+// x-api-key header AND an Authorization: Bearer header go out — matching
 // resolveCredentials, which sets both env vars together rather than
 // treating them as alternatives.
 func TestComplete_Direct_AnthropicAuthTokenBearer(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	h := &capturingHandler{t: t, body: sprintfBody(`auth token payload`)}
+	h := &capturingHandler{t: t, text: "auth token payload"}
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -158,197 +198,294 @@ func TestComplete_Direct_AnthropicAuthTokenBearer(t *testing.T) {
 		t.Fatalf("Complete: %v", err)
 	}
 	if got := h.LastHeader().Get("X-Api-Key"); got != "sk-ant-test" {
-		t.Errorf("X-Api-Key = %q, want sk-ant-test", got)
+		t.Errorf("x-api-key = %q, want sk-ant-test", got)
 	}
 	if got := h.LastHeader().Get("Authorization"); got != "Bearer gateway-bearer-tok" {
 		t.Errorf("Authorization = %q, want Bearer gateway-bearer-tok", got)
 	}
 }
 
-// TestComplete_Direct_BedrockBearer pins the Bedrock API-key path: the
-// bearer token goes out as an Authorization header and the request is
-// rewritten onto the Bedrock invoke path.
-func TestComplete_Direct_BedrockBearer(t *testing.T) {
+// TestComplete_Direct_RequestShape pins what a system job actually sends: the
+// pinned model, the prompt split (instructions as the system prompt, data as
+// the single user turn), the token cap, and — the one easily-dropped field —
+// the caller's temperature.
+func TestComplete_Direct_RequestShape(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	h := &capturingHandler{t: t, body: sprintfBody(`bedrock bearer ok`)}
+	h := &capturingHandler{t: t, text: "ok"}
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
 	secrets := stubSecrets{
-		"org-1/aws_bearer_token_bedrock": "bedrock-bearer-tok",
-		"org-1/aws_region":               "us-east-1",
-		"org-1/bedrock_base_url":         srv.URL,
+		"org-1/anthropic_api_key":  "sk-ant-test",
+		"org-1/anthropic_base_url": srv.URL,
 	}
-	r := NewRecorder(nil)
-	result, err := r.Complete(context.Background(), completeOpts("org-1", secrets))
-	if err != nil {
+	if _, err := NewRecorder(nil).Complete(context.Background(), completeOpts("org-1", secrets)); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if result.Text != "bedrock bearer ok" {
-		t.Errorf("Text = %q", result.Text)
+
+	body := h.LastBody()
+	if got := body["model"]; got != "claude-haiku-4-5-20251001" {
+		t.Errorf("model = %v, want the pinned DirectModel", got)
 	}
-	if got := h.LastHeader().Get("Authorization"); got != "Bearer bedrock-bearer-tok" {
-		t.Errorf("Authorization = %q, want Bearer bedrock-bearer-tok", got)
+	if got, ok := body["temperature"].(float64); !ok || got != 0.1 {
+		t.Errorf("temperature = %v (present=%v), want the caller's 0.1", body["temperature"], ok)
 	}
-	if !strings.Contains(h.LastPath(), "/invoke") {
-		t.Errorf("path = %q, want a Bedrock /model/.../invoke path", h.LastPath())
+	if got, ok := body["max_tokens"].(float64); !ok || int(got) != 2048 {
+		t.Errorf("max_tokens = %v, want 2048", body["max_tokens"])
+	}
+	if !strings.Contains(fmt.Sprint(body["system"]), "system instructions") {
+		t.Errorf("system = %v, want the SystemPrompt", body["system"])
+	}
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %v, want exactly the one synthetic user row", body["messages"])
+	}
+	msg, _ := msgs[0].(map[string]any)
+	if msg["role"] != "user" || !strings.Contains(fmt.Sprint(msg["content"]), "user data") {
+		t.Errorf("user message = %v, want the UserMessage as a user turn", msg)
+	}
+	if body["tools"] != nil || body["tool_choice"] != nil {
+		t.Errorf("a system job is toolless: tools = %v, tool_choice = %v", body["tools"], body["tool_choice"])
 	}
 }
 
-// TestComplete_Direct_BedrockSigV4WithSessionToken pins the Bedrock
-// access-key-triple path, including a session token — required because
-// Bedrock STS session creds ship this release. The signed request must
-// carry an AWS4-HMAC-SHA256 Authorization header and an
-// X-Amz-Security-Token header equal to the session token (SigV4 signs the
-// session token in, it doesn't just drop it).
-func TestComplete_Direct_BedrockSigV4WithSessionToken(t *testing.T) {
+// TestComplete_Direct_NoCacheBreakpointOnTheData pins that the one thing a
+// system job never sends again — this call's own data — is not marked as a
+// cache write. The system prefix repeats across calls of the same job and
+// keeps its breakpoint; the tail does not repeat, so a breakpoint there is a
+// write premium on tokens nothing will ever read back.
+func TestComplete_Direct_NoCacheBreakpointOnTheData(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	h := &capturingHandler{t: t, body: sprintfBody(`sigv4 ok`)}
+	h := &capturingHandler{t: t, text: "ok"}
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
 	secrets := stubSecrets{
-		"org-1/aws_access_key_id":     "AKIAEXAMPLE",
-		"org-1/aws_secret_access_key": "secretexample",
-		"org-1/aws_session_token":     "sessiontoken123",
-		"org-1/aws_region":            "us-east-1",
-		"org-1/bedrock_base_url":      srv.URL,
+		"org-1/anthropic_api_key":  "sk-ant-test",
+		"org-1/anthropic_base_url": srv.URL,
 	}
-	r := NewRecorder(nil)
-	result, err := r.Complete(context.Background(), completeOpts("org-1", secrets))
-	if err != nil {
+	if _, err := NewRecorder(nil).Complete(context.Background(), completeOpts("org-1", secrets)); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if result.Text != "sigv4 ok" {
-		t.Errorf("Text = %q", result.Text)
+
+	body := h.LastBody()
+	if !strings.Contains(fmt.Sprint(body["system"]), "cache_control") {
+		t.Errorf("system = %v, want the repeated prefix cached", body["system"])
 	}
-	if got := h.LastHeader().Get("Authorization"); !strings.HasPrefix(got, "AWS4-HMAC-SHA256") {
-		t.Errorf("Authorization = %q, want an AWS4-HMAC-SHA256 SigV4 signature", got)
-	}
-	if got := h.LastHeader().Get("X-Amz-Security-Token"); got != "sessiontoken123" {
-		t.Errorf("X-Amz-Security-Token = %q, want sessiontoken123", got)
+	if got := fmt.Sprint(body["messages"]); strings.Contains(got, "cache_control") {
+		t.Errorf("messages = %v, want no cache breakpoint on the per-call data", got)
 	}
 }
 
-// TestComplete_Direct_BedrockModelDefaultAndOverride pins decision 5's
-// Bedrock model mapping: bedrock_model_id wins when set, otherwise Complete
-// falls back to the pinned Haiku inference-profile default.
-func TestComplete_Direct_BedrockModelDefaultAndOverride(t *testing.T) {
+// TestComplete_Direct_RecordsSuccessRow pins the system_llm_runs row a
+// successful direct call produces: the provider's usage verbatim, a cost
+// priced from the vendored datasheet, the response id as the idempotency
+// key, and the single-turn/no-error shape.
+func TestComplete_Direct_RecordsSuccessRow(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
+	h := &capturingHandler{t: t, text: "ok"}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
 
-	t.Run("default", func(t *testing.T) {
-		h := &capturingHandler{t: t, body: sprintfBody(`ok`)}
-		srv := httptest.NewServer(h)
-		defer srv.Close()
-		secrets := stubSecrets{
-			"org-1/aws_bearer_token_bedrock": "tok",
-			"org-1/aws_region":               "us-east-1",
-			"org-1/bedrock_base_url":         srv.URL,
-		}
-		r := NewRecorder(nil)
-		if _, err := r.Complete(context.Background(), completeOpts("org-1", secrets)); err != nil {
-			t.Fatalf("Complete: %v", err)
-		}
-		if !strings.Contains(h.LastPath(), defaultBedrockHaikuModel) {
-			t.Errorf("path = %q, want it to reference the default model %q", h.LastPath(), defaultBedrockHaikuModel)
-		}
-	})
+	secrets := stubSecrets{
+		"org-1/anthropic_api_key":  "sk-ant-test",
+		"org-1/anthropic_base_url": srv.URL,
+	}
+	fs := &fakeStore{}
+	opts := completeOpts("org-1", secrets)
+	opts.Metadata = map[string]any{"batch_size": 10}
+	if _, err := NewRecorder(fs).Complete(context.Background(), opts); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
 
-	t.Run("override", func(t *testing.T) {
-		h := &capturingHandler{t: t, body: sprintfBody(`ok`)}
-		srv := httptest.NewServer(h)
-		defer srv.Close()
-		secrets := stubSecrets{
-			"org-1/aws_bearer_token_bedrock": "tok",
-			"org-1/aws_region":               "us-east-1",
-			"org-1/bedrock_base_url":         srv.URL,
-			"org-1/bedrock_model_id":         "custom.inference.profile",
-		}
-		r := NewRecorder(nil)
-		if _, err := r.Complete(context.Background(), completeOpts("org-1", secrets)); err != nil {
-			t.Fatalf("Complete: %v", err)
-		}
-		if !strings.Contains(h.LastPath(), "custom.inference.profile") {
-			t.Errorf("path = %q, want it to reference the overridden model", h.LastPath())
-		}
+	if len(fs.rows) != 1 {
+		t.Fatalf("recorded %d rows, want 1", len(fs.rows))
+	}
+	got := fs.rows[0]
+	if got.OrgID != "org-1" || got.Job != JobClassifier || got.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("context fields wrong: %+v", got)
+	}
+	// The fixture reports 10 input + 3 cache-read + 2 cache-write; the neutral
+	// layer folds the cache buckets into its prompt count (15), and the row
+	// records the four disjoint counts the column has always meant.
+	if got.InputTokens != 10 || got.OutputTokens != 5 || got.CacheReadTokens != 3 || got.CacheCreationTokens != 2 {
+		t.Errorf("token fields = %+v, want 10/5/3/2 as disjoint counts", got)
+	}
+	// Cost, by contrast, prices the inclusive usage — the formula subtracts
+	// the cache buckets back out at their own rates.
+	wantCost, ok := inference.CostForUsage(opts.DirectModel, inference.Usage{
+		InputTokens: 15, OutputTokens: 5, CacheReadTokens: 3, CacheCreationTokens: 2,
 	})
+	if !ok {
+		t.Fatalf("the pinned system-job model %q must be priceable from the vendored datasheet", opts.DirectModel)
+	}
+	if got.TotalCostUSD != wantCost {
+		t.Errorf("TotalCostUSD = %v, want %v", got.TotalCostUSD, wantCost)
+	}
+	if got.TraceID != "msg_test123" {
+		t.Errorf("TraceID = %q, want the provider's message id", got.TraceID)
+	}
+	if got.NumTurns != 1 || got.IsError {
+		t.Errorf("NumTurns = %d, IsError = %v, want a single successful turn", got.NumTurns, got.IsError)
+	}
+	if got.MetadataJSON != `{"batch_size":10}` {
+		t.Errorf("MetadataJSON = %q", got.MetadataJSON)
+	}
+	if got.DurationMs < 0 || got.CompletedAt.Before(got.StartedAt) {
+		t.Errorf("timing fields wrong: %+v", got)
+	}
 }
 
-// TestComplete_Direct_BedrockCostAccounting_PricesOnPinnedModel is the
-// regression guard for a Bedrock call recording $0 cost: the resolved
-// request model is a Bedrock inference-profile id/ARN (the regional
-// default, or an org's bedrock_model_id override) that has no entry in
-// ai.pricing's table, so cost math must key off opts.DirectModel (the
-// pinned Anthropic model id) instead.
-//
-// Can't use the real ai.CalculateCostUSD here — internal/ai imports
-// internal/systemllm, and Go treats that as a genuine import cycle even for
-// an internal (package systemllm) test file, not just production code. The
-// stub below mirrors its exact contract instead: 0 for any model string it
-// doesn't recognize, matching the account of the real bug (a resolved
-// Bedrock model has no pricing-table entry → silently $0). Before the fix,
-// CostFn was called with the resolved request model, so this stub would
-// have returned 0 for both cases below; after the fix it's called with
-// opts.DirectModel, matching the pinned constant.
-func TestComplete_Direct_BedrockCostAccounting_PricesOnPinnedModel(t *testing.T) {
+// TestComplete_Direct_RecordsErrorRow pins the other half: a failed call
+// still lands a row, flagged is_error, with no invented usage or cost and no
+// idempotency key (there was no response to key on).
+func TestComplete_Direct_RecordsErrorRow(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	const sentinelCost = 1.23
+	h := &capturingHandler{t: t, status: http.StatusBadRequest}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
 
-	run := func(t *testing.T, secrets stubSecrets, wantModelSubstr string) domain.SystemLLMRun {
-		t.Helper()
-		h := &capturingHandler{t: t, body: sprintfBody(`ok`)}
-		srv := httptest.NewServer(h)
-		defer srv.Close()
-		secrets["org-1/bedrock_base_url"] = srv.URL
+	secrets := stubSecrets{
+		"org-1/anthropic_api_key":  "sk-ant-test",
+		"org-1/anthropic_base_url": srv.URL,
+	}
+	fs := &fakeStore{}
+	if _, err := NewRecorder(fs).Complete(context.Background(), completeOpts("org-1", secrets)); err == nil {
+		t.Fatal("expected an error for a 400 response")
+	}
 
-		fs := &fakeStore{}
-		r := NewRecorder(fs)
-		opts := completeOpts("org-1", secrets)
-		pinnedModel := opts.DirectModel
-		opts.CostFn = func(model string, _, _, _, _ int) float64 {
-			if model != pinnedModel {
-				return 0 // mirrors ai.CalculateCostUSD: unknown model → 0
+	if len(fs.rows) != 1 {
+		t.Fatalf("recorded %d rows, want 1 — a failed call is still accounted for", len(fs.rows))
+	}
+	got := fs.rows[0]
+	if !got.IsError {
+		t.Error("IsError = false, want the row flagged")
+	}
+	if got.InputTokens != 0 || got.OutputTokens != 0 || got.TotalCostUSD != 0 {
+		t.Errorf("usage/cost = %+v, want zeros for a call that produced no response", got)
+	}
+	if got.TraceID != "" {
+		t.Errorf("TraceID = %q, want empty — no response, no idempotency key", got.TraceID)
+	}
+	if got.Model != "claude-haiku-4-5-20251001" || got.Job != JobClassifier {
+		t.Errorf("context fields wrong: %+v", got)
+	}
+}
+
+// TestRecordDirectCall_PricesOnPinnedModel is the regression guard for a
+// Bedrock call recording the wrong cost: the resolved request model is an
+// inference-profile id/ARN (the regional default, or an org's
+// bedrock_model_id override) whose datasheet row is not what the org is
+// billed on, so cost math keys off opts.DirectModel — while the row still
+// records the resolved model for observability.
+func TestRecordDirectCall_PricesOnPinnedModel(t *testing.T) {
+	usage := inference.Usage{InputTokens: 1000, OutputTokens: 500, CacheReadTokens: 100, CacheCreationTokens: 50}
+	wantCost, ok := inference.CostForUsage("claude-haiku-4-5-20251001", usage)
+	if !ok {
+		t.Fatal("the pinned system-job model must be priceable from the vendored datasheet")
+	}
+
+	for _, resolved := range []string{defaultBedrockHaikuModel, "custom.inference.profile"} {
+		t.Run(resolved, func(t *testing.T) {
+			fs := &fakeStore{}
+			r := NewRecorder(fs)
+			opts := completeOpts("org-1", nil)
+			r.recordDirectCall(context.Background(), opts, resolved, time.Now().UTC(), 42,
+				&inference.Completion{ID: "msg_x", Usage: usage}, nil)
+
+			if len(fs.rows) != 1 {
+				t.Fatalf("recorded %d rows, want 1", len(fs.rows))
 			}
-			return sentinelCost
-		}
-		if _, err := r.Complete(context.Background(), opts); err != nil {
-			t.Fatalf("Complete: %v", err)
-		}
-		if !strings.Contains(h.LastPath(), wantModelSubstr) {
-			t.Errorf("path = %q, want it to reference %q", h.LastPath(), wantModelSubstr)
-		}
-		if len(fs.rows) != 1 {
-			t.Fatalf("recorded %d rows, want 1", len(fs.rows))
-		}
-		return fs.rows[0]
+			got := fs.rows[0]
+			if got.TotalCostUSD != wantCost {
+				t.Errorf("TotalCostUSD = %v, want %v (cost must key on DirectModel, not the resolved model %q)", got.TotalCostUSD, wantCost, resolved)
+			}
+			if got.Model != resolved {
+				t.Errorf("Model = %q, want the resolved model recorded for observability", got.Model)
+			}
+		})
+	}
+}
+
+// TestDirectUsageFrom pins the projection between the two token conventions:
+// the neutral layer's prompt count includes the cache buckets, the row's
+// columns are disjoint. Getting this backwards double-counts every cached
+// token in the accounting table without failing anything else.
+func TestDirectUsageFrom(t *testing.T) {
+	got := directUsageFrom(inference.Usage{
+		InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 300, CacheCreationTokens: 100,
+	})
+	want := DirectUsage{InputTokens: 600, OutputTokens: 200, CacheReadTokens: 300, CacheCreationTokens: 100}
+	if got != want {
+		t.Errorf("directUsageFrom = %+v, want %+v", got, want)
 	}
 
-	t.Run("default model", func(t *testing.T) {
-		got := run(t, stubSecrets{
-			"org-1/aws_bearer_token_bedrock": "tok",
-			"org-1/aws_region":               "us-east-1",
-		}, defaultBedrockHaikuModel)
-		if got.TotalCostUSD != sentinelCost {
-			t.Errorf("TotalCostUSD = %v, want %v (CostFn must be keyed on DirectModel, not the resolved Bedrock model %q)", got.TotalCostUSD, sentinelCost, defaultBedrockHaikuModel)
-		}
-		if got.Model != defaultBedrockHaikuModel {
-			t.Errorf("Model = %q, want the resolved Bedrock model %q recorded for observability", got.Model, defaultBedrockHaikuModel)
-		}
-	})
+	// A provider that already reports prompt tokens exclusively (or a
+	// malformed payload) must not produce a negative count.
+	if got := directUsageFrom(inference.Usage{InputTokens: 10, CacheReadTokens: 400}); got.InputTokens != 0 {
+		t.Errorf("InputTokens = %d, want 0 rather than a negative count", got.InputTokens)
+	}
+}
 
-	t.Run("bedrock_model_id override", func(t *testing.T) {
-		got := run(t, stubSecrets{
-			"org-1/aws_bearer_token_bedrock": "tok",
-			"org-1/aws_region":               "us-east-1",
-			"org-1/bedrock_model_id":         "custom.inference.profile",
-		}, "custom.inference.profile")
-		if got.TotalCostUSD != sentinelCost {
-			t.Errorf("TotalCostUSD = %v, want %v (CostFn must be keyed on DirectModel, not the org's bedrock_model_id override)", got.TotalCostUSD, sentinelCost)
-		}
-		if got.Model != "custom.inference.profile" {
-			t.Errorf("Model = %q, want the overridden Bedrock model recorded for observability", got.Model)
-		}
-	})
+// TestDirectRequestModel pins the model each provider branch requests: an
+// Anthropic org sends the caller's pinned id verbatim, a Bedrock org sends
+// its bedrock_model_id override when set and the pinned Haiku inference
+// profile otherwise.
+func TestDirectRequestModel(t *testing.T) {
+	const pinned = "claude-haiku-4-5-20251001"
+	cases := []struct {
+		name  string
+		creds map[string]string
+		want  string
+	}{
+		{"anthropic uses the pinned model", map[string]string{"ANTHROPIC_API_KEY": "k"}, pinned},
+		{"bedrock bearer falls back to the default profile", map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "t", "AWS_REGION": "us-east-1"}, defaultBedrockHaikuModel},
+		{"bedrock sigv4 falls back to the default profile", map[string]string{"AWS_ACCESS_KEY_ID": "a", "AWS_SECRET_ACCESS_KEY": "s", "AWS_REGION": "us-east-1"}, defaultBedrockHaikuModel},
+		{"bedrock_model_id wins", map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "t", "AWS_REGION": "us-east-1", "ANTHROPIC_MODEL": "custom.inference.profile"}, "custom.inference.profile"},
+		{"an anthropic key wins over bedrock, model included", map[string]string{"ANTHROPIC_API_KEY": "k", "AWS_BEARER_TOKEN_BEDROCK": "t", "ANTHROPIC_MODEL": "custom.inference.profile"}, pinned},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := directRequestModel(tc.creds, pinned); got != tc.want {
+				t.Errorf("directRequestModel = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewDirectClient_ProviderMatchesCredentials pins that the provider the
+// request names is the one the credential mapping picked — a mismatch is a
+// no-key-for-model failure at request time, and the two are decided in
+// different places.
+func TestNewDirectClient_ProviderMatchesCredentials(t *testing.T) {
+	cases := []struct {
+		name  string
+		creds map[string]string
+		want  string
+	}{
+		{"anthropic", map[string]string{"ANTHROPIC_API_KEY": "k"}, string(inference.ProviderAnthropic)},
+		{"bedrock bearer", map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "t", "AWS_REGION": "us-east-1"}, string(inference.ProviderBedrock)},
+		{"bedrock sigv4", map[string]string{"AWS_ACCESS_KEY_ID": "a", "AWS_SECRET_ACCESS_KEY": "s", "AWS_REGION": "us-east-1"}, string(inference.ProviderBedrock)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			model := directRequestModel(tc.creds, "claude-haiku-4-5-20251001")
+			client, provider, release, err := newDirectClient(tc.creds, model)
+			if err != nil {
+				t.Fatalf("newDirectClient: %v", err)
+			}
+			defer release()
+			if client == nil {
+				t.Fatal("newDirectClient returned a nil client")
+			}
+			if string(provider) != tc.want {
+				t.Errorf("provider = %q, want %q", provider, tc.want)
+			}
+			if wantFamily := providerFamily(tc.creds); (wantFamily == providerFamilyBedrock) != (string(provider) == string(inference.ProviderBedrock)) {
+				t.Errorf("provider %q disagrees with the breaker's family %q", provider, wantFamily)
+			}
+		})
+	}
 }
 
 // TestComplete_Direct_NoCredentialsConfigured pins error propagation for an
@@ -363,15 +500,31 @@ func TestComplete_Direct_NoCredentialsConfigured(t *testing.T) {
 	}
 }
 
+// TestComplete_Direct_ResolverReturnedNothing pins the other empty-map route
+// in: a resolver that answers with no provider material must fail before any
+// request, as the credentials class it is rather than as an opaque provider
+// rejection.
+func TestComplete_Direct_ResolverReturnedNothing(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	opts := completeOpts("org-1", stubSecrets{})
+	opts.LLMResolver = func(context.Context, string) (map[string]string, error) {
+		return map[string]string{}, nil
+	}
+	_, err := NewRecorder(nil).Complete(context.Background(), opts)
+	if !errors.Is(err, inference.ErrNoCredentials) {
+		t.Fatalf("err = %v, want ErrNoCredentials", err)
+	}
+}
+
 // TestComplete_Direct_MissingSystemOrUserMessage pins the fast-fail guard
 // for a caller that forgot to populate the multi-mode prompt split: no
 // network call happens (the stub server fails the test if hit), and the
 // error names the actual problem instead of surfacing whatever opaque
-// rejection the SDK would give an empty system/user turn.
+// rejection the provider would give an empty system/user turn.
 func TestComplete_Direct_MissingSystemOrUserMessage(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("no request should be sent when SystemPrompt/UserMessage is missing")
+		t.Error("no request should be sent when SystemPrompt/UserMessage is missing")
 	}))
 	defer srv.Close()
 
@@ -397,14 +550,13 @@ func TestComplete_Direct_MissingSystemOrUserMessage(t *testing.T) {
 	})
 }
 
-// TestComplete_Direct_MissingDirectModel pins the fast-fail guard for the
-// Anthropic direct-API branch: a caller that forgot to set DirectModel must
-// not send a request with an empty model — the stub server fails the test
-// if hit.
+// TestComplete_Direct_MissingDirectModel pins the fast-fail guard for a
+// caller that forgot to set DirectModel: no request may go out with an empty
+// model — the stub server fails the test if hit.
 func TestComplete_Direct_MissingDirectModel(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("no request should be sent when DirectModel is missing")
+		t.Error("no request should be sent when DirectModel is missing")
 	}))
 	defer srv.Close()
 
@@ -420,12 +572,11 @@ func TestComplete_Direct_MissingDirectModel(t *testing.T) {
 }
 
 // TestComplete_Direct_TerminalErrorNotRetried pins 4xx handling: a
-// bad-request response is terminal (per the SDK's own retry policy) and
-// must surface as an error after exactly one request — no retry storm on a
-// caller/prompt bug.
+// bad-request response is terminal and must surface as an error after
+// exactly one request — no retry storm on a caller/prompt bug.
 func TestComplete_Direct_TerminalErrorNotRetried(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	h := &capturingHandler{t: t, status: http.StatusBadRequest, body: `{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}`}
+	h := &capturingHandler{t: t, status: http.StatusBadRequest, errBody: `{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}`}
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -477,21 +628,14 @@ func TestComplete_Direct_ContextCancelAbortsPromptly(t *testing.T) {
 	}
 }
 
-// sprintfBody builds a minimal-but-complete Anthropic Messages API response
-// — one text content block plus a usage block exercising every token
-// category RecordDirect reads — around the given (already-JSON-safe) text.
-func sprintfBody(text string) string {
-	return `{"id":"msg_test123","type":"message","role":"assistant","model":"claude-haiku-4-5-20251001","content":[{"type":"text","text":"` + text + `"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":2,"cache_read_input_tokens":3}}`
-}
-
 // TestComplete_Direct_LLMResolverUsed pins the TFAC-616 seam in the direct
 // path: when CompleteOptions.LLMResolver is wired, completeDirect resolves
 // the env map through it (minting for a role-mode Bedrock org) instead of the
 // raw secret store. Here the raw secrets are EMPTY — only the resolver
-// supplies credentials, so a fall-through to the raw path would 500.
+// supplies credentials, so a fall-through to the raw path would fail.
 func TestComplete_Direct_LLMResolverUsed(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	h := &capturingHandler{t: t, body: sprintfBody(`resolver ok`)}
+	h := &capturingHandler{t: t, text: "resolver ok"}
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -516,6 +660,30 @@ func TestComplete_Direct_LLMResolverUsed(t *testing.T) {
 		t.Errorf("Text = %q", result.Text)
 	}
 	if got := h.LastHeader().Get("X-Api-Key"); got != "sk-ant-minted" {
-		t.Errorf("X-Api-Key = %q, want the resolver-supplied key", got)
+		t.Errorf("x-api-key = %q, want the resolver-supplied key", got)
+	}
+}
+
+// TestCompletionText pins the text extraction: a plain string passes through,
+// and a block-shaped message concatenates its text blocks in order while
+// ignoring anything that isn't text.
+func TestCompletionText(t *testing.T) {
+	if got := completionText(nil); got != "" {
+		t.Errorf("nil completion = %q, want empty", got)
+	}
+	if got := completionText(&inference.Completion{}); got != "" {
+		t.Errorf("contentless completion = %q, want empty", got)
+	}
+
+	rows, err := inference.RowsToMessages([]domain.Message{
+		{Role: "assistant", Content: "part one", ContentBlocks: []domain.ContentBlock{
+			{Type: domain.ContentBlockImage, ImageURL: &domain.ContentImageURL{URL: "data:image/png;base64,eA=="}},
+		}},
+	}, inference.AssemblyOptions{NoCacheBreakpoint: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := completionText(&inference.Completion{Message: rows[0]}); got != "part one" {
+		t.Errorf("block-shaped completion = %q, want the text blocks only", got)
 	}
 }

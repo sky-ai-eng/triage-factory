@@ -736,5 +736,7 @@ func msSince(t time.Time) int {
 
 // ErrNoCredentials is returned by a Credentials implementation that has
 // nothing to resolve — surfaced rather than papered over, since a native
-// call cannot fall back to anything.
-var ErrNoCredentials = errors.New("agentloop: no LLM credentials available for this conversation")
+// call cannot fall back to anything. It is the inference sentinel itself, so
+// "this conversation has no credentials" and "this env map names no provider"
+// are one class to every caller matching either name.
+var ErrNoCredentials = inference.ErrNoCredentials
