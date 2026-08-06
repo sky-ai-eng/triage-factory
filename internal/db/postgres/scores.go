@@ -46,6 +46,24 @@ func (s *scoreStore) ResetScoringToPending(ctx context.Context, orgID string, ta
 	return err
 }
 
+func (s *scoreStore) ResetStaleScoring(ctx context.Context, orgID string) (int, error) {
+	// org_id in the WHERE is what keeps one tenant's crash recovery off
+	// another tenant's in-flight cycle: the runners are per-org and run
+	// concurrently, so an unscoped reset would strip the 'in_progress'
+	// claim out from under a live cycle on a different org.
+	res, err := s.q.ExecContext(ctx,
+		`UPDATE tasks SET scoring_status = 'pending' WHERE org_id = $1 AND scoring_status = 'in_progress'`,
+		orgID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
+
 func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates []domain.TaskScoreUpdate) error {
 	if len(updates) == 0 {
 		return nil

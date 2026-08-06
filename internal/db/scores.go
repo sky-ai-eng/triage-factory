@@ -32,6 +32,27 @@ type ScoreStore interface {
 	// 'pending') and they'd never be rescored.
 	ResetScoringToPending(ctx context.Context, orgID string, taskIDs []string) error
 
+	// ResetStaleScoring flips every 'in_progress' row in the org back
+	// to 'pending' and reports how many it moved. The runner calls it
+	// at the top of a cycle, strictly before that cycle's own
+	// MarkScoring, so it can never reset a row the cycle just claimed.
+	//
+	// It recovers what a killed process leaves behind. Every in-process
+	// failure path resets the rows it marked; a crash between
+	// MarkScoring and UpdateTaskScores resets nothing, and UnscoredTasks
+	// only picks 'pending', so those rows would never be scored again —
+	// which in turn leaves autonomy_suitability NULL and silently
+	// disables every min_autonomy_suitability-deferred trigger on them.
+	//
+	// Telling residue from live work needs no timestamp. The scorer is
+	// single-flight per org and runs only on the background-brain lease
+	// holder, so at the moment a cycle starts no other cycle for that
+	// org can be running and any 'in_progress' row is by definition left
+	// over from one that died. A lease handoff can at worst cost a
+	// redundant re-score, and UpdateTaskScores is an idempotent
+	// overwrite.
+	ResetStaleScoring(ctx context.Context, orgID string) (int, error)
+
 	// UpdateTaskScores applies AI-generated scores and summaries to
 	// tasks and sets scoring_status = 'scored'. Atomic across the
 	// whole batch (single tx); a partial-application failure rolls
