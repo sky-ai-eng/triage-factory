@@ -785,13 +785,31 @@ func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, m
 // mode is a single process that claims its own work, with no fleet reaper to
 // hand anything over and no second executor to hand it to — the losing side
 // of that race has no way to exist. These wrappers therefore do exactly what
-// their unfenced counterparts do, with the claim id used as the attribution
-// it is on both dialects.
+// their unfenced counterparts do.
+//
+// The claim id carries whichever of its two jobs the write actually has.
+// Where it is attribution — the claim stamped onto a transcript row — it is
+// written here exactly as Postgres writes it. Where it is only the assertion
+// of ownership the fence would have tested — the session id, the worktree
+// path, the terminal, the park — it is unused, because there is no rival
+// owner for it to be measured against.
 //
 // This is not a dialect fork of shared semantics: the write set, the
 // attribution, and the resulting rows are identical. What differs is a
 // refusal that has nothing to refuse. Postgres carries the enforcement and
 // the conformance suite asserts it there.
+
+func (s *agentRunStore) SetSessionForClaimSystem(ctx context.Context, orgID, runID, claimID, sessionID string) error {
+	return s.SetSession(ctx, orgID, runID, sessionID)
+}
+
+func (s *agentRunStore) SetExecutorForClaimSystem(ctx context.Context, orgID, runID, claimID, executorID string, bootEpoch int64) error {
+	return s.SetExecutorSystem(ctx, orgID, runID, executorID, bootEpoch)
+}
+
+func (s *agentRunStore) SetWorktreePathForClaimSystem(ctx context.Context, orgID, runID, claimID, path string) error {
+	return s.SetWorktreePath(ctx, orgID, runID, path)
+}
 
 func (s *agentRunStore) InsertMessageForClaimSystem(ctx context.Context, orgID, claimID string, msg *domain.Message) (int64, error) {
 	msg.ClaimID = claimID

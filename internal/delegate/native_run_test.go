@@ -215,13 +215,13 @@ func TestExecutorChangedSince(t *testing.T) {
 		s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 		if predecessor != "" {
 			s.SetExecutorID(predecessor, 1)
-			s.stampExecutor(org, runID)
+			s.stampExecutor(org, runID, "")
 			if err := s.agentRuns.SetExecutorSystem(ctx, org, runID, "", 0); err != nil {
 				t.Fatalf("release the predecessor's claim: %v", err)
 			}
 		}
 		s.SetExecutorID(self, 2)
-		s.stampExecutor(org, runID)
+		s.stampExecutor(org, runID, "")
 		var claimID string
 		if err := database.QueryRow(
 			`SELECT id FROM claims WHERE conversation_id = ? AND released_at IS NULL`, runID,

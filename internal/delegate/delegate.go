@@ -565,7 +565,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
 	}
 
-	if err := s.agentRuns.SetWorktreePathSystem(context.WithoutCancel(ctx), orgID, runID, wtPath); err != nil {
+	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, runID, claimID, wtPath); err != nil {
 		delegateLog.Warn("update worktree path for run failed", "run", runID, "error", err)
 	}
 
@@ -666,7 +666,7 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 // runs don't have a single "the worktree" the way GitHub PR runs do,
 // the run-root IS the agent's session cwd, which is the load-bearing
 // invariant for resume.
-func (s *Spawner) setupJira(ctx context.Context, orgID, runID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+func (s *Spawner) setupJira(ctx context.Context, orgID, runID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
 	// The run-root is a blueprint-run resource — shared across every step and
 	// rebuilt under the same key on a cold rehydrate — so it is keyed by rootKey
 	// (the blueprint run id), not this step's run id. runID still stamps the
@@ -675,7 +675,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID, rootKey string, t
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
-	if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, runID, runRoot); err != nil {
+	if err := s.setWorktreePath(context.Background(), orgID, runID, claimID, runRoot); err != nil {
 		delegateLog.Warn("set worktree_path for Jira run failed; resume will reject this run", "run", runID, "error", err)
 	}
 
@@ -710,7 +710,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID, rootKey string, t
 //     demand and then needs the gh verbs, the same reasoning as the Jira
 //     arm's GH+Jira composition. No registered reference is not an error:
 //     the run still works with base tools.
-func (s *Spawner) setupSlack(ctx context.Context, orgID, runID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+func (s *Spawner) setupSlack(ctx context.Context, orgID, runID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
 	// Keyed by rootKey (the blueprint run id), not this step's run id — the
 	// run-root is blueprint-scoped and cold-rehydrates under the same key. See
 	// setupJira.
@@ -718,7 +718,7 @@ func (s *Spawner) setupSlack(ctx context.Context, orgID, runID, rootKey string, 
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
-	if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, runID, runRoot); err != nil {
+	if err := s.setWorktreePath(context.Background(), orgID, runID, claimID, runRoot); err != nil {
 		delegateLog.Warn("set worktree_path for Slack run failed; resume will reject this run", "run", runID, "error", err)
 	}
 

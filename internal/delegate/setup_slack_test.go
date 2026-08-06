@@ -59,7 +59,7 @@ func TestSetupSlack_WorktreeLessAndNoClassificationWait(t *testing.T) {
 		classificationCalled.Store(true)
 	})
 
-	cfg, err := s.setupSlack(ctx, org, runID, rootKey, task, nil)
+	cfg, err := s.setupSlack(ctx, org, runID, "", rootKey, task, nil)
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestSetupSlack_PersistsWorktreePath(t *testing.T) {
 		Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
 	})
 
-	cfg, err := s.setupSlack(ctx, org, runID, rootKey, task, nil)
+	cfg, err := s.setupSlack(ctx, org, runID, "", rootKey, task, nil)
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestSetupSlack_ToolsRef_NoRegisteredReference(t *testing.T) {
 	rootKey := "slack-bp-notools" // run-root is blueprint-keyed, distinct from runID
 	t.Cleanup(func() { worktree.RemoveRunRoot(rootKey) })
 
-	cfg, err := s.setupSlack(ctx, org, runID, rootKey, task, nil)
+	cfg, err := s.setupSlack(ctx, org, runID, "", rootKey, task, nil)
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestSetupSlack_ToolsRef_ComposesRegisteredReference(t *testing.T) {
 	rootKey := "slack-bp-withtools" // run-root is blueprint-keyed, distinct from runID
 	t.Cleanup(func() { worktree.RemoveRunRoot(rootKey) })
 
-	cfg, err := s.setupSlack(ctx, org, runID, rootKey, task, nil)
+	cfg, err := s.setupSlack(ctx, org, runID, "", rootKey, task, nil)
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
