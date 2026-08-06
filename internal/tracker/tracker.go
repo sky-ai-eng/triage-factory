@@ -777,6 +777,12 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 		}
 	}
 
+	if discoveryErr != nil {
+		// The only error this returns is ErrRateLimited, which is a
+		// handled outcome with a resume cursor behind it — an attribute,
+		// not an error status, same as the per-repo children above.
+		span.SetAttributes(telemetry.Outcome("rate_limited"))
+	}
 	return all, quiet, resumeFrom, discoveryErr
 }
 
@@ -1240,12 +1246,15 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	// DefaultSearchFields.
 	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created", "updated"}
 
+	failed := 0
 	for _, q := range queries {
-		// Background context: the tracker is a background poller with no
-		// request-scoped deadline, matching its entity-store calls below.
 		issues, err := client.SearchIssues(ctx, q.jql, fields, 100)
 		if err != nil {
-			trackerLog.Error("jira discovery query failed", "error", err)
+			// One project's query failing must not sink the others, so
+			// this continues — which means the caller gets a short result
+			// with no indication why. The outcome below is that indication.
+			failed++
+			trackerLog.ErrorContext(ctx, "jira discovery query failed", "error", err)
 			continue
 		}
 		for _, issue := range issues {
@@ -1254,6 +1263,9 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 				all = append(all, issueToState(issue, baseURL, q.doneMembers))
 			}
 		}
+	}
+	if failed > 0 {
+		span.SetAttributes(telemetry.Outcome("partial"), telemetry.Attempt(failed))
 	}
 
 	return all, nil
@@ -1293,6 +1305,7 @@ func (t *Tracker) batchFetchJira(ctx context.Context, client *jiraclient.Client,
 		jql := fmt.Sprintf("key IN (%s)", strings.Join(batch, ", "))
 		issues, err := client.SearchIssues(ctx, jql, fields, jiraBatchSize)
 		if err != nil {
+			span.SetStatus(codes.Error, "batch fetch")
 			return nil, fmt.Errorf("batch fetch keys %d-%d: %w", i, end, err)
 		}
 

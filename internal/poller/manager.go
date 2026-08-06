@@ -423,6 +423,9 @@ func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 		// scoring/classify cycle on a pod that no longer holds the brain.
 		select {
 		case <-stop:
+			// Torn down mid-sweep. Without this the span is just a cycle
+			// with a low org count, indistinguishable from a quiet one.
+			span.SetAttributes(telemetry.Outcome("stopped"))
 			return
 		default:
 		}
@@ -458,6 +461,9 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		return
 	}
 	if len(repos) == 0 {
+		// Anticipated: an org that tracks nothing. Same posture as the
+		// Jira twin's unconfigured skip — an outcome, never an error.
+		span.SetAttributes(telemetry.Outcome("no_repos"))
 		m.setGitHubCursor(orgID, "") // tracked set emptied — drop any stale cursor
 		return
 	}
@@ -514,7 +520,8 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// surface it and skip the cycle rather than polling as some other identity.
 	if len(installs) == 0 {
 		degraded := errors.New("github app is active but installed on no accounts")
-		githubLog.Error("skipping cycle", "org", orgID, "error", degraded)
+		span.SetStatus(codes.Error, "app installed on no accounts")
+		githubLog.ErrorContext(ctx, "skipping cycle", "org", orgID, "error", degraded)
 		m.reportError("github", orgID, degraded)
 		return
 	}
@@ -617,7 +624,8 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// health and skip rather than masking it.
 	if !anyFunctional {
 		degraded := errors.New("github app is active but no installation produced a usable token")
-		githubLog.Error("skipping cycle", "org", orgID, "error", degraded)
+		span.SetStatus(codes.Error, "no usable installation token")
+		githubLog.ErrorContext(ctx, "skipping cycle", "org", orgID, "error", degraded)
 		m.reportError("github", orgID, degraded)
 		return
 	}
@@ -699,12 +707,20 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID string, repos
 // has no local sentinel user, so it passes no username (org-wide REST
 // discovery doesn't need one; dashboard history is local/PAT-only).
 func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []string, isLocal bool) {
+	// The PAT path is the whole body of one branch of runGitHubCycleForOrg,
+	// so it records onto that caller's poll.github.org span rather than
+	// opening a child that would only ever duplicate it. A no-op span when
+	// there is no caller (tests), which needs no guard.
+	span := trace.SpanFromContext(ctx)
+
 	client, err := m.resolver.ClientFor(ctx, orgID, "")
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+			span.SetAttributes(telemetry.Outcome("unconfigured"))
 			return // not configured for GitHub — silent skip
 		}
-		githubLog.Error("resolve pat client failed", "org", orgID, "error", err)
+		span.SetStatus(codes.Error, "resolve pat client")
+		githubLog.ErrorContext(ctx, "resolve pat client failed", "org", orgID, "error", err)
 		m.reportError("github", orgID, err)
 		return
 	}
@@ -718,12 +734,14 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 		// `...System` admin-pool variants.
 		orgSet, serr := m.orgs.GetSettingsSystem(ctx, orgID)
 		if serr != nil {
-			githubLog.Error("read org settings failed", "org", orgID, "error", serr)
+			span.SetStatus(codes.Error, "read org settings")
+			githubLog.ErrorContext(ctx, "read org settings failed", "org", orgID, "error", serr)
 			return
 		}
 		username, err = m.users.GetGitHubLoginSystem(ctx, runmode.LocalDefaultUserID, orgSet.GitHubBaseURL)
 		if err != nil {
-			githubLog.Error("read github identity failed", "org", orgID, "error", err)
+			span.SetStatus(codes.Error, "read github identity")
+			githubLog.ErrorContext(ctx, "read github identity failed", "org", orgID, "error", err)
 			return
 		}
 		if teams, terr := client.ListMyTeams(ctx); terr != nil {
@@ -736,7 +754,8 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	resolver := m.reviewerResolver(ctx, orgID, username, userTeams)
 	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, username, repos, resolver)
 	if rerr != nil {
-		githubLog.Error("tracker error", "org", orgID, "error", rerr)
+		span.SetStatus(codes.Error, "refresh")
+		githubLog.ErrorContext(ctx, "tracker error", "org", orgID, "error", rerr)
 		m.reportError("github", orgID, rerr)
 	} else {
 		m.stampGitHubSuccess(orgID)
@@ -934,6 +953,8 @@ func (m *Manager) runJiraCycle(stop <-chan struct{}) {
 		// lease demotion or RestartJira closes stop) — see runGitHubCycle.
 		select {
 		case <-stop:
+			// See runGitHubCycle.
+			span.SetAttributes(telemetry.Outcome("stopped"))
 			return
 		default:
 		}

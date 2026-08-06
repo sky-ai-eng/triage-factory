@@ -190,7 +190,8 @@ func (r *Runner) run(ctx context.Context) {
 
 	scores, skippedTasks, err := r.scoreTasks(ctx, tasks)
 	if err != nil {
-		aiLog.Error("scoring failed", "error", err)
+		span.SetStatus(codes.Error, "score tasks")
+		aiLog.ErrorContext(ctx, "scoring failed", "error", err)
 		r.reportError(err)
 		// Fatal scoring error — every task was MarkScoring'd but none of
 		// them will be transitioned to 'scored'. Reset the whole set back
