@@ -262,7 +262,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "Server spans are named after the route pattern, never the concrete path, so no repo name or other tenant data reaches this list. Click a row to open that trace's waterfall. The DB spans underneath usually explain the time. Empty is the healthy state.",
+      "description": "Every verb, not just reads — the mutating routes are where the slow work usually is (writes, delegation dispatch). Server spans are named \"<METHOD> <route pattern>\", never the concrete path, so no repo name or other tenant data reaches this list. Click a row to open that trace's waterfall. The DB spans underneath usually explain the time. Empty is the healthy state.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -304,7 +304,7 @@
           },
           "filters": [],
           "limit": 20,
-          "query": "{ name =~ \"GET /api/.*\" && duration > 500ms }",
+          "query": "{ name =~ \"(GET|POST|PUT|PATCH|DELETE) /api/.*\" && duration > 500ms }",
           "queryType": "traceql",
           "refId": "A",
           "tableType": "traces"

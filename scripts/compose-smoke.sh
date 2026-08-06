@@ -395,5 +395,38 @@ for attr in conversation.id event.id task.id; do
 done
 pass "grafana provisioned both data sources + the conversation/event/task correlations"
 
+# 7d. The dashboards half of the same provisioning, and the same failure mode:
+#     a malformed dashboard JSON is logged and skipped, leaving a Grafana that
+#     starts fine and shows an empty home page. Three distinct regressions,
+#     each invisible without its own assertion:
+#
+#       - the dashboard file didn't load at all (bad JSON, wrong mount path)
+#       - it loaded, but GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH names a
+#         different path than the mount, so :3030 opens on Grafana's stock home
+#         page and every panel here goes unseen
+#       - it loaded and is the home page, but its panels reference a data
+#         source UID nothing provisions, so every panel errors
+home=""
+for _ in $(seq 1 30); do
+  dash=$(dc exec -T grafana curl -sS http://localhost:3000/api/dashboards/uid/tf-overview 2>/dev/null || true)
+  case "$dash" in
+    *'"uid":"tf-overview"'*) home=$(dc exec -T grafana curl -sS http://localhost:3000/api/dashboards/home 2>/dev/null || true) ;;
+  esac
+  [ -n "$home" ] && break
+  sleep 2
+done
+[ -n "$home" ] || fail "grafana did not provision the tf-overview dashboard (bad JSON or a mount-path mismatch — check its logs)"
+case "$home" in
+  *'"uid":"tf-overview"'*) ;;
+  *) fail "grafana's home dashboard is not tf-overview — GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH does not resolve to the mounted file, so :3030 opens on the stock home page" ;;
+esac
+for uid in tf-tempo tf-prometheus; do
+  case "$dash" in
+    *"$uid"*) ;;
+    *) fail "the tf-overview dashboard references no $uid data source — a UID typo would leave its panels erroring" ;;
+  esac
+done
+pass "grafana provisioned tf-overview, serves it as the home dashboard, and its panels address both data sources"
+
 echo ""
 echo "compose-smoke: ALL CHECKS PASSED ✓"
