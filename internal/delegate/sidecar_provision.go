@@ -18,7 +18,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // executorSandbox is the run network + credential sidecar + proxy coordinates
@@ -242,12 +244,27 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 	// races the previous cell's teardown come up instead of failing.
 	sandbox.ClearRunCellFiles(run.ID)
 
-	net, err := sandbox.SetupRunNetwork(ctx, run.ID)
+	// The four-process choreography, from the executor's viewpoint. Every leg
+	// below is a round trip into a process that exports nothing itself — the
+	// cap-broker for the network, the sidecar for the credentials — so this
+	// side's client spans are the only place the timings exist.
+	ctx, bringUpSpan := tracer.Start(ctx, "engagement.sandbox.bringup")
+	defer bringUpSpan.End()
+
+	netCtx, netSpan := tracer.Start(ctx, "sandbox.network.setup")
+	net, err := sandbox.SetupRunNetwork(netCtx, run.ID)
+	recordSpanError(netSpan, err)
+	netSpan.End()
 	if err != nil {
+		recordSpanError(bringUpSpan, err)
 		return nil, fmt.Errorf("set up run network: %w", err)
 	}
-	sc, err := sandbox.LaunchSidecar(ctx, sandbox.SidecarConfig{RunID: run.ID, SubnetIdx: net.Idx})
+	scCtx, scSpan := tracer.Start(ctx, "sandbox.sidecar.launch")
+	sc, err := sandbox.LaunchSidecar(scCtx, sandbox.SidecarConfig{RunID: run.ID, SubnetIdx: net.Idx})
+	recordSpanError(scSpan, err)
+	scSpan.End()
 	if err != nil {
+		recordSpanError(bringUpSpan, err)
 		_ = net.Close()
 		return nil, fmt.Errorf("launch credential sidecar: %w", err)
 	}
@@ -316,10 +333,16 @@ func (s *Spawner) bringUpExecutorSandbox(ctx context.Context, orgID string, run 
 
 	res, conn, err := agentproc.BringUpRunSidecar(ctx, sc, s.sidecarProvisionFor(orgID, run.ID), params)
 	if err != nil {
+		recordSpanError(bringUpSpan, err)
 		_ = sc.Close()
 		_ = net.Close()
 		return nil, fmt.Errorf("bring up credential sidecar: %w", err)
 	}
+	// The engagement root, captured once, so every op this run's relay server
+	// later dispatches can link back to the setup that created it. Captured
+	// rather than propagated: the sidecar frames carry no trace context by
+	// design, and this server already knows which run it belongs to.
+	relaySrv.SetEngagementSpanContext(s.engagementSpanContext(run.ID))
 	// Hand the relay server the run's now-known proxy coords so a relayed
 	// `workspace add` clones + fetches PRs through them — the orchestrator holds
 	// no real credential for either. Set before the agent runs, so always ready
@@ -488,16 +511,58 @@ func (s *Spawner) executorGitGate(ctx context.Context, info agenthost.RunInfo, s
 		upstream = base
 	}
 	denialHost := agenthost.NewLocal(stores, info)
+	// Captured while the engagement's root is still live — the gate is built
+	// during bring-up, but every callback below fires mid-run, on a git
+	// operation the agent performed. Same reason the permission handler
+	// captures at construction.
+	engagement := s.engagementSpanContext(info.RunID)
+	recordPush := gitPushRecorder(stores, info)
 	return &agentproc.GitProxyConfig{
 		Upstream: upstream,
 		Authorize: func(ctx context.Context, owner, repo string) (gitproxy.Decision, error) {
-			return gitAuthorizeDecision(ctx, stores, info, owner, repo)
+			// The push gate is synchronous in front of the agent's git — a
+			// slow one stalls a push with no other signal that it did.
+			// owner/repo are deliberately absent from the span: a repo name
+			// is tenant data, and the decision's shape is what matters here.
+			ctx, span := startPunctualLinked(ctx, engagement, info.RunID, "git.authorize", telemetry.OrgID(info.OrgID))
+			defer span.End()
+			dec, err := gitAuthorizeDecision(ctx, stores, info, owner, repo)
+			recordSpanError(span, err)
+			if err == nil {
+				span.SetAttributes(telemetry.Outcome(gitAuthorizeOutcome(dec)))
+			}
+			return dec, err
 		},
 		RecordDenial: func(ctx context.Context, denied gitproxy.DeniedGitOp) {
 			denialHost.RecordGitDenied(ctx, denied.Owner, denied.Repo, denied.Ref, denied.Op, denied.Reason)
 		},
-		RecordPush: gitPushRecorder(stores, info),
+		RecordPush: func(ctx context.Context, pushed gitproxy.PushedRef) {
+			// This is the ONLY path a branch push reaches the audit log on an
+			// executor — the pre-push hook stands down inside the sandbox —
+			// so "was it even called" is a real question when an artifact is
+			// missing. The recorder swallows its own errors by contract, so
+			// the span reports that the relay arrived and how long the write
+			// took, not whether it succeeded; the store spans beneath it carry
+			// that.
+			ctx, span := startPunctualLinked(ctx, engagement, info.RunID, "git.record_push", telemetry.OrgID(info.OrgID))
+			defer span.End()
+			recordPush(ctx, pushed)
+		},
 	}
+}
+
+// gitAuthorizeOutcome names how the push gate answered, as the closed enum
+// the span carries: the decision's own allow/deny plus its deny reason,
+// which is a fixed vocabulary (untracked repo, protected ref, ...) rather
+// than the human-readable message beside it.
+func gitAuthorizeOutcome(dec gitproxy.Decision) string {
+	if dec.Allowed {
+		return "allowed"
+	}
+	if dec.DenyReason != "" {
+		return "denied_" + dec.DenyReason
+	}
+	return "denied"
 }
 
 // sidecarProvisionFor builds the callback BringUpRunSidecar invokes with the
@@ -515,11 +580,23 @@ func (s *Spawner) executorGitGate(ctx context.Context, info agenthost.RunInfo, s
 func (s *Spawner) sidecarProvisionFor(orgID, runID string) agentproc.SidecarProvisionFunc {
 	myID, myBootEpoch := s.executorIdentity()
 	return func(provCtx context.Context, sidecarPubKeyB64 string) ([]byte, int64, error) {
+		// The awaiting-credentials park, measured from the run's side: how long
+		// this engagement sat between ringing the doorbell and holding a bundle
+		// sealed to its own sidecar. That interval is somebody else's work — the
+		// brain's provisioner, on another pod — and this span is deliberately
+		// NOT joined to it: the tf_ctl doorbell is lossy, the sweep is the real
+		// completion path, and a link would promise a 1:1 handoff that does not
+		// exist. Both sides carry conversation.id, which is the join.
+		provCtx, span := tracer.Start(provCtx, "engagement.credentials.await",
+			trace.WithAttributes(telemetry.ConversationID(runID), telemetry.OrgID(orgID)))
+		defer span.End()
+
 		// Publish the sidecar's per-run pubkey onto the claim + fire the
 		// cred_request doorbell. MarkAwaitingCredentials is the same call the
 		// old pre-sandbox gate used, now carrying the recipient key so the
 		// brain seals to it (credprovision reads claim.CredPubKey).
 		if _, err := s.runQueue.MarkAwaitingCredentials(provCtx, orgID, runID, sidecarPubKeyB64); err != nil {
+			recordSpanError(span, err)
 			return nil, 0, fmt.Errorf("mark awaiting-credentials for run %s: %w", runID, err)
 		}
 
@@ -527,7 +604,9 @@ func (s *Spawner) sidecarProvisionFor(orgID, runID string) agentproc.SidecarProv
 		deadline := time.Now().Add(timeout)
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
+		polls := 0
 		for {
+			polls++
 			b, ok, err := s.runCredentials.Get(provCtx, orgID, runID)
 			if err != nil {
 				dispatchLog.Warn("read run credential bundle failed; retrying", "run", runID, "error", err)
@@ -539,14 +618,24 @@ func (s *Spawner) sidecarProvisionFor(orgID, runID string) agentproc.SidecarProv
 				// is sealed to a sidecar key this run never minted, so relaying it
 				// would just fail the unseal. Skip and keep polling until the brain
 				// re-seals for THIS claim.
+				//
+				// The poll count separates "the brain answered the doorbell"
+				// from "the sweep eventually got to it" — the same elapsed time
+				// means different things for the two, and only one of them is a
+				// working doorbell.
+				span.SetAttributes(telemetry.Count(polls), telemetry.Outcome("sealed"))
 				return b.Sealed, b.BootEpoch, nil
 			}
 			select {
 			case <-provCtx.Done():
+				recordSpanError(span, provCtx.Err())
 				return nil, 0, provCtx.Err()
 			case <-ticker.C:
 				if time.Now().After(deadline) {
-					return nil, 0, fmt.Errorf("timed out waiting for run %s credential bundle (brain not provisioning)", runID)
+					err := fmt.Errorf("timed out waiting for run %s credential bundle (brain not provisioning)", runID)
+					span.SetAttributes(telemetry.Count(polls))
+					recordSpanError(span, err)
+					return nil, 0, err
 				}
 			}
 		}

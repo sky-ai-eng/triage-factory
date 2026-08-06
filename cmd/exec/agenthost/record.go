@@ -5,6 +5,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // This file is the shared recording funnel behind every exec choke-point
@@ -95,6 +97,23 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info RunInfo, a 
 		stampActionIdentityInfo(act, info)
 	}
 
+	// The artifact write itself, under the relay op that carried it (a
+	// sandboxed run) or under whatever ambient span exists. A CHILD rather
+	// than a linked root: unlike the ops above it, this never runs on its own
+	// — it is always inside a caller this trace already covers.
+	//
+	// The whole point is the swallow below. Every write here is best-effort
+	// by contract, so a failure surfaces today only as a warn line; the span
+	// makes it a trace with an error status, which is how "the PR was opened
+	// but TF has no artifact for it" stops being invisible. The artifact kind
+	// is a closed domain vocabulary; its target is a repo path, and stays out.
+	ctx, span := tracer.Start(ctx, "artifact.record",
+		trace.WithAttributes(telemetry.ConversationID(info.RunID), telemetry.OrgID(info.OrgID)))
+	defer span.End()
+	if a != nil {
+		span.SetAttributes(telemetry.Op(a.Kind))
+	}
+
 	err := withWriteInfo(ctx, stores, info,
 		func() error {
 			if a != nil {
@@ -121,6 +140,7 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info RunInfo, a 
 		} else if act != nil {
 			target = act.Target
 		}
+		recordSpanError(span, err)
 		agenthostLog.Warn("external write recording failed (action already applied)",
 			"run", info.RunID, "kind", kind, "target", target, "error", err)
 	}

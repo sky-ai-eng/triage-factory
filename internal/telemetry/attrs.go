@@ -38,6 +38,11 @@ const (
 	keyQueueWaitMS    = attribute.Key("queue.wait_ms")
 	keyProvider       = attribute.Key("provider")
 	keyTransport      = attribute.Key("transport")
+	keyOp             = attribute.Key("op")
+	keyWorkspace      = attribute.Key("workspace.provenance")
+	keySizeBytes      = attribute.Key("size_bytes")
+	keyAgentCostUSD   = attribute.Key("agent.cost_usd")
+	keyAgentDuration  = attribute.Key("agent.duration_ms")
 )
 
 // Opaque row identifiers, the backbone of the set. Each is the id and
@@ -69,12 +74,21 @@ func EventType(kind string) attribute.KeyValue { return keyEventType.String(kind
 //     which credential shape resolved; never a hostname or a model id.
 //   - Transport — how a call reached its upstream where a subsystem has
 //     more than one route (the system-LLM path's "subprocess" vs "direct").
+//   - Op — which operation a multiplexed channel carried, where one span
+//     name covers a switch: a capbroker IPC method, a relay
+//     "<namespace>.<op>" pair. Every value is a Go constant in the
+//     dispatching switch, which is what keeps it an enum rather than a
+//     name the caller chose.
+//   - Workspace — how a run's worktree came to exist ("fresh", "warm",
+//     "rehydrated"), i.e. domain.WorkspaceProvenance. Never the path.
 func Source(name string) attribute.KeyValue       { return keySource.String(name) }
 func Disposition(value string) attribute.KeyValue { return keyDisposition.String(value) }
 func Runtime(value string) attribute.KeyValue     { return keyRuntime.String(value) }
 func Job(name string) attribute.KeyValue          { return keyJob.String(name) }
 func Provider(name string) attribute.KeyValue     { return keyProvider.String(name) }
 func Transport(name string) attribute.KeyValue    { return keyTransport.String(name) }
+func Op(name string) attribute.KeyValue           { return keyOp.String(name) }
+func Workspace(value string) attribute.KeyValue   { return keyWorkspace.String(value) }
 
 // Outcome names how a span finished. It exists to separate "failed" from
 // "correctly declined to do anything" — provider backoff, a quiet-skip, a
@@ -99,3 +113,18 @@ func Count(n int) attribute.KeyValue        { return keyCount.Int(n) }
 func QueueWait(d time.Duration) attribute.KeyValue {
 	return keyQueueWaitMS.Int64(d.Milliseconds())
 }
+
+// SizeBytes is how much a span moved — a workspace snapshot's compressed
+// footprint, say. A magnitude, never a filename or a key.
+func SizeBytes(n int64) attribute.KeyValue { return keySizeBytes.Int64(n) }
+
+// AgentCostUSD and AgentDuration are the agent runtime's OWN accounting of
+// a finished engagement, carried onto the terminal span because neither is
+// derivable from it: the span is punctual (it records a conclusion that
+// happened during an unbounded streaming period the trace deliberately does
+// not hold open), so its wall time is the bookkeeping, not the work. Both
+// are already computed and persisted on the conversation row; putting them
+// on the span is what lets "which runs were expensive" be asked of the same
+// place as "which runs were slow to start".
+func AgentCostUSD(usd float64) attribute.KeyValue { return keyAgentCostUSD.Float64(usd) }
+func AgentDuration(ms int64) attribute.KeyValue   { return keyAgentDuration.Int64(ms) }

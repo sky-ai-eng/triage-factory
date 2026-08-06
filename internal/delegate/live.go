@@ -243,10 +243,10 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 					// Bounded resume: no idle timer will ever close the warm
 					// process — close it and park to a durable resume.
 					_ = proc.Close()
-					_ = s.parkRunOpen(park, proc.SessionID())
+					_ = s.parkRunOpen(ctx, park, proc.SessionID())
 					return liveOutcome{hibernated: true}
 				}
-				_ = s.markRunOpen(park)
+				_ = s.markRunOpen(ctx, park)
 				resetIdleTimer(idle, idleTimeout)
 				continue
 			}
@@ -299,7 +299,7 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 				// reconcile correctly leaves alone (nothing to resume). No retry, no
 				// fail, no claim about why. Re-arm idle and loop; idle later closes
 				// the warm process (status stays open).
-				_ = s.markRunOpen(park)
+				_ = s.markRunOpen(ctx, park)
 				resetIdleTimer(idle, idleTimeout)
 			}
 
@@ -311,7 +311,7 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 			// to a durable resume. The status flips to open here; whether a process
 			// was warm was never a status.
 			_ = proc.Close()
-			_ = s.parkRunOpen(park, proc.SessionID())
+			_ = s.parkRunOpen(ctx, park, proc.SessionID())
 			return liveOutcome{hibernated: true}
 
 		case <-proc.Done():
@@ -353,11 +353,15 @@ func invalidEnvelopeCorrection() string {
 // engagement's claim was released. Nothing was recorded or broadcast, and the
 // caller must not act on the run's state either — it belongs to whoever holds
 // the claim now. Always false on the two unfenced arms.
-func (s *Spawner) markRunOpen(park liveParkContext) (fenced bool) {
+func (s *Spawner) markRunOpen(ctx context.Context, park liveParkContext) (fenced bool) {
 	if s.agentRuns == nil {
 		return false // test fixture with no DB wired
 	}
-	bgCtx := context.Background()
+	// The same detachment this always had — a park must land even when the
+	// run's ctx is already cancelled, which is the ordinary case here (a user
+	// stop IS a cancel) — expressed as WithoutCancel so the write stays inside
+	// the engagement's trace rather than orphaning into one of its own.
+	bgCtx := context.WithoutCancel(ctx)
 	var flipped bool
 	var err error
 	switch {
@@ -423,7 +427,7 @@ func (s *Spawner) markRunOpen(park liveParkContext) (fenced bool) {
 // cancel handler wrote its own terminal and removed the worktree on its way
 // out, which threw away the one thing a user who just killed a wedged run is
 // likely to want back. A stop is a park with a reason attached.
-func (s *Spawner) parkRunOpen(park liveParkContext, sessionID string) (fenced bool) {
+func (s *Spawner) parkRunOpen(ctx context.Context, park liveParkContext, sessionID string) (fenced bool) {
 	// Snapshot BEFORE the flip: once dormant the run can resume on a host
 	// without the warm worktree, so the blob must exist by the time the
 	// status commits. Best-effort — the kept warm worktree is the fast path.
@@ -440,13 +444,13 @@ func (s *Spawner) parkRunOpen(park liveParkContext, sessionID string) (fenced bo
 	// deliberately-stopped run with no workspace at all.
 	snapshotted := false
 	if park.claudeCwd != "" && park.namespace != "" {
-		if err := s.snapshotWorkspace(context.Background(), park.orgID, park.namespace, park.claudeCwd, sessionID); err != nil {
+		if err := s.snapshotWorkspace(context.WithoutCancel(ctx), park.orgID, park.runID, park.namespace, park.claudeCwd, sessionID); err != nil {
 			delegateLog.Warn("snapshot workspace before parking open failed", "run", park.runID, "error", err)
 		} else {
 			snapshotted = true
 		}
 	}
-	if fenced := s.markRunOpen(park); fenced {
+	if fenced := s.markRunOpen(ctx, park); fenced {
 		// The fenced teardown's one contribution just landed, and it is the one
 		// a follow-up needs. The actor who stopped this run parked the row and
 		// announced `open` before the blob existed, so every watcher read it as

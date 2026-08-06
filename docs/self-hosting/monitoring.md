@@ -208,6 +208,45 @@ trigger's `route.delegate` span carries the `conversation.id` of the run it
 started, and the run's own trace — claimed by an executor, possibly minutes
 later — carries the same. A TraceQL query on that attribute finds both sides.
 
+#### Reading a delegated run's trace
+
+One trace per **engagement attempt**, rooted at `engagement.setup`. It starts
+when the dispatcher claims the run and ends when the agent goes live, covering
+the claim-validity gates, the sandbox bring-up (`sandbox.network.setup`,
+`sandbox.sidecar.launch`, `sidecar.hello`, `sidecar.provision`,
+`sidecar.start_proxies`), the PR fetch and clone, the workspace, the staged
+skill and memory, the SDK install, and the jail launch — plus a
+`capbroker.call` span for every privileged host operation, since the
+cap-broker exports nothing itself.
+
+It ends at agent-live rather than at the run's end, and that is deliberate: a
+span only exports once it ends, so one held open across an hours-long
+streaming period would be lost entirely in a crash — exactly the runs you most
+want the data for. A run requeued five times therefore produces five traces
+sharing `conversation.id`, told apart by `claim.attempt`.
+
+What happens after agent-live appears as separate, punctual traces that **link
+back** to the engagement root: `permission.prompt` (the human wait, which the
+run's own duration accounting deliberately discounts), `relay.call` /
+`relay.notify` (each exec verb the sandboxed agent relayed out),
+`git.authorize` and `git.record_push`, `artifact.record`,
+`workspace.snapshot`, and `engagement.complete`, which carries the run's cost,
+duration and turn count. Open any of them and the links menu walks to the
+setup trace, and vice versa.
+
+Two spans on that path measure someone else's work.
+`engagement.credentials.await` is the executor sitting in
+`awaiting_credentials` waiting for a bundle sealed to its sidecar's key, and
+`credentials.provision` is the control pod producing it. They are **not**
+linked, because the doorbell between them is lossy by design and the sweep is
+the real completion path — a link would promise a handoff neither side can
+guarantee. Query `conversation.id` to see both.
+
+A local-mode run traces a shorter version of the same thing: with no sandbox
+there is no broker, sidecar, or credential span at all, and the trace is
+fetch → clone → staging → SDK → spawn. Missing spans there are the path not
+taken, not a failure.
+
 ### The bundled trace stack
 
 `docker compose up -d` brings up a trace backend alongside TF, and

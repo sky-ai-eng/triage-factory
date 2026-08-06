@@ -39,6 +39,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -241,7 +242,29 @@ func clampGrace(grace, full time.Duration) time.Duration {
 // the wait to the full window. Either way the total wait never exceeds
 // permTimeout() and a 200-acknowledged decision is never dropped.
 func (s *Spawner) BrowserPermissionHandler(orgID, runID, claimID string, absent AbsentAutoDeny) agentproc.PermissionHandler {
+	// The engagement's trace root, captured once when the handler is built —
+	// which is during setup, while the root is still live — rather than per
+	// prompt, since by the time a human is looking at a card the engagement
+	// has long since been deregistered.
+	engagement := s.engagementSpanContext(runID)
 	return func(req agentproc.PermissionRequest) agentproc.PermissionDecision {
+		// A permission prompt is the one place a run stops for a person, and
+		// the run's own accounting deliberately discounts that wait — so
+		// without this span the gap is invisible in every duration TF records.
+		// Punctual and linked, like everything after agent-live.
+		//
+		// The tool name is NOT an attribute: the input it came with is agent
+		// text, and the name alone is close enough to it that the hygiene rule
+		// (opaque ids and closed enums only) says no. What the span carries is
+		// how long the wait was and how it ended.
+		_, span := startPunctualLinked(context.Background(), engagement, runID, "permission.prompt",
+			telemetry.OrgID(orgID))
+		decided := "denied"
+		defer func() {
+			span.SetAttributes(telemetry.Outcome(decided))
+			span.End()
+		}()
+
 		key := permKey(runID, req.ToolCallID)
 		ch := make(chan agentproc.PermissionDecision, 1)
 		s.mu.Lock()
@@ -281,6 +304,9 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID, claimID string, absent 
 
 		decision, got, reason, why := s.awaitPermission(ch, orgID, runID, full, absent)
 		if got {
+			// A person answered. "allow" / "deny" come from the decision's own
+			// behavior field, which is a closed vocabulary the wrapper sets.
+			decided = "answered_" + decision.Behavior
 			return decision
 		}
 		// A deadline fired (full timeout, or the absent grace). Deregister
@@ -297,8 +323,14 @@ func (s *Spawner) BrowserPermissionHandler(orgID, runID, claimID string, absent 
 		case d := <-ch:
 			// Buffered under s.mu while the entry was live, so the row was
 			// already stamped by the resolver that acknowledged it.
+			decided = "answered_" + d.Behavior
 			return d
 		default:
+			// why is the auto-deny's reason code ('timeout' / 'absent'), the
+			// distinction the whole absent-deny policy exists to make.
+			if why != "" {
+				decided = why
+			}
 			// The prompt is no longer answerable. Stamp the row with WHY —
 			// 'timeout' and 'absent' are the whole reason this column exists,
 			// since the agent-facing prose below says the same thing in

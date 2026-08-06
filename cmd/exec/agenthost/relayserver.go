@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // RelayServer is the orchestrator-side op server the sidecar's relay envelope
@@ -60,7 +61,21 @@ type RelayServer struct {
 	// and the curator's own RelayServer never serves a `workspace add`, so both
 	// leave it nil and the wait no-ops.
 	credRefresh *CredentialRefresh
+
+	// engagement is the trace context of the engagement that built this
+	// server, captured once at bring-up (SetEngagementSpanContext). It is how
+	// a relayed op — which arrives long after the setup span ended, over a
+	// wire that deliberately carries no trace context — still names the run it
+	// belongs to. The zero value (local mode, the curator, an untraced
+	// process) simply produces unlinked spans.
+	engagement trace.SpanContext
 }
+
+// SetEngagementSpanContext records the engagement's trace root so every op
+// dispatched here links back to it. Injected late for the same reason
+// SetProxyCreds is: the run's identity in the trace only exists once the
+// engagement that owns the sidecar has started.
+func (s *RelayServer) SetEngagementSpanContext(sc trace.SpanContext) { s.engagement = sc }
 
 // CredentialRefresh is the orchestrator's read-only handle on the run's sealed
 // credential bundle. Neither half opens it: SealedAt reports only
@@ -111,6 +126,17 @@ const recordPushRelayTimeout = 30 * time.Second
 
 // DispatchCall serves a request/response relay op. See agentproc.RelayDispatcher.
 func (s *RelayServer) DispatchCall(ctx context.Context, namespace, op string, args json.RawMessage) (json.RawMessage, error) {
+	ctx, span := s.startRelayOp(ctx, "relay.call", namespace, op)
+	defer span.End()
+
+	res, err := s.dispatch(ctx, namespace, op, args)
+	recordSpanError(span, err)
+	return res, err
+}
+
+// dispatch routes one request/response op to its family, so DispatchCall is
+// the single instrumented choke point rather than two.
+func (s *RelayServer) dispatch(ctx context.Context, namespace, op string, args json.RawMessage) (json.RawMessage, error) {
 	if namespace == agentproc.RelayNamespaceCore {
 		return s.dispatchCoreCall(ctx, op, args)
 	}
@@ -121,11 +147,15 @@ func (s *RelayServer) DispatchCall(ctx context.Context, namespace, op string, ar
 
 // DispatchNotify serves a fire-and-forget audit relay op best-effort.
 func (s *RelayServer) DispatchNotify(ctx context.Context, namespace, op string, args json.RawMessage) {
+	ctx, span := s.startRelayOp(ctx, "relay.notify", namespace, op)
+	defer span.End()
+
 	if namespace == agentproc.RelayNamespaceCore {
 		s.dispatchCoreNotify(ctx, op, args)
 		return
 	}
 	if _, err := dispatchProviderOp(ctx, s.stores, s.info, namespace, op, args); err != nil {
+		recordSpanError(span, err)
 		agenthostLog.Warn("relay provider notify failed", "namespace", namespace, "op", op, "error", err)
 	}
 }

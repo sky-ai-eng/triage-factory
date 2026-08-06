@@ -285,7 +285,7 @@ func TestBuildStepConfig_ColdRehydrateStampsTheTreeTheSessionRunsIn(t *testing.T
 			// host-loss shape a cold rehydrate exists for.
 			src := filepath.Join(t.TempDir(), "workspace")
 			writeFile(t, filepath.Join(src, "_tfac", "notes.txt"), "scratch survived")
-			if err := f.s.snapshotWorkspace(ctx, org, f.brID, src, ""); err != nil {
+			if err := f.s.snapshotWorkspace(ctx, org, f.brID, f.brID, src, ""); err != nil {
 				t.Fatalf("snapshotWorkspace: %v", err)
 			}
 			if err := os.RemoveAll(src); err != nil {
