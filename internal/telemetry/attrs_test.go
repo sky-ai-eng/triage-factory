@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // approvedKeys is the vocabulary TF is allowed to emit from its own
@@ -110,6 +111,7 @@ func TestScrubbedTracerProviderDropsURLAttributes(t *testing.T) {
 	_, span := ScrubbedTracerProvider().Tracer("test").Start(context.Background(), "outbound")
 	span.SetAttributes(
 		attribute.String("url.full", "https://api.github.com/repos/acme/secret-project/pulls/18"),
+		attribute.String("url.path", "/api/repos/acme/secret-project"),
 		attribute.String("url.query", "state=open&head=acme:private-branch"),
 		attribute.String("server.address", "api.github.com"),
 		attribute.String("http.request.method", "GET"),
@@ -124,7 +126,7 @@ func TestScrubbedTracerProviderDropsURLAttributes(t *testing.T) {
 	for _, kv := range ended[0].Attributes() {
 		got = append(got, string(kv.Key))
 	}
-	for _, banned := range []string{"url.full", "url.query"} {
+	for _, banned := range []string{"url.full", "url.path", "url.query"} {
 		if slices.Contains(got, banned) {
 			t.Errorf("%s survived scrubbing; outbound URLs carry repo names and issue keys (attributes: %s)", banned, strings.Join(got, ", "))
 		}
@@ -133,5 +135,85 @@ func TestScrubbedTracerProviderDropsURLAttributes(t *testing.T) {
 		if !slices.Contains(got, kept) {
 			t.Errorf("%s was dropped; the scrubber must remove only the URL keys (attributes: %s)", kept, strings.Join(got, ", "))
 		}
+	}
+}
+
+// TestScrubbedTracerProviderDropsStartOptionAttributes covers the half the
+// SetAttributes override cannot reach. otelhttp's SERVER handler passes its
+// attributes — url.path among them — as a span-start option rather than
+// setting them afterwards, so without start-option filtering every server
+// span would carry the concrete request path.
+func TestScrubbedTracerProviderDropsStartOptionAttributes(t *testing.T) {
+	restoreTraceGlobals(t)
+	recorder := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+
+	_, span := ScrubbedTracerProvider().Tracer("test").Start(context.Background(), "inbound",
+		trace.WithAttributes(
+			attribute.String("url.path", "/api/repos/acme/secret-project"),
+			attribute.String("http.route", "PATCH /api/repos/{owner}/{repo}"),
+		))
+	span.End()
+
+	ended := recorder.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("recorded %d spans, want 1", len(ended))
+	}
+	var got []string
+	for _, kv := range ended[0].Attributes() {
+		got = append(got, string(kv.Key))
+	}
+	if slices.Contains(got, "url.path") {
+		t.Errorf("url.path survived a start option; TF has repo-keyed routes, so a server span's concrete path is tenant data (attributes: %s)", strings.Join(got, ", "))
+	}
+	// A stand-in for "everything that isn't a concrete URL": the scrubber
+	// must be a denylist, not a filter that keeps only what it recognizes.
+	if !slices.Contains(got, "http.route") {
+		t.Errorf("a non-URL attribute was dropped; the scrubber removes only the URL keys (attributes: %s)", strings.Join(got, ", "))
+	}
+}
+
+// TestScrubbedTracerProviderPreservesNonAttributeStartOptions guards the
+// rebuild in scrubStartOptions. Filtering attributes means reconstructing
+// the option list, and a field missed there fails silently — dropping
+// WithNewRoot in particular would quietly start honoring inbound
+// traceparent as a parent, reversing the public-endpoint posture.
+func TestScrubbedTracerProviderPreservesNonAttributeStartOptions(t *testing.T) {
+	restoreTraceGlobals(t)
+	recorder := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+
+	remote := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x01},
+		SpanID:     trace.SpanID{0x02},
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	// A parent in the ctx AND WithNewRoot, which is exactly the shape
+	// otelhttp builds for a public endpoint: ignore the inbound parent,
+	// keep it as a link.
+	parentCtx := trace.ContextWithSpanContext(context.Background(), remote)
+
+	_, span := ScrubbedTracerProvider().Tracer("test").Start(parentCtx, "inbound",
+		trace.WithAttributes(attribute.String("url.path", "/api/repos/acme/thing")),
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithNewRoot(),
+		trace.WithLinks(trace.Link{SpanContext: remote}),
+	)
+	span.End()
+
+	ended := recorder.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("recorded %d spans, want 1", len(ended))
+	}
+	got := ended[0]
+	if got.SpanKind() != trace.SpanKindServer {
+		t.Errorf("span kind = %v, want Server", got.SpanKind())
+	}
+	if len(got.Links()) != 1 {
+		t.Errorf("links = %d, want 1 — the inbound context must survive as a link", len(got.Links()))
+	}
+	if got.Parent().TraceID() == remote.TraceID() {
+		t.Error("the remote parent was honored; WithNewRoot was lost in the rebuild, which silently reverses the public-endpoint posture")
 	}
 }

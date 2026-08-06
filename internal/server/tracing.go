@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 )
@@ -63,6 +64,12 @@ func (s *Server) tracedHandler() http.Handler {
 	return otelhttp.NewHandler(
 		s.withSecurityHeaders(s.mux),
 		"http.server", // unused; httpSpanName ignores the operation
+		// Server spans record url.path, and TF's API is not all opaque
+		// ids — PATCH /api/repos/{owner}/{repo} puts a customer's repo
+		// name in the concrete path. The scrubber drops it; the span name
+		// below keeps the uninterpolated pattern, which is the dimension
+		// worth having anyway.
+		otelhttp.WithTracerProvider(telemetry.ScrubbedTracerProvider()),
 		otelhttp.WithSpanNameFormatter(httpSpanName),
 		otelhttp.WithFilter(traceableRequest),
 		// Ignore any inbound traceparent, demoting it to a link. This API

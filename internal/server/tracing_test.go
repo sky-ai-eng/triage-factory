@@ -3,7 +3,13 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 func TestHTTPSpanNameUsesRoutePattern(t *testing.T) {
@@ -60,6 +66,54 @@ func TestTraceableRequestExcludesSocketAndProbes(t *testing.T) {
 	for _, path := range []string{"/api/tasks", "/", "/api/orgs/018f2c/teams"} {
 		if !traceableRequest(httptest.NewRequest(http.MethodGet, path, nil)) {
 			t.Errorf("%s produced no span; only the socket and the probes are excluded", path)
+		}
+	}
+}
+
+// TestTracedHandlerDropsConcretePathFromServerSpans drives the real handler
+// chain, so it covers the wiring rather than the scrubber in isolation:
+// tracedHandler has to actually be built against the scrubbing provider.
+//
+// The route matters. TF's API is not all opaque ids — this one is keyed by
+// repository — so the concrete path is a customer's repo name, and
+// otelhttp attaches it as a span-START option, which a SetAttributes-only
+// filter would miss entirely. The span name is what carries the route
+// dimension afterwards, since otelhttp resolves http.route at span start,
+// before ServeMux has populated r.Pattern, and so never sets it.
+func TestTracedHandlerDropsConcretePathFromServerSpans(t *testing.T) {
+	recorder := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
+	t.Cleanup(func() { otel.SetTracerProvider(noop.NewTracerProvider()) })
+
+	s := &Server{mux: http.NewServeMux()}
+	s.mux.HandleFunc("PATCH /api/repos/{owner}/{repo}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	rec := httptest.NewRecorder()
+	s.tracedHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/repos/acme/secret-project", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+
+	ended := recorder.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("recorded %d spans, want 1", len(ended))
+	}
+	span := ended[0]
+
+	// The compensating control for the scrubbed path: the pattern,
+	// uninterpolated.
+	const want = "PATCH /api/repos/{owner}/{repo}"
+	if span.Name() != want {
+		t.Errorf("span name = %q, want %q", span.Name(), want)
+	}
+	for _, kv := range span.Attributes() {
+		if kv.Key == "url.path" {
+			t.Errorf("url.path survived on a server span (%q)", kv.Value.AsString())
+		}
+		if strings.Contains(kv.Value.AsString(), "secret-project") {
+			t.Errorf("attribute %s carries the repo name (%q); TF has repo-keyed routes, so the concrete path is tenant data", kv.Key, kv.Value.AsString())
 		}
 	}
 }
