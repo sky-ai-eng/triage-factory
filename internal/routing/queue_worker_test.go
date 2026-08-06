@@ -43,7 +43,7 @@ func enqueueCIFailed(t *testing.T, database *sql.DB, entityID string) {
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		DedupKey:     "build",
 		MetadataJSON: `{"check_name":"build"}`,
-	}); err != nil {
+	}, ""); err != nil {
 		t.Fatalf("enqueue ci_check_failed for %s: %v", entityID, err)
 	}
 }

@@ -35,12 +35,21 @@ type EventQueueStore interface {
 	//
 	// Only entity-bearing github:/jira: events are enqueued — the
 	// router's domain. System events stay bus-only and are never queued.
-	Enqueue(ctx context.Context, orgID string, evt domain.Event) (eventID string, err error)
+	//
+	// traceparent is the producer's W3C trace context, stamped onto the
+	// queue row so the drain worker can link an event's routing back to
+	// the cycle that emitted it. It is a parameter rather than something
+	// read off ctx here because a store must not depend on an ambient
+	// span: the caller (the ingestor) owns the propagator, and a test can
+	// hand over a literal. Empty — the normal case, with tracing off or an
+	// untraced producer — is stored as NULL.
+	Enqueue(ctx context.Context, orgID string, evt domain.Event, traceparent string) (eventID string, err error)
 
 	// ClaimNext claims the globally-oldest pending row (FIFO by id),
 	// flips it pending -> processing, stamps claimed_at + executor_id +
-	// boot_epoch, increments attempts, and returns it. Returns (nil, nil)
-	// when the queue is empty.
+	// boot_epoch, increments attempts, and returns it — traceparent
+	// included, since the claim is where a consumer picks the producer's
+	// trace context back up. Returns (nil, nil) when the queue is empty.
 	//
 	// executorID/bootEpoch (the caller's persistent instance-registry
 	// identity, TFAC-577) are stamped atomically in the same claim

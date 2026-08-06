@@ -39,7 +39,7 @@ func TestEventQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := t.Context()
 
 	// assertLocalOrg runs before any DB work, so an empty event is fine.
-	if _, err := stores.EventQueue.Enqueue(ctx, bogusOrg, domain.Event{}); err == nil {
+	if _, err := stores.EventQueue.Enqueue(ctx, bogusOrg, domain.Event{}, ""); err == nil {
 		t.Errorf("Enqueue with non-local orgID should error")
 	}
 	if err := stores.EventQueue.MarkDone(ctx, bogusOrg, 1); err == nil {

@@ -108,7 +108,7 @@ func TestIngestor_RouterBoundEvent_DurablyEnqueuedAndPublished(t *testing.T) {
 	ing := ingest.New(bus, queue, func() { atomic.AddInt32(&wakes, 1) })
 
 	eid := entityID
-	ing.Publish(domain.Event{
+	ing.Publish(context.Background(), domain.Event{
 		OrgID:        runmode.LocalDefaultOrgID,
 		EntityID:     &eid,
 		EventType:    domain.EventGitHubPRCICheckFailed,
@@ -157,7 +157,7 @@ func TestIngestor_SystemEvent_BusOnly(t *testing.T) {
 	var wakes int32
 	ing := ingest.New(bus, queue, func() { atomic.AddInt32(&wakes, 1) })
 
-	ing.Publish(domain.Event{
+	ing.Publish(context.Background(), domain.Event{
 		OrgID:        runmode.LocalDefaultOrgID,
 		EventType:    domain.EventSystemPollCompleted,
 		MetadataJSON: `{"source":"github"}`,
@@ -185,7 +185,7 @@ func TestIngestor_NilQueue_BusOnly(t *testing.T) {
 	ing := ingest.New(bus, nil, nil)
 
 	eid := entityID
-	ing.Publish(domain.Event{
+	ing.Publish(context.Background(), domain.Event{
 		OrgID:     runmode.LocalDefaultOrgID,
 		EntityID:  &eid,
 		EventType: domain.EventGitHubPRCICheckFailed,
@@ -204,7 +204,7 @@ func TestIngestor_NilQueue_BusOnly(t *testing.T) {
 // failure path without standing up a broken DB.
 type failingEnqueueQueue struct{ err error }
 
-func (q failingEnqueueQueue) Enqueue(context.Context, string, domain.Event) (string, error) {
+func (q failingEnqueueQueue) Enqueue(context.Context, string, domain.Event, string) (string, error) {
 	return "", q.err
 }
 func (failingEnqueueQueue) ClaimNext(context.Context, string, int64) (*domain.QueuedEvent, error) {
@@ -233,7 +233,7 @@ func TestIngestor_EnqueueFailure_DropsNoBusPhantom(t *testing.T) {
 	ing := ingest.New(bus, failingEnqueueQueue{err: errors.New("db down")}, func() { atomic.AddInt32(&wakes, 1) })
 
 	eid := "entity-x"
-	ing.Publish(domain.Event{
+	ing.Publish(context.Background(), domain.Event{
 		OrgID:     runmode.LocalDefaultOrgID,
 		EntityID:  &eid,
 		EventType: domain.EventGitHubPRCICheckFailed,
@@ -274,7 +274,7 @@ func TestIngestor_RegisteredSource_DurablyEnqueued(t *testing.T) {
 	ing := ingest.New(bus, queue, func() { atomic.AddInt32(&wakes, 1) })
 
 	eid := entityID
-	ing.Publish(domain.Event{
+	ing.Publish(context.Background(), domain.Event{
 		OrgID:     runmode.LocalDefaultOrgID,
 		EntityID:  &eid,
 		EventType: "fake:x",
@@ -307,7 +307,7 @@ func TestIngestor_UnregisteredSource_BusOnly(t *testing.T) {
 	bus, got := captureBus(t)
 
 	ing := ingest.New(bus, queue, nil)
-	ing.Publish(domain.Event{
+	ing.Publish(context.Background(), domain.Event{
 		OrgID:     runmode.LocalDefaultOrgID,
 		EventType: "unregistered-fake:x",
 	})

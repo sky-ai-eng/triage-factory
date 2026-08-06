@@ -9,8 +9,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // tryAutoDelegate decides whether a matched (task, trigger) fires now or
@@ -420,6 +423,14 @@ func (r *Router) stampAgentClaim(ctx context.Context, orgID string, task *domain
 // claim); the drain path passes the firing's already-stamped task claim. It's
 // frozen onto blueprint_runs.actor_agent_id at mint and inherited by every step.
 func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID, actorAgentID string) (string, error) {
+	// The handoff point, and the last thing this trace can see: what the
+	// spawner enqueues is claimed minutes later, by another process, and up
+	// to five times — so the engagement gets its own root and the
+	// conversation.id stamped below is what joins the two. A link would
+	// promise a 1:1 relationship that does not exist.
+	ctx, span := tracer.Start(ctx, "route.delegate", trace.WithAttributes(telemetry.TaskID(task.ID)))
+	defer span.End()
+
 	if r.spawner == nil {
 		return "", fmt.Errorf("spawner not configured")
 	}
@@ -458,9 +469,23 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 		// stampAgentClaim hasn't run yet either — the caller only calls
 		// it after fireDelegate returns nil. So this failure leaves the
 		// task in a clean unclaimed-queued state, which is correct.
+		//
+		// The two anticipated refusals — a replay hitting the fence, a task
+		// that went busy under the fire — are outcomes both callers handle
+		// by design, so they name themselves instead of colouring the trace
+		// red and diluting "traces with errors".
+		switch {
+		case errors.Is(err, delegate.ErrAlreadyFired):
+			span.SetAttributes(telemetry.Outcome("already_fired"))
+		case errors.Is(err, delegate.ErrTaskBusy):
+			span.SetAttributes(telemetry.Outcome("task_busy"))
+		default:
+			span.SetStatus(codes.Error, "delegate")
+		}
 		return "", err
 	}
-	routerLog.Info("started run for task", "run_id", runID, "task_id", task.ID)
+	span.SetAttributes(telemetry.ConversationID(runID))
+	routerLog.InfoContext(ctx, "started run for task", "run_id", runID, "task_id", task.ID)
 	return runID, nil
 }
 

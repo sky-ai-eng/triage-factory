@@ -103,7 +103,7 @@ func TestHandleEventCallback_DispatchesTitleResolutionOnCreated(t *testing.T) {
 	p := &ingestPipeline{
 		entities:   newFakeEntities(),
 		deliveries: newFakeDeliveries(),
-		publish:    func(domain.Event) {},
+		publish:    func(context.Context, domain.Event) {},
 		title:      resolver,
 	}
 	ws := testWorkspaceRow("org-1")

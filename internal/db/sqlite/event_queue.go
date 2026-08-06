@@ -28,7 +28,7 @@ func newEventQueueStore(conn *sql.DB) db.EventQueueStore {
 
 var _ db.EventQueueStore = (*eventQueueStore)(nil)
 
-func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.Event) (string, error) {
+func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.Event, traceparent string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
 	}
@@ -50,10 +50,13 @@ func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.
 	if evt.EntityID != nil && *evt.EntityID != "" {
 		entityID = *evt.EntityID
 	}
+	// NULLIF on traceparent: an untraced producer stores NULL rather than
+	// an empty string, so "no context to link" is one value in the column,
+	// not two.
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO event_queue (event_id, entity_id, event_type, status)
-		VALUES (?, ?, ?, 'pending')
-	`, id, entityID, evt.EventType); err != nil {
+		INSERT INTO event_queue (event_id, entity_id, event_type, status, traceparent)
+		VALUES (?, ?, ?, 'pending', NULLIF(?, ''))
+	`, id, entityID, evt.EventType, traceparent); err != nil {
 		return "", err
 	}
 	if err := tx.Commit(); err != nil {
@@ -78,7 +81,8 @@ func (s *eventQueueStore) ClaimNext(ctx context.Context, executorID string, boot
 		    boot_epoch  = CASE WHEN ? = '' THEN NULL ELSE ? END
 		WHERE id = (SELECT id FROM event_queue WHERE status = 'pending' ORDER BY id LIMIT 1)
 		RETURNING id, org_id, event_id, COALESCE(entity_id, ''), event_type,
-		          status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at
+		          status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at,
+		          COALESCE(traceparent, '')
 	`, time.Now(), executorID, executorID, bootEpoch)
 	return scanSqliteQueuedEvent(row)
 }
@@ -161,7 +165,8 @@ func (s *eventQueueStore) ListForEntity(ctx context.Context, orgID, entityID str
 	}
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT id, org_id, event_id, COALESCE(entity_id, ''), event_type,
-		       status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at
+		       status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at,
+		       COALESCE(traceparent, '')
 		FROM event_queue
 		WHERE entity_id = ?
 		ORDER BY id
@@ -193,6 +198,7 @@ func scanSqliteQueuedEvent(row *sql.Row) (*domain.QueuedEvent, error) {
 	err := row.Scan(
 		&qe.ID, &qe.OrgID, &qe.EventID, &qe.EntityID, &qe.EventType,
 		&qe.Status, &qe.Attempts, &qe.LastError, &qe.EnqueuedAt, &claimedAt, &processedAt,
+		&qe.Traceparent,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -214,6 +220,7 @@ func scanSqliteQueuedEventRow(rows *sql.Rows) (*domain.QueuedEvent, error) {
 	err := rows.Scan(
 		&qe.ID, &qe.OrgID, &qe.EventID, &qe.EntityID, &qe.EventType,
 		&qe.Status, &qe.Attempts, &qe.LastError, &qe.EnqueuedAt, &claimedAt, &processedAt,
+		&qe.Traceparent,
 	)
 	if err != nil {
 		return nil, err

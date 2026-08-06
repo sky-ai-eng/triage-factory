@@ -187,6 +187,27 @@ Shutdown flushes: a batch of finished spans that hasn't been exported yet is
 written out on SIGTERM before the process exits, so the traces covering a
 restart survive it.
 
+#### Following an event from the poll that found it
+
+One trace does not span the whole pipeline, deliberately. A poll cycle emits
+many events; each is routed later — seconds or minutes later, on whichever
+control pod holds the background brain, and up to five times if it retries —
+so a poll cycle's trace ends at the emit and each event's routing is its own
+trace. Joining them into one would produce a single sprawling trace per cycle
+that never quite ends.
+
+They are joined by a **span link** instead. The durable queue row carries the
+trace context of its `event.enqueue` span, and the `route.event` span that
+routes it links back to that enqueue. In Grafana, an event's routing trace
+names the poll cycle it came from, and the poll cycle's span lists what it
+caused — one link, navigable from either end. Rows enqueued while tracing was
+off carry no context and route identically, with no link.
+
+Everything past the routing is correlated by ID rather than linked: a fired
+trigger's `route.delegate` span carries the `conversation.id` of the run it
+started, and the run's own trace — claimed by an executor, possibly minutes
+later — carries the same. A TraceQL query on that attribute finds both sides.
+
 ### The bundled trace stack
 
 `docker compose up -d` brings up a trace backend alongside TF, and

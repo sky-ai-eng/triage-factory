@@ -8,7 +8,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // HandleEvent routes a single event: entity lifecycle, dedup task
@@ -73,7 +76,13 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) {
 	// to arrive through to reach here), but a direct call must not let the
 	// router sentinel its own sentinel.
 	disp := events.SystemRoutingDispositionMetadata{EventID: evt.ID, EventType: evt.EventType}
-	defer func() { r.publishDisposition(orgID, disp) }()
+	defer func() {
+		// Same value, two audiences: the sentinel tells an async event
+		// source what happened to its event, the span attribute tells
+		// whoever is reading the trace why it ended where it did.
+		recordDisposition(ctx, disp.Disposition)
+		r.publishDisposition(orgID, disp)
+	}()
 
 	// Entitlement gate (TFAC-524) — a gated-off event source (never entitled,
 	// or entitled and lapsed; deliberately identical) is frozen: the event
@@ -249,9 +258,13 @@ func (r *Router) routableEntity(ctx context.Context, orgID string, evt domain.Ev
 // would misreport an internal error as a legitimate "nothing configured"
 // outcome).
 func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Event, scopeCache map[string]bool) (matchedRules, matchedTriggers []domain.EventHandler, err error) {
+	ctx, span := tracer.Start(ctx, "route.match")
+	defer span.End()
+
 	handlers, err := r.handlers.GetEnabledForEventSystem(ctx, orgID, evt.EventType)
 	if err != nil {
-		routerLog.Error("failed to query event_handlers", "event_type", evt.EventType, "error", err)
+		span.SetStatus(codes.Error, "query event_handlers")
+		routerLog.ErrorContext(ctx, "failed to query event_handlers", "event_type", evt.EventType, "error", err)
 		return nil, nil, err
 	}
 
@@ -288,6 +301,7 @@ func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Eve
 			matchedTriggers = append(matchedTriggers, h)
 		}
 	}
+	span.SetAttributes(telemetry.Count(len(matchedRules) + len(matchedTriggers)))
 	return matchedRules, matchedTriggers, nil
 }
 
@@ -329,6 +343,9 @@ type eventRouting struct {
 // The matched handlers still gate whether a task is created and supply the
 // priority; the model only decides the team set + owner.
 func (r *Router) resolveTeamRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) (eventRouting, bool) {
+	ctx, span := tracer.Start(ctx, "route.own")
+	defer span.End()
+
 	// teamTriggers is model-independent: a team fires its matched triggers iff it
 	// lands in the model's orderedTeams. Grouped once, threaded through unchanged.
 	// Org-visibility handlers (team_id NULL) route to LocalDefaultTeamID via
@@ -353,8 +370,13 @@ func (r *Router) resolveTeamRouting(ctx context.Context, orgID string, evt domai
 		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = resolvePoolRouting(matchedRules, matchedTriggers)
 	}
 	if !ok {
+		span.SetAttributes(telemetry.Outcome("no_owner"))
 		return eventRouting{}, false
 	}
+	if ownerTeam != "" {
+		span.SetAttributes(telemetry.TeamID(ownerTeam))
+	}
+	span.SetAttributes(telemetry.Count(len(visibleTeams)))
 
 	return eventRouting{
 		ownerTeam:    ownerTeam,
@@ -442,6 +464,9 @@ func (r *Router) resolveRequestedPartyRouting(ctx context.Context, orgID string,
 //     not an error.
 //   - (nil, false, err)     — a store failure; no task exists to report.
 func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domain.Event, entityID string, routing eventRouting) (task *domain.Task, created bool, err error) {
+	ctx, span := tracer.Start(ctx, "route.task", trace.WithAttributes(telemetry.EntityID(entityID)))
+	defer span.End()
+
 	// Task createdAt = OccurredAt when the source reported a time, falling back
 	// to time.Now(). Keeps the backfill path's "stamp the task with the PR's
 	// CreatedAt for week-old review requests" semantic — queue ordering reflects
@@ -468,17 +493,21 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 		var suppressed bool
 		task, created, suppressed, err = r.tasks.FindOrCreateAtUnlessEntityActiveSystem(ctx, orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
 		if err != nil {
-			routerLog.Error("became_atomic: failed to check/create task on entity", "entity_id", entityID, "error", err)
+			span.SetStatus(codes.Error, "find or create task")
+			routerLog.ErrorContext(ctx, "became_atomic: failed to check/create task on entity", "entity_id", entityID, "error", err)
 			return nil, false, err
 		}
 		if suppressed {
-			routerLog.Warn("became_atomic: entity already has an active task, skipping duplicate creation", "entity_id", entityID)
+			// Anticipated: the dedup rule doing its job, not a failure.
+			span.SetAttributes(telemetry.Outcome("suppressed_entity_active"))
+			routerLog.WarnContext(ctx, "became_atomic: entity already has an active task, skipping duplicate creation", "entity_id", entityID)
 			return nil, false, nil
 		}
 	} else {
 		task, created, err = r.tasks.FindOrCreateAtSystem(ctx, orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
 		if err != nil {
-			routerLog.Error("failed to find/create task", "event_type", evt.EventType, "entity_id", entityID, "error", err)
+			span.SetStatus(codes.Error, "find or create task")
+			routerLog.ErrorContext(ctx, "failed to find/create task", "event_type", evt.EventType, "entity_id", entityID, "error", err)
 			return nil, false, err
 		}
 	}
@@ -509,6 +538,7 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 	// broadcast the task update to the frontend.
 	r.scorer.Trigger(orgID)
 	r.ws.Broadcast(websocket.Event{Type: "tasks_updated", OrgID: orgID, Data: map[string]any{}})
+	span.SetAttributes(telemetry.TaskID(task.ID))
 	return task, created, nil
 }
 
@@ -524,6 +554,9 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 // every no-op skip inside tryAutoDelegate (already claimed by another team,
 // breaker tripped, agent unavailable, disabled for the team, etc.) don't count.
 func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt domain.Event, entityID string, task *domain.Task, routing eventRouting) int {
+	ctx, span := tracer.Start(ctx, "route.triggers", trace.WithAttributes(telemetry.TaskID(task.ID)))
+	defer span.End()
+
 	fired := 0
 	for _, teamID := range routing.orderedTeams {
 		triggers := routing.teamTriggers[teamID]
@@ -551,5 +584,6 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 			}
 		}
 	}
+	span.SetAttributes(telemetry.Count(fired))
 	return fired
 }

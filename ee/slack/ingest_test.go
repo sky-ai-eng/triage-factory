@@ -162,7 +162,7 @@ func newTestPipeline() (*ingestPipeline, *fakeEntities, *fakeDeliveries, *[]doma
 	p := &ingestPipeline{
 		entities:   entities,
 		deliveries: deliveries,
-		publish:    func(evt domain.Event) { *published = append(*published, evt) },
+		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
 	}
 	return p, entities, deliveries, published
 }
@@ -524,7 +524,7 @@ func TestHandleEventCallback_DispatchesIdentityResolution(t *testing.T) {
 	p := &ingestPipeline{
 		entities:   newFakeEntities(),
 		deliveries: newFakeDeliveries(),
-		publish:    func(domain.Event) {},
+		publish:    func(context.Context, domain.Event) {},
 		identity:   resolver,
 	}
 	ws := testWorkspaceRow("org-1")
@@ -579,7 +579,7 @@ func TestHandleEventCallback_FollowUpDispatchesIdentityResolution(t *testing.T) 
 	p := &ingestPipeline{
 		entities:   entities,
 		deliveries: newFakeDeliveries(),
-		publish:    func(domain.Event) { published++ },
+		publish:    func(context.Context, domain.Event) { published++ },
 		identity:   resolver,
 	}
 	ws := testWorkspaceRow("org-1")
@@ -694,7 +694,7 @@ func TestHandleEventCallback_DispatchesChannelNameResolutionOnCreated(t *testing
 		entities:    newFakeEntities(),
 		deliveries:  newFakeDeliveries(),
 		channels:    channels,
-		publish:     func(domain.Event) {},
+		publish:     func(context.Context, domain.Event) {},
 		channelName: resolver,
 	}
 	ws := testWorkspaceRow("org-1")
@@ -748,7 +748,7 @@ func TestHandleEventCallback_DispatchesPermalinkResolutionOnCreated(t *testing.T
 	p := &ingestPipeline{
 		entities:   entities,
 		deliveries: newFakeDeliveries(),
-		publish:    func(domain.Event) {},
+		publish:    func(context.Context, domain.Event) {},
 		permalink:  resolver,
 	}
 	ws := testWorkspaceRow("org-1")
@@ -792,7 +792,7 @@ func TestHandleEventCallback_DoesNotDispatchPermalinkResolutionOnReMention(t *te
 	p := &ingestPipeline{
 		entities:   entities,
 		deliveries: newFakeDeliveries(),
-		publish:    func(domain.Event) {},
+		publish:    func(context.Context, domain.Event) {},
 		permalink:  resolver,
 	}
 	ws := testWorkspaceRow("org-1")

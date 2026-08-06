@@ -47,7 +47,7 @@ func TestEventQueueStore_Postgres_CrossOrg(t *testing.T) {
 
 	if _, err := stores.EventQueue.Enqueue(ctx, orgA, domain.Event{
 		EntityID: &entityA, EventType: domain.EventGitHubPRCICheckFailed,
-	}); err != nil {
+	}, ""); err != nil {
 		t.Fatalf("Enqueue orgA: %v", err)
 	}
 

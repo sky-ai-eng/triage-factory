@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -36,6 +37,7 @@ var approvedKeys = []string{
 	"org.id",
 	"outcome",
 	"provider",
+	"queue.wait_ms",
 	"runtime",
 	"source",
 	"task.id",
@@ -51,7 +53,7 @@ func TestAttributeHelpersEmitOnlyApprovedKeys(t *testing.T) {
 		EntityID("en"), TaskID("ta"), ConversationID("c"), ClaimAttempt(1),
 		Source("github"), Disposition("routed"), Outcome("ok"), Runtime("sdk"),
 		Attempt(2), Count(3), Job("scorer"), Provider("anthropic"),
-		Transport("direct"),
+		Transport("direct"), QueueWait(1500 * time.Millisecond),
 	}
 	for _, kv := range produced {
 		if !slices.Contains(approvedKeys, string(kv.Key)) {
@@ -86,7 +88,7 @@ func TestEveryAttributeHelperIsCovered(t *testing.T) {
 		"EntityID": true, "TaskID": true, "ConversationID": true,
 		"ClaimAttempt": true, "Source": true, "Disposition": true,
 		"Outcome": true, "Runtime": true, "Attempt": true, "Count": true,
-		"Job": true, "Provider": true, "Transport": true,
+		"Job": true, "Provider": true, "Transport": true, "QueueWait": true,
 	}
 	sort.Strings(declared)
 	for _, name := range declared {

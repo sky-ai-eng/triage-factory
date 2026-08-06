@@ -232,7 +232,7 @@ func newSocketTestRig(t *testing.T, rows ...*slackstore.Workspace) *socketTestRi
 	pipeline := &ingestPipeline{
 		entities:   newFakeEntities(),
 		deliveries: newFakeDeliveries(),
-		publish:    func(evt domain.Event) { *published = append(*published, evt) },
+		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
 	}
 
 	configChanged := make(chan struct{}, 1)

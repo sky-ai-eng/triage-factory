@@ -10,6 +10,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // This file is the close phase: the single, declared mechanism by which an
@@ -186,6 +188,12 @@ func jiraIssueTerminalCloseTypes() []string {
 // state flip. A terminating relation sets terminate even when no tasks exist to
 // close (a merged PR with no live tasks still closes its entity).
 func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, entityID string) (closedAny, terminate bool) {
+	ctx, span := tracer.Start(ctx, "route.close", trace.WithAttributes(telemetry.EntityID(entityID)))
+	defer span.End()
+
+	closed := 0
+	defer func() { span.SetAttributes(telemetry.Count(closed)) }()
+
 	for ri := range closeRelations {
 		rel := &closeRelations[ri]
 		if !slices.Contains(rel.onEvents, evt.EventType) {
@@ -235,8 +243,9 @@ func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, 
 				routerLog.Error("close: failed to close task", "task_id", t.ID, "on_event", evt.EventType, "error", err)
 				continue
 			}
-			routerLog.Info("closed task", "task_id", t.ID, "on_event", evt.EventType, "reason", reason)
+			routerLog.InfoContext(ctx, "closed task", "task_id", t.ID, "on_event", evt.EventType, "reason", reason)
 			closedAny = true
+			closed++
 		}
 	}
 	return closedAny, terminate

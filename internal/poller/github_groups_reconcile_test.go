@@ -51,7 +51,7 @@ func TestReconcileGitHubGroups_PrunesDeletedTeams(t *testing.T) {
 
 	m := &Manager{
 		database:     database,
-		pub:          bus,
+		pub:          busPublisher{bus: bus},
 		githubGroups: stores.TeamGitHubGroups,
 		resolver:     &fakeResolver{client: ghclient.NewClient(srv.URL, "pat")},
 	}
@@ -96,7 +96,7 @@ func TestReconcileGitHubGroups_EmptyFetchDoesNotPrune(t *testing.T) {
 
 	m := &Manager{
 		database:     database,
-		pub:          bus,
+		pub:          busPublisher{bus: bus},
 		githubGroups: stores.TeamGitHubGroups,
 		resolver:     &fakeResolver{client: ghclient.NewClient(srv.URL, "pat")},
 	}

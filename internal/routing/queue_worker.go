@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // maxEventAttempts caps how many times the drain worker re-claims a
@@ -193,9 +195,16 @@ func (r *Router) drainEventQueue(ctx context.Context) error {
 func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent) {
 	eventCtx := context.WithoutCancel(ctx)
 
+	// The trace root for this event's routing, linked back to whoever
+	// enqueued it. Opened around the WHOLE unit, terminal mark included, so
+	// the span's duration is what the worker actually owed this row.
+	eventCtx, span := startRouteSpan(eventCtx, qe)
+	defer span.End()
+
 	defer func() {
 		if rec := recover(); rec != nil {
-			routerLog.Error("event-queue: panic routing event",
+			span.SetStatus(codes.Error, "panic")
+			routerLog.ErrorContext(eventCtx, "event-queue: panic routing event",
 				"event_id", qe.EventID, "queue_id", qe.ID, "attempt", qe.Attempts, "panic", rec)
 			r.parkOrRequeue(eventCtx, qe, fmt.Sprintf("panic: %v", rec))
 		}
@@ -204,16 +213,20 @@ func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent)
 	ev, err := r.events.GetSystem(eventCtx, qe.OrgID, qe.EventID)
 	if err != nil {
 		// Transient read failure — requeue for another attempt.
-		routerLog.Warn("event-queue: load event failed", "event_id", qe.EventID, "queue_id", qe.ID, "error", err)
+		span.SetStatus(codes.Error, "load event")
+		routerLog.WarnContext(eventCtx, "event-queue: load event failed", "event_id", qe.EventID, "queue_id", qe.ID, "error", err)
 		r.parkOrRequeue(eventCtx, qe, fmt.Sprintf("load event: %v", err))
 		return
 	}
 	if ev == nil {
 		// The event row is gone (e.g. its entity was cascade-deleted).
 		// Nothing to route — park it failed so the worker doesn't spin.
-		routerLog.Warn("event-queue: event not found, marking failed", "event_id", qe.EventID, "queue_id", qe.ID)
+		// An outcome, not an error status: there is nothing wrong with a
+		// queue row outliving the event it pointed at by a cascade.
+		span.SetAttributes(telemetry.Outcome("event_gone"))
+		routerLog.WarnContext(eventCtx, "event-queue: event not found, marking failed", "event_id", qe.EventID, "queue_id", qe.ID)
 		if err := r.eventQueue.MarkFailed(eventCtx, qe.OrgID, qe.ID, "event row not found"); err != nil {
-			routerLog.Error("event-queue: mark failed (missing event)", "queue_id", qe.ID, "error", err)
+			routerLog.ErrorContext(eventCtx, "event-queue: mark failed (missing event)", "queue_id", qe.ID, "error", err)
 		}
 		return
 	}
@@ -227,7 +240,8 @@ func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent)
 		// boot recovery resets it — at which point re-routing is dedup-
 		// safe (tasks dedup index). Rare DB anomaly; log loudly and move
 		// on rather than risk a double-route by requeuing.
-		routerLog.Error("event-queue: mark done failed, row left processing (re-route on restart is dedup-safe)", "queue_id", qe.ID, "error", err)
+		span.SetStatus(codes.Error, "mark done")
+		routerLog.ErrorContext(eventCtx, "event-queue: mark done failed, row left processing (re-route on restart is dedup-safe)", "queue_id", qe.ID, "error", err)
 	}
 }
 

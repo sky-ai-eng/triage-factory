@@ -30,7 +30,7 @@ func TestExtensionAPI_PublishEvent_DelegatesToIngestor(t *testing.T) {
 	srv.SetIngestor(ingest.New(bus, nil, nil))
 	api := serverExtensionAPI{srv}
 
-	api.PublishEvent(domain.Event{EventType: "fake:thing", OrgID: "org-1"})
+	api.PublishEvent(context.Background(), domain.Event{EventType: "fake:thing", OrgID: "org-1"})
 
 	select {
 	case e := <-got:
@@ -52,7 +52,7 @@ func TestExtensionAPI_PublishEvent_NilIngestor_DropsWithLog(t *testing.T) {
 	defer restore()
 
 	api := serverExtensionAPI{&Server{}}
-	api.PublishEvent(domain.Event{EventType: "fake:thing", OrgID: "org-1"})
+	api.PublishEvent(context.Background(), domain.Event{EventType: "fake:thing", OrgID: "org-1"})
 
 	if !strings.Contains(logbuf.String(), "ingestor not wired") {
 		t.Errorf("expected an ERROR 'ingestor not wired' log on a nil ingestor; got:\n%s", logbuf.String())
