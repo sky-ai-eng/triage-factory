@@ -123,7 +123,7 @@ func PricingLoadError() error {
 // bifrost stream via usageFromBifrost.
 //
 // It carries the provider-neutral convention, which is the whole point of the
-// neutral layer: InputTokens is the ENTIRE prompt, cache reads and writes
+// neutral layer: PromptTokens is the ENTIRE prompt, cache reads and writes
 // included. Providers disagree on the wire — Anthropic reports the three
 // disjointly, OpenAI-shaped ones report a prompt total with the cached part
 // broken out — and the provider layer folds every one of them into this single
@@ -135,13 +135,17 @@ func PricingLoadError() error {
 // and system_llm_runs are DISJOINT, so they sum to the prompt without
 // double-counting — which is what every reader of them does (the compaction
 // trip's occupancy, the context gauge, the approximate-cost footer). Writers of
-// those columns take input tokens from NonCachedInputTokens, never from
-// InputTokens directly.
+// those columns take input tokens from NonCachedInputTokens.
+//
+// The field is named for bifrost's own PromptTokens rather than for the column
+// it eventually feeds, deliberately: it does not mean what a row's input_tokens
+// means, and a name that suggested otherwise is what put the inclusive figure
+// into three disjoint columns in the first place.
 type Usage struct {
-	// InputTokens is the whole prompt: tokens billed at the input rate, plus
+	// PromptTokens is the whole prompt: tokens billed at the input rate, plus
 	// cache reads, plus cache writes. See NonCachedInputTokens for the first
 	// of those on its own.
-	InputTokens         int
+	PromptTokens        int
 	OutputTokens        int
 	CacheReadTokens     int
 	CacheCreationTokens int
@@ -152,7 +156,7 @@ type Usage struct {
 }
 
 // NonCachedInputTokens is the prompt tokens billed at the plain input rate —
-// InputTokens with the two cache buckets taken out. It is the value the ledger's
+// PromptTokens with the two cache buckets taken out. It is the value the ledger's
 // input_tokens column stores, on either runtime and from any provider, so that
 // input + cache_read + cache_creation reconstructs the prompt exactly once.
 //
@@ -161,7 +165,7 @@ type Usage struct {
 // same way computeTextCost's own clamps do, so the row and the price it was
 // charged never describe two different requests.
 func (u Usage) NonCachedInputTokens() int {
-	nonCached := u.InputTokens - u.CacheReadTokens - u.CacheCreationTokens
+	nonCached := u.PromptTokens - u.CacheReadTokens - u.CacheCreationTokens
 	if nonCached < 0 {
 		return 0
 	}
@@ -252,7 +256,7 @@ func lookupPrice(table map[string]modelPrice, model string) (modelPrice, bool) {
 // cost field it doesn't recognize — so a new dimension surfaces as a reviewed
 // change to this formula, not silent drift in the data.
 func computeTextCost(p modelPrice, u Usage) float64 {
-	prompt := u.InputTokens
+	prompt := u.PromptTokens
 	completion := u.OutputTokens
 	cachedRead := u.CacheReadTokens
 	cachedWrite := u.CacheCreationTokens
@@ -314,7 +318,7 @@ func usageFromBifrost(u *schemas.BifrostLLMUsage) Usage {
 		return Usage{}
 	}
 	out := Usage{
-		InputTokens:  u.PromptTokens,
+		PromptTokens: u.PromptTokens,
 		OutputTokens: u.CompletionTokens,
 	}
 	if d := u.PromptTokensDetails; d != nil {

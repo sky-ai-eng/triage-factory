@@ -173,7 +173,7 @@ func TestInference_LiveSmoke_Bedrock(t *testing.T) {
 
 func assertUsageRecorded(t *testing.T, label string, c *Completion) {
 	t.Helper()
-	if c.Usage.InputTokens == 0 && c.Usage.OutputTokens == 0 {
+	if c.Usage.PromptTokens == 0 && c.Usage.OutputTokens == 0 {
 		t.Errorf("%s: expected usage to be recorded, got %+v", label, c.Usage)
 	}
 	if usd, ok := CostForUsage(c.Model, c.Usage); ok {

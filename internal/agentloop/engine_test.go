@@ -966,7 +966,7 @@ func TestRun_CostIsStampedPerAssistantRowAndNullWhenUnpriceable(t *testing.T) {
 	p := &scriptedProvider{turns: []scriptedTurn{{
 		text:  "done",
 		model: "a-model-no-datasheet-carries",
-		usage: inference.Usage{InputTokens: 100, OutputTokens: 20},
+		usage: inference.Usage{PromptTokens: 100, OutputTokens: 20},
 	}}}
 	e := newTestEngine(tr, p, newScriptedToolHost())
 
@@ -999,7 +999,7 @@ func TestRun_TokenColumnsAreDisjoint(t *testing.T) {
 	p := &scriptedProvider{turns: []scriptedTurn{{
 		text: "done",
 		usage: inference.Usage{
-			InputTokens: 100_000, OutputTokens: 20,
+			PromptTokens: 100_000, OutputTokens: 20,
 			CacheReadTokens: 90_000, CacheCreationTokens: 5_000,
 		},
 	}}}

@@ -315,7 +315,7 @@ func TestComplete_Direct_RecordsSuccessRow(t *testing.T) {
 	// Cost, by contrast, prices the inclusive usage — the formula subtracts
 	// the cache buckets back out at their own rates.
 	wantCost, ok := inference.CostForUsage(opts.DirectModel, inference.Usage{
-		InputTokens: 15, OutputTokens: 5, CacheReadTokens: 3, CacheCreationTokens: 2,
+		PromptTokens: 15, OutputTokens: 5, CacheReadTokens: 3, CacheCreationTokens: 2,
 	})
 	if !ok {
 		t.Fatalf("the pinned system-job model %q must be priceable from the vendored datasheet", opts.DirectModel)
@@ -380,7 +380,7 @@ func TestComplete_Direct_RecordsErrorRow(t *testing.T) {
 // billed on, so cost math keys off opts.DirectModel — while the row still
 // records the resolved model for observability.
 func TestRecordDirectCall_PricesOnPinnedModel(t *testing.T) {
-	usage := inference.Usage{InputTokens: 1000, OutputTokens: 500, CacheReadTokens: 100, CacheCreationTokens: 50}
+	usage := inference.Usage{PromptTokens: 1000, OutputTokens: 500, CacheReadTokens: 100, CacheCreationTokens: 50}
 	wantCost, ok := inference.CostForUsage("claude-haiku-4-5-20251001", usage)
 	if !ok {
 		t.Fatal("the pinned system-job model must be priceable from the vendored datasheet")
@@ -414,7 +414,7 @@ func TestRecordDirectCall_PricesOnPinnedModel(t *testing.T) {
 // token in the accounting table without failing anything else.
 func TestDirectUsageFrom(t *testing.T) {
 	got := directUsageFrom(inference.Usage{
-		InputTokens: 1000, OutputTokens: 200, CacheReadTokens: 300, CacheCreationTokens: 100,
+		PromptTokens: 1000, OutputTokens: 200, CacheReadTokens: 300, CacheCreationTokens: 100,
 	})
 	want := DirectUsage{InputTokens: 600, OutputTokens: 200, CacheReadTokens: 300, CacheCreationTokens: 100}
 	if got != want {
@@ -423,7 +423,7 @@ func TestDirectUsageFrom(t *testing.T) {
 
 	// A provider that already reports prompt tokens exclusively (or a
 	// malformed payload) must not produce a negative count.
-	if got := directUsageFrom(inference.Usage{InputTokens: 10, CacheReadTokens: 400}); got.InputTokens != 0 {
+	if got := directUsageFrom(inference.Usage{PromptTokens: 10, CacheReadTokens: 400}); got.InputTokens != 0 {
 		t.Errorf("InputTokens = %d, want 0 rather than a negative count", got.InputTokens)
 	}
 }
