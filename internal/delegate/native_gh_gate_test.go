@@ -39,6 +39,7 @@ func TestClassifyGHCommand(t *testing.T) {
 		{name: "on the far side of a pipe", command: "echo y | gh pr merge 7", want: ghActionMerge},
 		{name: "a REST merge through gh api", command: "gh api -X PUT repos/owner/repo/pulls/7/merge", want: ghActionMerge},
 		{name: "a REST merge with a leading slash", command: "gh api --method PUT /repos/owner/repo/pulls/7/merge -f merge_method=squash", want: ghActionMerge},
+		{name: "a REST merge with a query string", command: "gh api repos/owner/repo/pulls/7/merge?per_page=1 -X PUT", want: ghActionMerge},
 
 		// --- review ---
 		{name: "an approving review", command: "gh pr review 7 --approve", want: ghActionReview},
@@ -57,6 +58,10 @@ func TestClassifyGHCommand(t *testing.T) {
 		{name: "an issue verb", command: "gh issue view 12"},
 		{name: "a run verb", command: "gh run view 993 --log-failed"},
 		{name: "a read through gh api", command: "gh api repos/owner/repo/pulls/7"},
+		{name: "the branch-merge endpoint is a different resource", command: "gh api -X POST repos/owner/repo/merges -f base=main -f head=topic"},
+		{name: "merge-upstream is a different resource", command: "gh api -X POST repos/owner/repo/merge-upstream -f branch=main"},
+		{name: "checking mergeability", command: "gh api repos/owner/repo/pulls/7 --jq .mergeable"},
+		{name: "merge as a field value", command: "gh api repos/owner/repo/pulls/7 -f merge_method=merge"},
 		{name: "the TF review verbs", command: "tfac gh pr start-review 7"},
 		{name: "a local git merge", command: "git merge origin/main"},
 		{name: "a git push", command: "git push -u origin aa/TFAC-1"},
@@ -109,6 +114,11 @@ func TestAskedAboutMergeAlready(t *testing.T) {
 	stopNote := domain.Message{Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "This run reached its spend cap and has been paused."}
 	stagedNote := domain.Message{Role: "user", Subtype: "injection:system-note", Content: "<system-note>PR gained commits</system-note>"}
 	echo := domain.Message{Role: "assistant", Content: "I was told: " + mergeGateQuestion}
+	// The gate's tag is a string that exists in this repository and in every
+	// transcript the note lands in, so tool output can carry it for reasons
+	// that have nothing to do with a question having been put.
+	grepHit := domain.Message{Role: "tool", ToolCallID: "c8", Content: "native_gh_gate.go:59:const mergeGateTag = `" + mergeGateTag + "`"}
+	readTranscript := domain.Message{Role: "tool", ToolCallID: "c9", Content: `[{"role":"tool","content":"` + mergeGateQuestion + `"}]`}
 
 	tests := []struct {
 		name string
@@ -155,6 +165,16 @@ func TestAskedAboutMergeAlready(t *testing.T) {
 			// never fired.
 			name: "the model quoting the question is not the question",
 			rows: []domain.Message{human, echo},
+		},
+		{
+			// The reason the tag must OPEN the note rather than appear in it:
+			// a run grepping this repository hands itself the string.
+			name: "a grep hit on the gate's own source is not the question",
+			rows: []domain.Message{human, assistant, grepHit, assistant},
+		},
+		{
+			name: "reading a transcript that carries the note is not the question",
+			rows: []domain.Message{human, assistant, readTranscript, assistant},
 		},
 		{
 			name: "an empty transcript has nothing to have asked",

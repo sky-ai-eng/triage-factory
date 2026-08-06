@@ -68,8 +68,8 @@ const mergeGateTag = `<system-note kind="merge-gate">`
 const mergeGateQuestion = mergeGateTag + "\n" +
 	"This command was not run. Merging is not reversible and no human is watching this run. " +
 	"Before you do it: does your mission — the opening message of this conversation — actually tell you to merge? " +
-	"Quote the line that does. If you cannot find one, do not merge — finish your work and say in your final " +
-	"message that you believe the branch is ready to merge, and let a human do it.\n" +
+	"If it does, quote that line before merging. If you cannot find one, do not merge — finish your work and say " +
+	"in your final message that you believe the branch is ready to merge, and let a human do it.\n" +
 	"</system-note>"
 
 // ghCommandGate builds the native loop's BeforeToolCall hook.
@@ -132,14 +132,12 @@ func (s *Spawner) mergeAlreadyQuestioned(ctx context.Context, orgID, runID strin
 // the agent's behalf speaks for no one and is skipped, using the same closed
 // human set the engine's drain and turn budget key on.
 //
-// The note is recognized only on the tool row the gate itself writes, and that
-// check comes first: an assistant message quoting the question back would
-// otherwise disarm a gate that had never fired, and a role filter alone would
-// skip the system-authored row this is looking for.
+// The note check comes first, because the row it looks for is system-authored
+// and the human filter below would skip it.
 func askedAboutMergeAlready(rows []domain.Message) bool {
 	for i := len(rows) - 1; i >= 0; i-- {
 		r := rows[i]
-		if r.Role == "tool" && strings.Contains(r.Content, mergeGateTag) {
+		if isMergeGateNote(r) {
 			return true
 		}
 		if r.Role == "user" && agentloop.IsHumanInput(r) {
@@ -147,6 +145,18 @@ func askedAboutMergeAlready(rows []domain.Message) bool {
 		}
 	}
 	return false
+}
+
+// isMergeGateNote reports whether a row is one this gate itself wrote.
+//
+// The tag has to open an is_error tool result, not merely appear somewhere in
+// a row: it is a string that exists in this repository and in every transcript
+// the note lands in, so a run that greps its own source, cats a log, or reads
+// a conversation would otherwise hand itself a row that spends the question it
+// was never asked. Anchoring it leaves everything after the tag free to
+// change, which is the whole reason the identity is a tag and not the prose.
+func isMergeGateNote(r domain.Message) bool {
+	return r.Role == "tool" && r.IsError && strings.HasPrefix(r.Content, mergeGateTag)
 }
 
 // ghAction is the gated action a shell command was recognized as reaching for.
@@ -235,11 +245,23 @@ func subcommandChain(words []string) []string {
 	return chain
 }
 
-// namesMergeEndpoint reports whether any argument names a `/merge` REST path.
+// namesMergeEndpoint reports whether any argument names a REST path whose
+// last resource is `merge`.
+//
+// A whole path segment, not a substring: `/merges` merges two branches and
+// `/merge-upstream` syncs a fork, neither of which is the irreversible thing
+// this gate is about, and a field value that happens to contain the word is
+// not an endpoint at all.
 func namesMergeEndpoint(words []string) bool {
 	for _, w := range words {
-		if strings.Contains(w, "/merge") {
-			return true
+		p, _, _ := strings.Cut(w, "?")
+		p, _, _ = strings.Cut(p, "#")
+		for i, seg := range strings.Split(p, "/") {
+			// i > 0 keeps this to a path: the segment must be reached
+			// through a `/`, so a bare word `merge` is not an endpoint.
+			if i > 0 && seg == "merge" {
+				return true
+			}
 		}
 	}
 	return false
