@@ -392,7 +392,11 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// finalizes). No in-process for-loop holds the sequencing — blueprint_runs
 	// does (current_step_index), so a crash mid-flight is recoverable. The
 	// blueprint_run was just committed (the replay fence point); if the enqueue
-	// fails, mark it failed so it doesn't strand non-terminal.
+	// fails, mark it failed so it doesn't strand non-terminal. A hard death in
+	// the same window can't run that write, and the parent it leaves behind has
+	// no child for any conversation-joining recovery arm to find it by — so the
+	// childless-parent shape is owned outside this path, by the boot reconcile
+	// and the leader reaper (domain.BlueprintAbortOrphanedAtMint).
 	if err := s.enqueueBlueprintStep(bgCtx, orgID, blueprintRunID, task, steps[0], stepModelOrInherit(stepPlan[0].Model, model), triggerType, triggerID, creatorUserID, brRow.ActorAgentID); err != nil {
 		if _, mErr := s.blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, domain.BlueprintRunStatusFailed, "enqueue first step: "+err.Error(), nil); mErr != nil {
 			delegateLog.Warn("mark blueprint_run failed after enqueue error", "blueprint_run", blueprintRunID, "error", mErr)

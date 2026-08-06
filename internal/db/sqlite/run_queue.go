@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -632,6 +633,48 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 		}
 		count += int(n)
 
+		return nil
+	})
+	if err != nil {
+		return count, err
+	}
+
+	// Mint-crash arm — the mirror of the blueprint-terminal park above, one
+	// level up: that arm heals a live child under a dead parent, this one heals
+	// a live parent with no child at all. The firing path commits the
+	// blueprint_run first and enqueues its first step second, so a hard death
+	// between the two leaves a 'running' parent that nothing drives and nothing
+	// recovers — every other arm here (and the Postgres-only leader reaper)
+	// joins through conversations, and this shape has none.
+	//
+	// Local mode has the crash window and no reaper, so boot is its only
+	// recovery surface. It has no one-active-auto-run index either, so the
+	// Postgres livelock this un-sticks isn't the local symptom; the local
+	// symptom is a parent that reads in-flight forever. Failing frees both.
+	//
+	// SQLite's own clock, mirroring the Postgres arm's own-DB-time discipline.
+	// datetime() on both sides so the comparison survives whichever of the
+	// on-disk timestamp shapes a row carries (see parseDBDatetime) rather than
+	// only the CURRENT_TIMESTAMP one both insert paths write today.
+	err = inTx(ctx, s.conn, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE blueprint_runs
+			SET status = 'failed', completed_at = ?, abort_reason = ?
+			WHERE status = 'running'
+			  AND datetime(started_at) < datetime('now', ?)
+			  AND NOT EXISTS (
+			      SELECT 1 FROM conversations c WHERE c.blueprint_run_id = blueprint_runs.id
+			  )
+		`, time.Now().UTC(), domain.BlueprintAbortOrphanedAtMint,
+			fmt.Sprintf("-%d seconds", int(domain.BlueprintOrphanedAtMintGrace.Seconds())))
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		count += int(n)
 		return nil
 	})
 	return count, err

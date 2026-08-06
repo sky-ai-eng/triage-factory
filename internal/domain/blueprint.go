@@ -37,6 +37,27 @@ func (s BlueprintRunStatus) Terminal() bool {
 	}
 }
 
+// BlueprintAbortOrphanedAtMint is the abort_reason of a blueprint run failed
+// because it holds no step conversation at all. The firing path commits the
+// blueprint_run first and enqueues its first step second, so a hard death
+// between the two leaves a 'running' parent with nothing to drive it: no
+// conversation means no claim, so every recovery surface that joins through
+// conversations looks straight past it, and (in Postgres) it keeps holding the
+// one-active-auto-run index against its task.
+//
+// The transition running → failed on this reason belongs exclusively to the
+// two recovery surfaces — the leader reaper's sweep and the boot reconcile. No
+// live writer may use it: an in-process enqueue failure has its own error path
+// and reports what actually failed.
+const BlueprintAbortOrphanedAtMint = "orphaned_at_mint"
+
+// BlueprintOrphanedAtMintGrace is how long a childless 'running' blueprint run
+// is left alone before the recovery surfaces fail it. Mint→enqueue is one
+// in-process code path of milliseconds, so this is orders of magnitude past
+// any legitimate in-flight mint and cannot race a live firing. Shared by both
+// surfaces so the two can never disagree about what "old enough" means.
+const BlueprintOrphanedAtMintGrace = 5 * time.Minute
+
 // BlueprintTriggerType distinguishes how a blueprint run was initiated.
 type BlueprintTriggerType string
 

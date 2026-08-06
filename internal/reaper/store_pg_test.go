@@ -3,6 +3,7 @@ package reaper_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -566,5 +567,325 @@ func TestCancelStrandedCuratorTurns_CancelsDeadHomeOnly(t *testing.T) {
 	}
 	if released || outcome != "" {
 		t.Errorf("live-home claim = (released=%v outcome=%q), want (false, \"\") — the sweep must ignore live homes", released, outcome)
+	}
+}
+
+// orphanFixture is the mint→enqueue crash shape plus everything needed to
+// re-fire the same task afterwards: an org with a blueprint / prompt / task /
+// trigger chain, and a mint helper that produces event-triggered blueprint_runs
+// against it. The runs it mints carry no child conversation, which is the whole
+// point — that absence is what makes the row invisible to every other reaper arm.
+type orphanFixture struct {
+	orgID, userID, teamID string
+	taskID, blueprintID   string
+	promptID, triggerID   string
+	entityID              string
+	nextStep              int
+}
+
+func seedOrphanFixture(t *testing.T, h *pgtest.Harness) *orphanFixture {
+	t.Helper()
+	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "orphan-"+uuid.New().String()[:8])
+	teamID := reaperFirstTeamForOrg(t, h, orgID)
+
+	blueprintID := "orphan-bp-" + uuid.New().String()[:8]
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO blueprints (id, org_id, team_id, creator_user_id, name, source, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $1, 'user', now(), now())
+	`, blueprintID, orgID, teamID, userID)
+
+	promptID := "orphan-p-" + uuid.New().String()[:8]
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO prompts (id, org_id, team_id, creator_user_id, name, body, source, allowed_tools, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $1, 'body', 'user', '[]'::jsonb, now(), now())
+	`, promptID, orgID, teamID, userID)
+
+	entityID := uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Orphan Test Entity', 'https://example/x', '{}'::jsonb, now())
+	`, entityID, orgID, "orphan-test-"+entityID[:8])
+
+	fx := &orphanFixture{
+		orgID: orgID, userID: userID, teamID: teamID,
+		blueprintID: blueprintID, promptID: promptID, entityID: entityID,
+	}
+
+	taskID := uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO tasks (id, org_id, creator_user_id, team_id, entity_id, event_type, dedup_key, primary_event_id, status, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, '', $7, 'queued', now())
+	`, taskID, orgID, userID, teamID, entityID, domain.EventGitHubPRCICheckFailed, fx.newEvent(t, h))
+	fx.taskID = taskID
+
+	triggerID := uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, kind, event_type, enabled, source, blueprint_id, breaker_threshold, min_autonomy_suitability, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'trigger', $5, true, 'user', $6, 4, 0, now(), now())
+	`, triggerID, orgID, teamID, userID, domain.EventGitHubPRCICheckFailed, blueprintID)
+	fx.triggerID = triggerID
+
+	return fx
+}
+
+// newEvent records one more detection on the fixture's entity — a distinct
+// (triggering_event_id, trigger_id) pair per firing, so the replay fence never
+// stands in for the one-active index the tests here are about.
+func (fx *orphanFixture) newEvent(t *testing.T, h *pgtest.Harness) string {
+	t.Helper()
+	eventID := uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, $4, '', '{}'::jsonb, now())
+	`, eventID, fx.orgID, fx.entityID, domain.EventGitHubPRCICheckFailed)
+	return eventID
+}
+
+// firing is the BlueprintRun an auto-delegation would mint for this task: an
+// event-triggered run against a fresh event, which is what holds
+// blueprint_runs_one_active_auto_run_per_task.
+func (fx *orphanFixture) firing(t *testing.T, h *pgtest.Harness) domain.BlueprintRun {
+	t.Helper()
+	return domain.BlueprintRun{
+		ID:                uuid.New().String(),
+		BlueprintID:       fx.blueprintID,
+		TaskID:            fx.taskID,
+		TriggerType:       domain.BlueprintTriggerEvent,
+		TriggerID:         fx.triggerID,
+		TriggeringEventID: fx.newEvent(t, h),
+		Status:            domain.BlueprintRunStatusRunning,
+		WorktreePath:      "/tmp/wt-orphan",
+		StepPlan:          []domain.BlueprintPlanStep{{StepIndex: 0, PromptID: fx.promptID, PromptName: "p", PromptBody: "b"}},
+	}
+}
+
+// mintOrphan commits one childless 'running' blueprint_run — exactly what the
+// firing path leaves behind when it dies between its two commits — backdated by
+// age so the test controls which side of the grace it falls on.
+func (fx *orphanFixture) mintOrphan(t *testing.T, h *pgtest.Harness, age time.Duration) string {
+	t.Helper()
+	ctx := context.Background()
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	br := fx.firing(t, h)
+	inserted, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, br)
+	if err != nil || !inserted {
+		t.Fatalf("CreateRunIfNotFiredSystem = (%v, %v), want (true, nil)", inserted, err)
+	}
+	if age > 0 {
+		pgtest.MustExec(t, h.AdminDB,
+			`UPDATE blueprint_runs SET started_at = now() - $2::interval WHERE id = $1`, br.ID, age.String())
+	}
+	return br.ID
+}
+
+// enqueueChild stages one mid-flight step conversation under brID — the second
+// commit the crash window skips, and the presence that makes a run ordinary.
+func (fx *orphanFixture) enqueueChild(t *testing.T, h *pgtest.Harness, brID string) string {
+	t.Helper()
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	idx := fx.nextStep
+	fx.nextStep++
+	convID := uuid.New().String()
+	if err := stores.RunQueue.EnqueueRun(context.Background(), fx.orgID, domain.Conversation{
+		ID: convID, TaskID: fx.taskID, PromptID: fx.promptID, Model: "m",
+		TriggerType: "event", BlueprintRunID: brID, BlueprintStepIndex: &idx,
+	}); err != nil {
+		t.Fatalf("EnqueueRun: %v", err)
+	}
+	return convID
+}
+
+func orphanBlueprintState(t *testing.T, h *pgtest.Harness, brID string) (status, abortReason string, completedAtSet bool) {
+	t.Helper()
+	var reason sql.NullString
+	if err := h.AdminDB.QueryRow(
+		`SELECT status, abort_reason, completed_at IS NOT NULL FROM blueprint_runs WHERE id = $1`, brID,
+	).Scan(&status, &reason, &completedAtSet); err != nil {
+		t.Fatalf("read blueprint_run %s: %v", brID, err)
+	}
+	return status, reason.String, completedAtSet
+}
+
+// TestFailBlueprintRunsOrphanedAtMint_SweepsChildlessRunPastGrace pins the arm
+// itself: a 'running' blueprint_run with no child conversation, older than the
+// grace, takes the terminal that frees its task — and nothing else in the
+// deployment can reach that row, since every other arm joins through
+// conversations and this one has none.
+func TestFailBlueprintRunsOrphanedAtMint_SweepsChildlessRunPastGrace(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	fx := seedOrphanFixture(t, h)
+	brID := fx.mintOrphan(t, h, domain.BlueprintOrphanedAtMintGrace+time.Minute)
+
+	store := reaper.NewPostgresStore(h.AdminDB)
+	n, err := store.FailBlueprintRunsOrphanedAtMint(ctx, domain.BlueprintOrphanedAtMintGrace)
+	if err != nil {
+		t.Fatalf("FailBlueprintRunsOrphanedAtMint: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("swept %d runs, want 1", n)
+	}
+	status, reason, completed := orphanBlueprintState(t, h, brID)
+	if status != string(domain.BlueprintRunStatusFailed) {
+		t.Errorf("status = %q, want failed", status)
+	}
+	if reason != domain.BlueprintAbortOrphanedAtMint {
+		t.Errorf("abort_reason = %q, want %q", reason, domain.BlueprintAbortOrphanedAtMint)
+	}
+	if !completed {
+		t.Error("completed_at is NULL on a terminal blueprint_run")
+	}
+	// The replay fence survives on the failed row, so an at-least-once
+	// redelivery of the SAME event stays the no-op it always was — re-firing is
+	// the pending firing's job, as a fresh firing.
+	var fenceHeld bool
+	if err := h.AdminDB.QueryRow(
+		`SELECT triggering_event_id IS NOT NULL AND trigger_id IS NOT NULL FROM blueprint_runs WHERE id = $1`, brID,
+	).Scan(&fenceHeld); err != nil {
+		t.Fatalf("read fence columns: %v", err)
+	}
+	if !fenceHeld {
+		t.Error("the failed run dropped its (triggering_event_id, trigger_id) fence")
+	}
+
+	// Idempotent: the row is terminal, so a second sweep finds nothing.
+	if n2, err := store.FailBlueprintRunsOrphanedAtMint(ctx, domain.BlueprintOrphanedAtMintGrace); err != nil || n2 != 0 {
+		t.Errorf("second sweep = (%d, %v), want (0, nil)", n2, err)
+	}
+}
+
+// TestFailBlueprintRunsOrphanedAtMint_NegativeSpace pins the three ways this
+// arm could misfire, each of which would kill live or already-settled work.
+func TestFailBlueprintRunsOrphanedAtMint_NegativeSpace(t *testing.T) {
+	h := pgtest.Shared(t)
+	ctx := context.Background()
+	grace := domain.BlueprintOrphanedAtMintGrace
+
+	t.Run("run_with_a_child_at_any_age", func(t *testing.T) {
+		// A child is proof the mint completed. After that, age is just how long
+		// the work has been going — failing it would kill a live agent mid-step.
+		h.Reset(t)
+		fx := seedOrphanFixture(t, h)
+		brID := fx.mintOrphan(t, h, 30*24*time.Hour)
+		fx.enqueueChild(t, h, brID)
+
+		store := reaper.NewPostgresStore(h.AdminDB)
+		n, err := store.FailBlueprintRunsOrphanedAtMint(ctx, grace)
+		if err != nil {
+			t.Fatalf("FailBlueprintRunsOrphanedAtMint: %v", err)
+		}
+		if n != 0 {
+			t.Fatalf("swept %d runs, want 0 (a run with a child is not an orphan)", n)
+		}
+		if status, _, _ := orphanBlueprintState(t, h, brID); status != string(domain.BlueprintRunStatusRunning) {
+			t.Errorf("status = %q, want running", status)
+		}
+	})
+
+	t.Run("childless_run_inside_the_grace", func(t *testing.T) {
+		// The window this arm recovers from is also the window a healthy mint
+		// passes through, so the grace is the only thing keeping the sweep off a
+		// live Delegate.
+		h.Reset(t)
+		fx := seedOrphanFixture(t, h)
+		brID := fx.mintOrphan(t, h, 0)
+
+		store := reaper.NewPostgresStore(h.AdminDB)
+		n, err := store.FailBlueprintRunsOrphanedAtMint(ctx, grace)
+		if err != nil {
+			t.Fatalf("FailBlueprintRunsOrphanedAtMint: %v", err)
+		}
+		if n != 0 {
+			t.Fatalf("swept %d runs, want 0 (a mint still inside the grace)", n)
+		}
+		if status, _, _ := orphanBlueprintState(t, h, brID); status != string(domain.BlueprintRunStatusRunning) {
+			t.Errorf("status = %q, want running", status)
+		}
+	})
+
+	t.Run("terminal_childless_run_keeps_its_verdict", func(t *testing.T) {
+		// A terminal is a settled account of what happened; the arm may only
+		// claim a run still reading 'running'.
+		h.Reset(t)
+		fx := seedOrphanFixture(t, h)
+		brID := fx.mintOrphan(t, h, grace+time.Minute)
+		pgtest.MustExec(t, h.AdminDB,
+			`UPDATE blueprint_runs SET status = 'cancelled', abort_reason = 'user_cancelled', completed_at = now() WHERE id = $1`, brID)
+
+		store := reaper.NewPostgresStore(h.AdminDB)
+		n, err := store.FailBlueprintRunsOrphanedAtMint(ctx, grace)
+		if err != nil {
+			t.Fatalf("FailBlueprintRunsOrphanedAtMint: %v", err)
+		}
+		if n != 0 {
+			t.Fatalf("swept %d runs, want 0 (terminal runs are settled)", n)
+		}
+		status, reason, _ := orphanBlueprintState(t, h, brID)
+		if status != string(domain.BlueprintRunStatusCancelled) || reason != "user_cancelled" {
+			t.Errorf("terminal run = (%q, %q), want (cancelled, user_cancelled)", status, reason)
+		}
+	})
+}
+
+// TestFailBlueprintRunsOrphanedAtMint_UnblocksTheOneActiveIndex is the
+// end-to-end point of the arm, at the level where the damage actually happened.
+//
+// The orphan holds blueprint_runs_one_active_auto_run_per_task against its task
+// while the router's busy gate — which reads CONVERSATIONS — sees an idle task.
+// So every drain of the task's pending firing re-fires, hits the index, comes
+// back task-busy, and is released to pending again: a livelock at the sweeper's
+// interval with no breaker. This test reproduces exactly that refusal, sweeps,
+// and then re-fires the same firing to a fully-minted run with a real child —
+// which is what the queued pending firing does on its next drain.
+func TestFailBlueprintRunsOrphanedAtMint_UnblocksTheOneActiveIndex(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	fx := seedOrphanFixture(t, h)
+	orphanID := fx.mintOrphan(t, h, domain.BlueprintOrphanedAtMintGrace+time.Minute)
+
+	// The livelock: a NEW (event, trigger) firing on the same task — a fresh
+	// intent, not a replay — is refused by the index the orphan is holding.
+	blocked := fx.firing(t, h)
+	if _, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, blocked); !errors.Is(err, db.ErrTaskBusyActiveAutoRun) {
+		t.Fatalf("re-fire under the orphan = %v, want ErrTaskBusyActiveAutoRun", err)
+	}
+
+	store := reaper.NewPostgresStore(h.AdminDB)
+	if n, err := store.FailBlueprintRunsOrphanedAtMint(ctx, domain.BlueprintOrphanedAtMintGrace); err != nil || n != 1 {
+		t.Fatalf("FailBlueprintRunsOrphanedAtMint = (%d, %v), want (1, nil)", n, err)
+	}
+
+	// The same firing now lands, and its step conversation with it: the task is
+	// working again, on a run that has an owner.
+	fresh := fx.firing(t, h)
+	inserted, err := stores.Blueprints.CreateRunIfNotFiredSystem(ctx, fx.orgID, fresh)
+	if err != nil || !inserted {
+		t.Fatalf("re-fire after sweep = (%v, %v), want (true, nil) — the index is still held", inserted, err)
+	}
+	childID := fx.enqueueChild(t, h, fresh.ID)
+
+	var childCount int
+	if err := h.AdminDB.QueryRow(
+		`SELECT count(*) FROM conversations WHERE blueprint_run_id = $1`, fresh.ID,
+	).Scan(&childCount); err != nil {
+		t.Fatalf("count fresh run children: %v", err)
+	}
+	if childCount != 1 {
+		t.Errorf("fresh run has %d children, want 1 (%s)", childCount, childID)
+	}
+	if status, _, _ := orphanBlueprintState(t, h, orphanID); status != string(domain.BlueprintRunStatusFailed) {
+		t.Errorf("orphan status = %q, want failed", status)
+	}
+	// And the sweep is not hungry: the fresh run has a child, so it is never a
+	// candidate no matter how long it runs.
+	pgtest.MustExec(t, h.AdminDB,
+		`UPDATE blueprint_runs SET started_at = now() - '1 day'::interval WHERE id = $1`, fresh.ID)
+	if n, err := store.FailBlueprintRunsOrphanedAtMint(ctx, domain.BlueprintOrphanedAtMintGrace); err != nil || n != 0 {
+		t.Errorf("sweep after re-fire = (%d, %v), want (0, nil) — the replacement run must survive", n, err)
 	}
 }

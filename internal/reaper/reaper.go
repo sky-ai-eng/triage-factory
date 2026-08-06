@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
@@ -113,6 +114,17 @@ func RunReaper(ctx context.Context, store Store, interval time.Duration, staleTh
 				reaperLog.Warn("claim-desync sweep failed; retrying next tick", "error", herr)
 			} else if released > 0 {
 				reaperLog.Info("healed run↔claim desyncs", "released_claims", released)
+			}
+			// Mint-crash orphans: a 'running' blueprint with no child
+			// conversation, which every arm above looks past because they all
+			// join through conversations. The grace is a property of the shape,
+			// not of this deployment, so it comes from the constant both
+			// recovery surfaces read rather than a knob.
+			if n, oerr := store.FailBlueprintRunsOrphanedAtMint(ctx, domain.BlueprintOrphanedAtMintGrace); oerr != nil {
+				reaperLog.Warn("orphaned-at-mint blueprint sweep failed; retrying next tick", "error", oerr)
+			} else if n > 0 {
+				reaperLog.Info("failed blueprint runs orphaned at mint", "count", n,
+					"grace", domain.BlueprintOrphanedAtMintGrace)
 			}
 		}
 	}

@@ -769,7 +769,17 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 		if err != nil {
 			return err
 		}
-		total = parked + released
+
+		// Mint-crash arm: the mirror of the park above, one level up. That arm
+		// heals a live child under a dead parent; this one heals a live parent
+		// with no child at all. Order between the two is immaterial — a parent
+		// this arm fails has no child for the park to owe anything to, which is
+		// the whole reason it needs its own arm.
+		orphaned, err := failBlueprintRunsOrphanedAtMint(ctx, q)
+		if err != nil {
+			return err
+		}
+		total = parked + released + orphaned
 		return nil
 	})
 	if err != nil {
@@ -803,6 +813,43 @@ func healClaimDesyncs(ctx context.Context, q queryer) (released int, err error) 
 		WHERE claims.conversation_id = c.id AND claims.released_at IS NULL
 		  AND c.status IN (`+runTerminalStatusesSQL+`)
 	`)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
+
+// failBlueprintRunsOrphanedAtMint terminal-fails every 'running' blueprint_run
+// that holds no child conversation and is older than the shared grace: the
+// firing path's mint→enqueue crash window, where the parent committed and its
+// first step never did. With no child there is no claim and no conversation, so
+// every other recovery arm — here, in ResetProcessingRuns, in the leader reaper
+// — joins straight past it while it keeps holding the one-active-auto-run index
+// against its task.
+//
+// Own DB time, and nothing but the parent row to write: no child to park, no
+// claim to release, and no task touch. Freeing the index is the point — the
+// task's already-queued firing intent then drains into a fresh, fully-minted
+// run, which is why this fails rather than trying to re-mint the step (that
+// would duplicate the firing path's config derivation inside a recovery path).
+//
+// The grace makes racing a live mint impossible rather than unlikely. Retention
+// can't manufacture a false positive either: nothing purges conversation rows,
+// and archival keeps the row.
+func failBlueprintRunsOrphanedAtMint(ctx context.Context, q queryer) (int, error) {
+	res, err := q.ExecContext(ctx, `
+		UPDATE blueprint_runs
+		SET status = 'failed', completed_at = now(), abort_reason = $2
+		WHERE status = 'running'
+		  AND started_at < now() - make_interval(secs => $1)
+		  AND NOT EXISTS (
+		      SELECT 1 FROM conversations c WHERE c.blueprint_run_id = blueprint_runs.id
+		  )
+	`, domain.BlueprintOrphanedAtMintGrace.Seconds(), domain.BlueprintAbortOrphanedAtMint)
 	if err != nil {
 		return 0, err
 	}
