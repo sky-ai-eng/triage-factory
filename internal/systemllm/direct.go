@@ -24,22 +24,16 @@ import (
 // shape the Claude Code Bedrock docs recommend.
 const defaultBedrockHaikuModel = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
-// directHTTPClient is the transport every direct provider call shares, so
-// the three provider branches below get one instrumented client between
-// them instead of each needing its own.
+// directHTTPClient is the instrumented transport all three provider
+// branches below share. Hoisted to package level because buildDirectClient
+// runs per call — once per scoring batch, repo profile, and classification
+// vote — and a fresh *http.Client each time would discard the connection
+// pool with it.
 //
-// Hoisted to package level because buildDirectClient runs per call: an
-// anthropic.Client is constructed for every scoring batch, every repo
-// profile, every classification vote, and building a fresh *http.Client
-// each time would throw away the connection pool along with it.
-//
-// Zero Timeout on purpose — it matches http.DefaultClient, which is what
-// the SDK uses when no client is supplied, so installing this changes the
-// transport and nothing else. The request deadline stays where it already
-// was: on the caller's context and the SDK's own per-request budget.
-//
-// Bedrock's SigV4 signing is unaffected — it is registered as SDK
-// middleware, which runs above the HTTP client rather than inside it.
+// Zero Timeout matches http.DefaultClient, which is what the SDK uses when
+// no client is supplied, so this changes the transport and nothing else;
+// the deadline stays on the caller's ctx and the SDK's own budget. Bedrock
+// SigV4 signing is unaffected — it is SDK middleware, above the client.
 var directHTTPClient = &http.Client{Transport: telemetry.TracedTransport(nil, "llm")}
 
 // completeDirect calls the org's configured Anthropic/Bedrock provider
@@ -78,10 +72,9 @@ func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*C
 	// caller's existing fallback (leave for next poll cycle) handles it
 	// exactly like any other completeDirect error.
 	provider := providerKey(creds)
-	// providerKey itself is the breaker's key and embeds the configured
-	// base URL, which can name an operator's private gateway — so the span
-	// gets the coarse family instead. Which vendor answered is the useful
-	// dimension; where it lives is not the span's business.
+	// providerKey embeds the configured base URL, which can name an
+	// operator's private gateway, so the span gets the coarse family
+	// instead — which vendor answered is the useful dimension.
 	trace.SpanFromContext(ctx).SetAttributes(telemetry.Provider(providerFamily(creds)))
 	if backoffErr := r.breaker.check(provider); backoffErr != nil {
 		return nil, backoffErr
@@ -191,11 +184,10 @@ func extractText(msg *anthropic.Message) string {
 // overall vendor capacity, not a per-key quota, so every org on that
 // default endpoint deliberately shares one breaker entry — that's the
 // whole point of keying by provider instead of by org.
-// providerFamily is providerKey reduced to the vendor alone, for the span
-// attribute. providerKey has to distinguish two different gateways for the
-// same vendor — it keys a circuit breaker, and one being down says nothing
-// about the other — but a span wants the opposite: a stable, bounded value
-// that carries no deployment topology off the host.
+// providerFamily is providerKey reduced to the vendor, for the span
+// attribute. providerKey must distinguish two gateways for the same vendor
+// (it keys a breaker, and one being down says nothing about the other); a
+// span wants the opposite — bounded, and carrying no topology off the host.
 func providerFamily(creds map[string]string) string {
 	switch {
 	case creds["ANTHROPIC_API_KEY"] != "":

@@ -384,12 +384,10 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 
 	// Fetch fresh state — open PRs get the full fragment (includes CheckRuns).
 	//
-	// The two calls below are the most expensive thing a poll cycle does,
-	// and they are one GraphQL round trip each regardless of batch size, so
-	// the batch count is what explains a slow one. `full` separates them:
-	// the open batch pulls the whole fragment including check runs, the
-	// terminal batch pulls the discovery fragment, and they are not
-	// comparable durations.
+	// The two calls below are the most expensive thing a poll cycle does —
+	// one GraphQL round trip each regardless of batch size, so the count is
+	// what explains a slow one. `full` separates them: the open batch pulls
+	// check runs too, so their durations aren't comparable.
 	refreshed := make(map[string]domain.PRSnapshot)
 	if len(openItems) > 0 {
 		nodeIDs := make([]string, len(openItems))
@@ -420,10 +418,9 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 
 	// Phase 3: Diff + emit events.
 	//
-	// No network here — this is snapshot comparison plus the entity writes
-	// each transition implies, and its span exists to separate that cost
-	// from the fetch above. A cycle that is slow in this phase and fast in
-	// the one before it is a database problem, not a GitHub one.
+	// No network here — snapshot comparison plus the entity writes each
+	// transition implies. A cycle slow in this phase and fast in the one
+	// before it is a database problem, not a GitHub one.
 	ctx, diffSpan := tracer.Start(ctx, "tracker.github.diff_emit")
 
 	allItems := append(openItems, terminalItems...)
@@ -516,10 +513,9 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 	return eventsEmitted, "", nil
 }
 
-// refreshPRBatch is client.RefreshPRs under a span. Wrapped rather than
-// instrumented at the two call sites because both want the same three
-// facts — how many PRs, which fragment, how long — and a helper is the only
-// way to state them once.
+// refreshPRBatch is client.RefreshPRs under a span, wrapped rather than
+// instrumented at both call sites so the same three facts — how many PRs,
+// which fragment, how long — are stated once.
 func (t *Tracker) refreshPRBatch(ctx context.Context, client *ghclient.Client, nodeIDs []string, full bool) (map[string]domain.PRSnapshot, error) {
 	ctx, span := tracer.Start(ctx, "tracker.github.refresh_prs",
 		trace.WithAttributes(telemetry.Count(len(nodeIDs)), attribute.Bool("full", full)))
@@ -650,11 +646,9 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 		dispatched = i + 1
 		g.Go(func() error {
 			// One span per repo, so the fan-out shows as concurrent work
-			// and a single slow or throttled repo is identifiable as the
-			// one holding the cycle up. Which repo it was is deliberately
-			// not on the span — a repo name is tenant data, and the
-			// concurrency limit is small enough that the slow one is
-			// findable by its position and duration.
+			// and the repo holding the cycle up is identifiable by
+			// duration. Which repo it was stays off the span — that's a
+			// name, and the concurrency limit is small.
 			ctx, span := tracer.Start(ctx, "tracker.github.list_prs")
 			defer span.End()
 
@@ -688,8 +682,7 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 					// here (not at the next repo) next cycle.
 					results[i] = repoListResult{rateLimited: true}
 					// Not an error status: exhausting the budget is a
-					// documented, handled outcome with a resume cursor
-					// behind it, not a malfunction.
+					// handled outcome with a resume cursor behind it.
 					span.SetAttributes(telemetry.Outcome("rate_limited"))
 					return nil
 				}
@@ -1066,8 +1059,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		return 0, fmt.Errorf("batch fetch jira: %w", err)
 	}
 
-	// Phase 3: Diff + emit events. Network-free, like the GitHub twin —
-	// its span separates snapshot/diff/write cost from fetch cost.
+	// Phase 3: Diff + emit events. Network-free, like the GitHub twin.
 	ctx, diffSpan := tracer.Start(ctx, "tracker.jira.diff_emit")
 
 	eventsEmitted := 0
@@ -1189,9 +1181,8 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	if len(projects) == 0 {
 		return nil, nil
 	}
-	// Count is projects, not issues: the JQL fan-out below is one search
-	// per configured project (sometimes two), so that is the number that
-	// predicts how long this takes.
+	// Count is projects, not issues: the fan-out below is one JQL search
+	// per configured project (sometimes two).
 	ctx, span := tracer.Start(ctx, "tracker.jira.discover",
 		trace.WithAttributes(telemetry.Count(len(projects))))
 	defer span.End()
@@ -1277,11 +1268,10 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 // pinned at their last-captured value. Acceptable — description relevance
 // drops fast once a ticket is off the user's plate.
 func (t *Tracker) batchFetchJira(ctx context.Context, client *jiraclient.Client, baseURL string, keys []string, projects JiraRules) (map[string]jiraIssueState, error) {
-	// This loop is serial and its length is the active-entity count divided
-	// by the batch size, so its cost grows with every issue TF tracks and
-	// it is the poll cycle's most likely creeping regression. Untraced it
-	// is invisible — nothing else measures it, and the per-request spans
-	// underneath are each individually fast.
+	// Serial, with one iteration per batch of tracked issues — so its cost
+	// grows with every issue TF tracks, making it the cycle's most likely
+	// creeping regression. The per-request spans underneath are each fast,
+	// so nothing else would show it.
 	ctx, span := tracer.Start(ctx, "tracker.jira.batch_fetch",
 		trace.WithAttributes(telemetry.Count(len(keys))))
 	defer span.End()

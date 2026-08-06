@@ -291,8 +291,7 @@ func applyPGPoolDefaultsForRole(d *sql.DB, role runmode.DeployRole) {
 // registerPoolMetrics publishes a pool's sql.DBStats as OTel gauges,
 // logging and continuing on failure. Diagnostics are never a boot
 // dependency — the same posture internal/telemetry takes when the whole
-// exporter fails to build — and a process that runs without pool gauges is
-// strictly better than one that refuses to start because of them.
+// exporter fails to build.
 func registerPoolMetrics(handle *sql.DB, driverName, pool string) {
 	if err := db.RegisterPoolMetrics(handle, driverName, pool); err != nil {
 		appLog.Warn("db pool metrics registration failed; pool saturation will not be visible", "pool", pool, "error", err)

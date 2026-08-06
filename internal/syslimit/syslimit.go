@@ -53,12 +53,10 @@ func (l *Limiter) Acquire(ctx context.Context) error {
 	if l == nil {
 		return nil
 	}
-	// Fast path first: an uncontended acquire is the common case and gets
-	// no span, so the spans that do exist all mean "this caller queued."
-	// That is the signal worth having — queueing on the shared 8 slots is
-	// invisible today, and the scorer's per-cycle fan-out is unbounded, so
-	// a cycle can sit here for an arbitrarily long time looking like a slow
-	// LLM call.
+	// Fast path first, so the spans that do exist all mean "this caller
+	// queued" — the signal worth having, since the scorer's per-cycle
+	// fan-out is unbounded and a cycle can sit here for an arbitrarily long
+	// time looking like a slow LLM call.
 	select {
 	case l.sem <- struct{}{}:
 		return nil
@@ -73,8 +71,8 @@ func (l *Limiter) Acquire(ctx context.Context) error {
 		span.SetAttributes(telemetry.Outcome("acquired"))
 		return nil
 	case <-ctx.Done():
-		// Not an error status: a caller giving up on a full queue during
-		// shutdown, or on its own deadline, is the limiter working.
+		// Not an error status: giving up on a full queue during shutdown,
+		// or on the caller's own deadline, is the limiter working.
 		span.SetAttributes(telemetry.Outcome("cancelled"))
 		return ctx.Err()
 	}

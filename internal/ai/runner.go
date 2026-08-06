@@ -152,9 +152,8 @@ func (r *Runner) run(ctx context.Context) {
 		r.mu.Unlock()
 	}()
 
-	// Started after the single-flight guard, so a re-entrant call that
-	// bails produces no span — a cycle that did nothing because another
-	// was already running is not a cycle.
+	// After the single-flight guard, so a re-entrant call that bails
+	// produces no span — that isn't a cycle.
 	ctx, span := telemetry.StartJobCycle(ctx, "scorer", r.orgID)
 	defer span.End()
 

@@ -71,14 +71,12 @@ func (s *Store) SyntheticClaimsWithTx(ctx context.Context, orgID, userID string,
 // guardrails enforced at the public layer — once we're past those,
 // the SQL is identical.
 func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
-	// One span per claims-bound transaction, which is the handler-side
-	// atomicity boundary: every RLS-scoped write in the process passes
-	// through here. It measures something nothing else does — otelsql's
-	// statement spans cover each query, but the gap between them (holding
-	// the connection, the closure's own work, the commit) is invisible
-	// without a span that spans the whole thing. userID stays off it
-	// deliberately; org.id already scopes the trace, and per-user spans
-	// would attach an identity to every query a person runs.
+	// One span per claims-bound transaction — the handler-side atomicity
+	// boundary every RLS-scoped write passes through. otelsql covers each
+	// statement, but the gap between them (holding the connection, the
+	// closure's own work, the commit) is invisible without this. userID
+	// stays off: org.id already scopes the trace, and a per-user span
+	// attaches an identity to every query a person runs.
 	ctx, span := tracer.Start(ctx, "db.tx.claims_bound",
 		trace.WithAttributes(telemetry.OrgID(orgID)))
 	defer span.End()
@@ -118,10 +116,9 @@ func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn f
 	}
 
 	if err := fn(s.txStoresFromTx(tx)); err != nil {
-		// The closure's own failure, which rolls the tx back via the
-		// defer. Not recorded as an exception: a handler returning a
-		// validation error through here is the normal way a write is
-		// refused, and the error text can carry tenant data.
+		// Rolled back via the defer. Not recorded as an exception: a
+		// handler refusing a write with a validation error is normal, and
+		// the error text can carry tenant data.
 		span.SetStatus(codes.Error, "tx body")
 		return err
 	}

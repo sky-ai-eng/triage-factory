@@ -76,13 +76,11 @@ func WaitFor(ctx context.Context, entities db.EntityStore, trigger func(orgID st
 	if ctx.Err() != nil {
 		return
 	}
-	// This blocks the delegation spawner for up to the caller's timeout —
-	// 90 seconds in the production path — and nothing downstream records
-	// that it happened, so the wait surfaces only as spawn latency with no
-	// explanation. The outcome attribute is what makes it answerable:
-	// "classified" means the wait did its job, "timeout" means the run
-	// proceeded without project context, and the two look identical from
-	// the outside.
+	// Blocks the delegation spawner for up to the caller's timeout — 90s
+	// in production — and surfaces only as unexplained spawn latency. The
+	// outcome is what makes it answerable: "classified" means the wait did
+	// its job, "timeout" means the run proceeded without project context,
+	// and from the outside the two look identical.
 	ctx, span := tracer.Start(ctx, "projectclassify.wait",
 		trace.WithAttributes(telemetry.OrgID(orgID), telemetry.EntityID(entityID)))
 	defer span.End()

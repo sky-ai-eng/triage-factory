@@ -175,19 +175,16 @@ type tokenResponse struct {
 // A transport failure returns a plain wrapped error; a non-2xx or an `error`
 // field wraps ErrTokenEndpoint so the rotation-dead case is distinguishable.
 func (m *Minter) requestToken(ctx context.Context, form url.Values) (_ Token, err error) {
-	// The OAuth round trip hides inside credential resolution: a caller
-	// asking the token cache for a client can, on a miss, end up here doing
-	// a full refresh against Atlassian, and under the caller's span alone
-	// that time is charged to whatever the client was used for afterwards.
-	//
-	// grant_type is a closed set fixed by this package's two callers, so it
-	// separates the first exchange from a rotation without opening the
-	// attribute up. The form's other fields — client secret, code, refresh
-	// token — are credentials and go nowhere near a span.
+	// The OAuth round trip hides inside credential resolution: a token-cache
+	// miss ends up here doing a full refresh against Atlassian, and under
+	// the caller's span alone that time is charged to whatever the client
+	// was used for afterwards. grant_type separates a first exchange from a
+	// rotation; the form's other fields are credentials and go nowhere near
+	// a span.
 	//
 	// Named error return so the failure exits below don't each need a
-	// status line. The message is fixed rather than err.Error(): a failed
-	// token request's error text embeds a truncated response body.
+	// status line. Fixed message, not err.Error() — a failed token
+	// request's error text embeds a truncated response body.
 	ctx, span := tracer.Start(ctx, "jiraoauth.token_request",
 		trace.WithAttributes(telemetry.Disposition(form.Get("grant_type"))))
 	defer span.End()

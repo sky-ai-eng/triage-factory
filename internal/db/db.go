@@ -98,9 +98,8 @@ func OpenForCLI() (*sql.DB, string, error) {
 		if dsn == "" {
 			return nil, "", fmt.Errorf("TF_MODE=multi requires TF_DATABASE_URL")
 		}
-		// PoolAdmin: TF_DATABASE_URL is the superuser DSN, the same one
-		// the server's admin pool uses. A CLI invocation is short-lived
-		// and opens no second pool, so this is its only one.
+		// PoolAdmin: TF_DATABASE_URL is the superuser DSN, the same one the
+		// server's admin pool uses, and a CLI invocation opens no second.
 		conn, err := OpenTraced("pgx", dsn, PoolAdmin)
 		if err != nil {
 			return nil, "", fmt.Errorf("open postgres: %w", err)

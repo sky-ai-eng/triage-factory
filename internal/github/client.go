@@ -103,11 +103,9 @@ func NewClient(baseURL, pat string) *Client {
 	return &Client{
 		baseURL: APIBase(baseURL),
 		pat:     pat,
-		// Instrumented at the transport, which is what makes the coverage
-		// total: REST, GraphQL, artifact downloads (which clone this
-		// client and keep its Transport), and the handful of calls that
-		// build a request and hand it straight to c.http.Do without going
-		// through the retry core all produce a span, because none of them
+		// At the transport, so REST, GraphQL, artifact downloads (which
+		// clone this client, keeping its Transport), and the direct-Do
+		// calls that skip the retry core are all covered — none of them
 		// can reach the network any other way.
 		http: telemetry.TracedHTTPClient(30*time.Second, "github"),
 	}
@@ -129,10 +127,9 @@ func NewProxyClient(proxyURL, placeholder string) *Client {
 	return &Client{
 		baseURL: proxyURL,
 		pat:     placeholder,
-		// The span here covers the executor's hop to its own sidecar, not
-		// the sidecar's hop to GitHub — the sidecar is span-free by
-		// standing decision, so this is the only view of that call there
-		// is, and it is the one that matters for the run's latency.
+		// Covers the executor's hop to its own sidecar, not the sidecar's
+		// hop to GitHub — the sidecar is span-free by standing decision,
+		// so this is the only view of the call there is.
 		http:     telemetry.TracedHTTPClient(30*time.Second, "github"),
 		viaProxy: true,
 	}
@@ -147,9 +144,7 @@ func NewProxyClient(proxyURL, placeholder string) *Client {
 //
 // Tracing follows the same ownership: a supplied client replaces the
 // instrumented one NewClient built, so a caller that wants spans wraps its
-// own Transport with telemetry.TracedTransport. Left to the caller rather
-// than forced, because the reason to reach for this constructor is control
-// over the transport stack.
+// own Transport with telemetry.TracedTransport.
 func NewClientWithHTTPClient(baseURL, pat string, hc *http.Client) *Client {
 	c := NewClient(baseURL, pat)
 	if hc != nil {

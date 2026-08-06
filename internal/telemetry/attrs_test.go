@@ -16,18 +16,12 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-// approvedKeys is the whole span-attribute vocabulary TF is allowed to
-// emit from its own instrumentation, and this test is the gate on it.
-//
-// The point is not to catch a typo. Spans leave the process for a backend
-// an operator may not control, so every key here was a decision that a
-// repo name, a PR title, a username, a branch, a file path, or a message
-// body is NOT what it carries. A new helper appearing without a line here
-// fails the test, which is the moment to make that decision rather than
-// three months later when a customer's repository inventory is already in
-// someone's trace store.
-//
-// Keep sorted; the failure message tells you what to add.
+// approvedKeys is the vocabulary TF is allowed to emit from its own
+// instrumentation. Not a typo check: every key here was a decision that a
+// repo name, title, username, or file path is NOT what it carries, and a
+// new helper appearing without a line here fails the test — which is the
+// moment to make that decision, rather than once a customer's repository
+// inventory is already in someone's trace store. Keep sorted.
 var approvedKeys = []string{
 	"attempt",
 	"claim.attempt",
@@ -65,10 +59,10 @@ func TestAttributeHelpersEmitOnlyApprovedKeys(t *testing.T) {
 	}
 }
 
-// TestEveryAttributeHelperIsCovered parses attrs.go and fails if it
-// declares an exported function this test does not exercise above. Without
-// it, a new helper could carry a repo name to a trace backend and the test
-// above would still pass, because nothing would call it.
+// TestEveryAttributeHelperIsCovered parses attrs.go and fails on an
+// exported function the test above doesn't call — without it a new helper
+// could carry a repo name to a trace backend and the gate would still pass,
+// because nothing would exercise it.
 func TestEveryAttributeHelperIsCovered(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "attrs.go", nil, 0)
@@ -85,8 +79,7 @@ func TestEveryAttributeHelperIsCovered(t *testing.T) {
 		declared = append(declared, fn.Name.Name)
 	}
 
-	// The exercised set, derived from the test above by name so the two
-	// can't drift silently.
+	// Mirrors the calls above by name.
 	exercised := map[string]bool{
 		"OrgID": true, "TeamID": true, "EventID": true, "EventType": true,
 		"EntityID": true, "TaskID": true, "ConversationID": true,
@@ -103,17 +96,15 @@ func TestEveryAttributeHelperIsCovered(t *testing.T) {
 }
 
 // TestScrubbedTracerProviderDropsURLAttributes covers the other half of
-// the hygiene rule: attributes TF does not set itself. otelhttp's client
-// transport records the full outbound URL, and TF's outbound URLs contain
-// repository names and issue keys, so the scrubbing provider has to remove
-// it — and has to leave everything else alone.
+// the hygiene rule: attributes TF does not set itself. otelhttp records
+// the full outbound URL, and TF's carry repo names and issue keys — so the
+// scrubber must remove those keys and leave everything else alone.
 func TestScrubbedTracerProviderDropsURLAttributes(t *testing.T) {
 	restoreTraceGlobals(t)
 	recorder := tracetest.NewSpanRecorder()
-	// Installed on the global, not handed to the provider directly: the
-	// scrubber resolves otel.GetTracerProvider() per Tracer call, and that
-	// indirection — which is what lets an outbound client be constructed
-	// before Init — is part of what this test covers.
+	// Installed on the global rather than handed over directly, so the
+	// per-Tracer-call resolution that lets a client be built before Init is
+	// part of what this covers.
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
 
 	_, span := ScrubbedTracerProvider().Tracer("test").Start(context.Background(), "outbound")

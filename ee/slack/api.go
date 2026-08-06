@@ -27,9 +27,8 @@ var slackAPIBase = "https://slack.com/api"
 // the in-network GoTrue admin call, just with a shorter budget since these
 // calls run inline in a user-facing request.
 //
-// One package-level client backs every Slack call, so instrumenting it here
-// covers the whole Slack surface — the connect handshake, message posts,
-// the ingest replies — without an option threaded through any of them.
+// One package-level client backs every Slack call, so instrumenting it
+// here covers the whole surface with no option threaded through any of it.
 var slackHTTPClient = telemetry.TracedHTTPClient(15*time.Second, "slack")
 
 // authTestResult is the subset of Slack's auth.test response the connect

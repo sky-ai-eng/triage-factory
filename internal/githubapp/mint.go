@@ -332,22 +332,19 @@ func (m *Minter) MintScopedInstallationToken(ctx context.Context, installationID
 // a non-nil body is JSON-marshalled to narrow the token (repositories /
 // permissions).
 func (m *Minter) mintInstallationToken(ctx context.Context, installationID int64, body any) (_ Token, err error) {
-	// A span of its own because of where this gets called from: credential
-	// resolution. A caller asks for a client and gets one, and nothing in
-	// that call's shape suggests it may have just signed a JWT and made a
-	// round trip to GitHub first. Under the caller's span alone the cost
-	// lands on whatever the client was then used for.
-	//
-	// scoped distinguishes the two entry points — a narrowed token
-	// (repositories/permissions) from a full-installation one — without
-	// naming either. installationID stays off: it identifies the customer's
-	// GitHub org install as surely as its name would.
+	// Its own span because of where this is called from: credential
+	// resolution. A caller asks for a client and gets one; nothing in that
+	// call's shape suggests it may have signed a JWT and round-tripped to
+	// GitHub first, so under the caller's span the cost lands on whatever
+	// the client was then used for. scoped separates a narrowed token from
+	// a full-installation one; installationID stays off, since it
+	// identifies the customer's install as surely as its name would.
 	ctx, span := tracer.Start(ctx, "githubapp.mint_installation_token",
 		trace.WithAttributes(attribute.Bool("scoped", body != nil)))
 	defer span.End()
-	// Named error return so the many failure exits below don't each need a
-	// status line. The message is fixed rather than err.Error(): a failed
-	// mint's error text carries a truncated GitHub response body.
+	// Named error return so the failure exits below don't each need a
+	// status line. Fixed message, not err.Error() — a failed mint's error
+	// text carries a truncated GitHub response body.
 	defer func() {
 		if err != nil {
 			span.SetStatus(codes.Error, "mint failed")

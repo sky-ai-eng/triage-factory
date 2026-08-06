@@ -14,26 +14,25 @@ func TestHTTPSpanNameUsesRoutePattern(t *testing.T) {
 		want    string
 	}{
 		{
-			// The case the whole formatter exists for: without it the span
-			// would be named after the concrete path and every org would
-			// mint its own span name.
+			// The case the formatter exists for: otherwise every org mints
+			// its own span name from the concrete path.
 			name:    "method-qualified pattern is used verbatim",
 			method:  http.MethodGet,
 			pattern: "GET /api/orgs/{org_id}/teams",
 			want:    "GET /api/orgs/{org_id}/teams",
 		},
 		{
-			// The SPA catch-all, the JSON 404, and the GoTrue proxy are all
-			// registered without a method.
+			// The SPA catch-all, JSON 404, and GoTrue proxy are registered
+			// without a method.
 			name:    "method-less pattern gets the request's method",
 			method:  http.MethodGet,
 			pattern: "/",
 			want:    "GET /",
 		},
 		{
-			// Span start, before ServeMux has routed. otelhttp calls the
-			// formatter again afterwards, so this is only what an unrouted
-			// request keeps.
+			// Span start, before ServeMux routes. otelhttp calls the
+			// formatter again after, so this is what an unrouted request
+			// keeps.
 			name:    "no pattern falls back to the method",
 			method:  http.MethodPost,
 			pattern: "",

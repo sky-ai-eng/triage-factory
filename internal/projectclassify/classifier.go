@@ -244,14 +244,11 @@ func truncateDescription(desc string) string {
 // Multi mode reads the same .md set from the blob store (control hosts no KB
 // on disk); local mode keeps the byte-identical on-disk read.
 func (r *Runner) readProjectKB(ctx context.Context, projectID string) (string, bool, error) {
-	// One span per vote, and a vote happens per (entity, project) pair —
-	// so on the multi-mode branch this is N×M blob-store round trips per
-	// cycle, each one a network call the classifier makes before it can
-	// even build its prompt. Local mode reads the same set off disk and is
-	// covered by the same span, which is what makes the two comparable.
-	//
-	// The byte count is the number that explains a slow read; the file
-	// names and their contents are project data and stay out of it.
+	// One span per vote, and a vote runs per (entity, project) pair — so
+	// multi mode makes N×M blob-store round trips per cycle before it can
+	// even build a prompt. Local mode reads the same set off disk under the
+	// same span, which is what makes the two comparable. The byte count
+	// explains a slow read; the file names and contents are project data.
 	ctx, span := tracer.Start(ctx, "projectclassify.read_kb")
 	defer span.End()
 

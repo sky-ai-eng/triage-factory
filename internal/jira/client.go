@@ -1067,17 +1067,10 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 	}
 }
 
-// awaitRetry blocks out one backoff between attempts under its own span.
-//
-// doRequest can sleep several times per logical call — once per retried
-// transport error, once per throttled response — and untraced those sleeps
-// are indistinguishable from a slow Jira: the caller's span is long and
-// every transport span inside it is fast. reason separates the two causes
-// (a reset connection is a different problem from a 429), and the attempt
-// number separates one long wait from several short ones.
-//
-// Neither outcome is an error status: backing off is the client working,
-// and a cancelled wait is the caller leaving.
+// awaitRetry blocks out one backoff between attempts under its own span,
+// the Jira twin of internal/github's. doRequest can sleep several times
+// per logical call, so reason separates the two causes — a reset
+// connection is a different problem from a 429.
 func awaitRetry(ctx context.Context, attempt int, wait time.Duration, reason string) error {
 	ctx, span := tracer.Start(ctx, "jira.retry.backoff",
 		trace.WithAttributes(telemetry.Attempt(attempt), telemetry.Disposition(reason)))

@@ -126,8 +126,7 @@ func (r *Runner) run(ctx context.Context) {
 		r.mu.Unlock()
 	}()
 
-	// Started after the single-flight guard, so a re-entrant call that
-	// bails produces no span — see the scorer's twin.
+	// After the single-flight guard — see the scorer's twin.
 	ctx, span := telemetry.StartJobCycle(ctx, "classifier", r.orgID)
 	defer span.End()
 

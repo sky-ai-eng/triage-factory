@@ -43,11 +43,10 @@ func (s *Store) SyntheticClaimsWithTx(ctx context.Context, orgID, userID string,
 // JWT claims differently.
 func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
 	_ = userID // accepted for signature parity; SQLite has no auth concept
-	// The Postgres twin's span, under the same name and carrying the same
-	// attribute, so a local-mode trace has the same shape as a multi-mode
-	// one and a dashboard written against either reads both. org.id is the
-	// local sentinel here rather than a real tenant — constant, but present,
-	// which is what keeps the two shapes identical.
+	// The Postgres twin's span, same name and attribute, so a local-mode
+	// trace has the same shape as a multi-mode one. org.id is the local
+	// sentinel here — constant, but present, which is what keeps the two
+	// shapes identical.
 	ctx, span := tracer.Start(ctx, "db.tx.claims_bound",
 		trace.WithAttributes(telemetry.OrgID(orgID)))
 	defer span.End()
@@ -107,10 +106,8 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Ext:              db.BuildStoreExtensions("sqlite", tx, tx),
 	}
 	if err := fn(txStores); err != nil {
-		// The closure's own failure, which rolls the tx back via the
-		// defer. Not recorded as an exception: a handler returning a
-		// validation error through here is the normal way a write is
-		// refused, and the error text can carry tenant data.
+		// See the Postgres twin: rolled back via the defer, and not
+		// recorded as an exception.
 		span.SetStatus(codes.Error, "tx body")
 		return err
 	}

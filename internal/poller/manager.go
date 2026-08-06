@@ -396,12 +396,10 @@ func (m *Manager) startGitHub() {
 // failure on org A shouldn't starve orgs B..N of polls.
 func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 	m.stampGitHubHeartbeat()
-	// The trace root for everything a tick does: per-org refreshes, the
-	// GitHub calls under them, the rate-limit waits between those. A fresh
-	// root per cycle rather than a continuation of anything — the ticker
-	// that fires this has no caller and coalesces nothing, so there is no
-	// parent to inherit and inventing one would join unrelated cycles into
-	// a trace that never ends.
+	// The trace root for everything a tick does. Fresh per cycle: the
+	// ticker that fires this has no caller, so there is no parent to
+	// inherit and inventing one would join unrelated cycles into a trace
+	// that never ends.
 	ctx, span := tracer.Start(context.Background(), "poll.github",
 		trace.WithAttributes(telemetry.Source("github")))
 	defer span.End()
@@ -447,9 +445,8 @@ func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 // installation it falls back to the org's PAT (tier 3) over the full
 // configured set.
 func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
-	// The per-org child of the cycle root — and a root in its own right
-	// when PollGitHubOnce calls this directly, which needs no special
-	// handling: an empty parent context simply starts a new trace.
+	// Per-org child of the cycle root — and a root in its own right when
+	// PollGitHubOnce calls this directly, which needs no special handling.
 	ctx, span := tracer.Start(ctx, "poll.github.org",
 		trace.WithAttributes(telemetry.Source("github"), telemetry.OrgID(orgID)))
 	defer span.End()

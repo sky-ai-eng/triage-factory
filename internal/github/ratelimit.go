@@ -121,12 +121,9 @@ func (c *Client) awaitBudget(ctx context.Context) error {
 	if wait <= 0 {
 		return nil
 	}
-	// Only past this point does the call do anything — block, or refuse.
-	// The three returns above are the overwhelming majority and get no
-	// span, so a healthy client's traces aren't mostly no-ops. What is
-	// left is a wait of up to maxRateLimitWait that today is
-	// indistinguishable from a slow request, because it happens before
-	// any request is sent.
+	// Only past here does the call do anything — block, or refuse. The
+	// returns above are the overwhelming majority and get no span, so a
+	// healthy client's traces aren't mostly no-ops.
 	ctx, span := tracer.Start(ctx, "github.ratelimit.await")
 	defer span.End()
 
@@ -144,15 +141,12 @@ func (c *Client) awaitBudget(ctx context.Context) error {
 
 // awaitRetry blocks out one backoff between attempts under its own span.
 //
-// These sleeps are why a GitHub call can take five minutes without a slow
-// request anywhere in it: a Retry-After GitHub sent, a primary-budget reset
-// it named, or blind exponential backoff, all served by sleeping inline.
-// Untraced they are invisible — the caller's span just takes minutes and
-// the transport spans inside it are all fast. The attempt number is what
-// separates "one long wait" from "five short ones."
-//
-// Neither outcome is an error status: waiting out a rate limit is the
-// client working, and a cancelled wait is the caller leaving.
+// These sleeps are why a GitHub call can take five minutes with no slow
+// request in it: untraced, the caller's span just takes minutes while
+// every transport span inside it is fast. The attempt number separates
+// "one long wait" from "five short ones". Neither outcome is an error
+// status — waiting out a rate limit is the client working, and a
+// cancelled wait is the caller leaving.
 func awaitRetry(ctx context.Context, attempt int, wait time.Duration) error {
 	ctx, span := tracer.Start(ctx, "github.ratelimit.backoff",
 		trace.WithAttributes(telemetry.Attempt(attempt)))

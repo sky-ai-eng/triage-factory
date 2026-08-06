@@ -121,18 +121,17 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 			return
 		}
 
-		// The admin-pool read that resolves the cookie to a session row.
-		// It is the dominant per-request auth cost — every authenticated
-		// request pays it before any handler work begins — and otelsql's
-		// statement span alone wouldn't say which part of the stack asked.
+		// The dominant per-request auth cost: every authenticated request
+		// pays this admin-pool read before any handler work begins, and
+		// otelsql's statement span alone wouldn't say who asked.
 		lookupCtx, lookupSpan := tracer.Start(r.Context(), "session.lookup")
 		sess, err := s.authDeps.sessions.LookupSystem(lookupCtx, sid)
 		switch {
 		case err != nil:
 			lookupSpan.SetStatus(codes.Error, "lookup failed")
 		case sess == nil:
-			// Not an error: an expired or revoked cookie is the normal
-			// way a session ends, and a 401 here is the system working.
+			// Not an error: an expired or revoked cookie is how a
+			// session normally ends.
 			lookupSpan.SetAttributes(telemetry.Outcome("not_found"))
 		default:
 			lookupSpan.SetAttributes(telemetry.Outcome("found"))
@@ -161,10 +160,9 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 			}
 		}
 
-		// Verify is CPU-bound signature checking against a cached JWKS,
-		// except when the cache misses and it fetches — which is the case
-		// worth being able to see, and the only reason this gets a span of
-		// its own rather than being absorbed into the request's.
+		// CPU-bound signature checking against a cached JWKS — except on
+		// a cache miss, when it fetches. That case is the whole reason
+		// this gets a span rather than being absorbed into the request's.
 		_, verifySpan := tracer.Start(r.Context(), "jwt.verify")
 		claims, err := s.authDeps.verifier.Verify(sess.JWT)
 		if err != nil {
@@ -320,13 +318,12 @@ func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Sessio
 	if s.authDeps == nil || s.authDeps.gotrueRefresh == nil {
 		return errors.New("refresh not wired")
 	}
-	// The caller's ctx still must not reach fn — that detachment is the
-	// whole point of the paragraph above — but a span context is a value,
-	// not a cancellation, so capturing it here costs the detachment
-	// nothing. The refresh span links to it rather than parenting under
-	// it, for the same reason the ctx is dropped: the refresh outlives
-	// whichever request happened to win the race, and the N-1 waiters
-	// blocked on its result are just as much its callers as the winner is.
+	// The caller's ctx still must not reach fn (see above), but a span
+	// context is a value, not a cancellation, so capturing it costs that
+	// detachment nothing. The refresh span LINKS to it rather than
+	// parenting under it, for the same reason the ctx is dropped: the
+	// refresh outlives whichever request won the race, and the N-1
+	// waiters are just as much its callers as the winner.
 	requester := trace.SpanContextFromContext(ctx)
 
 	v, err, _ := s.refreshGroup.Do(sess.ID.String(), func() (any, error) {

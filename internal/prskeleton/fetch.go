@@ -49,17 +49,13 @@ const (
 
 // FetchPR builds a skeleton for one pull request.
 func FetchPR(ctx context.Context, g Getter, owner, repo string, number int) (*Skeleton, error) {
-	// One span for the whole fetch — 1 to 6 GETs, each with a client span
-	// of its own underneath, which individually say nothing about the
-	// logical operation they belong to. This runs per delegated run and per
-	// follow-up step, so it lands directly in the path a user is waiting on.
+	// One span over the whole fetch — 1 to 6 GETs whose individual client
+	// spans say nothing about the logical operation. It runs per delegated
+	// run and per follow-up step, so it sits in the path a user waits on.
 	//
-	// It also gives the truncation enum somewhere to go. Today it is
-	// returned on the Skeleton and every caller drops it: a skeleton that
-	// silently lost history renders as a shorter block and nothing
-	// anywhere records that it happened. Here the reason is a span
-	// attribute — page_cap, fetch_failed, parse_failed — so a run producing
-	// a partial history is answerable after the fact.
+	// It also gives the truncation enum somewhere to go: today every caller
+	// drops it, so a skeleton that silently lost history just renders
+	// shorter and nothing records that it happened.
 	ctx, span := tracer.Start(ctx, "prskeleton.fetch")
 	defer span.End()
 
@@ -119,8 +115,8 @@ func FetchPR(ctx context.Context, g Getter, owner, repo string, number int) (*Sk
 	}
 
 	// TruncationNone is the empty string, so a complete history reports
-	// "none" rather than an absent attribute — "was this truncated?" should
-	// be answerable by reading the span, not by noticing a missing key.
+	// "none" rather than an absent key — "was this truncated?" should be
+	// answerable by reading the span, not by noticing something missing.
 	truncation := string(sk.Truncation)
 	if truncation == "" {
 		truncation = "none"

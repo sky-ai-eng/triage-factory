@@ -12,12 +12,11 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 )
 
-// TestOpenTracedNestsStatementSpansUnderCaller is the load-bearing test for
-// the driver-level wrap: it proves a store query — which passes ctx and
-// knows nothing about tracing — lands as a child of whatever span the
-// caller had open. That nesting is the entire reason the instrumentation
-// sits at the driver rather than around the store interface, and it is not
-// something the type system can check.
+// TestOpenTracedNestsStatementSpansUnderCaller is the load-bearing test
+// for the driver-level wrap: a query that knows nothing about tracing must
+// land as a child of whatever span the caller had open. That nesting is
+// the whole reason the instrumentation sits at the driver, and the type
+// system can't check it.
 func TestOpenTracedNestsStatementSpansUnderCaller(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
@@ -65,8 +64,7 @@ func TestOpenTracedNestsStatementSpansUnderCaller(t *testing.T) {
 }
 
 // TestOpenTracedSuppressesPingSpans covers the option that keeps /readyz
-// from drowning the trace backend: a ping is on a fixed probe interval
-// forever and describes none of TF's work.
+// from drowning the backend.
 func TestOpenTracedSuppressesPingSpans(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder)))
