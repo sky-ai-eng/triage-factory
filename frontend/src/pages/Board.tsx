@@ -299,7 +299,7 @@ export default function Board() {
   const [approvalCtx, setApprovalCtx] = useState<{
     runID: string
     kind: 'review' | 'pr'
-    artifactId?: string
+    artifactId: string
   } | null>(null)
 
   // Resolve-all confirmation (TFAC-384 §4): drag-to-Done (complete) and
@@ -1161,11 +1161,11 @@ export default function Board() {
     setShowPromptPicker(true)
   }, [])
 
-  // Open a run's approval overlay (review or PR editor). Hoisted to a stable
-  // callback (rather than an inline closure in the column JSX) so the memoized
-  // cards' props don't churn on every board render.
+  // Open a run's approval overlay (review or PR editor) by artifact id. Hoisted
+  // to a stable callback (rather than an inline closure in the column JSX) so
+  // the memoized cards' props don't churn on every board render.
   const handleOpenApproval = useCallback(
-    (runID: string, kind: 'review' | 'pr', artifactId?: string) => {
+    (runID: string, kind: 'review' | 'pr', artifactId: string) => {
       setApprovalCtx({ runID, kind, artifactId })
     },
     [],
@@ -1365,7 +1365,8 @@ export default function Board() {
                     onPickerUnclaim={handlePickerUnclaim}
                     onPickerDelegate={handlePickerDelegate}
                     onPickerReassign={handlePickerReassign}
-                    onReview={handleOpenApproval}
+                    onOpenApproval={handleOpenApproval}
+                    onArtifactResolved={fetchTasks}
                     onRetry={handlePickerDelegate}
                   />
                 </BoardColumn>
@@ -1402,7 +1403,7 @@ export default function Board() {
       />
 
       <ReviewOverlay
-        artifactId={approvalCtx?.kind === 'review' ? (approvalCtx.artifactId ?? '') : ''}
+        artifactId={approvalCtx?.kind === 'review' ? approvalCtx.artifactId : ''}
         open={approvalCtx?.kind === 'review'}
         onClose={() => {
           setApprovalCtx(null)
@@ -1410,7 +1411,7 @@ export default function Board() {
         }}
       />
       <PendingPROverlay
-        artifactId={approvalCtx?.kind === 'pr' ? (approvalCtx.artifactId ?? '') : ''}
+        artifactId={approvalCtx?.kind === 'pr' ? approvalCtx.artifactId : ''}
         open={approvalCtx?.kind === 'pr'}
         onClose={() => {
           setApprovalCtx(null)
@@ -1481,7 +1482,8 @@ function ColumnContents({
   onPickerUnclaim,
   onPickerDelegate,
   onPickerReassign,
-  onReview,
+  onOpenApproval,
+  onArtifactResolved,
   onRetry,
 }: {
   colId: ColumnId
@@ -1497,7 +1499,8 @@ function ColumnContents({
   ) => Promise<void>
   delegateFailures: Record<string, string>
   onRequeue: (taskID: string) => void
-  onReview: (runID: string, kind: 'review' | 'pr', artifactId?: string) => void
+  onOpenApproval: (runID: string, kind: 'review' | 'pr', artifactId: string) => void
+  onArtifactResolved: () => void
   onRetry: (task: Task) => void
 } & Omit<PickerProps, 'pickerReadOnly'>) {
   if (tasks.length === 0) {
@@ -1537,7 +1540,8 @@ function ColumnContents({
               pendingPermissions={permQueues[run.ID]}
               onResolvePermission={onResolvePermission}
               onRequeue={onRequeue}
-              onReview={onReview}
+              onOpenApproval={onOpenApproval}
+              onArtifactResolved={onArtifactResolved}
               {...picker}
             />
           )
@@ -1649,7 +1653,8 @@ const SortableAgentCard = memo(function SortableAgentCard({
   pendingPermissions,
   onResolvePermission,
   onRequeue,
-  onReview,
+  onOpenApproval,
+  onArtifactResolved,
   ...picker
 }: {
   task: Task
@@ -1663,7 +1668,8 @@ const SortableAgentCard = memo(function SortableAgentCard({
     decision: PermissionDecisionInput,
   ) => Promise<void>
   onRequeue: (taskID: string) => void
-  onReview: (runID: string, kind: 'review' | 'pr', artifactId?: string) => void
+  onOpenApproval: (runID: string, kind: 'review' | 'pr', artifactId: string) => void
+  onArtifactResolved: () => void
 } & PickerProps) {
   // Bot-managed cards in in_progress / in_review are
   // read-only — column placement is owned by the spawner's run-state
@@ -1711,20 +1717,8 @@ const SortableAgentCard = memo(function SortableAgentCard({
           onResolvePermission(run.ID, toolCallID, decision)
         }
         onRequeue={() => onRequeue(task.id)}
-        onReview={() => {
-          // Minimal multi handling (the full mixed-kind dock is TFAC-385):
-          // open the FIRST unresolved artifact — pending_artifact_ids lists
-          // every draft PR first, then ready reviews, so unresolved_pr_count
-          // discriminates the head's kind. Resolving it re-derives the set;
-          // the next click opens the next. Guard the empty/undefined set
-          // (a transient projection omission / fetch race) so we never open
-          // an overlay with an undefined artifact id.
-          const ids = run.pending_artifact_ids ?? []
-          if (ids.length === 0) return
-          const kind: 'review' | 'pr' = (run.unresolved_pr_count ?? 0) > 0 ? 'pr' : 'review'
-          onReview(run.ID, kind, ids[0])
-        }}
-        onOpenArtifact={(kind, artifactId) => onReview(run.ID, kind, artifactId)}
+        onOpenArtifact={(kind, artifactId) => onOpenApproval(run.ID, kind, artifactId)}
+        onArtifactResolved={onArtifactResolved}
         assigneeSlot={<CardAssigneePicker task={task} picker={picker} />}
       />
     </div>

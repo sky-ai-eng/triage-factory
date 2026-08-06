@@ -132,6 +132,71 @@ describe('ArtifactList', () => {
     expect(onOpen).not.toHaveBeenCalled()
   })
 
+  it('sorts the pending set to the top in the projection order, with a dismiss on those rows only', async () => {
+    mockArtifacts([
+      art({ id: 'b1', kind: 'branch', state: 'pushed', target: 'branch-row' }),
+      art({ id: 'rv1', kind: 'review', state: 'pending', target: 'review-row' }),
+      art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'pr-row' }),
+    ])
+    render(<ArtifactList runId="r1" onOpenApproval={vi.fn()} pendingArtifactIds={['pr1', 'rv1']} />)
+
+    // The projection's order (draft PRs first, then ready reviews) leads; the
+    // rest keep the fetch order below.
+    const rows = await screen.findAllByRole('listitem')
+    expect(rows[0]).toHaveTextContent('pr-row')
+    expect(rows[1]).toHaveTextContent('review-row')
+    expect(rows[2]).toHaveTextContent('branch-row')
+
+    // Only the unresolved rows carry the in-place [x] — the branch never does.
+    expect(screen.getByRole('button', { name: /dismiss pull request/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /dismiss review/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /dismiss branch/i })).not.toBeInTheDocument()
+  })
+
+  it('dismisses a pending row in place: POST, refetch, onResolved', async () => {
+    const draft = art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'org/repo#18' })
+    const onResolved = vi.fn()
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve([draft]) })
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve([{ ...draft, state: 'closed' }]),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+    render(<ArtifactList runId="r1" pendingArtifactIds={['pr1']} onResolved={onResolved} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss pull request/i }))
+
+    await waitFor(() => expect(onResolved).toHaveBeenCalled())
+    expect(fetchMock).toHaveBeenCalledWith('/api/artifacts/pr1/dismiss', { method: 'POST' })
+    // The reloaded row shows its resolved state and, no longer actionable,
+    // loses the [x] even before the run projection catches up.
+    expect(await screen.findByText('closed')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /dismiss pull request/i })).not.toBeInTheDocument()
+  })
+
+  it('soft-refetches on a refreshKey change, keeping the stale rows until the new set lands', async () => {
+    const draft = art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'org/repo#18' })
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve([draft]) })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve([{ ...draft, state: 'open' }]),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+    const { rerender } = render(<ArtifactList runId="r1" refreshKey="2:pr1" />)
+    expect(await screen.findByText('draft')).toBeInTheDocument()
+
+    rerender(<ArtifactList runId="r1" refreshKey="2:" />)
+    expect(await screen.findByText('open')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    // A soft refetch never resets to the loading state — that's runId-change only.
+    expect(screen.queryByText(/Loading artifacts/)).not.toBeInTheDocument()
+  })
+
   it('shows a quiet empty state when the run produced no artifacts', async () => {
     mockArtifacts([])
     render(<ArtifactList runId="r1" />)

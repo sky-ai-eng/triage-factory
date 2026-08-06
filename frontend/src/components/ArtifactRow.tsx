@@ -1,4 +1,4 @@
-import { ExternalLink } from 'lucide-react'
+import { ExternalLink, X } from 'lucide-react'
 import type { Artifact } from '../types'
 import { TONE_TEXT, TONE_VAR, type Tone } from './board/cardStyle'
 import { metaForKind } from './artifactMeta'
@@ -19,10 +19,18 @@ import { metaForKind } from './artifactMeta'
 export function ArtifactRow({
   artifact,
   onOpenApproval,
+  onDismiss,
+  dismissing,
   note,
 }: {
   artifact: Artifact
   onOpenApproval?: (kind: 'review' | 'pr', artifactId: string) => void
+  // In-place dismiss for a row in the run's unresolved set (close the draft PR /
+  // discard the pending review without opening its editor). The owner decides
+  // which rows get it — ArtifactList gates on the run projection's authoritative
+  // pending ids — so the audit feed and resolved rows never carry an [x].
+  onDismiss?: () => void
+  dismissing?: boolean
   // Optional trailing context rendered between the target and the state badge —
   // the bot-activity org feed (TFAC-483) passes the owning team chip here so a
   // cross-team row shows which team's bot acted. Undefined elsewhere (the
@@ -52,6 +60,27 @@ export function ArtifactRow({
   const rowClass =
     'flex w-full items-center gap-2 rounded-[4px] border border-border-subtle bg-black/[0.015] px-2 py-1.5 text-left transition-colors hover:bg-black/[0.04]'
 
+  // The [x] rides the row's ACTIONABLE state, not the overlay handler — a
+  // still-pending row stays dismissable even where no editor is wired, and a
+  // freshly-resolved row drops it before the owner's pending set catches up.
+  const dismissButton =
+    onDismiss && actionable ? (
+      <button
+        type="button"
+        onClick={onDismiss}
+        disabled={dismissing}
+        aria-label={`Dismiss ${meta.label}`}
+        title={
+          artifact.kind === 'pull_request'
+            ? 'Dismiss — closes the draft PR (branch kept)'
+            : 'Dismiss — discards the pending review'
+        }
+        className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1.5 text-text-tertiary/70 transition-colors hover:bg-dismiss/[0.1] hover:text-dismiss disabled:cursor-wait disabled:opacity-50"
+      >
+        <X size={12} aria-hidden />
+      </button>
+    ) : null
+
   // Inline (not a precomputed boolean) so TypeScript narrows both to non-null
   // inside the branch — no `!` assertions on the click handler.
   if (overlayKind != null && onOpenApproval != null && actionable) {
@@ -67,6 +96,7 @@ export function ArtifactRow({
           {body}
         </button>
         {artifact.url && <ExternalLinkIcon url={artifact.url} label={meta.label} />}
+        {dismissButton}
       </li>
     )
   }
@@ -76,7 +106,7 @@ export function ArtifactRow({
   // a plain, non-interactive row.
   if (artifact.url) {
     return (
-      <li>
+      <li className={dismissButton ? 'flex items-center gap-1' : undefined}>
         <a
           href={artifact.url}
           target="_blank"
@@ -88,12 +118,14 @@ export function ArtifactRow({
           {body}
           <ExternalLink size={11} className="shrink-0 text-text-tertiary/70" aria-hidden />
         </a>
+        {dismissButton}
       </li>
     )
   }
   return (
     <li className={rowClass} aria-label={meta.label}>
       {body}
+      {dismissButton}
     </li>
   )
 }

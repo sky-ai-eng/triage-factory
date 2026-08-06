@@ -9,6 +9,7 @@ import {
   stopReasonLabel,
   workStartedAt,
 } from '../../lib/runStatus'
+import { artifactSetKey } from '../../lib/approval'
 import { compactNum, tint, type StationState } from './stationStyle'
 import ArtifactList from '../ArtifactList'
 
@@ -20,13 +21,23 @@ interface Props {
   /** Open an artifact's approval overlay (PR / review) — wired up the page to
    *  RunDetail's overlay state. */
   onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
+  /** Re-pull the run projection after an in-place dismiss in the Artifacts
+   *  list (the list refetches its own rows). */
+  onArtifactResolved?: () => void
 }
 
 // TelemetryRail — the instruments etched into the machine's housing, flanking
 // the screen. Unlike the dark screen, this is part of the warm housing: light,
 // quiet, all monospace readouts and thin gauges. It carries only data the run
 // actually has — no faked context meter (that arrives with P4's telemetry).
-export function TelemetryRail({ run, messages, state, now, onOpenArtifact }: Props) {
+export function TelemetryRail({
+  run,
+  messages,
+  state,
+  now,
+  onOpenArtifact,
+  onArtifactResolved,
+}: Props) {
   // The token rollups ride the run row (the run read SUMs them per
   // conversation), so the rail shows the same authoritative numbers the usage
   // dashboard does rather than re-summing the transcript — useRunDetail keeps
@@ -110,13 +121,20 @@ export function TelemetryRail({ run, messages, state, now, onOpenArtifact }: Pro
       </Section>
 
       {/* Artifacts — everything the run produced (branch / PR / review / issue /
-          comment); PR/review rows open their approval overlays, the rest link
-          out (TFAC-470). Gated on artifact_count (free on the run) so a run
-          that produced nothing skips both the section and its fetch — matching
-          the board card's affordance, which hides at 0. */}
+          comment), with the run's unresolved rows sorted first and dismissable
+          in place; PR/review rows open their approval overlays, the rest link
+          out. Gated on artifact_count (free on the run) so a run that produced
+          nothing skips both the section and its fetch — matching the board
+          card's affordance, which hides at 0. */}
       {(run.artifact_count ?? 0) > 0 && (
         <Section label="Artifacts">
-          <ArtifactList runId={run.ID} onOpenApproval={onOpenArtifact} />
+          <ArtifactList
+            runId={run.ID}
+            pendingArtifactIds={run.pending_artifact_ids}
+            refreshKey={artifactSetKey(run)}
+            onOpenApproval={onOpenArtifact}
+            onResolved={onArtifactResolved}
+          />
         </Section>
       )}
 
