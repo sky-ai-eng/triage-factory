@@ -38,6 +38,12 @@ const (
 	// cgroup are read together each step across the whole hold, fine enough
 	// to resolve a burst phase inside a jail's cycle.
 	sampleStep = 2 * time.Second
+	// oomPeakSlackMB is the containment check's allowance above a victim's
+	// ceiling: memory.current can read marginally over memory.max (per-CPU
+	// charge batching) and the sampler rounds bytes up to whole MiB. Kept
+	// well under the smallest ceiling the flag accepts, so a genuinely
+	// uncontained victim can never hide inside the slack.
+	oomPeakSlackMB = 64
 )
 
 // handle is one live benchmark sandbox: the per-run network, the tool-host
@@ -499,9 +505,11 @@ func runOOMTest(ctx context.Context, cfg benchConfig, getAbort func() string) er
 			o.Mode = "oom-killed"
 			o.KillSeconds = time.Since(killStart).Seconds()
 		}
-		// Containment = the ceiling held (small slack for the cgroup's
-		// pre-kill overshoot) AND the failure landed inside this run.
-		if o.Mode != "reached-target" && o.PeakMB <= cfg.oomVictimLimitMB+64 {
+		// Containment = the breach was actually observed (a zero peak means
+		// the sampler never saw this victim — evidence of nothing), the
+		// ceiling held within the slack, AND the failure landed inside this
+		// run.
+		if o.Mode != "reached-target" && o.PeakMB > 0 && o.PeakMB <= cfg.oomVictimLimitMB+oomPeakSlackMB {
 			contained++
 		}
 		outcomes[i] = o
@@ -649,6 +657,9 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*h
 	// the trusted path satisfies the launch without changing what the jail
 	// sees on disk.
 	agentMount := agenthost.SocketMountFor(runID)
+	if err := os.MkdirAll(filepath.Dir(agentMount.Source), 0o700); err != nil {
+		return fail(fmt.Errorf("create agenthost socket dir: %w", err))
+	}
 	_ = os.Remove(agentMount.Source)
 	ln, err := net.Listen("unix", agentMount.Source)
 	if err != nil {
@@ -688,7 +699,14 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*h
 	}
 	readyDur := time.Since(start)
 
+	// The registry entry is written before LaunchToolHost returns, so a miss
+	// here is a wiring bug — and a jail without a container id would silently
+	// vanish from cgroup sampling (skewed coefficients) and from the oomtest
+	// peak tracking (a hollow containment pass). Fail loudly instead.
 	h.containerID = containerIDFor(h.claimID)
+	if h.containerID == "" {
+		return fail(fmt.Errorf("no live-jail registry entry for claim %s", h.claimID))
+	}
 
 	if driven {
 		dctx, cancel := context.WithCancel(context.Background())
@@ -761,11 +779,16 @@ func (h *handle) call(name string, args map[string]any) bool {
 // pattern and the dominant in-jail cost of a real native run.
 func (h *handle) drive(ctx context.Context, interval time.Duration) {
 	defer close(h.driverDone)
+	// A ticker, not per-iteration timers: the cadence is part of the CPU
+	// coefficient, and sleeping AFTER each call would stretch the true
+	// period to interval + call latency.
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
 	for i := 0; ; i++ {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(interval):
+		case <-tick.C:
 		}
 		name, args := workloadCall(i)
 		if !h.call(name, args) {

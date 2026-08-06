@@ -115,7 +115,7 @@ func main() {
 	flag.BoolVar(&cfg.syncBursts, "sync-bursts", false,
 		"native-heavy: align every jail's burst (worst case) instead of staggering")
 	flag.IntVar(&cfg.oomNeighbors, "oom-neighbors", 8,
-		"oomtest: healthy jails running the agent workload while victims die")
+		"oomtest: healthy jails running the native tool workload while victims die")
 	flag.IntVar(&cfg.oomVictims, "oom-victims", 2,
 		"oomtest: jails driven past their own memory ceiling")
 	flag.IntVar(&cfg.oomVictimLimitMB, "oom-victim-limit-mb", 512,
