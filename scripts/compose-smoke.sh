@@ -325,9 +325,20 @@ pass "executor privsep posture: $posture"
 # 7a. TF resolved the endpoint and installed a tracer provider: the compose
 #     default reached the process env AND the binary accepted it. A dropped env
 #     line leaves every other check in this script passing.
-if ! dc logs triagefactory 2>/dev/null | grep -q "tracing enabled"; then
-  fail "control pod never logged 'tracing enabled' — TF_TRACES_ENDPOINT didn't reach it, or the exporter refused the value"
-fi
+#
+#     Read the log into a variable and match in the shell rather than piping
+#     into `grep -q`. Under `set -o pipefail` that pipeline is a race: grep
+#     exits on its first match and closes the pipe, `docker compose logs` dies
+#     of SIGPIPE (141), and pipefail hands 141 to the `if` — so the check fails
+#     *because* it found the line, whenever the container logged enough after
+#     it that compose was still writing. The line it looks for is emitted at
+#     boot and the pod logs steadily afterwards, so this got likelier the
+#     longer the checks above took.
+tf_logs=$(dc logs triagefactory 2>/dev/null || true)
+case "$tf_logs" in
+  *"tracing enabled"*) ;;
+  *) fail "control pod never logged 'tracing enabled' — TF_TRACES_ENDPOINT didn't reach it, or the exporter refused the value" ;;
+esac
 pass "control pod installed a tracer provider (logged 'tracing enabled')"
 
 # 7b. Tempo accepts OTLP over HTTP on the address that env var names, and hands
@@ -349,12 +360,15 @@ printf '%s' "{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"servi
   | dc exec -T grafana curl -sS -X POST http://tempo:4318/v1/traces \
       -H 'content-type: application/json' --data-binary @- >/dev/null \
   || fail "OTLP push to tempo:4318 failed"
+#     Same shell-side matching as above, and for the same reason — a trace
+#     body is large enough for the SIGPIPE race to be real, and here it would
+#     burn all 15 attempts before reporting a span that had arrived.
 stored=""
 for _ in $(seq 1 15); do
-  if dc exec -T grafana curl -sS "http://tempo:3200/api/traces/$trace_id" 2>/dev/null | grep -q compose-smoke; then
-    stored=yes
-    break
-  fi
+  body=$(dc exec -T grafana curl -sS "http://tempo:3200/api/traces/$trace_id" 2>/dev/null || true)
+  case "$body" in
+    *compose-smoke*) stored=yes; break ;;
+  esac
   sleep 2
 done
 [ -n "$stored" ] || fail "tempo accepted an OTLP span but never returned it from /api/traces/$trace_id"

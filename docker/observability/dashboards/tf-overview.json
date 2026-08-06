@@ -22,7 +22,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "One row per per-org GitHub poll. Click a row to open that trace's waterfall. Duration is the whole org's refresh + diff + emit; the waterfall says which repo batch spent it. An empty list means no org polled GitHub in the window \u2014 which for an org that tracks no repos is the correct answer, not a fault.",
+      "description": "One row per org's GitHub poll cycle. Click a row to open that trace's waterfall. Duration is the whole org's refresh + diff + emit; the waterfall says which repo batch spent it. An empty list means no org polled GitHub in the window \u2014 which for an org that tracks no repos is the correct answer, not a fault.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -102,7 +102,7 @@
         "type": "tempo",
         "uid": "tf-tempo"
       },
-      "description": "One row per per-org Jira poll. Click a row to open that trace's waterfall.",
+      "description": "One row per org's Jira poll cycle. Click a row to open that trace's waterfall.",
       "fieldConfig": {
         "defaults": {
           "custom": {
