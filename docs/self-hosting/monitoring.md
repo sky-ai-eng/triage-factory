@@ -260,6 +260,21 @@ logs for `tracing enabled` at boot and `opentelemetry sdk error` after it. If
 neither shows up, it's Tempo: `tempo_distributor_spans_received_total` in
 Prometheus counts what actually arrived.
 
+#### Reaching Tempo and Prometheus directly
+
+Two things Grafana can't show you: Prometheus's scrape-status page (whether it
+is actually hitting every executor — `up{job="triagefactory"}` answers most of
+it as a query) and Tempo's operational endpoints. Neither publishes a port, so
+go through `exec`, and mind that the two images differ:
+
+```sh
+# Prometheus ships busybox wget, no curl
+docker compose exec prometheus wget -qO- 'http://localhost:9090/api/v1/targets?state=any'
+
+# Tempo's image is distroless — no shell to exec into, so use a neighbour's curl
+docker compose exec grafana curl -sS http://tempo:3200/status/services
+```
+
 #### Clicking from a span to everything related
 
 Domain IDs ride on spans as attributes — `conversation.id`, `event.id`,
