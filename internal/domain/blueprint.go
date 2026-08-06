@@ -52,11 +52,24 @@ func (s BlueprintRunStatus) Terminal() bool {
 const BlueprintAbortOrphanedAtMint = "orphaned_at_mint"
 
 // BlueprintOrphanedAtMintGrace is how long a childless 'running' blueprint run
-// is left alone before the recovery surfaces fail it. Mint→enqueue is one
-// in-process code path of milliseconds, so this is orders of magnitude past
-// any legitimate in-flight mint and cannot race a live firing. Shared by both
-// surfaces so the two can never disagree about what "old enough" means.
-const BlueprintOrphanedAtMintGrace = 5 * time.Minute
+// is left alone before the recovery surfaces fail it. Shared by both surfaces
+// so the two can never disagree about what "old enough" means.
+//
+// The window it has to clear is two DB round trips — a placement read and the
+// step's INSERT — with no worktree, clone, or provider call between them (those
+// happen later, on claim). Sub-second when healthy. The only way a live mint
+// exceeds that without having crashed is a DB stall, and the one that happens
+// in normal operation is a failover of a few tens of seconds; two minutes
+// leaves margin over a pessimistic one while keeping recovery inside a couple
+// of minutes rather than a coffee break. Lowering it trades margin for latency
+// against that failover number, not against the code path.
+//
+// Losing that race degrades rather than corrupts, which is what makes a bounded
+// margin defensible instead of needing an arbitrarily large one: the late INSERT
+// lands a child under a now-terminal parent, the claim gate refuses to run a
+// step under one, and the boot reconcile's park arm retires the child. The
+// delegation dies visibly; it never double-runs.
+const BlueprintOrphanedAtMintGrace = 2 * time.Minute
 
 // BlueprintTriggerType distinguishes how a blueprint run was initiated.
 type BlueprintTriggerType string
