@@ -715,7 +715,9 @@ services:
   #     remote_write (docker/observability/tempo.yaml) needs a
   #     --web.enable-remote-write-receiver target; repoint or drop it.
   #   - Own Grafana? Delete `grafana` and copy the two data sources + three
-  #     correlations out of that same file.
+  #     correlations out of that same file, plus the dashboards under
+  #     docker/observability/dashboards/ (they reference data sources by the
+  #     pinned UIDs, so keep those UIDs or rewrite them).
   #   - No traces at all? Delete `tempo` AND set TF_TRACES_ENDPOINT=off, or TF
   #     posts spans to a name that no longer resolves and logs an export error
   #     every batch interval.
@@ -788,12 +790,28 @@ services:
       GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
       GF_AUTH_BASIC_ENABLED: "false"
+      # Land on the overview instead of Grafana's blank home page. Without
+      # this, a fresh stack shows nothing until someone finds Explore and
+      # knows what to type — the dashboards below would be provisioned and
+      # unvisited.
+      #
+      # A literal path, deliberately not a ${...} passthrough: it names a
+      # file this same compose file mounts, so making it configurable would
+      # add an operator knob whose only correct value is the one already
+      # written here.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/provisioning/dashboards/triage-factory/tf-overview.json
     volumes:
       # Data sources + the attribute correlations that make a span's
       # conversation.id / event.id / task.id clickable. Read-only: a
       # provisioned data source can't be edited in the UI anyway, and the
       # file is the source of truth.
       - ./docker/observability/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/triage-factory.yaml:ro
+      # Dashboards, same posture: a provider yaml plus the folder of
+      # dashboard JSON it points at, both read-only. Deleting the
+      # grafana-data volume reproduces them exactly, because none of it
+      # lives in Grafana's own database.
+      - ./docker/observability/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/triage-factory.yaml:ro
+      - ./docker/observability/dashboards:/etc/grafana/provisioning/dashboards/triage-factory:ro
       - grafana-data:/var/lib/grafana
     ports:
       # 3030, not 3001: that one is the executor's TF_HEALTHZ_PORT, which
