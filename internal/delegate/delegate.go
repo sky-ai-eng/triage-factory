@@ -478,8 +478,15 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 		return runConfig{}, fmt.Errorf("invalid PR number from task.EntitySourceID: %q", task.EntitySourceID)
 	}
 
-	s.updatePhase(orgID, runID, claimID, domain.ClaimPhaseFetching)
-	pr, err := ghClient.GetPR(ctx, owner, repo, prNumber, false)
+	s.updatePhase(ctx, orgID, runID, claimID, domain.ClaimPhaseFetching)
+	// Named for the phase it reports, so the trace and the run station agree
+	// on what the engagement was doing. On the executor path this GET is not
+	// a direct call to GitHub — it crosses the run's sidecar REST proxy — so
+	// the span covers a hop the outbound-client instrumentation cannot see.
+	fetchCtx, fetchSpan := tracer.Start(ctx, "engagement.fetch")
+	pr, err := ghClient.GetPR(fetchCtx, owner, repo, prNumber, false)
+	recordSpanError(fetchSpan, err)
+	fetchSpan.End()
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to fetch PR: %w", err)
 	}
@@ -528,7 +535,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 		return runConfig{}, fmt.Errorf("PR #%d on %s/%s: GitHub did not return a usable upstream URL; cannot create worktree", prNumber, owner, repo)
 	}
 
-	s.updatePhase(orgID, runID, claimID, domain.ClaimPhaseCloning)
+	s.updatePhase(ctx, orgID, runID, claimID, domain.ClaimPhaseCloning)
 	// Resolve the host-side clone credential. In multi mode the clone routes
 	// through the sidecar's git proxy (CloneAuthViaGitProxy): git is
 	// rewritten from the upstream host to the proxy URL and presents only the
@@ -546,16 +553,19 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 	// dir + its per-run push config — the PR worktree IS the shared run-root, and
 	// a cold rehydrate rebuilds it under the same key. CleanupPRConfig reclaims
 	// via filepath.Base(wtPath), so it follows this key automatically.
-	wtPath, err := worktree.CreateForPR(ctx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, rootKey,
+	cloneCtx, cloneSpan := tracer.Start(ctx, "engagement.clone")
+	wtPath, err := worktree.CreateForPR(cloneCtx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, rootKey,
 		worktree.WithCloneAuth(cloneAuth),
 		// Refresh origin/<base> at materialization so `pr diff` frames against a
 		// current base instead of a clone-time-frozen ref (TFAC-505).
 		worktree.WithBaseBranch(pr.BaseRef))
+	recordSpanError(cloneSpan, err)
+	cloneSpan.End()
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
 	}
 
-	if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, runID, wtPath); err != nil {
+	if err := s.agentRuns.SetWorktreePathSystem(context.WithoutCancel(ctx), orgID, runID, wtPath); err != nil {
 		delegateLog.Warn("update worktree path for run failed", "run", runID, "error", err)
 	}
 

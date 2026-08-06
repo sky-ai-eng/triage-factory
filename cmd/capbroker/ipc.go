@@ -16,6 +16,9 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // dialTimeout caps how long the client waits for the broker to accept a
@@ -72,7 +75,33 @@ func (c *IPCClient) call(ctx context.Context, method string, args, result any) e
 // drop the exit's OOM attribution; matching the server's no-timeout design
 // keeps the wait bounded only by the run itself (which the cancellation
 // watcher kills when the caller's context ends).
-func (c *IPCClient) callWithCap(ctx context.Context, method string, args, result any, budget time.Duration) error {
+func (c *IPCClient) callWithCap(ctx context.Context, method string, args, result any, budget time.Duration) (err error) {
+	// The single client-side span for the whole broker surface. It sits here
+	// rather than on each verb because this is the only place all of them
+	// pass through — network setup, rootfs, the run launch, every teardown —
+	// so a method added later is instrumented by existing.
+	//
+	// This is also the ONLY place the broker's work is visible at all. The
+	// broker holds CAP_SYS_ADMIN/CAP_NET_ADMIN and must never gain an
+	// outbound network dependency, so it exports nothing itself (standing
+	// decision 1) and no frame this file writes carries trace context: the
+	// request struct is method + args, unchanged. What the reader gets is the
+	// round trip as the caller experienced it, which is what a slow bring-up
+	// needs. If a breakdown of the broker's internals is ever wanted, the
+	// protocol can carry optional timing fields on the RESPONSE without a
+	// version bump — data flowing outward from the privileged process, never
+	// instructions flowing in.
+	ctx, span := tracer.Start(ctx, "capbroker.call",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(telemetry.Op(method)))
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
+
 	if c.closed.Load() {
 		return errors.New("capbroker: client closed")
 	}

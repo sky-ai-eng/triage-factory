@@ -10,6 +10,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Fixed in-sandbox paths for the native runtime's resident tool host. Both
@@ -226,7 +228,18 @@ func (j *ToolHostJail) recordActualsOnce() {
 // tool host rather than node + the SDK wrapper, and a per-run directory is
 // mounted read-write for the socket. Everything TF-side still arrives via
 // bind mounts and env, never baked into or assumed of the rootfs.
-func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (*ToolHostJail, error) {
+func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (_ *ToolHostJail, err error) {
+	// The native runtime's jail launch, the twin of newSandboxCommand's span
+	// on the SDK path. The loop this hands off to is out of the tracing
+	// epic's scope, but everything up to and including the jail coming up is
+	// shared setup and belongs in the engagement's trace either way.
+	var launchSpan trace.Span
+	ctx, launchSpan = tracer.Start(ctx, "agent.jail.launch", trace.WithAttributes(telemetry.Runtime("native")))
+	defer func() {
+		recordSpanError(launchSpan, err)
+		launchSpan.End()
+	}()
+
 	if opts.RunID == "" {
 		return nil, fmt.Errorf("agentproc: tool host launch requires a run id")
 	}

@@ -181,7 +181,7 @@ func TestParkRunOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
 	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
 	s.agentRuns = stub
 
-	fenced := s.parkRunOpen(liveParkContext{
+	fenced := s.parkRunOpen(context.Background(), liveParkContext{
 		orgID:       runmode.LocalDefaultOrgID,
 		runID:       runID,
 		claudeCwd:   wt,
@@ -237,7 +237,7 @@ func TestParkRunOpen_FencedWithoutSnapshotAnnouncesNothing(t *testing.T) {
 	s.SetEventPublisher(pub)
 	s.agentRuns = &fencedConversationStore{ConversationStore: s.agentRuns}
 
-	fenced := s.parkRunOpen(liveParkContext{
+	fenced := s.parkRunOpen(context.Background(), liveParkContext{
 		orgID:       runmode.LocalDefaultOrgID,
 		runID:       runID,
 		triggerType: "event",
@@ -283,7 +283,7 @@ func TestParkRunOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
 	namespace := blueprintRunIDForRun(t, database, runID)
 	s.agentRuns = &fencedConversationStore{ConversationStore: s.agentRuns}
 
-	fenced := s.parkRunOpen(liveParkContext{
+	fenced := s.parkRunOpen(context.Background(), liveParkContext{
 		orgID:       runmode.LocalDefaultOrgID,
 		runID:       runID,
 		claudeCwd:   wt,

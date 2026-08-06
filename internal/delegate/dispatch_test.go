@@ -228,7 +228,7 @@ func TestReactor_AdvanceEnqueuesNextStep(t *testing.T) {
 	stepRun, _ := s.agentRuns.GetSystem(context.Background(), org, run0)
 	stepRun.TriggerType = "manual"
 	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
 
 	if q := queuedStepRuns(t, database, brID); len(q) != 1 || q[0] != 1 {
 		t.Fatalf("queued step runs = %v, want [1]", q)
@@ -274,7 +274,7 @@ func TestReactor_AdvanceInheritsActorAgent(t *testing.T) {
 	stepRun, _ := s.agentRuns.GetSystem(ctx, org, run0)
 	stepRun.TriggerType = "manual"
 	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
 
 	var actor string
 	if err := database.QueryRow(`SELECT COALESCE(actor_agent_id, '') FROM conversations WHERE blueprint_run_id = ? AND blueprint_step_index = 1`, brID).Scan(&actor); err != nil {
@@ -315,7 +315,7 @@ func TestReactor_AdvanceInheritsTriggerID(t *testing.T) {
 	stepRun, _ := s.agentRuns.GetSystem(ctx, org, run0)
 	stepRun.TriggerType = "event"
 	stepRun.CreatorUserID = ""
-	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
 
 	var gotTrig string
 	if err := database.QueryRow(`SELECT COALESCE(trigger_id, '') FROM conversations WHERE blueprint_run_id = ? AND blueprint_step_index = 1`, brID).Scan(&gotTrig); err != nil {
@@ -335,7 +335,7 @@ func TestReactor_FinalStepFinishCompletes(t *testing.T) {
 	stepRun, _ := s.agentRuns.GetSystem(context.Background(), org, run0)
 	stepRun.TriggerType = "manual"
 	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
 
 	if q := queuedStepRuns(t, database, brID); len(q) != 0 {
 		t.Fatalf("queued step runs = %v, want none", q)
@@ -361,7 +361,7 @@ func TestReactor_CancelRequestedTerminates(t *testing.T) {
 	stepRun, _ := s.agentRuns.GetSystem(context.Background(), org, run0)
 	stepRun.TriggerType = "manual"
 	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
 
 	if q := queuedStepRuns(t, database, brID); len(q) != 0 {
 		t.Fatalf("queued step runs = %v, want none (cancel must not advance)", q)
@@ -381,7 +381,7 @@ func TestReactor_ParkedStepLeavesRunning(t *testing.T) {
 	stepRun, _ := s.agentRuns.GetSystem(context.Background(), org, run0)
 	stepRun.TriggerType = "manual"
 	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
 
 	if q := queuedStepRuns(t, database, brID); len(q) != 0 {
 		t.Fatalf("queued step runs = %v, want none (parked step waits for resume)", q)
@@ -408,7 +408,7 @@ func TestReactor_CancelledStepParksAndTerminatesBlueprint(t *testing.T) {
 	stepRun.CreatorUserID = runmode.LocalDefaultUserID
 	// The pre-agent blueprint the dispatcher captured has no cancel on it; the
 	// reactor's own refresh is what must find the signal.
-	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
 
 	if q := queuedStepRuns(t, database, brID); len(q) != 0 {
 		t.Fatalf("queued step runs = %v, want none (cancel must not advance)", q)
@@ -472,7 +472,7 @@ func TestReactor_IgnoresTerminalFromAStepTheBlueprintMovedPast(t *testing.T) {
 		// 1 and enqueues a SECOND copy of the step already running.
 		s, database, brID, _, stale := stage(t, "stale-adv", "continue")
 
-		s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), stale, runConfig{orgID: org}, time.Now())
+		s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), stale, runConfig{orgID: org}, time.Now())
 
 		if q := queuedStepRuns(t, database, brID); len(q) != 1 || q[0] != 1 {
 			t.Fatalf("queued step runs = %v, want [1] — the live step must not be enqueued a second time", q)
@@ -492,7 +492,7 @@ func TestReactor_IgnoresTerminalFromAStepTheBlueprintMovedPast(t *testing.T) {
 		// the agent still working in it.
 		s, database, brID, taskID, stale := stage(t, "stale-fin", "finish")
 
-		s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), stale, runConfig{orgID: org}, time.Now())
+		s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), stale, runConfig{orgID: org}, time.Now())
 
 		if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusRunning {
 			t.Errorf("blueprint status = %q, want running — step 1 is still executing", br.Status)
@@ -528,7 +528,7 @@ func TestReactor_IgnoresTerminalFromAStepTheBlueprintMovedPast(t *testing.T) {
 			t.Fatalf("RequestRunCancelSystem: %v", err)
 		}
 
-		s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), stale, runConfig{orgID: org}, time.Now())
+		s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), stale, runConfig{orgID: org}, time.Now())
 
 		br := mustGetRun(t, s, org, brID)
 		if br.Status != domain.BlueprintRunStatusRunning {
@@ -559,7 +559,7 @@ func TestReactor_LeavesASuccessorsConversationAlone(t *testing.T) {
 			stepRun.Status = status
 			stepRun.TriggerType = "manual"
 			stepRun.CreatorUserID = runmode.LocalDefaultUserID
-			s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+			s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
 
 			if q := queuedStepRuns(t, database, brID); len(q) != 0 {
 				t.Errorf("queued step runs = %v, want none — nothing about a successor's state says to advance", q)

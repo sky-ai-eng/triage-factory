@@ -180,12 +180,12 @@ func TestUpdatePhase_RoutesByClaimAndSurvivesAFenceTrip(t *testing.T) {
 	stub := &phaseFencedStore{ConversationStore: s.agentRuns}
 	s.agentRuns = stub
 
-	s.updatePhase(runmode.LocalDefaultOrgID, runID, "claim-1", "cloning")
+	s.updatePhase(context.Background(), runmode.LocalDefaultOrgID, runID, "claim-1", "cloning")
 	if stub.byClaim != 1 || stub.byConversation != 0 {
 		t.Errorf("with a claim: byClaim=%d byConversation=%d, want 1/0", stub.byClaim, stub.byConversation)
 	}
 
-	s.updatePhase(runmode.LocalDefaultOrgID, runID, "", "cloning")
+	s.updatePhase(context.Background(), runmode.LocalDefaultOrgID, runID, "", "cloning")
 	if stub.byConversation != 1 {
 		t.Errorf("without a claim: byConversation=%d, want the active-claim fallback", stub.byConversation)
 	}
@@ -227,7 +227,7 @@ func TestParkRunOpen_CancelFenceTripRecordsNothing(t *testing.T) {
 		t.Fatalf("seed worktree marker: %v", err)
 	}
 
-	fenced := s.parkRunOpen(liveParkContext{
+	fenced := s.parkRunOpen(context.Background(), liveParkContext{
 		orgID:       runmode.LocalDefaultOrgID,
 		runID:       runID,
 		claudeCwd:   wt,
@@ -263,7 +263,7 @@ func TestParkRunOpen_ResumeCancelFenceTripRecordsNothing(t *testing.T) {
 	stub := &fencedConversationStore{ConversationStore: s.agentRuns}
 	s.agentRuns = stub
 
-	fenced := s.markRunOpen(liveParkContext{
+	fenced := s.markRunOpen(context.Background(), liveParkContext{
 		orgID:       runmode.LocalDefaultOrgID,
 		runID:       runID,
 		triggerType: "manual",

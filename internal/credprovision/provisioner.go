@@ -27,6 +27,9 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // llmResolver is the narrow slice of internal/llmcred the provisioner mints
@@ -102,12 +105,30 @@ func NewManager(stores db.Stores, llm llmResolver) *Manager {
 // (reaped, requeued) between the notification firing and this handler
 // running; the executor's own timeout/requeue path is what recovers that
 // window, not this function surfacing an error.
-func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) error {
+func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err error) {
+	// The brain's half of the credential handshake, as its OWN root. It is
+	// deliberately not joined to the executor's awaiting-credentials span:
+	// the tf_ctl doorbell that usually triggers this is lossy by design (the
+	// sweeps are the real completion path), so a link would assert a 1:1
+	// handoff that neither side can guarantee — and the two sweeps reach here
+	// with no requester at all. conversation.id is the join; put the same id
+	// in a Tempo query and both sides come back.
+	ctx, span := tracer.Start(ctx, "credentials.provision", trace.WithNewRoot(),
+		trace.WithAttributes(telemetry.ConversationID(runID), telemetry.OrgID(orgID)))
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
+
 	claim, ok, err := m.stores.RunQueue.GetClaim(ctx, orgID, runID)
 	if err != nil {
 		return fmt.Errorf("credprovision: read claim for run %s: %w", runID, err)
 	}
 	if !ok || claim.ExecutorID == "" {
+		span.SetAttributes(telemetry.Outcome("unclaimed"))
 		return nil
 	}
 
@@ -118,6 +139,7 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) erro
 	if inst == nil {
 		log.Warn("claiming instance not found; skipping (not yet registered)",
 			"run", runID, "executor", claim.ExecutorID)
+		span.SetAttributes(telemetry.Outcome("executor_unregistered"))
 		return nil
 	}
 	// Seal to the run's per-run sidecar key when the executor published one
@@ -132,6 +154,7 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) erro
 	if sealPubKey == "" {
 		log.Warn("no sidecar or instance pubkey to seal to; skipping (not yet published, or not an executor)",
 			"run", runID, "executor", claim.ExecutorID)
+		span.SetAttributes(telemetry.Outcome("no_recipient_key"))
 		return nil
 	}
 	if inst.BootEpoch != claim.BootEpoch {
@@ -147,6 +170,7 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) erro
 		// answers. Skip and let the reaper requeue.
 		log.Warn("claiming executor's boot epoch has moved on since this run was claimed; skipping (reaper will requeue)",
 			"run", runID, "executor", claim.ExecutorID, "claim_epoch", claim.BootEpoch, "instance_epoch", inst.BootEpoch)
+		span.SetAttributes(telemetry.Outcome("stale_boot_epoch"))
 		return nil
 	}
 
@@ -221,6 +245,7 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) erro
 		return fmt.Errorf("credprovision: write bundle for run %s: %w", runID, err)
 	}
 	log.Debug("provisioned run credential bundle", "run", runID, "org", orgID, "executor", claim.ExecutorID, "boot_epoch", inst.BootEpoch)
+	span.SetAttributes(telemetry.Outcome("sealed"))
 	return nil
 }
 

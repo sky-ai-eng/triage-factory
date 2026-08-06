@@ -34,6 +34,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -102,11 +103,23 @@ func snapshotKey(orgID, keyID string) string {
 // worktree (preserved on dormancy by the per-run guards) is the primary resume
 // path and the snapshot is the durable backstop, only read when that cache is
 // gone.
-func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, sessionID string) error {
+func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, runID, keyID, wtPath, sessionID string) (err error) {
 	blobs := s.Storage()
 	if blobs == nil {
 		return nil // no store wired (tests / a configuration without the seam)
 	}
+
+	// Punctual and linked, not a child: this runs at a park or a terminal,
+	// arbitrarily long after the engagement's setup span ended. It is also
+	// the one piece of run teardown with an unbounded cost — a git bundle, a
+	// tar of the whole scratch tree, and a blob PUT — so a park that took a
+	// minute is answerable here rather than only in the log.
+	ctx, span := s.startPunctual(ctx, runID, "workspace.snapshot", telemetry.OrgID(orgID))
+	defer func() {
+		recordSpanError(span, err)
+		span.End()
+	}()
+
 	if keyID == "" {
 		return fmt.Errorf("snapshot: empty key id")
 	}
@@ -163,6 +176,8 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, keyID, wtPath, s
 	}
 	// Parked-window storage cost is a live sizing question; log every
 	// snapshot's real compressed footprint so it's answerable from the field.
+	// On the span too, where it explains the duration beside it.
+	span.SetAttributes(telemetry.SizeBytes(fi.Size()))
 	delegateLog.Info("snapshot written", "key", snapshotKey(orgID, keyID), "bytes_gzipped", fi.Size())
 	return nil
 }
@@ -303,7 +318,21 @@ func (s *Spawner) gitHostBaseFor(ctx context.Context, orgID string) string {
 // the only frame that knows it: past here a warm tree and a reconstruction of
 // one are the same directory, and what the agent is told about its own prior
 // work turns on the difference.
-func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain.Conversation, seed gitSeed) (string, domain.WorkspaceProvenance, error) {
+func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain.Conversation, seed gitSeed) (_ string, prov domain.WorkspaceProvenance, err error) {
+	// The provenance IS the interesting part of this span: a warm reuse is a
+	// stat call and a cold rehydrate is a blob fetch plus a git rebuild, and
+	// nothing downstream can tell them apart afterwards — past here they are
+	// the same directory. Recorded from the named result so every exit below
+	// carries it without restating the attribute.
+	ctx, span := tracer.Start(ctx, "engagement.workspace.ensure")
+	defer func() {
+		if prov != "" {
+			span.SetAttributes(telemetry.Workspace(string(prov)))
+		}
+		recordSpanError(span, err)
+		span.End()
+	}()
+
 	if run.WorktreePath != "" {
 		if _, err := os.Stat(run.WorktreePath); err == nil {
 			return run.WorktreePath, domain.WorkspaceProvenanceWarm, nil // warm: worktree still on disk
@@ -327,8 +356,8 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 	// Rebuild at the deterministic, host-local run-root for this key (equal to
 	// run.WorktreePath on the same host; a fresh path after landing elsewhere).
 	wtDir := worktree.RunRoot(keyID)
-	if err := s.rehydrateFromSnapshot(ctx, wtDir, seed, rc); err != nil {
-		return "", "", err
+	if rErr := s.rehydrateFromSnapshot(ctx, wtDir, seed, rc); rErr != nil {
+		return "", "", rErr
 	}
 	if wtDir != run.WorktreePath {
 		// Point the run (and the cleanup paths that key off it) at the rebuilt
@@ -337,8 +366,8 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 		// run.WorktreePath stays stale, so the NEXT resume won't find the
 		// warm copy and will cold-rehydrate again (correct, just slower) — log
 		// it distinctly so unexpected repeat rehydrates are diagnosable.
-		if err := s.agentRuns.SetWorktreePathSystem(context.Background(), orgID, run.ID, wtDir); err != nil {
-			delegateLog.Warn("rehydrate: persist new worktree_path failed; stale path will force a repeat cold rehydrate on the next resume", "worktree_path", wtDir, "run", run.ID, "error", err)
+		if wErr := s.agentRuns.SetWorktreePathSystem(context.WithoutCancel(ctx), orgID, run.ID, wtDir); wErr != nil {
+			delegateLog.Warn("rehydrate: persist new worktree_path failed; stale path will force a repeat cold rehydrate on the next resume", "worktree_path", wtDir, "run", run.ID, "error", wErr)
 		}
 	}
 	return wtDir, domain.WorkspaceProvenanceRehydrated, nil

@@ -60,7 +60,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 
 	// The park a stop lands on, wherever the stop catches this engagement.
 	stopped := func() engagementDisposition {
-		fenced := s.parkRunOpen(liveParkContext{
+		fenced := s.parkRunOpen(ctx, liveParkContext{
 			orgID:         orgID,
 			runID:         runID,
 			taskID:        task.ID,
@@ -99,16 +99,20 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		}
 	}
 
+	// The SDK path's twin (runAgent) — same staging, same span, so the two
+	// runtimes' setup is comparable in the backend rather than only in prose.
+	stagingCtx, stagingSpan := tracer.Start(ctx, "engagement.stage_context")
 	memoryDir, memoryOwned := entityMemoryTarget(&cfg, runID, claudeCwd, owned)
 	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, cfg.blueprintRunID, memoryOwned)
 
-	priorMemory := s.prepareInheritedMemory(ctx, orgID, runID, claudeCwd, owned, handedOff)
+	priorMemory := s.prepareInheritedMemory(stagingCtx, orgID, runID, claudeCwd, owned, handedOff)
 
 	if handedOff {
 		delegateLog.Debug("run tree already handed to the sandbox identity; project knowledge-base not refreshed for this step", "run", runID, "cwd", claudeCwd)
 	} else {
 		materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID, owned)
 	}
+	stagingSpan.End()
 
 	// Composed before the jail is launched, so the fallible half fails the claim
 	// without having cost a sandbox. The system prompt is the same for every
@@ -119,7 +123,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	}
 	systemPrompt := nativeSystemPrompt(cfg.appendSysPrompt != "")
 
-	s.updatePhase(orgID, runID, cfg.claimID, domain.ClaimPhaseAgentStarting)
+	s.updatePhase(ctx, orgID, runID, cfg.claimID, domain.ClaimPhaseAgentStarting)
 	if ctx.Err() != nil {
 		return stopped()
 	}
@@ -152,7 +156,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	tools := agentloop.NewToolHost(conn, 0)
 	defer func() { _ = tools.Close() }()
 
-	s.updatePhase(orgID, runID, cfg.claimID, "")
+	s.updatePhase(ctx, orgID, runID, cfg.claimID, "")
 	delegateLog.Info("native agent loop starting", "run", runID, "cwd", claudeCwd, "model", model)
 
 	transcript := newNativeTranscript(s, orgID, runID, cfg.claimID)
@@ -284,7 +288,7 @@ func (s *Spawner) buildNativeOpeningTurn(ctx context.Context, task domain.Task, 
 	if err != nil {
 		return "", fmt.Errorf("resolve own binary path: %w", err)
 	}
-	metadataJSON, err := s.events.GetMetadataSystem(context.Background(), cfg.orgID, task.PrimaryEventID)
+	metadataJSON, err := s.events.GetMetadataSystem(context.WithoutCancel(ctx), cfg.orgID, task.PrimaryEventID)
 	if err != nil {
 		delegateLog.Warn("load event metadata for task failed; the task context will carry no event fields",
 			"task", task.ID, "event", task.PrimaryEventID, "error", err)
@@ -557,7 +561,7 @@ func (s *Spawner) recordNativeResult(
 
 	switch result.Kind {
 	case agentloop.ResultCancelled:
-		return s.parkRunOpen(liveParkContext{
+		return s.parkRunOpen(ctx, liveParkContext{
 			orgID:         orgID,
 			runID:         runID,
 			taskID:        task.ID,
@@ -580,7 +584,7 @@ func (s *Spawner) recordNativeResult(
 		// A guard stopped the engagement before a call. The conversation is
 		// resumable, so the snapshot must exist by the time the status
 		// commits — parkRunOpen owns that ordering.
-		_ = s.parkRunOpen(liveParkContext{
+		_ = s.parkRunOpen(ctx, liveParkContext{
 			orgID:         orgID,
 			runID:         runID,
 			taskID:        task.ID,
@@ -597,19 +601,19 @@ func (s *Spawner) recordNativeResult(
 	// row presence means "the run terminated", NULL content means the agent
 	// wrote no usable memory file.
 	agentContent, fileState := readRunMemory(claudeCwd, priorMemory)
-	if err := s.taskMemory.UpsertAgentMemorySystem(context.Background(), orgID, runID, task.EntityID, cfg.blueprintRunID, agentContent); err != nil {
+	if err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, runID, task.EntityID, cfg.blueprintRunID, agentContent); err != nil {
 		delegateLog.Warn("upsert memory for run failed", "run", runID, "error", err)
 	}
 	if fileState != memoryFilePresent {
 		delegateLog.Debug("no usable memory file at termination", "run", runID, "state", fileState)
 	}
-	s.attachRunMemoryEntities(context.Background(), orgID, runID, task.EntityID)
+	s.attachRunMemoryEntities(context.WithoutCancel(ctx), orgID, runID, task.EntityID)
 
 	// Snapshot before the terminal write. A `continue` hands the shared
 	// workspace to the next step and an `abort` leaves a message-resumable
 	// conversation; both can be picked up on an executor that never held
 	// this worktree, so the blob has to exist by the time the status commits.
-	if err := s.snapshotWorkspace(ctx, orgID, namespace, claudeCwd, ""); err != nil {
+	if err := s.snapshotWorkspace(ctx, orgID, runID, namespace, claudeCwd, ""); err != nil {
 		delegateLog.Warn("snapshot workspace at native conclusion failed", "run", runID, "error", err)
 	}
 
@@ -625,7 +629,7 @@ func (s *Spawner) recordNativeResult(
 	// costUSD is zero here on purpose, and it is not a gap: the native
 	// runtime settles cost per assistant row at call time, so the ledger is
 	// already complete. Passing a lump would double-count.
-	bgCtx := context.Background()
+	bgCtx := context.WithoutCancel(ctx)
 	if err := s.agentRuns.CompleteForClaimSystem(bgCtx, orgID, runID, cfg.claimID, "completed", 0, result.DurationMs, result.NumTurns, "", result.ResultSummary, outcome, outcomeReason, ""); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			delegateLog.Error("engagement fenced out at conclusion; a successor owns the conversation",

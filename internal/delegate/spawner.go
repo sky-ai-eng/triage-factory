@@ -290,6 +290,13 @@ type Spawner struct {
 	blobs storage.Storage
 
 	cancels map[string]context.CancelFunc // runID → cancel the entire run
+	// engagements holds the live claim attempt's trace root for each run
+	// currently dispatching, keyed by run id — the seam between the setup
+	// span (which ends at agent-live) and the punctual spans that link back
+	// to it for the rest of the run. A conversation with no entry is the
+	// ordinary untraced case, and every reader is nil-safe. Guarded by mu
+	// like cancels beside it.
+	engagements map[string]*engagement
 	// curatorTurnDriver is the claim loop's curator execution arm (see
 	// SetCuratorTurnDriver). nil where no curator runtime is built.
 	curatorTurnDriver CuratorTurnDriver
@@ -534,6 +541,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		wsHub:            wsHub,
 		model:            model,
 		cancels:          make(map[string]context.CancelFunc),
+		engagements:      make(map[string]*engagement),
 		dispatchWake:     make(chan struct{}, 1),
 		procs:            make(map[string]*liveRunHandle),
 		permPending:      make(map[string]*pendingPermission),
@@ -1102,12 +1110,25 @@ func (s *Spawner) getRunSecrets() agentproc.SecretsReader {
 // write meets the same fence and abandons the run properly. Aborting from
 // here instead would mean a terminal write on a conversation this executor no
 // longer owns, which is the one thing a fenced-out engagement must not do.
-func (s *Spawner) updatePhase(orgID, runID, claimID, phase string) {
+func (s *Spawner) updatePhase(ctx context.Context, orgID, runID, claimID, phase string) {
+	// Clearing the phase IS agent-live — the one signal both runtimes share —
+	// so it is where the engagement's trace root ends (standing decision 5).
+	// Ahead of the write, because the span should measure bring-up rather than
+	// the bookkeeping that announces it, and because a fence refusal below
+	// still leaves the setup we just traced worth exporting.
+	if phase == "" {
+		s.endEngagement(runID, engagementLive)
+	}
+	// Detached from cancellation exactly as the former context.Background()
+	// was — a shutdown mid-setup must not abort the progress write — but
+	// WithoutCancel keeps the caller's values, so the write lands inside the
+	// engagement's trace instead of as an orphan.
+	ctx = context.WithoutCancel(ctx)
 	var err error
 	if claimID != "" {
-		err = s.agentRuns.SetClaimPhaseSystem(context.Background(), orgID, runID, claimID, phase)
+		err = s.agentRuns.SetClaimPhaseSystem(ctx, orgID, runID, claimID, phase)
 	} else {
-		err = s.agentRuns.SetActiveClaimPhaseSystem(context.Background(), orgID, runID, phase)
+		err = s.agentRuns.SetActiveClaimPhaseSystem(ctx, orgID, runID, phase)
 	}
 	if errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Error("claim fence refused a phase write — this executor no longer owns the conversation",

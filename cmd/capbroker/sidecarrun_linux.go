@@ -58,17 +58,21 @@ func (c *IPCClient) LaunchSidecar(ctx context.Context, p sandbox.SidecarLaunchPa
 	conn, err := l.Accept()
 	cleanupListener()
 	if err != nil {
-		killAndDrainSidecar(c, p.ContainerID)
+		killAndDrainSidecar(ctx, c, p.ContainerID)
 		return nil, fmt.Errorf("capbroker: accept sidecar stdio: %w", err)
 	}
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		_ = conn.Close()
-		killAndDrainSidecar(c, p.ContainerID)
+		killAndDrainSidecar(ctx, c, p.ContainerID)
 		return nil, fmt.Errorf("capbroker: accepted sidecar stdio is not a unix conn")
 	}
 
-	return &sidecarHandle{client: c, containerID: p.ContainerID, conn: uc}, nil
+	// The launch context is held for Close's sake. Nothing about the
+	// sidecar's lifetime depends on it — Close detaches from its
+	// cancellation, which is the normal case — but its VALUES are what let a
+	// teardown minutes or hours later still name the run it tore down.
+	return &sidecarHandle{client: c, ctx: ctx, containerID: p.ContainerID, conn: uc}, nil
 }
 
 // killAndDrainSidecar kills a broker-registered sidecar and blocks until
@@ -77,11 +81,18 @@ func (c *IPCClient) LaunchSidecar(ctx context.Context, p sandbox.SidecarLaunchPa
 // leaks the entry indefinitely. Used on every path that abandons a launch
 // past the point the broker has registered it: LaunchSidecar's own
 // Accept/type-assertion failures below, and sidecarHandle.Close's normal
-// teardown. Detached context: teardown must complete even if the run's own
-// ctx is already canceled (the common case for Close).
-func killAndDrainSidecar(c *IPCClient, containerID string) {
-	_ = c.call(context.Background(), methodKillSidecar, killSidecarArgs{ContainerID: containerID}, nil)
-	_ = c.call(context.Background(), methodWaitSidecar, waitSidecarArgs{ContainerID: containerID}, nil)
+// teardown.
+//
+// Both RPCs are detached from ctx's cancellation, because teardown must
+// complete even when the run's own ctx is already canceled — the common case
+// for Close. WithoutCancel rather than Background: the cancellation is what
+// has to go, not the values, and dropping those would leave these two spans
+// parentless, carrying nothing but a method name at exactly the moment
+// (a teardown that hung) when knowing whose teardown it was matters most.
+func killAndDrainSidecar(ctx context.Context, c *IPCClient, containerID string) {
+	ctx = context.WithoutCancel(ctx)
+	_ = c.call(ctx, methodKillSidecar, killSidecarArgs{ContainerID: containerID}, nil)
+	_ = c.call(ctx, methodWaitSidecar, waitSidecarArgs{ContainerID: containerID}, nil)
 }
 
 // sidecarHandle is the orchestrator-side sandbox.LaunchedSidecar for a
@@ -90,7 +101,10 @@ func killAndDrainSidecar(c *IPCClient, containerID string) {
 // no-ops on an already-reaped entry) then wait (drains the broker's
 // registry entry, exactly like a normal run's Wait does via WaitRun).
 type sidecarHandle struct {
-	client      *IPCClient
+	client *IPCClient
+	// ctx is the launch context, kept only for its values (see Close). Its
+	// cancellation is deliberately never honored here.
+	ctx         context.Context
 	containerID string
 	conn        *net.UnixConn
 	closeOnce   sync.Once
@@ -108,7 +122,7 @@ func (h *sidecarHandle) Close() error {
 		if h.conn != nil {
 			_ = h.conn.Close()
 		}
-		killAndDrainSidecar(h.client, h.containerID)
+		killAndDrainSidecar(h.ctx, h.client, h.containerID)
 	})
 	return nil
 }

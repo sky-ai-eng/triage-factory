@@ -173,22 +173,36 @@ func BringUpRunSidecar(ctx context.Context, sc sandbox.LaunchedSidecar, provisio
 	conn := sidecarproto.New(stream, sup)
 
 	// The sidecar's hello is its first write; wait for it before provisioning
-	// (the brain needs the public key to seal against).
+	// (the brain needs the public key to seal against). Its own span because
+	// this is the sidecar process starting up — the one part of bring-up that
+	// nothing on this side can attribute otherwise, since the sidecar exports
+	// nothing itself.
+	helloCtx, helloSpan := tracer.Start(ctx, "sidecar.hello")
 	var pubKey string
+	var helloErr error
 	select {
 	case pubKey = <-sup.helloCh:
 	case <-conn.Done():
-		_ = conn.Close()
-		return nil, nil, fmt.Errorf("agentproc: sidecar closed before announcing its key: %w", conn.Err())
+		helloErr = fmt.Errorf("agentproc: sidecar closed before announcing its key: %w", conn.Err())
 	case <-time.After(sidecarHelloTimeout):
+		helloErr = fmt.Errorf("agentproc: timed out waiting for sidecar hello")
+	case <-helloCtx.Done():
+		helloErr = helloCtx.Err()
+	}
+	recordSpanError(helloSpan, helloErr)
+	helloSpan.End()
+	if helloErr != nil {
 		_ = conn.Close()
-		return nil, nil, fmt.Errorf("agentproc: timed out waiting for sidecar hello")
-	case <-ctx.Done():
-		_ = conn.Close()
-		return nil, nil, ctx.Err()
+		return nil, nil, helloErr
 	}
 
-	sealed, bootEpoch, err := provision(ctx, pubKey)
+	// The credential handshake with the control plane: publish the key, then
+	// wait for a bundle sealed to it. Usually the longest leg of bring-up, and
+	// the one that measures somebody else's latency rather than this pod's.
+	provCtx, provSpan := tracer.Start(ctx, "sidecar.provision")
+	sealed, bootEpoch, err := provision(provCtx, pubKey)
+	recordSpanError(provSpan, err)
+	provSpan.End()
 	if err != nil {
 		_ = conn.Close()
 		return nil, nil, fmt.Errorf("agentproc: provision sidecar credentials: %w", err)
@@ -215,7 +229,11 @@ func BringUpRunSidecar(ctx context.Context, sc sandbox.LaunchedSidecar, provisio
 		req.GitUpstream = params.Git.Upstream
 	}
 	var res sidecarproto.StartProxiesResult
-	if err := conn.Call(ctx, sidecarproto.KindStartProxies, req, &res); err != nil {
+	proxyCtx, proxySpan := tracer.Start(ctx, "sidecar.start_proxies")
+	err = conn.Call(proxyCtx, sidecarproto.KindStartProxies, req, &res)
+	recordSpanError(proxySpan, err)
+	proxySpan.End()
+	if err != nil {
 		_ = conn.Close()
 		return nil, nil, fmt.Errorf("agentproc: start sidecar proxies: %w", err)
 	}

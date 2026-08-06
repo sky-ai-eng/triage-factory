@@ -27,6 +27,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -189,7 +190,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// agent has actually started — the pre-launch cancel below passes "" and
 	// snapshots a workspace with no transcript to carry.
 	cancelled := func(sessionID string) bool {
-		fenced := s.parkRunOpen(liveParkContext{
+		fenced := s.parkRunOpen(ctx, liveParkContext{
 			orgID:         orgID,
 			runID:         runID,
 			taskID:        task.ID,
@@ -235,7 +236,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			// terminal teardown removes it. Best-effort: a leaked row is harmless
 			// (run-scoped, never collides a future run).
 			if s.runWorktrees != nil && cfg.owner != "" && cfg.repo != "" && cfg.prNumber > 0 {
-				if delErr := s.runWorktrees.DeleteByRepoRefSystem(context.Background(), orgID, runID, cfg.owner+"/"+cfg.repo, worktree.PRRefSlug(cfg.prNumber)); delErr != nil {
+				if delErr := s.runWorktrees.DeleteByRepoRefSystem(context.WithoutCancel(ctx), orgID, runID, cfg.owner+"/"+cfg.repo, worktree.PRRefSlug(cfg.prNumber)); delErr != nil {
 					delegateLog.Warn("delete eager worktree conversation_worktrees row failed", "run", runID, "repo", cfg.owner+"/"+cfg.repo, "error", delErr)
 				}
 			}
@@ -263,13 +264,13 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			if parked {
 				return
 			}
-			rows, err := s.runWorktrees.ListSystem(context.Background(), orgID, runID)
+			rows, err := s.runWorktrees.ListSystem(context.WithoutCancel(ctx), orgID, runID)
 			if err != nil {
 				delegateLog.Warn("list conversation_worktrees for cleanup failed", "run", runID, "error", err)
 			} else {
 				// Use a detached context so cleanup is not skipped if the
 				// agent ctx has already been canceled.
-				cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 				defer cancel()
 				for _, w := range rows {
 					if rmErr := worktree.RemoveAt(w.Path, runID); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
@@ -357,6 +358,12 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// warm tree or cold — only the target moves, into a staging dir the launch
 	// mounts read-only when the agent is jailed. This is the blueprint handoff, so
 	// a step that cannot get it starts from nothing.
+	//
+	// It plus the project knowledge base below is a DB read and a tree copy
+	// that can run large, and the last thing between a rehydrated workspace and
+	// the agent starting — so one span covers both halves of the on-disk
+	// context the agent will read.
+	_, stagingSpan := tracer.Start(ctx, "engagement.stage_context")
 	memoryDir, memoryOwned := entityMemoryTarget(&cfg, runID, claudeCwd, owned)
 	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, cfg.blueprintRunID, memoryOwned)
 
@@ -390,6 +397,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	} else {
 		materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID, owned)
 	}
+	stagingSpan.End()
 
 	selfBin, err := os.Executable()
 	if err != nil {
@@ -401,7 +409,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// failure here is non-fatal: the block just renders without them. FKs
 	// guarantee the event exists, so a real miss would be a DB-level problem we
 	// want to log and continue through rather than aborting the run.
-	metadataJSON, err := s.events.GetMetadataSystem(context.Background(), orgID, task.PrimaryEventID)
+	metadataJSON, err := s.events.GetMetadataSystem(context.WithoutCancel(ctx), orgID, task.PrimaryEventID)
 	if err != nil {
 		delegateLog.Warn("load event metadata for task failed; the task context will carry no event fields", "task", task.ID, "event", task.PrimaryEventID, "error", err)
 		metadataJSON = ""
@@ -420,11 +428,11 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// The team's branch-naming convention, ticket-id-resolved, surfaced to the
 	// agent as run-context guidance (TFAC-498). Not enforced — the push gate
 	// authorizes whatever branch the worktree lands on.
-	branchTemplate := s.resolveBranchTemplate(context.Background(), task)
+	branchTemplate := s.resolveBranchTemplate(context.WithoutCancel(ctx), task)
 	runURL := s.runURLFor(orgID, runID)
 	prompt := buildPrompt(task, metadataJSON, cfg.prSkeleton, mission, cfg.scope, cfg.toolsRef, agentBin, agentRunRoot, branchTemplate, runURL)
 
-	s.updatePhase(orgID, runID, cfg.claimID, domain.ClaimPhaseAgentStarting)
+	s.updatePhase(ctx, orgID, runID, cfg.claimID, domain.ClaimPhaseAgentStarting)
 	if ctx.Err() != nil {
 		return cancelled("")
 	}
@@ -463,7 +471,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		extraEnv = append(extraEnv, "TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER="+commitIdentity.CoAuthorTrailer)
 	}
 
-	s.updatePhase(orgID, runID, cfg.claimID, "")
+	s.updatePhase(ctx, orgID, runID, cfg.claimID, "")
 
 	// StartAgentHost is invoked from inside agentproc.Run's sandbox branch —
 	// which only a multi-mode dispatch reaches, and every multi dispatch
@@ -645,7 +653,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// session at all; its failure is already recorded, and naming a coordinate
 	// it was never going to have would just be noise on top.
 	if out.hibernated || out.result != nil {
-		s.assertResumeCoordinates(context.Background(), orgID, runID, resumeCheckRest)
+		s.assertResumeCoordinates(context.WithoutCancel(ctx), orgID, runID, resumeCheckRest)
 	}
 
 	// Idle hibernation parked the run (status `open`, snapshot written) — a
@@ -725,6 +733,26 @@ func (s *Spawner) processCompletion(
 	priorMemory *memoryFingerprint,
 	sessionID, triggerType, creatorUserID string,
 ) (parked, fenced bool) {
+	// The engagement's terminal, as a punctual span linked back to the setup
+	// that started it. This is where a run's own accounting already exists —
+	// cost, wall time, turn count — so it is the one place those figures can
+	// ride into the trace without being recomputed; the span's own duration
+	// is the bookkeeping, not the agent's work, which is exactly why the
+	// agent's numbers have to be attributes rather than inferred.
+	ctx, span := s.startPunctual(ctx, runID, "engagement.complete",
+		telemetry.OrgID(orgID),
+		telemetry.TaskID(task.ID),
+		telemetry.AgentCostUSD(completion.CostUSD),
+		telemetry.AgentDuration(int64(completion.DurationMs)),
+		telemetry.Count(completion.NumTurns))
+	// Defaults to the park below, which is the one exit that returns before
+	// the terminal classification runs.
+	terminal := "open"
+	defer func() {
+		span.SetAttributes(telemetry.Outcome(terminal))
+		span.End()
+	}()
+
 	// The namespace keys this run's workspace (tree + snapshot) among its
 	// blueprint siblings. Derived from the caller-supplied blueprint_run_id —
 	// no DB fetch, so it can't silently fall back to the wrong key on a
@@ -738,7 +766,7 @@ func (s *Spawner) processCompletion(
 	// it never takes this branch however envelope-shaped its text.
 	class, parsed := classifyAgentResult(completion.Result)
 	if !completion.IsError && class == turnNone {
-		_ = s.parkRunOpen(liveParkContext{
+		_ = s.parkRunOpen(ctx, liveParkContext{
 			orgID:         orgID,
 			runID:         runID,
 			taskID:        task.ID,
@@ -758,7 +786,7 @@ func (s *Spawner) processCompletion(
 	// the next run's materializer can tell this workflow run's own steps from
 	// history.
 	agentContent, fileState := readRunMemory(claudeCwd, priorMemory)
-	if err := s.taskMemory.UpsertAgentMemorySystem(context.Background(), orgID, runID, task.EntityID, blueprintRunID, agentContent); err != nil {
+	if err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, runID, task.EntityID, blueprintRunID, agentContent); err != nil {
 		delegateLog.Warn("upsert memory for run failed", "run", runID, "error", err)
 	}
 	switch fileState {
@@ -775,10 +803,10 @@ func (s *Spawner) processCompletion(
 	// Attach the run's memory to every entity it materially engaged — the
 	// primary (task) entity plus everything it produced — so the narrative is
 	// reachable from all of them, not just the denormalized primary on
-	// conversation_memory.entity_id. context.Background() (not ctx) for the same reason
-	// the upsert above uses it: a cancelled turn still owns its terminal
+	// conversation_memory.entity_id. Cancellation-detached for the same reason
+	// the upsert above is: a cancelled turn still owns its terminal
 	// bookkeeping.
-	s.attachRunMemoryEntities(context.Background(), orgID, runID, task.EntityID)
+	s.attachRunMemoryEntities(context.WithoutCancel(ctx), orgID, runID, task.EntityID)
 
 	// Every run is a step of a blueprint_run now (a single prompt is a 1-step
 	// blueprint), so this helper never owns task disposition: it persists
@@ -816,12 +844,25 @@ func (s *Spawner) processCompletion(
 		resultSummary = "agent did not return a valid completion envelope"
 	}
 
+	// The classification is settled; carry it onto the terminal span. A
+	// failed run additionally gets the failure kind, which is the closed
+	// domain.RunFailure* vocabulary rather than the free-text summary.
+	terminal = status
+	if status == "failed" {
+		terminal = status + "_" + string(failureKind)
+	} else if outcome != "" {
+		terminal = status + "_" + outcome
+	}
+
 	// Detached context: the run's ctx may have been cancelled (user
 	// cancel mid-stream) but the terminal write still needs to record.
+	// WithoutCancel rather than Background: identical detachment (values
+	// kept, cancellation dropped) while the writes stay inside this
+	// engagement's trace instead of orphaning.
 	// Manual runs wrap in synthetic claims so the UPDATE passes RLS
 	// under tf_app with the creator's identity; event-triggered runs
 	// bypass via the admin pool.
-	bgCtx := context.Background()
+	bgCtx := context.WithoutCancel(ctx)
 
 	// A queued draft PR / pending review NO LONGER parks the run. The
 	// artifact was already recorded by the exec choke point and is an async
@@ -852,7 +893,7 @@ func (s *Spawner) processCompletion(
 	// accepted and a claim minted — for a workspace that, the other way round, is
 	// still being written.
 	if status == "completed" {
-		if err := s.snapshotWorkspace(ctx, orgID, namespace, claudeCwd, sessionID); err != nil {
+		if err := s.snapshotWorkspace(ctx, orgID, runID, namespace, claudeCwd, sessionID); err != nil {
 			delegateLog.Warn("snapshot workspace for completed run failed", "run", runID, "outcome", outcome, "error", err)
 		}
 	}

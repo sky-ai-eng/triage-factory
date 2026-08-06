@@ -25,6 +25,8 @@ import (
 // moment to make that decision, rather than once a customer's repository
 // inventory is already in someone's trace store. Keep sorted.
 var approvedKeys = []string{
+	"agent.cost_usd",
+	"agent.duration_ms",
 	"attempt",
 	"claim.attempt",
 	"conversation.id",
@@ -34,15 +36,18 @@ var approvedKeys = []string{
 	"event.id",
 	"event.type",
 	"job",
+	"op",
 	"org.id",
 	"outcome",
 	"provider",
 	"queue.wait_ms",
 	"runtime",
+	"size_bytes",
 	"source",
 	"task.id",
 	"team.id",
 	"transport",
+	"workspace.provenance",
 }
 
 // TestAttributeHelpersEmitOnlyApprovedKeys calls every exported helper in
@@ -54,6 +59,8 @@ func TestAttributeHelpersEmitOnlyApprovedKeys(t *testing.T) {
 		Source("github"), Disposition("routed"), Outcome("ok"), Runtime("sdk"),
 		Attempt(2), Count(3), Job("scorer"), Provider("anthropic"),
 		Transport("direct"), QueueWait(1500 * time.Millisecond),
+		Op("SetupNetwork"), Workspace("rehydrated"), SizeBytes(4096),
+		AgentCostUSD(0.42), AgentDuration(9000),
 	}
 	for _, kv := range produced {
 		if !slices.Contains(approvedKeys, string(kv.Key)) {
@@ -89,6 +96,8 @@ func TestEveryAttributeHelperIsCovered(t *testing.T) {
 		"ClaimAttempt": true, "Source": true, "Disposition": true,
 		"Outcome": true, "Runtime": true, "Attempt": true, "Count": true,
 		"Job": true, "Provider": true, "Transport": true, "QueueWait": true,
+		"Op": true, "Workspace": true, "SizeBytes": true,
+		"AgentCostUSD": true, "AgentDuration": true,
 	}
 	sort.Strings(declared)
 	for _, name := range declared {

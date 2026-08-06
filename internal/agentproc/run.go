@@ -17,6 +17,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // RunOptions configures one `claude -p` invocation. Callers populate
@@ -461,7 +463,7 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	// "Node not on PATH" — surface them to the caller so the run lands
 	// in failed state with a clear message rather than spawning a
 	// broken subprocess.
-	wrapperPath, err := EnsureSDK()
+	wrapperPath, err := ensureSDKTraced(runCtx)
 	if err != nil {
 		return nil, fmt.Errorf("agent runtime: %w", err)
 	}
@@ -586,7 +588,22 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 // caller brought up over the sealed bundle; the agent's env carries only the
 // proxy URLs + per-run placeholder credentials (opts.PrebuiltProxyEnv), and
 // the real key is injected onto the upstream hop inside the sidecar.
-func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath string) (runProc, func(), error) {
+func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath string) (_ runProc, _ func(), err error) {
+	// The jail bring-up under one span: the rootfs ensure, the run-tree
+	// handoff, and the LaunchRun IPC all happen below, and each of them is a
+	// round trip to the cap-broker that this side can time and the broker —
+	// which never exports a span of its own — cannot.
+	//
+	// runCtx is reassigned rather than shadowed so those broker calls nest
+	// under this span instead of hanging off the engagement root directly.
+	// Cancellation is untouched; a context gains only a value here.
+	var launchSpan trace.Span
+	runCtx, launchSpan = tracer.Start(runCtx, "agent.jail.launch", trace.WithAttributes(telemetry.Runtime("sdk")))
+	defer func() {
+		recordSpanError(launchSpan, err)
+		launchSpan.End()
+	}()
+
 	// Teardown state, accumulated as each setup step below succeeds. cleanup
 	// runs the undos in LIFO order and is single-shot via once, so the error
 	// paths can invoke it eagerly and the caller can still defer it safely.

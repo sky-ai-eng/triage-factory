@@ -36,7 +36,7 @@ func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
 	const sessionID = "sess-warm"
 	writeSession(t, wtPath, sessionID, `{"type":"summary"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, sessionID); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -94,7 +94,7 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	const sessionID = "sess-cold"
 	sessPath := writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"cold"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, sessionID); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -163,7 +163,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptBearingSnapshotIsResumable(t *testin
 	const sessionID = "sess-present"
 	writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"present"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, sessionID); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	if err := os.RemoveAll(wtPath); err != nil { // host loss: only the snapshot remains
@@ -198,7 +198,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable(t *testin
 	const sessionID = "sess-lost"
 	// Deliberately NO writeSession: the run carries a session id but its
 	// transcript is not on disk when the snapshot is taken.
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, sessionID); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	if err := os.RemoveAll(wtPath); err != nil {
@@ -234,7 +234,7 @@ func TestSnapshotWorkspace_StoresGzip(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch note")
 
 	const runID = "wt-gzip"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, ""); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -267,7 +267,7 @@ func TestEnsureWorkspace_ColdPath_CorruptGzipChecksumErrors(t *testing.T) {
 	const runID = "wt-corrupt"
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "_tfac", "ci-logs", "x.log"), "log bytes the gzip trailer checksums over")
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, src, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, src, ""); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -319,7 +319,7 @@ func TestSnapshotWorkspace_CompressionShrinksTranscriptHeavyBlob(t *testing.T) {
 		strings.Repeat("=== RUN   TestSomething\n--- PASS: TestSomething (0.01s)\n", 2000))
 
 	const runID = "wt-fat"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, sessionID); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, sessionID); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, runID))
@@ -365,7 +365,7 @@ func TestEnsureWorkspace_ColdPath_DetachedHead(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\ndetached edit\n")
 	headSHA := strings.TrimSpace(gitOut(t, wtPath, "rev-parse", "HEAD"))
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, ""); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -412,7 +412,7 @@ func TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nwork in progress\n")
 	headSHA := strings.TrimSpace(gitOut(t, wtPath, "rev-parse", "HEAD"))
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, wtPath, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, ""); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 

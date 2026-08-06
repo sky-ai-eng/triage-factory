@@ -121,7 +121,7 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 	stepRun, _ := s.agentRuns.GetSystem(ctx, org, run0)
 	stepRun.TriggerType = "manual"
 	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(org, br, *stepRun, runConfig{orgID: org}, time.Now())
+	s.reactToStepTerminal(context.Background(), org, br, *stepRun, runConfig{orgID: org}, time.Now())
 
 	if br2 := mustGetRun(t, s, org, brID); br2.Status != domain.BlueprintRunStatusRunning {
 		t.Fatalf("blueprint status = %q, want running (must advance off the frozen plan, not finish on the shortened live list)", br2.Status)

@@ -462,7 +462,7 @@ func TestParkRunOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "work in progress")
 	namespace := blueprintRunIDForRun(t, database, runID)
 
-	if fenced := s.parkRunOpen(liveParkContext{
+	if fenced := s.parkRunOpen(context.Background(), liveParkContext{
 		orgID:       runmode.LocalDefaultOrgID,
 		runID:       runID,
 		taskID:      taskID,

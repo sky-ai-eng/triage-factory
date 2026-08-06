@@ -68,7 +68,7 @@ func TestFollowUp_ConcludedStepOfARunningBlueprintIsRefused(t *testing.T) {
 	stepRun := loadRun(t, s, run0)
 	stepRun.TriggerType = "manual"
 	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
 
 	if q := queuedStepRuns(t, database, brID); len(q) != 1 || q[0] != 1 {
 		t.Fatalf("queued step runs = %v, want [1] — the next step must run", q)
@@ -100,7 +100,7 @@ func TestFollowUp_FinalStepAfterTheBlueprintFinishesStillLands(t *testing.T) {
 	stepRun := loadRun(t, s, run0)
 	stepRun.TriggerType = "manual"
 	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
 	if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusCompleted {
 		t.Fatalf("blueprint status = %q, want completed before the follow-up", br.Status)
 	}
@@ -145,7 +145,7 @@ func TestFollowUp_StopResumeOfAMidBlueprintStepStillLands(t *testing.T) {
 	stepRun := loadRun(t, s, run0)
 	stepRun.TriggerType = "manual"
 	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
 
 	if q := queuedStepRuns(t, database, brID); len(q) != 1 || q[0] != 1 {
 		t.Fatalf("queued step runs = %v, want [1] — a resumed step's conclusion still advances", q)
