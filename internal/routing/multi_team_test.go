@@ -376,8 +376,8 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	// Fire the trigger as team B (bot disabled) — must be blocked — and
 	// as team A (bot enabled) — must delegate. Order doesn't matter:
 	// team B's gate returns before the entity gate.
-	router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entity.ID, eventID, teamB)
-	router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entity.ID, eventID, teamA)
+	mustAutoDelegate(t, router, task, trigger, entity.ID, eventID, teamB)
+	mustAutoDelegate(t, router, task, trigger, entity.ID, eventID, teamA)
 
 	if stub.calls != 1 {
 		t.Fatalf("expected exactly 1 Delegate call (team A only); got %d", stub.calls)

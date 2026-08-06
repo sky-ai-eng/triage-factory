@@ -278,10 +278,13 @@ func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent)
 // once it has burned through maxEventAttempts. Used for transient
 // failures and panics so one bad event can't wedge the queue.
 //
-// Returns true when the row was requeued — it is pending again and will be
-// re-claimed, so the caller must stop draining rather than pick it straight
-// back up. A parked row returns false: it is terminal and ClaimNext will
-// never see it again.
+// Returns true only when the row actually reached 'pending' again — the one
+// state where it is about to be re-claimed, so the caller must stop draining
+// rather than pick it straight back up. A parked row returns false: it is
+// terminal and ClaimNext will never see it again. So does a row whose
+// Requeue itself failed, which leaves it stranded in 'processing' where
+// ClaimNext cannot reach it either — stopping the pass over that row would
+// hold up every other pending row for a scan tick and buy nothing.
 func (r *Router) parkOrRequeue(ctx context.Context, qe *domain.QueuedEvent, reason string) (requeued bool) {
 	if qe.Attempts >= maxEventAttempts {
 		if err := r.eventQueue.MarkFailed(ctx, qe.OrgID, qe.ID,
@@ -290,11 +293,9 @@ func (r *Router) parkOrRequeue(ctx context.Context, qe *domain.QueuedEvent, reas
 		}
 		return false
 	}
-	// A failed Requeue leaves the row 'processing', where ClaimNext can't
-	// reach it either — but the intent was a retry, so report it as one and
-	// let the caller stop rather than spin.
 	if err := r.eventQueue.Requeue(ctx, qe.OrgID, qe.ID, reason); err != nil {
 		routerLog.Error("event-queue: requeue failed", "queue_id", qe.ID, "error", err)
+		return false
 	}
 	return true
 }

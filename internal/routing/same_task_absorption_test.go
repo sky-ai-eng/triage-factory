@@ -246,7 +246,7 @@ func TestTryAutoDelegate_SameTask_InjectsIntoActiveRun(t *testing.T) {
 	// before tryAutoDelegate/tryAdditiveInjection ever runs.
 	bumpTaskViaRealUpsert(t, router, task, trigger, entityID, secondEventID)
 
-	router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
+	mustAutoDelegate(t, router, task, trigger, entityID, secondEventID, "")
 
 	if len(stub.calls) != 1 {
 		t.Fatalf("expected exactly 1 StageOrDeliverAdditiveEvent call, got %d", len(stub.calls))
@@ -308,7 +308,7 @@ func TestTryAutoDelegate_SameTask_StagedResumableRunHandled(t *testing.T) {
 	// InjectDeliveredLocal test above.
 	bumpTaskViaRealUpsert(t, router, task, trigger, entityID, secondEventID)
 
-	router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
+	mustAutoDelegate(t, router, task, trigger, entityID, secondEventID, "")
 
 	if len(stub.calls) != 1 {
 		t.Fatalf("expected 1 StageOrDeliverAdditiveEvent attempt, got %d", len(stub.calls))
@@ -364,7 +364,7 @@ func TestTryAutoDelegate_SameTask_DeliveredRemoteHandledWithoutRecording(t *test
 	// through the side effects below (no deferral, no local bookkeeping),
 	// matching the sibling InjectDeliveredLocal/InjectStagedResumable tests'
 	// convention.
-	router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
+	mustAutoDelegate(t, router, task, trigger, entityID, secondEventID, "")
 	if len(stub.calls) != 1 {
 		t.Fatalf("expected 1 StageOrDeliverAdditiveEvent attempt, got %d", len(stub.calls))
 	}
@@ -446,7 +446,7 @@ func TestTryAutoDelegate_SiblingTask_FiresConcurrently(t *testing.T) {
 	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal, allowFire: true}
 	router := newAbsorbTestRouter(database, st.Conversations, stub)
 
-	router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, taskB, trigB, entityID, otherEventID, "")
+	mustAutoDelegate(t, router, taskB, trigB, entityID, otherEventID, "")
 
 	if len(stub.calls) != 0 {
 		t.Errorf("expected no injection for a sibling-task firing, got %d StageOrDeliverAdditiveEvent call(s)", len(stub.calls))
@@ -486,11 +486,7 @@ func TestTryAutoDelegate_SameTask_NotDeliveredFallsThroughToDeferral(t *testing.
 	stub := &injectingStubDelegator{outcome: delegate.InjectNotDelivered}
 	router := newAbsorbTestRouter(database, sqlitestore.New(database).Conversations, stub)
 
-	fired, err := router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
-	if err != nil {
-		t.Fatalf("tryAutoDelegate: %v", err)
-	}
-	if !fired {
+	if !mustAutoDelegate(t, router, task, trigger, entityID, secondEventID, "") {
 		t.Error("expected tryAutoDelegate to report handled via the normal deferral (enqueueBusyFiring)")
 	}
 	if len(stub.calls) != 1 {
@@ -540,11 +536,7 @@ func TestTryAutoDelegate_SameTask_StageToNonResumableRun_NoOrphanedRow(t *testin
 		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil,
 		spawner, noopScorer{}, websocket.NewHub())
 
-	fired, err := router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
-	if err != nil {
-		t.Fatalf("tryAutoDelegate: %v", err)
-	}
-	if !fired {
+	if !mustAutoDelegate(t, router, task, trigger, entityID, secondEventID, "") {
 		t.Error("expected tryAutoDelegate to report handled via the normal deferral (enqueueBusyFiring)")
 	}
 
@@ -609,7 +601,7 @@ func TestTryAutoDelegate_SameTask_StampsAgentClaimOnInjectedTask(t *testing.T) {
 		st.Events, st.Orgs, st.Teams, nil, nil, nil,
 		stub, noopScorer{}, websocket.NewHub())
 
-	router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
+	mustAutoDelegate(t, router, task, trigger, entityID, secondEventID, "")
 
 	if len(stub.calls) != 1 {
 		t.Fatalf("expected exactly 1 injection attempt, got %d", len(stub.calls))
@@ -687,7 +679,7 @@ func TestTryAutoDelegate_FrozenTask_BlocksOnlyItself(t *testing.T) {
 
 	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal, allowFire: true}
 	router := newAbsorbTestRouter(database, st.Conversations, stub)
-	router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, taskB, trigB, entityID, siblingEventID, "")
+	mustAutoDelegate(t, router, taskB, trigB, entityID, siblingEventID, "")
 
 	if len(stub.delegated) != 1 || stub.delegated[0] != taskB.ID {
 		t.Errorf("sibling delegated = %v, want [%s] — a frozen task must not hold the entity", stub.delegated, taskB.ID)
@@ -706,7 +698,7 @@ func TestTryAutoDelegate_FrozenTask_BlocksOnlyItself(t *testing.T) {
 		t.Fatalf("record follow-up event: %v", err)
 	}
 	stub.delegated = nil
-	router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, taskA, trigA, entityID, followupEventID, "")
+	mustAutoDelegate(t, router, taskA, trigA, entityID, followupEventID, "")
 
 	if len(stub.delegated) != 0 {
 		t.Errorf("frozen task fired a second run (%v); its own gate must stay closed", stub.delegated)

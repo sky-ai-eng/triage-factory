@@ -87,6 +87,21 @@ func (s outageDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) 
 	return s.fenceStubDelegator.Delegate(task, opts)
 }
 
+// mustAutoDelegate calls tryAutoDelegate and fails the test if it reports a
+// dependency failure, returning the fired flag. Every call site that isn't
+// itself exercising the error path goes through it: tryAutoDelegate's error
+// return is what tells the queue worker an event is still owed, so a test
+// that discards it would keep passing while a regression quietly turned one
+// of these paths into a replayed — or eventually parked — event.
+func mustAutoDelegate(t *testing.T, r *Router, task *domain.Task, trigger domain.EventHandler, entityID, triggeringEventID, actingTeamID string) bool {
+	t.Helper()
+	fired, err := r.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, triggeringEventID, actingTeamID)
+	if err != nil {
+		t.Fatalf("tryAutoDelegate: %v", err)
+	}
+	return fired
+}
+
 // queueRow reads the single event_queue row's terminal state.
 func queueRow(t *testing.T, database *sql.DB) (status string, attempts int, lastErr string) {
 	t.Helper()
@@ -316,6 +331,52 @@ func TestProcessQueuedEvent_PersistentObligationFailure_ParksAfterBudget(t *test
 	}
 	if _, attempts, _ := queueRow(t, database); attempts != maxEventAttempts {
 		t.Errorf("attempts = %d after draining past a parked row, want %d — a failed row must not be re-claimed", attempts, maxEventAttempts)
+	}
+}
+
+// requeueFailingQueueStore fails the requeue write itself, which leaves the
+// row stranded in 'processing' — reachable by neither ClaimNext nor this
+// process's boot recovery.
+type requeueFailingQueueStore struct{ dbpkg.EventQueueStore }
+
+func (requeueFailingQueueStore) Requeue(ctx context.Context, orgID string, id int64, lastErr string) error {
+	return errOutage
+}
+
+// TestDrainEventQueue_RequeueWriteFails_KeepsDraining pins that the
+// stop-the-pass signal means "the row is pending again," not "something went
+// wrong." A row whose requeue write failed is stuck in 'processing', so
+// ClaimNext can't hand it back — stopping over it would strand every other
+// pending row until the next scan tick for no benefit at all.
+func TestDrainEventQueue_RequeueWriteFails_KeepsDraining(t *testing.T) {
+	database := newTestDB(t)
+	r := newQueueWorkerRouter(t, database)
+	// Only the first event's entity load fails, so the second row is
+	// perfectly routable and its fate is entirely the drain loop's choice.
+	r.entities = outageEntityStore{EntityStore: sqlitestore.New(database).Entities, o: &outage{remaining: 1}}
+	r.SetEventQueue(requeueFailingQueueStore{sqlitestore.New(database).EventQueue})
+
+	first, second := seedTwoQueuedEvents(t, database)
+
+	if err := r.drainEventQueue(context.Background()); err != nil {
+		t.Fatalf("drainEventQueue: %v", err)
+	}
+
+	var firstStatus, secondStatus string
+	if err := database.QueryRow(`SELECT status FROM event_queue WHERE entity_id = ?`, first).Scan(&firstStatus); err != nil {
+		t.Fatalf("read the first row: %v", err)
+	}
+	if err := database.QueryRow(`SELECT status FROM event_queue WHERE entity_id = ?`, second).Scan(&secondStatus); err != nil {
+		t.Fatalf("read the second row: %v", err)
+	}
+	if firstStatus != domain.QueuedEventStatusProcessing {
+		t.Errorf("first row = %q, want processing — a failed requeue write leaves it exactly where it was", firstStatus)
+	}
+	if secondStatus != domain.QueuedEventStatusDone {
+		t.Errorf("second row = %q, want done — the pass must not stop over a row that can no longer be re-claimed", secondStatus)
+	}
+	if n := activeTaskCount(t, database, second); n != 1 {
+		t.Errorf("tasks on the second entity = %d, want 1", n)
 	}
 }
 
