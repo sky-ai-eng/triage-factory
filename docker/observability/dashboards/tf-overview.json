@@ -1225,6 +1225,823 @@
       ],
       "title": "Slack ingest",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "description": "The router's spans. One `route.event` root per durable-queue row, linked back to the `event.enqueue` that produced it rather than parented to it \u2014 a poll cycle emits many events and they route later, possibly on another pod. All three empty means nothing routed in the window, which for a deployment tracking no repos or projects is the correct answer, not a fault.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "id": 18,
+      "panels": [],
+      "title": "Event pipeline \u2014 what routing did with each event",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per queue row the router claimed, sorted by the wait rather than by recency. `queue.wait_ms` is the enqueue\u2192claim interval \u2014 over before this span starts, so nothing else in the trace can show it, and without it a backed-up queue and slow routing look identical. `disposition` is what routing decided: most values end the pipeline early (`frozen`, the three `taskless_*`), so a pass that did nothing looks like a fast span until you read the column, and `error` is a disposition rather than a span error status \u2014 the store call that failed carries the status on its own span, where the cause is. Click a Span ID to open the routing trace; the filter icon keeps one disposition. Empty means nothing routed in the window.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "queue.wait_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              },
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "disposition"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "id": 19,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "queue.wait_ms"
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name = \"route.event\" } | select(span.queue.wait_ms, span.disposition, span.event.type)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Routed events \u2014 queue wait and disposition",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "`route.event` and `route.delegate` call rates, per minute. The delegation line is the operator-visible consequence of a trigger's configuration \u2014 enable a prompt_trigger and this is where it moves, and there is nowhere else it shows. The `conversation.id` each delegation started is an attribute on the `route.delegate` span, reached by opening that event's trace. A flat zero delegation line under a live routing line is the ordinary shape where no auto-delegation is configured.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "cpm"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 51
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "calcs": [
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum (rate(traces_spanmetrics_calls_total{span_name=\"route.event\"}[$__rate_interval])) * 60",
+          "legendFormat": "events routed",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum (rate(traces_spanmetrics_calls_total{span_name=\"route.delegate\"}[$__rate_interval])) * 60",
+          "legendFormat": "delegations started",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Events routed and delegations started",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "p95 by stage. `route.event` is the whole pass; the rest are its children \u2014 inline close checks, task_rule matching, team routing, the task upsert, trigger predicates, and the spawn enqueue. Read with the queue wait to the left, this says which half is slow: a short wait with a slow stage is slow routing, a long wait with fast stages is a backed-up queue. A stage with no calls in the window is absent rather than drawn at zero.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 51
+      },
+      "id": 21,
+      "options": {
+        "legend": {
+          "calcs": [
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, span_name) (rate(traces_spanmetrics_latency_bucket{span_name=~\"route\\\\..*\"}[$__rate_interval])))",
+          "legendFormat": "{{span_name}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Routing stage latency (p95)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "description": "One `engagement.setup` root per claim attempt, from the claim to agent-live. What follows agent-live is punctual spans linked back to it rather than children, because a span exports only once it ends and the streaming period is unbounded. Local mode takes a shorter path \u2014 no broker, sidecar, or credential spans exist there at all \u2014 and their absence is the path not taken, never a fault.",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "id": 22,
+      "panels": [],
+      "title": "Delegated runs \u2014 engagement setup",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per claim attempt, most recent first; `Duration` is the whole setup, claim to agent-live. `outcome` is the closed set \u2014 `agent_live` reached the agent, `cancelled` was stopped by someone, `shutdown` stood down for its departing executor and left the claim for the boot reconcile, `fenced` lost the conversation to a successor, `no_message` had nothing to deliver, `not_started` is an exit that did not say why, and `setup_failed` is the only one that also carries an error status. An error rate over engagements therefore has to read this attribute rather than the span status, or every stopped run counts as a failure. A requeued run is one row per attempt, sharing `conversation.id` and told apart by `claim.attempt`. Click a Span ID for the setup waterfall; empty means nothing was claimed in the window.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "claim.attempt"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 135
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "conversation.id"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 240
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "runtime"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 61
+      },
+      "id": 23,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 50,
+          "query": "{ name = \"engagement.setup\" } | select(span.outcome, span.runtime, span.claim.attempt, span.conversation.id)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ],
+      "title": "Engagement setups \u2014 outcome and attempt",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "Mean wall clock per call for each setup phase: the fleet-level answer to \"why did that run take four minutes to start\". For one specific run, open its trace from the table to the left instead. The phases NEST \u2014 `engagement.sandbox.bringup` contains the `sandbox.*` and `sidecar.*` children \u2014 so the lines deliberately do not stack and do not sum to the root. The credential park that also sits inside bring-up has its own panel below, since it measures another pod's work rather than this one's. In local mode the sandbox, sidecar and jail phases have no calls and are simply absent, leaving fetch, clone, staging and the SDK install.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 69
+      },
+      "id": 24,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "sortBy": "Mean",
+          "sortDesc": true,
+          "width": 400
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (span_name) (rate(traces_spanmetrics_latency_sum{span_name=~\"engagement\\\\.(claim_gates|sandbox\\\\.bringup|fetch|clone|workspace\\\\.ensure|stage_context|stage_skill)|sandbox\\\\.(network\\\\.setup|sidecar\\\\.launch)|sidecar\\\\.(hello|provision|start_proxies)|agent\\\\.(sdk\\\\.ensure|jail\\\\.launch)\"}[$__rate_interval])) / sum by (span_name) (rate(traces_spanmetrics_latency_count{span_name=~\"engagement\\\\.(claim_gates|sandbox\\\\.bringup|fetch|clone|workspace\\\\.ensure|stage_context|stage_skill)|sandbox\\\\.(network\\\\.setup|sidecar\\\\.launch)|sidecar\\\\.(hello|provision|start_proxies)|agent\\\\.(sdk\\\\.ensure|jail\\\\.launch)\"}[$__rate_interval]))",
+          "legendFormat": "{{span_name}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Setup phase breakdown \u2014 mean duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "p95 of the two halves of credential provisioning, which are two traces on purpose: `engagement.credentials.await` is the executor parked in `awaiting_credentials`, `credentials.provision` is the control pod sealing a bundle to that run's sidecar key. They are deliberately not linked \u2014 the doorbell between them is lossy by design and the sweep is the real completion path, so a link would promise a handoff neither side can guarantee. Both carry `conversation.id`, which is the join for one run: search it in Explore. A park much longer than the seal means the doorbell was missed and the sweep collected it; the `count` attribute on the await span is the poll count that says which. Both are empty in local mode, which has no sidecar to seal to.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 78
+      },
+      "id": 25,
+      "options": {
+        "legend": {
+          "calcs": [
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_spanmetrics_latency_bucket{span_name=\"engagement.credentials.await\"}[$__rate_interval])))",
+          "legendFormat": "executor park",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(traces_spanmetrics_latency_bucket{span_name=\"credentials.provision\"}[$__rate_interval])))",
+          "legendFormat": "control pod seal",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "Credential wait \u2014 the park and the seal",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tf-tempo"
+      },
+      "description": "One row per privileged host operation the executor asked the cap-broker to perform, slowest first; `Duration` is the round trip as the caller experienced it. The broker exports no spans of its own \u2014 permanently, so the most privileged process on the host gains no outbound network dependency \u2014 which makes these client-side spans the only record its work has anywhere. `op` is the broker method, a Go constant from the dispatching switch: filter it to compare `SetupNetwork` against `LaunchRun` against a teardown. Teardown calls land in their run's trace after the setup root ended, so a trace legitimately reads setup, gap, tail. Empty in local mode: there is no broker there.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Service"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Name"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Span ID"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Start time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 175
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "op"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 180
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 78
+      },
+      "id": 26,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Duration"
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tf-tempo"
+          },
+          "filters": [],
+          "limit": 30,
+          "query": "{ name = \"capbroker.call\" } | select(span.op)",
+          "queryType": "traceql",
+          "refId": "A",
+          "spss": 10,
+          "tableType": "spans"
+        }
+      ],
+      "title": "Broker IPC calls by op",
+      "type": "table"
     }
   ],
   "refresh": "30s",
