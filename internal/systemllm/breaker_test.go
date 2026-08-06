@@ -3,24 +3,32 @@ package systemllm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"testing"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/inference"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestProviderKey pins buildDirectClient's branch precedence and the
-// base-URL/region rules that decide which calls share a breaker entry.
+// TestProviderKey pins which calls share a breaker entry. The env maps go
+// through the same mapping the request does, because the key's whole job is
+// to describe the endpoint that will actually be dialed — a key derived from
+// the raw map instead can name a configuration the call doesn't have.
 func TestProviderKey(t *testing.T) {
 	cases := []struct {
 		name  string
 		creds map[string]string
 		want  string
 	}{
+		{
+			name:  "bedrock with no configured region keys on the region the call defaults to",
+			creds: map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "tok"},
+			want:  "bedrock:us-east-1",
+		},
 		{
 			name:  "anthropic direct, default endpoint",
 			creds: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-1"},
@@ -56,24 +64,42 @@ func TestProviderKey(t *testing.T) {
 			creds: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-1", "AWS_BEARER_TOKEN_BEDROCK": "tok", "AWS_REGION": "us-east-1"},
 			want:  "anthropic-direct:default",
 		},
-		{
-			name:  "no recognized credentials",
-			creds: map[string]string{},
-			want:  "unknown",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := providerKey(tc.creds); got != tc.want {
+			pc, err := mapDirectCreds(tc.creds, "claude-haiku-4-5-20251001")
+			if err != nil {
+				t.Fatalf("mapDirectCreds: %v", err)
+			}
+			if got := providerKey(pc); got != tc.want {
 				t.Errorf("providerKey(%v) = %q, want %q", tc.creds, got, tc.want)
 			}
 		})
 	}
+
+	t.Run("an unmapped env map never reaches the breaker", func(t *testing.T) {
+		// There is no "unknown" key any more: credentials that name no
+		// provider fail the mapping, and the call is over before there is
+		// anything to open a cooldown on.
+		if _, err := mapDirectCreds(map[string]string{}, "claude-haiku-4-5-20251001"); err == nil {
+			t.Fatal("expected an error for credentials naming no provider")
+		}
+	})
+}
+
+// providerErr builds an error in the shape internal/inference renders a
+// provider failure into — bifrost's own message, the wrapped cause, and the
+// status marker the classifier keys on. Written out rather than referencing
+// the renderer so a change to that rendering fails here loudly instead of
+// silently reclassifying every failure.
+func providerErr(status int, detail string) error {
+	return fmt.Errorf("inference: provider error: %s (HTTP %d) [provider_error] [endpoint: https://api.anthropic.com]", detail, status)
 }
 
 // TestIsTransientFailure pins the classification that decides what trips
-// the breaker: overloaded/rate-limited/5xx and unstructured transport
-// failures do; a caller-cancelled ctx and permanent 4xx client errors don't.
+// the breaker: overloaded/rate-limited/5xx and transport failures do; a
+// caller-cancelled ctx, permanent 4xx client errors, and a context overflow
+// don't.
 func TestIsTransientFailure(t *testing.T) {
 	bg := context.Background()
 	cancelled, cancel := context.WithCancel(context.Background())
@@ -86,23 +112,36 @@ func TestIsTransientFailure(t *testing.T) {
 		want bool
 	}{
 		{"nil error", bg, nil, false},
-		{"cancelled ctx never trips the breaker, even for an overload", cancelled, &anthropic.Error{StatusCode: 529}, false},
-		{"529 overloaded", bg, &anthropic.Error{StatusCode: 529}, true},
-		{"500 internal error", bg, &anthropic.Error{StatusCode: 500}, true},
-		{"429 rate limited", bg, &anthropic.Error{StatusCode: 429}, true},
-		{"408 request timeout", bg, &anthropic.Error{StatusCode: 408}, true},
-		{"409 conflict", bg, &anthropic.Error{StatusCode: 409}, true},
-		{"400 bad request is permanent, not transient", bg, &anthropic.Error{StatusCode: 400}, false},
-		{"401 unauthorized is permanent, not transient", bg, &anthropic.Error{StatusCode: 401}, false},
-		{"404 not found is permanent, not transient", bg, &anthropic.Error{StatusCode: 404}, false},
+		{"cancelled ctx never trips the breaker, even for an overload", cancelled, providerErr(529, "overloaded"), false},
+		{"529 overloaded", bg, providerErr(529, "overloaded_error"), true},
+		{"500 internal error", bg, providerErr(500, "internal server error"), true},
+		{"503 service unavailable", bg, providerErr(503, "service unavailable"), true},
+		{"429 rate limited", bg, providerErr(429, "rate_limit_error"), true},
+		{"408 request timeout", bg, providerErr(408, "request timeout"), true},
+		{"409 conflict", bg, providerErr(409, "conflict"), true},
+		{"400 bad request is permanent, not transient", bg, providerErr(400, "invalid_request_error"), false},
+		{"401 unauthorized is permanent, not transient", bg, providerErr(401, "authentication_error"), false},
+		{"404 not found is permanent, not transient", bg, providerErr(404, "model not found"), false},
 		{
-			name: "a net.Error-shaped transport failure (dial/DNS/TLS/timeout) is transient",
+			name: "a transport failure that never got a response is transient",
 			ctx:  bg,
-			err:  &url.Error{Op: "Post", URL: "https://api.anthropic.com/v1/messages", Err: errors.New("connection refused")},
+			err:  errors.New("inference: provider error: failed to execute HTTP request to provider API: dial tcp 10.42.7.1:443: connect: connection refused"),
 			want: true,
 		},
 		{
-			name: "an unstructured local/SDK error with no net.Error shape is NOT transient",
+			name: "a rendered status settles it: a 400 quoting a transport phrase stays permanent",
+			ctx:  bg,
+			err:  providerErr(400, "invalid_request_error: your prompt mentioned a connection reset"),
+			want: false,
+		},
+		{
+			name: "a context overflow is a deterministic rejection, not provider health",
+			ctx:  bg,
+			err:  fmt.Errorf("%w: prompt is too long: 429000 tokens > 200000 maximum (HTTP 400)", inference.ErrContextOverflow),
+			want: false,
+		},
+		{
+			name: "an unclassified error is NOT transient",
 			ctx:  bg,
 			err:  errors.New("unexpected end of JSON input"),
 			want: false,
@@ -115,6 +154,51 @@ func TestIsTransientFailure(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestIsTransientFailure_MatchesInferenceRendering pins the coupling between
+// this classifier and how internal/inference actually renders a status: the
+// marker is the whole contract, and a change to it would otherwise turn every
+// overload into an unclassified (permanent) failure with no test failing.
+func TestIsTransientFailure_MatchesInferenceRendering(t *testing.T) {
+	rendered := renderedStatusFixture(t, 529)
+	if !isTransientFailure(context.Background(), errors.New(rendered)) {
+		t.Fatalf("inference now renders a 529 as %q, which this classifier no longer recognizes", rendered)
+	}
+	if isTransientFailure(context.Background(), errors.New(renderedStatusFixture(t, 401))) {
+		t.Fatal("a 401 rendered the same way must stay permanent")
+	}
+}
+
+// renderedStatusFixture drives a real inference call against a stub provider
+// answering the given status and returns the error text it produced — the
+// actual rendering, not this package's belief about it.
+func renderedStatusFixture(t *testing.T, status int) string {
+	t.Helper()
+	srv := httptest.NewServer(&capturingHandler{t: t, status: status})
+	defer srv.Close()
+
+	const model = "claude-haiku-4-5-20251001"
+	pc, err := mapDirectCreds(map[string]string{"ANTHROPIC_API_KEY": "k", "ANTHROPIC_BASE_URL": srv.URL}, model)
+	if err != nil {
+		t.Fatalf("mapDirectCreds: %v", err)
+	}
+	client, release, err := newDirectClient(pc)
+	if err != nil {
+		t.Fatalf("newDirectClient: %v", err)
+	}
+	defer release()
+
+	_, callErr := client.Stream(context.Background(), inference.Request{
+		Provider:     pc.Provider,
+		Model:        model,
+		SystemPrompt: "system instructions",
+		Rows:         []domain.Message{{Role: "user", Content: "user data"}},
+	})
+	if callErr == nil {
+		t.Fatalf("expected an error for a %d response", status)
+	}
+	return callErr.Error()
 }
 
 func TestProviderBreaker_CheckAndRecord(t *testing.T) {
@@ -193,7 +277,7 @@ func TestProviderBreaker_NilIsSafeNoOp(t *testing.T) {
 // short-circuits without ever reaching the network.
 func TestComplete_Direct_ProviderBreakerShortCircuitsRepeatedOverload(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	h := &capturingHandler{t: t, status: 529, body: `{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}`}
+	h := &capturingHandler{t: t, status: 529, errBody: `{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}`}
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -230,11 +314,11 @@ func TestComplete_Direct_ProviderBreakerShortCircuitsRepeatedOverload(t *testing
 // gate the other.
 func TestComplete_Direct_ProviderBreakerDoesNotLeakAcrossProviders(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	overloaded := &capturingHandler{t: t, status: 529, body: `{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}`}
+	overloaded := &capturingHandler{t: t, status: 529, errBody: `{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}`}
 	overloadedSrv := httptest.NewServer(overloaded)
 	defer overloadedSrv.Close()
 
-	healthy := &capturingHandler{t: t, body: sprintfBody(`still healthy`)}
+	healthy := &capturingHandler{t: t, text: "still healthy"}
 	healthySrv := httptest.NewServer(healthy)
 	defer healthySrv.Close()
 
@@ -270,7 +354,7 @@ func TestComplete_Direct_ProviderBreakerDoesNotLeakAcrossProviders(t *testing.T)
 // breaker, however many times it recurs.
 func TestComplete_Direct_TerminalErrorDoesNotTripBreaker(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	h := &capturingHandler{t: t, status: http.StatusBadRequest, body: `{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}`}
+	h := &capturingHandler{t: t, status: http.StatusBadRequest, errBody: `{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}`}
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 

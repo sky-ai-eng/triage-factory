@@ -966,7 +966,7 @@ func TestRun_CostIsStampedPerAssistantRowAndNullWhenUnpriceable(t *testing.T) {
 	p := &scriptedProvider{turns: []scriptedTurn{{
 		text:  "done",
 		model: "a-model-no-datasheet-carries",
-		usage: inference.Usage{InputTokens: 100, OutputTokens: 20},
+		usage: inference.Usage{PromptTokens: 100, OutputTokens: 20},
 	}}}
 	e := newTestEngine(tr, p, newScriptedToolHost())
 
@@ -985,6 +985,39 @@ func TestRun_CostIsStampedPerAssistantRowAndNullWhenUnpriceable(t *testing.T) {
 	}
 	if row.Model != "a-model-no-datasheet-carries" {
 		t.Errorf("the row must record the model the provider served, got %q", row.Model)
+	}
+}
+
+// TestRun_TokenColumnsAreDisjoint pins the convention every reader of these
+// columns assumes: the four sum to the prompt exactly once. The neutral usage
+// counts prompt tokens inclusive of its cache buckets, so stamping it verbatim
+// would count each cached token twice — inflating the compaction trip's
+// occupancy (compacting early), the context gauge, and the approximate-cost
+// footer alike, while the SDK runtime's rows kept meaning the other thing.
+func TestRun_TokenColumnsAreDisjoint(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := &scriptedProvider{turns: []scriptedTurn{{
+		text: "done",
+		usage: inference.Usage{
+			PromptTokens: 100_000, OutputTokens: 20,
+			CacheReadTokens: 90_000, CacheCreationTokens: 5_000,
+		},
+	}}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
+	}
+	row := tr.find(func(m domain.Message) bool { return m.Role == "assistant" })
+	if row == nil {
+		t.Fatal("the assistant message must be persisted")
+	}
+	if row.InputTokens == nil || *row.InputTokens != 5_000 {
+		t.Errorf("input_tokens = %v, want 5000 — the prompt with its cache buckets taken out", row.InputTokens)
+	}
+	total := *row.InputTokens + *row.CacheReadTokens + *row.CacheCreationTokens
+	if total != 100_000 {
+		t.Errorf("the three prompt columns sum to %d, want the prompt's 100000 exactly once", total)
 	}
 }
 

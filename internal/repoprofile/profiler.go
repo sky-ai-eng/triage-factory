@@ -446,7 +446,6 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secre
 		Secrets:      secrets,
 		LLMResolver:  llmResolve,
 		Metadata:     map[string]any{"repo_count": len(batch)},
-		CostFn:       ai.CalculateCostUSD,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("repoprofile agent failed: %w", err)

@@ -61,8 +61,14 @@ func modelForRow(completion *inference.Completion, params Params) string {
 	return params.Model
 }
 
+// stampUsage writes the row's four token columns as disjoint counts — the
+// neutral usage counts the prompt inclusive of its cache buckets, the ledger
+// counts them beside it. Everything that reads these columns back sums all
+// four to recover the prompt: the compaction trip's occupancy, the context
+// gauge, the approximate-cost footer. Storing the inclusive figure here would
+// count every cached token twice in all three.
 func stampUsage(row *domain.Message, usage inference.Usage) {
-	in, out := usage.InputTokens, usage.OutputTokens
+	in, out := usage.NonCachedInputTokens(), usage.OutputTokens
 	cr, cc := usage.CacheReadTokens, usage.CacheCreationTokens
 	row.InputTokens = &in
 	row.OutputTokens = &out

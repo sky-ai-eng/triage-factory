@@ -99,7 +99,7 @@ func TestClient_ThroughRunProxy(t *testing.T) {
 	if got.FinishReason != "stop" {
 		t.Errorf("finish reason = %q, want %q", got.FinishReason, "stop")
 	}
-	if got.Usage.InputTokens != 10 || got.Usage.OutputTokens != 5 {
+	if got.Usage.PromptTokens != 10 || got.Usage.OutputTokens != 5 {
 		t.Errorf("usage = %+v, want 10 in / 5 out", got.Usage)
 	}
 

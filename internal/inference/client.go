@@ -97,6 +97,10 @@ type Request struct {
 	Effort string
 	// MaxTokens caps the completion. Zero leaves it to the provider.
 	MaxTokens int
+	// Temperature pins the sampling temperature. nil leaves the provider
+	// default — which is why it is a pointer: a caller that wants greedy
+	// decoding sends 0, and that is not the same request as sending nothing.
+	Temperature *float64
 	// ToolChoice pins the provider's tool policy for this call (a forced
 	// single-tool call). nil leaves the provider default (auto), which is
 	// what every conversational call sends — changing tool_choice
@@ -107,12 +111,26 @@ type Request struct {
 	// (an injection point that wants the pending queue in-window). Off by
 	// default.
 	IncludeUndelivered bool
+
+	// NoConversationCacheBreakpoint suppresses the moving breakpoint on the
+	// last message. The system-prefix breakpoint is unaffected.
+	//
+	// It exists for a single-turn call whose tail is never sent again — a
+	// system job's one synthetic user row carrying that call's own data. A
+	// breakpoint there buys a cache write premium on tokens no later request
+	// can match, so the default (on, for a conversation that grows by
+	// appending) is a pure loss for a conversation that does not.
+	NoConversationCacheBreakpoint bool
 }
 
 // Completion is a reassembled provider response: one neutral assistant
 // message, plus the usage/cost inputs and terminal metadata the loop stamps
 // onto the persisted row.
 type Completion struct {
+	// ID is the provider's own id for this response (Anthropic's message id).
+	// Empty when the provider reported none — it is a correlation handle, not
+	// something to key on without checking.
+	ID string
 	// Message is the reassembled assistant message — ready for MessageToRow.
 	Message schemas.ChatMessage
 	// Usage is the neutral token accounting (cache tokens included), the input
@@ -209,7 +227,10 @@ func buildChatRequest(req Request) (*schemas.BifrostChatRequest, error) {
 		return nil, fmt.Errorf("inference: request has no provider")
 	}
 
-	assembled, err := RowsToMessages(req.Rows, AssemblyOptions{IncludeUndelivered: req.IncludeUndelivered})
+	assembled, err := RowsToMessages(req.Rows, AssemblyOptions{
+		IncludeUndelivered: req.IncludeUndelivered,
+		NoCacheBreakpoint:  req.NoConversationCacheBreakpoint,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -238,6 +259,10 @@ func buildChatRequest(req Request) (*schemas.BifrostChatRequest, error) {
 		mt := req.MaxTokens
 		params.MaxCompletionTokens = &mt
 	}
+	if req.Temperature != nil {
+		temp := *req.Temperature
+		params.Temperature = &temp
+	}
 
 	return &schemas.BifrostChatRequest{
 		Provider: req.Provider,
@@ -259,7 +284,7 @@ func reassembleStream(ch chan *schemas.BifrostStreamChunk) (*Completion, error) 
 	tools := newToolCallAccumulator()
 
 	var usage *schemas.BifrostLLMUsage
-	var finishReason, model string
+	var finishReason, model, id string
 
 	for chunk := range ch {
 		if chunk == nil {
@@ -273,6 +298,9 @@ func reassembleStream(ch chan *schemas.BifrostStreamChunk) (*Completion, error) 
 		resp := chunk.BifrostChatResponse
 		if resp == nil {
 			continue
+		}
+		if resp.ID != "" {
+			id = resp.ID
 		}
 		if resp.Model != "" {
 			model = resp.Model
@@ -312,6 +340,7 @@ func reassembleStream(ch chan *schemas.BifrostStreamChunk) (*Completion, error) 
 	}
 
 	return &Completion{
+		ID:           id,
 		Message:      msg,
 		Usage:        usageFromBifrost(usage),
 		RawUsage:     usage,

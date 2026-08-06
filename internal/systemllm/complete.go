@@ -41,10 +41,10 @@ type CompleteOptions struct {
 	// agentproc.Run in local mode.
 	Model string
 	// DirectModel is the pinned model id used as the Anthropic-direct
-	// request model and, for every provider, the cost-accounting key passed
-	// to CostFn — required regardless of which auth branch resolves. The
-	// Bedrock branches resolve their own request model independently (see
-	// bedrockModel) and never use DirectModel for the request itself.
+	// request model and, for every provider, the cost-accounting key —
+	// required regardless of which auth branch resolves. The Bedrock branches
+	// resolve their own request model independently (see bedrockModel) and
+	// never use DirectModel for the request itself.
 	DirectModel string
 
 	MaxTokens   int64
@@ -66,11 +66,6 @@ type CompleteOptions struct {
 	// Metadata is optional per-job context (e.g. {"batch_size": 10}),
 	// threaded through to the system_llm_runs row.
 	Metadata map[string]any
-
-	// CostFn computes USD cost from token counts for the direct path.
-	// systemllm can't import internal/ai (internal/ai already imports
-	// systemllm for Recorder), so callers pass ai.CalculateCostUSD.
-	CostFn func(model string, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int) float64
 }
 
 // CompleteResult is the model's raw text output. Callers apply

@@ -11,7 +11,7 @@ import (
 // id must fail here, loudly — the alternative is a run whose every assistant
 // row persists with a NULL cost stamp.
 func TestNativeWireModel_PinsArePriced(t *testing.T) {
-	usage := inference.Usage{InputTokens: 1000, OutputTokens: 1000}
+	usage := inference.Usage{PromptTokens: 1000, OutputTokens: 1000}
 	for _, alias := range []string{"haiku", "sonnet", "opus"} {
 		resolved := nativeWireModel(alias)
 		if resolved == alias {

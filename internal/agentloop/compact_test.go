@@ -160,7 +160,7 @@ func TestWarmCompaction_RequestInvariance(t *testing.T) {
 	provider.turns = []scriptedTurn{
 		{
 			calls: []domain.ToolCall{{ID: "t1", Name: "bash", Input: map[string]any{"cmd": "ls"}}},
-			usage: inference.Usage{InputTokens: overThreshold},
+			usage: inference.Usage{PromptTokens: overThreshold},
 			onCall: func() {
 				// A steer lands while the big turn streams: it must ride
 				// through the compaction as queued input, not as span.
@@ -229,7 +229,13 @@ func TestWarmCompactionFailure_ToolCallsHandsOffToForcedShape(t *testing.T) {
 	provider := &scriptedProvider{turns: []scriptedTurn{
 		{ // The failed warm attempt: tool calls instead of a summary.
 			calls: []domain.ToolCall{{ID: "zombie-call", Name: "bash", Input: map[string]any{"cmd": "rm -rf /"}}},
-			usage: inference.Usage{InputTokens: 150000, OutputTokens: 500},
+			// Mostly cache reads, because a warm attempt runs against a hot
+			// cache by construction — which is what makes this row the one
+			// place the two token conventions are easiest to confuse.
+			usage: inference.Usage{
+				PromptTokens: 150000, OutputTokens: 500,
+				CacheReadTokens: 120000, CacheCreationTokens: 10000,
+			},
 			model: "claude-sonnet-4-5",
 		},
 		forcedReply("cold analysis", "cold summary"),
@@ -254,10 +260,17 @@ func TestWarmCompactionFailure_ToolCallsHandsOffToForcedShape(t *testing.T) {
 		t.Fatalf("the discarded reply reached the transcript: %+v", m)
 	}
 
-	// Its accounting settled on the request row, with the reason.
+	// Its accounting settled on the request row, with the reason — and in the
+	// ledger's convention, where the three prompt columns are disjoint. The
+	// neutral usage counts the prompt inclusive of its cache buckets, so
+	// settling it verbatim would count 130k cached tokens twice on a row that
+	// is, itself, one of the inputs to the next compaction decision.
 	req := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionRequest })
-	if req == nil || req.InputTokens == nil || *req.InputTokens != 150000 {
-		t.Fatalf("request row = %+v, want the failed attempt's usage settled on it", req)
+	if req == nil || req.InputTokens == nil || *req.InputTokens != 20000 {
+		t.Fatalf("request row = %+v, want the failed attempt's non-cached input (20000) settled on it", req)
+	}
+	if prompt := *req.InputTokens + *req.CacheReadTokens + *req.CacheCreationTokens; prompt != 150000 {
+		t.Errorf("the row's prompt columns sum to %d, want the attempt's 150000 exactly once", prompt)
 	}
 	if req.CostUSD == nil {
 		t.Error("failed attempt's cost not settled (sonnet is priceable)")

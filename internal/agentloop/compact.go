@@ -223,7 +223,7 @@ func (e *Engine) compactWarm(ctx context.Context, params Params) error {
 		}
 		u := completion.Usage
 		if err := e.Transcript.SettleCompactionRequest(ctx, params.OrgID, params.ConversationID,
-			reqRow.ID, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens,
+			reqRow.ID, u.NonCachedInputTokens(), u.OutputTokens, u.CacheReadTokens, u.CacheCreationTokens,
 			costUSD, failReason); err != nil {
 			return fmt.Errorf("settle failed compaction attempt: %w", err)
 		}

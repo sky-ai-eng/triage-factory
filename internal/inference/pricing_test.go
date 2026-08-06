@@ -99,7 +99,7 @@ func TestCostForUsage_KnownModel(t *testing.T) {
 	// sonnet-4-5, standard tier. input 1000 (200 cache-read, 100 cache-write
 	// 5m, 700 non-cached), output 500.
 	usd, ok := CostForUsage("claude-sonnet-4-5", Usage{
-		InputTokens:         1000,
+		PromptTokens:        1000,
 		OutputTokens:        500,
 		CacheReadTokens:     200,
 		CacheCreationTokens: 100,
@@ -116,7 +116,7 @@ func TestCostForUsage_KnownModel(t *testing.T) {
 func TestCostForUsage_CacheWrite1hSplit(t *testing.T) {
 	// 100 cache-write of which 40 are 1-hour (2x) and 60 are 5-minute (1.25x).
 	usd, ok := CostForUsage("claude-sonnet-4-5", Usage{
-		InputTokens:           100,
+		PromptTokens:          100,
 		CacheReadTokens:       0,
 		CacheCreationTokens:   100,
 		CacheCreationTokens1h: 40,
@@ -135,7 +135,7 @@ func TestCostForUsage_LongContextTier(t *testing.T) {
 	// Above 200k input, sonnet-4-5 bills input at 6e-06 and output at 2.25e-05.
 	in := 250000
 	out := 1000
-	usd, ok := CostForUsage("claude-sonnet-4-5", Usage{InputTokens: in, OutputTokens: out})
+	usd, ok := CostForUsage("claude-sonnet-4-5", Usage{PromptTokens: in, OutputTokens: out})
 	if !ok {
 		t.Fatal("expected ok")
 	}
@@ -148,7 +148,7 @@ func TestCostForUsage_LongContextTier(t *testing.T) {
 // TestCostForUsage_UnknownModel pins the ledger contract: an unknown model
 // yields ok=false so the caller stamps NULL, never a misleading 0.
 func TestCostForUsage_UnknownModel(t *testing.T) {
-	usd, ok := CostForUsage("gpt-not-a-real-model", Usage{InputTokens: 100})
+	usd, ok := CostForUsage("gpt-not-a-real-model", Usage{PromptTokens: 100})
 	if ok {
 		t.Fatalf("unknown model must return ok=false, got usd=%g", usd)
 	}
@@ -174,14 +174,14 @@ func TestCostForUsage_FreeIsNotUnknown(t *testing.T) {
 // both resolve and compute.
 func TestCostForUsage_CrossProvider(t *testing.T) {
 	// gpt-4o: input 2.5e-06, output 1e-05.
-	usd, ok := CostForUsage("gpt-4o", Usage{InputTokens: 1000, OutputTokens: 500})
+	usd, ok := CostForUsage("gpt-4o", Usage{PromptTokens: 1000, OutputTokens: 500})
 	if !ok {
 		t.Fatal("expected a non-Anthropic chat model (gpt-4o) to be priced")
 	}
 	if want := 1000*2.5e-06 + 500*1e-05; !approxEqual(usd, want) {
 		t.Fatalf("gpt-4o cost = %g, want %g", usd, want)
 	}
-	if _, ok := CostForUsage("gemini-2.5-pro", Usage{InputTokens: 100}); !ok {
+	if _, ok := CostForUsage("gemini-2.5-pro", Usage{PromptTokens: 100}); !ok {
 		t.Fatal("expected a Gemini chat model to be priced")
 	}
 }
@@ -232,7 +232,7 @@ func TestUsageFromBifrost(t *testing.T) {
 			},
 		},
 	})
-	want := Usage{InputTokens: 1000, OutputTokens: 500, CacheReadTokens: 200, CacheCreationTokens: 100, CacheCreationTokens1h: 40}
+	want := Usage{PromptTokens: 1000, OutputTokens: 500, CacheReadTokens: 200, CacheCreationTokens: 100, CacheCreationTokens1h: 40}
 	if u != want {
 		t.Fatalf("usage projection: got %+v want %+v", u, want)
 	}
@@ -262,5 +262,30 @@ func TestModelWindow(t *testing.T) {
 		if ok != c.ok || got != c.want {
 			t.Errorf("ModelWindow(%q) = (%d, %v), want (%d, %v)", c.model, got, ok, c.want, c.ok)
 		}
+	}
+}
+
+// TestUsage_NonCachedInputTokens pins the projection between the two token
+// conventions this package sits between: providers are normalized into one
+// prompt count that includes its cache buckets (what pricing needs), while
+// every stored ledger column is disjoint (what every reader of them sums).
+func TestUsage_NonCachedInputTokens(t *testing.T) {
+	u := Usage{PromptTokens: 100_000, OutputTokens: 500, CacheReadTokens: 90_000, CacheCreationTokens: 5_000}
+	if got := u.NonCachedInputTokens(); got != 5_000 {
+		t.Errorf("NonCachedInputTokens = %d, want 5000", got)
+	}
+	if sum := u.NonCachedInputTokens() + u.CacheReadTokens + u.CacheCreationTokens; sum != u.PromptTokens {
+		t.Errorf("the three prompt buckets sum to %d, want the prompt's %d exactly once", sum, u.PromptTokens)
+	}
+
+	if got := (Usage{PromptTokens: 1_000}).NonCachedInputTokens(); got != 1_000 {
+		t.Errorf("an uncached prompt = %d, want the whole prompt", got)
+	}
+
+	// A payload whose parts exceed its total is clamped the same way
+	// computeTextCost clamps it, so the row and the price it was charged never
+	// describe two different requests.
+	if got := (Usage{PromptTokens: 10, CacheReadTokens: 400}).NonCachedInputTokens(); got != 0 {
+		t.Errorf("NonCachedInputTokens = %d, want 0 rather than a negative count", got)
 	}
 }

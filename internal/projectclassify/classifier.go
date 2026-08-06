@@ -412,7 +412,6 @@ func (r *Runner) runHaiku(ctx context.Context, orgID string, p haikuPrompt) (int
 		TraceID:      "classify-stage1",
 		Secrets:      r.secrets,
 		LLMResolver:  r.llmResolve,
-		CostFn:       ai.CalculateCostUSD,
 	})
 	if err != nil {
 		return 0, "", fmt.Errorf("classify agent failed: %w", err)
