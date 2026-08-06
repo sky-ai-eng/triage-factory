@@ -225,7 +225,7 @@ func TestRevertTaskStatus_PreservesClaim(t *testing.T) {
 	}
 
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
-	router.revertTaskStatus(runmode.LocalDefaultOrgID, taskID, "queued")
+	router.revertTaskStatus(context.Background(), runmode.LocalDefaultOrgID, taskID, "queued")
 
 	task, err := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
 	if err != nil || task == nil {

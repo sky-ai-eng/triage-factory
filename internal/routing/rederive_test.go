@@ -130,7 +130,7 @@ func TestReDeriveAfterScoring_AboveThreshold_Delegates(t *testing.T) {
 	ws := websocket.NewHub()
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
 
-	router.ReDeriveAfterScoring(runmode.LocalDefaultOrgID, []string{taskID})
+	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{taskID})
 
 	// Task stays queued because no spawner is configured, but the trigger
 	// matched (visible in log output: "re-derive: task ... firing").
@@ -161,7 +161,7 @@ func TestReDeriveAfterScoring_BelowThreshold_Skips(t *testing.T) {
 
 	ws := websocket.NewHub()
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
-	router.ReDeriveAfterScoring(runmode.LocalDefaultOrgID, []string{taskID})
+	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{taskID})
 
 	// Task should remain queued — trigger was skipped
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
@@ -213,7 +213,7 @@ func TestReDeriveAfterScoring_BotClaimed_Skips(t *testing.T) {
 
 	ws := websocket.NewHub()
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
-	router.ReDeriveAfterScoring(runmode.LocalDefaultOrgID, []string{taskID})
+	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{taskID})
 
 	// Task still bot-claimed, no second firing enqueued.
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
@@ -259,7 +259,7 @@ func TestReDeriveAfterScoring_UserClaimed_Skips(t *testing.T) {
 
 	ws := websocket.NewHub()
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
-	router.ReDeriveAfterScoring(runmode.LocalDefaultOrgID, []string{taskID})
+	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{taskID})
 
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
 	if task.ClaimedByUserID != runmode.LocalDefaultUserID {
@@ -305,7 +305,7 @@ func TestReDeriveAfterScoring_Snoozed_Skips(t *testing.T) {
 
 	ws := websocket.NewHub()
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
-	router.ReDeriveAfterScoring(runmode.LocalDefaultOrgID, []string{taskID})
+	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{taskID})
 
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
 	if task.Status != "snoozed" {
@@ -373,7 +373,7 @@ func TestReDeriveAfterScoring_CrossTeamTrigger_Skips(t *testing.T) {
 	}
 
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
-	router.ReDeriveAfterScoring(runmode.LocalDefaultOrgID, []string{taskID})
+	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{taskID})
 
 	// Inspect pending_firings: team B's trigger must not have fired
 	// against team A's task. The team A trigger from
@@ -468,7 +468,7 @@ func TestReDeriveAfterScoring_TeamNotInVisibilitySet_Skips(t *testing.T) {
 
 	stub := &stubDelegator{db: database}
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.Conversations, stores.Entities, stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
-	router.ReDeriveAfterScoring(runmode.LocalDefaultOrgID, []string{task.ID})
+	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{task.ID})
 
 	if stub.calls != 0 {
 		t.Errorf("team B trigger delegated (%d calls) despite team B not being in the task's visibility set", stub.calls)
@@ -516,7 +516,7 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 
 	ws := websocket.NewHub()
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
-	router.ReDeriveAfterScoring(runmode.LocalDefaultOrgID, []string{task.ID})
+	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{task.ID})
 
 	// Task should remain queued — zero-threshold trigger is skipped in re-derive
 	// (it would have fired already in HandleEvent)
@@ -564,7 +564,7 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 
 	ws := websocket.NewHub()
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil, noopScorer{}, ws)
-	router.ReDeriveAfterScoring(runmode.LocalDefaultOrgID, []string{task.ID})
+	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{task.ID})
 
 	// Task should stay queued — predicate doesn't match
 	got, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, task.ID)

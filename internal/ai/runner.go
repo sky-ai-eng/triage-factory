@@ -27,7 +27,15 @@ type RunnerCallbacks struct {
 	// received fresh scores. Downstream re-derive needs orgID
 	// threaded so its store calls hit the right tenant in multi
 	// mode (every task in the slice belongs to orgID by construction).
-	OnScoringCompleted func(orgID string, taskIDs []string)
+	//
+	// ctx is the cycle's, and this hook alone takes one: the
+	// post-scoring re-derive it drives does durable work (fires
+	// deferred triggers), so it needs the cycle's values — trace
+	// context above all — rather than starting from nothing. The
+	// hook must not treat it as a lifetime; the cycle returns while
+	// the re-derive is still running, so a caller that keeps ctx
+	// past the call drops its cancellation first.
+	OnScoringCompleted func(ctx context.Context, orgID string, taskIDs []string)
 	// OnTasksSkipped fires once per scoring cycle if one or more batches
 	// errored. skipped is the exact count of tasks that weren't scored;
 	// total is len(tasks) at cycle start. orgID is the scoring context
@@ -265,6 +273,6 @@ func (r *Runner) run(ctx context.Context) {
 		for i, u := range updates {
 			scoredIDs[i] = u.ID
 		}
-		r.callbacks.OnScoringCompleted(r.orgID, scoredIDs)
+		r.callbacks.OnScoringCompleted(ctx, r.orgID, scoredIDs)
 	}
 }

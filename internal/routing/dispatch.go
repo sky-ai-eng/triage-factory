@@ -22,10 +22,17 @@ import (
 // at-least-once (a crash mid-process replays the event), and the task dedup
 // index makes a replay a no-op rather than a double-create.
 //
+// ctx reaches every store call the routing of this one event makes. The drain
+// worker hands it a ctx that carries values but cannot be cancelled
+// (processQueuedEvent's context.WithoutCancel), because a claimed row is one
+// unit: half a routed event is worse than a whole one that outlives its
+// shutdown signal. Callers that route an event outside the worker (tests, a
+// direct call) decide their own cancellation posture.
+//
 // The body is a pipeline of named stages; each short-circuits the rest by
 // returning ok=false (or an empty result), setting disp.Disposition on its
 // way out so the deferred publish below still reports the outcome.
-func (r *Router) HandleEvent(evt domain.Event) {
+func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) {
 	// Defensive: every upstream emitter (poller, per-org loop) tags
 	// events with evt.OrgID. A missing OrgID indicates an emitter bug — failing
 	// loud here prevents tenant-mixed writes that would silently land on the
@@ -44,7 +51,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// direct test call), record it here; later routing relies on evt.ID
 	// referring to a real row, so stop if that insert fails.
 	if evt.ID == "" {
-		id, err := r.events.RecordSystem(context.Background(), orgID, evt)
+		id, err := r.events.RecordSystem(ctx, orgID, evt)
 		if err != nil {
 			routerLog.Error("failed to record event", "event_type", evt.EventType, "error", err)
 			return
@@ -85,7 +92,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// nothing. A terminating event is gated here while its entity is STILL
 	// active (it is what closes the entity, in the close phase below), so it
 	// passes; only later stragglers on the now-closed entity drop.
-	entityID, ok, err := r.routableEntity(orgID, evt)
+	entityID, ok, err := r.routableEntity(ctx, orgID, evt)
 	if err != nil {
 		disp.Disposition = events.DispositionError
 		return
@@ -103,9 +110,9 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// should flip closed. Closing and routing are orthogonal: the same event
 	// goes on to create/fire its own task below (the close runs first, so a
 	// terminating event clears prior work before minting its riding task).
-	closedAny, terminate := r.runCloses(orgID, evt, entityID)
+	closedAny, terminate := r.runCloses(ctx, orgID, evt, entityID)
 	if terminate {
-		if err := r.entities.CloseSystem(context.Background(), orgID, entityID); err != nil {
+		if err := r.entities.CloseSystem(ctx, orgID, entityID); err != nil {
 			lifecycleLog.Error("entity close failed", "entity_id", entityID, "error", err)
 		}
 	}
@@ -121,7 +128,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	scopeCache := map[string]bool{}
 
 	// Match event_handlers (rules + triggers) for this event.
-	matchedRules, matchedTriggers, err := r.matchHandlers(orgID, evt, scopeCache)
+	matchedRules, matchedTriggers, err := r.matchHandlers(ctx, orgID, evt, scopeCache)
 	if err != nil {
 		disp.Disposition = events.DispositionError
 		return
@@ -134,7 +141,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 
 	// Resolve the task's owner team, visibility set, firing order, and
 	// creation-seed priority.
-	routing, ok := r.resolveTeamRouting(orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
+	routing, ok := r.resolveTeamRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
 	if !ok {
 		disp.Disposition = events.DispositionTasklessNoOwner
 		return
@@ -143,7 +150,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 
 	// Find or create the single task for this (entity, event_type,
 	// dedup_key); record visibility + lifecycle and enqueue scoring.
-	task, created, err := r.upsertTaskForEvent(orgID, evt, entityID, routing)
+	task, created, err := r.upsertTaskForEvent(ctx, orgID, evt, entityID, routing)
 	if err != nil {
 		disp.Disposition = events.DispositionError
 		return
@@ -163,7 +170,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	}
 
 	// Auto-delegate matching triggers in priority order.
-	disp.TriggersFired = r.fireMatchedTriggers(orgID, evt, entityID, task, routing)
+	disp.TriggersFired = r.fireMatchedTriggers(ctx, orgID, evt, entityID, task, routing)
 }
 
 // publishDisposition is HandleEvent's single deferred publish point for the
@@ -208,13 +215,13 @@ func (r *Router) publishDisposition(orgID string, disp events.SystemRoutingDispo
 // legitimate ok=false cases (no entity context, dangling reference, closed
 // entity) — so the caller can tell "nothing to route to" from "couldn't find
 // out" rather than reporting the latter as the former.
-func (r *Router) routableEntity(orgID string, evt domain.Event) (entityID string, ok bool, err error) {
+func (r *Router) routableEntity(ctx context.Context, orgID string, evt domain.Event) (entityID string, ok bool, err error) {
 	if evt.EntityID == nil {
 		return "", false, nil
 	}
 	entityID = *evt.EntityID
 
-	entity, err := r.entities.GetSystem(context.Background(), orgID, entityID)
+	entity, err := r.entities.GetSystem(ctx, orgID, entityID)
 	if err != nil {
 		routerLog.Error("failed to load entity", "entity_id", entityID, "error", err)
 		return "", false, err
@@ -241,8 +248,8 @@ func (r *Router) routableEntity(orgID string, evt domain.Event) (entityID string
 // caller must not read that as "queried fine, zero handlers matched" (which
 // would misreport an internal error as a legitimate "nothing configured"
 // outcome).
-func (r *Router) matchHandlers(orgID string, evt domain.Event, scopeCache map[string]bool) (matchedRules, matchedTriggers []domain.EventHandler, err error) {
-	handlers, err := r.handlers.GetEnabledForEventSystem(context.Background(), orgID, evt.EventType)
+func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Event, scopeCache map[string]bool) (matchedRules, matchedTriggers []domain.EventHandler, err error) {
+	handlers, err := r.handlers.GetEnabledForEventSystem(ctx, orgID, evt.EventType)
 	if err != nil {
 		routerLog.Error("failed to query event_handlers", "event_type", evt.EventType, "error", err)
 		return nil, nil, err
@@ -271,7 +278,7 @@ func (r *Router) matchHandlers(orgID string, evt domain.Event, scopeCache map[st
 		// here so the team never enters the visibility set, its triggers never
 		// fire, and task_teams excludes it for free. System/org-union
 		// handlers (NULL team_id) skip the gate.
-		if !r.handlerScopeMatchesEvent(evt, h, scopeCache) {
+		if !r.handlerScopeMatchesEvent(ctx, evt, h, scopeCache) {
 			continue
 		}
 		switch h.Kind {
@@ -321,7 +328,7 @@ type eventRouting struct {
 //
 // The matched handlers still gate whether a task is created and supply the
 // priority; the model only decides the team set + owner.
-func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) (eventRouting, bool) {
+func (r *Router) resolveTeamRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) (eventRouting, bool) {
 	// teamTriggers is model-independent: a team fires its matched triggers iff it
 	// lands in the model's orderedTeams. Grouped once, threaded through unchanged.
 	// Org-visibility handlers (team_id NULL) route to LocalDefaultTeamID via
@@ -339,9 +346,9 @@ func (r *Router) resolveTeamRouting(orgID string, evt domain.Event, entityID str
 	)
 	switch ownershipModelForEvent(evt.EventType) {
 	case events.OwnershipOwned:
-		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveOwnedRouting(orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
+		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveOwnedRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers, scopeCache)
 	case events.OwnershipRequestedParty:
-		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveRequestedPartyRouting(orgID, evt, entityID, matchedRules, matchedTriggers)
+		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = r.resolveRequestedPartyRouting(ctx, orgID, evt, entityID, matchedRules, matchedTriggers)
 	default: // events.OwnershipPool, events.OwnershipUnrouted
 		visibleTeams, ownerTeam, orderedTeams, taskPriority, ok = resolvePoolRouting(matchedRules, matchedTriggers)
 	}
@@ -389,15 +396,15 @@ func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) (vi
 // no-steal invariant — lives in ownerLadderRouting, and registered sources
 // inherit all of it unchanged (do NOT reimplement it here). ok=false →
 // external identity, no watching handler → no task.
-func (r *Router) resolveOwnedRouting(orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) ([]string, string, []string, float64, bool) {
+func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler, scopeCache map[string]bool) ([]string, string, []string, float64, bool) {
 	var owner string
 	var ownerSet []string
 	if hooks, ok := sourceHooksFor(evt.EventType); ok {
-		owner, ownerSet = hooks.ResolveOwner(context.Background(), orgID, evt, entityID)
+		owner, ownerSet = hooks.ResolveOwner(ctx, orgID, evt, entityID)
 	} else if isAuthorCentricGitHubEvent(evt.EventType) {
-		owner, ownerSet = r.authorCentricOwner(orgID, evt, entityID, scopeCache)
+		owner, ownerSet = r.authorCentricOwner(ctx, orgID, evt, entityID, scopeCache)
 	} else {
-		owner, ownerSet = r.assigneeCentricJiraOwner(orgID, evt, entityID, scopeCache)
+		owner, ownerSet = r.assigneeCentricJiraOwner(ctx, orgID, evt, entityID, scopeCache)
 	}
 	return ownerLadderRouting(owner, ownerSet, matchedRules, matchedTriggers)
 }
@@ -411,8 +418,8 @@ func (r *Router) resolveOwnedRouting(orgID string, evt domain.Event, entityID st
 // every reviewer team (already id-sorted by the helper); fireMatchedTriggers
 // walks them and the first whose pr-review trigger wins the exclusive claim
 // consolidates ownership onto itself, else the first human claim does.
-func (r *Router) resolveRequestedPartyRouting(orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler) ([]string, string, []string, float64, bool) {
-	reqTeams, scoped := r.reviewRequestVisibilityTeams(orgID, evt)
+func (r *Router) resolveRequestedPartyRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler) ([]string, string, []string, float64, bool) {
+	reqTeams, scoped := r.reviewRequestVisibilityTeams(ctx, orgID, evt)
 	if !scoped {
 		return resolvePoolRouting(matchedRules, matchedTriggers)
 	}
@@ -434,7 +441,7 @@ func (r *Router) resolveRequestedPartyRouting(orgID string, evt domain.Event, en
 //     task already covers the entity, so no new one is minted. Legitimate,
 //     not an error.
 //   - (nil, false, err)     — a store failure; no task exists to report.
-func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID string, routing eventRouting) (task *domain.Task, created bool, err error) {
+func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domain.Event, entityID string, routing eventRouting) (task *domain.Task, created bool, err error) {
 	// Task createdAt = OccurredAt when the source reported a time, falling back
 	// to time.Now(). Keeps the backfill path's "stamp the task with the PR's
 	// CreatedAt for week-old review requests" semantic — queue ordering reflects
@@ -459,7 +466,7 @@ func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID str
 		// gap between the check and the insert. The event is still
 		// recorded; only task creation is skipped.
 		var suppressed bool
-		task, created, suppressed, err = r.tasks.FindOrCreateAtUnlessEntityActiveSystem(context.Background(), orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
+		task, created, suppressed, err = r.tasks.FindOrCreateAtUnlessEntityActiveSystem(ctx, orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
 		if err != nil {
 			routerLog.Error("became_atomic: failed to check/create task on entity", "entity_id", entityID, "error", err)
 			return nil, false, err
@@ -469,7 +476,7 @@ func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID str
 			return nil, false, nil
 		}
 	} else {
-		task, created, err = r.tasks.FindOrCreateAtSystem(context.Background(), orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
+		task, created, err = r.tasks.FindOrCreateAtSystem(ctx, orgID, routing.ownerTeam, entityID, evt.EventType, evt.DedupKey, evt.ID, routing.taskPriority, createdAt)
 		if err != nil {
 			routerLog.Error("failed to find/create task", "event_type", evt.EventType, "entity_id", entityID, "error", err)
 			return nil, false, err
@@ -480,20 +487,20 @@ func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID str
 	// re-arrival matching new teams widens visibility. Failure here is logged
 	// but not fatal — the owning team_id still grants the owner visibility; a
 	// follow-up event re-attempts the wider set.
-	if err := r.tasks.SetVisibilityTeamsSystem(context.Background(), orgID, task.ID, routing.visibleTeams); err != nil {
+	if err := r.tasks.SetVisibilityTeamsSystem(ctx, orgID, task.ID, routing.visibleTeams); err != nil {
 		routerLog.Error("failed to set visibility teams for task", "task_id", task.ID, "error", err)
 	}
 
 	if created {
-		if err := r.tasks.RecordEventSystem(context.Background(), orgID, task.ID, evt.ID, "spawned"); err != nil {
+		if err := r.tasks.RecordEventSystem(ctx, orgID, task.ID, evt.ID, "spawned"); err != nil {
 			routerLog.Error("failed to record spawned task_event", "task_id", task.ID, "error", err)
 		}
 		routerLog.Info("created task", "task_id", task.ID, "event_type", evt.EventType, "entity_id", entityID, "owner_team", routing.ownerTeam, "visible_teams", len(routing.visibleTeams))
 	} else {
-		if err := r.tasks.BumpSystem(context.Background(), orgID, task.ID, evt.ID); err != nil {
+		if err := r.tasks.BumpSystem(ctx, orgID, task.ID, evt.ID); err != nil {
 			routerLog.Error("failed to bump task", "task_id", task.ID, "error", err)
 		}
-		if err := r.tasks.RecordEventSystem(context.Background(), orgID, task.ID, evt.ID, "bumped"); err != nil {
+		if err := r.tasks.RecordEventSystem(ctx, orgID, task.ID, evt.ID, "bumped"); err != nil {
 			routerLog.Error("failed to record bumped task_event", "task_id", task.ID, "error", err)
 		}
 	}
@@ -516,7 +523,7 @@ func (r *Router) upsertTaskForEvent(orgID string, evt domain.Event, entityID str
 // fire or a successful enqueue onto pending_firings) — deferred triggers and
 // every no-op skip inside tryAutoDelegate (already claimed by another team,
 // breaker tripped, agent unavailable, disabled for the team, etc.) don't count.
-func (r *Router) fireMatchedTriggers(orgID string, evt domain.Event, entityID string, task *domain.Task, routing eventRouting) int {
+func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt domain.Event, entityID string, task *domain.Task, routing eventRouting) int {
 	fired := 0
 	for _, teamID := range routing.orderedTeams {
 		triggers := routing.teamTriggers[teamID]
@@ -526,7 +533,7 @@ func (r *Router) fireMatchedTriggers(orgID string, evt domain.Event, entityID st
 		// Normalize the org-visible sentinel to the resolved owner team so the
 		// kill-switch / team_agents / claim all read a real team.
 		acting := effectiveActingTeam(teamID, teamIDValue(task))
-		if !r.autoDelegateEnabledForTeam(context.Background(), acting) {
+		if !r.autoDelegateEnabledForTeam(ctx, acting) {
 			// Diagnosable, not silent: a matched trigger that never fires because
 			// auto-delegate is off for the team is the "a task was created but no
 			// run started" surprise. One line at Info names the reason and the
@@ -539,7 +546,7 @@ func (r *Router) fireMatchedTriggers(orgID string, evt domain.Event, entityID st
 			if trigger.MinAutonomySuitability != nil && *trigger.MinAutonomySuitability > 0 {
 				continue // deferred to post-scoring handler
 			}
-			if r.tryAutoDelegate(orgID, task, trigger, entityID, evt.ID, acting) {
+			if r.tryAutoDelegate(ctx, orgID, task, trigger, entityID, evt.ID, acting) {
 				fired++
 			}
 		}

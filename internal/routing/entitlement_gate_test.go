@@ -117,7 +117,7 @@ func TestReDeriveTask_GatedSource_FiresNothing(t *testing.T) {
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
 		testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
 		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
-	router.ReDeriveAfterScoring(runmode.LocalDefaultOrgID, []string{taskID})
+	router.ReDeriveAfterScoring(context.Background(), runmode.LocalDefaultOrgID, []string{taskID})
 
 	if stub.calls != 0 {
 		t.Errorf("gated task delegated (%d calls), want 0 (rederive must freeze a task on a gated-off event type)", stub.calls)

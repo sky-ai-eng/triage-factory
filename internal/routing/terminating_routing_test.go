@@ -71,7 +71,7 @@ func seedTerminatingEntityWithCIFailure(t *testing.T, database *sql.DB, stub *st
 		t.Fatalf("create entity: %v", err)
 	}
 	router := firingRouter(database, stub)
-	router.HandleEvent(ciEvent(t, entity.ID, "owner/repo"))
+	router.HandleEvent(context.Background(), ciEvent(t, entity.ID, "owner/repo"))
 	if ci, _ := testTaskStore(database).FindActiveByEntityAndType(ctx, runmode.LocalDefaultOrgID, entity.ID, domain.EventGitHubPRCICheckFailed); len(ci) != 1 {
 		t.Fatalf("setup: expected 1 ci_check_failed task, got %d", len(ci))
 	}
@@ -100,7 +100,7 @@ func TestTerminating_Merged_TriggerFires_ClosesSiblings(t *testing.T) {
 	enableTeamAutoDelegate(t, database, team)
 	seedImmediateTrigger(t, database, team, domain.EventGitHubPRMerged, "merge")
 
-	router.HandleEvent(mergedEvent(t, entityID, "owner/repo"))
+	router.HandleEvent(context.Background(), mergedEvent(t, entityID, "owner/repo"))
 
 	ctx := context.Background()
 	ts := testTaskStore(database)
@@ -137,7 +137,7 @@ func TestTerminating_Merged_RuleCreatesCard_NoFire(t *testing.T) {
 
 	seedMatchAllRule(t, database, runmode.LocalDefaultTeamID, domain.EventGitHubPRMerged)
 
-	router.HandleEvent(mergedEvent(t, entityID, "owner/repo"))
+	router.HandleEvent(context.Background(), mergedEvent(t, entityID, "owner/repo"))
 
 	ctx := context.Background()
 	ts := testTaskStore(database)
@@ -162,7 +162,7 @@ func TestTerminating_Merged_NoHandler_ClosesAndTerminates_NoCard(t *testing.T) {
 	stub := &stubDelegator{db: database}
 	router, entityID := seedTerminatingEntityWithCIFailure(t, database, stub)
 
-	router.HandleEvent(mergedEvent(t, entityID, "owner/repo"))
+	router.HandleEvent(context.Background(), mergedEvent(t, entityID, "owner/repo"))
 
 	ctx := context.Background()
 	active, _ := testTaskStore(database).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entityID)
@@ -185,9 +185,9 @@ func TestTerminating_StragglerOnClosedEntity_Dropped(t *testing.T) {
 	stub := &stubDelegator{db: database}
 	router, entityID := seedTerminatingEntityWithCIFailure(t, database, stub)
 
-	router.HandleEvent(mergedEvent(t, entityID, "owner/repo"))
+	router.HandleEvent(context.Background(), mergedEvent(t, entityID, "owner/repo"))
 	// A straggler CI failure arrives after the merge.
-	router.HandleEvent(ciEvent(t, entityID, "owner/repo"))
+	router.HandleEvent(context.Background(), ciEvent(t, entityID, "owner/repo"))
 
 	ctx := context.Background()
 	if ci, _ := testTaskStore(database).FindActiveByEntityAndType(ctx, runmode.LocalDefaultOrgID, entityID, domain.EventGitHubPRCICheckFailed); len(ci) != 0 {

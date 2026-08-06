@@ -120,7 +120,7 @@ func TestGate_DisjointRepos_DropsUntrackingTeam(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 
-	gateRouter(dbh).HandleEvent(ciEvent(t, entity.ID, "owner/repo-b"))
+	gateRouter(dbh).HandleEvent(context.Background(), ciEvent(t, entity.ID, "owner/repo-b"))
 
 	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
@@ -164,7 +164,7 @@ func TestGate_SharedRepo_VisibleToBoth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
-	gateRouter(dbh).HandleEvent(ciEvent(t, entity.ID, "owner/shared"))
+	gateRouter(dbh).HandleEvent(context.Background(), ciEvent(t, entity.ID, "owner/shared"))
 
 	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil || len(active) != 1 {
@@ -199,7 +199,7 @@ func TestGate_EscapeHatches(t *testing.T) {
 
 	// (1) NULL/empty-team handler (multi-mode system/org-union row) →
 	// allowed regardless of tracking. This is acceptance #6's mechanism.
-	if !r.handlerScopeMatchesEvent(githubEvt, domain.EventHandler{TeamID: ""}, map[string]bool{}) {
+	if !r.handlerScopeMatchesEvent(context.Background(), githubEvt, domain.EventHandler{TeamID: ""}, map[string]bool{}) {
 		t.Error("empty-team (system) handler should skip the gate")
 	}
 
@@ -212,24 +212,24 @@ func TestGate_EscapeHatches(t *testing.T) {
 	// (2) teamRepos + jiraRules unwired (nil) → pre-ticket behavior, never
 	// drops, for either source.
 	rNil := NewRouter(nil, nil, nil, nil, nil, nil, nil, st.Conversations, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, noopScorer{}, nil)
-	if !rNil.handlerScopeMatchesEvent(githubEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
+	if !rNil.handlerScopeMatchesEvent(context.Background(), githubEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
 		t.Error("nil teamRepos store should skip the GitHub gate")
 	}
-	if !rNil.handlerScopeMatchesEvent(jiraEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
+	if !rNil.handlerScopeMatchesEvent(context.Background(), jiraEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
 		t.Error("nil jiraRules store should skip the Jira gate")
 	}
 
 	// (3) Unknown source → ungated even with a gate-active router + a real
 	// team that tracks nothing.
 	otherEvt := domain.Event{EventType: "system:poll:done", MetadataJSON: `{}`, OrgID: runmode.LocalDefaultOrgID}
-	if !r.handlerScopeMatchesEvent(otherEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
+	if !r.handlerScopeMatchesEvent(context.Background(), otherEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
 		t.Error("non-github/jira event should skip the scope gate")
 	}
 
 	// (4) Malformed/empty project metadata on a gate-active router →
 	// fail-open (no drop), same policy as the GitHub branch.
 	emptyProjEvt := domain.Event{EventType: domain.EventJiraIssueAssigned, MetadataJSON: `{}`, OrgID: runmode.LocalDefaultOrgID}
-	if !r.handlerScopeMatchesEvent(emptyProjEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
+	if !r.handlerScopeMatchesEvent(context.Background(), emptyProjEvt, domain.EventHandler{TeamID: "some-real-team"}, map[string]bool{}) {
 		t.Error("jira event with no project should fail open (skip the gate)")
 	}
 }
@@ -278,7 +278,7 @@ func TestJiraGate_DisjointProjects_DropsUntrackingTeam(t *testing.T) {
 		t.Fatalf("create entity: %v", err)
 	}
 
-	gateRouter(dbh).HandleEvent(jiraAssignedEvent(t, entity.ID, "SKY"))
+	gateRouter(dbh).HandleEvent(context.Background(), jiraAssignedEvent(t, entity.ID, "SKY"))
 
 	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil {
@@ -384,7 +384,7 @@ func TestGate_MultiTeamAuthor_UntrackedTeamGatedFromOwnerLadder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
-	gateRouter(dbh).HandleEvent(ciEvent(t, entity.ID, "owner/repo-a"))
+	gateRouter(dbh).HandleEvent(context.Background(), ciEvent(t, entity.ID, "owner/repo-a"))
 
 	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil || len(active) != 1 {
@@ -433,7 +433,7 @@ func TestGate_MultiTeamAuthor_BothTrack_StaysAmbiguous(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
-	gateRouter(dbh).HandleEvent(ciEvent(t, entity.ID, "owner/shared"))
+	gateRouter(dbh).HandleEvent(context.Background(), ciEvent(t, entity.ID, "owner/shared"))
 
 	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil || len(active) != 1 {
@@ -472,7 +472,7 @@ func TestGate_LocalN1_NoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
-	gateRouter(dbh).HandleEvent(ciEvent(t, entity.ID, "owner/repo"))
+	gateRouter(dbh).HandleEvent(context.Background(), ciEvent(t, entity.ID, "owner/repo"))
 
 	active, err := testTaskStore(dbh).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
 	if err != nil || len(active) != 1 {

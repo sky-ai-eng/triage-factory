@@ -193,7 +193,7 @@ func TestRun_OnScoringCompletedReceivesOnlyFreshlyScored(t *testing.T) {
 	var mu sync.Mutex
 	var gotOrgID string
 	var gotIDs []string
-	r.callbacks.OnScoringCompleted = func(orgID string, ids []string) {
+	r.callbacks.OnScoringCompleted = func(_ context.Context, orgID string, ids []string) {
 		mu.Lock()
 		defer mu.Unlock()
 		gotOrgID = orgID

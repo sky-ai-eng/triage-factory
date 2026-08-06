@@ -78,7 +78,7 @@ func (a *App) buildAI() {
 				Data:  map[string]any{"task_ids": taskIDs},
 			})
 		},
-		OnScoringCompleted: func(orgID string, taskIDs []string) {
+		OnScoringCompleted: func(ctx context.Context, orgID string, taskIDs []string) {
 			a.wsHub.Broadcast(websocket.Event{
 				Type:  "scoring_completed",
 				OrgID: orgID,
@@ -89,8 +89,14 @@ func (a *App) buildAI() {
 			// Async so it doesn't block the scorer clearing its running flag.
 			// a.router is set in buildRouting (before Run), so it's non-nil
 			// by the time any scoring cycle completes.
+			//
+			// WithoutCancel, not Background: the cycle that scheduled this
+			// returns immediately (and its ctx dies with it), but the work
+			// this fires — deferred triggers, runs, claims — must finish,
+			// while the cycle's values stay attached so the re-derive is
+			// still recognizably part of the scoring that caused it.
 			if a.router != nil {
-				go a.router.ReDeriveAfterScoring(orgID, taskIDs)
+				go a.router.ReDeriveAfterScoring(context.WithoutCancel(ctx), orgID, taskIDs)
 			}
 		},
 		OnTasksSkipped: func(orgID string, skipped, total int) {

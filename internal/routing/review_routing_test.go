@@ -104,7 +104,7 @@ func reviewEntity(t *testing.T, database *sql.DB, sourceID string) string {
 
 func emitReviewRequested(router *Router, entityID, dedupKey string, meta events.GitHubPRReviewRequestedMetadata) {
 	metaJSON, _ := json.Marshal(meta)
-	router.HandleEvent(domain.Event{
+	router.HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventGitHubPRReviewRequested,
 		EntityID:     &entityID,
 		DedupKey:     dedupKey,
@@ -365,7 +365,7 @@ func TestReviewByReviewer_ClosesOnlyTheirTask(t *testing.T) {
 	subMeta, _ := json.Marshal(events.GitHubPRReviewApprovedMetadata{
 		Author: "carol", Reviewer: "alice", Repo: "owner/repo", PRNumber: 7,
 	})
-	router.HandleEvent(domain.Event{
+	router.HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventGitHubPRReviewApproved,
 		EntityID:     &entityID,
 		MetadataJSON: string(subMeta),
@@ -409,7 +409,7 @@ func TestReviewRequestRemoved_ClosesOnlyMatchingReviewer(t *testing.T) {
 	removedMeta, _ := json.Marshal(events.GitHubPRReviewRequestRemovedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 6, RequestedLogin: "alice",
 	})
-	router.HandleEvent(domain.Event{
+	router.HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventGitHubPRReviewRequestRemoved,
 		EntityID:     &entityID,
 		DedupKey:     "user:alice",

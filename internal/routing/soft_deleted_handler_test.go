@@ -44,7 +44,7 @@ func TestRouter_SoftDeletedTrigger_NoLongerFires(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create entity A: %v", err)
 	}
-	router.HandleEvent(ciEvent(t, entityA.ID, "owner/repo"))
+	router.HandleEvent(context.Background(), ciEvent(t, entityA.ID, "owner/repo"))
 	if got := atomic.LoadInt64(&stub.calls); got != 1 {
 		t.Fatalf("control: trigger fired %d times before delete, want 1", got)
 	}
@@ -59,7 +59,7 @@ func TestRouter_SoftDeletedTrigger_NoLongerFires(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create entity B: %v", err)
 	}
-	router.HandleEvent(ciEvent(t, entityB.ID, "owner/repo"))
+	router.HandleEvent(context.Background(), ciEvent(t, entityB.ID, "owner/repo"))
 	if got := atomic.LoadInt64(&stub.calls); got != 1 {
 		t.Errorf("soft-deleted trigger fired again, calls = %d, want still 1", got)
 	}

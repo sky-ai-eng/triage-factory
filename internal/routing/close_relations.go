@@ -45,7 +45,7 @@ type closeRelation struct {
 	// ok=false skips the whole relation (the snapshot / identity gate); the
 	// returned context is threaded to keep. nil prepare = proceed with a nil
 	// context.
-	prepare func(r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool)
+	prepare func(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool)
 	// keep decides per task whether it actually closes (dedup-key narrowing,
 	// member-aware skip). nil keep = close every active task of a target type.
 	keep func(evt domain.Event, ctx closeContext, t domain.Task) bool
@@ -185,8 +185,7 @@ func jiraIssueTerminalCloseTypes() []string {
 // closedAny drives the tasks_updated broadcast; terminate drives the entity
 // state flip. A terminating relation sets terminate even when no tasks exist to
 // close (a merged PR with no live tasks still closes its entity).
-func (r *Router) runCloses(orgID string, evt domain.Event, entityID string) (closedAny, terminate bool) {
-	ctx := context.Background()
+func (r *Router) runCloses(ctx context.Context, orgID string, evt domain.Event, entityID string) (closedAny, terminate bool) {
 	for ri := range closeRelations {
 		rel := &closeRelations[ri]
 		if !slices.Contains(rel.onEvents, evt.EventType) {
@@ -212,7 +211,7 @@ func (r *Router) runCloses(orgID string, evt domain.Event, entityID string) (clo
 		var cctx closeContext
 		if rel.prepare != nil {
 			var ok bool
-			if cctx, ok = rel.prepare(r, orgID, evt, entityID); !ok {
+			if cctx, ok = rel.prepare(ctx, r, orgID, evt, entityID); !ok {
 				continue
 			}
 		}
@@ -232,7 +231,7 @@ func (r *Router) runCloses(orgID string, evt domain.Event, entityID string) (clo
 			if rel.keep != nil && !rel.keep(evt, cctx, t) {
 				continue
 			}
-			if err := r.closeTaskWithAudit(orgID, t.ID, evt.ID, reason, evt.EventType); err != nil {
+			if err := r.closeTaskWithAudit(ctx, orgID, t.ID, evt.ID, reason, evt.EventType); err != nil {
 				routerLog.Error("close: failed to close task", "task_id", t.ID, "on_event", evt.EventType, "error", err)
 				continue
 			}
@@ -247,8 +246,8 @@ func (r *Router) runCloses(orgID string, evt domain.Event, entityID string) (clo
 
 // prSnapshotForEntity loads + parses an entity's PR snapshot. The closes that
 // read the snapshot (CI green, review resolution) share it.
-func (r *Router) prSnapshotForEntity(orgID, entityID string) (*domain.PRSnapshot, bool) {
-	entity, err := r.entities.GetSystem(context.Background(), orgID, entityID)
+func (r *Router) prSnapshotForEntity(ctx context.Context, orgID, entityID string) (*domain.PRSnapshot, bool) {
+	entity, err := r.entities.GetSystem(ctx, orgID, entityID)
 	if err != nil || entity == nil {
 		return nil, false
 	}
@@ -261,8 +260,8 @@ func (r *Router) prSnapshotForEntity(orgID, entityID string) (*domain.PRSnapshot
 
 // prepareCIPassed gates ci_check_failed closes on a fully-green snapshot: if any
 // check is still failing at the latest SHA, don't close.
-func prepareCIPassed(r *Router, orgID string, _ domain.Event, entityID string) (closeContext, bool) {
-	snap, ok := r.prSnapshotForEntity(orgID, entityID)
+func prepareCIPassed(ctx context.Context, r *Router, orgID string, _ domain.Event, entityID string) (closeContext, bool) {
+	snap, ok := r.prSnapshotForEntity(ctx, orgID, entityID)
 	if !ok {
 		return nil, false
 	}
@@ -288,7 +287,7 @@ func reviewerFromMeta(evt domain.Event) string {
 
 // prepareReviewerKey yields the submitting reviewer's per-user dedup key so
 // keepDedupKey closes only that reviewer's review_requested task.
-func prepareReviewerKey(_ *Router, _ string, evt domain.Event, _ string) (closeContext, bool) {
+func prepareReviewerKey(_ context.Context, _ *Router, _ string, evt domain.Event, _ string) (closeContext, bool) {
 	reviewer := reviewerFromMeta(evt)
 	if reviewer == "" {
 		return nil, false
@@ -303,12 +302,12 @@ func keepDedupKey(_ domain.Event, ctx closeContext, t domain.Task) bool {
 
 // prepareReviewResolved gates review_changes_requested closes: the reviewer
 // must be identifiable AND no OTHER reviewer may still have changes outstanding.
-func prepareReviewResolved(r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool) {
+func prepareReviewResolved(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool) {
 	reviewer := reviewerFromMeta(evt)
 	if reviewer == "" {
 		return nil, false
 	}
-	snap, ok := r.prSnapshotForEntity(orgID, entityID)
+	snap, ok := r.prSnapshotForEntity(ctx, orgID, entityID)
 	if !ok {
 		return nil, false
 	}
@@ -331,23 +330,23 @@ func keepReviewRequestRemoved(evt domain.Event, _ closeContext, t domain.Task) b
 // member-aware skip and applies the Server/DC display-name fallback: when the
 // issue is still assigned to the local user (no accountId), skip the whole
 // close so a re-emit doesn't retire that user's own task.
-func prepareJiraReassign(r *Router, orgID string, evt domain.Event, _ string) (closeContext, bool) {
+func prepareJiraReassign(ctx context.Context, r *Router, orgID string, evt domain.Event, _ string) (closeContext, bool) {
 	var meta events.JiraIssueAssignedMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 		return nil, false
 	}
 	newOwnerTeams := map[string]struct{}{}
-	for _, tid := range r.assigneeTeams(orgID, evt) {
+	for _, tid := range r.assigneeTeams(ctx, orgID, evt) {
 		newOwnerTeams[tid] = struct{}{}
 	}
 	if r.users != nil && meta.AssigneeAccountID == "" && meta.Assignee != "" {
 		var jiraHost string
 		if r.orgs != nil {
-			if orgSet, serr := r.orgs.GetSettingsSystem(context.Background(), orgID); serr == nil {
+			if orgSet, serr := r.orgs.GetSettingsSystem(ctx, orgID); serr == nil {
 				jiraHost = orgSet.JiraBaseURL
 			}
 		}
-		if _, localDisplayName, err := r.users.GetJiraIdentitySystem(context.Background(), runmode.LocalDefaultUserID, jiraHost); err == nil {
+		if _, localDisplayName, err := r.users.GetJiraIdentitySystem(ctx, runmode.LocalDefaultUserID, jiraHost); err == nil {
 			if localDisplayName != "" && strings.EqualFold(meta.Assignee, localDisplayName) {
 				return nil, false // still assigned to the local user — don't retire
 			}
@@ -387,11 +386,11 @@ func keepJiraReassign(_ domain.Event, ctx closeContext, t domain.Task) bool {
 // call — the run ends up terminal either way and the task close still
 // lands. Teardown is fire-and-forget; the run's own goroutine parks it
 // asynchronously.
-func (r *Router) cancelActiveRunsForTask(orgID, taskID string) {
+func (r *Router) cancelActiveRunsForTask(ctx context.Context, orgID, taskID string) {
 	if r.spawner == nil {
 		return
 	}
-	ids, err := r.agentRuns.ActiveIDsForTaskSystem(context.Background(), orgID, taskID)
+	ids, err := r.agentRuns.ActiveIDsForTaskSystem(ctx, orgID, taskID)
 	if err != nil {
 		routerLog.Error("active-run lookup for task failed", "task_id", taskID, "error", err)
 		return
@@ -412,13 +411,13 @@ func (r *Router) cancelActiveRunsForTask(orgID, taskID string) {
 // authoritative invalidation surface, so runs and queued firings derive from
 // it. Without the cancel, closing a task mid-run would leave the agent churning
 // on work the system already considers resolved.
-func (r *Router) closeTaskWithAudit(orgID, taskID, closingEventID, closeReason, closeEventType string) error {
-	r.cancelActiveRunsForTask(orgID, taskID)
-	if err := r.tasks.CloseSystem(context.Background(), orgID, taskID, closeReason, closeEventType); err != nil {
+func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingEventID, closeReason, closeEventType string) error {
+	r.cancelActiveRunsForTask(ctx, orgID, taskID)
+	if err := r.tasks.CloseSystem(ctx, orgID, taskID, closeReason, closeEventType); err != nil {
 		return err
 	}
 	if closingEventID != "" {
-		_ = r.tasks.RecordEventSystem(context.Background(), orgID, taskID, closingEventID, "closed")
+		_ = r.tasks.RecordEventSystem(ctx, orgID, taskID, closingEventID, "closed")
 	}
 	return nil
 }

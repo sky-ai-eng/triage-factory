@@ -183,7 +183,7 @@ func TestEventQueue_NoDoubleTaskOnReclaim(t *testing.T) {
 	if err != nil || ev == nil {
 		t.Fatalf("load event: ev=%v err=%v", ev, err)
 	}
-	r.HandleEvent(*ev) // task created here
+	r.HandleEvent(context.Background(), *ev) // task created here
 
 	if got := countRows(t, database, `SELECT COUNT(*) FROM tasks`); got != 1 {
 		t.Fatalf("after first route, tasks = %d, want 1", got)
