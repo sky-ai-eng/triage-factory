@@ -96,13 +96,13 @@ func (r *brokerRun) Start() error {
 	if err != nil {
 		// The broker started a child but we can't wire its stdio — tell it
 		// to kill the run so it doesn't leak.
-		_ = r.client.call(context.Background(), methodKillRun, killRunArgs{ContainerID: r.params.ContainerID}, nil)
+		_ = r.client.call(context.WithoutCancel(r.ctx), methodKillRun, killRunArgs{ContainerID: r.params.ContainerID}, nil)
 		return fmt.Errorf("capbroker: accept runtime stdio: %w", err)
 	}
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		_ = conn.Close()
-		_ = r.client.call(context.Background(), methodKillRun, killRunArgs{ContainerID: r.params.ContainerID}, nil)
+		_ = r.client.call(context.WithoutCancel(r.ctx), methodKillRun, killRunArgs{ContainerID: r.params.ContainerID}, nil)
 		return fmt.Errorf("capbroker: accepted stdio is not a unix conn")
 	}
 	r.conn = uc
@@ -111,12 +111,17 @@ func (r *brokerRun) Start() error {
 	// Translate run-context cancellation into a kill RPC — the broker owns
 	// the child, so the orchestrator can't SIGKILL it directly. The watcher
 	// stops when Wait or Close runs.
+	//
+	// watchCtx is a lifetime signal for this goroutine and nothing else — it
+	// never reaches an RPC — so it stays rooted at Background. The kill it
+	// fires does carry the run context's values (WithoutCancel), because the
+	// one thing this RPC is triggered BY is that context being cancelled.
 	watchCtx, cancel := context.WithCancel(context.Background())
 	r.watchCancel = cancel
 	go func() {
 		select {
 		case <-r.ctx.Done():
-			_ = r.client.call(context.Background(), methodKillRun, killRunArgs{ContainerID: r.params.ContainerID}, nil)
+			_ = r.client.call(context.WithoutCancel(r.ctx), methodKillRun, killRunArgs{ContainerID: r.params.ContainerID}, nil)
 		case <-watchCtx.Done():
 		}
 	}()
@@ -139,15 +144,20 @@ func (r *brokerRun) Pid() int { return 0 }
 
 // Wait fetches the run's exit status via the WaitRun RPC. Called exactly
 // once, after the caller has drained Stdout to EOF (the run has already
-// exited), so it returns promptly. Uses a fresh context, not the run
-// context: cancellation kills the child (via the watcher), and we still
-// need the exit status afterward.
+// exited), so it returns promptly.
+//
+// Cancellation-detached from the run context, and it has to be:
+// cancellation kills the child (via the watcher), and we still need the exit
+// status afterward. WithoutCancel rather than a fresh Background is what
+// keeps the run context's VALUES — the trace context above all, so this call
+// is attributable to the run it waited on instead of minting a parentless
+// span with nothing on it but the method name.
 func (r *brokerRun) Wait() error {
 	var res waitRunResult
 	// Uncapped (budget 0): WaitRun blocks server-side until the run exits;
 	// a fixed client deadline would spuriously time out a one-shot Run whose
 	// runsc child hasn't finished exiting after emitting its terminal result.
-	err := r.client.callWithCap(context.Background(), methodWaitRun, waitRunArgs{ContainerID: r.params.ContainerID}, &res, 0)
+	err := r.client.callWithCap(context.WithoutCancel(r.ctx), methodWaitRun, waitRunArgs{ContainerID: r.params.ContainerID}, &res, 0)
 	r.oom = res.OOMKilled
 	r.actuals = sandbox.RunActuals{PeakMemMB: res.PeakMemMB, CPUUsec: res.CPUUsec}
 	r.stderrTail = res.StderrTail
@@ -181,7 +191,7 @@ func (r *brokerRun) Close() error {
 	r.closeOnce.Do(func() {
 		r.stopWatcher()
 		if r.started {
-			_ = r.client.call(context.Background(), methodKillRun, killRunArgs{ContainerID: r.params.ContainerID}, nil)
+			_ = r.client.call(context.WithoutCancel(r.ctx), methodKillRun, killRunArgs{ContainerID: r.params.ContainerID}, nil)
 		}
 		if r.conn != nil {
 			_ = r.conn.Close()
