@@ -1,0 +1,43 @@
+# Tempo for the local-mode dev loop — a single `docker run`, no compose, no
+# other containers. See docs/local-mode/tuning.md#tracing for the invocation.
+#
+# The difference from tempo.yaml (the compose profile's config) is what is
+# absent: no metrics-generator, because there is no Prometheus here to
+# remote-write to and a generator pointed at a name that doesn't resolve
+# turns the container's log into a retry loop. Everything a span needs to
+# arrive, be stored, and be searched is here; nothing else is.
+
+server:
+  # Query + ingest API. Published on 127.0.0.1 by the documented `docker run`
+  # so a host-run TF binary can reach it — and only the host.
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        # TF_TRACES_ENDPOINT=http://localhost:4318 lands here.
+        http:
+          endpoint: 0.0.0.0:4318
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+ingester:
+  # A trace becomes searchable once it has been idle long enough to be cut
+  # (~10s) and blocks are flushed on this interval. Short, because the dev
+  # loop is "add a span, restart TF, look for it".
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    # A day is plenty for a dev container; the container itself usually
+    # outlives its usefulness first.
+    block_retention: 24h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks

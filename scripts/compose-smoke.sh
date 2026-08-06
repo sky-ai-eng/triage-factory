@@ -319,5 +319,67 @@ posture=$(dc exec -T executor sh -c '
 ' 2>&1) || fail "executor privsep posture: $posture"
 pass "executor privsep posture: $posture"
 
+# 7. The observability stack. Each of these fails silently — no crash, no 503,
+#    just an empty UI weeks later when someone finally looks.
+
+# 7a. TF resolved the endpoint and installed a tracer provider: the compose
+#     default reached the process env AND the binary accepted it. A dropped env
+#     line leaves every other check in this script passing.
+if ! dc logs triagefactory 2>/dev/null | grep -q "tracing enabled"; then
+  fail "control pod never logged 'tracing enabled' — TF_TRACES_ENDPOINT didn't reach it, or the exporter refused the value"
+fi
+pass "control pod installed a tracer provider (logged 'tracing enabled')"
+
+# 7b. Tempo accepts OTLP over HTTP on the address that env var names, and hands
+#     the trace back. Retrieval is by ID, not search: an ID lookup hits the
+#     ingester immediately, while search waits for the trace to be cut (~10s)
+#     and would make this flaky for no extra coverage. curl runs from the
+#     grafana container — Tempo's image is distroless and has none. The
+#     payload is built here and piped over stdin rather than embedded in the
+#     remote shell's argv, so there is exactly one level of quoting to get
+#     right. Second-precision timestamps: macOS `date` has no %N, and a span
+#     stamped in 1970 stores fine and then never appears in any search.
+trace_id=1234567890abcdef1234567890abcdef
+now=$(date +%s)
+printf '%s' "{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"compose-smoke\"}}]},
+\"scopeSpans\":[{\"spans\":[{\"traceId\":\"$trace_id\",\"spanId\":\"1234567890abcdef\",
+\"name\":\"smoke.test\",\"kind\":1,
+\"startTimeUnixNano\":\"$((now - 1))000000000\",\"endTimeUnixNano\":\"${now}000000000\",
+\"attributes\":[{\"key\":\"conversation.id\",\"value\":{\"stringValue\":\"compose-smoke\"}}]}]}]}]}" \
+  | dc exec -T grafana curl -sS -X POST http://tempo:4318/v1/traces \
+      -H 'content-type: application/json' --data-binary @- >/dev/null \
+  || fail "OTLP push to tempo:4318 failed"
+stored=""
+for _ in $(seq 1 15); do
+  if dc exec -T grafana curl -sS "http://tempo:3200/api/traces/$trace_id" 2>/dev/null | grep -q compose-smoke; then
+    stored=yes
+    break
+  fi
+  sleep 2
+done
+[ -n "$stored" ] || fail "tempo accepted an OTLP span but never returned it from /api/traces/$trace_id"
+pass "tempo ingests OTLP/HTTP on :4318 and serves the trace back"
+
+# 7c. Grafana's provisioning actually applied. Provisioning failures are
+#     logged and skipped, not fatal, so a malformed data source or correlation
+#     leaves a running Grafana that simply cannot navigate anything — and the
+#     correlations are the entire point of the file.
+prov=""
+for _ in $(seq 1 30); do
+  ds=$(dc exec -T grafana curl -sS http://localhost:3000/api/datasources 2>/dev/null || true)
+  corr=$(dc exec -T grafana curl -sS http://localhost:3000/api/datasources/correlations 2>/dev/null || true)
+  case "$ds" in *tf-tempo*) case "$ds" in *tf-prometheus*) prov="$corr" ;; esac ;; esac
+  [ -n "$prov" ] && break
+  sleep 2
+done
+[ -n "$prov" ] || fail "grafana did not provision both data sources (tf-tempo + tf-prometheus)"
+for attr in conversation.id event.id task.id; do
+  case "$prov" in
+    *"$attr"*) ;;
+    *) fail "grafana is missing the $attr span correlation (provisioning error — check its logs)" ;;
+  esac
+done
+pass "grafana provisioned both data sources + the conversation/event/task correlations"
+
 echo ""
 echo "compose-smoke: ALL CHECKS PASSED ✓"

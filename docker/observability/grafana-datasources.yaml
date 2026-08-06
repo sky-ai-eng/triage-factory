@@ -1,0 +1,135 @@
+# Grafana data sources for the bundled `observability` compose profile,
+# provisioned from disk so a fresh `docker compose --profile observability up`
+# lands on a UI that already knows how to join TF's three signals.
+#
+# Mounted read-only into /etc/grafana/provisioning/datasources/. Grafana
+# re-reads it on start, and a provisioned data source is read-only in the UI —
+# edit this file and restart the container to change one.
+#
+# NOTE ON `$$`: Grafana interpolates `$VAR` in provisioning files against the
+# environment, so every dollar sign that belongs to a Grafana variable is
+# written `$$`. `$$conversationID` below reaches Grafana as `$conversationID`;
+# a single `$` would be substituted with an empty environment variable and the
+# link would query for nothing.
+#
+# Not configured here: trace-to-logs. It needs a log store to point at, and
+# this stack deliberately ships none — TF's logs↔traces join is the `trace_id`
+# / `span_id` pair slog stamps on every line emitted under a span, which on a
+# compose stack you read with `docker compose logs`. Add a Loki container and
+# a `tracesToLogsV2` block to the Tempo data source below if you want it as a
+# click instead of a grep.
+
+apiVersion: 1
+
+datasources:
+  # ── Traces ─────────────────────────────────────────────────────────────
+  - name: Tempo
+    uid: tf-tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    # Default so Explore opens on traces: on this stack the traces are the
+    # thing being looked at, and the metrics are the supporting cast.
+    isDefault: true
+    jsonData:
+      # Both fed by Tempo's metrics-generator through Prometheus — see the
+      # metrics_generator block in tempo.yaml. Without the generator these
+      # tabs render empty rather than erroring, which is a confusing way to
+      # find out the two halves disagree.
+      serviceMap:
+        datasourceUid: tf-prometheus
+      nodeGraph:
+        enabled: true
+      tracesToMetrics:
+        datasourceUid: tf-prometheus
+        # Maps the span's service.name onto the `service` label the
+        # span-metrics processor writes, so the queries below scope to the
+        # service of the span you clicked rather than the whole deployment.
+        tags: [{ key: 'service.name', value: 'service' }]
+        queries:
+          - name: 'Call rate (this service)'
+            query: 'sum by (span_name) (rate(traces_spanmetrics_calls_total{$$__tags}[5m]))'
+          - name: 'p95 latency (this service)'
+            query: 'histogram_quantile(0.95, sum by (le, span_name) (rate(traces_spanmetrics_latency_bucket{$$__tags}[5m])))'
+
+    # ── Attribute correlations ─────────────────────────────────────────
+    # The reverse join. The epic keeps trace IDs off domain tables (retention
+    # asymmetry: the column would mostly point at deleted traces), so domain
+    # IDs ride along as span attributes and the way back is a TraceQL search
+    # on those attributes. These correlations make that search a click on the
+    # span instead of a copy-paste into a query box.
+    #
+    # How each one works: the source field is `traceID` (the field the trace
+    # view hangs span links off), the regex transformation pulls one value out
+    # of the span's `tags` object, and the target is a TraceQL query on the
+    # same attribute — so the link only appears on spans that actually carry
+    # the attribute, and clicking it finds every other trace that touched the
+    # same conversation / event / task.
+    #
+    # `tags` arrives at the transformation as its JSON serialization —
+    # [{"key":"conversation.id","value":"..."},{"key":"org.id","value":"..."}]
+    # — hence the shape of the expressions: match one `{...}` object (the
+    # `[^}]*` bounds keep both lookaheads inside it) that has the key we want,
+    # and capture that same object's value. Two lookaheads rather than one
+    # key-then-value pattern so field order in the serialization is not
+    # load-bearing.
+    #
+    # Grafana 12+ is required for correlations to render in the trace view.
+    correlations:
+      - targetUID: tf-tempo
+        label: Traces for this conversation
+        description: Every trace carrying this conversation.id — the engagement's other attempts, its curator turns, the events that produced it.
+        type: query
+        config:
+          field: traceID
+          target:
+            queryType: traceql
+            query: '{ .conversation.id = "$$conversationID" }'
+          transformations:
+            - type: regex
+              field: tags
+              expression: '\{(?=[^}]*"key":"conversation\.id")(?=[^}]*"value":"(?<conversationID>[^"]*)")'
+
+      - targetUID: tf-tempo
+        label: Traces for this event
+        description: Every trace carrying this event.id — the poll cycle that emitted it and the routing pass that consumed it are separate roots, joined here.
+        type: query
+        config:
+          field: traceID
+          target:
+            queryType: traceql
+            query: '{ .event.id = "$$eventID" }'
+          transformations:
+            - type: regex
+              field: tags
+              expression: '\{(?=[^}]*"key":"event\.id")(?=[^}]*"value":"(?<eventID>[^"]*)")'
+
+      - targetUID: tf-tempo
+        label: Traces for this task
+        description: Every trace carrying this task.id — creation, re-derivation after scoring, and each delegated engagement it spawned.
+        type: query
+        config:
+          field: traceID
+          target:
+            queryType: traceql
+            query: '{ .task.id = "$$taskID" }'
+          transformations:
+            - type: regex
+              field: tags
+              expression: '\{(?=[^}]*"key":"task\.id")(?=[^}]*"value":"(?<taskID>[^"]*)")'
+
+  # ── Metrics ────────────────────────────────────────────────────────────
+  - name: Prometheus
+    uid: tf-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    jsonData:
+      # The metrics→traces direction, and the only genuine bridge between the
+      # two systems: TF's OTel SDK annotates histogram samples with the trace
+      # ID of the request that produced them (`trace_id`), Prometheus stores
+      # them as exemplars, and this turns each one into a link into Tempo.
+      # Needs --enable-feature=exemplar-storage on the Prometheus container.
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tf-tempo

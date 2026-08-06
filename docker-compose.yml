@@ -531,6 +531,11 @@ services:
       TF_PREVENT_ORG_CREATION: ${TF_PREVENT_ORG_CREATION:-}
       TF_TRUSTED_PROXY_CIDR: ${TF_TRUSTED_PROXY_CIDR:-}
       TF_CAPTURE_CLIENT_IP: ${TF_CAPTURE_CLIENT_IP:-}
+      # OTLP/HTTP trace destination — the `tempo` service at the bottom of
+      # this file. Override in .env to point at your own collector, or `off`
+      # to disable tracing (required if you delete tempo). Every pod traces
+      # itself, so the executor carries this line too.
+      TF_TRACES_ENDPOINT: ${TF_TRACES_ENDPOINT:-http://tempo:4318}
       # First-party Atlassian OAuth (3LO) app for one-click "Connect Jira"
       # (optional; the control pod serves the connect flow, so control-only).
       # Read from the process env at boot — forwarded here or a .env value is
@@ -671,6 +676,11 @@ services:
       TF_ORCHESTRATOR_HOME: ${TF_ORCHESTRATOR_HOME:-}
       TF_CAPBROKER_SOCKET: ${TF_CAPBROKER_SOCKET:-}
       TF_SANDBOX_GID: ${TF_SANDBOX_GID:-}
+      # Same destination as the control pod: a delegated run's spans are
+      # produced here — setup, dispatch, and the client-side spans around
+      # every broker/sidecar IPC call. The sandbox and the credential sidecar
+      # export nothing, ever.
+      TF_TRACES_ENDPOINT: ${TF_TRACES_ENDPOINT:-http://tempo:4318}
     # Sandbox caps + seccomp + private cgroup (the x-tf-hardening anchor) —
     # an executor's whole job is launching sandboxes, and it is the ONLY
     # service that carries these.
@@ -694,7 +704,107 @@ services:
       # retry while the control pod finishes migrating.
       start_period: 45s
 
+  # ── Observability ─────────────────────────────────────────────────────
+  # Tempo (traces) + Prometheus (metrics) + Grafana (the UI that joins them).
+  # TF_TRACES_ENDPOINT on both TF services points at the Tempo below.
+  #
+  # Editing this out is expected and supported:
+  #   - Own Prometheus? Delete `prometheus`, scrape each pod's :9464, and
+  #     update the Prometheus URL in
+  #     docker/observability/grafana-datasources.yaml. Tempo's span-metrics
+  #     remote_write (docker/observability/tempo.yaml) needs a
+  #     --web.enable-remote-write-receiver target; repoint or drop it.
+  #   - Own Grafana? Delete `grafana` and copy the two data sources + three
+  #     correlations out of that same file.
+  #   - No traces at all? Delete `tempo` AND set TF_TRACES_ENDPOINT=off, or TF
+  #     posts spans to a name that no longer resolves and logs an export error
+  #     every batch interval.
+  #
+  # Ports: Tempo and Prometheus publish nothing — TF and Grafana reach them
+  # over the compose network, same posture as :9464 and seaweedfs. Grafana
+  # publishes 127.0.0.1:3030 because a human has to open it, explicitly on
+  # loopback rather than Docker's default 0.0.0.0. Reach it on a remote box
+  # over an SSH tunnel (`ssh -L 3030:localhost:3030 …`); to expose it for
+  # real, put it behind the same reverse proxy and auth as everything else
+  # and give it accounts.
+  #
+  # All three volumes are caches: losing them loses trace and metric history,
+  # never TF state.
+  tempo:
+    image: grafana/tempo:2.10.7
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    restart: unless-stopped
+    volumes:
+      - ./docker/observability/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    # No healthcheck: the image is distroless (no shell, no curl/wget to probe
+    # with) and nothing gates on Tempo being up — TF's exporter retries, and
+    # Grafana's data source reconnects. `curl http://tempo:3200/ready` from
+    # another container in the network is the manual check.
+
+  prometheus:
+    image: prom/prometheus:v3.13.2
+    restart: unless-stopped
+    # Overriding the image's default command drops its legacy console flags,
+    # which is fine, but it also means every flag this stack needs has to be
+    # spelled out here:
+    #   --web.enable-remote-write-receiver  accepts Tempo's generated RED /
+    #       service-graph metrics (tempo.yaml's metrics_generator remote_write)
+    #   --enable-feature=exemplar-storage   stores the trace IDs TF's OTel SDK
+    #       attaches to histogram samples; without it exemplars are scraped and
+    #       dropped, and the metrics→traces click-through silently does nothing
+    #   --storage.tsdb.retention.time=7d    matches Tempo's block_retention, so
+    #       an exemplar never outlives the trace it links to
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-remote-write-receiver
+      - --enable-feature=exemplar-storage
+    volumes:
+      - ./docker/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    # Grafana 12 is the floor, not a preference: correlation links only render
+    # inside the trace view from 12 onwards, and those links are the whole
+    # point of the provisioning file mounted below. Don't float this backwards.
+    image: grafana/grafana:13.1.2
+    restart: unless-stopped
+    # service_started, not the service_healthy used elsewhere in this file:
+    # neither dependency ships a healthcheck (Tempo's image is distroless — no
+    # shell to probe with), and Grafana dials a data source on query anyway.
+    # This buys start ordering, nothing more.
+    depends_on:
+      tempo: { condition: service_started }
+      prometheus: { condition: service_started }
+    environment:
+      # No accounts: the UI is loopback-only and everything it knows comes
+      # from provisioning. Editor is what Explore needs; Admin would hand an
+      # anonymous session user management and server settings. For real
+      # accounts — do this if you put it behind a proxy — drop these four and
+      # set GF_SECURITY_ADMIN_PASSWORD.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+    volumes:
+      # Data sources + the attribute correlations that make a span's
+      # conversation.id / event.id / task.id clickable. Read-only: a
+      # provisioned data source can't be edited in the UI anyway, and the
+      # file is the source of truth.
+      - ./docker/observability/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/triage-factory.yaml:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      # 3030, not 3001: that one is the executor's TF_HEALTHZ_PORT, which
+      # scripts/multi-mode-dev.sh binds on the host.
+      - "127.0.0.1:3030:3000"
+
 volumes:
   pg-data:
   tf-data:
   seaweed-data:
+  # Observability-profile caches (created only when that profile runs).
+  tempo-data:
+  prometheus-data:
+  grafana-data:
