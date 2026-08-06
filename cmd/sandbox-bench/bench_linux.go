@@ -3,132 +3,200 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
-	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/capbroker"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// handle is one live benchmark sandbox: the launched run, the sandbox
-// teardown state, and the cancel that SIGKILLs it.
-type handle struct {
-	id     int
-	sb     *sandbox.Sandbox
-	run    sandbox.LaunchedRun
-	cancel context.CancelFunc
+const (
+	// readyTimeout bounds jail bring-up: Wrap returning is not "ready" —
+	// ready is the resident tool host having dialed in AND answered a call.
+	readyTimeout = 90 * time.Second
+	// toolCallTimeout bounds one workload round trip. Far above any single
+	// call's real cost; it catches a wedged host, not a slow command.
+	toolCallTimeout = 2 * time.Minute
+	// sampleStep is the series sampler's tick: host CPU and every jail's
+	// cgroup are read together each step across the whole hold, fine enough
+	// to resolve a burst phase inside a jail's cycle.
+	sampleStep = 2 * time.Second
+)
 
-	waitOnce sync.Once
-	waitErr  error
-	// closeMock shuts down the per-run mock LLM endpoint (claude
-	// profile only; nil otherwise).
-	closeMock func()
+// handle is one live benchmark sandbox: the per-run network, the tool-host
+// jail, the workload driver's controls, and everything teardown reclaims.
+type handle struct {
+	id          int
+	runID       string
+	claimID     string
+	containerID string
+	worktree    string
+
+	net       *sandbox.RunNetwork
+	jail      *agentproc.ToolHostJail
+	tools     agentloop.ToolHost
+	agentSock net.Listener
+
+	stopDriver context.CancelFunc
+	driverDone chan struct{}
+
+	toolCalls atomic.Int64
+	toolErrs  atomic.Int64
 }
 
-// wait reaps the runsc process exactly once; safe to call from both
-// the ready-watcher and teardown.
-func (h *handle) wait() error {
-	h.waitOnce.Do(func() { h.waitErr = h.run.Wait() })
-	return h.waitErr
+// teardown reclaims one sandbox in dependency order: the driver first (its
+// in-flight call unblocks when the connection closes), then the jail, then
+// the network the jail ran in, then the host-side artifacts. Tolerates a
+// partially-constructed handle so failed bring-ups share the same path.
+func (h *handle) teardown() {
+	if h.stopDriver != nil {
+		h.stopDriver()
+	}
+	if h.tools != nil {
+		_ = h.tools.Close()
+	}
+	if h.driverDone != nil {
+		<-h.driverDone
+	}
+	if h.jail != nil {
+		_ = h.jail.Close()
+	}
+	if h.net != nil {
+		_ = h.net.Close()
+	}
+	if h.agentSock != nil {
+		_ = h.agentSock.Close()
+	}
+	if h.worktree != "" {
+		_ = os.RemoveAll(h.worktree)
+	}
 }
 
 type levelResult struct {
 	level        int
-	spawnP50     time.Duration // sandbox.Wrap for sandboxes added this level
+	spawnP50     time.Duration // SetupRunNetwork + LaunchToolHost, per sandbox added this level
 	spawnP95     time.Duration
-	readyP50     time.Duration // Wrap start → workload printed READY
+	readyP50     time.Duration // spawn start → tool host connected and answering
 	readyP95     time.Duration
-	canaryMedian time.Duration // full Wrap→echo→Close while N are live
-	memAvailMB   int
-	memDeltaMB   int // pre-ramp MemAvailable minus now: true marginal cost
-	swapUsedMB   int
-	load1        float64
-	cpuPct       float64
-	sandboxRSSMB int // summed RSS of every live sandbox process tree
-	sandboxPSSMB int // summed PSS — shared pages divided; use for planning
-	failures     int
-	aborted      string // non-empty = guardrail/spawn abort reason
+	canaryMedian time.Duration // full network+jail+tool+teardown cycle while N are live
+
+	jailMemSumMB   int     // Σ memory.current over live jails (mean over ticks)
+	jailMemMeanMB  int     // mean memory.current per jail
+	jailMemPeakMB  int     // largest single-run memory.current observed
+	jailCoresMean  float64 // cycle-averaged CPU cores per jail
+	jailCoresPeak  float64 // hottest per-step reading of any single jail
+	jailCoresSum   float64
+	hostCPUPct     float64 // whole-hold host CPU average
+	hostCPUPeakPct float64 // hottest sample step
+
+	memAvailMB int
+	memDeltaMB int // pre-ramp MemAvailable minus now: true marginal cost
+	swapUsedMB int
+	load1      float64
+
+	toolCalls int64
+	toolErrs  int64
+	failures  int
+	aborted   string // non-empty = guardrail/spawn abort reason
+}
+
+// actualsLog accumulates each jail's teardown actuals — the same
+// billing-grade cgroup read production stamps on claims.
+var actualsLog = struct {
+	mu       sync.Mutex
+	peaksMB  []int
+	cpuUsec  []int64
+	recorded int
+}{}
+
+func recordActuals(_ context.Context, _, _ string, a sandbox.RunActuals) error {
+	actualsLog.mu.Lock()
+	defer actualsLog.mu.Unlock()
+	actualsLog.recorded++
+	if a.PeakMemMB != nil {
+		actualsLog.peaksMB = append(actualsLog.peaksMB, *a.PeakMemMB)
+	}
+	if a.CPUUsec != nil {
+		actualsLog.cpuUsec = append(actualsLog.cpuUsec, *a.CPUUsec)
+	}
+	return nil
 }
 
 func run(cfg benchConfig) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("must run as root (netns + iptables + chown to sandbox UID)")
 	}
-	for _, bin := range []string{"runsc", "ip", "iptables", "chroot"} {
+	for _, bin := range []string{"runsc", "ip", "iptables"} {
 		if _, err := exec.LookPath(bin); err != nil {
 			return fmt.Errorf("%s not found on PATH", bin)
 		}
 	}
+	if err := runmode.InitFromEnv(); err != nil {
+		return err
+	}
+	if _, err := os.Stat(sandbox.TrustedToolHostBinaryPath()); err != nil {
+		return fmt.Errorf("tool-host binary missing at %s — run inside the TF runtime image (scripts/sandbox-bench.sh): %w",
+			sandbox.TrustedToolHostBinaryPath(), err)
+	}
+	if _, err := os.Stat(sandbox.TrustedSDKDir()); err != nil {
+		return fmt.Errorf("SDK dir missing at %s — the broker mounts it unconditionally; run inside the TF runtime image: %w",
+			sandbox.TrustedSDKDir(), err)
+	}
 	if cfg.loadMax == 0 {
 		cfg.loadMax = 3 * float64(numCPU())
 	}
-	if cfg.workRoot == "" {
-		dir, err := os.MkdirTemp("", "sandbox-bench-")
-		if err != nil {
-			return err
-		}
-		cfg.workRoot = dir
-		defer os.RemoveAll(dir)
-	}
 
-	fmt.Printf("host: %d cpus, %d MB available, profile=%s rss=%dMB duty=%d%% levels=%v hold=%s\n",
-		numCPU(), readMemAvailableMB(), cfg.profile, cfg.rssMB, cfg.dutyPct, cfg.levels, cfg.hold)
-
-	// claude: fail fast when the SDK's musl engine binary isn't where
-	// the argv will point, rather than 90s-timeout per spawn.
-	if cfg.profile == "claude" {
-		bin := filepath.Join(cfg.sdkDir, claudeMuslRelPath())
-		if _, err := os.Stat(bin); err != nil {
-			return fmt.Errorf("claude profile: engine binary not found at %s (set -sdk-dir): %w", bin, err)
-		}
-		fmt.Printf("claude: engine %s, %d mock turns per run, JSC JIT %v\n", bin, cfg.turns, cfg.jscJIT)
-		debugMock = cfg.debugStream
-	}
-
-	// pageshare: one read-only blob on the host, bind-mounted into
-	// every sandbox. Real (non-sparse) bytes — hole reads would map
-	// the shared zero page and fake a "shared" result.
-	if cfg.profile == "pageshare" {
-		if err := writeBlob(blobPath(cfg), cfg.blobMB); err != nil {
-			return fmt.Errorf("write pageshare blob: %w", err)
-		}
-		fmt.Printf("pageshare: %d MB blob at %s — if MemAvailable delta grows ~%d MB per level step the pages are private per sandbox; if it stays ~flat they are shared\n",
-			cfg.blobMB, blobPath(cfg), cfg.blobMB)
-	}
-
-	// Root context: Ctrl-C / SIGTERM triggers the same orderly
-	// teardown path as a completed ramp.
+	// Root context: Ctrl-C / SIGTERM triggers the same orderly teardown
+	// path as a completed ramp.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Warm-up: one throwaway sandbox. On a cold rootfs cache this pays
-	// the alpine download + apk toolchain install (minutes); afterwards
-	// Wrap's rootfs step is one os.Stat. Doing it here keeps the cold
-	// cost out of every measurement.
+	// The launch is always brokered. Bring up our own broker the way the
+	// production binary does on bare metal — capbroker.Start spawns this
+	// binary's cap-broker subcommand when nothing is listening — and install
+	// its client as the sandbox package's privileged ops.
+	brokerProc, ops, err := capbroker.Start(ctx)
+	if err != nil {
+		return fmt.Errorf("start cap-broker: %w", err)
+	}
+	defer func() { _ = brokerProc.Close() }()
+	sandbox.SetPrivilegedOps(ops)
+
+	fmt.Printf("host: %d cpus, %d MB available | profile=%s levels=%v hold=%s tool-interval=%s\n",
+		numCPU(), readMemAvailableMB(), cfg.profile, cfg.levels, cfg.hold, cfg.toolInterval)
+
+	// Warm-up: one throwaway full cycle. On a cold rootfs cache this pays
+	// the alpine download + apk toolchain install (minutes); afterwards the
+	// rootfs step is one os.Stat. Keeps the cold cost out of every number.
 	fmt.Println("warmup: bringing up one sandbox (cold rootfs cache can take ~10 min)...")
 	warmCtx, warmCancel := context.WithTimeout(ctx, 20*time.Minute)
 	warmStart := time.Now()
-	if err := runOneShot(warmCtx, cfg, "warmup", []string{"/bin/echo", "warmup-ok"}); err != nil {
+	if err := runOneShot(warmCtx, cfg, 9000); err != nil {
 		warmCancel()
 		return fmt.Errorf("warmup sandbox failed: %w", err)
 	}
 	warmCancel()
 	fmt.Printf("warmup: ok in %s\n", time.Since(warmStart).Round(time.Millisecond))
 
-	// Guardrail watcher: flips abortReason and cancels spawning when
-	// the host crosses a limit. Sampled every 2s.
+	// Guardrail watcher: flips abortReason and cancels spawning when the
+	// host crosses a limit. Sampled every 2s.
 	guardCtx, guardCancel := context.WithCancel(ctx)
 	defer guardCancel()
 	var abortMu sync.Mutex
@@ -167,12 +235,16 @@ func run(cfg benchConfig) error {
 		}
 	}()
 
+	if cfg.profile == "oomtest" {
+		return runOOMTest(guardCtx, cfg, getAbort)
+	}
+
 	var live []*handle
 	var results []levelResult
 	nextID := 0
+	canaryID := 9100
 	baselineAvailMB := readMemAvailableMB()
 
-	// Teardown everything on every exit path before reporting.
 	defer func() {
 		if len(live) == 0 {
 			return
@@ -194,9 +266,9 @@ func run(cfg benchConfig) error {
 		live = append(live, added...)
 
 		res := levelResult{level: level, failures: failures}
-		// More than a quarter of the delta failing to come up is itself
-		// the soft-cap signal — record and stop rather than measuring a
-		// plateau that doesn't exist.
+		// More than a quarter of the delta failing to come up is itself the
+		// soft-cap signal — record and stop rather than measuring a plateau
+		// that doesn't exist.
 		if failures > delta/4 {
 			res.aborted = fmt.Sprintf("%d/%d spawns failed", failures, delta)
 			results = append(results, res)
@@ -211,25 +283,36 @@ func run(cfg benchConfig) error {
 		res.spawnP50, res.spawnP95 = percentiles(spawnTimes)
 		res.readyP50, res.readyP95 = percentiles(readyTimes)
 
-		// Hold the plateau, sampling host CPU over the tail so the
-		// number reflects steady state, not spawn churn.
-		sleepCtx(guardCtx, cfg.hold)
-		res.cpuPct = sampleCPUPct(guardCtx, 3*time.Second)
+		// The hold IS the sample: series-sample host CPU and every jail's
+		// cgroup across the whole plateau, so bursty profiles report cycle
+		// averages and peaks rather than whatever phase one window caught.
+		ps := sampleSeries(guardCtx, live, cfg.hold, sampleStep)
+		res.jailMemSumMB = ps.jailMemSumMB
+		res.jailMemMeanMB = ps.jailMemMeanMB
+		res.jailMemPeakMB = ps.jailMemPeakMB
+		res.jailCoresMean = ps.jailCoresMean
+		res.jailCoresPeak = ps.jailCoresPeak
+		res.jailCoresSum = ps.jailCoresSum
+		res.hostCPUPct = ps.hostCPUPct
+		res.hostCPUPeakPct = ps.hostCPUPeakPct
 		res.memAvailMB = readMemAvailableMB()
 		res.memDeltaMB = baselineAvailMB - res.memAvailMB
 		res.swapUsedMB = readSwapUsedMB()
 		res.load1 = readLoad1()
-		res.sandboxRSSMB = totalTreeRSSMB(live)
-		res.sandboxPSSMB = totalTreePSSMB(live)
+		for _, h := range live {
+			res.toolCalls += h.toolCalls.Load()
+			res.toolErrs += h.toolErrs.Load()
+		}
 
-		// Canary: the marginal cost of starting one more run while N
-		// are live. Median of 3 full Wrap→echo→Close cycles. At the
-		// 256 hard cap there is no 257th subnet, so no canary.
+		// Canary: the marginal cost of one more full run while N are live.
+		// Median of 3 network+jail+tool+teardown cycles. At the 256 hard cap
+		// there is no 257th subnet, so no canary.
 		var canary []time.Duration
 		for i := 0; i < 3 && level < 256 && getAbort() == "" && guardCtx.Err() == nil; i++ {
 			cStart := time.Now()
 			cCtx, cCancel := context.WithTimeout(guardCtx, 2*time.Minute)
-			err := runOneShot(cCtx, cfg, fmt.Sprintf("canary-%d-%d", level, i), []string{"/bin/echo", "canary-ok"})
+			err := runOneShot(cCtx, cfg, canaryID)
+			canaryID++
 			cCancel()
 			if err != nil {
 				fmt.Printf("level %d: canary %d failed: %v\n", level, i, err)
@@ -246,11 +329,13 @@ func run(cfg benchConfig) error {
 		}
 
 		results = append(results, res)
-		fmt.Printf("level %d: spawn p50=%s p95=%s ready p95=%s canary=%s | pss=%dMB (rss=%dMB) delta=%dMB avail=%dMB swap=%dMB load1=%.1f cpu=%.0f%% fail=%d\n",
+		fmt.Printf("level %d: spawn p50=%s p95=%s ready p95=%s canary=%s | jail mem=%dMB (%dMB/run, peak %dMB) cores/run=%.2f (peak %.2f) Σ=%.1f | host cpu=%.0f%% (peak %.0f%%) delta=%dMB avail=%dMB load1=%.1f | calls=%d errs=%d fail=%d\n",
 			level, res.spawnP50.Round(time.Millisecond), res.spawnP95.Round(time.Millisecond),
 			res.readyP95.Round(time.Millisecond), res.canaryMedian.Round(time.Millisecond),
-			res.sandboxPSSMB, res.sandboxRSSMB, res.memDeltaMB, res.memAvailMB,
-			res.swapUsedMB, res.load1, res.cpuPct, res.failures)
+			res.jailMemSumMB, res.jailMemMeanMB, res.jailMemPeakMB,
+			res.jailCoresMean, res.jailCoresPeak, res.jailCoresSum,
+			res.hostCPUPct, res.hostCPUPeakPct, res.memDeltaMB, res.memAvailMB, res.load1,
+			res.toolCalls, res.toolErrs, res.failures)
 
 		if res.aborted != "" {
 			break
@@ -260,13 +345,243 @@ func run(cfg benchConfig) error {
 	if err := writeCSV(cfg.csvPath, cfg.profile, results); err != nil {
 		return fmt.Errorf("write csv: %w", err)
 	}
+	if err := writeCapacityJSON(cfg, results); err != nil {
+		return fmt.Errorf("write json: %w", err)
+	}
 	printSummary(results, cfg)
 	return nil
 }
 
+// oomResult is the blast-radius scenario's JSON: a pass/fail record, not a
+// capacity curve.
+type oomResult struct {
+	GeneratedAt     string          `json:"generated_at"`
+	Scenario        string          `json:"scenario"`
+	Platform        string          `json:"platform"`
+	Host            hostJSON        `json:"host"`
+	VictimCeilingMB int             `json:"victim_ceiling_mb"`
+	VictimAllocMB   int             `json:"victim_alloc_mb"`
+	Victims         int             `json:"victims"`
+	Contained       int             `json:"victims_contained"`
+	VictimOutcomes  []oomVictimJSON `json:"victim_outcomes"`
+	Neighbors       int             `json:"neighbors"`
+	NeighborCalls   int64           `json:"neighbor_tool_calls"`
+	NeighborErrors  int64           `json:"neighbor_tool_errors"`
+	CanaryBeforeMs  int64           `json:"one_more_run_before_ms"`
+	CanaryAfterMs   int64           `json:"one_more_run_after_ms"`
+	Pass            bool            `json:"pass"`
+}
+
+// oomVictimJSON is one victim's fate. mode is "oom-killed" (the jail died
+// under the kernel's killer), "alloc-failed" (gVisor surfaced the cgroup
+// limit as ENOMEM inside the jail and the run survived its own failure), or
+// "uncapped" (the allocation reached its target resident — the failure case).
+type oomVictimJSON struct {
+	Mode        string  `json:"mode"`
+	PeakMB      int     `json:"peak_mb"`
+	KillSeconds float64 `json:"kill_seconds,omitempty"`
+}
+
+// runOOMTest is the memory blast-radius scenario: victims are driven past
+// their own cgroup ceiling while neighbors keep working. The contract under
+// test is containment, not a specific death: the ceiling must hold (the
+// victim's resident memory never exceeds it) and the failure must land
+// inside the offending run — as a kernel OOM kill of that jail, or as
+// gVisor surfacing ENOMEM to the allocating process — while no neighbor
+// takes an error and spawning stays flat.
+func runOOMTest(ctx context.Context, cfg benchConfig, getAbort func() string) error {
+	allocMB := cfg.oomVictimLimitMB * 2
+	fmt.Printf("oomtest: %d neighbors on the agent workload; %d victims with a %d MB ceiling allocating %d MB\n",
+		cfg.oomNeighbors, cfg.oomVictims, cfg.oomVictimLimitMB, allocMB)
+
+	var live []*handle
+	defer func() { teardownAll(live) }()
+
+	nextID := 0
+	neighbors, _, _, failures := spawnDelta(ctx, cfg, &nextID, cfg.oomNeighbors)
+	live = append(live, neighbors...)
+	if failures > 0 {
+		return fmt.Errorf("oomtest: %d/%d neighbor spawns failed — aborting before the scenario", failures, cfg.oomNeighbors)
+	}
+
+	canaryBefore, err := timeOneShot(ctx, cfg, 9300)
+	if err != nil {
+		return fmt.Errorf("oomtest: pre-kill canary failed: %w", err)
+	}
+
+	// Victims: no driver — each gets one oversized hold call, issued
+	// concurrently, and dies mid-request when the kernel kills its jail.
+	victimCfg := cfg
+	victimCfg.memLimitMB = cfg.oomVictimLimitMB
+	var victims []*handle
+	for i := 0; i < cfg.oomVictims; i++ {
+		v, _, _, err := startSandbox(ctx, victimCfg, 9400+i, false)
+		if err != nil {
+			return fmt.Errorf("oomtest: victim %d spawn failed: %w", i, err)
+		}
+		live = append(live, v)
+		victims = append(victims, v)
+	}
+
+	killStart := time.Now()
+	// Track each victim's cgroup high-water mark while it grows: it is the
+	// arbiter between the possible outcomes. Peaking at the ceiling and
+	// dying is the kill; peaking at the ceiling and answering politely is
+	// in-jail allocation failure; sailing past it means no ceiling applied.
+	victimPeak := make([]int, len(victims))
+	sampleCtx, stopSampling := context.WithCancel(ctx)
+	var sampleWG sync.WaitGroup
+	sampleWG.Add(1)
+	go func() {
+		defer sampleWG.Done()
+		for sampleCtx.Err() == nil {
+			for i, v := range victims {
+				if s := sandbox.SampleRunCgroup(v.containerID); s.MemCurrentMB != nil && *s.MemCurrentMB > victimPeak[i] {
+					victimPeak[i] = *s.MemCurrentMB
+				}
+			}
+			sleepCtx(sampleCtx, 300*time.Millisecond)
+		}
+	}()
+
+	// The wire outcome per victim: "jail-died" (transport error — the kill
+	// took the jail), "reached-target" (the grow printed its completion line
+	// — the ceiling never stopped it), or "alloc-failed" (any answered call
+	// that never reached target: gVisor surfaced the cgroup limit as ENOMEM
+	// and the allocating process failed inside the jail).
+	wireOutcome := make([]string, len(victims))
+	var callWG sync.WaitGroup
+	for i, v := range victims {
+		callWG.Add(1)
+		go func(i int, v *handle) {
+			defer callWG.Done()
+			out, err := v.tools.Call("bash", map[string]any{
+				"command": fmt.Sprintf("node /work/tf-grow.mjs %d", allocMB),
+				"timeout": 150,
+			})
+			tail := func(s string) string {
+				if len(s) > 220 {
+					return "…" + s[len(s)-220:]
+				}
+				return s
+			}
+			switch {
+			case err != nil:
+				wireOutcome[i] = "jail-died"
+				fmt.Printf("  victim %d: transport died mid-call: %v\n", i, err)
+			case out.Protocol != nil:
+				wireOutcome[i] = "jail-died"
+				fmt.Printf("  victim %d: protocol error: %s\n", i, out.Protocol.Error())
+			case strings.Contains(out.Content, "target reached") || strings.Contains(out.ToolError, "target reached"):
+				wireOutcome[i] = "reached-target"
+				fmt.Printf("  victim %d: allocation REACHED TARGET — the ceiling did not stop it: %s\n", i, tail(out.Content))
+			case out.ToolError != "":
+				wireOutcome[i] = "alloc-failed"
+				fmt.Printf("  victim %d: allocation failed inside the jail (tool error): %s\n", i, tail(out.ToolError))
+			default:
+				wireOutcome[i] = "alloc-failed"
+				fmt.Printf("  victim %d: allocation failed inside the jail: %s\n", i, tail(out.Content))
+			}
+		}(i, v)
+	}
+	callWG.Wait()
+
+	// Give a kernel kill a moment to register before reading each fate.
+	sleepCtx(ctx, 3*time.Second)
+	stopSampling()
+	sampleWG.Wait()
+
+	contained := 0
+	outcomes := make([]oomVictimJSON, len(victims))
+	for i, v := range victims {
+		o := oomVictimJSON{PeakMB: victimPeak[i], Mode: wireOutcome[i]}
+		if v.jail.OOMKilled() {
+			o.Mode = "oom-killed"
+			o.KillSeconds = time.Since(killStart).Seconds()
+		}
+		// Containment = the ceiling held (small slack for the cgroup's
+		// pre-kill overshoot) AND the failure landed inside this run.
+		if o.Mode != "reached-target" && o.PeakMB <= cfg.oomVictimLimitMB+64 {
+			contained++
+		}
+		outcomes[i] = o
+		fmt.Printf("  victim %d: %s · cgroup high-water %d MB (ceiling %d MB)\n", i, o.Mode, o.PeakMB, cfg.oomVictimLimitMB)
+	}
+
+	// Neighbors keep working through and past the kills before judgment.
+	sleepCtx(ctx, 20*time.Second)
+	var nCalls, nErrs int64
+	for _, n := range neighbors {
+		nCalls += n.toolCalls.Load()
+		nErrs += n.toolErrs.Load()
+	}
+
+	canaryAfter, err := timeOneShot(ctx, cfg, 9301)
+	if err != nil {
+		return fmt.Errorf("oomtest: post-kill canary failed: %w", err)
+	}
+
+	pass := contained == len(victims) && nErrs == 0 &&
+		canaryAfter < 3*canaryBefore && getAbort() == ""
+
+	res := oomResult{
+		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+		Scenario:        "oom-blast-radius",
+		Platform:        "gvisor-systrap",
+		Host:            hostJSON{CPUs: numCPU(), MemTotalMB: readMemTotalMB()},
+		VictimCeilingMB: cfg.oomVictimLimitMB,
+		VictimAllocMB:   allocMB,
+		Victims:         len(victims),
+		Contained:       contained,
+		VictimOutcomes:  outcomes,
+		Neighbors:       len(neighbors),
+		NeighborCalls:   nCalls,
+		NeighborErrors:  nErrs,
+		CanaryBeforeMs:  canaryBefore.Milliseconds(),
+		CanaryAfterMs:   canaryAfter.Milliseconds(),
+		Pass:            pass,
+	}
+	data, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(cfg.jsonPath, append(data, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write json: %w", err)
+	}
+
+	fmt.Printf("\n=== oom blast-radius ===\n")
+	fmt.Printf("victims: %d/%d contained (ceiling %d MB, attempted %d MB)\n",
+		contained, len(victims), cfg.oomVictimLimitMB, allocMB)
+	fmt.Printf("neighbors: %d jails, %d tool calls, %d errors during and after the breaches\n",
+		len(neighbors), nCalls, nErrs)
+	fmt.Printf("one more run: %s before → %s after\n",
+		canaryBefore.Round(time.Millisecond), canaryAfter.Round(time.Millisecond))
+	if pass {
+		fmt.Println("PASS: the ceiling holds and memory failure stays inside the offending run")
+	} else {
+		fmt.Println("FAIL: see the numbers above — the containment contract did not hold")
+	}
+	fmt.Printf("results: %s (no CSV for scenarios)\n", cfg.jsonPath)
+	if !pass {
+		return fmt.Errorf("oomtest failed")
+	}
+	return nil
+}
+
+// timeOneShot measures one full network+jail+tool+teardown cycle.
+func timeOneShot(ctx context.Context, cfg benchConfig, id int) (time.Duration, error) {
+	start := time.Now()
+	cCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	if err := runOneShot(cCtx, cfg, id); err != nil {
+		return 0, err
+	}
+	return time.Since(start), nil
+}
+
 // spawnDelta brings up `delta` new sandboxes with at most cfg.burst
-// concurrent bring-ups. Returns the successfully started handles plus
-// spawn (Wrap) and ready (Wrap→READY) timings.
+// concurrent bring-ups. Returns the started handles plus spawn and ready
+// timings.
 func spawnDelta(ctx context.Context, cfg benchConfig, nextID *int, delta int) (added []*handle, spawnTimes, readyTimes []time.Duration, failures int) {
 	sem := make(chan struct{}, cfg.burst)
 	var mu sync.Mutex
@@ -285,7 +600,7 @@ func spawnDelta(ctx context.Context, cfg benchConfig, nextID *int, delta int) (a
 				mu.Unlock()
 				return
 			}
-			h, spawnDur, readyDur, err := startSandbox(ctx, cfg, id)
+			h, spawnDur, readyDur, err := startSandbox(ctx, cfg, id, cfg.profile != "native-idle")
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -302,332 +617,457 @@ func spawnDelta(ctx context.Context, cfg benchConfig, nextID *int, delta int) (a
 	return added, spawnTimes, readyTimes, failures
 }
 
-// startSandbox Wraps + Starts one workload sandbox and waits for its
-// ready signal: the READY line for synthetic profiles, the first
-// `result` stream event for the claude profile — either way the
-// workload is fully resident before the plateau counts it.
-func startSandbox(ctx context.Context, cfg benchConfig, id int) (*handle, time.Duration, time.Duration, error) {
-	worktree, sdkDir, err := makeRunDirs(cfg.workRoot, id)
-	if err != nil {
+// startSandbox brings up one native jail exactly as the executor does:
+// per-run network first, then the tool-host jail into it, then the accepted
+// connection the workload drives. Ready means the resident host answered a
+// real tool call, not merely that the jail process started.
+func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*handle, time.Duration, time.Duration, error) {
+	runID := fmt.Sprintf("bench-%04d", id)
+	h := &handle{id: id, runID: runID, claimID: "bench-claim-" + runID}
+	fail := func(err error) (*handle, time.Duration, time.Duration, error) {
+		h.teardown()
 		return nil, 0, 0, err
 	}
 
-	var extraMounts []sandbox.Mount
-	if cfg.profile == "pageshare" {
-		extraMounts = append(extraMounts, sandbox.Mount{
-			Source:      blobPath(cfg),
-			Destination: "/blob.bin",
-			Options:     []string{"ro"},
-		})
+	worktree := sandbox.RunTreeRoot(runID)
+	if err := seedWorktree(worktree, cfg.seedFiles); err != nil {
+		return fail(fmt.Errorf("seed worktree: %w", err))
 	}
+	h.worktree = worktree
 
-	env := []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/work"}
-	var mock *mockLLM
-	var configureProxies func(s *sandbox.Sandbox) ([]string, error)
-	var closeMock func()
-	readyTimeout := 90 * time.Second
-	if cfg.profile == "claude" {
-		// Real engine: the SDK dir mounts at /sdk exactly as in
-		// production, and the mock endpoint binds on the run's gateway
-		// IP inside ConfigureProxies — same place, same sequencing as
-		// the production LLM proxy. The env mirrors TFAC-548's shape.
-		sdkDir = cfg.sdkDir
-		env = append(env,
-			"TERM=xterm",
-			"DISABLE_TELEMETRY=1",
-			"DISABLE_ERROR_REPORTING=1",
-			"DISABLE_AUTOUPDATER=1",
-			"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-		)
-		if !cfg.jscJIT {
-			env = append(env, "BUN_JSC_useJIT=0")
-		}
-		mock = &mockLLM{turns: cfg.turns}
-		configureProxies = func(s *sandbox.Sandbox) ([]string, error) {
-			baseURL, closer, err := mock.start(s.HostIP)
-			if err != nil {
-				return nil, err
-			}
-			closeMock = closer
-			return []string{
-				"ANTHROPIC_BASE_URL=" + baseURL,
-				"ANTHROPIC_API_KEY=sk-ant-mock-bench",
-			}, nil
-		}
-		readyTimeout = 150 * time.Second
-	}
-
-	runCtx, cancel := context.WithCancel(ctx)
 	start := time.Now()
-	run, sb, err := sandbox.Wrap(runCtx, sandbox.Config{
-		RunID:            fmt.Sprintf("bench-%04d", id),
-		Worktree:         worktree,
-		SDKDir:           sdkDir,
-		Argv:             workloadArgv(cfg),
-		Env:              env,
-		ExtraMounts:      extraMounts,
-		ConfigureProxies: configureProxies,
-		MemoryLimitMB:    cfg.memLimitMB,
+	rn, err := sandbox.SetupRunNetwork(ctx, runID)
+	if err != nil {
+		return fail(fmt.Errorf("run network: %w", err))
+	}
+	h.net = rn
+
+	// The broker validates the agenthost mount source against its own
+	// per-run derivation and requires it to exist; in production the run's
+	// credential sidecar binds it during bring-up. The bench has no sidecar
+	// and its workload runs no exec verbs, so a bound-but-unserved socket at
+	// the trusted path satisfies the launch without changing what the jail
+	// sees on disk.
+	agentMount := agenthost.SocketMountFor(runID)
+	_ = os.Remove(agentMount.Source)
+	ln, err := net.Listen("unix", agentMount.Source)
+	if err != nil {
+		return fail(fmt.Errorf("bind agenthost socket: %w", err))
+	}
+	h.agentSock = ln
+
+	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
+		RunID:                runID,
+		Worktree:             worktree,
+		SDKDir:               sandbox.TrustedSDKDir(),
+		PrebuiltNetwork:      rn,
+		AgentHostSocket:      agentMount,
+		MemoryLimitMB:        cfg.memLimitMB,
+		OrgID:                "bench",
+		ClaimID:              h.claimID,
+		RecordSandboxActuals: recordActuals,
 	})
 	if err != nil {
-		cancel()
-		if closeMock != nil {
-			closeMock()
-		}
-		return nil, 0, 0, err
+		return fail(fmt.Errorf("launch tool host: %w", err))
 	}
+	h.jail = jail
 	spawnDur := time.Since(start)
 
-	h := &handle{id: id, sb: sb, run: run, cancel: cancel, closeMock: closeMock}
-	fail := func(err error) (*handle, time.Duration, time.Duration, error) {
-		cancel()
-		_ = h.wait()
-		_ = run.Close()
-		_ = sb.Close()
-		if closeMock != nil {
-			closeMock()
-		}
-		return nil, 0, 0, err
+	conn, err := jail.Accept(ctx, readyTimeout)
+	if err != nil {
+		return fail(fmt.Errorf("tool host never connected: %w", err))
 	}
+	h.tools = agentloop.NewToolHost(conn, toolCallTimeout)
 
-	// LaunchedRun starts the run; its Stdin/Stdout are valid only after
-	// Start, and its stderr is captured internally (read via run.Stderr()).
-	if err := run.Start(); err != nil {
-		cancel()
-		_ = run.Close()
-		_ = sb.Close()
-		if closeMock != nil {
-			closeMock()
-		}
-		return nil, 0, 0, err
+	out, err := h.tools.Call("ls", map[string]any{"path": "/work"})
+	if err != nil {
+		return fail(fmt.Errorf("first tool call: %w", err))
 	}
-	stdout := run.Stdout()
-	var stdin io.WriteCloser
-	if cfg.profile == "claude" {
-		stdin = run.Stdin()
+	if out.Protocol != nil {
+		return fail(fmt.Errorf("first tool call: %s", out.Protocol.Error()))
 	}
+	readyDur := time.Since(start)
 
-	if cfg.profile == "claude" {
-		// One user message opens the conversation; stdin stays OPEN so
-		// the engine idles resident after its result, holding the
-		// plateau like a live delegated run between turns.
-		_, err := io.WriteString(stdin,
-			`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Run the benchmark task."}]}}`+"\n")
-		if err != nil {
-			return fail(fmt.Errorf("write initial message: %w", err))
-		}
-	}
+	h.containerID = containerIDFor(h.claimID)
 
-	isReady := func(line string) bool { return line == "READY" }
-	if cfg.profile == "claude" {
-		isReady = func(line string) bool { return strings.Contains(line, `"type":"result"`) }
+	if driven {
+		dctx, cancel := context.WithCancel(context.Background())
+		h.stopDriver = cancel
+		h.driverDone = make(chan struct{})
+		if cfg.profile == "native-heavy" {
+			go h.driveHeavy(dctx, cfg)
+		} else {
+			go h.drive(dctx, cfg.toolInterval)
+		}
 	}
-	ready := make(chan struct{})
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if cfg.debugStream {
-				fmt.Printf("  [%d out] %.220s\n", id, line)
-			}
-			if isReady(line) {
-				close(ready)
-				break
-			}
-		}
-		// Drain so the workload never blocks on a full pipe.
-		for scanner.Scan() {
-		}
-	}()
-
-	select {
-	case <-ready:
-		return h, spawnDur, time.Since(start), nil
-	case <-time.After(readyTimeout):
-		// Reap first so the exit reflects reality — an OOM-killed sandbox
-		// otherwise reads as "still running".
-		h.cancel()
-		waitErr := "exited"
-		if e := h.wait(); e != nil {
-			waitErr = e.Error()
-		}
-		if h.run.OOMKilled() {
-			waitErr += " (oom-killed)"
-		}
-		mockHits := int64(-1)
-		if mock != nil {
-			mockHits = mock.requests.Load()
-		}
-		return fail(fmt.Errorf("workload not ready after %s (proc: %s, mock hits: %d, stderr: %s)",
-			readyTimeout, waitErr, mockHits, lastLines(h.run.Stderr(), 5)))
-	case <-runCtx.Done():
-		_ = h.wait()
-		_ = run.Close()
-		_ = sb.Close()
-		if closeMock != nil {
-			closeMock()
-		}
-		return nil, 0, 0, runCtx.Err()
-	}
+	return h, spawnDur, readyDur, nil
 }
 
-// runOneShot is the warmup/canary path: one sandbox running a short
-// command through the full Wrap→exec→Close lifecycle.
-func runOneShot(ctx context.Context, cfg benchConfig, name string, argv []string) error {
-	worktree, sdkDir, err := makeRunDirs(cfg.workRoot, -1)
+// runOneShot is the warmup/canary path: one full network+jail cycle, one
+// real tool call, teardown — the whole lifecycle of "one more run" started
+// while the plateau stays live.
+func runOneShot(ctx context.Context, cfg benchConfig, id int) error {
+	h, _, _, err := startSandbox(ctx, cfg, id, false)
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(worktree)
-	defer os.RemoveAll(sdkDir)
-
-	run, sb, err := sandbox.Wrap(ctx, sandbox.Config{
-		RunID:    name,
-		Worktree: worktree,
-		SDKDir:   sdkDir,
-		Argv:     argv,
-		Env:      []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/work"},
-	})
+	defer h.teardown()
+	out, err := h.tools.Call("bash", map[string]any{"command": "true", "timeout": 60})
 	if err != nil {
 		return err
 	}
-	defer func() { _ = sb.Close() }()
-	defer func() { _ = run.Close() }()
-
-	// Drive the run to completion: drain stdout (so the workload never
-	// blocks on a full pipe), then Wait, mirroring the old cmd.CombinedOutput.
-	if err := run.Start(); err != nil {
-		return err
+	if out.Protocol != nil {
+		return fmt.Errorf("bash call: %s", out.Protocol.Error())
 	}
-	out, _ := io.ReadAll(run.Stdout())
-	if err := run.Wait(); err != nil {
-		combined := strings.TrimSpace(string(out) + run.Stderr())
-		return fmt.Errorf("%w (output: %s)", err, combined)
+	if out.ToolError != "" {
+		return fmt.Errorf("bash call failed: %s", out.ToolError)
 	}
 	return nil
 }
 
-// makeRunDirs creates the per-run worktree (chowned so the sandbox
-// UID can write it) and an empty SDK stub dir — the bench workloads
-// don't load the SDK, but Wrap requires the mount source to exist.
-func makeRunDirs(workRoot string, id int) (worktree, sdkDir string, err error) {
-	pattern := "run-"
-	if id >= 0 {
-		pattern = fmt.Sprintf("run-%04d-", id)
-	}
-	worktree, err = os.MkdirTemp(workRoot, pattern)
-	if err != nil {
-		return "", "", err
-	}
-	if err := os.Chown(worktree, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {
-		return "", "", fmt.Errorf("chown worktree: %w", err)
-	}
-	sdkDir = filepath.Join(worktree + "-sdk")
-	if err := os.Mkdir(sdkDir, 0o755); err != nil {
-		return "", "", err
-	}
-	return worktree, sdkDir, nil
-}
-
-// workloadArgv builds the in-sandbox command for the chosen profile.
-// Paths are absolute into the alpine rootfs (runsc does no PATH
-// resolution). The agent profile mirrors what a real delegated run
-// costs on the host: a few hundred MB resident, a few percent of one
-// core, and a trickle of writes into /work.
-func workloadArgv(cfg benchConfig) []string {
-	switch cfg.profile {
-	case "idle":
-		return []string{"/bin/sh", "-c", "echo READY; exec sleep 86400"}
-	case "cpu":
-		return []string{"/usr/bin/python3", "-c",
-			"print('READY', flush=True)\nwhile True: pass"}
-	case "claude":
-		// The real engine, exactly as production runs it minus the node
-		// supervisor: stream-json stdio against the mock endpoint. The
-		// model name is decorative — the mock answers whatever is asked.
-		return []string{
-			"/sdk/" + claudeMuslRelPath(), "-p",
-			"--input-format", "stream-json",
-			"--output-format", "stream-json",
-			"--verbose",
-			"--model", "haiku",
-			"--permission-mode", "bypassPermissions",
+// containerIDFor resolves the runsc container id for a claim through the
+// same registry the production resource sampler reads.
+func containerIDFor(claimID string) string {
+	for _, j := range agentproc.LiveJails() {
+		if j.ClaimID == claimID {
+			return j.ContainerID
 		}
-	case "pageshare":
-		// mmap the shared RO blob and touch every page — the same
-		// access pattern as executing a large mapped binary.
-		return []string{"/usr/bin/python3", "-c", `
-import mmap, os, time
-f = os.open('/blob.bin', os.O_RDONLY)
-m = mmap.mmap(f, 0, prot=mmap.PROT_READ)
-s = 0
-for i in range(0, len(m), 4096):
-    s += m[i]
-print('READY', flush=True)
-while True:
-    time.sleep(60)
-`}
-	default: // agent
-		script := fmt.Sprintf(`
-import time
-buf = bytearray(%d * 1024 * 1024)
-for i in range(0, len(buf), 4096):
-    buf[i] = 1
-print('READY', flush=True)
-duty = %d / 100.0
-n = 0
-while True:
-    t = time.monotonic()
-    while time.monotonic() - t < duty:
-        n += 1
-    with open('/work/beat.txt', 'w') as f:
-        f.write(str(n) * 512)
-    time.sleep(1.0 - duty)
-`, cfg.rssMB, cfg.dutyPct)
-		return []string{"/usr/bin/python3", "-c", script}
 	}
+	return ""
 }
 
-func blobPath(cfg benchConfig) string {
-	return filepath.Join(cfg.workRoot, "blob.bin")
-}
-
-// claudeMuslRelPath is the engine binary's path relative to the SDK
-// install root. The sandbox rootfs is alpine, so it's always the musl
-// build; only the arch varies.
-func claudeMuslRelPath() string {
-	arch := "x64"
-	if runtime.GOARCH == "arm64" {
-		arch = "arm64"
-	}
-	return filepath.Join("node_modules", "@anthropic-ai",
-		"claude-agent-sdk-linux-"+arch+"-musl", "claude")
-}
-
-// writeBlob writes sizeMB of real nonzero bytes, world-readable so
-// the sandbox UID can map it through the RO bind mount.
-func writeBlob(path string, sizeMB int) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+// call dispatches one workload tool call, counts it, and reports whether the
+// driver can continue — false on a dead transport or a fatal protocol error.
+func (h *handle) call(name string, args map[string]any) bool {
+	out, err := h.tools.Call(name, args)
+	h.toolCalls.Add(1)
 	if err != nil {
+		h.toolErrs.Add(1)
+		return false
+	}
+	if out.Protocol != nil {
+		h.toolErrs.Add(1)
+		return !out.Protocol.Fatal()
+	}
+	if out.ToolError != "" {
+		h.toolErrs.Add(1)
+	}
+	return true
+}
+
+// drive issues the agent-shaped workload until canceled: one tool call per
+// interval, cycling bash / read / grep / write over the seeded tree. Bash
+// dominates the mix deliberately — fork/exec is gVisor's most expensive
+// pattern and the dominant in-jail cost of a real native run.
+func (h *handle) drive(ctx context.Context, interval time.Duration) {
+	defer close(h.driverDone)
+	for i := 0; ; i++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+		}
+		name, args := workloadCall(i)
+		if !h.call(name, args) {
+			return
+		}
+	}
+}
+
+// driveHeavy cycles the CI-shaped phases until canceled: a build burst, a
+// memory hold, then idle sized so the active phases are cfg.duty of the
+// cycle. Alignment is the load model: staggered offsets make burst overlap
+// statistical like a real fleet; -sync-bursts phase-locks every jail to the
+// same wall-clock grid for the worst case, re-aligning each cycle so tool
+// latency jitter can't decohere the fleet mid-ramp.
+func (h *handle) driveHeavy(ctx context.Context, cfg benchConfig) {
+	defer close(h.driverDone)
+	active := time.Duration(cfg.burstSec+cfg.holdSec) * time.Second
+	cycle := time.Duration(float64(active) / cfg.duty)
+	untilNextBoundary := func() time.Duration {
+		return cycle - time.Duration(time.Now().UnixNano())%cycle
+	}
+	var wait time.Duration
+	if cfg.syncBursts {
+		wait = untilNextBoundary()
+	} else {
+		wait = time.Duration(int64(h.id)*7919%cycle.Milliseconds()) * time.Millisecond
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(wait):
+	}
+	for {
+		if !h.call("bash", map[string]any{
+			"command": fmt.Sprintf("node /work/tf-build.mjs %d 4", cfg.burstSec),
+			"timeout": cfg.burstSec + 90,
+		}) {
+			return
+		}
+		if !h.call("bash", map[string]any{
+			"command": fmt.Sprintf("node /work/tf-hold.mjs %d %d", cfg.holdMB, cfg.holdSec),
+			"timeout": cfg.holdSec + 60,
+		}) {
+			return
+		}
+		idle := cycle - active
+		if cfg.syncBursts {
+			idle = untilNextBoundary()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(idle):
+		}
+	}
+}
+
+func workloadCall(i int) (string, map[string]any) {
+	switch i % 6 {
+	case 0:
+		return "bash", map[string]any{"command": "ls -R /work | wc -l", "timeout": 60}
+	case 1:
+		return "read", map[string]any{"path": "/work/src/f0010.txt"}
+	case 2:
+		return "bash", map[string]any{"command": "cp /work/src/f0001.txt /work/scratch.txt && wc -l /work/scratch.txt", "timeout": 60}
+	case 3:
+		return "grep", map[string]any{"pattern": "needle", "path": "/work/src"}
+	case 4:
+		return "write", map[string]any{"path": "/work/notes.txt", "content": strings.Repeat("benchmark heartbeat line\n", 80)}
+	default:
+		return "bash", map[string]any{"command": "sh -c 'i=0; while [ $i -lt 3 ]; do date; i=$((i+1)); done' > /work/dates.txt && wc -l /work/dates.txt", "timeout": 60}
+	}
+}
+
+// tfBuildMJS is the build-shaped burst the heavy profile runs inside the
+// jail: real node executing real compute — JSON round trips, regex work,
+// hashing (JIT + GC churn, the syscall class gVisor emulates dearest) — plus
+// periodic child-process spawns (a build's worker storm). Offline by
+// construction: bench jails have no sidecar and therefore no egress, so this
+// stands in for npm/tsc work at the syscall level rather than literally
+// installing anything.
+const tfBuildMJS = `import { readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+const sec = Number(process.argv[2] || 15);
+const workers = Number(process.argv[3] || 4);
+const deadline = Date.now() + sec * 1000;
+const srcDir = '/work/src';
+const files = readdirSync(srcDir).filter((f) => f.endsWith('.txt'));
+const sources = files.map((f) => readFileSync(srcDir + '/' + f, 'utf8'));
+mkdirSync('/work/dist', { recursive: true });
+let n = 0;
+let out = '';
+while (Date.now() < deadline) {
+  for (const s of sources) {
+    const doc = { body: s, toks: s.split(/\s+/), n };
+    const round = JSON.parse(JSON.stringify(doc));
+    out = round.body.replace(/needle/g, 'thread') + round.toks.length;
+    createHash('sha256').update(out).digest('hex');
+  }
+  n++;
+  if (n % 3 === 0) {
+    for (let w = 0; w < workers && Date.now() < deadline; w++) {
+      execFileSync('/usr/bin/node', ['-e',
+        'const{createHash}=require("node:crypto");let h="x";for(let i=0;i<20000;i++)h=createHash("sha256").update(h).digest("hex");']);
+    }
+  }
+}
+writeFileSync('/work/dist/build-out.txt', 'iterations=' + n + '\n');
+console.log('build done iterations=' + n);
+`
+
+// tfHoldMJS is the test-shaped hold: pin a browser-sized resident buffer and
+// tick moderate compute until the phase ends, the footprint of a headless
+// test suite between build bursts.
+const tfHoldMJS = `const mb = Number(process.argv[2] || 300);
+const sec = Number(process.argv[3] || 15);
+const buf = Buffer.allocUnsafe(mb * 1024 * 1024);
+for (let i = 0; i < buf.length; i += 4096) buf[i] = 1;
+const deadline = Date.now() + sec * 1000;
+let x = 0;
+while (Date.now() < deadline) {
+  for (let i = 0; i < 5000000; i++) x = (x + i * i) % 9973;
+  await new Promise((r) => setTimeout(r, 150));
+}
+console.log('hold done mb=' + mb + ' touched=' + buf.length + ' x=' + x);
+`
+
+// tfGrowMJS is the oomtest victim's allocation: grow resident memory in
+// 32 MB touched chunks toward a target, the shape of a real process leaking
+// or loading past its budget — a single giant allocation can fail politely
+// inside the runtime, which is a different (gentler) outcome than the
+// ceiling enforcement this scenario exists to demonstrate.
+const tfGrowMJS = `const targetMB = Number(process.argv[2] || 1024);
+const chunkMB = 32;
+const chunks = [];
+let grown = 0;
+while (grown < targetMB) {
+  const buf = Buffer.allocUnsafe(chunkMB * 1024 * 1024);
+  for (let i = 0; i < buf.length; i += 4096) buf[i] = 1;
+  chunks.push(buf);
+  grown += chunkMB;
+  console.log('grown mb=' + grown);
+}
+console.log('target reached, holding');
+await new Promise((r) => setTimeout(r, 120000));
+console.log('held to completion chunks=' + chunks.length);
+`
+
+// seedWorktree materializes the tree the workload reads: text files carrying
+// a known token, sized so grep and ls do real work without dominating the
+// memory picture, plus the heavy profile's burst scripts. The jail's launch
+// chowns the tree to the sandbox identity.
+func seedWorktree(root string, files int) error {
+	if files < 16 {
+		files = 16
+	}
+	_ = os.RemoveAll(root)
+	src := filepath.Join(root, "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
 		return err
 	}
-	defer f.Close()
-	chunk := make([]byte, 1<<20)
-	for i := range chunk {
-		chunk[i] = byte(i%251 + 1)
+	var b strings.Builder
+	for i := 0; i < 64; i++ {
+		b.WriteString("lorem ipsum sandbox capacity line with a needle in it and padding padding padding\n")
 	}
-	for i := 0; i < sizeMB; i++ {
-		if _, err := f.Write(chunk); err != nil {
+	content := []byte(b.String())
+	for i := 1; i <= files; i++ {
+		if err := os.WriteFile(filepath.Join(src, fmt.Sprintf("f%04d.txt", i)), content, 0o644); err != nil {
 			return err
 		}
 	}
-	return f.Sync()
+	if err := os.WriteFile(filepath.Join(root, "tf-build.mjs"), []byte(tfBuildMJS), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(root, "tf-grow.mjs"), []byte(tfGrowMJS), 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(root, "tf-hold.mjs"), []byte(tfHoldMJS), 0o644)
 }
 
-// teardownAll cancels every runsc (SIGKILL), reaps it, then Closes the
-// sandbox (iptables/netns/bundle teardown), 16 at a time — Close shells
-// out to ip/iptables, so unbounded parallelism just thrashes the
+// plateauSample is one level's observation: host CPU and every live jail's
+// cgroup memory/CPU, sampled as a series across the whole hold so bursty
+// workloads report both the cycle average and the per-run peaks — a single
+// end-of-hold window would catch each jail in a random phase.
+type plateauSample struct {
+	hostCPUPct     float64 // whole-hold average
+	hostCPUPeakPct float64 // hottest sample step
+	jailCoresSum   float64
+	jailCoresMean  float64 // cycle-averaged, per run
+	jailCoresPeak  float64 // hottest per-step reading of any single run
+	jailMemSumMB   int     // mean over ticks of the fleet's summed memory.current
+	jailMemMeanMB  int
+	jailMemPeakMB  int // largest single-run memory.current observed
+	sampledJails   int
+}
+
+// jailSeriesStat accumulates one jail's series across the hold.
+type jailSeriesStat struct {
+	firstCPU  int64
+	lastCPU   int64
+	haveCPU   bool
+	peakCores float64
+	peakMemMB int
+}
+
+func sampleSeries(ctx context.Context, live []*handle, total, step time.Duration) plateauSample {
+	if total < step {
+		total = step
+	}
+	stats := make(map[string]*jailSeriesStat, len(live))
+	for _, h := range live {
+		if h.containerID != "" {
+			stats[h.containerID] = &jailSeriesStat{}
+		}
+	}
+
+	firstBusy, firstTotal, okFirst := readCPUStat()
+	prevBusy, prevTotal := firstBusy, firstTotal
+	var out plateauSample
+	var memSumAccum float64
+	var memTicks int
+	start := time.Now()
+
+	for time.Since(start) < total && ctx.Err() == nil {
+		sleepCtx(ctx, step)
+		stepSec := step.Seconds()
+
+		if busy, tot, ok := readCPUStat(); ok && tot > prevTotal {
+			pct := 100 * float64(busy-prevBusy) / float64(tot-prevTotal)
+			if pct > out.hostCPUPeakPct {
+				out.hostCPUPeakPct = pct
+			}
+			prevBusy, prevTotal = busy, tot
+		}
+
+		var tickMemSum, tickMemN int
+		for cid, st := range stats {
+			s := sandbox.SampleRunCgroup(cid)
+			if s.MemCurrentMB != nil {
+				tickMemSum += *s.MemCurrentMB
+				tickMemN++
+				if *s.MemCurrentMB > st.peakMemMB {
+					st.peakMemMB = *s.MemCurrentMB
+				}
+			}
+			if s.CPUUsecCum != nil {
+				if st.haveCPU && *s.CPUUsecCum >= st.lastCPU {
+					if c := float64(*s.CPUUsecCum-st.lastCPU) / 1e6 / stepSec; c > st.peakCores {
+						st.peakCores = c
+					}
+				}
+				if !st.haveCPU {
+					st.firstCPU = *s.CPUUsecCum
+					st.haveCPU = true
+				}
+				st.lastCPU = *s.CPUUsecCum
+			}
+		}
+		if tickMemN > 0 {
+			memSumAccum += float64(tickMemSum)
+			memTicks++
+			if tickMemN > out.sampledJails {
+				out.sampledJails = tickMemN
+			}
+		}
+	}
+
+	elapsed := time.Since(start).Seconds()
+	if lastBusy, lastTotal, ok := readCPUStat(); okFirst && ok && lastTotal > firstTotal {
+		out.hostCPUPct = 100 * float64(lastBusy-firstBusy) / float64(lastTotal-firstTotal)
+	} else {
+		out.hostCPUPct = -1
+	}
+
+	var coreRuns int
+	for _, st := range stats {
+		if st.haveCPU && st.lastCPU >= st.firstCPU && elapsed > 0 {
+			out.jailCoresSum += float64(st.lastCPU-st.firstCPU) / 1e6 / elapsed
+			coreRuns++
+		}
+		if st.peakCores > out.jailCoresPeak {
+			out.jailCoresPeak = st.peakCores
+		}
+		if st.peakMemMB > out.jailMemPeakMB {
+			out.jailMemPeakMB = st.peakMemMB
+		}
+	}
+	if coreRuns > 0 {
+		out.jailCoresMean = out.jailCoresSum / float64(coreRuns)
+	}
+	if memTicks > 0 {
+		out.jailMemSumMB = int(memSumAccum / float64(memTicks))
+	}
+	if out.sampledJails > 0 {
+		out.jailMemMeanMB = out.jailMemSumMB / out.sampledJails
+	}
+	return out
+}
+
+// teardownAll closes every sandbox 16 at a time — Close shells out to
+// ip/iptables via the broker, so unbounded parallelism just thrashes the
 // xtables lock.
 func teardownAll(live []*handle) {
 	sem := make(chan struct{}, 16)
@@ -638,15 +1078,7 @@ func teardownAll(live []*handle) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			h.cancel()
-			_ = h.wait()
-			_ = h.run.Close()
-			if err := h.sb.Close(); err != nil {
-				fmt.Printf("  close %d: %v\n", h.id, err)
-			}
-			if h.closeMock != nil {
-				h.closeMock()
-			}
+			h.teardown()
 		}(h)
 	}
 	wg.Wait()
@@ -668,14 +1100,6 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 	}
 }
 
-func lastLines(s string, n int) string {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
-	}
-	return strings.Join(lines, " | ")
-}
-
 func writeCSV(path, profile string, results []levelResult) error {
 	f, err := os.Create(path)
 	if err != nil {
@@ -686,8 +1110,10 @@ func writeCSV(path, profile string, results []levelResult) error {
 	defer w.Flush()
 	if err := w.Write([]string{
 		"level", "profile", "spawn_p50_ms", "spawn_p95_ms", "ready_p50_ms", "ready_p95_ms",
-		"canary_ms", "sandbox_pss_mb", "sandbox_rss_mb", "mem_delta_mb", "mem_avail_mb",
-		"swap_used_mb", "load1", "cpu_pct", "failures", "aborted",
+		"canary_ms", "jail_mem_sum_mb", "jail_mem_mean_mb", "jail_mem_peak_mb",
+		"jail_cores_per_run", "jail_cores_peak", "jail_cores_sum",
+		"host_cpu_pct", "host_cpu_peak_pct", "mem_delta_mb", "mem_avail_mb", "swap_used_mb", "load1",
+		"tool_calls", "tool_errors", "failures", "aborted",
 	}); err != nil {
 		return err
 	}
@@ -696,10 +1122,14 @@ func writeCSV(path, profile string, results []levelResult) error {
 			fmt.Sprint(r.level), profile,
 			fmt.Sprint(r.spawnP50.Milliseconds()), fmt.Sprint(r.spawnP95.Milliseconds()),
 			fmt.Sprint(r.readyP50.Milliseconds()), fmt.Sprint(r.readyP95.Milliseconds()),
-			fmt.Sprint(r.canaryMedian.Milliseconds()), fmt.Sprint(r.sandboxPSSMB),
-			fmt.Sprint(r.sandboxRSSMB), fmt.Sprint(r.memDeltaMB),
-			fmt.Sprint(r.memAvailMB), fmt.Sprint(r.swapUsedMB),
-			fmt.Sprintf("%.2f", r.load1), fmt.Sprintf("%.1f", r.cpuPct),
+			fmt.Sprint(r.canaryMedian.Milliseconds()),
+			fmt.Sprint(r.jailMemSumMB), fmt.Sprint(r.jailMemMeanMB), fmt.Sprint(r.jailMemPeakMB),
+			fmt.Sprintf("%.3f", r.jailCoresMean), fmt.Sprintf("%.3f", r.jailCoresPeak),
+			fmt.Sprintf("%.2f", r.jailCoresSum),
+			fmt.Sprintf("%.1f", r.hostCPUPct), fmt.Sprintf("%.1f", r.hostCPUPeakPct),
+			fmt.Sprint(r.memDeltaMB), fmt.Sprint(r.memAvailMB), fmt.Sprint(r.swapUsedMB),
+			fmt.Sprintf("%.2f", r.load1),
+			fmt.Sprint(r.toolCalls), fmt.Sprint(r.toolErrs),
 			fmt.Sprint(r.failures), r.aborted,
 		}); err != nil {
 			return err
@@ -708,9 +1138,215 @@ func writeCSV(path, profile string, results []levelResult) error {
 	return nil
 }
 
-// printSummary reports the measured soft cap: the last level that held
-// its plateau without a guardrail abort and without the canary
-// degrading past 2x the first plateau's baseline.
+// The capacity-model JSON: raw per-level data plus fitted per-run marginals,
+// in the shape the public sizing page's slider consumes. Coefficients only —
+// the min() capacity arithmetic lives with the consumer, and the formula
+// string documents it.
+type capacityJSON struct {
+	GeneratedAt   string        `json:"generated_at"`
+	Profile       string        `json:"profile"`
+	ToolIntervalS float64       `json:"tool_interval_s,omitempty"`
+	Workload      *workloadJSON `json:"workload,omitempty"`
+	Platform      string        `json:"platform"`
+	Host          hostJSON      `json:"host"`
+	Levels        []levelJSON   `json:"levels"`
+	Model         modelJSON     `json:"model"`
+	Actuals       *actualsJSON  `json:"teardown_actuals,omitempty"`
+}
+
+// workloadJSON records the heavy profile's cycle parameters, so a
+// coefficient set is never read without the load model that produced it.
+type workloadJSON struct {
+	Duty       float64 `json:"duty"`
+	BurstSec   int     `json:"burst_sec"`
+	HoldSec    int     `json:"hold_sec"`
+	HoldMB     int     `json:"hold_mb"`
+	SyncBursts bool    `json:"sync_bursts"`
+}
+
+type hostJSON struct {
+	CPUs       int `json:"cpus"`
+	MemTotalMB int `json:"mem_total_mb"`
+}
+
+type levelJSON struct {
+	Level           int     `json:"level"`
+	SpawnMsP50      int64   `json:"spawn_ms_p50"`
+	SpawnMsP95      int64   `json:"spawn_ms_p95"`
+	ReadyMsP50      int64   `json:"ready_ms_p50"`
+	ReadyMsP95      int64   `json:"ready_ms_p95"`
+	CanaryMs        int64   `json:"canary_ms"`
+	JailMemSumMB    int     `json:"jail_mem_sum_mb"`
+	JailMemMeanMB   int     `json:"jail_mem_mean_mb"`
+	JailMemPeakMB   int     `json:"jail_mem_peak_mb"`
+	JailCoresPerRun float64 `json:"jail_cores_per_run"`
+	JailCoresPeak   float64 `json:"jail_cores_peak"`
+	JailCoresSum    float64 `json:"jail_cores_sum"`
+	HostCPUPct      float64 `json:"host_cpu_pct"`
+	HostCPUPeakPct  float64 `json:"host_cpu_peak_pct"`
+	HostMemDeltaMB  int     `json:"host_mem_delta_mb"`
+	Load1           float64 `json:"load1"`
+	ToolCalls       int64   `json:"tool_calls"`
+	ToolErrors      int64   `json:"tool_errors"`
+	Failures        int     `json:"failures"`
+	Aborted         string  `json:"aborted,omitempty"`
+}
+
+type modelJSON struct {
+	MemMBPerRun     float64 `json:"mem_mb_per_run"`
+	JailMemMBPerRun float64 `json:"jail_mem_mb_per_run"`
+	MemPeakMBPerRun int     `json:"mem_peak_mb_per_run,omitempty"`
+	CoresPerRun     float64 `json:"cores_per_run"`
+	CoresPeakPerRun float64 `json:"cores_peak_per_run,omitempty"`
+	SpawnMsP50      int64   `json:"spawn_ms_p50"`
+	OneMoreRunMs    int64   `json:"one_more_run_ms"`
+	HardCap         int     `json:"hard_cap"`
+	Formula         string  `json:"formula"`
+}
+
+type actualsJSON struct {
+	Runs          int     `json:"runs"`
+	MeanPeakMemMB float64 `json:"mean_peak_mem_mb"`
+	TotalCPUSec   float64 `json:"total_cpu_sec"`
+}
+
+func writeCapacityJSON(cfg benchConfig, results []levelResult) error {
+	var healthy []levelResult
+	for _, r := range results {
+		if r.aborted == "" {
+			healthy = append(healthy, r)
+		}
+	}
+
+	var model modelJSON
+	model.HardCap = 256
+	model.Formula = "concurrent_runs = min((host_mem_mb - platform_reserve_mb) / mem_mb_per_run, host_cores / cores_per_run, hard_cap)"
+	if len(healthy) > 0 {
+		top := healthy[len(healthy)-1]
+		model.JailMemMBPerRun = float64(top.jailMemMeanMB)
+		model.MemPeakMBPerRun = top.jailMemPeakMB
+		model.CoresPerRun = top.jailCoresMean
+		model.CoresPeakPerRun = top.jailCoresPeak
+		model.OneMoreRunMs = top.canaryMedian.Milliseconds()
+		var spawns []time.Duration
+		var canaries []time.Duration
+		for _, r := range healthy {
+			spawns = append(spawns, r.spawnP50)
+			if r.canaryMedian > 0 {
+				canaries = append(canaries, r.canaryMedian)
+			}
+		}
+		p50, _ := percentiles(spawns)
+		model.SpawnMsP50 = p50.Milliseconds()
+		if cm, _ := percentiles(canaries); cm > 0 {
+			model.OneMoreRunMs = cm.Milliseconds()
+		}
+		model.MemMBPerRun = memSlopeMBPerRun(healthy)
+	}
+
+	out := capacityJSON{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Profile:     cfg.profile,
+		Platform:    "gvisor-systrap",
+		Host:        hostJSON{CPUs: numCPU(), MemTotalMB: readMemTotalMB()},
+		Model:       model,
+	}
+	if cfg.profile == "native" {
+		out.ToolIntervalS = cfg.toolInterval.Seconds()
+	}
+	if cfg.profile == "native-heavy" {
+		out.Workload = &workloadJSON{
+			Duty:       cfg.duty,
+			BurstSec:   cfg.burstSec,
+			HoldSec:    cfg.holdSec,
+			HoldMB:     cfg.holdMB,
+			SyncBursts: cfg.syncBursts,
+		}
+	}
+	for _, r := range results {
+		out.Levels = append(out.Levels, levelJSON{
+			Level:           r.level,
+			SpawnMsP50:      r.spawnP50.Milliseconds(),
+			SpawnMsP95:      r.spawnP95.Milliseconds(),
+			ReadyMsP50:      r.readyP50.Milliseconds(),
+			ReadyMsP95:      r.readyP95.Milliseconds(),
+			CanaryMs:        r.canaryMedian.Milliseconds(),
+			JailMemSumMB:    r.jailMemSumMB,
+			JailMemMeanMB:   r.jailMemMeanMB,
+			JailMemPeakMB:   r.jailMemPeakMB,
+			JailCoresPerRun: r.jailCoresMean,
+			JailCoresPeak:   r.jailCoresPeak,
+			JailCoresSum:    r.jailCoresSum,
+			HostCPUPct:      r.hostCPUPct,
+			HostCPUPeakPct:  r.hostCPUPeakPct,
+			HostMemDeltaMB:  r.memDeltaMB,
+			Load1:           r.load1,
+			ToolCalls:       r.toolCalls,
+			ToolErrors:      r.toolErrs,
+			Failures:        r.failures,
+			Aborted:         r.aborted,
+		})
+	}
+
+	actualsLog.mu.Lock()
+	if actualsLog.recorded > 0 {
+		a := &actualsJSON{Runs: actualsLog.recorded}
+		var peakSum int
+		for _, p := range actualsLog.peaksMB {
+			peakSum += p
+		}
+		if len(actualsLog.peaksMB) > 0 {
+			a.MeanPeakMemMB = float64(peakSum) / float64(len(actualsLog.peaksMB))
+		}
+		var cpuSum int64
+		for _, c := range actualsLog.cpuUsec {
+			cpuSum += c
+		}
+		a.TotalCPUSec = float64(cpuSum) / 1e6
+		out.Actuals = a
+	}
+	actualsLog.mu.Unlock()
+
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cfg.jsonPath, append(data, '\n'), 0o644)
+}
+
+// memSlopeMBPerRun fits host MemAvailable delta against level with simple
+// least squares over the healthy levels — the intercept absorbs the fixed
+// overhead standing the first plateau up, so the slope is the honest
+// marginal cost per additional run.
+func memSlopeMBPerRun(healthy []levelResult) float64 {
+	if len(healthy) == 0 {
+		return 0
+	}
+	if len(healthy) == 1 {
+		if healthy[0].level > 0 {
+			return float64(healthy[0].memDeltaMB) / float64(healthy[0].level)
+		}
+		return 0
+	}
+	var sx, sy, sxx, sxy float64
+	n := float64(len(healthy))
+	for _, r := range healthy {
+		x, y := float64(r.level), float64(r.memDeltaMB)
+		sx += x
+		sy += y
+		sxx += x * x
+		sxy += x * y
+	}
+	den := n*sxx - sx*sx
+	if den == 0 {
+		return 0
+	}
+	return (n*sxy - sx*sy) / den
+}
+
+// printSummary reports the measured soft cap — the last level that held its
+// plateau without a guardrail abort and without the canary degrading past 2x
+// the first plateau's baseline — plus the fitted capacity coefficients.
 func printSummary(results []levelResult, cfg benchConfig) {
 	if len(results) == 0 {
 		fmt.Println("no levels completed")
@@ -741,5 +1377,19 @@ func printSummary(results []levelResult, cfg benchConfig) {
 	} else {
 		fmt.Printf("soft cap on this host: ~%d concurrent sandboxes\n", softCap)
 	}
-	fmt.Printf("results: %s\n", cfg.csvPath)
+	var top *levelResult
+	for i := range results {
+		if results[i].aborted == "" {
+			top = &results[i]
+		}
+	}
+	if top != nil && top.jailCoresMean > 0 {
+		fmt.Printf("steady state at level %d: %.2f cores/run, %d MB/run (jail cgroup) → CPU-implied capacity on this host: ~%d runs\n",
+			top.level, top.jailCoresMean, top.jailMemMeanMB, int(float64(numCPU())/top.jailCoresMean))
+		if top.jailCoresPeak > 0 || top.jailMemPeakMB > 0 {
+			fmt.Printf("burst peaks at level %d: %.2f cores/run, %d MB/run — size headroom for these, not the averages\n",
+				top.level, top.jailCoresPeak, top.jailMemPeakMB)
+		}
+	}
+	fmt.Printf("results: %s + %s\n", cfg.csvPath, cfg.jsonPath)
 }
