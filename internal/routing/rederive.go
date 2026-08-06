@@ -132,7 +132,12 @@ func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) {
 		} else if _, visible := visibleSet[firingTeam]; !visible {
 			continue
 		}
-		if !r.autoDelegateEnabledForTeam(ctx, firingTeam) {
+		// The kill-switch read and the firing below are best-effort here, in
+		// contrast to the routed path: this pass hangs off a scoring cycle
+		// with no queue row to requeue, so a failure has nowhere to be
+		// returned to. The next score on the task re-runs it.
+		enabled, err := r.autoDelegateEnabledForTeam(ctx, firingTeam)
+		if err != nil || !enabled {
 			continue
 		}
 		minAutonomy := derefFloatDefault(trigger.MinAutonomySuitability, 0)
@@ -166,7 +171,9 @@ func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) {
 		// event — that's the one whose match scored autonomously above
 		// threshold. Real-event provenance keeps the audit trail honest
 		// when a re-derived firing ends up enqueued.
-		r.tryAutoDelegate(ctx, orgID, task, trigger, task.EntityID, task.PrimaryEventID, firingTeam)
+		if _, err := r.tryAutoDelegate(ctx, orgID, task, trigger, task.EntityID, task.PrimaryEventID, firingTeam); err != nil {
+			routerLog.Error("re-derive: deferred trigger failed to fire", "task_id", taskID, "trigger_id", trigger.ID, "error", err)
+		}
 	}
 }
 

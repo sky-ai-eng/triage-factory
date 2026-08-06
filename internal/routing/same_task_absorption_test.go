@@ -359,11 +359,11 @@ func TestTryAutoDelegate_SameTask_DeliveredRemoteHandledWithoutRecording(t *test
 	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredRemote}
 	router := newAbsorbTestRouter(database, sqlitestore.New(database).Conversations, stub)
 
-	// tryAutoDelegate's `fired` return is a bare `return` (the named
-	// return's zero value) on every injection branch — a pre-existing quirk
-	// this test doesn't re-litigate; "handled" is verified through the side
-	// effects below (no deferral, no local bookkeeping), matching the
-	// sibling InjectDeliveredLocal/InjectStagedResumable tests' convention.
+	// tryAutoDelegate reports fired=false on every injection branch — a
+	// pre-existing quirk this test doesn't re-litigate; "handled" is verified
+	// through the side effects below (no deferral, no local bookkeeping),
+	// matching the sibling InjectDeliveredLocal/InjectStagedResumable tests'
+	// convention.
 	router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
 	if len(stub.calls) != 1 {
 		t.Fatalf("expected 1 StageOrDeliverAdditiveEvent attempt, got %d", len(stub.calls))
@@ -486,7 +486,10 @@ func TestTryAutoDelegate_SameTask_NotDeliveredFallsThroughToDeferral(t *testing.
 	stub := &injectingStubDelegator{outcome: delegate.InjectNotDelivered}
 	router := newAbsorbTestRouter(database, sqlitestore.New(database).Conversations, stub)
 
-	fired := router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
+	fired, err := router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
+	if err != nil {
+		t.Fatalf("tryAutoDelegate: %v", err)
+	}
 	if !fired {
 		t.Error("expected tryAutoDelegate to report handled via the normal deferral (enqueueBusyFiring)")
 	}
@@ -537,7 +540,10 @@ func TestTryAutoDelegate_SameTask_StageToNonResumableRun_NoOrphanedRow(t *testin
 		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil,
 		spawner, noopScorer{}, websocket.NewHub())
 
-	fired := router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
+	fired, err := router.tryAutoDelegate(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "")
+	if err != nil {
+		t.Fatalf("tryAutoDelegate: %v", err)
+	}
 	if !fired {
 		t.Error("expected tryAutoDelegate to report handled via the normal deferral (enqueueBusyFiring)")
 	}

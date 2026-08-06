@@ -145,9 +145,10 @@ func (r *Router) RunEventQueue(ctx context.Context, wake <-chan struct{}, scanIn
 }
 
 // drainEventQueue claims and processes pending rows until the queue is
-// empty (or ctx is cancelled). Returns the ClaimNext error if one occurs
-// so the caller can track consecutive failures and escalate; a clean
-// drain or ctx cancellation returns nil.
+// empty, a row asks to be retried later, or ctx is cancelled. Returns the
+// ClaimNext error if one occurs so the caller can track consecutive failures
+// and escalate; every other ending — drained, paused for a retry, cancelled —
+// returns nil.
 //
 // Cancellation is checked BETWEEN rows and nowhere else. That is the whole
 // shape of shutdown for this worker: the claim gate below runs on the
@@ -168,15 +169,28 @@ func (r *Router) drainEventQueue(ctx context.Context) error {
 		if qe == nil {
 			return nil // queue drained
 		}
-		r.processQueuedEvent(ctx, qe)
+		if requeued := r.processQueuedEvent(ctx, qe); requeued {
+			// The row went back to 'pending' with its attempt spent, and
+			// ClaimNext takes the oldest pending row — which is this one
+			// again. Draining on would hand the same row back within
+			// microseconds and burn its whole retry budget on a blip that
+			// hasn't had time to clear, parking an event the store would
+			// have accepted a second later. The scan tick is this worker's
+			// only pacing, so retries are its to space out.
+			return nil
+		}
 	}
 }
 
 // processQueuedEvent routes one claimed row, then marks it terminal.
-// HandleEvent is best-effort (logs and continues on per-step errors), so
-// a successful run marks the row done. The recover guard is the poison-
-// pill safety net: a panic in routing must not kill the single worker
-// goroutine and freeze the whole queue.
+// Terminal has two shapes and HandleEvent's return picks between them: nil
+// marks the row done, an error requeues it for another attempt (parked
+// 'failed' once the attempt budget is spent). Done therefore means done —
+// every routing obligation the event carried was met. A store failure inside
+// routing used to reach MarkDone all the same, which permanently consumed the
+// event: no task, no retry, nothing left to inspect. The recover guard is the
+// poison-pill safety net on the same budget: a panic in routing must not kill
+// the single worker goroutine and freeze the whole queue.
 //
 // A claimed row is ONE UNIT, and the unit runs to completion. Everything
 // below — the event load, the routing itself, and the terminal MarkDone /
@@ -192,7 +206,10 @@ func (r *Router) drainEventQueue(ctx context.Context) error {
 // write that genuinely needs fencing, the tracker's snapshot RMW, carries
 // its own poll_seq CAS). drainEventQueue's between-rows gate is where a
 // demotion actually stops this worker.
-func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent) {
+//
+// Returns true when the row was requeued rather than resolved — the caller's
+// signal to end the pass and let the next scan tick own the retry.
+func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent) (requeued bool) {
 	eventCtx := context.WithoutCancel(ctx)
 
 	// The trace root for this event's routing, linked back to whoever
@@ -206,7 +223,7 @@ func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent)
 			span.SetStatus(codes.Error, "panic")
 			routerLog.ErrorContext(eventCtx, "event-queue: panic routing event",
 				"event_id", qe.EventID, "queue_id", qe.ID, "attempt", qe.Attempts, "panic", rec)
-			r.parkOrRequeue(eventCtx, qe, fmt.Sprintf("panic: %v", rec))
+			requeued = r.parkOrRequeue(eventCtx, qe, fmt.Sprintf("panic: %v", rec))
 		}
 	}()
 
@@ -215,8 +232,7 @@ func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent)
 		// Transient read failure — requeue for another attempt.
 		span.SetStatus(codes.Error, "load event")
 		routerLog.WarnContext(eventCtx, "event-queue: load event failed", "event_id", qe.EventID, "queue_id", qe.ID, "error", err)
-		r.parkOrRequeue(eventCtx, qe, fmt.Sprintf("load event: %v", err))
-		return
+		return r.parkOrRequeue(eventCtx, qe, fmt.Sprintf("load event: %v", err))
 	}
 	if ev == nil {
 		// The event row is gone (e.g. its entity was cascade-deleted).
@@ -228,10 +244,22 @@ func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent)
 		if err := r.eventQueue.MarkFailed(eventCtx, qe.OrgID, qe.ID, "event row not found"); err != nil {
 			routerLog.ErrorContext(eventCtx, "event-queue: mark failed (missing event)", "queue_id", qe.ID, "error", err)
 		}
-		return
+		return false
 	}
 
-	r.HandleEvent(eventCtx, *ev)
+	if err := r.HandleEvent(eventCtx, *ev); err != nil {
+		// A routing obligation went unmet — a dependency the pass needs
+		// failed, not a legitimate "nothing to do" outcome (those return
+		// nil and publish their own taskless disposition). Requeue rather
+		// than consume: replaying is safe (the tasks dedup index and the
+		// firing fences collapse anything that already landed) and it is
+		// the only path back, since the tracker's snapshot-diff will not
+		// re-emit this event.
+		span.SetStatus(codes.Error, "route event")
+		routerLog.WarnContext(eventCtx, "event-queue: routing failed, event not consumed",
+			"event_id", qe.EventID, "queue_id", qe.ID, "attempt", qe.Attempts, "error", err)
+		return r.parkOrRequeue(eventCtx, qe, fmt.Sprintf("route: %v", err))
+	}
 
 	if err := r.eventQueue.MarkDone(eventCtx, qe.OrgID, qe.ID); err != nil {
 		// The routing side effects already committed. A failed mark-done
@@ -243,20 +271,30 @@ func (r *Router) processQueuedEvent(ctx context.Context, qe *domain.QueuedEvent)
 		span.SetStatus(codes.Error, "mark done")
 		routerLog.ErrorContext(eventCtx, "event-queue: mark done failed, row left processing (re-route on restart is dedup-safe)", "queue_id", qe.ID, "error", err)
 	}
+	return false
 }
 
 // parkOrRequeue requeues a row for another attempt, or parks it failed
 // once it has burned through maxEventAttempts. Used for transient
 // failures and panics so one bad event can't wedge the queue.
-func (r *Router) parkOrRequeue(ctx context.Context, qe *domain.QueuedEvent, reason string) {
+//
+// Returns true when the row was requeued — it is pending again and will be
+// re-claimed, so the caller must stop draining rather than pick it straight
+// back up. A parked row returns false: it is terminal and ClaimNext will
+// never see it again.
+func (r *Router) parkOrRequeue(ctx context.Context, qe *domain.QueuedEvent, reason string) (requeued bool) {
 	if qe.Attempts >= maxEventAttempts {
 		if err := r.eventQueue.MarkFailed(ctx, qe.OrgID, qe.ID,
 			fmt.Sprintf("%s (after %d attempts)", reason, qe.Attempts)); err != nil {
 			routerLog.Error("event-queue: mark failed", "queue_id", qe.ID, "error", err)
 		}
-		return
+		return false
 	}
+	// A failed Requeue leaves the row 'processing', where ClaimNext can't
+	// reach it either — but the intent was a retry, so report it as one and
+	// let the caller stop rather than spin.
 	if err := r.eventQueue.Requeue(ctx, qe.OrgID, qe.ID, reason); err != nil {
 		routerLog.Error("event-queue: requeue failed", "queue_id", qe.ID, "error", err)
 	}
+	return true
 }
