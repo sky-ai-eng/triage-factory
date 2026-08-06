@@ -118,8 +118,10 @@ TF_TRACES_ENDPOINT=http://tempo:4318
 ```
 
 Point it at anything that speaks **OTLP over HTTP** — Grafana Tempo, Jaeger,
-an OpenTelemetry Collector, a vendor endpoint. TF ships no trace backend, the
-same posture it takes with metrics. A value with no scheme is read as
+an OpenTelemetry Collector, a vendor endpoint. The compose stack ships a Tempo
+and defaults this variable to it (see [below](#the-bundled-trace-stack)); local
+mode leaves it unset, so tracing there is off until you name a backend. A value
+with no scheme is read as
 plaintext (`tempo:4318` → `http://tempo:4318`); spell `https://` out for a
 TLS backend. A path is used as given and defaults to `/v1/traces`.
 `TF_TRACES_ENDPOINT=off` disables tracing, which is how you override an
@@ -187,25 +189,9 @@ restart survive it.
 
 ### The bundled trace stack
 
-TF ships no trace backend in the sense that matters — nothing is required and
-nothing starts by default — but the compose file carries an **opt-in profile**
-with one, because push-based signals have no equivalent of "point your existing
-scraper at it": until a backend exists somewhere, a span has nowhere to go.
-
-Two steps, and neither implies the other:
-
-```sh
-TF_TRACES_ENDPOINT=http://tempo:4318      # 1. in .env — this is what enables tracing
-
-docker compose --profile observability up -d   # 2. start the backend
-```
-
-Compose cannot fuse them, and shouldn't: enabling tracing is one explicit
-variable in every mode, and a profile that quietly exported an OTLP address
-would be precisely the inherited-endpoint case `TF_TRACES_ENDPOINT` exists to
-refuse. Starting the profile without the variable is harmless; setting the
-variable without the profile costs retried exports to a name that doesn't
-resolve.
+`docker compose up -d` brings up a trace backend alongside TF, and
+`TF_TRACES_ENDPOINT` defaults to it, so a fresh deployment traces itself. Open
+Grafana at <http://localhost:3030>.
 
 | Service | Role | Published |
 | --- | --- | --- |
@@ -213,20 +199,38 @@ resolve.
 | `prometheus` | scrapes every pod's `:9464`; receives Tempo's generated span metrics | nothing |
 | `grafana` | the UI that joins them; data sources and correlations provisioned from disk | `127.0.0.1:3030` |
 
-Grafana is the only one reachable from the host, because a human has to open
-it, and it publishes to `127.0.0.1` explicitly — Docker's default would put an
-anonymous-Admin Grafana on every interface the box has. **None of this is meant
-to be internet-facing.** A deployment where the trace UI needs to be reachable
-by more than the operator on the box should run Grafana behind the same reverse
-proxy and auth as everything else, and the same goes for pointing TF at a Tempo
-that isn't on the compose network: spans are unauthenticated on the wire unless
-you configure TLS.
+Grafana is the only one reachable from the host, and only on loopback — reach
+it on a remote box over an SSH tunnel (`ssh -L 3030:localhost:3030 …`). It runs
+with anonymous Editor access and no login form, which suits a loopback UI whose
+entire contents come from provisioning. **None of it is meant to be
+internet-facing**: to expose the trace UI, put Grafana behind the same reverse
+proxy and auth as everything else and give it accounts. The same applies to
+pointing TF at a Tempo off the compose network — spans are unauthenticated on
+the wire unless you configure TLS.
 
 Config lives in [`docker/observability/`](../../docker/observability/) — Tempo's
 config, Prometheus's scrape config, and Grafana's data sources. One detail worth
 knowing: Prometheus finds TF's `:9464` by DNS service discovery rather than
 static targets, so `--scale executor=3` is scraped as three targets instead of
 whichever replica DNS happened to answer with.
+
+#### Swapping pieces out
+
+The compose file is yours to edit, and these three services are the parts most
+likely to duplicate something you already run:
+
+- **Already have Prometheus?** Delete the `prometheus` service, scrape each
+  pod's `:9464` with yours, and update the Prometheus URL in
+  `docker/observability/grafana-datasources.yaml`. Tempo's span-metrics
+  `remote_write` needs a `--web.enable-remote-write-receiver` target — repoint
+  it or drop that block from `docker/observability/tempo.yaml`.
+- **Already have Grafana?** Delete the `grafana` service and copy the two data
+  sources and three correlations out of that same file.
+- **Already have a trace backend?** Keep Grafana and Prometheus if you want
+  them, delete `tempo`, and set `TF_TRACES_ENDPOINT` to your collector.
+- **Want no tracing?** Delete `tempo` and set `TF_TRACES_ENDPOINT=off`. Without
+  the second half TF keeps posting spans to a name that no longer resolves and
+  logs an export error every batch interval.
 
 #### Is the pipe working?
 
@@ -235,7 +239,7 @@ an alert — and "nothing in Grafana" looks identical whether TF never exported 
 Tempo never stored. Pushing one span by hand separates the two:
 
 ```sh
-docker compose --profile observability exec grafana sh -c '
+docker compose exec grafana sh -c '
   s=$(date +%s)
   curl -sS -X POST http://tempo:4318/v1/traces -H "content-type: application/json" -d "{
     \"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"smoke\"}}]},

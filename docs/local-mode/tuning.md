@@ -52,16 +52,13 @@ so set `TF_LOG_LEVEL=debug` to surface them.
 
 ## Tracing
 
-Tracing is off in local mode and multi mode alike until `TF_TRACES_ENDPOINT`
-names an OTLP/HTTP backend. That one variable is the whole switch — there is no
-`runmode` gate — and while it is unset no tracer provider is installed at all,
-so the cost of leaving tracing off is zero rather than small. Where the metrics
-listener defaults differently per mode (it opens a port, so a laptop shouldn't
-open it unasked), tracing only ever pushes to an address someone typed.
+`TF_TRACES_ENDPOINT` names an OTLP/HTTP backend and is the whole switch — same
+variable in both modes, no `runmode` gate. Unset (local mode's default) installs
+no tracer provider at all. The compose stack defaults it to its bundled Tempo;
+locally you point it at your own.
 
-Which is also why there is nothing to curl: spans are **pushed**, so something
-has to be listening before a single one is visible. For the local dev loop that
-something is one container.
+Spans are **pushed**, so something has to be listening before any of them is
+visible. For the local dev loop that something is one container.
 
 ### Tempo in one `docker run`
 
@@ -127,7 +124,7 @@ docker network create tf-traces
 docker network connect --alias tempo tf-traces tf-tempo
 
 docker run -d --name tf-grafana --network tf-traces -p 127.0.0.1:3030:3000 \
-  -e GF_AUTH_ANONYMOUS_ENABLED=true -e GF_AUTH_ANONYMOUS_ORG_ROLE=Admin \
+  -e GF_AUTH_ANONYMOUS_ENABLED=true -e GF_AUTH_ANONYMOUS_ORG_ROLE=Editor \
   -e GF_AUTH_DISABLE_LOGIN_FORM=true \
   -v "$PWD/docker/observability/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/triage-factory.yaml:ro" \
   grafana/grafana:13.1.2
@@ -136,14 +133,13 @@ docker run -d --name tf-grafana --network tf-traces -p 127.0.0.1:3030:3000 \
 Then open <http://localhost:3030> → **Explore** → **Tempo**. The file also
 provisions a Prometheus data source, which has nothing behind it in this
 two-container shape; the only thing that notices is the trace view's Service
-Graph tab. Anonymous Admin with no login form is a deliberate dev-loop
-convenience and the reason both containers publish to `127.0.0.1` only.
+Graph tab. No login form, and both containers publish to `127.0.0.1` only.
 
 Tear the whole thing down with `docker rm -f tf-tempo tf-grafana && docker
 network rm tf-traces` — no state outside the containers, and TF's own SQLite
 never learns any of this happened.
-The multi-mode equivalent is a compose profile that wires the same three pieces
-together for you: see [Monitoring → The bundled trace
+In multi mode the compose stack ships these same pieces already wired: see
+[Monitoring → The bundled trace
 stack](../self-hosting/monitoring.md#the-bundled-trace-stack).
 
 ## Claude binary
