@@ -264,3 +264,28 @@ func TestModelWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestUsage_NonCachedInputTokens pins the projection between the two token
+// conventions this package sits between: providers are normalized into one
+// prompt count that includes its cache buckets (what pricing needs), while
+// every stored ledger column is disjoint (what every reader of them sums).
+func TestUsage_NonCachedInputTokens(t *testing.T) {
+	u := Usage{InputTokens: 100_000, OutputTokens: 500, CacheReadTokens: 90_000, CacheCreationTokens: 5_000}
+	if got := u.NonCachedInputTokens(); got != 5_000 {
+		t.Errorf("NonCachedInputTokens = %d, want 5000", got)
+	}
+	if sum := u.NonCachedInputTokens() + u.CacheReadTokens + u.CacheCreationTokens; sum != u.InputTokens {
+		t.Errorf("the three prompt buckets sum to %d, want the prompt's %d exactly once", sum, u.InputTokens)
+	}
+
+	if got := (Usage{InputTokens: 1_000}).NonCachedInputTokens(); got != 1_000 {
+		t.Errorf("an uncached prompt = %d, want the whole prompt", got)
+	}
+
+	// A payload whose parts exceed its total is clamped the same way
+	// computeTextCost clamps it, so the row and the price it was charged never
+	// describe two different requests.
+	if got := (Usage{InputTokens: 10, CacheReadTokens: 400}).NonCachedInputTokens(); got != 0 {
+		t.Errorf("NonCachedInputTokens = %d, want 0 rather than a negative count", got)
+	}
+}

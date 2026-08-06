@@ -119,10 +119,28 @@ func PricingLoadError() error {
 	return err
 }
 
-// Usage is the neutral token accounting CostForUsage prices from — the same
-// four columns messages stores plus the 1-hour cache-write split Anthropic
-// bills at a higher rate. Built from a bifrost stream via usageFromBifrost.
+// Usage is the neutral token accounting CostForUsage prices from, built from a
+// bifrost stream via usageFromBifrost.
+//
+// It carries the provider-neutral convention, which is the whole point of the
+// neutral layer: InputTokens is the ENTIRE prompt, cache reads and writes
+// included. Providers disagree on the wire — Anthropic reports the three
+// disjointly, OpenAI-shaped ones report a prompt total with the cached part
+// broken out — and the provider layer folds every one of them into this single
+// shape before TF sees it. Pricing depends on that (computeTextCost subtracts
+// the cache buckets back out at their own rates), so this is the form to price,
+// compare, and reason about a request's size in.
+//
+// Storage uses the complementary convention: the four token columns on messages
+// and system_llm_runs are DISJOINT, so they sum to the prompt without
+// double-counting — which is what every reader of them does (the compaction
+// trip's occupancy, the context gauge, the approximate-cost footer). Writers of
+// those columns take input tokens from NonCachedInputTokens, never from
+// InputTokens directly.
 type Usage struct {
+	// InputTokens is the whole prompt: tokens billed at the input rate, plus
+	// cache reads, plus cache writes. See NonCachedInputTokens for the first
+	// of those on its own.
 	InputTokens         int
 	OutputTokens        int
 	CacheReadTokens     int
@@ -131,6 +149,23 @@ type Usage struct {
 	// 1-hour TTL (billed at 2× vs the 5-minute 1.25×). Zero when unknown or all
 	// writes are 5-minute.
 	CacheCreationTokens1h int
+}
+
+// NonCachedInputTokens is the prompt tokens billed at the plain input rate —
+// InputTokens with the two cache buckets taken out. It is the value the ledger's
+// input_tokens column stores, on either runtime and from any provider, so that
+// input + cache_read + cache_creation reconstructs the prompt exactly once.
+//
+// The clamp handles a usage payload whose parts don't fit its total (a provider
+// that reports prompt tokens exclusively after all, or a malformed block) the
+// same way computeTextCost's own clamps do, so the row and the price it was
+// charged never describe two different requests.
+func (u Usage) NonCachedInputTokens() int {
+	nonCached := u.InputTokens - u.CacheReadTokens - u.CacheCreationTokens
+	if nonCached < 0 {
+		return 0
+	}
+	return nonCached
 }
 
 // CostForUsage prices one message's usage in USD from the pinned datasheet.

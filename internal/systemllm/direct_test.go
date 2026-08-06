@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -427,11 +428,13 @@ func TestDirectUsageFrom(t *testing.T) {
 	}
 }
 
-// TestDirectRequestModel pins the model each provider branch requests: an
-// Anthropic org sends the caller's pinned id verbatim, a Bedrock org sends
-// its bedrock_model_id override when set and the pinned Haiku inference
-// profile otherwise.
-func TestDirectRequestModel(t *testing.T) {
+// TestRequestModel pins the model each provider branch requests: an Anthropic
+// org sends the caller's pinned id verbatim, a Bedrock org sends its
+// bedrock_model_id override when set and the pinned Haiku inference profile
+// otherwise. It also pins that the model is whitelisted on the key the call
+// carries — a model the key can't serve fails at request time with a
+// confusing no-key-for-model error.
+func TestRequestModel(t *testing.T) {
 	const pinned = "claude-haiku-4-5-20251001"
 	cases := []struct {
 		name  string
@@ -446,43 +449,16 @@ func TestDirectRequestModel(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := directRequestModel(tc.creds, pinned); got != tc.want {
-				t.Errorf("directRequestModel = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestNewDirectClient_ProviderMatchesCredentials pins that the provider the
-// request names is the one the credential mapping picked — a mismatch is a
-// no-key-for-model failure at request time, and the two are decided in
-// different places.
-func TestNewDirectClient_ProviderMatchesCredentials(t *testing.T) {
-	cases := []struct {
-		name  string
-		creds map[string]string
-		want  string
-	}{
-		{"anthropic", map[string]string{"ANTHROPIC_API_KEY": "k"}, string(inference.ProviderAnthropic)},
-		{"bedrock bearer", map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "t", "AWS_REGION": "us-east-1"}, string(inference.ProviderBedrock)},
-		{"bedrock sigv4", map[string]string{"AWS_ACCESS_KEY_ID": "a", "AWS_SECRET_ACCESS_KEY": "s", "AWS_REGION": "us-east-1"}, string(inference.ProviderBedrock)},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			model := directRequestModel(tc.creds, "claude-haiku-4-5-20251001")
-			client, provider, release, err := newDirectClient(tc.creds, model)
+			pc, err := mapDirectCreds(tc.creds, pinned)
 			if err != nil {
-				t.Fatalf("newDirectClient: %v", err)
+				t.Fatalf("mapDirectCreds: %v", err)
 			}
-			defer release()
-			if client == nil {
-				t.Fatal("newDirectClient returned a nil client")
+			got := requestModel(pc, tc.creds, pinned)
+			if got != tc.want {
+				t.Errorf("requestModel = %q, want %q", got, tc.want)
 			}
-			if string(provider) != tc.want {
-				t.Errorf("provider = %q, want %q", provider, tc.want)
-			}
-			if wantFamily := providerFamily(tc.creds); (wantFamily == providerFamilyBedrock) != (string(provider) == string(inference.ProviderBedrock)) {
-				t.Errorf("provider %q disagrees with the breaker's family %q", provider, wantFamily)
+			if !slices.Contains(pc.Models, got) {
+				t.Errorf("key whitelist %v does not carry the requested model %q", pc.Models, got)
 			}
 		})
 	}

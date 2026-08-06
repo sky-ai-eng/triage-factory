@@ -14,14 +14,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestProviderKey pins buildDirectClient's branch precedence and the
-// base-URL/region rules that decide which calls share a breaker entry.
+// TestProviderKey pins which calls share a breaker entry. The env maps go
+// through the same mapping the request does, because the key's whole job is
+// to describe the endpoint that will actually be dialed — a key derived from
+// the raw map instead can name a configuration the call doesn't have.
 func TestProviderKey(t *testing.T) {
 	cases := []struct {
 		name  string
 		creds map[string]string
 		want  string
 	}{
+		{
+			name:  "bedrock with no configured region keys on the region the call defaults to",
+			creds: map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "tok"},
+			want:  "bedrock:us-east-1",
+		},
 		{
 			name:  "anthropic direct, default endpoint",
 			creds: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-1"},
@@ -57,19 +64,27 @@ func TestProviderKey(t *testing.T) {
 			creds: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-1", "AWS_BEARER_TOKEN_BEDROCK": "tok", "AWS_REGION": "us-east-1"},
 			want:  "anthropic-direct:default",
 		},
-		{
-			name:  "no recognized credentials",
-			creds: map[string]string{},
-			want:  "unknown",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := providerKey(tc.creds); got != tc.want {
+			pc, err := mapDirectCreds(tc.creds, "claude-haiku-4-5-20251001")
+			if err != nil {
+				t.Fatalf("mapDirectCreds: %v", err)
+			}
+			if got := providerKey(pc); got != tc.want {
 				t.Errorf("providerKey(%v) = %q, want %q", tc.creds, got, tc.want)
 			}
 		})
 	}
+
+	t.Run("an unmapped env map never reaches the breaker", func(t *testing.T) {
+		// There is no "unknown" key any more: credentials that name no
+		// provider fail the mapping, and the call is over before there is
+		// anything to open a cooldown on.
+		if _, err := mapDirectCreds(map[string]string{}, "claude-haiku-4-5-20251001"); err == nil {
+			t.Fatal("expected an error for credentials naming no provider")
+		}
+	})
 }
 
 // providerErr builds an error in the shape internal/inference renders a
@@ -164,15 +179,18 @@ func renderedStatusFixture(t *testing.T, status int) string {
 	defer srv.Close()
 
 	const model = "claude-haiku-4-5-20251001"
-	creds := map[string]string{"ANTHROPIC_API_KEY": "k", "ANTHROPIC_BASE_URL": srv.URL}
-	client, provider, release, err := newDirectClient(creds, model)
+	pc, err := mapDirectCreds(map[string]string{"ANTHROPIC_API_KEY": "k", "ANTHROPIC_BASE_URL": srv.URL}, model)
+	if err != nil {
+		t.Fatalf("mapDirectCreds: %v", err)
+	}
+	client, release, err := newDirectClient(pc)
 	if err != nil {
 		t.Fatalf("newDirectClient: %v", err)
 	}
 	defer release()
 
 	_, callErr := client.Stream(context.Background(), inference.Request{
-		Provider:     provider,
+		Provider:     pc.Provider,
 		Model:        model,
 		SystemPrompt: "system instructions",
 		Rows:         []domain.Message{{Role: "user", Content: "user data"}},

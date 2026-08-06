@@ -21,15 +21,6 @@ import (
 // shape the Claude Code Bedrock docs recommend.
 const defaultBedrockHaikuModel = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
-// Provider families, as providerFamily classifies an org's resolved env map.
-// The family decides which model the request carries (see directRequestModel)
-// and is the coarse dimension the span reports.
-const (
-	providerFamilyAnthropic = "anthropic"
-	providerFamilyBedrock   = "bedrock"
-	providerFamilyNone      = "none"
-)
-
 // completeDirect calls the org's configured Anthropic/Bedrock provider
 // directly from this process — no subprocess, no sandbox — through
 // internal/inference, the same embedded-bifrost client every native-loop call
@@ -60,22 +51,31 @@ func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*C
 		return nil, err
 	}
 
+	// Map the env map onto provider credentials before anything else reads it,
+	// so the request model, the breaker key, and the span attribute are all
+	// derived from one decision about which provider this org is on rather
+	// than three that have to agree.
+	pc, err := mapDirectCreds(creds, opts.DirectModel)
+	if err != nil {
+		return nil, err
+	}
+	model := requestModel(pc, creds, opts.DirectModel)
+
 	// Pre-flight circuit-breaker check (see breaker.go): if this same
 	// upstream provider recently failed with a transient error and its
 	// cooldown hasn't elapsed, fail fast without spending a request — the
 	// caller's existing fallback (leave for next poll cycle) handles it
 	// exactly like any other completeDirect error.
-	provider := providerKey(creds)
+	provider := providerKey(pc)
 	// providerKey embeds the configured base URL, which can name an
 	// operator's private gateway, so the span gets the coarse family
 	// instead — which vendor answered is the useful dimension.
-	trace.SpanFromContext(ctx).SetAttributes(telemetry.Provider(providerFamily(creds)))
+	trace.SpanFromContext(ctx).SetAttributes(telemetry.Provider(string(pc.Provider)))
 	if backoffErr := r.breaker.check(provider); backoffErr != nil {
 		return nil, backoffErr
 	}
 
-	model := directRequestModel(creds, opts.DirectModel)
-	client, requestProvider, closeClient, err := newDirectClient(creds, model)
+	client, closeClient, err := newDirectClient(pc)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,7 @@ func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*C
 
 	temperature := opts.Temperature
 	completion, callErr := client.Stream(ctx, inference.Request{
-		Provider:     requestProvider,
+		Provider:     pc.Provider,
 		Model:        model,
 		SystemPrompt: opts.SystemPrompt,
 		// One synthetic user row carrying the data being triaged. These jobs
@@ -136,29 +136,52 @@ func resolveDirectCreds(ctx context.Context, opts CompleteOptions) (map[string]s
 	return agentproc.ResolveCredentialsForBundle(ctx, opts.Secrets, opts.OrgID)
 }
 
-// newDirectClient builds the per-call inference client for the resolved env
-// map, whitelisted to the one model this call will request. It also returns
-// the provider the mapping picked — the request must name the same one the
-// key was minted for, and that mapping is the authority on which it is. The
-// release closure shuts the embedded bifrost workers down.
-func newDirectClient(creds map[string]string, model string) (*inference.Client, schemas.ModelProvider, func(), error) {
-	pc, err := inference.ProviderCredentialsFromEnv(creds, []string{model})
+// mapDirectCreds resolves the env map onto provider credentials. The key's
+// whitelist names BOTH models this call could request, because which one it
+// will is a consequence of the provider the mapping picks — so the mapping
+// decides that once and requestModel reads its answer, rather than a second
+// copy of the precedence rules deciding it in parallel. A key allowed to serve
+// a model nobody asks for costs nothing; one missing the model actually
+// requested fails the call.
+func mapDirectCreds(creds map[string]string, pinnedModel string) (inference.ProviderCredentials, error) {
+	models := []string{pinnedModel}
+	if bedrock := bedrockModel(creds); bedrock != pinnedModel {
+		models = append(models, bedrock)
+	}
+	pc, err := inference.ProviderCredentialsFromEnv(creds, models)
 	if err != nil {
 		// ResolveCredentialsForBundle already returns
 		// ErrNoCredentialsConfigured for an org with nothing configured in
 		// multi mode, so an unconfigured map rarely reaches here; a resolver
 		// that returned an empty map still does.
-		return nil, "", nil, fmt.Errorf("systemllm: %w", err)
+		return inference.ProviderCredentials{}, fmt.Errorf("systemllm: %w", err)
 	}
+	return pc, nil
+}
+
+// requestModel picks the model the request carries: an Anthropic org sends
+// the caller's pinned model id verbatim, a Bedrock org sends its own
+// (bedrock_model_id override, else the pinned Haiku inference profile). The
+// pinned id remains the cost-accounting key either way.
+func requestModel(pc inference.ProviderCredentials, creds map[string]string, pinnedModel string) string {
+	if pc.Provider == inference.ProviderBedrock {
+		return bedrockModel(creds)
+	}
+	return pinnedModel
+}
+
+// newDirectClient builds the per-call inference client. The release closure
+// shuts the embedded bifrost workers down.
+func newDirectClient(pc inference.ProviderCredentials) (*inference.Client, func(), error) {
 	account, err := inference.NewAccount(pc)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("systemllm: %w", err)
+		return nil, nil, fmt.Errorf("systemllm: %w", err)
 	}
 	client, err := inference.New(account)
 	if err != nil {
-		return nil, "", nil, fmt.Errorf("systemllm: %w", err)
+		return nil, nil, fmt.Errorf("systemllm: %w", err)
 	}
-	return client, pc.Provider, client.Close, nil
+	return client, client.Close, nil
 }
 
 // recordDirectCall builds the DirectUsage + cost figures from whatever the
@@ -199,27 +222,13 @@ func (r *Recorder) recordDirectCall(ctx context.Context, opts CompleteOptions, m
 	}, traceID, usage, costUSD, durationMs, callErr != nil)
 }
 
-// directUsageFrom projects the neutral usage onto the row's four token
-// columns, which have always been disjoint counts — input tokens next to,
-// not inclusive of, the cache buckets, which is also what the local path's
-// subprocess reports.
-//
-// The neutral layer counts prompt tokens the OpenAI way instead: inclusive of
-// cache reads and writes. Both conventions are internally consistent, and
-// pricing wants the inclusive one (CostForUsage subtracts the cache buckets
-// back out itself), so the projection happens here rather than by rewriting
-// what the ledger means: one column that means "tokens billed at the input
-// rate" under local and "everything the prompt cost" under multi is a number
-// nobody can sum.
+// directUsageFrom projects the neutral usage onto the row's token columns,
+// which are disjoint counts — the same projection the native loop stamps its
+// message rows through, and the same shape the local path's subprocess
+// reports. Cost is priced from the full usage, not from this.
 func directUsageFrom(u inference.Usage) DirectUsage {
-	nonCached := u.InputTokens - u.CacheReadTokens - u.CacheCreationTokens
-	if nonCached < 0 {
-		// A provider that already reports prompt tokens exclusively (or a
-		// malformed usage payload) must not produce a negative count.
-		nonCached = 0
-	}
 	return DirectUsage{
-		InputTokens:         nonCached,
+		InputTokens:         u.NonCachedInputTokens(),
 		OutputTokens:        u.OutputTokens,
 		CacheReadTokens:     u.CacheReadTokens,
 		CacheCreationTokens: u.CacheCreationTokens,
@@ -247,21 +256,10 @@ func completionText(completion *inference.Completion) string {
 	return out.String()
 }
 
-// directRequestModel picks the model the request carries: the Anthropic
-// branch uses the caller's pinned model id verbatim, while a Bedrock org
-// resolves its own (its bedrock_model_id override, else the pinned Haiku
-// inference profile). The pinned id remains the cost-accounting key for both.
-func directRequestModel(creds map[string]string, pinnedModel string) string {
-	if providerFamily(creds) == providerFamilyBedrock {
-		return bedrockModel(creds)
-	}
-	return pinnedModel
-}
-
-// providerKey derives the circuit-breaker registry key for creds — mirrors
-// the provider-branch precedence (Anthropic direct wins over Bedrock bearer
-// wins over Bedrock SigV4) so the breaker groups exactly the calls that share
-// an upstream failure domain.
+// providerKey derives the circuit-breaker registry key from the credentials
+// the call will actually use, so the key can never describe a configuration
+// the request doesn't have — a region defaulted during mapping, a base URL
+// trimmed there, are already applied here.
 //
 // A custom base-URL override (a customer gateway/proxy, or a Bedrock VPC
 // endpoint) is treated as a distinct fleet from the vendor's default
@@ -270,43 +268,27 @@ func directRequestModel(creds map[string]string, pinnedModel string) string {
 // overall vendor capacity, not a per-key quota, so every org on that
 // default endpoint deliberately shares one breaker entry — that's the
 // whole point of keying by provider instead of by org.
-// providerFamily is providerKey reduced to the vendor, for the span
-// attribute. providerKey must distinguish two gateways for the same vendor
-// (it keys a breaker, and one being down says nothing about the other); a
-// span wants the opposite — bounded, and carrying no topology off the host.
-func providerFamily(creds map[string]string) string {
-	switch {
-	case creds["ANTHROPIC_API_KEY"] != "":
-		return providerFamilyAnthropic
-	case creds["AWS_BEARER_TOKEN_BEDROCK"] != "",
-		creds["AWS_ACCESS_KEY_ID"] != "" && creds["AWS_SECRET_ACCESS_KEY"] != "":
-		return providerFamilyBedrock
-	}
-	return providerFamilyNone
-}
-
-func providerKey(creds map[string]string) string {
-	if creds["ANTHROPIC_API_KEY"] != "" {
-		if base := normalizeProviderURL(creds["ANTHROPIC_BASE_URL"]); base != "" {
-			return "anthropic-direct:" + base
+//
+// The span attribute is deliberately NOT this: providerKey must distinguish
+// two gateways for the same vendor (it keys a breaker, and one being down
+// says nothing about the other), while a span wants the opposite — bounded,
+// and carrying no operator topology off the host. It gets the bare provider.
+func providerKey(pc inference.ProviderCredentials) string {
+	base := normalizeProviderURL(pc.BaseURL)
+	if pc.Provider == inference.ProviderBedrock {
+		region := ""
+		if pc.Bedrock != nil {
+			region = pc.Bedrock.Region
 		}
-		return "anthropic-direct:default"
-	}
-
-	hasBedrock := creds["AWS_BEARER_TOKEN_BEDROCK"] != "" ||
-		(creds["AWS_ACCESS_KEY_ID"] != "" && creds["AWS_SECRET_ACCESS_KEY"] != "")
-	if hasBedrock {
-		region := creds["AWS_REGION"]
-		if base := normalizeProviderURL(creds["ANTHROPIC_BEDROCK_BASE_URL"]); base != "" {
+		if base != "" {
 			return "bedrock:" + region + "@" + base
 		}
 		return "bedrock:" + region
 	}
-
-	// Unreachable in practice — resolveDirectCreds already errors out for an
-	// org with nothing configured before providerKey is ever called — kept
-	// as a defensive fallback.
-	return "unknown"
+	if base != "" {
+		return "anthropic-direct:" + base
+	}
+	return "anthropic-direct:default"
 }
 
 // normalizeProviderURL lowercases and trims a base-URL override so two
