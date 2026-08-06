@@ -225,6 +225,14 @@ streaming period would be lost entirely in a crash — exactly the runs you most
 want the data for. A run requeued five times therefore produces five traces
 sharing `conversation.id`, told apart by `claim.attempt`.
 
+The root's `outcome` says how the attempt ended, and the distinctions are the
+ones you actually filter on: `agent_live` reached the agent; `cancelled` was
+stopped by someone; `shutdown` stood down because its executor was going away,
+leaving the claim for the boot reconcile; `fenced` lost the conversation to a
+successor; `setup_failed` is the only one that also carries an error status, so
+"traces with errors" stays a list of things that are wrong rather than a list
+of runs that were stopped.
+
 What happens after agent-live appears as separate, punctual traces that **link
 back** to the engagement root: `permission.prompt` (the human wait, which the
 run's own duration accounting deliberately discounts), `relay.call` /

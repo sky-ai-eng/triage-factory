@@ -23,13 +23,19 @@ const (
 	// engagementLive is the success terminal: the agent is up and speaking.
 	engagementLive = "agent_live"
 	// engagementNotStarted is the catch-all for a claim that returned before
-	// the agent ran without one of the named dispositions below — in
-	// practice a shutdown mid-setup, which leaves the run for the boot
-	// reconcile.
+	// the agent ran and did not name why. It should be rare: every exit that
+	// knows its reason says so, and a rash of these means an exit was added
+	// without one.
 	engagementNotStarted = "not_started"
-	// engagementCancelled — a cancel raced the claim, so the step was parked
-	// rather than run. Anticipated, never an error.
+	// engagementCancelled — someone stopped this run before the agent came
+	// up, either by cancelling the claim outright or by racing a cancel
+	// against it. The run is parked, not failed. Anticipated, never an error.
 	engagementCancelled = "cancelled"
+	// engagementShutdown — the dispatcher's own context ended mid-setup, so
+	// this engagement stood down and left the claim for the boot reconcile to
+	// requeue. Distinct from engagementCancelled because the run is untouched
+	// and coming back, where a cancel is a disposition someone asked for.
+	engagementShutdown = "shutdown"
 	// engagementNoMessage — a follow-up claim on a finished blueprint that
 	// carried nothing to deliver, parked back.
 	engagementNoMessage = "no_message"
@@ -141,6 +147,41 @@ func (s *Spawner) endEngagement(runID, outcome string) {
 // a usable filter only if it means something went wrong.
 func (s *Spawner) failEngagement(runID string, err error) {
 	s.engagementFor(runID).finish(engagementSetupFailed, err)
+}
+
+// stopOutcome names why an engagement ended before the agent came up, for
+// the exits that read a cancelled context and park the run.
+//
+// Two different cancellations reach those exits and the code deliberately
+// treats them alike — both mean "stop, and leave the workspace alone" — but
+// they are not the same event and a trace that conflated them would be
+// useless for the question they are usually asked about. A user stop is a
+// disposition somebody chose; a dispatcher shutdown is this engagement
+// standing down with the claim intact for the boot reconcile. Reading the
+// PARENT first is what separates them: step is derived from parent, so a
+// shutdown cancels both while a user stop cancels only step.
+//
+// ok is false when neither is cancelled, which is not a stop at all — the
+// caller then leaves the engagement to whichever exit does know (a launch
+// error, a fence, agent-live itself). Returning a stop outcome there would
+// silently claim the end and no-op the real one, since the root ends once.
+func stopOutcome(parent, step context.Context) (outcome string, ok bool) {
+	switch {
+	case parent.Err() != nil:
+		return engagementShutdown, true
+	case step.Err() != nil:
+		return engagementCancelled, true
+	}
+	return "", false
+}
+
+// endEngagementIfStopped closes runID's root when a cancellation is what
+// ended it, naming which one. A no-op otherwise — including, importantly,
+// once the agent has gone live, since the root ends exactly once.
+func (s *Spawner) endEngagementIfStopped(runID string, parent, step context.Context) {
+	if outcome, ok := stopOutcome(parent, step); ok {
+		s.endEngagement(runID, outcome)
+	}
 }
 
 // engagementFor resolves runID's live engagement, or nil. Nil-safe

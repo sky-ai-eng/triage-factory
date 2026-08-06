@@ -184,6 +184,82 @@ func TestEngagementDispositionsAreNotErrors(t *testing.T) {
 	}
 }
 
+// TestStoppedEngagementNamesWhichCancellation covers the exits that read a
+// cancelled context and park the run. The code treats a user stop and a
+// dispatcher shutdown alike — both mean "stop, leave the workspace alone" —
+// but they are different events, and a trace that reported both as the
+// unexplained not_started could not answer the question these spans are
+// usually opened for: was this run stopped, or did its executor go away?
+//
+// The discriminator is which context is done. step derives from parent, so a
+// shutdown cancels both and a user stop cancels only step — which is why
+// stopOutcome must read the parent FIRST.
+func TestStoppedEngagementNamesWhichCancellation(t *testing.T) {
+	userStop := func() (context.Context, context.Context) {
+		parent := context.Background()
+		step, cancel := context.WithCancel(parent)
+		cancel() // the run's own cancel handle — Spawner.Stop
+		return parent, step
+	}
+	shutdown := func() (context.Context, context.Context) {
+		parent, cancel := context.WithCancel(context.Background())
+		step, stepCancel := context.WithCancel(parent)
+		t.Cleanup(stepCancel)
+		cancel() // the dispatcher's ctx — which cancels step too
+		return parent, step
+	}
+	live := func() (context.Context, context.Context) {
+		parent := context.Background()
+		step, cancel := context.WithCancel(parent)
+		t.Cleanup(cancel)
+		return parent, step
+	}
+
+	for _, tc := range []struct {
+		name    string
+		ctxs    func() (context.Context, context.Context)
+		want    string
+		wantEnd bool
+	}{
+		{"user stop", userStop, engagementCancelled, true},
+		{"dispatcher shutdown", shutdown, engagementShutdown, true},
+		{"nothing cancelled", live, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			read := recordSpans(t)
+			s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+			run := traceTestRun("run-stop-" + tc.name)
+			parent, step := tc.ctxs()
+
+			_, done := s.beginEngagement(context.Background(), run)
+			s.endEngagementIfStopped(run.ID, parent, step)
+
+			if !tc.wantEnd {
+				// Nothing was cancelled, so this is not a stop and the root must
+				// still be open — claiming the end here would silently no-op the
+				// launch-error or agent-live end that actually owns it.
+				if got := spansNamed(read(), "engagement.setup"); len(got) != 0 {
+					t.Fatalf("the root ended on a non-stop path (%d spans); the real end would then be swallowed", len(got))
+				}
+				done()
+				return
+			}
+
+			done() // a no-op if the stop already ended it, which is the point
+			roots := spansNamed(read(), "engagement.setup")
+			if len(roots) != 1 {
+				t.Fatalf("engagement.setup spans = %d, want 1", len(roots))
+			}
+			if got := spanAttr(t, roots[0], "outcome").AsString(); got != tc.want {
+				t.Errorf("outcome = %q, want %q — the deferred cleanup's not_started must not win over a named stop", got, tc.want)
+			}
+			if roots[0].Status().Code == codes.Error {
+				t.Error("a stop was recorded as an error; it is a disposition someone asked for")
+			}
+		})
+	}
+}
+
 // TestRequeuedRunProducesSeparateTracesSharingConversationID is the ticket's
 // acceptance criterion for retries: five attempts of one conversation are
 // five navigable traces, joined by conversation.id and told apart by

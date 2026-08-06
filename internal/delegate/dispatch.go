@@ -292,7 +292,8 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	br, err := s.blueprints.GetRunSystem(gateCtx, orgID, run.BlueprintRunID)
 	if err != nil || br == nil {
 		if ctx.Err() != nil {
-			closeGate("shutdown", nil)
+			closeGate(engagementShutdown, nil)
+			s.endEngagement(run.ID, engagementShutdown)
 			return // dispatcher shutting down — leave the claimed run for boot reconcile
 		}
 		// The owning blueprint_run is gone — nothing to drive. Fail the orphaned
@@ -305,7 +306,8 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	task, err := s.tasks.GetSystem(gateCtx, orgID, run.TaskID)
 	if err != nil || task == nil {
 		if ctx.Err() != nil {
-			closeGate("shutdown", nil)
+			closeGate(engagementShutdown, nil)
+			s.endEngagement(run.ID, engagementShutdown)
 			return
 		}
 		closeGate("task_missing", err)
@@ -423,6 +425,7 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 	execSandbox, err := s.bringUpExecutorSandbox(ctx, orgID, run, *task)
 	if err != nil {
 		if ctx.Err() != nil {
+			s.endEngagement(run.ID, engagementShutdown)
 			return // dispatcher shutting down — leave the claimed run for boot reconcile
 		}
 		s.failEngagement(run.ID, err)
@@ -590,6 +593,16 @@ func (s *Spawner) dispatchClaimedRun(ctx context.Context, run *domain.Conversati
 		disp = engagementDisposition{fenced: s.runAgent(stepCtx, run.ID, *task, mission, cfg, time.Now(), run.Model, run.TriggerType, run.CreatorUserID, run.SessionID)}
 	}
 
+	// A stop during bring-up produces neither of the dispositions below — both
+	// runtimes read a cancelled context first and answer with a park — so
+	// without this the engagement would end as the unexplained not_started,
+	// and a user cancel would be indistinguishable in the trace from a
+	// shutdown. A no-op once the agent went live, which is the ordinary case.
+	//
+	// It must stay ABOVE stepCancel(): past that line stepCtx always reads
+	// cancelled and the user-stop-vs-shutdown discriminator is gone.
+	s.endEngagementIfStopped(run.ID, ctx, stepCtx)
+
 	s.mu.Lock()
 	delete(s.cancels, run.ID)
 	s.mu.Unlock()
@@ -726,6 +739,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	if stepCtx.Err() != nil {
 		// No workspace rehydrated yet, so markRunOpen (the no-snapshot park)
 		// rather than parkRunOpen: there is nothing on disk to capture.
+		s.endEngagementIfStopped(run.ID, ctx, stepCtx)
 		disposed = s.markRunOpen(ctx, resumeParkContext(orgID, run, task, userID))
 		return
 	}
@@ -769,7 +783,9 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, run *domain.Conversat
 	handBack := func(cause error) {
 		disposed = true
 		if stepCtx.Err() != nil {
-			s.endEngagement(run.ID, engagementNotStarted)
+			// A stop, not a failure: cause is whatever the bring-up was doing
+			// when the cancel landed, which is not why this engagement ended.
+			s.endEngagementIfStopped(run.ID, ctx, stepCtx)
 			disposed = s.markRunOpen(ctx, resumeParkContext(orgID, run, task, userID))
 			return
 		}
