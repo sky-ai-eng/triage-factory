@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -118,10 +121,43 @@ func (c *Client) awaitBudget(ctx context.Context) error {
 	if wait <= 0 {
 		return nil
 	}
+	// Only past here does the call do anything — block, or refuse. The
+	// returns above are the overwhelming majority and get no span, so a
+	// healthy client's traces aren't mostly no-ops.
+	ctx, span := tracer.Start(ctx, "github.ratelimit.await")
+	defer span.End()
+
 	if wait > maxRateLimitWait {
+		span.SetAttributes(telemetry.Outcome("refused"))
 		return &ErrRateLimited{ResumeAt: reset}
 	}
-	return sleepCtx(ctx, wait)
+	if err := sleepCtx(ctx, wait); err != nil {
+		span.SetAttributes(telemetry.Outcome("cancelled"))
+		return err
+	}
+	span.SetAttributes(telemetry.Outcome("waited"))
+	return nil
+}
+
+// awaitRetry blocks out one backoff between attempts under its own span.
+//
+// These sleeps are why a GitHub call can take five minutes with no slow
+// request in it: untraced, the caller's span just takes minutes while
+// every transport span inside it is fast. The attempt number separates
+// "one long wait" from "five short ones". Neither outcome is an error
+// status — waiting out a rate limit is the client working, and a
+// cancelled wait is the caller leaving.
+func awaitRetry(ctx context.Context, attempt int, wait time.Duration) error {
+	ctx, span := tracer.Start(ctx, "github.ratelimit.backoff",
+		trace.WithAttributes(telemetry.Attempt(attempt)))
+	defer span.End()
+
+	if err := sleepCtx(ctx, wait); err != nil {
+		span.SetAttributes(telemetry.Outcome("cancelled"))
+		return err
+	}
+	span.SetAttributes(telemetry.Outcome("waited"))
+	return nil
 }
 
 // reqBuilder constructs a fresh *http.Request for one attempt. It's a
@@ -222,7 +258,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 		if !idempotent || wait > maxRateLimitWait || attempt >= maxAttempts {
 			return nil, &ErrRateLimited{ResumeAt: time.Now().Add(wait)}
 		}
-		if err := sleepCtx(ctx, wait); err != nil {
+		if err := awaitRetry(ctx, attempt, wait); err != nil {
 			return nil, err
 		}
 	}

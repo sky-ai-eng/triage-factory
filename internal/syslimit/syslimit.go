@@ -9,7 +9,11 @@
 // replace it with fleet-wide sandbox accounting without touching the call sites.
 package syslimit
 
-import "context"
+import (
+	"context"
+
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+)
 
 // DefaultMaxConcurrentSystemRuns is the process-wide cap on concurrent
 // background system-job sandboxes, shared across the scorer, repo-profiler,
@@ -49,10 +53,27 @@ func (l *Limiter) Acquire(ctx context.Context) error {
 	if l == nil {
 		return nil
 	}
+	// Fast path first, so the spans that do exist all mean "this caller
+	// queued" — the signal worth having, since the scorer's per-cycle
+	// fan-out is unbounded and a cycle can sit here for an arbitrarily long
+	// time looking like a slow LLM call.
 	select {
 	case l.sem <- struct{}{}:
 		return nil
+	default:
+	}
+
+	ctx, span := tracer.Start(ctx, "syslimit.acquire")
+	defer span.End()
+
+	select {
+	case l.sem <- struct{}{}:
+		span.SetAttributes(telemetry.Outcome("acquired"))
+		return nil
 	case <-ctx.Done():
+		// Not an error status: giving up on a full queue during shutdown,
+		// or on the caller's own deadline, is the limiter working.
+		span.SetAttributes(telemetry.Outcome("cancelled"))
 		return ctx.Err()
 	}
 }

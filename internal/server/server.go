@@ -597,7 +597,7 @@ func New(database *sql.DB, stores db.Stores, serverPort int) *Server {
 // mux, wrap it with additional middleware, or drive it over httptest without
 // opening a socket. The mux is populated by routes() during New, so the
 // handler is ready as soon as New returns.
-func (s *Server) Handler() http.Handler { return s.withSecurityHeaders(s.mux) }
+func (s *Server) Handler() http.Handler { return s.tracedHandler() }
 
 // ListenAndServe starts the HTTP server with no shutdown signal wired.
 // Kept for callers (and tests) that don't need graceful shutdown; it
@@ -610,10 +610,11 @@ func (s *Server) ListenAndServe(addr string) error {
 // shuts it down gracefully when ctx is cancelled (SIGINT/SIGTERM at the
 // process boundary). The mux is wrapped in withSecurityHeaders so every
 // response carries the standard set (HSTS conditionally, CSP,
-// X-Frame-Options, etc.). Returns nil on a clean ctx-driven shutdown; a
+// X-Frame-Options, etc.), and in otelhttp outside that — see
+// tracedHandler. Returns nil on a clean ctx-driven shutdown; a
 // non-ErrServerClosed listen error otherwise.
 func (s *Server) ListenAndServeContext(ctx context.Context, addr string) error {
-	httpSrv := &http.Server{Addr: addr, Handler: s.withSecurityHeaders(s.mux)}
+	httpSrv := &http.Server{Addr: addr, Handler: s.tracedHandler()}
 
 	// The watcher shuts the server down on ctx cancel, but must also exit if
 	// the server stops on its own first (e.g. a bind failure) — otherwise a

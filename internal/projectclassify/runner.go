@@ -10,6 +10,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // stage1Func runs one broad-pass Haiku classification. It is the
@@ -124,22 +126,31 @@ func (r *Runner) run(ctx context.Context) {
 		r.mu.Unlock()
 	}()
 
+	// After the single-flight guard — see the scorer's twin.
+	ctx, span := telemetry.StartJobCycle(ctx, "classifier", r.orgID)
+	defer span.End()
+
 	entities, err := r.entities.ListUnclassifiedSystem(ctx, r.orgID)
 	if err != nil {
-		classifyLog.Error("list unclassified entities failed", "org", r.orgID, "error", err)
+		span.SetStatus(codes.Error, "list unclassified entities")
+		classifyLog.ErrorContext(ctx, "list unclassified entities failed", "org", r.orgID, "error", err)
 		return
 	}
+	span.SetAttributes(telemetry.Count(len(entities)))
 	if len(entities) == 0 {
+		span.SetAttributes(telemetry.Outcome("nothing_to_classify"))
 		return
 	}
 
 	projects, err := r.projects.ListSystem(ctx, r.orgID)
 	if err != nil {
-		classifyLog.Error("list projects failed", "org", r.orgID, "error", err)
+		span.SetStatus(codes.Error, "list projects")
+		classifyLog.ErrorContext(ctx, "list projects failed", "org", r.orgID, "error", err)
 		return
 	}
 
 	if len(projects) == 0 {
+		span.SetAttributes(telemetry.Outcome("no_projects"))
 		// No projects to vote — stamp classified_at on every unclassified
 		// entity so we don't re-fire on every poll cycle. The
 		// project-creation popup is the path to retro-assign these once

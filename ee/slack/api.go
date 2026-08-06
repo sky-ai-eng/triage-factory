@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // slackAPIBase is the Slack Web API base. A var (not a const) so tests can
@@ -24,7 +26,10 @@ var slackAPIBase = "https://slack.com/api"
 // upper bound for the abnormal case — mirrors ssoHTTPClient's rationale for
 // the in-network GoTrue admin call, just with a shorter budget since these
 // calls run inline in a user-facing request.
-var slackHTTPClient = &http.Client{Timeout: 15 * time.Second}
+//
+// One package-level client backs every Slack call, so instrumenting it
+// here covers the whole surface with no option threaded through any of it.
+var slackHTTPClient = telemetry.TracedHTTPClient(15*time.Second, "slack")
 
 // authTestResult is the subset of Slack's auth.test response the connect
 // handler needs: the workspace identity (team_id/team), the bot's own user

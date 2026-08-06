@@ -9,6 +9,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // RunnerCallbacks are optional hooks fired during the scoring lifecycle.
@@ -150,18 +152,26 @@ func (r *Runner) run(ctx context.Context) {
 		r.mu.Unlock()
 	}()
 
+	// After the single-flight guard, so a re-entrant call that bails
+	// produces no span — that isn't a cycle.
+	ctx, span := telemetry.StartJobCycle(ctx, "scorer", r.orgID)
+	defer span.End()
+
 	tasks, err := r.scores.UnscoredTasks(ctx, r.orgID)
 	if err != nil {
-		aiLog.Error("fetch unscored tasks failed", "error", err)
+		span.SetStatus(codes.Error, "fetch unscored tasks")
+		aiLog.ErrorContext(ctx, "fetch unscored tasks failed", "error", err)
 		r.reportError(err)
 		return
 	}
 
+	span.SetAttributes(telemetry.Count(len(tasks)))
 	if len(tasks) == 0 {
+		span.SetAttributes(telemetry.Outcome("nothing_to_score"))
 		return
 	}
 
-	aiLog.Info("scoring unscored tasks", "count", len(tasks))
+	aiLog.InfoContext(ctx, "scoring unscored tasks", "count", len(tasks))
 
 	// Collect task IDs for callbacks
 	taskIDs := make([]string, len(tasks))
@@ -180,7 +190,8 @@ func (r *Runner) run(ctx context.Context) {
 
 	scores, skippedTasks, err := r.scoreTasks(ctx, tasks)
 	if err != nil {
-		aiLog.Error("scoring failed", "error", err)
+		span.SetStatus(codes.Error, "score tasks")
+		aiLog.ErrorContext(ctx, "scoring failed", "error", err)
 		r.reportError(err)
 		// Fatal scoring error — every task was MarkScoring'd but none of
 		// them will be transitioned to 'scored'. Reset the whole set back

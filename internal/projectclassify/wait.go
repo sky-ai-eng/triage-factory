@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // DefaultWaitTimeout is the spawner's deadline for a fresh
@@ -74,12 +76,23 @@ func WaitFor(ctx context.Context, entities db.EntityStore, trigger func(orgID st
 	if ctx.Err() != nil {
 		return
 	}
+	// Blocks the delegation spawner for up to the caller's timeout — 90s
+	// in production — and surfaces only as unexplained spawn latency. The
+	// outcome is what makes it answerable: "classified" means the wait did
+	// its job, "timeout" means the run proceeded without project context,
+	// and from the outside the two look identical.
+	ctx, span := tracer.Start(ctx, "projectclassify.wait",
+		trace.WithAttributes(telemetry.OrgID(orgID), telemetry.EntityID(entityID)))
+	defer span.End()
+
 	done, gone := classificationState(ctx, entities, orgID, entityID)
 	if gone {
-		classifyLog.Info("waitfor entity not found, returning early", "entity", entityID)
+		span.SetAttributes(telemetry.Outcome("entity_gone"))
+		classifyLog.InfoContext(ctx, "waitfor entity not found, returning early", "entity", entityID)
 		return
 	}
 	if done {
+		span.SetAttributes(telemetry.Outcome("already_classified"))
 		return
 	}
 	trigger(orgID)
@@ -96,17 +109,21 @@ func WaitFor(ctx context.Context, entities db.EntityStore, trigger func(orgID st
 	for {
 		select {
 		case <-ctx.Done():
+			span.SetAttributes(telemetry.Outcome("cancelled"))
 			return
 		case <-timer.C:
-			classifyLog.Warn("waitfor timed out, proceeding without project context", "entity", entityID, "timeout", timeout)
+			span.SetAttributes(telemetry.Outcome("timeout"))
+			classifyLog.WarnContext(ctx, "waitfor timed out, proceeding without project context", "entity", entityID, "timeout", timeout)
 			return
 		case <-ticker.C:
 			done, gone := classificationState(ctx, entities, orgID, entityID)
 			if gone {
-				classifyLog.Info("waitfor entity vanished mid-wait, returning early", "entity", entityID)
+				span.SetAttributes(telemetry.Outcome("entity_gone"))
+				classifyLog.InfoContext(ctx, "waitfor entity vanished mid-wait, returning early", "entity", entityID)
 				return
 			}
 			if done {
+				span.SetAttributes(telemetry.Outcome("classified"))
 				return
 			}
 		}

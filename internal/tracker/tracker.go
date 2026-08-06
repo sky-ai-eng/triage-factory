@@ -15,6 +15,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -379,13 +383,18 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 	}
 
 	// Fetch fresh state — open PRs get the full fragment (includes CheckRuns).
+	//
+	// The two calls below are the most expensive thing a poll cycle does —
+	// one GraphQL round trip each regardless of batch size, so the count is
+	// what explains a slow one. `full` separates them: the open batch pulls
+	// check runs too, so their durations aren't comparable.
 	refreshed := make(map[string]domain.PRSnapshot)
 	if len(openItems) > 0 {
 		nodeIDs := make([]string, len(openItems))
 		for i, item := range openItems {
 			nodeIDs[i] = item.nodeID
 		}
-		open, err := client.RefreshPRs(ctx, nodeIDs, true)
+		open, err := t.refreshPRBatch(ctx, client, nodeIDs, true)
 		if err != nil {
 			return 0, "", fmt.Errorf("refresh open PRs: %w", err)
 		}
@@ -398,7 +407,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		for i, item := range terminalItems {
 			nodeIDs[i] = item.nodeID
 		}
-		terminal, err := client.RefreshPRs(ctx, nodeIDs, false)
+		terminal, err := t.refreshPRBatch(ctx, client, nodeIDs, false)
 		if err != nil {
 			return 0, "", fmt.Errorf("refresh terminal PRs: %w", err)
 		}
@@ -408,6 +417,12 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 	}
 
 	// Phase 3: Diff + emit events.
+	//
+	// No network here — snapshot comparison plus the entity writes each
+	// transition implies. A cycle slow in this phase and fast in the one
+	// before it is a database problem, not a GitHub one.
+	ctx, diffSpan := tracer.Start(ctx, "tracker.github.diff_emit")
+
 	allItems := append(openItems, terminalItems...)
 	eventsEmitted := 0
 
@@ -429,16 +444,16 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			// we tracked it. The next cycle diffs against this seed normally.
 			snapJSON, _ := json.Marshal(newSnap)
 			if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, item.entity.ID, string(snapJSON), item.entity.PollSeq); err != nil {
-				trackerLog.Error("seed stub snapshot failed", "source_id", item.entity.SourceID, "error", err)
+				trackerLog.ErrorContext(ctx, "seed stub snapshot failed", "source_id", item.entity.SourceID, "error", err)
 			} else if !ok {
-				trackerLog.Warn("seed stub snapshot CAS lost race, skipping", "source_id", item.entity.SourceID)
+				trackerLog.WarnContext(ctx, "seed stub snapshot CAS lost race, skipping", "source_id", item.entity.SourceID)
 			}
 			if item.entity.Title != newSnap.Title {
 				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
 			}
 			if newSnap.Merged || newSnap.State == "CLOSED" || newSnap.State == "MERGED" {
 				if err := t.entities.MarkClosedSystem(context.Background(), orgID, item.entity.ID); err != nil {
-					trackerLog.Error("mark stub closed failed", "source_id", item.entity.SourceID, "error", err)
+					trackerLog.ErrorContext(ctx, "mark stub closed failed", "source_id", item.entity.SourceID, "error", err)
 				}
 			}
 			continue
@@ -461,11 +476,11 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		snapJSON, _ := json.Marshal(newSnap)
 		ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, item.entity.ID, string(snapJSON), item.entity.PollSeq)
 		if err != nil {
-			trackerLog.Error("update snapshot failed; suppressing this cycle's transitions (re-diffed next cycle)", "source_id", item.entity.SourceID, "error", err)
+			trackerLog.ErrorContext(ctx, "update snapshot failed; suppressing this cycle's transitions (re-diffed next cycle)", "source_id", item.entity.SourceID, "error", err)
 			continue
 		}
 		if !ok {
-			trackerLog.Warn("update snapshot CAS lost race (stale poll_seq); suppressing this cycle's transitions", "source_id", item.entity.SourceID)
+			trackerLog.WarnContext(ctx, "update snapshot CAS lost race (stale poll_seq); suppressing this cycle's transitions", "source_id", item.entity.SourceID)
 			continue
 		}
 		if item.entity.Title != newSnap.Title {
@@ -478,6 +493,9 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			eventsEmitted++
 		}
 	}
+
+	diffSpan.SetAttributes(telemetry.Count(eventsEmitted))
+	diffSpan.End()
 
 	// Info only when the cycle actually produced something (an emitted
 	// event) — a cycle that fetched fresh state but found no transitions is
@@ -493,6 +511,21 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 	}
 
 	return eventsEmitted, "", nil
+}
+
+// refreshPRBatch is client.RefreshPRs under a span, wrapped rather than
+// instrumented at both call sites so the same three facts — how many PRs,
+// which fragment, how long — are stated once.
+func (t *Tracker) refreshPRBatch(ctx context.Context, client *ghclient.Client, nodeIDs []string, full bool) (map[string]domain.PRSnapshot, error) {
+	ctx, span := tracer.Start(ctx, "tracker.github.refresh_prs",
+		trace.WithAttributes(telemetry.Count(len(nodeIDs)), attribute.Bool("full", full)))
+	defer span.End()
+
+	snaps, err := client.RefreshPRs(ctx, nodeIDs, full)
+	if err != nil {
+		span.SetStatus(codes.Error, "refresh prs")
+	}
+	return snaps, err
 }
 
 // resolveStubNodeID resolves the GitHub GraphQL node_id for a snapshot-less stub
@@ -584,6 +617,10 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 	// RefreshGitHub — stays strictly sequential, so per-repo event ordering
 	// and the snapshot-diff re-emit invariant are untouched regardless of
 	// what order the repo fetches actually complete in.
+	ctx, span := tracer.Start(ctx, "tracker.github.discover",
+		trace.WithAttributes(telemetry.Count(len(repos))))
+	defer span.End()
+
 	results := make([]repoListResult, len(repos))
 
 	var rateLimited atomic.Bool
@@ -608,15 +645,23 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 		}
 		dispatched = i + 1
 		g.Go(func() error {
+			// One span per repo, so the fan-out shows as concurrent work
+			// and the repo holding the cycle up is identifiable by
+			// duration. Which repo it was stays off the span — that's a
+			// name, and the concurrency limit is small.
+			ctx, span := tracer.Start(ctx, "tracker.github.list_prs")
+			defer span.End()
+
 			owner, name := splitOwnerRepo(repoFull)
 			if owner == "" || name == "" {
+				span.SetAttributes(telemetry.Outcome("unparseable"))
 				return nil
 			}
 
 			etag := ""
 			if t.repos != nil {
 				if stored, _, err := t.repos.GetPullsPollStateSystem(ctx, t.orgID, repoFull); err != nil {
-					trackerLog.Error("read pulls poll state failed", "repo", repoFull, "error", err)
+					trackerLog.ErrorContext(ctx, "read pulls poll state failed", "repo", repoFull, "error", err)
 				} else {
 					etag = stored
 				}
@@ -636,6 +681,9 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 					// was NOT refreshed, so TFAC-571's cursor must resume
 					// here (not at the next repo) next cycle.
 					results[i] = repoListResult{rateLimited: true}
+					// Not an error status: exhausting the budget is a
+					// handled outcome with a resume cursor behind it.
+					span.SetAttributes(telemetry.Outcome("rate_limited"))
 					return nil
 				}
 				// 403/404 means the token can't reach this configured repo (a
@@ -643,16 +691,20 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 				// skip and log rather than failing the whole sweep.
 				var he *ghclient.HTTPError
 				if errors.As(err, &he) && (he.StatusCode == 403 || he.StatusCode == 404) {
-					trackerLog.Warn("discovery: repo unreachable — skipping", "repo", repoFull, "status", he.StatusCode)
+					span.SetAttributes(telemetry.Outcome("unreachable"))
+					trackerLog.WarnContext(ctx, "discovery: repo unreachable — skipping", "repo", repoFull, "status", he.StatusCode)
 					return nil
 				}
-				trackerLog.Error("discovery: list open PRs failed", "repo", repoFull, "error", err)
+				span.SetStatus(codes.Error, "list open PRs")
+				trackerLog.ErrorContext(ctx, "discovery: list open PRs failed", "repo", repoFull, "error", err)
 				return nil
 			}
 
 			if notModified {
+				span.SetAttributes(telemetry.Outcome("not_modified"))
 				t.recordPullsPoll(ctx, repoFull, etag) // advance polled_at, keep etag
 			} else {
+				span.SetAttributes(telemetry.Outcome("listed"), telemetry.Count(len(prs)))
 				t.recordPullsPoll(ctx, repoFull, newEtag)
 			}
 
@@ -725,6 +777,12 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 		}
 	}
 
+	if discoveryErr != nil {
+		// The only error this returns is ErrRateLimited, which is a
+		// handled outcome with a resume cursor behind it — an attribute,
+		// not an error status, same as the per-repo children above.
+		span.SetAttributes(telemetry.Outcome("rate_limited"))
+	}
 	return all, quiet, resumeFrom, discoveryErr
 }
 
@@ -922,7 +980,7 @@ func (r JiraRules) doneMembersForKey(issueKey string) []string {
 // construction). In multi mode the poller's per-org loop constructs
 // one Tracker per active org per cycle; in local mode there's one
 // Tracker for the single synthetic tenant.
-func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, projects JiraRules) (int, error) {
+func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, baseURL string, projects JiraRules) (int, error) {
 	orgID := t.orgID
 	startedAt := time.Now()
 	terminal := func(snap domain.JiraSnapshot) bool {
@@ -938,7 +996,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		return false
 	}
 	// Phase 1: Discovery
-	discovered, err := t.discoverJira(client, baseURL, projects)
+	discovered, err := t.discoverJira(ctx, client, baseURL, projects)
 	if err != nil {
 		trackerLog.Error("jira discovery error", "error", err)
 	}
@@ -1002,12 +1060,14 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		keys[i] = e.SourceID
 	}
 
-	refreshed, err := t.batchFetchJira(client, baseURL, keys, projects)
+	refreshed, err := t.batchFetchJira(ctx, client, baseURL, keys, projects)
 	if err != nil {
 		return 0, fmt.Errorf("batch fetch jira: %w", err)
 	}
 
-	// Phase 3: Diff + emit events.
+	// Phase 3: Diff + emit events. Network-free, like the GitHub twin.
+	ctx, diffSpan := tracer.Start(ctx, "tracker.jira.diff_emit")
+
 	eventsEmitted := 0
 	for _, e := range entities {
 		newState, ok := refreshed[e.SourceID]
@@ -1096,7 +1156,10 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		}
 	}
 
-	trackerLog.Info("jira refresh", "discovered", len(discovered), "entities", len(entities), "refreshed", len(refreshed), "events", eventsEmitted)
+	diffSpan.SetAttributes(telemetry.Count(eventsEmitted))
+	diffSpan.End()
+
+	trackerLog.InfoContext(ctx, "jira refresh", "discovered", len(discovered), "entities", len(entities), "refreshed", len(refreshed), "events", eventsEmitted)
 
 	// Always fire the sentinel — it means "a poll cycle completed," not "a
 	// poll produced work." Carry-over readiness depends on this firing even
@@ -1120,10 +1183,15 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 // DoneMembers — subtasks can live in projects other than the parent's,
 // and the union matches today's "treat any known done status as
 // terminal" behavior across heterogeneous projects.
-func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projects JiraRules) ([]jiraIssueState, error) {
+func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, baseURL string, projects JiraRules) ([]jiraIssueState, error) {
 	if len(projects) == 0 {
 		return nil, nil
 	}
+	// Count is projects, not issues: the fan-out below is one JQL search
+	// per configured project (sometimes two).
+	ctx, span := tracer.Start(ctx, "tracker.jira.discover",
+		trace.WithAttributes(telemetry.Count(len(projects))))
+	defer span.End()
 
 	type queryWithDone struct {
 		jql         string
@@ -1178,12 +1246,15 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 	// DefaultSearchFields.
 	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created", "updated"}
 
+	failed := 0
 	for _, q := range queries {
-		// Background context: the tracker is a background poller with no
-		// request-scoped deadline, matching its entity-store calls below.
-		issues, err := client.SearchIssues(context.Background(), q.jql, fields, 100)
+		issues, err := client.SearchIssues(ctx, q.jql, fields, 100)
 		if err != nil {
-			trackerLog.Error("jira discovery query failed", "error", err)
+			// One project's query failing must not sink the others, so
+			// this continues — which means the caller gets a short result
+			// with no indication why. The outcome below is that indication.
+			failed++
+			trackerLog.ErrorContext(ctx, "jira discovery query failed", "error", err)
 			continue
 		}
 		for _, issue := range issues {
@@ -1192,6 +1263,9 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 				all = append(all, issueToState(issue, baseURL, q.doneMembers))
 			}
 		}
+	}
+	if failed > 0 {
+		span.SetAttributes(telemetry.Outcome("partial"), telemetry.Attempt(failed))
 	}
 
 	return all, nil
@@ -1205,7 +1279,15 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 // that stop matching discovery's JQL (e.g. reassigned to someone else) stay
 // pinned at their last-captured value. Acceptable — description relevance
 // drops fast once a ticket is off the user's plate.
-func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys []string, projects JiraRules) (map[string]jiraIssueState, error) {
+func (t *Tracker) batchFetchJira(ctx context.Context, client *jiraclient.Client, baseURL string, keys []string, projects JiraRules) (map[string]jiraIssueState, error) {
+	// Serial, with one iteration per batch of tracked issues — so its cost
+	// grows with every issue TF tracks, making it the cycle's most likely
+	// creeping regression. The per-request spans underneath are each fast,
+	// so nothing else would show it.
+	ctx, span := tracer.Start(ctx, "tracker.jira.batch_fetch",
+		trace.WithAttributes(telemetry.Count(len(keys))))
+	defer span.End()
+
 	results := make(map[string]jiraIssueState, len(keys))
 	// "updated" is required for the diff layer's source-time fallback.
 	// See the comment on the discovery field list for context.
@@ -1221,8 +1303,9 @@ func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys
 		batch := keys[i:end]
 
 		jql := fmt.Sprintf("key IN (%s)", strings.Join(batch, ", "))
-		issues, err := client.SearchIssues(context.Background(), jql, fields, jiraBatchSize)
+		issues, err := client.SearchIssues(ctx, jql, fields, jiraBatchSize)
 		if err != nil {
+			span.SetStatus(codes.Error, "batch fetch")
 			return nil, fmt.Errorf("batch fetch keys %d-%d: %w", i, end, err)
 		}
 

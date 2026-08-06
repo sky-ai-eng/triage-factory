@@ -17,6 +17,9 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // Getter is the transport: an authenticated GET returning a raw response
@@ -46,14 +49,26 @@ const (
 
 // FetchPR builds a skeleton for one pull request.
 func FetchPR(ctx context.Context, g Getter, owner, repo string, number int) (*Skeleton, error) {
+	// One span over the whole fetch — 1 to 6 GETs whose individual client
+	// spans say nothing about the logical operation. It runs per delegated
+	// run and per follow-up step, so it sits in the path a user waits on.
+	//
+	// It also gives the truncation enum somewhere to go: today every caller
+	// drops it, so a skeleton that silently lost history just renders
+	// shorter and nothing records that it happened.
+	ctx, span := tracer.Start(ctx, "prskeleton.fetch")
+	defer span.End()
+
 	base := fmt.Sprintf("/repos/%s/%s", owner, repo)
 
 	data, err := g.Get(ctx, fmt.Sprintf("%s/pulls/%d", base, number))
 	if err != nil {
+		span.SetStatus(codes.Error, "fetch pr")
 		return nil, fmt.Errorf("fetch PR %s#%d: %w", owner+"/"+repo, number, err)
 	}
 	var pr restPR
 	if err := json.Unmarshal(data, &pr); err != nil {
+		span.SetStatus(codes.Error, "parse pr")
 		return nil, fmt.Errorf("parse PR %s#%d: %w", owner+"/"+repo, number, err)
 	}
 
@@ -67,7 +82,9 @@ func FetchPR(ctx context.Context, g Getter, owner, repo string, number int) (*Sk
 		rows = append(rows, parsed{entry: *opened})
 	}
 
+	pages := 0
 	for page := 1; page <= maxTimelinePages; page++ {
+		pages = page
 		path := fmt.Sprintf("%s/issues/%d/timeline?per_page=%d&page=%d",
 			base, number, timelinePageSize, page)
 		data, err := g.Get(ctx, path)
@@ -96,6 +113,15 @@ func FetchPR(ctx context.Context, g Getter, owner, repo string, number int) (*Sk
 			sk.Truncation = TruncationPageCap
 		}
 	}
+
+	// TruncationNone is the empty string, so a complete history reports
+	// "none" rather than an absent key — "was this truncated?" should be
+	// answerable by reading the span, not by noticing something missing.
+	truncation := string(sk.Truncation)
+	if truncation == "" {
+		truncation = "none"
+	}
+	span.SetAttributes(telemetry.Count(pages), telemetry.Outcome(truncation))
 
 	sk.Entries = attachInlineComments(rows)
 	return sk, nil

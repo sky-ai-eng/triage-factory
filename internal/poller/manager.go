@@ -14,7 +14,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/tracker"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Manager manages the lifecycle of polling loops, allowing them to be
@@ -393,14 +396,25 @@ func (m *Manager) startGitHub() {
 // failure on org A shouldn't starve orgs B..N of polls.
 func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 	m.stampGitHubHeartbeat()
-	ctx := context.Background()
+	// The trace root for everything a tick does. Fresh per cycle: the
+	// ticker that fires this has no caller, so there is no parent to
+	// inherit and inventing one would join unrelated cycles into a trace
+	// that never ends.
+	ctx, span := tracer.Start(context.Background(), "poll.github",
+		trace.WithAttributes(telemetry.Source("github")))
+	defer span.End()
+
 	now := time.Now()
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
 	if err != nil {
-		githubLog.Error("list active orgs failed", "error", err)
+		span.SetStatus(codes.Error, "list active orgs")
+		githubLog.ErrorContext(ctx, "list active orgs failed", "error", err)
 		m.reportError("github", "", err)
 		return
 	}
+	polled := 0
+	defer func() { span.SetAttributes(telemetry.Count(polled)) }()
+
 	for _, orgID := range orgIDs {
 		// Stop starting NEW per-org batches the moment this loop is torn down
 		// (a lease demotion or RestartAll closes stop) — otherwise a demoted
@@ -409,6 +423,9 @@ func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 		// scoring/classify cycle on a pod that no longer holds the brain.
 		select {
 		case <-stop:
+			// Torn down mid-sweep. Without this the span is just a cycle
+			// with a low org count, indistinguishable from a quiet one.
+			span.SetAttributes(telemetry.Outcome("stopped"))
 			return
 		default:
 		}
@@ -417,6 +434,7 @@ func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 		}
 		interval := clampPollInterval(m.loadOrgSettings(ctx, orgID).GitHubPollInterval)
 		m.schedulePoll("github", orgID, now.Add(interval))
+		polled++
 		m.runGitHubCycleForOrg(ctx, orgID)
 	}
 	m.prunePoll("github", orgIDs)
@@ -430,12 +448,22 @@ func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 // installation it falls back to the org's PAT (tier 3) over the full
 // configured set.
 func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
+	// Per-org child of the cycle root — and a root in its own right when
+	// PollGitHubOnce calls this directly, which needs no special handling.
+	ctx, span := tracer.Start(ctx, "poll.github.org",
+		trace.WithAttributes(telemetry.Source("github"), telemetry.OrgID(orgID)))
+	defer span.End()
+
 	repos, err := m.repos.ListConfiguredNamesSystem(ctx, orgID)
 	if err != nil {
-		githubLog.Error("load configured repos failed", "org", orgID, "error", err)
+		span.SetStatus(codes.Error, "load configured repos")
+		githubLog.ErrorContext(ctx, "load configured repos failed", "org", orgID, "error", err)
 		return
 	}
 	if len(repos) == 0 {
+		// Anticipated: an org that tracks nothing. Same posture as the
+		// Jira twin's unconfigured skip — an outcome, never an error.
+		span.SetAttributes(telemetry.Outcome("no_repos"))
 		m.setGitHubCursor(orgID, "") // tracked set emptied — drop any stale cursor
 		return
 	}
@@ -492,7 +520,8 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// surface it and skip the cycle rather than polling as some other identity.
 	if len(installs) == 0 {
 		degraded := errors.New("github app is active but installed on no accounts")
-		githubLog.Error("skipping cycle", "org", orgID, "error", degraded)
+		span.SetStatus(codes.Error, "app installed on no accounts")
+		githubLog.ErrorContext(ctx, "skipping cycle", "org", orgID, "error", degraded)
 		m.reportError("github", orgID, degraded)
 		return
 	}
@@ -595,7 +624,8 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// health and skip rather than masking it.
 	if !anyFunctional {
 		degraded := errors.New("github app is active but no installation produced a usable token")
-		githubLog.Error("skipping cycle", "org", orgID, "error", degraded)
+		span.SetStatus(codes.Error, "no usable installation token")
+		githubLog.ErrorContext(ctx, "skipping cycle", "org", orgID, "error", degraded)
 		m.reportError("github", orgID, degraded)
 		return
 	}
@@ -677,12 +707,20 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID string, repos
 // has no local sentinel user, so it passes no username (org-wide REST
 // discovery doesn't need one; dashboard history is local/PAT-only).
 func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []string, isLocal bool) {
+	// The PAT path is the whole body of one branch of runGitHubCycleForOrg,
+	// so it records onto that caller's poll.github.org span rather than
+	// opening a child that would only ever duplicate it. A no-op span when
+	// there is no caller (tests), which needs no guard.
+	span := trace.SpanFromContext(ctx)
+
 	client, err := m.resolver.ClientFor(ctx, orgID, "")
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+			span.SetAttributes(telemetry.Outcome("unconfigured"))
 			return // not configured for GitHub — silent skip
 		}
-		githubLog.Error("resolve pat client failed", "org", orgID, "error", err)
+		span.SetStatus(codes.Error, "resolve pat client")
+		githubLog.ErrorContext(ctx, "resolve pat client failed", "org", orgID, "error", err)
 		m.reportError("github", orgID, err)
 		return
 	}
@@ -696,12 +734,14 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 		// `...System` admin-pool variants.
 		orgSet, serr := m.orgs.GetSettingsSystem(ctx, orgID)
 		if serr != nil {
-			githubLog.Error("read org settings failed", "org", orgID, "error", serr)
+			span.SetStatus(codes.Error, "read org settings")
+			githubLog.ErrorContext(ctx, "read org settings failed", "org", orgID, "error", serr)
 			return
 		}
 		username, err = m.users.GetGitHubLoginSystem(ctx, runmode.LocalDefaultUserID, orgSet.GitHubBaseURL)
 		if err != nil {
-			githubLog.Error("read github identity failed", "org", orgID, "error", err)
+			span.SetStatus(codes.Error, "read github identity")
+			githubLog.ErrorContext(ctx, "read github identity failed", "org", orgID, "error", err)
 			return
 		}
 		if teams, terr := client.ListMyTeams(ctx); terr != nil {
@@ -714,7 +754,8 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	resolver := m.reviewerResolver(ctx, orgID, username, userTeams)
 	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, username, repos, resolver)
 	if rerr != nil {
-		githubLog.Error("tracker error", "org", orgID, "error", rerr)
+		span.SetStatus(codes.Error, "refresh")
+		githubLog.ErrorContext(ctx, "tracker error", "org", orgID, "error", rerr)
 		m.reportError("github", orgID, rerr)
 	} else {
 		m.stampGitHubSuccess(orgID)
@@ -887,14 +928,21 @@ func (m *Manager) startJira() {
 // remaining orgs in the cycle.
 func (m *Manager) runJiraCycle(stop <-chan struct{}) {
 	m.stampJiraHeartbeat()
-	ctx := context.Background()
+	// Fresh trace root per tick, for the reasons in runGitHubCycle.
+	ctx, span := tracer.Start(context.Background(), "poll.jira",
+		trace.WithAttributes(telemetry.Source("jira")))
+	defer span.End()
+
 	now := time.Now()
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
 	if err != nil {
-		jiraLog.Error("list active orgs failed", "error", err)
+		span.SetStatus(codes.Error, "list active orgs")
+		jiraLog.ErrorContext(ctx, "list active orgs failed", "error", err)
 		m.reportError("jira", "", err)
 		return
 	}
+	polled := 0
+	defer func() { span.SetAttributes(telemetry.Count(polled)) }()
 	// ForSystem is the canonical constructor for the org/bot service
 	// client. The poller is read-only (discovery), so it's bot-attributed by
 	// design; routing through the resolver keeps system-client construction in
@@ -905,66 +953,91 @@ func (m *Manager) runJiraCycle(stop <-chan struct{}) {
 		// lease demotion or RestartJira closes stop) — see runGitHubCycle.
 		select {
 		case <-stop:
+			// See runGitHubCycle.
+			span.SetAttributes(telemetry.Outcome("stopped"))
 			return
 		default:
 		}
 		if !m.pollDue("jira", orgID, now) {
 			continue
 		}
-		orgSet, oerr := m.orgs.GetSettingsSystem(ctx, orgID)
-		if oerr != nil {
-			jiraLog.Error("load settings failed", "org", orgID, "error", oerr)
-			m.reportError("jira", orgID, oerr)
-			continue // leave unscheduled → retry next base tick (interval unknown)
-		}
-		// Reserve the next slot from the freshly-read interval BEFORE loading
-		// creds/rules below. The asymmetry is deliberate: a settings-read
-		// failure (above) leaves the org unscheduled so it retries at the next
-		// base tick (we don't know its interval); a creds/rules failure (below)
-		// keeps this slot, so a likely-persistent auth failure backs off to the
-		// org's own cadence instead of hammering every base tick.
-		m.schedulePoll("jira", orgID, now.Add(clampPollInterval(orgSet.JiraPollInterval)))
-		creds, lerr := integrations.LoadSystem(ctx, m.secrets, orgID)
-		if lerr != nil {
-			jiraLog.Error("load creds failed", "org", orgID, "error", lerr)
-			m.reportError("jira", orgID, lerr)
-			continue
-		}
-		rules := m.loadJiraRules(ctx, orgID)
-		// "Configured" is decided by the auth-method marker (via JiraSystemConfig),
-		// not key presence: a configured org has a URL plus the scheme's secret
-		// matching its jira_auth_method (DC PAT, or Cloud email + token). Reading
-		// the marker keeps this gate in lockstep with the client ForSystem builds
-		// below, so the two can't disagree. Skip silently when unconfigured or
-		// rules are missing — adding/removing a tenant's Jira config doesn't need
-		// a poller restart this way.
-		if _, ok := integrations.JiraSystemConfig(creds); !ok || len(rules) == 0 {
-			continue
-		}
-		baseURL := orgSet.JiraBaseURL
-		if baseURL == "" {
-			baseURL = creds.JiraURL
-		}
-		// creds load above gates configuration + supplies the baseURL fallback;
-		// ForSystem (reading the same secrets, routed Cloud-vs-DC by the stored
-		// auth-method marker) builds the authenticated client. The gate
-		// guarantees a credential is present, so ForSystem won't report
-		// ErrNoJiraSystemCredential here — handle errors defensively.
-		client, cerr := sysResolver.ForSystem(ctx, orgID)
-		if cerr != nil {
-			jiraLog.Error("resolve system client failed", "org", orgID, "error", cerr)
-			m.reportError("jira", orgID, cerr)
-			continue
-		}
-		projects := toTrackerJiraRules(rules)
-		if _, err := m.trackerForOrg(orgID).RefreshJira(client, baseURL, projects); err != nil {
-			jiraLog.Error("tracker error", "org", orgID, "error", err)
-			m.reportError("jira", orgID, err)
-		} else {
-			m.stampJiraSuccess(orgID)
-		}
+		polled++
+		m.runJiraCycleForOrg(ctx, sysResolver, orgID, now)
 	}
 	m.prunePoll("jira", orgIDs)
+}
+
+// runJiraCycleForOrg polls one org: settings → next-slot reservation →
+// credentials → rules → a single RefreshJira over the merged project set.
+// Split out of runJiraCycle's loop to mirror runGitHubCycleForOrg, so both
+// sources have one per-org unit to hang a span (and a future retry policy)
+// on. Every failure here is terminal for THIS org only — the caller moves
+// on to the next one.
+func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient.Resolver, orgID string, now time.Time) {
+	ctx, span := tracer.Start(ctx, "poll.jira.org",
+		trace.WithAttributes(telemetry.Source("jira"), telemetry.OrgID(orgID)))
+	defer span.End()
+
+	orgSet, oerr := m.orgs.GetSettingsSystem(ctx, orgID)
+	if oerr != nil {
+		span.SetStatus(codes.Error, "load settings")
+		jiraLog.ErrorContext(ctx, "load settings failed", "org", orgID, "error", oerr)
+		m.reportError("jira", orgID, oerr)
+		return // leave unscheduled → retry next base tick (interval unknown)
+	}
+	// Reserve the next slot from the freshly-read interval BEFORE loading
+	// creds/rules below. The asymmetry is deliberate: a settings-read
+	// failure (above) leaves the org unscheduled so it retries at the next
+	// base tick (we don't know its interval); a creds/rules failure (below)
+	// keeps this slot, so a likely-persistent auth failure backs off to the
+	// org's own cadence instead of hammering every base tick.
+	m.schedulePoll("jira", orgID, now.Add(clampPollInterval(orgSet.JiraPollInterval)))
+	creds, lerr := integrations.LoadSystem(ctx, m.secrets, orgID)
+	if lerr != nil {
+		span.SetStatus(codes.Error, "load creds")
+		jiraLog.ErrorContext(ctx, "load creds failed", "org", orgID, "error", lerr)
+		m.reportError("jira", orgID, lerr)
+		return
+	}
+	rules := m.loadJiraRules(ctx, orgID)
+	// "Configured" is decided by the auth-method marker (via JiraSystemConfig),
+	// not key presence: a configured org has a URL plus the scheme's secret
+	// matching its jira_auth_method (DC PAT, or Cloud email + token). Reading
+	// the marker keeps this gate in lockstep with the client ForSystem builds
+	// below, so the two can't disagree. Skip silently when unconfigured or
+	// rules are missing — adding/removing a tenant's Jira config doesn't need
+	// a poller restart this way.
+	if _, ok := integrations.JiraSystemConfig(creds); !ok || len(rules) == 0 {
+		// An anticipated skip, not a failure: an org with no Jira config
+		// is the common case, so it gets an outcome rather than an error
+		// status.
+		span.SetAttributes(telemetry.Outcome("unconfigured"))
+		return
+	}
+	baseURL := orgSet.JiraBaseURL
+	if baseURL == "" {
+		baseURL = creds.JiraURL
+	}
+	// creds load above gates configuration + supplies the baseURL fallback;
+	// ForSystem (reading the same secrets, routed Cloud-vs-DC by the stored
+	// auth-method marker) builds the authenticated client. The gate
+	// guarantees a credential is present, so ForSystem won't report
+	// ErrNoJiraSystemCredential here — handle errors defensively.
+	client, cerr := sysResolver.ForSystem(ctx, orgID)
+	if cerr != nil {
+		span.SetStatus(codes.Error, "resolve system client")
+		jiraLog.ErrorContext(ctx, "resolve system client failed", "org", orgID, "error", cerr)
+		m.reportError("jira", orgID, cerr)
+		return
+	}
+	projects := toTrackerJiraRules(rules)
+	if _, err := m.trackerForOrg(orgID).RefreshJira(ctx, client, baseURL, projects); err != nil {
+		span.SetStatus(codes.Error, "refresh")
+		jiraLog.ErrorContext(ctx, "tracker error", "org", orgID, "error", err)
+		m.reportError("jira", orgID, err)
+		return
+	}
+	m.stampJiraSuccess(orgID)
 }
 
 // toTrackerJiraRules collapses the org-wide rule union into the

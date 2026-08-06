@@ -200,7 +200,7 @@ func TestRefreshJira_EnrichesSnapshotlessStub(t *testing.T) {
 			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, org)
 			client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 
-			if _, err := tr.RefreshJira(client, srv.URL, tc.projects); err != nil {
+			if _, err := tr.RefreshJira(context.Background(), client, srv.URL, tc.projects); err != nil {
 				t.Fatalf("RefreshJira: %v", err)
 			}
 

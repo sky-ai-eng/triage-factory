@@ -6,6 +6,9 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // WithTx runs fn inside a single SQLite transaction. orgID must equal
@@ -40,11 +43,21 @@ func (s *Store) SyntheticClaimsWithTx(ctx context.Context, orgID, userID string,
 // JWT claims differently.
 func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
 	_ = userID // accepted for signature parity; SQLite has no auth concept
+	// The Postgres twin's span, same name and attribute, so a local-mode
+	// trace has the same shape as a multi-mode one. org.id is the local
+	// sentinel here — constant, but present, which is what keeps the two
+	// shapes identical.
+	ctx, span := tracer.Start(ctx, "db.tx.claims_bound",
+		trace.WithAttributes(telemetry.OrgID(orgID)))
+	defer span.End()
+
 	if orgID != runmode.LocalDefaultOrgID {
+		span.SetStatus(codes.Error, "org mismatch")
 		return fmt.Errorf("sqlite WithTx: orgID must be %q in local mode, got %q", runmode.LocalDefaultOrgID, orgID)
 	}
 	tx, err := s.conn.BeginTx(ctx, nil)
 	if err != nil {
+		span.SetStatus(codes.Error, "begin")
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
@@ -93,7 +106,14 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Ext:              db.BuildStoreExtensions("sqlite", tx, tx),
 	}
 	if err := fn(txStores); err != nil {
+		// See the Postgres twin: rolled back via the defer, and not
+		// recorded as an exception.
+		span.SetStatus(codes.Error, "tx body")
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		span.SetStatus(codes.Error, "commit")
+		return err
+	}
+	return nil
 }

@@ -8,11 +8,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // timeNow is package-var so middleware tests can stub the clock.
@@ -118,9 +121,24 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 			return
 		}
 
-		sess, err := s.authDeps.sessions.LookupSystem(r.Context(), sid)
+		// The dominant per-request auth cost: every authenticated request
+		// pays this admin-pool read before any handler work begins, and
+		// otelsql's statement span alone wouldn't say who asked.
+		lookupCtx, lookupSpan := tracer.Start(r.Context(), "session.lookup")
+		sess, err := s.authDeps.sessions.LookupSystem(lookupCtx, sid)
+		switch {
+		case err != nil:
+			lookupSpan.SetStatus(codes.Error, "lookup failed")
+		case sess == nil:
+			// Not an error: an expired or revoked cookie is how a
+			// session normally ends.
+			lookupSpan.SetAttributes(telemetry.Outcome("not_found"))
+		default:
+			lookupSpan.SetAttributes(telemetry.Outcome("found"))
+		}
+		lookupSpan.End()
 		if err != nil {
-			authLog.Error("session lookup failed", "error", err)
+			authLog.ErrorContext(r.Context(), "session lookup failed", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -142,7 +160,15 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 			}
 		}
 
+		// CPU-bound signature checking against a cached JWKS — except on
+		// a cache miss, when it fetches. That case is the whole reason
+		// this gets a span rather than being absorbed into the request's.
+		_, verifySpan := tracer.Start(r.Context(), "jwt.verify")
 		claims, err := s.authDeps.verifier.Verify(sess.JWT)
+		if err != nil {
+			verifySpan.SetStatus(codes.Error, "verify failed")
+		}
+		verifySpan.End()
 		if err != nil {
 			// Either the JWT decrypted cleanly but failed verification
 			// (rotated signing key, replay across issuers) — in either
@@ -292,7 +318,13 @@ func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Sessio
 	if s.authDeps == nil || s.authDeps.gotrueRefresh == nil {
 		return errors.New("refresh not wired")
 	}
-	_ = ctx // caller's ctx intentionally not propagated into fn; see comment above.
+	// The caller's ctx still must not reach fn (see above), but a span
+	// context is a value, not a cancellation, so capturing it costs that
+	// detachment nothing. The refresh span LINKS to it rather than
+	// parenting under it, for the same reason the ctx is dropped: the
+	// refresh outlives whichever request won the race, and the N-1
+	// waiters are just as much its callers as the winner.
+	requester := trace.SpanContextFromContext(ctx)
 
 	v, err, _ := s.refreshGroup.Do(sess.ID.String(), func() (any, error) {
 		// Detached background ctx with a 35s hard cap so a stuck refresh
@@ -303,27 +335,40 @@ func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Sessio
 		fnCtx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 		defer cancel()
 
+		var startOpts []trace.SpanStartOption
+		if requester.IsValid() {
+			startOpts = append(startOpts, trace.WithLinks(trace.Link{SpanContext: requester}))
+		}
+		fnCtx, span := tracer.Start(fnCtx, "session.refresh", startOpts...)
+		defer span.End()
+
 		fresh, err := s.authDeps.sessions.LookupSystem(fnCtx, sess.ID)
 		if err != nil {
+			span.SetStatus(codes.Error, "re-fetch failed")
 			return nil, fmt.Errorf("re-fetch session: %w", err)
 		}
 		if fresh == nil {
+			span.SetStatus(codes.Error, "session revoked")
 			return nil, errors.New("session revoked during refresh wait")
 		}
 		if !needsRefresh(fresh) {
 			// Another path already refreshed this session. Hand the
 			// fresh tokens back without calling gotrue.
+			span.SetAttributes(telemetry.Outcome("already_fresh"))
 			return refreshTokens{jwt: fresh.JWT, refresh: fresh.RefreshToken, jwtExp: fresh.JWTExpiresAt}, nil
 		}
 
 		newJWT, newRefresh, newExp, err := s.authDeps.gotrueRefresh(fnCtx, fresh.RefreshToken)
 		if err != nil {
+			span.SetStatus(codes.Error, "gotrue refresh failed")
 			return nil, err
 		}
 		newExpTime := unixToTime(newExp)
 		if err := s.authDeps.sessions.UpdateJWTSystem(fnCtx, sess.ID, newJWT, newRefresh, newExpTime); err != nil {
+			span.SetStatus(codes.Error, "persist failed")
 			return nil, err
 		}
+		span.SetAttributes(telemetry.Outcome("refreshed"))
 		return refreshTokens{jwt: newJWT, refresh: newRefresh, jwtExp: newExpTime}, nil
 	})
 	if err != nil {

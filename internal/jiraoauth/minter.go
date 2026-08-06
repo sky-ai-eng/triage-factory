@@ -40,6 +40,9 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Atlassian OAuth 3LO endpoints (identity platform). These are global —
@@ -100,7 +103,7 @@ type Minter struct {
 // NewMinter returns a Minter with a 30s-timeout HTTP client.
 func NewMinter() *Minter {
 	return &Minter{
-		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		httpClient:   telemetry.TracedHTTPClient(30*time.Second, "jira"),
 		tokenURL:     tokenEndpoint,
 		resourcesURL: accessibleResourcesEndpoint,
 	}
@@ -171,7 +174,26 @@ type tokenResponse struct {
 // requestToken POSTs the form to the token endpoint and parses the result.
 // A transport failure returns a plain wrapped error; a non-2xx or an `error`
 // field wraps ErrTokenEndpoint so the rotation-dead case is distinguishable.
-func (m *Minter) requestToken(ctx context.Context, form url.Values) (Token, error) {
+func (m *Minter) requestToken(ctx context.Context, form url.Values) (_ Token, err error) {
+	// The OAuth round trip hides inside credential resolution: a token-cache
+	// miss ends up here doing a full refresh against Atlassian, and under
+	// the caller's span alone that time is charged to whatever the client
+	// was used for afterwards. grant_type separates a first exchange from a
+	// rotation; the form's other fields are credentials and go nowhere near
+	// a span.
+	//
+	// Named error return so the failure exits below don't each need a
+	// status line. Fixed message, not err.Error() — a failed token
+	// request's error text embeds a truncated response body.
+	ctx, span := tracer.Start(ctx, "jiraoauth.token_request",
+		trace.WithAttributes(telemetry.Disposition(form.Get("grant_type"))))
+	defer span.End()
+	defer func() {
+		if err != nil {
+			span.SetStatus(codes.Error, "token request failed")
+		}
+	}()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return Token{}, fmt.Errorf("jiraoauth: build token request: %w", err)
