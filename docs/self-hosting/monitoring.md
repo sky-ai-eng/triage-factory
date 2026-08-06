@@ -259,7 +259,8 @@ taken, not a failure.
 
 `docker compose up -d` brings up a trace backend alongside TF, and
 `TF_TRACES_ENDPOINT` defaults to it, so a fresh deployment traces itself. Open
-Grafana at <http://localhost:3030>.
+Grafana at <http://localhost:3030> — it lands directly on the bundled overview
+dashboard, which needs no queries typed to be useful.
 
 | Service | Role | Published |
 | --- | --- | --- |
@@ -277,10 +278,54 @@ pointing TF at a Tempo off the compose network — spans are unauthenticated on
 the wire unless you configure TLS.
 
 Config lives in [`docker/observability/`](../../docker/observability/) — Tempo's
-config, Prometheus's scrape config, and Grafana's data sources. One detail worth
-knowing: Prometheus finds TF's `:9464` by DNS service discovery rather than
-static targets, so `--scale executor=3` is scraped as three targets instead of
-whichever replica DNS happened to answer with.
+config, Prometheus's scrape config, and Grafana's data sources and dashboards.
+One detail worth knowing: Prometheus finds TF's `:9464` by DNS service discovery
+rather than static targets, so `--scale executor=3` is scraped as three targets
+instead of whichever replica DNS happened to answer with.
+
+#### Bundled dashboards
+
+Grafana's home page is the **Triage Factory — Overview** dashboard, provisioned
+from [`docker/observability/dashboards/`](../../docker/observability/dashboards/)
+the same way the data sources are. Three rows, answering "is TF healthy, and
+what is slow":
+
+- **Traces.** Five fixed TraceQL searches — GitHub and Jira poll cycles, system
+  job cycles (scorer / profiler / classifier), API requests slower than 500 ms,
+  and every span that ended with an error status. Each row is one trace and
+  clicking it opens that trace's waterfall. Two of these are *supposed* to be
+  empty on a healthy deployment; the slow-request and errored-span lists filling
+  up is the signal.
+- **RED.** Request rate, error rate, and p95 latency by span name, over the
+  `traces_spanmetrics_*` series Tempo's metrics generator derives from the spans
+  it receives. This covers every instrumented subsystem at once and grows on its
+  own as new span families land — nothing here enumerates subsystems by hand.
+  The latency panel has **exemplars on**: each dot is one sample annotated with
+  the trace ID that produced it, so clicking one jumps straight to the trace
+  behind an outlier.
+- **Runtime.** Per-pod signals from `:9464`: DB pool connections and contention
+  (per pool — multi mode's `admin` and `app` behave nothing alike), HTTP
+  requests by response status, goroutines, RSS, and the Slack ingest counters.
+  Deliberately short: things you would act on, not a runtime-metrics museum.
+  The Slack panel stays empty unless a Slack app is connected.
+
+Everything the dashboard displays is span names, opaque IDs, and closed enums —
+never a repo name, username, or PR title — the same rule the spans and metrics
+themselves follow.
+
+The dashboards are **read-only**, and that is the point of checking the JSON in:
+the file is the source of truth, so deleting the `grafana-data` volume and
+re-upping reproduces them exactly. Grafana refuses a save-in-place with "Cannot
+save provisioned dashboard". To experiment, use **Export → Save as copy** in the
+dashboard menu — that lands a mutable duplicate in Grafana's own database, which
+you can edit freely and which the provisioner will not touch. To change the
+checked-in one, edit the JSON: the provisioner re-reads the directory on a timer,
+so a save shows up without restarting the container.
+
+Adding a dashboard is a file — drop another `.json` next to `tf-overview.json`
+and it is picked up. Reference data sources by the pinned UIDs (`tf-tempo`,
+`tf-prometheus`) rather than by name; that pinning is what lets checked-in JSON
+survive a fresh volume.
 
 #### Swapping pieces out
 
@@ -293,7 +338,9 @@ likely to duplicate something you already run:
   `remote_write` needs a `--web.enable-remote-write-receiver` target — repoint
   it or drop that block from `docker/observability/tempo.yaml`.
 - **Already have Grafana?** Delete the `grafana` service and copy the two data
-  sources and three correlations out of that same file.
+  sources and three correlations out of that same file, plus the dashboards in
+  `docker/observability/dashboards/`. They address data sources by UID, so keep
+  `tf-tempo` / `tf-prometheus` or rewrite the references.
 - **Already have a trace backend?** Keep Grafana and Prometheus if you want
   them, delete `tempo`, and set `TF_TRACES_ENDPOINT` to your collector.
 - **Want no tracing?** Delete `tempo` and set `TF_TRACES_ENDPOINT=off`. Without
@@ -364,9 +411,15 @@ container; the file's comments walk through the shape.
 Two things wire the metrics half in, both provisioned:
 
 - **Exemplars.** Prometheus runs with `--enable-feature=exemplar-storage`, so
-  the trace IDs TF attaches to histogram samples are stored, and the Prometheus
+  the trace IDs attached to histogram samples are stored, and the Prometheus
   data source turns each into a link into Tempo. A spike in a latency panel
-  becomes a click through to one slow request.
+  becomes a click through to one slow request — that is what the overview's p95
+  panel does. Two producers feed it and they spell the label differently: TF's
+  own OTel SDK writes `trace_id` on the `tf_*` histograms, Tempo's
+  metrics-generator writes `traceID` on `traces_spanmetrics_*`. The data source
+  declares both, because Grafana only renders the link when a declared name
+  matches a label the exemplar actually carries — with the spelling missing you
+  get a dot you can hover but not click.
 - **Span metrics and the service graph.** Tempo's metrics-generator derives RED
   metrics (`traces_spanmetrics_*`) and service-graph edges from the spans it
   receives and remote-writes them to Prometheus. That is what fills the trace

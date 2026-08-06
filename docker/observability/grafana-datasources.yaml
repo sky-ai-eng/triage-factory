@@ -126,10 +126,21 @@ datasources:
     url: http://prometheus:9090
     jsonData:
       # The metrics→traces direction, and the only genuine bridge between the
-      # two systems: TF's OTel SDK annotates histogram samples with the trace
-      # ID of the request that produced them (`trace_id`), Prometheus stores
-      # them as exemplars, and this turns each one into a link into Tempo.
+      # two systems: a histogram sample annotated with the trace ID of the
+      # request that produced it, which this turns into a link into Tempo.
       # Needs --enable-feature=exemplar-storage on the Prometheus container.
+      #
+      # Two entries because the two exemplar producers on this stack spell
+      # the label differently, and Grafana only renders the link when an
+      # entry's `name` matches a label the exemplar actually carries — a
+      # missing spelling is a dot you can hover but not click:
+      #   trace_id  TF's own OTel SDK, on tf_* histograms it exports (the
+      #             OpenMetrics/OTel spelling).
+      #   traceID   Tempo's metrics-generator, on the traces_spanmetrics_*
+      #             series it remote-writes — which is what the overview
+      #             dashboard's latency panel plots.
       exemplarTraceIdDestinations:
         - name: trace_id
+          datasourceUid: tf-tempo
+        - name: traceID
           datasourceUid: tf-tempo
