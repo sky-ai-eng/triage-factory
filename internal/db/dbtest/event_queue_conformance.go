@@ -37,15 +37,23 @@ const (
 
 // enqueueOn is a local helper: Enqueue a ci_check_failed event against
 // entityID and return the event id. ci_check_failed is a seeded catalog
-// entry, so the events.event_type FK is satisfied.
+// entry, so the events.event_type FK is satisfied. No traceparent — the
+// untraced producer is the ordinary case, and the round-trip of a real one
+// has its own case below.
 func enqueueOn(t *testing.T, ctx context.Context, s db.EventQueueStore, orgID, entityID string) string {
+	t.Helper()
+	return enqueueTracedOn(t, ctx, s, orgID, entityID, "")
+}
+
+// enqueueTracedOn is enqueueOn with the producer's trace context attached.
+func enqueueTracedOn(t *testing.T, ctx context.Context, s db.EventQueueStore, orgID, entityID, traceparent string) string {
 	t.Helper()
 	id, err := s.Enqueue(ctx, orgID, domain.Event{
 		EntityID:     &entityID,
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		DedupKey:     "",
 		MetadataJSON: "",
-	})
+	}, traceparent)
 	if err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
@@ -75,6 +83,9 @@ func enqueueOn(t *testing.T, ctx context.Context, s db.EventQueueStore, orgID, e
 //   - PruneDone deletes done rows older than the cutoff; failed rows
 //     are retained.
 //   - ListForEntity orders by id.
+//   - traceparent round-trips through the claim: what the producer stamped
+//     is what the consumer reads back, and an untraced producer reads back
+//     empty rather than as anything a link could be built from.
 func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -395,6 +406,53 @@ func RunEventQueueStoreConformance(t *testing.T, mk EventQueueStoreFactory) {
 		rows, _ := s.ListForEntity(ctx, orgID, entityID)
 		if len(rows) != 1 || rows[0].Status != domain.QueuedEventStatusFailed {
 			t.Errorf("after prune, only the failed row should remain, got %+v", rows)
+		}
+	})
+
+	// The producer's trace context has to survive the hop intact: the
+	// consumer builds a span link out of exactly these bytes, and a
+	// truncated or re-encoded value yields an invalid SpanContext, which
+	// degrades silently to "no link" — the failure mode nobody notices.
+	t.Run("Traceparent_round_trips_through_claim", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+		enqueueTracedOn(t, ctx, s, orgID, entityID, traceparent)
+
+		rows, err := s.ListForEntity(ctx, orgID, entityID)
+		if err != nil {
+			t.Fatalf("ListForEntity: %v", err)
+		}
+		if len(rows) != 1 || rows[0].Traceparent != traceparent {
+			t.Fatalf("stored traceparent = %+v, want %q", rows, traceparent)
+		}
+
+		claimed, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+		if err != nil || claimed == nil {
+			t.Fatalf("ClaimNext: got=%v err=%v", claimed, err)
+		}
+		if claimed.Traceparent != traceparent {
+			t.Errorf("claimed traceparent = %q, want %q — the claim is where the consumer picks the link up", claimed.Traceparent, traceparent)
+		}
+	})
+
+	// An untraced producer is the common case (tracing disabled, or a path
+	// nobody instrumented), and it must be indistinguishable from any other
+	// row apart from carrying no context.
+	t.Run("Traceparent_absent_reads_empty", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t)
+		enqueueOn(t, ctx, s, orgID, entityID)
+
+		claimed, err := s.ClaimNext(ctx, conformanceExecutorID, conformanceBootEpoch)
+		if err != nil || claimed == nil {
+			t.Fatalf("ClaimNext: got=%v err=%v", claimed, err)
+		}
+		if claimed.Traceparent != "" {
+			t.Errorf("traceparent = %q, want empty for an untraced producer", claimed.Traceparent)
+		}
+		if claimed.Status != domain.QueuedEventStatusProcessing {
+			t.Errorf("status = %q, want processing — an untraced row claims like any other", claimed.Status)
 		}
 	})
 

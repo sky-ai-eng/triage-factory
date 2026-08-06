@@ -185,7 +185,7 @@ func TestPollGitHubOnce_RateLimitCursorResumesAcrossCycles(t *testing.T) {
 
 	m := &Manager{
 		database: database,
-		pub:      bus,
+		pub:      busPublisher{bus: bus},
 		tasks:    stores.Tasks,
 		entities: stores.Entities,
 		repos:    stores.Repos,
@@ -299,7 +299,7 @@ func TestRunGitHubCycleForOrg_CursorSurvivesRepoRemoval(t *testing.T) {
 
 	m := &Manager{
 		database: database,
-		pub:      bus,
+		pub:      busPublisher{bus: bus},
 		tasks:    stores.Tasks,
 		entities: stores.Entities,
 		repos:    stores.Repos,
@@ -411,7 +411,7 @@ func TestRunGitHubCycleForOrg_UnresolvedInstallationDoesNotFalselyResetCursor(t 
 
 	m := &Manager{
 		database: database,
-		pub:      bus,
+		pub:      busPublisher{bus: bus},
 		tasks:    stores.Tasks,
 		entities: stores.Entities,
 		repos:    stores.Repos,

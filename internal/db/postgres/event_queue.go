@@ -29,7 +29,7 @@ func newEventQueueStore(conn *sql.DB) db.EventQueueStore {
 
 var _ db.EventQueueStore = (*eventQueueStore)(nil)
 
-func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.Event) (string, error) {
+func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.Event, traceparent string) (string, error) {
 	tx, err := s.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -48,10 +48,13 @@ func (s *eventQueueStore) Enqueue(ctx context.Context, orgID string, evt domain.
 	if evt.EntityID != nil && *evt.EntityID != "" {
 		entityID = *evt.EntityID
 	}
+	// NULLIF on traceparent: an untraced producer stores NULL rather than
+	// an empty string, so "no context to link" is one value in the column,
+	// not two.
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO public.event_queue (org_id, event_id, entity_id, event_type, status)
-		VALUES ($1, $2, $3, $4, 'pending')
-	`, orgID, id, entityID, evt.EventType); err != nil {
+		INSERT INTO public.event_queue (org_id, event_id, entity_id, event_type, status, traceparent)
+		VALUES ($1, $2, $3, $4, 'pending', NULLIF($5, ''))
+	`, orgID, id, entityID, evt.EventType, traceparent); err != nil {
 		return "", err
 	}
 	if err := tx.Commit(); err != nil {
@@ -83,7 +86,8 @@ func (s *eventQueueStore) ClaimNext(ctx context.Context, executorID string, boot
 			LIMIT 1
 		)
 		RETURNING id, org_id, event_id, entity_id, event_type,
-		          status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at
+		          status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at,
+		          COALESCE(traceparent, '')
 	`, executorID, bootEpoch)
 	return scanPgQueuedEvent(row)
 }
@@ -156,7 +160,8 @@ func (s *eventQueueStore) PruneDone(ctx context.Context, before time.Time) (int,
 func (s *eventQueueStore) ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.QueuedEvent, error) {
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT id, org_id, event_id, entity_id, event_type,
-		       status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at
+		       status, attempts, COALESCE(last_error, ''), enqueued_at, claimed_at, processed_at,
+		       COALESCE(traceparent, '')
 		FROM public.event_queue
 		WHERE org_id = $1 AND entity_id = $2
 		ORDER BY id
@@ -189,6 +194,7 @@ func scanPgQueuedEvent(row *sql.Row) (*domain.QueuedEvent, error) {
 	err := row.Scan(
 		&qe.ID, &qe.OrgID, &qe.EventID, &entityID, &qe.EventType,
 		&qe.Status, &qe.Attempts, &qe.LastError, &qe.EnqueuedAt, &claimedAt, &processedAt,
+		&qe.Traceparent,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -211,6 +217,7 @@ func scanPgQueuedEventRow(rows *sql.Rows) (*domain.QueuedEvent, error) {
 	err := rows.Scan(
 		&qe.ID, &qe.OrgID, &qe.EventID, &entityID, &qe.EventType,
 		&qe.Status, &qe.Attempts, &qe.LastError, &qe.EnqueuedAt, &claimedAt, &processedAt,
+		&qe.Traceparent,
 	)
 	if err != nil {
 		return nil, err

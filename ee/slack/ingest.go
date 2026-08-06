@@ -86,7 +86,7 @@ type entityFinder interface {
 type ingestPipeline struct {
 	entities   entityFinder
 	deliveries slackstore.DeliveryStore
-	publish    func(domain.Event)
+	publish    func(context.Context, domain.Event)
 	// identity resolves a message's sender to a TF user — both ingest branches
 	// dispatch it, since an engaged-thread follow-up's sender may never appear
 	// in an app_mention. Best-effort and detached — see resolveSender's doc.
@@ -207,7 +207,7 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 		p.title.dispatch(ws, entity.ID, ev.Channel)
 	}
 
-	if err := p.publishMessage(ws, ev, entity.ID, true, occurredAt); err != nil {
+	if err := p.publishMessage(ctx, ws, ev, entity.ID, true, occurredAt); err != nil {
 		return outcomeError, err
 	}
 
@@ -298,7 +298,7 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 		return dropDuplicate, nil
 	}
 
-	if err := p.publishMessage(ws, ev, entity.ID, false, parseSlackTS(ev.TS)); err != nil {
+	if err := p.publishMessage(ctx, ws, ev, entity.ID, false, parseSlackTS(ev.TS)); err != nil {
 		return outcomeError, err
 	}
 
@@ -319,7 +319,7 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 // slack:message event both ingest branches emit — identical but for the
 // Mentioned flag (an explicit @-mention vs an engaged-thread follow-up) and
 // the resolved entity the event hangs off.
-func (p *ingestPipeline) publishMessage(ws slackstore.Workspace, ev inboundMention, entityID string, mentioned bool, occurredAt time.Time) error {
+func (p *ingestPipeline) publishMessage(ctx context.Context, ws slackstore.Workspace, ev inboundMention, entityID string, mentioned bool, occurredAt time.Time) error {
 	metaJSON, err := json.Marshal(SlackMessageMetadata{
 		WorkspaceID: ws.WorkspaceID,
 		APIAppID:    ws.APIAppID,
@@ -334,7 +334,7 @@ func (p *ingestPipeline) publishMessage(ws slackstore.Workspace, ev inboundMenti
 	if err != nil {
 		return fmt.Errorf("marshal slack message metadata: %w", err)
 	}
-	p.publish(domain.Event{
+	p.publish(ctx, domain.Event{
 		OrgID:        ws.OrgID,
 		EventType:    domain.EventSlackMessage,
 		EntityID:     &entityID,

@@ -79,7 +79,11 @@ type ExtensionAPI interface {
 	// request-time use and inside OnReady hooks (which fire post-wiring) —
 	// the install closure runs before the ingestor is wired, so an
 	// extension must NOT call this from its install closure.
-	PublishEvent(evt domain.Event)
+	//
+	// Pass the request's ctx where there is one: the ingestor stamps its
+	// trace context onto the durable row, so an inbound webhook's server
+	// span becomes the producer the event's later routing links back to.
+	PublishEvent(ctx context.Context, evt domain.Event)
 	// Bus returns the in-process event bus, for subscribe-side consumers.
 	// Read-through to the live server; nil until app wiring completes. Safe
 	// for request-time use and inside OnReady hooks (which fire post-wiring)
@@ -259,12 +263,12 @@ func (a serverExtensionAPI) Bus() *eventbus.Bus         { return a.s.bus }
 // back to a.s.bus.Publish when unwired — that would silently skip the
 // durable outbox, exactly the loss internal/ingest exists to prevent (see
 // ingest.go's own drop-loudly convention on an enqueue failure).
-func (a serverExtensionAPI) PublishEvent(evt domain.Event) {
+func (a serverExtensionAPI) PublishEvent(ctx context.Context, evt domain.Event) {
 	if a.s.ingestor == nil {
-		serverLog.Error("ExtensionAPI.PublishEvent: ingestor not wired, dropping event", "event_type", evt.EventType)
+		serverLog.ErrorContext(ctx, "ExtensionAPI.PublishEvent: ingestor not wired, dropping event", "event_type", evt.EventType)
 		return
 	}
-	a.s.ingestor.Publish(evt)
+	a.s.ingestor.Publish(ctx, evt)
 }
 
 // OnReady collects the hook onto the server's readyHooks slice. Called

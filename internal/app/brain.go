@@ -165,6 +165,15 @@ func (a *App) runShippedDefaultsSync(ctx context.Context) {
 // dispatch gate (handleCtlMessage's isBrainHolder check) reads false the
 // moment the elector demotes. No component here starts a new unit of
 // work after this call returns.
+//
+// The drain worker's unit is the CLAIMED ROW, and it finishes the one it
+// holds — routing and the terminal mark included — before stopping. That
+// is a stated contract, not an accident of where the cancellation happens
+// to be checked: the row is already 'processing', and the only thing that
+// rescues a stranded 'processing' row is ownership-scoped boot recovery,
+// which a demoted pod never reaches because it does not restart. So the
+// worker pays out the debt it took on (a bounded handful of DB writes)
+// and declines the next one.
 func (a *App) stopBrain(reason string) {
 	a.brainMu.Lock()
 	defer a.brainMu.Unlock()

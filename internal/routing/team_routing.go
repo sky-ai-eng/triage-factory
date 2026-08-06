@@ -33,11 +33,11 @@ import (
 // The per-event result is memoized in cache, keyed by team id. A single
 // event has one source/entity, so the repo and project lookups for a
 // given team collapse to one cache entry.
-func (r *Router) handlerScopeMatchesEvent(evt domain.Event, h domain.EventHandler, cache map[string]bool) bool {
+func (r *Router) handlerScopeMatchesEvent(ctx context.Context, evt domain.Event, h domain.EventHandler, cache map[string]bool) bool {
 	if h.TeamID == "" {
 		return true
 	}
-	return r.teamTracksEventScopeCached(evt, h.TeamID, cache)
+	return r.teamTracksEventScopeCached(ctx, evt, h.TeamID, cache)
 }
 
 // teamTracksEventScopeCached memoizes teamTracksEventScope per team through
@@ -47,11 +47,11 @@ func (r *Router) handlerScopeMatchesEvent(evt domain.Event, h domain.EventHandle
 // matched handler and the author's/assignee's team set costs at most one store
 // lookup per event. The empty team id is never passed here — handlerScopeMatchesEvent
 // short-circuits it, and ladder team sets never contain it.
-func (r *Router) teamTracksEventScopeCached(evt domain.Event, teamID string, cache map[string]bool) bool {
+func (r *Router) teamTracksEventScopeCached(ctx context.Context, evt domain.Event, teamID string, cache map[string]bool) bool {
 	if allowed, ok := cache[teamID]; ok {
 		return allowed
 	}
-	allowed := r.teamTracksEventScope(evt, teamID)
+	allowed := r.teamTracksEventScope(ctx, evt, teamID)
 	cache[teamID] = allowed
 	return allowed
 }
@@ -61,21 +61,21 @@ func (r *Router) teamTracksEventScopeCached(evt domain.Event, teamID string, cac
 // registered event source (e.g. ee/slack) → its TracksScope hook. Each
 // branch fails open when its store is unwired so the gate degrades to "no
 // drop" in pre-ticket / test wiring; any other source is ungated.
-func (r *Router) teamTracksEventScope(evt domain.Event, teamID string) bool {
+func (r *Router) teamTracksEventScope(ctx context.Context, evt domain.Event, teamID string) bool {
 	switch {
 	case strings.HasPrefix(evt.EventType, "github:"):
 		if r.teamRepos == nil {
 			return true
 		}
-		return r.teamTracksEventRepo(evt, teamID)
+		return r.teamTracksEventRepo(ctx, evt, teamID)
 	case strings.HasPrefix(evt.EventType, "jira:"):
 		if r.jiraRules == nil {
 			return true
 		}
-		return r.teamTracksEventProject(evt, teamID)
+		return r.teamTracksEventProject(ctx, evt, teamID)
 	default:
 		if hooks, ok := sourceHooksFor(evt.EventType); ok {
-			return hooks.TracksScope(context.Background(), evt, teamID)
+			return hooks.TracksScope(ctx, evt, teamID)
 		}
 		return true
 	}
@@ -89,7 +89,7 @@ func (r *Router) teamTracksEventScope(evt domain.Event, teamID string) bool {
 // transient DB blip or an unexpected metadata shape is worse than the
 // pre-ticket behavior, and the events feeding this path come from TF's
 // own trusted poller.
-func (r *Router) teamTracksEventRepo(evt domain.Event, teamID string) bool {
+func (r *Router) teamTracksEventRepo(ctx context.Context, evt domain.Event, teamID string) bool {
 	var m struct {
 		Repo string `json:"repo"`
 	}
@@ -100,7 +100,7 @@ func (r *Router) teamTracksEventRepo(evt domain.Event, teamID string) bool {
 	if !ok || owner == "" || name == "" {
 		return true
 	}
-	tracks, err := r.teamRepos.TracksRepoSystem(context.Background(), teamID, owner, name)
+	tracks, err := r.teamRepos.TracksRepoSystem(ctx, teamID, owner, name)
 	if err != nil {
 		routerLog.Warn("team-repo gate lookup failed, allowing", "team_id", teamID, "repo", m.Repo, "error", err)
 		return true
@@ -116,14 +116,14 @@ func (r *Router) teamTracksEventRepo(evt domain.Event, teamID string) bool {
 // store error: dropping a legitimate task on a transient DB blip or an
 // unexpected metadata shape is worse than the pre-ticket behavior, and
 // the events feeding this path come from TF's own trusted poller.
-func (r *Router) teamTracksEventProject(evt domain.Event, teamID string) bool {
+func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, teamID string) bool {
 	var m struct {
 		Project string `json:"project"`
 	}
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.Project == "" {
 		return true
 	}
-	tracks, err := r.jiraRules.TracksProjectSystem(context.Background(), teamID, m.Project)
+	tracks, err := r.jiraRules.TracksProjectSystem(ctx, teamID, m.Project)
 	if err != nil {
 		routerLog.Warn("team-project gate lookup failed, allowing", "team_id", teamID, "project", m.Project, "error", err)
 		return true
@@ -150,13 +150,13 @@ func (r *Router) teamTracksEventProject(evt domain.Event, teamID string) bool {
 // inert in exactly the wiring where handlerScopeMatchesEvent is (pre-config /
 // tests that don't thread the tracking stores), and local N=1 is unaffected (the
 // sole team tracks every configured repo).
-func (r *Router) trackingTeams(evt domain.Event, teams []string, cache map[string]bool) []string {
+func (r *Router) trackingTeams(ctx context.Context, evt domain.Event, teams []string, cache map[string]bool) []string {
 	if len(teams) == 0 {
 		return teams
 	}
 	out := make([]string, 0, len(teams))
 	for _, t := range teams {
-		if r.teamTracksEventScopeCached(evt, t, cache) {
+		if r.teamTracksEventScopeCached(ctx, evt, t, cache) {
 			out = append(out, t)
 		}
 	}
@@ -210,7 +210,7 @@ func maxRuleDefaultPriority(rules []domain.EventHandler) float64 {
 // are unwired (test / pre-ticket wiring). Claims-free ...System lookups
 // throughout: the router runs on the eventbus subscriber goroutine with no
 // JWT context.
-func (r *Router) reviewRequestVisibilityTeams(orgID string, evt domain.Event) (teams []string, scoped bool) {
+func (r *Router) reviewRequestVisibilityTeams(ctx context.Context, orgID string, evt domain.Event) (teams []string, scoped bool) {
 	var meta events.GitHubPRReviewRequestedMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 		return nil, false
@@ -233,7 +233,7 @@ func (r *Router) reviewRequestVisibilityTeams(orgID string, evt domain.Event) (t
 		if !ok || orgLogin == "" || slug == "" {
 			return nil, true // malformed handle → no team
 		}
-		tids, err := r.githubGroups.TeamsForGroupSystem(context.Background(), orgID, orgLogin, slug)
+		tids, err := r.githubGroups.TeamsForGroupSystem(ctx, orgID, orgLogin, slug)
 		if err != nil {
 			routerLog.Error("review_requested: github-team mapping lookup failed", "requested_team", meta.RequestedTeam, "error", err)
 			return nil, true
@@ -245,7 +245,7 @@ func (r *Router) reviewRequestVisibilityTeams(orgID string, evt domain.Event) (t
 		if r.users == nil || r.teams == nil || r.orgs == nil {
 			return nil, false
 		}
-		orgSet, err := r.orgs.GetSettingsSystem(context.Background(), orgID)
+		orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
 		if err != nil {
 			routerLog.Error("review_requested: read org settings for host failed", "error", err)
 			return nil, true
@@ -255,13 +255,13 @@ func (r *Router) reviewRequestVisibilityTeams(orgID string, evt domain.Event) (t
 		// OAuth login-claim binds to github.com literally); the raw empty
 		// setting would look up host="" and drop the task.
 		host := dbpkg.EffectiveGitHubHost(orgSet.GitHubBaseURL)
-		userIDs, err := r.users.UserIDsForGitHubLoginSystem(context.Background(), host, meta.RequestedLogin)
+		userIDs, err := r.users.UserIDsForGitHubLoginSystem(ctx, host, meta.RequestedLogin)
 		if err != nil {
 			routerLog.Error("review_requested: reverse login lookup failed", "requested_login", meta.RequestedLogin, "error", err)
 			return nil, true
 		}
 		for _, uid := range userIDs {
-			tids, terr := r.teams.TeamIDsForUserInOrgSystem(context.Background(), orgID, uid)
+			tids, terr := r.teams.TeamIDsForUserInOrgSystem(ctx, orgID, uid)
 			if terr != nil {
 				routerLog.Error("review_requested: teams for user lookup failed", "user_id", uid, "error", terr)
 				continue
@@ -305,11 +305,11 @@ func (r *Router) reviewRequestVisibilityTeams(orgID string, evt domain.Event) (t
 //
 // Claims-free ...System lookups throughout: the router runs on the eventbus
 // goroutine with no JWT context.
-func (r *Router) authorCentricOwner(orgID string, evt domain.Event, entityID string, scopeCache map[string]bool) (owner string, ownerSet []string) {
+func (r *Router) authorCentricOwner(ctx context.Context, orgID string, evt domain.Event, entityID string, scopeCache map[string]bool) (owner string, ownerSet []string) {
 	// Tiers 1+2 — structural owner (owning_team_id override, else a
 	// team-visibility project's team). One store query.
 	if r.entities != nil {
-		if t, err := r.entities.OwningTeamForEntitySystem(context.Background(), orgID, entityID); err != nil {
+		if t, err := r.entities.OwningTeamForEntitySystem(ctx, orgID, entityID); err != nil {
 			routerLog.Error("author-centric owner: structural lookup failed", "entity_id", entityID, "error", err)
 		} else if t != "" {
 			return t, []string{t}
@@ -321,7 +321,7 @@ func (r *Router) authorCentricOwner(orgID string, evt domain.Event, entityID str
 	// NULL-owned priors are excluded by the store's team_id filter, so this
 	// can't fall into the review-first trap or be anchored by an unowned task.
 	if r.tasks != nil {
-		if t, err := r.tasks.OwnerTeamForLatestTaskInTypesSystem(context.Background(), orgID, entityID, authorCentricGitHubEventTypes); err != nil {
+		if t, err := r.tasks.OwnerTeamForLatestTaskInTypesSystem(ctx, orgID, entityID, authorCentricGitHubEventTypes); err != nil {
 			routerLog.Error("author-centric owner: prior-task lookup failed", "entity_id", entityID, "error", err)
 		} else if t != "" {
 			return t, []string{t}
@@ -336,7 +336,7 @@ func (r *Router) authorCentricOwner(orgID string, evt domain.Event, entityID str
 	// closes. If the gate empties the set (no member team tracks the repo) the
 	// author is treated like an external one: no member owner, deferring to any
 	// explicit watch handler exactly as an external/non-TF author would.
-	teams := r.trackingTeams(evt, r.authorTeams(orgID, evt), scopeCache)
+	teams := r.trackingTeams(ctx, evt, r.authorTeams(ctx, orgID, evt), scopeCache)
 	switch len(teams) {
 	case 0:
 		return "", nil
@@ -353,7 +353,7 @@ func (r *Router) authorCentricOwner(orgID string, evt domain.Event, entityID str
 // reverse lookup is the regression guard for a login bound to two users).
 // Returns an empty slice when the author isn't a TF user (dependabot /
 // external) or the identity stores are unwired.
-func (r *Router) authorTeams(orgID string, evt domain.Event) []string {
+func (r *Router) authorTeams(ctx context.Context, orgID string, evt domain.Event) []string {
 	if r.users == nil || r.teams == nil || r.orgs == nil {
 		return nil
 	}
@@ -363,7 +363,7 @@ func (r *Router) authorTeams(orgID string, evt domain.Event) []string {
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.Author == "" {
 		return nil
 	}
-	orgSet, err := r.orgs.GetSettingsSystem(context.Background(), orgID)
+	orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
 		routerLog.Error("author-centric owner: read org settings for host failed", "error", err)
 		return nil
@@ -372,14 +372,14 @@ func (r *Router) authorTeams(orgID string, evt domain.Event) []string {
 	// identities captured under the canonical host — the raw empty setting
 	// would look up host="" and resolve nobody.
 	host := dbpkg.EffectiveGitHubHost(orgSet.GitHubBaseURL)
-	userIDs, err := r.users.UserIDsForGitHubLoginSystem(context.Background(), host, m.Author)
+	userIDs, err := r.users.UserIDsForGitHubLoginSystem(ctx, host, m.Author)
 	if err != nil {
 		routerLog.Error("author-centric owner: reverse login lookup failed", "author", m.Author, "error", err)
 		return nil
 	}
 	set := map[string]struct{}{}
 	for _, uid := range userIDs {
-		tids, terr := r.teams.TeamIDsForUserInOrgSystem(context.Background(), orgID, uid)
+		tids, terr := r.teams.TeamIDsForUserInOrgSystem(ctx, orgID, uid)
 		if terr != nil {
 			routerLog.Error("author-centric owner: teams for user lookup failed", "user_id", uid, "error", terr)
 			continue
@@ -426,10 +426,10 @@ func (r *Router) authorTeams(orgID string, evt domain.Event) []string {
 //
 // Claims-free ...System lookups throughout: the router runs on the eventbus
 // goroutine with no JWT context.
-func (r *Router) assigneeCentricJiraOwner(orgID string, evt domain.Event, entityID string, scopeCache map[string]bool) (owner string, ownerSet []string) {
+func (r *Router) assigneeCentricJiraOwner(ctx context.Context, orgID string, evt domain.Event, entityID string, scopeCache map[string]bool) (owner string, ownerSet []string) {
 	// Tier 1 — structural owner (owning_team_id override). One store query.
 	if r.entities != nil {
-		if t, err := r.entities.OwningTeamForEntitySystem(context.Background(), orgID, entityID); err != nil {
+		if t, err := r.entities.OwningTeamForEntitySystem(ctx, orgID, entityID); err != nil {
 			routerLog.Error("assignee-centric owner: structural lookup failed", "entity_id", entityID, "error", err)
 		} else if t != "" {
 			return t, []string{t}
@@ -448,7 +448,7 @@ func (r *Router) assigneeCentricJiraOwner(orgID string, evt domain.Event, entity
 	// consistency GitHub gets without re-attaching to retired ownership. NULL-
 	// owned active tasks are skipped (an unresolved owner can't anchor).
 	if r.tasks != nil {
-		if t := r.latestActiveOwnedTaskTeam(orgID, entityID, assigneeCentricJiraEventSet); t != "" {
+		if t := r.latestActiveOwnedTaskTeam(ctx, orgID, entityID, assigneeCentricJiraEventSet); t != "" {
 			return t, []string{t}
 		}
 	}
@@ -458,7 +458,7 @@ func (r *Router) assigneeCentricJiraOwner(orgID string, evt domain.Event, entity
 	// author ladder: a team the assignee merely belongs to but that tracks none
 	// of this project must not become a co-owner in the visibility set). An empty
 	// gated set falls through to the external-assignee semantics below.
-	teams := r.trackingTeams(evt, r.assigneeTeams(orgID, evt), scopeCache)
+	teams := r.trackingTeams(ctx, evt, r.assigneeTeams(ctx, orgID, evt), scopeCache)
 	switch len(teams) {
 	case 0:
 		return "", nil
@@ -475,7 +475,7 @@ func (r *Router) assigneeCentricJiraOwner(orgID string, evt domain.Event, entity
 // guard for one account bound to two users). Returns an empty slice when the
 // issue is unassigned, the assignee isn't a TF user (external collaborator), or
 // the identity stores are unwired.
-func (r *Router) assigneeTeams(orgID string, evt domain.Event) []string {
+func (r *Router) assigneeTeams(ctx context.Context, orgID string, evt domain.Event) []string {
 	if r.users == nil || r.teams == nil || r.orgs == nil {
 		return nil
 	}
@@ -487,7 +487,7 @@ func (r *Router) assigneeTeams(orgID string, evt domain.Event) []string {
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.AssigneeAccountID == "" {
 		return nil
 	}
-	orgSet, err := r.orgs.GetSettingsSystem(context.Background(), orgID)
+	orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
 		routerLog.Error("assignee-centric owner: read org settings for host failed", "error", err)
 		return nil
@@ -505,14 +505,14 @@ func (r *Router) assigneeTeams(orgID string, evt domain.Event) []string {
 	// and then no identity exists to find, so the two are never out of step.
 	// An empty host (Jira not configured for identity) therefore resolves
 	// nobody, correctly: there are no member identities to route to.
-	userIDs, err := r.users.UserIDsForJiraAccountSystem(context.Background(), orgSet.JiraBaseURL, m.AssigneeAccountID)
+	userIDs, err := r.users.UserIDsForJiraAccountSystem(ctx, orgSet.JiraBaseURL, m.AssigneeAccountID)
 	if err != nil {
 		routerLog.Error("assignee-centric owner: reverse account lookup failed", "assignee_account_id", m.AssigneeAccountID, "error", err)
 		return nil
 	}
 	set := map[string]struct{}{}
 	for _, uid := range userIDs {
-		tids, terr := r.teams.TeamIDsForUserInOrgSystem(context.Background(), orgID, uid)
+		tids, terr := r.teams.TeamIDsForUserInOrgSystem(ctx, orgID, uid)
 		if terr != nil {
 			routerLog.Error("assignee-centric owner: teams for user lookup failed", "user_id", uid, "error", terr)
 			continue
@@ -664,8 +664,8 @@ func orderTeamsByRulePriority(vis map[string]struct{}, matchedRules []domain.Eve
 // reassignable-entity counterpart to the all-statuses
 // OwnerTeamForLatestTaskInTypesSystem the GitHub ladder uses. Claims-free
 // (...System); the router runs on the eventbus goroutine with no JWT context.
-func (r *Router) latestActiveOwnedTaskTeam(orgID, entityID string, types map[string]bool) string {
-	active, err := r.tasks.FindActiveByEntitySystem(context.Background(), orgID, entityID)
+func (r *Router) latestActiveOwnedTaskTeam(ctx context.Context, orgID, entityID string, types map[string]bool) string {
+	active, err := r.tasks.FindActiveByEntitySystem(ctx, orgID, entityID)
 	if err != nil {
 		routerLog.Error("assignee-centric owner: active-task lookup failed", "entity_id", entityID, "error", err)
 		return ""

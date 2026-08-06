@@ -11,6 +11,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Ingestor routes an emitted event two ways:
@@ -49,9 +54,15 @@ func New(bus *eventbus.Bus, queue db.EventQueueStore, wake func()) *Ingestor {
 // Publish durably enqueues router-bound events (and wakes the drainer),
 // then forwards every event to the ephemeral bus. evt.OrgID must already
 // be stamped by the caller (the tracker does this in its publish()).
-func (i *Ingestor) Publish(evt domain.Event) {
+//
+// ctx is the emitting work's — a poll cycle, a Slack webhook request — and
+// is what makes the durable hop traceable: the enqueue span below is the
+// producer an event's later routing links back to. A caller with no span
+// active (an untraced path, or tracing disabled) stamps nothing and the
+// row routes exactly as it always did.
+func (i *Ingestor) Publish(ctx context.Context, evt domain.Event) {
 	if i.queue != nil && routing.RouterBound(evt.EventType) {
-		id, err := i.queue.Enqueue(context.Background(), evt.OrgID, evt)
+		id, err := i.enqueue(ctx, evt)
 		if err != nil {
 			// The durability boundary failed — this event will not route
 			// (no events row, no task). That's the loss this package exists
@@ -63,7 +74,7 @@ func (i *Ingestor) Publish(evt domain.Event) {
 			// push a phantom live update that has no durable backing for
 			// the frontend to correlate against. Dropping it (the next poll
 			// re-emits) is cleaner than a broadcast we can't stand behind.
-			ingestLog.Error("durable enqueue failed; dropping (next poll re-diffs)", "event_type", evt.EventType, "org", evt.OrgID, "error", err)
+			ingestLog.ErrorContext(ctx, "durable enqueue failed; dropping (next poll re-diffs)", "event_type", evt.EventType, "org", evt.OrgID, "error", err)
 			return
 		}
 		evt.ID = id // so the bus event and the queue row agree on the id
@@ -72,4 +83,38 @@ func (i *Ingestor) Publish(evt domain.Event) {
 		}
 	}
 	i.bus.Publish(evt)
+}
+
+// enqueue is the durable half, wrapped in the producer span whose context
+// travels on the queue row. The span is started BEFORE the traceparent is
+// rendered, so the consumer links to this enqueue rather than to whatever
+// happened to be active around it — one poll cycle emits many events, and
+// "which emit was mine" is the question a link has to answer.
+//
+// The bus fan-out gets no span of its own: it is a coalescing, lossy
+// broadcast to subscribers that root their own cycles, so there is nothing
+// for a span there to measure or a link there to point at.
+func (i *Ingestor) enqueue(ctx context.Context, evt domain.Event) (string, error) {
+	ctx, span := tracer.Start(ctx, "event.enqueue",
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(telemetry.EventType(evt.EventType), telemetry.OrgID(evt.OrgID)))
+	defer span.End()
+
+	id, err := i.queue.Enqueue(ctx, evt.OrgID, evt, traceparentFrom(ctx))
+	if err != nil {
+		span.SetStatus(codes.Error, "enqueue")
+		return "", err
+	}
+	span.SetAttributes(telemetry.EventID(id))
+	return id, nil
+}
+
+// traceparentFrom renders ctx's active span as the W3C traceparent the
+// queue row carries. Empty when nothing is active — tracing disabled (the
+// global propagator is a no-op), or a producer nobody has instrumented
+// yet — which stores as NULL and costs the consumer only its link.
+func traceparentFrom(ctx context.Context) string {
+	carrier := propagation.MapCarrier{}
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	return carrier["traceparent"]
 }

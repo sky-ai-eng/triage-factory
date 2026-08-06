@@ -5974,7 +5974,25 @@ CREATE TABLE public.event_queue (
     -- (executor_id = self AND boot_epoch < the current boot's epoch), never
     -- a live sibling's claimed-but-still-processing row.
     executor_id  text,
-    boot_epoch   bigint
+    boot_epoch   bigint,
+    -- traceparent carries the W3C trace context of whoever enqueued this
+    -- row, so the routing of an event ties back to the poll cycle that
+    -- emitted it. The queue row is a message envelope — the one place in
+    -- this schema a trace id belongs (the Kafka-header / Sidekiq-payload
+    -- pattern), and its retention already matches a trace backend's, since
+    -- done rows are pruned after a week. Domain tables (events, tasks,
+    -- conversations) deliberately carry none: they outlive traces by years,
+    -- so such a column would mostly point at spans that no longer exist,
+    -- and domain ids as span attributes give the reverse join for free.
+    --
+    -- NULL is the normal state, not a degraded one: a row enqueued with
+    -- tracing off, from an untraced path, or by a process with no exporter
+    -- configured has no context to carry, and routes identically — it just
+    -- gets no link. The consumer LINKS to this context rather than
+    -- descending from it: one poll cycle emits N events routed later, and
+    -- possibly on another pod, so parenting would build a single sprawling
+    -- multi-pod trace instead of N navigable ones.
+    traceparent  text
 );
 
 ALTER TABLE ONLY public.event_queue

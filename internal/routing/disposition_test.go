@@ -367,7 +367,7 @@ func TestHandleEvent_BecameAtomicSuppression_PublishesTasklessNotError(t *testin
 
 	meta := events.JiraIssueBecameAtomicMetadata{IssueKey: "SKY-dispsuppress"}
 	metaJSON, _ := json.Marshal(meta)
-	router.HandleEvent(domain.Event{
+	router.HandleEvent(context.Background(), domain.Event{
 		EventType: domain.EventJiraIssueBecameAtomic, EntityID: &entity.ID,
 		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrgID,
 	})
@@ -449,7 +449,7 @@ func TestHandleEvent_MultipleTeams_TriggersFiredCountsOnlyCommitted(t *testing.T
 	pub := &fakeDispositionPublisher{}
 	router.SetEventPublisher(pub)
 
-	router.HandleEvent(domain.Event{
+	router.HandleEvent(context.Background(), domain.Event{
 		EventType: domain.EventJiraIssueAvailable, EntityID: &entity.ID,
 		MetadataJSON: string(metaJSON), OrgID: runmode.LocalDefaultOrgID,
 	})

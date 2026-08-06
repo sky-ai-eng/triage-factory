@@ -129,7 +129,7 @@ func TestRunGitHubCycleForOrg_StagedAppPollsViaPAT(t *testing.T) {
 
 	m := &Manager{
 		database: database,
-		pub:      bus,
+		pub:      busPublisher{bus: bus},
 		tasks:    stores.Tasks,
 		entities: stores.Entities,
 		repos:    stores.Repos,
@@ -180,7 +180,7 @@ func TestRunGitHubCycleForOrg_ActiveAppNoFunctionalInstallationDegrades(t *testi
 	var reportedErr error
 	m := &Manager{
 		database: database,
-		pub:      bus,
+		pub:      busPublisher{bus: bus},
 		tasks:    stores.Tasks,
 		entities: stores.Entities,
 		repos:    stores.Repos,

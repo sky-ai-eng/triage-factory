@@ -179,11 +179,11 @@ func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handl
 // steps can't be resolved (CountConsecutiveFailedRunsSystem then matches no
 // runs → breaker never trips, the safe default that doesn't block
 // auto-delegation on a transient read error). nil-safe on the store.
-func (r *Router) breakerPromptID(orgID, blueprintID string) string {
+func (r *Router) breakerPromptID(ctx context.Context, orgID, blueprintID string) string {
 	if r.blueprints == nil || blueprintID == "" {
 		return ""
 	}
-	steps, err := r.blueprints.ListStepsSystem(context.Background(), orgID, blueprintID)
+	steps, err := r.blueprints.ListStepsSystem(ctx, orgID, blueprintID)
 	if err != nil || len(steps) == 0 {
 		return ""
 	}

@@ -40,6 +40,13 @@ type QueuedEvent struct {
 	EnqueuedAt  time.Time  `json:"enqueued_at"`
 	ClaimedAt   *time.Time `json:"claimed_at,omitempty"`
 	ProcessedAt *time.Time `json:"processed_at,omitempty"`
+	// Traceparent is the W3C trace context of whoever enqueued this row —
+	// the envelope header that lets the routing of an event be tied back to
+	// the poll cycle that emitted it. Empty is the normal state (tracing
+	// off, an untraced producer) and reads back as NULL; the consumer LINKS
+	// to it rather than descending from it, because one cycle emits many
+	// events that route later and possibly elsewhere.
+	Traceparent string `json:"traceparent,omitempty"`
 }
 
 // Status values for QueuedEvent.Status.

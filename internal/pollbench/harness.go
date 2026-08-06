@@ -89,7 +89,7 @@ type countingPublisher struct {
 	byType map[string]int
 }
 
-func (p *countingPublisher) Publish(evt domain.Event) {
+func (p *countingPublisher) Publish(_ context.Context, evt domain.Event) {
 	if !strings.HasPrefix(evt.EventType, "github:") {
 		return // system:poll:* sentinels aren't tracked-transition events
 	}

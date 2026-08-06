@@ -110,7 +110,7 @@ func emitJiraAssigned(router *Router, entityID, accountID string) {
 		IssueKey: "SKY-1", Project: "SKY", Status: "To Do",
 	}
 	metaJSON, _ := json.Marshal(meta)
-	router.HandleEvent(domain.Event{
+	router.HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventJiraIssueAssigned,
 		EntityID:     &entityID,
 		MetadataJSON: string(metaJSON),
@@ -285,7 +285,7 @@ func TestAssigneeCentric_NonAssignedTypes_RouteByAssignee(t *testing.T) {
 			seedSystemJiraRule(t, database, teamB, tc.eventType)
 
 			entityID := jiraEntity(t, database, "SKY-"+tc.name)
-			reviewRouter(database).HandleEvent(domain.Event{
+			reviewRouter(database).HandleEvent(context.Background(), domain.Event{
 				EventType:    tc.eventType,
 				EntityID:     &entityID,
 				DedupKey:     tc.dedup,
@@ -357,7 +357,7 @@ func TestAssigneeCentric_CommenterNotARoutingDriver(t *testing.T) {
 		IssueKey: "SKY-1", Project: "SKY",
 	}
 	metaJSON, _ := json.Marshal(meta)
-	reviewRouter(database).HandleEvent(domain.Event{
+	reviewRouter(database).HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventJiraIssueCommented,
 		EntityID:     &entityID,
 		MetadataJSON: string(metaJSON),
@@ -431,7 +431,7 @@ func TestAssigneeCentric_PriorTaskAnchorsOwner(t *testing.T) {
 	statusMeta, _ := json.Marshal(events.JiraIssueStatusChangedMetadata{
 		Assignee: "bob", AssigneeAccountID: "acct-bob", IssueKey: "SKY-anchor", Project: "SKY", NewStatus: "In Progress",
 	})
-	router.HandleEvent(domain.Event{
+	router.HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventJiraIssueStatusChanged,
 		EntityID:     &entityID,
 		DedupKey:     "In Progress",
@@ -464,7 +464,7 @@ func TestAssigneeCentric_Available_StillCreatesTeamPoolTask(t *testing.T) {
 	entityID := jiraEntity(t, database, "SKY-pool")
 	meta := events.JiraIssueAvailableMetadata{IssueKey: "SKY-pool", Project: "SKY", Status: "To Do"}
 	metaJSON, _ := json.Marshal(meta)
-	reviewRouter(database).HandleEvent(domain.Event{
+	reviewRouter(database).HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventJiraIssueAvailable,
 		EntityID:     &entityID,
 		MetadataJSON: string(metaJSON),
@@ -532,7 +532,7 @@ func TestAssigneeCentric_AssignClosesAvailablePoolTask(t *testing.T) {
 
 	// The pool task lands first (owned by teamA, the tracking team).
 	availMeta, _ := json.Marshal(events.JiraIssueAvailableMetadata{IssueKey: "SKY-poolclaim", Project: "SKY", Status: "To Do"})
-	router.HandleEvent(domain.Event{
+	router.HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventJiraIssueAvailable,
 		EntityID:     &entityID,
 		MetadataJSON: string(availMeta),

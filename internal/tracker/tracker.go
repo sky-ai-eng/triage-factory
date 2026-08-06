@@ -25,11 +25,15 @@ import (
 // Publisher is the event sink the tracker emits to. In production it's
 // the durable ingestor, which enqueues router-bound github:/jira:
 // events (so the router can't drop them under burst) and forwards every
-// event to the in-memory bus for cosmetic subscribers. The plain
-// *eventbus.Bus also satisfies this interface, so tests (and any purely
-// loss-tolerant path) can pass a bare bus.
+// event to the in-memory bus for cosmetic subscribers.
+//
+// ctx is the emitting cycle's. It reaches the durable enqueue, which is
+// what lets an event's later routing be tied back to the poll that found
+// it — a bare *eventbus.Bus no longer satisfies this interface for that
+// reason, and a test that only wants the fan-out passes a two-line
+// adapter instead.
 type Publisher interface {
-	Publish(evt domain.Event)
+	Publish(ctx context.Context, evt domain.Event)
 }
 
 const (
@@ -83,11 +87,11 @@ func New(database *sql.DB, pub Publisher, tasks db.TaskStore, entities db.Entity
 // A pre-set evt.OrgID is left intact so future callers stamping their
 // own org (carry-over, backfill in another tenant) override the
 // tracker's default.
-func (t *Tracker) publish(evt domain.Event) {
+func (t *Tracker) publish(ctx context.Context, evt domain.Event) {
 	if evt.OrgID == "" {
 		evt.OrgID = t.orgID
 	}
-	t.pub.Publish(evt)
+	t.pub.Publish(ctx, evt)
 }
 
 // --- GitHub ---
@@ -212,7 +216,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 					if !known {
 						continue
 					}
-					if err := t.backfillReviewRequested(entity.ID, snap, login, team); err != nil {
+					if err := t.backfillReviewRequested(ctx, entity.ID, snap, login, team); err != nil {
 						trackerLog.Error("backfill review_requested failed", "source_id", sid, "reviewer", reviewer, "error", err)
 					}
 				}
@@ -354,7 +358,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 						RequestedLogin: login, RequestedTeam: team,
 					})
 					eid := e.ID
-					t.publish(domain.Event{
+					t.publish(ctx, domain.Event{
 						EventType:    domain.EventGitHubPRReviewRequestRemoved,
 						EntityID:     &eid,
 						DedupKey:     task.DedupKey,
@@ -377,7 +381,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		// liveness is reported independently via /readyz.
 		trackerLog.Debug("github refresh: no-op cycle", "discovered", len(discovered), "entities", len(entities), "skipped", skippedOpen)
 		if len(entities) > 0 {
-			t.EmitPollComplete("github", startedAt, len(entities), 0)
+			t.EmitPollComplete(ctx, "github", startedAt, len(entities), 0)
 		}
 		return 0, "", nil
 	}
@@ -489,7 +493,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 
 		// Publish events to bus. Recording + routing happens downstream.
 		for _, evt := range events {
-			t.publish(evt)
+			t.publish(ctx, evt)
 			eventsEmitted++
 		}
 	}
@@ -507,7 +511,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 	}
 
 	if len(entities) > 0 {
-		t.EmitPollComplete("github", startedAt, len(entities), eventsEmitted)
+		t.EmitPollComplete(ctx, "github", startedAt, len(entities), eventsEmitted)
 	}
 
 	return eventsEmitted, "", nil
@@ -857,7 +861,7 @@ func splitOwnerRepo(s string) (owner, repo string) {
 // requested identity (login or "org/slug" team) plus the PR author on the
 // metadata, and keys the event by that identity, so the router routes the
 // per-reviewer task and the predicate matcher can do its work.
-func (t *Tracker) backfillReviewRequested(entityID string, snap domain.PRSnapshot, requestedLogin, requestedTeam string) error {
+func (t *Tracker) backfillReviewRequested(ctx context.Context, entityID string, snap domain.PRSnapshot, requestedLogin, requestedTeam string) error {
 	reviewer := requestedLogin
 	if reviewer == "" {
 		reviewer = requestedTeam
@@ -884,7 +888,7 @@ func (t *Tracker) backfillReviewRequested(entityID string, snap domain.PRSnapsho
 		occurredAt = parsed
 	}
 	eid := entityID
-	t.publish(domain.Event{
+	t.publish(ctx, domain.Event{
 		EntityID:     &eid,
 		EventType:    domain.EventGitHubPRReviewRequested,
 		DedupKey:     reviewerDedupKey(reviewer),
@@ -1051,7 +1055,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 	if len(entities) == 0 {
 		// No entities to refresh, but still emit poll-complete so carry-over
 		// readiness flips true on fresh-setup / empty-project cases.
-		t.EmitPollComplete("jira", startedAt, 0, 0)
+		t.EmitPollComplete(ctx, "jira", startedAt, 0, 0)
 		return 0, nil
 	}
 
@@ -1151,7 +1155,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		// only place that actually carries the field in the response.
 
 		for _, evt := range events {
-			t.publish(evt)
+			t.publish(ctx, evt)
 			eventsEmitted++
 		}
 	}
@@ -1165,7 +1169,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 	// poll produced work." Carry-over readiness depends on this firing even
 	// on an empty first poll (e.g. projects configured but nothing assigned
 	// yet), otherwise the setup step shimmers forever.
-	t.EmitPollComplete("jira", startedAt, len(entities), eventsEmitted)
+	t.EmitPollComplete(ctx, "jira", startedAt, len(entities), eventsEmitted)
 
 	return eventsEmitted, nil
 }
@@ -1432,8 +1436,8 @@ func truncateDescription(s string, maxRunes int) string {
 // is the wall-clock time the poll cycle started, carried in metadata so
 // subscribers can ignore sentinels emitted by pre-restart poll generations
 // (an old RefreshXxx goroutine that finishes after a config-triggered restart).
-func (t *Tracker) EmitPollComplete(source string, startedAt time.Time, entityCount, eventCount int) {
-	t.publish(domain.Event{
+func (t *Tracker) EmitPollComplete(ctx context.Context, source string, startedAt time.Time, entityCount, eventCount int) {
+	t.publish(ctx, domain.Event{
 		EventType: domain.EventSystemPollCompleted,
 		MetadataJSON: mustJSON(events.SystemPollCompletedMetadata{
 			Source:    source,

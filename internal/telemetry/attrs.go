@@ -1,6 +1,10 @@
 package telemetry
 
-import "go.opentelemetry.io/otel/attribute"
+import (
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+)
 
 // The shared span-attribute vocabulary: every key TF sets itself (as
 // opposed to otelhttp's http.* and otelsql's db.*), each an opaque
@@ -31,6 +35,7 @@ const (
 	keyAttempt        = attribute.Key("attempt")
 	keyCount          = attribute.Key("count")
 	keyJob            = attribute.Key("job")
+	keyQueueWaitMS    = attribute.Key("queue.wait_ms")
 	keyProvider       = attribute.Key("provider")
 	keyTransport      = attribute.Key("transport")
 )
@@ -84,3 +89,13 @@ func Outcome(value string) attribute.KeyValue { return keyOutcome.String(value) 
 func Attempt(n int) attribute.KeyValue      { return keyAttempt.Int(n) }
 func ClaimAttempt(n int) attribute.KeyValue { return keyClaimAttempt.Int(n) }
 func Count(n int) attribute.KeyValue        { return keyCount.Int(n) }
+
+// QueueWait is how long a durable-queue row sat between being enqueued and
+// being claimed. It exists because that interval is over before the
+// consumer's span begins, so nothing else in the trace can show it — and
+// without it a backed-up queue and slow processing look the same. A
+// duration, never a timestamp: when the row was written is not something a
+// span needs to carry.
+func QueueWait(d time.Duration) attribute.KeyValue {
+	return keyQueueWaitMS.Int64(d.Milliseconds())
+}

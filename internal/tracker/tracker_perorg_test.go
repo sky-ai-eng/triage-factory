@@ -28,7 +28,7 @@ func TestRefreshJira_PropagatesTrackerOrgIDToEntityStore(t *testing.T) {
 
 	entities := &recordingEntityStore{}
 	const wantOrg = "00000000-0000-0000-0000-000000000abc"
-	tr := &Tracker{pub: bus, entities: entities, orgID: wantOrg}
+	tr := &Tracker{pub: busPublisher{bus: bus}, entities: entities, orgID: wantOrg}
 
 	if _, err := tr.RefreshJira(context.Background(), nil, "", nil); err != nil {
 		t.Fatalf("RefreshJira: %v", err)

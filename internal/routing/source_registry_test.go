@@ -145,7 +145,7 @@ func TestSourceRegistry_HandleEvent_OwnedRoutingCreatesTask(t *testing.T) {
 	seedFakeRule(t, database, teamX)
 	entityID := fakeEntity(t, database, "fake/thing#1")
 
-	fakeSourceRouter(database).HandleEvent(fakeEvent(entityID))
+	fakeSourceRouter(database).HandleEvent(context.Background(), fakeEvent(entityID))
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || len(active) != 1 {
@@ -178,7 +178,7 @@ func TestSourceRegistry_HandleEvent_TracksScopeFalse_DropsHandler(t *testing.T) 
 	seedFakeRule(t, database, teamX)
 	entityID := fakeEntity(t, database, "fake/thing#2")
 
-	fakeSourceRouter(database).HandleEvent(fakeEvent(entityID))
+	fakeSourceRouter(database).HandleEvent(context.Background(), fakeEvent(entityID))
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {

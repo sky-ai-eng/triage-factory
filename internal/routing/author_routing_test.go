@@ -28,7 +28,7 @@ func emitCI(router *Router, entityID, author string) {
 		Author: author, CheckName: "build", Repo: "owner/repo", HeadSHA: "abc123",
 	}
 	metaJSON, _ := json.Marshal(meta)
-	router.HandleEvent(domain.Event{
+	router.HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entityID,
 		DedupKey:     "build",
@@ -271,7 +271,7 @@ func TestAuthorCentric_PriorTaskAnchorsOwner(t *testing.T) {
 	// Then: a conflicts event from bob (team B). Tier 3 (prior owned
 	// author-centric task) anchors it to A, not bob's team B.
 	conflictMeta, _ := json.Marshal(events.GitHubPRConflictsMetadata{Author: "bob", Repo: "owner/repo"})
-	router.HandleEvent(domain.Event{
+	router.HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventGitHubPRConflicts,
 		EntityID:     &entityID,
 		MetadataJSON: string(conflictMeta),
@@ -523,7 +523,7 @@ func TestAuthorCentric_ConsolidatedOwnerAnchorsNextEvent(t *testing.T) {
 	// Second author-centric event (conflicts): tier 3 anchors it to the
 	// consolidated owner, even though the author still maps to both teams.
 	conflictMeta, _ := json.Marshal(events.GitHubPRConflictsMetadata{Author: "aidan", Repo: "owner/repo"})
-	router.HandleEvent(domain.Event{
+	router.HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventGitHubPRConflicts,
 		EntityID:     &entityID,
 		MetadataJSON: string(conflictMeta),

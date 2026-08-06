@@ -23,7 +23,7 @@ type recordingPublisher struct {
 	events []domain.Event
 }
 
-func (p *recordingPublisher) Publish(evt domain.Event) {
+func (p *recordingPublisher) Publish(_ context.Context, evt domain.Event) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.events = append(p.events, evt)

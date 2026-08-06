@@ -14,14 +14,19 @@ import (
 // scorer batches per-org so every task in the slice belongs to the same
 // tenant. Per-team auto_delegate_enabled is checked inside reDeriveTask
 // after the task's team_id is resolved.
-func (r *Router) ReDeriveAfterScoring(orgID string, taskIDs []string) {
+//
+// ctx is the scoring cycle's, minus its cancellation (the caller applies
+// context.WithoutCancel): this runs asynchronously and outlives the cycle
+// that scheduled it, and firing half a deferred trigger — a run inserted,
+// its claim unstamped — is worse than one that lands late.
+func (r *Router) ReDeriveAfterScoring(ctx context.Context, orgID string, taskIDs []string) {
 	for _, taskID := range taskIDs {
-		r.reDeriveTask(orgID, taskID)
+		r.reDeriveTask(ctx, orgID, taskID)
 	}
 }
 
-func (r *Router) reDeriveTask(orgID, taskID string) {
-	task, err := r.tasks.GetSystem(context.Background(), orgID, taskID)
+func (r *Router) reDeriveTask(ctx context.Context, orgID, taskID string) {
+	task, err := r.tasks.GetSystem(ctx, orgID, taskID)
 	if err != nil || task == nil {
 		return
 	}
@@ -73,14 +78,14 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 
 	// Fetch handlers for this event type — same call HandleEvent uses,
 	// kind-discriminated here.
-	handlers, err := r.handlers.GetEnabledForEventSystem(context.Background(), orgID, task.EventType)
+	handlers, err := r.handlers.GetEnabledForEventSystem(ctx, orgID, task.EventType)
 	if err != nil {
 		routerLog.Error("re-derive: failed to query event_handlers", "event_type", task.EventType, "error", err)
 		return
 	}
 
 	// Fetch the primary event's metadata for predicate matching.
-	metadata, err := r.events.GetMetadataSystem(context.Background(), orgID, task.PrimaryEventID)
+	metadata, err := r.events.GetMetadataSystem(ctx, orgID, task.PrimaryEventID)
 	if err != nil {
 		routerLog.Error("re-derive: failed to fetch event metadata", "event_id", task.PrimaryEventID, "error", err)
 		return
@@ -93,7 +98,7 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 	// otherwise absent from the match) could match the stored metadata,
 	// fire, and consolidate ownership onto a task that team can't see.
 	// The owner team_id always grants visibility, so it qualifies too.
-	visibleTeams, err := r.tasks.VisibilityTeamsSystem(context.Background(), orgID, taskID)
+	visibleTeams, err := r.tasks.VisibilityTeamsSystem(ctx, orgID, taskID)
 	if err != nil {
 		routerLog.Error("re-derive: failed to fetch visibility teams for task", "task_id", taskID, "error", err)
 		return
@@ -127,7 +132,7 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 		} else if _, visible := visibleSet[firingTeam]; !visible {
 			continue
 		}
-		if !r.autoDelegateEnabledForTeam(context.Background(), firingTeam) {
+		if !r.autoDelegateEnabledForTeam(ctx, firingTeam) {
 			continue
 		}
 		minAutonomy := derefFloatDefault(trigger.MinAutonomySuitability, 0)
@@ -161,7 +166,7 @@ func (r *Router) reDeriveTask(orgID, taskID string) {
 		// event — that's the one whose match scored autonomously above
 		// threshold. Real-event provenance keeps the audit trail honest
 		// when a re-derived firing ends up enqueued.
-		r.tryAutoDelegate(orgID, task, trigger, task.EntityID, task.PrimaryEventID, firingTeam)
+		r.tryAutoDelegate(ctx, orgID, task, trigger, task.EntityID, task.PrimaryEventID, firingTeam)
 	}
 }
 
