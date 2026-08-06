@@ -146,6 +146,33 @@ func (s *eventQueueStore) ResetProcessing(ctx context.Context, executorID string
 	return int(n), nil
 }
 
+func (s *eventQueueStore) RequeueStaleProcessing(ctx context.Context, olderThan time.Duration) (int, error) {
+	// The staleness backstop under ResetProcessing — see the interface doc
+	// for why it errs toward reclaiming. Unscoped by ownership on purpose:
+	// the row this exists for belongs to an instance id that is never coming
+	// back, so scoping it to any live identity would skip exactly the case
+	// it covers.
+	//
+	// The cutoff is computed from now() — the same server clock that stamped
+	// claimed_at — rather than from a caller-supplied timestamp, so pod clock
+	// skew can't turn a fresh claim into a stale one. A NULL claimed_at
+	// 'processing' row is reclaimed unconditionally (mirroring
+	// PendingFirings.RequeueStaleDraining): the claim stamps both columns in
+	// one statement so it should not exist, and if it somehow does it is
+	// stranded by every other predicate.
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE public.event_queue SET status = 'pending', last_error = $2, claimed_at = NULL,
+			executor_id = NULL, boot_epoch = NULL
+		WHERE status = 'processing'
+		  AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $1::double precision))
+	`, olderThan.Seconds(), db.StaleProcessingReclaimReason)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 func (s *eventQueueStore) PruneDone(ctx context.Context, before time.Time) (int, error) {
 	res, err := s.conn.ExecContext(ctx, `
 		DELETE FROM public.event_queue WHERE status = 'done' AND processed_at < $1

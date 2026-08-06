@@ -1592,17 +1592,27 @@ pass (2026-07-08). Reopening conditions noted per entry.
    floor. Reopens only if the unit of scale ever became run-per-pod,
    which §2.2 rejects independently.
 9. **Crash recovery is matched to the work's lifetime, not
-   standardized** (settled 2026-07-08, the P0 review pass). Two
-   patterns coexist deliberately: **ownership-scoped self-sweep**
-   (runs, event_queue — long-lived owned work where a false requeue
-   duplicates an agent run's external writes, so only the owner may
-   sweep, and dead owners wait for the reaper) and **staleness-based
-   requeue** (pending_firings `'draining'` — a milliseconds-scale
-   claim whose redelivery is absorbed by the (event, trigger) fence
-   and the one-active index, so any process may recover it and no
-   reaper dependency exists). Deciding factor: cost of a wrong
-   recovery vs cost of a stalled one. Reopens if a queue appears
-   whose claims are both long-lived AND cheaply redeliverable.
+   standardized** (settled 2026-07-08, the P0 review pass; amended
+   2026-08-06, the durability audit). Two patterns coexist
+   deliberately: **ownership-scoped self-sweep** (runs — long-lived
+   owned work where a false requeue duplicates an agent run's
+   external writes, so only the owner may sweep, and dead owners wait
+   for the reaper) and **staleness-based requeue** (pending_firings
+   `'draining'` — a milliseconds-scale claim whose redelivery is
+   absorbed by the (event, trigger) fence and the one-active index,
+   so any process may recover it and no reaper dependency exists).
+   `event_queue` is ownership-scoped **with a staleness backstop**:
+   the owner's boot reset is the fast path, and an unscoped 10-minute
+   sweep on the drain worker's floor scan covers the owner that is
+   *replaced* rather than rebooted (scale-down, a fresh instance id
+   after the lease moves). The original entry classified it
+   ownership-scoped alone, on the assumption the owner always
+   reboots; it does not, there is no reaper arm for this queue, and a
+   routing claim is milliseconds-scale like a firing's — so the rows
+   were stranded, and their events permanently unrouted. Deciding
+   factor: cost of a wrong recovery vs cost of a stalled one.
+   Reopens if a queue appears whose claims are both long-lived AND
+   cheaply redeliverable.
 
 ## Related
 

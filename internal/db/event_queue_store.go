@@ -25,6 +25,11 @@ import (
 // claim — ClaimNext reserves a row (pending -> processing) rather than a
 // non-mutating pop, so a future multi-worker drainer is safe via
 // FOR UPDATE SKIP LOCKED in Postgres.
+// StaleProcessingReclaimReason is the last_error every backend stamps on a
+// row RequeueStaleProcessing reclaims. Shared so the two impls can't drift
+// and an operator reading the column sees one string for one cause.
+const StaleProcessingReclaimReason = "stale processing reclaim"
+
 type EventQueueStore interface {
 	// Enqueue atomically records the event (the durable audit row) AND
 	// its queue row in a single transaction, returning the generated
@@ -93,7 +98,39 @@ type EventQueueStore interface {
 	// of itself. A live sibling's still-processing row (a different
 	// executor_id) is never touched, which is what makes a rolling deploy /
 	// two-replica boot safe.
+	//
+	// It is the fast path, not the whole recovery story: an owner that never
+	// comes back (scale-down, replacement under a fresh instance id) never
+	// runs it, which is what RequeueStaleProcessing backstops.
 	ResetProcessing(ctx context.Context, executorID string, bootEpoch int64) (int, error)
+
+	// RequeueStaleProcessing is the staleness backstop under ResetProcessing:
+	// every 'processing' row claimed longer than olderThan ago returns to
+	// pending with last_error = StaleProcessingReclaimReason, whoever owned
+	// it. Ownership-scoping alone strands a row forever when the owner is
+	// replaced rather than rebooted — the brain lease moves to another pod
+	// and the original instance id never returns — and an unrouted event is
+	// unrecoverable, since the tracker's snapshot-diff is forward-only and
+	// will not re-emit it.
+	//
+	// attempts is deliberately untouched (the claim already counted this
+	// try), so a row that keeps reaching this sweep still parks 'failed'
+	// once its budget runs out rather than looping forever. claimed_at and
+	// the ownership stamp are cleared: a pending row has no owner.
+	//
+	// olderThan is a duration rather than an absolute cutoff so the Postgres
+	// impl can subtract it from the DB's own clock — claimed_at is stamped
+	// with now() server-side, and a caller's wall clock in a multi-pod
+	// deployment is not the same clock.
+	//
+	// Reclaiming a genuinely live row is safe by construction: a routing
+	// unit is milliseconds-to-seconds of DB writes with no inline LLM call,
+	// so any sane threshold is orders of magnitude past one, and the double
+	// route a reclaim could produce is absorbed by the same fences that make
+	// a replay safe (the tasks dedup index, the (event, trigger) replay
+	// fence, the one-active index). Loss is unrecoverable, duplication is
+	// fenced — so this errs toward reclaiming.
+	RequeueStaleProcessing(ctx context.Context, olderThan time.Duration) (int, error)
 
 	// PruneDone deletes 'done' rows whose processed_at < before across all
 	// orgs, returning the count removed. The retention sweep — done rows

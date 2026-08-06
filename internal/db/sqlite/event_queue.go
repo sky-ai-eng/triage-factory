@@ -148,6 +148,28 @@ func (s *eventQueueStore) ResetProcessing(ctx context.Context, executorID string
 	return int(n), nil
 }
 
+func (s *eventQueueStore) RequeueStaleProcessing(ctx context.Context, olderThan time.Duration) (int, error) {
+	// The staleness backstop under ResetProcessing — see the interface doc.
+	// SQLite/local is N=1, so the case this covers (an owner replaced rather
+	// than rebooted) can't arise here; the method exists so both backends
+	// hold one contract and the local worker's sweep is a no-op rather than
+	// a branch. The cutoff is computed in Go because claimed_at is written
+	// from this same process's clock, so there is no second clock to skew
+	// against. A NULL claimed_at 'processing' row is reclaimed
+	// unconditionally, mirroring the Postgres impl.
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE event_queue SET status = 'pending', last_error = ?, claimed_at = NULL,
+			executor_id = NULL, boot_epoch = NULL
+		WHERE status = 'processing'
+		  AND (claimed_at IS NULL OR claimed_at < ?)
+	`, db.StaleProcessingReclaimReason, time.Now().Add(-olderThan))
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 func (s *eventQueueStore) PruneDone(ctx context.Context, before time.Time) (int, error) {
 	res, err := s.conn.ExecContext(ctx, `
 		DELETE FROM event_queue WHERE status = 'done' AND processed_at < ?
