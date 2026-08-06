@@ -6,6 +6,6 @@ Four things differ from using `gh` on your own machine:
 
 - **Open pull requests as drafts** — `gh pr create --draft` — unless your mission explicitly asks for one ready to review. A human marks it ready. Push the branch before you call `pr create`, or GitHub will reject it.
 - **`gh pr review` is refused.** It can only leave a top-level comment, it cannot attach comments to specific lines, and a review posted that way is invisible to Triage Factory. Reviews go through the verbs below.
-- **Do not merge a pull request** unless your mission says to explicitly. Opening the PR is the deliverable; merging, even if able, is somebody's decision.
+- **Do not merge a pull request** unless your mission says to explicitly. Opening the PR is the deliverable; merging, even if able, is somebody's decision. A merge — `gh pr merge`, or the same call made through `gh api` — is interrupted the first time you attempt it and asks you to quote the line of your mission that authorizes it.
 - On a large pull request, `gh pr diff` will overflow the tool result and spill to a file. This is expected. `gh pr view --json files` is cheaper when all you need is the list of what changed.
 </github>
