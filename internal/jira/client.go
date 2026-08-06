@@ -11,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Deployment identifies which Jira backend a Config targets. It selects the
@@ -296,10 +299,13 @@ type Client struct {
 
 // NewClient builds a Client from a Config. Construct the Config with a named
 // constructor, e.g. NewClient(DataCenterPAT(url, pat)).
+// Every Jira call in the process is built here — there is no
+// caller-supplied-client constructor and no second place a *Client comes
+// from — so instrumenting this one transport covers the whole surface.
 func NewClient(cfg Config) *Client {
 	return &Client{
 		cfg:  cfg,
-		http: &http.Client{Timeout: 15 * time.Second},
+		http: telemetry.TracedHTTPClient(15*time.Second, "jira"),
 	}
 }
 
@@ -1030,7 +1036,7 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 			// A transport error (reset, timeout) is retryable for an idempotent
 			// request; a mutation might have reached Jira, so it is returned as-is.
 			if idempotent && attempt <= maxRateLimitRetries && ctx.Err() == nil {
-				if serr := sleepCtx(ctx, backoffDuration(attempt)); serr != nil {
+				if serr := awaitRetry(ctx, attempt, backoffDuration(attempt), "transport_error"); serr != nil {
 					return 0, nil, serr
 				}
 				continue
@@ -1055,10 +1061,34 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 			// slot) waiting it out.
 			return resp.StatusCode, data, nil
 		}
-		if serr := sleepCtx(ctx, wait); serr != nil {
+		if serr := awaitRetry(ctx, attempt, wait, "throttled"); serr != nil {
 			return 0, nil, serr
 		}
 	}
+}
+
+// awaitRetry blocks out one backoff between attempts under its own span.
+//
+// doRequest can sleep several times per logical call — once per retried
+// transport error, once per throttled response — and untraced those sleeps
+// are indistinguishable from a slow Jira: the caller's span is long and
+// every transport span inside it is fast. reason separates the two causes
+// (a reset connection is a different problem from a 429), and the attempt
+// number separates one long wait from several short ones.
+//
+// Neither outcome is an error status: backing off is the client working,
+// and a cancelled wait is the caller leaving.
+func awaitRetry(ctx context.Context, attempt int, wait time.Duration, reason string) error {
+	ctx, span := tracer.Start(ctx, "jira.retry.backoff",
+		trace.WithAttributes(telemetry.Attempt(attempt), telemetry.Disposition(reason)))
+	defer span.End()
+
+	if err := sleepCtx(ctx, wait); err != nil {
+		span.SetAttributes(telemetry.Outcome("cancelled"))
+		return err
+	}
+	span.SetAttributes(telemetry.Outcome("waited"))
+	return nil
 }
 
 func (c *Client) get(ctx context.Context, url string) ([]byte, error) {

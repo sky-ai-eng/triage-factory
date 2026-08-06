@@ -6,6 +6,9 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // WithTx runs fn inside a single SQLite transaction. orgID must equal
@@ -40,11 +43,22 @@ func (s *Store) SyntheticClaimsWithTx(ctx context.Context, orgID, userID string,
 // JWT claims differently.
 func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
 	_ = userID // accepted for signature parity; SQLite has no auth concept
+	// The Postgres twin's span, under the same name and carrying the same
+	// attribute, so a local-mode trace has the same shape as a multi-mode
+	// one and a dashboard written against either reads both. org.id is the
+	// local sentinel here rather than a real tenant — constant, but present,
+	// which is what keeps the two shapes identical.
+	ctx, span := tracer.Start(ctx, "db.tx.claims_bound",
+		trace.WithAttributes(telemetry.OrgID(orgID)))
+	defer span.End()
+
 	if orgID != runmode.LocalDefaultOrgID {
+		span.SetStatus(codes.Error, "org mismatch")
 		return fmt.Errorf("sqlite WithTx: orgID must be %q in local mode, got %q", runmode.LocalDefaultOrgID, orgID)
 	}
 	tx, err := s.conn.BeginTx(ctx, nil)
 	if err != nil {
+		span.SetStatus(codes.Error, "begin")
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
@@ -93,7 +107,16 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Ext:              db.BuildStoreExtensions("sqlite", tx, tx),
 	}
 	if err := fn(txStores); err != nil {
+		// The closure's own failure, which rolls the tx back via the
+		// defer. Not recorded as an exception: a handler returning a
+		// validation error through here is the normal way a write is
+		// refused, and the error text can carry tenant data.
+		span.SetStatus(codes.Error, "tx body")
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		span.SetStatus(codes.Error, "commit")
+		return err
+	}
+	return nil
 }

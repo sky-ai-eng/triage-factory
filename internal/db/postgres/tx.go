@@ -8,6 +8,9 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // WithTx runs fn inside a single Postgres transaction against the app
@@ -68,8 +71,21 @@ func (s *Store) SyntheticClaimsWithTx(ctx context.Context, orgID, userID string,
 // guardrails enforced at the public layer — once we're past those,
 // the SQL is identical.
 func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	// One span per claims-bound transaction, which is the handler-side
+	// atomicity boundary: every RLS-scoped write in the process passes
+	// through here. It measures something nothing else does — otelsql's
+	// statement spans cover each query, but the gap between them (holding
+	// the connection, the closure's own work, the commit) is invisible
+	// without a span that spans the whole thing. userID stays off it
+	// deliberately; org.id already scopes the trace, and per-user spans
+	// would attach an identity to every query a person runs.
+	ctx, span := tracer.Start(ctx, "db.tx.claims_bound",
+		trace.WithAttributes(telemetry.OrgID(orgID)))
+	defer span.End()
+
 	tx, err := s.app.BeginTx(ctx, nil)
 	if err != nil {
+		span.SetStatus(codes.Error, "begin")
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
@@ -84,6 +100,7 @@ func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn f
 	// SET LOCAL scopes the role change to the tx, so the pool
 	// connection returns to authenticator when the tx ends.
 	if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE tf_app`); err != nil {
+		span.SetStatus(codes.Error, "set role")
 		return err
 	}
 
@@ -92,16 +109,27 @@ func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn f
 		"org_id": orgID,
 	})
 	if err != nil {
+		span.SetStatus(codes.Error, "marshal claims")
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `SELECT set_config('request.jwt.claims', $1, true)`, string(claims)); err != nil {
+		span.SetStatus(codes.Error, "set claims")
 		return err
 	}
 
 	if err := fn(s.txStoresFromTx(tx)); err != nil {
+		// The closure's own failure, which rolls the tx back via the
+		// defer. Not recorded as an exception: a handler returning a
+		// validation error through here is the normal way a write is
+		// refused, and the error text can carry tenant data.
+		span.SetStatus(codes.Error, "tx body")
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		span.SetStatus(codes.Error, "commit")
+		return err
+	}
+	return nil
 }
 
 // txStoresFromTx returns the TxStores bundle wired against a single

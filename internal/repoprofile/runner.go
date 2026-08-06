@@ -3,6 +3,9 @@ package repoprofile
 import (
 	"context"
 	"sync"
+
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // cycleFunc profiles one org's repos for a single cycle. force bypasses the
@@ -108,12 +111,19 @@ func (r *Runner) run(ctx context.Context) {
 		r.mu.Unlock()
 	}()
 
+	// Started after the single-flight guard, so a re-entrant call that
+	// bails produces no span — see the scorer's twin.
+	ctx, span := telemetry.StartJobCycle(ctx, "profiler", r.orgID)
+	defer span.End()
+
 	changed, err := r.cycle(ctx, r.orgID, force)
 	if err != nil {
 		if ctx.Err() != nil {
+			span.SetAttributes(telemetry.Outcome("shutdown"))
 			return // shutting down; don't chase the cycle-complete chain
 		}
-		repoprofileLog.Error("profile cycle failed", "org", r.orgID, "error", err)
+		span.SetStatus(codes.Error, "profile cycle")
+		repoprofileLog.ErrorContext(ctx, "profile cycle failed", "org", r.orgID, "error", err)
 	}
 
 	// Chain the post-profile bootstrap (warm bare clones from the freshly

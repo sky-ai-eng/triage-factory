@@ -65,6 +65,10 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // defaultAPIBase is the public-github REST endpoint. GHE installations
@@ -177,7 +181,7 @@ func NewMinter(cfg Config) (*Minter, error) {
 	}
 	client := cfg.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = telemetry.TracedHTTPClient(30*time.Second, "github")
 	}
 	return &Minter{
 		privateKey: cfg.PrivateKey,
@@ -327,7 +331,29 @@ func (m *Minter) MintScopedInstallationToken(ctx context.Context, installationID
 // entry points. body nil means the full-install token (no request body);
 // a non-nil body is JSON-marshalled to narrow the token (repositories /
 // permissions).
-func (m *Minter) mintInstallationToken(ctx context.Context, installationID int64, body any) (Token, error) {
+func (m *Minter) mintInstallationToken(ctx context.Context, installationID int64, body any) (_ Token, err error) {
+	// A span of its own because of where this gets called from: credential
+	// resolution. A caller asks for a client and gets one, and nothing in
+	// that call's shape suggests it may have just signed a JWT and made a
+	// round trip to GitHub first. Under the caller's span alone the cost
+	// lands on whatever the client was then used for.
+	//
+	// scoped distinguishes the two entry points — a narrowed token
+	// (repositories/permissions) from a full-installation one — without
+	// naming either. installationID stays off: it identifies the customer's
+	// GitHub org install as surely as its name would.
+	ctx, span := tracer.Start(ctx, "githubapp.mint_installation_token",
+		trace.WithAttributes(attribute.Bool("scoped", body != nil)))
+	defer span.End()
+	// Named error return so the many failure exits below don't each need a
+	// status line. The message is fixed rather than err.Error(): a failed
+	// mint's error text carries a truncated GitHub response body.
+	defer func() {
+		if err != nil {
+			span.SetStatus(codes.Error, "mint failed")
+		}
+	}()
+
 	if installationID <= 0 {
 		return Token{}, fmt.Errorf("githubapp: installationID must be positive, got %d", installationID)
 	}

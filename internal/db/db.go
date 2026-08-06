@@ -53,11 +53,11 @@ func OpenAt(dbPath string) (*sql.DB, error) {
 	// factory queries). Direct time.Time scans against legacy rows
 	// already in the old format still succeed — modernc's reader is
 	// permissive — so no data migration is needed.
-	db, err := sql.Open("sqlite", dbPath+
+	db, err := OpenTraced("sqlite", dbPath+
 		"?_pragma=journal_mode(WAL)"+
 		"&_pragma=foreign_keys(on)"+
 		"&_pragma=busy_timeout(5000)"+
-		"&_time_format=sqlite")
+		"&_time_format=sqlite", PoolLocal)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +98,10 @@ func OpenForCLI() (*sql.DB, string, error) {
 		if dsn == "" {
 			return nil, "", fmt.Errorf("TF_MODE=multi requires TF_DATABASE_URL")
 		}
-		conn, err := sql.Open("pgx", dsn)
+		// PoolAdmin: TF_DATABASE_URL is the superuser DSN, the same one
+		// the server's admin pool uses. A CLI invocation is short-lived
+		// and opens no second pool, so this is its only one.
+		conn, err := OpenTraced("pgx", dsn, PoolAdmin)
 		if err != nil {
 			return nil, "", fmt.Errorf("open postgres: %w", err)
 		}

@@ -32,6 +32,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 //go:embed prompts/classify_stage1.txt
@@ -241,10 +244,36 @@ func truncateDescription(desc string) string {
 // Multi mode reads the same .md set from the blob store (control hosts no KB
 // on disk); local mode keeps the byte-identical on-disk read.
 func (r *Runner) readProjectKB(ctx context.Context, projectID string) (string, bool, error) {
+	// One span per vote, and a vote happens per (entity, project) pair —
+	// so on the multi-mode branch this is N×M blob-store round trips per
+	// cycle, each one a network call the classifier makes before it can
+	// even build its prompt. Local mode reads the same set off disk and is
+	// covered by the same span, which is what makes the two comparable.
+	//
+	// The byte count is the number that explains a slow read; the file
+	// names and their contents are project data and stay out of it.
+	ctx, span := tracer.Start(ctx, "projectclassify.read_kb")
+	defer span.End()
+
+	var (
+		content   string
+		truncated bool
+		err       error
+	)
 	if r.kb != nil && runmode.Current() == runmode.ModeMulti {
-		return readProjectKBFromStore(ctx, r.kb, r.orgID, projectID)
+		content, truncated, err = readProjectKBFromStore(ctx, r.kb, r.orgID, projectID)
+	} else {
+		content, truncated, err = readProjectKBFromDisk(r.orgID, projectID)
 	}
-	return readProjectKBFromDisk(r.orgID, projectID)
+	if err != nil {
+		span.SetStatus(codes.Error, "read kb")
+		return content, truncated, err
+	}
+	span.SetAttributes(
+		telemetry.Count(len(content)),
+		attribute.Bool("truncated", truncated),
+	)
+	return content, truncated, nil
 }
 
 func readProjectKBFromDisk(orgID, projectID string) (string, bool, error) {

@@ -7,6 +7,9 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // runLocal is the local-mode execution seam — agentproc.Run in production,
@@ -85,10 +88,45 @@ type CompleteResult struct {
 // configured Anthropic/Bedrock provider directly from this process — no
 // subprocess, no sandbox.
 func (r *Recorder) Complete(ctx context.Context, opts CompleteOptions) (*CompleteResult, error) {
+	// One logical span over both branches, so a scoring batch, a repo
+	// profile, or a classification vote costs the same shape of span
+	// whichever mode it ran in — and so the mode is a filter rather than
+	// the reason two deployments' traces can't be compared. Both branches
+	// are also where all three system jobs actually spend their time, so
+	// this is the per-batch LLM span for every one of them.
+	ctx, span := tracer.Start(ctx, "systemllm.complete",
+		trace.WithAttributes(telemetry.OrgID(opts.OrgID), telemetry.Job(opts.Job)))
+	defer span.End()
+
+	var (
+		res *CompleteResult
+		err error
+	)
 	if runmode.Current() != runmode.ModeMulti {
-		return r.completeLocal(ctx, opts)
+		span.SetAttributes(telemetry.Transport("subprocess"))
+		res, err = r.completeLocal(ctx, opts)
+	} else {
+		span.SetAttributes(telemetry.Transport("direct"))
+		res, err = r.completeDirect(ctx, opts)
 	}
-	return r.completeDirect(ctx, opts)
+
+	switch {
+	case err == nil:
+		span.SetAttributes(telemetry.Outcome("completed"))
+	case IsProviderBackoff(err):
+		// The circuit breaker declining to spend a request on an upstream
+		// it just watched fail. Every caller already treats this as "leave
+		// it for the next cycle", so it is an anticipated skip and must
+		// not carry an error status — otherwise a provider outage paints
+		// every trace red and buries the failures that are actually TF's.
+		span.SetAttributes(telemetry.Outcome("provider_backoff"))
+	default:
+		// Fixed message, not err.Error(): a completion failure's text can
+		// carry a provider response body.
+		span.SetStatus(codes.Error, "completion failed")
+		span.SetAttributes(telemetry.Outcome("error"))
+	}
+	return res, err
 }
 
 func (r *Recorder) completeLocal(ctx context.Context, opts CompleteOptions) (*CompleteResult, error) {

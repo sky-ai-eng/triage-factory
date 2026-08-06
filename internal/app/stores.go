@@ -39,6 +39,7 @@ func (a *App) openStores(ctx context.Context) error {
 			database.Close()
 			return fmt.Errorf("migrate database: %w", err)
 		}
+		registerPoolMetrics(database, "sqlite", db.PoolLocal)
 		// No tenant rows exist on a fresh local DB — provisioning is the
 		// explicit "Start your factory" action (db.BootstrapLocalOrg via
 		// POST /api/setup/start), not a boot- or migration-time side
@@ -68,11 +69,12 @@ func (a *App) openStores(ctx context.Context) error {
 		if authPassword == "" {
 			return errors.New("TF_MODE=multi requires TF_AUTHENTICATOR_PASSWORD")
 		}
-		adminDB, err := sql.Open("pgx", adminDSN)
+		adminDB, err := db.OpenTraced("pgx", adminDSN, db.PoolAdmin)
 		if err != nil {
 			return fmt.Errorf("open admin DB: %w", err)
 		}
 		applyPGPoolDefaultsForRole(adminDB, a.plan.role)
+		registerPoolMetrics(adminDB, "pgx", db.PoolAdmin)
 		if err := adminDB.Ping(); err != nil {
 			adminDB.Close()
 			return fmt.Errorf("ping admin DB: %w", err)
@@ -85,12 +87,13 @@ func (a *App) openStores(ctx context.Context) error {
 			adminDB.Close()
 			return fmt.Errorf("derive app DSN: %w", err)
 		}
-		appDB, err := sql.Open("pgx", appDSN)
+		appDB, err := db.OpenTraced("pgx", appDSN, db.PoolApp)
 		if err != nil {
 			adminDB.Close()
 			return fmt.Errorf("open app DB: %w", err)
 		}
 		applyPGPoolDefaultsForRole(appDB, a.plan.role)
+		registerPoolMetrics(appDB, "pgx", db.PoolApp)
 		if err := appDB.Ping(); err != nil {
 			appDB.Close()
 			adminDB.Close()
@@ -283,4 +286,15 @@ func applyPGPoolDefaultsForRole(d *sql.DB, role runmode.DeployRole) {
 	d.SetMaxOpenConns(n)
 	d.SetMaxIdleConns(n)
 	d.SetConnMaxLifetime(5 * time.Minute)
+}
+
+// registerPoolMetrics publishes a pool's sql.DBStats as OTel gauges,
+// logging and continuing on failure. Diagnostics are never a boot
+// dependency — the same posture internal/telemetry takes when the whole
+// exporter fails to build — and a process that runs without pool gauges is
+// strictly better than one that refuses to start because of them.
+func registerPoolMetrics(handle *sql.DB, driverName, pool string) {
+	if err := db.RegisterPoolMetrics(handle, driverName, pool); err != nil {
+		appLog.Warn("db pool metrics registration failed; pool saturation will not be visible", "pool", pool, "error", err)
+	}
 }

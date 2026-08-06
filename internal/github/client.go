@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // HTTPError is returned for any transport-level non-2xx GitHub response.
@@ -101,7 +103,13 @@ func NewClient(baseURL, pat string) *Client {
 	return &Client{
 		baseURL: APIBase(baseURL),
 		pat:     pat,
-		http:    &http.Client{Timeout: 30 * time.Second},
+		// Instrumented at the transport, which is what makes the coverage
+		// total: REST, GraphQL, artifact downloads (which clone this
+		// client and keep its Transport), and the handful of calls that
+		// build a request and hand it straight to c.http.Do without going
+		// through the retry core all produce a span, because none of them
+		// can reach the network any other way.
+		http: telemetry.TracedHTTPClient(30*time.Second, "github"),
 	}
 }
 
@@ -119,9 +127,13 @@ func NewClient(baseURL, pat string) *Client {
 // base, not under it, and the REST proxy does not front it (see viaProxy).
 func NewProxyClient(proxyURL, placeholder string) *Client {
 	return &Client{
-		baseURL:  proxyURL,
-		pat:      placeholder,
-		http:     &http.Client{Timeout: 30 * time.Second},
+		baseURL: proxyURL,
+		pat:     placeholder,
+		// The span here covers the executor's hop to its own sidecar, not
+		// the sidecar's hop to GitHub — the sidecar is span-free by
+		// standing decision, so this is the only view of that call there
+		// is, and it is the one that matters for the run's latency.
+		http:     telemetry.TracedHTTPClient(30*time.Second, "github"),
 		viaProxy: true,
 	}
 }
@@ -132,6 +144,12 @@ func NewProxyClient(proxyURL, placeholder string) *Client {
 // tests, a RoundTripper that injects faults or observes request cancellation.
 // A nil hc falls back to NewClient's default. ctx threading is orthogonal: the
 // supplied client still has every request built with http.NewRequestWithContext.
+//
+// Tracing follows the same ownership: a supplied client replaces the
+// instrumented one NewClient built, so a caller that wants spans wraps its
+// own Transport with telemetry.TracedTransport. Left to the caller rather
+// than forced, because the reason to reach for this constructor is control
+// over the transport stack.
 func NewClientWithHTTPClient(baseURL, pat string, hc *http.Client) *Client {
 	c := NewClient(baseURL, pat)
 	if hc != nil {
