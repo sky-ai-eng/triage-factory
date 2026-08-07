@@ -36,6 +36,7 @@ import {
   approvalAction,
   approvalCounts,
   approvalKicker,
+  artifactSetKey,
   hasUnresolvedArtifacts,
 } from '../lib/approval'
 
@@ -52,11 +53,14 @@ interface Props {
   pendingPermissions?: PendingPermission[]
   onResolvePermission?: (toolCallID: string, decision: PermissionDecisionInput) => Promise<void>
   onRequeue?: () => void
-  onReview?: () => void
-  // Open a PR/review artifact's approval overlay by id, from the footer's
-  // artifacts popover (TFAC-470). Distinct from onReview, which fires the parked
-  // run's single gating overlay; this addresses any artifact in the full set.
+  // Open a PR/review artifact's approval overlay by id — from a row in the
+  // artifacts popover, or directly from the attention row when exactly one
+  // item is unresolved.
   onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
+  // Re-pull the board's task/run projections after an in-place dismiss in the
+  // artifacts popover (the popover's list refetches itself; the card's counts
+  // and column live on the run row).
+  onArtifactResolved?: () => void
   // Caller-supplied assignee picker, rendered in the header cluster.
   assigneeSlot?: React.ReactNode
 }
@@ -75,12 +79,16 @@ export default function AgentCard({
   pendingPermissions,
   onResolvePermission,
   onRequeue,
-  onReview,
   onOpenArtifact,
+  onArtifactResolved,
   assigneeSlot,
 }: Props) {
   const orgHref = useOrgHref()
   const [now, setNow] = useState(() => Date.now())
+  // The footer's artifacts popover, lifted so the attention row can raise it
+  // too: for a plural/mixed unresolved set the popover IS the approval surface
+  // (unresolved rows sort to the top of the list).
+  const [artifactsOpen, setArtifactsOpen] = useState(false)
 
   const isActive = isActiveRun(run)
   // Waiting for a dispatcher slot (the process-wide concurrency cap), not
@@ -256,13 +264,24 @@ export default function AgentCard({
         )}
 
         {/* Attention row — your move, in the canonical toned pattern. Count-aware
-            over the unresolved set; opening it raises the approval surface. */}
-        {needsApproval && onReview && (
+            over the unresolved set. One unresolved item goes straight to its
+            editor — no list detour; pending_artifact_ids lists draft PRs first,
+            then ready reviews, so unresolved_pr_count discriminates the head's
+            kind. Anything else (plural, mixed, or a transiently absent id set)
+            raises the artifacts popover, unresolved rows first. */}
+        {needsApproval && onOpenArtifact && (
           <div className="mx-4 mb-2">
             <AttentionRow
               kicker={approvalKicker(approval)}
               action={approvalAction(approval)}
-              onClick={onReview}
+              onClick={() => {
+                const ids = run.pending_artifact_ids ?? []
+                if (approval.total === 1 && ids.length > 0) {
+                  onOpenArtifact((run.unresolved_pr_count ?? 0) > 0 ? 'pr' : 'review', ids[0])
+                } else {
+                  setArtifactsOpen(true)
+                }
+              }}
             />
           </div>
         )}
@@ -290,7 +309,13 @@ export default function AgentCard({
             {run.TotalCostUSD != null && run.TotalCostUSD > 0 && (
               <span>${run.TotalCostUSD.toFixed(3)}</span>
             )}
-            <ArtifactsAffordance run={run} onOpenArtifact={onOpenArtifact} />
+            <ArtifactsAffordance
+              run={run}
+              onOpenArtifact={onOpenArtifact}
+              onArtifactResolved={onArtifactResolved}
+              open={artifactsOpen}
+              onOpenChange={setArtifactsOpen}
+            />
           </div>
 
           <div className="flex items-center gap-3">
@@ -326,22 +351,32 @@ function HeaderDivider() {
 }
 
 // ArtifactsAffordance is the footer's "N artifacts →" button — the full set a
-// run produced (the count comes free with the run, TFAC-465). Hidden at 0.
-// Clicking opens a lightweight popover that lazy-fetches the list (ArtifactList
-// only mounts when the popover does); PR/review rows reuse the board's approval
-// overlays via onOpenArtifact, the rest link out.
+// run produced (the count comes free with the run). Hidden at 0. Open state is
+// owned by the card, because the attention row raises the same popover for a
+// plural/mixed unresolved set. The popover lazy-fetches the list (ArtifactList
+// only mounts when it does), with the run's unresolved rows sorted first and
+// dismissable in place; PR/review rows reuse the board's approval overlays via
+// onOpenArtifact, the rest link out.
 function ArtifactsAffordance({
   run,
   onOpenArtifact,
+  onArtifactResolved,
+  open,
+  onOpenChange,
 }: {
   run: Conversation
   onOpenArtifact?: (kind: 'review' | 'pr', artifactId: string) => void
+  onArtifactResolved?: () => void
+  open: boolean
+  onOpenChange: (open: boolean) => void
 }) {
-  const [open, setOpen] = useState(false)
   const count = run.artifact_count ?? 0
-  if (count <= 0) return null
+  // `open` keeps a forced-open popover alive through a transiently absent
+  // count (the projections travel together, but the guard keeps the attention
+  // row's raise from ever landing on an unmounted trigger).
+  if (count <= 0 && !open) return null
   return (
-    <Popover.Root open={open} onOpenChange={setOpen}>
+    <Popover.Root open={open} onOpenChange={onOpenChange}>
       <Popover.Trigger asChild>
         <button
           type="button"
@@ -363,10 +398,13 @@ function ArtifactsAffordance({
           </div>
           <ArtifactList
             runId={run.ID}
+            pendingArtifactIds={run.pending_artifact_ids}
+            refreshKey={artifactSetKey(run)}
             onOpenApproval={(kind, id) => {
-              setOpen(false)
+              onOpenChange(false)
               onOpenArtifact?.(kind, id)
             }}
+            onResolved={onArtifactResolved}
           />
           <Popover.Arrow className="fill-surface-raised" />
         </Popover.Content>
