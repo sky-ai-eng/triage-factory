@@ -28,10 +28,21 @@ type reaperFixture struct {
 
 // seedReaperFixture mints an org, a blueprint/task/prompt chain, a running
 // blueprint_run, and one claimed run under a freshly-registered executor
-// instance. attempts is set via repeated claims (each ClaimNextRun mints a
-// claims row — the real production mechanism, not a raw INSERT) so the
-// fixture exercises the same claims count the reaper reads.
-func seedReaperFixture(t *testing.T, h *pgtest.Harness, attempts int) reaperFixture {
+// instance — the live claim the reaper will find.
+//
+// priorOutcomes is the claim history to lay down behind that live claim,
+// oldest first, one released claim per entry. Every entry is produced by the
+// production path that writes its outcome (each ClaimNextRun mints a real
+// claims row; no raw INSERT), because the reaper counts an EPISODE — the
+// trailing run of handed-back claims — and only the real paths put the
+// boundaries where production puts them:
+//
+//	"requeued"  — RunQueueStore.RequeueRun: a hand-back, which keeps the
+//	              current episode open.
+//	"cancelled" — a deliberate stop and a resume: an engagement that
+//	              concluded, which ENDS the episode and starts the next one
+//	              at zero however many claims came before it.
+func seedReaperFixture(t *testing.T, h *pgtest.Harness, priorOutcomes ...string) reaperFixture {
 	t.Helper()
 	ctx := context.Background()
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -88,23 +99,32 @@ func seedReaperFixture(t *testing.T, h *pgtest.Harness, attempts int) reaperFixt
 	}); err != nil {
 		t.Fatalf("EnqueueRun: %v", err)
 	}
-	for i := 0; i < attempts; i++ {
+	for i := 0; i <= len(priorOutcomes); i++ {
 		// The claim is cross-org and takes the globally-oldest eligible
 		// conversation, so a test seeding several fixtures must leave no
 		// older one claimable — assert the identity rather than let a
 		// mis-claim pass silently.
 		got, err := stores.RunQueue.ClaimNextRun(ctx, executorID, 1, db.ClaimPlacement{})
 		if err != nil || got == nil || got.ID != runID {
-			t.Fatalf("ClaimNextRun (attempt %d): got=%v err=%v, want run %s", i+1, got, err, runID)
+			t.Fatalf("ClaimNextRun (claim %d): got=%v err=%v, want run %s", i+1, got, err, runID)
 		}
-		if i < attempts-1 {
-			// A mid-loop requeue simulates the run bouncing back to 'queued'
-			// so the NEXT claim can bump attempts again — attempts is a
-			// monotonic per-row counter, not "how many times currently
-			// claimed".
+		if i == len(priorOutcomes) {
+			break // the live claim — left held, for the reaper to find
+		}
+		switch outcome := priorOutcomes[i]; outcome {
+		case "requeued":
 			if err := stores.RunQueue.RequeueRun(ctx, orgID, runID, "test churn"); err != nil {
-				t.Fatalf("RequeueRun (attempt %d): %v", i+1, err)
+				t.Fatalf("RequeueRun (claim %d): %v", i+1, err)
 			}
+		case "cancelled":
+			if ok, err := stores.Conversations.ParkOpen(ctx, orgID, runID, db.ParkStopped("user_cancelled", "")); err != nil || !ok {
+				t.Fatalf("ParkOpen (claim %d): ok=%v err=%v", i+1, ok, err)
+			}
+			if ok, err := stores.Conversations.MarkQueuedForResume(ctx, orgID, runID); err != nil || !ok {
+				t.Fatalf("MarkQueuedForResume (claim %d): ok=%v err=%v", i+1, ok, err)
+			}
+		default:
+			t.Fatalf("seedReaperFixture: unsupported prior claim outcome %q", outcome)
 		}
 	}
 
@@ -129,15 +149,15 @@ func backdateHeartbeat(t *testing.T, h *pgtest.Harness, executorID string, age t
 }
 
 // TestReapDeadExecutors_RequeuesUnderAttemptBudget pins the primary
-// recovery path: a claimed run under a stale-heartbeat executor, still
-// within its attempt budget, is requeued (active claim released with
+// recovery path: a claimed run under a stale-heartbeat executor, its loss
+// episode still under budget, is requeued (active claim released with
 // outcome 'reaped', no new claim minted) rather than failed.
 func TestReapDeadExecutors_RequeuesUnderAttemptBudget(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
 
-	fx := seedReaperFixture(t, h, 1)
+	fx := seedReaperFixture(t, h)
 	backdateHeartbeat(t, h, fx.executorID, time.Hour)
 
 	store := reaper.NewPostgresStore(h.AdminDB)
@@ -186,15 +206,16 @@ func TestReapDeadExecutors_RequeuesUnderAttemptBudget(t *testing.T) {
 }
 
 // TestReapDeadExecutors_TerminalFailsExecutorLostPastAttemptBudget pins the
-// attempts-exhausted path: attempts >= maxAttempts terminal-fails the run
-// with failure_kind='executor_lost' and finalizes the owning blueprint_run
-// failed, instead of requeuing it forever.
+// exhausted-episode path: a loss episode that reaches maxAttempts — a
+// genuine crash loop, one hand-back and then the death being reaped here —
+// terminal-fails the run with failure_kind='executor_lost' and finalizes the
+// owning blueprint_run failed, instead of requeuing it forever.
 func TestReapDeadExecutors_TerminalFailsExecutorLostPastAttemptBudget(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
 
-	fx := seedReaperFixture(t, h, 2) // attempts == maxAttempts below
+	fx := seedReaperFixture(t, h, "requeued") // episode == maxAttempts below
 	backdateHeartbeat(t, h, fx.executorID, time.Hour)
 
 	store := reaper.NewPostgresStore(h.AdminDB)
@@ -227,6 +248,103 @@ func TestReapDeadExecutors_TerminalFailsExecutorLostPastAttemptBudget(t *testing
 	}
 }
 
+// TestReapDeadExecutors_RequeuesAfterEngagementsThatConcluded pins the unit
+// the budget is counted in. This conversation has been stopped and resumed
+// twice, so it is on its THIRD lifetime claim when its executor dies — over
+// a lifetime budget of 2 before the first thing ever went wrong with it.
+// Counted as an episode it is at 1, because each stop concluded an
+// engagement, so the death is requeued and the blueprint keeps running.
+func TestReapDeadExecutors_RequeuesAfterEngagementsThatConcluded(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	fx := seedReaperFixture(t, h, "cancelled", "cancelled")
+	backdateHeartbeat(t, h, fx.executorID, time.Hour)
+	// Stamp the dead executor as the placement preference, so the requeue's
+	// clearing of it is observable rather than vacuous.
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = $2 WHERE id = $1`, fx.runID, fx.executorID)
+
+	var lifetime int
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM claims WHERE conversation_id = $1`, fx.runID,
+	).Scan(&lifetime); err != nil {
+		t.Fatalf("count lifetime claims: %v", err)
+	}
+	if lifetime != 3 {
+		t.Fatalf("lifetime claims = %d, want 3 — the fixture must be over a lifetime budget of 2 for this test to mean anything", lifetime)
+	}
+
+	store := reaper.NewPostgresStore(h.AdminDB)
+	counts, err := store.ReapDeadExecutors(ctx, 30*time.Second, 2)
+	if err != nil {
+		t.Fatalf("ReapDeadExecutors: %v", err)
+	}
+	if counts.Requeued != 1 || counts.Failed != 0 || counts.Cancelled != 0 {
+		t.Fatalf("counts = %+v, want {Requeued:1} — a resumed conversation's first executor death is not a crash loop", counts)
+	}
+
+	var status sql.NullString
+	var preferred sql.NullString
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT status, preferred_executor_id FROM conversations WHERE id = $1`, fx.runID,
+	).Scan(&status, &preferred); err != nil {
+		t.Fatalf("read back run: %v", err)
+	}
+	if status.Valid {
+		t.Errorf("status = %q, want none — releasing the claim IS the requeue", status.String)
+	}
+	if preferred.Valid {
+		t.Errorf("preferred_executor_id = %q, want none — affinity is never carried toward a corpse", preferred.String)
+	}
+
+	var brStatus string
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT status FROM blueprint_runs WHERE id = $1`, fx.blueprintRunID,
+	).Scan(&brStatus); err != nil {
+		t.Fatalf("read back blueprint_run: %v", err)
+	}
+	if brStatus != "running" {
+		t.Errorf("blueprint_run status = %q, want running — a requeue must not abort the blueprint", brStatus)
+	}
+}
+
+// TestReapDeadExecutors_TerminalFailsEpisodeBehindAConcludedEngagement is the
+// other side of the same boundary: the conversation concluded an engagement
+// once, but everything after it is hand-backs, and that trailing run reaches
+// the budget. Episode counting must find the loop that starts mid-history —
+// counting only since the last conclusion is not the same as forgiving
+// everything before it.
+func TestReapDeadExecutors_TerminalFailsEpisodeBehindAConcludedEngagement(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	fx := seedReaperFixture(t, h, "cancelled", "requeued")
+	backdateHeartbeat(t, h, fx.executorID, time.Hour)
+
+	store := reaper.NewPostgresStore(h.AdminDB)
+	counts, err := store.ReapDeadExecutors(ctx, 30*time.Second, 2)
+	if err != nil {
+		t.Fatalf("ReapDeadExecutors: %v", err)
+	}
+	if counts.Failed != 1 || counts.Requeued != 0 || counts.Cancelled != 0 {
+		t.Fatalf("counts = %+v, want {Failed:1} — the trailing hand-back plus this death is a full episode", counts)
+	}
+
+	var status, failureKind, brStatus string
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT c.status, COALESCE(c.failure_kind, ''), br.status
+		   FROM conversations c JOIN blueprint_runs br ON br.id = c.blueprint_run_id
+		  WHERE c.id = $1`, fx.runID,
+	).Scan(&status, &failureKind, &brStatus); err != nil {
+		t.Fatalf("read back run: %v", err)
+	}
+	if status != "failed" || failureKind != string(domain.RunFailureExecutorLost) || brStatus != "failed" {
+		t.Errorf("(run=%q failure_kind=%q blueprint_run=%q), want (failed, executor_lost, failed)", status, failureKind, brStatus)
+	}
+}
+
 // TestReapDeadExecutors_CancelRequestedFinalizesCancelledNotRequeued pins
 // "cancel-requested rows go through the existing cancel finalization
 // instead of requeue" — even a run still within its attempt budget must
@@ -240,7 +358,7 @@ func TestReapDeadExecutors_CancelRequestedFinalizesCancelledNotRequeued(t *testi
 	h.Reset(t)
 	ctx := context.Background()
 
-	fx := seedReaperFixture(t, h, 1)
+	fx := seedReaperFixture(t, h)
 	backdateHeartbeat(t, h, fx.executorID, time.Hour)
 	pgtest.MustExec(t, h.AdminDB, `UPDATE blueprint_runs SET cancel_requested = true WHERE id = $1`, fx.blueprintRunID)
 
@@ -279,7 +397,7 @@ func TestReapDeadExecutors_FreshHeartbeatNeverReaped(t *testing.T) {
 	h.Reset(t)
 	ctx := context.Background()
 
-	fx := seedReaperFixture(t, h, 1)
+	fx := seedReaperFixture(t, h)
 	// Simulate an operator draining this executor — still heartbeating,
 	// just refusing new claims locally. The reaper must not care.
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -318,7 +436,7 @@ func TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesRunsExecutorID(t *test
 	h.Reset(t)
 	ctx := context.Background()
 
-	fx := seedReaperFixture(t, h, 1)
+	fx := seedReaperFixture(t, h)
 	backdateHeartbeat(t, h, fx.executorID, 8*24*time.Hour) // 8 days stale
 
 	freshID := "reaper-fresh-" + uuid.New().String()[:8]
@@ -377,18 +495,18 @@ func TestHealClaimDesyncs_ReleasesTerminalDanglingClaims(t *testing.T) {
 
 	// Crash-after-flip: the conversation committed terminal but its claim
 	// release never landed.
-	terminal := seedReaperFixture(t, h, 1)
+	terminal := seedReaperFixture(t, h)
 	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = 'completed' WHERE id = $1`, terminal.runID)
 
 	// Healthy: mid-flight with a live claim. Seeded BEFORE the claimless
 	// fixture below, because the claim is cross-org and takes the oldest
 	// eligible conversation — a run left claimable would be picked up by the
 	// next fixture's claim instead of its own.
-	healthy := seedReaperFixture(t, h, 1)
+	healthy := seedReaperFixture(t, h)
 
 	// Mid-flight with the claim released: the ordinary claimable state now,
 	// stale placement stamp and all (the next claim re-earns affinity).
-	claimless := seedReaperFixture(t, h, 1)
+	claimless := seedReaperFixture(t, h)
 	pgtest.MustExec(t, h.AdminDB, `
 		UPDATE claims SET released_at = now(), outcome = 'failed'
 		WHERE conversation_id = $1 AND released_at IS NULL
