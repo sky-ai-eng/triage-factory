@@ -48,19 +48,21 @@ func TestClassifyStop(t *testing.T) {
 		}
 	}
 
-	// The two derived predicates read off the same table, so a reason added
-	// to one arm can never disagree with them.
-	if !isLengthStop("max_tokens") || isLengthStop(wallStop) {
-		t.Error("isLengthStop must cover the length arm and nothing else")
-	}
-	for _, cut := range []string{"length", "max_tokens", wallStop, "context_window_exceeded"} {
-		if !isCutStop(cut) {
-			t.Errorf("isCutStop(%q) = false; both cuts damage a message the same way", cut)
+	// interrupted reads off the same table, so a reason added to an arm can
+	// never disagree with the two rules that key on it. Every class that
+	// parks or retries is interrupted; only the two that act on the message —
+	// conclude and dispatch — are not.
+	for _, reason := range []string{"length", "max_tokens", wallStop, "context_window_exceeded",
+		"refusal", "content_filter", "guardrail_intervened", "pause_turn", "supernova"} {
+		if !classifyStop(reason).interrupted() {
+			t.Errorf("classifyStop(%q).interrupted() = false; nothing in that message may be dispatched, "+
+				"and its arguments may have stopped mid-JSON", reason)
 		}
 	}
-	for _, whole := range []string{"stop", "", "tool_calls", "refusal"} {
-		if isCutStop(whole) {
-			t.Errorf("isCutStop(%q) = true; nothing cut this message short", whole)
+	for _, finished := range []string{"stop", "", "tool_calls"} {
+		if classifyStop(finished).interrupted() {
+			t.Errorf("classifyStop(%q).interrupted() = true; the model ended this message itself, so "+
+				"malformed arguments in it are a provider bug and must stay loud", finished)
 		}
 	}
 }
@@ -362,6 +364,76 @@ func TestRun_DeclineParkIsWokenByAFollowUp(t *testing.T) {
 					t.Errorf("the waking call assembled an assistant row with nothing on it (id %d); "+
 						"the provider rejects that message", row.ID)
 				}
+			}
+		})
+	}
+}
+
+// TestRun_InterruptedCallsAreAnsweredBeforeParking covers a decline or an
+// unknown stop that lands after a tool call has already begun streaming — a
+// guardrail scanning output intervenes when it sees something, not before the
+// model starts, so the reply can carry calls and damaged arguments both.
+//
+// Two properties, and the second is why the calls are answered here rather
+// than left to the next claim. Repair would keep the transcript legal — it
+// runs on every claim and answers anything dangling — but its result says the
+// executor changed, the workspace was restored, and the call's effects may be
+// partially present. For a message the provider took away, every clause of
+// that is false, and the model would go verify state that nothing touched.
+func TestRun_InterruptedCallsAreAnsweredBeforeParking(t *testing.T) {
+	for _, reason := range []string{"guardrail_intervened", "supernova"} {
+		t.Run(reason, func(t *testing.T) {
+			tr := newMemTranscript(pendingUser("go"))
+			host := newScriptedToolHost()
+			p := &scriptedProvider{turns: []scriptedTurn{
+				{
+					calls: []domain.ToolCall{{ID: "c1", Name: "bash"}, {ID: "c2", Name: "write"}},
+					// The second call's arguments stopped mid-JSON.
+					rawArgs: map[int]string{1: `{"path":"internal/agentl`},
+					finish:  reason,
+				},
+				{text: "Done."},
+			}}
+			e := newTestEngine(tr, p, host)
+
+			got := e.Run(context.Background(), testParams())
+
+			if got.Kind != ResultParked {
+				t.Fatalf("disposition = %v (err: %v), want parked — damaged arguments under a stop the "+
+					"provider imposed are truncation, not a provider bug to fail loudly on", got.Kind, got.Err)
+			}
+			if len(host.calls()) != 0 {
+				t.Fatalf("nothing in a message the provider took away may run; the host saw %v", host.calls())
+			}
+			results := tr.toolResults()
+			if len(results) != 2 {
+				t.Fatalf("tool results = %d, want every call answered in the turn it arrived in", len(results))
+			}
+			for _, r := range results {
+				if !r.IsError {
+					t.Errorf("result for %s must be is_error", r.ToolCallID)
+				}
+				if r.Content != interruptedCallNotice {
+					t.Errorf("result for %s = %q, want the notice that says nothing happened", r.ToolCallID, r.Content)
+				}
+				if strings.Contains(r.Content, "workspace") {
+					t.Errorf("result for %s claims something about the workspace; nothing ran and nothing "+
+						"was restored: %q", r.ToolCallID, r.Content)
+				}
+			}
+
+			// And the park is resumable: the waking call carries no
+			// unanswered tool_use, with no repair pass needed to get there.
+			follow := pendingUser("go on then")
+			if _, err := tr.Insert(context.Background(), "org", &follow); err != nil {
+				t.Fatalf("insert follow-up: %v", err)
+			}
+			if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
+				t.Fatalf("second engagement = %+v, want the follow-up to wake the conversation", got)
+			}
+			if n := len(tr.toolResults()); n != 2 {
+				t.Errorf("tool results after the resume = %d, want the original 2 — repair had nothing "+
+					"left to answer, so it must not have added a synthetic result of its own", n)
 			}
 		})
 	}

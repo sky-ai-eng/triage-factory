@@ -489,14 +489,13 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		turn++
 		reactiveCompacted = false
 
-		// 7. Persist — one row, priced, display columns populated. Under a
-		// stop that cut the message off mid-generation — the output cap or
-		// the context window wall — the cut usually lands mid-arguments,
-		// leaving the final tool call's JSON unparseable; stub those
-		// arguments empty — under those stop reasons only — so the row
+		// 7. Persist — one row, priced, display columns populated. A message
+		// the provider ended rather than the model finishing usually lands
+		// mid-arguments, leaving the final tool call's JSON unparseable; stub
+		// those arguments empty — under those stop reasons only — so the row
 		// persists and step 8 can answer the batch. Everywhere else malformed
-		// arguments stay a loud persist failure: with no truncation to blame
-		// they are a provider bug, not something to paper over.
+		// arguments stay a loud persist failure: with nothing to blame for
+		// the damage they are a provider bug, not something to paper over.
 		class := classifyStop(completion.FinishReason)
 		if completion.FinishReason == "" {
 			// Read as an ordinary stop, per classifyStop. The warn is the only
@@ -505,7 +504,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			e.warn("provider reported no finish reason; reading the turn as an ordinary stop",
 				"conversation", params.ConversationID, "model", params.Model)
 		}
-		if isCutStop(completion.FinishReason) {
+		if class.interrupted() {
 			stubTruncatedToolArgs(completion)
 		}
 		assistantRow, err := e.persistAssistant(ctx, params, completion, msSince(callStarted))
@@ -540,10 +539,8 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			// any of them.
 			if len(calls) > 0 {
 				emptyLengthStops = 0
-				for _, call := range calls {
-					if err := e.insertToolResult(ctx, params, call, truncatedBatchNotice, true); err != nil {
-						return e.failed(ctx, started, turn, err)
-					}
+				if err := e.answerUndispatchedCalls(ctx, params, calls, truncatedBatchNotice); err != nil {
+					return e.failed(ctx, started, turn, err)
 				}
 				bareDrain = false
 				continue
@@ -587,15 +584,13 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			// length arm's answer, would make the wall arrive sooner.
 			//
 			// No call in a wall-cut message is ever dispatched. Answering
-			// them here rather than at step 9 is what makes that structural,
-			// and it is also what keeps the transcript legal for the
-			// summarize call about to read it — an unanswered tool_use is
-			// rejected on the wire. The answers flip inactive with the rest
-			// of the span a moment later.
-			for _, call := range calls {
-				if err := e.insertToolResult(ctx, params, call, wallCutBatchNotice, true); err != nil {
-					return e.failed(ctx, started, turn, err)
-				}
+			// them before compacting is what keeps the transcript legal for
+			// the summarize call about to read it — an unanswered tool_use is
+			// rejected on the wire, and this arm continues in-process, so no
+			// repair pass runs in between. The answers flip inactive with the
+			// rest of the span a moment later.
+			if err := e.answerUndispatchedCalls(ctx, params, calls, wallCutBatchNotice); err != nil {
+				return e.failed(ctx, started, turn, err)
 			}
 			windowWallStops++
 			if windowWallStops >= maxWindowWallStops {
@@ -618,12 +613,25 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		case stopDecline:
 			// A person decides what happens next. Retrying a refusal
 			// reproduces it, and the loop has nothing to change about the ask.
+			//
+			// A decline can land after a tool call has begun streaming — a
+			// guardrail scanning output intervenes when it sees something,
+			// not before the model starts. Those calls are answered like any
+			// other the loop declines to run: whatever the person does with
+			// this park, it must not begin by having the model told a call it
+			// never made was interrupted.
+			if err := e.answerUndispatchedCalls(ctx, params, calls, interruptedCallNotice); err != nil {
+				return e.failed(ctx, started, turn, err)
+			}
 			return e.parkOnStop(ctx, params, started, turn, rows, declineParkNotice(completion.FinishReason))
 
 		case stopUnknown:
 			e.warn("provider reported an unrecognized finish reason; parking rather than concluding",
 				"conversation", params.ConversationID, "model", params.Model,
 				"finish_reason", completion.FinishReason)
+			if err := e.answerUndispatchedCalls(ctx, params, calls, interruptedCallNotice); err != nil {
+				return e.failed(ctx, started, turn, err)
+			}
 			return e.parkOnStop(ctx, params, started, turn, rows, unrecognizedStopParkNotice(completion.FinishReason))
 
 		case stopToolCalls:
@@ -831,6 +839,25 @@ func (e *Engine) checkGuards(ctx context.Context, params Params, budgetTurns, tu
 		}
 	}
 	return ""
+}
+
+// answerUndispatchedCalls writes an is_error result for every call in a
+// message no arm will run, so a call is either dispatched or answered within
+// the turn it arrived in — never left standing.
+//
+// Leaving them to the next claim's repair pass would keep the transcript
+// legal, since repair runs unconditionally and answers anything dangling. It
+// would not keep it honest: repair's synthetic result describes an
+// interrupted execution on a restored workspace, and for these messages every
+// part of that is false. Nothing ran, nothing was restored, and there is no
+// state to go verify.
+func (e *Engine) answerUndispatchedCalls(ctx context.Context, params Params, calls []domain.ToolCall, notice string) error {
+	for _, call := range calls {
+		if err := e.insertToolResult(ctx, params, call, notice, true); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // parkOnStop parks the engagement `open` with a notice — the disposition

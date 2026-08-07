@@ -71,21 +71,24 @@ func classifyStop(reason string) stopClass {
 	}
 }
 
-// isLengthStop recognizes the provider's truncation stop reason across the
-// two spellings the neutral layer surfaces.
-func isLengthStop(reason string) bool {
-	return classifyStop(reason) == stopLength
-}
-
-// isCutStop recognizes a stop that cut the message off mid-generation,
-// whichever limit did it. The two are different events with different
-// remedies, but they leave identically damaged messages: arguments truncated
-// mid-JSON, and sometimes nothing at all but reasoning. The persistence rules
-// that answer to the damage key on this; the arms that answer to the remedy
-// key on the class.
-func isCutStop(reason string) bool {
-	switch classifyStop(reason) {
-	case stopLength, stopWindowWall:
+// interrupted reports a stop that ended the message before the model chose to
+// end it — a limit cut it short, or the provider took it away. The classes
+// differ entirely in remedy and not at all in the state they leave behind,
+// which is why two rules key on this rather than on the class:
+//
+//   - the strict tool-argument parse is relaxed, because the stream may have
+//     stopped mid-JSON and the fragments cannot form a whole document;
+//   - nothing in the message is dispatched, so every call it carries is
+//     answered in-band instead.
+//
+// A message the model finished gets neither. With nothing to blame for the
+// damage, malformed arguments there are a provider bug and stay a loud
+// failure. An unclassified stop counts as interrupted for the same reason it
+// parks rather than concludes: a reason nobody has classified is not evidence
+// that anything completed.
+func (c stopClass) interrupted() bool {
+	switch c {
+	case stopLength, stopWindowWall, stopDecline, stopUnknown:
 		return true
 	default:
 		return false
@@ -107,6 +110,15 @@ const truncatedBatchNotice = "This tool call was not executed: the model's respo
 const wallCutBatchNotice = "This tool call was not executed: the model's response ran out of context window " +
 	"mid-message, so the tool arguments in that message may be silently truncated and are not safe to run. " +
 	"The conversation is being compacted to make room; re-issue the call you intended after that."
+
+// interruptedCallNotice answers a tool call in a message the provider ended
+// before the loop could run it — a decline, or a stop nobody has classified.
+// It promises less than the two above because less is known: the call did not
+// run, and whether re-issuing it is even the right move depends on what a
+// person makes of the park it arrived with.
+const interruptedCallNotice = "This tool call was not executed: the provider ended the reply that contained it " +
+	"before the call could run, and this run is paused for a person to look at. Nothing from this call happened, " +
+	"and nothing it would have changed was changed."
 
 // maxEmptyLengthStops bounds consecutive turns cut at the output limit that
 // produced nothing. Two: the first buys a notice and a larger cap, and if the
