@@ -216,6 +216,9 @@ func (failingEnqueueQueue) Requeue(context.Context, string, int64, string) error
 func (failingEnqueueQueue) ResetProcessing(context.Context, string, int64) (int, error) {
 	return 0, nil
 }
+func (failingEnqueueQueue) RequeueStaleProcessing(context.Context, time.Duration) (int, error) {
+	return 0, nil
+}
 func (failingEnqueueQueue) PruneDone(context.Context, time.Time) (int, error) { return 0, nil }
 func (failingEnqueueQueue) ListForEntity(context.Context, string, string) ([]domain.QueuedEvent, error) {
 	return nil, nil

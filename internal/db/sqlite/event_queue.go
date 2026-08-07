@@ -72,7 +72,7 @@ func (s *eventQueueStore) ClaimNext(ctx context.Context, executorID string, boot
 	// the multi-worker case). A NULL subquery (empty queue) matches no
 	// row, RETURNING yields nothing, and the scan reports ErrNoRows.
 	//
-	// executor_id + boot_epoch are stamped in this same statement (TFAC-578),
+	// executor_id + boot_epoch are stamped in this same statement,
 	// mirroring the Postgres impl — see ResetProcessing.
 	row := s.conn.QueryRowContext(ctx, `
 		UPDATE event_queue
@@ -127,7 +127,7 @@ func (s *eventQueueStore) Requeue(ctx context.Context, orgID string, id int64, l
 }
 
 func (s *eventQueueStore) ResetProcessing(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
-	// Ownership-scoped (TFAC-578), mirroring the Postgres impl. SQLite is
+	// Ownership-scoped, mirroring the Postgres impl. SQLite is
 	// N=1, so this is trivially self-scoped, but the predicate keeps the two
 	// backends' semantics identical. `boot_epoch IS NULL` is a narrow
 	// defensive catch (this instance's persistent id, no epoch); pre-registry
@@ -141,6 +141,30 @@ func (s *eventQueueStore) ResetProcessing(ctx context.Context, executorID string
 		  AND executor_id = ?
 		  AND (boot_epoch IS NULL OR boot_epoch < ?)
 	`, executorID, bootEpoch)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+func (s *eventQueueStore) RequeueStaleProcessing(ctx context.Context, olderThan time.Duration) (int, error) {
+	// The staleness backstop under ResetProcessing — see the interface doc.
+	// SQLite/local is N=1, so the case that motivated it (an owner replaced
+	// rather than rebooted) can't arise here; what it still catches is a row
+	// left 'processing' by a hard crash wearing an ownership stamp the boot
+	// reset's predicate doesn't match. The method exists so both backends
+	// hold one contract and the drain worker sweeps without branching on
+	// mode. The cutoff is computed in Go because claimed_at is written from
+	// this same process's clock, so there is no second clock to skew
+	// against. A NULL claimed_at 'processing' row is reclaimed
+	// unconditionally, mirroring the Postgres impl.
+	res, err := s.conn.ExecContext(ctx, `
+		UPDATE event_queue SET status = 'pending', last_error = ?, claimed_at = NULL,
+			executor_id = NULL, boot_epoch = NULL
+		WHERE status = 'processing'
+		  AND (claimed_at IS NULL OR claimed_at < ?)
+	`, db.StaleProcessingReclaimReason, time.Now().Add(-olderThan))
 	if err != nil {
 		return 0, err
 	}
