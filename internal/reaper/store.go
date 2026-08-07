@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-  "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+  	"github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
