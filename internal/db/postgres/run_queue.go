@@ -272,8 +272,13 @@ const runQueueClaimSelect = `r.id, r.org_id,
 // speaking for itself: it concluded, it failed, it parked, it was stopped.
 const handedBackOutcomesSQL = `'requeued','reaped'`
 
-// episodeAttemptsSQL is the retry budget's unit: how many times THIS queue
-// episode has been attempted, the claim being minted included.
+// EpisodeAttemptsSQL renders the retry budget's unit: how many times THIS
+// queue episode has been attempted, the in-flight claim included — whether
+// that claim is being minted or handed back. Exported and alias-parameterized
+// (convAlias names the conversation in the enclosing query) because the
+// enclosing query is the only thing that varies: the counting rule below is a
+// decision about what an attempt IS, and a second copy of it would be a second
+// answer to that.
 //
 // An episode is the run of consecutive hand-backs at the tail of the
 // conversation's claim history. It ends at the most recent claim that recorded
@@ -294,8 +299,9 @@ const handedBackOutcomesSQL = `'requeued','reaped'`
 // conversation crash-loop the dispatcher forever — the one thing the lifetime
 // count did get right.
 //
-// The minted claim is excluded by construction rather than by the CTE snapshot
-// — it has no outcome yet, and both arms require one.
+// The in-flight claim is excluded from the COUNT by construction rather than
+// by the CTE snapshot — it has no outcome yet, and both arms require one. It
+// is what the +1 stands for.
 //
 // "Later than" is spelled against the hand-back's RELEASE, not its claim, and
 // non-strictly. Engagements on one conversation never overlap (the claim is
@@ -309,8 +315,9 @@ const handedBackOutcomesSQL = `'requeued','reaped'`
 // which costs at most one more round of retries. COALESCE covers a released
 // row that somehow carries an outcome without a release timestamp: it degrades
 // to comparing claims rather than silently never matching.
-const episodeAttemptsSQL = `(SELECT COUNT(*) + 1 FROM claims c2
-	WHERE c2.conversation_id = candidate.id
+func EpisodeAttemptsSQL(convAlias string) string {
+	return `(SELECT COUNT(*) + 1 FROM claims c2
+	WHERE c2.conversation_id = ` + convAlias + `.id
 	  AND c2.outcome IN (` + handedBackOutcomesSQL + `)
 	  AND NOT EXISTS (
 	      SELECT 1 FROM claims c3
@@ -318,21 +325,22 @@ const episodeAttemptsSQL = `(SELECT COUNT(*) + 1 FROM claims c2
 	        AND c3.outcome IS NOT NULL
 	        AND c3.outcome NOT IN (` + handedBackOutcomesSQL + `)
 	        AND c3.claimed_at >= COALESCE(c2.released_at, c2.claimed_at)))::int`
+}
 
 // runQueueClaimReturning is the outer-SELECT projection of ClaimNextRun. The
 // claim identity (executor/claim id/claimed_at/attempts) rides the same
 // statement: the id + claimed_at come from the freshly inserted claims row,
-// attempts from the current queue episode (see episodeAttemptsSQL). The
+// attempts from the current queue episode (see EpisodeAttemptsSQL). The
 // claim id is returned because the executor needs to name this engagement
 // later — at teardown, once it has been released and can no longer be found
 // by looking for the conversation's active claim.
-const runQueueClaimReturning = `candidate.id::text, candidate.org_id::text, candidate.type, candidate.task_id, candidate.prompt_id,
+var runQueueClaimReturning = `candidate.id::text, candidate.org_id::text, candidate.type, candidate.task_id, candidate.prompt_id,
 	candidate.model, candidate.runtime, candidate.worktree_path, candidate.sdk_session_id,
 	candidate.trigger_type, candidate.trigger_id, candidate.creator_user_id,
 	candidate.team_id, candidate.project_id,
 	candidate.blueprint_run_id, candidate.blueprint_step_index, candidate.turn_message_id,
 	minted.id::text AS claim_id, minted.claimed_at,
-	` + episodeAttemptsSQL + ` AS attempts`
+	` + EpisodeAttemptsSQL("candidate") + ` AS attempts`
 
 func (s *runQueueStore) ClaimNextRun(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement) (*domain.Conversation, error) {
 	// One scan, every surface: the needs-driving predicate is type-agnostic

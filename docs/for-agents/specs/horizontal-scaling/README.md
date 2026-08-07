@@ -555,7 +555,8 @@ claim → execute); three additions to the claim:
   A re-claimed *mid-flight* run restarts its step from the beginning on
   the new executor (fresh self-contained clone; the crashed attempt's
   session transcript died with the host). `attempts` caps this
-  (`TF_RUN_MAX_ATTEMPTS`, default 2). Residual risk, accepted and
+  (`TF_RUN_MAX_ATTEMPTS`, default 2 — consecutive losses, not
+  lifetime claims; decision 4). Residual risk, accepted and
   documented: a run that had already
   performed external writes (pushed a branch, posted a comment) before
   the crash will redo them — artifact upserts and branch-push semantics
@@ -1569,7 +1570,11 @@ pass (2026-07-08). Reopening conditions noted per entry.
    is removed (exact ties → unassigned), curator homes to executors —
    retiring the job-class endgame entirely rather than pulling it
    forward.
-4. **Executor-loss retry** — `TF_RUN_MAX_ATTEMPTS` default 2;
+4. **Executor-loss retry** — `TF_RUN_MAX_ATTEMPTS` default 2, counted
+   in *consecutive loss episodes* rather than lifetime claims (the
+   dispatcher's episode doctrine: any claim that recorded a real
+   outcome ends the episode, so a stopped-and-resumed conversation
+   meets its first executor death at 1);
    duplicate external writes on retry are accepted (upsert semantics
    absorb them; `failure_kind='executor_lost'` audits the rest); no
    compensation logic. Retried token spend is bounded by the attempt
