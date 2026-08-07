@@ -37,6 +37,40 @@ func (s BlueprintRunStatus) Terminal() bool {
 	}
 }
 
+// BlueprintAbortOrphanedAtMint is the abort_reason of a blueprint run failed
+// because it holds no step conversation at all. The firing path commits the
+// blueprint_run first and enqueues its first step second, so a hard death
+// between the two leaves a 'running' parent with nothing to drive it: no
+// conversation means no claim, so every recovery surface that joins through
+// conversations looks straight past it, and (in Postgres) it keeps holding the
+// one-active-auto-run index against its task.
+//
+// The transition running → failed on this reason belongs exclusively to the
+// two recovery surfaces — the leader reaper's sweep and the boot reconcile. No
+// live writer may use it: an in-process enqueue failure has its own error path
+// and reports what actually failed.
+const BlueprintAbortOrphanedAtMint = "orphaned_at_mint"
+
+// BlueprintOrphanedAtMintGrace is how long a childless 'running' blueprint run
+// is left alone before the recovery surfaces fail it. Shared by both surfaces
+// so the two can never disagree about what "old enough" means.
+//
+// The window it has to clear is two DB round trips — a placement read and the
+// step's INSERT — with no worktree, clone, or provider call between them (those
+// happen later, on claim). Sub-second when healthy. The only way a live mint
+// exceeds that without having crashed is a DB stall, and the one that happens
+// in normal operation is a failover of a few tens of seconds; two minutes
+// leaves margin over a pessimistic one while keeping recovery inside a couple
+// of minutes rather than a coffee break. Lowering it trades margin for latency
+// against that failover number, not against the code path.
+//
+// Losing that race degrades rather than corrupts, which is what makes a bounded
+// margin defensible instead of needing an arbitrarily large one: the late INSERT
+// lands a child under a now-terminal parent, the claim gate refuses to run a
+// step under one, and the boot reconcile's park arm retires the child. The
+// delegation dies visibly; it never double-runs.
+const BlueprintOrphanedAtMintGrace = 2 * time.Minute
+
 // BlueprintTriggerType distinguishes how a blueprint run was initiated.
 type BlueprintTriggerType string
 

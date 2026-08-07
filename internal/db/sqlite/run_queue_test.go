@@ -3,7 +3,9 @@ package sqlite_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -896,5 +898,90 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 				return got.Status
 			},
 		}
+	})
+}
+
+// TestRunQueueStore_SQLite_ReconcileOrphanedRuns runs the shared boot-reconcile
+// conformance against the SQLite impl. Each factory call opens a fresh
+// in-memory DB, so the suite's exact healed counts are this subtest's alone.
+func TestRunQueueStore_SQLite_ReconcileOrphanedRuns(t *testing.T) {
+	dbtest.RunReconcileOrphanedRunsConformance(t, func(t *testing.T) (db.RunQueueStore, dbtest.ReconcileOrphanSeeder) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		ctx := context.Background()
+		org := runmode.LocalDefaultOrgID
+
+		task := seedEntityEventTask(t, conn, "rq-recon")
+		insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rqrc-p0", Name: "Step 0", Body: "b", Source: "user"})
+		insertBlueprintForTest(t, conn, "rqrc-bp", "RQ Reconcile Blueprint")
+		if err := stores.Blueprints.ReplaceSteps(ctx, org, "rqrc-bp", []string{"rqrc-p0"}, nil); err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+
+		nextStep := 0
+		seed := dbtest.ReconcileOrphanSeeder{
+			BlueprintRun: func(t *testing.T, age time.Duration) string {
+				t.Helper()
+				brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+					ID: uuid.New().String(), BlueprintID: "rqrc-bp", TaskID: task.ID,
+					TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+					WorktreePath: "/tmp/wt-rqrc",
+				})
+				if err != nil {
+					t.Fatalf("CreateRun: %v", err)
+				}
+				if age > 0 {
+					// SQLite's own clock, in the CURRENT_TIMESTAMP shape the
+					// insert paths write, so the backdate can't smuggle in a
+					// timestamp format production never produces.
+					if _, err := conn.Exec(`UPDATE blueprint_runs SET started_at = datetime('now', ?) WHERE id = ?`,
+						fmt.Sprintf("-%d seconds", int(age.Seconds())), brID); err != nil {
+						t.Fatalf("backdate started_at: %v", err)
+					}
+				}
+				return brID
+			},
+			EnqueueChild: func(t *testing.T, brID string) string {
+				t.Helper()
+				idx := nextStep
+				nextStep++
+				convID := uuid.New().String()
+				if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
+					ID: convID, TaskID: task.ID, PromptID: "rqrc-p0", Model: "m",
+					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &idx,
+				}); err != nil {
+					t.Fatalf("EnqueueRun: %v", err)
+				}
+				return convID
+			},
+			ForceBlueprintStatus: func(t *testing.T, brID, status, abortReason string) {
+				t.Helper()
+				if _, err := conn.Exec(`UPDATE blueprint_runs SET status = ?, abort_reason = NULLIF(?, '') WHERE id = ?`,
+					status, abortReason, brID); err != nil {
+					t.Fatalf("force blueprint_run status %q: %v", status, err)
+				}
+			},
+			BlueprintRunState: func(t *testing.T, brID string) (string, string, bool) {
+				t.Helper()
+				var status string
+				var reason sql.NullString
+				var completedAt any
+				if err := conn.QueryRow(`SELECT status, abort_reason, completed_at FROM blueprint_runs WHERE id = ?`, brID).
+					Scan(&status, &reason, &completedAt); err != nil {
+					t.Fatalf("read blueprint_run %s: %v", brID, err)
+				}
+				return status, reason.String, completedAt != nil
+			},
+			ConversationStatus: func(t *testing.T, convID string) string {
+				t.Helper()
+				var status sql.NullString
+				if err := conn.QueryRow(`SELECT status FROM conversations WHERE id = ?`, convID).Scan(&status); err != nil {
+					t.Fatalf("read conversation %s status: %v", convID, err)
+				}
+				return status.String
+			},
+		}
+		return stores.RunQueue, seed
 	})
 }

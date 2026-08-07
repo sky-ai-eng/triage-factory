@@ -529,9 +529,11 @@ claim → execute); three additions to the claim:
    one-time SQLite migration replays the old global reset once —
    without it, a run mid-flight at upgrade shutdown stayed `running`
    forever and a mid-processing event was lost permanently. One
-   sanctioned exception stays global: `ReconcileOrphanedRuns` (cancel
-   children under terminal blueprints) is a cross-instance heal whose
-   terminal-parent guard makes it safe. Fleet-wide orphan recovery
+   sanctioned exception stays global: `ReconcileOrphanedRuns` (park
+   children under terminal blueprints; fail `running` blueprints that
+   hold no child at all past a grace) is a cross-instance heal whose
+   arms are each guarded by state no live owner can be in — a terminal
+   parent, or a mint older than any mint takes. Fleet-wide orphan recovery
    moves to the **leader reaper**: runs whose executor's heartbeat is
    stale past a threshold are requeued (`attempts`-capped, then failed
    with `failure_kind='executor_lost'`).

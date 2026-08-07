@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -632,6 +633,61 @@ func (s *runQueueStore) ReconcileOrphanedRuns(ctx context.Context) (int, error) 
 		}
 		count += int(n)
 
+		return nil
+	})
+	if err != nil {
+		return count, err
+	}
+
+	// Mint-crash arm — the mirror of the blueprint-terminal park above, one
+	// level up: that arm heals a live child under a dead parent, this one heals
+	// a live parent with no child at all. The firing path commits the
+	// blueprint_run first and enqueues its first step second, so a hard death
+	// between the two leaves a 'running' parent that nothing drives and nothing
+	// recovers — every other arm here (and the Postgres-only leader reaper)
+	// joins through conversations, and this shape has none.
+	//
+	// Local mode has the crash window and no reaper, so boot is its only
+	// recovery surface. It has no one-active-auto-run index either, so the
+	// Postgres livelock this un-sticks isn't the local symptom; the local
+	// symptom is a parent that reads in-flight forever. Failing frees both.
+	//
+	// Two clocks here on purpose, and the split is the opposite way round from
+	// the Postgres arm's all-now() statement:
+	//
+	// The GRACE runs on SQLite's own clock — datetime() on both sides, so the
+	// comparison survives whichever on-disk timestamp shape started_at carries
+	// (see parseDBDatetime) rather than only the CURRENT_TIMESTAMP one both
+	// insert paths write today.
+	//
+	// completed_at is bound from Go, like every other writer of this column
+	// (MarkRunStatus, CreateRun) and of conversations.completed_at. What the
+	// Postgres arm's now() buys is protection from DB/app clock skew, and an
+	// embedded engine has none to protect against — it reads the same host
+	// clock this process does. What the column does have is a text format:
+	// _time_format=sqlite serializes a Go bind as
+	// "2006-01-02 15:04:05.999999999-07:00", and datetime('now') would write a
+	// second shape into a column where every other row carries the first, for
+	// no gain.
+	err = inTx(ctx, s.conn, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE blueprint_runs
+			SET status = 'failed', completed_at = ?, abort_reason = ?
+			WHERE status = 'running'
+			  AND datetime(started_at) < datetime('now', ?)
+			  AND NOT EXISTS (
+			      SELECT 1 FROM conversations c WHERE c.blueprint_run_id = blueprint_runs.id
+			  )
+		`, time.Now().UTC(), domain.BlueprintAbortOrphanedAtMint,
+			fmt.Sprintf("-%d seconds", int(domain.BlueprintOrphanedAtMintGrace.Seconds())))
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		count += int(n)
 		return nil
 	})
 	return count, err

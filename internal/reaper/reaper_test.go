@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// countingStore is a Store seam that records DeleteStaleInstances calls. The
-// other two methods are unused by RunRegistryGC and panic if reached, so a
-// stray call surfaces as a test failure rather than a silent no-op.
+// countingStore is a Store seam that records DeleteStaleInstances calls. Every
+// other method is unused by RunRegistryGC and panics if reached, so a stray
+// call surfaces as a test failure rather than a silent no-op.
 type countingStore struct {
 	mu        sync.Mutex
 	gcCalls   int
@@ -34,6 +34,10 @@ func (s *countingStore) CancelStrandedCuratorTurns(context.Context, time.Duratio
 
 func (s *countingStore) HealClaimDesyncs(context.Context) (int, error) {
 	panic("HealClaimDesyncs not expected from RunRegistryGC")
+}
+
+func (s *countingStore) FailBlueprintRunsOrphanedAtMint(context.Context, time.Duration) (int, error) {
+	panic("FailBlueprintRunsOrphanedAtMint not expected from RunRegistryGC")
 }
 
 func (s *countingStore) calls() int {

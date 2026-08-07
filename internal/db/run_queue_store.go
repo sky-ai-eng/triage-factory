@@ -254,6 +254,19 @@ type RunQueueStore interface {
 	// released with the outcome mapped from its status. The leader reaper
 	// repeats it periodically; here it runs at boot in both modes.
 	//
+	// And it runs the mint-crash arm, the exact mirror of the first: a
+	// 'running' blueprint_run holding NO child conversation, older than
+	// domain.BlueprintOrphanedAtMintGrace, is terminal-failed with
+	// abort_reason=domain.BlueprintAbortOrphanedAtMint. The firing path commits
+	// the blueprint_run first and enqueues its first step second, so a hard
+	// death between the two leaves a parent nothing drives — and nothing else
+	// recovers it, because every other arm (and the Postgres-only leader
+	// reaper) joins through conversations. Failing frees the
+	// one-active-auto-run index the orphan was holding, so the task's
+	// already-queued firing intent drains into a fresh, fully-minted run
+	// instead of retrying against the index forever. Both dialects: local mode
+	// has the same crash window and no reaper.
+	//
 	// Cross-org system sweep; returns the total count of rows healed across
 	// all arms.
 	ReconcileOrphanedRuns(ctx context.Context) (int, error)

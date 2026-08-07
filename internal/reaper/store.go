@@ -14,7 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+  	"github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // Counts is the outcome of one ReapDeadExecutors sweep — how many runs the
@@ -93,6 +94,26 @@ type Store interface {
 	// no longer a desync at all: a released claim on a mid-flight
 	// conversation IS the requeue.
 	HealClaimDesyncs(ctx context.Context) (released int, err error)
+
+	// FailBlueprintRunsOrphanedAtMint terminal-fails every 'running'
+	// blueprint_run that holds no child conversation at all and is older than
+	// grace, stamping abort_reason=domain.BlueprintAbortOrphanedAtMint. This
+	// is the one recovery shape no other arm can reach: every predicate above
+	// joins through conversations, and an orphan minted by a crash between the
+	// firing path's two commits has none — so it is invisible to them, keeps
+	// holding the one-active-auto-run index against its task, and livelocks
+	// the router's pending-firing drain (the busy gate reads conversations and
+	// sees idle, the index refuses the insert, forever).
+	//
+	// Own DB time (now() - make_interval), same discipline as
+	// ReapDeadExecutors. Failing rather than re-minting the step is what makes
+	// it self-healing: the terminal write frees the index, and the firing
+	// intent already queued for the task drains into a fresh, fully-minted
+	// run. The same arm runs at boot inside
+	// RunQueueStore.ReconcileOrphanedRuns (both dialects — local mode has the
+	// same crash window and no reaper); the periodic repeat here bounds an
+	// orphan's lifetime to a reaper tick instead of the next restart.
+	FailBlueprintRunsOrphanedAtMint(ctx context.Context, grace time.Duration) (int, error)
 }
 
 // pgStore is the Postgres implementation.
@@ -317,6 +338,32 @@ func (s *pgStore) HealClaimDesyncs(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return int(rel), nil
+}
+
+func (s *pgStore) FailBlueprintRunsOrphanedAtMint(ctx context.Context, grace time.Duration) (int, error) {
+	// One statement, no claim/conversation join to make: the absence of a
+	// child IS the predicate. Duplicates the boot reconcile's SQL rather than
+	// importing it, keeping this package dialect-independent like the rest of
+	// the file (see pgUUIDArray's rationale).
+	//
+	// No conversation to park and no claim to release — a run with no child
+	// has neither, which is exactly why nothing else recovers it. Nothing
+	// touches the task either: freeing the index is what lets the task's
+	// already-queued firing intent produce a fresh run on the next drain.
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE blueprint_runs
+		SET status = 'failed', completed_at = now(), abort_reason = $2
+		WHERE status = 'running'
+		  AND started_at < now() - make_interval(secs => $1)
+		  AND NOT EXISTS (
+		      SELECT 1 FROM conversations c WHERE c.blueprint_run_id = blueprint_runs.id
+		  )
+	`, grace.Seconds(), domain.BlueprintAbortOrphanedAtMint)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
 }
 
 func (s *pgStore) CancelStrandedCuratorTurns(ctx context.Context, staleThreshold time.Duration) (int, error) {
