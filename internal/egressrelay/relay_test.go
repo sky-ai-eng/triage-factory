@@ -1,4 +1,4 @@
-package modproxy
+package egressrelay
 
 import (
 	"context"
@@ -20,22 +20,25 @@ func plainDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	return d.DialContext(ctx, network, addr)
 }
 
-// newTestServer builds a Server relaying to upstream/sumdb with a dialer
-// that can reach loopback, and returns it fronted by an httptest server.
-func newTestServer(t *testing.T, upstream, sumdb string) *httptest.Server {
+// newTestServer fronts cfg with an httptest server, substituting the
+// loopback-capable dialer.
+func newTestServer(t *testing.T, cfg Config) *httptest.Server {
 	t.Helper()
-	s, err := New(Config{
-		Upstream:    upstream,
-		SumDB:       sumdb,
-		DialContext: plainDial,
-		RunID:       "run-test",
-	})
+	cfg.DialContext = plainDial
+	s, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	front := httptest.NewServer(s.Handler())
 	t.Cleanup(front.Close)
 	return front
+}
+
+// goTestConfig is the Go entry's route shape pointed at test upstreams —
+// the same table production ships (via the shared goModules constructor),
+// so the go-shaped tests exercise real catalog data.
+func goTestConfig(moduleUpstream, sumDB string) Config {
+	return goModules(moduleUpstream, sumDB)
 }
 
 // noRedirectClient sees exactly what the relay returned, rather than
@@ -46,16 +49,16 @@ func noRedirectClient() *http.Client {
 	}}
 }
 
-// TestRelay_FollowsRedirectHostSide is the reason this package exists.
+// TestRelay_FollowsRedirectHostSide is the reason this lane exists.
 //
-// proxy.golang.org 302s large module zips to a CDN host that a fail-closed
-// jail cannot reach. The naive implementation — httputil.ReverseProxy —
-// passes that 302 straight through to the client, so the sandbox chases the
-// CDN itself and is blocked exactly as before. Resolving the hop host-side
-// is the whole fix, so this asserts the client sees 200 and the payload,
-// never the 302.
+// Registries in this catalog 302 artifacts to shared-storage CDN hosts
+// that a fail-closed jail cannot reach. The naive implementation —
+// httputil.ReverseProxy — passes that 302 straight through to the client,
+// so the sandbox chases the CDN itself and is blocked exactly as before.
+// Resolving the hop host-side is the whole fix, so this asserts the client
+// sees 200 and the payload, never the 302.
 func TestRelay_FollowsRedirectHostSide(t *testing.T) {
-	const payload = "MODULE-ZIP-BYTES"
+	const payload = "ARTIFACT-BYTES"
 	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, payload)
 	}))
@@ -66,7 +69,7 @@ func TestRelay_FollowsRedirectHostSide(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	front := newTestServer(t, origin.URL, DefaultSumDB)
+	front := newTestServer(t, goTestConfig(origin.URL, GoSumDB))
 
 	resp, err := noRedirectClient().Get(front.URL + "/golang.org/toolchain/@v/v0.0.1-go1.26.5.linux-amd64.zip")
 	if err != nil {
@@ -85,11 +88,12 @@ func TestRelay_FollowsRedirectHostSide(t *testing.T) {
 
 // TestRelay_RedirectToDeniedTargetIsRefused pins the confused-deputy gate.
 //
-// The relay follows redirects with the HOST's network reach, so an upstream
-// that redirects to the cloud metadata endpoint or a private address would
-// otherwise have the host fetch it and stream it into the jail. The denylist
-// rides on DialContext, so this uses a dialer that refuses the redirect
-// target and asserts the failure surfaces as 502 rather than a leak.
+// The relay follows redirects with the HOST's network reach, so an
+// upstream that redirects to the cloud metadata endpoint or a private
+// address would otherwise have the host fetch it and stream it into the
+// jail. The denylist rides on DialContext, so this uses a dialer that
+// refuses the redirect target and asserts the failure surfaces as 502
+// rather than a leak.
 func TestRelay_RedirectToDeniedTargetIsRefused(t *testing.T) {
 	secret := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "INTERNAL-METADATA")
@@ -112,7 +116,12 @@ func TestRelay_RedirectToDeniedTargetIsRefused(t *testing.T) {
 		return plainDial(ctx, network, addr)
 	}
 
-	s, err := New(Config{Upstream: origin.URL, DialContext: gated})
+	cfg := Config{
+		Name:        "test",
+		Routes:      []Route{{Prefix: "/", Upstream: origin.URL}},
+		DialContext: gated,
+	}
+	s, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -134,13 +143,11 @@ func TestRelay_RedirectToDeniedTargetIsRefused(t *testing.T) {
 	}
 }
 
-// TestSumDB_SupportedIsSynthesized pins the capability probe.
-//
-// cmd/go asks $GOPROXY/sumdb/<host>/supported before routing checksum
-// traffic through a proxy; a non-200 sends it to sum.golang.org DIRECTLY,
-// which the jail cannot reach. It must be synthesized rather than relayed,
-// because the upstream module proxy answers 404 for it.
-func TestSumDB_SupportedIsSynthesized(t *testing.T) {
+// TestRoutes_SyntheticAnsweredLocally pins synthetic routes: answered with
+// the configured status, contacting no upstream. The Go sumdb /supported
+// probe is the motivating case — cmd/go routes checksum traffic through
+// the relay only on a 200 here, and the upstream module proxy answers 404.
+func TestRoutes_SyntheticAnsweredLocally(t *testing.T) {
 	var upstreamHits int
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHits++
@@ -148,7 +155,7 @@ func TestSumDB_SupportedIsSynthesized(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	front := newTestServer(t, origin.URL, DefaultSumDB)
+	front := newTestServer(t, goTestConfig(origin.URL, GoSumDB))
 	resp, err := noRedirectClient().Get(front.URL + "/sumdb/sum.golang.org/supported")
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -159,14 +166,15 @@ func TestSumDB_SupportedIsSynthesized(t *testing.T) {
 		t.Errorf("status = %d, want 200; anything else sends cmd/go to sum.golang.org directly", resp.StatusCode)
 	}
 	if upstreamHits != 0 {
-		t.Errorf("probe reached the upstream %d times; it must be answered locally", upstreamHits)
+		t.Errorf("probe reached the upstream %d times; a synthetic route must be answered locally", upstreamHits)
 	}
 }
 
-// TestSumDB_RelaysToChecksumHost asserts the sumdb arm strips the
-// /sumdb/<host> prefix and targets the checksum database, not the module
-// proxy. Getting this wrong yields "module not found" for every build.
-func TestSumDB_RelaysToChecksumHost(t *testing.T) {
+// TestRoutes_StripPrefixTargetsSecondUpstream asserts a StripPrefix route
+// rewrites onto its own upstream with the prefix removed and the leading
+// slash restored. In the Go entry, getting this wrong yields "module not
+// found" for every build (checksum lookups landing on the module proxy).
+func TestRoutes_StripPrefixTargetsSecondUpstream(t *testing.T) {
 	var gotPath string
 	sumdb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.EscapedPath()
@@ -180,7 +188,7 @@ func TestSumDB_RelaysToChecksumHost(t *testing.T) {
 	defer moduleProxy.Close()
 
 	sumHost := strings.TrimPrefix(sumdb.URL, "http://")
-	front := newTestServer(t, moduleProxy.URL, sumdb.URL)
+	front := newTestServer(t, goTestConfig(moduleProxy.URL, sumdb.URL))
 
 	resp, err := noRedirectClient().Get(front.URL + "/sumdb/" + sumHost + "/lookup/github.com/zalando/go-keyring@v0.2.8")
 	if err != nil {
@@ -193,16 +201,16 @@ func TestSumDB_RelaysToChecksumHost(t *testing.T) {
 	}
 }
 
-// TestServeHTTP_UnknownSumDBIs404 keeps an unrelayed checksum database from
-// falling through to the module proxy, where it would 404 for a misleading
-// reason.
-func TestServeHTTP_UnknownSumDBIs404(t *testing.T) {
+// TestRoutes_FenceStopsFallthrough keeps a fenced namespace from falling
+// through to a broader route, where it would fail for a misleading reason
+// (an unrelayed checksum database 404ing off the module proxy).
+func TestRoutes_FenceStopsFallthrough(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("unknown sumdb reached the module proxy at %q", r.URL.Path)
+		t.Errorf("fenced path reached the fallthrough upstream at %q", r.URL.Path)
 	}))
 	defer origin.Close()
 
-	front := newTestServer(t, origin.URL, DefaultSumDB)
+	front := newTestServer(t, goTestConfig(origin.URL, GoSumDB))
 	resp, err := noRedirectClient().Get(front.URL + "/sumdb/evil.example.com/lookup/x@v1")
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -213,11 +221,65 @@ func TestServeHTTP_UnknownSumDBIs404(t *testing.T) {
 	}
 }
 
-// TestRelay_PreservesEscapedPath guards the encoding the GOPROXY protocol
-// depends on: module paths case-encode uppercase letters as "!x", and
+// TestRoutes_FirstMatchWins pins the ordered-table contract the catalog
+// depends on: a narrow route listed before a broad one takes the request
+// even though both prefixes match.
+func TestRoutes_FirstMatchWins(t *testing.T) {
+	var narrowHits, broadHits int
+	narrow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { narrowHits++ }))
+	defer narrow.Close()
+	broad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { broadHits++ }))
+	defer broad.Close()
+
+	front := newTestServer(t, Config{
+		Name: "test",
+		Routes: []Route{
+			{Prefix: "/nested/deeper/", Upstream: narrow.URL},
+			{Prefix: "/", Upstream: broad.URL},
+		},
+	})
+	resp, err := noRedirectClient().Get(front.URL + "/nested/deeper/thing")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	resp.Body.Close()
+	if narrowHits != 1 || broadHits != 0 {
+		t.Errorf("narrow=%d broad=%d; want the first matching route to win", narrowHits, broadHits)
+	}
+}
+
+// TestRoutes_ExactDoesNotMatchLongerPaths keeps an Exact route (the
+// synthetic-probe shape) from swallowing real paths that merely share its
+// prefix.
+func TestRoutes_ExactDoesNotMatchLongerPaths(t *testing.T) {
+	var upstreamPaths []string
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPaths = append(upstreamPaths, r.URL.Path)
+	}))
+	defer origin.Close()
+
+	front := newTestServer(t, Config{
+		Name: "test",
+		Routes: []Route{
+			{Prefix: "/supported", Exact: true, SyntheticStatus: 200},
+			{Prefix: "/", Upstream: origin.URL},
+		},
+	})
+	resp, err := noRedirectClient().Get(front.URL + "/supported-but-longer")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	resp.Body.Close()
+	if len(upstreamPaths) != 1 || upstreamPaths[0] != "/supported-but-longer" {
+		t.Errorf("upstream saw %v; the longer path must fall past the Exact route", upstreamPaths)
+	}
+}
+
+// TestRelay_PreservesEscapedPath guards the encoding relayed protocols
+// depend on: Go module paths case-encode uppercase letters as "!x", and
 // versions carry "@" and "+incompatible". Re-encoding any of it turns a
-// valid fetch into a spurious "module not found", so the escaped path must
-// arrive byte-identical.
+// valid fetch into a spurious "not found", so the escaped path must arrive
+// byte-identical.
 func TestRelay_PreservesEscapedPath(t *testing.T) {
 	const want = "/github.com/!aidan!allchin/bifrost/core/@v/v1.7.4+incompatible.info"
 	var got string
@@ -226,7 +288,7 @@ func TestRelay_PreservesEscapedPath(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	front := newTestServer(t, origin.URL, DefaultSumDB)
+	front := newTestServer(t, goTestConfig(origin.URL, GoSumDB))
 	resp, err := noRedirectClient().Get(front.URL + want)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -238,15 +300,16 @@ func TestRelay_PreservesEscapedPath(t *testing.T) {
 	}
 }
 
-// TestRelay_PassesThroughNotFound keeps 404/410 verbatim. cmd/go reads those
-// to conclude a module is absent and to advance its GOPROXY list; rewriting
-// them to 502 would turn "not found" into "proxy broken".
+// TestRelay_PassesThroughNotFound keeps 404/410 verbatim. Clients read
+// those to conclude an artifact is absent (cmd/go additionally advances
+// its GOPROXY list on them); rewriting them to 502 would turn "not found"
+// into "relay broken".
 func TestRelay_PassesThroughNotFound(t *testing.T) {
 	for _, code := range []int{http.StatusNotFound, http.StatusGone} {
 		origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(code)
 		}))
-		front := newTestServer(t, origin.URL, DefaultSumDB)
+		front := newTestServer(t, goTestConfig(origin.URL, GoSumDB))
 		resp, err := noRedirectClient().Get(front.URL + "/example.com/m/@v/list")
 		if err != nil {
 			t.Fatalf("get: %v", err)
@@ -272,7 +335,7 @@ func TestRelay_DropsInboundHeaders(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	front := newTestServer(t, origin.URL, DefaultSumDB)
+	front := newTestServer(t, goTestConfig(origin.URL, GoSumDB))
 	req, _ := http.NewRequest(http.MethodGet, front.URL+"/example.com/m/@v/list", nil)
 	req.Header.Set("Authorization", "Bearer run-token-should-not-escape")
 	req.Header.Set("Cookie", "session=nope")
@@ -298,7 +361,7 @@ func TestServeHTTP_RejectsWriteMethods(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	front := newTestServer(t, origin.URL, DefaultSumDB)
+	front := newTestServer(t, goTestConfig(origin.URL, GoSumDB))
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
 		req, _ := http.NewRequest(method, front.URL+"/example.com/m/@v/list", strings.NewReader("x"))
 		resp, err := noRedirectClient().Do(req)
@@ -312,36 +375,30 @@ func TestServeHTTP_RejectsWriteMethods(t *testing.T) {
 	}
 }
 
-func TestNew_RejectsMalformedUpstream(t *testing.T) {
-	for _, raw := range []string{
-		"https://proxy.golang.org/base/path", // a path would corrupt every relayed URL
-		"ftp://proxy.golang.org",
-		"https://",
-		"proxy.golang.org", // no scheme
+func TestNew_RejectsMalformedConfig(t *testing.T) {
+	valid := Route{Prefix: "/", Upstream: "https://example.com"}
+	for name, cfg := range map[string]Config{
+		"no name":             {Routes: []Route{valid}},
+		"no routes":           {Name: "t"},
+		"prefix no slash":     {Name: "t", Routes: []Route{{Prefix: "x", Upstream: "https://example.com"}}},
+		"upstream with path":  {Name: "t", Routes: []Route{{Prefix: "/", Upstream: "https://example.com/base"}}},
+		"upstream bad scheme": {Name: "t", Routes: []Route{{Prefix: "/", Upstream: "ftp://example.com"}}},
+		"upstream no host":    {Name: "t", Routes: []Route{{Prefix: "/", Upstream: "https://"}}},
+		"upstream no scheme":  {Name: "t", Routes: []Route{{Prefix: "/", Upstream: "example.com"}}},
+		"synthetic and upstream": {Name: "t", Routes: []Route{
+			{Prefix: "/", Upstream: "https://example.com", SyntheticStatus: 200},
+		}},
 	} {
-		if _, err := New(Config{Upstream: raw}); err == nil {
-			t.Errorf("New(Upstream=%q) = nil error; want a loud construction failure", raw)
+		if _, err := New(cfg); err == nil {
+			t.Errorf("New(%s) = nil error; want a loud construction failure", name)
 		}
-	}
-}
-
-func TestNew_DefaultsToPublicProxyAndSumDB(t *testing.T) {
-	s, err := New(Config{})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if got := s.upstream.String(); got != DefaultUpstream {
-		t.Errorf("upstream = %q, want %q", got, DefaultUpstream)
-	}
-	if got := s.sumDBPrefix(); got != "/sumdb/sum.golang.org" {
-		t.Errorf("sumdb prefix = %q, want /sumdb/sum.golang.org", got)
 	}
 }
 
 // TestStart_RefusesNonLoopbackWithoutOptIn keeps an unauthenticated relay
 // off the LAN by accident; the veth bind opts in explicitly.
 func TestStart_RefusesNonLoopbackWithoutOptIn(t *testing.T) {
-	s, err := New(Config{})
+	s, err := New(GoModules())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -351,7 +408,7 @@ func TestStart_RefusesNonLoopbackWithoutOptIn(t *testing.T) {
 }
 
 func TestShutdown_SafeBeforeStart(t *testing.T) {
-	s, err := New(Config{})
+	s, err := New(GoModules())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

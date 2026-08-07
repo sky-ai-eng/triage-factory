@@ -24,17 +24,19 @@ func DefaultRegistryHosts() []string {
 		// npm / pnpm
 		"registry.npmjs.org",
 		// Go modules + checksum database. Both are now VESTIGIAL for a
-		// sandboxed run: GOPROXY points cmd/go at the per-run modproxy
-		// relay, which serves the module protocol and the /sumdb/ arm from
-		// the host, so the jail no longer dials either host. They stay for
-		// one release as the degraded path if that env plumbing is ever
-		// absent — small modules still resolve inline, where a jail with
-		// neither entry nor relay would fail at the first fetch with
-		// nothing to point at. Remove once the relay has production miles.
+		// sandboxed run: GOPROXY points cmd/go at the per-run fetch relay
+		// (internal/egressrelay, go-modules catalog entry), which serves
+		// the module protocol and the /sumdb/ arm from the host, so the
+		// jail no longer dials either host. They stay for one release as
+		// the degraded path if that env plumbing is ever absent — small
+		// modules still resolve inline, where a jail with neither entry
+		// nor relay would fail at the first fetch with nothing to point
+		// at. Remove once the relay has production miles.
 		//
 		// Note the allowlist alone was never sufficient here: the public
-		// proxy 302s large zips (and every toolchain) to a Google Cloud
-		// Storage host, which is why the relay exists.
+		// proxy 302s large zips (and every toolchain) to
+		// storage.googleapis.com, a shared storage namespace this list
+		// must never carry — which is why the relay lane exists.
 		"proxy.golang.org",
 		"sum.golang.org",
 		// PyPI

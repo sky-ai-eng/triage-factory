@@ -1,20 +1,22 @@
 //go:build live
 
-// Live tests in this file exercise the relay against the REAL public Go
-// module proxy and checksum database, with the production vetted dialer.
+// Live tests in this file exercise the Go catalog entry against the REAL
+// public module proxy and checksum database, with the production vetted
+// dialer.
 //
-// They exist because the bug this package fixes is invisible to a mocked
+// They exist because the bug this lane fixes is invisible to a mocked
 // test: proxy.golang.org serves small module zips inline but 302-redirects
 // large ones to a Google Cloud Storage host, and only a fetch against the
 // real service exercises that split. A relay that passes unit tests can
-// still hand the redirect to the sandbox and fix nothing.
+// still hand the redirect to the sandbox and fix nothing. A new catalog
+// entry should ship with a live test of the same shape (see CLAUDE.md).
 //
 // Build-tagged so CI doesn't reach the network by default. No credentials
 // and no API spend — just bandwidth (the toolchain case pulls ~70MB).
 //
-// To run: `go test -tags live ./internal/modproxy/ -v -run TestLive`
+// To run: `go test -tags live ./internal/egressrelay/ -v -run TestLive`
 
-package modproxy
+package egressrelay
 
 import (
 	"context"
@@ -24,22 +26,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-// TestLiveRelay_ServesRedirectedArtifacts is the end-to-end proof.
+// TestLiveGoModules_ServesRedirectedArtifacts is the end-to-end proof.
 //
 // Each case below is a real artifact whose upstream behavior differs: the
-// toolchain and aws-sdk-go exceed the inline-serving threshold and redirect
-// to the CDN, while go-keyring is served inline. All three must arrive as
-// 200 with a non-empty body through the relay — a 302 reaching the client
-// means the redirect was passed through instead of resolved host-side,
-// which is precisely the failure this package exists to prevent.
-func TestLiveRelay_ServesRedirectedArtifacts(t *testing.T) {
-	// Production config: default upstreams, default (vetted) dialer. The
-	// listener is loopback but the DIAL targets are public, so the denylist
-	// is satisfied — exactly the production posture.
-	s, err := New(Config{RunID: "live"})
+// toolchain and aws-sdk-go exceed the inline-serving threshold and
+// redirect to the CDN, while go-keyring is served inline. All three must
+// arrive as 200 with a non-empty body through the relay — a 302 reaching
+// the client means the redirect was passed through instead of resolved
+// host-side, which is precisely the failure this lane exists to prevent.
+func TestLiveGoModules_ServesRedirectedArtifacts(t *testing.T) {
+	// Production config: the catalog entry verbatim, default (vetted)
+	// dialer. The listener is loopback but the DIAL targets are public,
+	// so the denylist is satisfied — exactly the production posture.
+	s, err := New(GoModules())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -92,14 +95,15 @@ func TestLiveRelay_ServesRedirectedArtifacts(t *testing.T) {
 	}
 }
 
-// TestLiveSumDB_RelaysVerificationData proves the checksum path survives the
-// indirection. The upstream module proxy answers 404 for /sumdb/ (that arm
-// is for private proxies), so the relay must synthesize the capability probe
-// and forward the rest to the checksum database itself — otherwise cmd/go
-// falls back to contacting sum.golang.org directly, which the jail cannot
-// reach, and every build fails at verification rather than at download.
-func TestLiveSumDB_RelaysVerificationData(t *testing.T) {
-	s, err := New(Config{RunID: "live"})
+// TestLiveGoModules_RelaysVerificationData proves the checksum path
+// survives the indirection. The upstream module proxy answers 404 for
+// /sumdb/ (that arm is for private proxies), so the relay must synthesize
+// the capability probe and forward the rest to the checksum database
+// itself — otherwise cmd/go falls back to contacting sum.golang.org
+// directly, which the jail cannot reach, and every build fails at
+// verification rather than at download.
+func TestLiveGoModules_RelaysVerificationData(t *testing.T) {
+	s, err := New(GoModules())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -125,35 +129,22 @@ func TestLiveSumDB_RelaysVerificationData(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	// A real signed lookup names the module and carries the go.mod hash.
-	if !contains(body, "github.com/zalando/go-keyring v0.2.8") {
+	if !strings.Contains(string(body), "github.com/zalando/go-keyring v0.2.8") {
 		t.Errorf("lookup body does not name the module:\n%s", body)
 	}
 }
 
-func contains(haystack []byte, needle string) bool {
-	return len(haystack) > 0 && stringsContains(string(haystack), needle)
-}
-
-func stringsContains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}
-
-// TestLiveGoCommand_DownloadsThroughRelay drives the relay with the real
+// TestLiveGoModules_GoCommandDownloads drives the relay with the real
 // cmd/go rather than a hand-built HTTP request.
 //
 // This is the case the unit tests cannot reach: it exercises the actual
 // GOPROXY protocol sequence (@v/list, .info, .mod, .zip, and the /sumdb/
 // lookups behind checksum verification) against the route table, with a
 // clean module cache so nothing is served from disk. If the routing,
-// path-escaping, or sumdb arm were wrong, `go mod download` fails here even
-// though every direct fetch above succeeds.
-func TestLiveGoCommand_DownloadsThroughRelay(t *testing.T) {
-	s, err := New(Config{RunID: "live"})
+// path-escaping, or sumdb arm were wrong, `go mod download` fails here
+// even though every direct fetch above succeeds.
+func TestLiveGoModules_GoCommandDownloads(t *testing.T) {
+	s, err := New(GoModules())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -170,15 +161,15 @@ func TestLiveGoCommand_DownloadsThroughRelay(t *testing.T) {
 
 	cmd := exec.Command("go", "mod", "download", "-x", "github.com/zalando/go-keyring@v0.2.8")
 	cmd.Dir = dir
-	// The GOPROXY value production actually ships, ",direct" arm included,
-	// so this exercises what runs rather than a stripped-down variant. The
+	// The env the catalog actually ships (",direct" arm included), so this
+	// exercises what runs rather than a stripped-down variant. The
 	// fallback cannot mask a routing bug here: direct fetching needs the
 	// per-run git proxy that only exists inside a jail, so anything the
 	// relay mishandles fails outright rather than being quietly rescued.
-	// GONOSUMDB/GOPRIVATE are cleared so checksum verification stays on and
-	// actually exercises the /sumdb/ arm.
-	cmd.Env = append(os.Environ(),
-		"GOPROXY=http://"+addr+",direct",
+	// GONOSUMDB/GOPRIVATE are cleared so checksum verification stays on
+	// and actually exercises the /sumdb/ arm.
+	env := append(os.Environ(), GoModulesEnv(addr)...)
+	cmd.Env = append(env,
 		"GOMODCACHE="+filepath.Join(dir, "modcache"),
 		"GOFLAGS=",
 		"GOPRIVATE=",

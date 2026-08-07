@@ -262,11 +262,14 @@ var allowedSandboxEnvKeys = map[string]struct{}{
 	"NO_PROXY":    {},
 	"no_proxy":    {},
 
-	// Go toolchain policy + module-proxy routing (agentproc.buildSandboxEnv,
-	// agentproc.sandboxModProxyEnv). Non-credential, and not paths the
-	// broker itself acts on — cmd/go inside the jail is the only reader.
-	// GOPROXY names this run's own host-side relay, the same shape as the
-	// egress and LLM proxy addresses above.
+	// Go toolchain policy + fetch-relay routing (agentproc.buildSandboxEnv;
+	// GOPROXY comes from the egressrelay catalog's go-modules entry).
+	// Non-credential, and not paths the broker itself acts on — cmd/go
+	// inside the jail is the only reader. GOPROXY names this run's own
+	// host-side relay, the same shape as the egress and LLM proxy
+	// addresses above. A new catalog entry's env key gets its own line
+	// here; the agentproc env drift test names the key when one is
+	// missing.
 	"GOTOOLCHAIN": {},
 	"GOPROXY":     {},
 
