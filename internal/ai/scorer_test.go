@@ -155,6 +155,9 @@ func (s *stubScoreStore) MarkScoring(_ context.Context, _ string, _ []string) er
 func (s *stubScoreStore) ResetScoringToPending(_ context.Context, _ string, _ []string) error {
 	return nil
 }
+func (s *stubScoreStore) ResetStaleScoring(_ context.Context, _ string) (int, error) {
+	return 0, nil
+}
 func (s *stubScoreStore) UpdateTaskScores(_ context.Context, _ string, _ []domain.TaskScoreUpdate) error {
 	return nil
 }

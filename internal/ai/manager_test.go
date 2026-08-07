@@ -171,6 +171,14 @@ func (s *recordingScoreStore) UnscoredTasks(ctx context.Context, orgID string) (
 	return nil, nil
 }
 
+// ResetStaleScoring is part of every cycle (crash recovery runs before
+// the runner picks work), so it's implemented rather than left to the
+// embedded nil — a panic here would say nothing about the per-org
+// routing these tests assert.
+func (s *recordingScoreStore) ResetStaleScoring(ctx context.Context, orgID string) (int, error) {
+	return 0, nil
+}
+
 func (s *recordingScoreStore) callsFor(orgID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -192,6 +200,10 @@ func (s *blockingScoreStore) UnscoredTasks(ctx context.Context, orgID string) ([
 		s.onCall(orgID)
 	}
 	return nil, nil
+}
+
+func (s *blockingScoreStore) ResetStaleScoring(ctx context.Context, orgID string) (int, error) {
+	return 0, nil
 }
 
 var (

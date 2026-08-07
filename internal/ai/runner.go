@@ -54,9 +54,10 @@ type RunnerCallbacks struct {
 // Runner manages AI scoring as a background process.
 // It exposes a Trigger channel that pollers signal after ingesting new tasks.
 //
-// The 4 DB operations the runner does itself (UnscoredTasks, MarkScoring,
-// ResetScoringToPending, UpdateTaskScores) go through db.ScoreStore so
-// the same code path serves both SQLite (local) and Postgres (multi).
+// The DB operations the runner does itself (ResetStaleScoring,
+// UnscoredTasks, MarkScoring, ResetScoringToPending, UpdateTaskScores)
+// go through db.ScoreStore so the same code path serves both SQLite
+// (local) and Postgres (multi).
 type Runner struct {
 	scores     db.ScoreStore
 	entities   db.EntityStore          // scorer bulk-loads entity descriptions for prompt context
@@ -164,6 +165,18 @@ func (r *Runner) run(ctx context.Context) {
 	// produces no span — that isn't a cycle.
 	ctx, span := telemetry.StartJobCycle(ctx, "scorer", r.orgID)
 	defer span.End()
+
+	// Recover the rows a crashed cycle stranded in 'in_progress' before
+	// this cycle picks its work. Ordering is the invariant: this runs
+	// strictly before the cycle's own MarkScoring, so it can never reset
+	// a row this cycle just claimed. Best-effort — a failure here leaves
+	// the residue for the next cycle rather than costing this one the
+	// genuinely-pending tasks it can still score.
+	if stale, err := r.scores.ResetStaleScoring(ctx, r.orgID); err != nil {
+		aiLog.WarnContext(ctx, "reset stale in-progress scoring failed", "error", err)
+	} else if stale > 0 {
+		aiLog.InfoContext(ctx, "recovered tasks stranded mid-scoring by a crashed cycle", "count", stale)
+	}
 
 	tasks, err := r.scores.UnscoredTasks(ctx, r.orgID)
 	if err != nil {
