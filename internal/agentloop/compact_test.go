@@ -492,6 +492,13 @@ func TestColdResume_CompactsBeforeTheFirstCall(t *testing.T) {
 	if q := rowWithContent(first.Rows, "queued overnight"); q != nil && isDelivered(*q) {
 		t.Fatal("queued input was delivered into the resume compaction")
 	}
+	// The summarize call carries a cap resolved for the SUMMARIZE model, not
+	// the conversation's and not the provider layer's default: this call's
+	// entire output is the summary, and a summary cut short is the one
+	// failure this path has no fallback beneath.
+	if first.MaxTokens != 64000 {
+		t.Errorf("forced-shape call max_tokens = %d, want haiku's own maximum 64000", first.MaxTokens)
+	}
 	resultRow := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionCompactionResult })
 	queued := tr.find(func(m domain.Message) bool { return strings.Contains(m.Content, "queued overnight") })
 	if queued == nil || !isDelivered(*queued) || queued.Seq == nil || *queued.Seq <= float64(resultRow.ID) {
