@@ -79,15 +79,19 @@ export default function ArtifactList({
   }, [runId])
 
   // A run change resets to the loading state; a refreshKey change (below) must
-  // not — it re-pulls behind the rows already on screen.
+  // not — it re-pulls behind the rows already on screen. The bump here — not
+  // just the one inside load() — is what invalidates the old run's in-flight
+  // response: the load effect skips a falsy runId, so without it a stale
+  // response could land after this reset and pass the guard.
   useEffect(() => {
+    generation.current++
     setArtifacts(null)
     setError(null)
   }, [runId])
 
-  // No cleanup needed: each load() bumps the generation on entry, so a newer
-  // load (or a run change) invalidates any in-flight predecessor, and a
-  // post-unmount setState is a no-op.
+  // No unmount cleanup needed: each load() bumps the generation on entry, so a
+  // newer load invalidates any in-flight predecessor, and a post-unmount
+  // setState is a no-op.
   useEffect(() => {
     if (!runId) return
     void load()
@@ -131,7 +135,12 @@ export default function ArtifactList({
     }
   }
 
-  if (error) {
+  // A failed load stands in for the rows only when there are none to show (the
+  // initial load, or a run change). A failed SOFT refetch keeps the rows it
+  // has — they were true a moment ago, and blanking an always-mounted list on
+  // a transient error defeats the point of refreshKey — and the next
+  // set-shape change retries.
+  if (error && artifacts === null) {
     return <p className="text-[11.5px] leading-relaxed text-dismiss">{error}</p>
   }
   if (ordered === null) {
