@@ -40,6 +40,12 @@ func TestSandboxEnvAllowlistCoversEveryProducer(t *testing.T) {
 	// Egress proxy routing.
 	add(sandboxEgressProxyEnv("10.42.1.1:9000", "10.42.1.1", "run-token"))
 
+	// Go module proxy routing (GOPROXY). Load-bearing on the allowlist:
+	// without the entry the broker rejects the launch outright, and with the
+	// entry missing from THIS list the rejection would only surface in
+	// production.
+	add(sandboxModProxyEnv("10.42.1.1:9001"))
+
 	// LLM proxy placeholders — every provider variant, since each emits a
 	// different key set (Anthropic vs. Bedrock bearer vs. Bedrock SigV4).
 	for _, kind := range []llmproxy.Provider{

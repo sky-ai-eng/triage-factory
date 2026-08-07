@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/modproxy"
 )
 
 // proxyTokenAnthropicPrefix shapes the per-run Anthropic token like a
@@ -95,6 +96,7 @@ type runProxies struct {
 	llm    *llmproxy.Server
 	git    *gitproxy.Server
 	egress *egressproxy.Server
+	mod    *modproxy.Server
 
 	// gitProxyURL / gitProxyToken are the git proxy's own address and per-run
 	// placeholder token, surfaced so the orchestrator's pre-sandbox clone can
@@ -125,6 +127,11 @@ func (p *runProxies) Shutdown(ctx context.Context) error {
 	if p.egress != nil {
 		if err := p.egress.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("egress proxy shutdown: %w", err))
+		}
+	}
+	if p.mod != nil {
+		if err := p.mod.Shutdown(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("go module proxy shutdown: %w", err))
 		}
 	}
 	return errors.Join(errs...)
@@ -428,6 +435,24 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 	bundle.egress = egressSrv
 	env = append(env, egressEnv...)
 
+	// Go module proxy: the jail's GOPROXY, on its own port of hostVethIP.
+	// Go cannot use the public proxy through the egress allowlist alone,
+	// because proxy.golang.org 302s large zips (and every toolchain) to a
+	// Google Cloud Storage host — and allowing that host would open every
+	// bucket in GCS to hostile-input-exposed code, since a CONNECT proxy
+	// matches hostnames and the signed URLs are path-style. Relaying
+	// host-side resolves the hop where egress is unrestricted and leaves the
+	// jail needing no public host for Go at all.
+	modEnv, modSrv, err := startModProxyForSandbox(hostVethIP)
+	if err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = bundle.Shutdown(shutdownCtx)
+		return nil, nil, err
+	}
+	bundle.mod = modSrv
+	env = append(env, modEnv...)
+
 	// Assemble the single GIT_CONFIG_* block for the sandboxed git. It
 	// always carries core.hooksPath (F2, TFAC-456) so the TF hooks fire
 	// for every repo the agent touches — including subdir clones in a
@@ -582,6 +607,50 @@ func startEgressProxyForSandbox(hostVethIP string, recordDenial func(ctx context
 		return nil, nil, fmt.Errorf("agentproc: start egress proxy on %s: %w", hostVethIP, err)
 	}
 	return sandboxEgressProxyEnv(addr, hostVethIP, incoming), srv, nil
+}
+
+// startModProxyForSandbox starts the per-run Go module relay on a free
+// port of hostVethIP and returns the env entries pointing the jail's
+// cmd/go at it, plus the server for the shutdown bundle.
+//
+// Started for every sandbox run, like the egress proxy: a non-Go run never
+// dials it, and one idle listener is cheaper than a second wiring path
+// conditioned on guessing the repo's language.
+//
+// Unlike the LLM and git proxies this mints no per-run token. It holds no
+// credential to steal, cmd/go has no clean way to present one, and
+// cross-run reach is already denied at L3 — see the modproxy package doc.
+func startModProxyForSandbox(hostVethIP string) ([]string, *modproxy.Server, error) {
+	srv, err := modproxy.New(modproxy.Config{AllowNonLoopback: true})
+	if err != nil {
+		return nil, nil, fmt.Errorf("agentproc: construct go module proxy: %w", err)
+	}
+	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("agentproc: start go module proxy on %s: %w", hostVethIP, err)
+	}
+	return sandboxModProxyEnv(addr), srv, nil
+}
+
+// sandboxModProxyEnv points the sandboxed cmd/go at this run's relay.
+//
+// No ",direct" fallback, deliberately. `direct` makes cmd/go fetch straight
+// from the VCS host on a proxy miss, which the jail cannot reach — so the
+// fallback could only ever convert a clean "module not found" into a
+// confusing connection failure. Failing closed at the relay is the honest
+// behavior.
+//
+// GOSUMDB is left at its default: the relay serves the /sumdb/ arm of the
+// GOPROXY protocol, so checksum verification flows through this same
+// address and stays fully enforced. Nothing here disables verification —
+// the sumdb answer is signed, so relaying it is a transport detail.
+//
+// http:// on the local hop, matching the LLM and git proxies: the jail
+// talks cleartext across the veth pair and the relay talks TLS to the real
+// upstream. Nothing secret crosses the local hop — the bytes are public
+// module data either way.
+func sandboxModProxyEnv(proxyAddr string) []string {
+	return []string{"GOPROXY=http://" + proxyAddr}
 }
 
 // sandboxEgressProxyEnv builds the proxy env entries that route the

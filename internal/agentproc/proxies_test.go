@@ -1448,3 +1448,38 @@ func TestStartProxiesForSandbox_EgressDenialReachesRecorder(t *testing.T) {
 		t.Fatal("a refused CONNECT never reached the audit hook — RecordDenial is unwired on the production construction path")
 	}
 }
+
+// TestSandboxModProxyEnv_NoDirectFallback pins the fail-closed GOPROXY.
+//
+// A ",direct" fallback would make cmd/go fetch straight from the VCS host
+// when the relay returns a miss — a host the jail's allowlist does not
+// carry, so the only possible outcome is a confusing connection failure in
+// place of a clean "module not found". The relay is the single path out for
+// Go, and the value must say so.
+func TestSandboxModProxyEnv_NoDirectFallback(t *testing.T) {
+	env := sandboxModProxyEnv("10.42.1.1:9001")
+	if len(env) != 1 {
+		t.Fatalf("sandboxModProxyEnv emitted %d entries, want 1: %v", len(env), env)
+	}
+	const want = "GOPROXY=http://10.42.1.1:9001"
+	if env[0] != want {
+		t.Errorf("GOPROXY = %q, want %q", env[0], want)
+	}
+	if strings.Contains(env[0], ",") || strings.Contains(env[0], "|") {
+		t.Errorf("GOPROXY %q carries a fallback list; the relay must be the only path out", env[0])
+	}
+}
+
+// TestSandboxModProxyEnv_LeavesSumDBAlone guards the checksum posture: the
+// relay serves the GOPROXY protocol's /sumdb/ arm, so verification flows
+// through it and stays enforced. An explicit GOSUMDB=off or GONOSUMDB here
+// would silently disable it while looking like routing config.
+func TestSandboxModProxyEnv_LeavesSumDBAlone(t *testing.T) {
+	for _, kv := range sandboxModProxyEnv("10.42.1.1:9001") {
+		for _, banned := range []string{"GOSUMDB", "GONOSUMDB", "GOFLAGS", "GONOSUMCHECK", "GOPRIVATE", "GONOPROXY"} {
+			if strings.HasPrefix(kv, banned+"=") {
+				t.Errorf("sandboxModProxyEnv emitted %q; module routing must not weaken checksum verification", kv)
+			}
+		}
+	}
+}
